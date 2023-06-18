@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "jijmodelingtranspiler-qiskit"
+version = "0.1.0"
+description = ""
+authors = ["Jij Inc."]
+readme = "README.md"
+packages = [{include = "jijmodelingtranspiler_qiskit"}]
+
+[tool.poetry.dependencies]
+python = ">=3.9,<3.11"
+qiskit = "^0.43.1"
+jijmodeling-transpiler = "^0.4.1"
+
+
+[tool.poetry.group.dev.dependencies]
+jupyter = "^1.0.0"
+matplotlib = "^3.7.1"
+pylatexenc = "^2.10"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
