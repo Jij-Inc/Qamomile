@@ -10,11 +10,16 @@ class QiskitQAOAAnsatzBuilder:
         self.pubo_builder = pubo_builder
         self.var_num = var_num
     
-    def get_qaoa_ansatz(self, p: int, multipliers=None, detail_parameters=None):
+    def get_qaoa_ansatz(
+        self,
+        p: int,
+        multipliers=None,
+        detail_parameters=None
+    ):
         qubo, constant = self.pubo_builder.get_qubo_dict(multipliers=multipliers, detail_parameters=detail_parameters)
         ising_operator, ising_const = to_ising_operator_from_qubo(qubo, self.var_num)
         qaoa_ansatz = qk.circuit.library.QAOAAnsatz(ising_operator, reps=p)
-        return qaoa_ansatz, ising_const + constant
+        return qaoa_ansatz, ising_operator, ising_const + constant
 
 
 def transpile_to_qaoa_ansatz(
