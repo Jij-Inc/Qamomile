@@ -16,7 +16,11 @@ jijmodeling-transpiler = "^0.4.1"
 jupyter = "^1.0.0"
 matplotlib = "^3.7.1"
 pylatexenc = "^2.10"
+pytest = "^7.3.2"
 
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+addopts = "--doctest-modules"
