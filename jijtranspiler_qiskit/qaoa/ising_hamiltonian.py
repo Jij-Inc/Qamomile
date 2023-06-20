@@ -17,6 +17,9 @@ def to_ising_operator_from_qubo(
 
     # convert linear parts of the objective function into Hamiltonian.
     for idx, coef in ising.linear.items():
+        if coef == 0.0:
+            continue
+ 
         z_p = zero.copy()
         weight = coef
         z_p[idx] = True
@@ -26,6 +29,9 @@ def to_ising_operator_from_qubo(
 
     # create Pauli terms
     for (i, j), coeff in ising.quad.items():
+        if coeff == 0.0:
+            continue
+
         weight = coeff
 
         if i == j:
@@ -35,14 +41,6 @@ def to_ising_operator_from_qubo(
             z_p[i] = True
             z_p[j] = True
             pauli_terms.append(qk_ope.SparsePauliOp(qk_ope.Pauli((z_p, zero)), weight))
-
-        z_p = zero.copy()
-        z_p[i] = True
-        pauli_terms.append(qk_ope.SparsePauliOp(qk_ope.Pauli((z_p, zero)), -weight))
-
-        z_p = zero.copy()
-        z_p[j] = True
-        pauli_terms.append(qk_ope.SparsePauliOp(qk_ope.Pauli((z_p, zero)), -weight))
 
         offset += weight
 

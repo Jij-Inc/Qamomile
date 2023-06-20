@@ -38,7 +38,8 @@ def calc_qubo_energy(qubo: dict[tuple[int, int], float], state: list[int]) -> fl
 
 
 def qubo_to_ising(
-    qubo: dict[tuple[int, int], float]
+    qubo: dict[tuple[int, int], float],
+    simplify = True
 ) -> IsingModel:
     """Converts a QUBO to an Ising model.
     
@@ -52,6 +53,12 @@ def qubo_to_ising(
         >>> spin = [-1, 1]
         >>> qubo_energy = calc_qubo_energy(qubo, binary)
         >>> assert qubo_energy == ising.calc_energy(spin)
+
+        >>> qubo = {(0, 1): 2, (0, 0): -1, (1, 1): -1}
+        >>> ising = qubo_to_ising(qubo)
+        >>> assert ising.constant == -0.5
+        >>> assert ising.linear == {}
+        >>> assert ising.quad == {(0, 1): 0.5}
     
     """
     ising_J: dict[tuple[int, int], float] = {}
@@ -65,4 +72,8 @@ def qubo_to_ising(
             constant += value / 2.0
         ising_h[i] = - value / 4.0 + ising_h.get(i, 0.0)
         ising_h[j] = - value / 4.0 + ising_h.get(j, 0.0)
+
+    if simplify:
+        ising_J = {ij: value for ij, value in ising_J.items() if value != 0.0}
+        ising_h = {i: value for i, value in ising_h.items() if value != 0.0}
     return IsingModel(ising_J, ising_h, constant)

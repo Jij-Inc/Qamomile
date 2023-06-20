@@ -3,9 +3,9 @@
 
 ## Test
 
-The test is everything is written in docstring of each function and class.
+The test is written at tests/ and docstring.
 
 ```
-python -m pytest
+python -m pytest tests jijtranspiler_qiskit
 ```
 
