@@ -11,7 +11,9 @@ class Pauli(enum.Enum):
     Z = enum.auto()
 
 
-def color_group_to_qrac_encode(color_group: dict[int, list[int]]) -> dict[int, tuple[int, Pauli]]:
+def color_group_to_qrac_encode(
+    color_group: dict[int, list[int]]
+) -> dict[int, tuple[int, Pauli]]:
     """qrac encode
 
     Args:
@@ -34,8 +36,7 @@ def color_group_to_qrac_encode(color_group: dict[int, list[int]]) -> dict[int, t
     return qrac31
 
 
-def create_pauli_term(operators: list[Pauli], indices: list[int]):
-    n_qubit = max(indices) + 1
+def create_pauli_term(operators: list[Pauli], indices: list[int], n_qubit: int):
     z_p = np.zeros(n_qubit, dtype=bool)
     x_p = np.zeros(n_qubit, dtype=bool)
     for ope, idx in zip(operators, indices):
@@ -50,8 +51,7 @@ def create_pauli_term(operators: list[Pauli], indices: list[int]):
 
 
 def qrac31_encode(
-    qubo: dict[tuple[int, int], float],
-    color_group: dict[int, list[int]]
+    qubo: dict[tuple[int, int], float], color_group: dict[int, list[int]]
 ) -> tuple[qk_ope.SparsePauliOp, float]:
     ising = qubo_to_ising(qubo)
 
@@ -66,11 +66,11 @@ def qrac31_encode(
     for idx, coeff in ising.linear.items():
         if coeff == 0.0:
             continue
- 
-        color, pauli_kind = encoded_ope[idx]
-        pauli_operator = create_pauli_term([pauli_kind], [color])
 
-        pauli_terms.append(qk_ope.SparsePauliOp(pauli_operator), 1/np.sqrt(3)*coeff)
+        color, pauli_kind = encoded_ope[idx]
+        pauli_operator = create_pauli_term([pauli_kind], [color], n_qubit)
+
+        pauli_terms.append(qk_ope.SparsePauliOp(pauli_operator, 1 / np.sqrt(3) * coeff))
 
     # create Pauli terms
     for (i, j), coeff in ising.quad.items():
@@ -85,12 +85,15 @@ def qrac31_encode(
 
         color_j, pauli_kind_j = encoded_ope[j]
 
-        pauli_ope = create_pauli_term([pauli_kind_i, pauli_kind_j], [color_i, color_j])
+        pauli_ope = create_pauli_term(
+            [pauli_kind_i, pauli_kind_j], [color_i, color_j], n_qubit
+        )
 
-        pauli_terms.append(qk_ope.SparsePauliOp(pauli_ope, 1/3*coeff))
+        pauli_terms.append(qk_ope.SparsePauliOp(pauli_ope, 1 / 3 * coeff))
 
     if pauli_terms:
         # Remove paulis whose coefficients are zeros.
+
         qubit_op = sum(pauli_terms).simplify(atol=0)
     else:
         # If there is no variable, we set num_nodes=1 so that qubit_op should be an operator.
