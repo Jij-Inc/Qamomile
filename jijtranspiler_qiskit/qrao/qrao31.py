@@ -2,7 +2,7 @@ from __future__ import annotations
 import enum
 import numpy as np
 import qiskit.quantum_info as qk_ope
-from jijtranspiler_qiskit.ising_qubo.ising_qubo import qubo_to_ising
+from jijtranspiler_qiskit.ising_qubo import qubo_to_ising, IsingModel
 
 
 class Pauli(enum.Enum):
@@ -50,10 +50,9 @@ def create_pauli_term(operators: list[Pauli], indices: list[int], n_qubit: int):
     return qk_ope.SparsePauliOp(qk_ope.Pauli((z_p, x_p)))
 
 
-def qrac31_encode(
-    qubo: dict[tuple[int, int], float], color_group: dict[int, list[int]]
-) -> tuple[qk_ope.SparsePauliOp, float]:
-    ising = qubo_to_ising(qubo)
+def qrac31_encode_ising(
+    ising: IsingModel, color_group: dict[int, list[int]]
+) -> tuple[qk_ope.SparsePauliOp, float, dict[int, tuple[int, Pauli]]]:
 
     encoded_ope = color_group_to_qrac_encode(color_group)
 
@@ -101,4 +100,4 @@ def qrac31_encode(
         n_qubit = max(1, n_qubit)
         qubit_op = qk_ope.SparsePauliOp("I" * n_qubit, 0)
 
-    return qubit_op, offset
+    return qubit_op, offset, encoded_ope

@@ -1,6 +1,6 @@
 from __future__ import annotations
 import qiskit as qk
-
+import qiskit.quantum_info as qk_info
 import jijmodeling as jm
 import jijmodeling.transpiler as jmt
 from jijtranspiler_qiskit.ising_qubo.ising_qubo import qubo_to_ising
@@ -17,17 +17,25 @@ class QiskitQAOAAnsatzBuilder:
         self.pubo_builder = pubo_builder
         self.num_vars = num_vars
         self.compiled_instance = compiled_instance
-    
+
+    def get_hamiltonian(
+        self,
+        multipliers=None,
+        detail_parameters=None,
+    ) -> tuple[qk_info.SparsePauliOp, float]:
+        qubo, constant = self.pubo_builder.get_qubo_dict(multipliers=multipliers, detail_parameters=detail_parameters)
+        ising_operator, ising_const = to_ising_operator_from_qubo(qubo, self.num_vars)
+        return ising_operator, ising_const + constant
+
     def get_qaoa_ansatz(
         self,
         p: int,
         multipliers=None,
         detail_parameters=None
     ):
-        qubo, constant = self.pubo_builder.get_qubo_dict(multipliers=multipliers, detail_parameters=detail_parameters)
-        ising_operator, ising_const = to_ising_operator_from_qubo(qubo, self.num_vars)
+        ising_operator, constant = self.get_hamiltonian(multipliers=multipliers, detail_parameters=detail_parameters)
         qaoa_ansatz = qk.circuit.library.QAOAAnsatz(ising_operator, reps=p)
-        return qaoa_ansatz, ising_operator, ising_const + constant
+        return qaoa_ansatz, ising_operator, constant
 
     def decode_from_counts(self, counts: dict[str, int]) -> jm.SampleSet:
         samples = []
