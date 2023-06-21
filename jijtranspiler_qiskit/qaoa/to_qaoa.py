@@ -17,6 +17,10 @@ class QiskitQAOAAnsatzBuilder:
         self.pubo_builder = pubo_builder
         self.num_vars = num_vars
         self.compiled_instance = compiled_instance
+    
+    @property
+    def var_map(self) -> dict[str, tuple[int, ...]]:
+        return self.compiled_instance.var_map.var_map
 
     def get_hamiltonian(
         self,
