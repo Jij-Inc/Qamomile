@@ -53,7 +53,6 @@ def create_pauli_term(operators: list[Pauli], indices: list[int], n_qubit: int):
 def qrac31_encode_ising(
     ising: IsingModel, color_group: dict[int, list[int]]
 ) -> tuple[qk_ope.SparsePauliOp, float, dict[int, tuple[int, Pauli]]]:
-
     encoded_ope = color_group_to_qrac_encode(color_group)
 
     pauli_terms: list[qk_ope.SparsePauliOp] = []
@@ -69,7 +68,7 @@ def qrac31_encode_ising(
         color, pauli_kind = encoded_ope[idx]
         pauli_operator = create_pauli_term([pauli_kind], [color], n_qubit)
 
-        pauli_terms.append(qk_ope.SparsePauliOp(pauli_operator, 1 / np.sqrt(3) * coeff))
+        pauli_terms.append(qk_ope.SparsePauliOp(pauli_operator, np.sqrt(3) * coeff))
 
     # create Pauli terms
     for (i, j), coeff in ising.quad.items():
@@ -88,7 +87,7 @@ def qrac31_encode_ising(
             [pauli_kind_i, pauli_kind_j], [color_i, color_j], n_qubit
         )
 
-        pauli_terms.append(qk_ope.SparsePauliOp(pauli_ope, 1 / 3 * coeff))
+        pauli_terms.append(qk_ope.SparsePauliOp(pauli_ope, 3 * coeff))
 
     if pauli_terms:
         # Remove paulis whose coefficients are zeros.
