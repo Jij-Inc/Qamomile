@@ -28,9 +28,7 @@ class QiskitQAOAAnsatzBuilder:
         detail_parameters=None,
     ) -> tuple[qk_info.SparsePauliOp, float]:
         qubo, constant = self.pubo_builder.get_qubo_dict(multipliers=multipliers, detail_parameters=detail_parameters)
-        print(qubo, constant)
         ising_operator, ising_const = to_ising_operator_from_qubo(qubo, self.num_vars)
-        print(ising_const, constant, "---")
         return ising_operator, ising_const + constant
 
     def get_qaoa_ansatz(
