@@ -13,7 +13,7 @@ from .qrao31 import qrac31_encode_ising, Pauli
 from .qrao21 import qrac21_encode_ising
 
 
-class QRAC(ABC):
+class QRACBuilder(ABC):
     def __init__(self, pubo_builder, compiled_instance) -> None:
         self.pubo_builder = pubo_builder
         self.compiled_instance = compiled_instance
@@ -46,7 +46,7 @@ class QRACEncodingCache:
     encoding: dict[int, tuple[int, Pauli]]
 
 
-class QRAC31Builder(QRAC):
+class QRAC31Builder(QRACBuilder):
     def get_hamiltonian(
         self, multipliers=None, detail_parameter=None
     ) -> tuple[qk_info.SparsePauliOp, float, QRACEncodingCache]:
@@ -72,7 +72,7 @@ def transpile_to_qrac31_hamiltonian(compiled_instance, normalize=True) -> QRAC31
     return QRAC31Builder(pubo_builder, compiled_instance)
 
 
-class QRAC21Builder(QRAC):
+class QRAC21Builder(QRACBuilder):
     def get_hamiltonian(
         self, multipliers=None, detail_parameter=None
     ) -> tuple[qk_info.SparsePauliOp, float, QRACEncodingCache]:
