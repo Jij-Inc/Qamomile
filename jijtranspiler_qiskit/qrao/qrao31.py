@@ -2,7 +2,7 @@ from __future__ import annotations
 import enum
 import numpy as np
 import qiskit.quantum_info as qk_ope
-from jijtranspiler_qiskit.ising_qubo import qubo_to_ising, IsingModel
+from jijtranspiler_qiskit.ising_qubo import IsingModel
 
 
 class Pauli(enum.Enum):
