@@ -54,4 +54,21 @@ qaoa_builder = jtq.quri.transpile_to_qaoa(compiled_instance)
 ```
 
 
+## Contributing
+
+### Setup
+
+```bash
+pip install poetry
+poetry install
+poetry shell
+```
+
+### Test
+
+```bash
+pytest tests
+```
+
+
 
