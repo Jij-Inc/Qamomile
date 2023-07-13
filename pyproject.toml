@@ -1,15 +1,16 @@
 [tool.poetry]
-name = "jijmodelingtranspiler-qiskit"
+name = "jijmodeling-transpiler-quantum"
 version = "0.1.0"
 description = ""
 authors = ["Jij Inc."]
 readme = "README.md"
-packages = [{include = "jijmodelingtranspiler_qiskit"}]
+packages = [{include = "jijmodeling_transpiler_quantum"}]
 
 [tool.poetry.dependencies]
 python = ">=3.9,<3.11"
 qiskit = "^0.43.1"
-jijmodeling-transpiler = "^0.4.1"
+jijmodeling-transpiler = "^0.6.0rc2"
+dimod = "^0.12.10"
 
 
 [tool.poetry.group.dev.dependencies]
