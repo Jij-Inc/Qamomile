@@ -68,18 +68,18 @@ def init_cost_funcgtion(A, n):
     n: n_c, the number of classical bits
     """
     #define cost function
-    def cost_function(Pi1, Pj1, Pi, Pj):
+    def cost_function(P1, P):
         # first sum of cost function 
         first_sum = 0
         for i in range(n):
             for j in range(n):
                 if i != j:
-                    first_sum += A[i][j]*(Pi1*Pj1/Pi*Pj)
+                    first_sum += A[i][j]*(P1[i]*P1[j]/P[i]*P[j])
     
         # second sum of cost function 
         second_sum = 0
         for i in range(n):
-            second_sum += A[i][i]*(Pi1/Pi)
+            second_sum += A[i][i]*(P1[i]/P[i])
         
         return second_sum + first_sum
     
@@ -93,6 +93,7 @@ circuit= generate_circuit(4,1,2, parameters)
 # print(parameters)
 circuit.draw(output='mpl', filename='circuit.png')
 
+#try Qiskit primitives
 #get expectation values using qiskit primitives
 estimator = Estimator()
 #define SparsePauliOp 
