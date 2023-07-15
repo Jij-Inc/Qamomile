@@ -1,6 +1,8 @@
 import qiskit as qk
 import qiskit.quantum_info as qk_ope
 import numpy as np
+import jijmodeling as jm
+import jijmodeling_transpiler as jmt
 from jijmodeling_transpiler_quantum.qiskit.qrao.qrao_space_efficient import (
     numbering_space_efficient_encode,
     qrac_space_efficient_encode_ising,
