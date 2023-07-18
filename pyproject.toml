@@ -1,16 +1,20 @@
+[build-system]
+requires = ["poetry-core>=1.0.0", "poetry-dynamic-versioning", "setuptools"]
+build-backend = "poetry_dynamic_versioning.backend"
+
 [tool.poetry]
 name = "jijmodeling-transpiler-quantum"
-version = "0.1.0"
+version = "0.1.0rc2"
 description = ""
 authors = ["Jij Inc."]
 readme = "README.md"
-packages = [{include = "jijmodeling_transpiler_quantum"}]
+packages = [
+    {include = "jijmodeling_transpiler_quantum"},
+]
 
 [tool.poetry.dependencies]
 python = ">=3.9,<3.11"
-qiskit = "^0.43.1"
 jijmodeling-transpiler = "^0.6.0rc2"
-dimod = "^0.12.10"
 
 
 [tool.poetry.group.dev.dependencies]
@@ -19,9 +23,9 @@ matplotlib = "^3.7.1"
 pylatexenc = "^2.10"
 pytest = "^7.3.2"
 
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+[tool.poetry.extras]
+qiskit = ["jijmodeling-transpiler-quantum-qiskit"]
+
 
 [tool.pytest.ini_options]
 addopts = "--doctest-modules"

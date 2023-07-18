@@ -33,6 +33,13 @@ qaoa_builder = jtq.qiskit.transpile_to_qaoa(compiled_instance)
 
 ## QURI-Parts
 
+
+
+| ❌ Not supported yet.                         | 
+|------------------------------------------|
+| Currently, `quri-parts` is not supported. Please wait for the next release. |
+
+
 [QURI Parts](https://quri-parts.qunasys.com/) is an open source library suite for creating and executing quantum algorithms on various quantum computers and simulators.
 
 ### Quantum Approximate Optimization Algorithm (QAOA)

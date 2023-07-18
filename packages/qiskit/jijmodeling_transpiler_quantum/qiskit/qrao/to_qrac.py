@@ -8,13 +8,9 @@ import qiskit.quantum_info as qk_info
 import jijmodeling as jm
 import jijmodeling_transpiler as jmt
 from jijmodeling_transpiler_quantum.core.ising_qubo import qubo_to_ising
-from jijmodeling_transpiler_quantum.core.qrac.graph_coloring import (
-    greedy_graph_coloring,
-)
+from jijmodeling_transpiler_quantum.core.qrac.graph_coloring import greedy_graph_coloring
 from .qrao31 import qrac31_encode_ising, Pauli
 from .qrao21 import qrac21_encode_ising
-from .qrao32 import qrac32_encode_ising
-from .qrao_space_efficient import qrac_space_efficient_encode_ising
 
 
 class QRACBuilder(ABC):
@@ -46,7 +42,7 @@ class QRACBuilder(ABC):
 
 @dataclasses.dataclass
 class QRACEncodingCache:
-    color_group: dict[int, list[int]] | None
+    color_group: dict[int, list[int]]
     encoding: dict[int, tuple[int, Pauli]]
 
 
@@ -100,54 +96,3 @@ def transpile_to_qrac21_hamiltonian(compiled_instance, normalize=True) -> QRAC21
         compiled_instance, normalize=normalize
     )
     return QRAC21Builder(pubo_builder, compiled_instance)
-
-
-class QRAC32Builder(QRACBuilder):
-    def get_hamiltonian(
-        self, multipliers=None, detail_parameter=None
-    ) -> tuple[qk_info.SparsePauliOp, float, QRACEncodingCache]:
-        qubo, constant = self.pubo_builder.get_qubo_dict(
-            multipliers=multipliers, detail_parameters=detail_parameter
-        )
-        ising = qubo_to_ising(qubo)
-        _, color_group = greedy_graph_coloring(
-            ising.quad.keys(), max_color_group_size=3
-        )
-        qrac_hamiltonian, offset, encoding = qrac32_encode_ising(ising, color_group)
-        return (
-            qrac_hamiltonian,
-            offset + constant,
-            QRACEncodingCache(color_group, encoding),
-        )
-
-
-def transpile_to_qrac32_hamiltonian(compiled_instance, normalize=True) -> QRAC32Builder:
-    pubo_builder = jmt.core.pubo.transpile_to_pubo(
-        compiled_instance, normalize=normalize
-    )
-    return QRAC32Builder(pubo_builder, compiled_instance)
-
-
-class QRACSpaceEfficientBuilder(QRACBuilder):
-    def get_hamiltonian(
-        self, multipliers=None, detail_parameter=None
-    ) -> tuple[qk_info.SparsePauliOp, float, QRACEncodingCache]:
-        qubo, constant = self.pubo_builder.get_qubo_dict(
-            multipliers=multipliers, detail_parameters=detail_parameter
-        )
-        ising = qubo_to_ising(qubo)
-        qrac_hamiltonian, offset, encoding = space_efficient_qrac_encoding(ising)
-        return (
-            qrac_hamiltonian,
-            offset + constant,
-            QRACEncodingCache(color_group=None, encoding=encoding),
-        )
-
-
-def transpile_to_qrac_space_efficient_hamiltonian(
-    compiled_instance, normalize=True
-) -> QRACSpaceEfficientBuilder:
-    pubo_builder = jmt.core.pubo.transpile_to_pubo(
-        compiled_instance, normalize=normalize
-    )
-    return QRACSpaceEfficientBuilder(pubo_builder, compiled_instance)
