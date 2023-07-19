@@ -1,0 +1,76 @@
+[W 05:10:49.404 NotebookApp] WARNING: The notebook server is listening on all IP addresses and not using encryption. This is not recommended.
+[I 05:10:49.410 NotebookApp] The port 9999 is already in use, trying another port.
+[I 05:10:49.410 NotebookApp] The port 10000 is already in use, trying another port.
+[I 05:10:49.411 NotebookApp] The port 10001 is already in use, trying another port.
+[I 05:10:49.412 NotebookApp] Serving notebooks from local directory: /home/quantumuser/JijModelingTranspilerQuantum
+[I 05:10:49.412 NotebookApp] Jupyter Notebook 6.5.3 is running at:
+[I 05:10:49.412 NotebookApp] http://Branchbound:10002/
+[I 05:10:49.412 NotebookApp] Use Control-C to stop this server and shut down all kernels (twice to skip confirmation).
+[W 05:11:24.027 NotebookApp] Notebook notebook/jijmodeling_trasnpiler_tutorial.ipynb is not trusted
+[W 05:11:24.056 NotebookApp] 404 GET /nbextensions/pydeck/extension.js?v=20230719051049 (127.0.0.1) 9.730000ms referer=http://localhost:9000/notebooks/notebook/jijmodeling_trasnpiler_tutorial.ipynb
+[I 05:11:24.324 NotebookApp] Kernel started: ef1905ba-abf9-4c96-8760-7a921d279f6e, name: python3
+[W 05:11:24.332 NotebookApp] 404 GET /nbextensions/widgets/notebook/js/extension.js?v=20230719051049 (127.0.0.1) 4.280000ms referer=http://localhost:9000/notebooks/notebook/jijmodeling_trasnpiler_tutorial.ipynb
+[I 05:11:41.371 NotebookApp] Kernel interrupted: ef1905ba-abf9-4c96-8760-7a921d279f6e
+[W 05:12:37.599 NotebookApp] 404 GET /nbextensions/pydeck/extension.js?v=20230719051049 (127.0.0.1) 1.580000ms referer=http://localhost:9000/notebooks/packages/quri_parts/jijmodeling_transpiler_quantum/quri_parts/qaoa/tsp_qaoa_tutorial_en-Copy1.ipynb
+[I 05:12:37.731 NotebookApp] Kernel started: 9f21f3f1-eec5-46b3-9ac1-3588e20306c0, name: python3
+[W 05:12:37.757 NotebookApp] 404 GET /nbextensions/widgets/notebook/js/extension.js?v=20230719051049 (127.0.0.1) 2.680000ms referer=http://localhost:9000/notebooks/packages/quri_parts/jijmodeling_transpiler_quantum/quri_parts/qaoa/tsp_qaoa_tutorial_en-Copy1.ipynb
+[I 05:12:58.128 NotebookApp] Kernel shutdown: 9f21f3f1-eec5-46b3-9ac1-3588e20306c0
+[W 05:12:58.546 NotebookApp] 404 DELETE /api/sessions/03107902-2fe5-4ef1-ac9c-04dd753c1619 (127.0.0.1): Session not found: session_id='03107902-2fe5-4ef1-ac9c-04dd753c1619'
+[W 05:12:58.546 NotebookApp] Session not found: session_id='03107902-2fe5-4ef1-ac9c-04dd753c1619'
+[W 05:12:58.547 NotebookApp] 404 DELETE /api/sessions/03107902-2fe5-4ef1-ac9c-04dd753c1619 (127.0.0.1) 1.250000ms referer=http://localhost:9000/notebooks/packages/quri_parts/jijmodeling_transpiler_quantum/quri_parts/qaoa/tsp_qaoa_tutorial_en-Copy1.ipynb
+[W 05:13:12.133 NotebookApp] 404 GET /nbextensions/pydeck/extension.js?v=20230719051049 (127.0.0.1) 2.730000ms referer=http://localhost:9000/notebooks/packages/quri_parts/tsp_qaoa_tutorial_en-Copy1.ipynb
+[I 05:13:12.309 NotebookApp] Kernel started: 4811e4ca-6210-49e1-8f3c-79b7c0c0cf80, name: python3
+[W 05:13:12.329 NotebookApp] 404 GET /nbextensions/widgets/notebook/js/extension.js?v=20230719051049 (127.0.0.1) 2.550000ms referer=http://localhost:9000/notebooks/packages/quri_parts/tsp_qaoa_tutorial_en-Copy1.ipynb
+[I 05:13:25.017 NotebookApp] Saving file at /notebook/jijmodeling_trasnpiler_tutorial.ipynb
+[W 05:13:25.019 NotebookApp] Notebook notebook/jijmodeling_trasnpiler_tutorial.ipynb is not trusted
+[W 05:14:37.988 NotebookApp] 404 GET /api/contents/packages/quri_parts/jijmodeling_transpiler_quantum/quri_parts/qaoa/tsp_qaoa_tutorial_en-Copy1.ipynb?content=0&_=1689743557319 (127.0.0.1): file or directory does not exist: 'packages/quri_parts/jijmodeling_transpiler_quantum/quri_parts/qaoa/tsp_qaoa_tutorial_en-Copy1.ipynb'
+[W 05:14:37.988 NotebookApp] file or directory does not exist: 'packages/quri_parts/jijmodeling_transpiler_quantum/quri_parts/qaoa/tsp_qaoa_tutorial_en-Copy1.ipynb'
+[W 05:14:37.988 NotebookApp] 404 GET /api/contents/packages/quri_parts/jijmodeling_transpiler_quantum/quri_parts/qaoa/tsp_qaoa_tutorial_en-Copy1.ipynb?content=0&_=1689743557319 (127.0.0.1) 1.790000ms referer=http://localhost:9000/notebooks/packages/quri_parts/jijmodeling_transpiler_quantum/quri_parts/qaoa/tsp_qaoa_tutorial_en-Copy1.ipynb
+[I 05:14:38.019 NotebookApp] Uploading file to /packages/quri_parts/jijmodeling_transpiler_quantum/quri_parts/qaoa/tsp_qaoa_tutorial_en-Copy1.ipynb
+[I 05:15:13.009 NotebookApp] Saving file at /packages/quri_parts/tsp_qaoa_tutorial_en-Copy1.ipynb
+[W 05:15:41.724 NotebookApp] 404 GET /nbextensions/pydeck/extension.js?v=20230719051049 (127.0.0.1) 2.640000ms referer=http://localhost:9000/notebooks/packages/quri_parts/tsp_qaoa_tutorial_en-Copy1.ipynb
+[W 05:15:41.947 NotebookApp] 404 GET /nbextensions/widgets/notebook/js/extension.js?v=20230719051049 (127.0.0.1) 2.290000ms referer=http://localhost:9000/notebooks/packages/quri_parts/tsp_qaoa_tutorial_en-Copy1.ipynb
+[W 05:17:16.520 NotebookApp] delete /jijmodeling_transpiler_quantum/packages
+[W 05:17:16.525 NotebookApp] delete /jijmodeling_transpiler_quantum/package
+[W 05:17:33.552 NotebookApp] 404 DELETE /api/sessions/03107902-2fe5-4ef1-ac9c-04dd753c1619 (127.0.0.1): Session not found: session_id='03107902-2fe5-4ef1-ac9c-04dd753c1619'
+[W 05:17:33.553 NotebookApp] Session not found: session_id='03107902-2fe5-4ef1-ac9c-04dd753c1619'
+[W 05:17:33.553 NotebookApp] 404 DELETE /api/sessions/03107902-2fe5-4ef1-ac9c-04dd753c1619 (127.0.0.1) 1.590000ms referer=http://localhost:9000/notebooks/packages/quri_parts/jijmodeling_transpiler_quantum/quri_parts/qaoa/tsp_qaoa_tutorial_en-Copy1.ipynb
+[I 05:17:33.587 NotebookApp] Kernel started: cbafcbd8-1481-4a90-83ce-de175598b4b8, name: python3
+[I 05:17:34.956 NotebookApp] Kernel restarted: cbafcbd8-1481-4a90-83ce-de175598b4b8
+[W 05:17:34.987 NotebookApp] Replacing stale connection: cbafcbd8-1481-4a90-83ce-de175598b4b8:7144dd2ab8a546528cdf15bf3957a0cb
+[I 05:17:35.463 NotebookApp] Starting buffering for cbafcbd8-1481-4a90-83ce-de175598b4b8:7144dd2ab8a546528cdf15bf3957a0cb
+[I 05:17:35.466 NotebookApp] Restoring connection for cbafcbd8-1481-4a90-83ce-de175598b4b8:7144dd2ab8a546528cdf15bf3957a0cb
+[I 05:17:36.473 NotebookApp] Replaying 3 buffered messages
+[I 05:17:47.864 NotebookApp] Starting buffering for 4811e4ca-6210-49e1-8f3c-79b7c0c0cf80:abefb262e4874199801c52a7b432853c
+[W 05:18:16.351 NotebookApp] 404 GET /nbextensions/pydeck/extension.js?v=20230719051049 (127.0.0.1) 2.710000ms referer=http://localhost:9000/notebooks/packages/quri_parts/tsp_qaoa_tutorial_en-Copy1.ipynb
+[W 05:18:16.559 NotebookApp] 404 GET /nbextensions/widgets/notebook/js/extension.js?v=20230719051049 (127.0.0.1) 2.590000ms referer=http://localhost:9000/notebooks/packages/quri_parts/tsp_qaoa_tutorial_en-Copy1.ipynb
+[I 05:18:18.014 NotebookApp] Starting buffering for cbafcbd8-1481-4a90-83ce-de175598b4b8:7144dd2ab8a546528cdf15bf3957a0cb
+[I 05:18:19.264 NotebookApp] Starting buffering for ef1905ba-abf9-4c96-8760-7a921d279f6e:c2cce95d998a433386818b5196f062c1
+[W 05:19:11.949 NotebookApp] 404 GET /nbextensions/pydeck/extension.js?v=20230719051049 (127.0.0.1) 2.460000ms referer=http://localhost:9000/notebooks/packages/quri_parts/tsp_qaoa_tutorial_en-Copy1.ipynb
+[W 05:19:12.165 NotebookApp] 404 GET /nbextensions/widgets/notebook/js/extension.js?v=20230719051049 (127.0.0.1) 1.650000ms referer=http://localhost:9000/notebooks/packages/quri_parts/tsp_qaoa_tutorial_en-Copy1.ipynb
+[I 05:21:02.052 NotebookApp] Saving file at /packages/quri_parts/jijmodeling_transpiler_quantum/quri_parts/__init__.py
+[I 05:21:05.948 NotebookApp] Starting buffering for 4811e4ca-6210-49e1-8f3c-79b7c0c0cf80:760f5f9dea4141bc9cf2385ead1733dc
+[I 05:21:06.484 NotebookApp] Kernel restarted: 4811e4ca-6210-49e1-8f3c-79b7c0c0cf80
+[I 05:21:06.582 NotebookApp] Restoring connection for 4811e4ca-6210-49e1-8f3c-79b7c0c0cf80:760f5f9dea4141bc9cf2385ead1733dc
+[I 05:21:07.588 NotebookApp] Replaying 3 buffered messages
+[I 05:21:12.172 NotebookApp] Saving file at /packages/quri_parts/tsp_qaoa_tutorial_en-Copy1.ipynb
+[I 05:23:13.007 NotebookApp] Saving file at /packages/quri_parts/tsp_qaoa_tutorial_en-Copy1.ipynb
+[I 05:23:52.074 NotebookApp] Kernel shutdown: 4811e4ca-6210-49e1-8f3c-79b7c0c0cf80
+[W 05:23:52.693 NotebookApp] 404 DELETE /api/sessions/8f1a53b8-9124-4c57-8b52-3d56d7d04a25 (127.0.0.1): Session not found: session_id='8f1a53b8-9124-4c57-8b52-3d56d7d04a25'
+[W 05:23:52.693 NotebookApp] Session not found: session_id='8f1a53b8-9124-4c57-8b52-3d56d7d04a25'
+[W 05:23:52.694 NotebookApp] 404 DELETE /api/sessions/8f1a53b8-9124-4c57-8b52-3d56d7d04a25 (127.0.0.1) 1.300000ms referer=http://localhost:9000/notebooks/packages/quri_parts/tsp_qaoa_tutorial_quri.ipynb
+[W 05:24:09.151 NotebookApp] 404 GET /nbextensions/pydeck/extension.js?v=20230719051049 (127.0.0.1) 1.740000ms referer=http://localhost:9000/notebooks/notebook/tsp_qaoa_tutorial_quri.ipynb
+[I 05:24:09.285 NotebookApp] Kernel started: c559a022-1565-477f-98c0-c79f38d8402f, name: python3
+[W 05:24:09.294 NotebookApp] 404 GET /nbextensions/widgets/notebook/js/extension.js?v=20230719051049 (127.0.0.1) 3.120000ms referer=http://localhost:9000/notebooks/notebook/tsp_qaoa_tutorial_quri.ipynb
+[I 05:25:25.053 NotebookApp] Kernel shutdown: c559a022-1565-477f-98c0-c79f38d8402f
+[W 05:25:25.470 NotebookApp] 404 DELETE /api/sessions/dda7c508-4897-449f-a8b5-8c6c287b4be0 (127.0.0.1): Session not found: session_id='dda7c508-4897-449f-a8b5-8c6c287b4be0'
+[W 05:25:25.470 NotebookApp] Session not found: session_id='dda7c508-4897-449f-a8b5-8c6c287b4be0'
+[W 05:25:25.470 NotebookApp] 404 DELETE /api/sessions/dda7c508-4897-449f-a8b5-8c6c287b4be0 (127.0.0.1) 1.190000ms referer=http://localhost:9000/notebooks/notebook/tsp_qaoa_tutorial_quri.ipynb
+[W 05:25:38.093 NotebookApp] 404 GET /nbextensions/pydeck/extension.js?v=20230719051049 (127.0.0.1) 1.930000ms referer=http://localhost:9000/notebooks/packages/quri_parts/tsp_qaoa_tutorial_quri.ipynb
+[I 05:25:38.222 NotebookApp] Kernel started: 6c326af2-c0e5-445a-8531-7b3d87cfc50f, name: python3
+[W 05:25:38.242 NotebookApp] 404 GET /nbextensions/widgets/notebook/js/extension.js?v=20230719051049 (127.0.0.1) 2.900000ms referer=http://localhost:9000/notebooks/packages/quri_parts/tsp_qaoa_tutorial_quri.ipynb
+[W 05:26:09.992 NotebookApp] 404 GET /api/contents/notebook/tsp_qaoa_tutorial_quri.ipynb?content=0&_=1689744248912 (127.0.0.1): file or directory does not exist: 'notebook/tsp_qaoa_tutorial_quri.ipynb'
+[W 05:26:09.992 NotebookApp] file or directory does not exist: 'notebook/tsp_qaoa_tutorial_quri.ipynb'
+[W 05:26:09.992 NotebookApp] 404 GET /api/contents/notebook/tsp_qaoa_tutorial_quri.ipynb?content=0&_=1689744248912 (127.0.0.1) 6.720000ms referer=http://localhost:9000/notebooks/notebook/tsp_qaoa_tutorial_quri.ipynb
+[I 05:26:10.029 NotebookApp] Uploading file to /notebook/tsp_qaoa_tutorial_quri.ipynb
+[I 05:27:39.041 NotebookApp] Saving file at /packages/quri_parts/tsp_qaoa_tutorial_quri.ipynb
