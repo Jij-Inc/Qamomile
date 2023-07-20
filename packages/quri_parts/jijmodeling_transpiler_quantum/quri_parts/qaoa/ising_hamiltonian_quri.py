@@ -8,6 +8,7 @@ from quri_parts.core.operator import pauli_label
 from quri_parts.core.operator import PAULI_IDENTITY
 from quri_parts.core.operator import Operator
 
+
 def to_ising_operator_from_qubo_quri(
     qubo: dict[tuple[int, int], float], n_qubit: int
 ) -> tuple[Operator, float]:
@@ -15,16 +16,16 @@ def to_ising_operator_from_qubo_quri(
     ising = qubo_to_ising(qubo)
     offset = ising.constant
     quri_operator = Operator()
-    
+
     # convert linear parts of the objective function into Operator.
     for idx, coeff in ising.linear.items():
         if coeff != 0.0:
-            quri_operator += Operator({pauli_label(f'Z{idx}'): coeff})
+            quri_operator += Operator({pauli_label(f"Z{idx}"): coeff})
 
     # convert quadratic parts of the objective function into Operator.
     for (i, j), coeff in ising.quad.items():
         if coeff != 0.0:
-            quri_operator += Operator({pauli_label(f'Z{i} Z{j}'): coeff})
+            quri_operator += Operator({pauli_label(f"Z{i} Z{j}"): coeff})
     quri_operator.constant = offset
     # Add the constant part to the operator.
     # op += Operator({pauli_label(''): ising.offset})
