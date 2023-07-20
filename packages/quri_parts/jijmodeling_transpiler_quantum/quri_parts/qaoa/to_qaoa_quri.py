@@ -70,11 +70,9 @@ class QuriQAOAAnsatzBuilder:
             Beta=quri_QAOAANSATZ.add_parameters(f"beta{i}")
             
             for i in zip(pauli_z,pauli_z_coeff):
-                print(i)
                 quri_QAOAANSATZ.add_ParametricRZ_gate(i[0][0],{Gamma[0]:2*i[1]})
     
             for i in zip(pauli_zz,pauli_zz_coeff):
-                print(i)
                 quri_QAOAANSATZ.add_CNOT_gate(i[0][0],i[0][1])
                 quri_QAOAANSATZ.add_ParametricRZ_gate(i[0][1],{Gamma[0]:2*i[1]})
                 quri_QAOAANSATZ.add_CNOT_gate(i[0][0],i[0][1])

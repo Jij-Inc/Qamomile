@@ -26,7 +26,7 @@ def to_ising_operator_from_qubo_quri(
         if coeff != 0.0:
             quri_operator += Operator({pauli_label(f'Z{i} Z{j}'): coeff})
     quri_operator.constant = offset
-#     # Add the constant part to the operator.
-#     op += Operator({pauli_label(''): ising.offset})
+    # Add the constant part to the operator.
+    # op += Operator({pauli_label(''): ising.offset})
 
     return quri_operator, offset

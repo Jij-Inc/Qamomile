@@ -74,3 +74,14 @@
 [W 05:26:09.992 NotebookApp] 404 GET /api/contents/notebook/tsp_qaoa_tutorial_quri.ipynb?content=0&_=1689744248912 (127.0.0.1) 6.720000ms referer=http://localhost:9000/notebooks/notebook/tsp_qaoa_tutorial_quri.ipynb
 [I 05:26:10.029 NotebookApp] Uploading file to /notebook/tsp_qaoa_tutorial_quri.ipynb
 [I 05:27:39.041 NotebookApp] Saving file at /packages/quri_parts/tsp_qaoa_tutorial_quri.ipynb
+[W 05:33:35.621 NotebookApp] 404 GET /nbextensions/pydeck/extension.js?v=20230719051049 (127.0.0.1) 2.580000ms referer=http://localhost:9000/notebooks/packages/quri_parts/tsp_qaoa_tutorial_quri.ipynb
+[W 05:33:35.780 NotebookApp] 404 GET /nbextensions/widgets/notebook/js/extension.js?v=20230719051049 (127.0.0.1) 3.760000ms referer=http://localhost:9000/notebooks/packages/quri_parts/tsp_qaoa_tutorial_quri.ipynb
+[W 05:34:04.155 NotebookApp] delete /packages/quri_parts/jijmodeling_transpiler_quantum/quri_parts/qaoa/tsp_qaoa_tutorial_en-Copy1.ipynb
+[I 05:34:04.158 NotebookApp] Kernel shutdown: cbafcbd8-1481-4a90-83ce-de175598b4b8
+[I 14:32:52.273 NotebookApp] Starting buffering for 6c326af2-c0e5-445a-8531-7b3d87cfc50f:145ea232c78f407184c0700c311af39d
+[I 14:32:53.947 NotebookApp] Restoring connection for 6c326af2-c0e5-445a-8531-7b3d87cfc50f:145ea232c78f407184c0700c311af39d
+[W 14:34:23.976 NotebookApp] WebSocket ping timeout after 90028 ms.
+[W 14:34:23.978 NotebookApp] WebSocket ping timeout after 90000 ms.
+[I 14:34:28.984 NotebookApp] Starting buffering for 6c326af2-c0e5-445a-8531-7b3d87cfc50f:fcddd31fb7184c568326d233edff6db9
+[I 03:05:09.770 NotebookApp] Saving file at /packages/quri_parts/jijmodeling_transpiler_quantum/quri_parts/qaoa/to_qaoa_quri.py
+[I 03:05:46.557 NotebookApp] Saving file at /packages/quri_parts/jijmodeling_transpiler_quantum/quri_parts/qaoa/ising_hamiltonian_quri.py
