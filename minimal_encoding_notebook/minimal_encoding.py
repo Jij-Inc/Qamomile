@@ -1,9 +1,10 @@
 from qiskit import QuantumRegister, AncillaRegister ,ClassicalRegister, QuantumCircuit, Aer, execute
 from qiskit.circuit import Parameter, ParameterVector
 from qiskit.visualization import plot_state_city, plot_histogram
+from qiskit.algorithms.optimizers import COBYLA
 
 #libs for get expectation value
-from qiskit.primitives import Estimator
+from qiskit.primitives import Estimator, Sampler
 from qiskit.circuit.library import RealAmplitudes
 from qiskit.quantum_info import SparsePauliOp
 
@@ -60,12 +61,12 @@ def generate_circuit(nr, na, l,parameters):
     return circuit
 
 #function to define SparsePauliOp 
-def define_pauli_op(nr):
+def define_pauli_op(nr, ancilla:bool=False):
     """
     nr: number of register qubits
+    ancilla: if True, add ancilla qubit of |1> state, else add pauli I for ancilla qubit
     """
     #total number of qubits (nq+na) where na is number of ancilla qubits and is always 1
-    n = nr + 1
     #get all binary 2^nq pattern
     lst = [list(i) for i in itertools.product([0, 1], repeat=nr)]
     lst = np.array(lst)
@@ -77,10 +78,23 @@ def define_pauli_op(nr):
     pauli_op = []
     for i in l:
         if i == []:
-            pauli_op.append(SparsePauliOp.from_list([('I'*n,1)]))
+            pauli_op.append(SparsePauliOp.from_list([('I'*nr,1)]))
         else:
-            i = [e + 1 for e in i]
-            pauli_op.append(SparsePauliOp.from_sparse_list([('Z'*len(i),i,1)],num_qubits=n))
+            i = [e for e in i]
+            pauli_op.append(SparsePauliOp.from_sparse_list([('Z'*len(i),i,1)],num_qubits=nr))
+    
+    Ha1 = SparsePauliOp.from_list([('I', 1/2)])
+    Ha2 = SparsePauliOp.from_list([('Z', -1/2)])
+    Ha = Ha1.sum([Ha1, Ha2])
+    Id = SparsePauliOp.from_list([('I', 1)])
+
+    #add ancilla qubit
+    for i in range(len(pauli_op)):
+        if ancilla == True:
+            pauli_op[i] = pauli_op[i].tensor(Ha)
+        else:
+            pauli_op[i] = pauli_op[i].tensor(Id)
+    
     return pauli_op
 
 #function to generate random QUBO matrix
@@ -91,7 +105,7 @@ def generate_random_qubo(nc):
     return np.random.uniform(low=-1.0, high=1.0, size = (nc, nc))
 
 #initialize cost function
-def init_cost_funcgtion(A, nc):
+def init_cost_function(A, nc):
     """
     A: QUBO matrix A
     nc: the number of classical bits
@@ -115,7 +129,7 @@ def init_cost_funcgtion(A, nc):
     return cost_function
 
 #function that classical optimizer will minimize
-def func_to_minimize(nc, nr, na, circuit,):
+def init_func(nc, nr, na, circuit,):
     """
     This function will be minimized by classical optimizer. 
     theta: parameters of the circuit 
@@ -124,30 +138,62 @@ def func_to_minimize(nc, nr, na, circuit,):
     #get expectation values from a circuit
     #get a list of H (observables), which is a list of SparsePauliOp
     H = define_pauli_op(nr)
-    H1 = define_pauli_op(nr)
-    Ha = SparsePauliOp.from_list([('IIII', 1/2), ('IIIZ', -1/2)])
-    for i in range(len(H1)):
-        H1[i] = H1[i].sum([H1[i], Ha])  
+    Ha = define_pauli_op(nr, ancilla=True)
     
     A = generate_random_qubo(nc)
-    cost_function = init_cost_funcgtion(A, nc)
+    cost_function = init_cost_function(A, nc)
 
     estimator = Estimator()
     def func(theta):
+        """
+        This function will be minimized by classical optimizer. 
+        theta: parameters of the circuit 
+        """
         #get a expectation value of each H
-        job1 = estimator.run([circuit]*len(H),H,[list(theta.values())]*len(H))
+        job1 = estimator.run([circuit]*len(H),H,[theta]*len(H))
         P = job1.result()
-        print(f"The primitive-job finished with result {P}")
+        # print(f"The primitive-job finished with result {P}")
 
-        job2 = estimator.run([circuit]*len(H),H1,[list(theta.values())]*len(H))
+        job2 = estimator.run([circuit]*len(H),Ha,[theta]*len(H))
         P1 = job2.result()
-        print(f"The primitive-job finished with result {P1}")
+        # print(f"The primitive-job finished with result {P1}")
 
         result = cost_function(P1.values, P.values)
         print(f"The resukt of cost function is {result}")
         return result
 
     return func
+
+def decode(theta, circuit,):
+    circuit.measure_all(inplace=True)
+    sampler = Sampler()
+    job = sampler.run(circuits=[circuit], parameter_values=[result.x], parameters=[[]])
+    job_result = job.result()
+    result = [q.binary_probabilities() for q in job_result.quasi_dists]
+    beta = list(resultr[0].values())
+    print(result)
+    circuit.remove_final_measurements(inplace=True)
+    #define observable to calculate expectation value
+    H = define_pauli_op(nr, ancilla=False)
+    Ha = define_pauli_op(nr,ancilla=True)
+    #get expectation values from
+    job1 = estimator.run([circuit]*len(H),H,[result.x]*len(H))
+    P = job1.result()
+    # print(f"The primitive-job finished with result {P}")
+    job2 = estimator.run([circuit]*len(H),Ha,[result.x]*len(H))
+    P1 = job2.result()
+    # print(f"The primitive-job finished with result {P1}")
+
+    #compute b_i
+    b = []
+    a= []
+    for i in range(1, len(P.values)):
+        b.append(P1.values[i] / P.values[i])
+        a[i] = 1 - b[i]
+
+    #need to fix return value
+    return 0
+
 
 #=====================================================
 # try functions
@@ -192,8 +238,13 @@ job2 = estimator.run([circuit]*len(H),H1,[list(theta.values())]*len(H))
 P1 = job2.result()
 print(f"The primitive-job finished with result {P1}")
 
-#init cost function 
-A = generate_random_qubo(nc)
-cost_function = init_cost_funcgtion(A, nc)
-result = cost_function(P1.values, P.values)
-print(f"The resukt of cost function is {result}")
+#try classical optimizer
+func = init_func(nc, nr, na, circuit)
+n_eval = 5000
+optimizer = COBYLA()
+result = optimizer.minimize(func, list(theta.values()))
+
+print(f"The final point of the minimization => {result.x}")
+print(f"The final value of the minimization => {result.fun}")
+print(f"The total number of function evaluations => {result.nfev}")
+print(f"The total number of iterations => {result.nit}")
