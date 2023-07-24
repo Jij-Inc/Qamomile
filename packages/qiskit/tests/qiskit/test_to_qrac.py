@@ -4,7 +4,7 @@ import numpy as np
 import jijmodeling as jm
 import jijmodeling_transpiler as jmt
 
-from jijmodeling_transpiler_quantum.qiskit.qrao.to_qrac import (
+from jijmodeling_transpiler_quantum.qiskit import (
     transpile_to_qrac_space_efficient_hamiltonian,
     transpile_to_qrac31_hamiltonian,
     transpile_to_qrac21_hamiltonian,
@@ -69,9 +69,11 @@ def test_transpile_to_qrac_space_efficient_hamiltonian():
     problem += jm.Constraint("onehot", jm.sum(i, x[i]) == 1)
 
     compiled_instance = jmt.core.compile_model(problem, {"n": 3})
-    qrac_builder = transpile_to_qrac_space_efficient_hamiltonian(compiled_instance)
+    qrac_builder = transpile_to_qrac_space_efficient_hamiltonian(
+        compiled_instance
+    )
 
     qrac_hamiltonian, offset, encoding = qrac_builder.get_hamiltonian(
         multipliers={"onehot": 1.0}
     )
-    assert encoding.color_group is None
+    assert encoding.color_group == {}

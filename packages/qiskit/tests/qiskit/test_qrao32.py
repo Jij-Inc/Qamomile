@@ -29,7 +29,9 @@ def test_create_pauli_x_prime_term():
 
     _pauli_terms: list[qk_ope.SparsePauliOp] = []
     for z_p, x_p, coeff in zip(zps, xps, coeffs):
-        _pauli_terms.append(qk_ope.SparsePauliOp(qk_ope.Pauli((z_p, x_p)), coeff))
+        _pauli_terms.append(
+            qk_ope.SparsePauliOp(qk_ope.Pauli((z_p, x_p)), coeff)
+        )
 
     answer = [
         qk_ope.SparsePauliOp(qk_ope.Pauli("XX"), 1 / 2),
@@ -61,7 +63,9 @@ def test_create_pauli_y_prime_term():
 
     _pauli_terms: list[qk_ope.SparsePauliOp] = []
     for z_p, x_p, coeff in zip(zps, xps, coeffs):
-        _pauli_terms.append(qk_ope.SparsePauliOp(qk_ope.Pauli((z_p, x_p)), coeff))
+        _pauli_terms.append(
+            qk_ope.SparsePauliOp(qk_ope.Pauli((z_p, x_p)), coeff)
+        )
 
     answer = [
         qk_ope.SparsePauliOp(qk_ope.Pauli("XI"), 1 / 2),
@@ -93,7 +97,9 @@ def test_create_pauli_z_prime_term():
 
     _pauli_terms: list[qk_ope.SparsePauliOp] = []
     for z_p, x_p, coeff in zip(zps, xps, coeffs):
-        _pauli_terms.append(qk_ope.SparsePauliOp(qk_ope.Pauli((z_p, x_p)), coeff))
+        _pauli_terms.append(
+            qk_ope.SparsePauliOp(qk_ope.Pauli((z_p, x_p)), coeff)
+        )
 
     answer = [
         qk_ope.SparsePauliOp(qk_ope.Pauli("ZZ"), 1.0),
