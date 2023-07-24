@@ -76,4 +76,4 @@ def test_transpile_to_qrac_space_efficient_hamiltonian():
     qrac_hamiltonian, offset, encoding = qrac_builder.get_hamiltonian(
         multipliers={"onehot": 1.0}
     )
-    assert encoding.color_group is None
+    assert encoding.color_group == {}

@@ -57,7 +57,7 @@ class QRACBuilder(ABC):
 
 @dataclasses.dataclass
 class QRACEncodingCache:
-    color_group: dict[int, list[int]] | None
+    color_group: dict[int, list[int]]
     encoding: dict[int, tuple[int, Pauli]]
 
 
@@ -250,7 +250,7 @@ class QRACSpaceEfficientBuilder(QRACBuilder):
         return (
             qrac_hamiltonian,
             offset + constant,
-            QRACEncodingCache(color_group=None, encoding=encoding),
+            QRACEncodingCache(color_group={}, encoding=encoding),
         )
 
 
