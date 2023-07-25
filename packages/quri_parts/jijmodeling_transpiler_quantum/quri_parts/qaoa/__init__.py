@@ -1,4 +1,4 @@
-from .to_qaoa_quri import transpile_to_qaoa_ansatz_quri
-from .ising_hamiltonian_quri import to_ising_operator_from_qubo_quri
+from .to_qaoa import transpile_to_qaoa_ansatz
+from .ising_hamiltonian import to_ising_operator_from_qubo
 
-__all__ = ["to_ising_operator_from_qubo_quri" "transpile_to_qaoa_ansatz_quri"]
+__all__ = ["to_ising_operator_from_qubo" "transpile_to_qaoa_ansatz"]

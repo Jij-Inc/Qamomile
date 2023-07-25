@@ -1,16 +1,12 @@
 from __future__ import annotations
-
+from abc import ABC, abstractmethod
+from jijmodeling_transpiler_quantum.core import qubo_to_ising, greedy_graph_coloring
+from .qrao31 import qrac31_encode_ising, Pauli
+from .qrao21 import qrac21_encode_ising
 import dataclasses
 import typing as typ
-from abc import ABC, abstractmethod
-
-import qiskit.quantum_info as qk_info
 import jijmodeling as jm
 import jijmodeling.transpiler as jmt
-from jijmodeling_transpiler_quantum.core import qubo_to_ising
-from jijmodeling_transpiler_quantum.core import greedy_graph_coloring
-from .qrao31 import qrac31_encode_ising_quri, Pauli
-from .qrao21 import qrac21_encode_ising_quri
 
 
 class QRACBuilder(ABC):
@@ -57,9 +53,7 @@ class QRAC31Builder(QRACBuilder):
         _, color_group = greedy_graph_coloring(
             ising.quad.keys(), max_color_group_size=3
         )
-        qrac_hamiltonian, offset, encoding = qrac31_encode_ising_quri(
-            ising, color_group
-        )
+        qrac_hamiltonian, offset, encoding = qrac31_encode_ising(ising, color_group)
         return (
             qrac_hamiltonian,
             offset + constant,
@@ -85,9 +79,7 @@ class QRAC21Builder(QRACBuilder):
         _, color_group = greedy_graph_coloring(
             ising.quad.keys(), max_color_group_size=2
         )
-        qrac_hamiltonian, offset, encoding = qrac21_encode_ising_quri(
-            ising, color_group
-        )
+        qrac_hamiltonian, offset, encoding = qrac21_encode_ising(ising, color_group)
         return (
             qrac_hamiltonian,
             offset + constant,

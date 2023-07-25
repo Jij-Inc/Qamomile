@@ -1,13 +1,11 @@
 from __future__ import annotations
 import numpy as np
 from jijmodeling_transpiler_quantum.core.ising_qubo import IsingModel
-from .qrao31 import Pauli, color_group_to_qrac_encode, create_pauli_term_quri
-from quri_parts.core.operator import pauli_label
-from quri_parts.core.operator import PAULI_IDENTITY
-from quri_parts.core.operator import Operator
+from .qrao31 import Pauli, color_group_to_qrac_encode, create_pauli_term
+from quri_parts.core.operator import pauli_label, PAULI_IDENTITY, Operator
 
 
-def qrac21_encode_ising_quri(
+def qrac21_encode_ising(
     ising: IsingModel, color_group: dict[int, list[int]]
 ) -> tuple[Operator, float, dict[int, tuple[int, Pauli]]]:
     encoded_ope = color_group_to_qrac_encode(color_group)
@@ -22,7 +20,7 @@ def qrac21_encode_ising_quri(
             continue
 
         color, pauli_kind = encoded_ope[idx]
-        pauli_str = create_pauli_term_quri([pauli_kind], [color], n_qubit)
+        pauli_str = create_pauli_term([pauli_kind], [color], n_qubit)
 
         pauli_terms.append(Operator({pauli_label(pauli_str): np.sqrt(2) * coeff}))
 
@@ -38,7 +36,7 @@ def qrac21_encode_ising_quri(
 
         color_j, pauli_kind_j = encoded_ope[j]
 
-        pauli_str = create_pauli_term_quri(
+        pauli_str = create_pauli_term(
             [pauli_kind_i, pauli_kind_j], [color_i, color_j], n_qubit
         )
 

@@ -7,14 +7,13 @@ build-backend = "poetry_dynamic_versioning.backend"
 [tool.poetry]
 name = "jijmodeling-transpiler-quantum-quri-parts"
 version = "0.1.0rc2"
-description = "JijModeling Transpiler for Quri-parts"
+description = "JijModeling Transpiler for QURI parts"
 authors = ["Jij Inc."]
 readme = "README.md"
 packages = [{include = "jijmodeling_transpiler_quantum"}]
 
 [tool.poetry.dependencies]
 python = ">=3.9,<3.11"
-qiskit = ">=0.43.1"
 jijmodeling-transpiler-quantum = "*"
 quri-parts = ">=0.11.0"
 qulacs = ">=0.5.6"

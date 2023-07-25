@@ -1,11 +1,8 @@
 from __future__ import annotations
 import enum
 import numpy as np
-import qiskit.quantum_info as qk_ope
 from jijmodeling_transpiler_quantum.core.ising_qubo import IsingModel
-from quri_parts.core.operator import pauli_label
-from quri_parts.core.operator import PAULI_IDENTITY
-from quri_parts.core.operator import Operator
+from quri_parts.core.operator import pauli_label, PAULI_IDENTITY, Operator
 
 
 class Pauli(enum.Enum):
@@ -39,9 +36,7 @@ def color_group_to_qrac_encode(
     return qrac31
 
 
-def create_pauli_term_quri(
-    operators: list[Pauli], indices: list[int], n_qubit: int
-) -> str:
+def create_pauli_term(operators: list[Pauli], indices: list[int], n_qubit: int) -> str:
     pauli_str = ""
     for ope, idx in zip(operators, indices):
         if ope == Pauli.X:
@@ -53,7 +48,7 @@ def create_pauli_term_quri(
     return pauli_str.rstrip()
 
 
-def qrac31_encode_ising_quri(
+def qrac31_encode_ising(
     ising: IsingModel, color_group: dict[int, list[int]]
 ) -> tuple[Operator, float, dict[int, tuple[int, Pauli]]]:
     encoded_ope = color_group_to_qrac_encode(color_group)
@@ -68,7 +63,7 @@ def qrac31_encode_ising_quri(
             continue
 
         color, pauli_kind = encoded_ope[idx]
-        pauli_operator = create_pauli_term_quri([pauli_kind], [color], n_qubit)
+        pauli_operator = create_pauli_term([pauli_kind], [color], n_qubit)
 
         pauli_terms.append(Operator({pauli_label(pauli_operator): np.sqrt(3) * coeff}))
 
@@ -84,7 +79,7 @@ def qrac31_encode_ising_quri(
 
         color_j, pauli_kind_j = encoded_ope[j]
 
-        pauli_ope = create_pauli_term_quri(
+        pauli_ope = create_pauli_term(
             [pauli_kind_i, pauli_kind_j], [color_i, color_j], n_qubit
         )
         pauli_terms.append(Operator({pauli_label(pauli_ope): 3 * coeff}))

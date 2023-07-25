@@ -1,15 +1,14 @@
 from __future__ import annotations
-import qiskit as qk
 import jijmodeling as jm
 import jijmodeling.transpiler as jmt
 from jijmodeling_transpiler_quantum.core import qubo_to_ising
-from .ising_hamiltonian_quri import to_ising_operator_from_qubo_quri
+from .ising_hamiltonian import to_ising_operator_from_qubo
 from quri_parts.circuit import LinearMappedUnboundParametricQuantumCircuit
 from quri_parts.core.operator import Operator
 from math import pi
 
 
-class QuriQAOAAnsatzBuilder:
+class QAOAAnsatzBuilder:
     def __init__(
         self,
         pubo_builder: jmt.core.pubo.PuboBuilder,
@@ -32,9 +31,7 @@ class QuriQAOAAnsatzBuilder:
         qubo, constant = self.pubo_builder.get_qubo_dict(
             multipliers=multipliers, detail_parameters=detail_parameters
         )
-        ising_operator, ising_const = to_ising_operator_from_qubo_quri(
-            qubo, self.num_vars
-        )
+        ising_operator, ising_const = to_ising_operator_from_qubo(qubo, self.num_vars)
         return ising_operator, ising_const + constant
 
     def get_qaoa_ansatz(
@@ -59,7 +56,7 @@ class QuriQAOAAnsatzBuilder:
             items = list(ising_operator.items())[i]
             coeff_terms.append(items[1])
 
-        quri_QAOAANSATZ = LinearMappedUnboundParametricQuantumCircuit(self.num_vars)
+        QAOAAnsatz = LinearMappedUnboundParametricQuantumCircuit(self.num_vars)
 
         pauli_z = pauli_terms[: self.num_vars]
         pauli_zz = pauli_terms[self.num_vars :]
@@ -68,24 +65,28 @@ class QuriQAOAAnsatzBuilder:
         pauli_zz_coeff = coeff_terms[self.num_vars :]
 
         for i in pauli_z:
-            quri_QAOAANSATZ.add_H_gate(i[0])
+            QAOAAnsatz.add_H_gate(i[0])
 
-        for i in range(p):
-            Gamma = quri_QAOAANSATZ.add_parameters(f"gamma{i}")
-            Beta = quri_QAOAANSATZ.add_parameters(f"beta{i}")
+        for p_level in range(p):
+            Gamma = QAOAAnsatz.add_parameters(f"gamma{p_level}")
+            Beta = QAOAAnsatz.add_parameters(f"beta{p_level}")
 
-            for i in zip(pauli_z, pauli_z_coeff):
-                quri_QAOAANSATZ.add_ParametricRZ_gate(i[0][0], {Gamma[0]: 2 * i[1]})
+            for pauli_z_info in zip(pauli_z, pauli_z_coeff):
+                QAOAAnsatz.add_ParametricRZ_gate(
+                    pauli_z_info[0][0], {Gamma[0]: 2 * pauli_z_info[1]}
+                )
 
-            for i in zip(pauli_zz, pauli_zz_coeff):
-                quri_QAOAANSATZ.add_CNOT_gate(i[0][0], i[0][1])
-                quri_QAOAANSATZ.add_ParametricRZ_gate(i[0][1], {Gamma[0]: 2 * i[1]})
-                quri_QAOAANSATZ.add_CNOT_gate(i[0][0], i[0][1])
+            for pauli_zz_info in zip(pauli_zz, pauli_zz_coeff):
+                QAOAAnsatz.add_CNOT_gate(pauli_zz_info[0][0], pauli_zz_info[0][1])
+                QAOAAnsatz.add_ParametricRZ_gate(
+                    pauli_zz_info[0][1], {Gamma[0]: 2 * pauli_zz_info[1]}
+                )
+                QAOAAnsatz.add_CNOT_gate(pauli_zz_info[0][0], pauli_zz_info[0][1])
 
-            for i in pauli_z:
-                quri_QAOAANSATZ.add_ParametricRX_gate(i[0], {Beta[0]: 2})
+            for pauli_z_info2 in pauli_z:
+                QAOAAnsatz.add_ParametricRX_gate(pauli_z_info2[0], {Beta[0]: 2})
 
-        return quri_QAOAANSATZ, ising_operator, constant
+        return QAOAAnsatz, ising_operator, constant
 
     def decode_from_counts(self, counts: dict[str, int]) -> jm.SampleSet:
         samples = []
@@ -112,7 +113,7 @@ class QuriQAOAAnsatzBuilder:
         return self.decode_from_counts(binary_counts)
 
 
-def transpile_to_qaoa_ansatz_quri(
+def transpile_to_qaoa_ansatz(
     compiled_instance: jmt.core.CompiledInstance,
     normalize: bool = True,
     relax_method=jmt.core.pubo.RelaxationMethod.AugmentedLagrangian,
@@ -121,4 +122,4 @@ def transpile_to_qaoa_ansatz_quri(
         compiled_instance, normalize=True, relax_method=relax_method
     )
     var_num = compiled_instance.var_map.var_num
-    return QuriQAOAAnsatzBuilder(pubo_builder, var_num, compiled_instance)
+    return QAOAAnsatzBuilder(pubo_builder, var_num, compiled_instance)
