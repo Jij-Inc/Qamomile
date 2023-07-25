@@ -12,6 +12,47 @@ import numpy as np
 from numpy import pi
 import math
 import itertools
+import matplotlib.pyplot as plt
+
+
+def main():
+    # try functions
+    """
+    Here, I consider the basic smallest case from paper where 
+    n_c = 8, thus n_r = 3, n_a = 1, and n_q = 4. Also, l = 4
+    """
+    nc = 8 
+    nr = 3
+    na = 1
+    nq = 4
+    l = 4
+
+
+    parameters, theta = init_parameter(nq, l) 
+    """
+    here, parameters is just a placeholder for the each parameters on the circuit
+    theta is a dictionary of parameters with random values
+    """
+    circuit= generate_circuit(nr, na, l, parameters)
+    #draw a circuit, comment out appropriate commands below if you like to see the circuit
+    # print(circuit)
+    # print(parameters)
+    # circuit.draw(output='mpl', filename='circuit.png')
+
+    #try classical optimizer
+    progress_history = []
+    func = init_func(nc, nr, na, circuit, progress_history)
+    #number of evaluation of cost function, it can be changed but
+    #it should be more than 150 to observe a good result
+    n_eval = 300 
+    optimizer = COBYLA(maxiter=n_eval, disp=True)
+    result = optimizer.minimize(func, list(theta.values()))
+    print(f"The total number of function evaluations => {result.nfev}")
+
+    plt.plot(progress_history)
+    plt.xlabel('number of iteration')
+    plt.ylabel('value of cost function')
+    plt.show()
 
 
 #initialize parameters
@@ -34,8 +75,7 @@ def generate_circuit(nr, na, l,parameters):
     nq = nr + na
     qreg_q = QuantumRegister(nr, 'q')
     areg_a = AncillaRegister(na, 'a')
-    creg_c = ClassicalRegister(nq, 'c')
-    circuit = QuantumCircuit(areg_a, qreg_q, creg_c)
+    circuit = QuantumCircuit(areg_a, qreg_q)
 
     #add H gate for each qubit
     circuit.h(areg_a[0])
@@ -68,30 +108,31 @@ def define_pauli_op(nr, ancilla:bool=False):
     """
     #total number of qubits (nq+na) where na is number of ancilla qubits and is always 1
     #get all binary 2^nq pattern
-    lst = [list(i) for i in itertools.product([0, 1], repeat=nr)]
-    lst = np.array(lst)
-    l = []
-    for i in lst:
-        l.append(list(np.where(i == 1)[0]))
+    l = [list(i) for i in itertools.product([0, 1], repeat=nr)]
+    l = np.array(l)
 
-    #list of SparsePauliOp 
-    pauli_op = []
-    for i in l:
-        if i == []:
-            pauli_op.append(SparsePauliOp.from_list([('I'*nr,1)]))
-        else:
-            i = [e for e in i]
-            pauli_op.append(SparsePauliOp.from_sparse_list([('Z'*len(i),i,1)],num_qubits=nr))
-    
-    Ha1 = SparsePauliOp.from_list([('I', 1/2)])
-    Ha2 = SparsePauliOp.from_list([('Z', -1/2)])
-    Ha = Ha1.sum([Ha1, Ha2])
+    #basic pieces of SparsePauliOp 
+    #PauliOp for |0> 
+    P0 = SparsePauliOp.from_list([('I', 1/2), ('Z', 1/2)])
+    #PauliOp for |1> 
+    P1 = SparsePauliOp.from_list([('I', 1/2), ('Z', -1/2)])
+    #Indentiy op
     Id = SparsePauliOp.from_list([('I', 1)])
+
+    #init list of SparsePauliOp 
+    pauli_op = []
+    for i in range(len(l)):
+        pauli_op.append(SparsePauliOp.from_list([('',1)]))
+        for j in l[i]:
+            if j == 0:
+                pauli_op[i] = pauli_op[i].tensor(P0)
+            else: 
+                pauli_op[i] = pauli_op[i].tensor(P1)
 
     #add ancilla qubit
     for i in range(len(pauli_op)):
         if ancilla == True:
-            pauli_op[i] = pauli_op[i].tensor(Ha)
+            pauli_op[i] = pauli_op[i].tensor(P1)
         else:
             pauli_op[i] = pauli_op[i].tensor(Id)
     
@@ -102,7 +143,8 @@ def generate_random_qubo(nc):
     """
     nc: number of classical bits
     """
-    return np.random.uniform(low=-1.0, high=1.0, size = (nc, nc))
+    q = np.random.uniform(low = -1.0, high = 1.0, size = (nc, nc))
+    return (q + q.T)/2
 
 #initialize cost function
 def init_cost_function(A, nc):
@@ -118,7 +160,6 @@ def init_cost_function(A, nc):
             for j in range(nc):
                 if i != j:
                     first_sum += A[i][j]*(P1[i]*P1[j]/P[i]*P[j])
-    
         # second sum of cost function 
         second_sum = 0
         for i in range(nc):
@@ -129,10 +170,14 @@ def init_cost_function(A, nc):
     return cost_function
 
 #function that classical optimizer will minimize
-def init_func(nc, nr, na, circuit,):
+def init_func(nc, nr, na, circuit,progress_history):
     """
     This function will be minimized by classical optimizer. 
     theta: parameters of the circuit 
+    nc: number of classical bits
+    nr, na: number of register and ancilla qubits
+    circuit: quantum circuit
+    progress_history: list to store the progress of the minimization
     """
     nq = nr + na
     #get expectation values from a circuit
@@ -159,11 +204,13 @@ def init_func(nc, nr, na, circuit,):
         # print(f"The primitive-job finished with result {P1}")
 
         result = cost_function(P1.values, P.values)
-        print(f"The resukt of cost function is {result}")
+        progress_history.append(result)
+        print(f"The result of cost function is {result}")
         return result
 
     return func
 
+# not complete
 def decode(theta, circuit,):
     circuit.measure_all(inplace=True)
     sampler = Sampler()
@@ -194,57 +241,5 @@ def decode(theta, circuit,):
     #need to fix return value
     return 0
 
-
-#=====================================================
-# try functions
-"""
-Here, I consider the basic smallest case where 
-n_c = 8, thus n_r = 3, n_a = 1, and n_q = 4. Also, l = 4
-"""
-nc = 8 
-nr = 3
-na = 1
-nq = 4
-l = 4
-
-
-parameters, theta = init_parameter(nq, l) 
-"""
-here, parameters is just a placeholder for the each parameters on the circuit
-theta is a dictionary of parameters with random values
-"""
-circuit= generate_circuit(nr, na, l, parameters)
-#draw a circuit 
-# print(circuit)
-# print(parameters)
-circuit.draw(output='mpl', filename='circuit.png')
-
-#try Qiskit primitives
-#get expectation values using qiskit primitives
-estimator = Estimator()
-#define SparsePauliOp 
-H = define_pauli_op(nr)
-H1 = define_pauli_op(nr)
-Ha = SparsePauliOp.from_list([('IIII', 1/2), ('IIIZ', -1/2)])
-for i in range(len(H1)):
-    H1[i] = H1[i].sum([H1[i], Ha])
-
-estimator = Estimator()
-job1 = estimator.run([circuit]*len(H),H,[list(theta.values())]*len(H))
-P = job1.result()
-print(f"The primitive-job finished with result {P}")
-
-job2 = estimator.run([circuit]*len(H),H1,[list(theta.values())]*len(H))
-P1 = job2.result()
-print(f"The primitive-job finished with result {P1}")
-
-#try classical optimizer
-func = init_func(nc, nr, na, circuit)
-n_eval = 5000
-optimizer = COBYLA()
-result = optimizer.minimize(func, list(theta.values()))
-
-print(f"The final point of the minimization => {result.x}")
-print(f"The final value of the minimization => {result.fun}")
-print(f"The total number of function evaluations => {result.nfev}")
-print(f"The total number of iterations => {result.nit}")
+if __name__ == '__main__':
+    main()
