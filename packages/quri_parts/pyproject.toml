@@ -7,7 +7,7 @@ build-backend = "poetry_dynamic_versioning.backend"
 [tool.poetry]
 name = "jijmodeling-transpiler-quantum-quri-parts"
 version = "0.1.0rc2"
-description = "JijModeling Transpiler for QURI parts"
+description = "JijModeling Transpiler for QURI Parts"
 authors = ["Jij Inc."]
 readme = "README.md"
 packages = [{include = "jijmodeling_transpiler_quantum"}]
