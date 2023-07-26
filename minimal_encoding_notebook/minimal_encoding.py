@@ -15,17 +15,21 @@ import itertools
 import matplotlib.pyplot as plt
 
 
+
 def main():
     # try functions
-    """
-    Here, I consider the basic smallest case from paper where 
-    n_c = 8, thus n_r = 3, n_a = 1, and n_q = 4. Also, l = 4
-    """
-    nc = 8 
-    nr = 3
+    # set basic information
+    nc = 8
+    nr = math.log2(nc) #in current implementation, this has to retun integer
     na = 1
-    nq = 4
+    nq = int(nr + na)
     l = 4
+
+    if nr.is_integer() == False:
+        print("The number of register qubits should be integer")
+        return 0
+    else:
+        nr = int(nr)
 
 
     parameters, theta = init_parameter(nq, l) 
@@ -41,9 +45,9 @@ def main():
 
     #try classical optimizer
     progress_history = []
-    func = init_func(nc, nr, na, circuit, progress_history)
+    A = generate_random_qubo(nc)
+    func = init_func(nc, nr, na, circuit, A, progress_history)
     #number of evaluation of cost function, it can be changed but
-    #it should be more than 150 to observe a good result
     n_eval = 300 
     optimizer = COBYLA(maxiter=n_eval, disp=True)
     result = optimizer.minimize(func, list(theta.values()))
@@ -101,7 +105,7 @@ def generate_circuit(nr, na, l,parameters):
     return circuit
 
 #function to define SparsePauliOp 
-def define_pauli_op(nr, ancilla:bool=False):
+def define_pauli_op(nr, ancilla:bool=False, zero:bool=False):
     """
     nr: number of register qubits
     ancilla: if True, add ancilla qubit of |1> state, else add pauli I for ancilla qubit
@@ -131,10 +135,13 @@ def define_pauli_op(nr, ancilla:bool=False):
 
     #add ancilla qubit
     for i in range(len(pauli_op)):
-        if ancilla == True:
-            pauli_op[i] = pauli_op[i].tensor(P1)
+        if zero == True:
+            pauli_op[i] = pauli_op[i].tensor(P0)
         else:
-            pauli_op[i] = pauli_op[i].tensor(Id)
+            if ancilla == True:
+                pauli_op[i] = pauli_op[i].tensor(P1)
+            else:
+                pauli_op[i] = pauli_op[i].tensor(Id)
     
     return pauli_op
 
@@ -170,7 +177,7 @@ def init_cost_function(A, nc):
     return cost_function
 
 #function that classical optimizer will minimize
-def init_func(nc, nr, na, circuit,progress_history):
+def init_func(nc, nr, na, circuit, A, progress_history):
     """
     This function will be minimized by classical optimizer. 
     theta: parameters of the circuit 
@@ -185,10 +192,10 @@ def init_func(nc, nr, na, circuit,progress_history):
     H = define_pauli_op(nr)
     Ha = define_pauli_op(nr, ancilla=True)
     
-    A = generate_random_qubo(nc)
     cost_function = init_cost_function(A, nc)
 
     estimator = Estimator()
+    # estimator.set_options(shots=1000)
     def func(theta):
         """
         This function will be minimized by classical optimizer. 
@@ -205,39 +212,43 @@ def init_func(nc, nr, na, circuit,progress_history):
 
         result = cost_function(P1.values, P.values)
         progress_history.append(result)
-        print(f"The result of cost function is {result}")
+        # print(f"The result of cost function is {result}")
         return result
 
     return func
 
 # not complete
-def decode(theta, circuit,):
+def decode(theta, circuit, nr):
     circuit.measure_all(inplace=True)
     sampler = Sampler()
-    job = sampler.run(circuits=[circuit], parameter_values=[result.x], parameters=[[]])
+    estimator = Estimator()
+    job = sampler.run(circuits=[circuit], parameter_values=[theta], parameters=[[]])
     job_result = job.result()
     result = [q.binary_probabilities() for q in job_result.quasi_dists]
-    beta = list(resultr[0].values())
+    beta = list(result[0].values())
     print(result)
     circuit.remove_final_measurements(inplace=True)
     #define observable to calculate expectation value
     H = define_pauli_op(nr, ancilla=False)
     Ha = define_pauli_op(nr,ancilla=True)
     #get expectation values from
-    job1 = estimator.run([circuit]*len(H),H,[result.x]*len(H))
+    job1 = estimator.run([circuit]*len(H),H,[theta]*len(H))
     P = job1.result()
     # print(f"The primitive-job finished with result {P}")
-    job2 = estimator.run([circuit]*len(H),Ha,[result.x]*len(H))
+    job2 = estimator.run([circuit]*len(H),Ha,[theta]*len(H))
     P1 = job2.result()
     # print(f"The primitive-job finished with result {P1}")
 
-    #compute b_i
-    b = []
-    a= []
-    for i in range(1, len(P.values)):
-        b.append(P1.values[i] / P.values[i])
-        a[i] = 1 - b[i]
+    #compute b_i and a_i
+    b=[]
+    a=[]
+    for i in range(len(P.values)):
+        val = (P1.values[i] / P.values[i])
+        b.append(val**2)
+        a.append(1 - b[i])
 
+    print(f"b is Pr(x=1){b}")
+    print(f"a is Pr(x=0){a}")
     #need to fix return value
     return 0
 
