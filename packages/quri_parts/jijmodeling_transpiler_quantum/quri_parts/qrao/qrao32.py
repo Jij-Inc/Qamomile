@@ -5,7 +5,7 @@ from .qrao31 import Pauli, color_group_to_qrac_encode, create_pauli_term
 from quri_parts.core.operator import pauli_label, PAULI_IDENTITY, Operator
 
 
-def qrac21_encode_ising(
+def qrac32_encode_ising(
     ising: IsingModel, color_group: dict[int, list[int]]
 ) -> tuple[Operator, float, dict[int, tuple[int, Pauli]]]:
     encoded_ope = color_group_to_qrac_encode(color_group)
@@ -13,7 +13,8 @@ def qrac21_encode_ising(
     pauli_terms: list[Operator] = []
 
     offset = ising.constant
-    n_qubit = len(color_group)
+    n_qubit = 2 * len(color_group)
+
     for idx, coeff in ising.linear.items():
         if coeff == 0.0:
             continue

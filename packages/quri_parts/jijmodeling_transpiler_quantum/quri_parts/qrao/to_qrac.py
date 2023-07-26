@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from jijmodeling_transpiler_quantum.core import qubo_to_ising, greedy_graph_coloring
 from .qrao31 import qrac31_encode_ising, Pauli
 from .qrao21 import qrac21_encode_ising
+from .qrao32 import qrac32_encode_ising
 import dataclasses
 import typing as typ
 import jijmodeling as jm
@@ -16,8 +17,12 @@ class QRACBuilder(ABC):
 
     @abstractmethod
     def get_hamiltonian(
-        self, multipliers=None, detail_parameter=None
-    ) -> tuple[qk_info.SparsePauliOp, float, QRACEncodingCache]:
+        self,
+        multipliers: typ.Optional[dict[str, float]] = None,
+        detail_parameters: typ.Optional[
+            dict[str, dict[tuple[int, ...], tuple[float, float]]]
+        ] = None,
+    ) -> tuple[Operator, float, QRACEncodingCache]:
         pass
 
     def decode_from_binary_values(
@@ -44,10 +49,23 @@ class QRACEncodingCache:
 
 class QRAC31Builder(QRACBuilder):
     def get_hamiltonian(
-        self, multipliers=None, detail_parameter=None
-    ) -> tuple[qk_info.SparsePauliOp, float, QRACEncodingCache]:
+        self,
+        multipliers: typ.Optional[dict[str, float]] = None,
+        detail_parameters: typ.Optional[
+            dict[str, dict[tuple[int, ...], tuple[float, float]]]
+        ] = None,
+    ) -> tuple[Operator, float, QRACEncodingCache]:
+        """Get Quantum Relaxation Hamiltonian based on (3,1,p)-QRAC.
+
+        Args:
+            multipliers (typ.Optional[dict[str, float]], optional): a multiplier for each penalty. Defaults to None.
+            detail_parameters (typ.Optional[ dict[str, dict[tuple[int, ...], tuple[float, float]]] ], optional): detail parameters for each penalty. Defaults to None.
+
+        Returns:
+            tuple[qk_info.SparsePauliOp, float, QRACEncodingCache]: (3,1,p)-QRAC Hamiltonian, constant term, and encoding cache for decoding
+        """
         qubo, constant = self.pubo_builder.get_qubo_dict(
-            multipliers=multipliers, detail_parameters=detail_parameter
+            multipliers=multipliers, detail_parameters=detail_parameters
         )
         ising = qubo_to_ising(qubo)
         _, color_group = greedy_graph_coloring(
@@ -61,7 +79,20 @@ class QRAC31Builder(QRACBuilder):
         )
 
 
-def transpile_to_qrac31_hamiltonian(compiled_instance, normalize=True) -> QRAC31Builder:
+def transpile_to_qrac31_hamiltonian(
+    compiled_instance: jmt.core.CompiledInstance, normalize: bool = True
+) -> QRAC31Builder:
+    """Generate Quantum Relaxation Hamiltonian based on (3,1,p)-QRAC builder.
+
+        The generation method is based on the [B. Fuller et al., arXiv (2021)](https://arxiv.org/abs/2111.03167).
+
+    Args:
+        compiled_instance (jmt.core.CompiledInstance): Compiled model
+        normalize (bool, optional): Normalize objective function. Defaults to True.
+
+    Returns:
+        QRAC31Builder: (3,1,p)-QRAC Hamiltonian builder
+    """
     pubo_builder = jmt.core.pubo.transpile_to_pubo(
         compiled_instance, normalize=normalize
     )
@@ -70,10 +101,23 @@ def transpile_to_qrac31_hamiltonian(compiled_instance, normalize=True) -> QRAC31
 
 class QRAC21Builder(QRACBuilder):
     def get_hamiltonian(
-        self, multipliers=None, detail_parameter=None
-    ) -> tuple[qk_info.SparsePauliOp, float, QRACEncodingCache]:
+        self,
+        multipliers: typ.Optional[dict[str, float]] = None,
+        detail_parameters: typ.Optional[
+            dict[str, dict[tuple[int, ...], tuple[float, float]]]
+        ] = None,
+    ) -> tuple[Operator, float, QRACEncodingCache]:
+        """Get Quantum Relaxation Hamiltonian based on (2,1,p)-QRAC.
+
+        Args:
+            multipliers (typ.Optional[dict[str, float]], optional): a multiplier for each penalty. Defaults to None.
+            detail_parameters (typ.Optional[ dict[str, dict[tuple[int, ...], tuple[float, float]]] ], optional): detail parameters for each penalty. Defaults to None.
+
+        Returns:
+            tuple[Operator, float, QRACEncodingCache]: (2,1,p)-QRAC Hamiltonian, constant term, and encoding cache for decoding
+        """
         qubo, constant = self.pubo_builder.get_qubo_dict(
-            multipliers=multipliers, detail_parameters=detail_parameter
+            multipliers=multipliers, detail_parameters=detail_parameters
         )
         ising = qubo_to_ising(qubo)
         _, color_group = greedy_graph_coloring(
@@ -87,8 +131,73 @@ class QRAC21Builder(QRACBuilder):
         )
 
 
-def transpile_to_qrac21_hamiltonian(compiled_instance, normalize=True) -> QRAC21Builder:
+def transpile_to_qrac21_hamiltonian(
+    compiled_instance: jmt.core.CompiledInstance, normalize: bool = True
+) -> QRAC21Builder:
+    """Generate Quantum Relaxation Hamiltonian based on (2,1,p)-QRAC builder.
+
+        The generation method is based on the [B. Fuller et al., arXiv (2021)](https://arxiv.org/abs/2111.03167).
+
+    Args:
+        compiled_instance (jmt.core.CompiledInstance): Compiled model
+        normalize (bool, optional): Normalize objective function. Defaults to True.
+
+    Returns:
+        QRAC21Builder: (2,1,p)-QRAC Hamiltonian builder
+    """
     pubo_builder = jmt.core.pubo.transpile_to_pubo(
         compiled_instance, normalize=normalize
     )
     return QRAC21Builder(pubo_builder, compiled_instance)
+
+
+class QRAC32Builder(QRACBuilder):
+    def get_hamiltonian(
+        self,
+        multipliers: typ.Optional[dict[str, float]] = None,
+        detail_parameters: typ.Optional[
+            dict[str, dict[tuple[int, ...], tuple[float, float]]]
+        ] = None,
+    ) -> tuple[Operator, float, QRACEncodingCache]:
+        """Get Quantum Relaxation Hamiltonian based on (3,2,p)-QRAC.
+
+        Args:
+            multipliers (typ.Optional[dict[str, float]], optional): a multiplier for each penalty. Defaults to None.
+            detail_parameters (typ.Optional[ dict[str, dict[tuple[int, ...], tuple[float, float]]] ], optional): detail parameters for each penalty. Defaults to None.
+
+        Returns:
+            tuple[Operator, float, QRACEncodingCache]: (3,2,p)-QRAC Hamiltonian, constant term, and encoding cache for decoding
+        """
+        qubo, constant = self.pubo_builder.get_qubo_dict(
+            multipliers=multipliers, detail_parameters=detail_parameters
+        )
+        ising = qubo_to_ising(qubo)
+        _, color_group = greedy_graph_coloring(
+            ising.quad.keys(), max_color_group_size=3
+        )
+        qrac_hamiltonian, offset, encoding = qrac32_encode_ising(ising, color_group)
+        return (
+            qrac_hamiltonian,
+            offset + constant,
+            QRACEncodingCache(color_group, encoding),
+        )
+
+
+def transpile_to_qrac32_hamiltonian(
+    compiled_instance: jmt.core.CompiledInstance, normalize: bool = True
+) -> QRAC32Builder:
+    """Generate Quantum Relaxation Hamiltonian based on (3,2,p)-QRAC builder.
+
+        The generation method is based on the [K. Teramoto et al., arXiv (2023)](https://arxiv.org/abs/2302.09481).
+
+    Args:
+        compiled_instance (jmt.core.CompiledInstance): Compiled model
+        normalize (bool, optional): Normalize objective function. Defaults to True.
+
+    Returns:
+        QRAC32Builder: (3,2,p)-QRAC Hamiltonian builder
+    """
+    pubo_builder = jmt.core.pubo.transpile_to_pubo(
+        compiled_instance, normalize=normalize
+    )
+    return QRAC32Builder(pubo_builder, compiled_instance)
