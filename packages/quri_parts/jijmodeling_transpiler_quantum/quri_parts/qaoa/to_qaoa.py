@@ -47,14 +47,13 @@ class QAOAAnsatzBuilder:
         keys = list(ising_operator.keys())
         items = list(ising_operator.items())
         num_terms = ising_operator.n_terms - 1
-
         pauli_terms = [keys[i].index_and_pauli_id_list[0] for i in range(num_terms)]
         coeff_terms = [items[i][1] for i in range(num_terms)]
-
         QAOAAnsatz = LinearMappedUnboundParametricQuantumCircuit(self.num_vars)
-
         pauli_z_terms = pauli_terms[: self.num_vars]
-        pauli_zz_terms = [sorted(sublist) for sublist in pauli_terms[self.num_vars :]]
+        pauli_zz_terms = [
+            sorted(sublist, reverse=True) for sublist in pauli_terms[self.num_vars :]
+        ]
 
         for term in pauli_z_terms:
             QAOAAnsatz.add_H_gate(term[0])
@@ -64,19 +63,19 @@ class QAOAAnsatzBuilder:
             Beta = QAOAAnsatz.add_parameters(f"beta{p_level}")
 
             for pauli_z_info, coeff in zip(pauli_z_terms, coeff_terms[: self.num_vars]):
-                QAOAAnsatz.add_ParametricRZ_gate(pauli_z_info[0], {Gamma[0]: 2 * coeff})
+                QAOAAnsatz.add_ParametricRZ_gate(
+                    pauli_z_info[0], {Gamma[-1]: 2 * coeff}
+                )
 
             for pauli_zz_info, coeff in zip(
                 pauli_zz_terms, coeff_terms[self.num_vars :]
             ):
-                QAOAAnsatz.add_CNOT_gate(pauli_zz_info[0], pauli_zz_info[1])
-                QAOAAnsatz.add_ParametricRZ_gate(
-                    pauli_zz_info[1], {Gamma[0]: 2 * coeff}
+                QAOAAnsatz.add_ParametricPauliRotation_gate(
+                    pauli_zz_info, pauli_ids=(3, 3), angle={Gamma[-1]: 2 * coeff}
                 )
-                QAOAAnsatz.add_CNOT_gate(pauli_zz_info[0], pauli_zz_info[1])
 
             for pauli_z_info in pauli_z_terms:
-                QAOAAnsatz.add_ParametricRX_gate(pauli_z_info[0], {Beta[0]: 2})
+                QAOAAnsatz.add_ParametricRX_gate(pauli_z_info[0], {Beta[-1]: 2})
 
         return QAOAAnsatz, ising_operator, constant
 
