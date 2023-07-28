@@ -1,4 +1,3 @@
-from email.generator import DecodedGenerator
 from minimal_encoding import *
 import warnings
 
@@ -6,7 +5,7 @@ import jijmodeling as jm
 import jijmodeling.transpiler as jmt
 import openjij as oj
 
-from qiskit.algorithms.optimizers import COBYLA
+from qiskit.algorithms.optimizers import COBYLA, ADAM
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -25,7 +24,7 @@ def main():
     nr = math.log2(nc)
     na = 1
     nq = int(nr + na)
-    l =  8
+    l =  4
 
     if nr.is_integer() == False:
         print("The number of register qubits should be integer")
@@ -46,9 +45,13 @@ def main():
 
     compiled_model = jmt.core.compile_model(problem, data, {})
     # Quadratic Unconstraint Binary Optimization (QUBO) model
-    pubo_builder = jmt.core.pubo.transpile_to_pubo(compiled_model=compiled_model)
 
-    qubo,const = pubo_builder.get_qubo_dict(multipliers = {'onehot': 1.0})  
+    # RelaxiationMethod not define error???
+    # pubo_builder = jmt.core.pubo.transpile_to_pubo(compiled_model=compiled_model, 
+    #                                                relax_method = RelaxationMethod.SquaredPenalty)
+    pubo_builder = jmt.core.pubo.transpile_to_pubo(compiled_model=compiled_model)
+    qubo,const = pubo_builder.get_qubo_dict(multipliers = {'onehot': 1.0},
+                                            detail_parameters={"onehot": {(1,): (1/2, 1)}})  
 
     #set sampler 
     sampler = oj.SASampler()
@@ -63,14 +66,8 @@ def main():
     opt = list(sampleset.record.solution.values())
     opt = opt[0][0][0][0]
 
-    result_price = [data['v'][i] for i in opt]
-    result_weight = [data['w'][i] for i in opt]
+    knapsack_solution(data, opt)
 
-    print('Price of chosen items: ', result_price)
-    print('Weight of chosen items: ', result_weight)
-    print('Total price: ', sum(result_price))
-    print('Total weight: ', sum(result_weight))
-    print('Constrain', data['W'])
 
     #minimal encoding for Knapoack problem
     parameters, theta = init_parameter(nq, l) 
@@ -80,15 +77,14 @@ def main():
     A = (A + A.T)/2
     print(A)
     func = init_func(nc, nr, na, circuit,A, progress_history)
-    n_eval = 500
-    optimizer = COBYLA(maxiter=n_eval, disp=True)
+    n_eval = 100
+    # optimizer = COBYLA(maxiter=n_eval, disp=True)
+    optimizer = ADAM(maxiter=n_eval)
     result = optimizer.minimize(func, list(theta.values()))
     print(f"The total number of function evaluations => {result.nfev}")
     print(circuit)
     decoded_result = decode(result.x, circuit, nr)
 
-    # a = np.array([1, 1, 1, 1, 1, 1, 1, 1])
-    # at = a.T
 
     plt.plot(progress_history)
     plt.xlabel('number of iteration')
@@ -170,6 +166,39 @@ def convert_qubo_datatype(qubo:dict , nc:int):
         qubo_matrix[key[0], key[1]] = value 
     
     return qubo_matrix
+
+def knapsack_solution(data:dict, ind:list):
+    '''
+    Takes a result of optimization and summarize it as a solution.
+
+    Parameters
+    ----------
+    data : dict
+        Data for knapsack problem.
+    ind : list
+        A result of optimization.
+    
+    Returns
+    -------
+    result_price : list
+        Price of chosen items.
+    result_weight : list
+        Weight of chosen items.
+    '''
+
+    result_price = [data['v'][i] for i in ind]
+    result_weight = [data['w'][i] for i in ind]
+
+    print('==== Solutions for Knapsack problem ====')
+    print('Price of chosen items: ', result_price)
+    print('Weight of chosen items: ', result_weight)
+    print('Total price: ', sum(result_price))
+    print('Total weight: ', sum(result_weight))
+    print('Constrain', data['W'])
+    print('========================================')
+
+    return result_price, result_weight
+
 
 
 if __name__ == "__main__":
