@@ -1,3 +1,4 @@
+from turtle import pu
 from minimal_encoding import *
 import warnings
 
@@ -10,6 +11,7 @@ from qiskit.algorithms.optimizers import COBYLA, ADAM
 import numpy as np
 import matplotlib.pyplot as plt
 import math
+import geocoder as gc
 
 """
 This file is for testing the minimal encoding with Knapoack problem amd Traveral Salesman Problem (TSP).
@@ -20,7 +22,7 @@ def main():
     warnings.filterwarnings('ignore')
 
     #set basic information
-    nc = 8
+    nc = 16
     nr = math.log2(nc)
     na = 1
     nq = int(nr + na)
@@ -33,43 +35,126 @@ def main():
         nr = int(nr)
 
     #define Knapoack problem
-    problem = define_knapsack()
+    # problem = define_problem('knapsack')
 
-    #create a list for price (v) and weight (w)
-    price = [5000, 7000, 2000, 1000, 4000, 3000, 1500, 3200]
-    weight = [800, 1000, 600, 400, 500, 300, 200, 700]
-    #set the capacity (constrain)
-    capacity = 2000
-    data = {'v': price, 'w':weight, 'W':capacity}
-    # data = knapsack_random_data(nc, 2000, 1000, 10000, 100, 1000)
+    # #create a list for price (v) and weight (w)
+    # price = [5000, 7000, 2000, 1000, 4000, 3000, 1500, 3200]
+    # weight = [800, 1000, 600, 400, 500, 300, 200, 700]
+    # #set the capacity (constrain)
+    # capacity = 2000
+    # data = {'v': price, 'w':weight, 'W':capacity}
+    # # data = knapsack_random_data(nc, 2000, 1000, 10000, 100, 1000)
 
-    compiled_model = jmt.core.compile_model(problem, data, {})
+    # compiled_model = jmt.core.compile_model(problem, data, {})
+    # # Quadratic Unconstraint Binary Optimization (QUBO) model
+
+    # # RelaxiationMethod not define error???
+    # # pubo_builder = jmt.core.pubo.transpile_to_pubo(compiled_model=compiled_model, 
+    # #                                                relax_method = RelaxationMethod.SquaredPenalty)
+    # pubo_builder = jmt.core.pubo.transpile_to_pubo(compiled_model=compiled_model)
+    # qubo,const = pubo_builder.get_qubo_dict(multipliers = {'onehot': 1.0},
+    #                                         detail_parameters={"onehot": {(1,): (1/2, 1)}})  
+
+    # #set sampler 
+    # sampler = oj.SASampler()
+
+    # #solve the problem 
+    # result = sampler.sample_qubo(qubo)
+    # print(result.states)
+    # #decode a result to JijModeling sample set
+    # sampleset = jmt.core.pubo.decode_from_openjij(result,pubo_builder,compiled_model)
+
+    # #extract a solution list from sampleset.
+    # opt = list(sampleset.record.solution.values())
+    # opt = opt[0][0][0][0]
+
+    # knapsack_solution(data, opt)
+
+    # #minimal encoding for Knapoack problem
+    # parameters, theta = init_parameter(nq, l) 
+    # circuit = generate_circuit(nr, na, l, parameters)
+    # progress_history = []
+    # A = convert_qubo_datatype(qubo, nc)
+    # A = (A + A.T)/2
+    # print(A)
+    # func = init_func(nc, nr, na, circuit,A, progress_history)
+    # n_eval = 200
+    # # optimizer = COBYLA(maxiter=n_eval, disp=True)
+    # optimizer = ADAM(maxiter=n_eval)
+    # result = optimizer.minimize(func, list(theta.values()))
+    # print(result)
+    # print(f"The total number of function evaluations => {result.nfev}")
+    # print(circuit)
+    # decoded_result = decode(result.x, circuit, nr)
+
+    # # print(f'prgress history: {progress_history}')
+    # plt.plot(progress_history)
+    # plt.xlabel('number of iteration')
+    # plt.ylabel('value of cost function')
+    # plt.show()
+
+    #try TSP 
+    #define TSP problem
+    problem = define_problem('tsp')
+    #set the name list of traveling points
+    # points = ['茨城県', '栃木県', '群馬県', '埼玉県', '千葉県', '東京都', '神奈川県', '山梨県']
+    points = ['茨城県', '栃木県', '群馬県', '埼玉県']
+    geo_data, instance_data = tsp_random_data(points, nc)
+
+    # compile problem
+    compiled_model = jmt.core.compile_model(problem, instance_data, {})
     # Quadratic Unconstraint Binary Optimization (QUBO) model
-
-    # RelaxiationMethod not define error???
-    # pubo_builder = jmt.core.pubo.transpile_to_pubo(compiled_model=compiled_model, 
-    #                                                relax_method = RelaxationMethod.SquaredPenalty)
     pubo_builder = jmt.core.pubo.transpile_to_pubo(compiled_model=compiled_model)
-    qubo,const = pubo_builder.get_qubo_dict(multipliers = {'onehot': 1.0},
-                                            detail_parameters={"onehot": {(1,): (1/2, 1)}})  
+    # qubo, const = pubo_builder.get_qubo_dict(multipliers = {'one-city': 0.5, 'one-time': 0.5})
+    qubo, const = pubo_builder.get_qubo_dict(multipliers = {'one-city': 1, 'one-time': 1})
 
-    #set sampler 
+    #set sampler
     sampler = oj.SASampler()
 
-    #solve the problem 
-    result = sampler.sample_qubo(qubo)
-    print(result.states)
-    #decode a result to JijModeling sample set
-    sampleset = jmt.core.pubo.decode_from_openjij(result,pubo_builder,compiled_model)
+    # solve problem
+    result = sampler.sample_qubo(qubo, num_reads=100)
+    # decode a result to JijModeling sample set
+    results = jmt.core.pubo.decode_from_openjij(result, pubo_builder, compiled_model)
 
-    #extract a solution list from sampleset.
-    opt = list(sampleset.record.solution.values())
-    opt = opt[0][0][0][0]
+    # Show the result of evaluation of solutions
+    max_show_num = 5
+    print("Energy: ", results.evaluation.energy[:max_show_num])       # Energy is objective value of QUBO
+    print("Objective: ", results.evaluation.objective[:max_show_num]) # Objective values of original constrained problem
+    print("one-city violation: ", results.evaluation.constraint_violations["one-city"][:max_show_num])  # violation of constraints
+    print("one-time violation: ", results.evaluation.constraint_violations["one-time"][:max_show_num])  # violation of constraints
 
-    knapsack_solution(data, opt)
+    feasibles = results.feasible()
+    # print(f'feasibles: {feasibles}')
+    objectives = np.array(feasibles.evaluation.objective)
+    lowest_index = np.argmin(objectives)
+    print(f"Lowest solution index: {lowest_index}, Lowest objective value: {objectives[lowest_index]}")
 
+    # # check solution
+    nonzero_indices, nonzero_values, shape = feasibles.record.solution["x"][lowest_index]
+    print("indices: ", nonzero_indices)
+    print("values: ", nonzero_values)
 
-    #minimal encoding for Knapoack problem
+    N_value = len(geo_data['latlng_list'])
+    tour = np.zeros(N_value, dtype=int)
+
+    i_value, t_value = nonzero_indices
+    tour[t_value] = i_value
+
+    tour = np.append(tour, [tour[0]])
+    print("tour: ", tour)
+
+    position = np.array(geo_data['latlng_list']).T[[1, 0]]
+
+    print(position)
+    print(np.array(geo_data['points'])[tour])
+
+    #plot the result of TSP with openJij 
+    # plt.axes().set_aspect('equal')
+    # plt.plot(*position, "o")
+    # plt.plot(position[0][tour], position[1][tour], "-")
+    # plt.show()
+
+    # minimal encoding for TSP
     parameters, theta = init_parameter(nq, l) 
     circuit = generate_circuit(nr, na, l, parameters)
     progress_history = []
@@ -77,38 +162,73 @@ def main():
     A = (A + A.T)/2
     print(A)
     func = init_func(nc, nr, na, circuit,A, progress_history)
-    n_eval = 100
-    # optimizer = COBYLA(maxiter=n_eval, disp=True)
-    optimizer = ADAM(maxiter=n_eval)
+    n_eval = 200
+
+    optimizer = COBYLA(maxiter=n_eval, disp=True)
     result = optimizer.minimize(func, list(theta.values()))
+    print(result)
     print(f"The total number of function evaluations => {result.nfev}")
     print(circuit)
     decoded_result = decode(result.x, circuit, nr)
 
-
+    # print(f'prgress history: {progress_history}')
     plt.plot(progress_history)
     plt.xlabel('number of iteration')
     plt.ylabel('value of cost function')
     plt.show()
 
-def define_knapsack():
-    # define variables
-    v = jm.Placeholder('v', dim=1)
-    N = v.shape[0].set_latex('N')
-    w = jm.Placeholder('w', shape=(N))
-    W = jm.Placeholder('W')
-    x = jm.Binary('x', shape=(N))
-    i = jm.Element('i', (0, N))
+    
 
-    # set problem
-    problem = jm.Problem('Knapsack')
-    # set objective function (equation (1))
-    obj = - jm.Sum(i, v[i]*x[i])
-    problem += obj
+def define_problem(problem:str):
+    '''
+    Function to define problem.
 
-    # set total weight constarint (equation (2))
-    const = jm.Sum(i, w[i]*x[i])
-    problem += jm.Constraint('weight', const<=W)
+    Parameters
+    ----------
+    problem : str
+        Problem name. Choose from "knapsack" or "tsp".
+    
+    Returns
+    -------
+    problem : jm.Problem
+    '''
+    if problem == 'knapsack':
+        # define variables
+        v = jm.Placeholder('v', dim=1)
+        N = v.shape[0].set_latex('N')
+        w = jm.Placeholder('w', shape=(N))
+        W = jm.Placeholder('W')
+        x = jm.Binary('x', shape=(N))
+        i = jm.Element('i', (0, N))
+
+        # set problem
+        problem = jm.Problem('Knapsack')
+        # set objective function (equation (1))
+        obj = - jm.Sum(i, v[i]*x[i])
+        problem += obj
+
+        # set total weight constarint (equation (2))
+        const = jm.Sum(i, w[i]*x[i])
+        problem += jm.Constraint('weight', const<=W)
+
+    elif problem == 'tsp':
+        # define variables
+        d = jm.Placeholder('d', ndim=2)
+        N = d.shape[0].set_latex("N")
+        i = jm.Element('i', belong_to=(0, N))
+        j = jm.Element('j', belong_to=(0, N))
+        t = jm.Element('t', belong_to=(0, N))
+        x = jm.BinaryVar('x', shape=(N, N))
+
+        # set problem
+        problem = jm.Problem('TSP')
+        problem += jm.sum([i, j], d[i, j] * jm.sum(t, x[i, t]*x[j, (t+1) % N]))
+        problem += jm.Constraint("one-city", x[:, t] == 1, forall=t)
+        problem += jm.Constraint("one-time", x[i, :] == 1, forall=i)
+    
+    else:
+        print('Please choose problem from "knapsack" or "tsp"')
+        return 0
 
     return problem
 
@@ -143,6 +263,44 @@ def knapsack_random_data(nc:int, capacity:int, price_min:int, price_max:int, wei
     data = {'v': price, 'w':weight, 'W':capacity}  
 
     return data 
+
+def tsp_random_data(points:list, nc:int):
+    '''
+    Function to generate data for TSP.
+
+    Parameters
+    ----------
+    points : list
+        List of traveling points. Ex. prefecture names in Japan, city names in the world, etc.
+    nc : int
+        The number of classical bits.
+    '''
+    if len(points)**2 != nc:
+        print('The number of classical bits is not appropriate for the number of traveling points.')
+        return 0
+    
+    # set the name list of traveling points
+    points = points
+    # get the latitude and longitude
+    latlng_list = []
+    for point in points:
+        location = gc.osm(point)
+        latlng_list.append(location.latlng)
+    # make distance matrix
+    num_points = len(points)
+    inst_d = np.zeros((num_points, num_points))
+    for i in range(num_points):
+        for j in range(num_points):
+            a = np.array(latlng_list[i])
+            b = np.array(latlng_list[j])
+            inst_d[i][j] = np.linalg.norm(a-b)
+    # normalize distance matrix
+    inst_d = (inst_d-inst_d.min()) / (inst_d.max()-inst_d.min())
+
+    geo_data = {'points': points, 'latlng_list': latlng_list}
+    instance_data = {'d': inst_d}
+
+    return geo_data, instance_data
 
 def convert_qubo_datatype(qubo:dict , nc:int):
     '''
