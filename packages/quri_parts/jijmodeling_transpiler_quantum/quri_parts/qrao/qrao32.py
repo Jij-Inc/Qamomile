@@ -5,29 +5,18 @@ from .qrao31 import Pauli, color_group_to_qrac_encode, create_pauli_term
 from quri_parts.core.operator import pauli_label, PAULI_IDENTITY, Operator
 
 
-def qrac21_encode_ising(
+def qrac32_encode_ising(
     ising: IsingModel, color_group: dict[int, list[int]]
 ) -> tuple[Operator, float, dict[int, tuple[int, Pauli]]]:
-    """Encode an Ising model and a color group into QRAC21.
-
-    This function encodes an Ising model into the operators, and returns as the QURI Parts Operator,
-    the offset(constant) of the Ising model, and the encoded operation as a dictionary.
-
-    Args:
-        ising (IsingModel): The Ising model to be encoded.
-        color_group (dict[int, list[int]]): The color group mapping for encoding.
-
-    Returns:
-        tuple[Operator, float, dict[int, tuple[int, Pauli]]]: The encoded quantum operator,
-        the offset of the Ising model, and the encoded operation as a dictionary.
-    """
     encoded_ope = color_group_to_qrac_encode(color_group)
 
     pauli_terms: list[Operator] = []
 
     offset = ising.constant
-    n_qubit = len(color_group)
+    n_qubit = 2 * len(color_group)
+
     for idx, coeff in ising.linear.items():
+        print(idx, coeff)
         if coeff == 0.0:
             continue
 
@@ -37,6 +26,7 @@ def qrac21_encode_ising(
         pauli_terms.append(Operator({pauli_label(pauli_str): np.sqrt(2) * coeff}))
 
     for (i, j), coeff in ising.quad.items():
+        print((i, j), coeff)
         if coeff == 0.0:
             continue
 

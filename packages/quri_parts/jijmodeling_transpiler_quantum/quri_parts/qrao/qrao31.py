@@ -37,6 +37,16 @@ def color_group_to_qrac_encode(
 
 
 def create_pauli_term(operators: list[Pauli], indices: list[int], n_qubit: int) -> str:
+    """Create a Pauli term string given a list of operators and indices.
+
+    Args:
+        operators (list[Pauli]): A list of Pauli operators.
+        indices (list[int]): A list of indices corresponding to each operator.
+        n_qubit (int): The total number of qubits.
+
+    Returns:
+        str: The created Pauli term string.
+    """
     pauli_str = ""
     for ope, idx in zip(operators, indices):
         if ope == Pauli.X:
@@ -51,6 +61,16 @@ def create_pauli_term(operators: list[Pauli], indices: list[int], n_qubit: int) 
 def qrac31_encode_ising(
     ising: IsingModel, color_group: dict[int, list[int]]
 ) -> tuple[Operator, float, dict[int, tuple[int, Pauli]]]:
+    """Encode an Ising model and a color group into QRAC31.
+
+    Args:
+        ising (IsingModel): The Ising model to be encoded.
+        color_group (dict[int, list[int]]): The color group mapping for encoding.
+
+    Returns:
+        tuple[Operator, float, dict[int, tuple[int, Pauli]]]: The encoded quantum operator,
+        the offset of the Ising model, and the encoded operation as a dictionary.
+    """
     encoded_ope = color_group_to_qrac_encode(color_group)
 
     pauli_terms: list[Operator] = []
