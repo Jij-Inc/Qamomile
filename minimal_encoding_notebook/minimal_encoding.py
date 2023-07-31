@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 def main():
     # try functions
     # set basic information
-    nc = 8
+    nc = 4
     nr = math.log2(nc) #in current implementation, this has to retun integer
     na = 1
     nq = int(nr + na)
@@ -30,7 +30,6 @@ def main():
         return 0
     else:
         nr = int(nr)
-
 
     parameters, theta = init_parameter(nq, l) 
     """
@@ -46,18 +45,22 @@ def main():
     #try classical optimizer
     progress_history = []
     A = generate_random_qubo(nc)
+    if check_symmetric(A) == False:
+        print("The QUBO matrix is not symmetric")
+        return 0
+    print(A)
     func = init_func(nc, nr, na, circuit, A, progress_history)
     #number of evaluation of cost function, it can be changed but
     n_eval = 300 
     optimizer = COBYLA(maxiter=n_eval, disp=True)
     result = optimizer.minimize(func, list(theta.values()))
     print(f"The total number of function evaluations => {result.nfev}")
+    decoded_result = decode(result.x, circuit, nr)
 
     plt.plot(progress_history)
     plt.xlabel('number of iteration')
     plt.ylabel('value of cost function')
     plt.show()
-
 
 #initialize parameters
 def init_parameter(nq, l):
@@ -90,10 +93,13 @@ def generate_circuit(nr, na, l,parameters):
     #add layers which consist of CNOT and Ry gate
     for j in range(0,l):
         #CNOT
-        circuit.cx(qreg_q[0],areg_a[0])
+        # circuit.cx(qreg_q[0],areg_a[0])
+        circuit.cx(areg_a[0],qreg_q[0])
         for i in range(nr):
             if i != 0:
-                circuit.cx(qreg_q[i],qreg_q[i-1]) 
+                # circuit.cx(qreg_q[i],qreg_q[i-1]) 
+                circuit.cx(qreg_q[i-1],qreg_q[i]) 
+
         #Ry
         for i in range(nq):
             if i == 0:
@@ -166,13 +172,16 @@ def init_cost_function(A, nc):
         for i in range(nc):
             for j in range(nc):
                 if i != j:
-                    first_sum += A[i][j]*(P1[i]*P1[j]/P[i]*P[j])
+                    # first_sum += A[i][j]*(P1[i]*P1[j]/P[i]*P[j])
+                    first_sum += A[i][j]*(P1[i]/P[i])*(P1[j]/P[j])
+                # else:
+                #     first_sum += A[i][i]*(P1[i]/P[i])
         # second sum of cost function 
         second_sum = 0
         for i in range(nc):
             second_sum += A[i][i]*(P1[i]/P[i])
         
-        return second_sum + first_sum
+        return  first_sum + second_sum   
     
     return cost_function
 
@@ -195,7 +204,7 @@ def init_func(nc, nr, na, circuit, A, progress_history):
     cost_function = init_cost_function(A, nc)
 
     estimator = Estimator()
-    # estimator.set_options(shots=1000)
+    # estimator.set_options(shots=100000)
     def func(theta):
         """
         This function will be minimized by classical optimizer. 
@@ -216,6 +225,25 @@ def init_func(nc, nr, na, circuit, A, progress_history):
         return result
 
     return func
+
+def check_symmetric(A, rtol=1e-05, atol=1e-08):
+    '''
+    Function to check if a matrix is symmetric or not
+
+    Parameters
+    ----------
+    A : numpy array
+        matrix to be checked
+    rtol : float, optional
+        relative tolerance. The default is 1e-05.
+    atol : float, optional
+        absolute tolerance. The default is 1e-08.
+    
+    Returns
+    -------
+    bool
+    '''
+    return np.allclose(A, A.T, rtol=rtol, atol=atol)
 
 # not complete
 def decode(theta, circuit, nr):
@@ -244,13 +272,22 @@ def decode(theta, circuit, nr):
     a=[]
     for i in range(len(P.values)):
         val = (P1.values[i] / P.values[i])
-        b.append(val**2)
+        b.append(val)
         a.append(1 - b[i])
 
-    print(f"b is Pr(x=1){b}")
-    print(f"a is Pr(x=0){a}")
+    final_binary = []
+    #compare a and b and pick the larger one
+    for i in range(len(a)):
+        if a[i] > b[i]:
+            final_binary.append(0)
+        else:
+            final_binary.append(1)
+
+    # print(f"b is Pr(x=1){b}")
+    # print(f"a is Pr(x=0){a}")
     #need to fix return value
-    return 0
+    print(f"final binary is {final_binary}")
+    return final_binary
 
 if __name__ == '__main__':
     main()
