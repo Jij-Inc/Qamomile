@@ -35,11 +35,11 @@ class QAOAAnsatzBuilder:
         multipliers: dict = None,
         detail_parameters: dict = None,
     ) -> tuple[Operator, float]:
-        """Get the Hamiltonian.
+        """Get the Ising Hamiltonian.
 
         Args:
-            multipliers (dict, optional): Multipliers for the Hamiltonian. Defaults to None.
-            detail_parameters (dict, optional): Detailed parameters for the Hamiltonian. Defaults to None.
+            multipliers (dict, optional): Multipliers for the Ising Hamiltonian. Defaults to None.
+            detail_parameters (dict, optional): Detailed parameters for the Ising Hamiltonian. Defaults to None.
 
         Returns:
             tuple[Operator, float]: The Ising operator and the constant offset.
@@ -60,8 +60,8 @@ class QAOAAnsatzBuilder:
 
         Args:
             p (int): The number of layers in the QAOA circuit.
-            multipliers (dict, optional): Multipliers for the QAOA ansatz. Defaults to None.
-            detail_parameters (dict, optional): Detailed parameters for the QAOA ansatz. Defaults to None.
+            multipliers (dict, optional): Multipliers for the Ising Hamiltonian. Defaults to None.
+            detail_parameters (dict, optional): Detailed parameters for the Ising Hamiltonian. Defaults to None.
 
         Returns:
             tuple[UnboundParametricQuantumCircuit, operator, float]: The QAOA ansatz, the Ising operator, and the constant offset.
