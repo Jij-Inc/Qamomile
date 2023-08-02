@@ -11,4 +11,5 @@ __all__ = [
     "qrac21_encode_ising",
     "transpile_to_qrac31_hamiltonian",
     "transpile_to_qrac21_hamiltonian",
+    "transpile_to_qrac32_hamiltonian",
 ]

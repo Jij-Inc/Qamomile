@@ -61,7 +61,7 @@ class QRAC31Builder(QRACBuilder):
             detail_parameters (typ.Optional[ dict[str, dict[tuple[int, ...], tuple[float, float]]] ], optional): detail parameters for each penalty. Defaults to None.
 
         Returns:
-            tuple[qk_info.SparsePauliOp, float, QRACEncodingCache]: (3,1,p)-QRAC Hamiltonian, constant term, and encoding cache for decoding
+            tuple[Operator, float, QRACEncodingCache]: (3,1,p)-QRAC Hamiltonian, constant term, and encoding cache for decoding
         """
         qubo, constant = self.pubo_builder.get_qubo_dict(
             multipliers=multipliers, detail_parameters=detail_parameters

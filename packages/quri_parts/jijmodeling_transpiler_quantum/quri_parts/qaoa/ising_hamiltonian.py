@@ -7,7 +7,21 @@ from quri_parts.core.operator import pauli_label, PAULI_IDENTITY, Operator
 def to_ising_operator_from_qubo(
     qubo: dict[tuple[int, int], float], n_qubit: int
 ) -> tuple[Operator, float]:
-    """Returns a quantum circuit that represents the QUBO."""
+    """Convert a given QUBO to an Ising operator.
+
+    This function converts a quadratic unconstrained binary optimization (QUBO) problem
+    into an Ising operator and returns the operator and the constant offset of the
+    Ising model.
+
+    Args:
+        qubo (dict[tuple[int, int], float]): The QUBO to be converted. It is a dictionary
+        where the keys are tuples representing the variables in the quadratic term
+        and the values are the coefficients of these terms.
+        n_qubit (int): The total number of qubits.
+
+    Returns:
+        tuple[Operator, float]: The Ising operator and the constant offset.
+    """
     ising = qubo_to_ising(qubo)
     offset = ising.constant
     quri_operator = Operator()
