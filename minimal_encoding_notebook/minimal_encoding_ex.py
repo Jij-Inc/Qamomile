@@ -455,25 +455,13 @@ def tsp_solution_min(result:dimod.SampleSet,
     -----
     Pubo_builder, compiled_model and data are ones that you define for TSP.
     '''
+    # decode from dimod.SampleSet result to JijModeling sample set
     results = jmt.core.pubo.decode_from_openjij(result, pubo_builder, compiled_model)
 
-    # Print the data type of each parameter and print them out with propriate label
-    print(f'result data type is {type(result)}')
-    print(f'pubo_builder data type is {type(pubo_builder)}')
-    print(f'compiled_model data type is {type(compiled_model)}')
-
-    # feasibles = results.feasible()
-    # print(f'feasibles: {feasibles}')
-    # objectives = np.array(feasibles.evaluation.objective)
-    # lowest_index = np.argmin(objectives)
-    # print(f"Lowest solution index: {lowest_index}, Lowest objective value: {objectives[lowest_index]}")
-
-    # # # check solution
-    # print(results.record.solution["x"][0][0])
+    #extract a solution list from sampleset.
     nonzero_indices = results.record.solution["x"][0][0]
     nonzero_values = results.record.solution["x"][0][1]
     shape = results.record.solution["x"][0][2]
-    # nonzero_indices, nonzero_values, shape = results.record.solution["x"]
     # print("indices: ", nonzero_indices)
     # print("values: ", nonzero_values)
 
