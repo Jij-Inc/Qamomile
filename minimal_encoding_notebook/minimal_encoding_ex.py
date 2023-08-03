@@ -1,4 +1,3 @@
-from turtle import pu
 from minimal_encoding import *
 import warnings
 
@@ -12,6 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import math
 import geocoder as gc
+import dimod
 
 """
 This file is for testing the minimal encoding with Knapoack problem amd Traveral Salesman Problem (TSP).
@@ -26,7 +26,7 @@ def main():
     nr = math.log2(nc)
     na = 1
     nq = int(nr + na)
-    l =  4
+    l =  8
 
     if nr.is_integer() == False:
         print("The number of register qubits should be integer")
@@ -34,16 +34,18 @@ def main():
     else: 
         nr = int(nr)
 
-    #define Knapoack problem
+    # #define Knapoack problem
     # problem = define_problem('knapsack')
 
     # #create a list for price (v) and weight (w)
-    # price = [5000, 7000, 2000, 1000, 4000, 3000, 1500, 3200]
-    # weight = [800, 1000, 600, 400, 500, 300, 200, 700]
-    # #set the capacity (constrain)
-    # capacity = 2000
-    # data = {'v': price, 'w':weight, 'W':capacity}
-    # # data = knapsack_random_data(nc, 2000, 1000, 10000, 100, 1000)
+    # # price = [5000, 7000, 2000, 1000, 4000, 3000, 1500, 3200]
+    # # weight = [800, 1000, 600, 400, 500, 300, 200, 700]
+    # # price = [5000, 7000, 2000, 1000]
+    # # weight = [800, 100, 600, 400]
+    # # #set the capacity (constrain)
+    # # capacity = 1000
+    # # data = {'v': price, 'w':weight, 'W':capacity}
+    # data = knapsack_random_data(nc, 2000, 10, 100, 100, 1000)
 
     # compiled_model = jmt.core.compile_model(problem, data, {})
     # # Quadratic Unconstraint Binary Optimization (QUBO) model
@@ -52,48 +54,53 @@ def main():
     # # pubo_builder = jmt.core.pubo.transpile_to_pubo(compiled_model=compiled_model, 
     # #                                                relax_method = RelaxationMethod.SquaredPenalty)
     # pubo_builder = jmt.core.pubo.transpile_to_pubo(compiled_model=compiled_model)
-    # qubo,const = pubo_builder.get_qubo_dict(multipliers = {'onehot': 1.0},
-    #                                         detail_parameters={"onehot": {(1,): (1/2, 1)}})  
+    # qubo,const = pubo_builder.get_qubo_dict(multipliers = {'onehot': 1.0})  
 
     # #set sampler 
     # sampler = oj.SASampler()
 
     # #solve the problem 
     # result = sampler.sample_qubo(qubo)
-    # print(result.states)
+    # print(f'result: {result}')
     # #decode a result to JijModeling sample set
-    # sampleset = jmt.core.pubo.decode_from_openjij(result,pubo_builder,compiled_model)
 
-    # #extract a solution list from sampleset.
-    # opt = list(sampleset.record.solution.values())
-    # opt = opt[0][0][0][0]
-
-    # knapsack_solution(data, opt)
+    # knapsack_solution(data, result, pubo_builder, compiled_model)
 
     # #minimal encoding for Knapoack problem
     # parameters, theta = init_parameter(nq, l) 
     # circuit = generate_circuit(nr, na, l, parameters)
     # progress_history = []
     # A = convert_qubo_datatype(qubo, nc)
-    # A = (A + A.T)/2
-    # print(A)
+    # # print(A)
+    # A = (A + A.T)
+    # for i in range(len(A)):
+    #     A[i][i] = A[i][i]/2
+    # if check_symmetric(A) == False:
+    #     print("The QUBO matrix is not symmetric")
+    #     return 0
+    # # print(A)
     # func = init_func(nc, nr, na, circuit,A, progress_history)
-    # n_eval = 200
-    # # optimizer = COBYLA(maxiter=n_eval, disp=True)
+    # n_eval = 100
+    # # optimizer = COBYLA(maxiter=n_eval, disp=False, tol=0.0001)
     # optimizer = ADAM(maxiter=n_eval)
     # result = optimizer.minimize(func, list(theta.values()))
     # print(result)
     # print(f"The total number of function evaluations => {result.nfev}")
     # print(circuit)
-    # decoded_result = decode(result.x, circuit, nr)
+    # decoded_result = get_ancilla_prob(result.x, circuit, nr)
+    # sample = get_sample(decoded_result, result.fun)
+    # print(sample)
 
-    # # print(f'prgress history: {progress_history}')
+    # knapsack_solution(data, sample, pubo_builder, compiled_model)
+
+    # # # # print(f'prgress history: {progress_history}')
     # plt.plot(progress_history)
     # plt.xlabel('number of iteration')
     # plt.ylabel('value of cost function')
     # plt.show()
 
     #try TSP 
+    #for TSP, nc is square of the number of traveling points
     #define TSP problem
     problem = define_problem('tsp')
     #set the name list of traveling points
@@ -112,65 +119,42 @@ def main():
     sampler = oj.SASampler()
 
     # solve problem
-    result = sampler.sample_qubo(qubo, num_reads=100)
+    result = sampler.sample_qubo(qubo, num_reads=10)
+    # result = sampler.sample_qubo(qubo)
+    print(f'result: {result}')
+    print(dir(result)) 
+    print(type(result))
     # decode a result to JijModeling sample set
-    results = jmt.core.pubo.decode_from_openjij(result, pubo_builder, compiled_model)
-
-    # Show the result of evaluation of solutions
-    max_show_num = 5
-    print("Energy: ", results.evaluation.energy[:max_show_num])       # Energy is objective value of QUBO
-    print("Objective: ", results.evaluation.objective[:max_show_num]) # Objective values of original constrained problem
-    print("one-city violation: ", results.evaluation.constraint_violations["one-city"][:max_show_num])  # violation of constraints
-    print("one-time violation: ", results.evaluation.constraint_violations["one-time"][:max_show_num])  # violation of constraints
-
-    feasibles = results.feasible()
-    # print(f'feasibles: {feasibles}')
-    objectives = np.array(feasibles.evaluation.objective)
-    lowest_index = np.argmin(objectives)
-    print(f"Lowest solution index: {lowest_index}, Lowest objective value: {objectives[lowest_index]}")
-
-    # # check solution
-    nonzero_indices, nonzero_values, shape = feasibles.record.solution["x"][lowest_index]
-    print("indices: ", nonzero_indices)
-    print("values: ", nonzero_values)
-
-    N_value = len(geo_data['latlng_list'])
-    tour = np.zeros(N_value, dtype=int)
-
-    i_value, t_value = nonzero_indices
-    tour[t_value] = i_value
-
-    tour = np.append(tour, [tour[0]])
-    print("tour: ", tour)
-
-    position = np.array(geo_data['latlng_list']).T[[1, 0]]
-
-    print(position)
-    print(np.array(geo_data['points'])[tour])
-
-    #plot the result of TSP with openJij 
-    # plt.axes().set_aspect('equal')
-    # plt.plot(*position, "o")
-    # plt.plot(position[0][tour], position[1][tour], "-")
-    # plt.show()
+    tsp_solution(result, pubo_builder, compiled_model, geo_data)
 
     # minimal encoding for TSP
     parameters, theta = init_parameter(nq, l) 
     circuit = generate_circuit(nr, na, l, parameters)
     progress_history = []
     A = convert_qubo_datatype(qubo, nc)
-    A = (A + A.T)/2
-    print(A)
-    func = init_func(nc, nr, na, circuit,A, progress_history)
-    n_eval = 200
+    # print(A)
+    A = (A + A.T)
+    for i in range(len(A)):
+        A[i][i] = A[i][i]/2
+    if check_symmetric(A) == False:
+        print("The QUBO matrix is not symmetric")
+        return 0
+    # # print(A)
+    func = init_func(nc, nr, na, circuit, A, progress_history)
+    n_eval = 1000
 
-    optimizer = COBYLA(maxiter=n_eval, disp=True)
+    optimizer = COBYLA(maxiter=n_eval, disp=False, tol=0.0001)
     result = optimizer.minimize(func, list(theta.values()))
-    print(result)
-    print(f"The total number of function evaluations => {result.nfev}")
-    print(circuit)
-    decoded_result = decode(result.x, circuit, nr)
-
+    # print(result)
+    # print(f"The total number of function evaluations => {result.nfev}")
+    # print(circuit)
+    energy = np.array(result.fun)
+    final_binary = get_ancilla_prob(result.x, circuit, nr)
+    sample = get_sample(final_binary, energy)
+    print(f'sample: {sample}')
+    print(dir(result))
+    print(type(result))
+    tsp_solution_min(sample, pubo_builder, compiled_model, geo_data)
     # print(f'prgress history: {progress_history}')
     plt.plot(progress_history)
     plt.xlabel('number of iteration')
@@ -179,7 +163,7 @@ def main():
 
     
 
-def define_problem(problem:str):
+def define_problem(problem:str)->jm.Problem:
     '''
     Function to define problem.
 
@@ -232,7 +216,7 @@ def define_problem(problem:str):
 
     return problem
 
-def knapsack_random_data(nc:int, capacity:int, price_min:int, price_max:int, weight_min:int, weight_max:int):
+def knapsack_random_data(nc:int, capacity:int, price_min:int, price_max:int, weight_min:int, weight_max:int)->dict[str, int]:
     """
     Function to generate random data for knapsack problem.
     
@@ -253,7 +237,7 @@ def knapsack_random_data(nc:int, capacity:int, price_min:int, price_max:int, wei
     
     Returns
     -------
-    data : dict
+    data : dict[str, int]
         Random data for knapsack problem.
     """
     price = np.random.randint(price_min,price_max,nc)
@@ -264,23 +248,30 @@ def knapsack_random_data(nc:int, capacity:int, price_min:int, price_max:int, wei
 
     return data 
 
-def tsp_random_data(points:list, nc:int):
+def tsp_random_data(points:list[str], nc:int)->tuple[dict, dict]:
     '''
     Function to generate data for TSP.
 
     Parameters
     ----------
-    points : list
+    points : list[str]
         List of traveling points. Ex. prefecture names in Japan, city names in the world, etc.
     nc : int
         The number of classical bits.
+
+    Returns
+    -------
+    geo_data : dict[str, list]
+        Data for TSP.
+    instance_data : dict[str, np.ndarray]
+        Data for TSP.
     '''
     if len(points)**2 != nc:
         print('The number of classical bits is not appropriate for the number of traveling points.')
         return 0
     
     # set the name list of traveling points
-    points = points
+    # points = points
     # get the latitude and longitude
     latlng_list = []
     for point in points:
@@ -300,9 +291,11 @@ def tsp_random_data(points:list, nc:int):
     geo_data = {'points': points, 'latlng_list': latlng_list}
     instance_data = {'d': inst_d}
 
+    print(f'geo_data: {geo_data}')
+    print(f'instance_data: {instance_data}')
     return geo_data, instance_data
 
-def convert_qubo_datatype(qubo:dict , nc:int):
+def convert_qubo_datatype(qubo:dict[tuple[int, int], float] , nc:int)->np.ndarray:
     '''
     This function convert qubo define by dict to qubo define by numpy.ndarray.
 
@@ -325,24 +318,41 @@ def convert_qubo_datatype(qubo:dict , nc:int):
     
     return qubo_matrix
 
-def knapsack_solution(data:dict, ind:list):
+def knapsack_solution(data:dict, 
+                      result:oj.sampler.response.Response, 
+                      pubo_builder:jmt.core.pubo.pubo_builder.PuboBuilder, 
+                      compiled_model:jmt.core.compile.compiled_model.CompiledInstance)->tuple[list[int], list[int]]:
     '''
-    Takes a result of optimization and summarize it as a solution.
+    Function to decode OpenJij response to JijModeling sample set and convert it to a solution of Knapsack problem.
 
     Parameters
     ----------
     data : dict
         Data for knapsack problem.
-    ind : list
-        A result of optimization.
+    result : openjij.sampler.response.Response
+        Result of optimization.
+    pubo_builder : jijmodeling.transpiler.core.pubo.pubo_builder.PuboBuilder
+        Pubo builder.
+    compiled_model : jijmodeling.transpiler.core.compile.compiled_model.CompiledInstance
+        Compiled model.
     
     Returns
     -------
-    result_price : list
+    result_price : list[int]
         Price of chosen items.
-    result_weight : list
+    result_weight : list[int]
         Weight of chosen items.
+
+    Notes
+    -----
+    Pubo_builder, compiled_model and data are ones that you define for knapsack problem.
     '''
+    #decode from openjij result to JijModeling sample set
+    sampleset = jmt.core.pubo.decode_from_openjij(result, pubo_builder, compiled_model)
+
+    #extract a solution list from sampleset.
+    opt = list(sampleset.record.solution.values())
+    ind = opt[0][0][0][0]
 
     result_price = [data['v'][i] for i in ind]
     result_weight = [data['w'][i] for i in ind]
@@ -357,6 +367,137 @@ def knapsack_solution(data:dict, ind:list):
 
     return result_price, result_weight
 
+def tsp_solution(result:oj.sampler.response.Response, 
+                 pubo_builder:jmt.core.pubo.pubo_builder.PuboBuilder, 
+                 compiled_model:jmt.core.compile.compiled_model.CompiledInstance, 
+                 geo_data:dict):
+    '''
+    Function to decode OpenJij response to JijModeling sample set and convert it to a solution of TSP.
+
+    Parameters
+    ----------
+    result : openjij.sampler.response.Response
+        Result of optimization.
+    pubo_builder : jijmodeling.transpiler.core.pubo.pubo_builder.PuboBuilder
+        Pubo builder.
+    compiled_model : jijmodeling.transpiler.core.compile.compiled_model.CompiledInstance
+        Compiled model.
+    geo_data : dict
+        Data for TSP.
+    
+    Notes
+    -----
+    Pubo_builder, compiled_model and data are ones that you define for TSP.
+    
+    '''
+
+    # decode from openjij result to JijModeling sample set
+    results = jmt.core.pubo.decode_from_openjij(result, pubo_builder, compiled_model)
+
+    # Show the result of evaluation of solutions
+    # max_show_num = 5
+    # print("Energy: ", results.evaluation.energy[:max_show_num])       # Energy is objective value of QUBO
+    # print("Objective: ", results.evaluation.objective[:max_show_num]) # Objective values of original constrained problem
+    # print("one-city violation: ", results.evaluation.constraint_violations["one-city"][:max_show_num])  # violation of constraints
+    # print("one-time violation: ", results.evaluation.constraint_violations["one-time"][:max_show_num])  # violation of constraints
+    feasibles = results.feasible()
+    print(f'feasibles: {feasibles}')
+    objectives = np.array(feasibles.evaluation.objective)
+    lowest_index = np.argmin(objectives)
+    print(f"Lowest solution index: {lowest_index}, Lowest objective value: {objectives[lowest_index]}")
+
+    # check solution
+    nonzero_indices, nonzero_values, shape = feasibles.record.solution["x"][lowest_index]
+    print("indices: ", nonzero_indices)
+    print("values: ", nonzero_values)
+
+    N_value = len(geo_data['latlng_list'])
+    tour = np.zeros(N_value, dtype=int)
+
+    i_value, t_value = nonzero_indices
+    tour[t_value] = i_value
+
+    tour = np.append(tour, [tour[0]])
+    print("tour: ", tour)
+
+    position = np.array(geo_data['latlng_list']).T[[1, 0]]
+
+    print(position)
+    print(np.array(geo_data['points'])[tour])
+
+    #plot the result of TSP with openJij 
+    plt.axes().set_aspect('equal')
+    plt.plot(*position, "o")
+    plt.plot(position[0][tour], position[1][tour], "-")
+    plt.show()
+
+    return 0
+
+def tsp_solution_min(result:dimod.SampleSet, 
+                     pubo_builder:jmt.core.pubo.pubo_builder.PuboBuilder, 
+                     compiled_model:jmt.core.compile.compiled_model.CompiledInstance, 
+                     geo_data:dict):
+    '''
+    Function to deocde dimod.SampleSet (result obtain from minimal encoding) to JijModeling sample set and convert it to a solution of TSP.
+
+    Parameters
+    ----------
+    result : dimod.SampleSet
+        Result of optimization.
+    pubo_builder : jijmodeling.transpiler.core.pubo.pubo_builder.PuboBuilder
+        Pubo builder.
+    compiled_model : jijmodeling.transpiler.core.compile.compiled_model.CompiledInstance
+        Compiled model.
+    geo_data : dict
+        Data for TSP.
+
+    Notes
+    -----
+    Pubo_builder, compiled_model and data are ones that you define for TSP.
+    '''
+    results = jmt.core.pubo.decode_from_openjij(result, pubo_builder, compiled_model)
+
+    # Print the data type of each parameter and print them out with propriate label
+    print(f'result data type is {type(result)}')
+    print(f'pubo_builder data type is {type(pubo_builder)}')
+    print(f'compiled_model data type is {type(compiled_model)}')
+
+    # feasibles = results.feasible()
+    # print(f'feasibles: {feasibles}')
+    # objectives = np.array(feasibles.evaluation.objective)
+    # lowest_index = np.argmin(objectives)
+    # print(f"Lowest solution index: {lowest_index}, Lowest objective value: {objectives[lowest_index]}")
+
+    # # # check solution
+    # print(results.record.solution["x"][0][0])
+    nonzero_indices = results.record.solution["x"][0][0]
+    nonzero_values = results.record.solution["x"][0][1]
+    shape = results.record.solution["x"][0][2]
+    # nonzero_indices, nonzero_values, shape = results.record.solution["x"]
+    # print("indices: ", nonzero_indices)
+    # print("values: ", nonzero_values)
+
+    N_value = len(geo_data['latlng_list'])
+    tour = np.zeros(N_value, dtype=int)
+
+    i_value, t_value = nonzero_indices
+    tour[t_value] = i_value
+
+    tour = np.append(tour, [tour[0]])
+    print("tour: ", tour)
+
+    position = np.array(geo_data['latlng_list']).T[[1, 0]]
+
+    print(position)
+    print(np.array(geo_data['points'])[tour])
+
+    #plot the result of TSP with openJij 
+    plt.axes().set_aspect('equal')
+    plt.plot(*position, "o")
+    plt.plot(position[0][tour], position[1][tour], "-")
+    plt.show()
+
+    return 0
 
 
 if __name__ == "__main__":
