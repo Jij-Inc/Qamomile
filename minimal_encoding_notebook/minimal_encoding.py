@@ -1,3 +1,4 @@
+from tkinter import N
 from qiskit import QuantumRegister, AncillaRegister ,ClassicalRegister, QuantumCircuit, Aer, execute
 from qiskit.circuit import Parameter, ParameterVector
 from qiskit.visualization import plot_state_city, plot_histogram
@@ -14,10 +15,10 @@ import math
 import itertools
 import matplotlib.pyplot as plt
 
-
+import dimod
 
 def main():
-    # try functions
+    # try minimal encoding
     # set basic information
     nc = 4
     nr = math.log2(nc) #in current implementation, this has to retun integer
@@ -32,10 +33,9 @@ def main():
         nr = int(nr)
 
     parameters, theta = init_parameter(nq, l) 
-    """
-    here, parameters is just a placeholder for the each parameters on the circuit
-    theta is a dictionary of parameters with random values
-    """
+    # here, parameters is just a placeholder for the each parameters on the circuit
+    # theta is a dictionary of parameters with random values
+
     circuit= generate_circuit(nr, na, l, parameters)
     #draw a circuit, comment out appropriate commands below if you like to see the circuit
     # print(circuit)
@@ -55,7 +55,7 @@ def main():
     optimizer = COBYLA(maxiter=n_eval, disp=True)
     result = optimizer.minimize(func, list(theta.values()))
     print(f"The total number of function evaluations => {result.nfev}")
-    decoded_result = decode(result.x, circuit, nr)
+    decoded_result = get_ancilla_prob(result.x, circuit, nr)
 
     plt.plot(progress_history)
     plt.xlabel('number of iteration')
@@ -63,20 +63,48 @@ def main():
     plt.show()
 
 #initialize parameters
-def init_parameter(nq, l):
+def init_parameter(nq:int , l:int):
+    '''
+    Function to initialize parameters for the circuit with random theta values
+    Parameters
+    ----------
+    nq : int
+        number of qubits
+    l : int
+        number of layers
+    Returns
+    -------
+    parameters : numpy array 
+        placeholder for parameters
+    theta : dictionary
+        dictionary of parameters with random values
+    '''
     #initialize a parameters
     parameters = ParameterVector('θ', nq*l)
     #create a dictionary of parameters with random values and return it
-    return parameters, {parameter: np.random.random() for parameter in parameters}
+    theta =  {parameter: np.random.random() for parameter in parameters}
+    return parameters, theta
 
 #generate a circuit
-def generate_circuit(nr, na, l,parameters):
+def generate_circuit(nr:int, na:int, l:int, parameters:np.array):
     """
     Function to generate qunatum circuit (variational ansatz) for minimal encoding.
-    nr: number for qubits 
-    na: number of ancilla qubits (which is 1 for this specific encoding)
-    l: number of layer, for this specific circuit one layer consists of C-NOT and Ry rotation gate
-    parameters: parameters placeholder for the circuit
+
+    Parameters
+    ----------
+    nr : int 
+        number of register qubit
+    na : int
+        number of ancilla qubits (which is 1 for this specific encoding)
+    l : int
+        number of layer, for this specific circuit one layer consists of C-NOT and Ry rotation gate
+    parameters : numpy array
+        parameters placeholder for the circuit
+
+    Returns
+    -------
+    circuit : qiskit.circuit.quantumcircuit.QuantumCircuit
+        Parameterised quantum circuit
     """
     #define number of qubits
     nq = nr + na
@@ -107,14 +135,24 @@ def generate_circuit(nr, na, l,parameters):
             else:
                 circuit.ry(parameters[nq*j+i], qreg_q[i-1])  
         circuit.barrier()
-
     return circuit
 
 #function to define SparsePauliOp 
-def define_pauli_op(nr, ancilla:bool=False, zero:bool=False):
+def define_pauli_op(nr:int, ancilla:bool=False):
     """
-    nr: number of register qubits
-    ancilla: if True, add ancilla qubit of |1> state, else add pauli I for ancilla qubit
+    Function to define pauli operator for each possible outcomes in computational basis
+    
+    Parameters
+    ----------
+    nr : int
+        number of register qubits
+    ancilla : bool, optional
+        whether to add ancilla qubit |1> or not. The default is False.
+
+    Returns
+    -------
+    pauli_op : list[SparsePauliOp]
+        list of SparsePauliOp for each possible outcomes in computational basis 
     """
     #total number of qubits (nq+na) where na is number of ancilla qubits and is always 1
     #get all binary 2^nq pattern
@@ -141,32 +179,66 @@ def define_pauli_op(nr, ancilla:bool=False, zero:bool=False):
 
     #add ancilla qubit
     for i in range(len(pauli_op)):
-        if zero == True:
-            pauli_op[i] = pauli_op[i].tensor(P0)
+        if ancilla == True:
+            pauli_op[i] = pauli_op[i].tensor(P1)
         else:
-            if ancilla == True:
-                pauli_op[i] = pauli_op[i].tensor(P1)
-            else:
-                pauli_op[i] = pauli_op[i].tensor(Id)
+            pauli_op[i] = pauli_op[i].tensor(Id)
     
     return pauli_op
 
 #function to generate random QUBO matrix
-def generate_random_qubo(nc):
+def generate_random_qubo(nc:int):
     """
-    nc: number of classical bits
+    Function to generate random QUBO matrix
+
+    Parameters
+    ----------
+    nc : int
+        number of classical bits
+    
+    Returns
+    -------
+    Q : numpy ndarray
+        random QUBO matrix
     """
-    q = np.random.uniform(low = -1.0, high = 1.0, size = (nc, nc))
-    return (q + q.T)/2
+    Q = np.random.uniform(low = -1.0, high = 1.0, size = (nc, nc))
+    Q = (Q + Q.T)/2
+    return Q
 
 #initialize cost function
-def init_cost_function(A, nc):
+def init_cost_function(A:np.ndarray, nc:int):
     """
-    A: QUBO matrix A
-    nc: the number of classical bits
+    Function to initialize cost function for minimal encoding
+
+    Parameters
+    ----------
+    A : numpy ndarray
+        QUBO matrix
+    nc : int
+        number of classical bits
+    
+    Returns
+    -------
+    cost_function : function
+        cost function for minimal encoding
     """
     #define cost function
-    def cost_function(P1, P):
+    def cost_function(P1:np.array, P:np.array):
+        '''
+        Function that compute value of cost function for minimal encoding
+
+        Parameters
+        ----------
+        P1 : numpy array
+            expectation value of each pauli operator for when ancilla qubit is |1>
+        P : numpy array
+            expectation value of each pauli operator ignoring ancilla qubit
+
+        Returns
+        -------
+        result : float
+            value of cost function
+        '''
         # first sum of cost function 
         first_sum = 0
         for i in range(nc):
@@ -180,20 +252,36 @@ def init_cost_function(A, nc):
         second_sum = 0
         for i in range(nc):
             second_sum += A[i][i]*(P1[i]/P[i])
-        
-        return  first_sum + second_sum   
+
+        result = first_sum + second_sum
+        return  result
     
     return cost_function
 
 #function that classical optimizer will minimize
-def init_func(nc, nr, na, circuit, A, progress_history):
+def init_func(nc:int, nr:int, na:int, circuit:qiskit.circuit.quantumcircuit.QuantumCircuit , A:np.ndarray, progress_history:list):
     """
-    This function will be minimized by classical optimizer. 
-    theta: parameters of the circuit 
-    nc: number of classical bits
-    nr, na: number of register and ancilla qubits
-    circuit: quantum circuit
-    progress_history: list to store the progress of the minimization
+    Function to initialize the function to be minimised by classical optimisor
+
+    Parameters
+    ----------
+    nc : int
+        number of classical bits
+    nr : int
+        number of register qubits
+    na : int 
+        number of ancilla qunbits 
+    circuit : qiskit.circuit.quantumcircuit.QuantumCircuit
+        variational ansatz (parameterized quantum circuit)
+    A : numpy ndarray
+        QUBO matrix
+    progress_history : list
+        list to store the progress of the minimization
+
+    Returns
+    -------
+    func : function
+        function to be minimized by classical optimizer
     """
     nq = nr + na
     #get expectation values from a circuit
@@ -205,10 +293,20 @@ def init_func(nc, nr, na, circuit, A, progress_history):
 
     estimator = Estimator()
     # estimator.set_options(shots=100000)
-    def func(theta):
+    def func(theta:dict):
         """
-        This function will be minimized by classical optimizer. 
-        theta: parameters of the circuit 
+        The function to be minimized by classical optimizer. 
+
+        Parameters
+        ----------
+        theta: dict
+            parameters of the circuit 
+        
+        Returns
+        -------
+        result : float
+            value of the cost function
+
         """
         #get a expectation value of each H
         job1 = estimator.run([circuit]*len(H),H,[theta]*len(H))
@@ -226,7 +324,7 @@ def init_func(nc, nr, na, circuit, A, progress_history):
 
     return func
 
-def check_symmetric(A, rtol=1e-05, atol=1e-08):
+def check_symmetric(A:np.ndarray, rtol=1e-05, atol=1e-08):
     '''
     Function to check if a matrix is symmetric or not
 
@@ -242,20 +340,13 @@ def check_symmetric(A, rtol=1e-05, atol=1e-08):
     Returns
     -------
     bool
+        True if matrix is symetric, False otherwise
     '''
     return np.allclose(A, A.T, rtol=rtol, atol=atol)
 
 # not complete
-def decode(theta, circuit, nr):
-    circuit.measure_all(inplace=True)
-    sampler = Sampler()
+def get_ancilla_prob(theta:dict, circuit:qiskit.circuit.quantumcircuit.QuantumCircuit, nr:int):
     estimator = Estimator()
-    job = sampler.run(circuits=[circuit], parameter_values=[theta], parameters=[[]])
-    job_result = job.result()
-    result = [q.binary_probabilities() for q in job_result.quasi_dists]
-    beta = list(result[0].values())
-    print(result)
-    circuit.remove_final_measurements(inplace=True)
     #define observable to calculate expectation value
     H = define_pauli_op(nr, ancilla=False)
     Ha = define_pauli_op(nr,ancilla=True)
@@ -266,7 +357,6 @@ def decode(theta, circuit, nr):
     job2 = estimator.run([circuit]*len(H),Ha,[theta]*len(H))
     P1 = job2.result()
     # print(f"The primitive-job finished with result {P1}")
-
     #compute b_i and a_i
     b=[]
     a=[]
@@ -286,8 +376,18 @@ def decode(theta, circuit, nr):
     # print(f"b is Pr(x=1){b}")
     # print(f"a is Pr(x=0){a}")
     #need to fix return value
-    print(f"final binary is {final_binary}")
+    # print(f"final binary is {final_binary}")
+    final_binary = np.array(final_binary)
     return final_binary
+
+# def get_sample(final_binary:np.array, energy:np.array):
+#     sample = dimod.SampleSet.from_samples(
+#         dimod.as_samples(final_binary), 
+#         'BINARY', 
+#         energy=energy,
+#     )
+#     return sample
+
 
 if __name__ == '__main__':
     main()
