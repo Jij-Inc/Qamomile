@@ -1,4 +1,4 @@
-from tkinter import N
+import qiskit as qk
 from qiskit import QuantumRegister, AncillaRegister ,ClassicalRegister, QuantumCircuit, Aer, execute
 from qiskit.circuit import Parameter, ParameterVector
 from qiskit.visualization import plot_state_city, plot_histogram
@@ -20,11 +20,12 @@ import dimod
 def main():
     # try minimal encoding
     # set basic information
-    nc = 4
+    nc = 8
     nr = math.log2(nc) #in current implementation, this has to retun integer
     na = 1
     nq = int(nr + na)
-    l = 4
+    l = 8
+    # l = [4, 8, 12, 16, 20]  # uncomment when smapling different number of layers
 
     if nr.is_integer() == False:
         print("The number of register qubits should be integer")
@@ -32,34 +33,44 @@ def main():
     else:
         nr = int(nr)
 
-    parameters, theta = init_parameter(nq, l) 
-    # here, parameters is just a placeholder for the each parameters on the circuit
-    # theta is a dictionary of parameters with random values
-
-    circuit= generate_circuit(nr, na, l, parameters)
-    #draw a circuit, comment out appropriate commands below if you like to see the circuit
-    # print(circuit)
-    # print(parameters)
-    # circuit.draw(output='mpl', filename='circuit.png')
-
-    #try classical optimizer
-    progress_history = []
+    #generate random QUBO matrix
     A = generate_random_qubo(nc)
     if check_symmetric(A) == False:
         print("The QUBO matrix is not symmetric")
         return 0
-    print(A)
-    func = init_func(nc, nr, na, circuit, A, progress_history)
-    #number of evaluation of cost function, it can be changed but
-    n_eval = 300 
-    optimizer = COBYLA(maxiter=n_eval, disp=True)
-    result = optimizer.minimize(func, list(theta.values()))
-    print(f"The total number of function evaluations => {result.nfev}")
-    decoded_result = get_ancilla_prob(result.x, circuit, nr)
+    # print(A)
 
-    plt.plot(progress_history)
+    line_style = ["-", "--", "-.", ":", "-", "--"]
+    shots = [None, 100, 1000, 5000, 10000, 100000] # uncomment when sampling different number of shots
+
+    # For loop to smaple different number of layers
+    for i, style in zip(shots, line_style):
+        parameters, theta = init_parameter(nq, l) 
+        # here, parameters is just a placeholder for the each parameters on the circuit
+        # theta is a dictionary of parameters with random values
+
+        circuit= generate_circuit(nr, na, l, parameters)
+        #draw a circuit, comment out appropriate commands below if you like to see the circuit
+        # print(circuit)
+        # print(parameters)
+        # circuit.draw(output='mpl', filename='circuit.png')
+
+        #try classical optimizer
+        progress_history = []
+        func = init_func(nc, nr, na, circuit, A, progress_history, num_shots= i)
+        #number of evaluation of cost function, it can be changed but
+        n_eval = 500
+        optimizer = COBYLA(maxiter=n_eval, disp=True)
+        result = optimizer.minimize(func, list(theta.values()))
+        print(f"The total number of function evaluations => {result.nfev}")
+        decoded_result = get_ancilla_prob(result.x, circuit, nr)
+
+        plt.plot(progress_history, label=f"number of shots = {i}", linestyle = style)
+
     plt.xlabel('number of iteration')
     plt.ylabel('value of cost function')
+    plt.title('Minimum encoding with different number of shots (layer = 8)')
+    plt.legend()
     plt.show()
 
 #initialize parameters
@@ -86,7 +97,7 @@ def init_parameter(nq:int , l:int):
     return parameters, theta
 
 #generate a circuit
-def generate_circuit(nr:int, na:int, l:int, parameters:np.array):
+def generate_circuit(nr:int, na:int, l:int, parameters:np.array)->qk.circuit.quantumcircuit.QuantumCircuit:
     """
     Function to generate qunatum circuit (variational ansatz) for minimal encoding.
 
@@ -138,7 +149,7 @@ def generate_circuit(nr:int, na:int, l:int, parameters:np.array):
     return circuit
 
 #function to define SparsePauliOp 
-def define_pauli_op(nr:int, ancilla:bool=False):
+def define_pauli_op(nr:int, ancilla:bool=False)->list[SparsePauliOp]:
     """
     Function to define pauli operator for each possible outcomes in computational basis
     
@@ -187,7 +198,7 @@ def define_pauli_op(nr:int, ancilla:bool=False):
     return pauli_op
 
 #function to generate random QUBO matrix
-def generate_random_qubo(nc:int):
+def generate_random_qubo(nc:int)->np.ndarray:
     """
     Function to generate random QUBO matrix
 
@@ -223,7 +234,7 @@ def init_cost_function(A:np.ndarray, nc:int):
         cost function for minimal encoding
     """
     #define cost function
-    def cost_function(P1:np.array, P:np.array):
+    def cost_function(P1:np.array, P:np.array)->float:
         '''
         Function that compute value of cost function for minimal encoding
 
@@ -259,7 +270,11 @@ def init_cost_function(A:np.ndarray, nc:int):
     return cost_function
 
 #function that classical optimizer will minimize
-def init_func(nc:int, nr:int, na:int, circuit:qiskit.circuit.quantumcircuit.QuantumCircuit , A:np.ndarray, progress_history:list):
+def init_func(nc:int, nr:int, na:int, 
+              circuit:qk.circuit.quantumcircuit.QuantumCircuit,
+              A:np.ndarray, 
+              progress_history:list,
+              num_shots:int = None):
     """
     Function to initialize the function to be minimised by classical optimisor
 
@@ -277,6 +292,10 @@ def init_func(nc:int, nr:int, na:int, circuit:qiskit.circuit.quantumcircuit.Quan
         QUBO matrix
     progress_history : list
         list to store the progress of the minimization
+    num_shots : int, optional
+        The number of shots. If None, it calculates the exact expectation values. 
+        Otherwise, it samples from normal distributions with standard errors as 
+        standard deviations using normal distribution approximation.
 
     Returns
     -------
@@ -291,9 +310,11 @@ def init_func(nc:int, nr:int, na:int, circuit:qiskit.circuit.quantumcircuit.Quan
     
     cost_function = init_cost_function(A, nc)
 
-    estimator = Estimator()
-    # estimator.set_options(shots=100000)
-    def func(theta:dict):
+    estimator = Estimator() 
+    if num_shots is not None:
+        estimator.set_options(shots=50000)
+    
+    def func(theta:dict)->float:
         """
         The function to be minimized by classical optimizer. 
 
@@ -324,7 +345,7 @@ def init_func(nc:int, nr:int, na:int, circuit:qiskit.circuit.quantumcircuit.Quan
 
     return func
 
-def check_symmetric(A:np.ndarray, rtol=1e-05, atol=1e-08):
+def check_symmetric(A:np.ndarray, rtol=1e-05, atol=1e-08)->bool:
     '''
     Function to check if a matrix is symmetric or not
 
@@ -345,7 +366,30 @@ def check_symmetric(A:np.ndarray, rtol=1e-05, atol=1e-08):
     return np.allclose(A, A.T, rtol=rtol, atol=atol)
 
 # not complete
-def get_ancilla_prob(theta:dict, circuit:qiskit.circuit.quantumcircuit.QuantumCircuit, nr:int):
+def get_ancilla_prob(theta:dict, circuit:qk.circuit.quantumcircuit.QuantumCircuit, nr:int)->np.array:
+    ''' 
+    Function to get final binary list from the circuit and optimised parameters.
+
+    Parameters
+    ----------
+    theta : dict
+        optimised parameters
+    circuit : qiskit.circuit.quantumcircuit.QuantumCircuit
+        parameterised quantum circuit
+    nr : int
+        number of register qubits
+    
+    Returns
+    -------
+    final_binary : numpy array
+        final binary list
+    
+    Note
+    ----
+    This function compute final binary list based on ancilla qubit probability.
+    First, it compute expectation value of each possible outcomes of register qubits, then it compute expectation value of each possible outcomes of register qubits when ancilla qubit is |1>.
+    Then, it compute b_i which is possibility of ancilla qubit being |1>. Also, compute a_i which is possibility of ancilla qubit being |0>.
+    '''
     estimator = Estimator()
     #define observable to calculate expectation value
     H = define_pauli_op(nr, ancilla=False)
@@ -358,8 +402,8 @@ def get_ancilla_prob(theta:dict, circuit:qiskit.circuit.quantumcircuit.QuantumCi
     P1 = job2.result()
     # print(f"The primitive-job finished with result {P1}")
     #compute b_i and a_i
-    b=[]
-    a=[]
+    b=[] # list of probability of ancilla qubit being |1>
+    a=[] # list of probability of ancilla qubit being |0>
     for i in range(len(P.values)):
         val = (P1.values[i] / P.values[i])
         b.append(val)
@@ -380,13 +424,28 @@ def get_ancilla_prob(theta:dict, circuit:qiskit.circuit.quantumcircuit.QuantumCi
     final_binary = np.array(final_binary)
     return final_binary
 
-# def get_sample(final_binary:np.array, energy:np.array):
-#     sample = dimod.SampleSet.from_samples(
-#         dimod.as_samples(final_binary), 
-#         'BINARY', 
-#         energy=energy,
-#     )
-#     return sample
+def get_sample(final_binary:np.array, energy:np.array)->dimod.SampleSet:
+    ''' 
+    Function to get sample from final binary and energy.
+
+    Parameters
+    ----------
+    final_binary : numpy array
+        final binary from get_ancilla_prob
+    energy : numpy array
+        value of the cost function with optimised parameters
+    
+    Returns
+    -------
+    sample : dimod.SampleSet
+        sample set of final binary and energy
+    '''
+    sample = dimod.SampleSet.from_samples(
+        dimod.as_samples(final_binary), 
+        'BINARY', 
+        energy=energy,
+    )
+    return sample
 
 
 if __name__ == '__main__':
