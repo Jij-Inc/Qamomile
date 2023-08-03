@@ -1,6 +1,6 @@
 from __future__ import annotations
 import jijmodeling as jm
-import jijmodeling.transpiler as jmt
+import jijmodeling_transpiler as jmt
 from jijmodeling_transpiler_quantum.core import qubo_to_ising
 from .ising_hamiltonian import to_ising_operator_from_qubo
 from quri_parts.circuit import LinearMappedUnboundParametricQuantumCircuit
