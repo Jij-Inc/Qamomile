@@ -16,8 +16,10 @@ packages = [
 ]
 
 [tool.poetry.dependencies]
-python = ">=3.9,<3.11"
+python = ">=3.9.8,<3.11"
 jijmodeling-transpiler = "^0.6.0rc2"
+qiskit = {version = ">=0.44.0", extras = ["qiskit"]}
+quri-parts = {version = ">=0.13.0", extras = ["quri-parts"]}
 
 
 [tool.poetry.group.dev.dependencies]
@@ -27,7 +29,8 @@ pylatexenc = "^2.10"
 pytest = "^7.3.2"
 
 [tool.poetry.extras]
-qiskit = ["jijmodeling-transpiler-quantum-qiskit"]
+qiskit = ["qiskit"]
+quri-parts = ["quri-parts"]
 
 
 [tool.pytest.ini_options]

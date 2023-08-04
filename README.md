@@ -2,15 +2,18 @@
 
 `JijModeling-Transpiler-Quantum` is a transpiler from model written in [JijModeling]() to quantum optimization algorithms on variaous quantum platform.
 
-## Installation
-
-```bash
-pip install jijmodeling-transpiler-quantum
-```
+- [Qiskit](#qiskit)
+- [QURI-Parts](#quri-parts)
 
 ## Qiskit
 
 [Qiskit](https://qiskit.org/) is an open-source SDK for working with quantum computers at the level of circuits, algorithms, and application modules.
+
+### Installation
+
+```bash
+pip install "jijmodeling-transpiler-quantum[qiskit]"
+```
 
 ### Quantum Approximate Optimization Algorithm (QAOA)
 
@@ -33,14 +36,11 @@ qaoa_builder = jtq.qiskit.transpile_to_qaoa(compiled_instance)
 
 ## QURI-Parts
 
-
-
-| ❌ Not supported yet.                         | 
-|------------------------------------------|
-| Currently, `quri-parts` is not supported. Please wait for the next release. |
-
-
 [QURI Parts](https://quri-parts.qunasys.com/) is an open source library suite for creating and executing quantum algorithms on various quantum computers and simulators.
+
+```bash
+pip install "jijmodeling-transpiler-quantum[quri-parts]"
+```
 
 ### Quantum Approximate Optimization Algorithm (QAOA)
 
@@ -67,7 +67,7 @@ qaoa_builder = jtq.quri.transpile_to_qaoa(compiled_instance)
 
 ```bash
 pip install poetry
-poetry install
+poetry install --all-extras
 poetry shell
 ```
 
