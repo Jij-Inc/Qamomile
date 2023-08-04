@@ -33,7 +33,7 @@ jobs:
         shell: bash
         run:  |
           set -eux
-          poetry install
+          poetry install --all-extras
       - name: Test
         shell: bash
         run: |
