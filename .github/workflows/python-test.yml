@@ -33,6 +33,7 @@ jobs:
         shell: bash
         run:  |
           set -eux
+          pip install dimod
           poetry install --all-extras
       - name: Test
         shell: bash
