@@ -6,7 +6,7 @@ from .qrao21 import qrac21_encode_ising
 import dataclasses
 import typing as typ
 import jijmodeling as jm
-import jijmodeling.transpiler as jmt
+import jijmodeling_transpiler as jmt
 
 
 class QRACBuilder(ABC):
