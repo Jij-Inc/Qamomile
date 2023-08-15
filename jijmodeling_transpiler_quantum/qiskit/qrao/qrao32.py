@@ -75,22 +75,14 @@ def create_pauli_linear_term(operator: Pauli, index: int, n_qubit: int):
 
     _pauli_terms: list[qk_ope.SparsePauliOp] = []
     for z_p, x_p, coeff in zip(zps, xps, coeffs):
-        _pauli_terms.append(
-            qk_ope.SparsePauliOp(qk_ope.Pauli((z_p, x_p)), coeff)
-        )
+        _pauli_terms.append(qk_ope.SparsePauliOp(qk_ope.Pauli((z_p, x_p)), coeff))
 
     return _pauli_terms
 
 
-def create_pauli_quad_term(
-    operators: list[Pauli], indices: list[int], n_qubit: int
-):
-    xps_i, zps_i, coeffs_i = create_pauli_prime_terms(
-        operators[0], indices[0], n_qubit
-    )
-    xps_j, zps_j, coeffs_j = create_pauli_prime_terms(
-        operators[1], indices[1], n_qubit
-    )
+def create_pauli_quad_term(operators: list[Pauli], indices: list[int], n_qubit: int):
+    xps_i, zps_i, coeffs_i = create_pauli_prime_terms(operators[0], indices[0], n_qubit)
+    xps_j, zps_j, coeffs_j = create_pauli_prime_terms(operators[1], indices[1], n_qubit)
 
     _pauli_terms: list[qk_ope.SparsePauliOp] = []
     for x_p_i, z_p_i, coeff_i in zip(xps_i, zps_i, coeffs_i):
@@ -121,10 +113,7 @@ def qrac32_encode_ising(
             continue
 
         color, pauli_kind = encoded_ope[idx]
-        pauli_operator_terms = create_pauli_linear_term(
-            pauli_kind, color, n_qubit
-        )
-
+        pauli_operator_terms = create_pauli_linear_term(pauli_kind, color, n_qubit)
         pauli_terms.extend(pauli_operator_terms)
 
     # create Pauli terms

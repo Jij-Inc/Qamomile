@@ -150,6 +150,7 @@ def transpile_to_qrac21_hamiltonian(
     )
     return QRAC21Builder(pubo_builder, compiled_instance)
 
+
 class QRAC32Builder(QRACBuilder):
     def get_hamiltonian(
         self,
@@ -200,4 +201,3 @@ def transpile_to_qrac32_hamiltonian(
         compiled_instance, normalize=normalize
     )
     return QRAC32Builder(pubo_builder, compiled_instance)
-

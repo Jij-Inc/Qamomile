@@ -33,9 +33,7 @@ class QAOAAnsatzBuilder:
         qubo, constant = self.pubo_builder.get_qubo_dict(
             multipliers=multipliers, detail_parameters=detail_parameters
         )
-        ising_operator, ising_const = to_ising_operator_from_qubo(
-            qubo, self.num_vars
-        )
+        ising_operator, ising_const = to_ising_operator_from_qubo(qubo, self.num_vars)
         return ising_operator, ising_const + constant
 
     def get_qaoa_ansatz(
@@ -83,9 +81,7 @@ class QAOAAnsatzBuilder:
             else:
                 shots = 30000
 
-        binary_counts = {
-            key: int(prob * shots) for key, prob in binary_prob.items()
-        }
+        binary_counts = {key: int(prob * shots) for key, prob in binary_prob.items()}
 
         return self.decode_from_counts(binary_counts)
 

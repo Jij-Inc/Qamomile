@@ -19,7 +19,7 @@ def to_ising_operator_from_qubo(
     for idx, coeff in ising.linear.items():
         if coeff == 0.0:
             continue
- 
+
         z_p = zero.copy()
         z_p[idx] = True
 
