@@ -1,20 +1,17 @@
 import qiskit as qk
-from qiskit import QuantumRegister, AncillaRegister ,ClassicalRegister, QuantumCircuit, Aer, execute
-from qiskit.circuit import Parameter, ParameterVector
-from qiskit.visualization import plot_state_city, plot_histogram
+from qiskit import QuantumRegister, AncillaRegister , QuantumCircuit
+from qiskit.circuit import  ParameterVector
 from qiskit.algorithms.optimizers import COBYLA
 
 #libs for get expectation value
-from qiskit.primitives import Estimator, Sampler
-from qiskit.circuit.library import RealAmplitudes
+from qiskit.primitives import Estimator
 from qiskit.quantum_info import SparsePauliOp
 
 import numpy as np
-from numpy import pi
 import math
 import itertools
 import matplotlib.pyplot as plt
-
+import jijmodeling as jm
 import dimod
 
 def main():
@@ -312,7 +309,7 @@ def init_func(nc:int, nr:int, na:int,
 
     estimator = Estimator() 
     if num_shots is not None:
-        estimator.set_options(shots=50000)
+        estimator.set_options(shots=num_shots)
     
     def func(theta:dict)->float:
         """
@@ -397,28 +394,28 @@ def get_ancilla_prob(theta:dict, circuit:qk.circuit.quantumcircuit.QuantumCircui
     #get expectation values from
     job1 = estimator.run([circuit]*len(H),H,[theta]*len(H))
     P = job1.result()
-    # print(f"The primitive-job finished with result {P}")
+    print(f"The primitive-job finished with result {P}")
     job2 = estimator.run([circuit]*len(H),Ha,[theta]*len(H))
     P1 = job2.result()
-    # print(f"The primitive-job finished with result {P1}")
+    print(f"The primitive-job finished with result {P1}")
     #compute b_i and a_i
-    b=[] # list of probability of ancilla qubit being |1>
-    a=[] # list of probability of ancilla qubit being |0>
+    b_sq=[] # list of probability of ancilla qubit being |1>
+    a_sq=[] # list of probability of ancilla qubit being |0>
     for i in range(len(P.values)):
-        val = (P1.values[i] / P.values[i])
-        b.append(val)
-        a.append(1 - b[i])
+        val = (P1.values[i] / P.values[i])**2
+        b_sq.append(val)
+        a_sq.append(1 - b_sq[i])
 
     final_binary = []
     #compare a and b and pick the larger one
-    for i in range(len(a)):
-        if a[i] > b[i]:
+    for i in range(len(a_sq)):
+        if a_sq[i] > b_sq[i]:
             final_binary.append(0)
         else:
             final_binary.append(1)
 
-    # print(f"b is Pr(x=1){b}")
-    # print(f"a is Pr(x=0){a}")
+    print(f"b is Pr(x=1){b_sq}")
+    print(f"a is Pr(x=0){a_sq}")
     #need to fix return value
     # print(f"final binary is {final_binary}")
     final_binary = np.array(final_binary)
