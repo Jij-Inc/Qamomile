@@ -129,14 +129,14 @@ def qrac32_encode_ising(
 
     offset = ising.constant
     n_qubit = 2 * len(color_group)
+    print(ising.linear.items())
 
     for idx, coeff in ising.linear.items():
-        #         print(idx, coeff)
         if coeff == 0.0:
             continue
 
         color, pauli_kind = encoded_ope[idx]
-        pauli_str = create_pauli_linear_term([pauli_kind], [color], n_qubit)
+        pauli_str = create_pauli_linear_term(pauli_kind, color, n_qubit)
         converted_pauli_str, coeffs = sparse_pauli_op_to_string(pauli_str)
 
         for pauli_str, coeff in zip(converted_pauli_str, coeffs):
