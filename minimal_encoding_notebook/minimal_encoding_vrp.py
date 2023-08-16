@@ -11,7 +11,7 @@ import geocoder as gc
 import math
 import numpy as np
 import matplotlib.pyplot as plt
-
+import time
 
 def main():
     '''
@@ -26,8 +26,10 @@ def main():
     points = ['千代田区' ,'練馬区', '品川区', '文京区', '荒川区']
     n = [0, 1, 2, 3, 4]
 
+    #get geo data 
+    geo_data, distance_data = geo_information(points)
+    #generate routes
     routes = random_greedy_route_generating(points, 3)
-
     routes['n'] = n
 
     print(f'routes: {routes}')
@@ -36,15 +38,51 @@ def main():
     # # Quadratic Unconstraint Binary Optimization (QUBO) model
     pubo_builder = jmt.core.pubo.transpile_to_pubo(compiled_model=compiled_model)
     # # qubo, const = pubo_builder.get_qubo_dict(multipliers = {'one-city': 0.5, 'one-time': 0.5})
-    qubo, const = pubo_builder.get_qubo_dict(multipliers = {'one-time': 50})
+    qubo, const = pubo_builder.get_qubo_dict(multipliers = {'one-time': 500})
 
     sampler = oj.SASampler()
 
     # solve problem
-    result = sampler.sample_qubo(qubo)
-    # result = sampler.sample_qubo(qubo, num_reads=10)
-    results = jmt.core.pubo.decode_from_openjij(result, pubo_builder, compiled_model)
-    print(f'results: {results}')
+    # result = sampler.sample_qubo(qubo) 
+    result = sampler.sample_qubo(qubo, num_reads=10)
+
+    #get solution
+    vrp_solution(result, pubo_builder, compiled_model, geo_data, routes)
+    
+
+    # ============== minimal encoding ==============
+
+    nc = 8
+    nr = math.log2(nc)
+    nr = int(nr)
+    l = 4
+    na = 1
+    nq = int(nr + na)
+    #minimal encoding
+    A = convert_qubo_datatype(qubo, nc)
+    # print(A)
+    A = (A + A.T)
+    for i in range(len(A)):
+        A[i][i] = A[i][i]/2
+    if check_symmetric(A) == False:
+        print("The QUBO matrix is not symmetric")
+        return 0
+    
+    parameters, theta = init_parameter(nq, l) 
+    circuit = generate_circuit(nr, na, l, parameters)
+    progress_history = []
+    
+    # # print(A)
+    func = init_func(nc, nr, na, circuit, A, progress_history)
+    n_eval = 1000
+    start = time.time()
+    optimizer = COBYLA(maxiter=n_eval, disp=False, tol=0.00001)
+    # optimizer = ADAM(maxiter=n_eval)
+    result = optimizer.minimize(func, list(theta.values()))
+    final_binary = get_ancilla_prob(result.x, circuit, nr)
+    energy = np.array(result.fun)
+    sample = get_sample(final_binary, energy)
+    vrp_solution(sample, pubo_builder, compiled_model, geo_data, routes)
 
     return 0 
 
@@ -63,12 +101,12 @@ def set_problem():
     # Define the problem
     c = jm.Placeholder('c', ndim=1) #cost of each route
     n = jm.Placeholder('n', ndim=1) #node (location)
-    d = jm.Placeholder('d', ndim=2) #delta
+    d = jm.Placeholder('d', ndim=2).set_latex(r'\delta') #delta
 
     R = c.shape[0].set_latex("R") #set of routes
     N = n.shape[0].set_latex(r'\mathscr{N}') #set of nodes which is locations
     r = jm.Element('r', belong_to=(R)) 
-    i = jm.Element('i', belong_to=(N))
+    i = jm.Element('i', belong_to=(1,N))
     x = jm.BinaryVar('x', shape = R)
 
 
@@ -139,8 +177,6 @@ def find_min_distance(distance:list[float])->int:
     # print(f'min_index: {min_index}')
     return min_index
 
-
-
 def find_next_location(current_location:int, visited_location:list[int], distance_matrix:list[list[float]])->int:
     ''' 
     Function to find the next location based on the current location and visited location
@@ -193,8 +229,6 @@ def get_delta(route:list[int], n:int)->list:
         delta[i] = int(1)
     
     return list(delta)
-
-
 
 def plot_route(routes:list[list[int]], geo_data:dict):
     '''
@@ -312,6 +346,73 @@ def random_greedy_route_generating(points:list[str], v:int):
     # plot_route(routes['route'], geo_data)
 
     return routes
+
+def get_routs_from_index(indecies:list[int], routes:list[list[int]])->list[list[int]]:
+    '''
+    Function to convert indecies into a set of routes.
+
+    Parameters
+    ----------
+    indecies : list[int]
+        list of indecies
+    routes : list[list[int]]
+        list of routes
+    
+    Returns
+    -------
+    optimised_routes : list[list[int]]
+        list of optimised routes
+    '''
+    optimised_routes = []
+    for i in indecies:
+        optimised_routes.append(routes['route'][i])
+    
+    return optimised_routes
+        
+def vrp_solution(result:oj.sampler.response.Response, 
+                 pubo_builder:jmt.core.pubo.pubo_builder.PuboBuilder,
+                 compiled_model:jmt.core.compile.compiled_model.CompiledInstance,
+                 geo_data:dict,
+                 routes:dict):
+    '''
+    Function to decode OpenJij response to JijModeling sample set and convert it to a solution of VRP.
+    It prints out result and plot a solution.
+
+    Parameters
+    ----------
+    result : oj.sampler.resposne.Response
+        OpenJij response, result of optimisation
+    pubo_builder : jmt.core.pubo.PUBOBuilder
+        PUBO Builder
+    compiled_model : jmt.core.model.CompiledModel
+        compiled model
+    geo_data : dict
+        dictionary of geo information, points and latlng_list
+    
+    Returns
+    -------
+    nonzero_indices : list[int]
+        list of nonzero indices, this indicate which routes are optimal solution for thew problem
+
+    Notes
+    -----
+    Pubo_builder, compiled_model and data are ones that you define for TSP.
+    '''
+    results = jmt.core.pubo.decode_from_openjij(result, pubo_builder, compiled_model)
+    feasibles = results.feasible()
+    print(f'feasibles: {feasibles}')
+    objectives = np.array(feasibles.evaluation.objective)
+    lowest_index = np.argmin(objectives)
+    print(f"Lowest solution index: {lowest_index}, Lowest objective value: {objectives[lowest_index]}")
+    nonzero_indices, nonzero_values, shape = feasibles.record.solution["x"][lowest_index]
+    print("indices: ", nonzero_indices)
+    print("values: ", nonzero_values)
+
+    #get the routes from the indices
+    optimised_routes = get_routs_from_index(nonzero_indices[0], routes)
+    plot_route(optimised_routes, geo_data)
+
+    return nonzero_indices
 
 
 
