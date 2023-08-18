@@ -336,6 +336,7 @@ def init_func(nc:int, nr:int, na:int,
         # print(f"The primitive-job finished with result {P1}")
 
         result = cost_function(P1.values, P.values)
+        #keep progress of the minimization just so we can plot it later
         progress_history.append(result)
         # print(f"The result of cost function is {result}")
         return result

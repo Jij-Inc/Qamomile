@@ -40,6 +40,8 @@ def main():
     # # qubo, const = pubo_builder.get_qubo_dict(multipliers = {'one-city': 0.5, 'one-time': 0.5})
     qubo, const = pubo_builder.get_qubo_dict(multipliers = {'one-time': 500})
 
+    #========= openJij ===================
+
     sampler = oj.SASampler()
 
     # solve problem
@@ -138,19 +140,24 @@ def geo_information(points:list[str]):
     '''
      # get the latitude and longitude
     latlng_list = []
-    for point in points:
-        location = gc.osm(point)
-        latlng_list.append(location.latlng)
-    # make distance matrix
-    num_points = len(points)
-    inst_d = np.zeros((num_points, num_points))
-    for i in range(num_points):
-        for j in range(num_points):
-            a = np.array(latlng_list[i])
-            b = np.array(latlng_list[j])
-            inst_d[i][j] = np.linalg.norm(a-b)
-    geo_data = {'points': points, 'latlng_list': latlng_list}
-    distance_data = {'d': inst_d}
+    try:
+        for point in points:
+            location = gc.osm(point)
+            latlng_list.append(location.latlng)
+        # make distance matrix
+        num_points = len(points)
+        inst_d = np.zeros((num_points, num_points))
+        for i in range(num_points):
+            for j in range(num_points):
+                a = np.array(latlng_list[i])
+                b = np.array(latlng_list[j])
+                inst_d[i][j] = np.linalg.norm(a-b)
+        geo_data = {'points': points, 'latlng_list': latlng_list}
+        distance_data = {'d': inst_d}
+    except:
+        print("Your machine may not connect to the internet. Please check your connection.")
+        print("If that's not the case, there may be a problem with the location you entered.")
+        return 0
 
     # print(f'geo_data: {geo_data}')
     # print(f'distance: {distance_data}')
@@ -410,9 +417,11 @@ def vrp_solution(result:oj.sampler.response.Response,
 
     #get the routes from the indices
     optimised_routes = get_routs_from_index(nonzero_indices[0], routes)
+    
+
     plot_route(optimised_routes, geo_data)
 
-    return nonzero_indices
+    return 
 
 
 
