@@ -1,17 +1,18 @@
 from minimal_encoding import *
 from minimal_encoding_ex import *
 
-import warnings
-
 import jijmodeling as jm
 import jijmodeling.transpiler as jmt
 import openjij as oj
 
+import warnings
 import geocoder as gc
 import math
 import numpy as np
 import matplotlib.pyplot as plt
 import time
+from abc import ABC, abstractmethod
+from typing import List
 
 def main():
     '''
@@ -23,13 +24,14 @@ def main():
     # Define the problem
     problem = set_problem()
     #list of points, the first location is the depot
-    points = ['千代田区' ,'練馬区', '品川区', '文京区', '荒川区']
-    n = [0, 1, 2, 3, 4]
+    # points = ['千代田区' ,'練馬区', '品川区', '文京区', '荒川区']
+    points = ['千代田区' ,'練馬区','品川区','文京区','港区','足立区','杉並区','葛飾区','江戸川区','世田谷区','渋谷区','江東区','荒川区','北区','目黒区','板橋区','中央区']
+    n = [index for index in range(len(points))] 
 
     #get geo data 
     geo_data, distance_data = geo_information(points)
     #generate routes
-    routes = random_greedy_route_generating(points, 3)
+    routes = greedy_route_generating(points, 4)
     routes['n'] = n
 
     print(f'routes: {routes}')
@@ -49,42 +51,48 @@ def main():
     result = sampler.sample_qubo(qubo, num_reads=10)
 
     #get solution
-    vrp_solution(result, pubo_builder, compiled_model, geo_data, routes)
+    vrp_solution(result, pubo_builder, compiled_model, geo_data, distance_data ,routes)
     
 
     # ============== minimal encoding ==============
 
-    nc = 8
-    nr = math.log2(nc)
-    nr = int(nr)
-    l = 4
-    na = 1
-    nq = int(nr + na)
-    #minimal encoding
-    A = convert_qubo_datatype(qubo, nc)
-    # print(A)
-    A = (A + A.T)
-    for i in range(len(A)):
-        A[i][i] = A[i][i]/2
-    if check_symmetric(A) == False:
-        print("The QUBO matrix is not symmetric")
-        return 0
-    
-    parameters, theta = init_parameter(nq, l) 
-    circuit = generate_circuit(nr, na, l, parameters)
-    progress_history = []
-    
+    # nc = len(routes['route'])
+    # nr = math.log2(nc)
+    # nr = int(nr)
+    # l = 4
+    # na = 1
+    # nq = int(nr + na)
+    # #minimal encoding
+    # A = convert_qubo_datatype(qubo, nc)
     # # print(A)
-    func = init_func(nc, nr, na, circuit, A, progress_history)
-    n_eval = 1000
-    start = time.time()
-    optimizer = COBYLA(maxiter=n_eval, disp=False, tol=0.00001)
-    # optimizer = ADAM(maxiter=n_eval)
-    result = optimizer.minimize(func, list(theta.values()))
-    final_binary = get_ancilla_prob(result.x, circuit, nr)
-    energy = np.array(result.fun)
-    sample = get_sample(final_binary, energy)
-    vrp_solution(sample, pubo_builder, compiled_model, geo_data, routes)
+    # A = (A + A.T)
+    # for i in range(len(A)):
+    #     A[i][i] = A[i][i]/2
+    # if check_symmetric(A) == False:
+    #     print("The QUBO matrix is not symmetric")
+    #     return 0
+    
+    # final_binary = []
+    # energy = []
+    # for i in range(10):
+    
+    #     parameters, theta = init_parameter(nq, l) 
+    #     circuit = generate_circuit(nr, na, l, parameters)
+    #     progress_history = []
+        
+    #     # # print(A)
+    #     func = init_func(nc, nr, na, circuit, A, progress_history)
+    #     n_eval = 1000
+    #     optimizer = COBYLA(maxiter=n_eval, disp=False, tol=0.00001)
+    #     # optimizer = ADAM(maxiter=n_eval)
+    #     result = optimizer.minimize(func, list(theta.values()))
+    #     energy = np.array(result.fun)
+    #     energy.append(result.fun)
+    #     final_binary.append(get_ancilla_prob(result.x, circuit, nr))
+
+
+    # sample = get_sample(final_binary, energy)
+    # vrp_solution(sample, pubo_builder, compiled_model, geo_data, distance_data, routes)
 
     return 0 
 
@@ -116,9 +124,6 @@ def set_problem():
     problem += jm.sum(r, c[r]*x[r])
     const = jm.sum(r, d[r,i]*x[r])
     problem += jm.Constraint("one-time", const==1, forall=i)
-    #optional constraint for number of vehicles
-    # const2 = jm.sum(r, d[0, r]*x[r])
-    # problem += jm.Constraint("num-vehicle", const2==V)
 
     return problem
 
@@ -264,7 +269,7 @@ def plot_route(routes:list[list[int]], geo_data:dict):
 
     return 0
 
-def random_greedy_route_generating(points:list[str], v:int):
+def greedy_route_generating(points:list[str], v:int):
     '''
     Function to randomly generate routes with greedy method
     
@@ -282,13 +287,6 @@ def random_greedy_route_generating(points:list[str], v:int):
     '''
     #get the latitude and longitude and distance matrix
     geo_data, distance_data = geo_information(points)
-    #set the depot location and distances from it
-    # depot_location = geo_data['points'][0]
-    # depot_latlang = geo_data['latlng_list'][0]
-    # depot_distance = distance_data['d'][0]
-    #set the other locations and distances from them
-    # locations = geo_data['points']
-    # latlng_list = geo_data['latlng_list']
     distance_matrix = distance_data['d']
 
     #set the maximum number of location that each vechicle can visit
@@ -354,32 +352,75 @@ def random_greedy_route_generating(points:list[str], v:int):
 
     return routes
 
-def get_routs_from_index(indecies:list[int], routes:list[list[int]])->list[list[int]]:
+# ====== Code provided by 松山さん ========
+class LocalSearch(ABC):
+    def __init__(self, distance_matrix: List[List[float]]):
+        self.distance_matrix = np.array(distance_matrix)
+        super().__init__()
+
+    @abstractmethod
+    def local_search(self, initial_solution: List[int]) -> List[int]:
+        raise NotImplementedError
+
+    def calculate_cost(self, solution: List[int]) -> float:
+        return (
+            np.sum(self.distance_matrix[solution[:-1], solution[1:]])
+            + self.distance_matrix[solution[-1], solution[0]]
+        )
+
+class TwoOpt(LocalSearch):
+    def local_search(self, initial_solution: List[int]) -> List[int]:
+        best_solution = initial_solution
+        improved = True
+
+        while improved:
+            improved = False
+            for i in range(1, len(best_solution) - 2):
+                for j in range(i + 1, len(best_solution)):
+                    if j - i == 1:
+                        continue  # changes nothing, skip then
+                    new_solution = best_solution[:]
+                    new_solution[i:j] = best_solution[
+                        j - 1 : i - 1 : -1
+                    ]  # this is the 2-optSwap
+                    if self.calculate_cost(new_solution) < self.calculate_cost(
+                        best_solution
+                    ):
+                        best_solution = new_solution
+                        improved = True
+        return best_solution
+#=====================================
+
+def two_opt_for_vrp(distance_data, routes, results):
     '''
-    Function to convert indecies into a set of routes.
+    Function to apply TwoOpt to VRP. 
 
     Parameters
     ----------
-    indecies : list[int]
-        list of indecies
-    routes : list[list[int]]
-        list of routes
+    distance_data : dict
+        distance matrix
+    routes : dict
+        dictionary of all routes
+    results : list[int]
+        list of indices of optimal routes
     
     Returns
     -------
-    optimised_routes : list[list[int]]
+    sol_routes : list[list[int]]
         list of optimised routes
     '''
-    optimised_routes = []
-    for i in indecies:
-        optimised_routes.append(routes['route'][i])
-    
-    return optimised_routes
-        
+    to = TwoOpt(distance_data)
+    sol_routes = []
+    for result in results:
+        routes[result] = to.local_search(initial_solution=routes[result]) 
+        sol_routes.append(routes[result])
+    return sol_routes
+
 def vrp_solution(result:oj.sampler.response.Response, 
                  pubo_builder:jmt.core.pubo.pubo_builder.PuboBuilder,
                  compiled_model:jmt.core.compile.compiled_model.CompiledInstance,
                  geo_data:dict,
+                 distance_data:dict,
                  routes:dict):
     '''
     Function to decode OpenJij response to JijModeling sample set and convert it to a solution of VRP.
@@ -416,14 +457,12 @@ def vrp_solution(result:oj.sampler.response.Response,
     print("values: ", nonzero_values)
 
     #get the routes from the indices
-    optimised_routes = get_routs_from_index(nonzero_indices[0], routes)
-    
-
+    # optimised_routes = get_routs_from_index(nonzero_indices[0], routes)
+    #apply TwoOpt
+    optimised_routes = two_opt_for_vrp(distance_data['d'], routes['route'], nonzero_indices[0])
     plot_route(optimised_routes, geo_data)
 
-    return 
-
-
+    return nonzero_indices[0]
 
 if __name__ == '__main__':
     main()
