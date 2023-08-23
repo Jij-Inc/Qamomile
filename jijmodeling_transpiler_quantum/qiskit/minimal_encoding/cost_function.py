@@ -72,11 +72,11 @@ def initialize_cost_function(
     """
 
     # define cost function
-    def cost_function(coeff_one: np.array) -> float:
+    def cost_function(one_coeffs: np.array) -> float:
         """Function to compute value of cost function for minimal encoding
 
         Args:
-            coeff_one (np.array): the ratio of the expectation value of each pauli operator for when ancilla qubit is |1> and the expectation value of each pauli operator ignoring ancilla qubit
+            one_coeffs (np.array): the ratio of the expectation value of each pauli operator for when ancilla qubit is |1> and the expectation value of each pauli operator ignoring ancilla qubit
 
         Returns:
             float: value of cost function
@@ -86,98 +86,10 @@ def initialize_cost_function(
         for i in range(num_cbits):
             for j in range(i, num_cbits):
                 if i != j:
-                    cost += 2 * qubo[(i, j)] * coeff_one[i] * coeff_one[j]
+                    cost += 2 * qubo[(i, j)] * one_coeffs[i] * one_coeffs[j]
                 else:
-                    cost += qubo[(i, j)] * coeff_one[i]
+                    cost += qubo[(i, j)] * one_coeffs[i]
 
         return cost
 
     return cost_function
-
-
-# def initialize_vqe_process(
-#     ansatz: qk.circuit.quantumcircuit.QuantumCircuit,
-#     qubo: dict[tuple[int, int], float],
-#     num_shots: int = None,
-# ) -> Callable[[dict], float]:
-#     """Function to initialize VQE process
-
-#     Args:
-#         ansatz (qk.circuit.quantumcircuit.QuantumCircuit): variational ansatz (parameterized quantum circuit)
-#         qubo (dict[tuple[int, int], float]): QUBO Matrix
-#         progress_history (list): list to store the progress of the minimization
-#         num_shots (int, optional): The number of shots. If None, it calculates the exact expectation values. Otherwise, it samples from normal distributions with standard errors as standard deviations using normal distribution approximation. Defaults to None.
-
-#     Returns:
-#         Callable[[dict], float]: function to be minimized by classical optimizer
-#     """
-#     num_cbits = max(max(i, j) for i, j in qubo.keys()) + 1
-#     num_registar_bits = np.ceil(np.log2(num_cbits)).astype(int)
-
-#     # get expectation values from a circuit
-#     # get a list of H (observables), which is a list of SparsePauliOp
-#     H = define_pauli_op(num_registar_bits)
-#     Ha = define_pauli_op(num_registar_bits, ancilla=True)
-
-#     cost_function = initialize_cost_function(qubo, num_cbits)
-
-#     estimator = Estimator()
-#     if num_shots is not None:
-#         estimator.set_options(shots=num_shots)
-
-#     def func(theta: dict) -> float:
-#         """Function to be minimized by classical optimizer
-
-#         Args:
-#             theta (dict): parameters of the circuit
-
-#         Returns:
-#             float: value of the cost function
-#         """
-
-#         job1 = estimator.run([ansatz] * len(H), H, [theta] * len(H))
-#         P = job1.result()
-
-#         job2 = estimator.run([ansatz] * len(Ha), Ha, [theta] * len(Ha))
-#         P1 = job2.result()
-
-#         one_coeffs = P1.values / P.values
-        
-#         cost = cost_function(one_coeffs)
-
-#         return cost
-
-#     return func
-
-
-# def get_ancilla_prob(
-#     circuit: qk.circuit.quantumcircuit.QuantumCircuit,
-#     theta: dict,
-#     num_register_bits: int,
-#     num_classical_bits: int,
-# ) -> np.array:
-#     """Function to get final binary list from the circuit and optimised parameters.
-
-#     Args:
-#         circuit (qk.circuit.quantumcircuit.QuantumCircuit): parameterised quantum circuit
-#         theta (dict): optimised parameters
-#         num_register_bits (int): number of register qubits
-#         num_classical_bits (int): number of classical bits
-
-#     Returns:
-#         np.array: final binary list
-#     """
-#     estimator = Estimator()
-#     # define observable to calculate expectation value
-#     H = define_pauli_op(num_register_bits, ancilla=False)
-#     Ha = define_pauli_op(num_register_bits, ancilla=True)
-#     # get expectation values from
-#     job1 = estimator.run([circuit] * len(H), H, [theta] * len(H))
-#     P = job1.result()
-
-#     job2 = estimator.run([circuit] * len(Ha), Ha, [theta] * len(Ha))
-#     P1 = job2.result()
-#     prob_one = (P1.values / P.values) ** 2
-#     final_binary = np.array(prob_one >= 0.5, dtype=int)
-
-#     return final_binary[:num_classical_bits]
