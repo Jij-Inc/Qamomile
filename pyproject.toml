@@ -1,12 +1,16 @@
 [build-system]
-requires = ["poetry-core>=1.0.0", "poetry-dynamic-versioning", "setuptools"]
+requires = ["poetry-core>=1.5.2", "poetry-dynamic-versioning>=0.21.4"]
 build-backend = "poetry_dynamic_versioning.backend"
+
+[tool.poetry-dynamic-versioning]
+enable = true
+style = "pep440"
 
 [tool.poetry]
 name = "jijmodeling-transpiler-quantum"
-version = "0.1.0rc3"
+version = "0.0.0" # using poetry-dynamic-versioning
 description = ""
-authors = ["Jij Inc."]
+authors = ["Jij Inc. <info@j-ij.com>"]
 readme = "README.md"
 packages = [
     {include = "jijmodeling_transpiler_quantum"},
@@ -14,7 +18,7 @@ packages = [
 
 [tool.poetry.dependencies]
 python = ">=3.9.8,<3.11"
-jijmodeling-transpiler = "^0.6.0rc2"
+jijmodeling-transpiler = ">=0.6.0rc3"
 qiskit = {version = ">=0.44.0", extras = ["qiskit"]}
 quri-parts = {version = ">=0.13.0", extras = ["quri-parts"]}
 
