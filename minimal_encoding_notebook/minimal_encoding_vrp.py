@@ -5,6 +5,8 @@ import jijmodeling as jm
 import jijmodeling.transpiler as jmt
 import openjij as oj
 
+from qiskit_ibm_runtime import QiskitRuntimeService, Session
+
 import warnings
 import geocoder as gc
 import math
@@ -13,6 +15,11 @@ import matplotlib.pyplot as plt
 import time
 from abc import ABC, abstractmethod
 from typing import List
+
+from scipy.optimize import minimize
+
+# from qiskit_aer.primitives import Estimator
+# from qiskit_ibm_runtime import Estimator
 
 def main():
     '''
@@ -24,13 +31,14 @@ def main():
     # Define the problem
     problem = set_problem()
     #list of points, the first location is the depot
-    # points = ['千代田区' ,'練馬区', '品川区', '文京区', '荒川区']
-    points = ['千代田区' ,'練馬区','品川区','文京区','港区','足立区','杉並区','葛飾区','江戸川区','世田谷区','渋谷区','江東区','荒川区','北区','目黒区','板橋区','中央区']
+    points = ['千代田区' ,'練馬区', '品川区', '文京区', '港区']
+    # points = ['千代田区' ,'練馬区','品川区','文京区','港区','足立区','杉並区','葛飾区','江戸川区','世田谷区','渋谷区','江東区','荒川区','北区','目黒区','板橋区','中央区']
     n = [index for index in range(len(points))] 
 
     #get geo data 
     geo_data, distance_data = geo_information(points)
     #generate routes
+    #be carful with the number of vehicles, if the number of vechicles is too small the algorithm will take longer time to generate routes
     routes = greedy_route_generating(points, 4)
     routes['n'] = n
 
@@ -40,59 +48,84 @@ def main():
     # # Quadratic Unconstraint Binary Optimization (QUBO) model
     pubo_builder = jmt.core.pubo.transpile_to_pubo(compiled_model=compiled_model)
     # # qubo, const = pubo_builder.get_qubo_dict(multipliers = {'one-city': 0.5, 'one-time': 0.5})
-    qubo, const = pubo_builder.get_qubo_dict(multipliers = {'one-time': 500})
+    qubo, const = pubo_builder.get_qubo_dict(multipliers = {'one-time': 100})
 
     #========= openJij ===================
 
-    sampler = oj.SASampler()
+    # sampler = oj.SASampler()
 
-    # solve problem
-    # result = sampler.sample_qubo(qubo) 
-    result = sampler.sample_qubo(qubo, num_reads=10)
+    # # solve problem
+    # # result = sampler.sample_qubo(qubo) 
+    # result = sampler.sample_qubo(qubo, num_reads=10)
 
-    #get solution
-    vrp_solution(result, pubo_builder, compiled_model, geo_data, distance_data ,routes)
+    # #get solution
+    # vrp_solution(result, pubo_builder, compiled_model, geo_data, distance_data ,routes)
     
 
     # ============== minimal encoding ==============
 
-    # nc = len(routes['route'])
-    # nr = math.log2(nc)
-    # nr = int(nr)
-    # l = 4
-    # na = 1
-    # nq = int(nr + na)
-    # #minimal encoding
-    # A = convert_qubo_datatype(qubo, nc)
-    # # print(A)
-    # A = (A + A.T)
-    # for i in range(len(A)):
-    #     A[i][i] = A[i][i]/2
-    # if check_symmetric(A) == False:
-    #     print("The QUBO matrix is not symmetric")
+    nc = len(routes['route'])
+    nr = math.log2(nc)
+    nr = int(nr)
+    l = 8
+    na = 1
+    nq = int(nr + na)
+    #minimal encoding
+    A = convert_qubo_datatype(qubo, nc)
+    # print(A)
+    A = (A + A.T)
+
+    # if nr.is_integer() == False:
+    #     print("The number of register qubits should be integer")
     #     return 0
-    
-    # final_binary = []
-    # energy = []
-    # for i in range(10):
-    
-    #     parameters, theta = init_parameter(nq, l) 
-    #     circuit = generate_circuit(nr, na, l, parameters)
-    #     progress_history = []
+    # else: 
+    #     nr = int(nr)
+
+    for i in range(len(A)):
+        A[i][i] = A[i][i]/2
+
+    if check_symmetric(A) == False:
+        print("The QUBO matrix is not symmetric")
+        return 0
+
+    final_binary = []
+    energy = []
+    for i in range(20):
+        parameters, theta = init_parameter(nq, l) 
+        circuit = generate_circuit(nr, na, l, parameters)
+        cost_function = init_cost_function(A, nc)
         
-    #     # # print(A)
-    #     func = init_func(nc, nr, na, circuit, A, progress_history)
-    #     n_eval = 1000
-    #     optimizer = COBYLA(maxiter=n_eval, disp=False, tol=0.00001)
-    #     # optimizer = ADAM(maxiter=n_eval)
-    #     result = optimizer.minimize(func, list(theta.values()))
-    #     energy = np.array(result.fun)
-    #     energy.append(result.fun)
-    #     final_binary.append(get_ancilla_prob(result.x, circuit, nr))
+        progress_history = []
+        n_eval = 1000        
+        # # print(A)
 
+        estimator = Estimator()
+        estimator.set_options(shots=i)
+        print('estimator start')
+        # estimator = Estimator(run_options= {"method": "statevector"})
+        H = define_pauli_op(nr)
+        Ha = define_pauli_op(nr, ancilla=True)
+        # optimizer = COBYLA(maxiter=n_eval,args=(circuit, estimator, cost_function, H, Ha, progress_history),)
+        # result = optimizer.minimize(fun, theta) 
+        result = minimize(fun, 
+                        theta, 
+                        args=(circuit, estimator, cost_function,H,Ha,progress_history),
+                        method='cobyla', 
+                        tol = 0.00001,
+                        options={'maxiter': n_eval,}
+                        )
+        # energy = np.array(result.fun)
+        energy.append(result.fun)
+        final_binary.append(get_ancilla_prob(result.x, circuit, nr))
+        plt.plot(progress_history)
 
-    # sample = get_sample(final_binary, energy)
-    # vrp_solution(sample, pubo_builder, compiled_model, geo_data, distance_data, routes)
+    sample = get_sample(final_binary, energy)
+    vrp_solution(sample, pubo_builder, compiled_model, geo_data, distance_data, routes)
+    plt.xlabel('number of iteration')
+    plt.ylabel('value of cost function')
+    plt.title('Minimum encoding with VRP')
+    # plt.legend()
+    plt.show()
 
     return 0 
 
@@ -235,16 +268,24 @@ def get_delta(route:list[int], n:int)->list:
     delta : list[int]
         list of delta
     '''
-
     delta = np.zeros(n)
     for i in route:
         delta[i] = int(1)
     
     return list(delta)
 
-def plot_route(routes:list[list[int]], geo_data:dict):
+def plot_route(routes:list[list[int]], geo_data:dict, cost:float = None):
     '''
     Function to plot the routes
+
+    Parameters
+    ----------
+    routes : list[list[int]]
+        list of routes
+    geo_data : dict
+        dictionary of geo information, points and latlng_list
+    cost : float
+        cost of the routes
     '''
     #get the latitude and longitude and distance matrix
     points = geo_data['points']
@@ -264,7 +305,10 @@ def plot_route(routes:list[list[int]], geo_data:dict):
         route_points = np.array(route_points)
         plt.plot(route_points[:,0], route_points[:,1], marker='o')
 
-    plt.title('ルート')
+    if cost is not None:
+        plt.title(f'ルート (コスト＝{cost})')
+    else:
+        plt.title('ルート')
     plt.show()
 
     return 0
@@ -460,9 +504,12 @@ def vrp_solution(result:oj.sampler.response.Response,
     # optimised_routes = get_routs_from_index(nonzero_indices[0], routes)
     #apply TwoOpt
     optimised_routes = two_opt_for_vrp(distance_data['d'], routes['route'], nonzero_indices[0])
-    plot_route(optimised_routes, geo_data)
+    cost = 0
+    for i in nonzero_indices[0]:
+        cost += routes['c'][i]
+    plot_route(optimised_routes, geo_data,cost)
 
-    return nonzero_indices[0]
+    return optimised_routes, cost 
 
 if __name__ == '__main__':
     main()
