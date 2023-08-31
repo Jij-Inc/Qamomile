@@ -1,11 +1,9 @@
 import qiskit as qk
 from qiskit import QuantumRegister, AncillaRegister , QuantumCircuit
 from qiskit.circuit import  ParameterVector
-from qiskit.algorithms.optimizers import COBYLA
-
-#libs for get expectation value
-from qiskit.primitives import Estimator
+from qiskit_ibm_runtime import QiskitRuntimeService, Session
 from qiskit.quantum_info import SparsePauliOp
+from qiskit.algorithms.optimizers import COBYLA
 
 import numpy as np
 import math
@@ -13,6 +11,12 @@ import itertools
 import matplotlib.pyplot as plt
 import jijmodeling as jm
 import dimod
+import time
+from scipy.optimize import minimize
+
+# from qiskit_aer.primitives import Estimator
+# from qiskit_ibm_runtime import Estimator
+from qiskit.primitives import Estimator
 
 def main():
     # try minimal encoding
@@ -21,14 +25,15 @@ def main():
     nr = math.log2(nc) #in current implementation, this has to retun integer
     na = 1
     nq = int(nr + na)
-    l = 8
-    # l = [4, 8, 12, 16, 20]  # uncomment when smapling different number of layers
+    # l = 4
+    l = [2, 4, 8, 12, 16, 20]  # uncomment when smapling different number of layers
 
     if nr.is_integer() == False:
         print("The number of register qubits should be integer")
         return 0
-    else:
+    else: 
         nr = int(nr)
+
 
     #generate random QUBO matrix
     A = generate_random_qubo(nc)
@@ -37,36 +42,50 @@ def main():
         return 0
     # print(A)
 
-    line_style = ["-", "--", "-.", ":", "-", "--"]
-    shots = [None, 100, 1000, 5000, 10000, 100000] # uncomment when sampling different number of shots
-
+    line_style = ["-", "--", "-.", ":", "-", "--"] 
+    # shots = [None,100, 1000, 5000, 10000, 100000] # uncomment when sampling different number of shots
+    # shots = None
+    shots = 100000
     # For loop to smaple different number of layers
-    for i, style in zip(shots, line_style):
-        parameters, theta = init_parameter(nq, l) 
+ 
+    # circuit.draw(output='mpl', filename='circuit.png')
+    for l, style in zip(l, line_style):
         # here, parameters is just a placeholder for the each parameters on the circuit
         # theta is a dictionary of parameters with random values
-
+        parameters, theta = init_parameter(nq, l) 
         circuit= generate_circuit(nr, na, l, parameters)
+        
         #draw a circuit, comment out appropriate commands below if you like to see the circuit
         # print(circuit)
         # print(parameters)
-        # circuit.draw(output='mpl', filename='circuit.png')
-
+        
         #try classical optimizer
         progress_history = []
-        func = init_func(nc, nr, na, circuit, A, progress_history, num_shots= i)
         #number of evaluation of cost function, it can be changed but
-        n_eval = 500
-        optimizer = COBYLA(maxiter=n_eval, disp=True)
-        result = optimizer.minimize(func, list(theta.values()))
+        n_eval = 1000
+        estimator = Estimator() 
+        estimator.set_options(shots=shots)
+        cost_function = init_cost_function(A, nc)
+        H = define_pauli_op(nr)
+        Ha = define_pauli_op(nr, ancilla=True)
+        optimizer = COBYLA(maxiter=n_eval,args=(circuit, estimator, cost_function, H, Ha, progress_history),)
+        start = time.time()
+        result = optimizer.minimize(fun, theta,)
+        # result = minimize(fun, theta, args=(circuit, estimator, cost_function, H, Ha, progress_history), 
+        #                   method='cobyla', tol = 0.00001, options={'maxiter': n_eval,})
+        end = time.time()
+        t = end - start
         print(f"The total number of function evaluations => {result.nfev}")
         decoded_result = get_ancilla_prob(result.x, circuit, nr)
 
-        plt.plot(progress_history, label=f"number of shots = {i}", linestyle = style)
+        # plt.plot(progress_history, label=f"number of shots = {i}, time : {t}s", linestyle = style)
+        plt.plot(progress_history, label=f"number of layer = {l}, time : {t}s")
+
 
     plt.xlabel('number of iteration')
     plt.ylabel('value of cost function')
-    plt.title('Minimum encoding with different number of shots (layer = 8)')
+    # plt.title('Minimum encoding with different number of shots (layer = 4) with qiskit.primitives')
+    plt.title('Minimum encoding with different number of layer (shots = 100000) with Aer')
     plt.legend()
     plt.show()
 
@@ -91,6 +110,7 @@ def init_parameter(nq:int , l:int):
     parameters = ParameterVector('θ', nq*l)
     #create a dictionary of parameters with random values and return it
     theta =  {parameter: np.random.random() for parameter in parameters}
+    theta = np.array(list(theta.values()))
     return parameters, theta
 
 #generate a circuit
@@ -181,8 +201,10 @@ def define_pauli_op(nr:int, ancilla:bool=False)->list[SparsePauliOp]:
         pauli_op.append(SparsePauliOp.from_list([('',1)]))
         for j in l[i]:
             if j == 0:
+                #|0>
                 pauli_op[i] = pauli_op[i].tensor(P0)
             else: 
+                #|1> 
                 pauli_op[i] = pauli_op[i].tensor(P1)
 
     #add ancilla qubit
@@ -252,10 +274,9 @@ def init_cost_function(A:np.ndarray, nc:int):
         for i in range(nc):
             for j in range(nc):
                 if i != j:
-                    # first_sum += A[i][j]*(P1[i]*P1[j]/P[i]*P[j])
+                    # first_sum += A[i][j]*((P1[i]*P1[j])/(P[i]*P[j]))
                     first_sum += A[i][j]*(P1[i]/P[i])*(P1[j]/P[j])
-                # else:
-                #     first_sum += A[i][i]*(P1[i]/P[i])
+
         # second sum of cost function 
         second_sum = 0
         for i in range(nc):
@@ -267,81 +288,47 @@ def init_cost_function(A:np.ndarray, nc:int):
     return cost_function
 
 #function that classical optimizer will minimize
-def init_func(nc:int, nr:int, na:int, 
-              circuit:qk.circuit.quantumcircuit.QuantumCircuit,
-              A:np.ndarray, 
-              progress_history:list,
-              num_shots:int = None):
-    """
-    Function to initialize the function to be minimised by classical optimisor
+def fun(params, ansatz, estimator, cost_function, H, Ha, progress_history:list = None):
+    '''
+    Function to compute value of cost function for minimal encoding
 
     Parameters
     ----------
-    nc : int
-        number of classical bits
-    nr : int
-        number of register qubits
-    na : int 
-        number of ancilla qunbits 
-    circuit : qiskit.circuit.quantumcircuit.QuantumCircuit
-        variational ansatz (parameterized quantum circuit)
-    A : numpy ndarray
-        QUBO matrix
-    progress_history : list
-        list to store the progress of the minimization
-    num_shots : int, optional
-        The number of shots. If None, it calculates the exact expectation values. 
-        Otherwise, it samples from normal distributions with standard errors as 
-        standard deviations using normal distribution approximation.
-
+    params : dict
+        parameters of the circuit
+    ansatz : qiskit.circuit.quantumcircuit.QuantumCircuit
+        parameterised quantum circuit
+    estimator : qiskit.primitives.estimator.Estimator or qiskit_aer.primitives.estimator.Estimator
+        estimator to get expectation value
+    cost_function : function
+        cost function for minimal encoding
+    H : list[SparsePauliOp]
+        list of SparsePauliOp for each possible outcomes of register qubits in computational basis
+    Ha : list[SparsePauliOp]
+        list of SparsePauliOp for each possible outcomes in computational basis with ancilla qubit |1>
+    progress_history : list, optional
+        list to store the progress of the minimization. The default is None.
+    
     Returns
     -------
-    func : function
-        function to be minimized by classical optimizer
-    """
-    nq = nr + na
+    result : float
+        value of the cost function
+    '''
     #get expectation values from a circuit
-    #get a list of H (observables), which is a list of SparsePauliOp
-    H = define_pauli_op(nr)
-    Ha = define_pauli_op(nr, ancilla=True)
-    
-    cost_function = init_cost_function(A, nc)
+    #get a expectation value of each H
+    job1 = estimator.run([ansatz]*len(H),H,[params]*len(H))
+    P = job1.result()
+    # print(f"The primitive-job finished with result {P}")
 
-    estimator = Estimator() 
-    if num_shots is not None:
-        estimator.set_options(shots=num_shots)
-    
-    def func(theta:dict)->float:
-        """
-        The function to be minimized by classical optimizer. 
+    job2 = estimator.run([ansatz]*len(H),Ha,[params]*len(H))
+    P1 = job2.result()
+    print(f"The primitive-job finished with result {P1}")
 
-        Parameters
-        ----------
-        theta: dict
-            parameters of the circuit 
-        
-        Returns
-        -------
-        result : float
-            value of the cost function
-
-        """
-        #get a expectation value of each H
-        job1 = estimator.run([circuit]*len(H),H,[theta]*len(H))
-        P = job1.result()
-        # print(f"The primitive-job finished with result {P}")
-
-        job2 = estimator.run([circuit]*len(H),Ha,[theta]*len(H))
-        P1 = job2.result()
-        # print(f"The primitive-job finished with result {P1}")
-
-        result = cost_function(P1.values, P.values)
-        #keep progress of the minimization just so we can plot it later
+    result = cost_function(P1.values, P.values)
+    if progress_history is not None:
         progress_history.append(result)
-        # print(f"The result of cost function is {result}")
-        return result
-
-    return func
+    print(result)
+    return result
 
 def check_symmetric(A:np.ndarray, rtol=1e-05, atol=1e-08)->bool:
     '''
@@ -364,7 +351,11 @@ def check_symmetric(A:np.ndarray, rtol=1e-05, atol=1e-08)->bool:
     return np.allclose(A, A.T, rtol=rtol, atol=atol)
 
 # not complete
-def get_ancilla_prob(theta:dict, circuit:qk.circuit.quantumcircuit.QuantumCircuit, nr:int)->np.array:
+def get_ancilla_prob(theta:dict, 
+                     circuit:qk.circuit.quantumcircuit.QuantumCircuit, 
+                     nr:int,
+                     session:Session = None,
+                     num_shots:int = None)->np.array:
     ''' 
     Function to get final binary list from the circuit and optimised parameters.
 
@@ -388,7 +379,14 @@ def get_ancilla_prob(theta:dict, circuit:qk.circuit.quantumcircuit.QuantumCircui
     First, it compute expectation value of each possible outcomes of register qubits, then it compute expectation value of each possible outcomes of register qubits when ancilla qubit is |1>.
     Then, it compute b_i which is possibility of ancilla qubit being |1>. Also, compute a_i which is possibility of ancilla qubit being |0>.
     '''
-    estimator = Estimator()
+    if session is None:
+        estimator = Estimator()
+    else:
+        estimator = Estimator(session=session)
+
+    if num_shots is not None:
+        estimator.set_options(shots=num_shots)
+
     #define observable to calculate expectation value
     H = define_pauli_op(nr, ancilla=False)
     Ha = define_pauli_op(nr,ancilla=True)
