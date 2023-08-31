@@ -1,8 +1,10 @@
 from __future__ import annotations
 import numpy as np
-import qiskit.quantum_info as qk_ope
 from jijmodeling_transpiler_quantum.core.ising_qubo import IsingModel
-from .qrao31 import Pauli, color_group_to_qrac_encode
+from .qrao31 import Pauli, color_group_to_qrac_encode, create_pauli_term
+from quri_parts.core.operator import pauli_label, PAULI_IDENTITY, Operator
+import qiskit.quantum_info as qk_ope
+from typing import List, Tuple
 
 
 def create_pauli_x_prime_term(
@@ -97,27 +99,51 @@ def create_pauli_quad_term(operators: list[Pauli], indices: list[int], n_qubit: 
     return _pauli_terms
 
 
+def sparse_pauli_op_to_string(sparse_pauli_ops):
+    pauli_str_list = []
+    coeff_list = []
+    for op in sparse_pauli_ops:
+        operators = list(str(op.paulis[0]))
+        n_qubit = len(operators)
+        indices = [i for i in range(n_qubit)]
+        coeff = op.coeffs[0]
+        pauli_str = ""
+        for ope, idx in zip(operators, indices):
+            if ope == "X":
+                pauli_str += f"X{idx} "
+            elif ope == "Y":
+                pauli_str += f"Y{idx} "
+            elif ope == "Z":
+                pauli_str += f"Z{idx} "
+        pauli_str_list.append(pauli_str.rstrip())
+        coeff_list.append(coeff)
+    return pauli_str_list, coeff_list
+
+
 def qrac32_encode_ising(
     ising: IsingModel, color_group: dict[int, list[int]]
-) -> tuple[qk_ope.SparsePauliOp, float, dict[int, tuple[int, Pauli]]]:
+) -> tuple[Operator, float, dict[int, tuple[int, Pauli]]]:
     encoded_ope = color_group_to_qrac_encode(color_group)
 
-    pauli_terms: list[qk_ope.SparsePauliOp] = []
+    pauli_terms: list[Operator] = []
 
     offset = ising.constant
     n_qubit = 2 * len(color_group)
+    print(ising.linear.items())
 
-    # convert linear parts of the objective function into Hamiltonian.
     for idx, coeff in ising.linear.items():
         if coeff == 0.0:
             continue
 
         color, pauli_kind = encoded_ope[idx]
-        pauli_operator_terms = create_pauli_linear_term(pauli_kind, color, n_qubit)
-        pauli_terms.extend(pauli_operator_terms)
+        pauli_str = create_pauli_linear_term(pauli_kind, color, n_qubit)
+        converted_pauli_str, coeffs = sparse_pauli_op_to_string(pauli_str)
 
-    # create Pauli terms
+        for pauli_str, coeff in zip(converted_pauli_str, coeffs):
+            pauli_terms.append(Operator({pauli_label(pauli_str): coeff}))
+
     for (i, j), coeff in ising.quad.items():
+        #         print((i, j), coeff)
         if coeff == 0.0:
             continue
 
@@ -129,20 +155,19 @@ def qrac32_encode_ising(
 
         color_j, pauli_kind_j = encoded_ope[j]
 
-        pauli_operator_terms = create_pauli_quad_term(
+        pauli_str = create_pauli_quad_term(
             [pauli_kind_i, pauli_kind_j], [color_i, color_j], n_qubit
         )
-
-        pauli_terms.extend(pauli_operator_terms)
+        converted_pauli_str, coeffs = sparse_pauli_op_to_string(pauli_str)
+        for pauli_str, coeff in zip(converted_pauli_str, coeffs):
+            pauli_terms.append(Operator({pauli_label(pauli_str): coeff}))
 
     if pauli_terms:
-        # Remove paulis whose coefficients are zeros.
-
-        qubit_op = sum(pauli_terms).simplify(atol=0)
+        qubit_op = Operator()
+        for term in pauli_terms:
+            qubit_op += term
     else:
-        # If there is no variable, we set num_nodes=1 so that qubit_op should be an operator.
-        # If num_nodes=0, I^0 = 1 (int).
         n_qubit = max(1, n_qubit)
-        qubit_op = qk_ope.SparsePauliOp("I" * n_qubit, 0)
+        qubit_op = Operator({PAULI_IDENTITY * n_qubit: 0})
 
     return qubit_op, offset, encoded_ope

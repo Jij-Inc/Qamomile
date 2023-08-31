@@ -41,4 +41,5 @@ jobs:
           set -eux
           poetry run pip list
           poetry run pip install qiskit
+          cd tests
           poetry run pytest
