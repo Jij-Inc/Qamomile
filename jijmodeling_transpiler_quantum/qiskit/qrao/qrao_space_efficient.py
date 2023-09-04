@@ -40,9 +40,7 @@ def qrac_space_efficient_encode_ising(
         color, pauli_kind = encoded_ope[idx]
         pauli_operator = create_pauli_term([pauli_kind], [color], n_qubit)
 
-        pauli_terms.append(
-            qk_ope.SparsePauliOp(pauli_operator, np.sqrt(3) * coeff)
-        )
+        pauli_terms.append(qk_ope.SparsePauliOp(pauli_operator, np.sqrt(3) * coeff))
 
     # create Pauli terms
     for (i, j), coeff in ising.quad.items():
@@ -59,9 +57,7 @@ def qrac_space_efficient_encode_ising(
 
         if color_i == color_j:
             pauli_ope = create_pauli_term([Pauli.Z], [color_i], n_qubit)
-            pauli_terms.append(
-                qk_ope.SparsePauliOp(pauli_ope, np.sqrt(3) * coeff)
-            )
+            pauli_terms.append(qk_ope.SparsePauliOp(pauli_ope, np.sqrt(3) * coeff))
         else:
             pauli_ope = create_pauli_term(
                 [pauli_kind_i, pauli_kind_j], [color_i, color_j], n_qubit

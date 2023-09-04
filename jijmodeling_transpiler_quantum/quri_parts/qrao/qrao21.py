@@ -33,7 +33,6 @@ def qrac21_encode_ising(
 
         color, pauli_kind = encoded_ope[idx]
         pauli_str = create_pauli_term([pauli_kind], [color], n_qubit)
-
         pauli_terms.append(Operator({pauli_label(pauli_str): np.sqrt(2) * coeff}))
 
     for (i, j), coeff in ising.quad.items():

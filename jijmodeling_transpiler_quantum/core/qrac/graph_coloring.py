@@ -11,7 +11,7 @@ def greedy_graph_coloring(
 
     Args:
         graph (typ.Iterable[tuple[int, int]]): _description_
-        max_color_group_size (int): if you want to use for the qrac31, set 3. 
+        max_color_group_size (int): if you want to use for the qrac31, set 3.
         init_coloring (typ.Optional[dict[int, int]], optional): initial coloring. Defaults to None.
 
     Returns:
@@ -54,9 +54,11 @@ def greedy_graph_coloring(
         neighbor_colors = [coloring[k] for k in neigborhoors if k in coloring]
 
         done_coloring = False
-        for color in range(max_color+1):
+        for color in range(max_color + 1):
             if color not in color_group or color not in neighbor_colors:
-                if color not in color_group or max_color_group_size > len(color_group[color]):
+                if color not in color_group or max_color_group_size > len(
+                    color_group[color]
+                ):
                     coloring[i] = color
                     done_coloring = True
                     if color not in color_group:
@@ -67,5 +69,5 @@ def greedy_graph_coloring(
             coloring[i] = max_color + 1
             color_group[max_color + 1] = [i]
             max_color += 1
-            
+
     return coloring, color_group

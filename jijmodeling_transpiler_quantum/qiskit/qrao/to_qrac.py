@@ -42,8 +42,7 @@ class QRACBuilder(ABC):
         self, binary_list: typ.Iterable[list[int]]
     ) -> jm.SampleSet:
         binary_results = [
-            {i: value for i, value in enumerate(binary)}
-            for binary in binary_list
+            {i: value for i, value in enumerate(binary)} for binary in binary_list
         ]
         binary_encoder = self.pubo_builder.binary_encoder
         decoded: jm.SampleSet = (
@@ -85,9 +84,7 @@ class QRAC31Builder(QRACBuilder):
         _, color_group = jmt_qc.greedy_graph_coloring(
             ising.quad.keys(), max_color_group_size=3
         )
-        qrac_hamiltonian, offset, encoding = qrac31_encode_ising(
-            ising, color_group
-        )
+        qrac_hamiltonian, offset, encoding = qrac31_encode_ising(ising, color_group)
         return (
             qrac_hamiltonian,
             offset + constant,
@@ -139,9 +136,7 @@ class QRAC21Builder(QRACBuilder):
         _, color_group = jmt_qc.greedy_graph_coloring(
             ising.quad.keys(), max_color_group_size=2
         )
-        qrac_hamiltonian, offset, encoding = qrac21_encode_ising(
-            ising, color_group
-        )
+        qrac_hamiltonian, offset, encoding = qrac21_encode_ising(ising, color_group)
         return (
             qrac_hamiltonian,
             offset + constant,
@@ -193,9 +188,7 @@ class QRAC32Builder(QRACBuilder):
         _, color_group = jmt_qc.greedy_graph_coloring(
             ising.quad.keys(), max_color_group_size=3
         )
-        qrac_hamiltonian, offset, encoding = qrac32_encode_ising(
-            ising, color_group
-        )
+        qrac_hamiltonian, offset, encoding = qrac32_encode_ising(ising, color_group)
         return (
             qrac_hamiltonian,
             offset + constant,
@@ -244,9 +237,7 @@ class QRACSpaceEfficientBuilder(QRACBuilder):
             multipliers=multipliers, detail_parameters=detail_parameters
         )
         ising = jmt_qc.qubo_to_ising(qubo)
-        qrac_hamiltonian, offset, encoding = qrac_space_efficient_encode_ising(
-            ising
-        )
+        qrac_hamiltonian, offset, encoding = qrac_space_efficient_encode_ising(ising)
         return (
             qrac_hamiltonian,
             offset + constant,
