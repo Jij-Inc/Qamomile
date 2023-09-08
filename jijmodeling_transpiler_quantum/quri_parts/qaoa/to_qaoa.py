@@ -115,11 +115,11 @@ class QAOAAnsatzBuilder:
             jm.SampleSet: The decoded sample set.
         """
         samples = []
-        num_occurances = []
+        num_occurrences = []
         for binary_str, count_num in counts.items():
             binary_values = {idx: int(b) for idx, b in enumerate(binary_str)}
             samples.append(binary_values)
-            num_occurances.append(count_num)
+            num_occurrences.append(count_num)
 
         binary_encoder = self.pubo_builder.binary_encoder
         decoded: jm.SampleSet = (
@@ -127,7 +127,15 @@ class QAOAAnsatzBuilder:
                 samples, binary_encoder, self.compiled_instance
             )
         )
-        decoded.record.num_occurrences = num_occurances
+        decoded = jm.SampleSet(
+            record=jm.Record(
+                num_occurrences=num_occurrences,
+                solution=decoded.record.solution,
+            ),
+            evaluation=decoded.evaluation,
+            measuring_time=decoded.measuring_time,
+            metadata=decoded.metadata,
+        )
         return decoded
 
     def decode_from_probs(self, probs: np.array) -> jm.SampleSet:
