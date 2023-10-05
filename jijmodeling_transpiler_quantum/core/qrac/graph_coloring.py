@@ -71,3 +71,39 @@ def greedy_graph_coloring(
             max_color += 1
 
     return coloring, color_group
+
+
+def check_linear_term(
+    color_group: dict[int, list[int]],
+    linear_term_index: list[int],
+    max_color_group_size: int,
+) -> dict[int, list[int]]:
+    """Search for items within the index of linear term that have not been assigned to the color_group, and add them.
+
+    Args:
+        color_group (dict[int, list[int]]): color_group
+        linear_term_index (list[int]): list of index of linear term
+        max_color_group_size (int): the maximum number of encoding qubits. if you want to use for the qrac31, set 3.
+
+    Returns:
+        dict[int, list[int]]: color_group which added items within the index of linear term that have not been assigned to the color_group.
+    """
+    idx_in_color_group = []
+    for v in color_group.values():
+        idx_in_color_group.extend(v)
+
+    max_idx = max(color_group.keys())
+    value_counter = 1
+    for idx in linear_term_index:
+        if idx not in idx_in_color_group:
+            if value_counter == 1:
+                color_group[max_idx + 1] = []
+
+            color_group[max_idx + 1].append(idx)
+            value_counter += 1
+
+            if value_counter > max_color_group_size:
+                max_idx += 1
+                value_counter = 1
+
+    return color_group
