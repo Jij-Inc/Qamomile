@@ -33,7 +33,9 @@ class QAOAAnsatzBuilder:
         qubo, constant = self.pubo_builder.get_qubo_dict(
             multipliers=multipliers, detail_parameters=detail_parameters
         )
-        ising_operator, ising_const = to_ising_operator_from_qubo(qubo, self.num_vars)
+        ising_operator, ising_const = to_ising_operator_from_qubo(
+            qubo, self.num_vars
+        )
         return ising_operator, ising_const + constant
 
     def get_qaoa_ansatz(
@@ -52,11 +54,11 @@ class QAOAAnsatzBuilder:
 
     def decode_from_counts(self, counts: dict[str, int]) -> jm.SampleSet:
         samples = []
-        num_occurances = []
+        num_occurrences = []
         for binary_str, count_num in counts.items():
             binary_values = {idx: int(b) for idx, b in enumerate(binary_str)}
             samples.append(binary_values)
-            num_occurances.append(count_num)
+            num_occurrences.append(count_num)
 
         binary_encoder = self.pubo_builder.binary_encoder
         decoded: jm.SampleSet = (
@@ -64,7 +66,15 @@ class QAOAAnsatzBuilder:
                 samples, binary_encoder, self.compiled_instance
             )
         )
-        decoded.record.num_occurrences = num_occurances
+        decoded = jm.SampleSet(
+            record=jm.Record(
+                num_occurrences=num_occurrences,
+                solution=decoded.record.solution,
+            ),
+            evaluation=decoded.evaluation,
+            measuring_time=decoded.measuring_time,
+            metadata=decoded.metadata,
+        )
         return decoded
 
     def decode_from_quasi_dist(
@@ -81,7 +91,9 @@ class QAOAAnsatzBuilder:
             else:
                 shots = 30000
 
-        binary_counts = {key: int(prob * shots) for key, prob in binary_prob.items()}
+        binary_counts = {
+            key: int(prob * shots) for key, prob in binary_prob.items()
+        }
 
         return self.decode_from_counts(binary_counts)
 

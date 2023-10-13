@@ -51,7 +51,17 @@ class QRACBuilder(ABC):
                 binary_results, binary_encoder, self.compiled_instance
             )
         )
-        decoded.record.num_occurrences = [[1]] * len(binary_results)
+
+        num_occurrences = [1] * len(binary_results)
+        decoded = jm.SampleSet(
+            record=jm.Record(
+                num_occurrences=num_occurrences,
+                solution=decoded.record.solution,
+            ),
+            evaluation=decoded.evaluation,
+            measuring_time=decoded.measuring_time,
+            metadata=decoded.metadata,
+        )
         return decoded
 
 
