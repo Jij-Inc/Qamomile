@@ -1,19 +1,19 @@
-import qiskit as qk
-import qiskit.quantum_info as qk_ope
-import numpy as np
 import jijmodeling as jm
 import jijmodeling_transpiler as jmt
-import jijmodeling_transpiler_quantum.qiskit as jtq
-
-from jijmodeling_transpiler_quantum.qiskit import (
-    transpile_to_qrac_space_efficient_hamiltonian,
-    transpile_to_qrac31_hamiltonian,
-    transpile_to_qrac21_hamiltonian,
-    transpile_to_qrac32_hamiltonian,
-)
+import numpy as np
+import qiskit as qk
+import qiskit.quantum_info as qk_ope
 from qiskit.algorithms.minimum_eigensolvers import NumPyMinimumEigensolver
 from qiskit.primitives import Estimator, Sampler
 from scipy.optimize import minimize
+
+import jijmodeling_transpiler_quantum.qiskit as jtq
+from jijmodeling_transpiler_quantum.qiskit import (
+    transpile_to_qrac21_hamiltonian,
+    transpile_to_qrac31_hamiltonian,
+    transpile_to_qrac32_hamiltonian,
+    transpile_to_qrac_space_efficient_hamiltonian,
+)
 
 
 def calculate_eigenvalue_three_one_pauli(
@@ -115,6 +115,8 @@ def test_transpile_to_qrac31_decode():
     )
 
     sampleset = qrac_builder.decode_from_binary_values([pauli_vars])
+
+    assert len(sampleset.feasible().record.solution["x"]) == 1
 
 
 def test_transpile_to_qrac21_hamiltonian():

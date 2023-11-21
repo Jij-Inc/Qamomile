@@ -1,11 +1,14 @@
 from __future__ import annotations
+
+from math import pi
+
 import jijmodeling as jm
 import jijmodeling_transpiler as jmt
-from jijmodeling_transpiler_quantum.core import qubo_to_ising
-from .ising_hamiltonian import to_ising_operator_from_qubo
+import numpy as np
 from quri_parts.circuit import LinearMappedUnboundParametricQuantumCircuit
 from quri_parts.core.operator import Operator
-from math import pi
+
+from .ising_hamiltonian import to_ising_operator_from_qubo
 
 
 class QAOAAnsatzBuilder:
@@ -57,7 +60,7 @@ class QAOAAnsatzBuilder:
         p: int,
         multipliers: dict = None,
         detail_parameters: dict = None,
-    ) -> tuple[UnboundParametricQuantumCircuit, operator, float]:
+    ) -> tuple[LinearMappedUnboundParametricQuantumCircuit, Operator, float]:
         """Get the QAOA ansatz.
 
         Args:
@@ -66,7 +69,7 @@ class QAOAAnsatzBuilder:
             detail_parameters (dict, optional): Detailed parameters for the Ising Hamiltonian. Defaults to None.
 
         Returns:
-            tuple[UnboundParametricQuantumCircuit, operator, float]: The QAOA ansatz, the Ising operator, and the constant offset.
+            tuple[LinearMappedUnboundParametricQuantumCircuit, Operator, float]: The QAOA ansatz, the Ising operator, and the constant offset.
         """
         ising_operator, constant = self.get_hamiltonian(
             multipliers=multipliers, detail_parameters=detail_parameters
@@ -173,7 +176,7 @@ def transpile_to_qaoa_ansatz(
     compiled_instance: jmt.core.CompiledInstance,
     normalize: bool = True,
     relax_method=jmt.core.pubo.RelaxationMethod.AugmentedLagrangian,
-) -> quriQAOAAnsatzBuilder:
+) -> QAOAAnsatzBuilder:
     """Transpile to a QAOA ansatz builder.
 
     Args:
@@ -182,10 +185,10 @@ def transpile_to_qaoa_ansatz(
         relax_method (jmt.core.pubo.RelaxationMethod, optional): The relaxation method to be used. Defaults to AugmentedLagrangian.
 
     Returns:
-        quriQAOAAnsatzBuilder: The QAOA ansatz builder.
+        QAOAAnsatzBuilder: The QAOA ansatz builder.
     """
     pubo_builder = jmt.core.pubo.transpile_to_pubo(
-        compiled_instance, normalize=True, relax_method=relax_method
+        compiled_instance, normalize=normalize, relax_method=relax_method
     )
     var_num = compiled_instance.var_map.var_num
     return QAOAAnsatzBuilder(pubo_builder, var_num, compiled_instance)
