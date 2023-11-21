@@ -31,7 +31,7 @@ pytest = "^7.3.2"
 
 [tool.poetry.extras]
 qiskit = ["qiskit"]
-quri-parts = ["quri-parts"]
+quri-parts = ["quri-parts[qulacs]"]
 
 
 [tool.pytest.ini_options]
