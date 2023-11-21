@@ -1,7 +1,9 @@
 from __future__ import annotations
+
 import numpy as np
+from quri_parts.core.operator import PAULI_IDENTITY, Operator, pauli_label
+
 from jijmodeling_transpiler_quantum.core import qubo_to_ising
-from quri_parts.core.operator import pauli_label, PAULI_IDENTITY, Operator
 
 
 def to_ising_operator_from_qubo(

@@ -1,12 +1,12 @@
 import jijmodeling_transpiler_quantum.qiskit as jtq
 from jijmodeling_transpiler_quantum.core.ising_qubo import IsingModel
 from jijmodeling_transpiler_quantum.core.qrac import (
-    greedy_graph_coloring,
     check_linear_term,
+    greedy_graph_coloring,
 )
 from jijmodeling_transpiler_quantum.qiskit.qrao import (
-    qrac31_encode_ising,
     qrac21_encode_ising,
+    qrac31_encode_ising,
 )
 
 
