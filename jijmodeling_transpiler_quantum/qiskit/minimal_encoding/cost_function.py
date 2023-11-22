@@ -1,7 +1,9 @@
 from __future__ import annotations
-from collections.abc import Callable
+
 import itertools
 import typing as typ
+from collections.abc import Callable
+
 import numpy as np
 import qiskit as qk
 import qiskit.quantum_info as qk_info
@@ -36,7 +38,8 @@ def define_pauli_op(
     one_op = qk_info.SparsePauliOp(
         qk_info.PauliList.from_symplectic(z, x), coeffs=[1 / 2, -1 / 2]
     )
-    identity_op = qk_info.SparsePauliOp(qk_info.Pauli([0], [0]))
+
+    identity_op = qk_info.SparsePauliOp(qk_info.Pauli(([0], [0])))
 
     ancilla_operator = one_op if ancilla else identity_op
 

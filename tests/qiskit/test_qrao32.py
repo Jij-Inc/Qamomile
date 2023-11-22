@@ -1,6 +1,7 @@
+import numpy as np
 import qiskit as qk
 import qiskit.quantum_info as qk_ope
-import numpy as np
+
 from jijmodeling_transpiler_quantum.qiskit.qrao.qrao32 import (
     create_pauli_x_prime_term,
     create_pauli_y_prime_term,

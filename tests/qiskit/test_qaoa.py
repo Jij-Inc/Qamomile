@@ -1,9 +1,8 @@
+import jijmodeling as jm
+import jijmodeling_transpiler as jmt
+import numpy as np
 import qiskit as qk
 from qiskit.algorithms.eigensolvers import NumPyEigensolver
-
-import jijmodeling as jm
-import numpy as np
-import jijmodeling_transpiler as jmt
 
 import jijmodeling_transpiler_quantum.qiskit as jmt_qk
 
@@ -43,8 +42,18 @@ def test_qaoa_H_eigenvalue():
     result = eigen_solver.compute_eigenvalues(hamiltonian)
     ising_optimal = (np.array(result.eigenvalues) + constant)[0].real
 
-    counts = result.eigenstates[0].sample_counts(shots=1)
+    num_shots = 1
+    counts = result.eigenstates[0].sample_counts(shots=num_shots)
     sampleset = qaoa_builder.decode_from_counts(counts)
 
     assert len(sampleset.feasible().record.solution["x"]) == 1
     assert ising_optimal == 0.0
+    assert sampleset.record.num_occurrences == [num_shots]
+
+    num_shots = 10
+    counts = result.eigenstates[0].sample_counts(shots=num_shots)
+    sampleset = qaoa_builder.decode_from_counts(counts)
+
+    assert len(sampleset.feasible().record.solution["x"]) == 1
+    assert ising_optimal == 0.0
+    assert sampleset.record.num_occurrences == [num_shots]

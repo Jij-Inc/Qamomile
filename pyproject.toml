@@ -20,7 +20,7 @@ packages = [
 python = ">=3.9.8,<3.11"
 jijmodeling-transpiler = ">=0.6.0rc3"
 qiskit = {version = ">=0.44.0", extras = ["qiskit"]}
-quri-parts = {version = ">=0.13.0", extras = ["quri-parts"]}
+quri-parts-qulacs = {version = "*", extras = ["quri-parts"]}
 
 
 [tool.poetry.group.dev.dependencies]
@@ -31,7 +31,7 @@ pytest = "^7.3.2"
 
 [tool.poetry.extras]
 qiskit = ["qiskit"]
-quri-parts = ["quri-parts"]
+quri-parts = ["quri-parts-qulacs"]
 
 
 [tool.pytest.ini_options]

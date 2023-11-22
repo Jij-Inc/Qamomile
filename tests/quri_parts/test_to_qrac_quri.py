@@ -1,12 +1,12 @@
-import qiskit as qk
-import numpy as np
 import jijmodeling as jm
 import jijmodeling_transpiler as jmt
+import numpy as np
+import qiskit as qk
 
 from jijmodeling_transpiler_quantum.quri_parts import (
+    transpile_to_qrac21_hamiltonian,
     transpile_to_qrac31_hamiltonian,
     transpile_to_qrac32_hamiltonian,
-    transpile_to_qrac21_hamiltonian,
 )
 
 

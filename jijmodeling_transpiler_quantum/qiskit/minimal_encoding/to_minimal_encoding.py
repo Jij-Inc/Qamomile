@@ -1,16 +1,16 @@
 from __future__ import annotations
+
 import typing as typ
 from collections.abc import Callable, Sequence
+
+import jijmodeling as jm
+import jijmodeling_transpiler as jmt
 import numpy as np
 import qiskit as qk
 import qiskit.quantum_info as qk_info
 from qiskit.primitives import Estimator
-import jijmodeling as jm
-import jijmodeling_transpiler as jmt
-from .cost_function import (
-    initialize_cost_function,
-    define_pauli_op,
-)
+
+from .cost_function import define_pauli_op, initialize_cost_function
 
 
 class MinimalEncodingBuilder:
@@ -203,5 +203,15 @@ class MinimalEncodedInstance:
                 self.minimal_encoding_builder.compiled_instance,
             )
         )
-        # decoded.record.num_occurrences = [[1]] * len(binary_results)
+
+        num_occurrences = [1] * len(binary_results)
+        decoded = jm.SampleSet(
+            record=jm.Record(
+                num_occurrences=num_occurrences,
+                solution=decoded.record.solution,
+            ),
+            evaluation=decoded.evaluation,
+            measuring_time=decoded.measuring_time,
+            metadata=decoded.metadata,
+        )
         return decoded
