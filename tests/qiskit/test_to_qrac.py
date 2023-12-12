@@ -15,6 +15,14 @@ from jijmodeling_transpiler_quantum.qiskit import (
     transpile_to_qrac_space_efficient_hamiltonian,
 )
 
+def qubo_problem():
+    Q = jm.Placeholder("Q", ndim=2)
+    x = jm.BinaryVar("x",shape=(Q.shape[0],))
+    i = jm.Element("i", belong_to=(0, Q.shape[0]))
+    j = jm.Element("j", belong_to=(0, Q.shape[0]))
+    problem = jm.Problem("QUBO")
+    problem += jm.sum([i, j], Q[i, j] * x[i] * x[j])
+    return problem
 
 def calculate_eigenvalue_three_one_pauli(
     hamiltonian: qk_ope.SparsePauliOp,
@@ -168,3 +176,19 @@ def test_transpile_to_qrac_space_efficient_hamiltonian():
         multipliers={"onehot": 1.0}
     )
     assert encoding.color_group == {}
+
+def test_check_linear_term_from_qubo():
+    qubo = [[1.0, 2.0, 0.0], [2.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    instance_data = {"Q": qubo}
+    compiled_model = jmt.core.compile_model(qubo_problem(), instance_data,{})
+    qrac_builder = transpile_to_qrac31_hamiltonian(compiled_model)
+    qrac_hamiltonian, offset, encoding = qrac_builder.get_hamiltonian()
+
+    qrac_builder = transpile_to_qrac21_hamiltonian(compiled_model)
+    qrac_hamiltonian, offset, encoding = qrac_builder.get_hamiltonian()
+
+    qrac_builder = transpile_to_qrac32_hamiltonian(compiled_model)
+    qrac_hamiltonian, offset, encoding = qrac_builder.get_hamiltonian()
+
+    qrac_builder = transpile_to_qrac_space_efficient_hamiltonian(compiled_model)
+    qrac_hamiltonian, offset, encoding = qrac_builder.get_hamiltonian()

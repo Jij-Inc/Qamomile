@@ -8,10 +8,7 @@ import jijmodeling as jm
 import jijmodeling_transpiler as jmt
 from quri_parts.core.operator import Operator
 
-from jijmodeling_transpiler_quantum.core import (
-    greedy_graph_coloring,
-    qubo_to_ising,
-)
+import jijmodeling_transpiler_quantum.core as jmt_qc
 
 from .qrao21 import qrac21_encode_ising
 from .qrao31 import Pauli, qrac31_encode_ising
@@ -85,9 +82,13 @@ class QRAC31Builder(QRACBuilder):
         qubo, constant = self.pubo_builder.get_qubo_dict(
             multipliers=multipliers, detail_parameters=detail_parameters
         )
-        ising = qubo_to_ising(qubo)
-        _, color_group = greedy_graph_coloring(
-            ising.quad.keys(), max_color_group_size=3
+        ising = jmt_qc.qubo_to_ising(qubo)
+        max_color_group_size = 3
+        _, color_group = jmt_qc.greedy_graph_coloring(
+            ising.quad.keys(), max_color_group_size=max_color_group_size
+        )
+        color_group = jmt_qc.qrac.check_linear_term(
+            color_group, ising.linear.keys(), max_color_group_size
         )
         qrac_hamiltonian, offset, encoding = qrac31_encode_ising(
             ising, color_group
@@ -139,9 +140,14 @@ class QRAC21Builder(QRACBuilder):
         qubo, constant = self.pubo_builder.get_qubo_dict(
             multipliers=multipliers, detail_parameters=detail_parameters
         )
-        ising = qubo_to_ising(qubo)
-        _, color_group = greedy_graph_coloring(
-            ising.quad.keys(), max_color_group_size=2
+        ising = jmt_qc.qubo_to_ising(qubo)
+        max_color_group_size = 2
+
+        _, color_group = jmt_qc.greedy_graph_coloring(
+            ising.quad.keys(), max_color_group_size=max_color_group_size
+        )
+        color_group = jmt_qc.qrac.check_linear_term(
+            color_group, ising.linear.keys(), max_color_group_size
         )
         qrac_hamiltonian, offset, encoding = qrac21_encode_ising(
             ising, color_group
@@ -193,9 +199,13 @@ class QRAC32Builder(QRACBuilder):
         qubo, constant = self.pubo_builder.get_qubo_dict(
             multipliers=multipliers, detail_parameters=detail_parameters
         )
-        ising = qubo_to_ising(qubo)
-        _, color_group = greedy_graph_coloring(
-            ising.quad.keys(), max_color_group_size=3
+        ising = jmt_qc.qubo_to_ising(qubo)
+        max_color_group_size = 3
+        _, color_group = jmt_qc.greedy_graph_coloring(
+            ising.quad.keys(), max_color_group_size=max_color_group_size
+        )
+        color_group = jmt_qc.qrac.check_linear_term(
+            color_group, ising.linear.keys(), max_color_group_size
         )
         qrac_hamiltonian, offset, encoding = qrac32_encode_ising(
             ising, color_group

@@ -9,10 +9,6 @@ import jijmodeling as jm
 import jijmodeling_transpiler as jmt
 import jijmodeling_transpiler_quantum.core as jmt_qc
 
-# from jijmodeling_transpiler_quantum.core.ising_qubo import qubo_to_ising
-# from jijmodeling_transpiler_quantum.core.qrac.graph_coloring import (
-#     greedy_graph_coloring,
-# )
 from .qrao31 import qrac31_encode_ising, Pauli
 from .qrao21 import qrac21_encode_ising
 from .qrao32 import qrac32_encode_ising
