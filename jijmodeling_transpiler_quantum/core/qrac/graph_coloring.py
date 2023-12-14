@@ -92,18 +92,20 @@ def check_linear_term(
     for v in color_group.values():
         idx_in_color_group.extend(v)
 
-    max_idx = max(color_group.keys())
-    value_counter = 1
+    # We're adding a bit to the next index of the 'quad' qubit, affecting only the linear term. 
+    # If the Ising Hamiltonian has only linear terms, making 'quad' empty and causing a 'max' error, we return index 0 to avoid this.
+    qubit_index_for_linear = max(color_group.keys()) + 1 if color_group else 0
+    bits_in_qubits_counter = 1
     for idx in linear_term_index:
         if idx not in idx_in_color_group:
-            if value_counter == 1:
-                color_group[max_idx + 1] = []
+            if bits_in_qubits_counter == 1:
+                color_group[qubit_index_for_linear] = []
 
-            color_group[max_idx + 1].append(idx)
-            value_counter += 1
+            color_group[qubit_index_for_linear].append(idx)
+            bits_in_qubits_counter += 1
 
-            if value_counter > max_color_group_size:
-                max_idx += 1
-                value_counter = 1
+            if bits_in_qubits_counter > max_color_group_size:
+                qubit_index_for_linear += 1
+                bits_in_qubits_counter = 1
 
     return color_group
