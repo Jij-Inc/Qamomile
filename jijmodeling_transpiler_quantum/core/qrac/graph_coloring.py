@@ -92,7 +92,7 @@ def check_linear_term(
     for v in color_group.values():
         idx_in_color_group.extend(v)
 
-    max_idx = max(color_group.keys())
+    max_idx = max(color_group.keys()) if color_group else -1
     value_counter = 1
     for idx in linear_term_index:
         if idx not in idx_in_color_group:
