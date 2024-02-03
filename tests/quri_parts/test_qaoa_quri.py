@@ -86,7 +86,8 @@ def test_qaoa_onehot():
             pauli_label("Z0 Z1"): 0.5,
             pauli_label("Z0 Z2"): 0.5,
             pauli_label("Z1 Z2"): 0.5,
-            PAULI_IDENTITY: 1.5,
+            # PAULI_IDENTITY: 1.5,
+            # coeff of identity is included in constant.
         }
     )
 
@@ -138,3 +139,55 @@ def test_qaoa_H_eigenvalue():
         ]
     ).all()
     assert len(sampleset.feasible().record.solution) != 0
+
+
+def test_qaoa_hamiltonian_3qubit_antiferro():
+    x = jm.BinaryVar("x", shape=(3,))
+    problem = jm.Problem("sample")
+
+    spin = lambda i: 2*x[i] - 1
+    problem += spin(0)*spin(1) + spin(1)*spin(2) + spin(0)*spin(2)
+
+    true_ising = {
+        (0, 1): 1,
+        (1, 2): 1,
+        (0, 2): 1,
+    }
+
+    compiled_instance = jmt.core.compile_model(problem, {})
+    qaoa_builder = jmt_qp.transpile_to_qaoa_ansatz(compiled_instance)
+    qaoa_ansatz, hamiltonian, constant = qaoa_builder.get_qaoa_ansatz(p=1)
+
+    assert constant == 0.0
+
+    true_H = Operator(
+        {
+            pauli_label("Z0 Z1"): 1/4,
+            pauli_label("Z1 Z2"): 1/4,
+            pauli_label("Z0 Z2"): 1/4,
+        }
+    )
+    assert hamiltonian == true_H
+
+    num_qubits = 3
+    true_ansatz = LinearMappedUnboundParametricQuantumCircuit(num_qubits)
+    for i in range(num_qubits):
+        true_ansatz.add_H_gate(i)
+
+    for p_level in range(1):
+        gamma = true_ansatz.add_parameter(f"gamma{p_level}")
+        beta = true_ansatz.add_parameter(f"beta{p_level}")
+        for (i, j), coeff in true_ising.items():
+            true_ansatz.add_ParametricPauliRotation_gate(
+                [i, j],
+                pauli_ids=(3, 3),
+                angle={gamma: 2 * coeff},
+            )
+        for i in range(num_qubits):
+            true_ansatz.add_ParametricRX_gate(
+                i, {beta: 2}
+            )
+
+    assert qaoa_ansatz.qubit_count == true_ansatz.qubit_count
+    assert qaoa_ansatz.parameter_count == true_ansatz.parameter_count
+    assert qaoa_ansatz.gates == true_ansatz.gates
