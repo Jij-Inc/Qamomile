@@ -6,9 +6,23 @@ import jijmodeling as jm
 import jijmodeling_transpiler as jmt
 import numpy as np
 from quri_parts.circuit import LinearMappedUnboundParametricQuantumCircuit
-from quri_parts.core.operator import Operator
+from quri_parts.core.operator import Operator, pauli_label
+from jijmodeling_transpiler_quantum.core import qubo_to_ising, IsingModel
 
-from .ising_hamiltonian import to_ising_operator_from_qubo
+
+def ising_to_hamiltonian(
+    ising: IsingModel,
+) -> tuple[Operator, float]:
+    quri_operator = Operator()
+    for idx, coeff in ising.linear.items():
+        if coeff != 0.0:
+            quri_operator += Operator({pauli_label(f"Z{idx}"): coeff})
+
+    for (i, j), coeff in ising.quad.items():
+        if coeff != 0.0:
+            quri_operator += Operator({pauli_label(f"Z{i} Z{j}"): coeff})
+
+    return quri_operator, ising.constant
 
 
 class QAOAAnsatzBuilder:
@@ -33,6 +47,27 @@ class QAOAAnsatzBuilder:
     def var_map(self) -> dict[str, tuple[int, ...]]:
         return self.compiled_instance.var_map.var_map
 
+    def get_ising_dict(
+        self,
+        multipliers: dict = None,
+        detail_parameters: dict = None,
+    ) -> IsingModel:
+        """Get the Ising dictionary.
+
+        Args:
+            multipliers (dict, optional): Multipliers for the Ising Hamiltonian. Defaults to None.
+            detail_parameters (dict, optional): Detailed parameters for the Ising Hamiltonian. Defaults to None.
+
+        Returns:
+            tuple[dict[tuple[int, int], float], dict[int, float], float]: The Ising dictionary, the constant offset, and the constant offset.
+        """
+        qubo, constant = self.pubo_builder.get_qubo_dict(
+            multipliers=multipliers, detail_parameters=detail_parameters
+        )
+        ising = qubo_to_ising(qubo)
+        ising.constant += constant
+        return ising
+
     def get_hamiltonian(
         self,
         multipliers: dict = None,
@@ -47,13 +82,9 @@ class QAOAAnsatzBuilder:
         Returns:
             tuple[Operator, float]: The Ising operator and the constant offset.
         """
-        qubo, constant = self.pubo_builder.get_qubo_dict(
-            multipliers=multipliers, detail_parameters=detail_parameters
-        )
-        ising_operator, ising_const = to_ising_operator_from_qubo(
-            qubo, self.num_vars
-        )
-        return ising_operator, ising_const + constant
+        ising = self.get_ising_dict(multipliers, detail_parameters)
+
+        return ising_to_hamiltonian(ising)
 
     def get_qaoa_ansatz(
         self,
@@ -71,51 +102,35 @@ class QAOAAnsatzBuilder:
         Returns:
             tuple[LinearMappedUnboundParametricQuantumCircuit, Operator, float]: The QAOA ansatz, the Ising operator, and the constant offset.
         """
-        ising_operator, constant = self.get_hamiltonian(
-            multipliers=multipliers, detail_parameters=detail_parameters
-        )
-
-        keys = list(ising_operator.keys())
-        items = list(ising_operator.items())
-        num_terms = ising_operator.n_terms - 1
-        pauli_terms = [
-            keys[i].index_and_pauli_id_list[0] for i in range(num_terms)
-        ]
-        coeff_terms = [items[i][1] for i in range(num_terms)]
+        ising = self.get_ising_dict(multipliers, detail_parameters)
         QAOAAnsatz = LinearMappedUnboundParametricQuantumCircuit(self.num_vars)
-        pauli_z_terms = pauli_terms[: self.num_vars]
-        pauli_zz_terms = [
-            sorted(sublist, reverse=True)
-            for sublist in pauli_terms[self.num_vars :]
-        ]
-
-        for term in pauli_z_terms:
-            QAOAAnsatz.add_H_gate(term[0])
+        # Create the QAOA ansatz
+        for i in range(self.num_vars):
+            QAOAAnsatz.add_H_gate(i)
 
         for p_level in range(p):
-            Gamma = QAOAAnsatz.add_parameters(f"gamma{p_level}")
-            Beta = QAOAAnsatz.add_parameters(f"beta{p_level}")
+            gamma = QAOAAnsatz.add_parameter(f"gamma{p_level}")
+            beta = QAOAAnsatz.add_parameter(f"beta{p_level}")
 
-            for pauli_z_info, coeff in zip(
-                pauli_z_terms, coeff_terms[: self.num_vars]
-            ):
-                QAOAAnsatz.add_ParametricRZ_gate(
-                    pauli_z_info[0], {Gamma[-1]: 2 * coeff}
-                )
-
-            for pauli_zz_info, coeff in zip(
-                pauli_zz_terms, coeff_terms[self.num_vars :]
-            ):
-                QAOAAnsatz.add_ParametricPauliRotation_gate(
-                    pauli_zz_info,
-                    pauli_ids=(3, 3),
-                    angle={Gamma[-1]: 2 * coeff},
-                )
-
-            for pauli_z_info in pauli_z_terms:
+            for idx, coeff in ising.linear.items():
+                if coeff != 0.0:
+                    QAOAAnsatz.add_ParametricRZ_gate(
+                        idx,
+                        angle={gamma: 2 * coeff}
+                    )
+            for (i, j), coeff in ising.quad.items():
+                if coeff != 0.0:
+                    QAOAAnsatz.add_ParametricPauliRotation_gate(
+                        [i, j],
+                        pauli_ids=(3, 3),
+                        angle={gamma: 2 * coeff},
+                    )
+            for i in range(self.num_vars):
                 QAOAAnsatz.add_ParametricRX_gate(
-                    pauli_z_info[0], {Beta[-1]: 2}
+                    i, {beta: 2}
                 )
+
+        ising_operator, constant = ising_to_hamiltonian(ising)
 
         return QAOAAnsatz, ising_operator, constant
 
