@@ -1,0 +1,41 @@
+# Copyright (c) 2020-2023 Jij Inc.
+
+# Project information
+site_name: Qamomile
+site_author: Jij Inc.
+site_description: "Qamomile: Quantum Algorithm for Mathematical OptiMization with jIjmodeLing Extension"
+
+
+# Copyright
+copyright: Copyright &copy; 2023-2024 Jij Inc.
+
+# Configuration
+theme:
+  name: material
+
+nav:
+  - Home: index.md
+  - Reference: reference/
+  - Tutorial: 
+    - Graph Coloring by Qiskit: tutorial/alternating_ansatz_graph_coloring_qiskit.ipynb
+    - Graph Coloring by QURI Parts: tutorial/alternating_ansatz_graph_coloring_quri.ipynb
+
+plugins:
+  - search:
+      separator: '[\s\-,:!=\[\]()"`/]+|\.(?!\d)|&[lg]t;|(?!\b)(?=[A-Z][a-z])'
+  - section-index
+  - literate-nav:
+      nav_file: docs/reference/SUMMARY.md
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          options:
+            show_source: true
+            show_signature_annotations: true
+            docstring_style: "google"
+  - gen-files:
+      scripts:
+      - docs/overrides/gen_ref_pages.py
+  - mkdocs-jupyter:
+      ignore_h1_titles: True
