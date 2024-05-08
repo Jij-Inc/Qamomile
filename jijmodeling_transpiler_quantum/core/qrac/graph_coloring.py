@@ -71,3 +71,41 @@ def greedy_graph_coloring(
             max_color += 1
 
     return coloring, color_group
+
+
+def check_linear_term(
+    color_group: dict[int, list[int]],
+    linear_term_index: list[int],
+    max_color_group_size: int,
+) -> dict[int, list[int]]:
+    """Search for items within the index of linear term that have not been assigned to the color_group, and add them.
+
+    Args:
+        color_group (dict[int, list[int]]): color_group
+        linear_term_index (list[int]): list of index of linear term
+        max_color_group_size (int): the maximum number of encoding qubits. if you want to use for the qrac31, set 3.
+
+    Returns:
+        dict[int, list[int]]: color_group which added items within the index of linear term that have not been assigned to the color_group.
+    """
+    idx_in_color_group = []
+    for v in color_group.values():
+        idx_in_color_group.extend(v)
+
+    # We're adding a bit to the next index of the 'quad' qubit, affecting only the linear term. 
+    # If the Ising Hamiltonian has only linear terms, making 'quad' empty and causing a 'max' error, we return index 0 to avoid this.
+    qubit_index_for_linear = max(color_group.keys()) + 1 if color_group else 0
+    bits_in_qubits_counter = 1
+    for idx in linear_term_index:
+        if idx not in idx_in_color_group:
+            if bits_in_qubits_counter == 1:
+                color_group[qubit_index_for_linear] = []
+
+            color_group[qubit_index_for_linear].append(idx)
+            bits_in_qubits_counter += 1
+
+            if bits_in_qubits_counter > max_color_group_size:
+                qubit_index_for_linear += 1
+                bits_in_qubits_counter = 1
+
+    return color_group

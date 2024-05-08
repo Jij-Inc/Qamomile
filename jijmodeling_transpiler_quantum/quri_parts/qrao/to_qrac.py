@@ -1,13 +1,18 @@
 from __future__ import annotations
-from abc import ABC, abstractmethod
-from jijmodeling_transpiler_quantum.core import qubo_to_ising, greedy_graph_coloring
-from .qrao31 import qrac31_encode_ising, Pauli
-from .qrao32 import qrac32_encode_ising
-from .qrao21 import qrac21_encode_ising
+
 import dataclasses
 import typing as typ
+from abc import ABC, abstractmethod
+
 import jijmodeling as jm
 import jijmodeling_transpiler as jmt
+from quri_parts.core.operator import Operator
+
+import jijmodeling_transpiler_quantum.core as jmt_qc
+
+from .qrao21 import qrac21_encode_ising
+from .qrao31 import Pauli, qrac31_encode_ising
+from .qrao32 import qrac32_encode_ising
 
 
 class QRACBuilder(ABC):
@@ -29,7 +34,8 @@ class QRACBuilder(ABC):
         self, binary_list: typ.Iterable[list[int]]
     ) -> jm.SampleSet:
         binary_results = [
-            {i: value for i, value in enumerate(binary)} for binary in binary_list
+            {i: value for i, value in enumerate(binary)}
+            for binary in binary_list
         ]
         binary_encoder = self.pubo_builder.binary_encoder
         decoded: jm.SampleSet = (
@@ -37,7 +43,16 @@ class QRACBuilder(ABC):
                 binary_results, binary_encoder, self.compiled_instance
             )
         )
-        decoded.record.num_occurrences = [[1]] * len(binary_results)
+
+        decoded = jm.SampleSet(
+            record=jm.Record(
+                num_occurrences=[1] * len(binary_results),
+                solution=decoded.record.solution,
+            ),
+            evaluation=decoded.evaluation,
+            measuring_time=decoded.measuring_time,
+            metadata=decoded.metadata,
+        )
         return decoded
 
 
@@ -67,11 +82,17 @@ class QRAC31Builder(QRACBuilder):
         qubo, constant = self.pubo_builder.get_qubo_dict(
             multipliers=multipliers, detail_parameters=detail_parameters
         )
-        ising = qubo_to_ising(qubo)
-        _, color_group = greedy_graph_coloring(
-            ising.quad.keys(), max_color_group_size=3
+        ising = jmt_qc.qubo_to_ising(qubo)
+        max_color_group_size = 3
+        _, color_group = jmt_qc.greedy_graph_coloring(
+            ising.quad.keys(), max_color_group_size=max_color_group_size
         )
-        qrac_hamiltonian, offset, encoding = qrac31_encode_ising(ising, color_group)
+        color_group = jmt_qc.qrac.check_linear_term(
+            color_group, ising.linear.keys(), max_color_group_size
+        )
+        qrac_hamiltonian, offset, encoding = qrac31_encode_ising(
+            ising, color_group
+        )
         return (
             qrac_hamiltonian,
             offset + constant,
@@ -119,11 +140,18 @@ class QRAC21Builder(QRACBuilder):
         qubo, constant = self.pubo_builder.get_qubo_dict(
             multipliers=multipliers, detail_parameters=detail_parameters
         )
-        ising = qubo_to_ising(qubo)
-        _, color_group = greedy_graph_coloring(
-            ising.quad.keys(), max_color_group_size=2
+        ising = jmt_qc.qubo_to_ising(qubo)
+        max_color_group_size = 2
+
+        _, color_group = jmt_qc.greedy_graph_coloring(
+            ising.quad.keys(), max_color_group_size=max_color_group_size
         )
-        qrac_hamiltonian, offset, encoding = qrac21_encode_ising(ising, color_group)
+        color_group = jmt_qc.qrac.check_linear_term(
+            color_group, ising.linear.keys(), max_color_group_size
+        )
+        qrac_hamiltonian, offset, encoding = qrac21_encode_ising(
+            ising, color_group
+        )
         return (
             qrac_hamiltonian,
             offset + constant,
@@ -171,11 +199,17 @@ class QRAC32Builder(QRACBuilder):
         qubo, constant = self.pubo_builder.get_qubo_dict(
             multipliers=multipliers, detail_parameters=detail_parameters
         )
-        ising = qubo_to_ising(qubo)
-        _, color_group = greedy_graph_coloring(
-            ising.quad.keys(), max_color_group_size=3
+        ising = jmt_qc.qubo_to_ising(qubo)
+        max_color_group_size = 3
+        _, color_group = jmt_qc.greedy_graph_coloring(
+            ising.quad.keys(), max_color_group_size=max_color_group_size
         )
-        qrac_hamiltonian, offset, encoding = qrac32_encode_ising(ising, color_group)
+        color_group = jmt_qc.qrac.check_linear_term(
+            color_group, ising.linear.keys(), max_color_group_size
+        )
+        qrac_hamiltonian, offset, encoding = qrac32_encode_ising(
+            ising, color_group
+        )
         return (
             qrac_hamiltonian,
             offset + constant,

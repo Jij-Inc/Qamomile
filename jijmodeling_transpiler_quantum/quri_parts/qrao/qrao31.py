@@ -1,8 +1,11 @@
 from __future__ import annotations
+
 import enum
+
 import numpy as np
+from quri_parts.core.operator import PAULI_IDENTITY, Operator, pauli_label
+
 from jijmodeling_transpiler_quantum.core.ising_qubo import IsingModel
-from quri_parts.core.operator import pauli_label, PAULI_IDENTITY, Operator
 
 
 class Pauli(enum.Enum):
@@ -36,7 +39,9 @@ def color_group_to_qrac_encode(
     return qrac31
 
 
-def create_pauli_term(operators: list[Pauli], indices: list[int], n_qubit: int) -> str:
+def create_pauli_term(
+    operators: list[Pauli], indices: list[int], n_qubit: int
+) -> str:
     """Create a Pauli term string given a list of operators and indices.
 
     Args:
@@ -85,7 +90,9 @@ def qrac31_encode_ising(
         color, pauli_kind = encoded_ope[idx]
         pauli_operator = create_pauli_term([pauli_kind], [color], n_qubit)
 
-        pauli_terms.append(Operator({pauli_label(pauli_operator): np.sqrt(3) * coeff}))
+        pauli_terms.append(
+            Operator({pauli_label(pauli_operator): np.sqrt(3) * coeff})
+        )
 
     for (i, j), coeff in ising.quad.items():
         if coeff == 0.0:

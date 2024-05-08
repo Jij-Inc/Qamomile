@@ -1,10 +1,14 @@
 from __future__ import annotations
-import numpy as np
-from jijmodeling_transpiler_quantum.core.ising_qubo import IsingModel
-from .qrao31 import Pauli, color_group_to_qrac_encode, create_pauli_term
-from quri_parts.core.operator import pauli_label, PAULI_IDENTITY, Operator
-import qiskit.quantum_info as qk_ope
+
 from typing import List, Tuple
+
+import numpy as np
+import qiskit.quantum_info as qk_ope
+from quri_parts.core.operator import PAULI_IDENTITY, Operator, pauli_label
+
+from jijmodeling_transpiler_quantum.core.ising_qubo import IsingModel
+
+from .qrao31 import Pauli, color_group_to_qrac_encode, create_pauli_term
 
 
 def create_pauli_x_prime_term(
@@ -77,14 +81,22 @@ def create_pauli_linear_term(operator: Pauli, index: int, n_qubit: int):
 
     _pauli_terms: list[qk_ope.SparsePauliOp] = []
     for z_p, x_p, coeff in zip(zps, xps, coeffs):
-        _pauli_terms.append(qk_ope.SparsePauliOp(qk_ope.Pauli((z_p, x_p)), coeff))
+        _pauli_terms.append(
+            qk_ope.SparsePauliOp(qk_ope.Pauli((z_p, x_p)), coeff)
+        )
 
     return _pauli_terms
 
 
-def create_pauli_quad_term(operators: list[Pauli], indices: list[int], n_qubit: int):
-    xps_i, zps_i, coeffs_i = create_pauli_prime_terms(operators[0], indices[0], n_qubit)
-    xps_j, zps_j, coeffs_j = create_pauli_prime_terms(operators[1], indices[1], n_qubit)
+def create_pauli_quad_term(
+    operators: list[Pauli], indices: list[int], n_qubit: int
+):
+    xps_i, zps_i, coeffs_i = create_pauli_prime_terms(
+        operators[0], indices[0], n_qubit
+    )
+    xps_j, zps_j, coeffs_j = create_pauli_prime_terms(
+        operators[1], indices[1], n_qubit
+    )
 
     _pauli_terms: list[qk_ope.SparsePauliOp] = []
     for x_p_i, z_p_i, coeff_i in zip(xps_i, zps_i, coeffs_i):

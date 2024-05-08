@@ -1,8 +1,11 @@
 from __future__ import annotations
+
 import numpy as np
+from quri_parts.core.operator import PAULI_IDENTITY, Operator, pauli_label
+
 from jijmodeling_transpiler_quantum.core.ising_qubo import IsingModel
+
 from .qrao31 import Pauli, color_group_to_qrac_encode, create_pauli_term
-from quri_parts.core.operator import pauli_label, PAULI_IDENTITY, Operator
 
 
 def qrac21_encode_ising(
@@ -33,7 +36,9 @@ def qrac21_encode_ising(
 
         color, pauli_kind = encoded_ope[idx]
         pauli_str = create_pauli_term([pauli_kind], [color], n_qubit)
-        pauli_terms.append(Operator({pauli_label(pauli_str): np.sqrt(2) * coeff}))
+        pauli_terms.append(
+            Operator({pauli_label(pauli_str): np.sqrt(2) * coeff})
+        )
 
     for (i, j), coeff in ising.quad.items():
         if coeff == 0.0:
