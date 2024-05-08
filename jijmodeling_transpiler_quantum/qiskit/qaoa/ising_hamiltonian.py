@@ -8,7 +8,15 @@ from jijmodeling_transpiler_quantum.core import qubo_to_ising
 def to_ising_operator_from_qubo(
     qubo: dict[tuple[int, int], float], n_qubit: int
 ) -> tuple[qk_ope.SparsePauliOp, float]:
-    """Returns a quantum circuit that represents the QUBO."""
+    """Returns a quantum circuit that represents the QUBO.
+
+    Args:
+        qubo (dict[tuple[int, int], float]): QUBO dictionary
+        n_qubit (int):number of qubits
+
+    Returns:
+        tuple[qk_ope.SparsePauliOp, float]: The Ising operator and the constant offset.
+    """
     ising = qubo_to_ising(qubo)
     pauli_terms: list[qk_ope.SparsePauliOp] = []
 
