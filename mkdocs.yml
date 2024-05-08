@@ -12,6 +12,18 @@ copyright: Copyright &copy; 2023-2024 Jij Inc.
 # Configuration
 theme:
   name: material
+  features:
+    - content.code.annotate
+    - content.code.copy
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
 
 nav:
   - Home: index.md
@@ -38,4 +50,4 @@ plugins:
       scripts:
       - docs/overrides/gen_ref_pages.py
   - mkdocs-jupyter:
-      ignore_h1_titles: True
+ 

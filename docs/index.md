@@ -5,9 +5,17 @@ Qamomile is Quantum Algorithm for Mathematical OptiMization with jIjmodeLing Ext
 You can easily create Ising Hamiltonians and encoded Hamiltonians from mathematical models using Qamomile.
 
 ## Installation
-
+Currently, Qamomile supports two quantum computation libraries, [Qiskit](https://www.ibm.com/quantum/qiskit) and [QURI-Part](https://quri-parts.qunasys.com/).
+The installation for qiskit is 
 ```bash
+# jijmodeling-transpiler-quantum for qiskit
 pip install "jijmodeling-transpiler-quantum[qiskit]"
+```
+
+The installation for QURI Parts is
+```bash
+# jijmodeling-transpiler-quantum for quri-parts
+pip install "jijmodeling-transpiler-quantum[quri-parts]"
 ```
 
 ## Quickstart
@@ -66,5 +74,5 @@ sampleset = qaoa_builder.decode_from_quasi_dist(result.eigenstate)
 sampleset.feasible()
 ```
 
-# Dicord
-Join our discord channel!
+## Dicord
+Join our [discord channel](https://discord.gg/Km5dKF9JjG)!
