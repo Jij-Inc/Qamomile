@@ -1,9 +1,9 @@
 import jijmodeling as jm
 import jijmodeling_transpiler.core as jtc
-import jijmodeling_transpiler_quantum.qiskit as jtqk
-import jijmodeling_transpiler_quantum.quri_parts as jtqp
-from jijmodeling_transpiler_quantum.core.ising_qubo import IsingModel, qubo_to_ising
-from jijmodeling_transpiler_quantum.core.qrac import (
+import qamomile.qiskit as jtqk
+import qamomile.quri_parts as jtqp
+from qamomile.core.ising_qubo import IsingModel, qubo_to_ising
+from qamomile.core.qrac import (
     check_linear_term,
     greedy_graph_coloring,
 )

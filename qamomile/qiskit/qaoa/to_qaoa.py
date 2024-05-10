@@ -7,7 +7,7 @@ import jijmodeling_transpiler as jmt
 import qiskit as qk
 import qiskit.quantum_info as qk_info
 
-from jijmodeling_transpiler_quantum.core import qubo_to_ising
+from qamomile.core import qubo_to_ising
 
 from .ising_hamiltonian import to_ising_operator_from_qubo
 

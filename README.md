@@ -1,6 +1,6 @@
-# JijModeling-Transpiler-Quantum
+# Qamomile
 
-`JijModeling-Transpiler-Quantum` is a transpiler from model written in [JijModeling]() to quantum optimization algorithms on variaous quantum platform.
+`Qamomile` is a transpiler from model written in [JijModeling]() to quantum optimization algorithms on variaous quantum platform.
 
 - [Qiskit](#qiskit)
 - [QURI-Parts](#quri-parts)
@@ -12,7 +12,7 @@
 ### Installation
 
 ```bash
-pip install "jijmodeling-transpiler-quantum[qiskit]"
+pip install "qamomile[qiskit]"
 ```
 
 ### Quantum Approximate Optimization Algorithm (QAOA)
@@ -20,7 +20,7 @@ pip install "jijmodeling-transpiler-quantum[qiskit]"
 ```python
 import jijmodeling as jm
 import jijmodeling_transpiler as jmt
-import jijmodeling_transpiler_quantum as jtq
+import qamomile as jtq
 
 # Create model
 problem = jm.Problem("model")
@@ -39,7 +39,7 @@ qaoa_builder = jtq.qiskit.transpile_to_qaoa(compiled_instance)
 [QURI Parts](https://quri-parts.qunasys.com/) is an open source library suite for creating and executing quantum algorithms on various quantum computers and simulators.
 
 ```bash
-pip install "jijmodeling-transpiler-quantum[quri-parts]"
+pip install "qamomile[quri-parts]"
 ```
 
 ### Quantum Approximate Optimization Algorithm (QAOA)
@@ -47,7 +47,7 @@ pip install "jijmodeling-transpiler-quantum[quri-parts]"
 ```python
 import jijmodeling as jm
 import jijmodeling_transpiler as jmt
-import jijmodeling_transpiler_quantum as jtq
+import qamomile as jtq
 
 # Create model
 problem = jm.Problem("model")

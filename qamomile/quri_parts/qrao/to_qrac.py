@@ -8,7 +8,7 @@ import jijmodeling as jm
 import jijmodeling_transpiler as jmt
 from quri_parts.core.operator import Operator
 
-import jijmodeling_transpiler_quantum.core as jmt_qc
+import qamomile.core as jmt_qc
 
 from .qrao21 import qrac21_encode_ising
 from .qrao31 import Pauli, qrac31_encode_ising

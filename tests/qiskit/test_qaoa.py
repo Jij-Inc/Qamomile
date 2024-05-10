@@ -4,7 +4,7 @@ import numpy as np
 import qiskit as qk
 from qiskit.algorithms.eigensolvers import NumPyEigensolver
 
-import jijmodeling_transpiler_quantum.qiskit as jmt_qk
+import qamomile.qiskit as jmt_qk
 
 
 def test_qaoa_onehot():

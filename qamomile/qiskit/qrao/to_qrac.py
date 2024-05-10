@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 import qiskit.quantum_info as qk_info
 import jijmodeling as jm
 import jijmodeling_transpiler as jmt
-import jijmodeling_transpiler_quantum.core as jmt_qc
+import qamomile.core as jmt_qc
 
 from .qrao31 import qrac31_encode_ising, Pauli
 from .qrao21 import qrac21_encode_ising

@@ -12,7 +12,7 @@ from quri_parts.qulacs.estimator import (
 from quri_parts.qulacs.sampler import create_qulacs_vector_sampler
 from scipy.optimize import OptimizeResult, minimize
 
-import jijmodeling_transpiler_quantum.quri_parts as jmt_qp
+import qamomile.quri_parts as jmt_qp
 
 
 def run_qaoa(

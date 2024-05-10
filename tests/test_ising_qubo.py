@@ -1,4 +1,4 @@
-from jijmodeling_transpiler_quantum.core.ising_qubo import qubo_to_ising
+from qamomile.core.ising_qubo import qubo_to_ising
 
 
 def test_onehot_conversion():

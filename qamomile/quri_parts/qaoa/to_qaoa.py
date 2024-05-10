@@ -7,7 +7,7 @@ import jijmodeling_transpiler as jmt
 import numpy as np
 from quri_parts.circuit import LinearMappedUnboundParametricQuantumCircuit
 from quri_parts.core.operator import Operator, pauli_label
-from jijmodeling_transpiler_quantum.core import qubo_to_ising, IsingModel
+from qamomile.core import qubo_to_ising, IsingModel
 
 
 def ising_to_hamiltonian(

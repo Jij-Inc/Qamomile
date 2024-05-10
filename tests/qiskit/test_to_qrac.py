@@ -7,8 +7,8 @@ from qiskit.algorithms.minimum_eigensolvers import NumPyMinimumEigensolver
 from qiskit.primitives import Estimator, Sampler
 from scipy.optimize import minimize
 
-import jijmodeling_transpiler_quantum.qiskit as jtq
-from jijmodeling_transpiler_quantum.qiskit import (
+import qamomile.qiskit as jtq
+from qamomile.qiskit import (
     transpile_to_qrac21_hamiltonian,
     transpile_to_qrac31_hamiltonian,
     transpile_to_qrac32_hamiltonian,
