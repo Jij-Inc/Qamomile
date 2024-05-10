@@ -1,5 +1,5 @@
-from jijmodeling_transpiler_quantum.quri_parts import qaoa as qaoa
-from jijmodeling_transpiler_quantum.quri_parts import qrao as qrao
+from qamomile.quri_parts import qaoa as qaoa
+from qamomile.quri_parts import qrao as qrao
 from .qaoa.to_qaoa import transpile_to_qaoa_ansatz
 from .qrao.to_qrac import (
     transpile_to_qrac31_hamiltonian,

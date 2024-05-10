@@ -7,13 +7,13 @@ enable = true
 style = "pep440"
 
 [tool.poetry]
-name = "jijmodeling-transpiler-quantum"
+name = "qamomile"
 version = "0.0.0" # using poetry-dynamic-versioning
 description = ""
 authors = ["Jij Inc. <info@j-ij.com>"]
 readme = "README.md"
 packages = [
-    {include = "jijmodeling_transpiler_quantum"},
+    {include = "qamomile"},
 ]
 
 [tool.poetry.dependencies]

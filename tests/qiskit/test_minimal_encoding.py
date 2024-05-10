@@ -7,7 +7,7 @@ from qiskit.algorithms.eigensolvers import NumPyEigensolver
 from qiskit.circuit import ParameterVector
 from scipy.optimize import minimize
 
-import jijmodeling_transpiler_quantum.qiskit.minimal_encoding as minimal_encoding
+import qamomile.qiskit.minimal_encoding as minimal_encoding
 
 
 def generate_circuit(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 import numpy as np
 import qiskit.quantum_info as qk_ope
-from jijmodeling_transpiler_quantum.core.ising_qubo import IsingModel
+from qamomile.core.ising_qubo import IsingModel
 from .qrao31 import Pauli, create_pauli_term
 
 

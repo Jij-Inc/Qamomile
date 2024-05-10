@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 from quri_parts.core.operator import PAULI_IDENTITY, Operator, pauli_label
 
-from jijmodeling_transpiler_quantum.core.ising_qubo import IsingModel
+from qamomile.core.ising_qubo import IsingModel
 
 from .qrao31 import Pauli, color_group_to_qrac_encode, create_pauli_term
 

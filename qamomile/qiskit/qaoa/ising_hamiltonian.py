@@ -2,7 +2,7 @@ from __future__ import annotations
 import numpy as np
 import qiskit.quantum_info as qk_ope
 
-from jijmodeling_transpiler_quantum.core import qubo_to_ising
+from qamomile.core import qubo_to_ising
 
 
 def to_ising_operator_from_qubo(

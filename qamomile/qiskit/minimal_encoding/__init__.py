@@ -1,7 +1,7 @@
-from jijmodeling_transpiler_quantum.qiskit import (
+from qamomile.qiskit import (
     minimal_encoding as minimal_encoding,
 )
-from jijmodeling_transpiler_quantum.qiskit.minimal_encoding.to_minimal_encoding import (
+from qamomile.qiskit.minimal_encoding.to_minimal_encoding import (
     transpile_to_minimal_encoding,
 )
 
