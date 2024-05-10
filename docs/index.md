@@ -1,13 +1,21 @@
 # Qamomile
 ## What is Qamomile
-Qamomile is Quantum Algorithm for Mathematical OptiMization with jIjmodeLing Extension.
+Qamomile is a library that supports running quantum optimization algorithms with various quantum computation libraries.
+Currently, Qamomile supports two quantum computation libraries, [Qiskit](https://www.ibm.com/quantum/qiskit) and [QURI-Part](https://quri-parts.qunasys.com/).
 
-You can easily create Ising Hamiltonians and encoded Hamiltonians from mathematical models using Qamomile.
+Qamomile stands for Quantum Algorithm for Mathematical OptiMization with jIjmodeLing Extension. It transforms mathematical models written by [JijModeling](https://www.documentation.jijzept.com/docs/jijmodeling) into Ising Hamiltonians and various other encoded Hamiltonians such as Quantum Random Access Optimization.
 
 ## Installation
-
+The installation for qiskit is 
 ```bash
+# jijmodeling-transpiler-quantum for qiskit
 pip install "jijmodeling-transpiler-quantum[qiskit]"
+```
+
+The installation for QURI Parts is
+```bash
+# jijmodeling-transpiler-quantum for quri-parts
+pip install "jijmodeling-transpiler-quantum[quri-parts]"
 ```
 
 ## Quickstart
@@ -66,5 +74,5 @@ sampleset = qaoa_builder.decode_from_quasi_dist(result.eigenstate)
 sampleset.feasible()
 ```
 
-# Dicord
-Join our discord channel!
+## Community
+Join our [discord channel](https://discord.gg/Km5dKF9JjG)!
