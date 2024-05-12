@@ -6,40 +6,7 @@ Currently, Qamomile supports two quantum computation libraries, [Qiskit](https:/
 **QAMOMILE** stands for "**Q**uantum **A**lgorithm for **M**athematical **O**pti**M**ization with j**I**jmode**L**ing **E**xtension". It transforms mathematical models written by [JijModeling](https://www.documentation.jijzept.com/docs/jijmodeling) into Ising Hamiltonians and various other encoded Hamiltonians such as Quantum Random Access Optimization.
 
 
-```mermaid
-graph LR
-    JijModeling --> Instance
-    subgraph JijModelingTranspiler
-        Instance
-    end
-    
-    subgraph Qiskit
-        QSKT[Hamiltonian]
-        QSKT --> QSKTCIRC[Q Circuit] --> QSKTR[Results]
-    end
-    subgraph Quri-Parts
-        QP[Hamiltonian]
-        QP --> QPCIRC[Q Circuit] --> QURIR[Results]
-    end
- 
-    
-
-    subgraph Qamomile
-        Instance --> Encode
-        Encode{Encode}
-        Encode --> QH[Quantum Hamiltonian]
-    end
-
-    QH --> QSKT
-    QH --> QP
-    
-    subgraph Qamomile
-        QSKTR --> Decode{Decode}
-        QURIR --> Decode
-    end
-    Decode --> Solutions
-```
-
+![](./qamomile_workflow.png)
 
 
 ## Installation

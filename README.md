@@ -7,6 +7,40 @@
 
 Documentation: [https://jij-inc.github.io/Qamomile/](https://jij-inc.github.io/Qamomile/)
 
+```mermaid
+graph LR
+    JijModeling --> Instance
+    subgraph JijModelingTranspiler
+        Instance
+    end
+    
+    subgraph Qiskit
+        QSKT[Hamiltonian]
+        QSKT --> QSKTCIRC[Q Circuit] --> QSKTR[Results]
+    end
+    subgraph Quri-Parts
+        QP[Hamiltonian]
+        QP --> QPCIRC[Q Circuit] --> QURIR[Results]
+    end
+ 
+    
+
+    subgraph Qamomile
+        Instance --> Encode
+        Encode{Encode}
+        Encode --> QH[Quantum Hamiltonian]
+    end
+
+    QH --> QSKT
+    QH --> QP
+    
+    subgraph Qamomile
+        QSKTR --> Decode{Decode}
+        QURIR --> Decode
+    end
+    Decode --> Solutions
+```
+
 ## Qiskit
 
 [Qiskit](https://qiskit.org/) is an open-source SDK for working with quantum computers at the level of circuits, algorithms, and application modules.
