@@ -8,14 +8,14 @@ Qamomile stands for Quantum Algorithm for Mathematical OptiMization with jIjmode
 ## Installation
 The installation for qiskit is 
 ```bash
-# jijmodeling-transpiler-quantum for qiskit
-pip install "jijmodeling-transpiler-quantum[qiskit]"
+# qamomile for qiskit
+pip install "qamomile[qiskit]"
 ```
 
 The installation for QURI Parts is
 ```bash
-# jijmodeling-transpiler-quantum for quri-parts
-pip install "jijmodeling-transpiler-quantum[quri-parts]"
+# qamomile for quri-parts
+pip install "qamomile[quri-parts]"
 ```
 
 ## Quickstart
@@ -23,7 +23,7 @@ In the following example, QAOA for the graph colouring problem is implemented us
 ```python
 import jijmodeling as jm
 import jijmodeling_transpiler.core as jtc
-import jijmodeling_transpiler_quantum.qiskit as jt_qk
+import qamomile.qiskit as qamo_qk
 
 from qiskit.primitives import Estimator, Sampler
 from qiskit.algorithms.minimum_eigensolvers import QAOA
@@ -60,7 +60,7 @@ num_qubits = num_nodes * color_num
 
 # Transpile mathematical model to Qiskit Ising Hamiltonian
 compiled_instance = jtc.compile_model(problem, instance_data)
-qaoa_builder = jt_qk.qaoa.transpile_to_qaoa_ansatz(compiled_instance,normalize=False,relax_method=jtc.pubo.RelaxationMethod.SquaredPenalty)
+qaoa_builder = qamo_qk.qaoa.transpile_to_qaoa_ansatz(compiled_instance,normalize=False,relax_method=jtc.pubo.RelaxationMethod.SquaredPenalty)
 hamiltonian, _ = qaoa_builder.get_hamiltonian(multipliers={"one-color": 1})
 
 # Run QAOA by Qiskit
