@@ -22,7 +22,7 @@ pip install "qamomile[qiskit]"
 ```python
 import jijmodeling as jm
 import jijmodeling_transpiler as jmt
-import qamomile as jtq
+import qamomile as qamo
 
 # Create model
 problem = jm.Problem("model")
@@ -32,7 +32,7 @@ problem = jm.Problem("model")
 compiled_instance = jmt.compile_model(problem, instance_data, fixed_vars)
 
 # Transpile to QAOA of qikit
-qaoa_builder = jtq.qiskit.transpile_to_qaoa(compiled_instance)
+qaoa_builder = qamo.qiskit.transpile_to_qaoa(compiled_instance)
 ```
 
 
@@ -49,7 +49,7 @@ pip install "qamomile[quri-parts]"
 ```python
 import jijmodeling as jm
 import jijmodeling_transpiler as jmt
-import qamomile as jtq
+import qamomile as qamo
 
 # Create model
 problem = jm.Problem("model")
@@ -59,7 +59,7 @@ problem = jm.Problem("model")
 compiled_instance = jmt.compile_model(problem, instance_data, fixed_vars)
 
 # Transpile to QAOA of qikit
-qaoa_builder = jtq.quri.transpile_to_qaoa(compiled_instance)
+qaoa_builder = qamo.quri.transpile_to_qaoa(compiled_instance)
 ```
 
 
