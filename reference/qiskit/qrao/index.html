@@ -20,7 +20,7 @@
       
       
       <link rel="icon" href="../../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.0, mkdocs-material-9.5.21">
+      <meta name="generator" content="mkdocs-1.5.3, mkdocs-material-9.5.17">
     
     
       
@@ -28,7 +28,7 @@
       
     
     
-      <link rel="stylesheet" href="../../../assets/stylesheets/main.66ac8b77.min.css">
+      <link rel="stylesheet" href="../../../assets/stylesheets/main.bcfcd587.min.css">
       
       
 
@@ -1112,90 +1112,6 @@
   
 
     
-      
-      
-  
-  
-  
-  
-    
-    
-    
-    
-    <li class="md-nav__item md-nav__item--nested">
-      
-        
-        
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
-        
-          
-          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
-            
-  
-  <span class="md-ellipsis">
-    Tutorial
-  </span>
-  
-
-            <span class="md-nav__icon md-icon"></span>
-          </label>
-        
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_3">
-            <span class="md-nav__icon md-icon"></span>
-            Tutorial
-          </label>
-          <ul class="md-nav__list" data-md-scrollfix>
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../../tutorial/alternating_ansatz_graph_coloring_qiskit/" class="md-nav__link">
-        
-  
-  <span class="md-ellipsis">
-    Quantum Alternating Operator Ansatz for Graph Coloring Problem with Qiskit
-  </span>
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../../tutorial/alternating_ansatz_graph_coloring_quri/" class="md-nav__link">
-        
-  
-  <span class="md-ellipsis">
-    Quantum Alternating Operator Ansatz for Graph Coloring Problem with Quri-parts
-  </span>
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-          </ul>
-        </nav>
-      
-    </li>
-  
-
-    
   </ul>
 </nav>
                   </div>
@@ -1327,7 +1243,7 @@
 
 
 
-  <p><span class="doc-section-title">Parameters:</span></p>
+  <p><strong>Parameters:</strong></p>
   <table>
     <thead>
       <tr>
@@ -1338,7 +1254,7 @@
       </tr>
     </thead>
     <tbody>
-        <tr class="doc-section-item">
+        <tr>
           <td><code>color_group</code></td>
           <td>
                 <code>dict[int, list[int]]</code>
@@ -1357,7 +1273,7 @@
 
 
 
-  <p><span class="doc-section-title">Returns:</span></p>
+  <p><strong>Returns:</strong></p>
   <table>
     <thead>
       <tr>
@@ -1366,7 +1282,7 @@
       </tr>
     </thead>
     <tbody>
-        <tr class="doc-section-item">
+        <tr>
           <td>
                 <code>dict[int, tuple[int, <span title="qamomile.qiskit.qrao.qrao31.Pauli">Pauli</span>]]</code>
           </td>
@@ -1381,7 +1297,7 @@
 
 
 
-<p><span class="doc-section-title">Examples:</span></p>
+<p><strong>Examples:</strong></p>
     <div class="language-pycon highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="gp">&gt;&gt;&gt; </span><span class="n">color_group</span> <span class="o">=</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">],</span> <span class="mi">1</span><span class="p">:</span> <span class="p">[</span><span class="mi">3</span><span class="p">,</span> <span class="mi">4</span><span class="p">],</span> <span class="mi">2</span><span class="p">:</span> <span class="p">[</span><span class="mi">6</span><span class="p">,]}</span>
 </span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="gp">&gt;&gt;&gt; </span><span class="n">color_group_for_qrac_encode</span><span class="p">(</span><span class="n">color_group</span><span class="p">)</span>
 </span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="go">{0: (0, &lt;Pauli.Z: 3&gt;), 1: (0, &lt;Pauli.X: 1&gt;), 2: (0, &lt;Pauli.Y: 2&gt;), 3: (1, &lt;Pauli.Z: 3&gt;), 4: (1, &lt;Pauli.X: 1&gt;), 6: (2, &lt;Pauli.Z: 3&gt;)}</span>
@@ -1459,7 +1375,7 @@
 
 
 
-  <p><span class="doc-section-title">Parameters:</span></p>
+  <p><strong>Parameters:</strong></p>
   <table>
     <thead>
       <tr>
@@ -1470,7 +1386,7 @@
       </tr>
     </thead>
     <tbody>
-        <tr class="doc-section-item">
+        <tr>
           <td><code>compiled_instance</code></td>
           <td>
                 <code><span title="jijmodeling_transpiler.core.CompiledInstance">CompiledInstance</span></code>
@@ -1484,7 +1400,7 @@
               <em>required</em>
           </td>
         </tr>
-        <tr class="doc-section-item">
+        <tr>
           <td><code>normalize</code></td>
           <td>
                 <code>bool</code>
@@ -1503,7 +1419,7 @@
 
 
 
-  <p><span class="doc-section-title">Returns:</span></p>
+  <p><strong>Returns:</strong></p>
   <table>
     <thead>
       <tr>
@@ -1512,7 +1428,7 @@
       </tr>
     </thead>
     <tbody>
-        <tr class="doc-section-item">
+        <tr>
 <td><code>QRAC21Builder</code></td>          <td>
                 <code><a class="autorefs autorefs-internal" title="qamomile.qiskit.qrao.to_qrac.QRAC21Builder" href="to_qrac/#qamomile.qiskit.qrao.to_qrac.QRAC21Builder">QRAC21Builder</a></code>
           </td>
@@ -1587,7 +1503,7 @@
 
 
 
-  <p><span class="doc-section-title">Parameters:</span></p>
+  <p><strong>Parameters:</strong></p>
   <table>
     <thead>
       <tr>
@@ -1598,7 +1514,7 @@
       </tr>
     </thead>
     <tbody>
-        <tr class="doc-section-item">
+        <tr>
           <td><code>compiled_instance</code></td>
           <td>
                 <code><span title="jijmodeling_transpiler.core.CompiledInstance">CompiledInstance</span></code>
@@ -1612,7 +1528,7 @@
               <em>required</em>
           </td>
         </tr>
-        <tr class="doc-section-item">
+        <tr>
           <td><code>normalize</code></td>
           <td>
                 <code>bool</code>
@@ -1631,7 +1547,7 @@
 
 
 
-  <p><span class="doc-section-title">Returns:</span></p>
+  <p><strong>Returns:</strong></p>
   <table>
     <thead>
       <tr>
@@ -1640,7 +1556,7 @@
       </tr>
     </thead>
     <tbody>
-        <tr class="doc-section-item">
+        <tr>
 <td><code>QRAC31Builder</code></td>          <td>
                 <code><a class="autorefs autorefs-internal" title="qamomile.qiskit.qrao.to_qrac.QRAC31Builder" href="to_qrac/#qamomile.qiskit.qrao.to_qrac.QRAC31Builder">QRAC31Builder</a></code>
           </td>
@@ -1715,7 +1631,7 @@
 
 
 
-  <p><span class="doc-section-title">Parameters:</span></p>
+  <p><strong>Parameters:</strong></p>
   <table>
     <thead>
       <tr>
@@ -1726,7 +1642,7 @@
       </tr>
     </thead>
     <tbody>
-        <tr class="doc-section-item">
+        <tr>
           <td><code>compiled_instance</code></td>
           <td>
                 <code><span title="jijmodeling_transpiler.core.CompiledInstance">CompiledInstance</span></code>
@@ -1740,7 +1656,7 @@
               <em>required</em>
           </td>
         </tr>
-        <tr class="doc-section-item">
+        <tr>
           <td><code>normalize</code></td>
           <td>
                 <code>bool</code>
@@ -1759,7 +1675,7 @@
 
 
 
-  <p><span class="doc-section-title">Returns:</span></p>
+  <p><strong>Returns:</strong></p>
   <table>
     <thead>
       <tr>
@@ -1768,7 +1684,7 @@
       </tr>
     </thead>
     <tbody>
-        <tr class="doc-section-item">
+        <tr>
 <td><code>QRAC32Builder</code></td>          <td>
                 <code><a class="autorefs autorefs-internal" title="qamomile.qiskit.qrao.to_qrac.QRAC32Builder" href="to_qrac/#qamomile.qiskit.qrao.to_qrac.QRAC32Builder">QRAC32Builder</a></code>
           </td>
@@ -1844,7 +1760,7 @@ In this paper, this method is called as Space Compression Ratio Preserving Quant
 
 
 
-  <p><span class="doc-section-title">Parameters:</span></p>
+  <p><strong>Parameters:</strong></p>
   <table>
     <thead>
       <tr>
@@ -1855,7 +1771,7 @@ In this paper, this method is called as Space Compression Ratio Preserving Quant
       </tr>
     </thead>
     <tbody>
-        <tr class="doc-section-item">
+        <tr>
           <td><code>compiled_instance</code></td>
           <td>
                 <code><span title="jijmodeling_transpiler.core.CompiledInstance">CompiledInstance</span></code>
@@ -1869,7 +1785,7 @@ In this paper, this method is called as Space Compression Ratio Preserving Quant
               <em>required</em>
           </td>
         </tr>
-        <tr class="doc-section-item">
+        <tr>
           <td><code>normalize</code></td>
           <td>
                 <code>bool</code>
@@ -1888,7 +1804,7 @@ In this paper, this method is called as Space Compression Ratio Preserving Quant
 
 
 
-  <p><span class="doc-section-title">Returns:</span></p>
+  <p><strong>Returns:</strong></p>
   <table>
     <thead>
       <tr>
@@ -1897,7 +1813,7 @@ In this paper, this method is called as Space Compression Ratio Preserving Quant
       </tr>
     </thead>
     <tbody>
-        <tr class="doc-section-item">
+        <tr>
 <td><code>QRACSpaceEfficientBuilder</code></td>          <td>
                 <code><a class="autorefs autorefs-internal" title="qamomile.qiskit.qrao.to_qrac.QRACSpaceEfficientBuilder" href="to_qrac/#qamomile.qiskit.qrao.to_qrac.QRACSpaceEfficientBuilder">QRACSpaceEfficientBuilder</a></code>
           </td>
@@ -2015,7 +1931,7 @@ In this paper, this method is called as Space Compression Ratio Preserving Quant
     <script id="__config" type="application/json">{"base": "../../..", "features": ["content.code.annotate", "content.code.copy"], "search": "../../../assets/javascripts/workers/search.b8dbb3d2.min.js", "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}}</script>
     
     
-      <script src="../../../assets/javascripts/bundle.a7c05c9e.min.js"></script>
+      <script src="../../../assets/javascripts/bundle.1e8ae164.min.js"></script>
       
     
   </body>
