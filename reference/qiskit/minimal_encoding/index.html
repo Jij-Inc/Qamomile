@@ -68,7 +68,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#jijmodeling_transpiler_quantum.qiskit.minimal_encoding" class="md-skip">
+        <a href="#qamomile.qiskit.minimal_encoding" class="md-skip">
           Skip to content
         </a>
       
@@ -1158,7 +1158,7 @@
         
   
   <span class="md-ellipsis">
-    Graph Coloring by Qiskit
+    Quantum Alternating Operator Ansatz for Graph Coloring Problem with Qiskit
   </span>
   
 
@@ -1179,7 +1179,7 @@
         
   
   <span class="md-ellipsis">
-    Graph Coloring by QURI Parts
+    Quantum Alternating Operator Ansatz for Graph Coloring Problem with Quri-parts
   </span>
   
 
@@ -1221,7 +1221,7 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#jijmodeling_transpiler_quantum.qiskit.minimal_encoding" class="md-nav__link">
+  <a href="#qamomile.qiskit.minimal_encoding" class="md-nav__link">
     <span class="md-ellipsis">
       minimal_encoding
     </span>
@@ -1230,7 +1230,7 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#jijmodeling_transpiler_quantum.qiskit.minimal_encoding.transpile_to_minimal_encoding" class="md-nav__link">
+  <a href="#qamomile.qiskit.minimal_encoding.transpile_to_minimal_encoding" class="md-nav__link">
     <span class="md-ellipsis">
       transpile_to_minimal_encoding
     </span>
@@ -1259,7 +1259,7 @@
 
 
 
-<a id="jijmodeling_transpiler_quantum.qiskit.minimal_encoding"></a>
+<a id="qamomile.qiskit.minimal_encoding"></a>
   <div class="doc doc-contents first">
 
   
@@ -1279,7 +1279,7 @@
 
 
 
-<h2 id="jijmodeling_transpiler_quantum.qiskit.minimal_encoding.transpile_to_minimal_encoding" class="doc doc-heading">
+<h2 id="qamomile.qiskit.minimal_encoding.transpile_to_minimal_encoding" class="doc doc-heading">
           <code class="highlight language-python"><span class="n">transpile_to_minimal_encoding</span><span class="p">(</span><span class="n">compiled_instance</span><span class="p">:</span> <span class="n">jmt</span><span class="o">.</span><span class="n">core</span><span class="o">.</span><span class="n">CompiledInstance</span><span class="p">,</span> <span class="n">normalize</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">MinimalEncodingBuilder</span></code>
 
 </h2>
@@ -1288,11 +1288,11 @@
   <div class="doc doc-contents ">
   
       <p>Function to transpile a compiled instance to a minimal encoding builder</p>
-<pre><code>Generating Minimal Encoding Builder from a compiled instance.
+<div class="language-text highlight"><pre><span></span><code>Generating Minimal Encoding Builder from a compiled instance.
 Minimal encoding is a method to reduce the number of qubits and classical bits.
-The method is first proposed by Tan, Benjamin, et al. "Qubit-efficient encoding schemes for binary optimisation problems." Quantum 5 (2021): 454.
+The method is first proposed by Tan, Benjamin, et al. &quot;Qubit-efficient encoding schemes for binary optimisation problems.&quot; Quantum 5 (2021): 454.
 More information is on https://quantum-journal.org/papers/q-2021-05-04-454/
-</code></pre>
+</code></pre></div>
 
 
 
@@ -1351,7 +1351,7 @@ More information is on https://quantum-journal.org/papers/q-2021-05-04-454/
     <tbody>
         <tr class="doc-section-item">
 <td><code>MinimalEncodingBuilder</code></td>          <td>
-                <code><a class="autorefs autorefs-internal" title="jijmodeling_transpiler_quantum.qiskit.minimal_encoding.to_minimal_encoding.MinimalEncodingBuilder" href="to_minimal_encoding/#jijmodeling_transpiler_quantum.qiskit.minimal_encoding.to_minimal_encoding.MinimalEncodingBuilder">MinimalEncodingBuilder</a></code>
+                <code><a class="autorefs autorefs-internal" title="qamomile.qiskit.minimal_encoding.to_minimal_encoding.MinimalEncodingBuilder" href="to_minimal_encoding/#qamomile.qiskit.minimal_encoding.to_minimal_encoding.MinimalEncodingBuilder">MinimalEncodingBuilder</a></code>
           </td>
           <td>
             <div class="doc-md-description">
@@ -1363,51 +1363,51 @@ More information is on https://quantum-journal.org/papers/q-2021-05-04-454/
   </table>
 
           <details class="quote">
-            <summary>Source code in <code>jijmodeling_transpiler_quantum/qiskit/minimal_encoding/to_minimal_encoding.py</code></summary>
-            <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">47</span>
-<span class="normal">48</span>
-<span class="normal">49</span>
-<span class="normal">50</span>
-<span class="normal">51</span>
-<span class="normal">52</span>
-<span class="normal">53</span>
-<span class="normal">54</span>
-<span class="normal">55</span>
-<span class="normal">56</span>
-<span class="normal">57</span>
-<span class="normal">58</span>
-<span class="normal">59</span>
-<span class="normal">60</span>
-<span class="normal">61</span>
-<span class="normal">62</span>
-<span class="normal">63</span>
-<span class="normal">64</span>
-<span class="normal">65</span>
-<span class="normal">66</span>
-<span class="normal">67</span>
-<span class="normal">68</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="k">def</span> <span class="nf">transpile_to_minimal_encoding</span><span class="p">(</span>
-    <span class="n">compiled_instance</span><span class="p">:</span> <span class="n">jmt</span><span class="o">.</span><span class="n">core</span><span class="o">.</span><span class="n">CompiledInstance</span><span class="p">,</span> <span class="n">normalize</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span>
-<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">MinimalEncodingBuilder</span><span class="p">:</span>
-<span class="w">    </span><span class="sd">&quot;&quot;&quot;Function to transpile a compiled instance to a minimal encoding builder</span>
-
-<span class="sd">        Generating Minimal Encoding Builder from a compiled instance.</span>
-<span class="sd">        Minimal encoding is a method to reduce the number of qubits and classical bits.</span>
-<span class="sd">        The method is first proposed by Tan, Benjamin, et al. &quot;Qubit-efficient encoding schemes for binary optimisation problems.&quot; Quantum 5 (2021): 454.</span>
-<span class="sd">        More information is on https://quantum-journal.org/papers/q-2021-05-04-454/</span>
-
-<span class="sd">    Args:</span>
-<span class="sd">        compiled_instance (jmt.core.CompiledInstance): compiled instance</span>
-<span class="sd">        normalize (bool, optional): whether to normalize the coefficients or not. Defaults to True.</span>
-
-<span class="sd">    Returns:</span>
-<span class="sd">        MinimalEncodingBuilder: minimal encoding builder</span>
-<span class="sd">    &quot;&quot;&quot;</span>
-
-    <span class="n">pubo_builder</span> <span class="o">=</span> <span class="n">jmt</span><span class="o">.</span><span class="n">core</span><span class="o">.</span><span class="n">pubo</span><span class="o">.</span><span class="n">transpile_to_pubo</span><span class="p">(</span>
-        <span class="n">compiled_instance</span><span class="p">,</span> <span class="n">normalize</span><span class="o">=</span><span class="n">normalize</span>
-    <span class="p">)</span>
-    <span class="k">return</span> <span class="n">MinimalEncodingBuilder</span><span class="p">(</span><span class="n">pubo_builder</span><span class="p">,</span> <span class="n">compiled_instance</span><span class="p">)</span>
-</code></pre></div></td></tr></table></div>
+            <summary>Source code in <code>qamomile/qiskit/minimal_encoding/to_minimal_encoding.py</code></summary>
+            <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-47">47</a></span>
+<span class="normal"><a href="#__codelineno-0-48">48</a></span>
+<span class="normal"><a href="#__codelineno-0-49">49</a></span>
+<span class="normal"><a href="#__codelineno-0-50">50</a></span>
+<span class="normal"><a href="#__codelineno-0-51">51</a></span>
+<span class="normal"><a href="#__codelineno-0-52">52</a></span>
+<span class="normal"><a href="#__codelineno-0-53">53</a></span>
+<span class="normal"><a href="#__codelineno-0-54">54</a></span>
+<span class="normal"><a href="#__codelineno-0-55">55</a></span>
+<span class="normal"><a href="#__codelineno-0-56">56</a></span>
+<span class="normal"><a href="#__codelineno-0-57">57</a></span>
+<span class="normal"><a href="#__codelineno-0-58">58</a></span>
+<span class="normal"><a href="#__codelineno-0-59">59</a></span>
+<span class="normal"><a href="#__codelineno-0-60">60</a></span>
+<span class="normal"><a href="#__codelineno-0-61">61</a></span>
+<span class="normal"><a href="#__codelineno-0-62">62</a></span>
+<span class="normal"><a href="#__codelineno-0-63">63</a></span>
+<span class="normal"><a href="#__codelineno-0-64">64</a></span>
+<span class="normal"><a href="#__codelineno-0-65">65</a></span>
+<span class="normal"><a href="#__codelineno-0-66">66</a></span>
+<span class="normal"><a href="#__codelineno-0-67">67</a></span>
+<span class="normal"><a href="#__codelineno-0-68">68</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-47"><a id="__codelineno-0-47" name="__codelineno-0-47"></a><span class="k">def</span> <span class="nf">transpile_to_minimal_encoding</span><span class="p">(</span>
+</span><span id="__span-0-48"><a id="__codelineno-0-48" name="__codelineno-0-48"></a>    <span class="n">compiled_instance</span><span class="p">:</span> <span class="n">jmt</span><span class="o">.</span><span class="n">core</span><span class="o">.</span><span class="n">CompiledInstance</span><span class="p">,</span> <span class="n">normalize</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span>
+</span><span id="__span-0-49"><a id="__codelineno-0-49" name="__codelineno-0-49"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">MinimalEncodingBuilder</span><span class="p">:</span>
+</span><span id="__span-0-50"><a id="__codelineno-0-50" name="__codelineno-0-50"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Function to transpile a compiled instance to a minimal encoding builder</span>
+</span><span id="__span-0-51"><a id="__codelineno-0-51" name="__codelineno-0-51"></a>
+</span><span id="__span-0-52"><a id="__codelineno-0-52" name="__codelineno-0-52"></a><span class="sd">        Generating Minimal Encoding Builder from a compiled instance.</span>
+</span><span id="__span-0-53"><a id="__codelineno-0-53" name="__codelineno-0-53"></a><span class="sd">        Minimal encoding is a method to reduce the number of qubits and classical bits.</span>
+</span><span id="__span-0-54"><a id="__codelineno-0-54" name="__codelineno-0-54"></a><span class="sd">        The method is first proposed by Tan, Benjamin, et al. &quot;Qubit-efficient encoding schemes for binary optimisation problems.&quot; Quantum 5 (2021): 454.</span>
+</span><span id="__span-0-55"><a id="__codelineno-0-55" name="__codelineno-0-55"></a><span class="sd">        More information is on https://quantum-journal.org/papers/q-2021-05-04-454/</span>
+</span><span id="__span-0-56"><a id="__codelineno-0-56" name="__codelineno-0-56"></a>
+</span><span id="__span-0-57"><a id="__codelineno-0-57" name="__codelineno-0-57"></a><span class="sd">    Args:</span>
+</span><span id="__span-0-58"><a id="__codelineno-0-58" name="__codelineno-0-58"></a><span class="sd">        compiled_instance (jmt.core.CompiledInstance): compiled instance</span>
+</span><span id="__span-0-59"><a id="__codelineno-0-59" name="__codelineno-0-59"></a><span class="sd">        normalize (bool, optional): whether to normalize the coefficients or not. Defaults to True.</span>
+</span><span id="__span-0-60"><a id="__codelineno-0-60" name="__codelineno-0-60"></a>
+</span><span id="__span-0-61"><a id="__codelineno-0-61" name="__codelineno-0-61"></a><span class="sd">    Returns:</span>
+</span><span id="__span-0-62"><a id="__codelineno-0-62" name="__codelineno-0-62"></a><span class="sd">        MinimalEncodingBuilder: minimal encoding builder</span>
+</span><span id="__span-0-63"><a id="__codelineno-0-63" name="__codelineno-0-63"></a><span class="sd">    &quot;&quot;&quot;</span>
+</span><span id="__span-0-64"><a id="__codelineno-0-64" name="__codelineno-0-64"></a>
+</span><span id="__span-0-65"><a id="__codelineno-0-65" name="__codelineno-0-65"></a>    <span class="n">pubo_builder</span> <span class="o">=</span> <span class="n">jmt</span><span class="o">.</span><span class="n">core</span><span class="o">.</span><span class="n">pubo</span><span class="o">.</span><span class="n">transpile_to_pubo</span><span class="p">(</span>
+</span><span id="__span-0-66"><a id="__codelineno-0-66" name="__codelineno-0-66"></a>        <span class="n">compiled_instance</span><span class="p">,</span> <span class="n">normalize</span><span class="o">=</span><span class="n">normalize</span>
+</span><span id="__span-0-67"><a id="__codelineno-0-67" name="__codelineno-0-67"></a>    <span class="p">)</span>
+</span><span id="__span-0-68"><a id="__codelineno-0-68" name="__codelineno-0-68"></a>    <span class="k">return</span> <span class="n">MinimalEncodingBuilder</span><span class="p">(</span><span class="n">pubo_builder</span><span class="p">,</span> <span class="n">compiled_instance</span><span class="p">)</span>
+</span></code></pre></div></td></tr></table></div>
           </details>
   </div>
 
@@ -1470,7 +1470,7 @@ More information is on https://quantum-journal.org/papers/q-2021-05-04-454/
     </div>
     
     
-    <script id="__config" type="application/json">{"base": "../../..", "features": [], "search": "../../../assets/javascripts/workers/search.b8dbb3d2.min.js", "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}}</script>
+    <script id="__config" type="application/json">{"base": "../../..", "features": ["content.code.annotate", "content.code.copy"], "search": "../../../assets/javascripts/workers/search.b8dbb3d2.min.js", "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}}</script>
     
     
       <script src="../../../assets/javascripts/bundle.a7c05c9e.min.js"></script>
