@@ -28,9 +28,9 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Reference: reference/
-  - Tutorial: 
-    - Graph Coloring by Qiskit: tutorial/alternating_ansatz_graph_coloring_qiskit.ipynb
-    - Graph Coloring by QURI Parts: tutorial/alternating_ansatz_graph_coloring_quri.ipynb
+  # - Tutorial: 
+  #   - Graph Coloring by Qiskit: tutorial/alternating_ansatz_graph_coloring_qiskit.ipynb
+  #   - Graph Coloring by QURI Parts: tutorial/alternating_ansatz_graph_coloring_quri.ipynb
 
 plugins:
   - search:
@@ -49,5 +49,5 @@ plugins:
   - gen-files:
       scripts:
       - docs/overrides/gen_ref_pages.py
-  - mkdocs-jupyter:
+  # - mkdocs-jupyter:
  
