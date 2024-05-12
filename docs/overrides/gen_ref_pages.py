@@ -7,7 +7,7 @@ from pathlib import Path
 
 import mkdocs_gen_files
 
-SOURCE_DIR = "jijmodeling_transpiler_quantum"
+SOURCE_DIR = "qamomile"
 
 nav = mkdocs_gen_files.Nav()
 
