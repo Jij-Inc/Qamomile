@@ -21,7 +21,7 @@ python = ">=3.9.8,<3.11"
 jijmodeling-transpiler = ">=0.6.0rc3"
 qiskit = {version = ">=0.44.0", extras = ["qiskit"]}
 quri-parts-qulacs = {version = "*", extras = ["quri-parts"]}
-black = "^23.11.0"
+black = "^24.3.0"
 
 
 [tool.poetry.group.dev.dependencies]
