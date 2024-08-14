@@ -1,0 +1,775 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="../../../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>core.converters.converter &#8212; Qamomile Documentation</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../../../_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../../../_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../../../_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+
+  
+  <link href="../../../_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="../../../_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../../../_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../../../_static/vendor/fontawesome/6.5.2/webfonts/fa-regular-400.woff2" />
+
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=fa44fd50" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/styles/sphinx-book-theme.css?v=a3416100" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/togglebutton.css?v=13237357" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/mystnb.4510f1fc1dee50b3e5859aac5469c37c29e427902b24a333a5f9fcb2f0b3ac41.css" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/sphinx-thebe.css?v=4fa983c6" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/graphviz.css?v=fd3f3429" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/sphinx-design.min.css?v=95c83b7e" />
+  
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../../../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
+<link rel="preload" as="script" href="../../../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
+  <script src="../../../_static/vendor/fontawesome/6.5.2/js/all.min.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    <script src="../../../_static/documentation_options.js?v=9eb32ce0"></script>
+    <script src="../../../_static/doctools.js?v=9a2dae69"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../../../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../../../_static/copybutton.js?v=f281be69"></script>
+    <script src="../../../_static/scripts/sphinx-book-theme.js?v=887ef09a"></script>
+    <script>let toggleHintShow = 'Click to show';</script>
+    <script>let toggleHintHide = 'Click to hide';</script>
+    <script>let toggleOpenOnPrint = 'true';</script>
+    <script src="../../../_static/togglebutton.js?v=4a39c7ea"></script>
+    <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../../_static/design-tabs.js?v=f930bc37"></script>
+    <script>const THEBE_JS_URL = "https://unpkg.com/thebe@0.8.2/lib/index.js"; const thebe_selector = ".thebe,.cell"; const thebe_selector_input = "pre"; const thebe_selector_output = ".output, .cell_output"</script>
+    <script async="async" src="../../../_static/sphinx-thebe.js?v=c100c467"></script>
+    <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script>const THEBE_JS_URL = "https://unpkg.com/thebe@0.8.2/lib/index.js"; const thebe_selector = ".thebe,.cell"; const thebe_selector_input = "pre"; const thebe_selector_output = ".output, .cell_output"</script>
+    <script>DOCUMENTATION_OPTIONS.pagename = '_modules/core/converters/converter';</script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-primary-sidebar-checkbox"/>
+  <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-secondary-sidebar-checkbox"/>
+  <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
+  
+  <div class="search-button__wrapper">
+    <div class="search-button__overlay"></div>
+    <div class="search-button__search-container">
+<form class="bd-search d-flex align-items-center"
+      action="../../../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         id="search-input"
+         placeholder="Search this book..."
+         aria-label="Search this book..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form></div>
+  </div>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+        
+      
+      <div class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+    
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../../../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../../../_static/logo.png" class="logo__image only-light" alt="Qamomile Documentation - Home"/>
+    <script>document.write(`<img src="../../../_static/logo.png" class="logo__image only-dark" alt="Qamomile Documentation - Home"/>`);</script>
+  
+  
+</a></div>
+        <div class="sidebar-primary-item">
+
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">Search</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script></div>
+        <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
+    <div class="bd-toc-item navbar-nav active">
+        
+        <ul class="nav bd-sidenav bd-sidenav__home-link">
+            <li class="toctree-l1">
+                <a class="reference internal" href="../../../index.html">
+                    Welcome to Qamomile
+                </a>
+            </li>
+        </ul>
+        <p aria-level="2" class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../../../quickstart.html">Qamomile Quickstart Guide</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">English</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../../../en/index.html">Welcome to Qamomile</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">日本語</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../../../ja/index.html">Qamomileへようこそ</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../../autoapi/index.html">API Reference</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../../../autoapi/core/index.html">core</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../../../autoapi/core/circuit/index.html">core.circuit</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../../autoapi/core/circuit/circuit/index.html">core.circuit.circuit</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../../autoapi/core/circuit/parameter/index.html">core.circuit.parameter</a></li>
+</ul>
+</details></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../../../autoapi/core/converters/index.html">core.converters</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../../autoapi/core/converters/qrao/index.html">core.converters.qrao</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../../autoapi/core/converters/converter/index.html">core.converters.converter</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../../autoapi/core/converters/qaoa/index.html">core.converters.qaoa</a></li>
+</ul>
+</details></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../autoapi/core/bitssample/index.html">core.bitssample</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../autoapi/core/ising_qubo/index.html">core.ising_qubo</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../autoapi/core/operator/index.html">core.operator</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../autoapi/core/transpiler/index.html">core.transpiler</a></li>
+</ul>
+</details></li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../../../autoapi/qiskit/index.html">qiskit</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../../autoapi/qiskit/exceptions/index.html">qiskit.exceptions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../autoapi/qiskit/parameter_converter/index.html">qiskit.parameter_converter</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../autoapi/qiskit/transpiler/index.html">qiskit.transpiler</a></li>
+</ul>
+</details></li>
+</ul>
+</details></li>
+</ul>
+
+    </div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+  
+  <div id="rtd-footer-container"></div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+
+<div class="sbt-scroll-pixel-helper"></div>
+
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item"><button class="sidebar-toggle primary-toggle btn btn-sm" title="Toggle primary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <span class="fa-solid fa-bars"></span>
+</button></div>
+      
+    </div>
+  
+  
+    <div class="header-article-items__end">
+      
+        <div class="header-article-item">
+
+<div class="article-header-buttons">
+
+
+
+
+
+<div class="dropdown dropdown-source-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Source repositories">
+    <i class="fab fa-github"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="https://github.com/executablebooks/jupyter-book" target="_blank"
+   class="btn btn-sm btn-source-repository-button dropdown-item"
+   title="Source repository"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fab fa-github"></i>
+  </span>
+<span class="btn__text-container">Repository</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/executablebooks/jupyter-book/issues/new?title=Issue%20on%20page%20%2F_modules/core/converters/converter.html&body=Your%20issue%20content%20here." target="_blank"
+   class="btn btn-sm btn-source-issues-button dropdown-item"
+   title="Open an issue"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-lightbulb"></i>
+  </span>
+<span class="btn__text-container">Open issue</span>
+</a>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+<button onclick="toggleFullScreen()"
+  class="btn btn-sm btn-fullscreen-button"
+  title="Fullscreen mode"
+  data-bs-placement="bottom" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-expand"></i>
+  </span>
+
+</button>
+
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script>
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm pst-navbar-icon search-button search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass fa-lg"></i>
+  </button>
+`);
+</script>
+
+</div></div>
+      
+    </div>
+  
+</div>
+</div>
+              
+              
+
+<div id="jb-print-docs-body" class="onlyprint">
+    <h1></h1>
+    <!-- Table of contents -->
+    <div id="print-main-content">
+        <div id="jb-print-toc">
+            
+        </div>
+    </div>
+</div>
+
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <h1>Source code for core.converters.converter</h1><div class="highlight"><pre>
+<span></span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">qamomile/core/converter.py</span>
+
+<span class="sd">This module defines the QuantumConverter abstract base class for converting between</span>
+<span class="sd">different problem representations and quantum models in Qamomile.</span>
+
+<span class="sd">The QuantumConverter class provides a framework for encoding classical optimization</span>
+<span class="sd">problems into quantum representations (e.g., Ising models) and decoding quantum</span>
+<span class="sd">computation results back into classical problem solutions.</span>
+
+<span class="sd">Key Features:</span>
+<span class="sd">- Conversion between classical optimization problems and Ising models.</span>
+<span class="sd">- Abstract methods for generating cost Hamiltonians and decoding results.</span>
+<span class="sd">- Integration with QuantumSDKTranspiler for SDK-specific result handling.</span>
+
+<span class="sd">Usage:</span>
+<span class="sd">Developers implementing specific quantum conversion strategies should subclass</span>
+<span class="sd">QuantumConverter and implement the abstract methods. The class is designed to work</span>
+<span class="sd">with jijmodeling for problem representation and various quantum SDKs through</span>
+<span class="sd">the QuantumSDKTranspiler interface.</span>
+
+<span class="sd">Example:</span>
+<span class="sd">    class QAOAConverter(QuantumConverter):</span>
+<span class="sd">        def get_cost_hamiltonian(self) -&gt; qm_o.Hamiltonian:</span>
+<span class="sd">            # Implementation for generating QAOA cost Hamiltonian</span>
+<span class="sd">            ...</span>
+
+<span class="sd">&quot;&quot;&quot;</span>
+
+<span class="kn">import</span> <span class="nn">abc</span>
+<span class="kn">import</span> <span class="nn">typing</span> <span class="k">as</span> <span class="nn">typ</span>
+
+<span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="nn">np</span>
+<span class="kn">import</span> <span class="nn">jijmodeling</span> <span class="k">as</span> <span class="nn">jm</span>
+<span class="kn">import</span> <span class="nn">jijmodeling_transpiler.core</span> <span class="k">as</span> <span class="nn">jmt</span>
+<span class="kn">import</span> <span class="nn">qamomile.core.bitssample</span> <span class="k">as</span> <span class="nn">qm_bs</span>
+<span class="kn">import</span> <span class="nn">qamomile.core.operator</span> <span class="k">as</span> <span class="nn">qm_o</span>
+<span class="kn">from</span> <span class="nn">qamomile.core.ising_qubo</span> <span class="kn">import</span> <span class="n">IsingModel</span><span class="p">,</span> <span class="n">qubo_to_ising</span>
+<span class="kn">from</span> <span class="nn">qamomile.core.transpiler</span> <span class="kn">import</span> <span class="n">QuantumSDKTranspiler</span>
+
+<span class="c1"># Import necessary functions from jijmodeling_transpiler</span>
+<span class="kn">from</span> <span class="nn">jijmodeling_transpiler.core.decode</span> <span class="kn">import</span> <span class="n">dict_to_record</span>
+<span class="kn">from</span> <span class="nn">jijmodeling_transpiler.core.pubo.binary_decode</span> <span class="kn">import</span> <span class="n">binary_decode</span>
+<span class="kn">from</span> <span class="nn">jijmodeling_transpiler.core.decode.evaluate</span> <span class="kn">import</span> <span class="n">calc_expr</span><span class="p">,</span> <span class="n">subs_expr</span>
+
+
+<div class="viewcode-block" id="ResultType">
+<a class="viewcode-back" href="../../../autoapi/core/converters/converter/index.html#core.converters.converter.ResultType">[docs]</a>
+<span class="n">ResultType</span> <span class="o">=</span> <span class="n">typ</span><span class="o">.</span><span class="n">TypeVar</span><span class="p">(</span><span class="s2">&quot;ResultType&quot;</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="QuantumConverter">
+<a class="viewcode-back" href="../../../autoapi/core/converters/converter/index.html#core.converters.converter.QuantumConverter">[docs]</a>
+<span class="k">class</span> <span class="nc">QuantumConverter</span><span class="p">(</span><span class="n">abc</span><span class="o">.</span><span class="n">ABC</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Abstract base class for quantum problem converters in Qamomile.</span>
+
+<span class="sd">    This class provides methods for encoding classical optimization problems</span>
+<span class="sd">    into quantum representations (e.g., Ising models) and decoding quantum</span>
+<span class="sd">    computation results back into classical problem solutions.</span>
+
+<span class="sd">    Attributes:</span>
+<span class="sd">        compiled_instance: The compiled instance of the optimization problem.</span>
+<span class="sd">        pubo_builder: The PUBO (Polynomial Unconstrained Binary Optimization) builder.</span>
+<span class="sd">        _ising (Optional[IsingModel]): Cached Ising model representation.</span>
+
+<span class="sd">    Methods:</span>
+<span class="sd">        get_ising: Retrieve or compute the Ising model representation.</span>
+<span class="sd">        ising_encode: Encode the problem into an Ising model.</span>
+<span class="sd">        get_cost_hamiltonian: Abstract method to get the cost Hamiltonian.</span>
+<span class="sd">        decode: Decode quantum computation results into a SampleSet.</span>
+<span class="sd">        decode_bits_to_sampleset: Abstract method to convert BitsSampleSet to SampleSet.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">compiled_instance</span><span class="p">,</span>
+        <span class="n">relax_method</span><span class="p">:</span> <span class="n">jmt</span><span class="o">.</span><span class="n">pubo</span><span class="o">.</span><span class="n">RelaxationMethod</span> <span class="o">=</span> <span class="n">jmt</span><span class="o">.</span><span class="n">pubo</span><span class="o">.</span><span class="n">RelaxationMethod</span><span class="o">.</span><span class="n">AugmentedLagrangian</span><span class="p">,</span>
+    <span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initialize the QuantumConverter.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            compiled_instance: The compiled instance of the optimization problem.</span>
+<span class="sd">            relax_method (jmt.pubo.RelaxationMethod): The relaxation method for PUBO conversion.</span>
+<span class="sd">                Defaults to AugmentedLagrangian.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+<div class="viewcode-block" id="QuantumConverter.pubo_builder">
+<a class="viewcode-back" href="../../../autoapi/core/converters/converter/index.html#core.converters.converter.QuantumConverter.pubo_builder">[docs]</a>
+        <span class="n">pubo_builder</span> <span class="o">=</span> <span class="n">jmt</span><span class="o">.</span><span class="n">pubo</span><span class="o">.</span><span class="n">transpile_to_pubo</span><span class="p">(</span>
+            <span class="n">compiled_instance</span><span class="p">,</span> <span class="n">relax_method</span><span class="o">=</span><span class="n">relax_method</span>
+        <span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="QuantumConverter.compiled_instance">
+<a class="viewcode-back" href="../../../autoapi/core/converters/converter/index.html#core.converters.converter.QuantumConverter.compiled_instance">[docs]</a>
+        <span class="bp">self</span><span class="o">.</span><span class="n">compiled_instance</span> <span class="o">=</span> <span class="n">compiled_instance</span></div>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">pubo_builder</span> <span class="o">=</span> <span class="n">pubo_builder</span>
+
+<div class="viewcode-block" id="QuantumConverter._ising">
+<a class="viewcode-back" href="../../../autoapi/core/converters/converter/index.html#core.converters.converter.QuantumConverter._ising">[docs]</a>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_ising</span><span class="p">:</span> <span class="n">typ</span><span class="o">.</span><span class="n">Optional</span><span class="p">[</span><span class="n">IsingModel</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span></div>
+
+
+<div class="viewcode-block" id="QuantumConverter.get_ising">
+<a class="viewcode-back" href="../../../autoapi/core/converters/converter/index.html#core.converters.converter.QuantumConverter.get_ising">[docs]</a>
+    <span class="k">def</span> <span class="nf">get_ising</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">IsingModel</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Get the Ising model representation of the problem.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            IsingModel: The Ising model representation.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_ising</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_ising</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">ising_encode</span><span class="p">()</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_ising</span></div>
+
+
+<div class="viewcode-block" id="QuantumConverter.ising_encode">
+<a class="viewcode-back" href="../../../autoapi/core/converters/converter/index.html#core.converters.converter.QuantumConverter.ising_encode">[docs]</a>
+    <span class="k">def</span> <span class="nf">ising_encode</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">multipliers</span><span class="p">:</span> <span class="n">typ</span><span class="o">.</span><span class="n">Optional</span><span class="p">[</span><span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">float</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">detail_parameters</span><span class="p">:</span> <span class="n">typ</span><span class="o">.</span><span class="n">Optional</span><span class="p">[</span>
+            <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="o">...</span><span class="p">],</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">]]]</span>
+        <span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">IsingModel</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Encode the problem to an Ising model.</span>
+
+<span class="sd">        This method converts the problem from QUBO (Quadratic Unconstrained Binary Optimization)</span>
+<span class="sd">        to Ising model representation.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            multipliers (Optional[dict[str, float]]): Multipliers for constraint terms.</span>
+<span class="sd">            detail_parameters (Optional[dict[str, dict[tuple[int, ...], tuple[float, float]]]]):</span>
+<span class="sd">                Detailed parameters for the encoding process.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            IsingModel: The encoded Ising model.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">qubo</span><span class="p">,</span> <span class="n">constant</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">pubo_builder</span><span class="o">.</span><span class="n">get_qubo_dict</span><span class="p">(</span>
+            <span class="n">multipliers</span><span class="o">=</span><span class="n">multipliers</span><span class="p">,</span> <span class="n">detail_parameters</span><span class="o">=</span><span class="n">detail_parameters</span>
+        <span class="p">)</span>
+        <span class="n">ising</span> <span class="o">=</span> <span class="n">qubo_to_ising</span><span class="p">(</span><span class="n">qubo</span><span class="p">,</span> <span class="n">simplify</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="n">ising</span><span class="o">.</span><span class="n">constant</span> <span class="o">+=</span> <span class="n">constant</span>
+        <span class="k">return</span> <span class="n">ising</span></div>
+
+
+    <span class="nd">@abc</span><span class="o">.</span><span class="n">abstractmethod</span>
+<div class="viewcode-block" id="QuantumConverter.get_cost_hamiltonian">
+<a class="viewcode-back" href="../../../autoapi/core/converters/converter/index.html#core.converters.converter.QuantumConverter.get_cost_hamiltonian">[docs]</a>
+    <span class="k">def</span> <span class="nf">get_cost_hamiltonian</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">qm_o</span><span class="o">.</span><span class="n">Hamiltonian</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Abstract method to get the cost Hamiltonian for the quantum problem.</span>
+
+<span class="sd">        This method should be implemented in subclasses to define how the</span>
+<span class="sd">        cost Hamiltonian is constructed for specific quantum algorithms.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            qm_o.Hamiltonian: The cost Hamiltonian for the quantum problem.</span>
+
+<span class="sd">        Raises:</span>
+<span class="sd">            NotImplementedError: If the method is not implemented in the subclass.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">()</span></div>
+
+
+<div class="viewcode-block" id="QuantumConverter.decode">
+<a class="viewcode-back" href="../../../autoapi/core/converters/converter/index.html#core.converters.converter.QuantumConverter.decode">[docs]</a>
+    <span class="k">def</span> <span class="nf">decode</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="n">transpiler</span><span class="p">:</span> <span class="n">QuantumSDKTranspiler</span><span class="p">[</span><span class="n">ResultType</span><span class="p">],</span> <span class="n">result</span><span class="p">:</span> <span class="n">ResultType</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">jm</span><span class="o">.</span><span class="n">experimental</span><span class="o">.</span><span class="n">SampleSet</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Decode quantum computation results into a SampleSet.</span>
+
+<span class="sd">        This method uses the provided transpiler to convert SDK-specific results</span>
+<span class="sd">        into a BitsSampleSet, then calls decode_bits_to_sampleset to produce</span>
+<span class="sd">        the final SampleSet.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            transpiler (QuantumSDKTranspiler[ResultType]): The transpiler for the specific quantum SDK.</span>
+<span class="sd">            result (ResultType): The raw result from the quantum computation.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            jm.experimental.SampleSet: The decoded results as a SampleSet.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">bitssampleset</span> <span class="o">=</span> <span class="n">transpiler</span><span class="o">.</span><span class="n">convert_result</span><span class="p">(</span><span class="n">result</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">decode_bits_to_sampleset</span><span class="p">(</span><span class="n">bitssampleset</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="QuantumConverter.decode_bits_to_sampleset">
+<a class="viewcode-back" href="../../../autoapi/core/converters/converter/index.html#core.converters.converter.QuantumConverter.decode_bits_to_sampleset">[docs]</a>
+    <span class="k">def</span> <span class="nf">decode_bits_to_sampleset</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="n">bitssampleset</span><span class="p">:</span> <span class="n">qm_bs</span><span class="o">.</span><span class="n">BitsSampleSet</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">jm</span><span class="o">.</span><span class="n">experimental</span><span class="o">.</span><span class="n">SampleSet</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Decode a BitArraySet to a SampleSet.</span>
+
+<span class="sd">        This method converts the quantum computation results (bitstrings)</span>
+<span class="sd">        into a format that represents solutions to the original optimization problem.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            bitarray_set (qm_c.BitArraySet): The set of bitstring results from quantum computation.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            jm.experimental.SampleSet: The decoded results as a SampleSet.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">ising</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_ising</span><span class="p">()</span>
+        <span class="n">num_occurrences</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="n">samples</span> <span class="o">=</span> <span class="p">[]</span>
+
+        <span class="c1"># Convert bitstrings to samples</span>
+        <span class="k">for</span> <span class="n">bitssample</span> <span class="ow">in</span> <span class="n">bitssampleset</span><span class="o">.</span><span class="n">bitarrays</span><span class="p">:</span>
+            <span class="n">sample</span> <span class="o">=</span> <span class="p">{}</span>
+            <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">bit</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">bitssample</span><span class="o">.</span><span class="n">bits</span><span class="p">):</span>
+                <span class="n">index</span> <span class="o">=</span> <span class="n">ising</span><span class="o">.</span><span class="n">ising2qubo_index</span><span class="p">(</span><span class="n">i</span><span class="p">)</span>
+                <span class="n">sample</span><span class="p">[</span><span class="n">index</span><span class="p">]</span> <span class="o">=</span> <span class="n">bit</span>
+            <span class="n">samples</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">sample</span><span class="p">)</span>
+            <span class="n">num_occurrences</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">bitssample</span><span class="o">.</span><span class="n">num_occurrences</span><span class="p">)</span>
+
+        <span class="c1"># Decode samples using jijmodeling_transpiler</span>
+        <span class="n">sampleset</span> <span class="o">=</span> <span class="n">decode_from_dict_binary_result</span><span class="p">(</span>
+            <span class="n">samples</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">pubo_builder</span><span class="o">.</span><span class="n">binary_encoder</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">compiled_instance</span>
+        <span class="p">)</span>
+
+        <span class="c1"># Update the number of occurrences</span>
+        <span class="n">record</span> <span class="o">=</span> <span class="n">jm</span><span class="o">.</span><span class="n">Record</span><span class="p">(</span><span class="n">sampleset</span><span class="o">.</span><span class="n">record</span><span class="o">.</span><span class="n">solution</span><span class="p">,</span> <span class="n">num_occurrences</span><span class="o">=</span><span class="n">num_occurrences</span><span class="p">)</span>
+        <span class="n">sampleset</span><span class="o">.</span><span class="n">record</span> <span class="o">=</span> <span class="n">record</span>
+
+        <span class="k">return</span> <span class="n">jm</span><span class="o">.</span><span class="n">experimental</span><span class="o">.</span><span class="n">from_old_sampleset</span><span class="p">(</span><span class="n">sampleset</span><span class="p">)</span></div>
+</div>
+
+
+
+<span class="c1"># Helper functions for decoding results</span>
+<div class="viewcode-block" id="decode_from_dict_binary_result">
+<a class="viewcode-back" href="../../../autoapi/core/converters/converter/index.html#core.converters.converter.decode_from_dict_binary_result">[docs]</a>
+<span class="k">def</span> <span class="nf">decode_from_dict_binary_result</span><span class="p">(</span>
+    <span class="n">samples</span><span class="p">:</span> <span class="n">typ</span><span class="o">.</span><span class="n">Iterable</span><span class="p">[</span><span class="nb">dict</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">int</span> <span class="o">|</span> <span class="nb">float</span><span class="p">]],</span>
+    <span class="n">binary_encoder</span><span class="p">,</span>
+    <span class="n">compiled_model</span><span class="p">:</span> <span class="n">jmt</span><span class="o">.</span><span class="n">CompiledInstance</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">jm</span><span class="o">.</span><span class="n">SampleSet</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Decode binary results into a SampleSet.</span>
+
+<span class="sd">    Args:</span>
+<span class="sd">        samples: Iterable of sample dictionaries.</span>
+<span class="sd">        binary_encoder: Binary encoder from jijmodeling_transpiler.</span>
+<span class="sd">        compiled_model: Compiled instance of the optimization problem.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        jm.SampleSet: Decoded sample set.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">inverse_varmap</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="o">...</span><span class="p">]]]</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">label</span><span class="p">,</span> <span class="n">values</span> <span class="ow">in</span> <span class="n">compiled_model</span><span class="o">.</span><span class="n">var_map</span><span class="o">.</span><span class="n">var_map</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="k">for</span> <span class="n">forall</span><span class="p">,</span> <span class="n">index</span> <span class="ow">in</span> <span class="n">values</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="n">inverse_varmap</span><span class="p">[</span><span class="n">index</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="n">label</span><span class="p">,</span> <span class="n">forall</span><span class="p">)</span>
+
+    <span class="n">decoded_samples</span> <span class="o">=</span> <span class="n">binary_decode</span><span class="p">(</span><span class="n">samples</span><span class="p">,</span> <span class="n">binary_encoder</span><span class="p">,</span> <span class="n">inverse_varmap</span><span class="p">)</span>
+    <span class="n">record</span> <span class="o">=</span> <span class="n">dict_to_record</span><span class="p">(</span><span class="n">decoded_samples</span><span class="p">,</span> <span class="n">compiled_model</span><span class="p">)</span>
+
+    <span class="n">evaluation</span> <span class="o">=</span> <span class="n">_evaluate</span><span class="p">(</span><span class="n">decoded_samples</span><span class="p">,</span> <span class="n">compiled_model</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">jm</span><span class="o">.</span><span class="n">SampleSet</span><span class="p">(</span>
+        <span class="n">record</span><span class="o">=</span><span class="n">record</span><span class="p">,</span>
+        <span class="n">evaluation</span><span class="o">=</span><span class="n">evaluation</span><span class="p">,</span>
+        <span class="n">measuring_time</span><span class="o">=</span><span class="n">jm</span><span class="o">.</span><span class="n">MeasuringTime</span><span class="p">(),</span>
+    <span class="p">)</span></div>
+
+
+
+<span class="k">def</span> <span class="nf">_evaluate</span><span class="p">(</span>
+    <span class="n">samples</span><span class="p">:</span> <span class="n">typ</span><span class="o">.</span><span class="n">Iterable</span><span class="p">[</span><span class="nb">dict</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">int</span> <span class="o">|</span> <span class="nb">float</span><span class="p">]],</span>
+    <span class="n">compiled_model</span><span class="p">:</span> <span class="n">jmt</span><span class="o">.</span><span class="n">CompiledInstance</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">jm</span><span class="o">.</span><span class="n">Evaluation</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Evaluate samples against the compiled model.</span>
+
+<span class="sd">    This function calculates objective values, constraint violations,</span>
+<span class="sd">    and penalty values for each sample.</span>
+
+<span class="sd">    Args:</span>
+<span class="sd">        samples: Iterable of sample dictionaries.</span>
+<span class="sd">        compiled_model: Compiled instance of the optimization problem.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        jm.Evaluation: Evaluation results for the samples.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">objectives</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="n">const_violation</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="nb">float</span><span class="p">]]</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="n">label</span><span class="p">:</span> <span class="p">[]</span> <span class="k">for</span> <span class="n">label</span> <span class="ow">in</span> <span class="n">compiled_model</span><span class="o">.</span><span class="n">constraint</span><span class="o">.</span><span class="n">keys</span><span class="p">()</span>
+    <span class="p">}</span>
+    <span class="n">constraint_forall</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="n">constraint_values</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="n">pena_violation</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="nb">float</span><span class="p">]]</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="n">label</span><span class="p">:</span> <span class="p">[]</span> <span class="k">for</span> <span class="n">label</span> <span class="ow">in</span> <span class="n">compiled_model</span><span class="o">.</span><span class="n">penalty</span><span class="o">.</span><span class="n">keys</span><span class="p">()</span>
+    <span class="p">}</span>
+
+    <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">sample</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">samples</span><span class="p">):</span>
+        <span class="n">sample</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">sample</span><span class="p">)</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="n">calc_expr</span><span class="p">(</span><span class="n">sample</span><span class="p">,</span> <span class="n">compiled_model</span><span class="p">)</span>
+        <span class="n">objectives</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">objective</span><span class="p">)</span>
+        <span class="n">constraint_values</span><span class="o">.</span><span class="n">append</span><span class="p">({})</span>
+
+        <span class="c1"># Process constraints</span>
+        <span class="k">for</span> <span class="n">label</span><span class="p">,</span> <span class="n">const_value</span> <span class="ow">in</span> <span class="n">result</span><span class="o">.</span><span class="n">constraint</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="k">if</span> <span class="n">i</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+                <span class="n">constraint_forall</span><span class="p">[</span><span class="n">label</span><span class="p">]</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span>
+                    <span class="p">[</span><span class="nb">list</span><span class="p">(</span><span class="n">subs</span><span class="p">)</span> <span class="k">for</span> <span class="n">subs</span> <span class="ow">in</span> <span class="n">const_value</span><span class="o">.</span><span class="n">keys</span><span class="p">()]</span>
+                <span class="p">)</span>
+            <span class="n">values</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="n">const_value</span><span class="o">.</span><span class="n">values</span><span class="p">()))</span>
+            <span class="n">constraint_condition</span> <span class="o">=</span> <span class="n">compiled_model</span><span class="o">.</span><span class="n">problem</span><span class="o">.</span><span class="n">constraints</span><span class="p">[</span><span class="n">label</span><span class="p">]</span><span class="o">.</span><span class="n">condition</span>
+            <span class="k">if</span> <span class="n">constraint_condition</span><span class="o">.</span><span class="n">kind</span> <span class="o">==</span> <span class="n">subs_expr</span><span class="o">.</span><span class="n">ConstraintKind</span><span class="o">.</span><span class="n">EQUAL</span><span class="p">:</span>
+                <span class="n">values</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">abs</span><span class="p">(</span><span class="n">values</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">feas</span> <span class="o">=</span> <span class="n">values</span> <span class="o">&lt;=</span> <span class="mi">0</span>
+                <span class="n">values</span><span class="p">[</span><span class="n">feas</span><span class="p">]</span> <span class="o">=</span> <span class="mf">0.0</span>
+            <span class="n">const_violation</span><span class="p">[</span><span class="n">label</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">values</span><span class="p">))</span>
+            <span class="n">constraint_values</span><span class="p">[</span><span class="n">i</span><span class="p">][</span><span class="n">label</span><span class="p">]</span> <span class="o">=</span> <span class="n">values</span>
+
+        <span class="c1"># Process penalties</span>
+        <span class="k">for</span> <span class="n">label</span><span class="p">,</span> <span class="n">pena_values</span> <span class="ow">in</span> <span class="n">result</span><span class="o">.</span><span class="n">penalty</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="n">pena_violation</span><span class="p">[</span><span class="n">label</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="nb">sum</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="n">pena_values</span><span class="o">.</span><span class="n">values</span><span class="p">())))</span>
+
+    <span class="k">return</span> <span class="n">jm</span><span class="o">.</span><span class="n">Evaluation</span><span class="p">(</span>
+        <span class="n">objective</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">objectives</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float64</span><span class="p">),</span>
+        <span class="n">constraint_violations</span><span class="o">=</span><span class="n">const_violation</span><span class="p">,</span>
+        <span class="n">constraint_forall</span><span class="o">=</span><span class="n">constraint_forall</span><span class="p">,</span>
+        <span class="n">constraint_values</span><span class="o">=</span><span class="n">constraint_values</span><span class="p">,</span>
+        <span class="n">penalty</span><span class="o">=</span><span class="n">pena_violation</span><span class="p">,</span>
+    <span class="p">)</span>
+</pre></div>
+
+                </article>
+              
+
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+</div>
+                </footer>
+              
+            </div>
+            
+            
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+<div class="bd-footer-content__inner container">
+  
+  <div class="footer-item">
+    
+<p class="component-author">
+By Jij Inc.
+</p>
+
+  </div>
+  
+  <div class="footer-item">
+    
+
+  <p class="copyright">
+    
+      © Copyright 2023.
+      <br/>
+    
+  </p>
+
+  </div>
+  
+  <div class="footer-item">
+    
+  </div>
+  
+  <div class="footer-item">
+    
+  </div>
+  
+</div>
+          </footer>
+        
+
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script src="../../../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
+<script src="../../../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+  <footer class="bd-footer">
+  </footer>
+  </body>
+</html>

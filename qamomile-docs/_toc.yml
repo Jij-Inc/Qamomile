@@ -1,0 +1,18 @@
+# Table of contents
+# Learn more at https://jupyterbook.org/customize/toc.html
+
+format: jb-book
+root: index
+parts:
+  - caption: Getting Started
+    chapters:
+    - file: quickstart
+  - caption: English
+    chapters:
+    - file: en/index
+  - caption: 日本語
+    chapters:
+    - file: ja/index
+  - caption: API Reference
+    chapters:
+    - file: autoapi/index
