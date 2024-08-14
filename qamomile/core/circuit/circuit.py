@@ -95,6 +95,27 @@ class TwoQubitGate(Gate):
     target: int
 
 
+class ParametricTwoQubitGateType(enum.Enum):
+    """Enum class for parametric two qubit gates."""
+
+    CRX = 0  # Controlled-RX gate
+    CRY = 1  # Controlled-RY gate
+    CRZ = 2  # Controlled-RZ gate
+    RXX = 3  # XX rotation gate
+    RYY = 4  # YY rotation gate
+    RZZ = 5  # ZZ rotation gate
+
+
+@dataclasses.dataclass
+class ParametricTwoQubitGate(Gate):
+    """Parameterized two qubit gate class."""
+
+    gate: ParametricTwoQubitGateType
+    control: int
+    target: int
+    parameter: ParameterExpression
+
+
 class ThreeQubitGateType(enum.Enum):
     """Enum class for three qubit gates."""
 
@@ -233,19 +254,55 @@ class QuantumCircuit:
 
     # Methods for adding parametric single-qubit gates
     def rx(self, angle: ParameterExpression, index: int):
-        """Add a parametric RX gate to the quantum circuit."""
+        r"""Add a parametric RX gate to the quantum circuit.
+
+        .. math::
+            RX(\theta) = \exp\left(-i\theta X/2\right)
+            = \begin{bmatrix}
+            \cos(\theta/2) & -i\sin(\theta/2) \\
+            -i\sin(\theta/2) & \cos(\theta/2)
+            \end{bmatrix}
+
+        Args:
+            angle (ParameterExpression): The angle parameter for the gate.
+            index (int): The index of the qubit to apply the gate. 
+        """
         self.add_gate(
             ParametricSingleQubitGate(ParametricSingleQubitGateType.RX, index, angle)
         )
 
     def ry(self, angle: ParameterExpression, index: int):
-        """Add a parametric RY gate to the quantum circuit."""
+        r"""Add a parametric RY gate to the quantum circuit.
+
+        .. math::
+            RY(\theta) = \exp\left(-i\theta Y/2\right)
+            = \begin{bmatrix}
+            \cos(\theta/2) & -\sin(\theta/2) \\
+            \sin(\theta/2) & \cos(\theta/2)
+            \end{bmatrix}
+
+        Args:
+            angle (ParameterExpression): The angle parameter for the gate.
+            index (int): The index of the qubit to apply the gate.
+        """
         self.add_gate(
             ParametricSingleQubitGate(ParametricSingleQubitGateType.RY, index, angle)
         )
 
     def rz(self, angle: ParameterExpression, index: int):
-        """Add a parametric RZ gate to the quantum circuit."""
+        r"""Add a parametric RZ gate to the quantum circuit.
+
+        .. math::
+            RZ(\theta) = \exp\left(-i\theta Z/2\right)
+            = \begin{bmatrix}
+            e^{-i\theta/2} & 0 \\
+            0 & e^{i\theta/2}
+            \end{bmatrix}
+
+        Args:
+            angle (ParameterExpression): The angle parameter for the gate.
+            index (int): The index of the qubit to apply the gate. 
+        """
         self.add_gate(
             ParametricSingleQubitGate(ParametricSingleQubitGateType.RZ, index, angle)
         )
@@ -265,6 +322,66 @@ class QuantumCircuit:
     def cz(self, controled_qubit: int, target_qubit: int):
         """Add a CZ gate to the quantum circuit."""
         self.add_gate(TwoQubitGate(TwoQubitGateType.CZ, controled_qubit, target_qubit))
+
+    def crx(self, angle: ParameterExpression, controled_qubit: int, target_qubit: int):
+        """Add a CRX gate to the quantum circuit."""
+        self.add_gate(
+            ParametricTwoQubitGate(
+                ParametricTwoQubitGateType.CRX, controled_qubit, target_qubit, angle
+            )
+        )
+    
+    def cry(self, angle: ParameterExpression, controled_qubit: int, target_qubit: int):
+        """Add a CRY gate to the quantum circuit."""
+        self.add_gate(
+            ParametricTwoQubitGate(
+                ParametricTwoQubitGateType.CRY, controled_qubit, target_qubit, angle
+            )
+        )
+    
+    def crz(self, angle: ParameterExpression, controled_qubit: int, target_qubit: int):
+        """Add a CRZ gate to the quantum circuit."""
+        self.add_gate(
+            ParametricTwoQubitGate(
+                ParametricTwoQubitGateType.CRZ, controled_qubit, target_qubit, angle
+            )
+        )
+
+    def rxx(self, angle: ParameterExpression, controled_qubit: int, target_qubit: int):
+        r"""Add a RXX gate to the quantum circuit.
+
+        .. math::
+            R_{XX}(\theta) = \exp\left(-i\theta X\otimes X/2\right)
+        """
+        self.add_gate(
+            ParametricTwoQubitGate(
+                ParametricTwoQubitGateType.RXX, controled_qubit, target_qubit, angle
+            )
+        )
+
+    def ryy(self, angle: ParameterExpression, controled_qubit: int, target_qubit: int):
+        r"""Add a RYY gate to the quantum circuit.
+        
+        .. math::
+            R_{YY}(\theta) = \exp\left(-i\theta Y\otimes Y/2\right)
+        """
+        self.add_gate(
+            ParametricTwoQubitGate(
+                ParametricTwoQubitGateType.RYY, controled_qubit, target_qubit, angle
+            )
+        )
+
+    def rzz(self, angle: ParameterExpression, controled_qubit: int, target_qubit: int):
+        r"""Add a RZZ gate to the quantum circuit.
+
+        .. math::
+            R_{ZZ}(\theta) = \exp\left(-i\theta Z\otimes Z/2\right)
+        """
+        self.add_gate(
+            ParametricTwoQubitGate(
+                ParametricTwoQubitGateType.RZZ, controled_qubit, target_qubit, angle
+            )
+        )
 
     # Method for adding three-qubit gate
     def ccx(self, control1: int, control2: int, target: int):

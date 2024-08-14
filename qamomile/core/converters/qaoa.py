@@ -134,6 +134,3 @@ class QAOAConverter(QuantumConverter):
 
         hamiltonian.constant = ising.constant
         return hamiltonian
-
-
-

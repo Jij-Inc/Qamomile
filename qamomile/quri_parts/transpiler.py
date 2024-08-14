@@ -97,6 +97,10 @@ class QuriPartsTranspiler(
                 )
             elif isinstance(gate, qm_c.TwoQubitGate):
                 qp_circuit = _two_qubit_gate(gate, qp_circuit)
+            elif isinstance(gate, qm_c.ParametricTwoQubitGate):
+                qp_circuit = _parametric_two_qubit_gate(
+                    gate, qp_circuit, parameters=param_mapping
+                )
             elif isinstance(gate, qm_c.ThreeQubitGate):
                 qp_circuit = _three_qubit_gate(gate, qp_circuit)
             elif isinstance(gate, qm_c.Operator):
@@ -205,6 +209,45 @@ def _two_qubit_gate(
         qm_c.TwoQubitGateType.CZ: qp_circuit.add_CZ_gate,
     }
     gate_map[gate.gate](gate.control, gate.target)
+    return qp_circuit
+
+
+def _parametric_two_qubit_gate(
+    gate: qm_c.ParametricTwoQubitGate,
+    qp_circuit: qp_c.LinearMappedUnboundParametricQuantumCircuit,
+    parameters: dict[qm_c.Parameter, qp_c.Parameter],
+) -> qp_c.LinearMappedUnboundParametricQuantumCircuit:
+    """Apply a parametric two qubit gate to the Qiskit circuit."""
+    angle = convert_parameter(gate.parameter, parameters=parameters)
+    match gate.gate:
+        # case qm_c.ParametricTwoQubitGateType.CRX:
+        #     qk_circuit.crx(angle, gate.control, gate.target)
+        # case qm_c.ParametricTwoQubitGateType.CRY:
+        #     qk_circuit.cry(angle, gate.control, gate.target)
+        # case qm_c.ParametricTwoQubitGateType.CRZ:
+        #     qk_circuit.crz(angle, gate.control, gate.target)
+        case qm_c.ParametricTwoQubitGateType.RXX:
+            qp_circuit.add_ParametricPauliRotation_gate(
+                [gate.control, gate.target],
+                pauli_ids=[0, 0],
+                angle=angle
+            )
+        case qm_c.ParametricTwoQubitGateType.RYY:
+            qp_circuit.add_ParametricPauliRotation_gate(
+                [gate.control, gate.target],
+                pauli_ids=[1, 1],
+                angle=angle
+            )
+        case qm_c.ParametricTwoQubitGateType.RZZ:
+            qp_circuit.add_ParametricPauliRotation_gate(
+                [gate.control, gate.target],
+                pauli_ids=[2, 2],
+                angle=angle
+            )
+        case _:
+            raise QamomileQuriPartsTranspileError(
+                f"Unsupported parametric two qubit gate: {gate.gate}"
+            )
     return qp_circuit
 
 

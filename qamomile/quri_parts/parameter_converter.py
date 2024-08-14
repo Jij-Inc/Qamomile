@@ -67,5 +67,3 @@ def convert_parameter(
                 raise ValueError(f"Unsupported binary operation: {param.kind}")
     else:
         raise ValueError(f"Unsupported parameter type: {type(param)}")
-    
-

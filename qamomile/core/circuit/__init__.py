@@ -39,6 +39,8 @@ from .circuit import (
     ParametricSingleQubitGateType,
     TwoQubitGateType,
     ThreeQubitGateType,
+    ParametricTwoQubitGate,
+    ParametricTwoQubitGateType,
     MeasurementGate,
 )
 
@@ -62,4 +64,6 @@ __all__ = [
     "BinaryOperator",
     "Value",
     "BinaryOpeKind",
+    "ParametricTwoQubitGate",
+    "ParametricTwoQubitGateType",
 ]

@@ -100,6 +100,10 @@ class QiskitTranspiler(QuantumSDKTranspiler[qk_primitives.BitArray]):
                 )
             elif isinstance(gate, qm_c.TwoQubitGate):
                 qiskit_circuit = _two_qubit_gate(gate, qiskit_circuit)
+            elif isinstance(gate, qm_c.ParametricTwoQubitGate):
+                qiskit_circuit = _parametric_two_qubit_gate(
+                    gate, qiskit_circuit, parameters=param_mapping
+                )
             elif isinstance(gate, qm_c.ThreeQubitGate):
                 qiskit_circuit = _three_qubit_gate(gate, qiskit_circuit)
             elif isinstance(gate, qm_c.Operator):
@@ -205,6 +209,31 @@ def _two_qubit_gate(
         qm_c.TwoQubitGateType.CZ: qk_circuit.cz,
     }
     gate_map[gate.gate](gate.control, gate.target)
+    return qk_circuit
+
+
+def _parametric_two_qubit_gate(
+    gate: qm_c.ParametricTwoQubitGate,
+    qk_circuit: qiskit.QuantumCircuit,
+    parameters: Dict[qm_c.Parameter, qiskit.circuit.Parameter],
+) -> qiskit.QuantumCircuit:
+    """Apply a parametric two qubit gate to the Qiskit circuit."""
+    angle = convert_parameter(gate.parameter, parameters=parameters)
+    match gate.gate:
+        case qm_c.ParametricTwoQubitGateType.CRX:
+            qk_circuit.crx(angle, gate.control, gate.target)
+        case qm_c.ParametricTwoQubitGateType.CRY:
+            qk_circuit.cry(angle, gate.control, gate.target)
+        case qm_c.ParametricTwoQubitGateType.CRZ:
+            qk_circuit.crz(angle, gate.control, gate.target)
+        case qm_c.ParametricTwoQubitGateType.RXX:
+            qk_circuit.rxx(angle, gate.control, gate.target)
+        case qm_c.ParametricTwoQubitGateType.RYY:
+            qk_circuit.ryy(angle, gate.control, gate.target)
+        case qm_c.ParametricTwoQubitGateType.RZZ:
+            qk_circuit.rzz(angle, gate.control, gate.target)
+        case _:
+            raise QamomileQiskitTranspileError(f"Unsupported parametric two qubit gate: {gate.gate}")
     return qk_circuit
 
 
