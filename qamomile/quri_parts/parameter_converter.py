@@ -47,6 +47,8 @@ def convert_parameter(
                 for r_param, r_value in right.items():
                     left[r_param] = left.get(r_param, 0.0) + r_value
                 left[qp_c.CONST] = left_const + right_const
+                if left[qp_c.CONST] == 0:
+                    left.pop(qp_c.CONST)
                 return left
             case qm_c.BinaryOpeKind.MUL:
                 if len(left) > 0 and len(right) > 0:
@@ -56,12 +58,16 @@ def convert_parameter(
                 else:
                     param_expr = {param: value * left_const for param, value in right.items()}
                 param_expr[qp_c.CONST] = left_const * right_const
+                if param_expr[qp_c.CONST] == 0:
+                    param_expr.pop(qp_c.CONST)
                 return param_expr
             case qm_c.BinaryOpeKind.DIV:
                 if len(right) > 0:
                     raise ValueError("QuriParts does not support non-linear parameter expression.")
                 param_expr = {param: value / right_const for param, value in left.items()}
                 param_expr[qp_c.CONST] = left_const / right_const
+                if param_expr[qp_c.CONST] == 0:
+                    param_expr.pop(qp_c.CONST)
                 return param_expr
             case _:
                 raise ValueError(f"Unsupported binary operation: {param.kind}")

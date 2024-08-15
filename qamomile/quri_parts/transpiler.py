@@ -60,16 +60,21 @@ class QuriPartsTranspiler(
         """
         try:
             parameters = qamomile_circuit.get_parameters()
+            qp_circuit = qp_c.LinearMappedUnboundParametricQuantumCircuit(
+                qamomile_circuit.num_qubits, qamomile_circuit.num_clbits
+            )
             param_mapping = {
-                param: qp_c.Parameter(param.name) for param in parameters
+                param: qp_circuit.add_parameter(param.name)
+                for param in parameters
             }
-            return self._circuit_convert(qamomile_circuit, param_mapping)
+            return self._circuit_convert(qamomile_circuit, qp_circuit, param_mapping)
         except Exception as e:
             raise QamomileQuriPartsTranspileError(f"Error converting circuit: {str(e)}")
 
     def _circuit_convert(
         self,
         qamomile_circuit: qm_c.QuantumCircuit,
+        qp_circuit: qp_c.LinearMappedUnboundParametricQuantumCircuit,
         param_mapping: dict[qm_c.Parameter, qp_c.Parameter],
     ) -> qp_c.LinearMappedUnboundParametricQuantumCircuit:
         """
@@ -77,6 +82,7 @@ class QuriPartsTranspiler(
 
         Args:
             qamomile_circuit (qm_c.QuantumCircuit): The Qamomile circuit to convert.
+            qp_circuit (qp_c.LinearMappedUnboundParametricQuantumCircuit): The QuriParts circuit.
             param_mapping (Dict[qm_c.Parameter, qp_c.Parameter]): Mapping of parameters.
 
         Returns:
@@ -85,9 +91,7 @@ class QuriPartsTranspiler(
         Raises:
             QamomileQuriPartsTranspileError: If an unsupported gate type is encountered.
         """
-        qp_circuit = qp_c.LinearMappedUnboundParametricQuantumCircuit(
-            qamomile_circuit.num_qubits, qamomile_circuit.num_clbits
-        )
+
         for gate in qamomile_circuit.gates:
             if isinstance(gate, qm_c.SingleQubitGate):
                 qp_circuit = _single_qubit_gate(gate, qp_circuit)
@@ -104,7 +108,11 @@ class QuriPartsTranspiler(
             elif isinstance(gate, qm_c.ThreeQubitGate):
                 qp_circuit = _three_qubit_gate(gate, qp_circuit)
             elif isinstance(gate, qm_c.Operator):
-                qp_subcircuit = self._circuit_convert(gate.circuit, param_mapping)
+                qp_subcircuit = self._circuit_convert(
+                                    gate.circuit,
+                                    qp_circuit,
+                                    param_mapping
+                                )
                 qp_circuit.extend(qp_subcircuit)
             elif isinstance(gate, qm_c.MeasurementGate):
                 qp_circuit.measure(gate.qubit, gate.cbit)

@@ -452,6 +452,8 @@ class QuantumCircuit:
         for gate in self.gates:
             if isinstance(gate, ParametricSingleQubitGate):
                 parameters.extend(gate.parameter.get_parameters())
+            elif isinstance(gate, ParametricTwoQubitGate):
+                parameters.extend(gate.parameter.get_parameters())
             elif isinstance(gate, Operator):
                 parameters.extend(gate.circuit.get_parameters())
         return set(parameters)
