@@ -108,12 +108,11 @@ class QuriPartsTranspiler(
             elif isinstance(gate, qm_c.ThreeQubitGate):
                 qp_circuit = _three_qubit_gate(gate, qp_circuit)
             elif isinstance(gate, qm_c.Operator):
-                qp_subcircuit = self._circuit_convert(
+                qp_circuit = self._circuit_convert(
                                     gate.circuit,
                                     qp_circuit,
                                     param_mapping
                                 )
-                qp_circuit.extend(qp_subcircuit)
             elif isinstance(gate, qm_c.MeasurementGate):
                 qp_circuit.measure(gate.qubit, gate.cbit)
             else:

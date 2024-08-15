@@ -1,82 +1,61 @@
-# Qamomile
-## What is Qamomile
-Qamomile is a library that supports running quantum optimization algorithms with various quantum computation libraries.
-Currently, Qamomile supports two quantum computation libraries, [Qiskit](https://www.ibm.com/quantum/qiskit) and [QURI-Part](https://quri-parts.qunasys.com/).
+# Welcome to Qamomile
 
-**QAMOMILE** stands for "**Q**uantum **A**lgorithm for **M**athematical **O**pti**M**ization with j**I**jmode**L**ing **E**xtension". It transforms mathematical models written by [JijModeling](https://www.documentation.jijzept.com/docs/jijmodeling) into Ising Hamiltonians and various other encoded Hamiltonians such as Quantum Random Access Optimization.
+Qamomile is a powerful SDK designed for quantum optimization algorithms, specializing in the conversion of mathematical models into quantum circuits. It serves as a bridge between classical optimization problems and quantum computing solutions.
 
+## Key Features
 
-![](./qamomile_workflow.png)
+- **Versatile Compatibility**: Supports leading quantum circuit SDKs including Qiskit and Quri-parts.
+- **Advanced Algorithm Support**: Goes beyond QAOA to include sophisticated encoding and algorithms like QRAO.
+- **Flexible Model Conversion**: Utilizes JijModeling for describing mathematical models and converting them to various quantum circuit SDKs.
+- **Intermediate Representation**: Capable of representing both Hamiltonians and quantum circuits as intermediate forms.
+- **Standalone Functionality**: Can implement quantum circuits independently, similar to other quantum circuit SDKs.
 
+## Quick Start
 
-## Installation
-The installation for qiskit is 
-```bash
-# qamomile for qiskit
-pip install "qamomile[qiskit]"
-```
+To get started with Qamomile, follow these simple steps:
 
-The installation for QURI Parts is
-```bash
-# qamomile for quri-parts
-pip install "qamomile[quri-parts]"
-```
+1. Install Qamomile:
+   ```
+   pip install qamomile
+   ```
 
-## Quickstart
-In the following example, QAOA for the graph colouring problem is implemented using Qamomile.
-```python
-import jijmodeling as jm
-import jijmodeling_transpiler.core as jtc
-import qamomile.qiskit as qamo_qk
+2. Import the necessary modules:
+   ```python
+   from qamomile import QamomileModel, QAOACircuit
+   ```
 
-from qiskit.primitives import Estimator, Sampler
-from qiskit.algorithms.minimum_eigensolvers import QAOA
-from qiskit.algorithms.optimizers import COBYLA
+3. Create your quantum optimization model:
+   ```python
+   model = QamomileModel()
+   # Define your optimization problem here
+   ```
 
-import networkx as nx
+4. Generate a quantum circuit:
+   ```python
+   circuit = QAOACircuit(model)
+   ```
 
-# Create Mathematical Model
-# define variables
-V = jm.Placeholder("V")
-E = jm.Placeholder("E", ndim=2)
-N = jm.Placeholder("N")
-x = jm.BinaryVar("x", shape=(V, N))
-n = jm.Element("i", belong_to=(0, N))
-v = jm.Element("v", belong_to=(0, V))
-e = jm.Element("e", belong_to=E)
-# set problem
-problem = jm.Problem("Graph Coloring")
-# set one-hot constraint that each vertex has only one color
+5. Run your quantum optimization algorithm:
+   ```python
+   result = circuit.run()
+   ```
 
-problem += jm.Constraint("one-color", x[v, :].sum() == 1, forall=v)
-# set objective function: minimize edges whose vertices connected by edges are the same color
-problem += jm.sum([n, e], x[e[0], n] * x[e[1], n])
+## Learn More
 
-# Create Problem Instance
-G = nx.Graph()
-G.add_nodes_from([0, 1, 2, 3, 4])
-G.add_edges_from([(0, 1), (1, 2), (1, 3), (2, 3), (3, 4), (2, 4)])
-inst_E = [list(edge) for edge in G.edges]
-color_num = 3
-num_nodes = G.number_of_nodes()
-instance_data = {"V": num_nodes, "N": color_num, "E": inst_E}
-num_qubits = num_nodes * color_num
+Explore our documentation to dive deeper into Qamomile's capabilities:
 
-# Transpile mathematical model to Qiskit Ising Hamiltonian
-compiled_instance = jtc.compile_model(problem, instance_data)
-qaoa_builder = qamo_qk.qaoa.transpile_to_qaoa_ansatz(compiled_instance,normalize=False,relax_method=jtc.pubo.RelaxationMethod.SquaredPenalty)
-hamiltonian, _ = qaoa_builder.get_hamiltonian(multipliers={"one-color": 1})
+- [Installation Guide](installation.md): Detailed instructions for setting up Qamomile.
+- [User Guide](user_guide/index.md): Comprehensive information on using Qamomile effectively.
+- [API Reference](api/index.md): Complete documentation of Qamomile's API.
+- [Tutorials](tutorials/index.md): Step-by-step guides and examples to get you started.
+- [Advanced Topics](advanced/index.md): Explore advanced features and optimization techniques.
 
-# Run QAOA by Qiskit
-sampler = Sampler()
-optimizer = COBYLA()
-qaoa = QAOA(sampler, optimizer, reps=1)
-result = qaoa.compute_minimum_eigenvalue(hamiltonian)
+## Contributing
 
-# Analyze Result
-sampleset = qaoa_builder.decode_from_quasi_dist(result.eigenstate)
-sampleset.feasible()
-```
+We welcome contributions from the community! If you're interested in improving Qamomile, please check out our [Contribution Guidelines](contributing.md).
 
-## Community
-Join our [discord channel](https://discord.gg/Km5dKF9JjG)!
+## Support
+
+If you encounter any issues or have questions, please file an issue on our [GitHub repository](https://github.com/your-github-username/qamomile) or join our community discussion forum.
+
+Welcome aboard, and happy quantum optimizing with Qamomile!

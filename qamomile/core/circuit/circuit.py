@@ -161,7 +161,7 @@ class QuantumCircuit:
     def __init__(
         self,
         num_qubits: int,
-        num_clbits: typ.Optional[int] = None,
+        num_clbits: int = 0,
         name: typ.Optional[str] = None,
     ) -> None:
         """
@@ -172,10 +172,7 @@ class QuantumCircuit:
         """
         self.gates = []
         self.num_qubits = num_qubits
-        if num_clbits is None:
-            self.num_clbits = num_qubits
-        else:
-            self.num_clbits = num_clbits
+        self.num_clbits = num_clbits
 
         self.name = name
 

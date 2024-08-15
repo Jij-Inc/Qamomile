@@ -1,11 +1,6 @@
 """
 This module provides classes for representing and manipulating bit samples
 from quantum computations in Qamomile.
-
-Classes:
-    BitsSample: Represents a single bit array sample with its occurrence count.
-    BitsSampleSet: Represents a set of bit array samples and provides methods
-                   for conversions and analysis.
 """
 
 from __future__ import annotations

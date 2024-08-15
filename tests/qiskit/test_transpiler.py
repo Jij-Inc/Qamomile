@@ -44,7 +44,7 @@ def test_transpile_parametric_circuit(transpiler):
 
 
 def test_transpile_complex_circuit(transpiler):
-    qc = QamomileCircuit(3)
+    qc = QamomileCircuit(3, 3)
     qc.h(0)
     qc.cx(0, 1)
     qc.ccx(0, 1, 2)
