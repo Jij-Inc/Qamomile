@@ -9,6 +9,7 @@ parts:
     - file: quickstart
   - caption: Tutorial
     chapters:
+    - file: tutorial/index
     - file: tutorial/alternating_ansatz_graph_coloring
   - caption: API Reference
     chapters:

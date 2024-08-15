@@ -12,42 +12,15 @@ Qamomile is a powerful SDK designed for quantum optimization algorithms, special
 
 ## Quick Start
 
-To get started with Qamomile, follow these simple steps:
-
-1. Install Qamomile:
-   ```
-   pip install qamomile
-   ```
-
-2. Import the necessary modules:
-   ```python
-   from qamomile import QamomileModel, QAOACircuit
-   ```
-
-3. Create your quantum optimization model:
-   ```python
-   model = QamomileModel()
-   # Define your optimization problem here
-   ```
-
-4. Generate a quantum circuit:
-   ```python
-   circuit = QAOACircuit(model)
-   ```
-
-5. Run your quantum optimization algorithm:
-   ```python
-   result = circuit.run()
-   ```
+To get started with Qamomile, please see the [Quick Start Guide](quickstart.ipynb) for installation instructions and a simple example.
 
 ## Learn More
 
 Explore our documentation to dive deeper into Qamomile's capabilities:
 
-- [Installation Guide](installation.md): Detailed instructions for setting up Qamomile.
-- [User Guide](user_guide/index.md): Comprehensive information on using Qamomile effectively.
+- [Quick Start Guide](quickstart.ipynb): Installation instructions and a simple example to get you started.
 - [API Reference](api/index.md): Complete documentation of Qamomile's API.
-- [Tutorials](tutorials/index.md): Step-by-step guides and examples to get you started.
+- [Tutorials](tutorial/index.md): Step-by-step guides and examples to get you started.
 - [Advanced Topics](advanced/index.md): Explore advanced features and optimization techniques.
 
 ## Contributing
@@ -56,6 +29,6 @@ We welcome contributions from the community! If you're interested in improving Q
 
 ## Support
 
-If you encounter any issues or have questions, please file an issue on our [GitHub repository](https://github.com/your-github-username/qamomile) or join our community discussion forum.
+If you encounter any issues or have questions, please file an issue on our [GitHub repository](https://github.com/Jij-Inc/Qamomile) or join our community discussion forum.
 
 Welcome aboard, and happy quantum optimizing with Qamomile!
