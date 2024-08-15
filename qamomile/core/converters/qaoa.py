@@ -71,9 +71,7 @@ class QAOAConverter(QuantumConverter):
         # Apply CNOT and RZ gates for quadratic terms
         for (i, j), Jij in ising.quad.items():
             if Jij != 0:
-                cost.cnot(i, j)
-                cost.rz(2 * Jij * beta, j)
-                cost.cnot(i, j)
+                cost.rzz(2 * Jij * beta, i, j)
 
         return cost
 
