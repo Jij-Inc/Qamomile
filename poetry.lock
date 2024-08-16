@@ -5281,4 +5281,4 @@ quri-parts = ["quri-parts-qulacs"]
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.10,<3.12"
-content-hash = "374ea05449f377e1949bb6247ca57c4d996d138bd4f436c517fd6497dacd0e06"
+content-hash = "359af624dcbfebd81323c6c8f77c5d270e161359452b5c406ecdf65f744393f9"
