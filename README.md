@@ -1,117 +1,83 @@
 # Qamomile
 
-`Qamomile` is a transpiler from model written in [JijModeling]() to quantum optimization algorithms on variaous quantum platform.
+[![PyPI version](https://badge.fury.io/py/qamomile.svg)](https://badge.fury.io/py/qamomile)
+![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)
 
-- [Qiskit](#qiskit)
-- [QURI-Parts](#quri-parts) 
+Qamomile is a powerful SDK designed for quantum optimization algorithms, specializing in the conversion of mathematical models into quantum circuits. It serves as a bridge between classical optimization problems and quantum computing solutions.
 
 Documentation: [https://jij-inc.github.io/Qamomile/](https://jij-inc.github.io/Qamomile/)
 
-```mermaid
-graph LR
-    JijModeling --> Instance
-    subgraph JijModelingTranspiler
-        Instance
-    end
-    
-    subgraph Qiskit
-        QSKT[Hamiltonian]
-        QSKT --> QSKTCIRC[Q Circuit] --> QSKTR[Results]
-    end
-    subgraph Quri-Parts
-        QP[Hamiltonian]
-        QP --> QPCIRC[Q Circuit] --> QURIR[Results]
-    end
- 
-    
+## Features
 
-    subgraph Qamomile
-        Instance --> Encode
-        Encode{Encode}
-        Encode --> QH[Quantum Hamiltonian]
-    end
+- **Versatile Compatibility**: Supports leading quantum circuit SDKs including Qiskit and QuriParts.
+- **Advanced Algorithm Support**: Implements sophisticated encoding and algorithms like QAOA and QRAO.
+- **Flexible Model Conversion**: Utilizes JijModeling for describing mathematical models and converting them to various quantum circuit SDKs.
+- **Intermediate Representation**: Capable of representing both Hamiltonians and quantum circuits as intermediate forms.
+- **Standalone Functionality**: Can implement quantum circuits independently, similar to other quantum circuit SDKs.
 
-    QH --> QSKT
-    QH --> QP
-    
-    subgraph Qamomile
-        QSKTR --> Decode{Decode}
-        QURIR --> Decode
-    end
-    Decode --> Solutions
-```
+## Installation
 
-## Qiskit
-
-[Qiskit](https://qiskit.org/) is an open-source SDK for working with quantum computers at the level of circuits, algorithms, and application modules.
-
-### Installation
+To install Qamomile, use pip:
 
 ```bash
-pip install "qamomile[qiskit]"
+pip install qamomile
 ```
 
-### Quantum Approximate Optimization Algorithm (QAOA)
+For optional dependencies:
+
+```bash
+pip install qamomile[qiskit]  # For Qiskit integration
+pip install qamomile[quri-parts]  # For QuriParts integration
+```
+
+## Quick Start
+
+Here's a simple example of how to use Qamomile with QAOA:
 
 ```python
 import jijmodeling as jm
 import jijmodeling_transpiler as jmt
-import qamomile as qamo
+from qamomile.core.qaoa import QAOAConverter
+from qamomile.qiskit.transpiler import QiskitTranspiler
 
-# Create model
-problem = jm.Problem("model")
-...  # Modeling ...
+# Define QUBO problem
+Q = jm.Placeholder("Q", ndim=2)
+n = Q.len_at(0, latex="n")
+x = jm.BinaryVar("x", shape=(n,))
+problem = jm.Problem("qubo")
+i, j = jm.Element("i", n), jm.Element("j", n)
+problem += jm.sum([i, j], Q[i, j] * x[i] * x[j])
 
-# Compile
-compiled_instance = jmt.compile_model(problem, instance_data, fixed_vars)
+# Prepare instance data
+instance_data = {"Q": [[0.1, 0.2, -0.1], [0.2, 0.3, 0.4], [-0.1, 0.4, 0.0]]}
 
-# Transpile to QAOA of qikit
-qaoa_builder = qamo.qiskit.transpile_to_qaoa(compiled_instance)
+# Compile the problem
+compiled_instance = jmt.compile_model(problem, instance_data)
+
+# Create QAOA converter
+qaoa_converter = QAOAConverter(compiled_instance)
+
+# Create Qiskit transpiler
+qiskit_transpiler = QiskitTranspiler()
+
+# Get QAOA circuit
+p = 2  # Number of QAOA layers
+qaoa_circuit = qaoa_converter.get_qaoa_ansatz(p)
+
+# Convert to Qiskit circuit
+qiskit_circuit = qiskit_transpiler.transpile_circuit(qaoa_circuit)
+
+# ... (continue with quantum execution and result processing)
 ```
 
+## Documentation
 
-## QURI-Parts
-
-[QURI Parts](https://quri-parts.qunasys.com/) is an open source library suite for creating and executing quantum algorithms on various quantum computers and simulators.
-
-```bash
-pip install "qamomile[quri-parts]"
-```
-
-### Quantum Approximate Optimization Algorithm (QAOA)
-
-```python
-import jijmodeling as jm
-import jijmodeling_transpiler as jmt
-import qamomile as qamo
-
-# Create model
-problem = jm.Problem("model")
-...  # Modeling ...
-
-# Compile
-compiled_instance = jmt.compile_model(problem, instance_data, fixed_vars)
-
-# Transpile to QAOA of qikit
-qaoa_builder = qamo.quri.transpile_to_qaoa(compiled_instance)
-```
-
+For more detailed information, please refer to our [documentation](https://qamomile.readthedocs.io).
 
 ## Contributing
 
-### Setup
+We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for more details.
 
-```bash
-pip install poetry
-poetry install --all-extras
-poetry shell
-```
+## License
 
-### Test
-
-```bash
-pytest tests
-```
-
-
-
+Qamomile is released under the [Apache 2.0 License](LICENSE).
