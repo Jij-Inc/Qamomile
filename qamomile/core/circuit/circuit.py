@@ -11,6 +11,7 @@ Key components:
 - SingleQubitGate: Represents unparameterized single-qubit gates (H, X, Y, Z, S, T)
 - ParametricSingleQubitGate: Represents parameterized single-qubit gates (RX, RY, RZ)
 - TwoQubitGate: Represents two-qubit gates (CNOT, CZ)
+- ParametricTwoQubitGate: Represents parametric two-qubit gates (CRX, CRY, CRZ, RXX, RYY, RZZ)
 - ThreeQubitGate: Represents three-qubit gates (Toffoli/CCX)
 - Operator: Represents a sub-circuit that can be added as a gate
 - QuantumCircuit: Main class for constructing quantum circuits
@@ -344,7 +345,7 @@ class QuantumCircuit:
             )
         )
 
-    def rxx(self, angle: ParameterExpression, controled_qubit: int, target_qubit: int):
+    def rxx(self, angle: ParameterExpression, qubit1: int, qubit2: int):
         r"""Add a RXX gate to the quantum circuit.
 
         .. math::
@@ -352,11 +353,11 @@ class QuantumCircuit:
         """
         self.add_gate(
             ParametricTwoQubitGate(
-                ParametricTwoQubitGateType.RXX, controled_qubit, target_qubit, angle
+                ParametricTwoQubitGateType.RXX, qubit1, qubit2, angle
             )
         )
 
-    def ryy(self, angle: ParameterExpression, controled_qubit: int, target_qubit: int):
+    def ryy(self, angle: ParameterExpression, qubit1: int, qubit2: int):
         r"""Add a RYY gate to the quantum circuit.
         
         .. math::
@@ -364,11 +365,11 @@ class QuantumCircuit:
         """
         self.add_gate(
             ParametricTwoQubitGate(
-                ParametricTwoQubitGateType.RYY, controled_qubit, target_qubit, angle
+                ParametricTwoQubitGateType.RYY, qubit1, qubit2, angle
             )
         )
 
-    def rzz(self, angle: ParameterExpression, controled_qubit: int, target_qubit: int):
+    def rzz(self, angle: ParameterExpression, qubit1: int, qubit2: int):
         r"""Add a RZZ gate to the quantum circuit.
 
         .. math::
@@ -376,7 +377,7 @@ class QuantumCircuit:
         """
         self.add_gate(
             ParametricTwoQubitGate(
-                ParametricTwoQubitGateType.RZZ, controled_qubit, target_qubit, angle
+                ParametricTwoQubitGateType.RZZ, qubit1, qubit2, angle
             )
         )
 
