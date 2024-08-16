@@ -1,5 +1,6 @@
 from __future__ import annotations
 import typing as typ
+import numpy as np
 from qamomile.core.converters.converter import QuantumConverter
 from qamomile.core.ising_qubo import IsingModel
 import qamomile.core.operator as qm_o
@@ -46,7 +47,7 @@ def qrac31_encode_ising(
             continue
 
         pauli = encoded_ope[idx]
-        hamiltonian.add_term((pauli,), coeff)
+        hamiltonian.add_term((pauli,), np.sqrt(3) * coeff)
 
     # create Pauli terms
     for (i, j), coeff in ising.quad.items():
@@ -61,7 +62,7 @@ def qrac31_encode_ising(
 
         pauli_j = encoded_ope[j]
 
-        hamiltonian.add_term((pauli_i, pauli_j), coeff)
+        hamiltonian.add_term((pauli_i, pauli_j), 3 * coeff)
 
     return hamiltonian, encoded_ope
 
