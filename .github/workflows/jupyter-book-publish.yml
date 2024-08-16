@@ -15,7 +15,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  build_deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -32,13 +35,7 @@ jobs:
         run: |
           cd docs
           jupyter-book build .
-    
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest   
-    steps:
+          cd ..
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact
