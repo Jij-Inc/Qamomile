@@ -21,7 +21,6 @@ jobs:
         pip install poetry
         poetry install --all-extras
         pip install -U jupyter-book
-        pip install -r requirements.txt
 
     - name: Build the book
       run: |
