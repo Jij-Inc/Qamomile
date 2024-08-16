@@ -31,6 +31,7 @@ jobs:
         run: |
           pip install -U jupyter-book
           pip install sphinx-autoapi
+          pip install -U qamomile
       - name: Build the book
         run: |
           cd docs
