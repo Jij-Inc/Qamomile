@@ -36,6 +36,7 @@ ruff = "^0.5.6"
 [tool.poetry.group.doc.dependencies]
 jupyter-book = "^1.0.2"
 sphinx-autoapi = "^3.2.1"
+networkx = "^3.3"
 
 [tool.poetry.extras]
 qiskit = ["qiskit"]
