@@ -5,33 +5,10 @@ from qamomile.core.converters.converter import QuantumConverter
 from qamomile.core.ising_qubo import IsingModel
 import qamomile.core.operator as qm_o
 from .graph_coloring import greedy_graph_coloring, check_linear_term
+from .qrao31 import color_group_to_qrac_encode
 
 
-def color_group_to_qrac_encode(
-    color_group: dict[int, list[int]]
-) -> dict[int, qm_o.PauliOperator]:
-    """qrac encode
-
-    Args:
-        color_group (dict[int, list[int]]): key is color (qubit's index). value is list of bit's index.
-
-    Returns:
-        dict[int, tuple[int, Pauli]]: key is bit's index. value is tuple of qubit's index and Pauli operator kind.
-
-    Examples:
-        >>> color_group = {0: [0, 1, 2], 1: [3, 4], 2: [6,]}
-        >>> color_group_for_qrac_encode(color_group)
-        {0: (0, <Pauli.Z: 3>), 1: (0, <Pauli.X: 1>), 2: (0, <Pauli.Y: 2>), 3: (1, <Pauli.Z: 3>), 4: (1, <Pauli.X: 1>), 6: (2, <Pauli.Z: 3>)}
-
-    """
-    qrac31 = {}
-    for color, group in color_group.items():
-        for ope_idx, bit_index in enumerate(group):
-            qrac31[bit_index] = qm_o.PauliOperator(qm_o.Pauli(ope_idx), color)
-    return qrac31
-
-
-def qrac31_encode_ising(
+def qrac21_encode_ising(
     ising: IsingModel, color_group: dict[int, list[int]]
 ) -> tuple[qm_o.Hamiltonian, dict[int, qm_o.PauliOperator]]:
     encoded_ope = color_group_to_qrac_encode(color_group)
@@ -47,7 +24,7 @@ def qrac31_encode_ising(
             continue
 
         pauli = encoded_ope[idx]
-        hamiltonian.add_term((pauli,), np.sqrt(3) * coeff)
+        hamiltonian.add_term((pauli,), np.sqrt(2) * coeff)
 
     # create Pauli terms
     for (i, j), coeff in ising.quad.items():
@@ -62,14 +39,14 @@ def qrac31_encode_ising(
 
         pauli_j = encoded_ope[j]
 
-        hamiltonian.add_term((pauli_i, pauli_j), 3 * coeff)
+        hamiltonian.add_term((pauli_i, pauli_j), 2 * coeff)
 
     return hamiltonian, encoded_ope
 
 
-class QRAC31Converter(QuantumConverter):
+class QRAC21Converter(QuantumConverter):
 
-    max_color_group_size = 3
+    max_color_group_size = 2
 
     def ising_encode(
         self,
@@ -91,14 +68,14 @@ class QRAC31Converter(QuantumConverter):
 
     def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
         """
-        Construct the cost Hamiltonian for QRAC31.
+        Construct the cost Hamiltonian for QRAC21.
 
         Returns:
             qm_o.Hamiltonian: The cost Hamiltonian.
         """
         ising = self.get_ising()
 
-        hamiltonian, pauli_encoding = qrac31_encode_ising(ising, self.color_group)
+        hamiltonian, pauli_encoding = qrac21_encode_ising(ising, self.color_group)
         self.pauli_encoding = pauli_encoding
         return hamiltonian
 
