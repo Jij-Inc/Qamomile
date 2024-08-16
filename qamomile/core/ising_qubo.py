@@ -10,8 +10,10 @@ class IsingModel:
     index_map: typ.Optional[dict[int, int]] = None
 
     def num_bits(self) -> int:
-        num_bits = max(self.linear.keys())
-        num_bits = max(num_bits, max(max(pair) for pair in self.quad.keys()))
+        num_bits = max(self.linear.keys(), default=-1)
+        num_bits = max(
+            num_bits, max((max(pair) for pair in self.quad.keys()), default=num_bits)
+        )
         return num_bits + 1
 
     def calc_energy(self, state: list[int]) -> float:
