@@ -17,11 +17,12 @@ packages = [
 ]
 
 [tool.poetry.dependencies]
-python = ">=3.9.8,<3.11"
+python = ">=3.10,<3.12"
 jijmodeling-transpiler = ">=0.6.0rc3"
-qiskit = {version = ">=0.44.0", extras = ["qiskit"]}
 quri-parts-qulacs = {version = "*", extras = ["quri-parts"]}
 black = "^23.11.0"
+quri-parts-circuit = "^0.19.0"
+qiskit = "^1.1.1"
 
 
 [tool.poetry.group.dev.dependencies]
@@ -29,6 +30,12 @@ jupyter = "^1.0.0"
 matplotlib = "^3.7.1"
 pylatexenc = "^2.10"
 pytest = "^7.3.2"
+ruff = "^0.5.6"
+
+
+[tool.poetry.group.doc.dependencies]
+jupyter-book = "^1.0.2"
+sphinx-autoapi = "^3.2.1"
 
 [tool.poetry.extras]
 qiskit = ["qiskit"]
