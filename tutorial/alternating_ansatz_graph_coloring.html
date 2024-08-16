@@ -1,0 +1,1420 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Quantum Alternating Operator Ansatz for Graph Coloring Problem with Qiskit and Quri-Parts &#8212; Qamomile Documentation</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+
+  
+  <link href="../_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-regular-400.woff2" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=fa44fd50" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/sphinx-book-theme.css?v=a3416100" />
+    <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=13237357" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/mystnb.4510f1fc1dee50b3e5859aac5469c37c29e427902b24a333a5f9fcb2f0b3ac41.css" />
+    <link rel="stylesheet" type="text/css" href="../_static/sphinx-thebe.css?v=4fa983c6" />
+    <link rel="stylesheet" type="text/css" href="../_static/graphviz.css?v=fd3f3429" />
+    <link rel="stylesheet" type="text/css" href="../_static/sphinx-design.min.css?v=95c83b7e" />
+  
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
+  <script src="../_static/vendor/fontawesome/6.5.2/js/all.min.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    <script src="../_static/documentation_options.js?v=9eb32ce0"></script>
+    <script src="../_static/doctools.js?v=9a2dae69"></script>
+    <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=f281be69"></script>
+    <script src="../_static/scripts/sphinx-book-theme.js?v=887ef09a"></script>
+    <script>let toggleHintShow = 'Click to show';</script>
+    <script>let toggleHintHide = 'Click to hide';</script>
+    <script>let toggleOpenOnPrint = 'true';</script>
+    <script src="../_static/togglebutton.js?v=4a39c7ea"></script>
+    <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../_static/design-tabs.js?v=f930bc37"></script>
+    <script>const THEBE_JS_URL = "https://unpkg.com/thebe@0.8.2/lib/index.js"; const thebe_selector = ".thebe,.cell"; const thebe_selector_input = "pre"; const thebe_selector_output = ".output, .cell_output"</script>
+    <script async="async" src="../_static/sphinx-thebe.js?v=c100c467"></script>
+    <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script>const THEBE_JS_URL = "https://unpkg.com/thebe@0.8.2/lib/index.js"; const thebe_selector = ".thebe,.cell"; const thebe_selector_input = "pre"; const thebe_selector_output = ".output, .cell_output"</script>
+    <script>window.MathJax = {"options": {"processHtmlClass": "tex2jax_process|mathjax_process|math|output_area"}}</script>
+    <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'tutorial/alternating_ansatz_graph_coloring';</script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="API Reference" href="../autoapi/index.html" />
+    <link rel="prev" title="Qamomile Tutorial" href="index.html" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-primary-sidebar-checkbox"/>
+  <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-secondary-sidebar-checkbox"/>
+  <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
+  
+  <div class="search-button__wrapper">
+    <div class="search-button__overlay"></div>
+    <div class="search-button__search-container">
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         id="search-input"
+         placeholder="Search this book..."
+         aria-label="Search this book..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form></div>
+  </div>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <div class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+    
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../_static/qamomile_logo.png" class="logo__image only-light" alt="Qamomile Documentation - Home"/>
+    <script>document.write(`<img src="../_static/qamomile_logo.png" class="logo__image only-dark" alt="Qamomile Documentation - Home"/>`);</script>
+  
+  
+</a></div>
+        <div class="sidebar-primary-item">
+
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">Search</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script></div>
+        <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
+    <div class="bd-toc-item navbar-nav active">
+        
+        <ul class="nav bd-sidenav bd-sidenav__home-link">
+            <li class="toctree-l1">
+                <a class="reference internal" href="../index.html">
+                    Welcome to Qamomile
+                </a>
+            </li>
+        </ul>
+        <p aria-level="2" class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../quickstart.html">Qamomile Quickstart Guide</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Tutorial</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="index.html">Qamomile Tutorial</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">Quantum Alternating Operator Ansatz for Graph Coloring Problem with Qiskit and Quri-Parts</a></li>
+
+
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1 has-children"><a class="reference internal" href="../autoapi/index.html">API Reference</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../autoapi/core/index.html">core</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../autoapi/core/circuit/index.html">core.circuit</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l4"><a class="reference internal" href="../autoapi/core/circuit/circuit/index.html">core.circuit.circuit</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../autoapi/core/circuit/parameter/index.html">core.circuit.parameter</a></li>
+</ul>
+</details></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../autoapi/core/converters/index.html">core.converters</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l4"><a class="reference internal" href="../autoapi/core/converters/qrao/index.html">core.converters.qrao</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../autoapi/core/converters/converter/index.html">core.converters.converter</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../autoapi/core/converters/qaoa/index.html">core.converters.qaoa</a></li>
+</ul>
+</details></li>
+<li class="toctree-l3"><a class="reference internal" href="../autoapi/core/bitssample/index.html">core.bitssample</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../autoapi/core/ising_qubo/index.html">core.ising_qubo</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../autoapi/core/operator/index.html">core.operator</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../autoapi/core/transpiler/index.html">core.transpiler</a></li>
+</ul>
+</details></li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../autoapi/qiskit/index.html">qiskit</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l3"><a class="reference internal" href="../autoapi/qiskit/exceptions/index.html">qiskit.exceptions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../autoapi/qiskit/parameter_converter/index.html">qiskit.parameter_converter</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../autoapi/qiskit/transpiler/index.html">qiskit.transpiler</a></li>
+</ul>
+</details></li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../autoapi/quri_parts/index.html">quri_parts</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l3"><a class="reference internal" href="../autoapi/quri_parts/exceptions/index.html">quri_parts.exceptions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../autoapi/quri_parts/parameter_converter/index.html">quri_parts.parameter_converter</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../autoapi/quri_parts/transpiler/index.html">quri_parts.transpiler</a></li>
+</ul>
+</details></li>
+</ul>
+</details></li>
+</ul>
+
+    </div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+  
+  <div id="rtd-footer-container"></div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+
+<div class="sbt-scroll-pixel-helper"></div>
+
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item"><button class="sidebar-toggle primary-toggle btn btn-sm" title="Toggle primary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <span class="fa-solid fa-bars"></span>
+</button></div>
+      
+    </div>
+  
+  
+    <div class="header-article-items__end">
+      
+        <div class="header-article-item">
+
+<div class="article-header-buttons">
+
+
+
+
+
+<div class="dropdown dropdown-source-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Source repositories">
+    <i class="fab fa-github"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="https://github.com/executablebooks/jupyter-book" target="_blank"
+   class="btn btn-sm btn-source-repository-button dropdown-item"
+   title="Source repository"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fab fa-github"></i>
+  </span>
+<span class="btn__text-container">Repository</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/executablebooks/jupyter-book/issues/new?title=Issue%20on%20page%20%2Ftutorial/alternating_ansatz_graph_coloring.html&body=Your%20issue%20content%20here." target="_blank"
+   class="btn btn-sm btn-source-issues-button dropdown-item"
+   title="Open an issue"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-lightbulb"></i>
+  </span>
+<span class="btn__text-container">Open issue</span>
+</a>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+
+
+<div class="dropdown dropdown-download-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Download this page">
+    <i class="fas fa-download"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="../_sources/tutorial/alternating_ansatz_graph_coloring.ipynb" target="_blank"
+   class="btn btn-sm btn-download-source-button dropdown-item"
+   title="Download source file"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file"></i>
+  </span>
+<span class="btn__text-container">.ipynb</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li>
+<button onclick="window.print()"
+  class="btn btn-sm btn-download-pdf-button dropdown-item"
+  title="Print to PDF"
+  data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file-pdf"></i>
+  </span>
+<span class="btn__text-container">.pdf</span>
+</button>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+<button onclick="toggleFullScreen()"
+  class="btn btn-sm btn-fullscreen-button"
+  title="Fullscreen mode"
+  data-bs-placement="bottom" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-expand"></i>
+  </span>
+
+</button>
+
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script>
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm pst-navbar-icon search-button search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass fa-lg"></i>
+  </button>
+`);
+</script>
+<button class="sidebar-toggle secondary-toggle btn btn-sm" title="Toggle secondary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-list"></span>
+</button>
+</div></div>
+      
+    </div>
+  
+</div>
+</div>
+              
+              
+
+<div id="jb-print-docs-body" class="onlyprint">
+    <h1>Quantum Alternating Operator Ansatz for Graph Coloring Problem with Qiskit and Quri-Parts</h1>
+    <!-- Table of contents -->
+    <div id="print-main-content">
+        <div id="jb-print-toc">
+            
+            <div>
+                <h2> Contents </h2>
+            </div>
+            <nav aria-label="Page">
+                <ul class="visible nav section-nav flex-column">
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#">Quantum Alternating Operator Ansatz for Graph Coloring Problem with Qiskit and Quri-Parts</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#quantum-approximate-optimazation-algorithm-qaoa">Quantum Approximate Optimazation Algorithm (QAOA)</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#implementing-qaoa-using-qamomile">Implementing QAOA using Qamomile</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#run-qaoa-using-qiskit">Run QAOA using Qiskit</a></li>
+</ul>
+</li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#quantum-alternating-operator-ansatz">Quantum Alternating Operator Ansatz</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#run-quantum-alternating-operator-ansatz-using-qiskit">Run Quantum Alternating Operator Ansatz using Qiskit</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#alternating-ansatz-with-quri-parts">Alternating Ansatz with Quri-Parts</a></li>
+</ul>
+</li>
+</ul>
+
+            </nav>
+        </div>
+    </div>
+</div>
+
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section class="tex2jax_ignore mathjax_ignore" id="quantum-alternating-operator-ansatz-for-graph-coloring-problem-with-qiskit-and-quri-parts">
+<h1>Quantum Alternating Operator Ansatz for Graph Coloring Problem with Qiskit and Quri-Parts<a class="headerlink" href="#quantum-alternating-operator-ansatz-for-graph-coloring-problem-with-qiskit-and-quri-parts" title="Link to this heading">#</a></h1>
+<p>In this tutorial, we would like to explain the functionality while solving the Graph Coloring Problem using the Quantum Approximate Optimization Algorithm and the Quantum Alternating Operator Ansatz. This time, we are going to conduct simulations using qiskit and quri-parts.</p>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">networkx</span> <span class="k">as</span> <span class="nn">nx</span>
+<span class="kn">import</span> <span class="nn">jijmodeling</span> <span class="k">as</span> <span class="nn">jm</span>
+<span class="kn">import</span> <span class="nn">jijmodeling_transpiler.core</span> <span class="k">as</span> <span class="nn">jmt</span>
+<span class="kn">import</span> <span class="nn">qamomile.core</span> <span class="k">as</span> <span class="nn">qm</span>
+</pre></div>
+</div>
+</div>
+<div class="cell_output docutils container">
+<div class="output traceback highlight-ipythontb notranslate"><div class="highlight"><pre><span></span><span class="gt">---------------------------------------------------------------------------</span>
+<span class="ne">ModuleNotFoundError</span><span class="g g-Whitespace">                       </span>Traceback (most recent call last)
+<span class="n">Cell</span> <span class="n">In</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">line</span> <span class="mi">1</span>
+<span class="ne">----&gt; </span><span class="mi">1</span> <span class="kn">import</span> <span class="nn">networkx</span> <span class="k">as</span> <span class="nn">nx</span>
+<span class="g g-Whitespace">      </span><span class="mi">2</span> <span class="kn">import</span> <span class="nn">jijmodeling</span> <span class="k">as</span> <span class="nn">jm</span>
+<span class="g g-Whitespace">      </span><span class="mi">3</span> <span class="kn">import</span> <span class="nn">jijmodeling_transpiler.core</span> <span class="k">as</span> <span class="nn">jmt</span>
+
+<span class="ne">ModuleNotFoundError</span>: No module named &#39;networkx&#39;
+</pre></div>
+</div>
+</div>
+</div>
+<p>First, we will implement the mathematical model of the graph coloring problem using JijModeling.</p>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">graph_coloring_problem</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="n">jm</span><span class="o">.</span><span class="n">Problem</span><span class="p">:</span>
+    <span class="c1"># define variables</span>
+    <span class="n">V</span> <span class="o">=</span> <span class="n">jm</span><span class="o">.</span><span class="n">Placeholder</span><span class="p">(</span><span class="s2">&quot;V&quot;</span><span class="p">)</span>
+    <span class="n">E</span> <span class="o">=</span> <span class="n">jm</span><span class="o">.</span><span class="n">Placeholder</span><span class="p">(</span><span class="s2">&quot;E&quot;</span><span class="p">,</span> <span class="n">ndim</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span>
+    <span class="n">N</span> <span class="o">=</span> <span class="n">jm</span><span class="o">.</span><span class="n">Placeholder</span><span class="p">(</span><span class="s2">&quot;N&quot;</span><span class="p">)</span>
+    <span class="n">x</span> <span class="o">=</span> <span class="n">jm</span><span class="o">.</span><span class="n">BinaryVar</span><span class="p">(</span><span class="s2">&quot;x&quot;</span><span class="p">,</span> <span class="n">shape</span><span class="o">=</span><span class="p">(</span><span class="n">V</span><span class="p">,</span> <span class="n">N</span><span class="p">))</span>
+    <span class="n">n</span> <span class="o">=</span> <span class="n">jm</span><span class="o">.</span><span class="n">Element</span><span class="p">(</span><span class="s2">&quot;i&quot;</span><span class="p">,</span> <span class="n">belong_to</span><span class="o">=</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">N</span><span class="p">))</span>
+    <span class="n">v</span> <span class="o">=</span> <span class="n">jm</span><span class="o">.</span><span class="n">Element</span><span class="p">(</span><span class="s2">&quot;v&quot;</span><span class="p">,</span> <span class="n">belong_to</span><span class="o">=</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">V</span><span class="p">))</span>
+    <span class="n">e</span> <span class="o">=</span> <span class="n">jm</span><span class="o">.</span><span class="n">Element</span><span class="p">(</span><span class="s2">&quot;e&quot;</span><span class="p">,</span> <span class="n">belong_to</span><span class="o">=</span><span class="n">E</span><span class="p">)</span>
+    <span class="c1"># set problem</span>
+    <span class="n">problem</span> <span class="o">=</span> <span class="n">jm</span><span class="o">.</span><span class="n">Problem</span><span class="p">(</span><span class="s2">&quot;Graph Coloring&quot;</span><span class="p">)</span>
+    <span class="c1"># set one-hot constraint that each vertex has only one color</span>
+
+    <span class="n">problem</span> <span class="o">+=</span> <span class="n">jm</span><span class="o">.</span><span class="n">Constraint</span><span class="p">(</span><span class="s2">&quot;one-color&quot;</span><span class="p">,</span> <span class="n">x</span><span class="p">[</span><span class="n">v</span><span class="p">,</span> <span class="p">:]</span><span class="o">.</span><span class="n">sum</span><span class="p">()</span> <span class="o">==</span> <span class="mi">1</span><span class="p">,</span> <span class="n">forall</span><span class="o">=</span><span class="n">v</span><span class="p">)</span>
+    <span class="c1"># set objective function: minimize edges whose vertices connected by edges are the same color</span>
+    <span class="n">problem</span> <span class="o">+=</span> <span class="n">jm</span><span class="o">.</span><span class="n">sum</span><span class="p">([</span><span class="n">n</span><span class="p">,</span> <span class="n">e</span><span class="p">],</span> <span class="n">x</span><span class="p">[</span><span class="n">e</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">n</span><span class="p">]</span> <span class="o">*</span> <span class="n">x</span><span class="p">[</span><span class="n">e</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">n</span><span class="p">])</span>
+    <span class="k">return</span> <span class="n">problem</span>
+
+<span class="n">problem</span> <span class="o">=</span> <span class="n">graph_coloring_problem</span><span class="p">()</span>
+<span class="n">problem</span>
+</pre></div>
+</div>
+</div>
+<div class="cell_output docutils container">
+<div class="output text_latex math notranslate nohighlight">
+\[\begin{split}\begin{array}{cccc}\text{Problem:} &amp; \text{Graph Coloring} &amp; &amp; \\&amp; &amp; \min \quad \displaystyle \sum_{i = 0}^{N - 1} \sum_{e \in E} x_{e_{0}, i} \cdot x_{e_{1}, i} &amp; \\\text{{s.t.}} &amp; &amp; &amp; \\ &amp; \text{one-color} &amp; \displaystyle \sum_{\ast_{1} = 0}^{N - 1} x_{v, \ast_{1}} = 1 &amp; \forall v \in \left\{0,\ldots,V - 1\right\} \\\text{{where}} &amp; &amp; &amp; \\&amp; x &amp; 2\text{-dim binary variable}\\\end{array}\end{split}\]</div>
+</div>
+</div>
+<p>Next, we will create an instance of the problem.</p>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="n">G</span> <span class="o">=</span> <span class="n">nx</span><span class="o">.</span><span class="n">Graph</span><span class="p">()</span>
+<span class="n">G</span><span class="o">.</span><span class="n">add_nodes_from</span><span class="p">([</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">4</span><span class="p">])</span>
+<span class="n">G</span><span class="o">.</span><span class="n">add_edges_from</span><span class="p">([(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span> <span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">),</span> <span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">3</span><span class="p">),</span> <span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">),</span> <span class="p">(</span><span class="mi">3</span><span class="p">,</span> <span class="mi">4</span><span class="p">),</span> <span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">4</span><span class="p">)])</span>
+<span class="n">nx</span><span class="o">.</span><span class="n">draw</span><span class="p">(</span><span class="n">G</span><span class="p">)</span>
+</pre></div>
+</div>
+</div>
+<div class="cell_output docutils container">
+<img alt="../_images/b00756b660ea9dd9a55434640c9af7270113c5681b6ae8f16f12fed872867f5e.png" src="../_images/b00756b660ea9dd9a55434640c9af7270113c5681b6ae8f16f12fed872867f5e.png" />
+</div>
+</div>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="n">inst_E</span> <span class="o">=</span> <span class="p">[</span><span class="nb">list</span><span class="p">(</span><span class="n">edge</span><span class="p">)</span> <span class="k">for</span> <span class="n">edge</span> <span class="ow">in</span> <span class="n">G</span><span class="o">.</span><span class="n">edges</span><span class="p">]</span>
+<span class="n">color_num</span> <span class="o">=</span> <span class="mi">3</span>
+<span class="n">num_nodes</span> <span class="o">=</span> <span class="n">G</span><span class="o">.</span><span class="n">number_of_nodes</span><span class="p">()</span>
+<span class="n">instance_data</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;V&quot;</span><span class="p">:</span> <span class="n">num_nodes</span><span class="p">,</span> <span class="s2">&quot;N&quot;</span><span class="p">:</span> <span class="n">color_num</span><span class="p">,</span> <span class="s2">&quot;E&quot;</span><span class="p">:</span> <span class="n">inst_E</span><span class="p">}</span>
+<span class="n">num_qubits</span> <span class="o">=</span> <span class="n">num_nodes</span> <span class="o">*</span> <span class="n">color_num</span>
+</pre></div>
+</div>
+</div>
+</div>
+</section>
+<section class="tex2jax_ignore mathjax_ignore" id="quantum-approximate-optimazation-algorithm-qaoa">
+<h1>Quantum Approximate Optimazation Algorithm (QAOA)<a class="headerlink" href="#quantum-approximate-optimazation-algorithm-qaoa" title="Link to this heading">#</a></h1>
+<p>The Quantum Approximate Optimization Algorithm (QAOA) is one of the quantum optimization algorithms that use a variational quantum circuit. For a detailed explanation, please refer to paper [1], but here we will only give a rough overview.
+In QAOA, a variational quantum circuit is constructed by applying the Ising Hamiltonian <span class="math notranslate nohighlight">\(H_P = \sum_{ij}J_{ij}Z_iZ_j\)</span> and the <span class="math notranslate nohighlight">\(X\)</span>-mixer Hamiltonian <span class="math notranslate nohighlight">\(H_M = \sum_iX_i\)</span> in the following way:
+If we start with an initial state <span class="math notranslate nohighlight">\(\ket{\psi_0}\)</span>, then</p>
+<div class="math notranslate nohighlight">
+\[
+\ket{\psi(\beta,\gamma)} = e^{-\beta_pH_M}e^{-\gamma_pH_P}\cdots e^{-\beta_1H_M}e^{-\gamma_1H_P}\ket{\psi_0}
+\]</div>
+<p>can be written. Here, <span class="math notranslate nohighlight">\(\beta_k,\gamma_k\)</span> are the parameters to be optimized, and since the operation <span class="math notranslate nohighlight">\(e^{-\beta_kH_M}e^{-\gamma_kH_P}\)</span> is repeated <span class="math notranslate nohighlight">\(p\)</span> times, there are a total of <span class="math notranslate nohighlight">\(2p\)</span> parameters. In the standard QAOA, the total number of parameters is independent of the number of qubits and depends only on the number of repetitions.</p>
+<p>Optimization of <span class="math notranslate nohighlight">\(\beta_k,\gamma_k\)</span> is performed by repeating the following steps 1 and 2:</p>
+<ol class="arabic simple">
+<li><p>Compute the expectation value <span class="math notranslate nohighlight">\(\bra{\psi(\beta,\gamma)}H_P\ket{\psi(\beta,\gamma)}\)</span> on a quantum device.</p></li>
+<li><p>Update the parameters on a classical computer to minimize the expectation value.</p></li>
+</ol>
+<p>By repeating this calculation of the expectation value on the quantum computer and optimization of parameters on the classical computer, we obtain the minimum energy <span class="math notranslate nohighlight">\(\langle H_P \rangle\)</span> and the corresponding final state. If we consider QAOA as a mathematical optimization algorithm, this minimum energy corresponds to the minimum objective function value, and the final state becomes the optimal solution.</p>
+<section id="implementing-qaoa-using-qamomile">
+<h2>Implementing QAOA using Qamomile<a class="headerlink" href="#implementing-qaoa-using-qamomile" title="Link to this heading">#</a></h2>
+<p>Now, let’s try solving the Graph Coloring Problem using QAOA.
+To execute QAOA, it’s necessary to convert the mathematical model into an Ising Hamiltonian, and then create a variational quantum circuit and Hamiltonian using a quantum computing library. However, since Qamomile supports QAOA, it allows for relatively easy execution.</p>
+<p>First, using JijModeling-Transpiler, we create a CompiledInstance from JijModeling’s mathematical model and instance data.</p>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="n">compiled_instance</span> <span class="o">=</span> <span class="n">jmt</span><span class="o">.</span><span class="n">compile_model</span><span class="p">(</span><span class="n">problem</span><span class="p">,</span> <span class="n">instance_data</span><span class="p">)</span>
+</pre></div>
+</div>
+</div>
+</div>
+<p>Next, we create a QAOAConverter. By setting the weight for the constraints on this Converter, we can create the Hamiltonian.</p>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="n">qaoa_converter</span> <span class="o">=</span> <span class="n">qm</span><span class="o">.</span><span class="n">qaoa</span><span class="o">.</span><span class="n">QAOAConverter</span><span class="p">(</span><span class="n">compiled_instance</span><span class="p">)</span>
+<span class="n">qaoa_converter</span><span class="o">.</span><span class="n">ising_encode</span><span class="p">(</span><span class="n">multipliers</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;one-color&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">})</span>
+<span class="n">qaoa_circuit</span> <span class="o">=</span> <span class="n">qaoa_converter</span><span class="o">.</span><span class="n">get_qaoa_ansatz</span><span class="p">(</span><span class="n">p</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">qaoa_cost</span> <span class="o">=</span> <span class="n">qaoa_converter</span><span class="o">.</span><span class="n">get_cost_hamiltonian</span><span class="p">()</span>
+</pre></div>
+</div>
+</div>
+</div>
+</section>
+<section id="run-qaoa-using-qiskit">
+<h2>Run QAOA using Qiskit<a class="headerlink" href="#run-qaoa-using-qiskit" title="Link to this heading">#</a></h2>
+<p>Now that we have the variational quantum circuit and Hamiltonian ready, let’s actually execute QAOA using Qiskit.<br />
+Transpile the qamomile’s circuit to the qiskit’s circuit and run the simulation.</p>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">qamomile.qiskit</span> <span class="kn">import</span> <span class="n">QiskitTranspiler</span>
+<span class="kn">import</span> <span class="nn">qiskit.primitives</span> <span class="k">as</span> <span class="nn">qk_pr</span>
+
+<span class="n">qk_transpiler</span> <span class="o">=</span> <span class="n">QiskitTranspiler</span><span class="p">()</span>
+<span class="n">qk_circuit</span> <span class="o">=</span> <span class="n">qk_transpiler</span><span class="o">.</span><span class="n">transpile_circuit</span><span class="p">(</span><span class="n">qaoa_circuit</span><span class="p">)</span>
+<span class="n">qk_cost</span> <span class="o">=</span> <span class="n">qk_transpiler</span><span class="o">.</span><span class="n">transpile_hamiltonian</span><span class="p">(</span><span class="n">qaoa_cost</span><span class="p">)</span>
+
+<span class="n">qk_circuit</span><span class="o">.</span><span class="n">draw</span><span class="p">(</span><span class="n">output</span><span class="o">=</span><span class="s2">&quot;mpl&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+</div>
+<div class="cell_output docutils container">
+<img alt="../_images/8ab5201ebdf7fae121eebbda98095ee7cf24dec72a6ddff2e002ee14bdc41c25.png" src="../_images/8ab5201ebdf7fae121eebbda98095ee7cf24dec72a6ddff2e002ee14bdc41c25.png" />
+</div>
+</div>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">scipy.optimize</span> <span class="k">as</span> <span class="nn">opt</span>
+
+<span class="c1"># Variational Step</span>
+<span class="n">estimator</span> <span class="o">=</span> <span class="n">qk_pr</span><span class="o">.</span><span class="n">StatevectorEstimator</span><span class="p">()</span>
+
+<span class="n">cost_history</span> <span class="o">=</span> <span class="p">[]</span>
+<span class="k">def</span> <span class="nf">estinamate_cost</span><span class="p">(</span><span class="n">params</span><span class="p">):</span>
+    <span class="n">job</span> <span class="o">=</span> <span class="n">estimator</span><span class="o">.</span><span class="n">run</span><span class="p">([(</span><span class="n">qk_circuit</span><span class="p">,</span> <span class="n">qk_cost</span><span class="p">,</span> <span class="n">params</span><span class="p">)])</span>
+    <span class="n">job_result</span> <span class="o">=</span> <span class="n">job</span><span class="o">.</span><span class="n">result</span><span class="p">()</span>
+    <span class="n">cost</span> <span class="o">=</span> <span class="n">job_result</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">data</span><span class="p">[</span><span class="s1">&#39;evs&#39;</span><span class="p">]</span>
+    <span class="n">cost_history</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">cost</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">cost</span>
+
+<span class="n">result</span> <span class="o">=</span> <span class="n">opt</span><span class="o">.</span><span class="n">minimize</span><span class="p">(</span><span class="n">estinamate_cost</span><span class="p">,</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">],</span> <span class="n">method</span><span class="o">=</span><span class="s2">&quot;COBYLA&quot;</span><span class="p">,</span> <span class="n">options</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;maxiter&quot;</span><span class="p">:</span> <span class="mi">100</span><span class="p">})</span>
+<span class="n">result</span>
+</pre></div>
+</div>
+</div>
+<div class="cell_output docutils container">
+<div class="output text_plain highlight-myst-ansi notranslate"><div class="highlight"><pre><span></span> message: Optimization terminated successfully.
+ success: True
+  status: 1
+     fun: -6.646036573651008
+       x: [ 3.551e-01 -4.544e-01]
+    nfev: 42
+   maxcv: 0.0
+</pre></div>
+</div>
+</div>
+</div>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">matplotlib.pyplot</span> <span class="k">as</span> <span class="nn">plt</span>
+
+<span class="n">plt</span><span class="o">.</span><span class="n">plot</span><span class="p">(</span><span class="n">cost_history</span><span class="p">)</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">xlabel</span><span class="p">(</span><span class="s2">&quot;Iteration&quot;</span><span class="p">)</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">ylabel</span><span class="p">(</span><span class="s2">&quot;Cost&quot;</span><span class="p">)</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">show</span><span class="p">()</span>
+</pre></div>
+</div>
+</div>
+<div class="cell_output docutils container">
+<img alt="../_images/c58b3d038cab7da1222a8cf241f3e05dabcfa1d6cdc742fa9c01f48fe9e71d1b.png" src="../_images/c58b3d038cab7da1222a8cf241f3e05dabcfa1d6cdc742fa9c01f48fe9e71d1b.png" />
+</div>
+</div>
+</section>
+</section>
+<section class="tex2jax_ignore mathjax_ignore" id="quantum-alternating-operator-ansatz">
+<h1>Quantum Alternating Operator Ansatz<a class="headerlink" href="#quantum-alternating-operator-ansatz" title="Link to this heading">#</a></h1>
+<p>Next, let’s try solving the graph coloring problem using the Quantum Alternating Operator Ansatz. The Quantum Alternating Operator Ansatz[2] is a modification of QAOA, where the mixer is changed from an <span class="math notranslate nohighlight">\(X\)</span>-mixer to a mixer tailored to the problem, ensuring that only solutions satisfying the constraints are searched for. For more detailed information, please refer to the original paper. Here, we will look at how to implement it in JTQ.</p>
+<p>For the Graph Coloring problem, there is a one-hot constraint:</p>
+<div class="math notranslate nohighlight">
+\[
+\sum_k x_{v,k} = 1\quad \forall v
+\]</div>
+<p>However, turning this into an <span class="math notranslate nohighlight">\(XY\)</span>-mixer is the Quantum Alternating Operator Ansatz approach to the Graph Coloring problem.</p>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="n">gamma</span> <span class="o">=</span> <span class="n">qm</span><span class="o">.</span><span class="n">circuit</span><span class="o">.</span><span class="n">Parameter</span><span class="p">(</span><span class="s2">&quot;gamma&quot;</span><span class="p">)</span>
+<span class="n">qaoa_cost_circuit</span> <span class="o">=</span> <span class="n">qaoa_converter</span><span class="o">.</span><span class="n">get_cost_ansatz</span><span class="p">(</span><span class="n">gamma</span><span class="p">)</span>  <span class="c1"># Get exp(-i beta H_C) circuit without mixer circuit.</span>
+</pre></div>
+</div>
+</div>
+</div>
+<p>Next, we will create an <span class="math notranslate nohighlight">\(XY\)</span>-mixer. The <span class="math notranslate nohighlight">\(XY\)</span>-mixer can be written as</p>
+<div class="math notranslate nohighlight">
+\[
+XY_{ij} = \frac{1}{2}\left(X_iX_j + Y_iY_j \right).
+\]</div>
+<p>This is an operator that swaps the bits 1 and 0 in bit <span class="math notranslate nohighlight">\(i,j\)</span>. Therefore, it can transform a bit string <span class="math notranslate nohighlight">\(100\)</span>, which satisfies the one-hot constraint, into another bit string <span class="math notranslate nohighlight">\(010\)</span>, which also satisfies the one-hot constraint.</p>
+<p>Here, the only part under the one-hot constraint is related to color, so in terms of the mathematical model, we need to transform the bits between <span class="math notranslate nohighlight">\(x_{v0}\)</span> and <span class="math notranslate nohighlight">\(x_{v1}\)</span>.
+On the other hand, as these variables are usually embedded in qubits, it is necessary to remember which bit corresponds to which variable when constructing the algorithm and handle them appropriately.
+In JTQ, the correspondence of variables is contained in var_map inside CompiledInstance.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">var_map</span><span class="p">[</span><span class="s1">&#39;variable_name&#39;</span><span class="p">][</span><span class="n">indices</span><span class="p">]</span>
+</pre></div>
+</div>
+<p>You can check which qubit corresponds to a variable in the mathematical model in this way.
+Let’s use this to create an <span class="math notranslate nohighlight">\(XY\)</span>-mixer.</p>
+<p>What we want here is the transformation between <span class="math notranslate nohighlight">\(x_{v,k}\)</span> and <span class="math notranslate nohighlight">\(x_{v,k+1}\)</span>, so we can obtain the index of the corresponding qubit by accessing compiled_instance.var_map.var_map[“x”][(i,k)].”</p>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">create_xy_mixer</span><span class="p">(</span>
+    <span class="n">beta</span><span class="p">:</span> <span class="n">qm</span><span class="o">.</span><span class="n">circuit</span><span class="o">.</span><span class="n">Parameter</span><span class="p">,</span>
+    <span class="n">num_nodes</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span>
+    <span class="n">num_color</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span>
+    <span class="n">compiled_instance</span><span class="p">:</span> <span class="n">jmt</span><span class="o">.</span><span class="n">CompiledInstance</span><span class="p">,</span>
+<span class="p">):</span>
+    <span class="n">n</span> <span class="o">=</span> <span class="n">num_color</span> <span class="o">*</span> <span class="n">num_nodes</span>
+    <span class="n">qc</span> <span class="o">=</span> <span class="n">qm</span><span class="o">.</span><span class="n">circuit</span><span class="o">.</span><span class="n">QuantumCircuit</span><span class="p">(</span><span class="n">n</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="s2">&quot;xy-mixer&quot;</span><span class="p">)</span>
+    <span class="n">var_map</span> <span class="o">=</span> <span class="n">compiled_instance</span><span class="o">.</span><span class="n">var_map</span><span class="o">.</span><span class="n">var_map</span><span class="p">[</span><span class="s2">&quot;x&quot;</span><span class="p">]</span>
+    <span class="c1"># even</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">num_nodes</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">num_color</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">):</span>
+            <span class="n">qc</span><span class="o">.</span><span class="n">rxx</span><span class="p">(</span><span class="n">beta</span><span class="p">,</span> <span class="n">var_map</span><span class="p">[(</span><span class="n">i</span><span class="p">,</span> <span class="n">k</span><span class="p">)],</span> <span class="n">var_map</span><span class="p">[(</span><span class="n">i</span><span class="p">,</span> <span class="n">k</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)])</span>
+            <span class="n">qc</span><span class="o">.</span><span class="n">ryy</span><span class="p">(</span><span class="n">beta</span><span class="p">,</span> <span class="n">var_map</span><span class="p">[(</span><span class="n">i</span><span class="p">,</span> <span class="n">k</span><span class="p">)],</span> <span class="n">var_map</span><span class="p">[(</span><span class="n">i</span><span class="p">,</span> <span class="n">k</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)])</span>
+
+    <span class="c1"># odd</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">num_nodes</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">num_color</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">):</span>
+            <span class="n">qc</span><span class="o">.</span><span class="n">rxx</span><span class="p">(</span><span class="n">beta</span><span class="p">,</span> <span class="n">var_map</span><span class="p">[(</span><span class="n">i</span><span class="p">,</span> <span class="n">k</span><span class="p">)],</span> <span class="n">var_map</span><span class="p">[(</span><span class="n">i</span><span class="p">,</span> <span class="n">k</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)])</span>
+            <span class="n">qc</span><span class="o">.</span><span class="n">ryy</span><span class="p">(</span><span class="n">beta</span><span class="p">,</span> <span class="n">var_map</span><span class="p">[(</span><span class="n">i</span><span class="p">,</span> <span class="n">k</span><span class="p">)],</span> <span class="n">var_map</span><span class="p">[(</span><span class="n">i</span><span class="p">,</span> <span class="n">k</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)])</span>
+
+    <span class="c1"># ini-last</span>
+    <span class="k">if</span> <span class="n">num_color</span> <span class="o">%</span> <span class="mi">2</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
+        <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">num_nodes</span><span class="p">):</span>
+            <span class="n">qc</span><span class="o">.</span><span class="n">rxx</span><span class="p">(</span><span class="n">beta</span><span class="p">,</span> <span class="n">var_map</span><span class="p">[(</span><span class="n">i</span><span class="p">,</span> <span class="mi">0</span><span class="p">)],</span> <span class="n">var_map</span><span class="p">[(</span><span class="n">i</span><span class="p">,</span> <span class="n">num_color</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)])</span>
+            <span class="n">qc</span><span class="o">.</span><span class="n">ryy</span><span class="p">(</span><span class="n">beta</span><span class="p">,</span> <span class="n">var_map</span><span class="p">[(</span><span class="n">i</span><span class="p">,</span> <span class="mi">0</span><span class="p">)],</span> <span class="n">var_map</span><span class="p">[(</span><span class="n">i</span><span class="p">,</span> <span class="n">num_color</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)])</span>
+    <span class="k">return</span> <span class="n">qc</span>
+</pre></div>
+</div>
+</div>
+</div>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">create_initial_state</span><span class="p">(</span>
+    <span class="n">compiled_instance</span><span class="p">:</span> <span class="n">jmt</span><span class="o">.</span><span class="n">CompiledInstance</span><span class="p">,</span> <span class="n">num_nodes</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">num_color</span><span class="p">:</span> <span class="nb">int</span>
+<span class="p">):</span>
+    <span class="n">n</span> <span class="o">=</span> <span class="n">num_color</span> <span class="o">*</span> <span class="n">num_nodes</span>
+    <span class="n">qc</span> <span class="o">=</span> <span class="n">qm</span><span class="o">.</span><span class="n">circuit</span><span class="o">.</span><span class="n">QuantumCircuit</span><span class="p">(</span><span class="n">n</span><span class="p">)</span>
+    <span class="n">var_map</span> <span class="o">=</span> <span class="n">compiled_instance</span><span class="o">.</span><span class="n">var_map</span><span class="o">.</span><span class="n">var_map</span><span class="p">[</span><span class="s2">&quot;x&quot;</span><span class="p">]</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">num_nodes</span><span class="p">):</span>
+        <span class="n">qc</span><span class="o">.</span><span class="n">x</span><span class="p">(</span><span class="n">var_map</span><span class="p">[(</span><span class="n">i</span><span class="p">,</span> <span class="mi">0</span><span class="p">)])</span>  <span class="c1"># set all nodes to color 0</span>
+    <span class="k">return</span> <span class="n">qc</span>
+</pre></div>
+</div>
+</div>
+</div>
+<p>Now that the Ansatz has been created, we would like to run the Quantum Alternating Operator Ansatz.</p>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="n">initial_circuit</span> <span class="o">=</span> <span class="n">create_initial_state</span><span class="p">(</span><span class="n">compiled_instance</span><span class="p">,</span> <span class="n">num_nodes</span><span class="p">,</span> <span class="n">color_num</span><span class="p">)</span>
+<span class="n">beta</span> <span class="o">=</span> <span class="n">qm</span><span class="o">.</span><span class="n">circuit</span><span class="o">.</span><span class="n">Parameter</span><span class="p">(</span><span class="s2">&quot;beta&quot;</span><span class="p">)</span>
+<span class="n">mixer_circuit</span> <span class="o">=</span> <span class="n">create_xy_mixer</span><span class="p">(</span><span class="n">beta</span><span class="p">,</span> <span class="n">num_nodes</span><span class="p">,</span> <span class="n">color_num</span><span class="p">,</span> <span class="n">compiled_instance</span><span class="p">)</span>
+<span class="n">initial_circuit</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">qaoa_cost_circuit</span><span class="p">)</span>
+<span class="n">initial_circuit</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">mixer_circuit</span><span class="p">)</span>
+
+<span class="n">alternating_ansatz</span> <span class="o">=</span> <span class="n">initial_circuit</span>
+</pre></div>
+</div>
+</div>
+</div>
+<section id="run-quantum-alternating-operator-ansatz-using-qiskit">
+<h2>Run Quantum Alternating Operator Ansatz using Qiskit<a class="headerlink" href="#run-quantum-alternating-operator-ansatz-using-qiskit" title="Link to this heading">#</a></h2>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="n">qk_transpiler</span> <span class="o">=</span> <span class="n">QiskitTranspiler</span><span class="p">()</span>
+<span class="n">qk_circuit</span> <span class="o">=</span> <span class="n">qk_transpiler</span><span class="o">.</span><span class="n">transpile_circuit</span><span class="p">(</span><span class="n">alternating_ansatz</span><span class="p">)</span>
+<span class="n">qk_circuit</span><span class="o">.</span><span class="n">draw</span><span class="p">(</span><span class="n">output</span><span class="o">=</span><span class="s2">&quot;mpl&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+</div>
+<div class="cell_output docutils container">
+<img alt="../_images/6e94479e0cfd09755df7b3bfad03dd126e75629df46f7b00f3010b9e792e8fe7.png" src="../_images/6e94479e0cfd09755df7b3bfad03dd126e75629df46f7b00f3010b9e792e8fe7.png" />
+</div>
+</div>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="c1"># Variational Step</span>
+<span class="n">estimator</span> <span class="o">=</span> <span class="n">qk_pr</span><span class="o">.</span><span class="n">StatevectorEstimator</span><span class="p">()</span>
+
+<span class="n">cost_history</span> <span class="o">=</span> <span class="p">[]</span>
+
+<span class="k">def</span> <span class="nf">estinamate_cost</span><span class="p">(</span><span class="n">params</span><span class="p">):</span>
+    <span class="n">job</span> <span class="o">=</span> <span class="n">estimator</span><span class="o">.</span><span class="n">run</span><span class="p">([(</span><span class="n">qk_circuit</span><span class="p">,</span> <span class="n">qk_cost</span><span class="p">,</span> <span class="n">params</span><span class="p">)])</span>
+    <span class="n">job_result</span> <span class="o">=</span> <span class="n">job</span><span class="o">.</span><span class="n">result</span><span class="p">()</span>
+    <span class="n">cost</span> <span class="o">=</span> <span class="n">job_result</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">data</span><span class="p">[</span><span class="s2">&quot;evs&quot;</span><span class="p">]</span>
+    <span class="n">cost_history</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">cost</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">cost</span>
+
+
+<span class="n">result</span> <span class="o">=</span> <span class="n">opt</span><span class="o">.</span><span class="n">minimize</span><span class="p">(</span>
+    <span class="n">estinamate_cost</span><span class="p">,</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">],</span> <span class="n">method</span><span class="o">=</span><span class="s2">&quot;COBYLA&quot;</span><span class="p">,</span> <span class="n">options</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;maxiter&quot;</span><span class="p">:</span> <span class="mi">100</span><span class="p">}</span>
+<span class="p">)</span>
+<span class="n">result</span>
+</pre></div>
+</div>
+</div>
+<div class="cell_output docutils container">
+<div class="output text_plain highlight-myst-ansi notranslate"><div class="highlight"><pre><span></span> message: Optimization terminated successfully.
+ success: True
+  status: 1
+     fun: -7.43749997649938
+       x: [ 7.855e-01 -1.425e-01]
+    nfev: 31
+   maxcv: 0.0
+</pre></div>
+</div>
+</div>
+</div>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="n">plt</span><span class="o">.</span><span class="n">plot</span><span class="p">(</span><span class="n">cost_history</span><span class="p">)</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">xlabel</span><span class="p">(</span><span class="s2">&quot;Iteration&quot;</span><span class="p">)</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">ylabel</span><span class="p">(</span><span class="s2">&quot;Cost&quot;</span><span class="p">)</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">show</span><span class="p">()</span>
+</pre></div>
+</div>
+</div>
+<div class="cell_output docutils container">
+<img alt="../_images/13fe2cb80ea93e5351032b35bcb382bc34ffb497b68e4083e0cc6201813a63a9.png" src="../_images/13fe2cb80ea93e5351032b35bcb382bc34ffb497b68e4083e0cc6201813a63a9.png" />
+</div>
+</div>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="n">sampler</span> <span class="o">=</span> <span class="n">qk_pr</span><span class="o">.</span><span class="n">StatevectorSampler</span><span class="p">()</span>
+<span class="n">qk_circuit</span><span class="o">.</span><span class="n">measure_all</span><span class="p">()</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">show</span><span class="p">()</span>
+<span class="n">job</span> <span class="o">=</span> <span class="n">sampler</span><span class="o">.</span><span class="n">run</span><span class="p">([(</span><span class="n">qk_circuit</span><span class="p">,</span> <span class="n">result</span><span class="o">.</span><span class="n">x</span><span class="p">)])</span>
+<span class="n">job_result</span> <span class="o">=</span> <span class="n">job</span><span class="o">.</span><span class="n">result</span><span class="p">()</span>
+</pre></div>
+</div>
+</div>
+</div>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="n">sampleset</span> <span class="o">=</span> <span class="n">qaoa_converter</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="n">qk_transpiler</span><span class="p">,</span> <span class="n">job_result</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">data</span><span class="p">[</span><span class="s1">&#39;meas&#39;</span><span class="p">])</span>
+</pre></div>
+</div>
+</div>
+</div>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="nn">np</span>
+<span class="k">def</span> <span class="nf">plot_graph_coloring</span><span class="p">(</span><span class="n">graph</span><span class="p">:</span> <span class="n">nx</span><span class="o">.</span><span class="n">Graph</span><span class="p">,</span> <span class="n">sampleset</span><span class="p">:</span> <span class="n">jm</span><span class="o">.</span><span class="n">experimental</span><span class="o">.</span><span class="n">SampleSet</span><span class="p">):</span>
+    <span class="c1"># extract feasible solution</span>
+    <span class="n">feasibles</span> <span class="o">=</span> <span class="n">sampleset</span><span class="o">.</span><span class="n">feasibles</span><span class="p">()</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">feasibles</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;No feasible solution found ...&quot;</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">lowest_sample</span> <span class="o">=</span> <span class="n">sampleset</span><span class="o">.</span><span class="n">lowest</span><span class="p">()[</span><span class="mi">0</span><span class="p">]</span>
+
+        <span class="c1"># get indices of x = 1</span>
+        <span class="n">indices</span> <span class="o">=</span> <span class="n">lowest_sample</span><span class="o">.</span><span class="n">var_values</span><span class="p">[</span><span class="s2">&quot;x&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">values</span><span class="o">.</span><span class="n">keys</span><span class="p">()</span>
+        <span class="c1"># get vertices and colors</span>
+        <span class="c1"># initialize vertex color list</span>
+        <span class="n">node_colors</span> <span class="o">=</span> <span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">*</span> <span class="n">graph</span><span class="o">.</span><span class="n">number_of_nodes</span><span class="p">()</span>
+        <span class="c1"># set color list for visualization</span>
+        <span class="n">colorlist</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;gold&quot;</span><span class="p">,</span> <span class="s2">&quot;violet&quot;</span><span class="p">,</span> <span class="s2">&quot;limegreen&quot;</span><span class="p">,</span> <span class="s2">&quot;darkorange&quot;</span><span class="p">]</span>
+        <span class="c1"># set vertex color list</span>
+        <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">j</span> <span class="ow">in</span> <span class="n">indices</span><span class="p">:</span>
+            <span class="n">node_colors</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="n">colorlist</span><span class="p">[</span><span class="n">j</span><span class="p">]</span>
+        <span class="c1"># make figure</span>
+        <span class="n">nx</span><span class="o">.</span><span class="n">draw_networkx</span><span class="p">(</span><span class="n">graph</span><span class="p">,</span> <span class="n">node_color</span><span class="o">=</span><span class="n">node_colors</span><span class="p">,</span> <span class="n">with_labels</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="n">plt</span><span class="o">.</span><span class="n">show</span><span class="p">()</span>
+
+<span class="n">plot_graph_coloring</span><span class="p">(</span><span class="n">G</span><span class="p">,</span> <span class="n">sampleset</span><span class="p">)</span>
+</pre></div>
+</div>
+</div>
+<div class="cell_output docutils container">
+<img alt="../_images/1f9cd7965a477e0f06692aa2916bc8ad612fec27037c9a1eeb2b1ab31ff3f80e.png" src="../_images/1f9cd7965a477e0f06692aa2916bc8ad612fec27037c9a1eeb2b1ab31ff3f80e.png" />
+</div>
+</div>
+</section>
+<section id="alternating-ansatz-with-quri-parts">
+<h2>Alternating Ansatz with Quri-Parts<a class="headerlink" href="#alternating-ansatz-with-quri-parts" title="Link to this heading">#</a></h2>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="c1"># !pip install quri-parts-algo</span>
+</pre></div>
+</div>
+</div>
+</div>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">qamomile.quri_parts</span> <span class="kn">import</span> <span class="n">QuriPartsTranspiler</span>
+</pre></div>
+</div>
+</div>
+</div>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">quri_parts.circuit.utils.circuit_drawer</span> <span class="kn">import</span> <span class="n">draw_circuit</span>
+
+<span class="n">qp_transpiler</span> <span class="o">=</span> <span class="n">QuriPartsTranspiler</span><span class="p">()</span>
+<span class="n">qp_alternating_circuit</span> <span class="o">=</span> <span class="n">qp_transpiler</span><span class="o">.</span><span class="n">transpile_circuit</span><span class="p">(</span><span class="n">alternating_ansatz</span><span class="p">)</span>
+<span class="n">qp_cost</span> <span class="o">=</span> <span class="n">qp_transpiler</span><span class="o">.</span><span class="n">transpile_hamiltonian</span><span class="p">(</span><span class="n">qaoa_cost</span><span class="p">)</span>
+</pre></div>
+</div>
+</div>
+</div>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="n">draw_circuit</span><span class="p">(</span><span class="n">qp_alternating_circuit</span><span class="p">)</span>
+</pre></div>
+</div>
+</div>
+<div class="cell_output docutils container">
+<div class="output stream highlight-myst-ansi notranslate"><div class="highlight"><pre><span></span>   ___     ___     ___            ___             ___                           
+  | X |   |PRZ|   |PPR|          |PPR|           |PPR|                          
+--|0  |---|5  |---|20 |----------|38 |-----------|39 |--------------------------
+  |___|   |___|   |   |          |_ _|           |_ _|                          
+   ___     ___    |   |    ___    | |      ___    | |                     ___   
+  | X |   |PRZ|   |   |   |PPR|   | |     |PPR|   | |                    |PPR|  
+--|1  |---|6  |---|   |---|21 |---| |-----|22 |---| |--------------------|41 |--
+  |___|   |___|   |___|   |   |   | |     |_ _|   | |                    |_ _|  
+   ___     ___            |   |   | |      | |    | |      ___            | |   
+  | X |   |PRZ|           |   |   | |      | |    | |     |PPR|           | |   
+--|2  |---|7  |-----------|   |---| |------| |----| |-----|23 |-----------| |---
+  |___|   |___|           |___|   | |      | |    | |     |   |           | |   
+   ___     ___                    | |     _| |_   | |     |   |           | |   
+  | X |   |PRZ|                   | |     |   |   | |     |   |           | |   
+--|3  |---|8  |-------------------| |-----|   |---| |-----|   |-----------| |---
+  |___|   |___|                   | |     |___|   | |     |___|           | |   
+   ___     ___                    | |             | |                     | |   
+  | X |   |PRZ|                   | |             | |                     | |   
+--|4  |---|9  |-------------------| |-------------| |---------------------| |---
+  |___|   |___|                   | |             | |                     | |   
+   ___     ___                   _| |_            | |             ___     | |   
+  |PRZ|   |PPR|                  |   |            | |            |PPR|    | |   
+--|10 |---|26 |------------------|   |------------| |------------|40 |----| |---
+  |___|   |   |                  |___|            | |            |_ _|    | |   
+   ___    |   |    ___     ___                    | |             | |    _| |_  
+  |PRZ|   |   |   |PPR|   |PPR|                   | |             | |    |   |  
+--|11 |---|   |---|27 |---|28 |-------------------| |-------------| |----|   |--
+  |___|   |___|   |   |   |_ _|                   | |             | |    |___|  
+   ___            |   |    | |             ___    | |      ___    | |           
+  |PRZ|           |   |    | |            |PPR|   | |     |PPR|   | |           
+--|12 |-----------|   |----| |------------|29 |---| |-----|30 |---| |-----------
+  |___|           |___|    | |            |   |   | |     |_ _|   | |           
+   ___                    _| |_           |   |   | |      | |    | |           
+  |PRZ|                   |   |           |   |   | |      | |    | |           
+--|13 |-------------------|   |-----------|   |---| |------| |----| |-----------
+  |___|                   |___|           |___|   | |      | |    | |           
+   ___                                            | |     _| |_   | |           
+  |PRZ|                                           | |     |   |   | |           
+--|14 |-------------------------------------------| |-----|   |---| |-----------
+  |___|                                           | |     |___|   | |           
+   ___     ___                                   _| |_           _| |_          
+  |PRZ|   |PPR|                                  |   |           |   |          
+--|15 |---|32 |----------------------------------|   |-----------|   |----------
+  |___|   |   |                                  |___|           |___|          
+   ___    |   |    ___     ___                                                  
+  |PRZ|   |   |   |PPR|   |PPR|                                                 
+--|16 |---|   |---|33 |---|34 |-------------------------------------------------
+  |___|   |___|   |   |   |_ _|                                                 
+   ___            |   |    | |             ___             ___                  
+  |PRZ|           |   |    | |            |PPR|           |PPR|                 
+--|17 |-----------|   |----| |------------|35 |-----------|36 |-----------------
+  |___|           |___|    | |            |   |           |_ _|                 
+   ___                    _| |_           |   |            | |                  
+  |PRZ|                   |   |           |   |            | |                  
+--|18 |-------------------|   |-----------|   |------------| |------------------
+  |___|                   |___|           |___|            | |                  
+   ___                                                    _| |_                 
+  |PRZ|                                                   |   |                 
+--|19 |---------------------------------------------------|   |-----------------
+  |___|                                                   |___|                 
+
+
+================================================================================
+
+                  ___                     ___                                   
+                 |PPR|                   |PPR|                                  
+-----------------|53 |-------------------|54 |----------------------------------
+                 |_ _|                   |_ _|                                  
+          ___     | |                     | |                             ___   
+         |PPR|    | |                     | |                            |PPR|  
+---------|42 |----| |---------------------| |----------------------------|55 |--
+         |_ _|    | |                     | |                            |_ _|  
+   ___    | |     | |             ___     | |      ___                    | |   
+  |PPR|   | |     | |            |PPR|    | |     |PPR|                   | |   
+--|24 |---| |-----| |------------|44 |----| |-----|45 |-------------------| |---
+  |_ _|   | |     | |            |_ _|    | |     |_ _|                   | |   
+   | |    | |     | |      ___    | |     | |      | |    ___             | |   
+   | |    | |     | |     |PPR|   | |     | |      | |   |PPR|            | |   
+---| |----| |-----| |-----|25 |---| |-----| |------| |---|47 |------------| |---
+   | |    | |     | |     |   |   | |     | |      | |   |_ _|            | |   
+  _| |_   | |     | |     |   |   | |     | |      | |    | |     ___     | |   
+  |   |   | |     | |     |   |   | |     | |      | |    | |    |PPR|    | |   
+--|   |---| |-----| |-----|   |---| |-----| |------| |----| |----|50 |----| |---
+  |___|   | |     | |     |___|   | |     | |      | |    | |    |_ _|    | |   
+          | |    _| |_            | |    _| |_     | |    | |     | |     | |   
+          | |    |   |            | |    |   |     | |    | |     | |     | |   
+----------| |----|   |------------| |----|   |-----| |----| |-----| |-----| |---
+          | |    |___|            | |    |___|     | |    | |     | |     | |   
+          | |              ___    | |              | |    | |     | |    _| |_  
+          | |             |PPR|   | |              | |    | |     | |    |   |  
+----------| |-------------|43 |---| |--------------| |----| |-----| |----|   |--
+          | |             |_ _|   | |              | |    | |     | |    |___|  
+          | |              | |   _| |_             | |    | |     | |           
+          | |              | |   |   |             | |    | |     | |           
+----------| |--------------| |---|   |-------------| |----| |-----| |-----------
+          | |              | |   |___|             | |    | |     | |           
+   ___    | |              | |                     | |   _| |_    | |           
+  |PPR|   | |              | |                     | |   |   |    | |           
+--|31 |---| |--------------| |---------------------| |---|   |----| |-----------
+  |   |   | |              | |                     | |   |___|    | |           
+  |   |   | |              | |                     | |           _| |_          
+  |   |   | |              | |                     | |           |   |          
+--|   |---| |--------------| |---------------------| |-----------|   |----------
+  |___|   | |              | |                     | |           |___|          
+          | |              | |                     | |                          
+          | |              | |                     | |                          
+----------| |--------------| |---------------------| |--------------------------
+          | |              | |                     | |                          
+         _| |_            _| |_                    | |                          
+         |   |            |   |                    | |                          
+---------|   |------------|   |--------------------| |--------------------------
+         |___|            |___|                    | |                          
+                                                  _| |_                         
+                                                  |   |                         
+--------------------------------------------------|   |-------------------------
+                                                  |___|                         
+   ___                                                                          
+  |PPR|                                                                         
+--|37 |-------------------------------------------------------------------------
+  |   |                                                                         
+  |   |                                                                         
+  |   |                                                                         
+--|   |-------------------------------------------------------------------------
+  |___|                                                                         
+
+
+================================================================================
+
+                                                                  ___           
+                                                                 |PPR|          
+-----------------------------------------------------------------|73 |----------
+                                                                 |_ _|          
+           ___                                                    | |           
+          |PPR|                                                   | |           
+----------|56 |---------------------------------------------------| |-----------
+          |_ _|                                                   | |           
+           | |                             ___                    | |      ___  
+           | |                            |PPR|                   | |     |PPR| 
+-----------| |----------------------------|57 |-------------------| |-----|58 |-
+           | |                            |_ _|                   | |     |_ _| 
+           | |    ___                      | |                    | |      | |  
+           | |   |PPR|                     | |                    | |      | |  
+-----------| |---|48 |---------------------| |--------------------| |------| |--
+           | |   |_ _|                     | |                    | |      | |  
+           | |    | |     ___              | |                    | |      | |  
+           | |    | |    |PPR|             | |                    | |      | |  
+-----------| |----| |----|51 |-------------| |--------------------| |------| |--
+           | |    | |    |_ _|             | |                    | |      | |  
+  ___      | |    | |     | |     ___      | |                    | |      | |  
+ |PPR|     | |    | |     | |    |PPR|     | |                    | |      | |  
+-|63 |-----| |----| |-----| |----|64 |-----| |--------------------| |------| |--
+ |_ _|     | |    | |     | |    |_ _|     | |                    | |      | |  
+  | |     _| |_   | |     | |     | |      | |            ___     | |      | |  
+  | |     |   |   | |     | |     | |      | |           |PPR|    | |      | |  
+--| |-----|   |---| |-----| |-----| |------| |-----------|65 |----| |------| |--
+  | |     |___|   | |     | |     | |      | |           |_ _|    | |      | |  
+  | |      ___    | |     | |     | |     _| |_           | |     | |     _| |_ 
+  | |     |PPR|   | |     | |     | |     |   |           | |     | |     |   | 
+--| |-----|46 |---| |-----| |-----| |-----|   |-----------| |-----| |-----|   |-
+  | |     |_ _|   | |     | |     | |     |___|           | |     | |     |___| 
+  | |      | |    | |     | |     | |      ___            | |     | |           
+  | |      | |    | |     | |     | |     |PPR|           | |     | |           
+--| |------| |----| |-----| |-----| |-----|49 |-----------| |-----| |-----------
+  | |      | |    | |     | |     | |     |_ _|           | |     | |           
+  | |      | |    | |     | |     | |      | |    ___     | |     | |           
+  | |      | |    | |     | |     | |      | |   |PPR|    | |     | |           
+--| |------| |----| |-----| |-----| |------| |---|52 |----| |-----| |-----------
+  | |      | |    | |     | |     | |      | |   |_ _|    | |     | |           
+ _| |_     | |    | |     | |    _| |_     | |    | |     | |    _| |_          
+ |   |     | |    | |     | |    |   |     | |    | |     | |    |   |          
+-|   |-----| |----| |-----| |----|   |-----| |----| |-----| |----|   |----------
+ |___|     | |    | |     | |    |___|     | |    | |     | |    |___|          
+           | |    | |     | |              | |    | |    _| |_                  
+           | |    | |     | |              | |    | |    |   |                  
+-----------| |----| |-----| |--------------| |----| |----|   |------------------
+           | |    | |     | |              | |    | |    |___|                  
+          _| |_   | |     | |              | |    | |                           
+          |   |   | |     | |              | |    | |                           
+----------|   |---| |-----| |--------------| |----| |---------------------------
+          |___|   | |     | |              | |    | |                           
+                 _| |_    | |             _| |_   | |                           
+                 |   |    | |             |   |   | |                           
+-----------------|   |----| |-------------|   |---| |---------------------------
+                 |___|    | |             |___|   | |                           
+                         _| |_                   _| |_                          
+                         |   |                   |   |                          
+-------------------------|   |-------------------|   |--------------------------
+                         |___|                   |___|                          
+
+
+================================================================================
+
+                          ___                                                   
+                         |PPR|                                                  
+-------------------------|74 |--------------------------------------------------
+                         |_ _|                                                  
+                          | |                             ___                   
+                          | |                            |PPR|                  
+--------------------------| |----------------------------|75 |------------------
+                          | |                            |_ _|                  
+                          | |                             | |                   
+                          | |                             | |                   
+--------------------------| |-----------------------------| |-------------------
+                          | |                             | |                   
+  ___                     | |      ___                    | |                   
+ |PPR|                    | |     |PPR|                   | |                   
+-|59 |--------------------| |-----|60 |-------------------| |-------------------
+ |_ _|                    | |     |_ _|                   | |                   
+  | |     ___             | |      | |    ___             | |                   
+  | |    |PPR|            | |      | |   |PPR|            | |                   
+--| |----|61 |------------| |------| |---|62 |------------| |-------------------
+  | |    |_ _|            | |      | |   |_ _|            | |                   
+  | |     | |             | |      | |    | |             | |                   
+  | |     | |             | |      | |    | |             | |                   
+--| |-----| |-------------| |------| |----| |-------------| |-------------------
+  | |     | |             | |      | |    | |             | |                   
+  | |     | |     ___     | |      | |    | |             | |                   
+  | |     | |    |PPR|    | |      | |    | |             | |                   
+--| |-----| |----|66 |----| |------| |----| |-------------| |-------------------
+  | |     | |    |_ _|    | |      | |    | |             | |                   
+  | |     | |     | |     | |      | |    | |     ___     | |      ___          
+  | |     | |     | |     | |      | |    | |    |PPR|    | |     |PPR|         
+--| |-----| |-----| |-----| |------| |----| |----|67 |----| |-----|68 |---------
+  | |     | |     | |     | |      | |    | |    |_ _|    | |     |_ _|         
+ _| |_    | |     | |     | |     _| |_   | |     | |     | |      | |    ___   
+ |   |    | |     | |     | |     |   |   | |     | |     | |      | |   |PPR|  
+-|   |----| |-----| |-----| |-----|   |---| |-----| |-----| |------| |---|69 |--
+ |___|    | |     | |     | |     |___|   | |     | |     | |      | |   |_ _|  
+         _| |_    | |     | |            _| |_    | |     | |      | |    | |   
+         |   |    | |     | |            |   |    | |     | |      | |    | |   
+---------|   |----| |-----| |------------|   |----| |-----| |------| |----| |---
+         |___|    | |     | |            |___|    | |     | |      | |    | |   
+                  | |    _| |_                    | |     | |      | |    | |   
+                  | |    |   |                    | |     | |      | |    | |   
+------------------| |----|   |--------------------| |-----| |------| |----| |---
+                  | |    |___|                    | |     | |      | |    | |   
+                 _| |_                            | |    _| |_     | |    | |   
+                 |   |                            | |    |   |     | |    | |   
+-----------------|   |----------------------------| |----|   |-----| |----| |---
+                 |___|                            | |    |___|     | |    | |   
+                                                 _| |_            _| |_   | |   
+                                                 |   |            |   |   | |   
+-------------------------------------------------|   |------------|   |---| |---
+                                                 |___|            |___|   | |   
+                                                                         _| |_  
+                                                                         |   |  
+-------------------------------------------------------------------------|   |--
+                                                                         |___|  
+                                                                                
+                                                                                
+--------------------------------------------------------------------------------
+                                                                                
+
+
+================================================================================
+
+                                                                                
+                                                                                
+--------------------------------------------------------------------------------
+                                                                                
+          ___                                                                   
+         |PPR|                                                                  
+---------|76 |------------------------------------------------------------------
+         |_ _|                                                                  
+          | |                     ___      ___                                  
+          | |                    |PPR|    |PPR|                                 
+----------| |--------------------|77 |----|78 |---------------------------------
+          | |                    |_ _|    |_ _|                                 
+          | |                     | |      | |    ___              ___          
+          | |                     | |      | |   |PPR|            |PPR|         
+----------| |---------------------| |------| |---|79 |------------|80 |---------
+          | |                     | |      | |   |_ _|            |_ _|         
+          | |                     | |      | |    | |     ___      | |    ___   
+          | |                     | |      | |    | |    |PPR|     | |   |PPR|  
+----------| |---------------------| |------| |----| |----|81 |-----| |---|82 |--
+          | |                     | |      | |    | |    |_ _|     | |   |_ _|  
+          | |                     | |      | |    | |     | |      | |    | |   
+          | |                     | |      | |    | |     | |      | |    | |   
+----------| |---------------------| |------| |----| |-----| |------| |----| |---
+          | |                     | |      | |    | |     | |      | |    | |   
+          | |                     | |      | |    | |     | |      | |    | |   
+          | |                     | |      | |    | |     | |      | |    | |   
+----------| |---------------------| |------| |----| |-----| |------| |----| |---
+          | |                     | |      | |    | |     | |      | |    | |   
+          | |                     | |      | |    | |     | |      | |    | |   
+          | |                     | |      | |    | |     | |      | |    | |   
+----------| |---------------------| |------| |----| |-----| |------| |----| |---
+          | |                     | |      | |    | |     | |      | |    | |   
+          | |      ___            | |      | |    | |     | |      | |    | |   
+          | |     |PPR|           | |      | |    | |     | |      | |    | |   
+----------| |-----|70 |-----------| |------| |----| |-----| |------| |----| |---
+          | |     |_ _|           | |      | |    | |     | |      | |    | |   
+  ___     | |      | |    ___     | |      | |    | |     | |      | |    | |   
+ |PPR|    | |      | |   |PPR|    | |      | |    | |     | |      | |    | |   
+-|71 |----| |------| |---|72 |----| |------| |----| |-----| |------| |----| |---
+ |_ _|    | |      | |   |_ _|    | |      | |    | |     | |      | |    | |   
+  | |     | |      | |    | |     | |      | |    | |     | |      | |    | |   
+  | |     | |      | |    | |     | |      | |    | |     | |      | |    | |   
+--| |-----| |------| |----| |-----| |------| |----| |-----| |------| |----| |---
+  | |     | |      | |    | |     | |      | |    | |     | |      | |    | |   
+  | |    _| |_     | |    | |     | |      | |    | |     | |      | |    | |   
+  | |    |   |     | |    | |     | |      | |    | |     | |      | |    | |   
+--| |----|   |-----| |----| |-----| |------| |----| |-----| |------| |----| |---
+  | |    |___|     | |    | |     | |      | |    | |     | |      | |    | |   
+  | |              | |    | |    _| |_    _| |_   | |     | |      | |    | |   
+  | |              | |    | |    |   |    |   |   | |     | |      | |    | |   
+--| |--------------| |----| |----|   |----|   |---| |-----| |------| |----| |---
+  | |              | |    | |    |___|    |___|   | |     | |      | |    | |   
+  | |             _| |_   | |                    _| |_    | |     _| |_   | |   
+  | |             |   |   | |                    |   |    | |     |   |   | |   
+--| |-------------|   |---| |--------------------|   |----| |-----|   |---| |---
+  | |             |___|   | |                    |___|    | |     |___|   | |   
+ _| |_                   _| |_                           _| |_           _| |_  
+ |   |                   |   |                           |   |           |   |  
+-|   |-------------------|   |---------------------------|   |-----------|   |--
+ |___|                   |___|                           |___|           |___|  
+</pre></div>
+</div>
+</div>
+</div>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">quri_parts.core.state</span> <span class="kn">import</span> <span class="n">quantum_state</span><span class="p">,</span> <span class="n">apply_circuit</span>
+
+<span class="n">cb_state</span> <span class="o">=</span> <span class="n">quantum_state</span><span class="p">(</span><span class="n">alternating_ansatz</span><span class="o">.</span><span class="n">num_qubits</span><span class="p">,</span> <span class="n">bits</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">parametric_state</span> <span class="o">=</span> <span class="n">apply_circuit</span><span class="p">(</span><span class="n">qp_alternating_circuit</span><span class="p">,</span> <span class="n">cb_state</span><span class="p">)</span>
+</pre></div>
+</div>
+</div>
+</div>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">typing</span> <span class="kn">import</span> <span class="n">Sequence</span>
+<span class="kn">from</span> <span class="nn">quri_parts.qulacs.estimator</span> <span class="kn">import</span> <span class="n">create_qulacs_vector_parametric_estimator</span>
+
+<span class="n">estimator</span> <span class="o">=</span> <span class="n">create_qulacs_vector_parametric_estimator</span><span class="p">()</span>
+
+
+<span class="n">cost_history</span> <span class="o">=</span> <span class="p">[]</span>
+<span class="k">def</span> <span class="nf">cost_fn</span><span class="p">(</span><span class="n">param_values</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">float</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
+    <span class="n">estimate</span> <span class="o">=</span> <span class="n">estimator</span><span class="p">(</span><span class="n">qp_cost</span><span class="p">,</span> <span class="n">parametric_state</span><span class="p">,</span> <span class="n">param_values</span><span class="p">)</span>
+    <span class="n">cost</span> <span class="o">=</span> <span class="n">estimate</span><span class="o">.</span><span class="n">value</span><span class="o">.</span><span class="n">real</span>
+    <span class="n">cost_history</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">cost</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">cost</span>
+
+
+<span class="n">result</span> <span class="o">=</span> <span class="n">opt</span><span class="o">.</span><span class="n">minimize</span><span class="p">(</span><span class="n">cost_fn</span><span class="p">,</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">],</span> <span class="n">method</span><span class="o">=</span><span class="s2">&quot;COBYLA&quot;</span><span class="p">,</span> <span class="n">options</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;maxiter&quot;</span><span class="p">:</span> <span class="mi">100</span><span class="p">})</span>
+<span class="n">result</span>
+</pre></div>
+</div>
+</div>
+<div class="cell_output docutils container">
+<div class="output text_plain highlight-myst-ansi notranslate"><div class="highlight"><pre><span></span> message: Optimization terminated successfully.
+ success: True
+  status: 1
+     fun: -5.826161402531299
+       x: [-5.693e-01 -4.550e-01]
+    nfev: 36
+   maxcv: 0.0
+</pre></div>
+</div>
+</div>
+</div>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="n">plt</span><span class="o">.</span><span class="n">plot</span><span class="p">(</span><span class="n">cost_history</span><span class="p">)</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">xlabel</span><span class="p">(</span><span class="s2">&quot;Iteration&quot;</span><span class="p">)</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">ylabel</span><span class="p">(</span><span class="s2">&quot;Cost&quot;</span><span class="p">)</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">show</span><span class="p">()</span>
+</pre></div>
+</div>
+</div>
+<div class="cell_output docutils container">
+<img alt="../_images/51e4460d27ee7f03333b4ddcc2973bf3ca714d9a756f3a6751c5a9ff0652ebf4.png" src="../_images/51e4460d27ee7f03333b4ddcc2973bf3ca714d9a756f3a6751c5a9ff0652ebf4.png" />
+</div>
+</div>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">quri_parts.qulacs.sampler</span> <span class="kn">import</span> <span class="n">create_qulacs_vector_sampler</span>
+
+
+<span class="n">sampler</span> <span class="o">=</span> <span class="n">create_qulacs_vector_sampler</span><span class="p">()</span>
+<span class="n">bounded_circuit</span> <span class="o">=</span> <span class="n">qp_alternating_circuit</span><span class="o">.</span><span class="n">bind_parameters</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">x</span><span class="p">)</span>
+<span class="n">qp_result</span> <span class="o">=</span> <span class="n">sampler</span><span class="p">(</span><span class="n">bounded_circuit</span><span class="p">,</span> <span class="mi">1000</span><span class="p">)</span>
+</pre></div>
+</div>
+</div>
+</div>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="n">sampleset</span> <span class="o">=</span> <span class="n">qaoa_converter</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="n">qp_transpiler</span><span class="p">,</span> <span class="p">(</span><span class="n">qp_result</span><span class="p">,</span> <span class="n">alternating_ansatz</span><span class="o">.</span><span class="n">num_qubits</span><span class="p">))</span>
+</pre></div>
+</div>
+</div>
+</div>
+<div class="cell docutils container">
+<div class="cell_input docutils container">
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="n">plot_graph_coloring</span><span class="p">(</span><span class="n">G</span><span class="p">,</span> <span class="n">sampleset</span><span class="p">)</span>
+</pre></div>
+</div>
+</div>
+<div class="cell_output docutils container">
+<img alt="../_images/01398424398571d1538bdb7d9cd069c652a3e444d7a14c382b1304b6c441bc81.png" src="../_images/01398424398571d1538bdb7d9cd069c652a3e444d7a14c382b1304b6c441bc81.png" />
+</div>
+</div>
+</section>
+</section>
+
+    <script type="text/x-thebe-config">
+    {
+        requestKernel: true,
+        binderOptions: {
+            repo: "binder-examples/jupyter-stacks-datascience",
+            ref: "master",
+        },
+        codeMirrorConfig: {
+            theme: "abcdef",
+            mode: "python"
+        },
+        kernelOptions: {
+            name: "python3",
+            path: "./tutorial"
+        },
+        predefinedOutput: true
+    }
+    </script>
+    <script>kernelName = 'python3'</script>
+
+                </article>
+              
+
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="index.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">Qamomile Tutorial</p>
+      </div>
+    </a>
+    <a class="right-next"
+       href="../autoapi/index.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">next</p>
+        <p class="prev-next-title">API Reference</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+              
+                <div class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+  <div class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> Contents
+  </div>
+  <nav class="bd-toc-nav page-toc">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#">Quantum Alternating Operator Ansatz for Graph Coloring Problem with Qiskit and Quri-Parts</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#quantum-approximate-optimazation-algorithm-qaoa">Quantum Approximate Optimazation Algorithm (QAOA)</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#implementing-qaoa-using-qamomile">Implementing QAOA using Qamomile</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#run-qaoa-using-qiskit">Run QAOA using Qiskit</a></li>
+</ul>
+</li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#quantum-alternating-operator-ansatz">Quantum Alternating Operator Ansatz</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#run-quantum-alternating-operator-ansatz-using-qiskit">Run Quantum Alternating Operator Ansatz using Qiskit</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#alternating-ansatz-with-quri-parts">Alternating Ansatz with Quri-Parts</a></li>
+</ul>
+</li>
+</ul>
+
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+<div class="bd-footer-content__inner container">
+  
+  <div class="footer-item">
+    
+<p class="component-author">
+By Jij Inc.
+</p>
+
+  </div>
+  
+  <div class="footer-item">
+    
+
+  <p class="copyright">
+    
+      © Copyright 2023.
+      <br/>
+    
+  </p>
+
+  </div>
+  
+  <div class="footer-item">
+    
+  </div>
+  
+  <div class="footer-item">
+    
+  </div>
+  
+</div>
+          </footer>
+        
+
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script src="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
+<script src="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+  <footer class="bd-footer">
+  </footer>
+  </body>
+</html>

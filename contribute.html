@@ -8,7 +8,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>Welcome to Qamomile &#8212; Qamomile Documentation</title>
+    <title>Contributing to qamomile Documentation &#8212; Qamomile Documentation</title>
   
   
   
@@ -58,12 +58,9 @@
     <script async="async" src="_static/sphinx-thebe.js?v=c100c467"></script>
     <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
     <script>const THEBE_JS_URL = "https://unpkg.com/thebe@0.8.2/lib/index.js"; const thebe_selector = ".thebe,.cell"; const thebe_selector_input = "pre"; const thebe_selector_output = ".output, .cell_output"</script>
-    <script>window.MathJax = {"options": {"processHtmlClass": "tex2jax_process|mathjax_process|math|output_area"}}</script>
-    <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
-    <script>DOCUMENTATION_OPTIONS.pagename = 'index';</script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'contribute';</script>
     <link rel="index" title="Index" href="genindex.html" />
     <link rel="search" title="Search" href="search.html" />
-    <link rel="next" title="Qamomile Quickstart Guide" href="quickstart.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   </head>
@@ -146,7 +143,7 @@
     
   
 
-<a class="navbar-brand logo" href="#">
+<a class="navbar-brand logo" href="index.html">
   
   
   
@@ -177,8 +174,8 @@
     <div class="bd-toc-item navbar-nav active">
         
         <ul class="nav bd-sidenav bd-sidenav__home-link">
-            <li class="toctree-l1 current active">
-                <a class="reference internal" href="#">
+            <li class="toctree-l1">
+                <a class="reference internal" href="index.html">
                     Welcome to Qamomile
                 </a>
             </li>
@@ -300,7 +297,7 @@
       
       
       
-      <li><a href="https://github.com/executablebooks/jupyter-book/issues/new?title=Issue%20on%20page%20%2Findex.html&body=Your%20issue%20content%20here." target="_blank"
+      <li><a href="https://github.com/executablebooks/jupyter-book/issues/new?title=Issue%20on%20page%20%2Fcontribute.html&body=Your%20issue%20content%20here." target="_blank"
    class="btn btn-sm btn-source-issues-button dropdown-item"
    title="Open an issue"
    data-bs-placement="left" data-bs-toggle="tooltip"
@@ -330,7 +327,7 @@
       
       
       
-      <li><a href="_sources/index.md" target="_blank"
+      <li><a href="_sources/contribute.md" target="_blank"
    class="btn btn-sm btn-download-source-button dropdown-item"
    title="Download source file"
    data-bs-placement="left" data-bs-toggle="tooltip"
@@ -414,7 +411,7 @@ document.write(`
               
 
 <div id="jb-print-docs-body" class="onlyprint">
-    <h1>Welcome to Qamomile</h1>
+    <h1>Contributing to qamomile Documentation</h1>
     <!-- Table of contents -->
     <div id="print-main-content">
         <div id="jb-print-toc">
@@ -424,11 +421,14 @@ document.write(`
             </div>
             <nav aria-label="Page">
                 <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#key-features">Key Features</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#quick-start">Quick Start</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#learn-more">Learn More</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#contributing">Contributing</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#support">Support</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#prerequisites">Prerequisites</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#setting-up">Setting Up</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#making-changes-to-the-documentation">Making Changes to the Documentation</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#building-the-documentation-locally">Building the Documentation Locally</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#submitting-your-changes">Submitting Your Changes</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#style-guidelines">Style Guidelines</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#documentation-structure">Documentation Structure</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#questions-or-need-help">Questions or Need Help?</a></li>
 </ul>
             </nav>
         </div>
@@ -440,48 +440,105 @@ document.write(`
 <div id="searchbox"></div>
                 <article class="bd-article">
                   
-  <section class="tex2jax_ignore mathjax_ignore" id="welcome-to-qamomile">
-<h1>Welcome to Qamomile<a class="headerlink" href="#welcome-to-qamomile" title="Link to this heading">#</a></h1>
-<p>Qamomile is a powerful SDK designed for quantum optimization algorithms, specializing in the conversion of mathematical models into quantum circuits. It serves as a bridge between classical optimization problems and quantum computing solutions.</p>
-<section id="key-features">
-<h2>Key Features<a class="headerlink" href="#key-features" title="Link to this heading">#</a></h2>
+  <section class="tex2jax_ignore mathjax_ignore" id="contributing-to-qamomile-documentation">
+<h1>Contributing to qamomile Documentation<a class="headerlink" href="#contributing-to-qamomile-documentation" title="Link to this heading">#</a></h1>
+<p>We welcome contributions to the qamomile documentation! This guide will help you get started with contributing to our docs using Jupyter Book.</p>
+<section id="prerequisites">
+<h2>Prerequisites<a class="headerlink" href="#prerequisites" title="Link to this heading">#</a></h2>
+<p>Before you begin, ensure you have the following installed:</p>
+<ol class="arabic simple">
+<li><p>Python 3.x</p></li>
+<li><p>Git</p></li>
+<li><p>Jupyter Book (<code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span> <span class="pre">jupyter-book</span></code>)</p></li>
+</ol>
+</section>
+<section id="setting-up">
+<h2>Setting Up<a class="headerlink" href="#setting-up" title="Link to this heading">#</a></h2>
+<ol class="arabic">
+<li><p>Fork the qamomile repository on GitHub.</p></li>
+<li><p>Clone your fork locally:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">gh</span> <span class="n">repo</span> <span class="n">clone</span> <span class="n">Jij</span><span class="o">-</span><span class="n">Inc</span><span class="o">/</span><span class="n">Qamomile</span>
+<span class="n">cd</span> <span class="n">qamomile</span>
+</pre></div>
+</div>
+</li>
+<li><p>Create a virtual environment and activate it:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">poetry</span> <span class="n">install</span>
+<span class="n">poetry</span> <span class="n">shell</span>
+</pre></div>
+</div>
+</li>
+</ol>
+</section>
+<section id="making-changes-to-the-documentation">
+<h2>Making Changes to the Documentation<a class="headerlink" href="#making-changes-to-the-documentation" title="Link to this heading">#</a></h2>
+<ol class="arabic simple">
+<li><p>Navigate to the <code class="docutils literal notranslate"><span class="pre">docs/</span></code> directory in your local repository.</p></li>
+<li><p>Find the appropriate Markdown (<code class="docutils literal notranslate"><span class="pre">.md</span></code>) or Jupyter Notebook (<code class="docutils literal notranslate"><span class="pre">.ipynb</span></code>) file you want to edit, or create a new one.</p></li>
+<li><p>Make your changes using your preferred text editor.</p></li>
+<li><p>If you’re adding new pages, update the <code class="docutils literal notranslate"><span class="pre">_toc.yml</span></code> file to include your new page in the table of contents.</p></li>
+</ol>
+</section>
+<section id="building-the-documentation-locally">
+<h2>Building the Documentation Locally<a class="headerlink" href="#building-the-documentation-locally" title="Link to this heading">#</a></h2>
+<p>To preview your changes:</p>
+<ol class="arabic">
+<li><p>From the <code class="docutils literal notranslate"><span class="pre">docs/</span></code> directory, run:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">jupyter</span><span class="o">-</span><span class="n">book</span> <span class="n">build</span> <span class="o">.</span>
+</pre></div>
+</div>
+</li>
+<li><p>Open <code class="docutils literal notranslate"><span class="pre">_build/html/index.html</span></code> in your web browser to view the built documentation.</p></li>
+</ol>
+</section>
+<section id="submitting-your-changes">
+<h2>Submitting Your Changes<a class="headerlink" href="#submitting-your-changes" title="Link to this heading">#</a></h2>
+<ol class="arabic">
+<li><p>Commit your changes:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">git</span> <span class="n">add</span> <span class="o">.</span>
+<span class="n">git</span> <span class="n">commit</span> <span class="o">-</span><span class="n">m</span> <span class="s2">&quot;Brief description of your changes&quot;</span>
+</pre></div>
+</div>
+</li>
+<li><p>Push to your fork:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">git</span> <span class="n">push</span> <span class="n">origin</span> <span class="n">main</span>
+</pre></div>
+</div>
+</li>
+<li><p>Create a pull request from your fork to the main qamomile repository on GitHub.</p></li>
+</ol>
+</section>
+<section id="style-guidelines">
+<h2>Style Guidelines<a class="headerlink" href="#style-guidelines" title="Link to this heading">#</a></h2>
 <ul class="simple">
-<li><p><strong>Versatile Compatibility</strong>: Supports leading quantum circuit SDKs including Qiskit and Quri-parts.</p></li>
-<li><p><strong>Advanced Algorithm Support</strong>: Goes beyond QAOA to include sophisticated encoding and algorithms like QRAO.</p></li>
-<li><p><strong>Flexible Model Conversion</strong>: Utilizes JijModeling for describing mathematical models and converting them to various quantum circuit SDKs.</p></li>
-<li><p><strong>Intermediate Representation</strong>: Capable of representing both Hamiltonians and quantum circuits as intermediate forms.</p></li>
-<li><p><strong>Standalone Functionality</strong>: Can implement quantum circuits independently, similar to other quantum circuit SDKs.</p></li>
+<li><p>Use clear, concise language.</p></li>
+<li><p>Follow the existing documentation structure and formatting.</p></li>
+<li><p>Include code examples where appropriate, especially when explaining qamomile’s features or API.</p></li>
+<li><p>Use proper Markdown syntax for headings, lists, code blocks, etc.</p></li>
+<li><p>When documenting code, follow the docstring style used in the qamomile project.</p></li>
 </ul>
 </section>
-<section id="quick-start">
-<h2>Quick Start<a class="headerlink" href="#quick-start" title="Link to this heading">#</a></h2>
-<p>To get started with Qamomile, please see the <a class="reference internal" href="quickstart.html"><span class="std std-doc">Quick Start Guide</span></a> for installation instructions and a simple example.</p>
-</section>
-<section id="learn-more">
-<h2>Learn More<a class="headerlink" href="#learn-more" title="Link to this heading">#</a></h2>
-<p>Explore our documentation to dive deeper into Qamomile’s capabilities:</p>
+<section id="documentation-structure">
+<h2>Documentation Structure<a class="headerlink" href="#documentation-structure" title="Link to this heading">#</a></h2>
+<p>Our documentation is organized as follows:</p>
 <ul class="simple">
-<li><p><a class="reference internal" href="quickstart.html"><span class="std std-doc">Quick Start Guide</span></a>: Installation instructions and a simple example to get you started.</p></li>
-<li><p><a class="reference internal" href="api/index.html"><span class="std std-doc">API Reference</span></a>: Complete documentation of Qamomile’s API.</p></li>
-<li><p><a class="reference internal" href="tutorial/index.html"><span class="std std-doc">Tutorials</span></a>: Step-by-step guides and examples to get you started.</p></li>
-<li><p><a class="reference internal" href="#advanced/index.md"><span class="xref myst">Advanced Topics</span></a>: Explore advanced features and optimization techniques.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">index.md</span></code>: The main landing page</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">quickstart.md</span></code>: Guide for new users</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">api/</span></code>: API reference documentation for qamomile.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">tutorial/</span></code>: Usage examples and tutorials</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">contributing.md</span></code>: This guide</p></li>
 </ul>
+<p>Feel free to suggest improvements to this structure if you think it can be made more intuitive.</p>
 </section>
-<section id="contributing">
-<h2>Contributing<a class="headerlink" href="#contributing" title="Link to this heading">#</a></h2>
-<p>We welcome contributions from the community! If you’re interested in improving Qamomile, please check out our <a class="reference internal" href="#contributing.md"><span class="xref myst">Contribution Guidelines</span></a>.</p>
+<section id="questions-or-need-help">
+<h2>Questions or Need Help?<a class="headerlink" href="#questions-or-need-help" title="Link to this heading">#</a></h2>
+<p>If you have any questions or need assistance while contributing, please don’t hesitate to:</p>
+<ul class="simple">
+<li><p>Open an issue on GitHub</p></li>
+<li><p>Reach out to the maintainers via [contact method]</p></li>
+</ul>
+<p>Thank you for your interest in improving qamomile’s documentation!</p>
 </section>
-<section id="support">
-<h2>Support<a class="headerlink" href="#support" title="Link to this heading">#</a></h2>
-<p>If you encounter any issues or have questions, please file an issue on our <a class="reference external" href="https://github.com/Jij-Inc/Qamomile">GitHub repository</a> or join our community discussion forum.</p>
-<p>Welcome aboard, and happy quantum optimizing with Qamomile!</p>
-</section>
-<div class="toctree-wrapper compound">
-</div>
-<div class="toctree-wrapper compound">
-</div>
-<div class="toctree-wrapper compound">
-</div>
 </section>
 
     <script type="text/x-thebe-config">
@@ -514,15 +571,6 @@ document.write(`
                 <footer class="prev-next-footer d-print-none">
                   
 <div class="prev-next-area">
-    <a class="right-next"
-       href="quickstart.html"
-       title="next page">
-      <div class="prev-next-info">
-        <p class="prev-next-subtitle">next</p>
-        <p class="prev-next-title">Qamomile Quickstart Guide</p>
-      </div>
-      <i class="fa-solid fa-angle-right"></i>
-    </a>
 </div>
                 </footer>
               
@@ -539,11 +587,14 @@ document.write(`
   </div>
   <nav class="bd-toc-nav page-toc">
     <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#key-features">Key Features</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#quick-start">Quick Start</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#learn-more">Learn More</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#contributing">Contributing</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#support">Support</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#prerequisites">Prerequisites</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#setting-up">Setting Up</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#making-changes-to-the-documentation">Making Changes to the Documentation</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#building-the-documentation-locally">Building the Documentation Locally</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#submitting-your-changes">Submitting Your Changes</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#style-guidelines">Style Guidelines</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#documentation-structure">Documentation Structure</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#questions-or-need-help">Questions or Need Help?</a></li>
 </ul>
   </nav></div>
 
