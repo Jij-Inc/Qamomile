@@ -82,6 +82,50 @@ class PauliOperator:
         """
         return f"{self.pauli.name}{self.index}"
 
+    # def __mul__(self, other) -> "Hamiltonian":
+    #     if isinstance(other, (int, float, complex)):
+    #         h = Hamiltonian()
+    #         h.add_term((self,), other)
+    #         return h
+    #     elif isinstance(other, PauliOperator):
+    #         h = pauli_multiplication(self, other)
+    #         return h
+    #     else:
+    #         raise ValueError("Unsupported multiplication operation.")
+
+    # def __rmul__(self, other):
+    #     return self.__mul__(other)
+
+
+def pauli_multiplication(pauli1:PauliOperator, pauli2:PauliOperator) -> "Hamiltonian":
+    h = Hamiltonian()
+    if pauli1.index == pauli2.index:
+        if pauli1.pauli == pauli2.pauli:
+            return h
+        elif pauli1.pauli == Pauli.X:
+            if pauli2.pauli == Pauli.Y:
+                h.add_term((Z(pauli1.index),), 1.0j)
+                return h
+            elif pauli2.pauli == Pauli.Z:
+                h.add_term((Y(pauli1.index),), -1.0j)
+                return h
+        elif pauli1.pauli == Pauli.Y:
+            if pauli2.pauli == Pauli.X:
+                h.add_term((Z(pauli1.index),), -1.0j)
+                return h
+            elif pauli2.pauli == Pauli.Z:
+                h.add_term((X(pauli1.index),), 1.0j)
+                return h
+        elif pauli1.pauli == Pauli.Z:
+            if pauli2.pauli == Pauli.X:
+                h.add_term((Y(pauli1.index),), 1.0j)
+                return h
+            elif pauli2.pauli == Pauli.Y:
+                h.add_term((X(pauli1.index),), -1.0j)
+                return h
+    else:
+        h.add_term((pauli1,pauli2), 1.0)
+        return h
 
 def X(index: int) -> PauliOperator:
     """
@@ -242,3 +286,28 @@ class Hamiltonian:
             f"{operators}: {coeff}" for operators, coeff in self._terms.items()
         )
         return f"Hamiltonian({terms_str})"
+    
+    def __eq__(self, other):
+        if not isinstance(other, Hamiltonian):
+            return False
+        return self.terms == other.terms and self.constant == other.constant
+
+    def __add__(self, other):
+        if isinstance(other, Hamiltonian):
+            h = Hamiltonian()
+            h._terms = self._terms.copy()
+            h.constant = self.constant
+            for term, coeff in other.terms.items():
+                h.add_term(term, coeff)
+            h.constant += other.constant
+            return h
+        elif isinstance(other, (int, float, complex)):
+            h = Hamiltonian()
+            h._terms = self._terms.copy()
+            h.constant = self.constant + other
+            return h
+        else:
+            raise ValueError("Unsupported addition operation.")
+        
+    def __radd__(self, other):
+        return self.__add__(other)
