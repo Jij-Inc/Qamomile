@@ -154,9 +154,9 @@ class QiskitTranspiler(QuantumSDKTranspiler[qk_primitives.BitArray]):
             qk_pauli_x = np.zeros(num_qubits, dtype=bool)
             for pauli in term:
                 if pauli.pauli == qm_o.Pauli.X:
-                    qk_pauli_x[pauli.index] = not qk_pauli_z[pauli.index]
+                    qk_pauli_x[pauli.index] = not qk_pauli_x[pauli.index]
                 elif pauli.pauli == qm_o.Pauli.Y:
-                    qk_pauli_x[pauli.index] = not qk_pauli_z[pauli.index]
+                    qk_pauli_x[pauli.index] = not qk_pauli_x[pauli.index]
                     qk_pauli_z[pauli.index] = not qk_pauli_z[pauli.index]
                 elif pauli.pauli == qm_o.Pauli.Z:
                     qk_pauli_z[pauli.index] = not qk_pauli_z[pauli.index]
