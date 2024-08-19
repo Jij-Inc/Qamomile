@@ -151,15 +151,14 @@ class Hamiltonian:
         if operators:
             # Sort the operators to ensure consistent representation
             operators = tuple(
-                    sorted(operators, key=lambda x: x.index * 10 + x.pauli.value)
-                )
+                sorted(operators, key=lambda x: x.index * 10 + x.pauli.value)
+            )
             if operators in self._terms:
                 self._terms[operators] += phase * coeff
             else:
                 self._terms[operators] = phase * coeff
         else:
             self.constant += phase * coeff
-        
 
     @property
     def num_qubits(self) -> int:
@@ -241,15 +240,15 @@ class Hamiltonian:
                         h.add_term(term, phase * coeff1 * coeff2)
                     else:
                         h.constant += phase * coeff1 * coeff2
-            
-            if not math.isclose(other.constant,0.0, abs_tol=1e-15):
+
+            if not math.isclose(other.constant, 0.0, abs_tol=1e-15):
                 for terms, coeff1 in self.terms.items():
                     h.add_term(terms, coeff1 * other.constant)
 
-            if not math.isclose(self.constant,0.0, abs_tol=1e-15):
+            if not math.isclose(self.constant, 0.0, abs_tol=1e-15):
                 for terms, coeff2 in other.terms.items():
                     h.add_term(terms, coeff2 * self.constant)
-            
+
             h.constant += self.constant * other.constant
 
             return h
