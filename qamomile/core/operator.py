@@ -5,7 +5,7 @@ It defines classes and functions to create and manipulate Pauli operators and Ha
 which are fundamental in quantum mechanics and quantum computing.
 
 Key Components:
-- Pauli: An enumeration of Pauli operators (X, Y, Z).
+- Pauli: An enumeration of Pauli operators (X, Y, Z, I).
 - PauliOperator: A class representing a single Pauli operator acting on a specific qubit.
 - Hamiltonian: A class representing a quantum Hamiltonian as a sum of Pauli operator products.
 
@@ -39,11 +39,13 @@ class Pauli(enum.Enum):
         X (int): Pauli X operator, represented by 0.
         Y (int): Pauli Y operator, represented by 1.
         Z (int): Pauli Z operator, represented by 2.
+        I (int): Identity operator, represented by 3.
     """
 
     X = 0
     Y = 1
     Z = 2
+    I = 3
 
 
 @dataclasses.dataclass
@@ -95,90 +97,6 @@ class PauliOperator:
 
     # def __rmul__(self, other):
     #     return self.__mul__(other)
-
-
-def pauli_multiplication(pauli1:PauliOperator, pauli2:PauliOperator) -> "Hamiltonian":
-    h = Hamiltonian()
-    if pauli1.index == pauli2.index:
-        if pauli1.pauli == pauli2.pauli:
-            return h
-        elif pauli1.pauli == Pauli.X:
-            if pauli2.pauli == Pauli.Y:
-                h.add_term((Z(pauli1.index),), 1.0j)
-                return h
-            elif pauli2.pauli == Pauli.Z:
-                h.add_term((Y(pauli1.index),), -1.0j)
-                return h
-        elif pauli1.pauli == Pauli.Y:
-            if pauli2.pauli == Pauli.X:
-                h.add_term((Z(pauli1.index),), -1.0j)
-                return h
-            elif pauli2.pauli == Pauli.Z:
-                h.add_term((X(pauli1.index),), 1.0j)
-                return h
-        elif pauli1.pauli == Pauli.Z:
-            if pauli2.pauli == Pauli.X:
-                h.add_term((Y(pauli1.index),), 1.0j)
-                return h
-            elif pauli2.pauli == Pauli.Y:
-                h.add_term((X(pauli1.index),), -1.0j)
-                return h
-    else:
-        h.add_term((pauli1,pauli2), 1.0)
-        return h
-
-def X(index: int) -> PauliOperator:
-    """
-    Creates a Pauli X operator for a specified qubit.
-
-    Args:
-        index (int): The index of the qubit.
-
-    Returns:
-        PauliOperator: A Pauli X operator acting on the specified qubit.
-
-    Example:
-        >>> X0 = X(0)
-        >>> print(X0)
-        X0
-    """
-    return PauliOperator(Pauli.X, index)
-
-
-def Y(index: int) -> PauliOperator:
-    """
-    Creates a Pauli Y operator for a specified qubit.
-
-    Args:
-        index (int): The index of the qubit.
-
-    Returns:
-        PauliOperator: A Pauli Y operator acting on the specified qubit.
-
-    Example:
-        >>> Y1 = Y(1)
-        >>> print(Y1)
-        Y1
-    """
-    return PauliOperator(Pauli.Y, index)
-
-
-def Z(index: int) -> PauliOperator:
-    """
-    Creates a Pauli Z operator for a specified qubit.
-
-    Args:
-        index (int): The index of the qubit.
-
-    Returns:
-        PauliOperator: A Pauli Z operator acting on the specified qubit.
-
-    Example:
-        >>> Z2 = Z(2)
-        >>> print(Z2)
-        Z2
-    """
-    return PauliOperator(Pauli.Z, index)
 
 
 class Hamiltonian:
@@ -311,3 +229,156 @@ class Hamiltonian:
         
     def __radd__(self, other):
         return self.__add__(other)
+
+    def __mul__(self, other):
+        if isinstance(other, (int, float, complex)):
+            h = Hamiltonian()
+            for term, coeff in self.terms.items():
+                h.add_term(term, coeff * other)
+            h.constant = self.constant * other
+            return h
+        elif isinstance(other, Hamiltonian):
+            h = Hamiltonian()
+            for term1, coeff1 in self.terms.items():
+                for term2, coeff2 in other.terms.items():
+                    term, phase = simplify_pauliop_terms(term1 + term2)
+                    h.add_term(term, phase * coeff1 * coeff2)
+            return h
+        else:
+            raise ValueError("Unsupported multiplication operation.")
+        
+
+    def __rmul__(self, other):
+        return self.__mul__(other)
+    
+
+def X(index: int) -> Hamiltonian:
+    """
+    Creates a Pauli X operator for a specified qubit.
+
+    Args:
+        index (int): The index of the qubit.
+
+    Returns:
+        Hamiltonian: A Pauli X Hamiltonian operator acting on the specified qubit.
+
+    Example:
+        >>> X0 = X(0)
+        >>> print(X0)
+        X0
+    """
+    h = Hamiltonian()
+    h.add_term((PauliOperator(Pauli.X, index),), 1.0)
+    return h
+
+
+def Y(index: int) -> Hamiltonian:
+    """
+    Creates a Pauli Y operator for a specified qubit.
+
+    Args:
+        index (int): The index of the qubit.
+
+    Returns:
+        Hamiltonian: A Pauli Y Hamiltonian operator acting on the specified qubit.
+
+    Example:
+        >>> Y1 = Y(1)
+        >>> print(Y1)
+        Y1
+    """
+    h = Hamiltonian()
+    h.add_term((PauliOperator(Pauli.Y, index),), 1.0)
+    return h
+
+
+def Z(index: int) -> Hamiltonian:
+    """
+    Creates a Pauli Z operator for a specified qubit.
+
+    Args:
+        index (int): The index of the qubit.
+
+    Returns:
+        Hamiltonian: A Pauli Z Hamiltonian operator acting on the specified qubit.
+
+    Example:
+        >>> Z2 = Z(2)
+        >>> print(Z2)
+        Z2
+    """
+    h = Hamiltonian()
+    h.add_term((PauliOperator(Pauli.Z, index),), 1.0)
+    return h
+
+def multiply_pauli_same_qubit(pauli1:PauliOperator, pauli2:PauliOperator) -> tuple[PauliOperator, complex]:
+    
+    if pauli1.index == pauli2.index:
+        if pauli1.pauli == pauli2.pauli:
+            return PauliOperator(Pauli.I, pauli1.index), 1.0
+        
+        elif pauli1.pauli == Pauli.X:
+            if pauli2.pauli == Pauli.Y:
+                return PauliOperator(Pauli.Z, pauli1.index) , 1.0j
+                
+            elif pauli2.pauli == Pauli.Z:
+                return PauliOperator(Pauli.Y, pauli1.index) , -1.0j
+            
+            elif pauli2.pauli == Pauli.I:
+                return PauliOperator(Pauli.X, pauli1.index), 1.0
+
+        elif pauli1.pauli == Pauli.Y:
+            if pauli2.pauli == Pauli.X:
+                return PauliOperator(Pauli.Z, pauli1.index) , -1.0j
+                
+            elif pauli2.pauli == Pauli.Z:
+                return PauliOperator(Pauli.X, pauli1.index) , 1.0j
+
+            elif pauli2.pauli == Pauli.I:
+                return PauliOperator(Pauli.Y, pauli1.index), 1.0
+                
+
+        elif pauli1.pauli == Pauli.Z:
+            if pauli2.pauli == Pauli.X:
+                return PauliOperator(Pauli.Y, pauli1.index) , 1.0j
+                
+            elif pauli2.pauli == Pauli.Y:
+                return PauliOperator(Pauli.X, pauli1.index) , -1.0j
+            
+            elif pauli2.pauli == Pauli.I:
+                return PauliOperator(Pauli.Z, pauli1.index), 1.0
+
+        elif pauli1.pauli == Pauli.I:
+            return pauli2, 1.0
+        
+    else:
+        raise ValueError("Pauli operators act on different qubits.")
+    
+def simplify_pauliop_terms(term:tuple[PauliOperator]) -> tuple[PauliOperator]:
+    phase = 1.0
+    paulis = {}
+
+    for op in term:
+        if op.index in paulis:
+            paulis[op.index].append(op)
+        else:
+            paulis[op.index] = [op]
+    
+    for qubit_index,_pauli_list in paulis.items():
+        if len(_pauli_list) == 1:
+            continue
+        else:
+            op = _pauli_list[0]
+            for i in range(1, len(_pauli_list)):
+                op, _phase = multiply_pauli_same_qubit(op, _pauli_list[i])
+                phase *= _phase
+                
+            paulis[qubit_index] = [op]
+
+    pauli_list = []
+    
+    for _pauli_list in paulis.values():
+        if _pauli_list[0].pauli != Pauli.I:
+            pauli_list.append(_pauli_list[0])
+
+    return set(pauli_list), phase
