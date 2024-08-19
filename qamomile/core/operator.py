@@ -26,6 +26,7 @@ Usage:
     print(H.num_qubits)
 """
 
+import math
 import dataclasses
 import enum
 from typing import Dict, Tuple, Union, Optional
@@ -83,20 +84,6 @@ class PauliOperator:
             str: A string in the format "PauliTypeQubitIndex" (e.g., "X0" for Pauli X on qubit 0).
         """
         return f"{self.pauli.name}{self.index}"
-
-    # def __mul__(self, other) -> "Hamiltonian":
-    #     if isinstance(other, (int, float, complex)):
-    #         h = Hamiltonian()
-    #         h.add_term((self,), other)
-    #         return h
-    #     elif isinstance(other, PauliOperator):
-    #         h = pauli_multiplication(self, other)
-    #         return h
-    #     else:
-    #         raise ValueError("Unsupported multiplication operation.")
-
-    # def __rmul__(self, other):
-    #     return self.__mul__(other)
 
 
 class Hamiltonian:
@@ -159,19 +146,20 @@ class Hamiltonian:
             >>> print(H.terms)
             {(X0, Y1): (0.5+0.5j)}
         """
-        operators, phase = simplify_pauliop_terms(operators)
 
+        operators, phase = simplify_pauliop_terms(operators)
         if operators:
             # Sort the operators to ensure consistent representation
             operators = tuple(
-                sorted(operators, key=lambda x: x.index * 10 + x.pauli.value)
-            )
+                    sorted(operators, key=lambda x: x.index * 10 + x.pauli.value)
+                )
             if operators in self._terms:
                 self._terms[operators] += phase * coeff
             else:
                 self._terms[operators] = phase * coeff
         else:
             self.constant += phase * coeff
+        
 
     @property
     def num_qubits(self) -> int:
@@ -253,6 +241,17 @@ class Hamiltonian:
                         h.add_term(term, phase * coeff1 * coeff2)
                     else:
                         h.constant += phase * coeff1 * coeff2
+            
+            if not math.isclose(other.constant,0.0, abs_tol=1e-15):
+                for terms, coeff1 in self.terms.items():
+                    h.add_term(terms, coeff1 * other.constant)
+
+            if not math.isclose(self.constant,0.0, abs_tol=1e-15):
+                for terms, coeff2 in other.terms.items():
+                    h.add_term(terms, coeff2 * self.constant)
+            
+            h.constant += self.constant * other.constant
+
             return h
         else:
             raise ValueError("Unsupported multiplication operation.")

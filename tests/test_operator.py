@@ -277,6 +277,35 @@ def test_Hamiltonian_multiplication():
     )
     assert h == expected_h
 
+    h1 = 2.0 * x0 + 1.0
+    h = y1 * h1
+    expected_h = qm_o.Hamiltonian()
+    expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 1),qm_o.PauliOperator(qm_o.Pauli.X, 0)), 2.0)
+    expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 1),), 1.0)
+    assert h == expected_h
+
+    h = h1 * y1
+    expected_h = qm_o.Hamiltonian()
+    expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 1),qm_o.PauliOperator(qm_o.Pauli.X, 0)), 2.0)
+    expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 1),), 1.0)
+    assert h == expected_h
+
+    h = h1 * h1
+    expected_h = qm_o.Hamiltonian()
+    expected_h.constant += 5.0
+    expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), 4.0)
+    print(h.constant)
+    assert h == expected_h
+
+    h2 = 4 * y1 + 3
+    h = h1 * h2
+    expected_h = qm_o.Hamiltonian()
+    expected_h.constant += 3.0
+    expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0), qm_o.PauliOperator(qm_o.Pauli.Y, 1)), 8.0)
+    expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), 6.0)
+    expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 1),), 4.0)
+    assert h == expected_h
+
 
 def test_Hamiltonian_neg():
     x0 = qm_o.X(0)
