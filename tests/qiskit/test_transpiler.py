@@ -98,3 +98,20 @@ def test_transpile_hamiltonian(transpiler):
     assert isinstance(qiskit_hamiltonian, qk_ope.SparsePauliOp)
     assert len(qiskit_hamiltonian) == 2
     assert np.allclose(qiskit_hamiltonian.coeffs, [1.0, 2.0])
+
+    hamiltonian = Hamiltonian()
+    hamiltonian.add_term((PauliOperator(Pauli.X, 0), ), 1.0)
+    hamiltonian.add_term((PauliOperator(Pauli.X, 0), ), 1.0)
+
+    qiskit_hamiltonian = transpiler.transpile_hamiltonian(hamiltonian)
+
+    assert isinstance(qiskit_hamiltonian, qk_ope.SparsePauliOp)
+    assert len(qiskit_hamiltonian) == 1
+    assert np.allclose(qiskit_hamiltonian.coeffs, [2.0])
+    assert np.all(qiskit_hamiltonian.paulis == ['X'])
+
+
+
+
+
+    

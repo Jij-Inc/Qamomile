@@ -124,11 +124,11 @@ class QAOAConverter(QuantumConverter):
 
         # Add linear terms
         for i, hi in ising.linear.items():
-            hamiltonian.add_term((qm_o.Z(i),), hi)
+            hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z ,i),), hi)
 
         # Add quadratic terms
         for (i, j), Jij in ising.quad.items():
-            hamiltonian.add_term((qm_o.Z(i), qm_o.Z(j)), Jij)
+            hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z ,i), qm_o.PauliOperator(qm_o.Pauli.Z ,j)), Jij)
 
         hamiltonian.constant = ising.constant
         return hamiltonian
