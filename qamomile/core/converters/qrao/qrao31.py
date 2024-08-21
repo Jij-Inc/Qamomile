@@ -56,7 +56,7 @@ def qrac31_encode_ising(
             continue
 
         if i == j:
-            offset += coeff
+            hamiltonian.constant += coeff
             continue
 
         pauli_i = encoded_ope[i]
