@@ -29,9 +29,9 @@ jobs:
           python-version: '3.10'
       - name: Install dependencies
         run: |
-          pip install -U jupyter-book
-          pip install sphinx-autoapi
-          pip install -U qamomile[qiskit, quri-parts]
+          poetry shell
+          poetry install --all-extras
+          poetry run pip install -U jupyter-book
       - name: Build the book
         run: |
           cd docs
