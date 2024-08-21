@@ -8,6 +8,18 @@ from .qrao31 import color_group_to_qrac_encode
 from .graph_coloring import greedy_graph_coloring, check_linear_term
 
 def create_x_prime(idx: int) -> qm_o.PauliOperator:
+    """
+    Creates a X' operator for the given index.
+
+    .. math::
+            X' = \frac{1}{2}X_1X_2 + \frac{1}{2}X_1Z_2 + Z_1I_2
+
+    Parameters:
+    idx (int): The index of the first qubit.
+
+    Returns:
+    qm_o.PauliOperator: The X' operator for the given index.
+    """
     Xi0 = qm_o.X(idx)
     Xi1 = qm_o.X(idx + 1)
     Zi0 = qm_o.Z(idx)
@@ -15,6 +27,18 @@ def create_x_prime(idx: int) -> qm_o.PauliOperator:
     return 1 / 2 * (Xi0 * Xi1) + 1 / 2 * (Xi0 * Zi1) + Zi0
 
 def create_y_prime(idx: int) -> qm_o.Hamiltonian:
+    """
+    Creates a Y' operator for the given index.
+
+    .. math::
+            Y' = \frac{1}{2}I_1X_2 + I_1Z_2 + \frac{1}{2}Y_1Y_2
+
+    Parameters:
+    idx (int): The index of the first qubit.
+
+    Returns:
+    qm_o.PauliOperator: The Y' operator for the given index.
+    """
     Xi1 = qm_o.X(idx + 1)
     Zi1 = qm_o.Z(idx + 1)
     Yi0 = qm_o.Y(idx)
@@ -23,6 +47,18 @@ def create_y_prime(idx: int) -> qm_o.Hamiltonian:
 
 
 def create_z_prime(idx: int) -> qm_o.Hamiltonian:
+    """
+    Creates a Z' operator for the given index.
+
+    .. math::
+            Z' = Z_1Z_2 - \frac{1}{2}X_1I_2 - \frac{1}{2}Z_1X_2
+
+    Parameters:
+    idx (int): The index of the first qubit.
+
+    Returns:
+    qm_o.PauliOperator: The Z' operator for the given index.
+    """
     Xi0 = qm_o.X(idx)
     Xi1 = qm_o.X(idx + 1)
     Zi0 = qm_o.Z(idx)
