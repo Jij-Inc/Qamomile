@@ -12,7 +12,7 @@ def create_x_prime(idx: int) -> qm_o.PauliOperator:
     Creates a X' operator for the given index.
 
     .. math::
-            X' = \frac{1}{2}X_1X_2 + \frac{1}{2}X_1Z_2 + Z_1I_2
+            X' = \\frac{1}{2}X_1X_2 + \\frac{1}{2}X_1Z_2 + Z_1I_2
 
     Parameters:
     idx (int): The index of the first qubit.
@@ -31,7 +31,7 @@ def create_y_prime(idx: int) -> qm_o.Hamiltonian:
     Creates a Y' operator for the given index.
 
     .. math::
-            Y' = \frac{1}{2}I_1X_2 + I_1Z_2 + \frac{1}{2}Y_1Y_2
+            Y' = \\frac{1}{2}I_1X_2 + I_1Z_2 + \\frac{1}{2}Y_1Y_2
 
     Parameters:
     idx (int): The index of the first qubit.
@@ -51,7 +51,7 @@ def create_z_prime(idx: int) -> qm_o.Hamiltonian:
     Creates a Z' operator for the given index.
 
     .. math::
-            Z' = Z_1Z_2 - \frac{1}{2}X_1I_2 - \frac{1}{2}Z_1X_2
+            Z' = Z_1Z_2 - \\frac{1}{2}X_1I_2 - \\frac{1}{2}Z_1X_2
 
     Parameters:
     idx (int): The index of the first qubit.
