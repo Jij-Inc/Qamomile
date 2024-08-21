@@ -30,13 +30,12 @@ jobs:
       - name: Install dependencies
         run: |
           pip install poetry
-          poetry shell
           poetry install --all-extras
           poetry run pip install -U jupyter-book
       - name: Build the book
         run: |
           cd docs
-          jupyter-book build .
+          poetry run jupyter-book build .
           cd ..
       - name: Setup Pages
         uses: actions/configure-pages@v5
