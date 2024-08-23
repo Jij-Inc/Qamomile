@@ -39,7 +39,7 @@ def test_add_term():
     h.add_term((X0, Y0), -4.0)
     assert h.terms == {(X0,): 2.0, (Y1, Y2): 3.0, (Z0,): -4.0j}
     assert h.constant == -1.0
-
+    
 
 def test_pauli_hamiltonian_creation():
     x0 = qm_o.X(0)
@@ -118,6 +118,28 @@ def test_Hamiltonian_add_scalar():
     expected_h.constant += 2.0
     assert h == expected_h
 
+def test_Hamiltonian_sub():
+    h1 = qm_o.Hamiltonian()
+    h1.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), 1.0)
+    h2 = qm_o.Hamiltonian()
+    h2.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 0),), 1.0)
+    h = h1 - h2
+    expected_h = qm_o.Hamiltonian()
+    expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), 1.0)
+    expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 0),), -1.0)
+    assert h == expected_h
+
+    h = h1 - 2.0
+    expected_h = qm_o.Hamiltonian()
+    expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), 1.0)
+    expected_h.constant = -2.0
+    assert h == expected_h
+
+    h = 2.0 - h1
+    expected_h = qm_o.Hamiltonian()
+    expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), -1.0)
+    expected_h.constant = 2.0
+    assert h == expected_h
 
 def test_Hamiltonian_scalar_multiplication():
     h = qm_o.Hamiltonian()

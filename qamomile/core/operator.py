@@ -223,6 +223,12 @@ class Hamiltonian:
 
     def __radd__(self, other):
         return self.__add__(other)
+    
+    def __sub__(self, other):
+        return self + (-1.0 * other)
+    
+    def __rsub__(self, other):
+        return -1.0 * self + other
 
     def __mul__(self, other):
         if isinstance(other, (int, float, complex)):

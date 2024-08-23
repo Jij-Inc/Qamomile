@@ -20,14 +20,15 @@ def color_group_to_qrac_encode(
 
     Examples:
         >>> color_group = {0: [0, 1, 2], 1: [3, 4], 2: [6,]}
-        >>> color_group_for_qrac_encode(color_group)
-        {0: (0, <Pauli.Z: 3>), 1: (0, <Pauli.X: 1>), 2: (0, <Pauli.Y: 2>), 3: (1, <Pauli.Z: 3>), 4: (1, <Pauli.X: 1>), 6: (2, <Pauli.Z: 3>)}
+        >>> color_group_to_qrac_encode(color_group)
+        {0: Z0, 1: X0, 2: Y0, 3: Z1, 4: X1, 6: Z2}
 
     """
     qrac31 = {}
+    paulis = [qm_o.Pauli.Z, qm_o.Pauli.X, qm_o.Pauli.Y]
     for color, group in color_group.items():
         for ope_idx, bit_index in enumerate(group):
-            qrac31[bit_index] = qm_o.PauliOperator(qm_o.Pauli(ope_idx), color)
+            qrac31[bit_index] = qm_o.PauliOperator(paulis[ope_idx], color)
     return qrac31
 
 
@@ -55,7 +56,7 @@ def qrac31_encode_ising(
             continue
 
         if i == j:
-            offset += coeff
+            hamiltonian.constant += coeff
             continue
 
         pauli_i = encoded_ope[i]
