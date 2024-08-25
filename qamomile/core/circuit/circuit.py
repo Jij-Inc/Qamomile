@@ -150,6 +150,24 @@ class Operator(Gate):
         self.circuit = circuit
         self.label = label
 
+    def operated_qubits(self) -> list[int]:
+        operated_qubits = []
+        for gate in self.circuit.gates:
+            if isinstance(gate, (SingleQubitGate, ParametricSingleQubitGate)):
+                operated_qubits.append(gate.qubit)
+            elif isinstance(gate, (TwoQubitGate, ParametricTwoQubitGate)):
+                operated_qubits.append(gate.control)
+                operated_qubits.append(gate.target)
+            elif isinstance(gate, ThreeQubitGate):
+                operated_qubits.append(gate.control1)
+                operated_qubits.append(gate.control2)
+                operated_qubits.append(gate.target)
+            elif isinstance(gate, Operator):
+                operated_qubits.extend(gate.operated_qubits())
+            else:
+                raise ValueError(f"Invalid gate type: {type(gate)}")
+        return list(set(operated_qubits))
+
 
 class QuantumCircuit:
     """
@@ -171,11 +189,28 @@ class QuantumCircuit:
         Args:
             num_qubits (int): The number of qubits in the circuit.
         """
-        self.gates = []
+        self.gates: list[Gate] = []
         self.num_qubits = num_qubits
         self.num_clbits = num_clbits
 
         self.name = name
+
+        self._qubits_label: list[str] = ["q_{" + str(i) + "}" for i in range(num_qubits)]
+
+    def update_qubits_label(self, qubits_label: dict[int, str]):
+        """
+        Update the qubits label.
+
+        Args:
+            qubits_label (dict[int, str]): A dictionary of qubit index and its label.
+        """
+        for i in range(self.num_qubits):
+            if i in qubits_label:
+                self._qubits_label[i] = qubits_label[i]
+
+    @property
+    def qubits_label(self) -> list[str]:
+        return self._qubits_label
 
     def add_gate(self, gate: Gate):
         """
