@@ -87,6 +87,7 @@ class QuantumConverter(abc.ABC):
 
         self.compiled_instance = compiled_instance
         self.pubo_builder = pubo_builder
+        self.int2varlabel: dict[int, str] = {}
 
         self._ising: typ.Optional[IsingModel] = None
 
@@ -127,6 +128,14 @@ class QuantumConverter(abc.ABC):
         )
         ising = qubo_to_ising(qubo, simplify=True)
         ising.constant += constant
+
+        var_map = self.compiled_instance.var_map.var_map
+        inv_varmap = {}
+        for var_label, var_indices in var_map.items():
+            for subs, index in var_indices.items():
+                inv_varmap[index] = var_label + "_{" + ",".join(map(str, subs)) + "}"
+        self.int2varlabel = inv_varmap
+
         return ising
 
     @abc.abstractmethod

@@ -73,6 +73,8 @@ class QAOAConverter(QuantumConverter):
             if Jij != 0:
                 cost.rzz(2 * Jij * beta, i, j)
 
+        cost.update_qubits_label(self.int2varlabel)
+
         return cost
 
     def get_qaoa_ansatz(
@@ -110,12 +112,7 @@ class QAOAConverter(QuantumConverter):
             qaoa_circuit.append(cost)
             qaoa_circuit.append(mixer)
 
-        var_map = self.compiled_instance.var_map.var_map
-        inv_varmap = {}
-        for var_label, var_indices in var_map.items():
-            for subs, index in var_indices.items():
-                inv_varmap[index] = var_label + "_{" + ",".join(map(str, subs)) + "}"
-        qaoa_circuit.update_qubits_label(inv_varmap)
+        qaoa_circuit.update_qubits_label(self.int2varlabel)
 
         return qaoa_circuit
 
