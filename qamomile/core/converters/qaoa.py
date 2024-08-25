@@ -110,6 +110,13 @@ class QAOAConverter(QuantumConverter):
             qaoa_circuit.append(cost)
             qaoa_circuit.append(mixer)
 
+        var_map = self.compiled_instance.var_map.var_map
+        inv_varmap = {}
+        for var_label, var_indices in var_map.items():
+            for subs, index in var_indices.items():
+                inv_varmap[index] = var_label + "_{" + ",".join(map(str, subs)) + "}"
+        qaoa_circuit.update_qubits_label(inv_varmap)
+
         return qaoa_circuit
 
     def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:

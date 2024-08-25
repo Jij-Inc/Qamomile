@@ -1,5 +1,14 @@
-from typing import Dict, Union, Optional, List, Tuple
-import matplotlib.pyplot as plt
+from typing import Union, List, Tuple
+import typing as typ
+# Check matplotlib installation
+# Because the drawer module is optional, `qamomile` should not depend on `matplotlib`
+try:
+    import matplotlib.pyplot as plt
+except ImportError:
+    raise ImportError(
+        "The `matplotlib` package is required to use "
+        + "the `qamomile.core.circuit.drawer.plot_quantum_circuit` function."
+    )
 import numpy as np
 from matplotlib.patches import Rectangle, Circle, Arc
 from contextlib import contextmanager
@@ -15,37 +24,313 @@ from .circuit import (
     ParametricSingleQubitGateType,
     ParametricTwoQubitGateType,
     TwoQubitGateType,
+    Operator
 )
+
+
+# named tuple for gate components
+class GateComponent(typ.NamedTuple):
+    """Gate component for plotting quantum circuits.
+
+        <-->  = gate width
+        ----
+     --|    |--
+        ----
+          ^-- gate (center) position
+
+    """
+    gate: Gate
+    position: float
+    width: float
+
+
+def plot_quantum_circuit(
+    circuit: QuantumCircuit, title: Union[bool, str] = True,
+    decompose_level: int = 0
+) -> None:
+    """
+    Plot a quantum circuit diagram.
+
+    Args:
+        circuit (QuantumCircuit): The quantum circuit to plot.
+        title (Union[bool, str], optional): Title of the plot. If True, use default title.
+                                            If False, no title. If string, use as custom title.
+                                            Defaults to True.
+        decompose_level (int, optional): The level of circuit decomposition.
+    """
+    with plot_style():
+
+        # Calculate gate widths and positions
+        gate_components = _create_components(circuit, decompose_level)
+
+        # Draw only wires of Quantum Circuit ------------
+        # Ex. 2 qubits
+        # q0 |0> -----------
+        # q1 |0> -----------
+        fig, ax = _draw_quantum_circuit(gate_components, circuit.num_qubits, circuit)
+
+        for gate in gate_components:
+            add_gate(ax, gate.gate, gate.position, gate.width)
+
+        if title:
+            if isinstance(title, str):
+                plt.title(title)
+            else:
+                plt.title(
+                    f"Quantum Circuit: {circuit.name}"
+                    if circuit.name
+                    else "Quantum Circuit"
+                )
+
+        plt.tight_layout()
+        plt.show()
+
+
+def _create_components(
+    circuit: QuantumCircuit,
+    decompose_level: int = 0,
+    gate_space=0.2
+) -> list[GateComponent]:
+    gate_components: list[GateComponent] = []
+    _qubit_pos = np.zeros(circuit.num_qubits)
+    # Gate position = A center of the gate
+    #    ----
+    # --|    |--
+    #    ----
+    #      ^-- gate position
+
+    def _decompose(_gate_list, decompose_level):
+        if decompose_level == 0:
+            return _gate_list
+        new_gate_list = []
+        for gate in _gate_list:
+            if isinstance(gate, Operator):
+                new_gate_list.extend(_decompose(gate.circuit.gates, decompose_level - 1))
+            else:
+                new_gate_list.append(gate)
+        return new_gate_list
+
+    gate_list = _decompose(circuit.gates, decompose_level)
+
+    for gate in gate_list:
+        gate_width = calculate_gate_width(gate)
+        MULTI_QUBIT_GATE_TYPE = (
+            TwoQubitGate,
+            ParametricTwoQubitGate,
+            ThreeQubitGate,
+            Operator,
+        )
+        if isinstance(
+            gate, (SingleQubitGate, ParametricSingleQubitGate, MeasurementGate)
+        ):
+            gate_pos = _qubit_pos[gate.qubit] + gate_width / 2
+            _qubit_pos[gate.qubit] += gate_width + gate_space
+            gate_components.append(GateComponent(gate, gate_pos, gate_width))
+        elif isinstance(gate, MULTI_QUBIT_GATE_TYPE):
+            if isinstance(gate, (TwoQubitGate, ParametricTwoQubitGate)):
+                operated_qubits = [gate.control, gate.target]
+            elif isinstance(gate, ThreeQubitGate):
+                operated_qubits = [gate.control1, gate.control2, gate.target]
+            elif isinstance(gate, Operator):
+                operated_qubits = gate.operated_qubits()
+            straddling_qubits = np.arange(min(operated_qubits), max(operated_qubits) + 1)
+            max_posision = np.max(_qubit_pos[straddling_qubits])
+            gate_pos = max_posision + gate_width / 2
+            for qubit in straddling_qubits:
+                _qubit_pos[qubit] = max_posision + gate_width + gate_space
+            gate_components.append(GateComponent(gate, gate_pos, gate_width))
+        else:
+            raise ValueError(f"Unsupported gate type: {type(gate)}")
+    return gate_components
+
+
+def _draw_quantum_circuit(
+    gate_components: List[GateComponent],
+    n_qubits: int,
+    circuit: QuantumCircuit,
+) -> Tuple[plt.Figure, plt.Axes]:
+    """Draw the basic structure of a quantum circuit.
+
+          <-> = wire mergin
+    q0 |0>   -----------
+             <-> = wire padding
+    q1 |0>   ---■-----
+
+    """
+
+    WIRE_MERGIN = 0.4
+    WIRE_PADDING = 0.2
+
+    max_time = max(gate.position + gate.width / 2 for gate in gate_components)
+    fig, ax = plt.subplots(figsize=(max_time * 0.8 + 1, n_qubits * 0.7))
+
+    ax.set_ylim(n_qubits - 0.5, -0.5)
+    ax.set_yticks([])
+    ax.set_xticks([])
+
+    # add qubit labels and initial states
+    for i in range(n_qubits):
+        ax.text(
+            -WIRE_MERGIN,
+            i,
+            f"${circuit.qubits_label[i]}:\ " + r"|0\rangle$",
+            ha="right",
+            va="center",
+            fontsize=14,
+        )
+
+    # calculate x-axis limits
+    # when the circuit ends with measurement gates, add extra space
+    x_max = max_time + (0.5 if check_final_measurement(circuit) else 1.0)
+    ax.set_xlim(-0.8, x_max)
+
+    # add horizontal lines for qubits (wires)
+    for i in range(n_qubits):
+        ax.hlines(
+            y=i, xmin=-WIRE_PADDING, xmax=x_max - 0.5, linewidth=1, color="black", zorder=1
+        )
+
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    return fig, ax
+
+
+def add_gate(
+    ax: plt.Axes,
+    gate: Gate,
+    time_step: float,
+    gate_width: float,
+):
+    """Add a gate to the quantum circuit diagram."""
+
+    def gate_rectangle(qubits: list[int], gate_space=0.3):
+        min_qubit = min(qubits)
+        max_qubit = max(qubits)
+        rectangle_top = min_qubit - gate_space
+        rectangle_bottom = max_qubit + gate_space
+        return Rectangle(
+            (time_step - gate_width / 2, rectangle_top),
+            gate_width,
+            rectangle_bottom - rectangle_top,
+            facecolor="white",
+            edgecolor="black",
+            lw=0.5,
+            zorder=2,
+        )
+
+    def add_gate_text(
+        qubits: list[int], text: str, gate_space=0.3, fontsize=8
+    ):
+        min_qubit = min(qubits)
+        max_qubit = max(qubits)
+        rectangle_top = min_qubit - gate_space
+        rectangle_bottom = max_qubit + gate_space
+        ax.text(
+            time_step,
+            rectangle_bottom - (rectangle_bottom - rectangle_top) / 2,
+            text,
+            ha="center",
+            va="center",
+            # fontweight="bold",
+            zorder=3,
+            fontsize=fontsize,
+        )
+        return (rectangle_top, rectangle_bottom)
+
+    if isinstance(gate, (SingleQubitGate, ParametricSingleQubitGate)):
+        rect = gate_rectangle([gate.qubit])
+        ax.add_patch(rect)
+        gate_text = gate_name(gate)
+        add_gate_text([gate.qubit], gate_text)
+    elif isinstance(gate, (TwoQubitGate, ParametricTwoQubitGate, ThreeQubitGate)):
+        if isinstance(gate, ParametricTwoQubitGate):
+            rect = gate_rectangle([gate.target])
+            ax.add_patch(rect)
+            add_gate_text([gate.target], gate_name(gate))
+        add_control_target(ax, gate, time_step)
+    elif isinstance(gate, MeasurementGate):
+        add_measurement(ax, gate.qubit, time_step)
+    elif isinstance(gate, Operator):
+        operated_qubits = gate.operated_qubits()
+        rect = gate_rectangle(operated_qubits)
+        for qubit in operated_qubits:
+            ax.text(
+                time_step - gate_width / 2 + 0.1,
+                qubit,
+                f"{qubit}",
+                ha="left",
+                va="center",
+                fontsize=10,
+                zorder=3,
+            )
+        ax.add_patch(rect)
+        # Add gate label in the center of the gate
+        gate_top, gate_bottom = add_gate_text(operated_qubits, gate_name(gate), fontsize=10)
+        parameters_name = [param.name for param in gate.circuit.get_parameters()]
+        gate_center = gate_bottom - (gate_top + gate_bottom) / 2
+        for i, param in enumerate(parameters_name):
+            ax.text(
+                time_step,
+                gate_center + 0.4 + 0.2 * i,
+                param,
+                ha="center",
+                va="center",
+                fontsize=8,
+                zorder=3,
+            )
+    else:
+        raise ValueError(f"Unsupported gate type: {type(gate)}")
+
+
+def gate_name(gate: Gate) -> str:
+    """Get the display name for a quantum gate.
+
+    Args:
+        gate (Gate): The quantum gate.
+
+    Returns:
+        str: The display name of the quantum gate.
+
+    Examples:
+        >>> gate_name(SingleQubitGate(0, SingleQubitGateType.H))
+        '$H$'
+    """
+    match gate:
+        case SingleQubitGate():
+            return "$" + str(gate.gate.name) + "$"
+        case ParametricSingleQubitGate():
+            return f"$R_{gate.gate.name[-1].lower()}({gate.parameter})$"
+        case TwoQubitGate():
+            return gate.gate.name
+        case ParametricTwoQubitGate():
+            if gate.gate in [
+                ParametricTwoQubitGateType.CRX,
+                ParametricTwoQubitGateType.CRY,
+                ParametricTwoQubitGateType.CRZ,
+            ]:
+                return f"$R_{gate.gate.name[-1].lower()}({gate.parameter})$"
+            else:
+                return (
+                    r"$R_{"
+                    + gate.gate.name[-2:].lower()
+                    + r"}"
+                    + f"({gate.parameter})$"
+                )
+        case ThreeQubitGate():
+            return gate.gate.name
+        case MeasurementGate():
+            return "M"
+        case Operator():
+            gate_label = gate.label if gate.label else "U"
+            return gate_label
+        case _:
+            raise ValueError(f"Unsupported gate type: {type(gate)}")
 
 
 def get_text_width(text: str, fontsize: int, ratio: float = 0.4) -> float:
     """Calculate the width of text based on font size and a ratio."""
     return len(text) * fontsize * ratio
-
-
-def gate_name(gate: Gate) -> str:
-    """Get the display name for a quantum gate."""
-    if isinstance(gate, SingleQubitGate):
-        return "$" + str(gate.gate.name) + "$"
-    elif isinstance(gate, ParametricSingleQubitGate):
-        return f"$R_{gate.gate.name[-1].lower()}({gate.parameter})$"
-    elif isinstance(gate, TwoQubitGate):
-        return gate.gate.name
-    elif isinstance(gate, ParametricTwoQubitGate):
-        if gate.gate in [
-            ParametricTwoQubitGateType.CRX,
-            ParametricTwoQubitGateType.CRY,
-            ParametricTwoQubitGateType.CRZ,
-        ]:
-            return f"$R_{gate.gate.name[-1].lower()}({gate.parameter})$"
-        else:
-            return r"$R_{" + gate.gate.name[-2:].lower() + r"}" + f"({gate.parameter})$"
-    elif isinstance(gate, ThreeQubitGate):
-        return gate.gate.name
-    elif isinstance(gate, MeasurementGate):
-        return "M"
-    else:
-        raise ValueError(f"Unsupported gate type: {type(gate)}")
 
 
 def calculate_gate_width(gate: Gate) -> float:
@@ -61,92 +346,13 @@ def calculate_gate_width(gate: Gate) -> float:
         gate_text = str(gate_name(gate))
         text_width = get_text_width(gate_text, 8, ratio=0.3)
         return max(default_gate_width, text_width / 50)
+    elif isinstance(gate, Operator):
+        gate_text = "U" if not gate.label else gate.label
+        gate_text = f"  {gate_text}  "
+        text_width = get_text_width(gate_text, 8)
+        return 0.2 * len(gate_text)
     else:
         return default_gate_width
-
-
-def update_multi_qubit_gate_position(
-    gate: Gate, qubit_pos: List[float], gate_width: float, gate_space: float
-):
-    """
-    Update the position of multi-qubit gates.
-
-    Args:
-        gate (Gate): The multi-qubit gate to update.
-        qubit_pos (List[float]): The current positions of qubits.
-        gate_width (float): The width of the gate.
-        gate_space (float): The space between gates.
-
-    Raises:
-        ValueError: If an unsupported gate type is encountered.
-    """
-    if isinstance(gate, (TwoQubitGate, ParametricTwoQubitGate)):
-        qubits = [gate.control, gate.target]
-    elif isinstance(gate, ThreeQubitGate):
-        qubits = [gate.control1, gate.control2, gate.target]
-    else:
-        raise ValueError(f"Unsupported gate type: {type(gate)}")
-
-    _range = range(min(qubits), max(qubits) + 1)
-    time_step = max((qubit_pos[_qubit_index] for _qubit_index in _range))
-    gate.time_step = time_step
-    for _qubit_index in _range:
-        qubit_pos[_qubit_index] = time_step + gate_width + gate_space
-
-
-def assign_time_steps(circuit: QuantumCircuit) -> Dict[int, float]:
-    """Assign time steps to gates in the quantum circuit."""
-    gate_space = 0.2
-    gate_widths = {}
-    qubit_pos = [0.0] * circuit.num_qubits
-
-    for gate_index, gate in enumerate(circuit.gates):
-        gate_width = calculate_gate_width(gate)
-        gate_widths[gate_index] = gate_width
-
-        if isinstance(
-            gate, (SingleQubitGate, ParametricSingleQubitGate, MeasurementGate)
-        ):
-            gate.time_step = qubit_pos[gate.qubit]
-            qubit_pos[gate.qubit] += gate_width + gate_space
-        elif isinstance(gate, (TwoQubitGate, ParametricTwoQubitGate, ThreeQubitGate)):
-            update_multi_qubit_gate_position(gate, qubit_pos, gate_width, gate_space)
-        else:
-            raise ValueError(f"Unsupported gate type: {type(gate)}")
-
-    return gate_widths
-
-
-def add_gate_shape(ax: plt.Axes, gate: Gate, time_step: float, gate_width: float):
-    """Add the basic shape of a gate to the quantum circuit diagram."""
-    base_gate_size = 0.6
-    qubit = gate.qubit if hasattr(gate, "qubit") else gate.target
-    rect = Rectangle(
-        (time_step - gate_width / 2, qubit - base_gate_size / 2),
-        gate_width,
-        base_gate_size,
-        facecolor="white",
-        edgecolor="black",
-        lw=0.5,
-        zorder=2,
-    )
-    ax.add_patch(rect)
-    return qubit
-
-
-def add_gate_label(ax: plt.Axes, gate: Gate, time_step: float, qubit: int):
-    """Add the label for a gate to the quantum circuit diagram."""
-    gate_text = gate_name(gate)
-    ax.text(
-        time_step,
-        qubit,
-        gate_text,
-        ha="center",
-        va="center",
-        fontweight="bold",
-        zorder=3,
-        fontsize=8,
-    )
 
 
 def add_control_target(
@@ -168,31 +374,6 @@ def add_control_target(
         add_target(ax, gate.target, time_step)
         add_connection(ax, gate.control1, gate.target, time_step)
         add_connection(ax, gate.control2, gate.target, time_step)
-
-
-def add_gate(
-    ax: plt.Axes,
-    gate: Gate,
-    time_step: float,
-    gate_widths: Dict[int, float],
-    circuit: QuantumCircuit,
-):
-    """Add a gate to the quantum circuit diagram."""
-    gate_index = circuit.gates.index(gate)
-    gate_width = gate_widths.get(gate_index, 0.6)
-
-    if isinstance(gate, (SingleQubitGate, ParametricSingleQubitGate)):
-        qubit = add_gate_shape(ax, gate, time_step, gate_width)
-        add_gate_label(ax, gate, time_step, qubit)
-    elif isinstance(gate, (TwoQubitGate, ParametricTwoQubitGate, ThreeQubitGate)):
-        if isinstance(gate, ParametricTwoQubitGate):
-            qubit = add_gate_shape(ax, gate, time_step, gate_width)
-            add_gate_label(ax, gate, time_step, qubit)
-        add_control_target(ax, gate, time_step)
-    elif isinstance(gate, MeasurementGate):
-        add_measurement(ax, gate.qubit, time_step)
-    else:
-        raise ValueError(f"Unsupported gate type: {type(gate)}")
 
 
 def add_control(ax: plt.Axes, qubit: int, time_step: float):
@@ -272,76 +453,8 @@ def check_final_measurement(circuit: QuantumCircuit) -> bool:
     return any(isinstance(gate, MeasurementGate) for gate in circuit.gates)
 
 
-def draw_quantum_circuit(
-    circuit: QuantumCircuit, max_time: float
-) -> Tuple[plt.Figure, plt.Axes]:
-    """Draw the basic structure of a quantum circuit."""
-    n_qubits = circuit.num_qubits
-    fig, ax = plt.subplots(figsize=(max_time * 0.8 + 1, n_qubits * 0.7))
-
-    ax.set_ylim(n_qubits - 0.5, -0.5)
-    ax.set_yticks([])
-    ax.set_xticks([])
-
-    for i in range(n_qubits):
-        ax.text(
-            -0.8,
-            i,
-            r"$q_{" + str(i) + "}:\ " + r"|0\rangle$",
-            ha="right",
-            va="center",
-            fontsize=14,
-        )
-
-    x_max = max_time + (0.5 if check_final_measurement(circuit) else 1.0)
-    ax.set_xlim(-0.8, x_max)
-    for i in range(n_qubits):
-        ax.hlines(
-            y=i, xmin=-0.5, xmax=x_max - 0.5, linewidth=1, color="black", zorder=1
-        )
-
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-
-    return fig, ax
-
-
 @contextmanager
 def plot_style():
     """Context manager for setting plot style."""
     with plt.style.context({"font.family": "DejaVu Sans", "mathtext.fontset": "cm"}):
         yield
-
-
-def plot_quantum_circuit(
-    circuit: QuantumCircuit, title: Union[bool, str] = True
-) -> None:
-    """
-    Plot a quantum circuit diagram.
-
-    Args:
-        circuit (QuantumCircuit): The quantum circuit to plot.
-        title (Union[bool, str], optional): Title of the plot. If True, use default title.
-                                            If False, no title. If string, use as custom title.
-                                            Defaults to True.
-    """
-    with plot_style():
-        gate_widths = assign_time_steps(circuit)
-        max_time = max(gate.time_step for gate in circuit.gates)
-        fig, ax = draw_quantum_circuit(circuit, max_time)
-
-        for gate in circuit.gates:
-            add_gate(ax, gate, gate.time_step, gate_widths, circuit)
-
-        if title:
-            if isinstance(title, str):
-                plt.title(title)
-            else:
-                plt.title(
-                    f"Quantum Circuit: {circuit.name}"
-                    if circuit.name
-                    else "Quantum Circuit"
-                )
-
-        plt.tight_layout()
-        plt.show()
