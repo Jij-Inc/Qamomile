@@ -1,15 +1,57 @@
 import pytest
 import numpy as np
+import networkx as nx
 import collections
+import jijmodeling as jm
+import jijmodeling_transpiler.core as jmt
 import quri_parts.circuit as qp_c
 import quri_parts.core.operator as qp_o
+from quri_parts.qulacs.sampler import create_qulacs_vector_sampler
 import qamomile.core.circuit as qm_c
 import qamomile.core.operator as qm_o
 import qamomile.core.bitssample as qm_bs
+import qamomile.core as qm
 from qamomile.core.converters.qaoa import QAOAConverter
 from qamomile.quri_parts.transpiler import QuriPartsTranspiler
 
+def graph_coloring_problem() -> jm.Problem:
+    # define variables
+    V = jm.Placeholder("V")
+    E = jm.Placeholder("E", ndim=2)
+    N = jm.Placeholder("N")
+    x = jm.BinaryVar("x", shape=(V, N))
+    n = jm.Element("i", belong_to=(0, N))
+    v = jm.Element("v", belong_to=(0, V))
+    e = jm.Element("e", belong_to=E)
+    # set problem
+    problem = jm.Problem("Graph Coloring")
+    # set one-hot constraint that each vertex has only one color
 
+    #problem += jm.Constraint("one-color", x[v, :].sum() == 1, forall=v)
+    problem += jm.Constraint("one-color", jm.sum(n, x[v, n]) == 1, forall=v)
+    # set objective function: minimize edges whose vertices connected by edges are the same color
+    problem += jm.sum([n, e], x[e[0], n] * x[e[1], n])
+    return problem
+
+def graph_coloring_instance():
+    G = nx.Graph()
+    G.add_nodes_from([0, 1, 2, 3])
+    G.add_edges_from([(0, 1), (1, 2), (1, 3), (2, 3)])
+    E = [list(edge) for edge in G.edges]
+    num_color = 3
+    num_nodes = G.number_of_nodes()
+    instance_data = {"V": num_nodes, "N": num_color, "E": E}
+    return instance_data
+
+def create_graph_coloring_operator_ansatz_initial_state(
+    compiled_instance: jmt.CompiledInstance, num_nodes: int, num_color: int
+):
+    n = num_color * num_nodes
+    qc = qm_c.QuantumCircuit(n)
+    var_map = compiled_instance.var_map.var_map["x"]
+    for i in range(num_nodes):
+        qc.x(var_map[(i, 0)])  # set all nodes to color 0
+    return qc
 
 @pytest.fixture
 def transpiler():
@@ -133,3 +175,20 @@ def test_qaoa_circuit():
     assert isinstance(qp_circuit, qp_c.LinearMappedUnboundParametricQuantumCircuit)
     assert qp_circuit.qubit_count == 3
     assert qp_circuit.parameter_count == 4
+
+def test_coloring_sample_decode():
+    problem = graph_coloring_problem()
+    instance_data = graph_coloring_instance()
+    compiled_instance = jmt.compile_model(problem, instance_data)
+    initial_circuit = create_graph_coloring_operator_ansatz_initial_state(compiled_instance, instance_data['V'], instance_data['N'])
+    qaoa_converter = qm.qaoa.QAOAConverter(compiled_instance)
+    qaoa_converter.ising_encode(multipliers={"one-color": 1})
+    
+    qp_transpiler = QuriPartsTranspiler()
+    sampler = create_qulacs_vector_sampler()
+    qp_circ = qp_transpiler.transpile_circuit(initial_circuit)
+    qp_result = sampler(qp_circ, 10)
+    
+    sampleset = qaoa_converter.decode(qp_transpiler, (qp_result, initial_circuit.num_qubits))
+    assert sampleset[0].var_values["x"].values == {(0, 0): 1, (1, 0): 1, (2, 0): 1, (3, 0): 1}
+    assert sampleset[0].num_occurrences == 10

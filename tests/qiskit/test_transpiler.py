@@ -2,15 +2,59 @@
 
 import pytest
 import numpy as np
+import jijmodeling as jm
+import jijmodeling_transpiler.core as jmt
+import networkx as nx
 import qiskit
 import qiskit.quantum_info as qk_ope
+import qiskit.primitives as qk_pr
 from qamomile.core.circuit import QuantumCircuit as QamomileCircuit
 from qamomile.core.circuit import Parameter
 from qamomile.core.operator import Hamiltonian, PauliOperator, Pauli
 import qamomile.core.bitssample as qm_bs
+
+import qamomile.core as qm
 from qamomile.qiskit.transpiler import QiskitTranspiler
 from qamomile.qiskit.exceptions import QamomileQiskitTranspileError
 
+def graph_coloring_problem() -> jm.Problem:
+    # define variables
+    V = jm.Placeholder("V")
+    E = jm.Placeholder("E", ndim=2)
+    N = jm.Placeholder("N")
+    x = jm.BinaryVar("x", shape=(V, N))
+    n = jm.Element("i", belong_to=(0, N))
+    v = jm.Element("v", belong_to=(0, V))
+    e = jm.Element("e", belong_to=E)
+    # set problem
+    problem = jm.Problem("Graph Coloring")
+    # set one-hot constraint that each vertex has only one color
+
+    #problem += jm.Constraint("one-color", x[v, :].sum() == 1, forall=v)
+    problem += jm.Constraint("one-color", jm.sum(n, x[v, n]) == 1, forall=v)
+    # set objective function: minimize edges whose vertices connected by edges are the same color
+    problem += jm.sum([n, e], x[e[0], n] * x[e[1], n])
+    return problem
+
+def graph_coloring_instance():
+    G = nx.Graph()
+    G.add_nodes_from([0, 1, 2, 3])
+    G.add_edges_from([(0, 1), (1, 2), (1, 3), (2, 3)])
+    E = [list(edge) for edge in G.edges]
+    num_color = 3
+    num_nodes = G.number_of_nodes()
+    instance_data = {"V": num_nodes, "N": num_color, "E": E}
+    return instance_data
+
+def create_graph_coloring_operator_ansatz_initial_state(
+    compiled_instance: jmt.CompiledInstance, num_nodes: int, num_color: int
+):
+    n = num_color * num_nodes
+    qc = QamomileCircuit(n)
+    var_map = compiled_instance.var_map.var_map["x"]
+    for i in range(num_nodes):
+        qc.x(var_map[(i, 0)])  # set all nodes to color 0
+    return qc
 
 @pytest.fixture
 def transpiler():
@@ -111,7 +155,24 @@ def test_transpile_hamiltonian(transpiler):
     assert np.all(qiskit_hamiltonian.paulis == ['X'])
 
 
-
-
+def test_coloring_sample_decode():
+    problem = graph_coloring_problem()
+    instance_data = graph_coloring_instance()
+    compiled_instance = jmt.compile_model(problem, instance_data)
+    initial_circuit = create_graph_coloring_operator_ansatz_initial_state(compiled_instance, instance_data['V'], instance_data['N'])
+    qaoa_converter = qm.qaoa.QAOAConverter(compiled_instance)
+    qaoa_converter.ising_encode(multipliers={"one-color": 1})
+    
+    qk_transpiler = QiskitTranspiler()
+    sampler = qk_pr.StatevectorSampler()
+    qk_circ = qk_transpiler.transpile_circuit(initial_circuit)
+    qk_circ.measure_all()
+    job = sampler.run([qk_circ])
+    
+    job_result = job.result()
+    
+    sampleset = qaoa_converter.decode(qk_transpiler, job_result[0].data['meas'])
+    assert sampleset[0].var_values["x"].values == {(0, 0): 1, (1, 0): 1, (2, 0): 1, (3, 0): 1}
+    assert sampleset[0].num_occurrences == 1024
 
     
