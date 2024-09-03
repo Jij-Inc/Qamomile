@@ -82,7 +82,7 @@ class BitsSampleSet:
         bitarrays = []
         for int_value, count in int_counts.items():
             # Convert the integer to a bit array of the specified length
-            bitarray = list(map(int, bin(int_value)[2:].zfill(bit_length)))
+            bitarray = list(map(int, bin(int_value)[2:].zfill(bit_length)[::-1]))
             bitarrays.append(BitsSample(count, bitarray))
         return cls(bitarrays)
 

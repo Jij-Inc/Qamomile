@@ -30,11 +30,11 @@ def test_from_int_counts():
         for sample in sample_set.bitarrays
     )
     assert any(
-        sample.bits == [0, 1] and sample.num_occurrences == 2
+        sample.bits == [1, 0] and sample.num_occurrences == 2
         for sample in sample_set.bitarrays
     )
     assert any(
-        sample.bits == [1, 0] and sample.num_occurrences == 1
+        sample.bits == [0, 1] and sample.num_occurrences == 1
         for sample in sample_set.bitarrays
     )
 
@@ -66,7 +66,7 @@ def test_from_int_counts_with_larger_bit_length():
     sample_set = BitsSampleSet.from_int_counts(int_counts, bit_length=5)
     assert all(len(sample.bits) == 5 for sample in sample_set.bitarrays)
     assert any(sample.bits == [0, 0, 0, 0, 0] for sample in sample_set.bitarrays)
-    assert any(sample.bits == [0, 1, 1, 1, 1] for sample in sample_set.bitarrays)
+    assert any(sample.bits == [1, 1, 1, 1, 0] for sample in sample_set.bitarrays)
 
 
 def test_get_most_common_with_ties():
@@ -76,3 +76,4 @@ def test_get_most_common_with_ties():
     assert len(most_common) == 3
     assert most_common[0].num_occurrences == most_common[1].num_occurrences == 2
     assert most_common[2].num_occurrences == 1
+
