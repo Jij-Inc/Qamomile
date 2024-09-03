@@ -14,6 +14,7 @@ import qamomile.core as qm
 from qamomile.core.converters.qaoa import QAOAConverter
 from qamomile.quri_parts.transpiler import QuriPartsTranspiler
 
+
 def graph_coloring_problem() -> jm.Problem:
     # define variables
     V = jm.Placeholder("V")
@@ -27,11 +28,12 @@ def graph_coloring_problem() -> jm.Problem:
     problem = jm.Problem("Graph Coloring")
     # set one-hot constraint that each vertex has only one color
 
-    #problem += jm.Constraint("one-color", x[v, :].sum() == 1, forall=v)
+    # problem += jm.Constraint("one-color", x[v, :].sum() == 1, forall=v)
     problem += jm.Constraint("one-color", jm.sum(n, x[v, n]) == 1, forall=v)
     # set objective function: minimize edges whose vertices connected by edges are the same color
     problem += jm.sum([n, e], x[e[0], n] * x[e[1], n])
     return problem
+
 
 def graph_coloring_instance():
     G = nx.Graph()
@@ -43,15 +45,67 @@ def graph_coloring_instance():
     instance_data = {"V": num_nodes, "N": num_color, "E": E}
     return instance_data
 
+
 def create_graph_coloring_operator_ansatz_initial_state(
-    compiled_instance: jmt.CompiledInstance, num_nodes: int, num_color: int
+    compiled_instance: jmt.CompiledInstance,
+    num_nodes: int,
+    num_color: int,
+    apply_vars: tuple[int, int],
 ):
     n = num_color * num_nodes
     qc = qm_c.QuantumCircuit(n)
     var_map = compiled_instance.var_map.var_map["x"]
-    for i in range(num_nodes):
-        qc.x(var_map[(i, 0)])  # set all nodes to color 0
+    for pos in apply_vars:
+        qc.x(var_map[pos])  # set all nodes to color 0
     return qc
+
+
+def tsp_problem() -> jm.Problem:
+    N = jm.Placeholder("N")
+    D = jm.Placeholder("d", ndim=2)
+    start = jm.Placeholder("start", latex="N-1")
+    x = jm.BinaryVar("x", shape=(N - 1, N - 1))
+    t = jm.Element("t", belong_to=N - 2)
+    j = jm.Element("j", belong_to=N - 1)
+    u = jm.Element("u", belong_to=(0, N - 1))
+    v = jm.Element("v", belong_to=(0, N - 1))
+
+    problem = jm.Problem("TSP")
+    problem += jm.sum(u, D[start][u] * (x[0][u] + x[N - 2][u])) + jm.sum(
+        t, jm.sum(u, jm.sum(v, D[u][v] * x[t][u] * x[t + 1][v]))
+    )
+
+    return problem
+
+
+def tsp_instance():
+    N = 5
+    np.random.seed(3)
+
+    x_pos = np.random.rand(N)
+    y_pos = np.random.rand(N)
+
+    d = [[0] * N for _ in range(N)]
+    for i in range(N):
+        for j in range(N):
+            d[i][j] = np.sqrt((x_pos[i] - x_pos[j]) ** 2 + (y_pos[i] - y_pos[j]) ** 2)
+
+    instance_data = {"N": N, "d": d, "start": N - 1}
+    return instance_data
+
+
+def create_tsp_initial_state(
+    compiled_instance: jmt.CompiledInstance, num_nodes: int = 4
+):
+    n = num_nodes * num_nodes
+    qc = qm.circuit.QuantumCircuit(n)
+    var_map = compiled_instance.var_map.var_map["x"]
+
+    for i in range(num_nodes):
+        qc.x(var_map[(i, i)])
+
+    return qc
+
 
 @pytest.fixture
 def transpiler():
@@ -161,9 +215,9 @@ def test_qaoa_circuit():
     import jijmodeling as jm
     import jijmodeling_transpiler.core as jmt
 
-    x = jm.BinaryVar("x", shape=(3, ))
+    x = jm.BinaryVar("x", shape=(3,))
     problem = jm.Problem("qubo")
-    problem += -x[0]*x[1] + x[1]*x[2] + x[2]*x[0]
+    problem += -x[0] * x[1] + x[1] * x[2] + x[2] * x[0]
 
     compiled_instance = jmt.compile_model(problem, {})
     qaoa_converter = QAOAConverter(compiled_instance)
@@ -176,19 +230,98 @@ def test_qaoa_circuit():
     assert qp_circuit.qubit_count == 3
     assert qp_circuit.parameter_count == 4
 
+
 def test_coloring_sample_decode():
     problem = graph_coloring_problem()
     instance_data = graph_coloring_instance()
     compiled_instance = jmt.compile_model(problem, instance_data)
-    initial_circuit = create_graph_coloring_operator_ansatz_initial_state(compiled_instance, instance_data['V'], instance_data['N'])
+    apply_vars = [(0, 0), (1, 0), (2, 0), (3, 0)]
+    initial_circuit = create_graph_coloring_operator_ansatz_initial_state(
+        compiled_instance, instance_data["V"], instance_data["N"], apply_vars
+    )
     qaoa_converter = qm.qaoa.QAOAConverter(compiled_instance)
     qaoa_converter.ising_encode(multipliers={"one-color": 1})
-    
+
     qp_transpiler = QuriPartsTranspiler()
     sampler = create_qulacs_vector_sampler()
     qp_circ = qp_transpiler.transpile_circuit(initial_circuit)
     qp_result = sampler(qp_circ, 10)
-    
-    sampleset = qaoa_converter.decode(qp_transpiler, (qp_result, initial_circuit.num_qubits))
-    assert sampleset[0].var_values["x"].values == {(0, 0): 1, (1, 0): 1, (2, 0): 1, (3, 0): 1}
+
+    sampleset = qaoa_converter.decode(
+        qp_transpiler, (qp_result, initial_circuit.num_qubits)
+    )
+    assert sampleset[0].var_values["x"].values == {
+        (0, 0): 1,
+        (1, 0): 1,
+        (2, 0): 1,
+        (3, 0): 1,
+    }
+    assert sampleset[0].num_occurrences == 10
+
+    apply_vars = [(0, 0), (1, 1), (2, 2)]
+    initial_circuit = create_graph_coloring_operator_ansatz_initial_state(
+        compiled_instance, instance_data["V"], instance_data["N"], apply_vars
+    )
+    qaoa_converter = qm.qaoa.QAOAConverter(compiled_instance)
+    qaoa_converter.ising_encode(multipliers={"one-color": 1})
+
+    qp_transpiler = QuriPartsTranspiler()
+    sampler = create_qulacs_vector_sampler()
+    qp_circ = qp_transpiler.transpile_circuit(initial_circuit)
+    qp_result = sampler(qp_circ, 10)
+
+    sampleset = qaoa_converter.decode(
+        qp_transpiler, (qp_result, initial_circuit.num_qubits)
+    )
+    assert sampleset[0].var_values["x"].values == {(0, 0): 1, (1, 1): 1, (2, 2): 1}
+    assert sampleset[0].num_occurrences == 10
+
+    apply_vars = [(0, 0), (0, 1), (0, 2), (2, 2)]
+    initial_circuit = create_graph_coloring_operator_ansatz_initial_state(
+        compiled_instance, instance_data["V"], instance_data["N"], apply_vars
+    )
+    qaoa_converter = qm.qaoa.QAOAConverter(compiled_instance)
+    qaoa_converter.ising_encode(multipliers={"one-color": 1})
+
+    qp_transpiler = QuriPartsTranspiler()
+    sampler = create_qulacs_vector_sampler()
+    qp_circ = qp_transpiler.transpile_circuit(initial_circuit)
+    qp_result = sampler(qp_circ, 10)
+
+    sampleset = qaoa_converter.decode(
+        qp_transpiler, (qp_result, initial_circuit.num_qubits)
+    )
+    assert sampleset[0].var_values["x"].values == {
+        (0, 0): 1,
+        (0, 1): 1,
+        (0, 2): 1,
+        (2, 2): 1,
+    }
+    assert sampleset[0].num_occurrences == 10
+
+
+def test_tsp_decode():
+    problem = tsp_problem()
+    instance_data = tsp_instance()
+    compiled_instance = jmt.compile_model(problem, instance_data)
+
+    qaoa_converter = qm.qaoa.QAOAConverter(compiled_instance)
+    qaoa_converter.ising_encode(multipliers={"one-color": 1})
+    initial_circuit = create_tsp_initial_state(compiled_instance)
+
+    qp_transpiler = QuriPartsTranspiler()
+    sampler = create_qulacs_vector_sampler()
+    qp_circ = qp_transpiler.transpile_circuit(initial_circuit)
+    qp_result = sampler(qp_circ, 10)
+
+    sampleset = qaoa_converter.decode(
+        qp_transpiler, (qp_result, initial_circuit.num_qubits)
+    )
+
+    assert sampleset[0].var_values["x"].values == {
+        (0, 0): 1,
+        (1, 1): 1,
+        (2, 2): 1,
+        (3, 3): 1,
+    }
     assert sampleset[0].num_occurrences == 10

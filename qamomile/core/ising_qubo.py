@@ -52,7 +52,7 @@ def calc_qubo_energy(qubo: dict[tuple[int, int], float], state: list[int]) -> fl
 
 
 def qubo_to_ising(
-    qubo: dict[tuple[int, int], float], constant: float = 0.0, simplify=True
+    qubo: dict[tuple[int, int], float], constant: float = 0.0, simplify=False
 ) -> IsingModel:
     r"""Converts a Quadratic Unconstrained Binary Optimization (QUBO) problem to an equivalent Ising model.
 
