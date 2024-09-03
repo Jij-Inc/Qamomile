@@ -103,5 +103,4 @@ def test_QRAC32Converter():
     cost_hamiltonian = converter.get_cost_hamiltonian()
 
     pauli_list = converter.get_encoded_pauli_list()
-    print(pauli_list)
     assert len(pauli_list) == 3

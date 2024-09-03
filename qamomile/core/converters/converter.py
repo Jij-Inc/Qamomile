@@ -126,7 +126,7 @@ class QuantumConverter(abc.ABC):
         qubo, constant = self.pubo_builder.get_qubo_dict(
             multipliers=multipliers, detail_parameters=detail_parameters
         )
-        ising = qubo_to_ising(qubo, simplify=True)
+        ising = qubo_to_ising(qubo, simplify=False)
         ising.constant += constant
 
         var_map = self.compiled_instance.var_map.var_map
@@ -237,6 +237,7 @@ def decode_from_dict_binary_result(
             inverse_varmap[index] = (label, forall)
 
     decoded_samples = binary_decode(samples, binary_encoder, inverse_varmap)
+
     record = dict_to_record(decoded_samples, compiled_model)
 
     evaluation = _evaluate(decoded_samples, compiled_model)

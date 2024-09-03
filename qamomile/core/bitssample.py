@@ -84,6 +84,7 @@ class BitsSampleSet:
             # Convert the integer to a bit array of the specified length
             bitarray = list(map(int, bin(int_value)[2:].zfill(bit_length)[::-1]))
             bitarrays.append(BitsSample(count, bitarray))
+
         return cls(bitarrays)
 
     def get_most_common(self, n: int = 1) -> list[BitsSample]:

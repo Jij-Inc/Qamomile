@@ -70,7 +70,7 @@ def test_convert_binary_operator_div():
 
     assert isinstance(result, dict)
     assert len(result) == 1
-    print(result)
+  
     assert result[quri_param] == 0.5
 
 
