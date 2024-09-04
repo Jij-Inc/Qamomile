@@ -65,13 +65,15 @@ class QAOAConverter(QuantumConverter):
 
         # Apply RZ gates for linear terms
         for i, hi in ising.linear.items():
-            if hi != 0:
+            if hi != 0.0:
                 cost.rz(2 * hi * beta, i)
 
         # Apply CNOT and RZ gates for quadratic terms
         for (i, j), Jij in ising.quad.items():
-            if Jij != 0:
+            if Jij != 0.0:
                 cost.rzz(2 * Jij * beta, i, j)
+
+        cost.update_qubits_label(self.int2varlabel)
 
         return cost
 
@@ -110,6 +112,8 @@ class QAOAConverter(QuantumConverter):
             qaoa_circuit.append(cost)
             qaoa_circuit.append(mixer)
 
+        qaoa_circuit.update_qubits_label(self.int2varlabel)
+
         return qaoa_circuit
 
     def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
@@ -124,11 +128,19 @@ class QAOAConverter(QuantumConverter):
 
         # Add linear terms
         for i, hi in ising.linear.items():
-            hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z ,i),), hi)
+            if hi != 0.0:
+                hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, i),), hi)
 
         # Add quadratic terms
         for (i, j), Jij in ising.quad.items():
-            hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z ,i), qm_o.PauliOperator(qm_o.Pauli.Z ,j)), Jij)
+            if Jij != 0.0:
+                hamiltonian.add_term(
+                    (
+                        qm_o.PauliOperator(qm_o.Pauli.Z, i),
+                        qm_o.PauliOperator(qm_o.Pauli.Z, j),
+                    ),
+                    Jij,
+                )
 
         hamiltonian.constant = ising.constant
         return hamiltonian
