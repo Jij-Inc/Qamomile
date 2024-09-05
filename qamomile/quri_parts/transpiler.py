@@ -236,19 +236,19 @@ def _parametric_two_qubit_gate(
         case qm_c.ParametricTwoQubitGateType.RXX:
             qp_circuit.add_ParametricPauliRotation_gate(
                 [gate.control, gate.target],
-                pauli_ids=[0, 0],
+                pauli_ids=[1, 1],
                 angle=angle
             )
         case qm_c.ParametricTwoQubitGateType.RYY:
             qp_circuit.add_ParametricPauliRotation_gate(
                 [gate.control, gate.target],
-                pauli_ids=[1, 1],
+                pauli_ids=[2, 2],
                 angle=angle
             )
         case qm_c.ParametricTwoQubitGateType.RZZ:
             qp_circuit.add_ParametricPauliRotation_gate(
                 [gate.control, gate.target],
-                pauli_ids=[2, 2],
+                pauli_ids=[3, 3],
                 angle=angle
             )
         case _:

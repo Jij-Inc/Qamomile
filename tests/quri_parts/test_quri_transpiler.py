@@ -138,6 +138,33 @@ def test_transpile_parametric_circuit(transpiler):
     assert len(quri_circuit.gates) == 1
     assert isinstance(quri_circuit.gates[0], qp_c.gate.ParametricQuantumGate)
 
+def test_rotation_two_pauli_circuit(transpiler):
+    qc = qm_c.QuantumCircuit(2)
+    theta = qm_c.Parameter("theta")
+    qc.rxx(theta, 0, 1)
+    quri_circuit = transpiler.transpile_circuit(qc)
+
+    for gate in quri_circuit.gates:
+        assert isinstance(gate, qp_c.gate.ParametricQuantumGate)
+        assert gate.pauli_ids == (1,1)
+
+    qc = qm_c.QuantumCircuit(2)
+    theta = qm_c.Parameter("theta")
+    qc.ryy(theta, 0, 1)
+    quri_circuit = transpiler.transpile_circuit(qc)
+
+    for gate in quri_circuit.gates:
+        assert isinstance(gate, qp_c.gate.ParametricQuantumGate)
+        assert gate.pauli_ids == (2,2)
+
+    qc = qm_c.QuantumCircuit(2)
+    theta = qm_c.Parameter("theta")
+    qc.rzz(theta, 0, 1)
+    quri_circuit = transpiler.transpile_circuit(qc)
+
+    for gate in quri_circuit.gates:
+        assert isinstance(gate, qp_c.gate.ParametricQuantumGate)
+        assert gate.pauli_ids == (3,3)
 
 def test_transpile_complex_circuit(transpiler):
     qc = qm_c.QuantumCircuit(3, 3)
@@ -206,7 +233,7 @@ def test_parametric_two_qubit_gate(transpiler):
     assert len(quri_circuit.gates) == 2
     assert isinstance(quri_circuit.gates[0], qp_c.ParametricQuantumGate)
     assert quri_circuit.gates[0].target_indices == (0, 1)
-    assert quri_circuit.gates[0].pauli_ids == (0, 0)  # XX
+    assert quri_circuit.gates[0].pauli_ids == (1, 1)  # XX
 
     assert quri_circuit.parameter_count == 1
 
@@ -273,6 +300,7 @@ def test_coloring_sample_decode():
     sampleset = qaoa_converter.decode(
         qp_transpiler, (qp_result, initial_circuit.num_qubits)
     )
+    
     assert sampleset[0].var_values["x"].values == {(0, 0): 1, (1, 1): 1, (2, 2): 1}
     assert sampleset[0].num_occurrences == 10
 
