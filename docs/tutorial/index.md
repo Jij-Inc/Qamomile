@@ -17,4 +17,5 @@ Welcome to the Qamomile tutorial! This guide will help you get started with Qamo
 
 ## Tutorials
 
+- [Building Quantum Circuits](building_quantum_circuits.ipynb): Learn how to build a quantum circuit using Qamomile.
 - [Quantum Alternating Ansatz for Graph Coloring](alternating_ansatz_graph_coloring.ipynb): Learn how to run the Quantum Alternating Ansatz for graph coloring problems.

@@ -10,6 +10,7 @@ parts:
   - caption: Tutorial
     chapters:
     - file: tutorial/index
+    - file: tutorial/building_quantum_circuits
     - file: tutorial/alternating_ansatz_graph_coloring
   - caption: API Reference
     chapters:
