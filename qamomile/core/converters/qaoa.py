@@ -30,17 +30,13 @@ and decoding functionalities.
 """
 
 import typing as typ
-import math
 import jijmodeling_transpiler.core as jmt
 import qamomile.core.bitssample as qm_bs
 import qamomile.core.circuit as qm_c
 import qamomile.core.operator as qm_o
 from qamomile.core.converters.converter import QuantumConverter
+from qamomile.core.converters.utils import is_close_zero
 
-
-EPSILON = 1e-15
-def is_close_zero(value: float) -> bool:
-    return math.isclose(value, 0.0, abs_tol=EPSILON)
 
 class QAOAConverter(QuantumConverter):
     """

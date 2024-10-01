@@ -2,7 +2,7 @@ from __future__ import annotations
 import typing as typ
 import numpy as np
 from qamomile.core.converters.converter import QuantumConverter
-from qamomile.core.converters.qaoa import is_close_zero
+from qamomile.core.converters.utils import is_close_zero
 from qamomile.core.ising_qubo import IsingModel
 import qamomile.core.operator as qm_o
 from .qrao31 import color_group_to_qrac_encode

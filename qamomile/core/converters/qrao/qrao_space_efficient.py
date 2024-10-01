@@ -5,7 +5,7 @@ from qamomile.core.converters.converter import QuantumConverter
 from qamomile.core.ising_qubo import IsingModel
 import qamomile.core.operator as qm_o
 from .graph_coloring import greedy_graph_coloring, check_linear_term
-from qamomile.core.converters.qaoa import is_close_zero
+from qamomile.core.converters.utils import is_close_zero
 
 def numbering_space_efficient_encode(
     ising: IsingModel,
