@@ -178,7 +178,7 @@ def test_transpile_complex_circuit(transpiler):
     assert isinstance(quri_circuit, qp_c.LinearMappedUnboundParametricQuantumCircuit)
     assert quri_circuit.qubit_count == 3
     assert quri_circuit.cbit_count == 3
-    assert len(quri_circuit.gates) == 4
+    assert len(quri_circuit.gates) == 3  # QURI-Parts does not support measurement gate
 
 
 def test_transpile_unsupported_gate(transpiler):
@@ -353,3 +353,16 @@ def test_tsp_decode():
         (3, 3): 1,
     }
     assert sampleset[0].num_occurrences == 10
+
+
+def test_run_small_circuit():
+    circuit = qm_c.QuantumCircuit(2)
+    circuit.h(0)
+    circuit.cnot(0, 1)
+    circuit.measure_all()
+
+    transpiler = QuriPartsTranspiler()
+    quri_c = transpiler.transpile_circuit(circuit)
+    from quri_parts.qulacs.sampler import create_qulacs_vector_sampler
+    sampler = create_qulacs_vector_sampler()
+    result = sampler(quri_c, 10)

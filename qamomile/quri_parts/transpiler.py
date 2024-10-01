@@ -114,7 +114,8 @@ class QuriPartsTranspiler(
                                     param_mapping
                                 )
             elif isinstance(gate, qm_c.MeasurementGate):
-                qp_circuit.measure(gate.qubit, gate.cbit)
+                # QURI-Parts circuits don't have measurement gates
+                pass
             else:
                 raise QamomileQuriPartsTranspileError(
                     f"Unsupported gate type: {type(gate)}"
