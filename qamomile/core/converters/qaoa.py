@@ -35,6 +35,7 @@ import qamomile.core.bitssample as qm_bs
 import qamomile.core.circuit as qm_c
 import qamomile.core.operator as qm_o
 from qamomile.core.converters.converter import QuantumConverter
+from qamomile.core.converters.utils import is_close_zero
 
 
 class QAOAConverter(QuantumConverter):
@@ -65,12 +66,12 @@ class QAOAConverter(QuantumConverter):
 
         # Apply RZ gates for linear terms
         for i, hi in ising.linear.items():
-            if hi != 0.0:
+            if not is_close_zero(hi):
                 cost.rz(2 * hi * gamma, i)
 
         # Apply CNOT and RZ gates for quadratic terms
         for (i, j), Jij in ising.quad.items():
-            if Jij != 0.0:
+            if not is_close_zero(Jij):
                 cost.rzz(2 * Jij * gamma, i, j)
 
         cost.update_qubits_label(self.int2varlabel)
@@ -128,12 +129,12 @@ class QAOAConverter(QuantumConverter):
 
         # Add linear terms
         for i, hi in ising.linear.items():
-            if hi != 0.0:
+            if not is_close_zero(hi):
                 hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, i),), hi)
 
         # Add quadratic terms
         for (i, j), Jij in ising.quad.items():
-            if Jij != 0.0:
+            if not is_close_zero(Jij):
                 hamiltonian.add_term(
                     (
                         qm_o.PauliOperator(qm_o.Pauli.Z, i),

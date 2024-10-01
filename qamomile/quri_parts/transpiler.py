@@ -63,11 +63,11 @@ class QuriPartsTranspiler(
             qp_circuit = qp_c.LinearMappedUnboundParametricQuantumCircuit(
                 qamomile_circuit.num_qubits, qamomile_circuit.num_clbits
             )
-            param_mapping = {
+            self.param_mapping = {
                 param: qp_circuit.add_parameter(param.name)
                 for param in parameters
             }
-            return self._circuit_convert(qamomile_circuit, qp_circuit, param_mapping)
+            return self._circuit_convert(qamomile_circuit, qp_circuit, self.param_mapping)
         except Exception as e:
             raise QamomileQuriPartsTranspileError(f"Error converting circuit: {str(e)}")
 

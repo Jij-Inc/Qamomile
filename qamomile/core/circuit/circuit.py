@@ -489,4 +489,5 @@ class QuantumCircuit:
                 parameters.extend(gate.parameter.get_parameters())
             elif isinstance(gate, Operator):
                 parameters.extend(gate.circuit.get_parameters())
-        return set(parameters)
+        
+        return list(dict.fromkeys(parameters))

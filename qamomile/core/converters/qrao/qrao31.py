@@ -2,6 +2,7 @@ from __future__ import annotations
 import typing as typ
 import numpy as np
 from qamomile.core.converters.converter import QuantumConverter
+from qamomile.core.converters.utils import is_close_zero
 from qamomile.core.ising_qubo import IsingModel
 import qamomile.core.operator as qm_o
 from .graph_coloring import greedy_graph_coloring, check_linear_term
@@ -44,7 +45,7 @@ def qrac31_encode_ising(
 
     # convert linear parts of the objective function into Hamiltonian.
     for idx, coeff in ising.linear.items():
-        if coeff == 0.0:
+        if is_close_zero(coeff):
             continue
 
         pauli = encoded_ope[idx]
@@ -52,7 +53,7 @@ def qrac31_encode_ising(
 
     # create Pauli terms
     for (i, j), coeff in ising.quad.items():
-        if coeff == 0.0:
+        if is_close_zero(coeff):
             continue
 
         if i == j:
