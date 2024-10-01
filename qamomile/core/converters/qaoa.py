@@ -46,13 +46,13 @@ class QAOAConverter(QuantumConverter):
     """
 
     def get_cost_ansatz(
-        self, beta: qm_c.Parameter, name: str = "Cost"
+        self, gamma: qm_c.Parameter, name: str = "Cost"
     ) -> qm_c.QuantumCircuit:
         """
         Generate the cost ansatz circuit for QAOA.
 
         Args:
-            beta (qm_c.Parameter): The beta parameter for the cost ansatz.
+            gamma (qm_c.Parameter): The gamma parameter for the cost ansatz.
             name (str, optional): Name of the circuit. Defaults to "Cost".
 
         Returns:
@@ -66,12 +66,12 @@ class QAOAConverter(QuantumConverter):
         # Apply RZ gates for linear terms
         for i, hi in ising.linear.items():
             if hi != 0.0:
-                cost.rz(2 * hi * beta, i)
+                cost.rz(2 * hi * gamma, i)
 
         # Apply CNOT and RZ gates for quadratic terms
         for (i, j), Jij in ising.quad.items():
             if Jij != 0.0:
-                cost.rzz(2 * Jij * beta, i, j)
+                cost.rzz(2 * Jij * gamma, i, j)
 
         cost.update_qubits_label(self.int2varlabel)
 
@@ -102,12 +102,12 @@ class QAOAConverter(QuantumConverter):
         # Construct QAOA layers
         for _p in range(p):
             beta = qm_c.Parameter(f"beta_{_p}")
-            cost = self.get_cost_ansatz(beta, name=f"Cost_{_p}")
+            gamma = qm_c.Parameter(f"gamma_{_p}")
+            cost = self.get_cost_ansatz(gamma, name=f"Cost_{_p}")
 
             mixer = qm_c.QuantumCircuit(num_qubits, 0, name=f"Mixer_{_p}")
-            gamma = qm_c.Parameter(f"gamma_{_p}")
             for i in range(num_qubits):
-                mixer.rx(2 * gamma, i)
+                mixer.rx(2 * beta, i)
 
             qaoa_circuit.append(cost)
             qaoa_circuit.append(mixer)
