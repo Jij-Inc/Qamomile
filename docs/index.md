@@ -25,7 +25,7 @@ Explore our documentation to dive deeper into Qamomile's capabilities:
 
 ## Contributing
 
-We welcome contributions from the community! If you're interested in improving Qamomile, please check out our [Contribution Guidelines](contributing.md).
+We welcome contributions from the community! If you're interested in improving Qamomile, please check out our [Contribution Guidelines](contribute.md).
 
 ## Support
 

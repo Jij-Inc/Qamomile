@@ -16,7 +16,7 @@ Before you begin, ensure you have the following installed:
 2. Clone your fork locally:
    ```
    gh repo clone Jij-Inc/Qamomile
-   cd qamomile
+   cd Qamomile
    ```
 3. Create a virtual environment and activate it:
    ```
@@ -70,7 +70,7 @@ Our documentation is organized as follows:
 - `quickstart.md`: Guide for new users
 - `api/`: API reference documentation for qamomile.
 - `tutorial/`: Usage examples and tutorials
-- `contributing.md`: This guide
+- `contribute.md`: This guide
 
 Feel free to suggest improvements to this structure if you think it can be made more intuitive.
 
