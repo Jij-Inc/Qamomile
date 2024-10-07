@@ -76,7 +76,7 @@ For more detailed information, please refer to our [documentation](https://qamom
 
 ## Contributing
 
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for more details.
+We welcome contributions! Please see our [Contributing Guide](docs/contribute.md) for more details.
 
 ## License
 
