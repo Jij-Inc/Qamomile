@@ -12,7 +12,7 @@ The 2 :math:`p` variational parameters are optimized classically to minimize the
 This module provides functionality to convert optimization problems which written by `jijmodeling`
 into QAOA circuits (:math:`U(\\vec{\\beta},\\vec{\gamma})`), construct cost Hamiltonians (:math:`H_P`), and decode quantum computation results.
 
-The QAOAConverter class extends the QuantumConverter base class, specializing in
+The `QAOAConverter` class extends the `QuantumConverter` base class, specializing in
 QAOA-specific operations such as ansatz circuit generation and result decoding.
 
 
@@ -25,6 +25,7 @@ Key Features:
 Note: This module requires `jijmodeling` and `jijmodeling_transpiler` for problem representation.
 
 .. bibliography::
+    :filter: docname in docnames
 
 """
 

@@ -11,7 +11,7 @@ is converted into a relaxed Hamiltonian
 using the :math:`(3,1,p)`-QRAC method and the relaxed Hamiltonian becomes
 
 .. math::
-    \\tilde{H} = \sum_{ij} 3J_{ij} P_{f(i)} P_{f(j)} + \sum_{i} \sqrt{3}h_i P_{f(i)},\ P_{k,\mu} \in \{X, Z\}
+    \\tilde{H} = \sum_{ij} 3J_{ij} P_{f(i)} P_{f(j)} + \sum_{i} \sqrt{3}h_i P_{f(i)},\ P_{k,\mu} \in \{X, Y, Z\}
 
 where :math:`i` th variable is mapped into Pauli :math:`\mu` operator of the :math:`k` th qubit by :math:`f(i)`.
 For example, if :math:`f(i) = (2,0)`, the :math:`i` th variable is mapped into the Pauli :math:`Z` operator of the 2nd qubit.
@@ -160,10 +160,10 @@ class QRAC31Converter(QuantumConverter):
 
     def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
         """
-        Construct the cost Hamiltonian for QRAC31.
+        Construct the relaxed Hamiltonian for :math:`(3,1,p)`-QRAO.
 
         Returns:
-            qm_o.Hamiltonian: The cost Hamiltonian.
+            qm_o.Hamiltonian: The relaxed Hamiltonian.
         """
         ising = self.get_ising()
 

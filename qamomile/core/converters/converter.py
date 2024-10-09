@@ -20,10 +20,12 @@ with jijmodeling for problem representation and various quantum SDKs through
 the QuantumSDKTranspiler interface.
 
 Example:
-    class QAOAConverter(QuantumConverter):
-        def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
-            # Implementation for generating QAOA cost Hamiltonian
-            ...
+    .. code::
+
+        class QAOAConverter(QuantumConverter):
+            def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
+                # Implementation for generating QAOA cost Hamiltonian
+                ...
 
 """
 

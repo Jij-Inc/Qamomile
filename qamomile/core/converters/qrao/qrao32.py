@@ -11,7 +11,7 @@ is converted into a relaxed Hamiltonian
 using the :math:`(3,2,p)`-QRAC method and the relaxed Hamiltonian becomes
 
 .. math::
-    \\tilde{H} = \sum_{ij} J_{ij} P_{f(i)} P_{f(j)} + \sum_{i} h_i P_{f(i)},\ P_{k,\mu} \in \{X', Y', Z'\}
+    \\tilde{H} = \sum_{ij} 6J_{ij} P_{f(i)} P_{f(j)} + \sum_{i} \sqrt{6}h_i P_{f(i)},\ P_{k,\mu} \in \{X', Y', Z'\}
 
 Here, :math:`X'`, :math:`Y'`, and :math:`Z'` are the 2-local Pauli operator which defined as follows:
 
