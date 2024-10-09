@@ -1,32 +1,32 @@
 """
 This module implements the Quantum Approximate Optimization Algorithm (QAOA) converter
-for the Qamomile framework. It provides functionality to convert optimization problems
-into QAOA circuits, construct cost Hamiltonians, and decode quantum computation results.
+for the Qamomile framework :cite:`farhi2014quantum`. 
+The parameterized state :math:`|\\vec{\\beta},\\vec{\gamma}\\rangle` of :math:`p`-layer QAOA is defined as:
 
-The QAOAConverter class extends the QuantumConverter base class, specializing in
+.. math::
+    |\\vec{\\beta},\\vec{\gamma}\\rangle = U(\\vec{\\beta},\\vec{\gamma})|0\\rangle^{\otimes n} = e^{-i\\beta_{p-1} H_M}e^{-i\gamma_{p-1} H_P} \cdots e^{-i\\beta_0 H_M}e^{-i\gamma_0 H_P} H^{\otimes n}|0\\rangle^{\otimes n}
+
+where :math:`H_P` is the cost Hamiltonian, :math:`H_M` is the mixer Hamiltonian and :math:`\gamma_l` and :math:`\\beta_l` are the variational parameters.
+The 2 :math:`p` variational parameters are optimized classically to minimize the expectation value :math:`\langle \\vec{\\beta},\\vec{\gamma}|H_P|\\vec{\\beta},\\vec{\gamma}\\rangle`.
+
+This module provides functionality to convert optimization problems which written by `jijmodeling`
+into QAOA circuits (:math:`U(\\vec{\\beta},\\vec{\gamma})`), construct cost Hamiltonians (:math:`H_P`), and decode quantum computation results.
+
+The `QAOAConverter` class extends the `QuantumConverter` base class, specializing in
 QAOA-specific operations such as ansatz circuit generation and result decoding.
+
 
 Key Features:
 - Generation of QAOA ansatz circuits
 - Construction of cost Hamiltonians for QAOA
 - Decoding of quantum computation results into classical optimization solutions
 
-Usage:
-    from qamomile.core.qaoa.qaoa import QAOAConverter
 
-    # Initialize with a compiled optimization problem instance
-    qaoa_converter = QAOAConverter(compiled_instance)
+Note: This module requires `jijmodeling` and `jijmodeling_transpiler` for problem representation.
 
-    # Generate QAOA circuit
-    p = 2  # Number of QAOA layers
-    qaoa_circuit = qaoa_converter.get_ansatz_circuit(p)
+.. bibliography::
+    :filter: docname in docnames
 
-    # Get cost Hamiltonian
-    cost_hamiltonian = qaoa_converter.get_cost_hamiltonian()
-
-
-Note: This module requires jijmodeling and jijmodeling_transpiler for problem representation
-and decoding functionalities.
 """
 
 import typing as typ
@@ -44,13 +44,29 @@ class QAOAConverter(QuantumConverter):
 
     This class provides methods to convert optimization problems into QAOA circuits,
     construct cost Hamiltonians, and decode quantum computation results.
+
+    Examples:
+
+    .. code::
+
+        from qamomile.core.qaoa.qaoa import QAOAConverter
+        
+        # Initialize with a compiled optimization problem instance 
+        qaoa_converter = QAOAConverter(compiled_instance) 
+
+        # Generate QAOA circuit and cost Hamiltonian
+        p = 2  # Number of QAOA layers
+        qaoa_circuit = qaoa_converter.get_ansatz_circuit(p) 
+        cost_hamiltonian = qaoa_converter.get_cost_hamiltonian()
+
     """
 
     def get_cost_ansatz(
         self, gamma: qm_c.Parameter, name: str = "Cost"
     ) -> qm_c.QuantumCircuit:
         """
-        Generate the cost ansatz circuit for QAOA.
+        Generate the cost ansatz circuit (:math:`e^{-\gamma H_P}`) for QAOA.
+        This function is mainly used when you have designed your own mixer Hamiltonian and only need the cost Hamiltonian.
 
         Args:
             gamma (qm_c.Parameter): The gamma parameter for the cost ansatz.

@@ -11,41 +11,41 @@ from qamomile.core.converters.qrao.graph_coloring import (
 
 def test_create_x_prime():
     X_prime = create_x_prime(0)
-
+    coeff = 1.0 / np.sqrt(6)
     X0 = qm_o.PauliOperator(qm_o.Pauli.X, 0)
     X1 = qm_o.PauliOperator(qm_o.Pauli.X, 1)
     Z0 = qm_o.PauliOperator(qm_o.Pauli.Z, 0)
     Z1 = qm_o.PauliOperator(qm_o.Pauli.Z, 1)
     expected = qm_o.Hamiltonian()
-    expected.add_term((X0,X1), 1 / 2)
-    expected.add_term((X0,Z1), 1 / 2)
-    expected.add_term((Z0,), 1)
+    expected.add_term((X0,X1), 1 / 2 * coeff)
+    expected.add_term((X0,Z1), 1 / 2 * coeff)
+    expected.add_term((Z0,), 1 * coeff)
     assert X_prime == expected
 
 def test_create_y_prime():
     Y_prime = create_y_prime(0)
-
+    coeff = 1.0 / np.sqrt(6)
     X1 = qm_o.PauliOperator(qm_o.Pauli.X, 1)
     Z1 = qm_o.PauliOperator(qm_o.Pauli.Z, 1)
     Y0 = qm_o.PauliOperator(qm_o.Pauli.Y, 0)
     Y1 = qm_o.PauliOperator(qm_o.Pauli.Y, 1)
     expected = qm_o.Hamiltonian()
-    expected.add_term((X1,), 1 / 2)
-    expected.add_term((Z1,), 1)
-    expected.add_term((Y0,Y1), 1 / 2)
+    expected.add_term((X1,), 1 / 2  * coeff)
+    expected.add_term((Z1,), 1  * coeff)
+    expected.add_term((Y0,Y1), 1 / 2  * coeff)
     assert Y_prime == expected
 
 def test_create_z_prime():
     Z_prime = create_z_prime(0)
-
+    coeff = 1.0 / np.sqrt(6)
     X0 = qm_o.PauliOperator(qm_o.Pauli.X, 0)
     X1 = qm_o.PauliOperator(qm_o.Pauli.X, 1)
     Z0 = qm_o.PauliOperator(qm_o.Pauli.Z, 0)
     Z1 = qm_o.PauliOperator(qm_o.Pauli.Z, 1)
     expected = qm_o.Hamiltonian()
-    expected.add_term((Z0,Z1), 1)
-    expected.add_term((X0,), -1 / 2)
-    expected.add_term((Z0,X1), -1 / 2)
+    expected.add_term((Z0,Z1), 1 * coeff)
+    expected.add_term((X0,), -1 / 2 * coeff)
+    expected.add_term((Z0,X1), -1 / 2 * coeff)
     assert Z_prime == expected
 
 def test_qrac32_encode_ising():
@@ -77,10 +77,10 @@ def test_qrac32_encode_ising():
     Z2_prime = create_prime_operator(Z2)
     X1_prime = create_prime_operator(X1)
 
-    expected_hamiltonian += 2.0 * Z0_prime * Z1_prime
-    expected_hamiltonian += 1.0 * Z0_prime * X1_prime
-    expected_hamiltonian += 5.0 * X1_prime
-    expected_hamiltonian += 2.0 * Z2_prime
+    expected_hamiltonian += 6 * 2.0 * Z0_prime * Z1_prime
+    expected_hamiltonian += 6 * 1.0 * Z0_prime * X1_prime
+    expected_hamiltonian += np.sqrt(6) * 5.0 * X1_prime
+    expected_hamiltonian += np.sqrt(6) * 2.0 * Z2_prime
     # expected_hamiltonian = {
     #     (Z0, Z1): max_color_group_size * 2.0,
     #     (Z0, X1): max_color_group_size * 1.0,

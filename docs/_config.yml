@@ -43,6 +43,8 @@ sphinx:
       - 'sphinx.ext.napoleon'
       # - 'sphinx.ext.viewcode'
       - 'autoapi.extension'
+      - 'sphinx.ext.autodoc'
+      - 'sphinx_copybutton'
     config:
       add_module_names: False
       autoapi_type: 'python'
@@ -59,6 +61,13 @@ sphinx:
       html_search_language: en
       suppress_warnings: ["etoc.toctree"]
       mathjax_path: https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+      bibtex_reference_style: author_year
+      # コードハイライトの設定
+      pygments_style: 'sphinx'
+      highlight_language: 'python'
+      html_theme_options:
+        code_font_family: 'monospace'
+        code_font_size: '0.9em'
 
 languages:
   en: English
