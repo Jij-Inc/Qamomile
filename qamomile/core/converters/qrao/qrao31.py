@@ -1,3 +1,52 @@
+"""
+This modeule implements Quantum Random Access Optimization (QRAO) 
+using :math:`(3,1,p)`-QRAC :cite:`fuller2024approximate`.
+
+The Ising Hamiltonian
+
+.. math::
+    H = \sum_{ij} J_{ij} Z_i Z_j + \sum_{i} h_i Z_i 
+
+is converted into a relaxed Hamiltonian 
+using the :math:`(3,1,p)`-QRAC method and the relaxed Hamiltonian becomes
+
+.. math::
+    \\tilde{H} = \sum_{ij} 3J_{ij} P_{f(i)} P_{f(j)} + \sum_{i} \sqrt{3}h_i P_{f(i)},\ P_{k,\mu} \in \{X, Z\}
+
+where :math:`i` th variable is mapped into Pauli :math:`\mu` operator of the :math:`k` th qubit by :math:`f(i)`.
+For example, if :math:`f(i) = (2,0)`, the :math:`i` th variable is mapped into the Pauli :math:`Z` operator of the 2nd qubit.
+If :math:`f(i) = (0,1)`, the :math:`i` th variable is mapped into the Pauli :math:`X` operator of the 0th qubit.
+If :math:`f(i) = (4,2)`, the :math:`i` th variable is mapped into the Pauli :math:`Y` operator of the 4th qubit
+The assignment of variables to qubits is determined by solving the graph coloring problem on the interaction graph 
+so that :math:`f(i)` and :math:`f(j)` are assigned to different qubits.
+
+
+This module provides functionality to convert optimization problems which written by `jijmodeling`
+into relaxed Hamiltonians using :math:`(3,1,p)`-QRAO.
+
+The `QRAC31Converter` class extends the `QuantumConverter` base class, specializing in
+:math:`(3,1,p)` -QRAO-specific operations such as relaxed Hamiltonian generation and result decoding.
+
+
+Key Features:
+    - Generation of relaxed Hamiltonians for :math:`(3,1,p)`-QRAO
+    - Graph coloring algorithm for qubit assignment
+    - Retrieve an encoded Pauli operators list for Pauli Rounding
+    - Decoding of rounding results into classical optimization solutions    
+    
+Attention:
+    Currently, this module does not provide the rounding algorithm.
+
+Note:
+    This module requires `jijmodeling` and `jijmodeling_transpiler` for problem representation
+    and decoding functionalities.
+    
+
+.. bibliography::
+    :filter: docname in docnames
+
+"""
+
 from __future__ import annotations
 import typing as typ
 import numpy as np
@@ -70,7 +119,25 @@ def qrac31_encode_ising(
 
 
 class QRAC31Converter(QuantumConverter):
+    """
+    :math:`(3,1,p)`-QRAO (Quantum Random Access Optimization) converter class.
 
+    This class provides methods to convert optimization problems into :math:`(3,1,p)`-QRAO 
+    relaxed Hamiltonians, and decode quantum computation results.
+
+    Examples:
+
+        .. code::
+
+            from qamomile.core.converters.qrao.qrao31 import QRAC31Converter
+            
+            # Initialize with a compiled optimization problem instance 
+            qrao_converter = QRAC31Converter(compiled_instance) 
+
+            # Generate relaxed Hamiltonian
+            cost_hamiltonian = qrao_converter.get_cost_hamiltonian()
+
+    """
     max_color_group_size = 3
 
     def ising_encode(
@@ -105,6 +172,15 @@ class QRAC31Converter(QuantumConverter):
         return hamiltonian
 
     def get_encoded_pauli_list(self) -> list[qm_o.Hamiltonian]:
+        """
+        Get the encoded Pauli operators as a list of Hamiltonians.
+
+        This method returns the Pauli Operators which correspond 
+        to the each variable in the Ising model.
+
+        Returns:
+            list[qm_o.Hamiltonian]: A list of the encoded Pauli operators.
+        """
         # return the encoded Pauli operators as list
         ising = self.get_ising()
         num_qubits = len(self.color_group)
