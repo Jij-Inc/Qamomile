@@ -12,7 +12,6 @@ parts:
     - file: tutorial/index
     - file: tutorial/building_quantum_circuits
     - file: tutorial/alternating_ansatz_graph_coloring
-    - file: tutorial/graph_partition
   - caption: API Reference
     chapters:
     - file: autoapi/index
