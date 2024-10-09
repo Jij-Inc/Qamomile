@@ -81,7 +81,7 @@ class QuantumConverter(abc.ABC):
             compiled_instance: The compiled instance of the optimization problem.
             relax_method (jmt.pubo.RelaxationMethod): The relaxation method for PUBO conversion.
                 Defaults to AugmentedLagrangian.
-            normalize_model (bool): Normalize objective function.
+            normalize_model (bool): The objective function and the constraints are normalized using the maximum absolute value of the coefficients contained in each.
                 Defaults to False
         """
         pubo_builder = jmt.pubo.transpile_to_pubo(
