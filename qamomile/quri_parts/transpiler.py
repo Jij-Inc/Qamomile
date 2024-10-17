@@ -107,6 +107,8 @@ class QuriPartsTranspiler(
                 )
             elif isinstance(gate, qm_c.ThreeQubitGate):
                 qp_circuit = _three_qubit_gate(gate, qp_circuit)
+            elif isinstance(gate, qm_c.ParametricExpGate):
+                qp_circuit = _parametric_exp_gate(gate, qp_circuit, parameters=param_mapping)
             elif isinstance(gate, qm_c.Operator):
                 qp_circuit = self._circuit_convert(
                                     gate.circuit,
@@ -266,4 +268,16 @@ def _three_qubit_gate(
     """Apply a three qubit gate to the quri-parts circuit."""
     if gate.gate == qm_c.ThreeQubitGateType.CCX:
         qp_circuit.add_TOFFOLI_gate(gate.control1, gate.control2, gate.target)
+    return qp_circuit
+
+def _parametric_exp_gate(
+    self, 
+    gate: qm_c.ParametricExpGate,
+    qp_circuit: qp_c.LinearMappedUnboundParametricQuantumCircuit,
+    parameters: dict[qm_c.Parameter, qp_c.Parameter],
+) -> qp_c.LinearMappedUnboundParametricQuantumCircuit:
+    """Apply an exponential pauli rotation gate to the quri-parts circuit."""
+    qp_operator = self.transpile_hamiltonian(gate.Hamiltonian)
+    param_fn = convert_parameter(gate.parameter, parameters=parameters)
+    qp_circuit.add_parametric_commuting_paulis_exp_gate(qp_circuit, param_fn, qp_operator)
     return qp_circuit

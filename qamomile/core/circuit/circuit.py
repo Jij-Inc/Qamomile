@@ -38,6 +38,7 @@ import dataclasses
 import abc
 import enum
 from .parameter import ParameterExpression, Parameter
+from qamomile.core.operator import Hamiltonian
 
 
 class Gate(abc.ABC):
@@ -134,6 +135,11 @@ class ThreeQubitGate(Gate):
     control2: int
     target: int
 
+@dataclasses.dataclass
+class ParametricExpGate(Gate):
+    hamiltonian: Hamiltonian
+    parameter: ParameterExpression
+    indices: list[int]
 
 @dataclasses.dataclass
 class MeasurementGate(Gate):
@@ -424,6 +430,31 @@ class QuantumCircuit:
         self.add_gate(
             ThreeQubitGate(ThreeQubitGateType.CCX, control1, control2, target)
         )
+    
+    def expevo(self, time: ParameterExpression, hamiltonian: Hamiltonian):
+        for ops, coeff in hamiltonian._terms.items():
+            for op in ops:
+                #self.add_gate(ParametricExpGate(hamiltonian, parameter=time, indices=op.index))
+                if op.pauli.name=="X": 
+                       self.add_gate(
+                        ParametricSingleQubitGate(ParametricSingleQubitGateType.RX, op.index, 2*time*coeff)
+                    )
+				   
+                elif op.pauli.name=="Y": 
+                    self.add_gate(
+                        ParametricSingleQubitGate(ParametricSingleQubitGateType.RY, op.index, 2*time*coeff)
+                    ) 
+					 
+                elif op.pauli.name=="Z": 
+                    self.add_gate(
+                        ParametricSingleQubitGate(ParametricSingleQubitGateType.RZ, op.index, 2*time*coeff)
+                    )  
+					 
+                elif op.pauli.name=="I":
+                     pass
+                
+                else: 
+                    raise ValueError(f"Invalid gate type: {type(ParametricExpGate)}")
 
     def measure(self, qubit: int, cbit: int):
         """
