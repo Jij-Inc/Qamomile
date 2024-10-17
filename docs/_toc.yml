@@ -13,6 +13,7 @@ parts:
     - file: tutorial/building_quantum_circuits
     - file: tutorial/alternating_ansatz_graph_coloring
     - file: tutorial/graph_partition
+    - file: tutorial/maxcut
     - file: tutorial/qrao_tutorial
   - caption: API Reference
     chapters:
