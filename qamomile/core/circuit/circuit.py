@@ -21,13 +21,15 @@ a flexible and extensible structure for defining quantum operations and circuits
 
 
 Example:
-    ```python
-    # Bell state circuit
-    qc = QuantumCircuit(2)
-    qc.h(0)
-    qc.cnot(0, 1)
-    qc.measure_all()
-    ```
+
+    .. code::
+    
+        # Bell state circuit
+        qc = QuantumCircuit(2)
+        qc.h(0)
+        qc.cnot(0, 1)
+        qc.measure_all()
+    
 
 """
 
@@ -489,4 +491,5 @@ class QuantumCircuit:
                 parameters.extend(gate.parameter.get_parameters())
             elif isinstance(gate, Operator):
                 parameters.extend(gate.circuit.get_parameters())
-        return set(parameters)
+        
+        return list(dict.fromkeys(parameters))

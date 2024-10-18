@@ -63,11 +63,11 @@ class QuriPartsTranspiler(
             qp_circuit = qp_c.LinearMappedUnboundParametricQuantumCircuit(
                 qamomile_circuit.num_qubits, qamomile_circuit.num_clbits
             )
-            param_mapping = {
+            self.param_mapping = {
                 param: qp_circuit.add_parameter(param.name)
                 for param in parameters
             }
-            return self._circuit_convert(qamomile_circuit, qp_circuit, param_mapping)
+            return self._circuit_convert(qamomile_circuit, qp_circuit, self.param_mapping)
         except Exception as e:
             raise QamomileQuriPartsTranspileError(f"Error converting circuit: {str(e)}")
 
@@ -114,7 +114,8 @@ class QuriPartsTranspiler(
                                     param_mapping
                                 )
             elif isinstance(gate, qm_c.MeasurementGate):
-                qp_circuit.measure(gate.qubit, gate.cbit)
+                # QURI-Parts circuits don't have measurement gates
+                pass
             else:
                 raise QamomileQuriPartsTranspileError(
                     f"Unsupported gate type: {type(gate)}"

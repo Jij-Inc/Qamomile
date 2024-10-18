@@ -63,10 +63,10 @@ class QiskitTranspiler(QuantumSDKTranspiler[qk_primitives.BitArray]):
         """
         try:
             parameters = qamomile_circuit.get_parameters()
-            param_mapping = {
+            self.param_mapping = {
                 param: qiskit.circuit.Parameter(param.name) for param in parameters
             }
-            return self._circuit_convert(qamomile_circuit, param_mapping)
+            return self._circuit_convert(qamomile_circuit, self.param_mapping)
         except Exception as e:
             raise QamomileQiskitTranspileError(f"Error converting circuit: {str(e)}")
 

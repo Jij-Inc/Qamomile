@@ -17,4 +17,9 @@ Welcome to the Qamomile tutorial! This guide will help you get started with Qamo
 
 ## Tutorials
 
-- [Quantum Alternating Ansatz for Graph Coloring](alternating_ansatz_graph_coloring.ipynb): Learn how to run the Quantum Alternating Ansatz for graph coloring problems.
+- [Building Quantum Circuits](building_quantum_circuits.ipynb): Learn how to build a quantum circuit using Qamomile.
+- [Quantum Alternating Ansatz for Graph Coloring](alternating_ansatz_graph_coloring.ipynb): Learn how to run the Quantum Alternating Ansatz for graph coloring problem.
+- [Quantum Approximate Optimization Algorithm for Graph Partitioning](graph_partition.ipynb): Learn how to run the Quantum Approximate Optimization Algorithm for graph partitioning problem.
+- [Quantum Approximate Optimization Algorithm for vertex covering](vertex_cover.ipynb): Learn how to run the Quantum Approximate Optimization Algorithm for vertex cover problem.
+- [Quantum Approximate Optimization Algorithm for Max-Cut](maxcut.ipynb): Learn how to run the Quantum Quantum Approximate Optimization Algorithm for Max-Cut problem.
+- [Quantum Approximate Optimization Algorithm for Multi-car Paint Shop Problem](multi_car_paint.ipynb): Learn how to run the Quantum Approximate Optimization Algorithm for multi-car paint shop problem.

@@ -20,10 +20,12 @@ with jijmodeling for problem representation and various quantum SDKs through
 the QuantumSDKTranspiler interface.
 
 Example:
-    class QAOAConverter(QuantumConverter):
-        def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
-            # Implementation for generating QAOA cost Hamiltonian
-            ...
+    .. code::
+
+        class QAOAConverter(QuantumConverter):
+            def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
+                # Implementation for generating QAOA cost Hamiltonian
+                ...
 
 """
 
@@ -72,6 +74,7 @@ class QuantumConverter(abc.ABC):
         self,
         compiled_instance,
         relax_method: jmt.pubo.RelaxationMethod = jmt.pubo.RelaxationMethod.AugmentedLagrangian,
+        normalize_model: bool = False,
     ):
         """
         Initialize the QuantumConverter.
@@ -80,9 +83,11 @@ class QuantumConverter(abc.ABC):
             compiled_instance: The compiled instance of the optimization problem.
             relax_method (jmt.pubo.RelaxationMethod): The relaxation method for PUBO conversion.
                 Defaults to AugmentedLagrangian.
+            normalize_model (bool): The objective function and the constraints are normalized using the maximum absolute value of the coefficients contained in each.
+                Defaults to False
         """
         pubo_builder = jmt.pubo.transpile_to_pubo(
-            compiled_instance, relax_method=relax_method
+            compiled_instance, relax_method=relax_method, normalize = normalize_model
         )
 
         self.compiled_instance = compiled_instance
