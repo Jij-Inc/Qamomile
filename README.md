@@ -72,7 +72,7 @@ qiskit_circuit = qiskit_transpiler.transpile_circuit(qaoa_circuit)
 
 ## Documentation
 
-For more detailed information, please refer to our [documentation](https://qamomile.readthedocs.io).
+For more detailed information, please refer to our [documentation](https://jij-inc.github.io/Qamomile/).
 
 ## Contributing
 
