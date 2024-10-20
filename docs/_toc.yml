@@ -16,6 +16,7 @@ parts:
     - file: tutorial/vertex_cover
     - file: tutorial/maxcut
     - file: tutorial/multi_car_paint
+    - file: tutorial/qrao_tutorial
 
   - caption: API Reference
     chapters:
