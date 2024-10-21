@@ -37,7 +37,7 @@ import typing as typ
 import dataclasses
 import abc
 import enum
-from .parameter import ParameterExpression, Parameter
+from .parameter import ParameterExpression, Value, Parameter
 from qamomile.core.operator import Hamiltonian
 
 
@@ -441,7 +441,9 @@ class QuantumCircuit:
             ThreeQubitGate(ThreeQubitGateType.CCX, control1, control2, target)
         )
     
-    def expevo(self, time: ParameterExpression, hamiltonian: Hamiltonian):
+    def exp_evolution(self, time: ParameterExpression, hamiltonian: Hamiltonian):
+        if isinstance(time, float):
+            time = Value(time)
         indices = set()
         for ops, _ in hamiltonian._terms.items():
             for op in ops:

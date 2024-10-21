@@ -1,6 +1,7 @@
 # File: tests/circuit/test_circuit.py
 
 import pytest
+import qamomile.core.operator as qm_o
 from qamomile.core.circuit import (
     QuantumCircuit,
     Parameter,
@@ -9,6 +10,7 @@ from qamomile.core.circuit import (
     TwoQubitGateType,
     ThreeQubitGateType,
     MeasurementGate,
+    ParametricExpGate,
     Operator
 )
 
@@ -56,6 +58,19 @@ def test_three_qubit_gate():
     qc.ccx(0, 1, 2)
     assert len(qc.gates) == 1
     assert qc.gates[0].gate == ThreeQubitGateType.CCX
+
+def test_exp_evolution():
+    hamiltonian = qm_o.Hamiltonian()
+    hamiltonian += qm_o.X(0) * qm_o.Z(1)
+    qc = QuantumCircuit(2)
+    theta = Parameter("theta")
+    qc.exp_evolution(theta,hamiltonian)
+    assert len(qc.gates) == 1
+    assert isinstance(qc.gates[0], ParametricExpGate)
+    assert qc.gates[0].parameter == theta
+    assert len(qc.gates[0].indices) == 2
+    assert qc.gates[0].hamiltonian == hamiltonian
+
 
 
 def test_measurement():

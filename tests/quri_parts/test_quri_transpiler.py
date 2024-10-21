@@ -238,10 +238,10 @@ def test_parametric_two_qubit_gate(transpiler):
 
 def test_parametric_exp_gate(transpiler):
     hamiltonian = qm_o.Hamiltonian()
-    hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),qm_o.PauliOperator(qm_o.Pauli.Z, 1)), 1.0)
+    hamiltonian += qm_o.X(0) * qm_o.Z(1)
     qc = qm_c.QuantumCircuit(2)
     theta = qm_c.Parameter("theta")
-    qc.expevo(theta,hamiltonian)
+    qc.exp_evolution(theta,hamiltonian)
     quri_circuit = transpiler.transpile_circuit(qc)
 
     assert isinstance(quri_circuit, qp_c.LinearMappedUnboundParametricQuantumCircuit)
