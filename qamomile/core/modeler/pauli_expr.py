@@ -2,7 +2,7 @@ import jijmodeling as jm
 
 
 class PauliExpr:
-    def x(shape: int | tuple[int, ...]) -> jm.BinaryVar:
+    def x(shape: int | jm.Placeholder  | tuple[int, ...]) -> jm.BinaryVar:
         if isinstance(shape, int):
             return jm.BinaryVar(
                 "_PauliX", shape=(shape,), latex=r"\hat{X}", description="PauliX"
@@ -14,7 +14,7 @@ class PauliExpr:
         else:
             raise ValueError("The shape is invalid.")
 
-    def y(shape: int | tuple[int, ...]) -> jm.BinaryVar:
+    def y(shape: int | jm.Placeholder  | tuple[int, ...]) -> jm.BinaryVar:
         if isinstance(shape, int):
             return jm.BinaryVar(
                 "_PauliY", shape=(shape,), latex=r"\hat{Y}", description="PauliY"
@@ -26,7 +26,7 @@ class PauliExpr:
         else:
             raise ValueError("The shape is invalid.")
 
-    def z(shape: int | tuple[int, ...]) -> jm.BinaryVar:
+    def z(shape: int | jm.Placeholder | tuple[int, ...]) -> jm.BinaryVar:
         if isinstance(shape, int):
             return jm.BinaryVar(
                 "_PauliZ", shape=(shape,), latex=r"\hat{Z}", description="PauliZ"
