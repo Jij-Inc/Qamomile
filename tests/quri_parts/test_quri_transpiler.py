@@ -234,9 +234,22 @@ def test_parametric_two_qubit_gate(transpiler):
     assert isinstance(quri_circuit.gates[0], qp_c.ParametricQuantumGate)
     assert quri_circuit.gates[0].target_indices == (0, 1)
     assert quri_circuit.gates[0].pauli_ids == (1, 1)  # XX
-
     assert quri_circuit.parameter_count == 1
 
+def test_parametric_exp_gate(transpiler):
+    hamiltonian = qm_o.Hamiltonian()
+    hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),qm_o.PauliOperator(qm_o.Pauli.Z, 1)), 1.0)
+    qc = qm_c.QuantumCircuit(2)
+    theta = qm_c.Parameter("theta")
+    qc.expevo(theta,hamiltonian)
+    quri_circuit = transpiler.transpile_circuit(qc)
+
+    assert isinstance(quri_circuit, qp_c.LinearMappedUnboundParametricQuantumCircuit)
+    assert len(quri_circuit.gates) == 1
+    assert isinstance(quri_circuit.gates[0], qp_c.ParametricQuantumGate)
+    assert quri_circuit.gates[0].target_indices == (0, 1)
+    assert quri_circuit.gates[0].pauli_ids == (1, 3)  #XZ
+    assert quri_circuit.parameter_count == 1
 
 def test_qaoa_circuit():
     import jijmodeling as jm

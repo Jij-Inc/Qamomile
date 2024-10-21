@@ -137,6 +137,8 @@ class ThreeQubitGate(Gate):
 
 @dataclasses.dataclass
 class ParametricExpGate(Gate):
+    """Parametric exponential gate class."""
+
     hamiltonian: Hamiltonian
     parameter: ParameterExpression
     indices: list[int]
@@ -170,6 +172,8 @@ class Operator(Gate):
                 operated_qubits.append(gate.control1)
                 operated_qubits.append(gate.control2)
                 operated_qubits.append(gate.target)
+            elif isinstance(gate, ParametricExpGate):
+                operated_qubits.extend(gate.indices)
             elif isinstance(gate, Operator):
                 operated_qubits.extend(gate.operated_qubits())
             else:
@@ -256,6 +260,12 @@ class QuantumCircuit:
                 raise ValueError(
                     f"Invalid number of qubits. Expected: {self.num_qubits}, Actual: {gate.circuit.num_qubits}"
                 )
+        elif isinstance(gate, ParametricExpGate):
+            for index in gate.indices:
+                 if index > self.num_qubits:
+                     raise ValueError(
+                         f"Invalid number of qubits. Expected: {self.num_qubits}, Actual: {index}"
+                     )  
         elif isinstance(gate, MeasurementGate):
             if gate.qubit >= self.num_qubits or gate.cbit >= self.num_clbits:
                 raise ValueError(
@@ -432,30 +442,13 @@ class QuantumCircuit:
         )
     
     def expevo(self, time: ParameterExpression, hamiltonian: Hamiltonian):
-        for ops, coeff in hamiltonian._terms.items():
+        indices = set()
+        for ops, _ in hamiltonian._terms.items():
             for op in ops:
-                #self.add_gate(ParametricExpGate(hamiltonian, parameter=time, indices=op.index))
-                if op.pauli.name=="X": 
-                       self.add_gate(
-                        ParametricSingleQubitGate(ParametricSingleQubitGateType.RX, op.index, 2*time*coeff)
-                    )
-				   
-                elif op.pauli.name=="Y": 
-                    self.add_gate(
-                        ParametricSingleQubitGate(ParametricSingleQubitGateType.RY, op.index, 2*time*coeff)
-                    ) 
-					 
-                elif op.pauli.name=="Z": 
-                    self.add_gate(
-                        ParametricSingleQubitGate(ParametricSingleQubitGateType.RZ, op.index, 2*time*coeff)
-                    )  
-					 
-                elif op.pauli.name=="I":
-                     pass
-                
-                else: 
-                    raise ValueError(f"Invalid gate type: {type(ParametricExpGate)}")
-
+                indices.add(op.index)
+        indices = sorted(list(indices))
+        self.add_gate(ParametricExpGate(hamiltonian, parameter=time, indices=indices))
+              
     def measure(self, qubit: int, cbit: int):
         """
         Add a measurement gate to the quantum circuit.
@@ -522,5 +515,7 @@ class QuantumCircuit:
                 parameters.extend(gate.parameter.get_parameters())
             elif isinstance(gate, Operator):
                 parameters.extend(gate.circuit.get_parameters())
+            elif isinstance(gate, ParametricExpGate):
+                parameters.extend(gate.parameter.get_parameters())
         
         return list(dict.fromkeys(parameters))

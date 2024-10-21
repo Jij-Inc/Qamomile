@@ -28,7 +28,7 @@ import qamomile.core.bitssample as qm_bs
 import qamomile.core.circuit as qm_c
 import qamomile.core.operator as qm_o
 from qamomile.core.transpiler import QuantumSDKTranspiler
-
+from quri_parts.core.circuit import add_parametric_commuting_paulis_exp_gate
 from .parameter_converter import convert_parameter
 from .exceptions import QamomileQuriPartsTranspileError
 
@@ -108,7 +108,8 @@ class QuriPartsTranspiler(
             elif isinstance(gate, qm_c.ThreeQubitGate):
                 qp_circuit = _three_qubit_gate(gate, qp_circuit)
             elif isinstance(gate, qm_c.ParametricExpGate):
-                qp_circuit = _parametric_exp_gate(gate, qp_circuit, parameters=param_mapping)
+                qp_operator=self.transpile_hamiltonian(gate.hamiltonian)
+                qp_circuit = _parametric_exp_gate(gate, qp_circuit, parameters=param_mapping, qp_operator=qp_operator )
             elif isinstance(gate, qm_c.Operator):
                 qp_circuit = self._circuit_convert(
                                     gate.circuit,
@@ -141,7 +142,7 @@ class QuriPartsTranspiler(
         counter, num_bits = result
         int_counts = dict(counter)
         return qm_bs.BitsSampleSet.from_int_counts(int_counts, num_bits)
-
+    
     def transpile_hamiltonian(
         self,
         operator: qm_o.Hamiltonian
@@ -271,13 +272,12 @@ def _three_qubit_gate(
     return qp_circuit
 
 def _parametric_exp_gate(
-    self, 
     gate: qm_c.ParametricExpGate,
     qp_circuit: qp_c.LinearMappedUnboundParametricQuantumCircuit,
     parameters: dict[qm_c.Parameter, qp_c.Parameter],
+    qp_operator: qp_o.Operator,
 ) -> qp_c.LinearMappedUnboundParametricQuantumCircuit:
     """Apply an exponential pauli rotation gate to the quri-parts circuit."""
-    qp_operator = self.transpile_hamiltonian(gate.Hamiltonian)
     param_fn = convert_parameter(gate.parameter, parameters=parameters)
-    qp_circuit.add_parametric_commuting_paulis_exp_gate(qp_circuit, param_fn, qp_operator)
+    add_parametric_commuting_paulis_exp_gate(qp_circuit, param_fn, qp_operator)
     return qp_circuit
