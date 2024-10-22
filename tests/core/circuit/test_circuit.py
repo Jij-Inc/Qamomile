@@ -1,9 +1,12 @@
 # File: tests/circuit/test_circuit.py
 
 import pytest
+import random
+import math
 from qamomile.core.circuit import (
     QuantumCircuit,
     Parameter,
+    Value,
     SingleQubitGateType,
     ParametricSingleQubitGateType,
     TwoQubitGateType,
@@ -38,10 +41,16 @@ def test_parametric_single_qubit_gates():
     qc.rx(theta, 0)
     qc.ry(theta, 0)
     qc.rz(theta, 0)
+    qc2 = QuantumCircuit(1)
+    random_float = random.uniform(0, 4* math.pi)
+    qc2.rx(random_float, 0)
+    qc2.ry(random_float, 0)
+    qc2.rz(random_float, 0)
+    
     assert len(qc.gates) == 3
     assert all(gate.gate in ParametricSingleQubitGateType for gate in qc.gates)
     assert all(gate.parameter == theta for gate in qc.gates)
-
+    assert all(gate.parameter.value == random_float for gate in qc2.gates)
 
 def test_two_qubit_gates():
     qc = QuantumCircuit(2)
