@@ -11,6 +11,7 @@ parts:
     chapters:
     - file: tutorial/index
     - file: tutorial/building_quantum_circuits
+    - file: tutorial/algebraic_operator
     - file: tutorial/alternating_ansatz_graph_coloring
     - file: tutorial/graph_partition
     - file: tutorial/vertex_cover

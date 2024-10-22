@@ -180,6 +180,59 @@ class Hamiltonian:
             return 0
         return max(op.index for term in self.terms.keys() for op in term) + 1
 
+    def to_latex(self) -> str:
+        """
+        Converts the Hamiltonian to a LaTeX representation.
+
+        This function does not add constant term when we show the Hamiltonian.
+        This function does not add $ symbols.
+
+        Returns:
+            str: 
+                A LaTeX representation of the Hamiltonian. 
+
+        .. code::
+
+            import qamomile.core.operator as qm_o
+            import IPython.display as ipd
+
+            h = qm_o.Hamiltonian()
+            h += -qm_o.X(0) * qm_o.Y(1) - 2.0 * qm_o.Z(0) * qm_o.Z(1)
+
+            # Show the Hamiltonian in LaTeX at Jupyter Notebook
+            ipd.display(ipd.Latex("$" + h.to_latex() + "$"))
+        """
+        h_str = ""
+        counter = 0
+
+        pauli_map = {Pauli.X: "X", Pauli.Y: "Y", Pauli.Z: "Z"}
+        
+        for term, coeff in self.terms.items():
+            term_str = ""
+            
+            for op in term:
+                if op.pauli == "I":  
+                    continue
+
+                pauli_str = pauli_map.get(op.pauli, "")
+                term_str += f"{pauli_str}_{{{op.index}}}"
+            
+            # At first term, we don't need to add a sign
+            if counter == 0:
+                if abs(coeff) == 1:
+                    h_str += term_str if coeff > 0 else "-" + term_str
+                else:
+                    h_str += f"{coeff}{term_str}"
+            else:
+                if abs(coeff) == 1:
+                    h_str += "+" + term_str if coeff > 0 else "-" + term_str
+                else:
+                    h_str += f"+{coeff}" + term_str if coeff > 0 else f"{coeff}" + term_str
+            
+            counter += 1
+
+        return h_str
+
     def __repr__(self) -> str:
         """
         Provides a string representation of the Hamiltonian.
