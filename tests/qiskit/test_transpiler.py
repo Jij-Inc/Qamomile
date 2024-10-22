@@ -8,9 +8,10 @@ import networkx as nx
 import qiskit
 import qiskit.quantum_info as qk_ope
 import qiskit.primitives as qk_pr
+
 from qamomile.core.circuit import QuantumCircuit as QamomileCircuit
 from qamomile.core.circuit import Parameter
-from qamomile.core.operator import Hamiltonian, PauliOperator, Pauli
+from qamomile.core.operator import Hamiltonian, PauliOperator, Pauli, X, Y, Z
 import qamomile.core.bitssample as qm_bs
 
 import qamomile.core as qm
@@ -253,3 +254,18 @@ def test_tsp_decode():
         (3, 3): 1,
     }
     assert sampleset[0].num_occurrences == 1024
+
+    def test_parametric_exp_gate(transpiler):
+        hamiltonian = Hamiltonian()
+        hamiltonian += X(0) * Z(1)
+        qc = QamomileCircuit(2)
+        theta = Parameter("theta")
+        qc.exp_evolution(theta,hamiltonian)
+        qk_circ = transpiler.transpile_circuit(qc)
+
+        assert isinstance(qk_circ, qiskit.QuantumCircuit)
+        assert len(qk_circ.data) == 1
+        assert isinstance(qk_circ.data[0].operation.name == "PauliEvolution")
+        assert qk_circ.data[0]._index == 0
+        assert qk_circ.data[0]._index == 1
+        assert len(qk_circ.data[0].params) == 1
