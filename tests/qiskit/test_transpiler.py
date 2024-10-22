@@ -112,7 +112,7 @@ def transpiler():
     return QiskitTranspiler()
 
 
-def test_transpile_simple_circuit(transpiler):
+def test_transpile_simple_circuit(transpiler: QiskitTranspiler):
     qc = QamomileCircuit(2)
     qc.h(0)
     qc.cx(0, 1)
@@ -126,7 +126,7 @@ def test_transpile_simple_circuit(transpiler):
     assert qiskit_circuit.data[1].operation.name == "cx"
 
 
-def test_transpile_parametric_circuit(transpiler):
+def test_transpile_parametric_circuit(transpiler: QiskitTranspiler):
     qc = QamomileCircuit(1)
     theta = Parameter("theta")
     qc.rx(theta, 0)
@@ -138,7 +138,7 @@ def test_transpile_parametric_circuit(transpiler):
     assert qiskit_circuit.parameters[0].name == "theta"
 
 
-def test_transpile_complex_circuit(transpiler):
+def test_transpile_complex_circuit(transpiler: QiskitTranspiler):
     qc = QamomileCircuit(3, 3)
     qc.h(0)
     qc.cx(0, 1)
@@ -153,7 +153,7 @@ def test_transpile_complex_circuit(transpiler):
     assert len(qiskit_circuit.data) == 4
 
 
-def test_transpile_unsupported_gate(transpiler):
+def test_transpile_unsupported_gate(transpiler: QiskitTranspiler):
     class UnsupportedGate:
         pass
 
@@ -164,7 +164,7 @@ def test_transpile_unsupported_gate(transpiler):
         transpiler.transpile_circuit(qc)
 
 
-def test_convert_result(transpiler):
+def test_convert_result(transpiler: QiskitTranspiler):
     # Simulate Qiskit BitArray result
     class MockBitArray:
         def __init__(self, counts, num_bits):
@@ -183,7 +183,7 @@ def test_convert_result(transpiler):
     assert result.total_samples() == 1000
 
 
-def test_transpile_hamiltonian(transpiler):
+def test_transpile_hamiltonian(transpiler: QiskitTranspiler):
     hamiltonian = Hamiltonian()
     hamiltonian.add_term((PauliOperator(Pauli.X, 0),), 1.0)
     hamiltonian.add_term((PauliOperator(Pauli.Z, 1),), 2.0)
@@ -227,6 +227,20 @@ def test_coloring_sample_decode():
     assert sampleset[0].var_values["x"].values == {(0, 0): 1, (1, 0): 1, (2, 0): 1, (3, 0): 1}
     assert sampleset[0].num_occurrences == 1024
 
+def test_parametric_exp_gate(transpiler: QiskitTranspiler):
+        hamiltonian = Hamiltonian()
+        hamiltonian += X(0) * Z(1)
+        qc = QamomileCircuit(2)
+        theta = Parameter("theta")
+        qc.exp_evolution(theta,hamiltonian)
+        qk_circ = transpiler.transpile_circuit(qc)
+        
+        assert isinstance(qk_circ, qiskit.QuantumCircuit)
+        assert len(qk_circ.data) == 1
+        assert qk_circ.data[0].operation.name == 'PauliEvolution'
+        assert qk_circ.data[0].qubits[0]._index == 0
+        assert qk_circ.data[0].qubits[1]._index == 1
+        assert len(qk_circ.data[0].params) == 1
     
 def test_tsp_decode():
     problem = tsp_problem()
@@ -255,17 +269,4 @@ def test_tsp_decode():
     }
     assert sampleset[0].num_occurrences == 1024
 
-    def test_parametric_exp_gate(transpiler):
-        hamiltonian = Hamiltonian()
-        hamiltonian += X(0) * Z(1)
-        qc = QamomileCircuit(2)
-        theta = Parameter("theta")
-        qc.exp_evolution(theta,hamiltonian)
-        qk_circ = transpiler.transpile_circuit(qc)
-
-        assert isinstance(qk_circ, qiskit.QuantumCircuit)
-        assert len(qk_circ.data) == 1
-        assert isinstance(qk_circ.data[0].operation.name == "PauliEvolution")
-        assert qk_circ.data[0]._index == 0
-        assert qk_circ.data[0]._index == 1
-        assert len(qk_circ.data[0].params) == 1
+    
