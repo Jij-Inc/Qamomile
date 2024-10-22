@@ -37,7 +37,7 @@ import typing as typ
 import dataclasses
 import abc
 import enum
-from .parameter import ParameterExpression, Parameter
+from .parameter import ParameterExpression, Parameter, Value
 
 
 class Gate(abc.ABC):
@@ -303,7 +303,7 @@ class QuantumCircuit:
             index (int): The index of the qubit to apply the gate. 
         """
         if isinstance(angle, float):
-            angle = Parameter(angle)
+            angle = Value(angle)
         
         self.add_gate(
             ParametricSingleQubitGate(ParametricSingleQubitGateType.RX, index, angle)
@@ -324,7 +324,7 @@ class QuantumCircuit:
             index (int): The index of the qubit to apply the gate.
         """
         if isinstance(angle, float):
-            angle = Parameter(angle)
+            angle = Value(angle)
         
         self.add_gate(
             ParametricSingleQubitGate(ParametricSingleQubitGateType.RY, index, angle)
@@ -345,7 +345,7 @@ class QuantumCircuit:
             index (int): The index of the qubit to apply the gate. 
         """
         if isinstance(angle, float):
-            angle = Parameter(angle)
+            angle = Value(angle)
 
         self.add_gate(
             ParametricSingleQubitGate(ParametricSingleQubitGateType.RZ, index, angle)
@@ -370,7 +370,7 @@ class QuantumCircuit:
     def crx(self, angle: ParameterExpression, controled_qubit: int, target_qubit: int):
         """Add a CRX gate to the quantum circuit."""
         if isinstance(angle, float):
-            angle = Parameter(angle)
+            angle = Value(angle)
         
         self.add_gate(
             ParametricTwoQubitGate(
@@ -381,7 +381,7 @@ class QuantumCircuit:
     def cry(self, angle: ParameterExpression, controled_qubit: int, target_qubit: int):
         """Add a CRY gate to the quantum circuit."""
         if isinstance(angle, float):
-            angle = Parameter(angle)
+            angle = Value(angle)
         
         self.add_gate(
             ParametricTwoQubitGate(
@@ -392,7 +392,7 @@ class QuantumCircuit:
     def crz(self, angle: ParameterExpression, controled_qubit: int, target_qubit: int):
         """Add a CRZ gate to the quantum circuit."""
         if isinstance(angle, float):
-            angle = Parameter(angle)
+            angle = Value(angle)
         
         self.add_gate(
             ParametricTwoQubitGate(
@@ -407,7 +407,7 @@ class QuantumCircuit:
             R_{XX}(\theta) = \exp\left(-i\theta X\otimes X/2\right)
         """
         if isinstance(angle, float):
-            angle = Parameter(angle)
+            angle = Value(angle)
 
         self.add_gate(
             ParametricTwoQubitGate(
@@ -422,7 +422,7 @@ class QuantumCircuit:
             R_{YY}(\theta) = \exp\left(-i\theta Y\otimes Y/2\right)
         """
         if isinstance(angle, float):
-            angle = Parameter(angle)
+            angle = Value(angle)
         
         self.add_gate(
             ParametricTwoQubitGate(
@@ -437,7 +437,7 @@ class QuantumCircuit:
             R_{ZZ}(\theta) = \exp\left(-i\theta Z\otimes Z/2\right)
         """
         if isinstance(angle, float):
-            angle = Parameter(angle)
+            angle = Value(angle)
         
         self.add_gate(
             ParametricTwoQubitGate(
