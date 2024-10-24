@@ -279,5 +279,7 @@ def _parametric_exp_gate(
 ) -> qp_c.LinearMappedUnboundParametricQuantumCircuit:
     """Apply an exponential pauli rotation gate to the quri-parts circuit."""
     param_fn = convert_parameter(gate.parameter, parameters=parameters)
+    for key in param_fn:
+        param_fn[key]=-param_fn[key]
     add_parametric_commuting_paulis_exp_gate(qp_circuit, param_fn, qp_operator)
     return qp_circuit

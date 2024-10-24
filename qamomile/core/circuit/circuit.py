@@ -137,7 +137,10 @@ class ThreeQubitGate(Gate):
 
 @dataclasses.dataclass
 class ParametricExpGate(Gate):
-    """Parametric exponential gate class."""
+    r"""Parametric exponential gate class.
+    .. math::
+            e^{-i\theta H}
+    """
 
     hamiltonian: Hamiltonian
     parameter: ParameterExpression
@@ -261,11 +264,10 @@ class QuantumCircuit:
                     f"Invalid number of qubits. Expected: {self.num_qubits}, Actual: {gate.circuit.num_qubits}"
                 )
         elif isinstance(gate, ParametricExpGate):
-            for index in gate.indices:
-                 if index > self.num_qubits:
-                     raise ValueError(
-                         f"Invalid number of qubits. Expected: {self.num_qubits}, Actual: {index}"
-                     )  
+            if gate.hamiltonian.num_qubits > self.num_qubits:
+                raise ValueError(
+                    f"Invalid number of qubits. Expected: {self.num_qubits}, Actual: {gate.hamiltonian.num_qubits}"
+                )  
         elif isinstance(gate, MeasurementGate):
             if gate.qubit >= self.num_qubits or gate.cbit >= self.num_clbits:
                 raise ValueError(
