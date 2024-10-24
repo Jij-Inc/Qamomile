@@ -3897,6 +3897,51 @@ quri-parts-core = "*"
 typing-extensions = ">=4.1.1,<5.0.0"
 
 [[package]]
+name = "qutip"
+version = "4.7.5"
+description = "QuTiP: The Quantum Toolbox in Python"
+optional = false
+python-versions = "*"
+files = [
+    {file = "qutip-4.7.5-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:b4ae6b823674328703f96ca1fec75260c773d3eea981f91eecaa71235c965ba3"},
+    {file = "qutip-4.7.5-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:7141cf931b6f92397cd6738d082c46e082b26c066deb494a4b6b8f1f841b0aa8"},
+    {file = "qutip-4.7.5-cp310-cp310-win_amd64.whl", hash = "sha256:a0e513344872dfbd5728a5a1688671909fa4ebeb1d42f09bc896518ed880f82c"},
+    {file = "qutip-4.7.5-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:7a257fc52facddb25149c2fc03400fd219b893a9238fde46548d9e1430c16b2d"},
+    {file = "qutip-4.7.5-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:95587c1bd98084c6ca29c4d745048da39ed2431854dd1f12914c21aa47076e9c"},
+    {file = "qutip-4.7.5-cp311-cp311-win_amd64.whl", hash = "sha256:8c4b7b9ad94b9edad32d290d0823af4e87daf123c5398925afd8f99f8c6a8fcb"},
+    {file = "qutip-4.7.5-cp36-cp36m-macosx_10_9_x86_64.whl", hash = "sha256:cd223ff0f31cef3b08de9d898d959c65a4cd3ef05eec3cf91ee25431285d284d"},
+    {file = "qutip-4.7.5-cp36-cp36m-manylinux_2_5_i686.manylinux1_i686.manylinux_2_12_i686.manylinux2010_i686.whl", hash = "sha256:4f08e5ffcffdae89e906fd579aa155e3b794d0eb7345ae4cfadb4b24a46a08d7"},
+    {file = "qutip-4.7.5-cp36-cp36m-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_12_x86_64.manylinux2010_x86_64.whl", hash = "sha256:d0090d2543fcab58f966387b0553987971c75cc8b7fb269c354e68b023d87f18"},
+    {file = "qutip-4.7.5-cp36-cp36m-win32.whl", hash = "sha256:193b96cd41a522f842bd9807c763e305d0e810fd6bedd5f486e8a5284d80ea26"},
+    {file = "qutip-4.7.5-cp36-cp36m-win_amd64.whl", hash = "sha256:240c01a931fe22417fbc18864cb91b91c44fdf6e5b922386e3891752e2cf9740"},
+    {file = "qutip-4.7.5-cp37-cp37m-macosx_10_9_x86_64.whl", hash = "sha256:11b6b750e6d68d6b35a9f64576d00742fb0f7ea97f5e624bd01fe9fec0eb0c53"},
+    {file = "qutip-4.7.5-cp37-cp37m-manylinux_2_5_i686.manylinux1_i686.manylinux_2_12_i686.manylinux2010_i686.whl", hash = "sha256:349dff8b40a0fc97ff2722c76e73f6141f9a5ffd44c0bf16d830b780a41d0dca"},
+    {file = "qutip-4.7.5-cp37-cp37m-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_12_x86_64.manylinux2010_x86_64.whl", hash = "sha256:736a1b0f13bcf51fe9152478409d78a7608d9a7bb924238483df8a0df55c88fd"},
+    {file = "qutip-4.7.5-cp37-cp37m-win32.whl", hash = "sha256:695183bee518aee1c0915e7a0974a4305d128f06afc59b6e18a2127ef353138b"},
+    {file = "qutip-4.7.5-cp37-cp37m-win_amd64.whl", hash = "sha256:700b4d1df10ed7cac8acd0b15da4bfb4506073d7bcdb46f9cc896da5b13ed0f5"},
+    {file = "qutip-4.7.5-cp38-cp38-macosx_10_9_x86_64.whl", hash = "sha256:be905e4b3a0afbf53d3144b642391b0de8274123ea7febbee19e1ec1339c2c70"},
+    {file = "qutip-4.7.5-cp38-cp38-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:4595d59c5cd22c88022897d3bdbdab191a9eb032ee2ae8fd88937b82d736435c"},
+    {file = "qutip-4.7.5-cp38-cp38-win_amd64.whl", hash = "sha256:79b2667a7ded59d05722c78bfd71054e63a7c0ceb8a4ec7426ece69cd125668c"},
+    {file = "qutip-4.7.5-cp39-cp39-macosx_10_9_x86_64.whl", hash = "sha256:b9c16d9f5f7e61d8c0b904b498fa44d30ded6685d7fe28c3c19c57b9c0fc8fc9"},
+    {file = "qutip-4.7.5-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:acb9f827ea757faa193bf19e42269ed52da06efc38f966923ee6b793b28526f5"},
+    {file = "qutip-4.7.5-cp39-cp39-win_amd64.whl", hash = "sha256:36502a7883b8c87d42381aa7b8fb0b3450b3bed26924dfdad9e7829d33a2ced3"},
+    {file = "qutip-4.7.5.tar.gz", hash = "sha256:a0cc9883281ec89e38ac635adc4bb602d85ec49071628ee17d3bf2c14b5c11ac"},
+]
+
+[package.dependencies]
+numpy = ">=1.16.6"
+packaging = "*"
+scipy = ">=1.0"
+
+[package.extras]
+full = ["cvxopt", "cvxpy (>=1.0)", "cython (>=0.29.20,<3.0.0)", "ipython", "matplotlib (>=1.2.1)", "pytest (>=5.2)", "pytest-rerunfailures"]
+graphics = ["matplotlib (>=1.2.1)"]
+ipython = ["ipython"]
+runtime-compilation = ["cython (>=0.29.20,<3.0.0)"]
+semidefinite = ["cvxopt", "cvxpy (>=1.0)"]
+tests = ["pytest (>=5.2)", "pytest-rerunfailures"]
+
+[[package]]
 name = "referencing"
 version = "0.35.1"
 description = "JSON Referencing + Python"
@@ -5289,4 +5334,4 @@ quri-parts = ["quri-parts-qulacs"]
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.10,<3.12"
-content-hash = "cb2e75a578c6a96a2901988aa4752552cc9a51f5291301384ecffc24ddfb5062"
+content-hash = "bd3d7c239c511a5ca2a5bc038dae63aafb32b48ed80b52fd93318fbfa4a8d860"
