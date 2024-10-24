@@ -252,10 +252,10 @@ def test_parametric_exp_gate(transpiler: QiskitTranspiler):
         assert isinstance(qk_circ2, qiskit.QuantumCircuit)
         assert len(qk_circ2.data) == 1
         assert qk_circ2.data[0].operation.name == 'PauliEvolution'
-        assert qk_circ.data[0].operation.num_qubits == 2
-        assert qk_circ.data[0].qubits[0]._index == 0
-        assert qk_circ.data[0].qubits[1]._index == 1
-        assert len(qk_circ.data[0].params) == 1
+        assert qk_circ2.data[0].operation.num_qubits == 2
+        assert qk_circ2.data[0].qubits[0]._index == 0
+        assert qk_circ2.data[0].qubits[1]._index == 1
+        assert len(qk_circ2.data[0].params) == 1
     
 def test_tsp_decode():
     problem = tsp_problem()
