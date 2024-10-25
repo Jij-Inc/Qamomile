@@ -21,7 +21,7 @@ import qamomile.core.operator as qm_o
 
 import collections
 from qamomile.core.transpiler import QuantumSDKTranspiler
-from qutip import Qobj, sigmaz, sigmax, sigmay, tensor, identity
+from qutip import Qobj, sigmaz, sigmax, sigmay, tensor, qzero, qeye
 
 class QuTiPTranspiler(
     QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
@@ -50,9 +50,9 @@ class QuTiPTranspiler(
             NotImplementedError: If an unsupported Pauli operator is encountered.
         """
         n = operator.num_qubits
-        H = 0 * tensor([identity(2)] * n)
+        H = tensor([qzero(2)]*n)
         for term, coeff in operator.terms.items():
-            op_list = [identity(2)] * n
+            op_list = [qeye(2)] * n
             for pauli in term:
                 match pauli.pauli:
                     case qm_o.Pauli.X:
