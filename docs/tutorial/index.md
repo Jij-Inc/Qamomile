@@ -25,3 +25,4 @@ Welcome to the Qamomile tutorial! This guide will help you get started with Qamo
 =======
 - [Quantum Approximate Optimization Algorithm for Max-Cut](maxcut.ipynb): Learn how to run the Quantum Quantum Approximate Optimization Algorithm for Max-Cut problem.
 >>>>>>> main
+- [Quantum Annealing using QuTiP](maxcut.ipynb): Learn how to run the Quantum Annealing with QuTiP's built-in functions.

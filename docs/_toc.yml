@@ -15,6 +15,7 @@ parts:
     - file: tutorial/graph_partition
     - file: tutorial/vertex_cover
     - file: tutorial/maxcut
+    - file: tutorial/quantum_annealing
   - caption: API Reference
     chapters:
     - file: autoapi/index
