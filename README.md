@@ -36,8 +36,8 @@ Here's a simple example of how to use Qamomile with QAOA:
 
 ```python
 import jijmodeling as jm
-import jijmodeling_transpiler as jmt
-from qamomile.core.qaoa import QAOAConverter
+import jijmodeling_transpiler.core as jmt
+from qamomile.core.converters.qaoa import QAOAConverter
 from qamomile.qiskit.transpiler import QiskitTranspiler
 
 # Define QUBO problem
@@ -72,7 +72,7 @@ qiskit_circuit = qiskit_transpiler.transpile_circuit(qaoa_circuit)
 
 ## Documentation
 
-For more detailed information, please refer to our [documentation](https://qamomile.readthedocs.io).
+For more detailed information, please refer to our [documentation](https://jij-inc.github.io/Qamomile/).
 
 ## Contributing
 

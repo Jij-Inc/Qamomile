@@ -37,8 +37,9 @@ import typing as typ
 import dataclasses
 import abc
 import enum
-from .parameter import ParameterExpression, Value, Parameter
+from .parameter import ParameterExpression, Parameter, Value
 from qamomile.core.operator import Hamiltonian
+
 
 
 class Gate(abc.ABC):
@@ -319,9 +320,12 @@ class QuantumCircuit:
             \end{bmatrix}
 
         Args:
-            angle (ParameterExpression): The angle parameter for the gate.
+            angle (ParameterExpression/float): The angle parameter for the gate.
             index (int): The index of the qubit to apply the gate. 
         """
+        if isinstance(angle, float):
+            angle = Value(angle)
+        
         self.add_gate(
             ParametricSingleQubitGate(ParametricSingleQubitGateType.RX, index, angle)
         )
@@ -337,9 +341,12 @@ class QuantumCircuit:
             \end{bmatrix}
 
         Args:
-            angle (ParameterExpression): The angle parameter for the gate.
+            angle (ParameterExpression/float): The angle parameter for the gate.
             index (int): The index of the qubit to apply the gate.
         """
+        if isinstance(angle, float):
+            angle = Value(angle)
+        
         self.add_gate(
             ParametricSingleQubitGate(ParametricSingleQubitGateType.RY, index, angle)
         )
@@ -355,9 +362,12 @@ class QuantumCircuit:
             \end{bmatrix}
 
         Args:
-            angle (ParameterExpression): The angle parameter for the gate.
+            angle (ParameterExpression/float): The angle parameter for the gate.
             index (int): The index of the qubit to apply the gate. 
         """
+        if isinstance(angle, float):
+            angle = Value(angle)
+
         self.add_gate(
             ParametricSingleQubitGate(ParametricSingleQubitGateType.RZ, index, angle)
         )
@@ -380,6 +390,9 @@ class QuantumCircuit:
 
     def crx(self, angle: ParameterExpression, controled_qubit: int, target_qubit: int):
         """Add a CRX gate to the quantum circuit."""
+        if isinstance(angle, float):
+            angle = Value(angle)
+        
         self.add_gate(
             ParametricTwoQubitGate(
                 ParametricTwoQubitGateType.CRX, controled_qubit, target_qubit, angle
@@ -388,6 +401,9 @@ class QuantumCircuit:
     
     def cry(self, angle: ParameterExpression, controled_qubit: int, target_qubit: int):
         """Add a CRY gate to the quantum circuit."""
+        if isinstance(angle, float):
+            angle = Value(angle)
+        
         self.add_gate(
             ParametricTwoQubitGate(
                 ParametricTwoQubitGateType.CRY, controled_qubit, target_qubit, angle
@@ -396,6 +412,9 @@ class QuantumCircuit:
     
     def crz(self, angle: ParameterExpression, controled_qubit: int, target_qubit: int):
         """Add a CRZ gate to the quantum circuit."""
+        if isinstance(angle, float):
+            angle = Value(angle)
+        
         self.add_gate(
             ParametricTwoQubitGate(
                 ParametricTwoQubitGateType.CRZ, controled_qubit, target_qubit, angle
@@ -408,6 +427,9 @@ class QuantumCircuit:
         .. math::
             R_{XX}(\theta) = \exp\left(-i\theta X\otimes X/2\right)
         """
+        if isinstance(angle, float):
+            angle = Value(angle)
+
         self.add_gate(
             ParametricTwoQubitGate(
                 ParametricTwoQubitGateType.RXX, qubit1, qubit2, angle
@@ -420,6 +442,9 @@ class QuantumCircuit:
         .. math::
             R_{YY}(\theta) = \exp\left(-i\theta Y\otimes Y/2\right)
         """
+        if isinstance(angle, float):
+            angle = Value(angle)
+        
         self.add_gate(
             ParametricTwoQubitGate(
                 ParametricTwoQubitGateType.RYY, qubit1, qubit2, angle
@@ -432,6 +457,9 @@ class QuantumCircuit:
         .. math::
             R_{ZZ}(\theta) = \exp\left(-i\theta Z\otimes Z/2\right)
         """
+        if isinstance(angle, float):
+            angle = Value(angle)
+        
         self.add_gate(
             ParametricTwoQubitGate(
                 ParametricTwoQubitGateType.RZZ, qubit1, qubit2, angle
