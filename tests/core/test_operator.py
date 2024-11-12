@@ -352,13 +352,18 @@ def test_Hamiltonian_neg():
 
 def test_num_qubits():
     h = qm_o.Hamiltonian(num_qubits=3)
-    h.constant = 1.0
+    h += 1.0
     assert h.num_qubits == 3
     h *= qm_o.X(0)
     assert h.num_qubits == 3
     h *= qm_o.X(1)
     assert h.num_qubits == 3
+    h *= qm_o.X(3)
+    assert h.num_qubits == 4
 
-    h = qm_o.X(0) + qm_o.X(2)
+    h = qm_o.Hamiltonian(num_qubits=3)
+    h += qm_o.X(0) 
     assert h.num_qubits == 3
+    h += qm_o.X(3) 
+    assert h.num_qubits == 4
     

@@ -265,11 +265,16 @@ class Hamiltonian:
             for term, coeff in other.terms.items():
                 h.add_term(term, coeff)
             h.constant += other.constant
+
+            if h.num_qubits < self.num_qubits:
+                h._num_qubits = self.num_qubits
+
             return h
         elif isinstance(other, (int, float, complex)):
-            h = Hamiltonian()
+            h = Hamiltonian(num_qubits = self.num_qubits)
             h._terms = self._terms.copy()
             h.constant = self.constant + other
+            
             return h
         else:
             raise ValueError("Unsupported addition operation.")
@@ -291,7 +296,7 @@ class Hamiltonian:
             h.constant = self.constant * other
             return h
         elif isinstance(other, Hamiltonian):
-            h = Hamiltonian(num_qubits = self.num_qubits)
+            h = Hamiltonian()
             for term1, coeff1 in self.terms.items():
                 for term2, coeff2 in other.terms.items():
                     term, phase = simplify_pauliop_terms(term1 + term2)
@@ -309,6 +314,9 @@ class Hamiltonian:
                     h.add_term(terms, coeff2 * self.constant)
 
             h.constant += self.constant * other.constant
+
+            if h.num_qubits < self.num_qubits:
+                h._num_qubits = self.num_qubits
 
             return h
         else:
