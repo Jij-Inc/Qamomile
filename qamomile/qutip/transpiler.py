@@ -69,8 +69,12 @@ class QuTiPTranspiler(
     def transpile_circuit(
         self
     ) -> None:
-        pass
+        raise NotImplementedError(
+        "Invalid function. The 'transpile_circuit' function is not supported by the QuTiPTranspiler class."
+    )
     def convert_result(
         self
     ) -> None:
-        pass
+        raise NotImplementedError(
+        "Invalid function. The 'convert_result' function is not supported by the QuTiPTranspiler class."
+    )
