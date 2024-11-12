@@ -285,13 +285,13 @@ class Hamiltonian:
 
     def __mul__(self, other):
         if isinstance(other, (int, float, complex)):
-            h = Hamiltonian()
+            h = Hamiltonian(num_qubits = self.num_qubits)
             for term, coeff in self.terms.items():
                 h.add_term(term, coeff * other)
             h.constant = self.constant * other
             return h
         elif isinstance(other, Hamiltonian):
-            h = Hamiltonian()
+            h = Hamiltonian(num_qubits = self.num_qubits)
             for term1, coeff1 in self.terms.items():
                 for term2, coeff2 in other.terms.items():
                     term, phase = simplify_pauliop_terms(term1 + term2)
