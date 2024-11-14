@@ -349,3 +349,21 @@ def test_Hamiltonian_neg():
     expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), -2.0)
     expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 1),), -1.0)
     assert h1 == expected_h
+
+def test_num_qubits():
+    h = qm_o.Hamiltonian(num_qubits=3)
+    h += 1.0
+    assert h.num_qubits == 3
+    h *= qm_o.X(0)
+    assert h.num_qubits == 3
+    h *= qm_o.X(1)
+    assert h.num_qubits == 3
+    h *= qm_o.X(3)
+    assert h.num_qubits == 4
+
+    h = qm_o.Hamiltonian(num_qubits=3)
+    h += qm_o.X(0) 
+    assert h.num_qubits == 3
+    h += qm_o.X(3) 
+    assert h.num_qubits == 4
+    
