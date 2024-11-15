@@ -18,108 +18,91 @@ from qamomile.core.ising_qubo import IsingModel
 from qamomile.core.converters.converter import QuantumConverter
 import qamomile.core.operator as qm_o
 from qamomile.core.converters.utils import is_close_zero
+from qamomile.core.bitssample import BitsSample, BitsSampleSet
 import numpy as np
+import jijmodeling as jm
+from typing import Callable
 
 class IsingMatrix:
     def __init__(self, quad: np.array, linear: np.array):
         self.quad = quad
         self.linear = linear
 
-
-class IsingConverter(QuantumConverter):
-    def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
-        """
-        Construct the cost Hamiltonian.
-
-        Returns:
-            qm_o.Hamiltonian: The cost Hamiltonian.
-        """
-        hamiltonian = qm_o.Hamiltonian()
-        ising = self.get_ising()
-
-        # Add linear terms
-        for i, hi in ising.linear.items():
-            if not is_close_zero(hi):
-                hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, i),), hi)
-
-        # Add quadratic terms
-        for (i, j), Jij in ising.quad.items():
-            if not is_close_zero(Jij):
-                hamiltonian.add_term(
-                    (
-                        qm_o.PauliOperator(qm_o.Pauli.Z, i),
-                        qm_o.PauliOperator(qm_o.Pauli.Z, j),
-                    ),
-                    Jij,
-                )
-
-        hamiltonian.constant = ising.constant
-        return hamiltonian
-
-	
-def to_ising_matrix(ising: IsingModel):
-    size = max(max(i, j) for i, j in ising.quad.keys()) + 1
-    
-    quad_matrix = np.zeros((size, size))
-    for (i, j), value in ising.quad.items():
-        quad_matrix[i, j] = value
-        quad_matrix[j, i] = value
-    
-    linear_vector = np.zeros(size)
-    for i, value in ising.linear.items():
-        linear_vector[i] = value
-    
-    return IsingMatrix(quad=quad_matrix, linear=linear_vector)
-
-def first_improvement(ising: IsingModel, initial_state: np.array):
-    ising_matrix = to_ising_matrix(ising)
-    N = len(initial_state)
-    current_state = initial_state.copy()
-
-    for i in range(N): 
-        delta_E_i = calc_E_diff(ising_matrix, current_state, i)
+class LocalSearch:
+    def __init__(self, converter: QuantumConverter):
+        self.converter = converter
+        self.ising = converter.ising_encode()
         
-        if delta_E_i < 0:
-            current_state[i] = -current_state[i]
-            break  
+    def decode(self, result) -> jm.experimental.SampleSet:
+        sample = BitsSample(1,np.where(result == -1, 0, 1).tolist())
+        sample_set = BitsSampleSet(bitarrays=[sample])
+        decoded_sampleset=self.converter.decode_bits_to_sampleset(sample_set)
 
-    return current_state
+        return decoded_sampleset
 
-import numpy as np
+    def to_ising_matrix(self, ising: IsingModel) -> IsingMatrix:
+        size = max(max(i, j) for i, j in ising.quad.keys()) + 1
+        quad_matrix = np.zeros((size, size))
+        for (i, j), value in ising.quad.items():
+            quad_matrix[i, j] = value
+            quad_matrix[j, i] = value
 
-def best_improvement(ising: IsingModel, initial_state: np.array):
-    ising_matrix = to_ising_matrix(ising)
-    N = len(initial_state)
-    current_state = initial_state.copy() 
+        linear_vector = np.zeros(size)
+        for i, value in ising.linear.items():
+            linear_vector[i] = value
 
-    best_delta_E = 0
-    best_index = -1
+        return IsingMatrix(quad=quad_matrix, linear=linear_vector)
 
-    for i in range(N):
-        delta_E_i = calc_E_diff(ising_matrix, current_state, i)
-        if delta_E_i < best_delta_E:  
-            best_delta_E = delta_E_i
-            best_index = i
-    
+    def calc_E_diff(self, ising: IsingMatrix, state: np.ndarray, l: int) -> float:
+        delta_E = -2 * state[l] * (ising.quad[:, l] @ state - ising.linear[l])
+        return delta_E
 
-    if best_index != -1:
-        current_state[best_index] = -current_state[best_index]
+    def first_improvement(self, ising_matrix: IsingMatrix, current_state: np.ndarray, N: int) -> np.ndarray:
 
-    return current_state
+        for i in range(N):
+            delta_E_i = self.calc_E_diff(ising_matrix, current_state, i)
+            if delta_E_i < 0:
+                current_state[i] = -current_state[i]
+            
+        return current_state
 
-
-def calc_E_diff(ising: IsingMatrix, state: np.array, l: int):
-    delta_E = -2 * state[l] * (ising.quad[:, l] @ state - ising.linear[l])
-    return delta_E
-
-def run(local_search_method, ising: IsingModel, initial_state: np.array):
-    current_state = initial_state.copy()
-    
-    while True:
-        previous_state = current_state 
-        current_state = local_search_method(ising, current_state)
+    def best_improvement(self, ising_matrix: IsingMatrix, current_state: np.ndarray, N: int) -> np.ndarray:
+        delta_E = np.array([self.calc_E_diff(ising_matrix, current_state, i) for i in range(N)])
+        best_index = np.argmin(delta_E)
+        best_delta_E = delta_E[best_index]
         
-        if np.array_equal(previous_state, current_state):
-            break  
+        if best_delta_E < 0:
+            current_state[best_index] = -current_state[best_index]
+        
+        return current_state
+    
+    def run(self, initial_state: np.array, max_iter: int, local_search_method: str = "best_improvement") -> jm.experimental.SampleSet:
+        method_map = {
+        "best_improvement": self.best_improvement,
+        "first_improvement": self.first_improvement
+        }
+        if local_search_method not in method_map:
+            raise ValueError(f"Invalid local_search_method: {local_search_method}. Choose from {list(method_map.keys())}.")
 
-    return current_state
+        method = method_map[local_search_method]
+        result = self._run_local_search(method, initial_state, max_iter)
+        decoded_sampleset = self.decode(result)
+        return decoded_sampleset
+
+    def _run_local_search(self, method: Callable, initial_state: np.array, max_iter: int) -> np.ndarray:
+        current_state = initial_state.copy()
+        ising_matrix = self.to_ising_matrix(self.ising)
+        N = len(current_state)
+        counter = 0
+
+        while counter < max_iter:
+            previous_state = current_state.copy()
+            current_state = method(ising_matrix, current_state, N)
+
+            if np.array_equal(previous_state, current_state):
+                break
+            
+            counter += 1
+
+        return current_state
+
