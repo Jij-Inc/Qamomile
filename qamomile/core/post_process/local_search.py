@@ -65,23 +65,6 @@ class LocalSearch:
         decoded_sampleset=self.converter.decode_bits_to_sampleset(sample_set)
 
         return decoded_sampleset
-
-    # def to_ising_matrix(self, ising: IsingModel) -> IsingMatrix:
-    #     # size = max(max(i, j) for i, j in ising.quad.keys()) + 1
-    #     size = ising.num_bits()
-    #     quad_matrix = np.zeros((size, size))
-    #     for (i, j), value in ising.quad.items():
-    #         quad_matrix[i, j] = value
-    #         quad_matrix[j, i] = value
-
-    #     linear_vector = np.zeros(size)
-    #     for i, value in ising.linear.items():
-    #         linear_vector[i] = value
-
-    #     return IsingMatrix(quad=quad_matrix, linear=linear_vector)
-    # def calc_E_diff(self, ising: IsingMatrix, state: np.ndarray, l: int) -> float:
-    #     delta_E = -2 * state[l] * (ising.quad[:, l] @ state - ising.linear[l])
-    #     return delta_E
     
     def first_improvement(self, ising_matrix: IsingMatrix, current_state: np.ndarray, N: int) -> np.ndarray:
 
