@@ -16,17 +16,43 @@ Key Features:
 
 from qamomile.core.ising_qubo import IsingModel
 from qamomile.core.converters.converter import QuantumConverter
-import qamomile.core.operator as qm_o
-from qamomile.core.converters.utils import is_close_zero
 from qamomile.core.bitssample import BitsSample, BitsSampleSet
 import numpy as np
 import jijmodeling as jm
 from typing import Callable
 
 class IsingMatrix:
-    def __init__(self, quad: np.array, linear: np.array):
-        self.quad = quad
-        self.linear = linear
+    def __init__(self, quad: np.array = None, linear: np.array = None):
+        
+        if quad is None:
+            self.quad = np.array([])  
+        else:
+            self.quad = quad
+        
+        if linear is None:
+            self.linear = np.array([])  
+        else:
+            self.linear = linear
+    
+    def from_ising_model(self, ising: 'IsingModel') -> 'IsingMatrix':
+        size = ising.num_bits()
+
+        quad_matrix = np.zeros((size, size))
+        for (i, j), value in ising.quad.items():
+            quad_matrix[i, j] = value
+            quad_matrix[j, i] = value
+
+        linear_vector = np.zeros(size)
+        for i, value in ising.linear.items():
+            linear_vector[i] = value
+
+        self.quad = quad_matrix
+        self.linear = linear_vector
+        return self
+    
+    def calc_E_diff(self, state: np.ndarray, l: int) -> float:
+        delta_E = -2 * state[l] * (self.quad[:, l] @ state - self.linear[l])
+        return delta_E
 
 class LocalSearch:
     def __init__(self, converter: QuantumConverter):
@@ -40,34 +66,35 @@ class LocalSearch:
 
         return decoded_sampleset
 
-    def to_ising_matrix(self, ising: IsingModel) -> IsingMatrix:
-        size = max(max(i, j) for i, j in ising.quad.keys()) + 1
-        quad_matrix = np.zeros((size, size))
-        for (i, j), value in ising.quad.items():
-            quad_matrix[i, j] = value
-            quad_matrix[j, i] = value
+    # def to_ising_matrix(self, ising: IsingModel) -> IsingMatrix:
+    #     # size = max(max(i, j) for i, j in ising.quad.keys()) + 1
+    #     size = ising.num_bits()
+    #     quad_matrix = np.zeros((size, size))
+    #     for (i, j), value in ising.quad.items():
+    #         quad_matrix[i, j] = value
+    #         quad_matrix[j, i] = value
 
-        linear_vector = np.zeros(size)
-        for i, value in ising.linear.items():
-            linear_vector[i] = value
+    #     linear_vector = np.zeros(size)
+    #     for i, value in ising.linear.items():
+    #         linear_vector[i] = value
 
-        return IsingMatrix(quad=quad_matrix, linear=linear_vector)
-
-    def calc_E_diff(self, ising: IsingMatrix, state: np.ndarray, l: int) -> float:
-        delta_E = -2 * state[l] * (ising.quad[:, l] @ state - ising.linear[l])
-        return delta_E
-
+    #     return IsingMatrix(quad=quad_matrix, linear=linear_vector)
+    # def calc_E_diff(self, ising: IsingMatrix, state: np.ndarray, l: int) -> float:
+    #     delta_E = -2 * state[l] * (ising.quad[:, l] @ state - ising.linear[l])
+    #     return delta_E
+    
     def first_improvement(self, ising_matrix: IsingMatrix, current_state: np.ndarray, N: int) -> np.ndarray:
 
         for i in range(N):
-            delta_E_i = self.calc_E_diff(ising_matrix, current_state, i)
+            delta_E_i = ising_matrix.calc_E_diff(current_state, i)
             if delta_E_i < 0:
                 current_state[i] = -current_state[i]
             
         return current_state
 
     def best_improvement(self, ising_matrix: IsingMatrix, current_state: np.ndarray, N: int) -> np.ndarray:
-        delta_E = np.array([self.calc_E_diff(ising_matrix, current_state, i) for i in range(N)])
+    
+        delta_E = np.array([ising_matrix.calc_E_diff(current_state, i) for i in range(N)])
         best_index = np.argmin(delta_E)
         best_delta_E = delta_E[best_index]
         
@@ -76,7 +103,7 @@ class LocalSearch:
         
         return current_state
     
-    def run(self, initial_state: np.array, max_iter: int, local_search_method: str = "best_improvement") -> jm.experimental.SampleSet:
+    def run(self, initial_state: np.array, max_iter: int = -1, local_search_method: str = "best_improvement") -> jm.experimental.SampleSet:
         method_map = {
         "best_improvement": self.best_improvement,
         "first_improvement": self.first_improvement
@@ -91,11 +118,12 @@ class LocalSearch:
 
     def _run_local_search(self, method: Callable, initial_state: np.array, max_iter: int) -> np.ndarray:
         current_state = initial_state.copy()
-        ising_matrix = self.to_ising_matrix(self.ising)
+        ising_matrix = IsingMatrix()
+        ising_matrix.from_ising_model(self.ising)
         N = len(current_state)
         counter = 0
 
-        while counter < max_iter:
+        while max_iter == -1 or counter < max_iter:
             previous_state = current_state.copy()
             current_state = method(ising_matrix, current_state, N)
 
