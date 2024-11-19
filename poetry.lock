@@ -3897,6 +3897,43 @@ quri-parts-core = "*"
 typing-extensions = ">=4.1.1,<5.0.0"
 
 [[package]]
+name = "qutip"
+version = "5.0.4"
+description = "QuTiP: The Quantum Toolbox in Python"
+optional = false
+python-versions = ">=3.9"
+files = [
+    {file = "qutip-5.0.4-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:e855d70e5b97e15e30372dec89ec0c6bb12842a1262472894e4bb444e1e31541"},
+    {file = "qutip-5.0.4-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:10a50997d68df3702781ebd6e79def2c54431daecf550e742dba95679ce3d578"},
+    {file = "qutip-5.0.4-cp310-cp310-win_amd64.whl", hash = "sha256:85adc3c8ab91db1c22068599db9d39ea5d849f0ac646a176da221229560d25be"},
+    {file = "qutip-5.0.4-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:288d2dcadc79b5a6918bef41adffb75d4a62039c095b02fc9901b2a7cd51787e"},
+    {file = "qutip-5.0.4-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:39da3510f0b508e698a1526b93826be6154f03add1cc090840d3d7b6a23f6298"},
+    {file = "qutip-5.0.4-cp311-cp311-win_amd64.whl", hash = "sha256:6096c018a909177d0220db2e89608c1929fe2d6cb14b04cce68aadcc53b142a1"},
+    {file = "qutip-5.0.4-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:ca0a7b5bd16404c16156600afe24f656b5230a7236f2e3fde933fed6e4823df9"},
+    {file = "qutip-5.0.4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:683fa10b9273ff0357323c9f0993e5620bf6bd020e80f2ec34f1c4c8bc3cbc0e"},
+    {file = "qutip-5.0.4-cp312-cp312-win_amd64.whl", hash = "sha256:6a5c85b0df421ab5ed1dde345491256ceb9bdc77e0f6853541e1fa0a45536730"},
+    {file = "qutip-5.0.4-cp39-cp39-macosx_11_0_arm64.whl", hash = "sha256:d5f617912ad9262a4bd4ea04096c24868507ede4e20cffe80b704f4a77101f82"},
+    {file = "qutip-5.0.4-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:d322e8637747f8f618ee2239e0ffed37f687cca1e282294ab6e46b5a3f54f5ca"},
+    {file = "qutip-5.0.4-cp39-cp39-win_amd64.whl", hash = "sha256:7f556165bf1cc73fe2b1ae062ef09ee11d80718426e197d359908c073b882fc6"},
+    {file = "qutip-5.0.4.tar.gz", hash = "sha256:e5ee097cf0ef72e12baf21b32b293f2a7838bd439098286762ef786343549f1c"},
+]
+
+[package.dependencies]
+numpy = ">=1.22"
+packaging = "*"
+scipy = ">=1.9"
+
+[package.extras]
+extras = ["loky", "tqdm"]
+full = ["cvxopt", "cvxpy (>=1.0)", "cython (>=0.29.20)", "filelock", "ipython", "loky", "matplotlib (>=3.5)", "pytest (>=5.2)", "pytest-rerunfailures", "setuptools", "tqdm"]
+graphics = ["matplotlib (>=3.5)"]
+ipython = ["ipython"]
+mpi = ["mpi4py"]
+runtime-compilation = ["cython (>=0.29.20)", "filelock", "setuptools"]
+semidefinite = ["cvxopt", "cvxpy (>=1.0)"]
+tests = ["pytest (>=5.2)", "pytest-rerunfailures"]
+
+[[package]]
 name = "referencing"
 version = "0.35.1"
 description = "JSON Referencing + Python"
@@ -5285,8 +5322,9 @@ test = ["big-O", "importlib-resources", "jaraco.functools", "jaraco.itertools", 
 [extras]
 qiskit = ["qiskit"]
 quri-parts = ["quri-parts-qulacs"]
+qutip = ["qutip"]
 
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.10,<3.12"
-content-hash = "cb2e75a578c6a96a2901988aa4752552cc9a51f5291301384ecffc24ddfb5062"
+content-hash = "846d68a1516e1d546b1e386d76a57057a0f0391066ad6bb3c33e8177f6a801cf"
