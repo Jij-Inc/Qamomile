@@ -70,11 +70,11 @@ def test_run_local_search(local_search_instance, qaoa_converter):
     def side_effect(_, current_state, __):
         if mock_method.call_count < 5:
             new_state = current_state.copy()
-            new_state[0] *= -1  # Modify the first element to ensure it's different
+            new_state[0] *= -1  
         else:
             new_state = (
                 current_state.copy()
-            )  # After 5 calls, return the same state to simulate stabilization
+            )  
         return new_state
 
     mock_method.side_effect = side_effect
