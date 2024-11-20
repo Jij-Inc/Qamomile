@@ -23,7 +23,7 @@ from typing import Callable, Optional
 
 
 class IsingMatrix:
-    def __init__(self, quad: Optional[np.ndarray], linear: Optional[np.ndarray]):
+    def __init__(self, quad: Optional[np.ndarray] = None, linear: Optional[np.ndarray] = None):
         if quad is None:
             self.quad = np.array([])
         else:
