@@ -1,4 +1,4 @@
-from qamomile.pennylane.transpiler import PennylaneTranpiler
+from qamomile.pennylane.transpiler import PennylaneTranspiler
 from qamomile.pennylane.exceptions import QamomilePennylaneTranspileError
 
-__all__ = ["QuTiPTranspiler", "QamomileQuTiPTranspileError"]
+__all__ = ["PennylaneTranspiler", "QamomilePennylaneTranspileError"]
