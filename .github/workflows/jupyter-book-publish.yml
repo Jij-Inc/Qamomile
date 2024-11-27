@@ -51,11 +51,10 @@ jobs:
           cd qamomile-lp
           npm ci
           npm run build
+          mkdir -p ../_build/html
           cp dist/index.html ../_build/html/landing.html
-          cp -r dist/assets ../_build/html/
           cp dist/*.png ../_build/html/
           cd ../..
-          cd ..
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact
