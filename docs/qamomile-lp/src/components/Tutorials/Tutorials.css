@@ -1,0 +1,137 @@
+.tutorials {
+    position: relative;
+    padding: 6rem 2rem;
+    background: linear-gradient(180deg, #fff 0%, #f9f5ff 100%);
+    overflow: hidden;
+}
+
+.tutorials-background {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 0;
+}
+
+.blur-circle.purple.bottom {
+    position: absolute;
+    width: 600px;
+    height: 600px;
+    border-radius: 50%;
+    background: #8A2BE2;
+    opacity: 0.1;
+    filter: blur(120px);
+    bottom: -300px;
+    right: -200px;
+}
+
+.tutorials-container {
+    position: relative;
+    max-width: 1200px;
+    margin: 0 auto;
+    z-index: 1;
+}
+
+.tutorials h2 {
+    font-size: 3rem;
+    font-weight: 600;
+    color: #1a1a1a;
+    text-align: center;
+    margin-bottom: 1rem;
+}
+
+.tutorials-description {
+    text-align: center;
+    color: #666;
+    font-size: 1.125rem;
+    margin-bottom: 3rem;
+}
+
+.tutorials-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 2rem;
+    margin-top: 2rem;
+}
+
+.tutorial-card {
+    background: white;
+    padding: 2rem;
+    border-radius: 1rem;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.tutorial-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 8px 30px rgba(138, 43, 226, 0.1);
+}
+
+.tutorial-icon {
+    margin-bottom: 1.5rem;
+}
+
+.tutorial-card h3 {
+    color: #1a1a1a;
+    font-size: 1.25rem;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+}
+
+.tutorial-card p {
+    color: #666;
+    font-size: 0.875rem;
+    line-height: 1.6;
+    margin-bottom: 1.5rem;
+}
+
+.tutorial-link {
+    display: inline-flex;
+    align-items: center;
+    color: #8A2BE2;
+    text-decoration: none;
+    font-size: 0.875rem;
+    font-weight: 500;
+}
+
+.tutorial-link .arrow {
+    margin-left: 0.5rem;
+    transition: transform 0.2s ease;
+}
+
+.tutorial-link:hover .arrow {
+    transform: translateX(4px);
+}
+
+@media (max-width: 1024px) {
+    .tutorials-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+@media (max-width: 768px) {
+    .tutorials {
+        padding: 4rem 1.5rem;
+    }
+
+    .tutorials h2 {
+        font-size: 2.5rem;
+    }
+
+    .tutorials-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .tutorials-description {
+        font-size: 1rem;
+        margin-bottom: 2rem;
+    }
+
+    .blur-circle.purple.bottom {
+        width: 400px;
+        height: 400px;
+        bottom: -200px;
+        right: -100px;
+    }
+}

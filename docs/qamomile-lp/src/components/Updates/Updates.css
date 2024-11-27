@@ -1,0 +1,74 @@
+.updates {
+    padding: 6rem 2rem;
+    background: #fff;
+}
+
+.updates-container {
+    max-width: 800px;
+    margin: 0 auto;
+}
+
+.updates h2 {
+    font-size: 3rem;
+    font-weight: 600;
+    color: #1a1a1a;
+    margin-bottom: 3rem;
+}
+
+.update-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+}
+
+.update-item {
+    display: flex;
+    align-items: flex-start;
+    padding: 1rem 0;
+    border-bottom: 1px solid #eaeaea;
+}
+
+.update-date {
+    flex-shrink: 0;
+    width: 120px;
+    color: #666;
+    font-size: 0.875rem;
+    font-weight: 500;
+}
+
+.update-content {
+    flex-grow: 1;
+}
+
+.update-content p {
+    margin: 0;
+    color: #1a1a1a;
+    font-size: 0.875rem;
+    line-height: 1.6;
+}
+
+/* ホバーエフェクト */
+.update-item:hover {
+    background: linear-gradient(to right, rgba(138, 43, 226, 0.03), transparent);
+}
+
+@media (max-width: 768px) {
+    .updates {
+        padding: 4rem 1.5rem;
+    }
+
+    .updates h2 {
+        font-size: 2.5rem;
+        margin-bottom: 2rem;
+    }
+
+    .update-item {
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+
+    .update-date {
+        width: auto;
+        margin-bottom: 0.25rem;
+    }
+}
