@@ -11,14 +11,14 @@ function Concept() {
         <picture className="concept-image">
           <source
             media="(min-width: 768px)"
-            srcSet="/image-Qamomile-Concept-pc.png"
+            srcSet="./image-Qamomile-Concept-pc.png"
           />
           <source
             media="(max-width: 767px)"
-            srcSet="/image-Qamomile-Concept-sp.png"
+            srcSet="./image-Qamomile-Concept-sp.png"
           />
           <img
-            src="/image-Qamomile-Concept-pc.png"
+            src="./image-Qamomile-Concept-pc.png"
             alt="Qamomile Concept: Mathematical Model to Quantum Algorithm"
             className="concept-img"
           />
