@@ -1,7 +1,7 @@
 import pytest
 import pennylane as qml
 import numpy as np
-import qamomile.core.operator as qm_o
+import qamomile
 from qamomile.pennylane.transpiler import PennylaneTranspiler
 
 @pytest.fixture
@@ -12,8 +12,8 @@ def transpiler():
 def test_transpile_hamiltonian(transpiler):
     """Test the transpilation of Qamomile Hamiltonian to Pennylane Hamiltonian."""
     # Define a Qamomile Hamiltonian
-    hamiltonian = qm_o.Hamiltonian()
-    hamiltonian += qm_o.X(0) * qm_o.Z(1)
+    hamiltonian = qamomile.core.operator.Hamiltonian()
+    hamiltonian += qamomile.core.operator.X(0) * qamomile.core.operator.Z(1)
 
     # Transpile the Hamiltonian
     pennylane_hamiltonian = transpiler.transpile_hamiltonian(hamiltonian)
@@ -32,15 +32,12 @@ def test_transpile_hamiltonian(transpiler):
     assert isinstance(term_ops[0][0], qml.PauliX)  # X on qubit 0
     assert isinstance(term_ops[0][1], qml.PauliZ)  # Z on qubit 1
 
-
-
-
 def test_transpile_complex_hamiltonian(transpiler):
     """Test the transpilation of Qamomile Hamiltonian to Pennylane Hamiltonian."""
     # Define a Qamomile Hamiltonian
-    hamiltonian = qm_o.Hamiltonian()
-    hamiltonian += qm_o.X(0) * qm_o.Z(1)
-    hamiltonian += qm_o.Y(0) * qm_o.Y(1)
+    hamiltonian = qamomile.core.operator.Hamiltonian()
+    hamiltonian += qamomile.core.operator.X(0) * qamomile.core.operator.Z(1)
+    hamiltonian += qamomile.core.operator.Y(0) * qamomile.core.operator.Y(1)
 
     # Transpile the Hamiltonian
     pennylane_hamiltonian = transpiler.transpile_hamiltonian(hamiltonian)

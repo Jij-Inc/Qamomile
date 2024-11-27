@@ -19,7 +19,7 @@ Requirements:
 - Pennylane
 """
 
-import qamomile.core.operator as qm_o
+import qamomile.core.operator 
 import pennylane as qml
 import collections
 import numpy as np
@@ -63,11 +63,11 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
         for term, coeff in operator.terms.items():
             op_list = [qml.Identity(i) for i in range(n)]
             for pauli in term:
-                if pauli.pauli == qm_o.Pauli.X:
+                if pauli.pauli == qamomile.core.operator.Pauli.X:
                     op_list[pauli.index] = qml.PauliX(pauli.index)
-                elif pauli.pauli == qm_o.Pauli.Y:
+                elif pauli.pauli == qamomile.core.operator.Pauli.Y:
                     op_list[pauli.index] = qml.PauliY(pauli.index)
-                elif pauli.pauli == qm_o.Pauli.Z:
+                elif pauli.pauli == qamomile.core.operator.Pauli.Z:
                     op_list[pauli.index] = qml.PauliZ(pauli.index)
                 else:
                     raise NotImplementedError(
