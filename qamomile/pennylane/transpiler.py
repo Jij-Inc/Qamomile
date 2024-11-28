@@ -43,7 +43,7 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
 
     """
 
-    def transpile_hamiltonian(self, operator: qm_o.Hamiltonian) -> qml.Hamiltonian :
+    def transpile_hamiltonian(self, operator: qamomile.core.operator.Hamiltonian) -> qml.Hamiltonian :
         """
         Converts a Qamomile Hamiltonian to a Pennylane Hamiltonian.
 
