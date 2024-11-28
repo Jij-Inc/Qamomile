@@ -70,11 +70,9 @@ def test_run_local_search(local_search_instance, qaoa_converter):
     def side_effect(_, current_state, __):
         if mock_method.call_count < 5:
             new_state = current_state.copy()
-            new_state[0] *= -1  
+            new_state[0] *= -1
         else:
-            new_state = (
-                current_state.copy()
-            )  
+            new_state = current_state.copy()
         return new_state
 
     mock_method.side_effect = side_effect
@@ -100,11 +98,14 @@ def test_best_improvement(local_search_instance, ising_matrix, qaoa_converter):
     ising_matrix.to_ising_matrix(qaoa_encoded)
     size = qaoa_encoded.num_bits()
     state = np.random.choice([-1, 1], size=size)
+    E1 = qaoa_encoded.calc_energy(state)
 
     new_state = local_search_instance.best_improvement(ising_matrix, state, size)
+    E2 = qaoa_encoded.calc_energy(new_state)
 
     assert len(state) == len(new_state)
     assert all(val in [-1, 1] for val in new_state)
+    assert E2 <= E1
 
 
 def test_first_improvement(local_search_instance, ising_matrix, qaoa_converter):
@@ -112,11 +113,14 @@ def test_first_improvement(local_search_instance, ising_matrix, qaoa_converter):
     ising_matrix.to_ising_matrix(qaoa_encoded)
     size = qaoa_encoded.num_bits()
     state = np.random.choice([-1, 1], size=size)
+    E1 = qaoa_encoded.calc_energy(state)
 
     new_state = local_search_instance.first_improvement(ising_matrix, state, size)
+    E2 = qaoa_encoded.calc_energy(new_state)
 
     assert len(state) == len(new_state)
     assert all(val in [-1, 1] for val in new_state)
+    assert E2 <= E1
 
 
 def test_decode(local_search_instance, qaoa_converter):
