@@ -33,7 +33,7 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
 
     Methods:
     --------
-    transpile_hamiltonian(operator: qm_o.Hamiltonian) -> qml.Hamiltonian:
+    transpile_hamiltonian(operator: qamomile.core.operator.Hamiltonian) -> qml.Hamiltonian:
         Converts a Qamomile Hamiltonian to a Pennylane Hamiltonian.
 
     Example Usage:
@@ -48,7 +48,7 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
         Converts a Qamomile Hamiltonian to a Pennylane Hamiltonian.
 
         Args:
-            operator (qm_o.Hamiltonian): The Qamomile Hamiltonian to be converted.
+            operator (qamomile.core.operator.Hamiltonian): The Qamomile Hamiltonian to be converted.
 
         Returns:
             qml.Hamiltonian: The corresponding Pennylane Hamiltonian.
