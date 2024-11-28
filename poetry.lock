@@ -5447,7 +5447,7 @@ doc = ["furo", "jaraco.packaging (>=9.3)", "jaraco.tidelift (>=1.4)", "rst.linke
 test = ["big-O", "importlib-resources", "jaraco.functools", "jaraco.itertools", "jaraco.test", "more-itertools", "pytest (>=6,!=8.1.*)", "pytest-checkdocs (>=2.4)", "pytest-cov", "pytest-enabler (>=2.2)", "pytest-ignore-flaky", "pytest-mypy", "pytest-ruff (>=0.2.1)"]
 
 [extras]
-pennylane = ["PennyLane"]
+pennylane = ["pennylane"]
 qiskit = ["qiskit"]
 quri-parts = ["quri-parts-qulacs"]
 qutip = ["qutip"]
@@ -5455,4 +5455,4 @@ qutip = ["qutip"]
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.10,<3.12"
-content-hash = "f966b12a632dd6a263ec38c770cea361f61bf105e3da8ff35f6e2475328d33bf"
+content-hash = "f5814459cfd3817c2b860df0af491d8b2e0cc846e9ded28b2cc37df304d22553"
