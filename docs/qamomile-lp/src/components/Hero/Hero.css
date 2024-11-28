@@ -1,0 +1,191 @@
+/* src/components/Hero/Hero.css */
+.hero {
+    position: relative;
+    padding: 160px 2rem 120px;
+    overflow: hidden;
+}
+
+.hero-background {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    overflow: hidden;
+    z-index: 0;
+}
+
+.hero-watermark {
+    position: absolute;
+    top: 50%;
+    left: 0;
+    right: 0;
+    transform: translateY(-50%);
+    font-size: 120px;
+    font-weight: 300;
+    font-family: 'Red Hat Display', sans-serif;
+    color: rgba(0, 0, 0, 0.03);
+    white-space: nowrap;
+    pointer-events: none;
+}
+
+
+.blur-circle {
+    position: absolute;
+    width: 500px;
+    height: 500px;
+    border-radius: 50%;
+    filter: blur(100px);
+    opacity: 0.85;
+}
+
+.blur-circle.blue {
+    background: #4169E1;
+    top: 10%;
+    right: 25%;
+}
+
+.blur-circle.purple {
+    background: #8A2BE2;
+    top: 30%;
+    right: 5%;
+}
+
+.hero-container {
+    position: relative;
+    max-width: 1200px;
+    margin: 0 auto;
+    z-index: 1;
+}
+
+.hero-content {
+    max-width: 600px;
+    text-align: left;
+}
+
+.hero h1 {
+    font-size: 5rem;
+    font-weight: 600;
+    margin-bottom: 1.5rem;
+    letter-spacing: -0.02em;
+    line-height: 1;
+    /* グラデーションの追加 */
+    background: linear-gradient(135deg, #8A2BE2 0%, #4169E1 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    /* Safari対応 */
+    color: #8A2BE2;
+}
+
+
+.hero-subtitle {
+    font-size: 1.25rem;
+    margin-bottom: 2.5rem;
+    font-weight: 400;
+    line-height: 1.6;
+    /* グラデーションの追加 */
+    background: linear-gradient(135deg, #8A2BE2 20%, #4169E1 80%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    /* Safari対応 */
+    color: #8A2BE2;
+}
+
+.cta-button {
+    display: inline-block;
+    background: #1a1a1a;
+    color: white;
+    padding: 0.875rem 2rem;
+    border-radius: 2rem;
+    text-decoration: none;
+    font-weight: 500;
+    font-size: 1rem;
+    transition: all 0.2s ease;
+}
+
+.cta-button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    background: #000;
+}
+
+.hero-description {
+    position: relative;
+    max-width: 1200px;
+    margin: 6rem auto 0;
+    z-index: 1;
+}
+
+.hero-description p {
+    color: #8A2BE2;
+    font-size: 1.25rem;
+    line-height: 1.8;
+    text-align: center;
+}
+
+@media (max-width: 1024px) {
+    .hero {
+        min-height: 600px;
+    }
+
+    .blur-circle {
+        width: 400px;
+        height: 400px;
+    }
+
+    .hero-watermark {
+        font-size: 80px;
+    }
+}
+
+@media (max-width: 768px) {
+    .hero {
+        padding: 120px 1.5rem 80px;
+        min-height: auto;
+    }
+
+    .hero-content {
+        text-align: center;
+    }
+
+    .hero h1 {
+        font-size: 3.5rem;
+    }
+
+    .hero-subtitle {
+        font-size: 1.125rem;
+    }
+
+    .hero-description {
+        margin-top: 4rem;
+    }
+
+    .hero-description p {
+        font-size: 1rem;
+
+        br {
+            display: none;
+        }
+    }
+
+    .blur-circle {
+        width: 300px;
+        height: 300px;
+    }
+
+    .blur-circle.blue {
+        top: 20%;
+        right: -20%;
+    }
+
+    .blur-circle.purple {
+        top: 40%;
+        right: -30%;
+    }
+
+    .hero-watermark {
+        font-size: 40px;
+    }
+}

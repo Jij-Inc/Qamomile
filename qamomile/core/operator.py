@@ -265,11 +265,16 @@ class Hamiltonian:
             for term, coeff in other.terms.items():
                 h.add_term(term, coeff)
             h.constant += other.constant
+
+            if h.num_qubits < self.num_qubits:
+                h._num_qubits = self.num_qubits
+
             return h
         elif isinstance(other, (int, float, complex)):
-            h = Hamiltonian()
+            h = Hamiltonian(num_qubits = self.num_qubits)
             h._terms = self._terms.copy()
             h.constant = self.constant + other
+            
             return h
         else:
             raise ValueError("Unsupported addition operation.")
@@ -285,7 +290,7 @@ class Hamiltonian:
 
     def __mul__(self, other):
         if isinstance(other, (int, float, complex)):
-            h = Hamiltonian()
+            h = Hamiltonian(num_qubits = self.num_qubits)
             for term, coeff in self.terms.items():
                 h.add_term(term, coeff * other)
             h.constant = self.constant * other
@@ -309,6 +314,9 @@ class Hamiltonian:
                     h.add_term(terms, coeff2 * self.constant)
 
             h.constant += self.constant * other.constant
+
+            if h.num_qubits < self.num_qubits:
+                h._num_qubits = self.num_qubits
 
             return h
         else:

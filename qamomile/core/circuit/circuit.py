@@ -38,6 +38,8 @@ import dataclasses
 import abc
 import enum
 from .parameter import ParameterExpression, Parameter, Value
+from qamomile.core.operator import Hamiltonian
+
 
 
 class Gate(abc.ABC):
@@ -134,6 +136,18 @@ class ThreeQubitGate(Gate):
     control2: int
     target: int
 
+@dataclasses.dataclass
+class ParametricExpGate(Gate):
+    r"""Parametric exponential gate class.
+    .. math::
+            e^{-it H}
+    where:
+        - t is the parametric variable, representing the evolution time or phase angle.
+        - H is the Hamiltonian of the system. 
+    """
+    hamiltonian: Hamiltonian
+    parameter: ParameterExpression
+    indices: list[int]
 
 @dataclasses.dataclass
 class MeasurementGate(Gate):
@@ -164,6 +178,8 @@ class Operator(Gate):
                 operated_qubits.append(gate.control1)
                 operated_qubits.append(gate.control2)
                 operated_qubits.append(gate.target)
+            elif isinstance(gate, ParametricExpGate):
+                operated_qubits.extend(gate.indices)
             elif isinstance(gate, Operator):
                 operated_qubits.extend(gate.operated_qubits())
             else:
@@ -250,6 +266,11 @@ class QuantumCircuit:
                 raise ValueError(
                     f"Invalid number of qubits. Expected: {self.num_qubits}, Actual: {gate.circuit.num_qubits}"
                 )
+        elif isinstance(gate, ParametricExpGate):
+            if gate.hamiltonian.num_qubits > self.num_qubits:
+                raise ValueError(
+                    f"Invalid number of qubits. Expected: {self.num_qubits}, Actual: {gate.hamiltonian.num_qubits}"
+                )  
         elif isinstance(gate, MeasurementGate):
             if gate.qubit >= self.num_qubits or gate.cbit >= self.num_clbits:
                 raise ValueError(
@@ -451,7 +472,26 @@ class QuantumCircuit:
         self.add_gate(
             ThreeQubitGate(ThreeQubitGateType.CCX, control1, control2, target)
         )
+    
+    def exp_evolution(self, time: ParameterExpression, hamiltonian: Hamiltonian):
+        r"""Add a parametric exponential gate to the quantum circuit.
+        This function evolves a quantum state under the influence of a Hamiltonian, H, 
+        for a given time duration or parameter, t.
 
+        The time evolution operator for this gate is given by:
+        .. math::
+            e^{-it H}
+            
+        """
+        if isinstance(time, float):
+            time = Value(time)
+        indices = set()
+        for ops, _ in hamiltonian._terms.items():
+            for op in ops:
+                indices.add(op.index)
+        indices = sorted(list(indices))
+        self.add_gate(ParametricExpGate(hamiltonian, parameter=time, indices=indices))
+              
     def measure(self, qubit: int, cbit: int):
         """
         Add a measurement gate to the quantum circuit.
@@ -518,5 +558,7 @@ class QuantumCircuit:
                 parameters.extend(gate.parameter.get_parameters())
             elif isinstance(gate, Operator):
                 parameters.extend(gate.circuit.get_parameters())
+            elif isinstance(gate, ParametricExpGate):
+                parameters.extend(gate.parameter.get_parameters())
         
         return list(dict.fromkeys(parameters))
