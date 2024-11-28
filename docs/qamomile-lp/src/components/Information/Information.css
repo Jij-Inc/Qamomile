@@ -1,0 +1,126 @@
+/* src/components/Information/Information.css */
+.information {
+    padding: 6rem 2rem;
+    background: #fafafa;
+}
+
+.information-container {
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+.information h2 {
+    font-size: 3rem;
+    font-weight: 600;
+    color: #1a1a1a;
+    text-align: center;
+    margin-bottom: 3rem;
+}
+
+.info-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 2rem;
+    max-width: 800px;
+    margin: 0 auto;
+}
+
+.info-card {
+    position: relative;
+    display: block;
+    text-decoration: none;
+    background: white;
+    border-radius: 1rem;
+    overflow: hidden;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.info-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 8px 30px rgba(138, 43, 226, 0.1);
+}
+
+.info-content {
+    padding: 2rem;
+}
+
+.info-icon {
+    margin-bottom: 1.5rem;
+}
+
+.info-card h3 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: #1a1a1a;
+    margin-bottom: 0.75rem;
+}
+
+.info-card p {
+    color: #666;
+    font-size: 0.875rem;
+    line-height: 1.6;
+    margin-bottom: 1.5rem;
+}
+
+.info-link-text {
+    color: #8A2BE2;
+    font-size: 0.875rem;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    transition: gap 0.2s ease;
+}
+
+.info-card:hover .info-link-text {
+    gap: 0.75rem;
+}
+
+.info-icon svg {
+    width: 24px;
+    height: 24px;
+    transition: transform 0.2s ease;
+}
+
+.info-card:hover .info-icon svg {
+    transform: scale(1.1);
+}
+
+/* グラデーション背景 */
+.info-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(45deg, rgba(138, 43, 226, 0.03), rgba(65, 105, 225, 0.03));
+    opacity: 0;
+    transition: opacity 0.2s ease;
+    pointer-events: none;
+}
+
+.info-card:hover::before {
+    opacity: 1;
+}
+
+@media (max-width: 768px) {
+    .information {
+        padding: 4rem 1.5rem;
+    }
+
+    .information h2 {
+        font-size: 2.5rem;
+        margin-bottom: 2rem;
+    }
+
+    .info-grid {
+        grid-template-columns: 1fr;
+        gap: 1.5rem;
+    }
+
+    .info-content {
+        padding: 1.5rem;
+    }
+}
