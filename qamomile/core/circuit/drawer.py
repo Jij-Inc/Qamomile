@@ -24,7 +24,8 @@ from .circuit import (
     ParametricSingleQubitGateType,
     ParametricTwoQubitGateType,
     TwoQubitGateType,
-    Operator
+    Operator,
+    ParametricExpGate,
 )
 
 
@@ -119,6 +120,7 @@ def _create_components(
             ParametricTwoQubitGate,
             ThreeQubitGate,
             Operator,
+            ParametricExpGate
         )
         if isinstance(
             gate, (SingleQubitGate, ParametricSingleQubitGate, MeasurementGate)
@@ -133,6 +135,8 @@ def _create_components(
                 operated_qubits = [gate.control1, gate.control2, gate.target]
             elif isinstance(gate, Operator):
                 operated_qubits = gate.operated_qubits()
+            elif isinstance(gate, ParametricExpGate):
+                operated_qubits = gate.indices
             straddling_qubits = np.arange(min(operated_qubits), max(operated_qubits) + 1)
             max_posision = np.max(_qubit_pos[straddling_qubits])
             gate_pos = max_posision + gate_width / 2
@@ -279,6 +283,24 @@ def add_gate(
                 fontsize=8,
                 zorder=3,
             )
+    
+    elif isinstance(gate, ParametricExpGate):
+        operated_qubits = gate.indices
+        rect = gate_rectangle(operated_qubits)
+        for qubit in operated_qubits:
+            ax.text(
+                time_step - gate_width / 2 + 0.1,
+                qubit,
+                f"{qubit}",
+                ha="left",
+                va="center",
+                fontsize=8,
+                zorder=3,
+            )
+        ax.add_patch(rect)
+        # Add gate label in the center of the gate
+        gate_top, gate_bottom = add_gate_text(operated_qubits, gate_name(gate), fontsize=12)
+
     else:
         raise ValueError(f"Unsupported gate type: {type(gate)}")
 
@@ -324,6 +346,11 @@ def gate_name(gate: Gate) -> str:
         case Operator():
             gate_label = gate.label if gate.label else "U"
             return gate_label
+        case ParametricExpGate():
+            hamiltonian_label = gate.hamiltonian.to_latex()
+            return f"$e^{{-i{gate.parameter}({hamiltonian_label})}}$"
+
+        
         case _:
             raise ValueError(f"Unsupported gate type: {type(gate)}")
 
@@ -351,6 +378,10 @@ def calculate_gate_width(gate: Gate) -> float:
         gate_text = f"  {gate_text}  "
         text_width = get_text_width(gate_text, 8)
         return 0.2 * len(gate_text)
+    elif isinstance(gate, ParametricExpGate):
+        gate_text = str(gate_name(gate))
+        text_width = get_text_width(gate_text, 8)
+        return max(default_gate_width, text_width / 50)
     else:
         return default_gate_width
 
