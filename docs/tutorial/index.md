@@ -12,7 +12,7 @@ Welcome to the Qamomile tutorial! This guide will help you get started with Qamo
 
 - **Qiskit**
 - **Quri-parts**
-
+- **Qutip**
 
 
 ## Tutorials
