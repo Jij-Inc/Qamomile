@@ -3,6 +3,9 @@ import pennylane as qml
 import numpy as np
 import qamomile
 from qamomile.pennylane.transpiler import PennylaneTranspiler
+from qamomile.core.circuit import QuantumCircuit, SingleQubitGate, TwoQubitGate, ParametricSingleQubitGate
+from qamomile.core.operator import Hamiltonian, PauliOperator, Pauli
+
 
 @pytest.fixture
 def transpiler():
@@ -59,3 +62,46 @@ def test_transpile_complex_hamiltonian(transpiler):
     assert isinstance(term_ops[1][0], qml.PauliY)  # Y on qubit 0
     assert isinstance(term_ops[1][1], qml.PauliY)  # Y on qubit 1
 
+def extract_gate_outputs(qnode, *args, **kwargs):
+    """
+    Extracts and prints the operations and parameters from a qnode.
+
+    Args:
+        qnode: A quantum node or function that represents a quantum circuit.
+        *args, **kwargs: Arguments to be passed to the qnode.
+
+    Returns:
+        list: A list of dictionaries, where each dictionary contains information about a gate.
+    """
+    # Execute the QNode to ensure the tape is constructed
+    qnode(*args, **kwargs)
+
+    # Access the internal tape
+    tape = qnode.qtape
+    
+    gate_outputs = []
+    
+    for op in tape.operations:
+        print(op)
+        # Extract gate information
+        # gate_info = {
+        #     "name": op.name,
+        #     "parameters": op.parameters,
+        #     "wires": op.wires.tolist()
+        # }
+        gate_outputs.append(op)
+    
+    return gate_outputs
+
+
+def test_transpile_simple_circuit(transpiler: PennylaneTranspiler):
+    qc = QuantumCircuit(3)
+    qc.h(0)
+    qc.cx(0, 1)
+    qnode = transpiler.transpile_circuit(qc)
+    gate_info = extract_gate_outputs(qnode)
+
+    assert isinstance(qnode, qml.QNode)
+    assert len(qnode.device.wires) == 3
+    assert gate_info[0].name == "Hadamard"
+    assert gate_info[1].name == 'CNOT'
