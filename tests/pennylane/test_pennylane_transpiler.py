@@ -3,6 +3,7 @@ import pennylane as qml
 import numpy as np
 import qamomile
 from qamomile.pennylane.transpiler import PennylaneTranspiler
+from qamomile.core.circuit import Parameter
 from qamomile.core.circuit import QuantumCircuit, SingleQubitGate, TwoQubitGate, ParametricSingleQubitGate
 from qamomile.core.operator import Hamiltonian, PauliOperator, Pauli
 
@@ -82,26 +83,52 @@ def extract_gate_outputs(qnode, *args, **kwargs):
     gate_outputs = []
     
     for op in tape.operations:
-        print(op)
-        # Extract gate information
-        # gate_info = {
-        #     "name": op.name,
-        #     "parameters": op.parameters,
-        #     "wires": op.wires.tolist()
-        # }
         gate_outputs.append(op)
     
     return gate_outputs
 
-
 def test_transpile_simple_circuit(transpiler: PennylaneTranspiler):
     qc = QuantumCircuit(3)
     qc.h(0)
+    qc.s(1)
+    qc.t(2)
+    qc.x(0)
+    qc.y(1)
+    qc.z(2)
     qc.cx(0, 1)
+    qc.cx(1, 2)
+    qc.cx(2, 0)
     qnode = transpiler.transpile_circuit(qc)
     gate_info = extract_gate_outputs(qnode)
 
     assert isinstance(qnode, qml.QNode)
     assert len(qnode.device.wires) == 3
     assert gate_info[0].name == "Hadamard"
-    assert gate_info[1].name == 'CNOT'
+    assert gate_info[-1].name == 'CNOT'
+
+
+def test_transpile_para_circuit(transpiler: PennylaneTranspiler):
+    qc = QuantumCircuit(3)
+    theta = Parameter("theta")
+    beta = Parameter("beta")
+    gamma = Parameter("gamma")
+
+    qc.rx(theta, 0)
+    qc.ry(beta, 1)
+    qc.rz(gamma, 2)
+    qc.crx(gamma, 0 ,1)
+    qc.crz(theta, 1 ,2)
+    qc.cry(beta, 2 ,0)
+
+    qnode = transpiler.transpile_circuit(qc)
+    p= {"theta":0.1,"beta":0.2, "gamma": 0.3}
+    gate_info = extract_gate_outputs(qnode, **p)
+
+    assert isinstance(qnode, qml.QNode)
+    assert len(qnode.device.wires) == 3
+    assert gate_info[0].name == "RX"
+    assert gate_info[1].name == "RY"
+    assert gate_info[2].name == "RZ"
+    assert gate_info[3].name == "CRX"
+    assert gate_info[4].name == "CRZ"
+    assert gate_info[5].name == "CRY"

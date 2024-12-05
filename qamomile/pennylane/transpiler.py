@@ -83,13 +83,14 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
         """
         try:
             dev = qml.device("default.qubit", wires=qamomile_circuit.num_qubits)
-            
+
             @qml.qnode(dev)
-            def circuit_fn(*params):
+            def circuit_fn(*args, **kwargs):
+                # Apply gates using kwargs for parameter passing
                 self._apply_gates(
                     qamomile_circuit,
                     param_mapping=self._create_param_mapping(qamomile_circuit),
-                    params=params,
+                    params=kwargs,
                 )
                 return [
                     qml.expval(qml.PauliZ(i))
@@ -97,31 +98,45 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
                 ]
 
             return qml.QNode(circuit_fn, dev)
-            
+
         except Exception as e:
             raise ValueError(f"Error converting circuit: {str(e)}")
 
     def _create_param_mapping(
         self, qamomile_circuit: qamomile.core.circuit.QuantumCircuit
-    ) -> Dict[qamomile.core.circuit.Parameter, Any]:
+    ) -> Dict[str, qamomile.core.circuit.Parameter]:
         parameters = qamomile_circuit.get_parameters()
-        return {param: qml.numpy.array(param.value) for param in parameters}
+
+        # Convert list of parameters to a dictionary with parameter names as keys
+        param_mapping = {}
+        for param in parameters:
+            try:
+                # Using the name or a unique identifier of the parameter as the key
+                param_name = getattr(param, "name", None)
+                if param_name is None:
+                    raise AttributeError("Parameter has no 'name' attribute")
+                param_mapping[param_name] = param
+            except AttributeError:
+                raise ValueError(f"Cannot determine name of parameter: {param}")
+        return param_mapping
 
     def _apply_gates(
         self,
         qamomile_circuit: qamomile.core.circuit.QuantumCircuit,
         param_mapping: Dict,
-        params: List[float],
+        params: Dict[str, Any],
     ):
         for gate in qamomile_circuit.gates:
             if isinstance(gate, qamomile.core.circuit.SingleQubitGate):
                 self._apply_single_qubit_gate(gate)
-            elif isinstance(gate, qamomile.core.circuit.ParametricSingleQubitGate):
-                self._apply_parametric_single_qubit_gate(gate, param_mapping, params)
             elif isinstance(gate, qamomile.core.circuit.TwoQubitGate):
                 self._apply_two_qubit_gate(gate)
+
+            elif isinstance(gate, qamomile.core.circuit.ParametricSingleQubitGate):
+                self._apply_parametric_single_qubit_gate(gate, params)
             elif isinstance(gate, qamomile.core.circuit.ParametricTwoQubitGate):
-                self._apply_parametric_two_qubit_gate(gate, param_mapping, params)
+                self._apply_parametric_two_qubit_gate(gate, params)
+
             elif isinstance(gate, qamomile.core.circuit.MeasurementGate):
                 pass
 
@@ -136,20 +151,6 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
         }
         gate_map[gate.gate](wires=gate.qubit)
 
-    def _apply_parametric_single_qubit_gate(
-        self,
-        gate: qamomile.core.circuit.ParametricSingleQubitGate,
-        param_mapping: Dict,
-        params: List[float],
-    ):
-        angle = param_mapping[gate.parameter]
-        gate_map = {
-            qamomile.core.circuit.ParametricSingleQubitGateType.RX: qml.RX,
-            qamomile.core.circuit.ParametricSingleQubitGateType.RY: qml.RY,
-            qamomile.core.circuit.ParametricSingleQubitGateType.RZ: qml.RZ,
-        }
-        gate_map[gate.gate](angle, wires=gate.qubit)
-
     def _apply_two_qubit_gate(self, gate: qamomile.core.circuit.TwoQubitGate):
         gate_map = {
             qamomile.core.circuit.TwoQubitGateType.CNOT: qml.CNOT,
@@ -157,18 +158,47 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
         }
         gate_map[gate.gate](wires=[gate.control, gate.target])
 
+    def _apply_parametric_single_qubit_gate(
+        self,
+        gate: qamomile.core.circuit.ParametricSingleQubitGate,
+        params: Dict[str, Any],
+    ):
+        param_name = gate.parameter.name
+        if param_name in params:
+            angle = params[param_name]
+        else:
+            raise ValueError(
+                f"Parameter '{param_name}' not found in the provided params."
+            )
+
+        gate_map = {
+            qamomile.core.circuit.ParametricSingleQubitGateType.RX: qml.RX,
+            qamomile.core.circuit.ParametricSingleQubitGateType.RY: qml.RY,
+            qamomile.core.circuit.ParametricSingleQubitGateType.RZ: qml.RZ,
+        }
+        gate_map[gate.gate](angle, wires=gate.qubit)
+
     def _apply_parametric_two_qubit_gate(
         self,
         gate: qamomile.core.circuit.ParametricTwoQubitGate,
-        param_mapping: Dict,
-        params: List[float],
+        params: Dict[str, Any],
     ):
-        angle = param_mapping[gate.parameter]
+        param_name = gate.parameter.name
+        if param_name in params:
+            angle = params[param_name]
+        else:
+            raise ValueError(
+                f"Parameter '{param_name}' not found in the provided params."
+            )
+
+        # Map the gate to PennyLane gate
         gate_map = {
             qamomile.core.circuit.ParametricTwoQubitGateType.CRX: qml.CRX,
             qamomile.core.circuit.ParametricTwoQubitGateType.CRY: qml.CRY,
             qamomile.core.circuit.ParametricTwoQubitGateType.CRZ: qml.CRZ,
         }
+
+        # Apply the gate with the provided parameter value
         gate_map[gate.gate](angle, wires=[gate.control, gate.target])
 
     def convert_result(self, result: Any) -> Any:
