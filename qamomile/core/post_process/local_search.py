@@ -89,7 +89,7 @@ class IsingMatrix:
         Returns:
             float: The difference in energy due to flipping the specified bit.
         """
-        delta_E = -2 * state[l] * (self.quad[:, l] @ state - self.linear[l])
+        delta_E = -2 * state[l] * (self.quad[:, l] @ state + self.linear[l])
         return delta_E
 
 
@@ -129,7 +129,7 @@ class LocalSearch:
         Returns:
             jm.experimental.SampleSet: The decoded results.
         """
-        sample = BitsSample(1, np.where(result == -1, 0, 1).tolist())
+        sample = BitsSample(1, np.where(result == -1, 1, 0).tolist())
         sample_set = BitsSampleSet(bitarrays=[sample])
         decoded_sampleset = self.converter.decode_bits_to_sampleset(sample_set)
 
