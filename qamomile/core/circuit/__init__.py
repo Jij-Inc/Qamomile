@@ -41,6 +41,7 @@ from .circuit import (
     ThreeQubitGateType,
     ParametricTwoQubitGate,
     ParametricTwoQubitGateType,
+    ParametricExpGate,
     MeasurementGate,
 )
 

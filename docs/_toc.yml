@@ -11,10 +11,14 @@ parts:
     chapters:
     - file: tutorial/index
     - file: tutorial/building_quantum_circuits
+    - file: tutorial/algebraic_operator
     - file: tutorial/alternating_ansatz_graph_coloring
     - file: tutorial/graph_partition
     - file: tutorial/vertex_cover
     - file: tutorial/maxcut
+    - file: tutorial/multi_car_paint
+    - file: tutorial/qrao_tutorial
+
   - caption: API Reference
     chapters:
     - file: autoapi/index

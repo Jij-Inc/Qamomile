@@ -1,14 +1,19 @@
 # File: tests/circuit/test_circuit.py
 
 import pytest
+import random
+import math
+import qamomile.core.operator as qm_o
 from qamomile.core.circuit import (
     QuantumCircuit,
     Parameter,
+    Value,
     SingleQubitGateType,
     ParametricSingleQubitGateType,
     TwoQubitGateType,
     ThreeQubitGateType,
     MeasurementGate,
+    ParametricExpGate,
     Operator
 )
 
@@ -38,10 +43,16 @@ def test_parametric_single_qubit_gates():
     qc.rx(theta, 0)
     qc.ry(theta, 0)
     qc.rz(theta, 0)
+    qc2 = QuantumCircuit(1)
+    random_float = random.uniform(0, 4* math.pi)
+    qc2.rx(random_float, 0)
+    qc2.ry(random_float, 0)
+    qc2.rz(random_float, 0)
+    
     assert len(qc.gates) == 3
     assert all(gate.gate in ParametricSingleQubitGateType for gate in qc.gates)
     assert all(gate.parameter == theta for gate in qc.gates)
-
+    assert all(gate.parameter.value == random_float for gate in qc2.gates)
 
 def test_two_qubit_gates():
     qc = QuantumCircuit(2)
@@ -57,6 +68,35 @@ def test_three_qubit_gate():
     assert len(qc.gates) == 1
     assert qc.gates[0].gate == ThreeQubitGateType.CCX
 
+def test_exp_evolution():
+    hamiltonian = qm_o.Hamiltonian()
+    hamiltonian += qm_o.X(0) * qm_o.Z(1)
+    qc = QuantumCircuit(2)
+    theta = Parameter("theta")
+    qc.exp_evolution(theta,hamiltonian)
+    assert len(qc.gates) == 1
+    assert isinstance(qc.gates[0], ParametricExpGate)
+    assert qc.gates[0].parameter == theta
+    assert len(qc.gates[0].indices) == 2
+    assert qc.gates[0].hamiltonian == hamiltonian
+
+    hamiltonian2 = qm_o.Hamiltonian()
+    hamiltonian2 += qm_o.X(0) * qm_o.Y(1) + qm_o.Z(0) * qm_o.X(1) 
+    qc2 = QuantumCircuit(2)
+    qc2.exp_evolution(theta,hamiltonian)
+    assert len(qc2.gates) == 1
+    assert isinstance(qc2.gates[0], ParametricExpGate)
+    assert qc2.gates[0].parameter == theta
+    assert len(qc2.gates[0].indices) == 2
+    assert qc2.gates[0].hamiltonian == hamiltonian
+    
+def test_invalid_exp_evolution():
+    hamiltonian = qm_o.Hamiltonian()
+    hamiltonian += qm_o.X(0) * qm_o.Z(1)
+    qc = QuantumCircuit(1)
+    theta = Parameter("theta")
+    with pytest.raises(ValueError):
+        qc.exp_evolution(theta,hamiltonian)
 
 def test_measurement():
     qc = QuantumCircuit(2, 2)

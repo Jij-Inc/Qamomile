@@ -1,0 +1,74 @@
+.concept {
+    position: relative;
+    padding: 6rem 2rem;
+    overflow: hidden;
+}
+
+.concept-background {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    overflow: hidden;
+    z-index: -1;
+}
+
+.blur-circle {
+    position: absolute;
+    width: 300px;
+    height: 300px;
+    border-radius: 50%;
+    filter: blur(100px);
+    opacity: 0.2;
+}
+
+.blur-circle.blue {
+    background: #4169E1;
+    top: 50%;
+    left: 10%;
+    transform: translateY(-50%);
+}
+
+.blur-circle.purple {
+    background: #8A2BE2;
+    top: 50%;
+    right: 10%;
+    transform: translateY(-50%);
+}
+
+.concept-container {
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+.concept-image {
+    display: block;
+    width: 100%;
+    text-align: center;
+}
+
+.concept-img {
+    max-width: 100%;
+    height: auto;
+    margin: 0 auto;
+}
+
+@media (max-width: 767px) {
+    .concept {
+        padding: 4rem 1.5rem;
+    }
+
+    .blur-circle {
+        width: 200px;
+        height: 200px;
+    }
+
+    .blur-circle.blue {
+        left: -20%;
+    }
+
+    .blur-circle.purple {
+        right: -20%;
+    }
+}

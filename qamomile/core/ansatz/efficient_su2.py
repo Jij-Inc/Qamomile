@@ -41,7 +41,7 @@ def create_efficient_su2_circuit(
     ) -> tuple[qm_c.QuantumCircuit, int]:
         for gate in rotation_blocks:
             for i in range(num_qubits):
-                param = qm_c.Parameter(f"theta_{num_params}")
+                param = qm_c.Parameter(r"\theta_{" + f"{num_params}" + r"}")
                 num_params += 1
                 if gate == "ry":
                     circuit.ry(param, i)
