@@ -2,24 +2,29 @@
 qamomile/core/post_process.py
 
 This module provides functionality for Local Search Algorithm. Local Search Algorithm is one of the simplest
-heuristic algorithms for the optimization problem. Let's take the Ising Hamiltonian as objective
-function to be minimized.
+heuristic algorithms for the optimization problem. You can apply the local search to the following Ising Hamiltonian.
 
     .. math::
-        \sum_{ij} J_{ij} z_i z_j + \sum_i h_i z_i, ~\text{s.t.}~z_i \in \{-1, 1\}
+        \sum_{ij} J_{ij} z_i z_j + \sum_i h_i z_i, \\\\
+        \\text{s.t.}~z_i \in \{-1, 1\}
 
 Key Features:
+
 - Implementation of first- and best-improvement local search algorithms
+
 - Construction of cost Hamiltonians for the Ising model
+
 - Conversion of Ising interactions from dictionary format to matrix form
+
 """
 
-from qamomile.core.ising_qubo import IsingModel
-from qamomile.core.converters.converter import QuantumConverter
-from qamomile.core.bitssample import BitsSample, BitsSampleSet
-import numpy as np
-import jijmodeling as jm
 from typing import Callable, Optional
+
+import jijmodeling as jm
+import numpy as np
+from qamomile.core.bitssample import BitsSample, BitsSampleSet
+from qamomile.core.converters.converter import QuantumConverter
+from qamomile.core.ising_qubo import IsingModel
 
 
 class IsingMatrix:
