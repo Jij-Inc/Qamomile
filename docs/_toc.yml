@@ -18,6 +18,7 @@ parts:
     - file: tutorial/maxcut
     - file: tutorial/multi_car_paint
     - file: tutorial/qrao_tutorial
+    - file: tutorial/Travelling_Salesman_Problem
 
   - caption: API Reference
     chapters:
