@@ -23,12 +23,11 @@ import qamomile.core.operator
 import qamomile.core.circuit
 import qamomile.core.bitssample as qm_bs
 from qamomile.core.transpiler import QuantumSDKTranspiler
+from pennylane import I, X, Y, Z
 import pennylane as qml
 import collections
 import numpy as np
 from typing import Dict, List, Any
-from qamomile.core.transpiler import QuantumSDKTranspiler
-
 
 class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]):
     """
@@ -64,7 +63,7 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
                     raise NotImplementedError(
                         f"Unsupported Pauli operator: {pauli.pauli}"
                     )
-            ops.append(qml.operation.Tensor(*op_list))
+            ops.append(qml.prod(*op_list))
             coeffs.append(coeff)
 
         return qml.Hamiltonian(np.array(coeffs), ops)
