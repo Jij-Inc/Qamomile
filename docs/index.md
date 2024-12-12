@@ -21,7 +21,6 @@ Explore our documentation to dive deeper into Qamomile's capabilities:
 - [Quick Start Guide](quickstart.ipynb): Installation instructions and a simple example to get you started.
 - [API Reference](api/index.md): Complete documentation of Qamomile's API.
 - [Tutorials](tutorial/index.md): Step-by-step guides and examples to get you started.
-- [Advanced Topics](advanced/index.md): Explore advanced features and optimization techniques.
 
 ## Contributing
 
