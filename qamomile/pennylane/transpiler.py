@@ -135,6 +135,9 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
                 self._apply_parametric_single_qubit_gate(gate, params)
             elif isinstance(gate, qamomile.core.circuit.ParametricTwoQubitGate):
                 self._apply_parametric_two_qubit_gate(gate, params)
+                
+            elif isinstance(gate, qamomile.core.circuit.Operator):
+                self._apply_gates(gate.circuit, param_mapping, params)
 
             elif isinstance(gate, qamomile.core.circuit.MeasurementGate):
                 pass
