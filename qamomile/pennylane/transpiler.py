@@ -81,9 +81,9 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
             Callable: A PennyLane QNode.
         """
         try:
-            dev = qml.device("default.qubit", wires=qamomile_circuit.num_qubits)
+            # dev = qml.device("default.qubit", wires=qamomile_circuit.num_qubits)
 
-            @qml.qnode(dev)
+            # @qml.qnode(dev)
             def circuit_fn(*args, **kwargs):
                 # Apply gates using kwargs for parameter passing
                 self._apply_gates(
@@ -91,12 +91,13 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
                     param_mapping=self._create_param_mapping(qamomile_circuit),
                     params=kwargs,
                 )
-                return [
-                    qml.expval(qml.PauliZ(i))
-                    for i in range(qamomile_circuit.num_qubits)
-                ]
+                # return [
+                #     qml.expval(qml.PauliZ(i))
+                #     for i in range(qamomile_circuit.num_qubits)
+                # ]
 
-            return qml.QNode(circuit_fn, dev)
+            # return 
+            return circuit_fn
 
         except Exception as e:
             raise ValueError(f"Error converting circuit: {str(e)}")
@@ -105,7 +106,6 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
         self, qamomile_circuit: qamomile.core.circuit.QuantumCircuit
     ) -> Dict[str, qamomile.core.circuit.Parameter]:
         parameters = qamomile_circuit.get_parameters()
-
         # Convert list of parameters to a dictionary with parameter names as keys
         param_mapping = {}
         for param in parameters:
@@ -135,9 +135,10 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
                 self._apply_parametric_single_qubit_gate(gate, params)
             elif isinstance(gate, qamomile.core.circuit.ParametricTwoQubitGate):
                 self._apply_parametric_two_qubit_gate(gate, params)
-                
+
             elif isinstance(gate, qamomile.core.circuit.Operator):
                 self._apply_gates(gate.circuit, param_mapping, params)
+                
 
             elif isinstance(gate, qamomile.core.circuit.MeasurementGate):
                 pass
@@ -160,18 +161,44 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
         }
         gate_map[gate.gate](wires=[gate.control, gate.target])
 
+    def _extract_angle(self, gate, params):
+        param_name = getattr(gate.parameter, "name", None)
+
+        # 有名稱的參數
+        if param_name is not None:
+            if param_name in params:
+                return params[param_name]
+            else:
+                raise ValueError(f"Parameter '{param_name}' not found in the provided params.")
+
+        # 沒有名稱，嘗試解析係數 * 基底參數的形式
+        full_param_str = str(gate.parameter).strip()
+        parts = [p.strip() for p in full_param_str.split("*")]
+        if len(parts) == 2:
+            coeff_str, base_param = parts
+            # 嘗試將前半段轉為浮點數作為係數
+            try:
+                coeff = float(coeff_str)
+            except ValueError:
+                raise ValueError(
+                    f"Cannot parse coefficient from parameter expression: {full_param_str}"
+                )
+
+            if base_param in params:
+                angle = coeff * params[base_param]
+                return angle
+            else:
+                raise ValueError(f"Base parameter '{base_param}' not found in provided params.")
+        else:
+            raise ValueError(f"Unexpected parameter format: {full_param_str}")
+
     def _apply_parametric_single_qubit_gate(
         self,
         gate: qamomile.core.circuit.ParametricSingleQubitGate,
         params: Dict[str, Any],
     ):
-        param_name = gate.parameter.name
-        if param_name in params:
-            angle = params[param_name]
-        else:
-            raise ValueError(
-                f"Parameter '{param_name}' not found in the provided params."
-            )
+
+        angle = self._extract_angle(gate, params)
 
         gate_map = {
             qamomile.core.circuit.ParametricSingleQubitGateType.RX: qml.RX,
@@ -185,19 +212,17 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
         gate: qamomile.core.circuit.ParametricTwoQubitGate,
         params: Dict[str, Any],
     ):
-        param_name = gate.parameter.name
-        if param_name in params:
-            angle = params[param_name]
-        else:
-            raise ValueError(
-                f"Parameter '{param_name}' not found in the provided params."
-            )
 
+        angle = self._extract_angle(gate, params)
         # Map the gate to PennyLane gate
         gate_map = {
             qamomile.core.circuit.ParametricTwoQubitGateType.CRX: qml.CRX,
             qamomile.core.circuit.ParametricTwoQubitGateType.CRY: qml.CRY,
             qamomile.core.circuit.ParametricTwoQubitGateType.CRZ: qml.CRZ,
+            qamomile.core.circuit.ParametricTwoQubitGateType.RXX: qml.IsingXX,
+            qamomile.core.circuit.ParametricTwoQubitGateType.RYY: qml.IsingYY,
+            qamomile.core.circuit.ParametricTwoQubitGateType.RZZ: qml.IsingZZ,
+        
         }
 
         # Apply the gate with the provided parameter value
@@ -208,3 +233,4 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
         Dummy implementation to satisfy the abstract method requirement.
         """
         raise NotImplementedError("convert_result is not implemented yet.")
+    
