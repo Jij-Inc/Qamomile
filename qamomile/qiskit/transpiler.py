@@ -33,7 +33,7 @@ import qamomile.core.bitssample as qm_bs
 import qamomile.core.circuit as qm_c
 import qamomile.core.operator as qm_o
 from qamomile.core.transpiler import QuantumSDKTranspiler
-
+from qiskit.circuit.library import PauliEvolutionGate
 from .parameter_converter import convert_parameter
 from .exceptions import QamomileQiskitTranspileError
 
@@ -106,6 +106,9 @@ class QiskitTranspiler(QuantumSDKTranspiler[qk_primitives.BitArray]):
                 )
             elif isinstance(gate, qm_c.ThreeQubitGate):
                 qiskit_circuit = _three_qubit_gate(gate, qiskit_circuit)
+            elif isinstance(gate, qm_c.ParametricExpGate):
+                operator=self.transpile_hamiltonian(gate.hamiltonian)
+                qiskit_circuit = _parametric_exp_gate(gate, qiskit_circuit, parameters=param_mapping, operator=operator)
             elif isinstance(gate, qm_c.Operator):
                 qiskit_subcircuit = self._circuit_convert(gate.circuit, param_mapping)
                 qubit_indices = list(range(gate.circuit.num_qubits))
@@ -243,4 +246,16 @@ def _three_qubit_gate(
     """Apply a three qubit gate to the Qiskit circuit."""
     if gate.gate == qm_c.ThreeQubitGateType.CCX:
         qk_circuit.ccx(gate.control1, gate.control2, gate.target)
+    return qk_circuit
+
+def _parametric_exp_gate(
+    gate: qm_c.ParametricExpGate,
+    qk_circuit: qiskit.QuantumCircuit,
+    parameters: Dict[qm_c.Parameter, qiskit.circuit.Parameter],
+    operator: qk_ope.SparsePauliOp,
+) -> qiskit.QuantumCircuit:
+    """Apply an exponential pauli rotation gate to the quri-parts circuit."""
+    time = convert_parameter(gate.parameter, parameters=parameters)
+    evo = PauliEvolutionGate(operator, time)
+    qk_circuit.append(evo, range(len(gate.indices)))
     return qk_circuit

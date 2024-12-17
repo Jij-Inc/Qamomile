@@ -19,6 +19,7 @@ parts:
     - file: tutorial/multi_car_paint
     - file: tutorial/qrao_tutorial
     - file: tutorial/Travelling_Salesman_Problem
+    - file: tutorial/quantum_annealing
 
   - caption: API Reference
     chapters:

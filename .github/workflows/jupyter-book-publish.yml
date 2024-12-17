@@ -23,6 +23,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: 'docs/qamomile-lp/package-lock.json'
+      # - name: Build Landing Page
+      #   run: |
+      #     cd docs/qamomile-lp
+
+    
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
@@ -32,11 +44,17 @@ jobs:
           pip install poetry
           poetry install --all-extras
           poetry run pip install -U jupyter-book
-      - name: Build the book
+      - name: Build the book and LP
         run: |
           cd docs
           poetry run jupyter-book build .
-          cd ..
+          cd qamomile-lp
+          npm ci
+          npm run build
+          mkdir -p ../_build/html
+          cp dist/index.html ../_build/html/landing.html
+          cp dist/*.png ../_build/html/
+          cd ../..
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact
