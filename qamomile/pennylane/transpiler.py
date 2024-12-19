@@ -22,6 +22,7 @@ import collections
 from typing import Dict, Any
 import numpy as np
 import pennylane as qml
+from pennylane import numpy as p_np
 
 import qamomile.core.operator
 import qamomile.core.circuit
@@ -84,16 +85,56 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
             Callable: A PennyLane-compatible function which applies the circuit.
         """
 
+        # Retrieve parameters in a defined order
+        parameters = qamomile_circuit.get_parameters()
+
+        # Create a mapping from parameter names to parameter objects
         param_mapping = self._create_param_mapping(qamomile_circuit)
 
+        # Extract parameter names in order to establish a positional mapping
+        ordered_param_names = [p.name for p in parameters]
+        print("ordered_param_names: ", ordered_param_names)
+
         def circuit_fn(*args, **kwargs):
+            # If we have exactly one positional argument
+            if len(args) == 1:
+                # Try to interpret it as a parameter vector if it has a shape attribute
+                param_values = args[0]
+                
+                # Check if param_values has a shape (works for np.ndarray, p_np.tensor, and AutogradArrayBox)
+                if hasattr(param_values, 'shape'):
+                    # Check length
+                    if param_values.size != len(ordered_param_names):
+                        raise ValueError(
+                            f"The number of parameters provided ({param_values.size}) does not match "
+                            f"the expected number of parameters ({len(ordered_param_names)})."
+                        )
+                    # Map the parameters by name
+                    positional_params = {
+                        pname: val for pname, val in zip(ordered_param_names, param_values)
+                    }
+                else:
+                    # If it's not array-like, fall back to empty (no positional params)
+                    positional_params = {}
+            else:
+                # No positional argument provided
+                positional_params = {}
+
+            # Merge with keyword arguments
+            final_params = {**positional_params, **kwargs}
+
+            # Check that all required parameters are assigned
+            for pname in ordered_param_names:
+                if pname not in final_params:
+                    raise ValueError(f"No value provided for parameter '{pname}'.")
+
             self._apply_gates(
                 qamomile_circuit,
                 param_mapping=param_mapping,
-                params=kwargs,
+                params=final_params,
             )
-
         return circuit_fn
+
 
     def _create_param_mapping(
         self, qamomile_circuit: qamomile.core.circuit.QuantumCircuit
@@ -151,6 +192,7 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
 
             elif isinstance(gate, qamomile.core.circuit.MeasurementGate):
                 pass
+
 
     def _apply_single_qubit_gate(self, gate: qamomile.core.circuit.SingleQubitGate):
         """
