@@ -93,7 +93,6 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
 
         # Extract parameter names in order to establish a positional mapping
         ordered_param_names = [p.name for p in parameters]
-        print("ordered_param_names: ", ordered_param_names)
 
         def circuit_fn(*args, **kwargs):
             # If we have exactly one positional argument
