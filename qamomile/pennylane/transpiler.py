@@ -134,7 +134,6 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
             )
         return circuit_fn
 
-
     def _create_param_mapping(
         self, qamomile_circuit: qamomile.core.circuit.QuantumCircuit
     ) -> Dict[str, qamomile.core.circuit.Parameter]:
@@ -148,14 +147,7 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
             Dict[str, qamomile.core.circuit.Parameter]: A mapping from parameter names to parameters.
         """
         parameters = qamomile_circuit.get_parameters()
-        param_mapping = {}
-
-        for param in parameters:
-            param_name = getattr(param, "name", None)
-            if param_name is None:
-                raise ValueError(f"Parameter {param} has no 'name' attribute.")
-            param_mapping[param_name] = param
-
+        param_mapping = {param.name: param for param in parameters}
         return param_mapping
 
     def _apply_gates(

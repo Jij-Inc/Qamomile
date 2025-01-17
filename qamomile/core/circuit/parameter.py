@@ -95,14 +95,14 @@ class Parameter(ParameterExpression):
     Represents a named parameter in a quantum circuit.
     """
 
-    def __init__(self, name):
+    def __init__(self, name: str):
         """
         Initialize a Parameter with a name.
 
         Args:
             name (str): The name of the parameter.
         """
-        self.name = name
+        self.name: str = name
 
     def __repr__(self):
         """String representation of the Parameter."""

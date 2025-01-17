@@ -191,22 +191,7 @@ def test_transpile_circuit_with_parameters(transpiler):
     # when theta=pi，RX(pi)=X gate on qubit 0，|00> -> |10>，then CRX(pi/2)
     # CRX(pi/2) -> |1+> , Z measurement on qubit 0:
     # expval=|0>'s prob - |1>'s prob = 0
-    assert np.allclose(test_qnode(np.pi/2), 0)  
-
- ## other  unsupported case   
-
-def test_param_mapping_no_name(transpiler):
-    """Test if an error is raised when a parameter has no 'name' attribute."""
-    class ParamNoName:
-        pass
-
-    circuit = QuantumCircuit(0)
-    def mock_get_parameters():
-        return [ParamNoName()]
-    circuit.get_parameters = mock_get_parameters
-
-    with pytest.raises(ValueError, match="has no 'name' attribute"):
-        transpiler._create_param_mapping(circuit)
+    assert np.allclose(test_qnode(np.pi/2), 0)
 
 
 def test_extract_angle_param_not_found(transpiler):
