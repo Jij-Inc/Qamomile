@@ -58,3 +58,4 @@ mkdocs-literate-nav = "^0.6.0"
 mkdocstrings = {version = ">=0.19", extras = ["python"]}
 mkdocs-jupyter = "^0.24.7"
 mkdocs-mermaid2-plugin = "^1.1.1"
+qiskit-aer = "^0.16.0"
