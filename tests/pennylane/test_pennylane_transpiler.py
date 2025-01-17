@@ -208,33 +208,15 @@ def test_param_mapping_no_name(transpiler):
     with pytest.raises(ValueError, match="has no 'name' attribute"):
         transpiler._create_param_mapping(circuit)
 
+
 def test_extract_angle_param_not_found(transpiler):
     """Test extracting an angle when the parameter is not found in params."""
-    class MockParam:
-        name = "phi"
-
-    class MockGate:
-        parameter = MockParam()
+    phi = Parameter("phi")
+    gate = ParametricSingleQubitGate(ParametricSingleQubitGateType.RX, 0, phi)
 
     with pytest.raises(ValueError, match="Parameter 'phi' not found"):
-        transpiler._extract_angle(MockGate(), params={})
+        transpiler._extract_angle(gate, params={})
 
-
-def test_extract_angle_invalid_format(transpiler):
-    """Test extracting an angle with unexpected parameter format."""
-    class MockParam:
-        def __str__(self):
-            return "invalid_format"
-
-        @property
-        def name(self):
-            return None
-
-    class MockGate:
-        parameter = MockParam()
-
-    with pytest.raises(ValueError, match="Unexpected parameter format"):
-        transpiler._extract_angle(MockGate(), params={"theta": 0.5})
 
 def test_apply_single_qubit_gate_unsupported(transpiler):
     """Test applying an unsupported single qubit gate."""

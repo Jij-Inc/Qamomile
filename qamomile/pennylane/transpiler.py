@@ -230,7 +230,11 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
 
         gate_map[gate.gate](wires=[gate.control, gate.target])
 
-    def _extract_angle(self, gate, params):
+    def _extract_angle(
+        self,
+        gate: qamomile.core.circuit.ParametricSingleQubitGate | qamomile.core.circuit.ParametricTwoQubitGate,
+        params
+    ):
         """
         Extract the angle parameter for parameterized gates from the params dictionary.
 
@@ -241,39 +245,9 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
         Returns:
             float: The numeric angle/value for the gate.
         """
-
-        param_name = getattr(gate.parameter, "name", None)
-
-        if param_name is not None:
-            if param_name in params:
-                return params[param_name]
-            else:
-                raise ValueError(
-                    f"Parameter '{param_name}' not found in the provided params."
-                )
-
-        full_param_str = str(gate.parameter).strip()
-        parts = [p.strip() for p in full_param_str.split("*")]
-
-        if len(parts) == 2:
-            coeff_str, base_param = parts
-            try:
-                coeff = float(coeff_str)
-            except ValueError:
-                raise ValueError(
-                    f"Cannot parse coefficient from parameter expression: '{full_param_str}'"
-                )
-
-            if base_param in params:
-                return coeff * params[base_param]
-            else:
-                raise ValueError(
-                    f"Base parameter '{base_param}' not found in provided params."
-                )
-        else:
-            raise ValueError(
-                f"Unexpected parameter format: '{full_param_str}'. Expected 'coeff*param'."
-            )
+        return qamomile.core.circuit.parameter.substitute_param_expr(
+            gate.parameter, params
+        )
 
     def _apply_parametric_single_qubit_gate(
         self,

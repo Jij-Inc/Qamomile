@@ -17,6 +17,7 @@ the definition of circuits with variable parameters that can be optimized or
 swept over during execution or simulation.
 """
 
+import typing
 import enum
 import abc
 
@@ -179,3 +180,36 @@ class BinaryOperator(ParameterExpression):
     def __repr__(self):
         """String representation of the BinaryOperator."""
         return f"{self.left} {self.kind.value} {self.right}"
+
+
+def substitute_param_expr(
+    expression: ParameterExpression,
+    mapping: typing.Mapping[Parameter, float],
+) -> float:
+    """
+    Substitute parameters in an expression with specific values.
+
+    Args:
+        expression (ParameterExpression): The expression to substitute.
+        mapping (Mapping[Parameter, number]): A mapping of parameters to values.
+
+    Returns:
+        float: The result of substituting the parameters in the expression.
+    """
+    if isinstance(expression, Value):
+        return expression.value
+    elif isinstance(expression, Parameter):
+        try:
+            return mapping[expression.name]
+        except KeyError:
+            raise ValueError(f"Parameter '{expression}' not found")
+    elif isinstance(expression, BinaryOperator):
+        left = substitute_param_expr(expression.left, mapping)
+        right = substitute_param_expr(expression.right, mapping)
+        if expression.kind == BinaryOpeKind.ADD:
+            return left + right
+        elif expression.kind == BinaryOpeKind.MUL:
+            return left * right
+        elif expression.kind == BinaryOpeKind.DIV:
+            return left / right
+    raise ValueError("Unknown expression type")
