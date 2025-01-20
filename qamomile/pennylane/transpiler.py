@@ -297,4 +297,19 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
 
         Currently not implemented.
         """
-        raise NotImplementedError("convert_result is not implemented yet.")
+
+        def binary_to_decimal(binary_string):
+            try:
+                # Ensure input is a valid binary string
+                if not all(char in '01' for char in binary_string):
+                    raise ValueError("Input must be a binary string containing only '0' and '1'.")
+                # Convert binary string to decimal
+                decimal_number = int(binary_string, 2)
+                return decimal_number
+            except Exception as e:
+                print(f"Error: {e}")
+                return None
+            
+        decimal_result_data = {binary_to_decimal(key): value for key, value in result.items()}
+        num_bits = len(result.popitem()[0])
+        return qm_bs.BitsSampleSet.from_int_counts(decimal_result_data, num_bits)
