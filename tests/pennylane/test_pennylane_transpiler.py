@@ -2,6 +2,7 @@ import pytest
 import pennylane as qml
 import numpy as np
 import qamomile
+import qamomile.core.bitssample as qm_bs
 from qamomile.pennylane.transpiler import PennylaneTranspiler
 from qamomile.core.operator import Hamiltonian, Pauli, X, Y, Z
 from qamomile.core.circuit import (
@@ -246,7 +247,12 @@ def test_apply_parametric_two_qubit_gate_unsupported(transpiler):
     with pytest.raises(NotImplementedError, match="Unsupported parametric two-qubit gate"):
         transpiler._apply_parametric_two_qubit_gate(MockParamGate(), params={"theta": np.pi})
 
-def test_convert_result_not_implemented(transpiler):
-    """Test convert_result raises NotImplementedError."""
-    with pytest.raises(NotImplementedError):
-        transpiler.convert_result(None)
+def test_convert_result(transpiler):
+
+    dict_result = {'00': 500, '11': 500}
+
+    sampleset = transpiler.convert_result(dict_result)
+
+    assert isinstance(sampleset, qm_bs.BitsSampleSet)
+    assert len(sampleset.bitarrays) == 2
+    assert sampleset.total_samples() == 1000
