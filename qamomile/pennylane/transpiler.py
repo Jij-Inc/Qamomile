@@ -317,12 +317,21 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
                 if not all(char in '01' for char in binary_string):
                     raise ValueError("Input must be a binary string containing only '0' and '1'.")
                 # Convert binary string to decimal
-                decimal_number = int(binary_string, 2)
-                return decimal_number
+                return int(binary_string, 2)
             except Exception as e:
-                print(f"Error: {e}")
-                return None
-            
-        decimal_result_data = {binary_to_decimal(key): value for key, value in result.items()}
-        num_bits = len(result.popitem()[0])
+                raise ValueError(f"Error converting to decimal: {e}")
+
+        if not result:
+            raise ValueError("Result dictionary cannot be empty.")
+        binary_keys = list(result.keys())
+        num_bits = len(binary_keys[0])
+
+        if not all(len(key) == num_bits for key in binary_keys):
+            raise ValueError("All binary keys must have the same length.")
+
+        try:
+            decimal_result_data = {binary_to_decimal(key): count for key, count in result.items()}
+        except ValueError as e:
+            raise ValueError(f"Error converting binary keys: {e}")
+        
         return qm_bs.BitsSampleSet.from_int_counts(decimal_result_data, num_bits)
