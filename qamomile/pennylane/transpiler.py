@@ -291,14 +291,27 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
 
         gate_map[gate.gate](angle, wires=[gate.control, gate.target])
 
-    def convert_result(self, result: Any) -> Any:
+    def convert_result(self, result: Dict[str, int]) -> qm_bs.BitsSampleSet:
         """
-        Convert the result from PennyLane execution to a Qamomile-compatible result.
+        Convert a dictionary of results from PennyLane execution to a Qamomile-compatible BitsSampleSet.
 
-        Currently not implemented.
+        Args:
+            result (Dict[str, int]):  A dictionary where each key is a binary string consisting of '0' and '1' 
+                (representing measurement outcomes), and each value is the corresponding count.
+
+        Returns:
+            BitsSampleSet: A Qamomile BitsSampleSet object.
         """
-
         def binary_to_decimal(binary_string):
+            """
+            Convert a binary string to a decimal integer.
+
+            Args:
+                binary_string (str): A string of '0' and '1' characters.
+
+            Returns:
+                Optional[int]: The integer value of the binary string, or None if the conversion fails.
+            """
             try:
                 # Ensure input is a valid binary string
                 if not all(char in '01' for char in binary_string):
