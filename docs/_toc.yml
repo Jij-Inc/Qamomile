@@ -19,7 +19,11 @@ parts:
     - file: tutorial/multi_car_paint
     - file: tutorial/qrao_tutorial
     - file: tutorial/quantum_annealing
+<<<<<<< HEAD
     - file: tutorial/vqe_for_hydrogen
+=======
+    - file: tutorial/Using_the_PennyLaneTranspiler_in_Qamomile
+>>>>>>> main
 
   - caption: API Reference
     chapters:
