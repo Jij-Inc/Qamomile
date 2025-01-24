@@ -63,6 +63,17 @@ test = ["anyio[trio]", "coverage[toml] (>=7)", "exceptiongroup (>=1.2.0)", "hypo
 trio = ["trio (>=0.23)"]
 
 [[package]]
+name = "appdirs"
+version = "1.4.4"
+description = "A small Python module for determining appropriate platform-specific dirs, e.g. a \"user data dir\"."
+optional = false
+python-versions = "*"
+files = [
+    {file = "appdirs-1.4.4-py2.py3-none-any.whl", hash = "sha256:a841dacd6b99318a741b166adb07e19ee71a274450e68237b4650ca1055ab128"},
+    {file = "appdirs-1.4.4.tar.gz", hash = "sha256:7d5d0167b2b1ba821647616af46a749d1c653740dd0d2415100fe26e27afdf41"},
+]
+
+[[package]]
 name = "appnope"
 version = "0.1.4"
 description = "Disable App Nap on macOS >= 10.9"
@@ -215,6 +226,38 @@ tests = ["cloudpickle", "hypothesis", "mypy (>=1.11.1)", "pympler", "pytest (>=4
 tests-mypy = ["mypy (>=1.11.1)", "pytest-mypy-plugins"]
 
 [[package]]
+name = "autograd"
+version = "1.7.0"
+description = "Efficiently computes derivatives of NumPy code."
+optional = false
+python-versions = ">=3.8"
+files = [
+    {file = "autograd-1.7.0-py3-none-any.whl", hash = "sha256:49680300f842f3a8722b060ac0d3ed7aca071d1ad4d3d38c9fdadafdcc73c30b"},
+    {file = "autograd-1.7.0.tar.gz", hash = "sha256:de743fd368d6df523cd37305dcd171861a9752a144493677d2c9f5a56983ff2f"},
+]
+
+[package.dependencies]
+numpy = "*"
+
+[package.extras]
+scipy = ["scipy"]
+
+[[package]]
+name = "autoray"
+version = "0.7.0"
+description = "Abstract your array operations."
+optional = false
+python-versions = ">=3.9"
+files = [
+    {file = "autoray-0.7.0-py3-none-any.whl", hash = "sha256:03103957df3d1b66b8068158056c2909a72095b19d1b24262261276a714a5d07"},
+    {file = "autoray-0.7.0.tar.gz", hash = "sha256:7829d21258512f87e02f23ce74ae5759af4ce8998069d2cce53468f1d701a219"},
+]
+
+[package.extras]
+docs = ["astroid (<3)", "furo", "ipython (!=8.7.0)", "myst-nb", "setuptools-scm", "sphinx (>=2.0)", "sphinx-autoapi", "sphinx-copybutton"]
+tests = ["coverage", "numpy", "pytest", "pytest-cov"]
+
+[[package]]
 name = "babel"
 version = "2.16.0"
 description = "Internationalization utilities"
@@ -312,6 +355,17 @@ webencodings = "*"
 
 [package.extras]
 css = ["tinycss2 (>=1.1.0,<1.3)"]
+
+[[package]]
+name = "cachetools"
+version = "5.5.0"
+description = "Extensible memoizing collections and decorators"
+optional = false
+python-versions = ">=3.7"
+files = [
+    {file = "cachetools-5.5.0-py3-none-any.whl", hash = "sha256:02134e8439cdc2ffb62023ce1debca2944c3f289d66bb17ead3ab3dede74b292"},
+    {file = "cachetools-5.5.0.tar.gz", hash = "sha256:2cc24fb4cbe39633fb7badd9db9ca6295d766d9c2995f245725a46715d050f2a"},
+]
 
 [[package]]
 name = "certifi"
@@ -2918,6 +2972,68 @@ files = [
 ]
 
 [[package]]
+name = "pennylane"
+version = "0.39.0"
+description = "PennyLane is a cross-platform Python library for quantum computing, quantum machine learning, and quantum chemistry. Train a quantum computer the same way as a neural network."
+optional = false
+python-versions = "*"
+files = [
+    {file = "PennyLane-0.39.0-py3-none-any.whl", hash = "sha256:e11928a8ffd652b9c1b4f11955b50210c3b637f36ee3d8cea64a3a9a6a830977"},
+]
+
+[package.dependencies]
+appdirs = "*"
+autograd = "*"
+autoray = ">=0.6.11"
+cachetools = "*"
+networkx = "*"
+numpy = "<2.1"
+packaging = "*"
+pennylane-lightning = ">=0.39"
+requests = "*"
+rustworkx = ">=0.14.0"
+scipy = "*"
+toml = "*"
+typing-extensions = "*"
+
+[package.extras]
+kernels = ["cvxopt", "cvxpy"]
+
+[[package]]
+name = "pennylane-lightning"
+version = "0.39.0"
+description = "PennyLane-Lightning plugin"
+optional = false
+python-versions = ">=3.10"
+files = [
+    {file = "PennyLane_Lightning-0.39.0-cp310-cp310-macosx_13_0_arm64.whl", hash = "sha256:dfdf6071337f743519d7bcbe4d1bf35f1822bf14020dbda3c734b0471c4dbb12"},
+    {file = "PennyLane_Lightning-0.39.0-cp310-cp310-macosx_13_0_x86_64.whl", hash = "sha256:0d9d7a865cf81923a05247e811a1534f3395fc9f27ea51a0472837b2dbe88f8d"},
+    {file = "PennyLane_Lightning-0.39.0-cp310-cp310-manylinux_2_28_aarch64.whl", hash = "sha256:1d4c22f28afdb816bca37617d9d508e3a73b0bd50df4581bafd1de7f8ab028b2"},
+    {file = "PennyLane_Lightning-0.39.0-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:1878dbf59c779face32ee8b9291e2cf18a601c491a132afe89f9b1e477026455"},
+    {file = "PennyLane_Lightning-0.39.0-cp310-cp310-win_amd64.whl", hash = "sha256:8e5e68f467f68216d2b5f19639b4b3d621743c389a4d207282c52557e20ff10c"},
+    {file = "PennyLane_Lightning-0.39.0-cp311-cp311-macosx_13_0_arm64.whl", hash = "sha256:8b5dfb5ee187a98925130965b5cbfb9ecfc650ec23b2cfdbf16040db25d79f73"},
+    {file = "PennyLane_Lightning-0.39.0-cp311-cp311-macosx_13_0_x86_64.whl", hash = "sha256:80debc3b1c7a5923509f4662b95ca1703ac8a29eaaa78a169240b23c4c1c7875"},
+    {file = "PennyLane_Lightning-0.39.0-cp311-cp311-manylinux_2_28_aarch64.whl", hash = "sha256:ac2bcafd8b10b58e99cd050bb89a67e97b53e66ab8636e37bafd67a32905f935"},
+    {file = "PennyLane_Lightning-0.39.0-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:de45c1c2e97572e59081878dc80bbebe17b938a783005ce0ad6632ba8dd46956"},
+    {file = "PennyLane_Lightning-0.39.0-cp311-cp311-win_amd64.whl", hash = "sha256:dcbec946148018a8aebae6cf45bb0d9d6f9a418bb0655ed4b3ae2f7e948e320d"},
+    {file = "PennyLane_Lightning-0.39.0-cp312-cp312-macosx_13_0_arm64.whl", hash = "sha256:6c7553d206f185ab6f7688fe086d80a33f382beb56e9ad579090bdba041adfb1"},
+    {file = "PennyLane_Lightning-0.39.0-cp312-cp312-macosx_13_0_x86_64.whl", hash = "sha256:30a08ed59fd2c11257bc989303547b8125e7453c8165f8c75ec7d8090451ec54"},
+    {file = "PennyLane_Lightning-0.39.0-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:c0f52da46791605e3f8f0644b45a97de799df1f69cd3659a58fc04f7288f948e"},
+    {file = "PennyLane_Lightning-0.39.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:f0a9ab74b0cf2cbc9556a0c85a750a5d6063721405f76cacf8b17f9e6774dd9b"},
+    {file = "PennyLane_Lightning-0.39.0-cp312-cp312-win_amd64.whl", hash = "sha256:f568120eac4ed4b5d498889cb9359040dd7070ef711e98cdbace4efde794c866"},
+    {file = "PennyLane_Lightning-0.39.0-py3-none-any.whl", hash = "sha256:55de99da8e513f89b416087d1665257498be244006968b472b82a56b972d0f0d"},
+    {file = "PennyLane_Lightning-0.39.0.tar.gz", hash = "sha256:a1db6069c7d97eea50846d5b51a3d9ae97539bf68ac480b5c9bea1eaa5e3f1d1"},
+]
+
+[package.dependencies]
+pennylane = ">=0.37"
+
+[package.extras]
+gpu = ["pennylane-lightning-gpu"]
+kokkos = ["pennylane-lightning-kokkos"]
+tensor = ["pennylane-lightning-tensor"]
+
+[[package]]
 name = "pexpect"
 version = "4.9.0"
 description = "Pexpect allows easy control of interactive console applications."
@@ -4959,6 +5075,17 @@ doc = ["sphinx", "sphinx_rtd_theme"]
 test = ["pytest", "ruff"]
 
 [[package]]
+name = "toml"
+version = "0.10.2"
+description = "Python Library for Tom's Obvious, Minimal Language"
+optional = false
+python-versions = ">=2.6, !=3.0.*, !=3.1.*, !=3.2.*"
+files = [
+    {file = "toml-0.10.2-py2.py3-none-any.whl", hash = "sha256:806143ae5bfb6a3c6e736a764057db0e6a0e05e338b5630894a5f779cabb4f9b"},
+    {file = "toml-0.10.2.tar.gz", hash = "sha256:b3bda1d108d5dd99f4a20d24d9c348e91c4db7ab1b749200bded2f839ccbe68f"},
+]
+
+[[package]]
 name = "tomli"
 version = "2.0.1"
 description = "A lil' TOML parser"
@@ -5320,6 +5447,7 @@ doc = ["furo", "jaraco.packaging (>=9.3)", "jaraco.tidelift (>=1.4)", "rst.linke
 test = ["big-O", "importlib-resources", "jaraco.functools", "jaraco.itertools", "jaraco.test", "more-itertools", "pytest (>=6,!=8.1.*)", "pytest-checkdocs (>=2.4)", "pytest-cov", "pytest-enabler (>=2.2)", "pytest-ignore-flaky", "pytest-mypy", "pytest-ruff (>=0.2.1)"]
 
 [extras]
+pennylane = ["pennylane"]
 qiskit = ["qiskit"]
 quri-parts = ["quri-parts-qulacs"]
 qutip = ["qutip"]
@@ -5327,4 +5455,4 @@ qutip = ["qutip"]
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.10,<3.12"
-content-hash = "846d68a1516e1d546b1e386d76a57057a0f0391066ad6bb3c33e8177f6a801cf"
+content-hash = "f5814459cfd3817c2b860df0af491d8b2e0cc846e9ded28b2cc37df304d22553"
