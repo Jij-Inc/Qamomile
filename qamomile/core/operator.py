@@ -305,11 +305,11 @@ class Hamiltonian:
                     else:
                         h.constant += phase * coeff1 * coeff2
 
-            if not math.isclose(other.constant, 0.0, abs_tol=1e-15):
+            if not math.isclose(abs(other.constant), 0.0, abs_tol=1e-15):
                 for terms, coeff1 in self.terms.items():
                     h.add_term(terms, coeff1 * other.constant)
 
-            if not math.isclose(self.constant, 0.0, abs_tol=1e-15):
+            if not math.isclose(abs(self.constant), 0.0, abs_tol=1e-15):
                 for terms, coeff2 in other.terms.items():
                     h.add_term(terms, coeff2 * self.constant)
 
