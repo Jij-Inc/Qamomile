@@ -367,3 +367,14 @@ def test_num_qubits():
     h += qm_o.X(3) 
     assert h.num_qubits == 4
     
+def test_coeff_complex():
+    h = qm_o.Hamiltonian()
+    h.add_term((qm_o.PauliOperator(qm_o.Pauli.I, 0),), 1.0j)
+    h *= (1 + 1j * qm_o.Y(0))
+
+    expected_h = qm_o.Hamiltonian()
+    expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.I, 0),), 1.0j)
+    expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 0),), -1.0)
+    assert h == expected_h
+
+    
