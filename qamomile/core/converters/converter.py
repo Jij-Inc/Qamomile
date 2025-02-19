@@ -75,6 +75,7 @@ class QuantumConverter(abc.ABC):
         compiled_instance,
         relax_method: jmt.pubo.RelaxationMethod = jmt.pubo.RelaxationMethod.AugmentedLagrangian,
         normalize_model: bool = False,
+        normalize_ising: typ.Optional[str] = None,
     ):
         """
         Initialize the QuantumConverter.
@@ -93,6 +94,7 @@ class QuantumConverter(abc.ABC):
         self.compiled_instance = compiled_instance
         self.pubo_builder = pubo_builder
         self.int2varlabel: dict[int, str] = {}
+        self.normalize_ising = normalize_ising
 
         self._ising: typ.Optional[IsingModel] = None
 
@@ -133,6 +135,14 @@ class QuantumConverter(abc.ABC):
         )
         ising = qubo_to_ising(qubo, simplify=False)
         ising.constant += constant
+
+        if isinstance(self.normalize_ising, str):
+            if self.normalize_ising == "abs_max":
+                ising.normalize_by_abs_max()
+            elif self.normalize_ising == "rms":
+                ising.normalize_by_rms()
+            else:
+                raise ValueError(f"Invalid value for normalize_ising: {self.normalize_ising}")
 
         var_map = self.compiled_instance.var_map.var_map
         inv_varmap = {}
