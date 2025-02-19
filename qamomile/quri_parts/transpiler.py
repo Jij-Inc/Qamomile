@@ -174,7 +174,10 @@ class QuriPartsTranspiler(
                         raise NotImplementedError("Only Pauli X, Y, and Z are supported")
 
             qp_pauli_terms[qp_o.pauli_label(pauli_list)] = coeff
-        return qp_o.Operator(qp_pauli_terms)
+        h = qp_o.Operator(qp_pauli_terms)
+        if operator.constant != 0:
+            h.constant = operator.constant
+        return h
 
 
 def _single_qubit_gate(

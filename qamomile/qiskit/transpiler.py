@@ -168,6 +168,13 @@ class QiskitTranspiler(QuantumSDKTranspiler[qk_primitives.BitArray]):
             qk_pauli = qk_ope.Pauli((qk_pauli_z, qk_pauli_x))
             qk_pauli_list.append(qk_pauli)
             coeff_list.append(coeff)
+
+        # Add constant term
+        if operator.constant != 0:
+            I = "I"*num_qubits
+            qk_pauli_list.append(qk_ope.Pauli(I))
+            coeff_list.append(operator.constant)
+
         return qk_ope.SparsePauliOp(qk_pauli_list, coeffs=np.array(coeff_list))
 
 
