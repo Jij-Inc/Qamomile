@@ -1,6 +1,7 @@
 import dataclasses
-import numpy as np
 import typing as typ
+
+import numpy as np
 
 
 @dataclasses.dataclass
@@ -42,10 +43,12 @@ class IsingModel:
         r"""Normalize coefficients by the absolute maximum value.
 
         The coefficients for normalized is defined as:
+
         .. math::
-            W = max(|J_{ij}|, |h_i|)
+            W = \max(|J_{ij}|, |h_i|)
 
         We normalize the Ising Hamiltonian as
+        
         .. math::
             \tilde{H} = \frac{1}{W}\sum_{ij}J_{ij}Z_iZ_j + \frac{1}{W}\sum_ih_iZ_i + \frac{1}{W}C
 
@@ -72,15 +75,21 @@ class IsingModel:
         r"""Normalize coefficients by the root mean square.
 
         The coefficients for normalized is defined as:
+
         .. math::
-            W = sqrt(sum(w_ij^2)/E_2 + sum(w_i^2)/E_1)
+            W = \sqrt{ \frac{1}{E_2}\sum(w_ij^2) + \frac{1}{E_1}\sum(w_i^2) }
 
         where w_ij are quadratic coefficients and w_i are linear coefficients.
         E_2 and E_1 are the number of quadratic and linear terms respectively.
         We normalize the Ising Hamiltonian as
+
         .. math::
             \tilde{H} = \frac{1}{W}\sum_{ij}J_{ij}Z_iZ_j + \frac{1}{W}\sum_ih_iZ_i + \frac{1}{W}C
-        This method is proposed in :cite:`Sureshbabu2023-cn`
+        This method is proposed in :cite:`Sureshbabu2024parametersettingin`
+
+        .. bibliography::
+            :filter: docname in docnames
+
         """
         if not self.linear and not self.quad:
             return  # 係数が存在しない場合は正規化しない
