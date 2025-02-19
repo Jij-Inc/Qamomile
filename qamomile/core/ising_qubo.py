@@ -39,6 +39,18 @@ class IsingModel:
         return self.index_map[index]
 
     def normalize_by_abs_max(self):
+        r"""Normalize coefficients by the absolute maximum value.
+
+        The coefficients for normalized is defined as:
+        .. math::
+            W = max(|J_{ij}|, |h_i|)
+
+        We normalize the Ising Hamiltonian as
+        .. math::
+            \tilde{H} = \frac{1}{W}\sum_{ij}J_{ij}Z_iZ_j + \frac{1}{W}\sum_ih_iZ_i + \frac{1}{W}C
+
+        """
+
         if not self.linear and not self.quad:
             return  # 係数が存在しない場合は正規化しない
 
@@ -59,12 +71,15 @@ class IsingModel:
     def normalize_by_rms(self):
         r"""Normalize coefficients by the root mean square.
 
-        The coefficients are normalized by
+        The coefficients for normalized is defined as:
         .. math::
-            sqrt(sum(w_ij^2)/E_2 + sum(w_i^2)/E_1)
+            W = sqrt(sum(w_ij^2)/E_2 + sum(w_i^2)/E_1)
 
         where w_ij are quadratic coefficients and w_i are linear coefficients.
         E_2 and E_1 are the number of quadratic and linear terms respectively.
+        We normalize the Ising Hamiltonian as
+        .. math::
+            \tilde{H} = \frac{1}{W}\sum_{ij}J_{ij}Z_iZ_j + \frac{1}{W}\sum_ih_iZ_i + \frac{1}{W}C
         This method is proposed in :cite:`Sureshbabu2023-cn`
         """
         if not self.linear and not self.quad:

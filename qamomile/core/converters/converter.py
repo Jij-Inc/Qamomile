@@ -86,9 +86,10 @@ class QuantumConverter(abc.ABC):
                 Defaults to AugmentedLagrangian.
             normalize_model (bool): The objective function and the constraints are normalized using the maximum absolute value of the coefficients contained in each.
                 Defaults to False
+            normalize_ising (Optional[str]): The normalization method for the Ising Hamiltonian.
         """
         pubo_builder = jmt.pubo.transpile_to_pubo(
-            compiled_instance, relax_method=relax_method, normalize = normalize_model
+            compiled_instance, relax_method=relax_method, normalize=normalize_model
         )
 
         self.compiled_instance = compiled_instance
@@ -142,7 +143,9 @@ class QuantumConverter(abc.ABC):
             elif self.normalize_ising == "rms":
                 ising.normalize_by_rms()
             else:
-                raise ValueError(f"Invalid value for normalize_ising: {self.normalize_ising}")
+                raise ValueError(
+                    f"Invalid value for normalize_ising: {self.normalize_ising}"
+                )
 
         var_map = self.compiled_instance.var_map.var_map
         inv_varmap = {}
