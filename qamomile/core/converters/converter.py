@@ -9,11 +9,15 @@ problems into quantum representations (e.g., Ising models) and decoding quantum
 computation results back into classical problem solutions.
 
 Key Features:
+
 - Conversion between classical optimization problems and Ising models.
+
 - Abstract methods for generating cost Hamiltonians and decoding results.
+
 - Integration with QuantumSDKTranspiler for SDK-specific result handling.
 
 Usage:
+
 Developers implementing specific quantum conversion strategies should subclass
 QuantumConverter and implement the abstract methods. The class is designed to work
 with jijmodeling for problem representation and various quantum SDKs through
@@ -32,19 +36,17 @@ Example:
 import abc
 import typing as typ
 
-import numpy as np
 import jijmodeling as jm
 import jijmodeling_transpiler.core as jmt
+import numpy as np
 import qamomile.core.bitssample as qm_bs
 import qamomile.core.operator as qm_o
-from qamomile.core.ising_qubo import IsingModel, qubo_to_ising
-from qamomile.core.transpiler import QuantumSDKTranspiler
-
 # Import necessary functions from jijmodeling_transpiler
 from jijmodeling_transpiler.core.decode import dict_to_record
-from jijmodeling_transpiler.core.pubo.binary_decode import binary_decode
 from jijmodeling_transpiler.core.decode.evaluate import calc_expr, subs_expr
-
+from jijmodeling_transpiler.core.pubo.binary_decode import binary_decode
+from qamomile.core.ising_qubo import IsingModel, qubo_to_ising
+from qamomile.core.transpiler import QuantumSDKTranspiler
 
 ResultType = typ.TypeVar("ResultType")
 
@@ -75,10 +77,12 @@ class QuantumConverter(abc.ABC):
         compiled_instance,
         relax_method: jmt.pubo.RelaxationMethod = jmt.pubo.RelaxationMethod.AugmentedLagrangian,
         normalize_model: bool = False,
-        normalize_ising: typ.Optional[str] = None,
+        normalize_ising: typ.Optional[typ.Literal["abs_max", "rms"]] = None,
     ):
         """
         Initialize the QuantumConverter.
+
+        This method initializes the converter with the compiled instance of the optimization problem
 
         Args:
             compiled_instance: The compiled instance of the optimization problem.
@@ -86,7 +90,12 @@ class QuantumConverter(abc.ABC):
                 Defaults to AugmentedLagrangian.
             normalize_model (bool): The objective function and the constraints are normalized using the maximum absolute value of the coefficients contained in each.
                 Defaults to False
-            normalize_ising (Optional[str]): The normalization method for the Ising Hamiltonian.
+            normalize_ising (Literal["abs_max", "rms"] | None): The normalization method for the Ising Hamiltonian. 
+                Available options:
+                - "abs_max": Normalize by absolute maximum value
+                - "rms": Normalize by root mean square
+                Defaults to None.
+
         """
         pubo_builder = jmt.pubo.transpile_to_pubo(
             compiled_instance, relax_method=relax_method, normalize=normalize_model
@@ -99,12 +108,14 @@ class QuantumConverter(abc.ABC):
 
         self._ising: typ.Optional[IsingModel] = None
 
+
     def get_ising(self) -> IsingModel:
         """
         Get the Ising model representation of the problem.
 
         Returns:
             IsingModel: The Ising model representation.
+
         """
         if self._ising is None:
             self._ising = self.ising_encode()
@@ -130,6 +141,7 @@ class QuantumConverter(abc.ABC):
 
         Returns:
             IsingModel: The encoded Ising model.
+
         """
         qubo, constant = self.pubo_builder.get_qubo_dict(
             multipliers=multipliers, detail_parameters=detail_parameters
