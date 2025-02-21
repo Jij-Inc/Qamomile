@@ -10,36 +10,36 @@ parts:
 
   - caption: Basic Usage of the Library
     chapters:
-    - file: tutorial/index_usage
+    - file: tutorial/usage/index_usage
       sections:
-        - file: tutorial/building_quantum_circuits
-        - file: tutorial/algebraic_operator
-        - file: tutorial/Using_the_QiskitTranspiler_in_Qamomile
-        - file: tutorial/Using_the_QuriPartsTranspiler_in_Qamomile
-        - file: tutorial/Using_the_PennyLaneTranspiler_in_Qamomile
-        - file: tutorial/quantum_annealing
+        - file: tutorial/usage/building_quantum_circuits
+        - file: tutorial/usage/algebraic_operator
+        - file: tutorial/usage/Using_the_QiskitTranspiler_in_Qamomile
+        - file: tutorial/usage/Using_the_QuriPartsTranspiler_in_Qamomile
+        - file: tutorial/usage/Using_the_PennyLaneTranspiler_in_Qamomile
+        - file: tutorial/usage/quantum_annealing
 
   - caption: Solving Problems with QAOA
     chapters:
-    - file: tutorial/index_qaoa
+    - file: tutorial/qaoa/index_qaoa
       sections:
-      - file: tutorial/maxcut
-      - file: tutorial/graph_partition
-      - file: tutorial/vertex_cover
-      - file: tutorial/multi_car_paint
+      - file: tutorial/qaoa/maxcut
+      - file: tutorial/qaoa/graph_partition
+      - file: tutorial/qaoa/vertex_cover
+      - file: tutorial/qaoa/multi_car_paint
 
   - caption: Advanced techniques for Quantum Optimization
     chapters:
-    - file: tutorial/index_advance
+    - file: tutorial/qaoa/index_advance
       sections:
-        - file: tutorial/alternating_ansatz_graph_coloring
-        - file: tutorial/qrao_tutorial
+        - file: tutorial/qaoa/alternating_ansatz_graph_coloring
+        - file: tutorial/qaoa/qrao_tutorial
 
   - caption: Quantum Chemistry
     chapters:
-    - file: tutorial/index_chemistry
+    - file: tutorial/chemistry/index_chemistry
       sections:
-        - file: tutorial/vqe_for_hydrogen
+        - file: tutorial/chemistry/vqe_for_hydrogen
     
 
   - caption: API Reference
