@@ -1,6 +1,8 @@
 import dataclasses
 import typing as typ
 
+import numpy as np
+
 
 @dataclasses.dataclass
 class IsingModel:
@@ -36,6 +38,84 @@ class IsingModel:
         if self.index_map is None:
             return index
         return self.index_map[index]
+
+    def normalize_by_abs_max(self):
+        r"""Normalize coefficients by the absolute maximum value.
+
+        The coefficients for normalized is defined as:
+
+        .. math::
+            W = \max(|J_{ij}|, |h_i|)
+
+        We normalize the Ising Hamiltonian as
+        
+        .. math::
+            \tilde{H} = \frac{1}{W}\sum_{ij}J_{ij}Z_iZ_j + \frac{1}{W}\sum_ih_iZ_i + \frac{1}{W}C
+
+        """
+
+        if not self.linear and not self.quad:
+            return  # 係数が存在しない場合は正規化しない
+
+        max_coeff = max(
+            max((abs(value) for value in self.linear.values()), default=0),
+            max((abs(value) for value in self.quad.values()), default=0),
+        )
+
+        if max_coeff == 0:
+            return  # すべての係数が0の場合は正規化しない
+
+        self.constant /= max_coeff
+        for key in self.linear:
+            self.linear[key] /= max_coeff
+        for key in self.quad:
+            self.quad[key] /= max_coeff
+
+    def normalize_by_rms(self):
+        r"""Normalize coefficients by the root mean square.
+
+        The coefficients for normalized is defined as:
+
+        .. math::
+            W = \sqrt{ \frac{1}{E_2}\sum(w_ij^2) + \frac{1}{E_1}\sum(w_i^2) }
+
+        where w_ij are quadratic coefficients and w_i are linear coefficients.
+        E_2 and E_1 are the number of quadratic and linear terms respectively.
+        We normalize the Ising Hamiltonian as
+
+        .. math::
+            \tilde{H} = \frac{1}{W}\sum_{ij}J_{ij}Z_iZ_j + \frac{1}{W}\sum_ih_iZ_i + \frac{1}{W}C
+        This method is proposed in :cite:`Sureshbabu2024parametersettingin`
+
+        .. bibliography::
+            :filter: docname in docnames
+
+        """
+        if not self.linear and not self.quad:
+            return  # 係数が存在しない場合は正規化しない
+
+        # numpyのarrayに変換して二乗和を計算
+        quad_coeffs = np.array(list(self.quad.values()))
+        linear_coeffs = np.array(list(self.linear.values()))
+
+        E2 = len(self.quad)
+        E1 = len(self.linear)
+
+        # np.sum(quad_coeffs ** 2)はnp.dot(quad_coeffs, quad_coeffs)より効率的
+        quad_variance = np.sum(quad_coeffs**2) / E2 if E2 > 0 else 0
+        linear_variance = np.sum(linear_coeffs**2) / E1 if E1 > 0 else 0
+
+        normalization_factor = np.sqrt(quad_variance + linear_variance)
+
+        if normalization_factor == 0:
+            return  # すべての係数が0の場合は正規化しない
+
+        # 正規化
+        self.constant /= normalization_factor
+        for key in self.linear:
+            self.linear[key] /= normalization_factor
+        for key in self.quad:
+            self.quad[key] /= normalization_factor
 
 
 def calc_qubo_energy(qubo: dict[tuple[int, int], float], state: list[int]) -> float:
