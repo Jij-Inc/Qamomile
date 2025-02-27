@@ -8,7 +8,7 @@ logo: qamomile_logo.png
 # Force re-execution of notebooks on each build.
 # See https://jupyterbook.org/content/execute.html
 execute:
-  execute_notebooks: force
+  execute_notebooks: "off"
 
 parse:
   myst_enable_extensions:
@@ -57,6 +57,7 @@ sphinx:
         - show-module-summary
         - imported-members
         - no-index
+      autoapi_python_class_content: 'both'
       language: en
       html_search_language: en
       suppress_warnings: ["etoc.toctree"]

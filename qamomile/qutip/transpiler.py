@@ -62,6 +62,8 @@ class QuTiPTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
                             "Only Pauli X, Y, and Z are supported"
                         )
             H += coeff * tensor(op_list)
+        if operator.constant != 0:
+            H += operator.constant * qeye(2 ** n)
         return Qobj(H)
 
     def transpile_circuit(self) -> None:

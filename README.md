@@ -26,9 +26,10 @@ pip install qamomile
 For optional dependencies:
 
 ```bash
-pip install qamomile[qiskit]  # For Qiskit integration
-pip install qamomile[quri-parts]  # For QuriParts integration
-pip install qamomile[qutip]  # For QuTiP integration
+pip install "qamomile[qiskit]"  # For Qiskit integration
+pip install "qamomile[quri-parts]"  # For QuriParts integration
+pip install "qamomile[pennylane]"  # For QuriParts integration
+pip install "qamomile[qutip]"  # For QuTiP integration
 ```
 
 ## Quick Start

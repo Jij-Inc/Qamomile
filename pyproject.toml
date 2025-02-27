@@ -19,13 +19,14 @@ packages = [
 [tool.poetry.dependencies]
 python = ">=3.10,<3.12"
 jijmodeling-transpiler = ">=0.6.0rc3"
-quri-parts-qulacs = {version = "*", extras = ["quri-parts"]}
+quri-parts-qulacs = {version = "^0.19.0", extras = ["quri-parts"]}
 black = "^24.3.0"
+quri-parts-core = "^0.19.0"
 quri-parts-circuit = "^0.19.0"
 qiskit = "^1.1.1"
 matplotlib = "^3.9.2"
 qutip = "^5.0.4"
-
+pennylane = "^0.39.0"
 
 [tool.poetry.group.dev.dependencies]
 jupyter = "^1.0.0"
@@ -45,6 +46,7 @@ matplotlib = "^3.9.2"
 qiskit = ["qiskit"]
 quri-parts = ["quri-parts-qulacs"]
 qutip = ["qutip"]
+pennylane = ["pennylane"]
 
 [tool.pytest.ini_options]
 addopts = "--doctest-modules"
@@ -58,3 +60,4 @@ mkdocs-literate-nav = "^0.6.0"
 mkdocstrings = {version = ">=0.19", extras = ["python"]}
 mkdocs-jupyter = "^0.24.7"
 mkdocs-mermaid2-plugin = "^1.1.1"
+qiskit-aer = "^0.16.0"
