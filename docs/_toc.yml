@@ -30,10 +30,10 @@ parts:
 
   - caption: Advanced techniques for Quantum Optimization
     chapters:
-    - file: tutorial/qaoa/index_advance
+    - file: tutorial/opt_advance/index_advance
       sections:
-        - file: tutorial/qaoa/alternating_ansatz_graph_coloring
-        - file: tutorial/qaoa/qrao_tutorial
+        - file: tutorial/opt_advance/alternating_ansatz_graph_coloring
+        - file: tutorial/opt_advance/qrao_tutorial
 
   - caption: Quantum Chemistry
     chapters:
