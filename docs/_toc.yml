@@ -28,12 +28,13 @@ parts:
       - file: tutorial/qaoa/vertex_cover
       - file: tutorial/qaoa/multi_car_paint
       - file: tutorial/qaoa/Travelling_Salesman_Problem
+      - file: tutorial/qaoa/graph_coloring
 
   - caption: Advanced techniques for Quantum Optimization
     chapters:
     - file: tutorial/opt_advance/index_advance
       sections:
-        - file: tutorial/opt_advance/alternating_ansatz_graph_coloring
+        - file: tutorial/opt_advance/graph_coloring_alternating_ansatz
         - file: tutorial/opt_advance/qrao_tutorial
 
   - caption: Quantum Chemistry
