@@ -27,6 +27,7 @@ parts:
       - file: tutorial/qaoa/graph_partition
       - file: tutorial/qaoa/vertex_cover
       - file: tutorial/qaoa/multi_car_paint
+      - file: tutorial/qaoa/Travelling_Salesman_Problem
 
   - caption: Advanced techniques for Quantum Optimization
     chapters:

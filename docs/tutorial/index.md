@@ -25,6 +25,7 @@ Welcome to the Qamomile tutorial! This guide will help you get started with Qamo
 - [Quantum Approximate Optimization Algorithm for Max-Cut](maxcut.ipynb): Learn how to run the Quantum Quantum Approximate Optimization Algorithm for Max-Cut problem.
 - [Quantum Approximate Optimization Algorithm for Multi-car Paint Shop Problem](multi_car_paint.ipynb): Learn how to run the Quantum Approximate Optimization Algorithm for multi-car paint shop problem.
 - [Quantum Random Access Optimization (QRAO) for Maxcut problem](qrao_tutorial.ipynb): Learn how to use Quantum Random Access Optimization.
+- [Quantum Approximate Optimization Algorithm for Travelling Salesman Problem](qaoa/Travelling_Salesman_Problem.ipynb): Learn how to run the Quantum Approximate Optimization Algorithm for Travelling Salesman Problem.
 - [Quantum Annealing using QuTiP](quantum_annealing.ipynb): Learn how to run the Quantum Annealing with QuTiP's built-in functions.
 - [Using the PennyLaneTranspiler in Qamomile](Using_the_PennyLaneTranspiler_in_Qamomile.ipynb): Learn how to transpile from Qamomile to PennyLane.
 
