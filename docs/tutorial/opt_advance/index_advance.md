@@ -2,5 +2,5 @@
 
 ## Tutorials
 
-- [Quantum Alternating Ansatz for Graph Coloring](alternating_ansatz_graph_coloring.ipynb): Learn how to run the Quantum Alternating Ansatz for graph coloring problem.
+- [Quantum Alternating Operator Ansatz for Graph Coloring](graph_coloring_alternating_ansatz.ipynb): Learn how to run the Quantum Alternating Operator Ansatz for graph coloring problem.
 - [Quantum Random Access Optimization (QRAO) for Maxcut problem](qrao_tutorial.ipynb): Learn how to use Quantum Random Access Optimization.
