@@ -14,7 +14,7 @@ class EfficientSU2Ansatz(Ansatz):
     def __init__(
         self,
         num_qubits: int,
-        rotation_types: Optional[list[str]]  = None,
+        rotation_types: Optional[list[str]] = None,
         entanglement: str = "linear",
         skip_final_rotation_layer: bool = False,
         reps: int = 1,
@@ -46,7 +46,9 @@ class EfficientSU2Ansatz(Ansatz):
         for _ in range(self.reps):
             for rotation_type in self.rotation_types:
                 rotation_layer = RotationLayer(
-                    self.num_qubits, rotation_type, parameter_context=self.parameter_context
+                    self.num_qubits,
+                    rotation_type,
+                    parameter_context=self.parameter_context,
                 ).get_circuit()
                 circuit.append(rotation_layer)
 
@@ -55,11 +57,14 @@ class EfficientSU2Ansatz(Ansatz):
         if not self.skip_final_rotation_layer:
             for rotation_type in self.rotation_types:
                 rotation_layer = RotationLayer(
-                    self.num_qubits, rotation_type, parameter_context=self.parameter_context
+                    self.num_qubits,
+                    rotation_type,
+                    parameter_context=self.parameter_context,
                 ).get_circuit()
                 circuit.append(rotation_layer)
 
         return circuit
+
 
 def create_efficient_su2(
     num_qubits: int,
@@ -69,24 +74,28 @@ def create_efficient_su2(
     skip_final_rotation_layer: bool = False,
 ) -> EfficientSU2Ansatz:
     """
-    EfficientSU2Ansatzを簡単に作成するためのファクトリー関数。
+    Factory function for creating an Efficient SU2 ansatz.
 
     Args:
-        num_qubits: 量子ビット数
-        rotation_types: 回転演算子のリスト
-        entanglement: エンタングルメントの種類
-        reps: 繰り返し回数
+        num_qubits (int): The number of qubits in the circuit.
+        rotation_types (list[str] | None): A list of rotation gates to apply in each rotation layer.
+            If None, defaults to ["ry", "rz"].
+        entanglement (str): The type of entanglement to apply. Options are 'linear', 'full',
+            'circular', or 'reverse_linear'.
+        skip_final_rotation_layer (bool): If True, skips the final rotation layer.
+        reps (int): The number of repetitions of the rotation-entanglement block.
 
     Returns:
-        EfficientSU2Ansatz: 作成されたAnsatzインスタンス
+        EfficientSU2Ansatz: The constructed Efficient SU2 ansatz.
     """
     return EfficientSU2Ansatz(
         num_qubits=num_qubits,
         rotation_types=rotation_types,
         entanglement=entanglement,
         reps=reps,
-        skip_final_rotation_layer=skip_final_rotation_layer
+        skip_final_rotation_layer=skip_final_rotation_layer,
     )
+
 
 # def create_efficient_su2_circuit(
 #     num_qubits: int,

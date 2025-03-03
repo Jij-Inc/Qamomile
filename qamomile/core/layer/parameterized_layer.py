@@ -2,6 +2,7 @@ from abc import abstractmethod
 from typing import Optional
 
 import qamomile.core.circuit as qm_c
+import qamomile.core.operator as qm_o
 
 from .layer import Layer
 from .parameter_context import ParameterContext
@@ -113,7 +114,12 @@ class RotationLayer(ParameterizedLayer):
         self.rotation_type = rotation_type
         self.num_qubits = num_qubits
 
-        super().__init__(num_params=num_qubits, params= params, symbol= symbol, parameter_context= parameter_context)
+        super().__init__(
+            num_params=num_qubits,
+            params=params,
+            symbol=symbol,
+            parameter_context=parameter_context,
+        )
 
     def get_circuit(self) -> qm_c.QuantumCircuit:
         circuit = qm_c.QuantumCircuit(
@@ -126,5 +132,81 @@ class RotationLayer(ParameterizedLayer):
 
         for i in range(self.num_qubits):
             apply_rotation(self.params[i], i)
+
+        return circuit
+
+
+class CostLayer(ParameterizedLayer):
+    """
+    CostMixerLayer class applies a cost mixer layer to a quantum circuit.
+
+    Attributes:
+        num_qubits (int): Number of qubits in the layer.
+        params (list, optional): Parameters for the cost mixer. Defaults to None.
+        symbol (str, optional): Symbol representing the parameters. Defaults to "θ".
+        layer_id (int, optional): Identifier for the layer. Defaults to None.
+
+    """
+
+    def __init__(
+        self,
+        hamiltonian: qm_o.Hamiltonian,
+        symbol="γ",
+        parameter_context: Optional[ParameterContext] = None,
+    ):
+        self.num_qubits = hamiltonian.num_qubits
+        self.hamiltonian = hamiltonian
+
+        super().__init__(
+            num_params=1,
+            symbol=symbol,
+            parameter_context=parameter_context,
+        )
+
+    def get_circuit(self) -> qm_c.QuantumCircuit:
+        circuit = qm_c.QuantumCircuit(self.num_qubits, 0, name="CostMixerLayer")
+
+        circuit.exp_evolution(self.params[0], self.hamiltonian)
+
+        return circuit
+
+
+class MixerLayer(ParameterizedLayer):
+    """A layer that applies a mixer operation to a quantum circuit."""
+
+    SUPPORTED_MIXER_TYPES = ["x", "y", "z"]
+
+    def __init__(
+        self,
+        num_qubits,
+        symbol="β",
+        parameter_context: Optional[ParameterContext] = None,
+        mixer_type="x",
+    ):
+        if mixer_type not in self.SUPPORTED_MIXER_TYPES:
+            raise ValueError(
+                f"Unsupported mixer type: {mixer_type}. Supported types: {self.SUPPORTED_MIXER_TYPES}"
+            )
+
+        self.num_qubits = num_qubits
+        self.mixer_type = mixer_type
+
+        super().__init__(
+            num_params=1, symbol=symbol, parameter_context=parameter_context
+        )
+
+    def get_circuit(self) -> qm_c.QuantumCircuit:
+        """Apply the mixer layer to the given quantum circuit.
+
+        Args:
+            circuit (QuantumCircuit): The quantum circuit to which the layer will be applied.
+        """
+        circuit = qm_c.QuantumCircuit(self.num_qubits, 0, name="MixerLayer")
+
+        rotation_methods = {"x": circuit.rx, "y": circuit.ry, "z": circuit.rz}
+        apply_rotation = rotation_methods[self.mixer_type]
+
+        for i in range(self.num_qubits):
+            apply_rotation(self.params[0], i)
 
         return circuit

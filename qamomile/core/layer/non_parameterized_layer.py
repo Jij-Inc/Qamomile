@@ -43,3 +43,23 @@ class EntanglementLayer(Layer):
                 circuit.cnot(i, i - 1)
 
         return circuit
+
+
+class SuperpositionLayer(Layer):
+    """A layer that applies a superposition operation to a quantum circuit."""
+
+    def __init__(self, num_qubits):
+        self.num_qubits = num_qubits
+
+    def get_circuit(self) -> qm_c.QuantumCircuit:
+        """Apply the superposition layer to the given quantum circuit.
+
+        Args:
+            circuit (QuantumCircuit): The quantum circuit to which the layer will be applied.
+        """
+        circuit = qm_c.QuantumCircuit(self.num_qubits, 0, name="SuperpositionLayer")
+
+        for i in range(self.num_qubits):
+            circuit.h(i)
+
+        return circuit

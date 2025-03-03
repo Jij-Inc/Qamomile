@@ -24,7 +24,9 @@ class CustomAnsatz(Ansatz):
 
         for _ in range(self.reps):
             for layer in self.layers:
-                if self.use_common_parameter_context and isinstance(layer, ParameterizedLayer):
+                if self.use_common_parameter_context and isinstance(
+                    layer, ParameterizedLayer
+                ):
                     layer.set_parameter_context(self.parameter_context, regenerate=True)
                 layer_circuit = layer.get_circuit()
                 circuit.append(layer_circuit)
