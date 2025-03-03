@@ -11,15 +11,6 @@ from qamomile.core.layer.parameterized_layer import (CostLayer, MixerLayer,
 from qamomile.core.operator import Hamiltonian
 
 
-class MockParameterContext(ParameterContext):
-    def __init__(self):
-        self.counter = 0
-
-    def get_next_parameter(self, symbol):
-        param = Parameter(f"{symbol}_{self.counter}")
-        self.counter += 1
-        return param
-
 def test_rotation_layer_initialization():
     num_qubits = 3
     rotation_type = "rx"
@@ -105,23 +96,23 @@ def test_parameterized_layer_with_invalid_params():
 
 def test_parameterized_layer_with_parameter_context():
     num_params = 3
-    context = MockParameterContext()
+    context = ParameterContext()
     layer = RotationLayer(num_qubits=num_params, rotation_type="rx", parameter_context=context, symbol="alpha")
     print(layer.params)
     assert len(layer.params) == num_params
     assert all(isinstance(param, Parameter) for param in layer.params)
-    assert layer.params[0].name == "alpha_0"
-    assert layer.params[1].name == "alpha_1"
-    assert layer.params[2].name == "alpha_2"
+    assert layer.params[0].name == "alpha_{0}"
+    assert layer.params[1].name == "alpha_{1}"
+    assert layer.params[2].name == "alpha_{2}"
 
 def test_set_parameter_context():
     num_params = 3
-    context = MockParameterContext()
+    context = ParameterContext()
     layer = RotationLayer(num_qubits=num_params, rotation_type="rx", symbol="alpha")
     layer.set_parameter_context(context, regenerate=True)
 
     assert len(layer.params) == num_params
     assert all(isinstance(param, Parameter) for param in layer.params)
-    assert layer.params[0].name == "alpha_0"
-    assert layer.params[1].name == "alpha_1"
-    assert layer.params[2].name == "alpha_2"
+    assert layer.params[0].name == "alpha_{0}"
+    assert layer.params[1].name == "alpha_{1}"
+    assert layer.params[2].name == "alpha_{2}"

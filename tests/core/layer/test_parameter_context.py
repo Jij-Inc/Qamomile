@@ -4,12 +4,6 @@ import qamomile.core.circuit as qm_c
 from qamomile.core.layer.parameter_context import ParameterContext
 
 
-class MockParameter:
-    def __init__(self, name):
-        self.name = name
-
-qm_c.Parameter = MockParameter
-
 def test_initial_counter():
     context = ParameterContext()
     assert context.counter == 0
