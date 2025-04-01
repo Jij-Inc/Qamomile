@@ -7,6 +7,8 @@ Qamomile is a powerful SDK designed for quantum optimization algorithms, special
 
 Documentation: [https://jij-inc.github.io/Qamomile/](https://jij-inc.github.io/Qamomile/)
 
+LP: [https://jij-inc.github.io/Qamomile/landing.html](https://jij-inc.github.io/Qamomile/landing.html)
+
 ## Features
 
 - **Versatile Compatibility**: Supports leading quantum circuit SDKs including Qiskit and QuriParts.
