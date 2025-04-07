@@ -34,9 +34,11 @@ Example:
 """
 
 import abc
+import enum
 import typing as typ
 
 import jijmodeling as jm
+import ommx.v1
 import jijmodeling_transpiler.core as jmt
 import numpy as np
 import qamomile.core.bitssample as qm_bs
@@ -49,6 +51,21 @@ from qamomile.core.ising_qubo import IsingModel, qubo_to_ising
 from qamomile.core.transpiler import QuantumSDKTranspiler
 
 ResultType = typ.TypeVar("ResultType")
+
+
+class RelaxationMethod(enum.Enum):
+    """
+    Enumeration for relaxation methods used in quantum problem conversion.
+
+    Attributes:
+        AugmentedLagrangian: Augmented Lagrangian method for PUBO conversion.
+        Penalty: Penalty method for PUBO conversion.
+        None: No relaxation method applied.
+    """
+    AugmentedLagrangian = "AugmentedLagrangian"
+    SquaredPenalty = "SquaredPenalty"
+
+
 
 
 class QuantumConverter(abc.ABC):
@@ -74,8 +91,8 @@ class QuantumConverter(abc.ABC):
 
     def __init__(
         self,
-        compiled_instance,
-        relax_method: jmt.pubo.RelaxationMethod = jmt.pubo.RelaxationMethod.AugmentedLagrangian,
+        instance: ommx.v1.Instance,
+        relax_method: RelaxationMethod = RelaxationMethod.SquaredPenalty,
         normalize_model: bool = False,
         normalize_ising: typ.Optional[typ.Literal["abs_max", "rms"]] = None,
     ):
@@ -85,8 +102,8 @@ class QuantumConverter(abc.ABC):
         This method initializes the converter with the compiled instance of the optimization problem
 
         Args:
-            compiled_instance: The compiled instance of the optimization problem.
-            relax_method (jmt.pubo.RelaxationMethod): The relaxation method for PUBO conversion.
+            compiled_instance: ommx.v1.Instance.
+            relax_method (RelaxationMethod): The relaxation method for PUBO conversion.
                 Defaults to AugmentedLagrangian.
             normalize_model (bool): The objective function and the constraints are normalized using the maximum absolute value of the coefficients contained in each.
                 Defaults to False
@@ -97,16 +114,29 @@ class QuantumConverter(abc.ABC):
                 Defaults to None.
 
         """
-        pubo_builder = jmt.pubo.transpile_to_pubo(
-            compiled_instance, relax_method=relax_method, normalize=normalize_model
-        )
 
-        self.compiled_instance = compiled_instance
-        self.pubo_builder = pubo_builder
+        self.original_instance = instance
+        self.parametric_qubo_instance: typ.Optional[ommx.v1.ParametricInstance] = None
+        
         self.int2varlabel: dict[int, str] = {}
         self.normalize_ising = normalize_ising
 
         self._ising: typ.Optional[IsingModel] = None
+
+
+    def instance_to_qubo(self) -> tuple[dict[tuple[int, int], float], float]:
+        """
+        Convert the instance to QUBO format.
+
+        This method converts the optimization problem instance into a QUBO (Quadratic Unconstrained Binary Optimization)
+        representation, which is suitable for quantum computation.
+
+        Returns:
+            tuple[dict[int, float], float]: A tuple containing the QUBO dictionary and the constant term.
+
+        """
+        qubo, constant = self.original_instance.to_qubo()
+        return qubo, constant
 
 
     def get_ising(self) -> IsingModel:
@@ -143,9 +173,8 @@ class QuantumConverter(abc.ABC):
             IsingModel: The encoded Ising model.
 
         """
-        qubo, constant = self.pubo_builder.get_qubo_dict(
-            multipliers=multipliers, detail_parameters=detail_parameters
-        )
+
+        qubo, constant = self.instance_to_qubo()
         ising = qubo_to_ising(qubo, simplify=False)
         ising.constant += constant
 
@@ -248,7 +277,7 @@ class QuantumConverter(abc.ABC):
 def decode_from_dict_binary_result(
     samples: typ.Iterable[dict[int, int | float]],
     binary_encoder,
-    compiled_model: jmt.CompiledInstance,
+    instance: ommx.v1.Instance
 ) -> jm.SampleSet:
     """
     Decode binary results into a SampleSet.
