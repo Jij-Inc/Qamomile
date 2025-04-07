@@ -5,6 +5,7 @@ This module implements algorithms for mapping various optimization problems (lik
 to unit disk grid graphs, which can be naturally encoded in neutral-atom quantum computers.
 """
 
+
 from .dragondrop import (
     map_qubo,
     map_simple_wmis,
@@ -12,11 +13,12 @@ from .dragondrop import (
     solve_mwis_scipy,
     qubo_result_to_networkx,
     QUBOResult,
-    WMISResult
+    WMISResult,
+    Ising_UnitDiskGraph
 )
 
 __all__ = [
-    "map_qubo", "map_simple_wmis", "solve_qubo",
+    "Ising_UnitDiskGraph", "map_qubo", "map_simple_wmis", "solve_qubo",
     "solve_mwis_scipy", "qubo_result_to_networkx",
     "QUBOResult", "WMISResult",
 ]

@@ -4,7 +4,8 @@ Simple test script to verify UDM integration.
 
 import sys
 import numpy as np
-from qamomile.core.ising_qubo import IsingModel, UnitDiskGraph
+from qamomile.core.ising_qubo import IsingModel
+from qamomile.udm import Ising_UnitDiskGraph
 
 def test_udm_integration():
     """Test the UDM integration by creating and solving a simple Ising problem."""
@@ -26,7 +27,7 @@ def test_udm_integration():
     print("Created Ising model successfully")
     
     # Create UnitDiskGraph
-    udg = ising.to_unit_disk_graph()
+    udg = Ising_UnitDiskGraph(ising)
     print("Created UnitDiskGraph successfully")
     
     # Check if key structures are available
@@ -46,6 +47,18 @@ def test_udm_integration():
     assert isinstance(result["original_config"], list)
     assert "solution_method" in result
     assert isinstance(result["solution_method"], str)
+
+    print("\nTest Brute Force Result")
+    bf_energy = result['brute_force_result']['min_energy']
+    bf_config = result['brute_force_result']['best_config']
+    assert bf_config == [-1, 1, -1]
+    assert np.isclose(bf_energy, -5.20, atol=1e-5)
+
+    print("\nTest MWIS Result")
+    mwis_energy = result['energy']
+    mwis_config = result['original_config']
+    assert mwis_config == [-1., 1., -1.]
+    assert np.isclose(mwis_energy, -5.20, atol=1e-5)
     
 
 if __name__ == "__main__":

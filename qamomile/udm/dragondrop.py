@@ -8,9 +8,15 @@ on unit disk graphs.
 
 import numpy as np
 import networkx as nx
-from typing import List, Tuple, Dict, Optional, Any, Union
+import dataclasses
+import typing as typ
 
 from .core import SimpleCell, Node, GridGraph, WeightedNode
+
+# import from qamomile.core
+from qamomile.core.ising_qubo import IsingModel
+from qamomile.core.post_process.local_search import IsingMatrix
+
 
 
 def glue(grid, DI: int, DJ: int):
@@ -956,6 +962,99 @@ def vglue(mats, i):
 def hglue(mats, j):
     """Glue matrices horizontally."""
     return glue(np.array(mats).reshape(1, -1), 0, j)
+
+@dataclasses.dataclass
+class Ising_UnitDiskGraph:
+    """
+    A representation of an Ising model as a unit disk graph suitable for neutral atom quantum computers.
+    
+    This class wraps the UDM module to map QUBO/Ising problems to unit disk graphs.
+    """
+    ising_model: IsingModel
+    _ising_matrix: IsingMatrix = None
+    _qubo_result: typ.Optional[QUBOResult] = None
+    _networkx_graph: typ.Optional[object] = None
+    _delta: typ.Optional[float] = None
+    
+    def __post_init__(self):
+        """Initialize the unit disk graph mapping after construction."""
+        self._create_mapping()
+    
+    def _create_mapping(self):
+        """Create the unit disk graph mapping from the Ising model."""
+        # Convert the Ising model to IsingMatrix
+        self._ising_matrix = IsingMatrix().to_ising_matrix(self.ising_model)
+        
+        # Initialize J matrix and h vector
+        J = self._ising_matrix.quad
+        h = self._ising_matrix.linear
+        
+        # Calculate delta parameter for weight scaling
+        self._delta = 1.5 * max(np.max(np.abs(h)), np.max(np.abs(J)))
+        
+        # Map the QUBO problem to a unit disk graph
+        self._qubo_result = map_qubo(J, h, self._delta)
+        
+        # Convert to a NetworkX graph for visualization and analysis
+        self._networkx_graph = qubo_result_to_networkx(self._qubo_result)
+    
+    def solve(self, use_brute_force: bool = False, binary_variables: bool = False) -> dict:
+        """
+        Solve the Ising model using the unit disk graph mapping.
+        
+        Args:
+            use_brute_force: Whether to use brute force enumeration for small problems
+            binary_variables: Whether to use {0,1} variables (True) or {-1,1} variables (False)
+            
+        Returns:
+            Dictionary containing solution information including:
+            - original_config: Configuration for the original Ising variables
+            - energy: Energy of the solution
+            - solution_method: Method used to find the solution ("brute_force" or "mwis")
+        """
+        
+        # Initialize J matrix and h vector
+        J = self._ising_matrix.quad
+        h = self._ising_matrix.linear
+        
+        # Solve the QUBO problem
+        result = solve_qubo(
+            J, h, 
+            binary_variables=binary_variables,
+            use_brute_force=use_brute_force,
+            max_brute_force_size=20  # Adjust this value based on performance needs
+        )
+        
+        return result
+    
+    @property
+    def qubo_result(self) -> QUBOResult:
+        """Get the QUBOResult object from the UDM module."""
+        return self._qubo_result
+    
+    @property
+    def networkx_graph(self) -> object:
+        """Get the NetworkX graph representation."""
+        return self._networkx_graph
+    
+    @property
+    def pins(self) -> list:
+        """Get the list of pins (indices of nodes corresponding to original variables)."""
+        if self._qubo_result:
+            return self._qubo_result.pins
+        return []
+    
+    @property
+    def nodes(self) -> list:
+        """Get the list of nodes in the unit disk graph."""
+        if self._qubo_result and hasattr(self._qubo_result.grid_graph, 'nodes'):
+            return self._qubo_result.grid_graph.nodes
+        return []
+    
+    @property
+    def delta(self) -> float:
+        """Get the delta parameter used for scaling the weights."""
+        return self._delta
 
 
 
