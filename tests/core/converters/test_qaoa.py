@@ -3,7 +3,7 @@
 import pytest
 import numpy as np
 import jijmodeling as jm
-import jijmodeling_transpiler.core as jmt
+import ommx.v1
 from qamomile.core.converters.qaoa import QAOAConverter
 import qamomile.core.circuit as qm_c
 import qamomile.core.operator as qm_o
@@ -19,8 +19,8 @@ def simple_qubo_problem():
     i, j = jm.Element("i", n), jm.Element("j", n)
     problem += jm.sum([i, j], Q[i, j] * x[i] * x[j])
     instance_data = {"Q": [[0.1, 0.2], [0.2, 0.3]]}
-    compiled_instance = jmt.compile_model(problem, instance_data)
-    return compiled_instance
+    instance = jm.Interpreter(instance_data).eval_problem(problem)
+    return instance
 
 
 @pytest.fixture
@@ -68,9 +68,8 @@ def test_decode_bits_to_sampleset(qaoa_converter):
 
     sampleset = qaoa_converter.decode_bits_to_sampleset(bits_sample_set)
 
-    assert isinstance(sampleset, jm.experimental.SampleSet)
-    assert len(sampleset) == 2
-    assert [sample.num_occurrences for sample in sampleset] == [3, 1]
+    assert isinstance(sampleset, ommx.v1.SampleSet)
+    assert len(sampleset.sample_ids) == 4
 
 
 def test_qaoa_converter_with_larger_problem():
@@ -82,7 +81,7 @@ def test_qaoa_converter_with_larger_problem():
     i, j = jm.Element("i", n), jm.Element("j", n)
     problem += jm.sum([i, j], Q[i, j] * x[i] * x[j])
     instance_data = {"Q": np.random.rand(10, 10)}
-    compiled_instance = jmt.compile_model(problem, instance_data)
+    compiled_instance = jm.Interpreter(instance_data).eval_problem(problem)
 
     qaoa_converter = QAOAConverter(compiled_instance)
 

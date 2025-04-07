@@ -1,5 +1,5 @@
 import jijmodeling as jm
-import jijmodeling_transpiler.core as jmt
+import ommx.v1
 import qamomile.core.operator as qm_o
 
 
@@ -53,20 +53,20 @@ class HamiltonianBuilder:
         This method substitutes the Hamiltonian expression with the given instance data.
 
         """
-        el_map = {}
-        subs, el_map = jmt.substitute.convert_to_substitutable(
-            self.hamiltonian_expr.hamiltonian, el_map
-        )
-        var_map = jmt.VariableMap({}, var_num=0, integer_bound={}, continuous_bound={})
+        interpreter = jm.Interpreter(self.instance_data)
+        problem = jm.Problem("Hamiltonian")
+        problem += self.hamiltonian_expr.hamiltonian
+        subsituted_expr: ommx.v1.Instance = interpreter.eval_problem(problem)
 
-        ph_vars = subs.extract_type(jmt.substitute.substitutable_expr.Placeholder)
-        ph_names = [p.name for p in ph_vars]
-        instance_data = jmt.InstanceData(self.instance_data, {}, ph_names, indices={})
+        self._subsituted_expr: ommx.v1.Instance = subsituted_expr
 
-        subsituted_expr = subs.substitute(var_map, instance_data)
+        var_map = {}
+        for dc in subsituted_expr.raw.decision_variables:
+            if dc.name not in var_map:
+                var_map[dc.name] = {}
+            var_map[dc.name][tuple(dc.subscripts)] = dc.id
 
-        self._subsituted_expr = subsituted_expr
-        self._var_map = var_map
+        self._var_map: dict[str, dict[tuple[int, ...], int]] = var_map
 
     def _pauli_str_to_pauli_type(self, pauli_str: str) -> qm_o.Pauli:
         """Convert string Pauli name to Qamomile Pauli type.
@@ -97,7 +97,7 @@ class HamiltonianBuilder:
         """ 
         qubit_index_map = {}
         qubit_index = 0
-        for pauli_op, indices_map in self._var_map.var_map.items():
+        for pauli_op, indices_map in self._var_map.items():
             for indices, _ in indices_map.items():
                 if indices not in qubit_index_map.keys():
                     qubit_index_map[indices] = qubit_index
@@ -109,12 +109,12 @@ class HamiltonianBuilder:
         """Make mapper from the index to the Pauli operator."""
         reverse_var_map = {}
         self.make_qubit_index_mapper()
-        for pauli_op, indices_map in self._var_map.var_map.items():
+        for pauli_op, indices_map in self._var_map.items():
             pauli_type = self._pauli_str_to_pauli_type(pauli_op)
             for indices, var in indices_map.items():
                 qubit_index = self._qubit_index_map[indices]
                 reverse_var_map[var] = qm_o.PauliOperator(pauli_type, qubit_index)
-        self._reverse_var_map = reverse_var_map
+        self._reverse_var_map: dict[int, qm_o.PauliOperator] = reverse_var_map
 
     def make_hamiltonian_operator(self) -> qm_o.Hamiltonian:
         """Make Qamomile Hamiltonian operator.
@@ -123,10 +123,12 @@ class HamiltonianBuilder:
             qm_o.Hamiltonian: Qamomile Hamiltonian operator.
         """
         hamiltonian = qm_o.Hamiltonian()
-        hamiltonian.constant = self._subsituted_expr.constant
+        hamiltonian.constant = self._subsituted_expr.objective.raw.constant
+        hamiltonian.constant += self._subsituted_expr.objective.raw.linear.constant
 
-        for indices, coeff in self._subsituted_expr.coeff.items():
-            hamiltonian.add_term((self._reverse_var_map[i] for i in indices), coeff)
+        for indices, coeff in self._subsituted_expr.objective.terms.items():
+            operators = tuple([self._reverse_var_map[i] for i in indices])
+            hamiltonian.add_term(operators, coeff)
 
         return hamiltonian
 

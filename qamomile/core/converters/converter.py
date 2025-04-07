@@ -39,14 +39,9 @@ import typing as typ
 
 import jijmodeling as jm
 import ommx.v1
-import jijmodeling_transpiler.core as jmt
 import numpy as np
 import qamomile.core.bitssample as qm_bs
 import qamomile.core.operator as qm_o
-# Import necessary functions from jijmodeling_transpiler
-from jijmodeling_transpiler.core.decode import dict_to_record
-from jijmodeling_transpiler.core.decode.evaluate import calc_expr, subs_expr
-from jijmodeling_transpiler.core.pubo.binary_decode import binary_decode
 from qamomile.core.ising_qubo import IsingModel, qubo_to_ising
 from qamomile.core.transpiler import QuantumSDKTranspiler
 
@@ -64,8 +59,6 @@ class RelaxationMethod(enum.Enum):
     """
     AugmentedLagrangian = "AugmentedLagrangian"
     SquaredPenalty = "SquaredPenalty"
-
-
 
 
 class QuantumConverter(abc.ABC):
@@ -115,14 +108,12 @@ class QuantumConverter(abc.ABC):
 
         """
 
-        self.original_instance = instance
-        self.parametric_qubo_instance: typ.Optional[ommx.v1.ParametricInstance] = None
-        
+        self.original_instance: ommx.v1.Instance = instance
+
         self.int2varlabel: dict[int, str] = {}
         self.normalize_ising = normalize_ising
 
         self._ising: typ.Optional[IsingModel] = None
-
 
     def instance_to_qubo(self) -> tuple[dict[tuple[int, int], float], float]:
         """
@@ -137,7 +128,6 @@ class QuantumConverter(abc.ABC):
         """
         qubo, constant = self.original_instance.to_qubo()
         return qubo, constant
-
 
     def get_ising(self) -> IsingModel:
         """
@@ -175,6 +165,8 @@ class QuantumConverter(abc.ABC):
         """
 
         qubo, constant = self.instance_to_qubo()
+        # TODO: When simplify-True, we met some errors.
+        #       Need to be fixed.
         ising = qubo_to_ising(qubo, simplify=False)
         ising.constant += constant
 
@@ -188,12 +180,16 @@ class QuantumConverter(abc.ABC):
                     f"Invalid value for normalize_ising: {self.normalize_ising}"
                 )
 
-        var_map = self.compiled_instance.var_map.var_map
-        inv_varmap = {}
-        for var_label, var_indices in var_map.items():
-            for subs, index in var_indices.items():
-                inv_varmap[index] = var_label + "_{" + ",".join(map(str, subs)) + "}"
-        self.int2varlabel = inv_varmap
+        deci_vars = {dv.id: dv for dv in self.original_instance.raw.decision_variables}
+        if ising.index_map is not None:
+            for ising_index, qubo_index in ising.index_map.items():
+                deci_var = deci_vars[qubo_index]
+                # TODO: If use log encoding to represent an integer,
+                #       var_name is ommx.log_encode and subscripts represents [original variable index, encoded binary index].
+                #       Need to be fixed.
+                var_name = deci_var.name
+                subscripts = deci_var.subscripts
+                self.int2varlabel[ising_index]  = var_name + "_{" + ",".join(map(str, subscripts)) + "}"
 
         return ising
 
@@ -215,7 +211,7 @@ class QuantumConverter(abc.ABC):
 
     def decode(
         self, transpiler: QuantumSDKTranspiler[ResultType], result: ResultType
-    ) -> jm.experimental.SampleSet:
+    ) -> ommx.v1.SampleSet:
         """
         Decode quantum computation results into a SampleSet.
 
@@ -235,7 +231,7 @@ class QuantumConverter(abc.ABC):
 
     def decode_bits_to_sampleset(
         self, bitssampleset: qm_bs.BitsSampleSet
-    ) -> jm.experimental.SampleSet:
+    ) -> ommx.v1.SampleSet:
         """
         Decode a BitArraySet to a SampleSet.
 
@@ -246,125 +242,29 @@ class QuantumConverter(abc.ABC):
             bitarray_set (qm_c.BitArraySet): The set of bitstring results from quantum computation.
 
         Returns:
-            jm.experimental.SampleSet: The decoded results as a SampleSet.
+            ommx.v1.SampleSet: The decoded results as a SampleSet.
         """
         ising = self.get_ising()
-        num_occurrences = []
-        samples = []
 
-        # Convert bitstrings to samples
+        # Create ommx.v1.Samples
+        sample_id = 0
+        entries = []
         for bitssample in bitssampleset.bitarrays:
             sample = {}
             for i, bit in enumerate(bitssample.bits):
                 index = ising.ising2qubo_index(i)
                 sample[index] = bit
-            samples.append(sample)
-            num_occurrences.append(bitssample.num_occurrences)
+            state = ommx.v1.State(entries=sample)
+            # `num_occurrences` is encoded into sample ID list.
+            # For example, if `num_occurrences` is 2, there are two samples with the same state, thus two sample IDs are generated.
+            ids = []
+            for _ in range(bitssample.num_occurrences):
+                ids.append(sample_id)
+                sample_id += 1
+            entries.append(ommx.v1.Samples.SamplesEntry(state=state, ids=ids))
 
-        # Decode samples using jijmodeling_transpiler
-        sampleset = decode_from_dict_binary_result(
-            samples, self.pubo_builder.binary_encoder, self.compiled_instance
-        )
+        samples = ommx.v1.Samples(entries=entries)
 
-        # Update the number of occurrences
-        record = jm.Record(sampleset.record.solution, num_occurrences=num_occurrences)
-        sampleset.record = record
-
-        return jm.experimental.from_old_sampleset(sampleset)
-
-
-# Helper functions for decoding results
-def decode_from_dict_binary_result(
-    samples: typ.Iterable[dict[int, int | float]],
-    binary_encoder,
-    instance: ommx.v1.Instance
-) -> jm.SampleSet:
-    """
-    Decode binary results into a SampleSet.
-
-    Args:
-        samples: Iterable of sample dictionaries.
-        binary_encoder: Binary encoder from jijmodeling_transpiler.
-        compiled_model: Compiled instance of the optimization problem.
-
-    Returns:
-        jm.SampleSet: Decoded sample set.
-    """
-    inverse_varmap: dict[int, tuple[str, tuple[int, ...]]] = {}
-    for label, values in compiled_model.var_map.var_map.items():
-        for forall, index in values.items():
-            inverse_varmap[index] = (label, forall)
-
-    decoded_samples = binary_decode(samples, binary_encoder, inverse_varmap)
-
-    record = dict_to_record(decoded_samples, compiled_model)
-
-    evaluation = _evaluate(decoded_samples, compiled_model)
-
-    return jm.SampleSet(
-        record=record,
-        evaluation=evaluation,
-        measuring_time=jm.MeasuringTime(),
-    )
+        return self.original_instance.evaluate_samples(samples)
 
 
-def _evaluate(
-    samples: typ.Iterable[dict[int, int | float]],
-    compiled_model: jmt.CompiledInstance,
-) -> jm.Evaluation:
-    """
-    Evaluate samples against the compiled model.
-
-    This function calculates objective values, constraint violations,
-    and penalty values for each sample.
-
-    Args:
-        samples: Iterable of sample dictionaries.
-        compiled_model: Compiled instance of the optimization problem.
-
-    Returns:
-        jm.Evaluation: Evaluation results for the samples.
-    """
-    objectives: list[float] = []
-    const_violation: dict[str, list[float]] = {
-        label: [] for label in compiled_model.constraint.keys()
-    }
-    constraint_forall = {}
-    constraint_values = []
-    pena_violation: dict[str, list[float]] = {
-        label: [] for label in compiled_model.penalty.keys()
-    }
-
-    for i, sample in enumerate(samples):
-        sample = dict(sample)
-        result = calc_expr(sample, compiled_model)
-        objectives.append(result.objective)
-        constraint_values.append({})
-
-        # Process constraints
-        for label, const_value in result.constraint.items():
-            if i == 0:
-                constraint_forall[label] = np.array(
-                    [list(subs) for subs in const_value.keys()]
-                )
-            values = np.array(list(const_value.values()))
-            constraint_condition = compiled_model.problem.constraints[label].condition
-            if constraint_condition.kind == subs_expr.ConstraintKind.EQUAL:
-                values = np.abs(values)
-            else:
-                feas = values <= 0
-                values[feas] = 0.0
-            const_violation[label].append(np.sum(values))
-            constraint_values[i][label] = values
-
-        # Process penalties
-        for label, pena_values in result.penalty.items():
-            pena_violation[label].append(sum(list(pena_values.values())))
-
-    return jm.Evaluation(
-        objective=np.array(objectives, dtype=np.float64),
-        constraint_violations=const_violation,
-        constraint_forall=constraint_forall,
-        constraint_values=constraint_values,
-        penalty=pena_violation,
-    )

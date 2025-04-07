@@ -18,7 +18,6 @@ packages = [
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"
-jijmodeling-transpiler = ">=0.6.0rc3"
 quri-parts-qulacs = {version = "^0.19.0", extras = ["quri-parts"]}
 quri-parts-core = "^0.19.0"
 quri-parts-circuit = "^0.19.0"
@@ -27,6 +26,7 @@ matplotlib = "^3.9.2"
 qutip = "^5.0.4"
 pennylane = "^0.39.0"
 ommx = "^1.9.0"
+jijmodeling = "^1.12.3"
 
 [tool.poetry.group.dev.dependencies]
 jupyter = "^1.0.0"

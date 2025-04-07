@@ -1,6 +1,5 @@
 import numpy as np
 import jijmodeling as jm
-import jijmodeling_transpiler.core as jmt
 from qamomile.core.ising_qubo import IsingModel, qubo_to_ising
 from qamomile.core.converters.qrao.qrao32 import create_x_prime, create_y_prime, create_z_prime, qrac32_encode_ising, create_prime_operator,QRAC32Converter
 import qamomile.core.operator as qm_o
@@ -95,9 +94,9 @@ def test_QRAC32Converter():
     problem = jm.Problem("sample")
     x = jm.BinaryVar("x", shape = (3,))
     problem += x[1] * x[2] + x[0]
-    compiled_instance = jmt.compile_model(problem, {})
+    instance = jm.Interpreter({}).eval_problem(problem)
 
-    converter = QRAC32Converter(compiled_instance)
+    converter = QRAC32Converter(instance)
 
     # Test get_cost_hamiltonian method
     cost_hamiltonian = converter.get_cost_hamiltonian()
