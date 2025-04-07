@@ -545,7 +545,7 @@ def solve_mwis_scipy(G):
     return selected_nodes, -res.fun, res.x
 
 
-def solve_qubo(J, h, binary_variables=False, 
+def solve_qubo(J, h,
                compare_brute_force=True, use_brute_force=True, max_brute_force_size=20):
     """
     Solve a QUBO problem by mapping it to a unit disk graph and solving the MWIS.
@@ -553,7 +553,6 @@ def solve_qubo(J, h, binary_variables=False,
     Args:
         J: Coupling matrix (must be symmetric)
         h: Bias vector
-        binary_variables: If True, use {0,1} variables, otherwise use {-1,1} variables
         compare_brute_force: If True, also compute brute force solution for comparison
         use_brute_force: If True, use brute force solution for small problems
         max_brute_force_size: Maximum problem size to use brute force (if use_brute_force=True)
@@ -584,33 +583,19 @@ def solve_qubo(J, h, binary_variables=False,
         
         for i in range(2**n):
             # Convert binary representation to configuration
-            if binary_variables:
-                # {0,1} variables
-                config = [(i >> j) & 1 for j in range(n)]
-                
-                # Calculate energy
-                e = 0
-                # Quadratic terms
-                for a in range(n):
-                    for b in range(n):
-                        e += J[a, b] * config[a] * config[b]
-                # Linear terms
-                for a in range(n):
-                    e += h[a] * config[a]
-            else:
-                # {-1,1} variables
-                binary_config = [(i >> j) & 1 for j in range(n)]
-                config = [2 * bit - 1 for bit in binary_config]  # Convert 0->-1, 1->1
-                
-                # Calculate energy
-                e = 0
-                # Contribution from couplings
-                for a in range(n):
-                    for b in range(n):
-                        e += J[a, b] * config[a] * config[b]
-                # Contribution from biases
-                for a in range(n):
-                    e += h[a] * config[a]
+            # {-1,1} variables
+            binary_config = [(i >> j) & 1 for j in range(n)]
+            config = [2 * bit - 1 for bit in binary_config]  # Convert 0->-1, 1->1
+            
+            # Calculate energy
+            e = 0
+            # Contribution from couplings
+            for a in range(n):
+                for b in range(n):
+                    e += J[a, b] * config[a] * config[b]
+            # Contribution from biases
+            for a in range(n):
+                e += h[a] * config[a]
             
             all_configs.append((config, e))
             if e < min_energy:
@@ -647,24 +632,14 @@ def solve_qubo(J, h, binary_variables=False,
         # Calculate QUBO energy
         energy = 0
         
-        if binary_variables:
-            # For binary {0,1} variables
-            for i in range(n):
-                for j in range(n):
-                    energy += J[i, j] * original_config[i] * original_config[j]
-            
-            # Add linear terms
-            for i in range(n):
-                energy += h[i] * original_config[i]
-        else:
-            # For {-1,1} variables (standard QUBO formulation)
-            for i in range(n):
-                for j in range(n):
-                    energy += J[i, j] * original_config[i] * original_config[j]
-                    
-            # Contribution from biases
-            for i in range(n):
-                energy += h[i] * original_config[i]
+        # For {-1,1} variables (standard Ising formulation)
+        for i in range(n):
+            for j in range(n):
+                energy += J[i, j] * original_config[i] * original_config[j]
+                
+        # Contribution from biases
+        for i in range(n):
+            energy += h[i] * original_config[i]
         
         solution_method = "mwis"
     
@@ -998,7 +973,7 @@ class Ising_UnitDiskGraph:
         # Convert to a NetworkX graph for visualization and analysis
         self._networkx_graph = qubo_result_to_networkx(self._qubo_result)
     
-    def solve(self, use_brute_force: bool = False, binary_variables: bool = False) -> dict:
+    def solve(self, use_brute_force: bool = False) -> dict:
         """
         Solve the Ising model using the unit disk graph mapping.
         
@@ -1020,7 +995,6 @@ class Ising_UnitDiskGraph:
         # Solve the QUBO problem
         result = solve_qubo(
             J, h, 
-            binary_variables=binary_variables,
             use_brute_force=use_brute_force,
             max_brute_force_size=20  # Adjust this value based on performance needs
         )
