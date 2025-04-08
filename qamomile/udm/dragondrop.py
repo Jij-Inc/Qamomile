@@ -627,7 +627,7 @@ def solve_qubo(J, h,
         # Use MWIS solution
         G = qubo_result_to_networkx(qubo_result)
         selected_nodes, mwis_weight, solution_vector = solve_mwis_scipy(G)
-        original_config = map_config_back(qubo_result, solution_vector, binary=binary_variables)
+        original_config = map_config_back(qubo_result, solution_vector, binary=False)
         
         # Calculate QUBO energy
         energy = 0
