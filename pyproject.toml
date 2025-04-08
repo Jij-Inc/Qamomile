@@ -26,7 +26,7 @@ matplotlib = "^3.9.2"
 qutip = "^5.0.4"
 pennylane = "^0.39.0"
 jijmodeling = "^1.12.3"
-ommx = ">=1.9.1"
+ommx = "^1.9.2"
 
 [tool.poetry.group.dev.dependencies]
 jupyter = "^1.0.0"

@@ -2615,17 +2615,17 @@ files = [
 
 [[package]]
 name = "ommx"
-version = "1.9.1"
+version = "1.9.2"
 description = "Open Mathematical prograMming eXchange (OMMX)"
 optional = false
 python-versions = ">=3.9"
 files = [
-    {file = "ommx-1.9.1-cp313-cp313t-macosx_11_0_arm64.whl", hash = "sha256:86b2016640f390173a92f00308f2eec0b0afbc12e04c9d6dbba9d02e152bf894"},
-    {file = "ommx-1.9.1-cp313-cp313t-manylinux_2_28_x86_64.whl", hash = "sha256:ecc472d4cc1c13270550ba57716d33bd8a1d2cdfbd9da2b98009c9b2af13f2a7"},
-    {file = "ommx-1.9.1-cp313-cp313t-win_amd64.whl", hash = "sha256:8814dcd0555902aa6c50fdaa76474929ab77e569beb0e75d525b717c038f7bbd"},
-    {file = "ommx-1.9.1-cp38-abi3-macosx_11_0_arm64.whl", hash = "sha256:d94a7c9ca0c0b0be270c9cf97092aba334d2822a9dd24cbab798071578881cb6"},
-    {file = "ommx-1.9.1-cp38-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:2bff803a97e774a53a8b640319e5cac107d216c6d0627a95fa8fdeb2e06831c3"},
-    {file = "ommx-1.9.1-cp38-abi3-win_amd64.whl", hash = "sha256:371db0991ced000e9427e0c2762f1f670612adddf7ba77b5d1f7480bcbca8a6d"},
+    {file = "ommx-1.9.2-cp313-cp313t-macosx_11_0_arm64.whl", hash = "sha256:3ca7afb4710dff7993faafca5c2b071f351a7427f8e61027de461eb5ef213fde"},
+    {file = "ommx-1.9.2-cp313-cp313t-manylinux_2_28_x86_64.whl", hash = "sha256:6cce6792c007877739bbd2eb5d9d776df9825e6afe09d441b859474561f15a73"},
+    {file = "ommx-1.9.2-cp313-cp313t-win_amd64.whl", hash = "sha256:6a4583680827024ef7961a422566ae573211b866bdc77d4aba6a86844b57e272"},
+    {file = "ommx-1.9.2-cp38-abi3-macosx_11_0_arm64.whl", hash = "sha256:87697de93ed4fdbcc02ca3e5d11c9eca48a052a4a6d89935a54edd2238d08224"},
+    {file = "ommx-1.9.2-cp38-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:a980b8075d61018f5b6fd5937b32491d1e0b0b21533ababa104f6716d954a73d"},
+    {file = "ommx-1.9.2-cp38-abi3-win_amd64.whl", hash = "sha256:fd0d6902c9307dbbcbca0d9efa13e10f28b5d95c085fc6cf950bf668fd4bebe5"},
 ]
 
 [package.dependencies]
@@ -4091,6 +4091,7 @@ files = [
     {file = "rustworkx-0.16.0-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:4f12a13d7486234fa2a84746d5e41f436bf9df43548043e7a232f48804ff8c61"},
     {file = "rustworkx-0.16.0-cp39-abi3-manylinux_2_17_s390x.manylinux2014_s390x.whl", hash = "sha256:89efd5c3a4653ddacc55ca39f28b261d43deec7d678f8f8fc6b76b5087f1dfea"},
     {file = "rustworkx-0.16.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:ec0c12aac8c54910ace20ac6ada4b890cd39f95f69100514715f8ad7af9041e4"},
+    {file = "rustworkx-0.16.0-cp39-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:d650e39fc1a1534335f7517358ebfc3478bb235428463cfcd7c5750d50377b33"},
     {file = "rustworkx-0.16.0-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:293180b83509ee9bff4c3af7ccc1024f6528d61b65d0cb7320bd31924f10cb71"},
     {file = "rustworkx-0.16.0-cp39-abi3-win32.whl", hash = "sha256:040c4368729cf502f756a3b0ff5f1c6915fc389f74dcc6afc6c3833688c97c01"},
     {file = "rustworkx-0.16.0-cp39-abi3-win_amd64.whl", hash = "sha256:905df608843c32fa45ac023687769fe13056edf7584474c801d5c50705d76e9b"},
@@ -5176,4 +5177,4 @@ qutip = ["qutip"]
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.10,<3.13"
-content-hash = "7e0900769cd5ddd3d9a6afd03c41b3ea47d0cb4904abd846744392624de8c4f5"
+content-hash = "53f7e6e5b1801d8062f79ca8cc3aeeb927128bc22549ffc9f5157484baae0df4"
