@@ -29,6 +29,7 @@ Note: This module requires `jijmodeling` and `jijmodeling_transpiler` for proble
 
 """
 
+import numpy as np
 import typing as typ
 import jijmodeling_transpiler.core as jmt
 import qamomile.core.bitssample as qm_bs
@@ -36,6 +37,7 @@ import qamomile.core.circuit as qm_c
 import qamomile.core.operator as qm_o
 from qamomile.core.converters.converter import QuantumConverter
 from qamomile.core.converters.utils import is_close_zero
+import ommx.v1
 from openfermion.linalg import givens_decomposition
 
 
@@ -62,11 +64,19 @@ class FQAOAConverter(QuantumConverter):
 
     """
     
-    def get_init_state_preparation(
+    def get_init_state(
 		self, slater_det: np.array, 
 	):
 
         givens_angles = 1
+        
+    def add_snake_jw_hopping_operator(
+    circuit: qm_c.QuantumCircuit,
+    beta: qm_c.Parameter,
+    hopping,
+    index: typ.Optional[int]
+	):
+        circuit.
 
     def get_mixer_ansatz(
 		self,
@@ -100,16 +110,44 @@ class FQAOAConverter(QuantumConverter):
   
         if isinstance(lattice_structure, str):
             if lattice_structure == "cyclic":
-				# Construct U_I and U_II
-				for 
-			elif lattice_structure == "ladder":
-				ising.normalize_by_rms()
-			else:
-				raise ValueError(
+				# I(odd)
+                for i in range(0, num_qubits-1, 2):
+                    mixer.rxx(beta, i, i+1)
+                    mixer.ryy(beta, i, i+1)
+                # II(even)
+                for i in range(1, num_qubits-1, 2):
+                    mixer.rxx(beta, i, i+1)
+                    mixer.ryy(beta, i, i+1)
+                # BD
+                for i in range(0, num_qubits, 2):
+                    mixer.rxx(beta, i, 0)
+                    mixer.ryy(beta, i, 0)
+            
+            elif lattice_structure == "ladder":
+                D = 1
+                N = 1
+                # parallel direction 
+                for d in range(D):
+                    # I
+                    for l in range(0, N-1, 2):
+                        mixer.rxx(beta, l, l+1)
+                        mixer.ryy(beta, l, l+1)
+                    # II
+                    for l in range(1, N-1, 2):
+                        mixer.rxx(beta, l, l+1)
+                        mixer.ryy(beta, l, l+1)
+                    # BD
+                    mixer.rxx(beta, N-1, 0)
+                    mixer.ryy(beta, N-1, 0)
+                
+                # vertical direction
+                
+            else:
+                raise ValueError(
                     f"Invalid value for lattice_structure: {lattice_structure}"
                 )
 
-		return mixer
+        return mixer
 
     def get_cost_ansatz(
         self, gamma: qm_c.Parameter, name: str = "Cost"
@@ -148,7 +186,7 @@ class FQAOAConverter(QuantumConverter):
 		self,
 		p: int,
 		lattice_structure: typ.Optional[typ.Literal["cyclic", "ladder"]] = "cyclic",
-		hopping: float
+		hopping: float = 1.0
   	) -> qm_c.QuantumCircuit:
         """
         Generate the FQAOA ansatz circuit.
@@ -165,15 +203,15 @@ class FQAOAConverter(QuantumConverter):
         Returns:
             qm_c.QuantumCircuit: The FQAOA ansatz circuit.
         """
-		ising = self.get_ising()
-		num_qubits = ising.num_bits()
-		fqaoa_circuit = qm_c.QuantumCircuit(num_qubits, 0, name="FQAOA")
+        ising = self.get_ising()
+        num_qubits = ising.num_bits()
+        fqaoa_circuit = qm_c.QuantumCircuit(num_qubits, 0, name="FQAOA")
 
 		# Construct QAOA layers
-		init = self.get_init_state_preparation()
-		fqaoa_circuit.append(init)
+        init = self.get_init_state()
+        fqaoa_circuit.append(init)
 
-		for _p in range(p):
+        for _p in range(p):
             beta = qm_c.Parameter(f"beta_{_p}")
             gamma = qm_c.Parameter(f"gamma_{_p}")
             
