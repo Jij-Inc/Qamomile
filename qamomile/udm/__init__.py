@@ -6,7 +6,7 @@ to unit disk grid graphs, which can be naturally encoded in neutral-atom quantum
 """
 
 
-from .dragondrop import (
+from .mwis_solver import (
     map_qubo,
     map_simple_wmis,
     solve_qubo,

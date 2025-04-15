@@ -539,6 +539,17 @@ def solve_mwis_scipy(G):
     # Solve the MILP
     res = milp(c=c, constraints=constraints, bounds=bounds, integrality=integrality)
     
+    # Check solution status
+    if not res.success:
+        status_messages = {
+            1: "Iteration or time limit reached",
+            2: "Problem is infeasible",
+            3: "Problem is unbounded",
+            4: f"Other error: {res.message}"
+        }
+        error_msg = status_messages.get(res.status, f"Unknown error: {res.message}")
+        raise RuntimeError(f"Failed to find optimal solution: {error_msg}")
+    
     # The solution vector res.x contains the binary decisions.
     selected_nodes = [node for node, idx in node_to_idx.items() if round(res.x[idx]) == 1]
     
@@ -813,7 +824,7 @@ def map_simple_wmis(graph, weights):
     gg, pins = post_process_grid(grid, weights, np.zeros_like(weights))
     
     # Calculate overhead
-    mis_overhead = (n - 1) * n * 4 + n - 4 - 2 * graph.number_of_edges()
+    # mis_overhead = (n - 1) * n * 4 + n - 4 - 2 * graph.number_of_edges()
     
     # Create dummy nodes if none exist (for robustness)
     if len(gg.nodes) == 0:

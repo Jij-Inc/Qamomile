@@ -8,8 +8,8 @@ from .utils import unit_disk_graph
 # Constants
 SHOW_WEIGHT = False
 
-# ONE type - a singleton to represent the constant 1 for unweighted cases
-class ONE:
+# UNWEIGHTED type - a singleton to represent the constant 1 for unweighted cases
+class UNWEIGHTED:
     """A class representing the constant 1 for unweighted graphs."""
     def __str__(self):
         return "1"
@@ -18,12 +18,12 @@ class ONE:
         return "1"
 
 # A singleton instance to use throughout the code
-ONE_INSTANCE = ONE()
+UNWEIGHTED_INSTANCE = UNWEIGHTED()
 
 # Cell classes
 class AbstractCell:
     """Abstract base class for all cell types."""
-    def __init__(self, occupied: bool = True, weight: Any = ONE_INSTANCE):
+    def __init__(self, occupied: bool = True, weight: Any = UNWEIGHTED_INSTANCE):
         self.occupied = occupied
         self.weight = weight
     
@@ -53,10 +53,10 @@ class SimpleCell(AbstractCell):
     """A simple cell implementation."""
     
     @classmethod
-    def create_empty(cls, weight_type=ONE):
+    def create_empty(cls, weight_type=UNWEIGHTED):
         """Create an empty cell of a given weight type."""
-        if weight_type == ONE:
-            return cls(occupied=False, weight=ONE_INSTANCE)
+        if weight_type == UNWEIGHTED:
+            return cls(occupied=False, weight=UNWEIGHTED_INSTANCE)
         else:
             return cls(occupied=False, weight=1)
     
@@ -71,12 +71,12 @@ class SimpleCell(AbstractCell):
             return self
         
         # Both occupied
-        if isinstance(self.weight, ONE) and isinstance(other.weight, ONE):
-            return SimpleCell(occupied=True, weight=ONE_INSTANCE)
+        if isinstance(self.weight, UNWEIGHTED) and isinstance(other.weight, UNWEIGHTED):
+            return SimpleCell(occupied=True, weight=UNWEIGHTED_INSTANCE)
         else:
-            # Convert ONE to 1 if needed
-            w1 = 1 if isinstance(self.weight, ONE) else self.weight
-            w2 = 1 if isinstance(other.weight, ONE) else other.weight
+            # Convert UNWEIGHTED to 1 if needed
+            w1 = 1 if isinstance(self.weight, UNWEIGHTED) else self.weight
+            w2 = 1 if isinstance(other.weight, UNWEIGHTED) else other.weight
             return SimpleCell(occupied=True, weight=w1 + w2)
     
     def __sub__(self, other):
@@ -90,12 +90,12 @@ class SimpleCell(AbstractCell):
             return self
         
         # Both occupied
-        if isinstance(self.weight, ONE) and isinstance(other.weight, ONE):
+        if isinstance(self.weight, UNWEIGHTED) and isinstance(other.weight, UNWEIGHTED):
             return SimpleCell(occupied=True, weight=0)
         else:
-            # Convert ONE to 1 if needed
-            w1 = 1 if isinstance(self.weight, ONE) else self.weight
-            w2 = 1 if isinstance(other.weight, ONE) else other.weight
+            # Convert UNWEIGHTED to 1 if needed
+            w1 = 1 if isinstance(self.weight, UNWEIGHTED) else self.weight
+            w2 = 1 if isinstance(other.weight, UNWEIGHTED) else other.weight
             return SimpleCell(occupied=True, weight=w1 - w2)
     
     def __neg__(self):
@@ -103,14 +103,14 @@ class SimpleCell(AbstractCell):
         if not self.occupied:
             return self
         
-        if isinstance(self.weight, ONE):
+        if isinstance(self.weight, UNWEIGHTED):
             return SimpleCell(occupied=True, weight=-1)
         else:
             return SimpleCell(occupied=True, weight=-self.weight)
 
 # Type aliases for clarity
 WeightedSimpleCell = SimpleCell  # SimpleCell with numeric weight
-UnWeightedSimpleCell = SimpleCell  # SimpleCell with ONE weight
+UnWeightedSimpleCell = SimpleCell  # SimpleCell with UNWEIGHTED weight
 
 # Node class for graph representation
 class Node:
@@ -121,11 +121,11 @@ class Node:
         if len(args) == 1 and isinstance(args[0], tuple) and len(args[0]) == 2:
             # Node((x, y))
             self.loc = args[0]
-            self.weight = kwargs.get('weight', ONE_INSTANCE)
+            self.weight = kwargs.get('weight', UNWEIGHTED_INSTANCE)
         elif len(args) == 2 and all(isinstance(arg, (int, float)) for arg in args):
             # Node(x, y)
             self.loc = (int(args[0]), int(args[1]))
-            self.weight = kwargs.get('weight', ONE_INSTANCE)
+            self.weight = kwargs.get('weight', UNWEIGHTED_INSTANCE)
         elif len(args) == 3 and all(isinstance(args[i], (int, float)) for i in range(2)):
             # Node(x, y, weight)
             self.loc = (int(args[0]), int(args[1]))
@@ -133,7 +133,7 @@ class Node:
         elif len(args) == 1 and isinstance(args[0], list) and len(args[0]) == 2:
             # Node([x, y])
             self.loc = (args[0][0], args[0][1])
-            self.weight = kwargs.get('weight', ONE_INSTANCE)
+            self.weight = kwargs.get('weight', UNWEIGHTED_INSTANCE)
         else:
             raise ValueError("Invalid arguments for Node initialization")
     
@@ -151,7 +151,7 @@ class Node:
     
     def __str__(self):
         """String representation."""
-        if isinstance(self.weight, ONE):
+        if isinstance(self.weight, UNWEIGHTED):
             return f"Node({self.loc[0]}, {self.loc[1]})"
         else:
             return f"Node({self.loc[0]}, {self.loc[1]}, {self.weight})"
@@ -174,7 +174,7 @@ class Node:
 
 # Type aliases for Node
 WeightedNode = Node  # Node with numeric weight
-UnWeightedNode = Node  # Node with ONE weight
+UnWeightedNode = Node  # Node with UNWEIGHTED weight
 
 class GridGraph:
     """A graph embedded in a 2D grid with a unit disk connectivity radius."""
@@ -245,13 +245,15 @@ class GridGraph:
     def cell_matrix(self):
         """Convert the grid graph to a matrix of cells."""
         # Create an empty matrix
-        matrix = [[SimpleCell.create_empty(ONE if isinstance(self.nodes[0].weight, ONE) else type(self.nodes[0].weight)) 
+        matrix = [[SimpleCell.create_empty(UNWEIGHTED if isinstance(self.nodes[0].weight, UNWEIGHTED) else type(self.nodes[0].weight)) 
                    for _ in range(self.size[1])] 
                   for _ in range(self.size[0])]
         
         # Fill in the nodes
         for node in self.nodes:
             i, j = node.loc
+            assert 0 <= i < self.size[0], f"i={i} is out of bounds [0, {self.size[0]})"
+            assert 0 <= j < self.size[1], f"j={j} is out of bounds [0, {self.size[1]})"
             matrix[i][j] = SimpleCell(occupied=True, weight=node.weight)
             
         return matrix

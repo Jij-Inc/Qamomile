@@ -1,13 +1,11 @@
 import networkx as nx
 import numpy as np
-from typing import List, Tuple, Set, Dict, Any, Union, Optional
+from typing import List, Tuple, Set, Dict, Any, Union, Optional, Callable
 
 def simple_graph_from_edgelist(edgelist: List[Tuple[int, int]]) -> nx.Graph:
     """Create a simple graph from an edge list."""
     g = nx.Graph()
-    for i, j in edgelist:
-        g.add_edge(i, j)
-    return g
+    return nx.Graph(edgelist)
 
 # Geometric transformations
 def rotate90(loc: Tuple[int, int]) -> Tuple[int, int]:
@@ -31,7 +29,7 @@ def reflectoffdiag(loc: Tuple[int, int]) -> Tuple[int, int]:
     return (loc[1], loc[0])
 
 # Apply transformations with a center
-def apply_transform(loc: Tuple[int, int], center: Tuple[int, int], transform_func):
+def apply_transform(loc: Tuple[int, int], center: Tuple[int, int], transform_func: Callable[[Tuple[int, int]], Tuple[int, int]]) -> Tuple[int, int]:
     """Apply a transformation function with respect to a center point."""
     dx, dy = transform_func((loc[0] - center[0], loc[1] - center[1]))
     return (center[0] + dx, center[1] + dy)
@@ -112,7 +110,7 @@ def is_diff_by_const(arr1: np.ndarray, arr2: np.ndarray) -> Tuple[bool, float]:
             
     return True, diff if diff is not None else 0
 
-def is_unit_disk_graph(grid_graph) -> bool:
+def is_unit_disk_graph(grid_graph, verbose=False) -> bool:
     """
     Check if a grid graph is a valid unit disk graph.
     
@@ -125,6 +123,7 @@ def is_unit_disk_graph(grid_graph) -> bool:
     
     Args:
         grid_graph: A GridGraph object with nodes having location attributes
+        verbose: If True, print the unmatched node/edge 
         
     Returns:
         True if the graph is a valid unit disk graph, False otherwise
@@ -150,6 +149,7 @@ def is_unit_disk_graph(grid_graph) -> bool:
             
             # If there's a mismatch, this is not a valid unit disk graph
             if should_be_connected != is_connected:
+                if verbose: print(f"({i}, {j}) should be connected but is not")
                 return False
                 
     return True

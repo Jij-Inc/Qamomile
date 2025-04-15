@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import List, Tuple, Dict, Any, Union, Optional, Callable
 import networkx as nx
 import numpy as np
-from .core import Node, ONE_INSTANCE
+from .core import Node, UNWEIGHTED
 
 @dataclass
 class CopyLine:
@@ -86,7 +86,7 @@ class CrossingLattice:
         self.graph = graph
     
     def __getitem__(self, indices):
-        """Access a block in the lattice."""
+        """Access a block in the lattice. The indices are 1-indexed """
         if isinstance(indices, tuple) and len(indices) == 2:
             i, j = indices
             
