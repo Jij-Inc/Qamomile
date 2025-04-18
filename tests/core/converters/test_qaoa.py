@@ -3,7 +3,7 @@
 import pytest
 import numpy as np
 import jijmodeling as jm
-import jijmodeling_transpiler.core as jmt
+import ommx.v1
 from qamomile.core.converters.qaoa import QAOAConverter
 import qamomile.core.circuit as qm_c
 import qamomile.core.operator as qm_o
@@ -19,8 +19,8 @@ def simple_qubo_problem():
     i, j = jm.Element("i", n), jm.Element("j", n)
     problem += jm.sum([i, j], Q[i, j] * x[i] * x[j])
     instance_data = {"Q": [[0.1, 0.2], [0.2, 0.3]]}
-    compiled_instance = jmt.compile_model(problem, instance_data)
-    return compiled_instance
+    instance = jm.Interpreter(instance_data).eval_problem(problem)
+    return instance
 
 
 @pytest.fixture
@@ -28,7 +28,8 @@ def qaoa_converter(simple_qubo_problem):
     return QAOAConverter(simple_qubo_problem)
 
 
-def test_get_cost_ansatz(qaoa_converter):
+def test_get_cost_ansatz(qaoa_converter: QAOAConverter):
+
     beta = qm_c.Parameter("beta")
     cost_circuit = qaoa_converter.get_cost_ansatz(beta)
 
@@ -68,9 +69,8 @@ def test_decode_bits_to_sampleset(qaoa_converter):
 
     sampleset = qaoa_converter.decode_bits_to_sampleset(bits_sample_set)
 
-    assert isinstance(sampleset, jm.experimental.SampleSet)
-    assert len(sampleset) == 2
-    assert [sample.num_occurrences for sample in sampleset] == [3, 1]
+    assert isinstance(sampleset, ommx.v1.SampleSet)
+    assert len(sampleset.sample_ids) == 4
 
 
 def test_qaoa_converter_with_larger_problem():
@@ -82,7 +82,7 @@ def test_qaoa_converter_with_larger_problem():
     i, j = jm.Element("i", n), jm.Element("j", n)
     problem += jm.sum([i, j], Q[i, j] * x[i] * x[j])
     instance_data = {"Q": np.random.rand(10, 10)}
-    compiled_instance = jmt.compile_model(problem, instance_data)
+    compiled_instance = jm.Interpreter(instance_data).eval_problem(problem)
 
     qaoa_converter = QAOAConverter(compiled_instance)
 
@@ -94,3 +94,36 @@ def test_qaoa_converter_with_larger_problem():
     # Test Hamiltonian generation
     hamiltonian = qaoa_converter.get_cost_hamiltonian()
     assert len(hamiltonian.terms) > 0
+
+
+def test_multipliers():
+    n = jm.Placeholder("n")
+    x = jm.BinaryVar("x", shape=(n,))
+    y = jm.BinaryVar("y")
+    problem = jm.Problem("sample")
+    i = jm.Element("i", (0, n))
+    problem += jm.Constraint("const1", x[i] + y == 0, forall=i)
+    intepreter = jm.Interpreter({"n": 3})
+    instance: ommx.v1.Instance = intepreter.eval_problem(problem)
+
+    multipliers = {"const1": 1.5}
+    detail_parameters = {"const1": {(0,): 2.0}}
+
+    converter = QAOAConverter(instance)
+    qubo, constant = converter.instance_to_qubo(multipliers, detail_parameters)
+    # 1.5*2*(x_0 + y)^2 + 1.5*(x_1 + y)^2 + 1.5*(x_2 + y)^2
+    # = 6*(x_0*y) + 3*x_0 + ... + 3*(x_2*y) + 1.5*x_2 ... + 3*x_2*y + 3*y^2
+    dv_list = instance.get_decision_variables()
+    dv_objects = {}
+    for dv in dv_list:
+        if dv.name not in dv_objects:
+            dv_objects[dv.name] = {}
+        dv_objects[dv.name][tuple(dv.subscripts)] = dv.id
+    x0 = dv_objects["x"][(0,)]
+    y = dv_objects["y"][()]
+    assert qubo[x0, y] == 6.0
+    assert qubo[x0, x0] == 3.0
+    x1 = dv_objects["x"][(1,)]
+    assert qubo[x1, y] == 3.0
+    _ = converter.ising_encode()
+    print(converter.int2varlabel)

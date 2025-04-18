@@ -3,7 +3,7 @@ import numpy as np
 import networkx as nx
 import collections
 import jijmodeling as jm
-import jijmodeling_transpiler.core as jmt
+import ommx.v1
 import quri_parts.circuit as qp_c
 import quri_parts.core.operator as qp_o
 from quri_parts.qulacs.sampler import create_qulacs_vector_sampler
@@ -47,14 +47,15 @@ def graph_coloring_instance():
 
 
 def create_graph_coloring_operator_ansatz_initial_state(
-    compiled_instance: jmt.CompiledInstance,
+    compiled_instance: ommx.v1.Instance,
     num_nodes: int,
     num_color: int,
-    apply_vars: tuple[int, int],
+    apply_vars: list[tuple[int, int]],
 ):
     n = num_color * num_nodes
     qc = qm_c.QuantumCircuit(n)
-    var_map = compiled_instance.var_map.var_map["x"]
+    deci_vars = compiled_instance.raw.decision_variables
+    var_map = {tuple(dc.subscripts): dc.id for dc in deci_vars if dc.name == "x"}
     for pos in apply_vars:
         qc.x(var_map[pos])  # set all nodes to color 0
     return qc
@@ -95,11 +96,12 @@ def tsp_instance():
 
 
 def create_tsp_initial_state(
-    compiled_instance: jmt.CompiledInstance, num_nodes: int = 4
+    compiled_instance: ommx.v1.Instance, num_nodes: int = 4
 ):
     n = num_nodes * num_nodes
     qc = qm.circuit.QuantumCircuit(n)
-    var_map = compiled_instance.var_map.var_map["x"]
+    deci_vars = compiled_instance.raw.decision_variables
+    var_map = {tuple(dc.subscripts): dc.id for dc in deci_vars if dc.name == "x"}
 
     for i in range(num_nodes):
         qc.x(var_map[(i, i)])
@@ -270,13 +272,12 @@ def test_parametric_exp_gate(transpiler):
 
 def test_qaoa_circuit():
     import jijmodeling as jm
-    import jijmodeling_transpiler.core as jmt
 
     x = jm.BinaryVar("x", shape=(3,))
     problem = jm.Problem("qubo")
     problem += -x[0] * x[1] + x[1] * x[2] + x[2] * x[0]
 
-    compiled_instance = jmt.compile_model(problem, {})
+    compiled_instance = jm.Interpreter({}).eval_problem(problem)
     qaoa_converter = QAOAConverter(compiled_instance)
 
     qaoa_circuit = qaoa_converter.get_qaoa_ansatz(2)
@@ -291,7 +292,7 @@ def test_qaoa_circuit():
 def test_coloring_sample_decode():
     problem = graph_coloring_problem()
     instance_data = graph_coloring_instance()
-    compiled_instance = jmt.compile_model(problem, instance_data)
+    compiled_instance = jm.Interpreter(instance_data).eval_problem(problem)
     apply_vars = [(0, 0), (1, 0), (2, 0), (3, 0)]
     initial_circuit = create_graph_coloring_operator_ansatz_initial_state(
         compiled_instance, instance_data["V"], instance_data["N"], apply_vars
@@ -307,13 +308,14 @@ def test_coloring_sample_decode():
     sampleset = qaoa_converter.decode(
         qp_transpiler, (qp_result, initial_circuit.num_qubits)
     )
-    assert sampleset[0].var_values["x"].values == {
+    nonzero_results = {k: v for k, v in sampleset.extract_decision_variables("x", 0).items() if v != 0}
+    assert nonzero_results == {
         (0, 0): 1,
         (1, 0): 1,
         (2, 0): 1,
         (3, 0): 1,
     }
-    assert sampleset[0].num_occurrences == 10
+    assert len(sampleset.sample_ids) == 10
 
     apply_vars = [(0, 0), (1, 1), (2, 2)]
     initial_circuit = create_graph_coloring_operator_ansatz_initial_state(
@@ -331,8 +333,9 @@ def test_coloring_sample_decode():
         qp_transpiler, (qp_result, initial_circuit.num_qubits)
     )
     
-    assert sampleset[0].var_values["x"].values == {(0, 0): 1, (1, 1): 1, (2, 2): 1}
-    assert sampleset[0].num_occurrences == 10
+    nonzero_results = {k: v for k, v in sampleset.extract_decision_variables("x", 0).items() if v != 0}
+    assert nonzero_results == {(0, 0): 1, (1, 1): 1, (2, 2): 1}
+    assert len(sampleset.sample_ids) == 10
 
     apply_vars = [(0, 0), (0, 1), (0, 2), (2, 2)]
     initial_circuit = create_graph_coloring_operator_ansatz_initial_state(
@@ -349,19 +352,16 @@ def test_coloring_sample_decode():
     sampleset = qaoa_converter.decode(
         qp_transpiler, (qp_result, initial_circuit.num_qubits)
     )
-    assert sampleset[0].var_values["x"].values == {
-        (0, 0): 1,
-        (0, 1): 1,
-        (0, 2): 1,
-        (2, 2): 1,
-    }
-    assert sampleset[0].num_occurrences == 10
+
+    nonzero_results = {k: v for k, v in sampleset.extract_decision_variables("x", 0).items() if v != 0}
+    assert nonzero_results == {(0, 0): 1, (0, 1): 1, (0, 2): 1, (2, 2): 1}
+    assert len(sampleset.sample_ids) == 10
 
 
 def test_tsp_decode():
     problem = tsp_problem()
     instance_data = tsp_instance()
-    compiled_instance = jmt.compile_model(problem, instance_data)
+    compiled_instance = jm.Interpreter(instance_data).eval_problem(problem)
 
     qaoa_converter = qm.qaoa.QAOAConverter(compiled_instance)
     qaoa_converter.ising_encode(multipliers={"one-color": 1})
@@ -376,13 +376,14 @@ def test_tsp_decode():
         qp_transpiler, (qp_result, initial_circuit.num_qubits)
     )
 
-    assert sampleset[0].var_values["x"].values == {
+    nonzero_results = {k: v for k, v in sampleset.extract_decision_variables("x", 0).items() if v != 0}
+    assert nonzero_results == {
         (0, 0): 1,
         (1, 1): 1,
         (2, 2): 1,
         (3, 3): 1,
     }
-    assert sampleset[0].num_occurrences == 10
+    assert len(sampleset.sample_ids) == 10
 
 
 def test_run_small_circuit():

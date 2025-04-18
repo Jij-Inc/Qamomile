@@ -17,16 +17,16 @@ packages = [
 ]
 
 [tool.poetry.dependencies]
-python = ">=3.10,<3.12"
-jijmodeling-transpiler = ">=0.6.0rc3"
+python = ">=3.10,<3.13"
 quri-parts-qulacs = {version = "^0.19.0", extras = ["quri-parts"]}
-black = "^24.3.0"
 quri-parts-core = "^0.19.0"
 quri-parts-circuit = "^0.19.0"
-qiskit = "^1.1.1"
+qiskit = ">=1.1.1,<2.0.0"
 matplotlib = "^3.9.2"
 qutip = "^5.0.4"
 pennylane = "^0.39.0"
+jijmodeling = "^1.12.3"
+ommx = "^1.9.2"
 
 [tool.poetry.group.dev.dependencies]
 jupyter = "^1.0.0"
@@ -34,6 +34,7 @@ matplotlib = "^3.7.1"
 pylatexenc = "^2.10"
 pytest = "^7.3.2"
 ruff = "^0.5.6"
+black = "^25.1.0"
 
 
 [tool.poetry.group.doc.dependencies]
