@@ -22,7 +22,7 @@ Key Features:
 - Decoding of quantum computation results into classical optimization solutions
 
 
-Note: This module requires `jijmodeling` and `jijmodeling_transpiler` for problem representation.
+Note: This module requires `jijmodeling` for problem representation.
 
 .. bibliography::
     :filter: docname in docnames
@@ -30,7 +30,6 @@ Note: This module requires `jijmodeling` and `jijmodeling_transpiler` for proble
 """
 
 import typing as typ
-import jijmodeling_transpiler.core as jmt
 import qamomile.core.bitssample as qm_bs
 import qamomile.core.circuit as qm_c
 import qamomile.core.operator as qm_o

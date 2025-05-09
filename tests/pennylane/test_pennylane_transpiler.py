@@ -1,6 +1,7 @@
 import pytest
 import pennylane as qml
 import numpy as np
+import ommx.v1
 import qamomile
 import qamomile.core.bitssample as qm_bs
 from qamomile.pennylane.transpiler import PennylaneTranspiler
@@ -19,7 +20,6 @@ from qamomile.core.circuit import (
 )
 
 import jijmodeling as jm
-import jijmodeling_transpiler.core as jmt
 import networkx as nx
 
 def graph_coloring_problem() -> jm.Problem:
@@ -52,14 +52,15 @@ def graph_coloring_instance():
     return instance_data
 
 def create_graph_coloring_operator_ansatz_initial_state(
-    compiled_instance: jmt.CompiledInstance,
+    compiled_instance: ommx.v1.Instance,
     num_nodes: int,
     num_color: int,
     apply_vars: tuple[int, int],
 ):
     n = num_color * num_nodes
     qc = QamomileCircuit(n)
-    var_map = compiled_instance.var_map.var_map["x"]
+    deci_vars = compiled_instance.raw.decision_variables
+    var_map = {tuple(dc.subscripts): dc.id for dc in deci_vars if dc.name == "x"}
     for pos in apply_vars:
         qc.x(var_map[pos])  # set all nodes to color 0
     return qc
