@@ -2,7 +2,6 @@ import pytest
 import numpy as np
 import jijmodeling as jm
 import jijmodeling_transpiler.core as jmt
-import networkx as nx
 from collections import OrderedDict
 
 from qamomile.core.circuit import Parameter
