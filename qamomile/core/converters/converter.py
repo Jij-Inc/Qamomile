@@ -36,7 +36,7 @@ Example:
 import abc
 import enum
 import typing as typ
-
+import copy
 import jijmodeling as jm
 import ommx.v1
 import numpy as np
@@ -106,7 +106,6 @@ class QuantumConverter(abc.ABC):
                 Defaults to None.
 
         """
-
         self.original_instance: ommx.v1.Instance = instance
 
         # TODO: Support other relaxation methods.
@@ -180,7 +179,9 @@ class QuantumConverter(abc.ABC):
             const_id = constraint.id
             penalty_weights[const_id] = multiplier
 
-        qubo, constant = self.original_instance.to_qubo(penalty_weights=penalty_weights)
+        instance_copy = copy.deepcopy(self.original_instance)
+        qubo, constant = instance_copy.to_qubo(penalty_weights=penalty_weights)
+
         return qubo, constant
 
     def get_ising(self) -> IsingModel:
@@ -277,7 +278,7 @@ class QuantumConverter(abc.ABC):
             result (ResultType): The raw result from the quantum computation.
 
         Returns:
-            jm.experimental.SampleSet: The decoded results as a SampleSet.
+            ommx.v1.SampleSet: The decoded results as a SampleSet.
         """
         bitssampleset = transpiler.convert_result(result)
         return self.decode_bits_to_sampleset(bitssampleset)
