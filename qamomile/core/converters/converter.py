@@ -86,7 +86,6 @@ class QuantumConverter(abc.ABC):
         self,
         instance: ommx.v1.Instance,
         relax_method: RelaxationMethod = RelaxationMethod.SquaredPenalty,
-        normalize_model: bool = False,
         normalize_ising: typ.Optional[typ.Literal["abs_max", "rms"]] = None,
     ):
         """
@@ -109,24 +108,80 @@ class QuantumConverter(abc.ABC):
         """
         self.original_instance: ommx.v1.Instance = instance
 
+        # TODO: Support other relaxation methods.
+        if relax_method != RelaxationMethod.SquaredPenalty:
+            raise ValueError(
+                "Relaxation method other than SquaredPenalty is not supported yet."
+            )
+
         self.int2varlabel: dict[int, str] = {}
         self.normalize_ising = normalize_ising
 
         self._ising: typ.Optional[IsingModel] = None
 
-    def instance_to_qubo(self) -> tuple[dict[tuple[int, int], float], float]:
+    def instance_to_qubo(
+        self,
+        multipliers: typ.Optional[dict[str, float]] = None,
+        detail_parameters: typ.Optional[
+            dict[str, dict[tuple[int, ...], float]]
+        ] = None,
+    ) -> tuple[dict[tuple[int, int], float], float]:
         """
         Convert the instance to QUBO format.
 
         This method converts the optimization problem instance into a QUBO (Quadratic Unconstrained Binary Optimization)
         representation, which is suitable for quantum computation.
 
+        Args:
+            multipliers (Optional[dict[str, float]]): Multipliers for constraint terms.
+            detail_parameters (Optional[dict[str, dict[tuple[int, ...], float]]]):
+                Detailed parameters for the encoding process.
+
+        Note:
+            $\min_x f(x)$~s.t. $g_{s, i}(x) = 0~\forall s, i$ is converted to
+            $\min_x f(x) + \sum_{s \in \{\text{'const1'}, \cdots\}} A_s \sum_i \lambda_i g_i(x)$.
+
+            where $A_s$ is the multiplier for constraint $s$ and $\lambda_i$ is the detailed parameter for constraint $s$ with subscripts $i$.
+
         Returns:
             tuple[dict[int, float], float]: A tuple containing the QUBO dictionary and the constant term.
 
+    
+        Example:
+            .. code::
+                imoprt jijmodeling as jm
+                n = jm.Placeholder("n")
+                x = jm.BinaryVar("x", shape=(n,))
+                y = jm.BinaryVar("y")
+                problem = jm.Problem("sample")
+                i = jm.Element("i", (0, n))
+                problem += jm.Constraint("const1", x[i] + y == 1, forall=i)
+                intepreter = jm.Interpreter({"n": 3})
+                multipliers = {"const1": 1.0}
+                detail_parameters = {"const1": {(0,): 2.0}}
+                qubo, constant = converter.instance_to_qubo(multipliers, detail_parameters)
+
         """
+        _multipliers = multipliers if multipliers is not None else {}
+        _parameters = detail_parameters if detail_parameters is not None else {}
+        
+        penalty_weights = {}
+        for constraint in self.original_instance.get_constraints():
+            name = constraint.name
+            if name is not None and name in _multipliers:
+                multiplier = _multipliers[name]
+            else:
+                multiplier = 1.0
+            subscripts = tuple(constraint.subscripts)
+            if name is not None and name in _parameters:
+                multiplier *= _parameters[name].get(subscripts, 1.0)
+
+            const_id = constraint.id
+            penalty_weights[const_id] = multiplier
+
         instance_copy = copy.deepcopy(self.original_instance)
-        qubo, constant = instance_copy.to_qubo()
+        qubo, constant = instance_copy.to_qubo(penalty_weights=penalty_weights)
+
         return qubo, constant
 
     def get_ising(self) -> IsingModel:
@@ -145,7 +200,7 @@ class QuantumConverter(abc.ABC):
         self,
         multipliers: typ.Optional[dict[str, float]] = None,
         detail_parameters: typ.Optional[
-            dict[str, dict[tuple[int, ...], tuple[float, float]]]
+            dict[str, dict[tuple[int, ...], float]]
         ] = None,
     ) -> IsingModel:
         """
@@ -156,7 +211,7 @@ class QuantumConverter(abc.ABC):
 
         Args:
             multipliers (Optional[dict[str, float]]): Multipliers for constraint terms.
-            detail_parameters (Optional[dict[str, dict[tuple[int, ...], tuple[float, float]]]]):
+            detail_parameters (Optional[dict[str, dict[tuple[int, ...], float]]]):
                 Detailed parameters for the encoding process.
 
         Returns:
@@ -164,7 +219,7 @@ class QuantumConverter(abc.ABC):
 
         """
 
-        qubo, constant = self.instance_to_qubo()
+        qubo, constant = self.instance_to_qubo(multipliers, detail_parameters)
         # TODO: When simplify-True, we met some errors.
         #       Need to be fixed.
         ising = qubo_to_ising(qubo, simplify=False)
@@ -181,15 +236,14 @@ class QuantumConverter(abc.ABC):
                 )
 
         deci_vars = {dv.id: dv for dv in self.original_instance.raw.decision_variables}
-        if ising.index_map is not None:
-            for ising_index, qubo_index in ising.index_map.items():
-                deci_var = deci_vars[qubo_index]
-                # TODO: If use log encoding to represent an integer,
-                #       var_name is ommx.log_encode and subscripts represents [original variable index, encoded binary index].
-                #       Need to be fixed.
-                var_name = deci_var.name
-                subscripts = deci_var.subscripts
-                self.int2varlabel[ising_index]  = var_name + "_{" + ",".join(map(str, subscripts)) + "}"
+        for ising_index, qubo_index in ising.index_map.items():
+            deci_var = deci_vars[qubo_index]
+            # TODO: If use log encoding to represent an integer,
+            #       var_name is ommx.log_encode and subscripts represents [original variable index, encoded binary index].
+            #       Need to be fixed.
+            var_name = deci_var.name
+            subscripts = deci_var.subscripts
+            self.int2varlabel[ising_index]  = var_name + "_{" + ",".join(map(str, subscripts)) + "}"
 
         return ising
 
