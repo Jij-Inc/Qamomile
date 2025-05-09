@@ -29,12 +29,13 @@ Note: This module requires `jijmodeling` and `jijmodeling_transpiler` for proble
 
 """
 
+import copy
 import numpy as np
 import typing as typ
-import jijmodeling_transpiler.core as jmt
 import qamomile.core.bitssample as qm_bs
 import qamomile.core.circuit as qm_c
 import qamomile.core.operator as qm_o
+from qamomile.core.ising_qubo import IsingModel, qubo_to_ising
 from qamomile.core.converters.converter import QuantumConverter
 from qamomile.core.converters.utils import is_close_zero
 import ommx.v1
@@ -64,88 +65,256 @@ class FQAOAConverter(QuantumConverter):
 
     """
     
-    def get_init_state(
-		self, slater_det: np.array, 
-	):
-
-        givens_angles = 1
+    def __init__(
+        self,
+        instance: ommx.v1.Instance,
+        num_fermions: int,
+        mixer_connectivity: typ.Optional[typ.Literal["ladder", "cyclic"]] = "cyclic",
+        normalize_model: bool = False,
+        normalize_ising: typ.Optional[typ.Literal["abs_max", "rms"]] = None
+    ):
+        super().__init__(instance)
         
-    def add_snake_jw_hopping_operator(
-    circuit: qm_c.QuantumCircuit,
-    beta: qm_c.Parameter,
-    hopping,
-    index: typ.Optional[int]
-	):
-        circuit.
+        n, d = self.original_instance.decision_variables.iloc[-1]["subscripts"]
+        self.num_integers, self.num_bits = n+1, d+1
+        self.num_fermions = num_fermions
+        
+        if isinstance(mixer_connectivity, str):
+            if mixer_connectivity == "cyclic":
+                self.connectivity = mixer_connectivity
+                self.var_map = self.cyclic_mapping()
+            elif mixer_connectivity == "ladder":
+                self.connectivity = mixer_connectivity
+                self.var_map = self.fermion_mapping()
+        else:
+            raise ValueError(f"Invalid value for connectivity: {mixer_connectivity}")
+        
+        self.ising = self.get_ising()
+        self.num_qubits = self.ising.num_bits()
+        
+    def instance_to_qubo(self) -> tuple[dict[tuple[int, int], float], float]:
+        """
+        Convert the instance to QUBO format.
+
+        This method converts the optimization problem instance into a QUBO (Quadratic Unconstrained Binary Optimization)
+        representation, which is suitable for quantum computation.
+
+        Returns:
+            tuple[dict[int, float], float]: A tuple containing the QUBO dictionary and the constant term.
+
+        """
+        instance_copy = copy.deepcopy(self.original_instance)
+        qubo, constant = instance_copy.to_qubo(uniform_penalty_weight=0.0)
+        return qubo, constant
+
+    def get_ising(self) -> IsingModel:
+        """
+        Get the Ising model representation of the problem.
+
+        Returns:
+            IsingModel: The Ising model representation.
+
+        """
+        if self._ising is None:
+            self._ising = self.ising_encode()
+        return self._ising
+        
+    def cyclic_mapping(self) -> dict[int, tuple[int, int]]:
+        """
+        Get variable maps between decision variable indices (l,d) and qubit index i.
+        
+        Return:
+			dict[int, tuple[int, int]] : A variable map for ring driver.
+        """
+        cyclic_var_map = {}
+        for id, pos in self.original_instance.decision_variables.subscripts.items():
+            # l = pos[0], d = pos[1]
+            i = pos[0] + self.num_integers * pos[1] 
+            cyclic_var_map[i] = pos
+        
+        return cyclic_var_map
+    
+    def ladder_mapping(self) -> dict[int, tuple[int, int]]:
+        """
+        Get variable maps between decision variable indices (l,d) and qubit index i.
+        
+        Return:
+			dict[int, tuple[int, int]] : A variable map for ladder driver.
+        """
+        fermi_var_map = {}
+        for id, pos in self.original_instance.decision_variables.subscripts.items():
+            # l = pos[0], d = pos[1]
+            i = (-1)**(pos[1]) * pos[0] + self.num_integers * pos[1] + (1-(-1)**pos[1]) * (self.num_integers-1) / 2 
+            fermi_var_map[i] = pos
+        
+        return fermi_var_map
+    
+    def get_fermi_orbital(self):
+        """
+        Compute the single-particle wave functions of the occupied spin orbitals.
+        
+        Return:
+			nd.array: A 2D numpy array of shape (num_fermions, num_qubits)
+
+        """
+        orbital = np.zeros((self.num_fermions, self.num_qubits))
+        
+        if self.connectivity == "cyclic":
+            if self.num_fermions % 2 == 0: # num_fermion is even
+                for i in range(self.num_qubits):
+                    for k in range(int(self.num_fermions/2)):
+                        angle = 2.0 * np.pi * (k+0.5) * (i+1) / self.num_qubits
+                        orbital[k, i] = np.sqrt(2.0/self.num_qubits) * np.sin(angle)
+                        orbital[int(self.num_fermions-1-k), i] = np.sqrt(2.0/self.num_qubits) * np.cos(angle)
+            else: # num_fermion is odd
+                for i in range(self.num_qubits):
+                    orbital[0, i] = np.sqrt(1.0/self.num_qubits)
+                    for k in range(int(self.num_fermions/2)):
+                        angle = 2.0 * np.pi * (k+1) * (i+1) / self.num_qubits
+                        orbital[k, i] = np.sqrt(2.0/self.num_qubits) * np.sin(angle)
+                        orbital[int(self.num_fermions-1-k), i] = np.sqrt(2.0/self.num_qubits) * np.cos(angle)
+                
+        else:
+            # 要修正
+            # (k,m)
+            for i, pos_i in self.var_map.items():
+                if pos_i[0] == (int(self.num_qubits*0.5-1) or int(self.num_qubits-1)):
+                    coef = np.sqrt(2/((self.num_bits+1)*self.num_integers))
+                else:
+                    coef = np.sqrt(4/((self.num_bits+1)*self.num_integers))
+                
+                # (l,d)
+                for j, pos_j in self.var_map.items():
+                    if pos_i[0] < int(self.num_qubits*0.5-1):
+                        orbital[i,j] = coef * np.sin(2*np.pi*pos_i[0]*pos_j[0]/self.num_integers) * np.sin(np.pi*pos_i[1]*pos_j[1]/(self.num_bits+1))
+                    else:
+                        orbital[i,j] = coef * np.cos(2*np.pi*pos_i[0]*pos_j[0]/self.num_integers) * np.sin(np.pi*pos_i[1]*pos_j[1]/(self.num_bits+1))
+                        
+        return orbital
+    
+    def givens_rotation(self, givens_angles, gate_id):
+        i, j, theta, varphi = givens_angles
+        
+        circuit = qm_c.QuantumCircuit(self.num_qubits, 0, name=f"g_{gate_id}")
+        circuit.cnot(j,i)
+        circuit.cry(-2.0*theta, i, j)
+        circuit.cnot(j,i)
+        circuit.rz(varphi, j)
+        
+        return circuit
+        
+    def fermion_swap_gate(self, i):
+        circuit = qm_c.QuantumCircuit(self.num_qubits, 0, name="FSWAP")
+        circuit.swap(i,i+1)
+        circuit.h(i+1)
+        circuit.cnot(i,i+1)
+        circuit.h(i+1)
+        
+        return circuit
+    
+    def get_init_state(self):
+        unitary_rows = self.get_fermi_orbital()
+        givens_rotations = givens_decomposition(unitary_rows)
+            
+        init = qm_c.QuantumCircuit(self.num_qubits, 0, name="init")
+        
+        for i in range(self.num_fermions):
+            init.x(i)
+            
+        givens_rot_list = []
+        for givens_rot_paralell in reversed(givens_rotations[0]):
+            for givens_rot in reversed(givens_rot_paralell):
+                givens_rot_list.append(givens_rot)
+        
+        i = 0
+        for givens_angles in givens_rot_list:
+            init.append(self.givens_rotation(givens_angles, int(len(givens_rot_list)-i)))
+            i += 1
+            
+        return init
 
     def get_mixer_ansatz(
-		self,
-		beta: qm_c.Parameter, 
-		lattice_structure: typ.Optional[typ.Literal["cyclic", "ladder"]] = "cyclic",
-		hopping: float = 1.0,
-		name: str = "Mixer"
+		self, beta: qm_c.Parameter, hopping: float = 1.0, name: str = "Mixer"
 	) -> qm_c.QuantumCircuit:
         """
     	Generate the fermionic mixer ansatz circuit (:math:`e^{-\gamma H_d}`) for FQAOA.
 
 		Args:
 			beta (qm_c.Parameter): The gamma parameter for the cost ansatz.
-			lattice_structure (Literal["abs_max", "rms"] | None): The lattice structure of the driver Hamiltonian. 
-                Available options:
-                - "cyclic": Use an one-dimentional cyclic lattice
-                - "ladder": Use a D-leg ladder lattice
-                Defaults to "cyclic".
-            hopping (float): The hopping integral.
-				Defaults to 1.0.
-			name (str, optional): Name of the circuit.
-				Defaults to "Mixer".
+   			hopping (float): The hopping integral. Defaults to 1.0.
+			name (str, optional): Name of the circuit. Defaults to "Mixer".
 
 		Returns:
 			qm_c.QuantumCircuit: The fermionic driver ansatz circuit.
 		"""
-        ising = self.get_ising()
-        num_qubits = ising.num_bits()
 
-        mixer = qm_c.QuantumCircuit(num_qubits, 0, name=name)
+        mixer = qm_c.QuantumCircuit(self.num_qubits, 0, name=name)
   
-        if isinstance(lattice_structure, str):
-            if lattice_structure == "cyclic":
-				# I(odd)
-                for i in range(0, num_qubits-1, 2):
-                    mixer.rxx(beta, i, i+1)
-                    mixer.ryy(beta, i, i+1)
-                # II(even)
-                for i in range(1, num_qubits-1, 2):
-                    mixer.rxx(beta, i, i+1)
-                    mixer.ryy(beta, i, i+1)
-                # BD
-                for i in range(0, num_qubits, 2):
-                    mixer.rxx(beta, i, 0)
-                    mixer.ryy(beta, i, 0)
+        # 1d-cyclic
+        if self.connectivity == "cyclic":
+			# layer-I(odd)
+            for i in range(0, self.num_qubits-1, 2):
+                mixer.rx(-1.0*np.pi/2, i)
+                mixer.rx(np.pi/2, i+1)
+                mixer.cnot(i, i+1)
+                mixer.rx(-1.0*beta*hopping, i)
+                mixer.rz(beta*hopping, i+1)
+                mixer.cnot(i, i+1)
+                mixer.rx(np.pi/2, i)
+                mixer.rx(-1.0*np.pi/2, i+1)
+                
+            # layer-II(even)
+            for i in range(1, self.num_qubits-1, 2):
+                mixer.rx(-1.0*np.pi/2, i)
+                mixer.rx(np.pi/2, i+1)
+                mixer.cnot(i, i+1)
+                mixer.rx(-1.0*beta*hopping, i)
+                mixer.rz(beta*hopping, i+1)
+                mixer.cnot(i, i+1)
+                mixer.rx(np.pi/2, i)
+                mixer.rx(-1.0*np.pi/2, i+1)
+                
+            # BD
+            mixer.rx(-1.0*np.pi/2, 0)
+            mixer.rx(np.pi/2, self.num_qubits-1)
+            mixer.cnot(0, self.num_qubits-1)
+            mixer.rx(-1.0*beta*hopping, 0)
+            mixer.rz(beta*hopping, self.num_qubits-1)
+            mixer.cnot(0, self.num_qubits-1)
+            mixer.rx(np.pi/2, 0)
+            mixer.rx(-1.0*np.pi/2, self.num_qubits-1)
             
-            elif lattice_structure == "ladder":
-                D = 1
-                N = 1
-                # parallel direction 
-                for d in range(D):
-                    # I
-                    for l in range(0, N-1, 2):
-                        mixer.rxx(beta, l, l+1)
-                        mixer.ryy(beta, l, l+1)
-                    # II
-                    for l in range(1, N-1, 2):
-                        mixer.rxx(beta, l, l+1)
-                        mixer.ryy(beta, l, l+1)
-                    # BD
-                    mixer.rxx(beta, N-1, 0)
-                    mixer.ryy(beta, N-1, 0)
-                
-                # vertical direction
-                
-            else:
-                raise ValueError(
-                    f"Invalid value for lattice_structure: {lattice_structure}"
-                )
+        # 2d-ladder
+        else:
+            """
+            # parallel
+            for i in range(self.num_qubits):
+                # layer-I
+                if [(x % 2 == 0) for x in self.var_map[i]] in ([True, True], [False, False]):
+                    if self.var_map[i][0] in (0,N-1): # without BD
+                        mixer.rxx(beta*hopping, i, i+1)
+                        mixer.ryy(beta*hopping, i, i+1)
+                # layer-II
+                else:
+                    if self.var_map[i][0] in (0,N-1): #without BD
+                        mixer.rxx(beta*hopping, i, i+1)
+                        mixer.ryy(beta*hopping, i, i+1)
+            # vertical
+            for i in range(self.num_qubits): # VB
+                # F_I
+                if [(x % 2 == 0) for x in self.var_map[i]] in ([True, True], [False, False]):
+                    if self.var_map[i][0] in (0,N-1):
+                        mixer.append(self.fermion_swap_gate(i))
+                # F_II
+                else:
+                    if self.var_map[i][0] in (0,N-1):
+                        mixer.append(self.fermion_swap_gate(i))
+                # hopping
+                for 
+            for i in range(D): #BD
+            for i in range(self.num_qubits): # VB
+            """
+            raise ValueError(f"Not implements")
 
         return mixer
 
@@ -163,18 +332,15 @@ class FQAOAConverter(QuantumConverter):
         Returns:
             qm_c.QuantumCircuit: The cost ansatz circuit.
         """
-        ising = self.get_ising()
-        num_qubits = ising.num_bits()
-
-        cost = qm_c.QuantumCircuit(num_qubits, 0, name=name)
+        cost = qm_c.QuantumCircuit(self.num_qubits, 0, name=name)
 
         # Apply RZ gates for linear terms
-        for i, hi in ising.linear.items():
+        for i, hi in self.ising.linear.items():
             if not is_close_zero(hi):
                 cost.rz(2 * hi * gamma, i)
 
         # Apply CNOT and RZ gates for quadratic terms
-        for (i, j), Jij in ising.quad.items():
+        for (i, j), Jij in self.ising.quad.items():
             if not is_close_zero(Jij):
                 cost.rzz(2 * Jij * gamma, i, j)
 
@@ -183,29 +349,20 @@ class FQAOAConverter(QuantumConverter):
         return cost
 
     def get_fqaoa_ansatz(
-		self,
-		p: int,
-		lattice_structure: typ.Optional[typ.Literal["cyclic", "ladder"]] = "cyclic",
-		hopping: float = 1.0
+		self, p: int, hopping: float = 1.0
   	) -> qm_c.QuantumCircuit:
         """
         Generate the FQAOA ansatz circuit.
 
         Args:
             p (int): Number of QAOA layers.
-            lattice_structure (Literal["abs_max", "rms"] | None): The lattice structure of the driver Hamiltonian. 
-                Available options:
-                - "cyclic": Use an one-dimentional cyclic lattice
-                - "ladder": Use a D-leg ladder lattice
-                Defaults to "cyclic".
             hopping (float): The hopping integral.
 
         Returns:
             qm_c.QuantumCircuit: The FQAOA ansatz circuit.
         """
-        ising = self.get_ising()
-        num_qubits = ising.num_bits()
-        fqaoa_circuit = qm_c.QuantumCircuit(num_qubits, 0, name="FQAOA")
+
+        fqaoa_circuit = qm_c.QuantumCircuit(self.num_qubits, 0, name="FQAOA")
 
 		# Construct QAOA layers
         init = self.get_init_state()
@@ -216,7 +373,7 @@ class FQAOAConverter(QuantumConverter):
             gamma = qm_c.Parameter(f"gamma_{_p}")
             
             cost = self.get_cost_ansatz(gamma, name=f"Cost_{_p}")
-            mixer = self.get_mixer_ansatz(beta, lattice_structure=lattice_structure, hopping=hopping, name=f"Mixer_{_p}")
+            mixer = self.get_mixer_ansatz(beta, hopping=hopping, name=f"Mixer_{_p}")
 
             fqaoa_circuit.append(cost)
             fqaoa_circuit.append(mixer)
@@ -227,21 +384,20 @@ class FQAOAConverter(QuantumConverter):
 
     def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
         """
-        Construct the cost Hamiltonian for QAOA.
+        Construct the cost Hamiltonian for FQAOA.
 
         Returns:
             qm_o.Hamiltonian: The cost Hamiltonian.
         """
         hamiltonian = qm_o.Hamiltonian()
-        ising = self.get_ising()
 
         # Add linear terms
-        for i, hi in ising.linear.items():
+        for i, hi in self.ising.linear.items():
             if not is_close_zero(hi):
                 hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, i),), hi)
 
         # Add quadratic terms
-        for (i, j), Jij in ising.quad.items():
+        for (i, j), Jij in self.ising.quad.items():
             if not is_close_zero(Jij):
                 hamiltonian.add_term(
                     (
@@ -251,5 +407,4 @@ class FQAOAConverter(QuantumConverter):
                     Jij,
                 )
 
-        hamiltonian.constant = ising.constant
         return hamiltonian

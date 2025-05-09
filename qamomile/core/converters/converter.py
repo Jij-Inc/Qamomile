@@ -36,7 +36,7 @@ Example:
 import abc
 import enum
 import typing as typ
-
+import copy
 import jijmodeling as jm
 import ommx.v1
 import numpy as np
@@ -107,7 +107,6 @@ class QuantumConverter(abc.ABC):
                 Defaults to None.
 
         """
-
         self.original_instance: ommx.v1.Instance = instance
 
         self.int2varlabel: dict[int, str] = {}
@@ -126,7 +125,8 @@ class QuantumConverter(abc.ABC):
             tuple[dict[int, float], float]: A tuple containing the QUBO dictionary and the constant term.
 
         """
-        qubo, constant = self.original_instance.to_qubo()
+        instance_copy = copy.deepcopy(self.original_instance)
+        qubo, constant = instance_copy.to_qubo()
         return qubo, constant
 
     def get_ising(self) -> IsingModel:
@@ -224,7 +224,7 @@ class QuantumConverter(abc.ABC):
             result (ResultType): The raw result from the quantum computation.
 
         Returns:
-            jm.experimental.SampleSet: The decoded results as a SampleSet.
+            ommx.v1.SampleSet: The decoded results as a SampleSet.
         """
         bitssampleset = transpiler.convert_result(result)
         return self.decode_bits_to_sampleset(bitssampleset)
