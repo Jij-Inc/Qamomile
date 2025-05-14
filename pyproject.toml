@@ -29,15 +29,12 @@ qutip = "^5.0.4"
 pennylane = "^0.39.0"
 bloqade-analog = ">=0.16.5"
 
-
 [tool.poetry.group.dev.dependencies]
 jupyter = "^1.0.0"
 matplotlib = "^3.7.1"
 pylatexenc = "^2.10"
 pytest = "^7.3.2"
 ruff = "^0.5.6"
-black = "^25.1.0"
-
 
 [tool.poetry.group.doc.dependencies]
 jupyter-book = "^1.0.2"
