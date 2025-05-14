@@ -32,6 +32,7 @@ pip install "qamomile[qiskit]"  # For Qiskit integration
 pip install "qamomile[quri-parts]"  # For QuriParts integration
 pip install "qamomile[pennylane]"  # For QuriParts integration
 pip install "qamomile[qutip]"  # For QuTiP integration
+pip install "qamomile[udm]"  # For bloqade-analog integration
 ```
 
 ## Quick Start
