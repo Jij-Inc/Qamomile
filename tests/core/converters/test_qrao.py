@@ -1,6 +1,5 @@
 import numpy as np
 import jijmodeling as jm
-import jijmodeling_transpiler.core as jmt
 from qamomile.core.ising_qubo import IsingModel, qubo_to_ising
 from qamomile.core.converters.qrao.graph_coloring import (
     greedy_graph_coloring,
@@ -81,7 +80,7 @@ def test_QRAC31Converter():
     x = jm.BinaryVar("x", shape = (3,))
     problem += x[1]
     problem += jm.Constraint("const", x[0] + x[2] == 1)
-    compiled_instance = jmt.compile_model(problem, {})
+    compiled_instance = jm.Interpreter({}).eval_problem(problem)
 
     converter = QRAC31Converter(compiled_instance)
 
@@ -196,7 +195,7 @@ def test_QRAC21Converter():
     x = jm.BinaryVar("x", shape = (3,))
     problem += x[1]
     problem += jm.Constraint("const", x[0] + x[2] == 1)
-    compiled_instance = jmt.compile_model(problem, {})
+    compiled_instance = jm.Interpreter({}).eval_problem(problem)
 
     converter = QRAC21Converter(compiled_instance)
 
@@ -246,7 +245,7 @@ def test_QRACSpaceEfficientConverter():
     x = jm.BinaryVar("x", shape = (3,))
     problem += x[0] + x[1]
     problem += jm.Constraint("const", x[0] + x[1] + x[2] == 1)
-    compiled_instance = jmt.compile_model(problem, {})
+    compiled_instance = jm.Interpreter({}).eval_problem(problem)
 
     # Create an instance of QRACSpaceEfficientConverter
     converter = QRACSpaceEfficientConverter(compiled_instance)

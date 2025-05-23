@@ -1,6 +1,6 @@
 import pytest
 import jijmodeling as jm
-import jijmodeling_transpiler.core as jmt
+import ommx.v1
 from qamomile.core.post_process.local_search import IsingMatrix, LocalSearch
 from qamomile.core.converters.qaoa import QAOAConverter
 import numpy as np
@@ -13,7 +13,7 @@ def qaoa_converter() -> QAOAConverter:
     problem += (
         8 * x[0] * x[1] + 8 * x[1] * x[2] - 12 * x[0] - 8 * x[1] - 4 * x[2] + 8
     )  # in order to generate IsingModel({(0, 1): 2.0 ,(1, 2): 2.0}, {0: 4.0}, 0)
-    compiled_instance = jmt.compile_model(problem, {})
+    compiled_instance = jm.Interpreter({}).eval_problem(problem)
     qaoa_converter = QAOAConverter(compiled_instance)
 
     return qaoa_converter
@@ -101,10 +101,10 @@ def test_first_improvement(local_search_instance, ising_matrix, qaoa_converter):
 def test_decode(local_search_instance):
     state = np.array([-1, 1, -1])
     result = local_search_instance.decode(state)
-    state_dict = result.data[0].var_values["x"].values
-    expected_state_dict = {(2,): 1.0, (0,): 1.0}
-    obj = result.data[0].eval.objective
+    state_dict = result.extract_decision_variables("x", sample_id=0)
+    expected_state_dict = {(2,): 1.0, (0,): 1.0, (1,): 0.0}
+    obj = result.objectives[0]
 
-    assert isinstance(result, jm.experimental.SampleSet)
+    assert isinstance(result, ommx.v1.SampleSet)
     assert state_dict == expected_state_dict
     assert obj == -8

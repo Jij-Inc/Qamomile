@@ -9,7 +9,14 @@ class IsingModel:
     quad: dict[tuple[int, int], float]
     linear: dict[int, float]
     constant: float
-    index_map: typ.Optional[dict[int, int]] = None
+    index_map: dict[int, int] = dataclasses.field(default_factory=dict)
+
+    def __post_init__(self):
+        if len(self.index_map) == 0:
+            self.index_map = {i: i for i in self.linear.keys()}
+            for i, j in self.quad.keys():
+                self.index_map[i] = i
+                self.index_map[j] = j
 
     def num_bits(self) -> int:
         num_bits = max(self.linear.keys(), default=-1)
@@ -35,8 +42,6 @@ class IsingModel:
         return energy
 
     def ising2qubo_index(self, index: int) -> int:
-        if self.index_map is None:
-            return index
         return self.index_map[index]
 
     def normalize_by_abs_max(self):

@@ -1,10 +1,8 @@
 import pytest
 import numpy as np
 import jijmodeling as jm
-import jijmodeling_transpiler.core as jmt
 from collections import OrderedDict
-
-from qamomile.core.circuit import Parameter
+import ommx.v1
 import qamomile.core.bitssample as qm_bs
 from qamomile.core.converters.qaoa import QAOAConverter
 from qamomile.udm import Ising_UnitDiskGraph
@@ -59,7 +57,7 @@ def test_udm_integration():
 
     problem = Create_QUBO_problem()
     instance = Create_instance()
-    compiled_instance = jmt.compile_model(problem, instance)
+    compiled_instance = jm.Interpreter(instance).eval_problem(problem)
     udm_converter = QAOAConverter(compiled_instance)
 
     ising_model = udm_converter.ising_encode()
@@ -74,7 +72,7 @@ def test_convert_result():
 
     problem = Create_QUBO_problem()
     instance = Create_instance()
-    compiled_instance = jmt.compile_model(problem, instance)
+    compiled_instance = jm.Interpreter(instance).eval_problem(problem)
     udm_converter = QAOAConverter(compiled_instance)
     ising_model = udm_converter.ising_encode()
     udg = Ising_UnitDiskGraph(ising_model)
@@ -93,5 +91,4 @@ def test_convert_result():
     assert result.total_samples() == 1000
 
     sampleset = udm_converter.decode(transpiler, mock_result)
-
-    assert isinstance(sampleset, jm.experimental.SampleSet)
+    assert isinstance(sampleset, ommx.v1.SampleSet)

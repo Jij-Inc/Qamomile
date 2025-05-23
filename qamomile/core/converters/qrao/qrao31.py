@@ -38,7 +38,7 @@ Attention:
     Currently, this module does not provide the rounding algorithm.
 
 Note:
-    This module requires `jijmodeling` and `jijmodeling_transpiler` for problem representation
+    This module requires `jijmodeling` for problem representation
     and decoding functionalities.
     
 
