@@ -1,10 +1,8 @@
 import pytest
 import numpy as np
 import jijmodeling as jm
-import jijmodeling_transpiler.core as jmt
 from collections import OrderedDict
 import ommx.v1
-from qamomile.core.circuit import Parameter
 import qamomile.core.bitssample as qm_bs
 from qamomile.core.converters.qaoa import QAOAConverter
 from qamomile.udm import Ising_UnitDiskGraph
