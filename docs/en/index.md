@@ -19,7 +19,7 @@ To get started with Qamomile, please see the [Quick Start Guide](quickstart.ipyn
 Explore our documentation to dive deeper into Qamomile's capabilities:
 
 - [Quick Start Guide](quickstart.ipynb): Installation instructions and a simple example to get you started.
-- [API Reference](api/index.md): Complete documentation of Qamomile's API.
+- [API Reference](api_index.md): Complete documentation of Qamomile's API.
 - [Tutorials](tutorial/index.md): Step-by-step guides and examples to get you started.
 
 ## Contributing
