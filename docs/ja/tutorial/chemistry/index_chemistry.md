@@ -1,5 +1,5 @@
-# Quantum Chemistry
+# 量子化学
 
-## Tutorials
+## チュートリアル
 
-- [Variational Quantum EigenSolver (VQE) for the Hydrogen Molecule](vqe_for_hydrogen.ipynb): Learn how to implement VQE to find the ground state energy of hydrogen molecule.
+- [水素分子に対する変分量子固有値ソルバー（VQE）](vqe_for_hydrogen.ipynb)：水素分子の基底状態エネルギーを求めるために VQE を実装する方法を学びます。

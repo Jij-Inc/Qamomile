@@ -1,10 +1,10 @@
-# Solving Problems with QAOA
+# QAOA による問題解決
 
-## Tutorials
+## チュートリアル
 
-- [Quantum Approximate Optimization Algorithm for Max-Cut](maxcut.ipynb): Learn how to run the Quantum Approximate Optimization Algorithm for Max-Cut problem.
-- [Quantum Approximate Optimization Algorithm for Graph Partitioning](graph_partition.ipynb): Learn how to run the Quantum Approximate Optimization Algorithm for graph partitioning problem.
-- [Quantum Approximate Optimization Algorithm for vertex covering](vertex_cover.ipynb): Learn how to run the Quantum Approximate Optimization Algorithm for vertex cover problem.
-- [Quantum Approximate Optimization Algorithm for Multi-car Paint Shop Problem](multi_car_paint.ipynb): Learn how to run the Quantum Approximate Optimization Algorithm for multi-car paint shop problem.
-- [Quantum Approximate Optimization Algorithm for Travelling Salesman Problem](Travelling_Salesman_Problem.ipynb): Learn how to run the Quantum Approximate Optimization Algorithm for Travelling Salesman Problem.
-- [Quantum Approximate Optimization Algorithm for Graph Coloring](graph_coloring.ipynb): Learn how to run the Quantum Approximate Optimization Algorithm for graph coloring problem.
+- [Max-Cut 問題に対する量子近似最適化アルゴリズム](maxcut.ipynb)：Max-Cut 問題に対して Quantum Approximate Optimization Algorithm（QAOA）を実行する方法を学びます。
+- [グラフ分割問題に対する量子近似最適化アルゴリズム](graph_partition.ipynb)：グラフ分割問題に対して QAOA を実行する方法を学びます。
+- [頂点被覆問題に対する量子近似最適化アルゴリズム](vertex_cover.ipynb)：頂点被覆問題に対して QAOA を実行する方法を学びます。
+- [マルチカーペイントショップ問題に対する量子近似最適化アルゴリズム](multi_car_paint.ipynb)：マルチカーペイントショップ問題に対して QAOA を実行する方法を学びます。
+- [巡回セールスマン問題に対する量子近似最適化アルゴリズム](Travelling_Salesman_Problem.ipynb)：巡回セールスマン問題に対して QAOA を実行する方法を学びます。
+- [グラフ彩色問題に対する量子近似最適化アルゴリズム](graph_coloring.ipynb)：グラフ彩色問題に対して QAOA を実行する方法を学びます。

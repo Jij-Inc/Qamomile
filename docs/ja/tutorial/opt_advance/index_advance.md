@@ -1,6 +1,6 @@
-# Advanced techniques for Quantum Optimization
+# 量子最適化のための高度な手法
 
-## Tutorials
+## チュートリアル
 
-- [Quantum Alternating Operator Ansatz for Graph Coloring](graph_coloring_alternating_ansatz.ipynb): Learn how to run the Quantum Alternating Operator Ansatz for graph coloring problem.
-- [Quantum Random Access Optimization (QRAO) for Maxcut problem](qrao_tutorial.ipynb): Learn how to use Quantum Random Access Optimization.
+- [グラフ彩色問題に対する量子交互演算子アンサッツ](graph_coloring_alternating_ansatz.ipynb)：グラフ彩色問題に対して Quantum Alternating Operator Ansatz を実行する方法を学びます。
+- [Max-Cut 問題に対する量子ランダムアクセス最適化（QRAO）](qrao_tutorial.ipynb)：Quantum Random Access Optimization（QRAO）の使い方を学びます。
