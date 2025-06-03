@@ -52,7 +52,7 @@ sphinx:
     config:
       add_module_names: False
       autoapi_type: 'python'
-      autoapi_dirs: ['../qamomile']
+      autoapi_dirs: ['../../qamomile']
       autoapi_add_toctree_entry: True
       autoapi_options:
         - members
