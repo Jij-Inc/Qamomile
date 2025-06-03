@@ -20,7 +20,11 @@ Explore our documentation to dive deeper into Qamomile's capabilities:
 
 - [Quick Start Guide](quickstart.ipynb): Installation instructions and a simple example to get you started.
 - [API Reference](api_index.md): Complete documentation of Qamomile's API.
-- [Tutorials](tutorial/index.md): Step-by-step guides and examples to get you started.
+- Tutorials: Step-by-step guides and examples to get you started.
+    - [Basic Usage of the Library](tutorial/usage/index_usage.md)
+    - [Solving Problems with QAOA](tutorial/qaoa/index_qaoa.md)
+    - [Advanced techniques for Quantum Optimization](tutorial/opt_advance/index_advance.md)
+    - [Quantum Chemistry](tutorial/chemistry/index_chemistry.md)
 
 ## Contributing
 
