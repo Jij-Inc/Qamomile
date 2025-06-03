@@ -1,33 +1,33 @@
-# Welcome to Qamomile
+# Qamomileへようこそ
 
-Qamomile is a powerful SDK designed for quantum optimization algorithms, specializing in the conversion of mathematical models into quantum circuits. It serves as a bridge between classical optimization problems and quantum computing solutions.
+Qamomileは、量子最適化アルゴリズムのために設計された強力なSDKであり、数学モデルを量子回路へ変換することを専門としています。これは、古典的な最適化問題と量子コンピューティングによる解決法との橋渡しをする役割を果たします。
 
-## Key Features
+## 主な特徴
 
-- **Versatile Compatibility**: Supports leading quantum circuit SDKs including Qiskit and Quri-parts.
-- **Advanced Algorithm Support**: Goes beyond QAOA to include sophisticated encoding and algorithms like QRAO.
-- **Flexible Model Conversion**: Utilizes JijModeling for describing mathematical models and converting them to various quantum circuit SDKs.
-- **Intermediate Representation**: Capable of representing both Hamiltonians and quantum circuits as intermediate forms.
-- **Standalone Functionality**: Can implement quantum circuits independently, similar to other quantum circuit SDKs.
+- **多様な互換性**：QiskitやQuri-partsなど、主要な量子回路SDKに対応
+- **高度なアルゴリズム対応**：QAOAを超え、QRAOのような高度なエンコーディングやアルゴリズムにも対応
+- **柔軟なモデル変換**：数学モデルの記述と、さまざまな量子回路SDKへの変換にJijModelingを活用
+- **中間表現の活用**：ハミルトニアンや量子回路の両方を中間形式として表現可能
+- **スタンドアロン機能**：他の量子回路SDKのように、単体でも量子回路の実装が可能
 
-## Quick Start
+## クイックスタート
 
-To get started with Qamomile, please see the [Quick Start Guide](quickstart.ipynb) for installation instructions and a simple example.
+Qamomileの使用を始めるには、[クイックスタートガイド](quickstart.ipynb)をご覧ください。インストール手順と簡単な例を紹介しています。
 
-## Learn More
+## 詳しく知るには
 
-Explore our documentation to dive deeper into Qamomile's capabilities:
+Qamomileの機能をより深く理解するために、以下のドキュメントをご活用ください：
 
-- [Quick Start Guide](quickstart.ipynb): Installation instructions and a simple example to get you started.
-- [API Reference](api/index.md): Complete documentation of Qamomile's API.
-- [Tutorials](tutorial/index.md): Step-by-step guides and examples to get you started.
+- [クイックスタートガイド](quickstart.ipynb)：インストール手順と簡単な使用例。
+- [APIリファレンス](api_index.md)：QamomileのAPIの完全なドキュメント。
+- [チュートリアル](tutorial/index.md)：ステップバイステップのガイドと実例。
 
-## Contributing
+## コントリビューションについて
 
-We welcome contributions from the community! If you're interested in improving Qamomile, please check out our [Contribution Guidelines](contribute.md).
+コミュニティからの貢献を歓迎しています！Qamomileの改善にご興味のある方は、[コントリビューションガイドライン](contribute.md)をご確認ください。
 
-## Support
+## サポート
 
-If you encounter any issues or have questions, please file an issue on our [GitHub repository](https://github.com/Jij-Inc/Qamomile) or join our community discussion forum.
+問題が発生した場合や質問がある場合は、[GitHubリポジトリ](https://github.com/Jij-Inc/Qamomile)でIssueを登録するか、コミュニティディスカッションフォーラムにご参加ください。
 
-Welcome aboard, and happy quantum optimizing with Qamomile!
+Qamomileへようこそ！量子最適化をお楽しみください！
