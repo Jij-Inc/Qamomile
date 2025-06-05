@@ -5,7 +5,7 @@ function Explore() {
     {
       title: 'Quick Start Guide',
       description: 'Installation instructions and a simple example to get you started.',
-      link: 'https://jij-inc.github.io/Qamomile/quickstart.html'
+      link: 'https://jij-inc.github.io/Qamomile/en/quickstart.html'
     },
     {
       title: 'API Reference',
@@ -15,7 +15,7 @@ function Explore() {
     {
       title: 'Advanced Topics',
       description: 'Explore advanced features and optimization techniques.',
-      link: 'https://jij-inc.github.io/Qamomile/tutorial/index.html'
+      link: 'https://jij-inc.github.io/Qamomile/en/tutorial/index.html'
     }
   ]
 
