@@ -28,6 +28,7 @@ parts:
     chapters:
     - file: tutorial/qaoa/index_qaoa
       sections:
+      - file: tutorial/qaoa/qaoa
       - file: tutorial/qaoa/maxcut
       - file: tutorial/qaoa/graph_partition
       - file: tutorial/qaoa/vertex_cover
