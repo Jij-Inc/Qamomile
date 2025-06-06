@@ -14,14 +14,13 @@ concurrency:
   group: "pages"
   cancel-in-progress: false
 
-# ランディングページ，jupyter bookのビルドとGitHub Pagesへのデプロイを行うジョブを別々に実行する
+# Build the landing page and jupyter book and deploy those pages to GitHub Pages separately.
 jobs: 
   build-lp:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -31,7 +30,6 @@ jobs:
       # - name: Build Landing Page
       #   run: |
       #     cd docs/qamomile-lp
-
       - name: Build the LP
         run: |
           cd docs/qamomile-lp
@@ -58,7 +56,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-    
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
