@@ -320,5 +320,3 @@ class QuantumConverter(abc.ABC):
         samples = ommx.v1.Samples(entries=entries)
 
         return self.original_instance.evaluate_samples(samples)
-
-

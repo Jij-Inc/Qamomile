@@ -1,28 +1,31 @@
 """
-This module implements the Fermionic QAOA converter
-for the Qamomile framework :cite:`farhi2014quantum`. 
+This module implements the Fermionic QAOA (FQAOA) converter for the Qamomile framework :cite:`yoshioka2023fermionic`. 
+FQAOA translates the Hamiltonians into the representation of fermion systems, 
+and the equality constraint is naturally incorporated as a constant number of particles condition.
+
 The parameterized state :math:`|\\vec{\\beta},\\vec{\gamma}\\rangle` of :math:`p`-layer QAOA is defined as:
 
 .. math::
-    |\\vec{\\beta},\\vec{\gamma}\\rangle = U(\\vec{\\beta},\\vec{\gamma})|0\\rangle^{\otimes n} = e^{-i\\beta_{p-1} H_M}e^{-i\gamma_{p-1} H_P} \cdots e^{-i\\beta_0 H_M}e^{-i\gamma_0 H_P} H^{\otimes n}|0\\rangle^{\otimes n}
+    |\\vec{\\beta},\\vec{\gamma}\\rangle = U(\\vec{\\beta},\\vec{\gamma})|0\\rangle^{\otimes n} = e^{-i\\beta_{p-1} H_M}e^{-i\gamma_{p-1} H_P} \cdots e^{-i\\beta_0 H_M}e^{-i\gamma_0 H_P} U_{init}|0\\rangle^{\otimes n}
 
 where :math:`H_P` is the cost Hamiltonian, :math:`H_M` is the mixer Hamiltonian and :math:`\gamma_l` and :math:`\\beta_l` are the variational parameters.
-The 2 :math:`p` variational parameters are optimized classically to minimize the expectation value :math:`\langle \\vec{\\beta},\\vec{\gamma}|H_P|\\vec{\\beta},\\vec{\gamma}\\rangle`.
+The :math:`2p` variational parameters are optimized classically to minimize the expectation value :math:`\langle \\vec{\\beta},\\vec{\gamma}|H_P|\\vec{\\beta},\\vec{\gamma}\\rangle`.
+:math:`U_{init}` prepares the initial state using Givens rotation gates :cite:`jiang2018quantum`.
 
 This module provides functionality to convert optimization problems which written by `jijmodeling`
-into QAOA circuits (:math:`U(\\vec{\\beta},\\vec{\gamma})`), construct cost Hamiltonians (:math:`H_P`), and decode quantum computation results.
+into FQAOA circuits (:math:`U(\\vec{\\beta}, \\vec{\gamma})`), construct cost Hamiltonians (:math:`H_P`), and decode quantum computation results.
 
 The `QAOAConverter` class extends the `QuantumConverter` base class, specializing in
-QAOA-specific operations such as ansatz circuit generation and result decoding.
+FQAOA-specific operations such as ansatz circuit generation and result decoding.
 
 
 Key Features:
-- Generation of QAOA ansatz circuits
-- Construction of cost Hamiltonians for QAOA
-- Decoding of quantum computation results into classical optimization solutions
+	- Generation of FQAOA ansatz circuits
+	- Construction of cost Hamiltonians for QAOA
+	- Decoding of quantum computation results into classical optimization solutions
 
-
-Note: This module requires `jijmodeling` and `jijmodeling_transpiler` for problem representation.
+Note: 
+	This module requires `jijmodeling` and `jijmodeling_transpiler` for problem representation and `openfermion` for preparing a Givens rotation gate.
 
 .. bibliography::
     :filter: docname in docnames
@@ -39,8 +42,12 @@ from qamomile.core.ising_qubo import IsingModel, qubo_to_ising
 from qamomile.core.converters.converter import QuantumConverter
 from qamomile.core.converters.utils import is_close_zero
 import ommx.v1
-from openfermion.linalg import givens_decomposition
 
+# lazy import
+try:
+    from openfermion.linalg import givens_decomposition
+except ImportError:
+    raise ImportError("To use the FQAOAConverter class, 'openfermion' is required. \n Installation method: 'pip install openfermion'")
 
 class FQAOAConverter(QuantumConverter):
     """
@@ -56,11 +63,11 @@ class FQAOAConverter(QuantumConverter):
         from qamomile.core.qaoa.fqaoa import FQAOAConverter
         
         # Initialize with a compiled optimization problem instance 
-        fqaoa_converter = FQAOAConverter(compiled_instance) 
+        fqaoa_converter = FQAOAConverter(compiled_instance, num_fermion=4, mixer_connectivity='cyclic') 
 
         # Generate QAOA circuit and cost Hamiltonian
         p = 2  # Number of QAOA layers
-        qaoa_circuit = fqaoa_converter.get_ansatz_circuit(p) 
+        fqaoa_circuit = fqaoa_converter.get_ansatz_circuit(p) 
         cost_hamiltonian = fqaoa_converter.get_cost_hamiltonian()
 
     """
@@ -73,6 +80,28 @@ class FQAOAConverter(QuantumConverter):
         normalize_model: bool = False,
         normalize_ising: typ.Optional[typ.Literal["abs_max", "rms"]] = None
     ):
+        """
+        Initialize the FQAOAConverter.
+
+        This method initializes the converter with the compiled instance of the optimization problem.
+
+        Args:
+            compiled_instance: ommx.v1.Instance.
+            num_fermions (int): Number of fermions. This means the constraint :math:`M = \\sum_{l,d} x_{l,d}`.
+            mixer_connectivity (Literal["ladder", "cyclic"] | 'cyclic'): The lattice structure of mixer Hamiltonian.\
+				Available options:
+				- 'ladder': two-dimensional Ladder lattice
+				- 'cyclic': one-dimensional cyclic lattice
+				Defaults to 'cyclic'.
+            normalize_model (bool): The objective function and the constraints are normalized using the maximum absolute value of the coefficients contained in each.\
+                Defaults to False
+            normalize_ising (Literal["abs_max", "rms"] | None): The normalization method for the Ising Hamiltonian. \
+                Available options:
+                - "abs_max": Normalize by absolute maximum value
+                - "rms": Normalize by root mean square
+                Defaults to None.
+
+        """
         super().__init__(instance)
         
         n, d = self.original_instance.decision_variables.iloc[-1]["subscripts"]
@@ -85,14 +114,14 @@ class FQAOAConverter(QuantumConverter):
                 self.var_map = self.cyclic_mapping()
             elif mixer_connectivity == "ladder":
                 self.connectivity = mixer_connectivity
-                self.var_map = self.fermion_mapping()
+                self.var_map = self.ladder_mapping()
         else:
             raise ValueError(f"Invalid value for connectivity: {mixer_connectivity}")
         
-        self.ising = self.get_ising()
+        self.ising = self.fqaoa_get_ising()
         self.num_qubits = self.ising.num_bits()
         
-    def instance_to_qubo(self) -> tuple[dict[tuple[int, int], float], float]:
+    def fqaoa_instance_to_qubo(self) -> tuple[dict[tuple[int, int], float], float]:
         """
         Convert the instance to QUBO format.
 
@@ -107,7 +136,7 @@ class FQAOAConverter(QuantumConverter):
         qubo, constant = instance_copy.to_qubo(uniform_penalty_weight=0.0)
         return qubo, constant
 
-    def get_ising(self) -> IsingModel:
+    def fqaoa_get_ising(self) -> IsingModel:
         """
         Get the Ising model representation of the problem.
 
@@ -116,45 +145,72 @@ class FQAOAConverter(QuantumConverter):
 
         """
         if self._ising is None:
-            self._ising = self.ising_encode()
+            self._ising = self.fqaoa_ising_encode()
         return self._ising
+
+    def fqaoa_ising_encode(self) -> IsingModel:
+        qubo, constant = self.fqaoa_instance_to_qubo()
+        ising = qubo_to_ising(qubo, simplify=False)
+        ising.constant += constant
+
+		# normalize
+        if isinstance(self.normalize_ising, str):
+            if self.normalize_ising == "abs_max":
+                ising.normalize_by_abs_max()
+            elif self.normalize_ising == "rms":
+                ising.normalize_by_rms()
+            else:
+                raise ValueError(
+                    f"Invalid value for normalize_ising: {self.normalize_ising}"
+                )
+
+		# index labeling
+        deci_vars = {dv.id: dv for dv in self.original_instance.raw.decision_variables}
         
-    def cyclic_mapping(self) -> dict[int, tuple[int, int]]:
+        for ising_index, qubo_index in ising.index_map.items():
+            deci_var = deci_vars[qubo_index]
+            var_name = deci_var.name
+            subscripts = tuple(deci_var.subscripts)
+            
+            fermionic_index = self.var_map[subscripts]
+            self.int2varlabel[fermionic_index]  = var_name + "_{" + ",".join(map(str, subscripts)) + "}"
+
+        return ising
+        
+    def cyclic_mapping(self) -> dict[tuple[int, int], int]:
         """
-        Get variable maps between decision variable indices (l,d) and qubit index i.
+        Get variable maps between decision variable indices :math:`(l,d)` and qubit index :math:`i`.
         
         Return:
-			dict[int, tuple[int, int]] : A variable map for ring driver.
+			dict[tuple[int, int], int] : A variable map for ring driver.
         """
         cyclic_var_map = {}
         for id, pos in self.original_instance.decision_variables.subscripts.items():
             # l = pos[0], d = pos[1]
-            i = pos[0] + self.num_integers * pos[1] 
-            cyclic_var_map[i] = pos
+            cyclic_var_map[tuple(pos)] = pos[0] + self.num_integers * pos[1]
         
         return cyclic_var_map
     
-    def ladder_mapping(self) -> dict[int, tuple[int, int]]:
+    def ladder_mapping(self) -> dict[tuple[int, int], int]:
         """
-        Get variable maps between decision variable indices (l,d) and qubit index i.
+        Get variable maps between decision variable indices :math:`(l,d)` and qubit index :math:`i`.
         
         Return:
-			dict[int, tuple[int, int]] : A variable map for ladder driver.
+			dict[tuple[int, int], int] : A variable map for ladder driver.
         """
         fermi_var_map = {}
         for id, pos in self.original_instance.decision_variables.subscripts.items():
             # l = pos[0], d = pos[1]
-            i = (-1)**(pos[1]) * pos[0] + self.num_integers * pos[1] + (1-(-1)**pos[1]) * (self.num_integers-1) / 2 
-            fermi_var_map[i] = pos
+            fermi_var_map[tuple(pos)] = (-1)**(pos[1]) * pos[0] + self.num_integers * pos[1] + (1-(-1)**pos[1]) * (self.num_integers-1) / 2
         
         return fermi_var_map
     
-    def get_fermi_orbital(self):
+    def get_fermi_orbital(self) -> np.ndarray:
         """
         Compute the single-particle wave functions of the occupied spin orbitals.
         
         Return:
-			nd.array: A 2D numpy array of shape (num_fermions, num_qubits)
+			numpy.ndarray: A 2D numpy array of shape (num_fermions, num_qubits)
 
         """
         orbital = np.zeros((self.num_fermions, self.num_qubits))
@@ -192,7 +248,16 @@ class FQAOAConverter(QuantumConverter):
                         
         return orbital
     
-    def givens_rotation(self, givens_angles, gate_id):
+    def givens_rotation(self, givens_angles: tuple[int, int, float, float], gate_id: int) -> qm_c.QuantumCircuit:
+        """
+        Generate givens rotation gates for the initial state preparation of FQAOA.
+        
+        Args:
+    	    givens_angles (tuple[int, int, float, float]): Parameters which represents a givens rotation of coordinates :math:`(i,j)` by angles :math:`(\\theta, \\varphi)`.
+    	    gate_id (int): The index of givens rotations gate.
+        Returns:
+            qm_c.QuantumCircuit: The :math:`i`-th givens rotation gate.
+        """
         i, j, theta, varphi = givens_angles
         
         circuit = qm_c.QuantumCircuit(self.num_qubits, 0, name=f"g_{gate_id}")
@@ -203,7 +268,7 @@ class FQAOAConverter(QuantumConverter):
         
         return circuit
         
-    def fermion_swap_gate(self, i):
+    def fermion_swap_gate(self, i) -> qm_c.QuantumCircuit:
         circuit = qm_c.QuantumCircuit(self.num_qubits, 0, name="FSWAP")
         circuit.swap(i,i+1)
         circuit.h(i+1)
@@ -212,7 +277,24 @@ class FQAOAConverter(QuantumConverter):
         
         return circuit
     
-    def get_init_state(self):
+    def hopping_gate(self, i, j, beta, hopping) -> qm_c.QuantumCircuit:
+        circuit = qm_c.QuantumCircuit(self.num_qubits, 0, name="hopping")
+        
+        circuit.rx(-0.5*np.pi, i)
+        circuit.rx(0.5*np.pi, j)
+        circuit.cnot(i, j)
+        circuit.rx(-1.0*beta*hopping, i)
+        circuit.rz(beta*hopping, j)
+        circuit.cnot(i, j)
+        circuit.rx(0.5*np.pi, i)
+        circuit.rx(-0.5*np.pi, j)
+        
+        return circuit
+    
+    def get_init_state(self) -> qm_c.QuantumCircuit:
+        """
+        Generate the initial state preparation for FQAOA.
+        """
         unitary_rows = self.get_fermi_orbital()
         givens_rotations = givens_decomposition(unitary_rows)
             
@@ -237,15 +319,15 @@ class FQAOAConverter(QuantumConverter):
 		self, beta: qm_c.Parameter, hopping: float = 1.0, name: str = "Mixer"
 	) -> qm_c.QuantumCircuit:
         """
-    	Generate the fermionic mixer ansatz circuit (:math:`e^{-\gamma H_d}`) for FQAOA.
-
-		Args:
-			beta (qm_c.Parameter): The gamma parameter for the cost ansatz.
-   			hopping (float): The hopping integral. Defaults to 1.0.
-			name (str, optional): Name of the circuit. Defaults to "Mixer".
-
-		Returns:
-			qm_c.QuantumCircuit: The fermionic driver ansatz circuit.
+        Generate the fermionic mixer ansatz circuit (:math:`e^{-\\beta H_d}`) for FQAOA.
+        
+        Args:
+        	beta (qm_c.Parameter): The beta parameter for the mixer ansatz.
+         	hopping (float): The hopping integral. Defaults to 1.0.
+          	name (str, optional): Name of the circuit. Defaults to "Mixer".
+        
+        Returns:
+        	qm_c.QuantumCircuit: The fermionic mixer ansatz circuit.
 		"""
 
         mixer = qm_c.QuantumCircuit(self.num_qubits, 0, name=name)
@@ -254,35 +336,14 @@ class FQAOAConverter(QuantumConverter):
         if self.connectivity == "cyclic":
 			# layer-I(odd)
             for i in range(0, self.num_qubits-1, 2):
-                mixer.rx(-1.0*np.pi/2, i)
-                mixer.rx(np.pi/2, i+1)
-                mixer.cnot(i, i+1)
-                mixer.rx(-1.0*beta*hopping, i)
-                mixer.rz(beta*hopping, i+1)
-                mixer.cnot(i, i+1)
-                mixer.rx(np.pi/2, i)
-                mixer.rx(-1.0*np.pi/2, i+1)
+                mixer.append(self.hopping_gate(i, i+1, beta, hopping))
                 
             # layer-II(even)
             for i in range(1, self.num_qubits-1, 2):
-                mixer.rx(-1.0*np.pi/2, i)
-                mixer.rx(np.pi/2, i+1)
-                mixer.cnot(i, i+1)
-                mixer.rx(-1.0*beta*hopping, i)
-                mixer.rz(beta*hopping, i+1)
-                mixer.cnot(i, i+1)
-                mixer.rx(np.pi/2, i)
-                mixer.rx(-1.0*np.pi/2, i+1)
+                mixer.append(self.hopping_gate(i, i+1, beta, hopping))
                 
             # BD
-            mixer.rx(-1.0*np.pi/2, 0)
-            mixer.rx(np.pi/2, self.num_qubits-1)
-            mixer.cnot(0, self.num_qubits-1)
-            mixer.rx(-1.0*beta*hopping, 0)
-            mixer.rz(beta*hopping, self.num_qubits-1)
-            mixer.cnot(0, self.num_qubits-1)
-            mixer.rx(np.pi/2, 0)
-            mixer.rx(-1.0*np.pi/2, self.num_qubits-1)
+            mixer.append(self.hopping_gate(0, self.num_qubits-1, beta, hopping))
             
         # 2d-ladder
         else:
@@ -384,7 +445,7 @@ class FQAOAConverter(QuantumConverter):
 
     def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
         """
-        Construct the cost Hamiltonian for FQAOA.
+        Construct the cost Hamiltonian (:math:`H_P`) for FQAOA.
 
         Returns:
             qm_o.Hamiltonian: The cost Hamiltonian.

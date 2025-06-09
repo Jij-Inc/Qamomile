@@ -28,4 +28,4 @@ Welcome to the Qamomile tutorial! This guide will help you get started with Qamo
 - [Quantum Approximate Optimization Algorithm for Travelling Salesman Problem](qaoa/Travelling_Salesman_Problem.ipynb): Learn how to run the Quantum Approximate Optimization Algorithm for Travelling Salesman Problem.
 - [Quantum Annealing using QuTiP](quantum_annealing.ipynb): Learn how to run the Quantum Annealing with QuTiP's built-in functions.
 - [Using the PennyLaneTranspiler in Qamomile](Using_the_PennyLaneTranspiler_in_Qamomile.ipynb): Learn how to transpile from Qamomile to PennyLane.
-
+- [Fermionic QAOA for Portfolio Optimization](portfolio_optimization.ipynb): Learn how to use the Fermionic QAOA (FQAOA) for the portfolio optimization problem.
