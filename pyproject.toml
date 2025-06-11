@@ -27,6 +27,7 @@ qiskit = "^1.1.1"
 matplotlib = "^3.9.2"
 qutip = "^5.0.4"
 pennylane = "^0.39.0"
+cudaq = {version = "^0.11.0", optional = true}
 
 [tool.poetry.group.dev.dependencies]
 jupyter = "^1.0.0"
@@ -47,6 +48,7 @@ qiskit = ["qiskit"]
 quri-parts = ["quri-parts-qulacs"]
 qutip = ["qutip"]
 pennylane = ["pennylane"]
+cudaq = ["cudaq"]
 
 [tool.pytest.ini_options]
 addopts = "--doctest-modules"
