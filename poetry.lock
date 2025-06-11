@@ -6027,4 +6027,4 @@ qutip = ["qutip"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.12"
-content-hash = "9b9480a00a2d5001b11457b10ac8760c428f39aede2b115ce92bfd9edb3b2ed7"
+content-hash = "e55152c7dfe08ad5f7d768d84123d8974d81a3b032c7539658aa278a965ff3f4"
