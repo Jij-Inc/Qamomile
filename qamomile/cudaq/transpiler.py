@@ -195,6 +195,8 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
             # Apply a gate corresponding to a qamomil.core.circuit.MeasurementGate.
             elif isinstance(gate, qamomile.core.circuit.MeasurementGate):
                 self._apply_measurement(kernel, qvector[gate.qubit])
+            elif isinstance(gate, qamomile.core.circuit.Operator):
+                self._convert_circuit(gate.circuit, kernel, param_mapping, qvector)
 
         return kernel
 
