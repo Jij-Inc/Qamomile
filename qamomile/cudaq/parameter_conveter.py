@@ -13,7 +13,7 @@ Usage:
     from qamomile.cudaq.parameter_converter import convert_parameter
     cudaq_param = convert_parameter(qamomile_param, parameter_map)
 
-Note: This module requires both Qamomile and Qiskit to be installed.
+Note: This module requires both Qamomile and CUDA-Q to be installed.
 """
 
 import cudaq
@@ -52,8 +52,8 @@ def convert_parameter(
 
     Examples:
         >>> qamomile_param = Parameter('theta')
-        >>> cudaq_param = cudaq.QuakeValue()
-        >>> param_map = {qamomile_param: qiskit_param}
+        >>> cudaq_param = cudaq.QuakeValue("theta", cudaq.make_kernel())
+        >>> param_map = {qamomile_param: cudaq_param}
         >>> result = convert_parameter(qamomile_param, param_map)
         >>> isinstance(result, cudaq.QuakeValue)
         True
