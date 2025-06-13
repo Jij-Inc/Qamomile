@@ -70,7 +70,20 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
 
         return hamltonian
 
-    def transpile_circuit(self, qamomile_circuit: qamomile.core.circuit.QuantumCircuit):
+    def transpile_circuit(
+        self, qamomile_circuit: qamomile.core.circuit.QuantumCircuit
+    ) -> cudaq.Kernel:
+        """Transpile a Qamomile quantum circuit to a CUDA-Q kernel, which corresponds to the Qamomile quantum circuit.
+
+        Args:
+            qamomile_circuit (qamomile.core.circuit.QuantumCircuit): the Qamomile quantum circuit to be transpiled
+
+        Raises:
+            QamomileCudaqTranspileError: If the transpiler encountered an error while converting the circuit.
+
+        Returns:
+            cudaq.Kernel: the CUDA-Q kernel that corresponds to the Qamomile quantum circuit
+        """
         try:
             # Get the parameters from the Qamomile circuit.
             qamomile_parameters = qamomile_circuit.get_parameters()
