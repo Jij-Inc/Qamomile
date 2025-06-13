@@ -245,5 +245,21 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
             case _:
                 raise NotImplementedError(f"Unsupported three-qubit gate: {gate.gate}")
 
+    def _apply_parametric_exp_gate(
+        kernel: cudaq.Kernel,
+        coefficient: float,
+        qubits: cudaq.qvector,
+        pauli_word: cudaq.pauli_word,
+    ) -> None:
+        """Apply a ParametricExpGate to the given qubits in the given kernel.
+
+        Args:
+            kernel (cudaq.Kernel): the kernel to be applied the gate to
+            coefficient (float): the coefficient for the Pauli term
+            qubits cudaq.qvector: the qubits to apply the gate to
+            pauli_word (cudaq.pauli_word): the Pauli word to be applied
+        """
+        kernel.exp_pauli(coefficient, qubits, pauli_word)
+
     def convert_result(self, result: dict[str, int]) -> qm_bs.BitsSampleSet:
         pass
