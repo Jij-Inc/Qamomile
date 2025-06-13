@@ -96,11 +96,90 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
                 for i, param in enumerate(qamomile_parameters)
             }
             # Run and return the convetered circuit.
-            return self._circuit_convert(
-                qamomile_circuit, kernel, qvector, self.param_mapping
+            return self._convert_circuit(
+                qamomile_circuit, kernel, self.param_mapping, qvector
             )
         except Exception as e:
             raise QamomileCudaqTranspileError(f"Error converting circuit: {str(e)}")
+
+    def _convert_circuit(
+        self,
+        qamomile_circuit: qamomile.core.circuit.QuantumCircuit,
+        kernel: cudaq.Kernel,
+        param_mapping: dict[
+            qamomile.core.circuit.parameter.Parameter, cudaq.QuakeValue
+        ],
+        qvector: cudaq.qvector,
+    ) -> cudaq.Kernel:
+        """Convert a Qamomile quantum circuit to a CUDA-Q kernel.
+
+        Args:
+            qamomile_circuit (qamomile.core.circuit.QuantumCircuit): the Qamomile quantum circuit to be converted
+            kernel (cudaq.Kernel): the CUDA-Q kernel to be applied the gates to
+            param_mapping (dict[qamomile.core.circuit.parameter.Parameter, cudaq.QuakeValue]): the map of Qamomile parameters to CUDA-Q parameters
+            qvector (cudaq.qvector): the qubits in the kernel
+
+        Returns:
+            cudaq.Kernel: the CUDA-Q kernel that corresponds to the Qamomile quantum circuit
+        """
+        num_qubits = qamomile_circuit.num_qubits
+
+        # Sequentially iterate over the gates of the given Qamomile circuit to apply each gate to the CUDA-Q kernel.
+        for gate in qamomile_circuit.gates:
+            # Apply a gate corresponding to a qamomil.core.circuit.SingleQubitGate.
+            if isinstance(gate, qamomile.core.circuit.SingleQubitGate):
+                self._apply_single_qubit_gate(kernel, gate, qvector[gate.qubit])
+            # Apply a ParametricSingleQubitGate.
+            elif isinstance(gate, qamomile.core.circuit.ParametricSingleQubitGate):
+                self._apply_parametric_single_qubit_gate(
+                    kernel, gate, param_mapping[gate.parameter], qvector[gate.qubit]
+                )
+            # Apply a gate corresponding to a qamomil.core.circuit.TwoQubitGate.
+            elif isinstance(gate, qamomile.core.circuit.TwoQubitGate):
+                self._apply_two_qubit_gate(
+                    kernel, gate, qvector[gate.control], qvector[gate.target]
+                )
+            # Apply a gate corresponding to a qamomil.core.circuit.ParametricTwoQubitGate.
+            elif isinstance(gate, qamomile.core.circuit.ParametricTwoQubitGate):
+                self._apply_parametric_two_qubit_gate(
+                    kernel,
+                    gate,
+                    param_mapping[gate.parameter],
+                    qvector[gate.control],
+                    qvector[gate.target],
+                )
+            # Apply a gate corresponding to a qamomil.core.circuit.ThreeQubitGate.
+            elif isinstance(gate, qamomile.core.circuit.ThreeQubitGate):
+                self._apply_three_qubit_gate(
+                    kernel,
+                    gate,
+                    qvector[gate.control1],
+                    qvector[gate.control2],
+                    qvector[gate.target],
+                )
+            # Apply a gate corresponding to a qamomil.core.circuit.ParametricExpGate.
+            elif isinstance(gate, qamomile.core.circuit.ParametricExpGate):
+                for term, coefficient in gate.hamiltonian.terms.items():
+                    word_list = ["I" for _ in range(num_qubits)]
+                    for index, op in enumerate(term):
+                        match op.pauli:
+                            case qamomile.core.operator.Pauli.X:
+                                word_list[index] = "X"
+                            case qamomile.core.operator.Pauli.Y:
+                                word_list[index] = "Y"
+                            case qamomile.core.operator.Pauli.Z:
+                                word_list[index] = "Z"
+                            case _:
+                                raise NotImplementedError(
+                                    f"Unsupported Pauli operator: {op.pauli}"
+                                )
+                    word = "".join(word_list)
+                    self._apply_parametric_exp_gate(kernel, coefficient, qvector, word)
+            # Apply a gate corresponding to a qamomil.core.circuit.MeasurementGate.
+            elif isinstance(gate, qamomile.core.circuit.MeasurementGate):
+                self._apply_measurement(kernel, qvector[gate.qubit])
+
+        return kernel
 
     def _apply_single_qubit_gate(
         self,
