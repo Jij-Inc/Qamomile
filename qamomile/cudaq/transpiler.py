@@ -76,7 +76,7 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
         kernel: cudaq.Kernel,
         gate: qamomile.core.circuit.Gate,
         qubit: cudaq.qubit,
-    ):
+    ) -> None:
         """Apply a SingleQubitGate to the given qubit in the given kernel.
 
         Args:
@@ -102,6 +102,35 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
                 kernel.t(qubit)
             case _:
                 raise NotImplementedError(f"Unsupported single-qubit gate: {gate.gate}")
+
+    def _apply_parametric_single_qubit_gate(
+        kernel: cudaq.Kernel,
+        gate: qamomile.core.circuit.Gate,
+        parameter: cudaq.QuakeValue,
+        qubit: cudaq.qubit,
+    ) -> None:
+        """Apply a ParametricSingleQubitGate to the given qubit in the given kernel.
+
+        Args:
+            kernel (cudaq.Kernel): the kernel to be applied the gate to
+            gate (qamomile.core.circuit.Gate): the gate to be applied
+            parameter (cudaq.QuakeValue): the parameter for the gate
+            qubit (cudaq.qubit): the qubit to apply the gate to
+
+        Raises:
+            NotImplementedError: If the gate type is not supported.
+        """
+        match gate.gate:
+            case qamomile.core.circuit.ParametricSingleQubitGateType.RX:
+                kernel.rx(parameter, qubit)
+            case qamomile.core.circuit.ParametricSingleQubitGateType.RY:
+                kernel.ry(parameter, qubit)
+            case qamomile.core.circuit.ParametricSingleQubitGateType.RZ:
+                kernel.rz(parameter, qubit)
+            case _:
+                raise NotImplementedError(
+                    f"Unsupported parametric single-qubit gate: {gate.gate}"
+                )
 
     def convert_result(self, result: dict[str, int]) -> qm_bs.BitsSampleSet:
         pass
