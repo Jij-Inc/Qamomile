@@ -412,5 +412,20 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
         """
         kernel.mz(qubit)
 
-    def convert_result(self, result: dict[str, int]) -> qm_bs.BitsSampleSet:
-        pass
+    def convert_result(self, sample: cudaq.SampleResult) -> qm_bs.BitsSampleSet:
+        """Convert a CUDA-Q sample result to a Qamomile BitsSampleSet.
+
+        Args:
+            sample (cudaq.SampleResult): the sample result from a CUDA-Q kernel execution
+
+        Returns:
+            qm_bs.BitsSampleSet: the converted BitsSampleSet containing the samples as bit strings
+        """
+        # Create a dictionary whose keys and values are (decimal) integer representations of the bit strings and their counts.
+        decimal_result = {}
+        for key, value in sample.items():
+            decimal_result[int(key, 2)] = value
+        # Get the number of bits from the last key.
+        num_bits = len(key)
+
+        return qm_bs.BitsSampleSet.from_int_counts(decimal_result, num_bits)
