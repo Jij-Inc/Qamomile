@@ -21,6 +21,7 @@ Requirements:
 import collections
 
 import cudaq
+import numpy as np
 
 import qamomile
 import qamomile.core.bitssample as qm_bs
@@ -156,6 +157,66 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
                 kernel.cz(qubit_1, qubit_2)  # qubit_1: ctrl, qubit_2: target
             case _:
                 raise NotImplementedError(f"Unsupported two-qubit gate: {gate.gate}")
+
+    def _apply_parametric_two_qubit_gate(
+        kernel: cudaq.Kernel,
+        gate: qamomile.core.circuit.Gate,
+        parameter: cudaq.QuakeValue,
+        qubit_1: cudaq.qubit,
+        qubit_2: cudaq.qubit,
+    ) -> None:
+        """Apply a ParametricTwoQubitGate to the given qubits in the given kernel.
+
+        Args:
+            kernel (cudaq.Kernel): the kernel to be applied the gate to
+            gate (qamomile.core.circuit.Gate): the gate to be applied
+            parameter (cudaq.QuakeValue): the parameter for the gate
+            qubit_1 (cudaq.qubit): the first qubit to apply the gate to
+            qubit_2 (cudaq.qubit): the second qubit to apply the gate to
+
+        Raises:
+            NotImplementedError: If the gate type is not supported.
+        """
+        match gate.gate:
+            case qamomile.core.circuit.ParametricTwoQubitGateType.CRX:
+                kernel.crx(
+                    parameter, qubit_1, qubit_2
+                )  # qubit_1: ctrl, qubit_2: target
+            case qamomile.core.circuit.ParametricTwoQubitGateType.CRY:
+                kernel.cry(
+                    parameter, qubit_1, qubit_2
+                )  # qubit_1: ctrl, qubit_2: target
+            case qamomile.core.circuit.ParametricTwoQubitGateType.CRZ:
+                kernel.crz(
+                    parameter, qubit_1, qubit_2
+                )  # qubit_1: ctrl, qubit_2: target
+            case qamomile.core.circuit.ParametricTwoQubitGateType.RXX:
+                # Ref: https://github.com/Qiskit/qiskit/blob/stable/2.0/qiskit/circuit/library/standard_gates/rxx.py
+                kernel.h(qubit_1)
+                kernel.h(qubit_2)
+                kernel.cx(qubit_1, qubit_2)
+                kernel.rz(parameter, qubit_2)
+                kernel.cx(qubit_1, qubit_2)
+                kernel.h(qubit_1)
+                kernel.h(qubit_2)
+            case qamomile.core.circuit.ParametricTwoQubitGateType.RYY:
+                # Ref: https://github.com/Qiskit/qiskit/blob/stable/2.0/qiskit/circuit/library/standard_gates/ryy.py
+                kernel.rx(np.pi / 2, qubit_1)
+                kernel.rx(np.pi / 2, qubit_2)
+                kernel.cx(qubit_1, qubit_2)
+                kernel.rz(parameter, qubit_2)
+                kernel.cx(qubit_1, qubit_2)
+                kernel.rx(-np.pi / 2, qubit_1)
+                kernel.rx(-np.pi / 2, qubit_2)
+            case qamomile.core.circuit.ParametricTwoQubitGateType.RZZ:
+                # Ref: https://github.com/Qiskit/qiskit/blob/stable/2.0/qiskit/circuit/library/standard_gates/rzz.py
+                kernel.cx(qubit_1, qubit_2)
+                kernel.rz(parameter, qubit_2)
+                kernel.cx(qubit_1, qubit_2)
+            case _:
+                raise NotImplementedError(
+                    f"Unsupported parametric two-qubit gate: {gate.gate}"
+                )
 
     def convert_result(self, result: dict[str, int]) -> qm_bs.BitsSampleSet:
         pass
