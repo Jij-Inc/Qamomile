@@ -26,6 +26,7 @@ import numpy as np
 import qamomile
 import qamomile.core.bitssample as qm_bs
 from qamomile.core.transpiler import QuantumSDKTranspiler
+from .exceptions import QamomileCudaqTranspileError
 
 
 class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]):
@@ -70,7 +71,23 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
         return hamltonian
 
     def transpile_circuit(self, qamomile_circuit: qamomile.core.circuit.QuantumCircuit):
-        pass
+        try:
+            # Get the parameters from the Qamomile circuit.
+            qamomile_parameters = qamomile_circuit.get_parameters()
+            # Creat the CUDA-Q kernel and its parameters and qubits.
+            kernel, cudaq_parameters = cudaq.make_kernel(list[float])
+            qvector = kernel.qalloc(qamomile_circuit.num_qubits)
+            # Create a parameter map from Qamomile parameters to CUDA-Q parameters.
+            self.param_mapping = {
+                param: cudaq_parameters[i]
+                for i, param in enumerate(qamomile_parameters)
+            }
+            # Run and return the convetered circuit.
+            return self._circuit_convert(
+                qamomile_circuit, kernel, qvector, self.param_mapping
+            )
+        except Exception as e:
+            raise QamomileCudaqTranspileError(f"Error converting circuit: {str(e)}")
 
     def _apply_single_qubit_gate(
         self,
