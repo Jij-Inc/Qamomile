@@ -261,5 +261,19 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
         """
         kernel.exp_pauli(coefficient, qubits, pauli_word)
 
+    def _apply_measurement(
+        self,
+        kernel: cudaq.Kernel,
+        qubit: cudaq.qubit,
+    ) -> None:
+        """
+        Apply measurement operations to the given qubits in the CUDA-Q kernel.
+
+        Args:
+            kernel (cudaq.Kernel): The kernel to apply measurements to.
+            qubit cudaq.qubit: The qubit to be measured.
+        """
+        kernel.mz(qubit)
+
     def convert_result(self, result: dict[str, int]) -> qm_bs.BitsSampleSet:
         pass
