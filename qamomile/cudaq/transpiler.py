@@ -28,6 +28,7 @@ import qamomile.core
 import qamomile.core.bitssample as qm_bs
 from qamomile.core.transpiler import QuantumSDKTranspiler
 from .exceptions import QamomileCudaqTranspileError
+from .parameter_conveter import convert_parameter
 
 
 class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]):
@@ -132,8 +133,9 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
                 self._apply_single_qubit_gate(kernel, gate, qvector[gate.qubit])
             # Apply a ParametricSingleQubitGate.
             elif isinstance(gate, qamomile.core.circuit.ParametricSingleQubitGate):
+                parameter = convert_parameter(gate.parameter, param_mapping)
                 self._apply_parametric_single_qubit_gate(
-                    kernel, gate, param_mapping[gate.parameter], qvector[gate.qubit]
+                    kernel, gate, parameter, qvector[gate.qubit]
                 )
             # Apply a gate corresponding to a qamomil.core.circuit.TwoQubitGate.
             elif isinstance(gate, qamomile.core.circuit.TwoQubitGate):
@@ -142,10 +144,11 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
                 )
             # Apply a gate corresponding to a qamomil.core.circuit.ParametricTwoQubitGate.
             elif isinstance(gate, qamomile.core.circuit.ParametricTwoQubitGate):
+                parameter = convert_parameter(gate.parameter, param_mapping)
                 self._apply_parametric_two_qubit_gate(
                     kernel,
                     gate,
-                    param_mapping[gate.parameter],
+                    parameter,
                     qvector[gate.control],
                     qvector[gate.target],
                 )
@@ -180,8 +183,15 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
                     #    https://github.com/Jij-Inc/Qamomile/blob/0ba3cfb6b6d1ffc8e64e482c66f3f092d0359dc8/qamomile/core/circuit/circuit.py#L140-L147
                     # Meanwhile, CUDA-Q's exp_pauli gate corresponds to e^{i *H}.
                     #    https://nvidia.github.io/cuda-quantum/latest/examples/python/operators.html#Pauli-Words-and-Exponentiating-Pauli-Words
-                    # Thus, we need to negate the coefficient.
-                    self._apply_parametric_exp_gate(kernel, -coefficient, qvector, word)
+                    # Thus, we need to negate the coefficient: (-1).
+                    parameter = (
+                        (-1)
+                        * coefficient  # a coefficient of each Pauli term in Qamomile
+                        * convert_parameter(
+                            gate.parameter, param_mapping
+                        )  # time t in Qamomile's exp_evolution
+                    )  # Convert the parameter to CUDA-Q format.
+                    self._apply_parametric_exp_gate(kernel, parameter, qvector, word)
             # Apply a gate corresponding to a qamomil.core.circuit.MeasurementGate.
             elif isinstance(gate, qamomile.core.circuit.MeasurementGate):
                 self._apply_measurement(kernel, qvector[gate.qubit])
