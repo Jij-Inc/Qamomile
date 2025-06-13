@@ -132,5 +132,30 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
                     f"Unsupported parametric single-qubit gate: {gate.gate}"
                 )
 
+    def _apply_two_qubit_gate(
+        kernel: cudaq.Kernel,
+        gate: qamomile.core.circuit.Gate,
+        qubit_1: cudaq.qubit,
+        qubit_2: cudaq.qubit,
+    ) -> None:
+        """Apply a TwoQubitGate to the given qubits in the given kernel.
+
+        Args:
+            kernel (cudaq.Kernel): the kernel to be applied the gate to
+            gate (qamomile.core.circuit.Gate): the gate to be applied
+            qubit_1 (cudaq.qubit): the first qubit to apply the gate to (for now all of them are control)
+            qubit_2 (cudaq.qubit): the second qubit to apply the gate to (for now all of them are target)
+
+        Raises:
+            NotImplementedError: If the gate type is not supported.
+        """
+        match gate.gate:
+            case qamomile.core.circuit.TwoQubitGateType.CNOT:
+                kernel.cx(qubit_1, qubit_2)  # qubit_1: ctrl, qubit_2: target
+            case qamomile.core.circuit.TwoQubitGateType.CZ:
+                kernel.cz(qubit_1, qubit_2)  # qubit_1: ctrl, qubit_2: target
+            case _:
+                raise NotImplementedError(f"Unsupported two-qubit gate: {gate.gate}")
+
     def convert_result(self, result: dict[str, int]) -> qm_bs.BitsSampleSet:
         pass
