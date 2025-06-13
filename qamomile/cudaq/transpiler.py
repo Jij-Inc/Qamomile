@@ -24,6 +24,7 @@ import cudaq
 import numpy as np
 
 import qamomile
+import qamomile.core
 import qamomile.core.bitssample as qm_bs
 from qamomile.core.transpiler import QuantumSDKTranspiler
 from .exceptions import QamomileCudaqTranspileError
@@ -160,6 +161,7 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
             # Apply a gate corresponding to a qamomil.core.circuit.ParametricExpGate.
             elif isinstance(gate, qamomile.core.circuit.ParametricExpGate):
                 for term, coefficient in gate.hamiltonian.terms.items():
+                    # Create a Pauli word for the term.
                     word_list = ["I" for _ in range(num_qubits)]
                     for index, op in enumerate(term):
                         match op.pauli:
@@ -174,7 +176,12 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
                                     f"Unsupported Pauli operator: {op.pauli}"
                                 )
                     word = "".join(word_list)
-                    self._apply_parametric_exp_gate(kernel, coefficient, qvector, word)
+                    # Qamomile's ParametricExpGate corresponds to e^{-i t H}.
+                    #    https://github.com/Jij-Inc/Qamomile/blob/0ba3cfb6b6d1ffc8e64e482c66f3f092d0359dc8/qamomile/core/circuit/circuit.py#L140-L147
+                    # Meanwhile, CUDA-Q's exp_pauli gate corresponds to e^{i *H}.
+                    #    https://nvidia.github.io/cuda-quantum/latest/examples/python/operators.html#Pauli-Words-and-Exponentiating-Pauli-Words
+                    # Thus, we need to negate the coefficient.
+                    self._apply_parametric_exp_gate(kernel, -coefficient, qvector, word)
             # Apply a gate corresponding to a qamomil.core.circuit.MeasurementGate.
             elif isinstance(gate, qamomile.core.circuit.MeasurementGate):
                 self._apply_measurement(kernel, qvector[gate.qubit])
@@ -361,7 +368,7 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
     def _apply_parametric_exp_gate(
         self,
         kernel: cudaq.Kernel,
-        coefficient: float,
+        coefficient: cudaq.QuakeValue | float,
         qubits: cudaq.qvector,
         pauli_word: cudaq.pauli_word,
     ) -> None:
@@ -369,7 +376,7 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
 
         Args:
             kernel (cudaq.Kernel): the kernel to be applied the gate to
-            coefficient (float): the coefficient for the Pauli term
+            coefficient (cudaq.QuakeValue | float): the coefficient for the Pauli term
             qubits cudaq.qvector: the qubits to apply the gate to
             pauli_word (cudaq.pauli_word): the Pauli word to be applied
         """
