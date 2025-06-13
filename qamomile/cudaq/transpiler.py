@@ -197,6 +197,10 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
                 self._apply_measurement(kernel, qvector[gate.qubit])
             elif isinstance(gate, qamomile.core.circuit.Operator):
                 self._convert_circuit(gate.circuit, kernel, param_mapping, qvector)
+            else:
+                raise NotImplementedError(
+                    f"Unsupported gate type: {type(gate).__name__}"
+                )
 
         return kernel
 
