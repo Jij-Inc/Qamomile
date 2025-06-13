@@ -105,6 +105,7 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
                 raise NotImplementedError(f"Unsupported single-qubit gate: {gate.gate}")
 
     def _apply_parametric_single_qubit_gate(
+        self,
         kernel: cudaq.Kernel,
         gate: qamomile.core.circuit.Gate,
         parameter: cudaq.QuakeValue,
@@ -134,6 +135,7 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
                 )
 
     def _apply_two_qubit_gate(
+        self,
         kernel: cudaq.Kernel,
         gate: qamomile.core.circuit.Gate,
         qubit_1: cudaq.qubit,
@@ -159,6 +161,7 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
                 raise NotImplementedError(f"Unsupported two-qubit gate: {gate.gate}")
 
     def _apply_parametric_two_qubit_gate(
+        self,
         kernel: cudaq.Kernel,
         gate: qamomile.core.circuit.Gate,
         parameter: cudaq.QuakeValue,
@@ -219,6 +222,7 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
                 )
 
     def _apply_three_qubit_gate(
+        self,
         kernel: cudaq.Kernel,
         gate: qamomile.core.circuit.Gate,
         qubit_1: cudaq.qubit,
@@ -246,6 +250,7 @@ class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
                 raise NotImplementedError(f"Unsupported three-qubit gate: {gate.gate}")
 
     def _apply_parametric_exp_gate(
+        self,
         kernel: cudaq.Kernel,
         coefficient: float,
         qubits: cudaq.qvector,
