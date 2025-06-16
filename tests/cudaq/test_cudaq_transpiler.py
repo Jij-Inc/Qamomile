@@ -10,8 +10,8 @@ from qamomile.core.operator import Hamiltonian, PauliOperator, Pauli, X, Y, Z
 import qamomile.core.bitssample as qm_bs
 from qamomile.cudaq.transpiler import CudaqTranspiler
 from qamomile.cudaq.exceptions import QamomileCudaqTranspileError
-from tests.utils import *
-from tests.cudaq.utils import *
+from tests.utils import Utils
+from tests.cudaq.utils import CudaqUtils
 
 
 @pytest.fixture
@@ -23,11 +23,11 @@ def test_transpile_simple_circuit(transpiler: CudaqTranspiler):
     # Create a simple circuit and the expected statevector.
     num_qubits = 2
     qc = QamomileCircuit(num_qubits)
-    state_0 = np.kron(KET_0, KET_0)  # |00>
+    state_0 = np.kron(Utils.KET_0, Utils.KET_0)  # |00>
     qc.x(0)
-    x_applied_state = np.kron(X_MATRIX, I_MATRIX) @ state_0  # |10>
+    x_applied_state = np.kron(Utils.X_MATRIX, Utils.I_MATRIX) @ state_0  # |10>
     qc.cx(0, 1)
-    expected_statevector = (CX_MATRIX @ x_applied_state).flatten()  # |11>
+    expected_statevector = (Utils.CX_MATRIX @ x_applied_state).flatten()  # |11>
 
     # Transpile the circuit to a CUDA-Q kernel.
     cudaq_kernel = transpiler.transpile_circuit(qc)
@@ -48,11 +48,11 @@ def test_transpile_parametric_circuit(transpiler: CudaqTranspiler):
     # Create a simple parametric circuit and the expected statevector.
     num_qubits = 1
     qc = QamomileCircuit(num_qubits)
-    state_0 = KET_0  # |0>
+    state_0 = Utils.KET_0  # |0>
     theta = Parameter("theta")
     qc.rx(theta, 0)
     expected_statevector = (
-        lambda theta: RX_MATRIX(theta) @ state_0
+        lambda theta: Utils.RX_MATRIX(theta) @ state_0
     )  # |0> rotated by theta
     # Transpile the circuit to a CUDA-Q kernel.
     cudaq_kernel = transpiler.transpile_circuit(qc)
@@ -66,9 +66,9 @@ def test_transpile_parametric_circuit(transpiler: CudaqTranspiler):
 
     # Check if the kernel has the expected number of qubits.
     qir_str = cudaq.translate(cudaq_kernel, [0], format="qir")
-    assert count_qir_parameters(qir_str) == 1  # One parameter for theta
+    assert CudaqUtils.count_qir_parameters(qir_str) == 1  # One parameter for theta
     # Check if the kernel has only one operation, which is the RX.
-    operations = count_qir_operations(qir_str)
+    operations = CudaqUtils.count_qir_operations(qir_str)
     assert len(operations) == 1
     assert operations["__quantum__qis__rx"] == 1
 
@@ -89,13 +89,20 @@ def test_transpile_complex_circuit(transpiler: CudaqTranspiler):
     num_cbits = 3
     num_measured_cbits = 0
     qc = QamomileCircuit(num_qubits, num_cbits)
-    state_0 = take_tensor_product(KET_0, KET_0, KET_0)  # |000>
+    state_0 = Utils.take_tensor_product(
+        [Utils.KET_0, Utils.KET_0, Utils.KET_0]
+    )  # |000>
     qc.h(0)
-    state_1 = take_tensor_product(H_MATRIX, I_MATRIX, I_MATRIX) @ state_0
+    state_1 = (
+        Utils.take_tensor_product([Utils.H_MATRIX, Utils.I_MATRIX, Utils.I_MATRIX])
+        @ state_0
+    )
     qc.cx(0, 1)
-    state_2 = take_tensor_product(CX_MATRIX, I_MATRIX) @ state_1
+    print(state_1)
+    state_2 = Utils.take_tensor_product([Utils.CX_MATRIX, Utils.I_MATRIX]) @ state_1
     qc.ccx(0, 1, 2)
-    expected_statevector = (CCX_MATRIX @ state_2).flatten()
+    print(state_2)
+    expected_statevector = (Utils.CCX_MATRIX @ state_2).flatten()
 
     # Transpile the circuit to a CUDA-Q kernel.
     cudaq_kernel = transpiler.transpile_circuit(qc)
@@ -207,9 +214,9 @@ def test_parametric_exp_gate(transpiler: CudaqTranspiler):
     assert isinstance(cudaq_kernel, cudaq.Kernel)
     # Check if the kernel has the expected number of qubits.
     qir_str = cudaq.translate(cudaq_kernel, [1], format="qir")
-    assert count_qir_parameters(qir_str) == 1  # One parameter for theta
+    assert CudaqUtils.count_qir_parameters(qir_str) == 1  # One parameter for theta
     # Check if the kernel has only one operation, which is the Pauli evolution.
-    operations = count_qir_operations(qir_str)
+    operations = CudaqUtils.count_qir_operations(qir_str)
     assert len(operations) == 1
     assert operations["__quantum__qis__exp_pauli"] == 1
     # Check if the kernel has the expected number of qubits.
@@ -227,10 +234,10 @@ def test_parametric_exp_gate(transpiler: CudaqTranspiler):
     # Check if the kernel has the expected number of qubits.
     qir_str2 = cudaq.translate(cudaq_kernel2, [1], format="qir")
     assert (
-        count_qir_parameters(qir_str2) == 2
+        CudaqUtils.count_qir_parameters(qir_str2) == 2
     )  # Two parameter for X(0) * Y(1) + Z(0) * X(1)
     # Check if the kernel has only one operation, which is the Pauli evolution.
-    operations2 = count_qir_operations(qir_str2)
+    operations2 = CudaqUtils.count_qir_operations(qir_str2)
     assert len(operations2) == 1
     assert (
         operations2["__quantum__qis__exp_pauli"] == 2
