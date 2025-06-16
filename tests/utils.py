@@ -15,28 +15,52 @@ class Utils:
     I_MATRIX: Final[np.ndarray] = np.identity(2)
     H_MATRIX: Final[np.ndarray] = np.array([[1, 1], [1, -1]]) / np.sqrt(2)
     X_MATRIX: Final[np.ndarray] = np.array([[0, 1], [1, 0]])
-
-    CX_MATRIX: Final[np.ndarray] = np.array(
-        [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1], [0, 0, 1, 0]]
-    )
-
-    CCX_MATRIX: Final[np.ndarray] = np.array(
-        [
-            [1, 0, 0, 0, 0, 0, 0, 0],
-            [0, 1, 0, 0, 0, 0, 0, 0],
-            [0, 0, 1, 0, 0, 0, 0, 0],
-            [0, 0, 0, 1, 0, 0, 0, 0],
-            [0, 0, 0, 0, 1, 0, 0, 0],
-            [0, 0, 0, 0, 0, 1, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0, 1],
-            [0, 0, 0, 0, 0, 0, 1, 0],
-        ]
-    )
+    Y_MATRIX: Final[np.ndarray] = np.array([[0, -1j], [1j, 0]])
+    Z_MATRIX: Final[np.ndarray] = np.array([[1, 0], [0, -1]])
+    S_MATRIX: Final[np.ndarray] = np.array([[1, 0], [0, 1j]])
+    T_MATRIX: Final[np.ndarray] = np.array([[1, 0], [0, np.exp(1j * np.pi / 4)]])
 
     RX_MATRIX: Final[Callable] = lambda theta: np.array(
         [
             [np.cos(theta / 2), -1j * np.sin(theta / 2)],
             [-1j * np.sin(theta / 2), np.cos(theta / 2)],
+        ]
+    )
+    RY_MATRIX: Final[Callable] = lambda theta: np.array(
+        [
+            [np.cos(theta / 2), -np.sin(theta / 2)],
+            [np.sin(theta / 2), np.cos(theta / 2)],
+        ]
+    )
+    RZ_MATRIX: Final[Callable] = lambda theta: np.array(
+        [
+            [np.exp(-1j * theta / 2), 0],
+            [0, np.exp(1j * theta / 2)],
+        ]
+    )
+
+    RXX_MATRIX: Final[Callable] = lambda theta: np.array(
+        [
+            [np.cos(theta / 2), 0, 0, -1j * np.sin(theta / 2)],
+            [0, np.cos(theta / 2), -1j * np.sin(theta / 2), 0],
+            [0, -1j * np.sin(theta / 2), np.cos(theta / 2), 0],
+            [-1j * np.sin(theta / 2), 0, 0, np.cos(theta / 2)],
+        ]
+    )
+    RYY_MATRIX: Final[Callable] = lambda theta: np.array(
+        [
+            [np.cos(theta / 2), 0, 0, 1j * np.sin(theta / 2)],
+            [0, np.cos(theta / 2), -1j * np.sin(theta / 2), 0],
+            [0, -1j * np.sin(theta / 2), np.cos(theta / 2), 0],
+            [1j * np.sin(theta / 2), 0, 0, np.cos(theta / 2)],
+        ]
+    )
+    RZZ_MATRIX: Final[Callable] = lambda theta: np.array(
+        [
+            [np.exp(-1j * theta / 2), 0, 0, 0],
+            [0, np.exp(1j * theta / 2), 0, 0],
+            [0, 0, np.exp(1j * theta / 2), 0],
+            [0, 0, 0, np.exp(-1j * theta / 2)],
         ]
     )
 
