@@ -4,6 +4,11 @@
 format: jb-book
 root: index
 parts:
+  - caption: "Switch Language"
+    chapters:
+      - url: https://jij-inc.github.io/qamomile/en/
+        title: "English"
+
   - caption: Getting Started
     chapters:
     - file: quickstart
@@ -23,6 +28,7 @@ parts:
     chapters:
     - file: tutorial/qaoa/index_qaoa
       sections:
+      - file: tutorial/qaoa/qaoa
       - file: tutorial/qaoa/maxcut
       - file: tutorial/qaoa/graph_partition
       - file: tutorial/qaoa/vertex_cover
