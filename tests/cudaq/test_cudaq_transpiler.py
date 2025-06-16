@@ -11,6 +11,7 @@ import qamomile.core.bitssample as qm_bs
 from qamomile.cudaq.transpiler import CudaqTranspiler
 from qamomile.cudaq.exceptions import QamomileCudaqTranspileError
 from tests.utils import *
+from tests.cudaq.utils import *
 
 
 @pytest.fixture
