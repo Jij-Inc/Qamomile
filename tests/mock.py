@@ -8,3 +8,9 @@ class UnsupportedParam:
     """Mock class for an unsupported parameter type."""
 
     pass
+
+
+class UnsupportedGate:
+    """Mock class for an unsupported gate type."""
+
+    pass

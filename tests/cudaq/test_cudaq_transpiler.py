@@ -11,8 +11,9 @@ from qamomile.core.operator import Hamiltonian, PauliOperator, Pauli, X, Y, Z
 import qamomile.core.bitssample as qm_bs
 from qamomile.cudaq.transpiler import CudaqTranspiler
 from qamomile.cudaq.exceptions import QamomileCudaqTranspileError
-from tests.utils import Utils
 from tests.cudaq.utils import CudaqUtils
+from tests.mock import UnsupportedGate
+from tests.utils import Utils
 
 
 @pytest.fixture
@@ -329,9 +330,6 @@ def test_transpile_unsupported_gate(transpiler: CudaqTranspiler):
     Check if
     1. The transpiler raises a QamomileCudaqTranspileError.
     """
-
-    class UnsupportedGate:
-        pass
 
     qc = QamomileCircuit(1)
     qc.gates.append(UnsupportedGate())
