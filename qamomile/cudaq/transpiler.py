@@ -28,7 +28,7 @@ import qamomile.core
 import qamomile.core.bitssample as qm_bs
 from qamomile.core.transpiler import QuantumSDKTranspiler
 from .exceptions import QamomileCudaqTranspileError
-from .parameter_conveter import convert_parameter
+from .parameter_converter import convert_parameter
 
 
 class CudaqTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]):
