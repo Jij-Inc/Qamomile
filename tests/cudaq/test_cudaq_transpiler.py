@@ -322,61 +322,66 @@ def test_coloring_sample_decode(transpiler: CudaqTranspiler):
     assert sampleset[0].num_occurrences == 1024
 
 
-# def test_parametric_exp_gate(transpiler: CudaqTranspiler):
-#     hamiltonian = Hamiltonian()
-#     hamiltonian += X(0) * Z(1)
-#     qc = QamomileCircuit(2)
-#     theta = Parameter("theta")
-#     qc.exp_evolution(theta, hamiltonian)
+def test_parametric_exp_gate(transpiler: CudaqTranspiler):
+    hamiltonian = Hamiltonian()
+    hamiltonian += X(0) * Z(1)
+    qc = QamomileCircuit(2)
+    theta = Parameter("theta")
+    qc.exp_evolution(theta, hamiltonian)
 
-#     cudaq_kernel = transpiler.transpile_circuit(qc)
+    cudaq_kernel = transpiler.transpile_circuit(qc)
 
-#     assert isinstance(cudaq_kernel, cudaq.Kernel)
-#     assert len(qk_circ.data) == 1
-#     assert qk_circ.data[0].operation.name == "PauliEvolution"
-#     assert qk_circ.data[0].operation.num_qubits == 2
-#     assert qk_circ.data[0].qubits[0]._index == 0
-#     assert qk_circ.data[0].qubits[1]._index == 1
-#     assert len(qk_circ.data[0].params) == 1
+    # Check if the transpiled circuit is a CUDA-Q kernel.
+    assert isinstance(cudaq_kernel, cudaq.Kernel)
+    # Check if the kernel has the expected number of qubits.
+    qir_str = cudaq.translate(cudaq_kernel, [1], format="qir")
+    assert count_qir_parameters(qir_str) == 1  # One parameter for theta
+    # Check if the kernel has only one operation, which is the Pauli evolution.
+    operations = count_qir_operations(qir_str)
+    assert len(operations) == 1
+    assert operations["__quantum__qis__exp_pauli"] == 1
+    # Check if the kernel has the expected number of qubits.
+    cudaq_num_qubits = cudaq.get_state(cudaq_kernel, []).num_qubits()
+    assert cudaq_num_qubits == 2
 
-#     hamiltonian2 = Hamiltonian()
-#     hamiltonian2 += X(0) * Y(1) + Z(0) * X(1)
-#     qc2 = QamomileCircuit(2)
-#     qc2.exp_evolution(theta, hamiltonian2)
-#     qk_circ2 = transpiler.transpile_circuit(qc2)
+    hamiltonian2 = Hamiltonian()
+    hamiltonian2 += X(0) * Y(1) + Z(0) * X(1)
+    qc2 = QamomileCircuit(2)
+    qc2.exp_evolution(theta, hamiltonian2)
+    cudaq_kernel2 = transpiler.transpile_circuit(qc2)
 
-#     assert isinstance(qk_circ2, qiskit.QuantumCircuit)
-#     assert len(qk_circ2.data) == 1
-#     assert qk_circ2.data[0].operation.name == "PauliEvolution"
-#     assert qk_circ2.data[0].operation.num_qubits == 2
-#     assert qk_circ2.data[0].qubits[0]._index == 0
-#     assert qk_circ2.data[0].qubits[1]._index == 1
-#     assert len(qk_circ2.data[0].params) == 1
+    # Check if the transpiled circuit is a CUDA-Q kernel.
+    assert isinstance(cudaq_kernel2, cudaq.Kernel)
+    # Check if the kernel has the expected number of qubits.
+    qir_str2 = cudaq.translate(cudaq_kernel2, [1], format="qir")
+    assert count_qir_parameters(qir_str2) == 1  # One parameter for theta
+    # Check if the kernel has only one operation, which is the Pauli evolution.
+    operations2 = count_qir_operations(qir_str2)
+    assert len(operations2) == 1
+    assert operations2["__quantum__qis__exp_pauli"] == 1
+    # Check if the kernel has the expected number of qubits.
+    cudaq_num_qubits2 = cudaq.get_state(cudaq_kernel2, []).num_qubits()
+    assert cudaq_num_qubits2 == 2
 
 
-# def test_tsp_decode():
-#     problem = tsp_problem()
-#     instance_data = tsp_instance()
-#     compiled_instance = jmt.compile_model(problem, instance_data)
+def test_tsp_decode(transpiler: CudaqTranspiler):
+    problem = tsp_problem()
+    instance_data = tsp_instance()
+    compiled_instance = jmt.compile_model(problem, instance_data)
 
-#     qaoa_converter = qm.qaoa.QAOAConverter(compiled_instance)
-#     qaoa_converter.ising_encode(multipliers={"one-color": 1})
-#     initial_circuit = create_tsp_initial_state(compiled_instance)
+    qaoa_converter = qm.qaoa.QAOAConverter(compiled_instance)
+    qaoa_converter.ising_encode(multipliers={"one-color": 1})
+    initial_circuit = create_tsp_initial_state(compiled_instance)
 
-#     qk_transpiler = QiskitTranspiler()
-#     sampler = qk_pr.StatevectorSampler()
-#     qk_circ = qk_transpiler.transpile_circuit(initial_circuit)
-#     qk_circ.measure_all()
-#     job = sampler.run([qk_circ])
+    cudaq_kernel = transpiler.transpile_circuit(initial_circuit)
+    sample = cudaq.sample(cudaq_kernel, [])
 
-#     job_result = job.result()
+    sampleset = qaoa_converter.decode(transpiler, sample)
 
-#     sampleset = qaoa_converter.decode(qk_transpiler, job_result[0].data["meas"])
-
-#     assert sampleset[0].var_values["x"].values == {
-#         (0, 0): 1,
-#         (1, 1): 1,
-#         (2, 2): 1,
-#         (3, 3): 1,
-#     }
-#     assert sampleset[0].num_occurrences == 1024
+    assert sampleset[0].var_values["x"].values == {
+        (0, 0): 1,
+        (1, 1): 1,
+        (2, 2): 1,
+        (3, 3): 1,
+    }
+    assert sampleset[0].num_occurrences == 1024
