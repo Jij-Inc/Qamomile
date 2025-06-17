@@ -40,5 +40,6 @@ jobs:
           set -eux
           poetry run pip list
           poetry run pip install qiskit
+          poetry run pip install cudaq
           cd tests
           poetry run pytest
