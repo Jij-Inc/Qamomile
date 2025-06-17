@@ -1,6 +1,11 @@
 # File: tests/qiskit/test_parameter_converter.py
-
+import sys
 import pytest
+
+# Skip all tests if the platform is not Linux.
+if sys.platform != "linux":
+    pytest.skip("CUDA Quantum requires Linux", allow_module_level=True)
+
 
 import cudaq
 

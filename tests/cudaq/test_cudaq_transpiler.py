@@ -1,9 +1,16 @@
 # File: tests/cudaq/test_transpiler.py
+import sys
+import pytest
+
+# Skip all tests if the platform is not Linux.
+if sys.platform != "linux":
+    pytest.skip("CUDA Quantum requires Linux", allow_module_level=True)
+
+
 import itertools
 
 import cudaq
 import numpy as np
-import pytest
 
 from qamomile.core.circuit import QuantumCircuit as QamomileCircuit
 from qamomile.core.circuit import Parameter
