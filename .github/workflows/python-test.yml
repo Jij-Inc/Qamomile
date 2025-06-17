@@ -34,6 +34,13 @@ jobs:
         run:  |
           set -eux
           poetry install --all-extras
+      # Install cudaq if only the os is linux.
+      - name: Install CUDA Quantum (Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -eux
+          poetry run pip install cudaq
       - name: Test
         shell: bash
         run: |
