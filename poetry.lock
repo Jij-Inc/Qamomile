@@ -708,10 +708,10 @@ test-no-images = ["pytest", "pytest-cov", "pytest-rerunfailures", "pytest-xdist"
 name = "cudaq"
 version = "0.11.0"
 description = "Python bindings for the CUDA-Q toolkit for heterogeneous quantum-classical workflows."
-optional = true
+optional = false
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "extra == \"cudaq\""
+markers = "sys_platform == \"linux\" and extra == \"cudaq\""
 files = [
     {file = "cudaq-0.11.0.tar.gz", hash = "sha256:8dcfd2a187a66430714b812e4d8efaf4676efd76597336249028929c76fd7077"},
 ]
@@ -6027,4 +6027,4 @@ qutip = ["qutip"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.12"
-content-hash = "e55152c7dfe08ad5f7d768d84123d8974d81a3b032c7539658aa278a965ff3f4"
+content-hash = "e6cb38ed34d9fb65dc84fe54c4450291a4e7ed4feed29763731fc74e484809b4"
