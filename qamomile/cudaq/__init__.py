@@ -15,7 +15,7 @@ if sys.platform != "linux":
 elif importlib.util.find_spec("cudaq") is None:
     import_error_message = """
             The 'cudaq' package is not found. 
-            "Please make sure you have installed Qamomile with the 'cudaq' extra: 'pip install Qamomile[cudaq]'"
+            "Please make sure you have installed Qamomile with the 'cudaq' extra: 'pip install qamomile[cudaq]'"
         """
     raise ImportError(import_error_message)
 
