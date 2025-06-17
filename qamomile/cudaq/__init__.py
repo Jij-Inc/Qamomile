@@ -1,4 +1,4 @@
-import importlib
+import importlib.util
 import sys
 
 # Check if the operating system is linux since CUDA-Q is only supported on Linux systems.
