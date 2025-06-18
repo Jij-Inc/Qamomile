@@ -273,7 +273,7 @@ class QuantumConverter(abc.ABC):
             result (ResultType): The raw result from the quantum computation.
 
         Returns:
-            jm.experimental.SampleSet: The decoded results as a SampleSet.
+            ommx.v1.SampleSet: The decoded results as a SampleSet.
         """
         bitssampleset = transpiler.convert_result(result)
         return self.decode_bits_to_sampleset(bitssampleset)
