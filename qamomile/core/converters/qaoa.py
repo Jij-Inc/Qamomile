@@ -1,6 +1,6 @@
 """
 This module implements the Quantum Approximate Optimization Algorithm (QAOA) converter
-for the Qamomile framework :cite:`farhi2014quantum`. 
+for the Qamomile framework :cite:`farhi2014quantum`.
 The parameterized state :math:`|\\vec{\\beta},\\vec{\gamma}\\rangle` of :math:`p`-layer QAOA is defined as:
 
 .. math::
@@ -49,13 +49,13 @@ class QAOAConverter(QuantumConverter):
     .. code::
 
         from qamomile.core.qaoa.qaoa import QAOAConverter
-        
-        # Initialize with a compiled optimization problem instance 
-        qaoa_converter = QAOAConverter(compiled_instance) 
+
+        # Initialize with a compiled optimization problem instance
+        qaoa_converter = QAOAConverter(compiled_instance)
 
         # Generate QAOA circuit and cost Hamiltonian
         p = 2  # Number of QAOA layers
-        qaoa_circuit = qaoa_converter.get_ansatz_circuit(p) 
+        qaoa_circuit = qaoa_converter.get_ansatz_circuit(p)
         cost_hamiltonian = qaoa_converter.get_cost_hamiltonian()
 
     """

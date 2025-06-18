@@ -1,6 +1,7 @@
 import networkx as nx
 from typing import List, Tuple
 
+
 def unit_disk_graph(locs: List[Tuple[float, float]], unit: float) -> nx.Graph:
     """
     Create a unit disk graph given a list of 2D coordinates and a distance threshold.

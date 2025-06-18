@@ -23,13 +23,13 @@ a flexible and extensible structure for defining quantum operations and circuits
 Example:
 
     .. code::
-    
+
         # Bell state circuit
         qc = QuantumCircuit(2)
         qc.h(0)
         qc.cnot(0, 1)
         qc.measure_all()
-    
+
 
 """
 
@@ -39,7 +39,6 @@ import abc
 import enum
 from .parameter import ParameterExpression, Parameter, Value
 from qamomile.core.operator import Hamiltonian
-
 
 
 class Gate(abc.ABC):
@@ -136,6 +135,7 @@ class ThreeQubitGate(Gate):
     control2: int
     target: int
 
+
 @dataclasses.dataclass
 class ParametricExpGate(Gate):
     r"""Parametric exponential gate class.
@@ -143,11 +143,13 @@ class ParametricExpGate(Gate):
             e^{-it H}
     where:
         - t is the parametric variable, representing the evolution time or phase angle.
-        - H is the Hamiltonian of the system. 
+        - H is the Hamiltonian of the system.
     """
+
     hamiltonian: Hamiltonian
     parameter: ParameterExpression
     indices: list[int]
+
 
 @dataclasses.dataclass
 class MeasurementGate(Gate):
@@ -213,7 +215,9 @@ class QuantumCircuit:
 
         self.name = name
 
-        self._qubits_label: list[str] = ["q_{" + str(i) + "}" for i in range(num_qubits)]
+        self._qubits_label: list[str] = [
+            "q_{" + str(i) + "}" for i in range(num_qubits)
+        ]
 
     def update_qubits_label(self, qubits_label: dict[int, str]):
         """
@@ -270,7 +274,7 @@ class QuantumCircuit:
             if gate.hamiltonian.num_qubits > self.num_qubits:
                 raise ValueError(
                     f"Invalid number of qubits. Expected: {self.num_qubits}, Actual: {gate.hamiltonian.num_qubits}"
-                )  
+                )
         elif isinstance(gate, MeasurementGate):
             if gate.qubit >= self.num_qubits or gate.cbit >= self.num_clbits:
                 raise ValueError(
@@ -325,7 +329,7 @@ class QuantumCircuit:
         """
         if isinstance(angle, float):
             angle = Value(angle)
-        
+
         self.add_gate(
             ParametricSingleQubitGate(ParametricSingleQubitGateType.RX, index, angle)
         )
@@ -346,7 +350,7 @@ class QuantumCircuit:
         """
         if isinstance(angle, float):
             angle = Value(angle)
-        
+
         self.add_gate(
             ParametricSingleQubitGate(ParametricSingleQubitGateType.RY, index, angle)
         )
@@ -392,29 +396,29 @@ class QuantumCircuit:
         """Add a CRX gate to the quantum circuit."""
         if isinstance(angle, float):
             angle = Value(angle)
-        
+
         self.add_gate(
             ParametricTwoQubitGate(
                 ParametricTwoQubitGateType.CRX, controled_qubit, target_qubit, angle
             )
         )
-    
+
     def cry(self, angle: ParameterExpression, controled_qubit: int, target_qubit: int):
         """Add a CRY gate to the quantum circuit."""
         if isinstance(angle, float):
             angle = Value(angle)
-        
+
         self.add_gate(
             ParametricTwoQubitGate(
                 ParametricTwoQubitGateType.CRY, controled_qubit, target_qubit, angle
             )
         )
-    
+
     def crz(self, angle: ParameterExpression, controled_qubit: int, target_qubit: int):
         """Add a CRZ gate to the quantum circuit."""
         if isinstance(angle, float):
             angle = Value(angle)
-        
+
         self.add_gate(
             ParametricTwoQubitGate(
                 ParametricTwoQubitGateType.CRZ, controled_qubit, target_qubit, angle
@@ -438,13 +442,13 @@ class QuantumCircuit:
 
     def ryy(self, angle: ParameterExpression, qubit1: int, qubit2: int):
         r"""Add a RYY gate to the quantum circuit.
-        
+
         .. math::
             R_{YY}(\theta) = \exp\left(-i\theta Y\otimes Y/2\right)
         """
         if isinstance(angle, float):
             angle = Value(angle)
-        
+
         self.add_gate(
             ParametricTwoQubitGate(
                 ParametricTwoQubitGateType.RYY, qubit1, qubit2, angle
@@ -459,7 +463,7 @@ class QuantumCircuit:
         """
         if isinstance(angle, float):
             angle = Value(angle)
-        
+
         self.add_gate(
             ParametricTwoQubitGate(
                 ParametricTwoQubitGateType.RZZ, qubit1, qubit2, angle
@@ -472,16 +476,16 @@ class QuantumCircuit:
         self.add_gate(
             ThreeQubitGate(ThreeQubitGateType.CCX, control1, control2, target)
         )
-    
+
     def exp_evolution(self, time: ParameterExpression, hamiltonian: Hamiltonian):
         r"""Add a parametric exponential gate to the quantum circuit.
-        This function evolves a quantum state under the influence of a Hamiltonian, H, 
+        This function evolves a quantum state under the influence of a Hamiltonian, H,
         for a given time duration or parameter, t.
 
         The time evolution operator for this gate is given by:
         .. math::
             e^{-it H}
-            
+
         """
         if isinstance(time, float):
             time = Value(time)
@@ -491,7 +495,7 @@ class QuantumCircuit:
                 indices.add(op.index)
         indices = sorted(list(indices))
         self.add_gate(ParametricExpGate(hamiltonian, parameter=time, indices=indices))
-              
+
     def measure(self, qubit: int, cbit: int):
         """
         Add a measurement gate to the quantum circuit.
@@ -560,5 +564,5 @@ class QuantumCircuit:
                 parameters.extend(gate.circuit.get_parameters())
             elif isinstance(gate, ParametricExpGate):
                 parameters.extend(gate.parameter.get_parameters())
-        
+
         return list(dict.fromkeys(parameters))

@@ -57,6 +57,7 @@ class RelaxationMethod(enum.Enum):
         Penalty: Penalty method for PUBO conversion.
         None: No relaxation method applied.
     """
+
     AugmentedLagrangian = "AugmentedLagrangian"
     SquaredPenalty = "SquaredPenalty"
 
@@ -99,7 +100,7 @@ class QuantumConverter(abc.ABC):
                 Defaults to AugmentedLagrangian.
             normalize_model (bool): The objective function and the constraints are normalized using the maximum absolute value of the coefficients contained in each.
                 Defaults to False
-            normalize_ising (Literal["abs_max", "rms"] | None): The normalization method for the Ising Hamiltonian. 
+            normalize_ising (Literal["abs_max", "rms"] | None): The normalization method for the Ising Hamiltonian.
                 Available options:
                 - "abs_max": Normalize by absolute maximum value
                 - "rms": Normalize by root mean square
@@ -123,9 +124,7 @@ class QuantumConverter(abc.ABC):
     def instance_to_qubo(
         self,
         multipliers: typ.Optional[dict[str, float]] = None,
-        detail_parameters: typ.Optional[
-            dict[str, dict[tuple[int, ...], float]]
-        ] = None,
+        detail_parameters: typ.Optional[dict[str, dict[tuple[int, ...], float]]] = None,
     ) -> tuple[dict[tuple[int, int], float], float]:
         """
         Convert the instance to QUBO format.
@@ -147,7 +146,7 @@ class QuantumConverter(abc.ABC):
         Returns:
             tuple[dict[int, float], float]: A tuple containing the QUBO dictionary and the constant term.
 
-    
+
         Example:
             .. code::
                 imoprt jijmodeling as jm
@@ -165,7 +164,7 @@ class QuantumConverter(abc.ABC):
         """
         _multipliers = multipliers if multipliers is not None else {}
         _parameters = detail_parameters if detail_parameters is not None else {}
-        
+
         penalty_weights = {}
         for constraint in self.original_instance.get_constraints():
             name = constraint.name
@@ -198,9 +197,7 @@ class QuantumConverter(abc.ABC):
     def ising_encode(
         self,
         multipliers: typ.Optional[dict[str, float]] = None,
-        detail_parameters: typ.Optional[
-            dict[str, dict[tuple[int, ...], float]]
-        ] = None,
+        detail_parameters: typ.Optional[dict[str, dict[tuple[int, ...], float]]] = None,
     ) -> IsingModel:
         """
         Encode the problem to an Ising model.
@@ -242,7 +239,9 @@ class QuantumConverter(abc.ABC):
             #       Need to be fixed.
             var_name = deci_var.name
             subscripts = deci_var.subscripts
-            self.int2varlabel[ising_index]  = var_name + "_{" + ",".join(map(str, subscripts)) + "}"
+            self.int2varlabel[ising_index] = (
+                var_name + "_{" + ",".join(map(str, subscripts)) + "}"
+            )
 
         return ising
 
@@ -319,5 +318,3 @@ class QuantumConverter(abc.ABC):
         samples = ommx.v1.Samples(entries=entries)
 
         return self.original_instance.evaluate_samples(samples)
-
-

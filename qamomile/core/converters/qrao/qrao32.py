@@ -66,6 +66,7 @@ import qamomile.core.operator as qm_o
 from .qrao31 import color_group_to_qrac_encode
 from .graph_coloring import greedy_graph_coloring, check_linear_term
 
+
 def create_x_prime(idx: int) -> qm_o.PauliOperator:
     """
     Creates a X' operator for the given index.
@@ -85,6 +86,7 @@ def create_x_prime(idx: int) -> qm_o.PauliOperator:
     Zi1 = qm_o.Z(idx + 1)
     return 1 / np.sqrt(6) * (1 / 2 * (Xi0 * Xi1) + 1 / 2 * (Xi0 * Zi1) + Zi0)
 
+
 def create_y_prime(idx: int) -> qm_o.Hamiltonian:
     """
     Creates a Y' operator for the given index.
@@ -102,7 +104,7 @@ def create_y_prime(idx: int) -> qm_o.Hamiltonian:
     Zi1 = qm_o.Z(idx + 1)
     Yi0 = qm_o.Y(idx)
     Yi1 = qm_o.Y(idx + 1)
-    return 1 / np.sqrt(6) * ( 1 / 2 * Xi1 + Zi1 + 1 / 2 * (Yi0 * Yi1))
+    return 1 / np.sqrt(6) * (1 / 2 * Xi1 + Zi1 + 1 / 2 * (Yi0 * Yi1))
 
 
 def create_z_prime(idx: int) -> qm_o.Hamiltonian:
@@ -124,6 +126,7 @@ def create_z_prime(idx: int) -> qm_o.Hamiltonian:
     Zi1 = qm_o.Z(idx + 1)
     return 1 / np.sqrt(6) * (Zi0 * Zi1 - 1 / 2 * Xi0 - 1 / 2 * (Zi0 * Xi1))
 
+
 def create_prime_operator(pauli_op: qm_o.PauliOperator) -> qm_o.Hamiltonian:
     if pauli_op.pauli == qm_o.Pauli.X:
         return create_x_prime(2 * pauli_op.index)
@@ -133,6 +136,7 @@ def create_prime_operator(pauli_op: qm_o.PauliOperator) -> qm_o.Hamiltonian:
         return create_z_prime(2 * pauli_op.index)
     else:
         raise ValueError("Invalid Pauli operator")
+
 
 def qrac32_encode_ising(
     ising: IsingModel, color_group: dict[int, list[int]]
@@ -172,11 +176,12 @@ def qrac32_encode_ising(
 
     return hamiltonian, encoded_ope
 
+
 class QRAC32Converter(QuantumConverter):
     """
     :math:`(3,2,p)`-QRAO (Quantum Random Access Optimization) converter class.
 
-    This class provides methods to convert optimization problems into :math:`(3,2,p)`-QRAO 
+    This class provides methods to convert optimization problems into :math:`(3,2,p)`-QRAO
     relaxed Hamiltonians, and decode quantum computation results.
 
     Examples:
@@ -184,26 +189,28 @@ class QRAC32Converter(QuantumConverter):
         .. code::
 
             from qamomile.core.converters.qrao.qrao32 import QRAC32Converter
-            
-            # Initialize with a compiled optimization problem instance 
-            qrao_converter = QRAC32Converter(compiled_instance) 
+
+            # Initialize with a compiled optimization problem instance
+            qrao_converter = QRAC32Converter(compiled_instance)
 
             # Generate relaxed Hamiltonian
             cost_hamiltonian = qrao_converter.get_cost_hamiltonian()
 
     """
+
     max_color_group_size = 3
 
     def ising_encode(
         self,
         multipliers: typ.Optional[dict[str, float]] = None,
-        detail_parameters: typ.Optional[dict[str, dict[tuple[int, ...], tuple[float, float]]]] = None
+        detail_parameters: typ.Optional[
+            dict[str, dict[tuple[int, ...], tuple[float, float]]]
+        ] = None,
     ) -> IsingModel:
         ising = super().ising_encode(multipliers, detail_parameters)
 
         _, color_group = greedy_graph_coloring(
-            ising.quad.keys(),
-            self.max_color_group_size
+            ising.quad.keys(), self.max_color_group_size
         )
         color_group = check_linear_term(
             color_group, list(ising.linear.keys()), self.max_color_group_size
@@ -229,7 +236,7 @@ class QRAC32Converter(QuantumConverter):
         """
         Get the encoded Pauli operators as a list of Hamiltonians.
 
-        This method returns the Pauli Operators which correspond 
+        This method returns the Pauli Operators which correspond
         to the each variable in the Ising model.
 
         Returns:

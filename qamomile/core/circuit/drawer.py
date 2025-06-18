@@ -1,5 +1,6 @@
 from typing import Union, List, Tuple
 import typing as typ
+
 # Check matplotlib installation
 # Because the drawer module is optional, `qamomile` should not depend on `matplotlib`
 try:
@@ -33,21 +34,21 @@ from .circuit import (
 class GateComponent(typ.NamedTuple):
     """Gate component for plotting quantum circuits.
 
-        <-->  = gate width
-        ----
-     --|    |--
-        ----
-          ^-- gate (center) position
+       <-->  = gate width
+       ----
+    --|    |--
+       ----
+         ^-- gate (center) position
 
     """
+
     gate: Gate
     position: float
     width: float
 
 
 def plot_quantum_circuit(
-    circuit: QuantumCircuit, title: Union[bool, str] = True,
-    decompose_level: int = 0
+    circuit: QuantumCircuit, title: Union[bool, str] = True, decompose_level: int = 0
 ) -> None:
     """
     Plot a quantum circuit diagram.
@@ -88,9 +89,7 @@ def plot_quantum_circuit(
 
 
 def _create_components(
-    circuit: QuantumCircuit,
-    decompose_level: int = 0,
-    gate_space=0.2
+    circuit: QuantumCircuit, decompose_level: int = 0, gate_space=0.2
 ) -> list[GateComponent]:
     gate_components: list[GateComponent] = []
     _qubit_pos = np.zeros(circuit.num_qubits)
@@ -106,7 +105,9 @@ def _create_components(
         new_gate_list = []
         for gate in _gate_list:
             if isinstance(gate, Operator):
-                new_gate_list.extend(_decompose(gate.circuit.gates, decompose_level - 1))
+                new_gate_list.extend(
+                    _decompose(gate.circuit.gates, decompose_level - 1)
+                )
             else:
                 new_gate_list.append(gate)
         return new_gate_list
@@ -120,7 +121,7 @@ def _create_components(
             ParametricTwoQubitGate,
             ThreeQubitGate,
             Operator,
-            ParametricExpGate
+            ParametricExpGate,
         )
         if isinstance(
             gate, (SingleQubitGate, ParametricSingleQubitGate, MeasurementGate)
@@ -137,7 +138,9 @@ def _create_components(
                 operated_qubits = gate.operated_qubits()
             elif isinstance(gate, ParametricExpGate):
                 operated_qubits = gate.indices
-            straddling_qubits = np.arange(min(operated_qubits), max(operated_qubits) + 1)
+            straddling_qubits = np.arange(
+                min(operated_qubits), max(operated_qubits) + 1
+            )
             max_posision = np.max(_qubit_pos[straddling_qubits])
             gate_pos = max_posision + gate_width / 2
             for qubit in straddling_qubits:
@@ -191,7 +194,12 @@ def _draw_quantum_circuit(
     # add horizontal lines for qubits (wires)
     for i in range(n_qubits):
         ax.hlines(
-            y=i, xmin=-WIRE_PADDING, xmax=x_max - 0.5, linewidth=1, color="black", zorder=1
+            y=i,
+            xmin=-WIRE_PADDING,
+            xmax=x_max - 0.5,
+            linewidth=1,
+            color="black",
+            zorder=1,
         )
 
     for spine in ax.spines.values():
@@ -223,9 +231,7 @@ def add_gate(
             zorder=2,
         )
 
-    def add_gate_text(
-        qubits: list[int], text: str, gate_space=0.3, fontsize=8
-    ):
+    def add_gate_text(qubits: list[int], text: str, gate_space=0.3, fontsize=8):
         min_qubit = min(qubits)
         max_qubit = max(qubits)
         rectangle_top = min_qubit - gate_space
@@ -270,7 +276,9 @@ def add_gate(
             )
         ax.add_patch(rect)
         # Add gate label in the center of the gate
-        gate_top, gate_bottom = add_gate_text(operated_qubits, gate_name(gate), fontsize=10)
+        gate_top, gate_bottom = add_gate_text(
+            operated_qubits, gate_name(gate), fontsize=10
+        )
         parameters_name = [param.name for param in gate.circuit.get_parameters()]
         gate_center = gate_bottom - (gate_top + gate_bottom) / 2
         for i, param in enumerate(parameters_name):
@@ -283,7 +291,7 @@ def add_gate(
                 fontsize=8,
                 zorder=3,
             )
-    
+
     elif isinstance(gate, ParametricExpGate):
         operated_qubits = gate.indices
         rect = gate_rectangle(operated_qubits)
@@ -299,7 +307,9 @@ def add_gate(
             )
         ax.add_patch(rect)
         # Add gate label in the center of the gate
-        gate_top, gate_bottom = add_gate_text(operated_qubits, gate_name(gate), fontsize=12)
+        gate_top, gate_bottom = add_gate_text(
+            operated_qubits, gate_name(gate), fontsize=12
+        )
 
     else:
         raise ValueError(f"Unsupported gate type: {type(gate)}")
@@ -350,7 +360,6 @@ def gate_name(gate: Gate) -> str:
             hamiltonian_label = gate.hamiltonian.to_latex()
             return f"$e^{{-i{gate.parameter}({hamiltonian_label})}}$"
 
-        
         case _:
             raise ValueError(f"Unsupported gate type: {type(gate)}")
 
