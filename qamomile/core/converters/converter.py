@@ -54,8 +54,7 @@ class RelaxationMethod(enum.Enum):
 
     Attributes:
         AugmentedLagrangian: Augmented Lagrangian method for PUBO conversion.
-        Penalty: Penalty method for PUBO conversion.
-        None: No relaxation method applied.
+        SquaredPenalty: Squared penalty method for PUBO conversion.
     """
 
     AugmentedLagrangian = "AugmentedLagrangian"
