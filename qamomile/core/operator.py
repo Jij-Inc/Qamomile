@@ -188,8 +188,8 @@ class Hamiltonian:
         This function does not add $ symbols.
 
         Returns:
-            str: 
-                A LaTeX representation of the Hamiltonian. 
+            str:
+                A LaTeX representation of the Hamiltonian.
 
         .. code::
 
@@ -206,17 +206,17 @@ class Hamiltonian:
         counter = 0
 
         pauli_map = {Pauli.X: "X", Pauli.Y: "Y", Pauli.Z: "Z"}
-        
+
         for term, coeff in self.terms.items():
             term_str = ""
-            
+
             for op in term:
-                if op.pauli == "I":  
+                if op.pauli == "I":
                     continue
 
                 pauli_str = pauli_map.get(op.pauli, "")
                 term_str += f"{pauli_str}_{{{op.index}}}"
-            
+
             # At first term, we don't need to add a sign
             if counter == 0:
                 if abs(coeff) == 1:
@@ -227,8 +227,10 @@ class Hamiltonian:
                 if abs(coeff) == 1:
                     h_str += "+" + term_str if coeff > 0 else "-" + term_str
                 else:
-                    h_str += f"+{coeff}" + term_str if coeff > 0 else f"{coeff}" + term_str
-            
+                    h_str += (
+                        f"+{coeff}" + term_str if coeff > 0 else f"{coeff}" + term_str
+                    )
+
             counter += 1
 
         return h_str
@@ -271,26 +273,26 @@ class Hamiltonian:
 
             return h
         elif isinstance(other, (int, float, complex)):
-            h = Hamiltonian(num_qubits = self.num_qubits)
+            h = Hamiltonian(num_qubits=self.num_qubits)
             h._terms = self._terms.copy()
             h.constant = self.constant + other
-            
+
             return h
         else:
             raise ValueError("Unsupported addition operation.")
 
     def __radd__(self, other):
         return self.__add__(other)
-    
+
     def __sub__(self, other):
         return self + (-1.0 * other)
-    
+
     def __rsub__(self, other):
         return -1.0 * self + other
 
     def __mul__(self, other):
         if isinstance(other, (int, float, complex)):
-            h = Hamiltonian(num_qubits = self.num_qubits)
+            h = Hamiltonian(num_qubits=self.num_qubits)
             for term, coeff in self.terms.items():
                 h.add_term(term, coeff * other)
             h.constant = self.constant * other

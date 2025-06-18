@@ -99,9 +99,9 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
             if len(args) == 1:
                 # Try to interpret it as a parameter vector if it has a shape attribute
                 param_values = args[0]
-                
+
                 # Check if param_values has a shape (works for np.ndarray, p_np.tensor, and AutogradArrayBox)
-                if hasattr(param_values, 'shape'):
+                if hasattr(param_values, "shape"):
                     # Check length
                     if param_values.size != len(ordered_param_names):
                         raise ValueError(
@@ -110,7 +110,8 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
                         )
                     # Map the parameters by name
                     positional_params = {
-                        pname: val for pname, val in zip(ordered_param_names, param_values)
+                        pname: val
+                        for pname, val in zip(ordered_param_names, param_values)
                     }
                 else:
                     # If it's not array-like, fall back to empty (no positional params)
@@ -132,6 +133,7 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
                 param_mapping=param_mapping,
                 params=final_params,
             )
+
         return circuit_fn
 
     def _create_param_mapping(
@@ -184,7 +186,6 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
             elif isinstance(gate, qamomile.core.circuit.MeasurementGate):
                 pass
 
-
     def _apply_single_qubit_gate(self, gate: qamomile.core.circuit.SingleQubitGate):
         """
         Apply a single-qubit gate to the QNode.
@@ -224,8 +225,11 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
 
     def _extract_angle(
         self,
-        gate: qamomile.core.circuit.ParametricSingleQubitGate | qamomile.core.circuit.ParametricTwoQubitGate,
-        params
+        gate: (
+            qamomile.core.circuit.ParametricSingleQubitGate
+            | qamomile.core.circuit.ParametricTwoQubitGate
+        ),
+        params,
     ):
         """
         Extract the angle parameter for parameterized gates from the params dictionary.
@@ -260,7 +264,9 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
             qamomile.core.circuit.ParametricSingleQubitGateType.RZ: qml.RZ,
         }
         if gate.gate not in gate_map:
-            raise NotImplementedError(f"Unsupported parametric single-qubit gate: {gate.gate}")
+            raise NotImplementedError(
+                f"Unsupported parametric single-qubit gate: {gate.gate}"
+            )
 
         gate_map[gate.gate](angle, wires=gate.qubit)
 
@@ -287,7 +293,9 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
             qamomile.core.circuit.ParametricTwoQubitGateType.RZZ: qml.IsingZZ,
         }
         if gate.gate not in gate_map:
-            raise NotImplementedError(f"Unsupported parametric two-qubit gate: {gate.gate}")
+            raise NotImplementedError(
+                f"Unsupported parametric two-qubit gate: {gate.gate}"
+            )
 
         gate_map[gate.gate](angle, wires=[gate.control, gate.target])
 
@@ -296,12 +304,13 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
         Convert a dictionary of results from PennyLane execution to a Qamomile-compatible BitsSampleSet.
 
         Args:
-            result (Dict[str, int]):  A dictionary where each key is a binary string consisting of '0' and '1' 
+            result (Dict[str, int]):  A dictionary where each key is a binary string consisting of '0' and '1'
                 (representing measurement outcomes), and each value is the corresponding count.
 
         Returns:
             BitsSampleSet: A Qamomile BitsSampleSet object.
         """
+
         def binary_to_decimal(binary_string):
             """
             Convert a binary string to a decimal integer.
@@ -314,8 +323,10 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
             """
             try:
                 # Ensure input is a valid binary string
-                if not all(char in '01' for char in binary_string):
-                    raise ValueError("Input must be a binary string containing only '0' and '1'.")
+                if not all(char in "01" for char in binary_string):
+                    raise ValueError(
+                        "Input must be a binary string containing only '0' and '1'."
+                    )
                 # Convert binary string to decimal
                 return int(binary_string, 2)
             except Exception as e:
@@ -330,8 +341,10 @@ class PennylaneTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], i
             raise ValueError("All binary keys must have the same length.")
 
         try:
-            decimal_result_data = {binary_to_decimal(key): count for key, count in result.items()}
+            decimal_result_data = {
+                binary_to_decimal(key): count for key, count in result.items()
+            }
         except ValueError as e:
             raise ValueError(f"Error converting binary keys: {e}")
-        
+
         return qm_bs.BitsSampleSet.from_int_counts(decimal_result_data, num_bits)

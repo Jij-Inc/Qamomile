@@ -4,7 +4,7 @@ import jijmodeling as jm
 class PauliExpr:
     """Pauli expression class."""
 
-    def x(shape: int | jm.Placeholder  | tuple[int, ...]) -> jm.BinaryVar:
+    def x(shape: int | jm.Placeholder | tuple[int, ...]) -> jm.BinaryVar:
         """Create a PauliX expression.
 
         Args:
@@ -27,15 +27,15 @@ class PauliExpr:
         else:
             raise ValueError("The shape is invalid.")
 
-    def y(shape: int | jm.Placeholder  | tuple[int, ...]) -> jm.BinaryVar:
+    def y(shape: int | jm.Placeholder | tuple[int, ...]) -> jm.BinaryVar:
         """Create a PauliY expression.
 
         Args:
             shape (int | jm.Placeholder | tuple[int, ...]): Shape of the PauliY expression.
-        
+
         Raises:
             ValueError: If the shape is invalid.
-        
+
         Returns:
             jm.BinaryVar: PauliY expression.
         """
