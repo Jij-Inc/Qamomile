@@ -46,7 +46,7 @@ jobs:
         uses: actions/upload-pages-artifact@v3
         with:
           name: doc-landing-page
-          path: 'docs/qamomile-lp/_build/html'
+          path: 'docs/_build/html'
   
   build-jupyter-book:
     runs-on: ubuntu-latest
