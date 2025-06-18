@@ -10,7 +10,7 @@ function Explore() {
     {
       title: 'API Reference',
       description: 'Complete documentation of Qamomile\'s API.',
-      link: 'https://jij-inc.github.io/Qamomile/autoapi/index.html'
+      link: 'https://jij-inc.github.io/Qamomile/en/autoapi/index.html'
     },
     {
       title: 'Advanced Topics',
