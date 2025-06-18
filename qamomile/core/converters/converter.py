@@ -94,11 +94,9 @@ class QuantumConverter(abc.ABC):
         This method initializes the converter with the compiled instance of the optimization problem
 
         Args:
-            compiled_instance: ommx.v1.Instance.
+            instance (ommx.v1.Instance): an orginal instance to be converted.
             relax_method (RelaxationMethod): The relaxation method for PUBO conversion.
                 Defaults to AugmentedLagrangian.
-            normalize_model (bool): The objective function and the constraints are normalized using the maximum absolute value of the coefficients contained in each.
-                Defaults to False
             normalize_ising (Literal["abs_max", "rms"] | None): The normalization method for the Ising Hamiltonian.
                 Available options:
                 - "abs_max": Normalize by absolute maximum value
