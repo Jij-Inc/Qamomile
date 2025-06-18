@@ -39,7 +39,7 @@ def test_add_term():
     h.add_term((X0, Y0), -4.0)
     assert h.terms == {(X0,): 2.0, (Y1, Y2): 3.0, (Z0,): -4.0j}
     assert h.constant == -1.0
-    
+
 
 def test_pauli_hamiltonian_creation():
     x0 = qm_o.X(0)
@@ -118,6 +118,7 @@ def test_Hamiltonian_add_scalar():
     expected_h.constant += 2.0
     assert h == expected_h
 
+
 def test_Hamiltonian_sub():
     h1 = qm_o.Hamiltonian()
     h1.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), 1.0)
@@ -140,6 +141,7 @@ def test_Hamiltonian_sub():
     expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), -1.0)
     expected_h.constant = 2.0
     assert h == expected_h
+
 
 def test_Hamiltonian_scalar_multiplication():
     h = qm_o.Hamiltonian()
@@ -350,6 +352,7 @@ def test_Hamiltonian_neg():
     expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 1),), -1.0)
     assert h1 == expected_h
 
+
 def test_num_qubits():
     h = qm_o.Hamiltonian(num_qubits=3)
     h += 1.0
@@ -362,19 +365,18 @@ def test_num_qubits():
     assert h.num_qubits == 4
 
     h = qm_o.Hamiltonian(num_qubits=3)
-    h += qm_o.X(0) 
+    h += qm_o.X(0)
     assert h.num_qubits == 3
-    h += qm_o.X(3) 
+    h += qm_o.X(3)
     assert h.num_qubits == 4
-    
+
+
 def test_coeff_complex():
     h = qm_o.Hamiltonian()
     h.add_term((qm_o.PauliOperator(qm_o.Pauli.I, 0),), 1.0j)
-    h *= (1 + 1j * qm_o.Y(0))
+    h *= 1 + 1j * qm_o.Y(0)
 
     expected_h = qm_o.Hamiltonian()
     expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.I, 0),), 1.0j)
     expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 0),), -1.0)
     assert h == expected_h
-
-    

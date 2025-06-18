@@ -95,9 +95,7 @@ def tsp_instance():
     return instance_data
 
 
-def create_tsp_initial_state(
-    compiled_instance: ommx.v1.Instance, num_nodes: int = 4
-):
+def create_tsp_initial_state(compiled_instance: ommx.v1.Instance, num_nodes: int = 4):
     n = num_nodes * num_nodes
     qc = qm.circuit.QuantumCircuit(n)
     deci_vars = compiled_instance.raw.decision_variables
@@ -140,6 +138,7 @@ def test_transpile_parametric_circuit(transpiler):
     assert len(quri_circuit.gates) == 1
     assert isinstance(quri_circuit.gates[0], qp_c.gate.ParametricQuantumGate)
 
+
 def test_rotation_two_pauli_circuit(transpiler):
     qc = qm_c.QuantumCircuit(2)
     theta = qm_c.Parameter("theta")
@@ -148,7 +147,7 @@ def test_rotation_two_pauli_circuit(transpiler):
 
     for gate in quri_circuit.gates:
         assert isinstance(gate, qp_c.gate.ParametricQuantumGate)
-        assert gate.pauli_ids == (1,1)
+        assert gate.pauli_ids == (1, 1)
 
     qc = qm_c.QuantumCircuit(2)
     theta = qm_c.Parameter("theta")
@@ -157,7 +156,7 @@ def test_rotation_two_pauli_circuit(transpiler):
 
     for gate in quri_circuit.gates:
         assert isinstance(gate, qp_c.gate.ParametricQuantumGate)
-        assert gate.pauli_ids == (2,2)
+        assert gate.pauli_ids == (2, 2)
 
     qc = qm_c.QuantumCircuit(2)
     theta = qm_c.Parameter("theta")
@@ -166,7 +165,8 @@ def test_rotation_two_pauli_circuit(transpiler):
 
     for gate in quri_circuit.gates:
         assert isinstance(gate, qp_c.gate.ParametricQuantumGate)
-        assert gate.pauli_ids == (3,3)
+        assert gate.pauli_ids == (3, 3)
+
 
 def test_transpile_complex_circuit(transpiler):
     qc = qm_c.QuantumCircuit(3, 3)
@@ -238,25 +238,26 @@ def test_parametric_two_qubit_gate(transpiler):
     assert quri_circuit.gates[0].pauli_ids == (1, 1)  # XX
     assert quri_circuit.parameter_count == 1
 
+
 def test_parametric_exp_gate(transpiler):
     hamiltonian = qm_o.Hamiltonian()
     hamiltonian += qm_o.X(0) * qm_o.Z(1)
     qc = qm_c.QuantumCircuit(2)
     theta = qm_c.Parameter("theta")
-    qc.exp_evolution(theta,hamiltonian)
+    qc.exp_evolution(theta, hamiltonian)
     quri_circuit = transpiler.transpile_circuit(qc)
-    
+
     assert isinstance(quri_circuit, qp_c.LinearMappedUnboundParametricQuantumCircuit)
     assert len(quri_circuit.gates) == 1
     assert isinstance(quri_circuit.gates[0], qp_c.ParametricQuantumGate)
     assert quri_circuit.gates[0].target_indices == (0, 1)
-    assert quri_circuit.gates[0].pauli_ids == (1, 3)  #XZ
+    assert quri_circuit.gates[0].pauli_ids == (1, 3)  # XZ
     assert quri_circuit.parameter_count == 1
-    
+
     hamiltonian2 = qm_o.Hamiltonian()
     hamiltonian2 += qm_o.X(0) * qm_o.Y(1) + qm_o.Z(0) * qm_o.X(1)
     qc2 = qm_c.QuantumCircuit(2)
-    qc2.exp_evolution(theta,hamiltonian2)
+    qc2.exp_evolution(theta, hamiltonian2)
     quri_circuit2 = transpiler.transpile_circuit(qc2)
 
     assert isinstance(quri_circuit2, qp_c.LinearMappedUnboundParametricQuantumCircuit)
@@ -265,8 +266,8 @@ def test_parametric_exp_gate(transpiler):
     assert isinstance(quri_circuit2.gates[1], qp_c.ParametricQuantumGate)
     assert quri_circuit2.gates[0].target_indices == (0, 1)
     assert quri_circuit2.gates[1].target_indices == (1, 0)
-    assert quri_circuit2.gates[0].pauli_ids == (1, 2) #XY
-    assert quri_circuit2.gates[1].pauli_ids == (1, 3) #ZX
+    assert quri_circuit2.gates[0].pauli_ids == (1, 2)  # XY
+    assert quri_circuit2.gates[1].pauli_ids == (1, 3)  # ZX
     assert quri_circuit2.parameter_count == 1
 
 
@@ -308,7 +309,9 @@ def test_coloring_sample_decode():
     sampleset = qaoa_converter.decode(
         qp_transpiler, (qp_result, initial_circuit.num_qubits)
     )
-    nonzero_results = {k: v for k, v in sampleset.extract_decision_variables("x", 0).items() if v != 0}
+    nonzero_results = {
+        k: v for k, v in sampleset.extract_decision_variables("x", 0).items() if v != 0
+    }
     assert nonzero_results == {
         (0, 0): 1,
         (1, 0): 1,
@@ -332,8 +335,10 @@ def test_coloring_sample_decode():
     sampleset = qaoa_converter.decode(
         qp_transpiler, (qp_result, initial_circuit.num_qubits)
     )
-    
-    nonzero_results = {k: v for k, v in sampleset.extract_decision_variables("x", 0).items() if v != 0}
+
+    nonzero_results = {
+        k: v for k, v in sampleset.extract_decision_variables("x", 0).items() if v != 0
+    }
     assert nonzero_results == {(0, 0): 1, (1, 1): 1, (2, 2): 1}
     assert len(sampleset.sample_ids) == 10
 
@@ -353,7 +358,9 @@ def test_coloring_sample_decode():
         qp_transpiler, (qp_result, initial_circuit.num_qubits)
     )
 
-    nonzero_results = {k: v for k, v in sampleset.extract_decision_variables("x", 0).items() if v != 0}
+    nonzero_results = {
+        k: v for k, v in sampleset.extract_decision_variables("x", 0).items() if v != 0
+    }
     assert nonzero_results == {(0, 0): 1, (0, 1): 1, (0, 2): 1, (2, 2): 1}
     assert len(sampleset.sample_ids) == 10
 
@@ -376,7 +383,9 @@ def test_tsp_decode():
         qp_transpiler, (qp_result, initial_circuit.num_qubits)
     )
 
-    nonzero_results = {k: v for k, v in sampleset.extract_decision_variables("x", 0).items() if v != 0}
+    nonzero_results = {
+        k: v for k, v in sampleset.extract_decision_variables("x", 0).items() if v != 0
+    }
     assert nonzero_results == {
         (0, 0): 1,
         (1, 1): 1,
@@ -395,5 +404,6 @@ def test_run_small_circuit():
     transpiler = QuriPartsTranspiler()
     quri_c = transpiler.transpile_circuit(circuit)
     from quri_parts.qulacs.sampler import create_qulacs_vector_sampler
+
     sampler = create_qulacs_vector_sampler()
     result = sampler(quri_c, 10)

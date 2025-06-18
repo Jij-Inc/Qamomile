@@ -18,6 +18,7 @@ import qamomile.core as qm
 from qamomile.qiskit.transpiler import QiskitTranspiler
 from qamomile.qiskit.exceptions import QamomileQiskitTranspileError
 
+
 def graph_coloring_problem() -> jm.Problem:
     # define variables
     V = jm.Placeholder("V")
@@ -31,11 +32,12 @@ def graph_coloring_problem() -> jm.Problem:
     problem = jm.Problem("Graph Coloring")
     # set one-hot constraint that each vertex has only one color
 
-    #problem += jm.Constraint("one-color", x[v, :].sum() == 1, forall=v)
+    # problem += jm.Constraint("one-color", x[v, :].sum() == 1, forall=v)
     problem += jm.Constraint("one-color", jm.sum(n, x[v, n]) == 1, forall=v)
     # set objective function: minimize edges whose vertices connected by edges are the same color
     problem += jm.sum([n, e], x[e[0], n] * x[e[1], n])
     return problem
+
 
 def graph_coloring_instance():
     G = nx.Graph()
@@ -46,6 +48,7 @@ def graph_coloring_instance():
     num_nodes = G.number_of_nodes()
     instance_data = {"V": num_nodes, "N": num_color, "E": E}
     return instance_data
+
 
 def create_graph_coloring_operator_ansatz_initial_state(
     compiled_instance: ommx.v1.Instance,
@@ -96,18 +99,18 @@ def tsp_instance():
     return instance_data
 
 
-def create_tsp_initial_state(
-    compiled_instance: ommx.v1.Instance, num_nodes: int = 4
-):
+def create_tsp_initial_state(compiled_instance: ommx.v1.Instance, num_nodes: int = 4):
     n = num_nodes * num_nodes
     qc = qm.circuit.QuantumCircuit(n)
     var_map = {
-        tuple(dc.subscripts): dc.id for dc in compiled_instance.raw.decision_variables}
+        tuple(dc.subscripts): dc.id for dc in compiled_instance.raw.decision_variables
+    }
 
     for i in range(num_nodes):
         qc.x(var_map[(i, i)])
 
     return qc
+
 
 @pytest.fixture
 def transpiler():
@@ -197,15 +200,15 @@ def test_transpile_hamiltonian(transpiler: QiskitTranspiler):
     assert np.allclose(qiskit_hamiltonian.coeffs, [1.0, 2.0])
 
     hamiltonian = Hamiltonian()
-    hamiltonian.add_term((PauliOperator(Pauli.X, 0), ), 1.0)
-    hamiltonian.add_term((PauliOperator(Pauli.X, 0), ), 1.0)
+    hamiltonian.add_term((PauliOperator(Pauli.X, 0),), 1.0)
+    hamiltonian.add_term((PauliOperator(Pauli.X, 0),), 1.0)
 
     qiskit_hamiltonian = transpiler.transpile_hamiltonian(hamiltonian)
 
     assert isinstance(qiskit_hamiltonian, qk_ope.SparsePauliOp)
     assert len(qiskit_hamiltonian) == 1
     assert np.allclose(qiskit_hamiltonian.coeffs, [2.0])
-    assert np.all(qiskit_hamiltonian.paulis == ['X'])
+    assert np.all(qiskit_hamiltonian.paulis == ["X"])
 
 
 def test_coloring_sample_decode():
@@ -213,53 +216,59 @@ def test_coloring_sample_decode():
     instance_data = graph_coloring_instance()
     compiled_instance = jm.Interpreter(instance_data).eval_problem(problem)
     apply_vars = [(0, 0), (1, 0), (2, 0), (3, 0)]
-    initial_circuit = create_graph_coloring_operator_ansatz_initial_state(compiled_instance, instance_data['V'], instance_data['N'], apply_vars)
+    initial_circuit = create_graph_coloring_operator_ansatz_initial_state(
+        compiled_instance, instance_data["V"], instance_data["N"], apply_vars
+    )
     qaoa_converter = qm.qaoa.QAOAConverter(compiled_instance)
     qaoa_converter.ising_encode(multipliers={"one-color": 1})
-    
+
     qk_transpiler = QiskitTranspiler()
     sampler = qk_pr.StatevectorSampler()
     qk_circ = qk_transpiler.transpile_circuit(initial_circuit)
     qk_circ.measure_all()
     job = sampler.run([qk_circ])
-    
+
     job_result = job.result()
-    
-    sampleset = qaoa_converter.decode(qk_transpiler, job_result[0].data['meas'])
-    nonzero_results = {k: v for k, v in sampleset.extract_decision_variables("x", 0).items() if v != 0}
+
+    sampleset = qaoa_converter.decode(qk_transpiler, job_result[0].data["meas"])
+    nonzero_results = {
+        k: v for k, v in sampleset.extract_decision_variables("x", 0).items() if v != 0
+    }
     assert nonzero_results == {(0, 0): 1, (1, 0): 1, (2, 0): 1, (3, 0): 1}
     assert len(sampleset.sample_ids) == 1024
 
+
 def test_parametric_exp_gate(transpiler: QiskitTranspiler):
-        hamiltonian = Hamiltonian()
-        hamiltonian += X(0) * Z(1)
-        qc = QamomileCircuit(2)
-        theta = Parameter("theta")
-        qc.exp_evolution(theta,hamiltonian)
-        qk_circ = transpiler.transpile_circuit(qc)
-        
-        assert isinstance(qk_circ, qiskit.QuantumCircuit)
-        assert len(qk_circ.data) == 1
-        assert qk_circ.data[0].operation.name == 'PauliEvolution'
-        assert qk_circ.data[0].operation.num_qubits == 2
-        assert qk_circ.data[0].qubits[0]._index == 0
-        assert qk_circ.data[0].qubits[1]._index == 1
-        assert len(qk_circ.data[0].params) == 1
+    hamiltonian = Hamiltonian()
+    hamiltonian += X(0) * Z(1)
+    qc = QamomileCircuit(2)
+    theta = Parameter("theta")
+    qc.exp_evolution(theta, hamiltonian)
+    qk_circ = transpiler.transpile_circuit(qc)
 
-        hamiltonian2 = Hamiltonian()
-        hamiltonian2 += X(0) * Y(1) + Z(0) * X(1)
-        qc2 = QamomileCircuit(2)
-        qc2.exp_evolution(theta,hamiltonian2)
-        qk_circ2 = transpiler.transpile_circuit(qc2)
+    assert isinstance(qk_circ, qiskit.QuantumCircuit)
+    assert len(qk_circ.data) == 1
+    assert qk_circ.data[0].operation.name == "PauliEvolution"
+    assert qk_circ.data[0].operation.num_qubits == 2
+    assert qk_circ.data[0].qubits[0]._index == 0
+    assert qk_circ.data[0].qubits[1]._index == 1
+    assert len(qk_circ.data[0].params) == 1
 
-        assert isinstance(qk_circ2, qiskit.QuantumCircuit)
-        assert len(qk_circ2.data) == 1
-        assert qk_circ2.data[0].operation.name == 'PauliEvolution'
-        assert qk_circ2.data[0].operation.num_qubits == 2
-        assert qk_circ2.data[0].qubits[0]._index == 0
-        assert qk_circ2.data[0].qubits[1]._index == 1
-        assert len(qk_circ2.data[0].params) == 1
-    
+    hamiltonian2 = Hamiltonian()
+    hamiltonian2 += X(0) * Y(1) + Z(0) * X(1)
+    qc2 = QamomileCircuit(2)
+    qc2.exp_evolution(theta, hamiltonian2)
+    qk_circ2 = transpiler.transpile_circuit(qc2)
+
+    assert isinstance(qk_circ2, qiskit.QuantumCircuit)
+    assert len(qk_circ2.data) == 1
+    assert qk_circ2.data[0].operation.name == "PauliEvolution"
+    assert qk_circ2.data[0].operation.num_qubits == 2
+    assert qk_circ2.data[0].qubits[0]._index == 0
+    assert qk_circ2.data[0].qubits[1]._index == 1
+    assert len(qk_circ2.data[0].params) == 1
+
+
 def test_tsp_decode():
     problem = tsp_problem()
     instance_data = tsp_instance()
@@ -274,10 +283,10 @@ def test_tsp_decode():
     qk_circ = qk_transpiler.transpile_circuit(initial_circuit)
     qk_circ.measure_all()
     job = sampler.run([qk_circ])
-    
+
     job_result = job.result()
-    
-    sampleset = qaoa_converter.decode(qk_transpiler, job_result[0].data['meas'])
+
+    sampleset = qaoa_converter.decode(qk_transpiler, job_result[0].data["meas"])
 
     results = sampleset.extract_decision_variables("x", sample_id=0)
     nonzero_results = {k: v for k, v in results.items() if v != 0}
@@ -288,5 +297,3 @@ def test_tsp_decode():
         (3, 3): 1,
     }
     assert len(sampleset.sample_ids) == 1024
-
-    

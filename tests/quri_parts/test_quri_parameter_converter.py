@@ -65,12 +65,12 @@ def test_convert_binary_operator_div():
     quri_param = qp_c.Parameter("theta")
     param_map = {param: quri_param}
 
-    qamomile_expr = param/value
+    qamomile_expr = param / value
     result = convert_parameter(qamomile_expr, param_map)
 
     assert isinstance(result, dict)
     assert len(result) == 1
-  
+
     assert result[quri_param] == 0.5
 
 

@@ -76,4 +76,3 @@ def test_get_most_common_with_ties():
     assert len(most_common) == 3
     assert most_common[0].num_occurrences == most_common[1].num_occurrences == 2
     assert most_common[2].num_occurrences == 1
-
