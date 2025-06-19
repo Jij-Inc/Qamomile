@@ -35,16 +35,24 @@ def test_bits_sample_creation(num_occurrences, bits):
 
 
 # >>> BitsSampleSet >>>
-def test_bits_sample_set_creation():
+@pytest.mark.parametrize(
+    "samples",
+    [
+        [BitsSample(3, [0, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1, 0])],
+        [BitsSample(4, [1, 1, 0, 0]), BitsSample(2, [0, 1])],
+        [BitsSample(1, [1]), BitsSample(3, [0, 0, 1])],
+    ],
+)
+def test_bits_sample_set_creation(samples):
     """Create a BitsSampleSet instance and verify its length.
 
     Check if
     1. The number of bitarrays in the set matches the number of samples provided.
     """
-    samples = [BitsSample(3, [0, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1, 0])]
     sample_set = BitsSampleSet(samples)
-    # 1. The sample set should contain three bitarrays
-    assert len(sample_set.bitarrays) == 3
+    # 1. The number of bitarrays in the set matches the number of samples provided.
+    num_bitarrays = len(samples)
+    assert len(sample_set.bitarrays) == num_bitarrays
 
 
 def test_get_int_counts():
