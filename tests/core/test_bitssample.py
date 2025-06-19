@@ -59,6 +59,31 @@ def test_bits_sample_set_creation(samples):
     assert len(sample_set.bitarrays) == num_bitarrays
 
 
+def test_empty_sample_set():
+    """Create BitsSampleSet with an empty samples and run its methods.
+    Also, compare the instance created by BitsSampleSet.from_int_counts with an empty int_counts.
+
+    Check if
+    1. get_int_counts returns an empty dict,
+    2. get_most_common returns an empty list,
+    3. total_samples returns 0,
+    4. from_int_counts with an empty int_counts returns an empty BitsSampleSet being the same as the first creation in terms of their bitarrays.
+    """
+    sample_set = BitsSampleSet([])
+    # 1. get_int_counts returns an empty dict,
+    assert sample_set.get_int_counts() == {}
+    # 2. get_most_common returns an empty list,
+    assert sample_set.get_most_common() == []
+    # 3. total_samples returns 0.
+    assert sample_set.total_samples() == 0
+    # 4. from_int_counts with an empty int_counts returns an empty BitsSampleSet being the same as the first creation in terms of their bitarrays.
+    empty_int_counts = {}
+    sample_set_from_int_counts = BitsSampleSet.from_int_counts(
+        int_counts=empty_int_counts, bit_length=0
+    )
+    assert sample_set_from_int_counts.bitarrays == sample_set.bitarrays
+
+
 @pytest.mark.parametrize(
     "samples, expected_counts",
     [
@@ -142,6 +167,36 @@ def test_from_int_counts(int_counts, bit_length, expected_samples):
 
 
 @pytest.mark.parametrize(
+    "int_counts, bit_length, expected_bits_list",
+    [
+        # Standard: 2 samples, bit_length 5
+        ({0: 1, 15: 1}, 5, [[0, 0, 0, 0, 0], [1, 1, 1, 1, 0]]),
+        # All zeros and all ones, bit_length 4
+        ({0: 2, 15: 3}, 4, [[0, 0, 0, 0], [1, 1, 1, 1]]),
+        # Single sample, bit_length 3
+        ({7: 1}, 3, [[1, 1, 1]]),
+        # Empty int_counts, bit_length 3
+        ({}, 3, []),
+    ],
+)
+def test_from_int_counts_with_larger_bit_length(
+    int_counts, bit_length, expected_bits_list
+):
+    """Run BitsSampleSet.from_int_counts with a larger bit length.
+
+    Check if
+    1. All samples have the correct bit length,
+    2. The expected bit patterns are present.
+    """
+    sample_set = BitsSampleSet.from_int_counts(int_counts, bit_length=bit_length)
+    # 1. All samples have the correct bit length,
+    assert all(len(sample.bits) == bit_length for sample in sample_set.bitarrays)
+    # 2. The expected bit patterns are present.
+    for expected_bits in expected_bits_list:
+        assert any(sample.bits == expected_bits for sample in sample_set.bitarrays)
+
+
+@pytest.mark.parametrize(
     "samples, n, expected_bits",
     [
         # Standard case: 3 samples, get top 2
@@ -203,61 +258,6 @@ def test_total_samples(samples, expected_total):
     sample_set = BitsSampleSet(samples)
     # 1. The total number of samples is computed correctly.
     assert sample_set.total_samples() == expected_total
-
-
-def test_empty_sample_set():
-    """Create BitsSampleSet with an empty samples and run its methods.
-    Also, compare the instance created by BitsSampleSet.from_int_counts with an empty int_counts.
-
-    Check if
-    1. get_int_counts returns an empty dict,
-    2. get_most_common returns an empty list,
-    3. total_samples returns 0,
-    4. from_int_counts with an empty int_counts returns an empty BitsSampleSet being the same as the first creation in terms of their bitarrays.
-    """
-    sample_set = BitsSampleSet([])
-    # 1. get_int_counts returns an empty dict,
-    assert sample_set.get_int_counts() == {}
-    # 2. get_most_common returns an empty list,
-    assert sample_set.get_most_common() == []
-    # 3. total_samples returns 0.
-    assert sample_set.total_samples() == 0
-    # 4. from_int_counts with an empty int_counts returns an empty BitsSampleSet being the same as the first creation in terms of their bitarrays.
-    empty_int_counts = {}
-    sample_set_from_int_counts = BitsSampleSet.from_int_counts(
-        int_counts=empty_int_counts, bit_length=0
-    )
-    assert sample_set_from_int_counts.bitarrays == sample_set.bitarrays
-
-
-@pytest.mark.parametrize(
-    "int_counts, bit_length, expected_bits_list",
-    [
-        # Standard: 2 samples, bit_length 5
-        ({0: 1, 15: 1}, 5, [[0, 0, 0, 0, 0], [1, 1, 1, 1, 0]]),
-        # All zeros and all ones, bit_length 4
-        ({0: 2, 15: 3}, 4, [[0, 0, 0, 0], [1, 1, 1, 1]]),
-        # Single sample, bit_length 3
-        ({7: 1}, 3, [[1, 1, 1]]),
-        # Empty int_counts, bit_length 3
-        ({}, 3, []),
-    ],
-)
-def test_from_int_counts_with_larger_bit_length(
-    int_counts, bit_length, expected_bits_list
-):
-    """Run BitsSampleSet.from_int_counts with a larger bit length.
-
-    Check if
-    1. All samples have the correct bit length,
-    2. The expected bit patterns are present.
-    """
-    sample_set = BitsSampleSet.from_int_counts(int_counts, bit_length=bit_length)
-    # 1. All samples have the correct bit length,
-    assert all(len(sample.bits) == bit_length for sample in sample_set.bitarrays)
-    # 2. The expected bit patterns are present.
-    for expected_bits in expected_bits_list:
-        assert any(sample.bits == expected_bits for sample in sample_set.bitarrays)
 
 
 # <<< BitsSampleSet <<<
