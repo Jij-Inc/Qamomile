@@ -21,7 +21,7 @@ Before you begin, ensure you have the following installed:
 3. Create a virtual environment and activate it:
    ```
    poetry install
-   poetry shell
+   eval $(poetry env activate)
    ```
 
 ## Making Changes to the Documentation
