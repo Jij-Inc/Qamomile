@@ -230,20 +230,34 @@ def test_empty_sample_set():
     assert sample_set_from_int_counts.bitarrays == sample_set.bitarrays
 
 
-def test_from_int_counts_with_larger_bit_length():
-    """Test BitsSampleSet.from_int_counts with a larger bit length.
+@pytest.mark.parametrize(
+    "int_counts, bit_length, expected_bits_list",
+    [
+        # Standard: 2 samples, bit_length 5
+        ({0: 1, 15: 1}, 5, [[0, 0, 0, 0, 0], [1, 1, 1, 1, 0]]),
+        # All zeros and all ones, bit_length 4
+        ({0: 2, 15: 3}, 4, [[0, 0, 0, 0], [1, 1, 1, 1]]),
+        # Single sample, bit_length 3
+        ({7: 1}, 3, [[1, 1, 1]]),
+        # Empty int_counts, bit_length 3
+        ({}, 3, []),
+    ],
+)
+def test_from_int_counts_with_larger_bit_length(
+    int_counts, bit_length, expected_bits_list
+):
+    """Run BitsSampleSet.from_int_counts with a larger bit length.
 
     Check if
     1. All samples have the correct bit length,
     2. The expected bit patterns are present.
     """
-    int_counts = {0: 1, 15: 1}  # 15 is 1111 in binary
-    sample_set = BitsSampleSet.from_int_counts(int_counts, bit_length=5)
-    # 1. All samples should have bit length 5
-    assert all(len(sample.bits) == 5 for sample in sample_set.bitarrays)
-    # 2. Check for expected bit patterns
-    assert any(sample.bits == [0, 0, 0, 0, 0] for sample in sample_set.bitarrays)
-    assert any(sample.bits == [1, 1, 1, 1, 0] for sample in sample_set.bitarrays)
+    sample_set = BitsSampleSet.from_int_counts(int_counts, bit_length=bit_length)
+    # 1. All samples have the correct bit length,
+    assert all(len(sample.bits) == bit_length for sample in sample_set.bitarrays)
+    # 2. The expected bit patterns are present.
+    for expected_bits in expected_bits_list:
+        assert any(sample.bits == expected_bits for sample in sample_set.bitarrays)
 
 
 def test_get_most_common_with_ties():
