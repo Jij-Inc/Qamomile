@@ -227,92 +227,101 @@ def test_ising2qubo_index(index_map, index, expected_qubo_index):
     assert ising.ising2qubo_index(index) == expected_qubo_index
 
 
-def test_normalize_by_abs_max():
+@pytest.mark.parametrize(
+    "quad, linear, constant, expected_quad, expected_linear, expected_constant",
+    [
+        # Quad-dominant normalization
+        (
+            {(0, 1): 2.0, (1, 2): -4.0},
+            {0: 1.0, 1: 3.0},
+            6.0,
+            {(0, 1): 0.5, (1, 2): -1.0},
+            {0: 0.25, 1: 0.75},
+            1.5,
+        ),
+        # Linear-dominant normalization
+        (
+            {(0, 1): 2.0},
+            {0: 4.0, 1: -5.0},
+            10.0,
+            {(0, 1): 0.4},
+            {0: 0.8, 1: -1.0},
+            2.0,
+        ),
+        # Only constant (should remain unchanged)
+        (
+            {},
+            {},
+            5.0,
+            {},
+            {},
+            5.0,
+        ),
+        # Only quad
+        (
+            {(0, 1): 8.0, (1, 2): -4.0},
+            {},
+            4.0,
+            {(0, 1): 1.0, (1, 2): -0.5},
+            {},
+            0.5,
+        ),
+        # Only linear
+        (
+            {},
+            {0: 2.0, 1: -6.0},
+            12.0,
+            {},
+            {0: 0.3333333333333333, 1: -1.0},
+            2.0,
+        ),
+        # Empty model
+        (
+            {},
+            {},
+            0.0,
+            {},
+            {},
+            0.0,
+        ),
+        # 0 coefficients for quad (should remain unchanged)
+        (
+            {(0, 1): 0.0},
+            {},
+            0.0,
+            {(0, 1): 0.0},
+            {},
+            0.0,
+        ),
+        # 0 coefficients for linear (should remain unchanged)
+        (
+            {},
+            {0: 0.0},
+            0.0,
+            {},
+            {0: 0.0},
+            0.0,
+        ),
+    ],
+)
+def test_normalize_by_abs_max(
+    quad, linear, constant, expected_quad, expected_linear, expected_constant
+):
     """Run IsingModel.normalize_by_abs_max and check normalization by max coefficient.
 
     Check if
-    1. All coefficients are divided by the maximum absolute value among quad and linear terms,
-    2. The constant term is also normalized,
-    3. The function works for both quad-dominant and linear-dominant cases.
+    1. The constant term is normalized,
+    2. The linear terms are normalized,
+    3. The quadratic terms are normalized.
     """
-    # Setup: Create an Ising model with known coefficients
-    ising = IsingModel(
-        quad={(0, 1): 2.0, (1, 2): -4.0},  # max quad coeff is 4.0
-        linear={0: 1.0, 1: 3.0},  # max linear coeff is 3.0
-        constant=6.0,
-    )
-
-    # Execute normalization
+    ising = IsingModel(quad=quad, linear=linear, constant=constant)
     ising.normalize_by_abs_max()
-
-    # 1. All coefficients are divided by the maximum absolute value among quad and linear terms
-    assert ising.quad[(0, 1)] == 0.5  # 2.0 / 4.0
-    assert ising.quad[(1, 2)] == -1.0  # -4.0 / 4.0
-    assert ising.linear[0] == 0.25  # 1.0 / 4.0
-    assert ising.linear[1] == 0.75  # 3.0 / 4.0
-    # 2. The constant term is also normalized
-    assert ising.constant == 1.5  # 6.0 / 4.0
-
-
-def test_normalize_by_abs_max_linear_dominant():
-    """Run IsingModel.normalize_by_abs_max for a linear-dominant model.
-
-    Check if
-    1. All coefficients are divided by the maximum absolute value among quad and linear terms,
-    2. The constant term is also normalized.
-    """
-    # Setup: Create an Ising model where linear term has the max coefficient
-    ising = IsingModel(
-        quad={(0, 1): 2.0},  # max quad coeff is 2.0
-        linear={0: 4.0, 1: -5.0},  # max linear coeff is 5.0
-        constant=10.0,
-    )
-
-    # Execute normalization
-    ising.normalize_by_abs_max()
-
-    # 1. All coefficients are divided by the maximum absolute value among quad and linear terms
-    assert ising.quad[(0, 1)] == 0.4  # 2.0 / 5.0
-    assert ising.linear[0] == 0.8  # 4.0 / 5.0
-    assert ising.linear[1] == -1.0  # -5.0 / 5.0
-    # 2. The constant term is also normalized
-    assert ising.constant == 2.0  # 10.0 / 5.0
-
-
-def test_normalize_by_abs_max_empty():
-    """Run IsingModel.normalize_by_abs_max for an empty model.
-
-    Check if
-    1. The function does not change the model if there are no coefficients.
-    """
-    # Setup: Create an Ising model with no coefficients
-    ising = IsingModel(quad={}, linear={}, constant=0.0)
-
-    # Empty model should not be normalized
-    ising.normalize_by_abs_max()
-
-    # 1. The function does not change the model if there are no coefficients.
-    assert ising.constant == 0.0
-    assert len(ising.quad) == 0
-    assert len(ising.linear) == 0
-
-
-def test_normalize_by_abs_max_only_constant():
-    """Run IsingModel.normalize_by_abs_max for a model with only a constant term.
-
-    Check if
-    1. The function does not change the model if there are no quad or linear terms.
-    """
-    # Setup: Create an Ising model with only constant term
-    ising = IsingModel(quad={}, linear={}, constant=5.0)
-
-    # Model with only constant should not be normalized
-    ising.normalize_by_abs_max()
-
-    # 1. The function does not change the model if there are no quad or linear terms.
-    assert ising.constant == 5.0
-    assert len(ising.quad) == 0
-    assert len(ising.linear) == 0
+    # 1. The constant term is normalized,
+    assert ising.quad == pytest.approx(expected_quad)
+    # 2. The linear terms are normalized,
+    assert ising.linear == pytest.approx(expected_linear)
+    # 3. The quadratic terms are normalized.
+    assert ising.constant == pytest.approx(expected_constant)
 
 
 def test_normalize_by_rms():
