@@ -349,33 +349,116 @@ def test_normalize_by_rms(quad, linear, constant):
 
 
 # >>> qubo_to_ising >>>
-def test_onehot_conversion():
-    """Run qubo_to_ising with a simple QUBO.
+@pytest.mark.parametrize(
+    "qubo",
+    [
+        # Standard QUBO with off-diagonal and diagonal terms
+        {(0, 1): 2, (0, 0): -1, (1, 1): -1},
+        # Only diagonal terms
+        {(0, 0): 2.0, (1, 1): 3.0},
+        # Only off-diagonal terms
+        {(0, 1): 4.0, (1, 2): -2.0},
+        # Empty QUBO
+        {},
+        # Zero coefficients
+        {(0, 0): 0.0, (1, 1): 0.0, (0, 1): 0.0},
+        # Single variable QUBO
+        {(0, 0): 3.0},
+        # Mixed zero and nonzero
+        {(0, 1): 0.0, (1, 2): 2.0, (2, 2): 0.0},
+    ],
+)
+def test_qubo_to_ising_without_simplify(qubo):
+    """Run qubo_to_ising with various QUBOs and check Ising conversion (no simplify).
 
     Check if
     1. The constant term is correctly calculated,
     2. The linear terms are correctly converted to Ising model,
-    3. The quadratic terms are correctly converted to Ising model,
-    4. The simplified version has the correct constant term,
-    5. The simplified version removes linear terms,
-    6. The simplified version has the correct quadratic terms.
+    3. The quadratic terms are correctly converted to Ising model.
     """
-    qubo: dict[tuple[int, int], float] = {(0, 1): 2, (0, 0): -1, (1, 1): -1}
-    ising = qubo_to_ising(qubo)
-    # 1. The constant term is correctly calculated,
-    assert ising.constant == -0.5
-    # 2. The linear terms are correctly converted to Ising model,
-    assert ising.linear == {0: 0, 1: 0}
-    # 3. The quadratic terms are correctly converted to Ising model,
-    assert ising.quad == {(0, 1): 0.5}
+    ising = qubo_to_ising(qubo, simplify=False)
 
+    # Calculate the expected constant, linear, and quadratic terms.
+    expected_quad = {(i, j): value / 4.0 for (i, j), value in qubo.items() if i != j}
+    expected_constant = sum(
+        2 * (value / 4.0) if i == j else (value / 4.0) for (i, j), value in qubo.items()
+    )
+    expected_linear = {}
+    for (i, j), value in qubo.items():
+        expected_linear[i] = expected_linear.get(i, 0) - value / 4.0
+        expected_linear[j] = expected_linear.get(j, 0) - value / 4.0
+
+    # 1. The constant term is correctly calculated,
+    assert ising.constant == pytest.approx(expected_constant)
+    # 2. The linear terms are correctly converted to Ising model,
+    assert ising.linear == pytest.approx(expected_linear)
+    # 3. The quadratic terms are correctly converted to Ising model,
+    assert ising.quad == pytest.approx(expected_quad)
+
+
+@pytest.mark.parametrize(
+    "qubo",
+    [
+        # Standard QUBO with off-diagonal and diagonal terms
+        {(0, 1): 2, (0, 0): -1, (1, 1): 0, (0, 2): 0, (1, 3): 1},
+        # Only diagonal terms
+        {(0, 0): 2.0, (1, 1): 0},
+        # Only off-diagonal terms
+        {(0, 1): 4.0, (1, 2): 0},
+        # Empty QUBO
+        {},
+        # Zero coefficients
+        {(0, 0): 0.0, (1, 1): 0.0, (0, 1): 0.0},
+        # Single variable QUBO
+        {(0, 0): 0},
+        # Cancel h[2] out but J[0, 2] remains (for the coverage rate)
+        {(0, 0): 4.0, (1, 2): 4.0, (3, 2): -4.0, (0, 1): 12.0},
+    ],
+)
+def test_qubo_to_ising_with_simplify(qubo):
+    """Run qubo_to_ising with various QUBOs and check Ising conversion (with simplify).
+
+    Check if
+    1. The constant term is correctly calculated,
+    2. Each linear term is at least in the expected linear term,
+    3. Each quadratic term is at least in the expected quadratic term,
+    4. The length of the index map is correct.
+    """
     ising = qubo_to_ising(qubo, simplify=True)
-    # 4. The simplified version has the correct constant term,
-    assert ising.constant == -0.5
-    # 5. The simplified version removes linear terms,
-    assert ising.linear == {}
-    # 6. The simplified version has the correct quadratic terms.
-    assert ising.quad == {(0, 1): 0.5}
+
+    # Calculate the expected constant, linear, quadratic terms, and number of elements of idnex_map.
+    expected_quad = {
+        (i, j): value / 4.0 for (i, j), value in qubo.items() if i != j and value != 0
+    }
+    expected_constant = sum(
+        2 * (value / 4.0) if i == j else (value / 4.0)
+        for (i, j), value in qubo.items()
+        if value != 0
+    )
+    expected_linear = {}
+    for (i, j), value in qubo.items():
+        if value != 0:
+            expected_linear[i] = expected_linear.get(i, 0) - value / 4.0
+            expected_linear[j] = expected_linear.get(j, 0) - value / 4.0
+    expected_linear = {i: v for i, v in expected_linear.items() if v != 0}
+    expected_valid_indices = set([i for i in expected_linear.keys()])
+    for i, j in expected_quad.keys():
+        expected_valid_indices.add(i)
+        expected_valid_indices.add(j)
+    expected_num_index_map = len(expected_valid_indices)
+
+    # 1. The constant term is correctly calculated,
+    assert ising.constant == pytest.approx(expected_constant)
+    # 2. Each linear term is at least in the expected linear term,
+    for value in ising.linear.values():
+        assert any(
+            value == expected_value for expected_value in expected_linear.values()
+        )
+    # 3. Each quadratic term is at least in the expected quadratic term,
+    for value in ising.quad.values():
+        assert any(value == expected_value for expected_value in expected_quad.values())
+    # 4. The length of the index map is correct.
+    assert len(ising.index_map) == expected_num_index_map
 
 
 # <<< qubo_to_ising <<<
