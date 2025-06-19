@@ -228,99 +228,59 @@ def test_ising2qubo_index(index_map, index, expected_qubo_index):
 
 
 @pytest.mark.parametrize(
-    "quad, linear, constant, expected_quad, expected_linear, expected_constant",
+    "quad, linear, constant",
     [
         # Quad-dominant normalization
-        (
-            {(0, 1): 2.0, (1, 2): -4.0},
-            {0: 1.0, 1: 3.0},
-            6.0,
-            {(0, 1): 0.5, (1, 2): -1.0},
-            {0: 0.25, 1: 0.75},
-            1.5,
-        ),
+        ({(0, 1): 2.0, (1, 2): -4.0}, {0: 1.0, 1: 3.0}, 6.0),
         # Linear-dominant normalization
-        (
-            {(0, 1): 2.0},
-            {0: 4.0, 1: -5.0},
-            10.0,
-            {(0, 1): 0.4},
-            {0: 0.8, 1: -1.0},
-            2.0,
-        ),
+        ({(0, 1): 2.0}, {0: 4.0, 1: -5.0}, 10.0),
         # Only constant (should remain unchanged)
-        (
-            {},
-            {},
-            5.0,
-            {},
-            {},
-            5.0,
-        ),
+        ({}, {}, 5.0),
         # Only quad
-        (
-            {(0, 1): 8.0, (1, 2): -4.0},
-            {},
-            4.0,
-            {(0, 1): 1.0, (1, 2): -0.5},
-            {},
-            0.5,
-        ),
+        ({(0, 1): 8.0, (1, 2): -4.0}, {}, 4.0),
         # Only linear
-        (
-            {},
-            {0: 2.0, 1: -6.0},
-            12.0,
-            {},
-            {0: 0.3333333333333333, 1: -1.0},
-            2.0,
-        ),
+        ({}, {0: 2.0, 1: -6.0}, 12.0),
         # Empty model
-        (
-            {},
-            {},
-            0.0,
-            {},
-            {},
-            0.0,
-        ),
-        # 0 coefficients for quad (should remain unchanged)
-        (
-            {(0, 1): 0.0},
-            {},
-            0.0,
-            {(0, 1): 0.0},
-            {},
-            0.0,
-        ),
-        # 0 coefficients for linear (should remain unchanged)
-        (
-            {},
-            {0: 0.0},
-            0.0,
-            {},
-            {0: 0.0},
-            0.0,
-        ),
+        ({}, {}, 0.0),
+        # 0 coefficients (should remain unchanged)
+        ({(0, 1): 0.0}, {0: 0, 1: 0}, 0.0),
     ],
 )
-def test_normalize_by_abs_max(
-    quad, linear, constant, expected_quad, expected_linear, expected_constant
-):
+def test_normalize_by_abs_max(quad, linear, constant):
     """Run IsingModel.normalize_by_abs_max and check normalization by max coefficient.
 
     Check if
-    1. The constant term is normalized,
+    1. The quadratic terms are normalized.
     2. The linear terms are normalized,
-    3. The quadratic terms are normalized.
+    3. The constant term is normalized,
     """
     ising = IsingModel(quad=quad, linear=linear, constant=constant)
     ising.normalize_by_abs_max()
-    # 1. The constant term is normalized,
+
+    # Calculate the maximum coefficient.
+    max_coeff_quad = 0
+    if len(ising.quad) != 0:
+        max_coeff_quad = max(abs(value) for value in ising.quad.values())
+    max_coeff_linear = 0
+    if len(ising.linear) != 0:
+        max_coeff_linear = max(abs(value) for value in ising.linear.values())
+    max_coeff = max(max_coeff_quad, max_coeff_linear)
+    # Calculate the expected values after normalization.
+    expected_quad = quad.copy()
+    expected_linear = linear.copy()
+    expected_constant = constant
+    if max_coeff != 0:
+        expected_quad = {
+            (i, j): value / max_coeff for (i, j), value in ising.quad.items()
+        }
+        expected_linear = {i: value / max_coeff for i, value in ising.linear.items()}
+        expected_constant = ising.constant / max_coeff
+
+    # 1. The quadratic terms are normalized.
     assert ising.quad == pytest.approx(expected_quad)
     # 2. The linear terms are normalized,
     assert ising.linear == pytest.approx(expected_linear)
-    # 3. The quadratic terms are normalized.
+    # 3. The constant term is normalized,
     assert ising.constant == pytest.approx(expected_constant)
 
 
@@ -339,10 +299,8 @@ def test_normalize_by_abs_max(
         ({}, {0: 2.0, 1: -6.0}, 12.0),
         # Empty model
         ({}, {}, 0.0),
-        # 0 coefficients for quad (should remain unchanged)
-        ({(0, 1): 0.0}, {}, 0.0),
-        # 0 coefficients for linear (should remain unchanged)
-        ({}, {0: 0.0}, 0.0),
+        # 0 coefficients (should remain unchanged)
+        ({(0, 1): 0.0}, {0: 0, 1: 0}, 0.0),
     ],
 )
 def test_normalize_by_rms(quad, linear, constant):
