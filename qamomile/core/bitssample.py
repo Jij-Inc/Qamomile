@@ -43,6 +43,8 @@ class BitsSampleSet:
         bitarrays (List[BitsSample]): A list of BitsSample objects representing the sample set.
     """
 
+    # Additional TODO: Currently, we can create this instance from [BitsSample(4, [1, 1, 0, 0]), BitsSample(2, [0, 1])], which has different lengths of bits. It  would be nice to implement an error not to accept this or to augument zeros to the shorter bit arrays. Otherwise, it might cause issues in QuantumConverter.decode?
+
     bitarrays: list[BitsSample]
 
     def get_int_counts(self) -> dict[int, int]:
