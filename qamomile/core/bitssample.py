@@ -81,6 +81,8 @@ class BitsSampleSet:
         Returns:
             BitsSampleSet: A new BitsSampleSet object containing the converted samples.
         """
+        # Additional TODO: Currently, this method accepts weird combination of int_counts and bit_length, e.g., int_counts = {0: 3, 1: 2, 2: 1}, bit_length = 1 and the return value is BitsSampleSet(bitarrays=[BitsSample(num_occurrences=3, bits=[0]), BitsSample(num_occurrences=2, bits=[1]), BitsSample(num_occurrences=1, bits=[0, 1])]). We should probably raise an error if the bit_length is not sufficient to represent the integers in int_counts.
+
         bitarrays = []
         for int_value, count in int_counts.items():
             # Convert the integer to a bit array of the specified length
