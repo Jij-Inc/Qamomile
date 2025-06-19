@@ -55,17 +55,33 @@ def test_bits_sample_set_creation(samples):
     assert len(sample_set.bitarrays) == num_bitarrays
 
 
-def test_get_int_counts():
-    """Test the get_int_counts method of BitsSampleSet.
+@pytest.mark.parametrize(
+    "samples, expected_counts",
+    [
+        (
+            [BitsSample(3, [0, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1, 0])],
+            {0: 3, 1: 2, 2: 1},
+        ),
+        (
+            [BitsSample(1, [1]), BitsSample(4, [0])],
+            {0: 4, 1: 1},
+        ),
+        (
+            [BitsSample(5, [1, 0, 1]), BitsSample(2, [0, 0, 1])],
+            {5: 5, 1: 2},
+        ),
+    ],
+)
+def test_get_int_counts(samples, expected_counts):
+    """Run the get_int_counts method of BitsSampleSet.
 
     Check if
     1. The integer counts are correctly computed from the samples.
     """
-    samples = [BitsSample(3, [0, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1, 0])]
     sample_set = BitsSampleSet(samples)
     int_counts = sample_set.get_int_counts()
-    # 1. The returned dictionary should match the expected integer counts
-    assert int_counts == {0: 3, 1: 2, 2: 1}
+    # 1. The integer counts are correctly computed from the samples.
+    assert int_counts == expected_counts
 
 
 def test_from_int_counts():
