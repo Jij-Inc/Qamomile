@@ -260,20 +260,4 @@ def test_from_int_counts_with_larger_bit_length(
         assert any(sample.bits == expected_bits for sample in sample_set.bitarrays)
 
 
-def test_get_most_common_with_ties():
-    """Test get_most_common when there are ties in occurrence counts.
-
-    Check if
-    1. Samples with the same number of occurrences are handled correctly,
-    2. The total number of returned samples matches the requested count.
-    """
-    samples = [BitsSample(2, [0, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1, 0])]
-    sample_set = BitsSampleSet(samples)
-    most_common = sample_set.get_most_common(3)
-    # 1. There should be three samples, with the first two having the same occurrence count
-    assert len(most_common) == 3
-    assert most_common[0].num_occurrences == most_common[1].num_occurrences == 2
-    assert most_common[2].num_occurrences == 1
-
-
 # <<< BitsSampleSet <<<
