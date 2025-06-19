@@ -179,16 +179,30 @@ def test_get_most_common(samples, n, expected_bits):
     assert len(most_common) == min(n, len(samples))
 
 
-def test_total_samples():
+@pytest.mark.parametrize(
+    "samples, expected_total",
+    [
+        # Standard case
+        ([BitsSample(3, [0, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1, 0])], 6),
+        # Single sample
+        ([BitsSample(5, [1, 1, 1])], 5),
+        # No samples
+        ([], 0),
+        # Multiple samples with zero occurrences
+        ([BitsSample(0, [1, 0]), BitsSample(0, [0, 1])], 0),
+        # Mixed zero and nonzero occurrences
+        ([BitsSample(0, [1, 0]), BitsSample(2, [0, 1])], 2),
+    ],
+)
+def test_total_samples(samples, expected_total):
     """Test the total_samples method of BitsSampleSet.
 
     Check if
     1. The total number of samples is computed correctly.
     """
-    samples = [BitsSample(3, [0, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1, 0])]
     sample_set = BitsSampleSet(samples)
-    # 1. The total number of samples should be 6
-    assert sample_set.total_samples() == 6
+    # 1. The total number of samples is computed correctly.
+    assert sample_set.total_samples() == expected_total
 
 
 def test_empty_sample_set():
