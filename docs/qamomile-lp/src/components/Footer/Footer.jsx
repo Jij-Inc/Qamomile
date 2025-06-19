@@ -12,7 +12,7 @@ function Footer() {
       <div className="footer-container">
         <div className="footer-content">
           <div className="footer-logo">
-            <a href="/" className="logo">Qamomile</a>
+            <a href="https://jij-inc.github.io/Qamomile/" className="logo">Qamomile</a>
           </div>
           <div className="footer-links">
             {footerLinks.map((link, index) => (

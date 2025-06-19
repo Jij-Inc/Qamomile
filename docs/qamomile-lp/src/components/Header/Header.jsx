@@ -4,7 +4,7 @@ function Header() {
   return (
     <header className="header">
       <nav className="nav">
-        <a href="/" className="logo">Qamomile</a>
+        <a href="https://jij-inc.github.io/Qamomile/" className="logo">Qamomile</a>
         <div className="nav-links">
           <a href="https://jij-inc.github.io/Qamomile/">Docs</a>
           <a href="https://jij-inc.github.io/Qamomile/en/autoapi/index.html">API</a>

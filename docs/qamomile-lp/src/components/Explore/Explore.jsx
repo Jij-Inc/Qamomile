@@ -15,7 +15,7 @@ function Explore() {
     {
       title: 'Advanced Topics',
       description: 'Explore advanced features and optimization techniques.',
-      link: 'https://jij-inc.github.io/Qamomile/en/tutorial/index.html'
+      link: 'https://jij-inc.github.io/Qamomile/en/tutorial/qaoa/index_qaoa.html'
     }
   ]
 
