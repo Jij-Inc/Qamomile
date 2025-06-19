@@ -126,47 +126,32 @@ def test_ising_model_creation_with_index_map(quad, linear, constant, initial_ind
     assert ising.index_map == initial_index_map
 
 
-def test_num_bits():
+@pytest.mark.parametrize(
+    "quad, linear, constant, expected_num_bits",
+    [
+        # Both quad and linear terms, max index is 6
+        ({(0, 1): 2.0, (0, 2): 1.0}, {2: 5.0, 3: 2.0, 4: 1.0, 5: 1.0, 6: 1.0}, 6.0, 7),
+        # Only linear terms, max index is 3
+        ({}, {0: 1.0, 1: 1.0, 2: 5.0, 3: 2.0}, 6.0, 4),
+        # Only quad terms, max index is 2
+        ({(0, 1): 2.0, (0, 2): 1.0}, {}, 6.0, 3),
+        # Empty model
+        ({}, {}, 6.0, 0),
+        # Single linear term, index 0
+        ({}, {0: 1.0}, 6.0, 1),
+        # Only constant term, no quad or linear terms
+        ({}, {}, 42.0, 0),
+    ],
+)
+def test_num_bits(quad, linear, constant, expected_num_bits):
     """Run IsingModel.num_bits for various IsingModel instances.
 
     Check if
-    1. The number of bits is correctly calculated from quad and linear terms,
-    2. The function returns 0 for empty models,
-    3. The function returns 1 for a single linear term.
+    1. The number of bits is correctly calculated from quad and linear terms.
     """
-    ising = IsingModel(
-        {(0, 1): 2.0, (0, 2): 1.0},
-        {2: 5.0, 3: 2.0, 4: 1.0, 5: 1.0, 6: 1.0},
-        6.0,
-    )
-    # 1. The number of bits is correctly calculated from quad and linear terms
-    assert ising.num_bits() == 7
-
-    ising = IsingModel({}, {0: 1.0, 1: 1.0, 2: 5.0, 3: 2.0}, 6.0)
-    assert ising.num_bits() == 4
-
-    ising = IsingModel(
-        {(0, 1): 2.0, (0, 2): 1.0},
-        {},
-        6.0,
-    )
-    assert ising.num_bits() == 3
-
-    # 2. The function returns 0 for empty models
-    ising = IsingModel(
-        {},
-        {},
-        6.0,
-    )
-    assert ising.num_bits() == 0
-
-    # 3. The function returns 1 for a single linear term
-    ising = IsingModel(
-        {},
-        {0: 1.0},
-        6.0,
-    )
-    assert ising.num_bits() == 1
+    ising = IsingModel(quad=quad, linear=linear, constant=constant)
+    # 1. The number of bits is correctly calculated from quad and linear terms.
+    assert ising.num_bits() == expected_num_bits
 
 
 def test_normalize_by_abs_max():
