@@ -35,6 +35,7 @@ class IsingModel:
             3.0
 
         """
+        # Additional TODO: Should we handle an error when the length of the state does not match the number of bits?
         energy = self.constant
         for (i, j), value in self.quad.items():
             energy += value * state[i] * state[j]
