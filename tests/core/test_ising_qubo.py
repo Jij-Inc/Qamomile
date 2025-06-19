@@ -1,4 +1,4 @@
-from qamomile.core.ising_qubo import qubo_to_ising, IsingModel
+from qamomile.core.ising_qubo import calc_qubo_energy, qubo_to_ising, IsingModel
 import pytest
 import numpy as np
 
@@ -464,4 +464,42 @@ def test_qubo_to_ising_with_simplify(qubo):
 # <<< qubo_to_ising <<<
 
 # >>> calc_qubo_energy >>>
+
+
+@pytest.mark.parametrize(
+    "qubo, state",
+    [
+        # Standard QUBO with off-diagonal and diagonal terms
+        ({(0, 1): 2, (0, 0): -1, (1, 1): -1}, [0, 1]),
+        # Only diagonal terms
+        ({(0, 0): 2.0, (1, 1): 3.0}, [1, 1]),
+        # Only off-diagonal terms
+        ({(0, 1): 4.0, (1, 2): -2.0}, [1, 0, 1]),
+        # Empty QUBO
+        ({}, []),
+        # Zero coefficients
+        ({(0, 0): 0.0, (1, 1): 0.0, (0, 1): 0.0}, [0, 0]),
+        # Single variable QUBO
+        ({(0, 0): 3.0}, [1]),
+        # Mixed zero and nonzero
+        ({(0, 1): 0.0, (1, 2): 2.0, (2, 2): 0.0}, [1, 1, 1]),
+        # Negative coefficients
+        ({(0, 0): -2.0, (1, 1): -2.0, (0, 1): -4.0}, [1, 1]),
+        # Non-contiguous variables
+        ({(0, 2): 5.0, (2, 2): 1.0}, [1, 0, 1]),
+    ],
+)
+def test_calc_qubo_energy(qubo, state):
+    """Run calc_qubo_energy with QUBO coefficients and check the energy calculation.
+
+    Check if
+    1. The energy is calculated correctly for given qubo and state.
+    """
+    expected_energy = 0
+    for (i, j), value in qubo.items():
+        expected_energy += value * state[i] * state[j]
+    # 1. The energy is calculated correctly for given qubo and state.
+    assert calc_qubo_energy(qubo, state) == pytest.approx(expected_energy)
+
+
 # <<< calc_qubo_energy <<<
