@@ -2,7 +2,7 @@ name: Deploy Jupyter Book to GitHub Pages
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "fix/jupyter-book-publish"]  # Temporary branch for testing
   workflow_dispatch:
 
 permissions:
