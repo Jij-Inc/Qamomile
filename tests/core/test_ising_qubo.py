@@ -324,34 +324,67 @@ def test_normalize_by_abs_max(
     assert ising.constant == pytest.approx(expected_constant)
 
 
-def test_normalize_by_rms():
+@pytest.mark.parametrize(
+    "quad, linear, constant",
+    [
+        # Quad and linear terms (quad-dominant)
+        ({(0, 1): 2.0, (1, 2): -2.0}, {0: 1.0, 1: -1.0}, 6.0),
+        # Quad and linear terms (linear-dominant)
+        ({(0, 1): 2}, {0: 3.0, 1: -4.0}, 7.0),
+        # Only constant (should remain unchanged)
+        ({}, {}, 5.0),
+        # Only quad
+        ({(0, 1): 8.0, (1, 2): -4.0}, {}, 4.0),
+        # Only linear
+        ({}, {0: 2.0, 1: -6.0}, 12.0),
+        # Empty model
+        ({}, {}, 0.0),
+        # 0 coefficients for quad (should remain unchanged)
+        ({(0, 1): 0.0}, {}, 0.0),
+        # 0 coefficients for linear (should remain unchanged)
+        ({}, {0: 0.0}, 0.0),
+    ],
+)
+def test_normalize_by_rms(quad, linear, constant):
     """Run IsingModel.normalize_by_rms and check normalization by RMS value.
 
     Check if
-    1. All coefficients are divided by the RMS value of quad and linear terms,
-    2. The constant term is also normalized.
+    1. The quadratic terms are divided by the RMS value,
+    2. The linear terms are divided by the RMS value,
+    3. The constant term is normalized by the RMS value.
     """
-    # Setup: Create an Ising model with known coefficients
-    ising = IsingModel(
-        quad={(0, 1): 2.0, (1, 2): -2.0},  # sum(w_ij^2) = 8, E2 = 2
-        linear={0: 1.0, 1: -1.0},  # sum(w_i^2) = 2, E1 = 2
-        constant=6.0,
-    )
-
-    # Calculate expected normalization factor
-    # sqrt(8/2 + 2/2) = sqrt(4 + 1) = sqrt(5)
-    expected_factor = np.sqrt(5)
-
-    # Execute normalization
+    ising = IsingModel(quad=quad, linear=linear, constant=constant)
     ising.normalize_by_rms()
 
-    # 1. All coefficients are divided by the RMS value of quad and linear terms
-    np.testing.assert_allclose(ising.quad[(0, 1)], 2.0 / expected_factor)
-    np.testing.assert_allclose(ising.quad[(1, 2)], -2.0 / expected_factor)
-    np.testing.assert_allclose(ising.linear[0], 1.0 / expected_factor)
-    np.testing.assert_allclose(ising.linear[1], -1.0 / expected_factor)
-    # 2. The constant term is also normalized
-    np.testing.assert_allclose(ising.constant, 6.0 / expected_factor)
+    # Calcuate the RMS value.
+    rms_quad = 0
+    rms_linear = 0
+    if len(ising.quad) != 0:
+        rms_quad = np.sqrt(
+            sum(value**2 for value in ising.quad.values()) / len(ising.quad)
+        )
+    if len(ising.linear) != 0:
+        rms_linear = np.sqrt(
+            sum(value**2 for value in ising.linear.values()) / len(ising.linear)
+        )
+    rms_value = np.sqrt(rms_quad**2 + rms_linear**2)
+    # Calcuate the expected values after normalization.
+    expected_quad = quad.copy()
+    expected_linear = linear.copy()
+    expected_constant = constant
+    if rms_value != 0:
+        expected_quad = {
+            (i, j): value / rms_value for (i, j), value in ising.quad.items()
+        }
+        expected_linear = {i: value / rms_value for i, value in ising.linear.items()}
+        expected_constant = ising.constant / rms_value
+
+    # 1. The constant term is normalized,
+    assert ising.quad == pytest.approx(expected_quad)
+    # 2. The linear terms are normalized,
+    assert ising.linear == pytest.approx(expected_linear)
+    # 3. The quadratic terms are normalized.
+    assert ising.constant == pytest.approx(expected_constant)
 
 
 # <<< IsingModel <<<
