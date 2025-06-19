@@ -206,20 +206,28 @@ def test_total_samples(samples, expected_total):
 
 
 def test_empty_sample_set():
-    """Test BitsSampleSet behavior with an empty sample list.
+    """Create BitsSampleSet with an empty samples and run its methods.
+    Also, compare the instance created by BitsSampleSet.from_int_counts with an empty int_counts.
 
     Check if
     1. get_int_counts returns an empty dict,
     2. get_most_common returns an empty list,
-    3. total_samples returns 0.
+    3. total_samples returns 0,
+    4. from_int_counts with an empty int_counts returns an empty BitsSampleSet being the same as the first creation in terms of their bitarrays.
     """
     sample_set = BitsSampleSet([])
-    # 1. Should return empty dict for int counts
+    # 1. get_int_counts returns an empty dict,
     assert sample_set.get_int_counts() == {}
-    # 2. Should return empty list for most common
+    # 2. get_most_common returns an empty list,
     assert sample_set.get_most_common() == []
-    # 3. Should return 0 for total samples
+    # 3. total_samples returns 0.
     assert sample_set.total_samples() == 0
+    # 4. from_int_counts with an empty int_counts returns an empty BitsSampleSet being the same as the first creation in terms of their bitarrays.
+    empty_int_counts = {}
+    sample_set_from_int_counts = BitsSampleSet.from_int_counts(
+        int_counts=empty_int_counts, bit_length=0
+    )
+    assert sample_set_from_int_counts.bitarrays == sample_set.bitarrays
 
 
 def test_from_int_counts_with_larger_bit_length():
