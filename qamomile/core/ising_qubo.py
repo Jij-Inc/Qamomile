@@ -132,7 +132,7 @@ def calc_qubo_energy(qubo: dict[tuple[int, int], float], state: list[int]) -> fl
         >>> calc_qubo_energy({(0, 0): 1.0, (0, 1): 2.0, (1, 1): 3.0}, [1, 1])
         6.0
     """
-    # Additional TODO: Do we need this function? I, ksk-jij, did not find any usage of this function in Qamomile.
+    # Additional TODO: Do we need this function? I, ksk-jij, did not find any usage of this function in Qamomile. Also, this is easily replaceable by IsingModel.calc_energy with qubo_to_ising if I correctly understand it.
     energy = 0.0
     for (i, j), value in qubo.items():
         energy += value * state[i] * state[j]
