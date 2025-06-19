@@ -84,30 +84,55 @@ def test_get_int_counts(samples, expected_counts):
     assert int_counts == expected_counts
 
 
-def test_from_int_counts():
-    """Test BitsSampleSet.from_int_counts class method.
+@pytest.mark.parametrize(
+    "int_counts, bit_length, expected_samples",
+    [
+        (
+            {0: 3, 1: 2},
+            1,
+            [
+                {"bits": [0], "num_occurrences": 3},
+                {"bits": [1], "num_occurrences": 2},
+            ],
+        ),
+        (
+            {3: 4, 2: 2},
+            2,
+            [
+                {"bits": [1, 1], "num_occurrences": 4},
+                {"bits": [0, 1], "num_occurrences": 2},
+            ],
+        ),
+        (
+            {7: 1, 0: 5},
+            3,
+            [
+                {"bits": [1, 1, 1], "num_occurrences": 1},
+                {"bits": [0, 0, 0], "num_occurrences": 5},
+            ],
+        ),
+    ],
+)
+def test_from_int_counts(int_counts, bit_length, expected_samples):
+    """Run BitsSampleSet.from_int_counts class method.
 
     Check if
     1. The sample set is correctly created from a dictionary of integer counts,
     2. Each sample has the correct bits and occurrence count.
     """
-    int_counts = {0: 3, 1: 2, 2: 1}
-    sample_set = BitsSampleSet.from_int_counts(int_counts, bit_length=2)
-    # 1. The sample set should contain three bitarrays
-    assert len(sample_set.bitarrays) == 3
-    # 2. Check that each sample has the correct bits and occurrence count
-    assert any(
-        sample.bits == [0, 0] and sample.num_occurrences == 3
-        for sample in sample_set.bitarrays
-    )
-    assert any(
-        sample.bits == [1, 0] and sample.num_occurrences == 2
-        for sample in sample_set.bitarrays
-    )
-    assert any(
-        sample.bits == [0, 1] and sample.num_occurrences == 1
-        for sample in sample_set.bitarrays
-    )
+    sample_set = BitsSampleSet.from_int_counts(int_counts, bit_length=bit_length)
+    # 1. The sample set is correctly created from a dictionary of integer counts,
+    num_samples = len(expected_samples)
+    assert len(sample_set.bitarrays) == num_samples
+    for expected_sample in expected_samples:
+        # 2. Each sample has the correct bits and occurrence count.
+        assert any(
+            (
+                sample.bits == expected_sample["bits"]
+                and sample.num_occurrences == expected_sample["num_occurrences"]
+            )
+            for sample in sample_set.bitarrays
+        )
 
 
 def test_get_most_common():
