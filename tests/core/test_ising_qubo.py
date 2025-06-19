@@ -154,6 +154,47 @@ def test_num_bits(quad, linear, constant, expected_num_bits):
     assert ising.num_bits() == expected_num_bits
 
 
+@pytest.mark.parametrize(
+    "quad, linear, constant, state, expected_energy",
+    [
+        # Simple case: 2 bits
+        (
+            {(0, 1): 1.0},
+            {0: 2.0, 1: -1.0},
+            3.0,
+            [1, -1],
+            1.0 * 1 * (-1) + 2.0 * 1 + (-1.0) * (-1) + 3.0,
+        ),
+        # Simple case: 3 bits
+        (
+            {(0, 1): 1.0, (1, 2): -2.0},
+            {0: 1.0, 2: 2.0},
+            3.0,
+            [1, -1, 1],
+            1.0 * 1 * -1 + (-2.0) * -1 * 1 + 1.0 * 1 + 2.0 * 1 + 3.0,
+        ),
+        # Only constant
+        ({}, {}, 5.0, [1, -1], 5.0),
+        # Only linear
+        ({}, {0: 2.0, 1: -3.0}, 0.0, [1, -1], 2.0 * 1 + (-3.0) * (-1)),
+        # Only quad
+        ({(0, 1): 2.0}, {}, 0.0, [1, -1], 2.0 * 1 * -1),
+        # Empty model
+        ({}, {}, 0.0, [], 0.0),
+    ],
+)
+def test_calc_energy(quad, linear, constant, state, expected_energy):
+    """Run IsingModel.calc_energy and check the energy calculation.
+
+    Check if
+    1. The energy is calculated correctly for given state.
+    """
+    # Setup: Create an Ising model with given coefficients
+    ising = IsingModel(quad=quad, linear=linear, constant=constant)
+    # 1. The energy is calculated correctly for given state
+    assert ising.calc_energy(state) == expected_energy
+
+
 def test_normalize_by_abs_max():
     """Run IsingModel.normalize_by_abs_max and check normalization by max coefficient.
 
