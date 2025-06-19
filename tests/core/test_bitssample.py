@@ -135,20 +135,42 @@ def test_from_int_counts(int_counts, bit_length, expected_samples):
         )
 
 
-def test_get_most_common():
-    """Test the get_most_common method of BitsSampleSet.
+@pytest.mark.parametrize(
+    "samples, n, expected_bits",
+    [
+        # Standard case: 3 samples, get top 2
+        (
+            [BitsSample(3, [0, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1, 0])],
+            2,
+            [[0, 0], [0, 1]],
+        ),
+        # n greater than number of samples
+        ([BitsSample(1, [1, 1, 1])], 3, [[1, 1, 1]]),
+        # n is zero
+        ([BitsSample(2, [1, 0])], 0, []),
+        # Empty samples
+        ([], 2, []),
+        # Tie in num_occurrences, should preserve order
+        (
+            [BitsSample(2, [1, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1, 1])],
+            2,
+            [[1, 0], [0, 1]],
+        ),
+    ],
+)
+def test_get_most_common(samples, n, expected_bits):
+    """Run the get_most_common method of BitsSampleSet.
 
     Check if
     1. The most common samples are returned in the correct order,
     2. The number of returned samples matches the requested count.
     """
-    samples = [BitsSample(3, [0, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1, 0])]
     sample_set = BitsSampleSet(samples)
-    most_common = sample_set.get_most_common(2)
-    # 1. The two most common samples should be returned
-    assert len(most_common) == 2
-    assert most_common[0].bits == [0, 0]
-    assert most_common[1].bits == [0, 1]
+    most_common = sample_set.get_most_common(n)
+    # 1. The most common samples are returned in the correct order,
+    assert [s.bits for s in most_common] == expected_bits
+    # 2. The number of returned samples matches the requested count.
+    assert len(most_common) == min(n, len(samples))
 
 
 def test_total_samples():
