@@ -43,7 +43,7 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: doc-landing-page
           path: 'docs/_build/html'
@@ -73,7 +73,7 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: doc-jupyter-book-${{ matrix.lang }}
           path: 'docs/${{ matrix.lang }}/_build/html'
@@ -91,7 +91,7 @@ jobs:
           mkdir -p docs/_build/html/en && cp -r doc-jupyter-book-en/* docs/_build/html/en/
           mkdir -p docs/_build/html/ja && cp -r doc-jupyter-book-ja/* docs/_build/html/ja/
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: doc-jupyter-book
           path: 'docs/_build/html'
