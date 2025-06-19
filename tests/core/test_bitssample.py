@@ -7,10 +7,11 @@ from qamomile.core.bitssample import BitsSample, BitsSampleSet
 @pytest.mark.parametrize(
     "num_occurrences, bits",
     [
-        (5, [0, 1, 1, 0]),
+        # Standard cases with different bit lengths
         (3, [1, 0, 1]),
         (2, [0, 0]),
         (1, [1]),
+        (0, []),
     ],
 )
 def test_bits_sample_creation(num_occurrences, bits):
@@ -38,9 +39,12 @@ def test_bits_sample_creation(num_occurrences, bits):
 @pytest.mark.parametrize(
     "samples",
     [
+        # Standard case
         [BitsSample(3, [0, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1, 0])],
-        [BitsSample(4, [1, 1, 0, 0]), BitsSample(2, [0, 1])],
-        [BitsSample(1, [1]), BitsSample(3, [0, 0, 1])],
+        # Case with different lengths of bits
+        [BitsSample(4, [1, 1, 0, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1])],
+        # Case with single sample
+        [BitsSample(1, [1])],
     ],
 )
 def test_bits_sample_set_creation(samples):
@@ -58,6 +62,7 @@ def test_bits_sample_set_creation(samples):
 @pytest.mark.parametrize(
     "samples, expected_counts",
     [
+        # Standard cases with different bit lengths
         (
             [BitsSample(3, [0, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1, 0])],
             {0: 3, 1: 2, 2: 1},
@@ -87,6 +92,7 @@ def test_get_int_counts(samples, expected_counts):
 @pytest.mark.parametrize(
     "int_counts, bit_length, expected_samples",
     [
+        # Standard cases with different bit lengths
         (
             {0: 3, 1: 2},
             1,
