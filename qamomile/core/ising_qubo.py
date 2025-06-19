@@ -186,6 +186,7 @@ def qubo_to_ising(
     constant = 0.0
     for (i, j), value in qubo.items():
         if i != j:
+            # Additional TODO: Could we remove "ising_J.get((i, j), 0.0)"?
             ising_J[(i, j)] = value / 4.0 + ising_J.get((i, j), 0.0)
             constant += value / 4.0
         else:
