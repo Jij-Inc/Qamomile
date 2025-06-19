@@ -6,6 +6,7 @@ import numpy as np
 
 @dataclasses.dataclass
 class IsingModel:
+    # Additional TODO: Create docstrings for this class itself and some methods.
     quad: dict[tuple[int, int], float]
     linear: dict[int, float]
     constant: float
