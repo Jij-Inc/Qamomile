@@ -5,17 +5,17 @@ function Tutorials() {
     {
       title: 'Quantum Approximate Optimization',
       description: 'Learn how to solve optimization problems.',
-      link: 'https://jij-inc.github.io/Qamomile/en/tutorial/maxcut.html'
+      link: 'https://jij-inc.github.io/Qamomile/en/tutorial/qaoa/maxcut.html'
     },
     {
       title: 'Quantum Alternating Ansatz',
       description: 'Explore advanced quantum algorithms.',
-      link: 'https://jij-inc.github.io/Qamomile/en/tutorial/alternating_ansatz_graph_coloring.html'
+      link: 'https://jij-inc.github.io/Qamomile/en/tutorial/opt_advance/alternating_ansatz_graph_coloring.html'
     },
     {
       title: 'Quantum Random Access Optimization',
       description: 'Master quantum optimization techniques.',
-      link: 'https://jij-inc.github.io/Qamomile/en/tutorial/qrao_tutorial.html'
+      link: 'https://jij-inc.github.io/Qamomile/en/tutorial/opt_advance/qrao_tutorial.html'
     }
   ]
 

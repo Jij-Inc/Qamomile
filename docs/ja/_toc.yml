@@ -6,7 +6,7 @@ root: index
 parts:
   - caption: "Switch Language"
     chapters:
-      - url: https://jij-inc.github.io/qamomile/en/
+      - url: https://jij-inc.github.io/Qamomile/en/
         title: "English"
 
   - caption: Getting Started

@@ -10,12 +10,12 @@ function Explore() {
     {
       title: 'API Reference',
       description: 'Complete documentation of Qamomile\'s API.',
-      link: 'https://jij-inc.github.io/Qamomile/autoapi/index.html'
+      link: 'https://jij-inc.github.io/Qamomile/en/autoapi/index.html'
     },
     {
       title: 'Advanced Topics',
       description: 'Explore advanced features and optimization techniques.',
-      link: 'https://jij-inc.github.io/Qamomile/en/tutorial/index.html'
+      link: 'https://jij-inc.github.io/Qamomile/en/tutorial/qaoa/index_qaoa.html'
     }
   ]
 
