@@ -177,6 +177,8 @@ def qubo_to_ising(
         >>> assert ising.quad == {(0, 1): 0.5}
 
     """
+
+    # Additional TODO: Could we set this as a class method of IsingModel?
     ising_J: dict[tuple[int, int], float] = {}
     ising_h: dict[int, float] = {}
     constant = 0.0
