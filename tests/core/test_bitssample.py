@@ -36,22 +36,42 @@ def test_bits_sample_creation(num_occurrences, bits):
 
 # >>> BitsSampleSet >>>
 def test_bits_sample_set_creation():
+    """Create a BitsSampleSet instance and verify its length.
+
+    Check if
+    1. The number of bitarrays in the set matches the number of samples provided.
+    """
     samples = [BitsSample(3, [0, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1, 0])]
     sample_set = BitsSampleSet(samples)
+    # 1. The sample set should contain three bitarrays
     assert len(sample_set.bitarrays) == 3
 
 
 def test_get_int_counts():
+    """Test the get_int_counts method of BitsSampleSet.
+
+    Check if
+    1. The integer counts are correctly computed from the samples.
+    """
     samples = [BitsSample(3, [0, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1, 0])]
     sample_set = BitsSampleSet(samples)
     int_counts = sample_set.get_int_counts()
+    # 1. The returned dictionary should match the expected integer counts
     assert int_counts == {0: 3, 1: 2, 2: 1}
 
 
 def test_from_int_counts():
+    """Test BitsSampleSet.from_int_counts class method.
+
+    Check if
+    1. The sample set is correctly created from a dictionary of integer counts,
+    2. Each sample has the correct bits and occurrence count.
+    """
     int_counts = {0: 3, 1: 2, 2: 1}
     sample_set = BitsSampleSet.from_int_counts(int_counts, bit_length=2)
+    # 1. The sample set should contain three bitarrays
     assert len(sample_set.bitarrays) == 3
+    # 2. Check that each sample has the correct bits and occurrence count
     assert any(
         sample.bits == [0, 0] and sample.num_occurrences == 3
         for sample in sample_set.bitarrays
@@ -67,39 +87,77 @@ def test_from_int_counts():
 
 
 def test_get_most_common():
+    """Test the get_most_common method of BitsSampleSet.
+
+    Check if
+    1. The most common samples are returned in the correct order,
+    2. The number of returned samples matches the requested count.
+    """
     samples = [BitsSample(3, [0, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1, 0])]
     sample_set = BitsSampleSet(samples)
     most_common = sample_set.get_most_common(2)
+    # 1. The two most common samples should be returned
     assert len(most_common) == 2
     assert most_common[0].bits == [0, 0]
     assert most_common[1].bits == [0, 1]
 
 
 def test_total_samples():
+    """Test the total_samples method of BitsSampleSet.
+
+    Check if
+    1. The total number of samples is computed correctly.
+    """
     samples = [BitsSample(3, [0, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1, 0])]
     sample_set = BitsSampleSet(samples)
+    # 1. The total number of samples should be 6
     assert sample_set.total_samples() == 6
 
 
 def test_empty_sample_set():
+    """Test BitsSampleSet behavior with an empty sample list.
+
+    Check if
+    1. get_int_counts returns an empty dict,
+    2. get_most_common returns an empty list,
+    3. total_samples returns 0.
+    """
     sample_set = BitsSampleSet([])
+    # 1. Should return empty dict for int counts
     assert sample_set.get_int_counts() == {}
+    # 2. Should return empty list for most common
     assert sample_set.get_most_common() == []
+    # 3. Should return 0 for total samples
     assert sample_set.total_samples() == 0
 
 
 def test_from_int_counts_with_larger_bit_length():
+    """Test BitsSampleSet.from_int_counts with a larger bit length.
+
+    Check if
+    1. All samples have the correct bit length,
+    2. The expected bit patterns are present.
+    """
     int_counts = {0: 1, 15: 1}  # 15 is 1111 in binary
     sample_set = BitsSampleSet.from_int_counts(int_counts, bit_length=5)
+    # 1. All samples should have bit length 5
     assert all(len(sample.bits) == 5 for sample in sample_set.bitarrays)
+    # 2. Check for expected bit patterns
     assert any(sample.bits == [0, 0, 0, 0, 0] for sample in sample_set.bitarrays)
     assert any(sample.bits == [1, 1, 1, 1, 0] for sample in sample_set.bitarrays)
 
 
 def test_get_most_common_with_ties():
+    """Test get_most_common when there are ties in occurrence counts.
+
+    Check if
+    1. Samples with the same number of occurrences are handled correctly,
+    2. The total number of returned samples matches the requested count.
+    """
     samples = [BitsSample(2, [0, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1, 0])]
     sample_set = BitsSampleSet(samples)
     most_common = sample_set.get_most_common(3)
+    # 1. There should be three samples, with the first two having the same occurrence count
     assert len(most_common) == 3
     assert most_common[0].num_occurrences == most_common[1].num_occurrences == 2
     assert most_common[2].num_occurrences == 1
