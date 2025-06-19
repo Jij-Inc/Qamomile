@@ -195,6 +195,38 @@ def test_calc_energy(quad, linear, constant, state, expected_energy):
     assert ising.calc_energy(state) == expected_energy
 
 
+@pytest.mark.parametrize(
+    "index_map, index, expected_qubo_index",
+    [
+        # Standard mapping
+        ({0: 10, 1: 11, 2: 12}, 0, 10),
+        ({0: 10, 1: 11, 2: 12}, 1, 11),
+        ({0: 10, 1: 11, 2: 12}, 2, 12),
+        # Identity mapping
+        ({0: 0, 1: 1, 2: 2}, 0, 0),
+        ({0: 0, 1: 1, 2: 2}, 1, 1),
+        ({0: 0, 1: 1, 2: 2}, 2, 2),
+        # Non-contiguous mapping
+        ({0: 5, 2: 7}, 0, 5),
+        ({0: 5, 2: 7}, 2, 7),
+        # Single element
+        ({0: 42}, 0, 42),
+    ],
+)
+def test_ising2qubo_index(index_map, index, expected_qubo_index):
+    """Run IsingModel.ising2qubo_index and check index mapping.
+
+    Check if
+    1. The index is correctly mapped to the QUBO index.
+    """
+    quad = {}
+    linear = {}
+    constant = 0
+    ising = IsingModel(quad=quad, linear=linear, constant=constant, index_map=index_map)
+    # 1. The index is correctly mapped to the QUBO index.
+    assert ising.ising2qubo_index(index) == expected_qubo_index
+
+
 def test_normalize_by_abs_max():
     """Run IsingModel.normalize_by_abs_max and check normalization by max coefficient.
 
