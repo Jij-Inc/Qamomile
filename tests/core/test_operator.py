@@ -42,12 +42,21 @@ def test_pauli_operator_creation(pauli, index):
     Check if
     1. The pauli attribute is correctly set.
     2. The index is set correctly.
+    3. The return value of repr function of PauliOperator is correct.
+    4. The return value of str function of PauliOperator is correct.
+    5. The return value of hash function of PauliOperator is a tuple of its pauli and its index in this order.
     """
     pauli_operator = qm_o.PauliOperator(pauli, index)
     # 1. The pauli attribute is correctly set.
     assert pauli_operator.pauli == pauli
     # 2. The index is set correctly.
     assert pauli_operator.index == index
+    # 3. The return value of repr function of PauliOperator is correct.
+    assert repr(pauli_operator) == f"{pauli.name}{index}"
+    # 4. The return value of str function of PauliOperator is correct.
+    assert str(pauli_operator) == f"{pauli.name}{index}"
+    # 5. The return value of hash function of PauliOperator is a tuple of its pauli and its index in this order.
+    assert hash(pauli_operator) == hash((pauli, index))
 
 
 # >>> multiply_pauli_same_qubit >>>
