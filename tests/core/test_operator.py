@@ -1,3 +1,5 @@
+import pytest
+
 import qamomile.core.operator as qm_o
 
 
@@ -24,30 +26,28 @@ def test_pauli():
 
 
 # >>> PauliOperator >>>
-def test_pauli_operator_creation():
+@pytest.mark.parametrize(
+    "pauli, index",
+    [
+        # Standard cases with different Pauli and indices
+        (qm_o.Pauli.X, 3),
+        (qm_o.Pauli.Y, 2),
+        (qm_o.Pauli.Z, 1),
+        (qm_o.Pauli.I, 0),
+    ],
+)
+def test_pauli_operator_creation(pauli, index):
     """Create PauliOperators.
 
     Check if
     1. The pauli attribute is correctly set.
     2. The index is set correctly.
     """
-    X0 = qm_o.PauliOperator(qm_o.Pauli.X, 0)
+    pauli_operator = qm_o.PauliOperator(pauli, index)
     # 1. The pauli attribute is correctly set.
-    assert X0.pauli == qm_o.Pauli.X
+    assert pauli_operator.pauli == pauli
     # 2. The index is set correctly.
-    assert X0.index == 0
-
-    Y1 = qm_o.PauliOperator(qm_o.Pauli.Y, 1)
-    # 1. The pauli attribute is correctly set.
-    assert Y1.pauli == qm_o.Pauli.Y
-    # 2. The index is set correctly.
-    assert Y1.index == 1
-
-    Z2 = qm_o.PauliOperator(qm_o.Pauli.Z, 2)
-    # 1. The pauli attribute is correctly set.
-    assert Z2.pauli == qm_o.Pauli.Z
-    # 2. The index is set correctly.
-    assert Z2.index == 2
+    assert pauli_operator.index == index
 
 
 def test_add_term():
