@@ -1,6 +1,28 @@
 import qamomile.core.operator as qm_o
 
 
+# >>> Pauli >>>
+def test_pauli():
+    """Test Pauli class.
+
+    Check if
+    1. The Pauli class has the correct attributes for I, X, Y, Z,
+    2. The Pauli class has only four attributes.
+    """
+    # 1. The Pauli class has the correct attributes for I, X, Y, Z,
+    #    It is alright to just access the attributes.
+    #    If error arises, then the attribute is not defined, which is a failure of the test.
+    qm_o.Pauli.I
+    qm_o.Pauli.X
+    qm_o.Pauli.Y
+    qm_o.Pauli.Z
+    # 2. The Pauli class has only four attributes.
+    assert len(qm_o.Pauli) == 4
+
+
+# <<< Pauli <<<
+
+
 # >>> PauliOperator >>>
 def test_pauli_operator_creation():
     """Create PauliOperators.
