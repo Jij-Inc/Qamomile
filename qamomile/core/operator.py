@@ -174,6 +174,7 @@ class Hamiltonian:
             >>> print(H.num_qubits)
             4
         """
+        # Additional TODO: Handle the correct behaviour of this property when the terms specify larger qubit indices than the initial num_qubits.
         if self._num_qubits is not None:
             return self._num_qubits
         if not self._terms:
