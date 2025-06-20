@@ -415,6 +415,8 @@ def multiply_pauli_same_qubit(
         (Z0, 1j)
     """
 
+    # Additional TODO: phase can be int. It would be nice to either change the type hint to int | complex or add 0.0j after 1.0.
+
     if pauli1.index == pauli2.index:
         if pauli1.pauli == pauli2.pauli:
             return PauliOperator(Pauli.I, pauli1.index), 1.0
