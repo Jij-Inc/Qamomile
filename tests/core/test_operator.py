@@ -1,3 +1,5 @@
+import itertools
+
 import numpy as np
 import pytest
 
@@ -524,40 +526,115 @@ def test_coeff_complex():
 
 
 # >>> simplify_pauliop_terms >>>
-def test_simplify_pauliop_terms():
-    """Test simplify_pauliop_terms for various PauliOperator tuples.
+def test_simplify_pauliop_terms_on_same_qubit():
+    """Run simplify_pauliop_terms for various Paulis on the same qubit.
 
     Check if
-    1. The correct simplified PauliOperator tuple and phase are returned for each input.
+    1. The simplified PauliOperator tuple is correct,
+    2. The simplified phase is correct.
     """
-    # 1. The correct simplified PauliOperator tuple and phase are returned for each input
-    X0 = qm_o.PauliOperator(qm_o.Pauli.X, 0)
-    X1 = qm_o.PauliOperator(qm_o.Pauli.X, 1)
-    Y0 = qm_o.PauliOperator(qm_o.Pauli.Y, 0)
-    Z0 = qm_o.PauliOperator(qm_o.Pauli.Z, 0)
-    Y1 = qm_o.PauliOperator(qm_o.Pauli.Y, 1)
-    Z1 = qm_o.PauliOperator(qm_o.Pauli.Z, 1)
-    paulis, phase = qm_o.simplify_pauliop_terms((X0, Y1))
-    assert set(paulis) == set((X0, Y1))
-    assert phase == 1.0
-    paulis, phase = qm_o.simplify_pauliop_terms((X1, Y0) + (X0,))
-    assert set(paulis) == set((X1, Z0))
-    assert phase == -1.0j
-    paulis, coeffs = qm_o.simplify_pauliop_terms((Z0,) + (X0,))
-    assert set(paulis) == set((Y0,))
-    assert coeffs == 1.0j
-    paulis, coeffs = qm_o.simplify_pauliop_terms((X0, X0))
-    assert set(paulis) == set(())
-    assert coeffs == 1.0
-    paulis, coeffs = qm_o.simplify_pauliop_terms((Y0, Y0, X0))
-    assert set(paulis) == set((X0,))
-    assert coeffs == 1.0
-    paulis, coeffs = qm_o.simplify_pauliop_terms((Y0, Y0, X0, X1, Z1))
-    assert set(paulis) == set((X0, Y1))
-    assert coeffs == -1.0j
-    paulis, coeffs = qm_o.simplify_pauliop_terms(())
-    assert set(paulis) == set(())
-    assert coeffs == 1.0
+    index = 0
+    max_num_paulis = 4
+    for length in range(2, max_num_paulis + 1):
+        # Get all combinations of Pauli products of the given length.
+        pauli_products = list(itertools.product(list(qm_o.Pauli), repeat=length))
+
+        # Iterate over each combination of pauli_products.
+        for pauli_product in pauli_products:
+            # Run simplify_pauliop_terms on the current combination of Pauli products.
+            pauli_ops = [qm_o.PauliOperator(pauli, index) for pauli in pauli_product]
+            simplified_pauli_ops, simplified_phase = qm_o.simplify_pauliop_terms(
+                pauli_ops
+            )
+
+            # Compute the expected PauliOperator and phase.
+            expected_pauli = pauli_product[0]
+            phases = []
+            for pauli in pauli_product[1:]:
+                expected_pauli, phase = Utils.PAULI_PRODUCT_TABLE[
+                    (expected_pauli, pauli)
+                ]
+                phases.append(phase)
+
+            if expected_pauli == qm_o.Pauli.I:
+                expected_pauli_op = ()
+            else:
+                expected_pauli_op = (qm_o.PauliOperator(expected_pauli, index),)
+            expected_phase = np.prod(phases)
+
+            # 1. The simplified PauliOperator tuple is correct,
+            assert simplified_pauli_ops == expected_pauli_op
+            # 2. The simplified phase is correct.
+            assert simplified_phase == expected_phase
+
+
+@pytest.mark.parametrize(
+    "pauli_ops, expected_pauli_ops_set, expected_phase",
+    [
+        # Simple case: One Pauli operator on each different qubit
+        (
+            (
+                qm_o.PauliOperator(qm_o.Pauli.X, 0),
+                qm_o.PauliOperator(qm_o.Pauli.Y, 1),
+            ),
+            set(
+                (
+                    qm_o.PauliOperator(qm_o.Pauli.X, 0),
+                    qm_o.PauliOperator(qm_o.Pauli.Y, 1),
+                )
+            ),
+            1.0,
+        ),
+        # Complex case: Multiple Pauli operators on different qubits
+        (
+            (
+                qm_o.PauliOperator(qm_o.Pauli.X, 1),
+                qm_o.PauliOperator(qm_o.Pauli.Y, 0),
+                qm_o.PauliOperator(qm_o.Pauli.X, 0),
+            ),
+            set(
+                (
+                    qm_o.PauliOperator(qm_o.Pauli.X, 1),
+                    qm_o.PauliOperator(qm_o.Pauli.Z, 0),
+                )
+            ),
+            -1.0j,
+        ),
+        # Complex case: Multiple Pauli operators on different qubits with more than two terms
+        (
+            (
+                qm_o.PauliOperator(qm_o.Pauli.Y, 0),
+                qm_o.PauliOperator(qm_o.Pauli.Y, 0),
+                qm_o.PauliOperator(qm_o.Pauli.X, 0),
+                qm_o.PauliOperator(qm_o.Pauli.X, 1),
+                qm_o.PauliOperator(qm_o.Pauli.Z, 1),
+            ),
+            set(
+                (
+                    qm_o.PauliOperator(qm_o.Pauli.X, 0),
+                    qm_o.PauliOperator(qm_o.Pauli.Y, 1),
+                )
+            ),
+            -1.0j,
+        ),
+        ((), set(()), 1),
+    ],
+)
+def test_simplify_pauliop_terms_on_different_qubits(
+    pauli_ops, expected_pauli_ops_set, expected_phase
+):
+    """Run simplify_pauliop_terms for various PauliOperators on different qubits.
+
+    Check if
+    1. The simplified PauliOperator tuple is correct,
+    2. The simplified phase is correct.
+    """
+    simplified_pauli_ops, simplified_phase = qm_o.simplify_pauliop_terms(pauli_ops)
+
+    # 1. The simplified PauliOperator tuple is correct,
+    assert set(simplified_pauli_ops) == expected_pauli_ops_set
+    # 2. The simplified phase is correct.
+    assert simplified_phase == expected_phase
 
 
 # <<< simplify_pauliop_terms <<<
