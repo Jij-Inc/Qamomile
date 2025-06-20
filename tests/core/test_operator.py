@@ -228,6 +228,41 @@ def test_add_term():
     assert h.constant == -1.0
 
 
+# @pytest.mark.parametrize("num_qubits", [0, 1, 2, 3])
+# def test_num_qubits_with_num_qubits(num_qubits):
+#     """Call num_qubits property of Hamiltonian with num_qubits.
+
+#     Check if
+#     1. num_qubits is the same as the given num_qubits when creating Hamiltonian with num_qubits without adding terms,
+#     2. num_qubits is the same as the given num_qubits when creating Hamiltonian with num_qubits with adding terms,
+#     """
+#     hamiltonian = qm_o.Hamiltonian(num_qubits=num_qubits)
+
+#     # 1. num_qubits is the same as the given num_qubits when creating Hamiltonian with num_qubits without adding terms,
+#     assert hamiltonian.num_qubits == num_qubits
+
+#     max_iterations = 10
+#     index = 0
+#     for _ in range(max_iterations):
+#         hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), index)
+#         index += 1
+#         hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 0),), index)
+#         index += 1
+#         hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, 0),), index)
+#         index += 1
+#         # 2. num_qubits is the same as the given num_qubits when creating Hamiltonian with num_qubits with adding terms.
+#         assert hamiltonian.num_qubits == num_qubits
+
+
+# def test_num_qubits_without_num_qubits():
+#     """Call num_qubits property of Hamiltonian without num_qubits.
+
+#     Check if
+#     2. num_qubits is zero when creating Hamiltonian without num_qubits and without adding terms,
+#     3. num_qubits is 1 + the maximum index of PauliOperators in the terms when creating Hamiltonian without num_qubits and adding terms.
+#     """
+
+
 def test_pauli_hamiltonian_creation():
     """Test creation of Hamiltonians using X, Y, Z helpers and manual construction.
 
