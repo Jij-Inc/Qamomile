@@ -61,6 +61,9 @@ def test_pauli_operator_creation(pauli, index):
     assert hash(pauli_operator) == hash((pauli, index))
 
 
+# <<< PauliOperator <<<
+
+
 # >>> multiply_pauli_same_qubit >>>
 @pytest.mark.parametrize(
     "pauli1",
@@ -129,8 +132,6 @@ def test_multiply_pauli_same_qubit_on_different_qubits(pauli1, pauli2):
 
 
 # <<< multiply_pauli_same_qubit <<<
-
-# <<< PauliOperator <<<
 
 
 # >>> Hamiltonian >>>
