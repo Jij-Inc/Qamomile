@@ -263,28 +263,6 @@ def test_add_term():
 #     """
 
 
-def test_pauli_hamiltonian_creation():
-    """Test creation of Hamiltonians using X, Y, Z helpers and manual construction.
-
-    Check if
-    1. The helper functions X, Y, Z create correct Hamiltonians,
-    2. Manually constructed Hamiltonians are equal to those from helpers.
-    """
-    # 1. The helper functions X, Y, Z create correct Hamiltonians
-    x0 = qm_o.X(0)
-    _x0 = qm_o.Hamiltonian()
-    _x0.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), 1.0)
-    assert x0 == _x0
-    y1 = qm_o.Y(1)
-    _y1 = qm_o.Hamiltonian()
-    _y1.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 1),), 1.0)
-    assert y1 == _y1
-    z2 = qm_o.Z(2)
-    _z2 = qm_o.Hamiltonian()
-    _z2.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, 2),), 1.0)
-    assert z2 == _z2
-
-
 def test_Hamiltonian_add():
     """Test Hamiltonian addition with other Hamiltonians.
 
@@ -578,6 +556,73 @@ def test_coeff_complex():
 
 
 # <<< Hamiltonian <<<
+
+
+# >>> X, Y, Z >>>
+@pytest.mark.parametrize("index", range(4))
+def test_X(index):
+    """Call X function.
+
+    Check if
+    1. the returned value is Hamltonian,
+    2. the returned value's terms is {(X as PauliOperator, index): 1.0},
+    3. the returned value's constant is 0.0,
+    4. the returned value's num_qubits is index + 1.
+    """
+    h = qm_o.X(index)
+    # 1. the returned value is Hamltonian,
+    assert isinstance(h, qm_o.Hamiltonian)
+    # 2. the returned value's terms is {(X as PauliOperator, index): 1.0},
+    assert h.terms == {(qm_o.PauliOperator(qm_o.Pauli.X, index),): 1.0}
+    # 3. the returned value's constant is 0.0,
+    assert h.constant == 0.0
+    # 4. the returned value's num_qubits is index + 1.
+    assert h.num_qubits == index + 1
+
+
+@pytest.mark.parametrize("index", range(4))
+def test_Y(index):
+    """Call Y function.
+
+    Check if
+    1. the returned value is Hamltonian,
+    2. the returned value's terms is {(Y as PauliOperator, index): 1.0},
+    3. the returned value's constant is 0.0,
+    4. the returned value's num_qubits is index + 1.
+    """
+    h = qm_o.Y(index)
+    # 1. the returned value is Hamltonian,
+    assert isinstance(h, qm_o.Hamiltonian)
+    # 2. the returned value's terms is {(X as PauliOperator, index): 1.0},
+    assert h.terms == {(qm_o.PauliOperator(qm_o.Pauli.Y, index),): 1.0}
+    # 3. the returned value's constant is 0.0,
+    assert h.constant == 0.0
+    # 4. the returned value's num_qubits is index + 1.
+    assert h.num_qubits == index + 1
+
+
+@pytest.mark.parametrize("index", range(4))
+def test_Z(index):
+    """Call Z function.
+
+    Check if
+    1. the returned value is Hamltonian,
+    2. the returned value's terms is {(Z as PauliOperator, index): 1.0},
+    3. the returned value's constant is 0.0,
+    4. the returned value's num_qubits is index + 1.
+    """
+    h = qm_o.Z(index)
+    # 1. the returned value is Hamltonian,
+    assert isinstance(h, qm_o.Hamiltonian)
+    # 2. the returned value's terms is {(X as PauliOperator, index): 1.0},
+    assert h.terms == {(qm_o.PauliOperator(qm_o.Pauli.Z, index),): 1.0}
+    # 3. the returned value's constant is 0.0,
+    assert h.constant == 0.0
+    # 4. the returned value's num_qubits is index + 1.
+    assert h.num_qubits == index + 1
+
+
+# <<< X, Y, Z <<<
 
 
 # >>> simplify_pauliop_terms >>>
