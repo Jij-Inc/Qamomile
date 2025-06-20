@@ -33,7 +33,7 @@ def simple_problem():
     return instance
 
 def test_initializaiton(simple_problem):
-    fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4, mixer_connectivity='cyclic')
+    fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4)
     
     assert fqaoa_converter.num_integers == 4
     assert fqaoa_converter.num_bits == 2
@@ -45,7 +45,7 @@ def test_initializaiton(simple_problem):
     print(fqaoa_converter.int2varlabel)
 
 def test_fqaoa_instance_to_qubo(simple_problem):
-    fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4, mixer_connectivity='cyclic')
+    fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4)
     num_constraints = len(simple_problem.get_constraints())
     
     qubo, constant = fqaoa_converter.fqaoa_instance_to_qubo()
@@ -53,23 +53,18 @@ def test_fqaoa_instance_to_qubo(simple_problem):
     assert len(simple_problem.get_constraints()) == num_constraints
     
 def test_fqaoa_ising_encode(simple_problem):
-    fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4, mixer_connectivity='cyclic')
+    fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4)
     ising = fqaoa_converter.fqaoa_ising_encode()
     
     assert fqaoa_converter.int2varlabel == {0:'x_{0,0}', 1:'x_{1,0}', 2:'x_{2,0}', 3:'x_{3,0}', 4:'x_{0,1}', 5:'x_{1,1}', 6:'x_{2,1}', 7:'x_{3,1}'}
     
 def test_cyclic_mapping(simple_problem):
-    fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4, mixer_connectivity='cyclic')
+    fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4)
     
     assert fqaoa_converter.var_map == {(0,0): 0, (1,0): 1, (2,0): 2, (3,0): 3, (0,1): 4, (1,1): 5, (2,1): 6, (3,1): 7}
     
-def test_ladder_mapping(simple_problem):
-    fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4, mixer_connectivity='ladder')
-    
-    assert fqaoa_converter.var_map == {(0,0): 0, (1,0): 1, (2,0): 2, (3,0): 3, (3,1): 4, (2,1): 5, (1,1): 6, (0,1): 7}
-    
 def test_get_init_state(simple_problem):
-    fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4, mixer_connectivity='cyclic')
+    fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4)
     init_circuit = fqaoa_converter.get_init_state()
     
     assert isinstance(init_circuit, qm_c.QuantumCircuit)
@@ -90,7 +85,7 @@ def test_get_init_state(simple_problem):
     assert (df_test_sampleset['feasible'] == True).sum() == 1000
     
 def test_get_mixer_ansatz(simple_problem):
-    fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4, mixer_connectivity='cyclic')
+    fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4)
     mixer_circuit = fqaoa_converter.get_mixer_ansatz(beta=2.0)
     
     assert isinstance(mixer_circuit, qm_c.QuantumCircuit)
@@ -113,7 +108,7 @@ def test_get_mixer_ansatz(simple_problem):
     assert (df_test_sampleset['feasible'] == True).sum() == 1000
     
 def test_get_cost_ansatz(simple_problem):
-    fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4, mixer_connectivity='cyclic')
+    fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4)
     cost_circuit = fqaoa_converter.get_cost_ansatz(gamma=2.0)
     
     # circuit
