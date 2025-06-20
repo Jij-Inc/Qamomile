@@ -135,6 +135,44 @@ def test_multiply_pauli_same_qubit_on_different_qubits(pauli1, pauli2):
 
 
 # >>> Hamiltonian >>>
+@pytest.mark.parametrize(
+    "num_qubits",
+    [0, 1, 2, 3],
+)
+def test_hamiltonian_creation_with_num_qubits(num_qubits):
+    """Create Hamiltonian with specifying num_qubits.
+
+    Check if
+    1. Its num_qubits is set correctly,
+    2. Its terms is an empty dictionary,
+    3. Its constasnt is set to zero.
+    """
+    h = qm_o.Hamiltonian(num_qubits=num_qubits)
+    # 1. Its num_qubits is set correctly,
+    assert h.num_qubits == num_qubits
+    # 2. Its terms is an empty dictionary,
+    assert h.terms == {}
+    # 3. Its constasnt is set to zero.
+    assert h.constant == 0.0
+
+
+def test_hamiltonian_creation_without_num_qubits():
+    """Create Hamiltonian without specifying num_qubits.
+
+    Check if
+    1. Its num_qubits is zero,
+    2. Its terms is an empty dictionary,
+    3. Its constasnt is set to zero.
+    """
+    h = qm_o.Hamiltonian()
+    # 1. Its num_qubits is set correctly,
+    assert h.num_qubits == 0
+    # 2. Its terms is an empty dictionary,
+    assert h.terms == {}
+    # 3. Its constasnt is set to zero.
+    assert h.constant == 0.0
+
+
 def test_add_term():
     """Test Hamiltonian.add_term for various PauliOperator combinations.
 
