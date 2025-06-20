@@ -50,39 +50,6 @@ def test_pauli_operator_creation(pauli, index):
     assert pauli_operator.index == index
 
 
-def test_add_term():
-    """Test Hamiltonian.add_term for various PauliOperator combinations.
-
-    Check if
-    1. Terms are added and accumulated correctly,
-    2. Adding the same term accumulates the coefficient,
-    3. Adding a term with two identical PauliOperators on the same qubit updates the constant,
-    4. Adding a term with X and Y on the same qubit produces a Z term with correct phase.
-    """
-    # 1. Terms are added and accumulated correctly
-    X0 = qm_o.PauliOperator(qm_o.Pauli.X, 0)
-    Y0 = qm_o.PauliOperator(qm_o.Pauli.Y, 0)
-    Z0 = qm_o.PauliOperator(qm_o.Pauli.Z, 0)
-    Y1 = qm_o.PauliOperator(qm_o.Pauli.Y, 1)
-    Y2 = qm_o.PauliOperator(qm_o.Pauli.Y, 2)
-    h = qm_o.Hamiltonian()
-    h.add_term((X0,), 1.0)
-    assert h.terms == {(X0,): 1.0}
-    h.add_term((Y1, Y2), 3.0)
-    assert h.terms == {(X0,): 1.0, (Y1, Y2): 3.0}
-    # 2. Adding the same term accumulates the coefficient
-    h.add_term((X0,), 1.0)
-    assert h.terms == {(X0,): 2.0, (Y1, Y2): 3.0}
-    # 3. Adding a term with two identical PauliOperators on the same qubit updates the constant
-    h.add_term((X0, X0), -1.0)
-    assert h.terms == {(X0,): 2.0, (Y1, Y2): 3.0}
-    assert h.constant == -1.0
-    # 4. Adding a term with X and Y on the same qubit produces a Z term with correct phase
-    h.add_term((X0, Y0), -4.0)
-    assert h.terms == {(X0,): 2.0, (Y1, Y2): 3.0, (Z0,): -4.0j}
-    assert h.constant == -1.0
-
-
 # >>> multiply_pauli_same_qubit >>>
 def test_multiply_pauli_same_qubit():
     """Test multiply_pauli_same_qubit for all Pauli combinations on the same qubit.
@@ -124,6 +91,39 @@ def test_multiply_pauli_same_qubit():
 
 
 # >>> Hamiltonian >>>
+def test_add_term():
+    """Test Hamiltonian.add_term for various PauliOperator combinations.
+
+    Check if
+    1. Terms are added and accumulated correctly,
+    2. Adding the same term accumulates the coefficient,
+    3. Adding a term with two identical PauliOperators on the same qubit updates the constant,
+    4. Adding a term with X and Y on the same qubit produces a Z term with correct phase.
+    """
+    # 1. Terms are added and accumulated correctly
+    X0 = qm_o.PauliOperator(qm_o.Pauli.X, 0)
+    Y0 = qm_o.PauliOperator(qm_o.Pauli.Y, 0)
+    Z0 = qm_o.PauliOperator(qm_o.Pauli.Z, 0)
+    Y1 = qm_o.PauliOperator(qm_o.Pauli.Y, 1)
+    Y2 = qm_o.PauliOperator(qm_o.Pauli.Y, 2)
+    h = qm_o.Hamiltonian()
+    h.add_term((X0,), 1.0)
+    assert h.terms == {(X0,): 1.0}
+    h.add_term((Y1, Y2), 3.0)
+    assert h.terms == {(X0,): 1.0, (Y1, Y2): 3.0}
+    # 2. Adding the same term accumulates the coefficient
+    h.add_term((X0,), 1.0)
+    assert h.terms == {(X0,): 2.0, (Y1, Y2): 3.0}
+    # 3. Adding a term with two identical PauliOperators on the same qubit updates the constant
+    h.add_term((X0, X0), -1.0)
+    assert h.terms == {(X0,): 2.0, (Y1, Y2): 3.0}
+    assert h.constant == -1.0
+    # 4. Adding a term with X and Y on the same qubit produces a Z term with correct phase
+    h.add_term((X0, Y0), -4.0)
+    assert h.terms == {(X0,): 2.0, (Y1, Y2): 3.0, (Z0,): -4.0j}
+    assert h.constant == -1.0
+
+
 def test_pauli_hamiltonian_creation():
     """Test creation of Hamiltonians using X, Y, Z helpers and manual construction.
 
