@@ -416,6 +416,7 @@ def multiply_pauli_same_qubit(
     """
 
     # Additional TODO: phase can be int. It would be nice to either change the type hint to int | complex or add 0.0j after 1.0.
+    # Additional TODO: Could we use use simplify_pauliop_terms for this function to simplify the code?
 
     if pauli1.index == pauli2.index:
         if pauli1.pauli == pauli2.pauli:
