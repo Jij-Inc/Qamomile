@@ -174,11 +174,20 @@ class Hamiltonian:
             >>> print(H.num_qubits)
             4
         """
-        if self._num_qubits is not None:
-            return self._num_qubits
-        if not self._terms:
-            return 0
-        return max(op.index for term in self.terms.keys() for op in term) + 1
+        # Get the maximum qubit index from the terms.
+        #    If the terms is {(X0, Y1): 0.5, (Z3,): 1.0}, then it will be 3.
+        max_qubit_index = -1  # If no terms, assume no qubits are used
+        if self._terms:
+            max_qubit_index = max(op.index for term in self.terms.keys() for op in term)
+        # Compute the number of qubits to realise all those terms.
+        num_qubits_to_realise_terms = max_qubit_index + 1
+
+        if self._num_qubits is None:
+            # Return the number of qubits to realise all terms if the user did not specify the number of qubits.
+            return num_qubits_to_realise_terms
+        else:
+            # Return the maximum of the two if the user specified the number of qubits.
+            return max(num_qubits_to_realise_terms, self._num_qubits)
 
     def to_latex(self) -> str:
         """
