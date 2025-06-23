@@ -54,9 +54,9 @@ class RelaxationMethod(enum.Enum):
 
     Attributes:
         AugmentedLagrangian: Augmented Lagrangian method for PUBO conversion.
-        Penalty: Penalty method for PUBO conversion.
-        None: No relaxation method applied.
+        SquaredPenalty: Squared penalty method for PUBO conversion.
     """
+
     AugmentedLagrangian = "AugmentedLagrangian"
     SquaredPenalty = "SquaredPenalty"
 
@@ -94,12 +94,10 @@ class QuantumConverter(abc.ABC):
         This method initializes the converter with the compiled instance of the optimization problem
 
         Args:
-            compiled_instance: ommx.v1.Instance.
+            instance (ommx.v1.Instance): an orginal instance to be converted.
             relax_method (RelaxationMethod): The relaxation method for PUBO conversion.
-                Defaults to AugmentedLagrangian.
-            normalize_model (bool): The objective function and the constraints are normalized using the maximum absolute value of the coefficients contained in each.
-                Defaults to False
-            normalize_ising (Literal["abs_max", "rms"] | None): The normalization method for the Ising Hamiltonian. 
+                Defaults to RelaxationMethod.SquaredPenalty.
+            normalize_ising (Literal["abs_max", "rms"] | None): The normalization method for the Ising Hamiltonian.
                 Available options:
                 - "abs_max": Normalize by absolute maximum value
                 - "rms": Normalize by root mean square
@@ -122,9 +120,7 @@ class QuantumConverter(abc.ABC):
     def instance_to_qubo(
         self,
         multipliers: typ.Optional[dict[str, float]] = None,
-        detail_parameters: typ.Optional[
-            dict[str, dict[tuple[int, ...], float]]
-        ] = None,
+        detail_parameters: typ.Optional[dict[str, dict[tuple[int, ...], float]]] = None,
     ) -> tuple[dict[tuple[int, int], float], float]:
         """
         Convert the instance to QUBO format.
@@ -146,7 +142,7 @@ class QuantumConverter(abc.ABC):
         Returns:
             tuple[dict[int, float], float]: A tuple containing the QUBO dictionary and the constant term.
 
-    
+
         Example:
             .. code::
                 imoprt jijmodeling as jm
@@ -164,7 +160,7 @@ class QuantumConverter(abc.ABC):
         """
         _multipliers = multipliers if multipliers is not None else {}
         _parameters = detail_parameters if detail_parameters is not None else {}
-        
+
         penalty_weights = {}
         for constraint in self.original_instance.get_constraints():
             name = constraint.name
@@ -199,9 +195,7 @@ class QuantumConverter(abc.ABC):
     def ising_encode(
         self,
         multipliers: typ.Optional[dict[str, float]] = None,
-        detail_parameters: typ.Optional[
-            dict[str, dict[tuple[int, ...], float]]
-        ] = None,
+        detail_parameters: typ.Optional[dict[str, dict[tuple[int, ...], float]]] = None,
     ) -> IsingModel:
         """
         Encode the problem to an Ising model.
@@ -243,7 +237,9 @@ class QuantumConverter(abc.ABC):
             #       Need to be fixed.
             var_name = deci_var.name
             subscripts = deci_var.subscripts
-            self.int2varlabel[ising_index]  = var_name + "_{" + ",".join(map(str, subscripts)) + "}"
+            self.int2varlabel[ising_index] = (
+                var_name + "_{" + ",".join(map(str, subscripts)) + "}"
+            )
 
         return ising
 

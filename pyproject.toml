@@ -25,6 +25,7 @@ qiskit = ">=1.1.1,<2.0.0"
 matplotlib = "^3.9.2"
 qutip = "^5.0.4"
 pennylane = "^0.39.0"
+cudaq = {version = "^0.11.0", markers = "sys_platform == 'linux'"}
 ommx = "^1.9.2"
 ommx-pyscipopt-adapter = "^1.9.2"
 jijmodeling = "^1.12.3"
@@ -49,6 +50,7 @@ qiskit = ["qiskit"]
 quri-parts = ["quri-parts-qulacs"]
 qutip = ["qutip"]
 pennylane = ["pennylane"]
+cudaq = ["cudaq"]
 
 [tool.pytest.ini_options]
 addopts = "--doctest-modules"

@@ -53,7 +53,7 @@ class IsingModel:
             W = \max(|J_{ij}|, |h_i|)
 
         We normalize the Ising Hamiltonian as
-        
+
         .. math::
             \tilde{H} = \frac{1}{W}\sum_{ij}J_{ij}Z_iZ_j + \frac{1}{W}\sum_ih_iZ_i + \frac{1}{W}C
 

@@ -41,7 +41,9 @@ class IsingMatrix:
         calc_E_diff: Calculates the change in energy if a specific bit is flipped.
     """
 
-    def __init__(self, quad: Optional[np.ndarray] = None, linear: Optional[np.ndarray] = None):
+    def __init__(
+        self, quad: Optional[np.ndarray] = None, linear: Optional[np.ndarray] = None
+    ):
         """
         Initializes an IsingMatrix instance.
 
@@ -147,9 +149,9 @@ class LocalSearch:
         """
         Performs first-improvement local search on the Ising model.
 
-        The first-improvement local search method iteratively examines each bit in the current state 
-        of the Ising model to determine if flipping that bit will reduce the system's energy. 
-        If a bit flip results in an energy decrease, the flip is accepted immediately, and the algorithm moves to the next bit. 
+        The first-improvement local search method iteratively examines each bit in the current state
+        of the Ising model to determine if flipping that bit will reduce the system's energy.
+        If a bit flip results in an energy decrease, the flip is accepted immediately, and the algorithm moves to the next bit.
         This process continues until all bits have been evaluated once.
 
         Args:
@@ -173,8 +175,8 @@ class LocalSearch:
         """
         Performs best-improvement local search on the Ising model.
 
-        The best-improvement local search method examines all possible bit flips in the current state of 
-        the Ising model to determine which single bit flip would result in the greatest decrease in energy. 
+        The best-improvement local search method examines all possible bit flips in the current state of
+        the Ising model to determine which single bit flip would result in the greatest decrease in energy.
         It then flips the bit that leads to the most significant energy reduction, provided there is at least one such improvement.
         If no flip results in a reduction in energy, the state remains unchanged.
 
@@ -259,4 +261,3 @@ class LocalSearch:
             counter += 1
 
         return current_state
-

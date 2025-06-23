@@ -9,15 +9,16 @@ class HamiltonianExpr:
     Attributes:
         hamiltonian : Hamiltonian expression.
         name (str) : Name of the Hamiltonian expression.
-    
+
     .. code::
 
         N = jm.Placeholder("N")
         Z = PauliExpr.z(shape=(N,))
         i = jm.Element("i", belong_to = (0,N - 1))
         h_expr = HamiltonianExpr(jm.sum(i, Z[i] * Z[i+1]))
-    
+
     """
+
     def __init__(self, expr, name: str = ""):
         self.hamiltonian = expr
         self.name = name
@@ -28,11 +29,11 @@ class HamiltonianExpr:
 
 class HamiltonianBuilder:
     """Hamiltonian builder class.
-    
+
     Attributes:
         hamiltonian_expr (HamiltonianExpr): Hamiltonian expression.
         instance_data (dict): Instance data.
-    
+
     Example:
         >>> Z = PauliExpr.z(shape=(3,))
         >>> i = jm.Element("i", belong_to = (0, 3))
@@ -94,7 +95,7 @@ class HamiltonianBuilder:
 
         This method creates a mapper from the operator index to the quantum bit index.
 
-        """ 
+        """
         qubit_index_map = {}
         qubit_index = 0
         for pauli_op, indices_map in self._var_map.items():
@@ -140,5 +141,5 @@ class HamiltonianBuilder:
         """
         self.make_substituted_hamiltonian()
         self.make_reverse_var_map()
-        
+
         return self.make_hamiltonian_operator()
