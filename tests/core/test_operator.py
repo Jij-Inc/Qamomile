@@ -370,11 +370,12 @@ def test_Hamiltonian_add_wrt_valid_constants(constant):
 
     # Add constant to Hamiltonian with constant not zero.
     h = qm_o.Hamiltonian()
-    h.constant = 1.0
+    initial_constant = 1.0
+    h.constant = initial_constant
     h = h + constant
     # Create the expected Hamiltonian with the constant.
     expected_h = qm_o.Hamiltonian()
-    expected_h.constant = 1.0 + constant
+    expected_h.constant = initial_constant + constant
     # 2. Adding a constant to one whose constant is not zero updates the constant term.
     assert h == expected_h
 
@@ -484,11 +485,12 @@ def test_Hamiltonian_radd_wrt_valid_constants(constant):
 
     # Add constant to Hamiltonian with constant not zero.
     h = qm_o.Hamiltonian()
-    h.constant = 1.0
+    initial_constant = 1.0
+    h.constant = initial_constant
     h += constant
     # Create the expected Hamiltonian with the constant.
     expected_h = qm_o.Hamiltonian()
-    expected_h.constant = 1.0 + constant
+    expected_h.constant = initial_constant + constant
     # 2. Adding a constant to one whose constant is not zero updates the constant term.
     assert h == expected_h
 
