@@ -1,6 +1,7 @@
 import pytest
 
 import qamomile.core.operator as qm_o
+from tests.utils import Utils
 
 
 # >>> Pauli >>>
@@ -60,6 +61,73 @@ def test_pauli_operator_creation(pauli, index):
 # <<< PauliOperator <<<
 
 
+# >>> multiply_pauli_same_qubit >>>
+@pytest.mark.parametrize(
+    "pauli1",
+    [qm_o.Pauli.X, qm_o.Pauli.Y, qm_o.Pauli.Z, qm_o.Pauli.I],
+)
+@pytest.mark.parametrize(
+    "pauli2",
+    [qm_o.Pauli.X, qm_o.Pauli.Y, qm_o.Pauli.Z, qm_o.Pauli.I],
+)
+def test_multiply_pauli_same_qubit_on_same_qubit(pauli1, pauli2):
+    """Test multiply_pauli_same_qubit for all Pauli combinations on the same qubit.
+
+    Check if
+    1. The returned PauliOperator's index is the same as the input PauliOperators' index,
+    2. The returned PauliOperator's pauli is correct according to the multiplication rules,
+    3. The returned phase is correct according to the multiplication rules.
+    """
+    # Create PauliOperators for the same qubit.
+    index = 0
+    pauli_op1 = qm_o.PauliOperator(pauli1, index)
+    pauli_op2 = qm_o.PauliOperator(pauli2, index)
+    # Run multiply_pauli_same_qubit for those PauliOperators.
+    ops, phase = qm_o.multiply_pauli_same_qubit(pauli_op1, pauli_op2)
+
+    # 1. The returned PauliOperator's index is the same as the input PauliOperators' index,
+    assert ops.index == index
+
+    # Get the expected Pauli.
+    expected_pauli, expected_phase = Utils.PAULI_PRODUCT_TABLE[(pauli1, pauli2)]
+
+    # 2. The returned PauliOperator's pauli is correct according to the multiplication rules,
+    assert ops.pauli == expected_pauli
+    # 3. The returned phase is correct according to the multiplication rules.
+    assert phase == expected_phase
+
+
+@pytest.mark.parametrize(
+    "pauli1",
+    [qm_o.Pauli.X, qm_o.Pauli.Y, qm_o.Pauli.Z, qm_o.Pauli.I],
+)
+@pytest.mark.parametrize(
+    "pauli2",
+    [qm_o.Pauli.X, qm_o.Pauli.Y, qm_o.Pauli.Z, qm_o.Pauli.I],
+)
+def test_multiply_pauli_same_qubit_on_different_qubits(pauli1, pauli2):
+    """Test multiply_pauli_same_qubit for PauliOperators on different qubits.
+
+    Check if
+    1. ValueError arises.
+    """
+    max_index = 5
+    for first_index in range(1, max_index + 1):
+        for second_index in range(first_index + 1, max_index + 1):
+
+            pauli_op1 = qm_o.PauliOperator(pauli1, first_index)
+            pauli_op2 = qm_o.PauliOperator(pauli2, second_index)
+            # 1. ValueError arises.
+            with pytest.raises(ValueError):
+                qm_o.multiply_pauli_same_qubit(pauli_op1, pauli_op2)
+            # 1. ValueError arises.
+            with pytest.raises(ValueError):
+                qm_o.multiply_pauli_same_qubit(pauli_op2, pauli_op1)
+
+
+# <<< multiply_pauli_same_qubit <<<
+
+
 def test_add_term():
     X0 = qm_o.PauliOperator(qm_o.Pauli.X, 0)
     Y0 = qm_o.PauliOperator(qm_o.Pauli.Y, 0)
@@ -101,41 +169,6 @@ def test_pauli_hamiltonian_creation():
     _z2 = qm_o.Hamiltonian()
     _z2.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, 2),), 1.0)
     assert z2 == _z2
-
-
-def test_multiply_pauli_same_qubit():
-    X0 = qm_o.PauliOperator(qm_o.Pauli.X, 0)
-    Y0 = qm_o.PauliOperator(qm_o.Pauli.Y, 0)
-    Z0 = qm_o.PauliOperator(qm_o.Pauli.Z, 0)
-    I0 = qm_o.PauliOperator(qm_o.Pauli.I, 0)
-
-    ops, phase = qm_o.multiply_pauli_same_qubit(X0, Y0)
-    assert ops == Z0
-    assert phase == 1.0j
-
-    ops, phase = qm_o.multiply_pauli_same_qubit(X0, Z0)
-    assert ops == Y0
-    assert phase == -1.0j
-
-    ops, phase = qm_o.multiply_pauli_same_qubit(Y0, Z0)
-    assert ops == X0
-    assert phase == 1.0j
-
-    ops, phase = qm_o.multiply_pauli_same_qubit(X0, X0)
-    assert ops == I0
-    assert phase == 1.0
-
-    ops, phase = qm_o.multiply_pauli_same_qubit(Y0, Y0)
-    assert ops == I0
-    assert phase == 1.0
-
-    ops, phase = qm_o.multiply_pauli_same_qubit(Z0, I0)
-    assert ops == Z0
-    assert phase == 1.0
-
-    ops, phase = qm_o.multiply_pauli_same_qubit(I0, Z0)
-    assert ops == Z0
-    assert phase == 1.0
 
 
 def test_Hamiltonian_add():
