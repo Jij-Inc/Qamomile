@@ -1024,7 +1024,7 @@ def test_Hamiltonian_mul_wrt_invalid_constants(invalid_constant):
         h * invalid_constant
 
 
-def test_Hamiltonian_multiplication():
+def test_Hamiltonian_mul_repeatedly():
     """Test Hamiltonian multiplication with other Hamiltonians and scalars repeatedly.
 
     Check if
