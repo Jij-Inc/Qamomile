@@ -355,6 +355,44 @@ def test_to_latex(pauli_combinations, negative_coefficient):
         assert h.to_latex() == expected_str
 
 
+def test_Hamiltonian_eq_manually():
+    """Test Hamiltonian equality.
+
+    Check if
+    1. Two Hamiltonians with the same terms and constant are equal,
+    2. Two Hamiltonians with different terms or constant are not equal.
+    """
+    h1 = qm_o.Hamiltonian()
+    h1.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), 1.0)
+    h1.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 1),), 2.0)
+    h1.constant = 3.0
+
+    h2 = qm_o.Hamiltonian()
+    h2.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), 1.0)
+    h2.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 1),), 2.0)
+    h2.constant = 3.0
+
+    # 1. Two Hamiltonians with the same terms and constant are equal,
+    assert h1 == h2
+
+    # Change a term in h2.
+    h2.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, 2),), -4.0)
+
+    # 2. Two Hamiltonians with different terms or constant are not equal.
+    assert h1 != h2
+
+
+@pytest.mark.parametrize("other", [int(0), 1, 1.1, float(2.0), "1", "0", None, [1]])
+def test_Hamiltonian_eq_with_invalid_type(other):
+    """Test Hamiltonian equality with invalid type.
+
+    Check if
+    1. TypeError arises.
+    """
+    h = qm_o.Hamiltonian()
+    assert h != other
+
+
 @pytest.mark.parametrize(
     "pauli_combinations1",
     [
