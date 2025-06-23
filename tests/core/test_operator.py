@@ -984,7 +984,7 @@ def test_Hamiltonian_mul_wrt_different_qubits(pauli_combinations1, pauli_combina
     ],
 )
 def test_Hamiltonian_mul_wrt_valid_constants(constant):
-    """Add Hamiltonian with valid constants.
+    """Mul Hamiltonian with valid constants.
 
     Check if
     1. Multiplicating a constant to one whose constant is zero updates the constant term,
@@ -1022,6 +1022,178 @@ def test_Hamiltonian_mul_wrt_invalid_constants(invalid_constant):
     # 1. ValueError arises.
     with pytest.raises(ValueError):
         h * invalid_constant
+
+
+@pytest.mark.parametrize(
+    "pauli_combinations1",
+    [
+        list(itertools.permutations(qm_o.Pauli, 1)),
+        list(itertools.permutations(qm_o.Pauli, 2)),
+        list(itertools.permutations(qm_o.Pauli, 3)),
+        list(itertools.permutations(qm_o.Pauli, 4)),
+    ],
+)
+@pytest.mark.parametrize(
+    "pauli_combinations2",
+    [
+        list(itertools.permutations(qm_o.Pauli, 1)),
+        list(itertools.permutations(qm_o.Pauli, 2)),
+        list(itertools.permutations(qm_o.Pauli, 3)),
+        list(itertools.permutations(qm_o.Pauli, 4)),
+    ],
+)
+def test_Hamiltonian_rmul_wrt_same_qubit(pauli_combinations1, pauli_combinations2):
+    """Test Hamiltonian right multiplication with other Hamiltonians whose all the terms are with respect to the same qubits.
+
+    Check if
+    1. Multiplicating two Hamiltonians accumulates all terms correctly.
+    """
+    index = 0
+    # Iterate over pauli_combinations1.
+    for pauli_combination1 in pauli_combinations1:
+
+        # Iterate over pauli_combinations2.
+        for pauli_combination2 in pauli_combinations2:
+            # Create the first Hamiltonian.
+            #    Note: We now test the right multiplication operator, so we need to create the first Hamiltonian every time.
+            h1 = qm_o.Hamiltonian()
+            for pauli1 in pauli_combination1:
+                h1.add_term((qm_o.PauliOperator(pauli1, index),), 1.0)
+
+            # Create the second Hamiltonian.
+            h2 = qm_o.Hamiltonian()
+            for pauli2 in pauli_combination2:
+                # Add terms to to the same qubit as the first Hamiltonian: index.
+                h2.add_term((qm_o.PauliOperator(pauli2, index),), 1.0)
+
+            # Add the two Hamiltonians.
+            h1 *= h2
+
+            # Calculate the expected Hamiltonian.
+            #    Note: If h1 = X + Y + Z + I and h2 = X + Y + Z + I, then
+            #          h = (X + Y + Z + I) * (X + Y + Z + I)
+            #          = XX + XY + XZ + XI + YX + YY + YZ + YI + ZX + ZY + ZZ + ZI + IX + IY + IZ + II.
+            #          Thus, the following loop accumulates all terms correctly.
+            expected_h = qm_o.Hamiltonian()
+            for pauli1 in pauli_combination1:
+                for pauli2 in pauli_combination2:
+                    expected_h.add_term(
+                        (
+                            qm_o.PauliOperator(pauli1, index),
+                            qm_o.PauliOperator(pauli2, index),
+                        ),
+                        1.0,
+                    )
+
+            # 1. Multiplicating two Hamiltonians accumulates all terms correctly.
+            assert h1 == expected_h
+
+
+@pytest.mark.parametrize(
+    "pauli_combinations1",
+    [
+        list(itertools.permutations(qm_o.Pauli, 1)),
+        list(itertools.permutations(qm_o.Pauli, 2)),
+        list(itertools.permutations(qm_o.Pauli, 3)),
+        list(itertools.permutations(qm_o.Pauli, 4)),
+    ],
+)
+@pytest.mark.parametrize(
+    "pauli_combinations2",
+    [
+        list(itertools.permutations(qm_o.Pauli, 1)),
+        list(itertools.permutations(qm_o.Pauli, 2)),
+        list(itertools.permutations(qm_o.Pauli, 3)),
+        list(itertools.permutations(qm_o.Pauli, 4)),
+    ],
+)
+def test_Hamiltonian_rmul_wrt_different_qubits(
+    pauli_combinations1, pauli_combinations2
+):
+    """Test Hamiltonian right multiplication with other Hamiltonians whose all the terms are with respect to different qubits.
+
+    Check if
+    1. multiplicating two Hamiltonians accumulates all terms correctly.
+    """
+    index1 = 0
+    index2 = 1
+    # Iterate over palui_combinations1.
+    for pauli_combination1 in pauli_combinations1:
+
+        # Iterate over palui_combinations2.
+        for pauli_combination2 in pauli_combinations2:
+            # Create the first Hamiltonian.
+            #    Note: We now test the right multiplication operator, so we need to create the first Hamiltonian every time.
+            h1 = qm_o.Hamiltonian()
+            for pauli1 in pauli_combination1:
+                h1.add_term((qm_o.PauliOperator(pauli1, index1),), 1.0)
+
+            # Create the second Hamiltonian.
+            h2 = qm_o.Hamiltonian()
+            for pauli2 in pauli_combination2:
+                # Add terms to a different qubit than the first Hamiltonian: index2.
+                h2.add_term((qm_o.PauliOperator(pauli2, index2),), 1.0)
+
+            # Mul the two Hamiltonians.
+            h1 *= h2
+
+            # Calculate the expected Hamiltonian.
+            #    Note: If h1 = X1 + Y1 + Z1 + I1 and h2 = X2 + Y2 + Z2 + I2, then
+            #          h = (X1 + Y1 + Z1 + I1) * (X2 + Y2 + Z2 + I2)
+            #          = X1X2 + X1Y2 + X1Z2 + X1I2 + Y1X2 + Y1Y2 + Y1Z2 + Y1I2 + Z1X2 + Z1Y2 + Z1Z2 + Z1I2 + I1X2 + I1Y2 + I1Z2 + I1I2.
+            #          Thus, the following loop accumulates all terms correctly.
+            expected_h = qm_o.Hamiltonian()
+            for pauli1 in pauli_combination1:
+                for pauli2 in pauli_combination2:
+                    expected_h.add_term(
+                        (
+                            qm_o.PauliOperator(pauli1, index1),
+                            qm_o.PauliOperator(pauli2, index2),
+                        ),
+                        1.0,
+                    )
+
+            # 1. Multiplicating two Hamiltonians accumulates all terms correctly.
+            assert h1 == expected_h
+
+
+@pytest.mark.parametrize(
+    "constant",
+    [
+        int(2),
+        float(2.0),
+        float(1.1),
+        complex(2.0, 2.0),
+        complex(2.0, 0.0),
+        complex(0.0, 2.0),
+    ],
+)
+def test_Hamiltonian_rmul_wrt_valid_constants(constant):
+    """Right mul Hamiltonian with valid constants.
+
+    Check if
+    1. Multiplicating a constant to one whose constant is zero updates the constant term,
+    2. Multiplicating a constant to one whose constant is not zero updates the constant term.
+    """
+    # Mul constant to Hamiltonian with constant zero.
+    h = qm_o.Hamiltonian()
+    h *= constant
+    # Create the expected Hamiltonian with the constant.
+    expected_h = qm_o.Hamiltonian()
+    expected_h.constant = expected_h.constant * constant
+    # 1. Multiplicating a constant to one whose constant is zero updates the constant term,
+    assert h == expected_h
+
+    # Mul constant to Hamiltonian with constant not zero.
+    h = qm_o.Hamiltonian()
+    initial_constant = 1.0
+    h.constant = initial_constant
+    h *= constant
+    # Create the expected Hamiltonian with the constant.
+    expected_h = qm_o.Hamiltonian()
+    expected_h.constant = initial_constant * constant
+    # 2. Multiplicating a constant to one whose constant is not zero updates the constant term.
+    assert h == expected_h
 
 
 def test_Hamiltonian_mul_repeatedly():
