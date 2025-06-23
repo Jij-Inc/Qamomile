@@ -280,43 +280,116 @@ def test_num_qubits_without_num_qubits():
         index += 1
 
 
-def test_Hamiltonian_add():
-    """Test Hamiltonian addition with other Hamiltonians.
+def test_Hamiltonian_add_wrt_same_qubit():
+    """Test Hamiltonian addition with other Hamiltonians whose all the terms are with respect to the same qubits.
 
     Check if
     1. Adding two Hamiltonians accumulates all terms correctly.
     """
-    # 1. Adding two Hamiltonians accumulates all terms correctly
-    h1 = qm_o.Hamiltonian()
-    h1.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), 1.0)
-    h2 = qm_o.Hamiltonian()
-    h2.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 0),), 1.0)
-    h = h1 + h2
-    expected_h = qm_o.Hamiltonian()
-    expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), 1.0)
-    expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 0),), 1.0)
-    assert h == expected_h
+    index = 0
+    # Iterate over all possible combinations of Pauli operators on the same qubit.
+    for r in range(1, len(qm_o.Pauli) + 1):
+        for perm1 in itertools.permutations(qm_o.Pauli, r):
+            h1 = qm_o.Hamiltonian()
+            for pauli1 in perm1:
+                h1.add_term((qm_o.PauliOperator(pauli1, index),), 1.0)
+
+            # Iterate over all possible combinations of Pauli operators on the same qubit.
+            for perm2 in itertools.permutations(qm_o.Pauli, r):
+                h2 = qm_o.Hamiltonian()
+                for pauli2 in perm2:
+                    h2.add_term((qm_o.PauliOperator(pauli2, index),), 1.0)
+
+                # Add the two Hamiltonians.
+                h = h1 + h2
+
+                # Calculate the expected Hamiltonian.
+                expected_h = qm_o.Hamiltonian()
+                all_perms = list(perm1) + list(perm2)
+                for pauli in all_perms:
+                    expected_h.add_term((qm_o.PauliOperator(pauli, index),), 1.0)
+
+                # 1. Adding two Hamiltonians accumulates all terms correctly.
+                assert h == expected_h
 
 
-def test_Hamiltonian_add_scalar():
-    """Test Hamiltonian addition with scalars.
+def test_Hamiltonian_add_wrt_different_qubits():
+    """Test Hamiltonian addition with other Hamiltonians whose all the terms are with respect to different qubits.
 
     Check if
-    1. Adding a scalar updates the constant term,
-    2. Adding a scalar from the left also updates the constant term.
+    1. Adding two Hamiltonians accumulates all terms correctly.
     """
-    # 1. Adding a scalar updates the constant term
+    index1 = 0
+    index2 = 1
+    # Iterate over all possible combinations of Pauli operators on the same qubit.
+    for r in range(1, len(qm_o.Pauli) + 1):
+        for perm1 in itertools.permutations(qm_o.Pauli, r):
+            h1 = qm_o.Hamiltonian()
+            for pauli1 in perm1:
+                h1.add_term((qm_o.PauliOperator(pauli1, index1),), 1.0)
+
+            # Iterate over all possible combinations of Pauli operators on the same qubit.
+            for perm2 in itertools.permutations(qm_o.Pauli, r):
+                h2 = qm_o.Hamiltonian()
+                for pauli2 in perm2:
+                    h2.add_term((qm_o.PauliOperator(pauli2, index2),), 1.0)
+
+                # Add the two Hamiltonians.
+                h = h1 + h2
+
+                # Calculate the expected Hamiltonian.
+                expected_h = qm_o.Hamiltonian()
+
+                for pauli in perm1:
+                    expected_h.add_term((qm_o.PauliOperator(pauli, index1),), 1.0)
+                for pauli in perm2:
+                    expected_h.add_term((qm_o.PauliOperator(pauli, index2),), 1.0)
+
+                # 1. Adding two Hamiltonians accumulates all terms correctly.
+                assert h == expected_h
+
+
+@pytest.mark.parametrize(
+    "constant", [int(1), float(1.0), float(1.1), complex(1.0, 1.0), complex(1.0, 0.0)]
+)
+def test_Hamiltonian_add_wrt_valid_constants(constant):
+    """Add Hamiltonian with valid constants.
+
+    Check if
+    1. Adding a constant to one whose constant is zero updates the constant term,
+    2. Adding a constant to one whose constant is not zero updates the constant term.
+    """
+    # Add constant to Hamiltonian with constant zero.
     h = qm_o.Hamiltonian()
-    h.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), 1.0)
-    h = h + 2.0
+    h = h + constant
+    # Create the expected Hamiltonian with the constant.
     expected_h = qm_o.Hamiltonian()
-    expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), 1.0)
-    expected_h.constant = 2.0
+    expected_h.constant = constant
+    # 1. Adding a constant to one whose constant is zero updates the constant term,
     assert h == expected_h
-    # 2. Adding a scalar from the left also updates the constant term
-    h = 2.0 + h
-    expected_h.constant += 2.0
+
+    # Add constant to Hamiltonian with constant not zero.
+    h = qm_o.Hamiltonian()
+    h.constant = 1.0
+    h = h + constant
+    # Create the expected Hamiltonian with the constant.
+    expected_h = qm_o.Hamiltonian()
+    expected_h.constant = 1.0 + constant
+    # 2. Adding a constant to one whose constant is not zero updates the constant term.
     assert h == expected_h
+
+
+@pytest.mark.parametrize("invalid_constant", [str(1), list([1, 2, 3]), dict({1: 2})])
+def test_Hamiltonian_add_wrt_invalid_constants(invalid_constant):
+    """Add Hamiltonian with invalid constants.
+
+    Check if
+    1. ValueError arises.
+    """
+    h = qm_o.Hamiltonian()
+    # 1. Adding a string raises TypeError,
+    with pytest.raises(ValueError):
+        h + invalid_constant
 
 
 def test_Hamiltonian_sub():
