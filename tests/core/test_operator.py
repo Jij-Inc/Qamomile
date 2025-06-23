@@ -1430,19 +1430,19 @@ def test_Hamiltonian_neg_manually():
     assert h1 == expected_h
 
 
-def test_coeff_complex():
+def test_coeff_complex_manually():
     """Test Hamiltonian with complex coefficients.
 
     Check if
     1. Complex coefficients are handled correctly in multiplication and addition.
     """
-    # 1. Complex coefficients are handled correctly in multiplication and addition
     h = qm_o.Hamiltonian()
     h.add_term((qm_o.PauliOperator(qm_o.Pauli.I, 0),), 1.0j)
     h *= 1 + 1j * qm_o.Y(0)
     expected_h = qm_o.Hamiltonian()
     expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.I, 0),), 1.0j)
     expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 0),), -1.0)
+    # 1. Complex coefficients are handled correctly in multiplication and addition
     assert h == expected_h
 
 
