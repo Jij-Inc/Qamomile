@@ -1170,7 +1170,45 @@ def test_Hamiltonian_mul_repeatedly():
     assert h == expected_h
 
 
-def test_Hamiltonian_neg():
+@pytest.mark.parametrize(
+    "pauli_combinations",
+    [
+        list(itertools.permutations(qm_o.Pauli, 1)),
+        list(itertools.permutations(qm_o.Pauli, 2)),
+        list(itertools.permutations(qm_o.Pauli, 3)),
+        list(itertools.permutations(qm_o.Pauli, 4)),
+    ],
+)
+def test_Hamiltonian_neg(pauli_combinations):
+    """Test Hamiltonian negation with other Hamiltonians whose all the terms are with respect to the same qubits.
+
+    Check if
+    1. negating Hamiltonian shows all terms correctly.
+    """
+    index = 0
+    # Iterate over pauli_combinations1.
+    for pauli_combination in pauli_combinations:
+        # Create the first Hamiltonian.
+        h = qm_o.Hamiltonian()
+        for pauli in pauli_combination:
+            h.add_term((qm_o.PauliOperator(pauli, index),), 1.0)
+
+        # Negate the Hamiltonian.
+        h = -h
+
+        # Calculate the expected Hamiltonian.
+        expected_h = qm_o.Hamiltonian()
+        for pauli in pauli_combination:
+            expected_h.add_term(
+                (qm_o.PauliOperator(pauli, index),),
+                -1.0,
+            )
+
+        # 1. negating Hamiltonian shows all terms correctly.
+        assert h == expected_h
+
+
+def test_Hamiltonian_neg_manually():
     """Test negation of Hamiltonian.
 
     Check if
@@ -1182,11 +1220,13 @@ def test_Hamiltonian_neg():
     h = -x0
     expected_h = qm_o.Hamiltonian()
     expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), -1.0)
+    # 1. Negating a Hamiltonian negates all coefficients and the constant.
     assert h == expected_h
     h1 = -(2.0 * x0 + y1)
     expected_h = qm_o.Hamiltonian()
     expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), -2.0)
     expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 1),), -1.0)
+    # 1. Negating a Hamiltonian negates all coefficients and the constant.
     assert h1 == expected_h
 
 
