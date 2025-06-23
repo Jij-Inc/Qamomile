@@ -280,40 +280,78 @@ def test_num_qubits_without_num_qubits():
         index += 1
 
 
-def test_Hamiltonian_add_wrt_same_qubit():
+@pytest.mark.parametrize(
+    "pauli_combinations1",
+    [
+        list(itertools.permutations(qm_o.Pauli, 1)),
+        list(itertools.permutations(qm_o.Pauli, 2)),
+        list(itertools.permutations(qm_o.Pauli, 3)),
+        list(itertools.permutations(qm_o.Pauli, 4)),
+    ],
+)
+@pytest.mark.parametrize(
+    "pauli_combinations2",
+    [
+        list(itertools.permutations(qm_o.Pauli, 1)),
+        list(itertools.permutations(qm_o.Pauli, 2)),
+        list(itertools.permutations(qm_o.Pauli, 3)),
+        list(itertools.permutations(qm_o.Pauli, 4)),
+    ],
+)
+def test_Hamiltonian_add_wrt_same_qubit(pauli_combinations1, pauli_combinations2):
     """Test Hamiltonian addition with other Hamiltonians whose all the terms are with respect to the same qubits.
 
     Check if
     1. Adding two Hamiltonians accumulates all terms correctly.
     """
     index = 0
-    # Iterate over all possible combinations of Pauli operators on the same qubit.
-    for r in range(1, len(qm_o.Pauli) + 1):
-        for perm1 in itertools.permutations(qm_o.Pauli, r):
-            h1 = qm_o.Hamiltonian()
-            for pauli1 in perm1:
-                h1.add_term((qm_o.PauliOperator(pauli1, index),), 1.0)
+    # Iterate over pauli_combinations1.
+    for pauli_combination1 in pauli_combinations1:
+        # Create the first Hamiltonian.
+        h1 = qm_o.Hamiltonian()
+        for pauli1 in pauli_combination1:
+            h1.add_term((qm_o.PauliOperator(pauli1, index),), 1.0)
 
-            # Iterate over all possible combinations of Pauli operators on the same qubit.
-            for perm2 in itertools.permutations(qm_o.Pauli, r):
-                h2 = qm_o.Hamiltonian()
-                for pauli2 in perm2:
-                    h2.add_term((qm_o.PauliOperator(pauli2, index),), 1.0)
+        # Iterate over pauli_combinations2.
+        for pauli_combination2 in pauli_combinations2:
+            # Create the second Hamiltonian.
+            h2 = qm_o.Hamiltonian()
+            for pauli2 in pauli_combination2:
+                # Add terms to to the same qubit as the first Hamiltonian: index.
+                h2.add_term((qm_o.PauliOperator(pauli2, index),), 1.0)
 
-                # Add the two Hamiltonians.
-                h = h1 + h2
+            # Add the two Hamiltonians.
+            h = h1 + h2
 
-                # Calculate the expected Hamiltonian.
-                expected_h = qm_o.Hamiltonian()
-                all_perms = list(perm1) + list(perm2)
-                for pauli in all_perms:
-                    expected_h.add_term((qm_o.PauliOperator(pauli, index),), 1.0)
+            # Calculate the expected Hamiltonian.
+            expected_h = qm_o.Hamiltonian()
+            pauli_combination = list(pauli_combination1) + list(pauli_combination2)
+            for pauli in pauli_combination:
+                expected_h.add_term((qm_o.PauliOperator(pauli, index),), 1.0)
 
-                # 1. Adding two Hamiltonians accumulates all terms correctly.
-                assert h == expected_h
+            # 1. Adding two Hamiltonians accumulates all terms correctly.
+            assert h == expected_h
 
 
-def test_Hamiltonian_add_wrt_different_qubits():
+@pytest.mark.parametrize(
+    "pauli_combinations1",
+    [
+        list(itertools.permutations(qm_o.Pauli, 1)),
+        list(itertools.permutations(qm_o.Pauli, 2)),
+        list(itertools.permutations(qm_o.Pauli, 3)),
+        list(itertools.permutations(qm_o.Pauli, 4)),
+    ],
+)
+@pytest.mark.parametrize(
+    "pauli_combinations2",
+    [
+        list(itertools.permutations(qm_o.Pauli, 1)),
+        list(itertools.permutations(qm_o.Pauli, 2)),
+        list(itertools.permutations(qm_o.Pauli, 3)),
+        list(itertools.permutations(qm_o.Pauli, 4)),
+    ],
+)
+def test_Hamiltonian_add_wrt_different_qubits(pauli_combinations1, pauli_combinations2):
     """Test Hamiltonian addition with other Hamiltonians whose all the terms are with respect to different qubits.
 
     Check if
@@ -321,32 +359,33 @@ def test_Hamiltonian_add_wrt_different_qubits():
     """
     index1 = 0
     index2 = 1
-    # Iterate over all possible combinations of Pauli operators on the same qubit.
-    for r in range(1, len(qm_o.Pauli) + 1):
-        for perm1 in itertools.permutations(qm_o.Pauli, r):
-            h1 = qm_o.Hamiltonian()
-            for pauli1 in perm1:
-                h1.add_term((qm_o.PauliOperator(pauli1, index1),), 1.0)
+    # Iterate over palui_combinations1.
+    for pauli_combination1 in pauli_combinations1:
+        # Create the first Hamiltonian.
+        h1 = qm_o.Hamiltonian()
+        for pauli1 in pauli_combination1:
+            h1.add_term((qm_o.PauliOperator(pauli1, index1),), 1.0)
 
-            # Iterate over all possible combinations of Pauli operators on the same qubit.
-            for perm2 in itertools.permutations(qm_o.Pauli, r):
-                h2 = qm_o.Hamiltonian()
-                for pauli2 in perm2:
-                    h2.add_term((qm_o.PauliOperator(pauli2, index2),), 1.0)
+        # Iterate over palui_combinations2.
+        for pauli_combination2 in pauli_combinations2:
+            # Create the second Hamiltonian.
+            h2 = qm_o.Hamiltonian()
+            for pauli2 in pauli_combination2:
+                # Add terms to a different qubit than the first Hamiltonian: index2.
+                h2.add_term((qm_o.PauliOperator(pauli2, index2),), 1.0)
 
-                # Add the two Hamiltonians.
-                h = h1 + h2
+            # Add the two Hamiltonians.
+            h = h1 + h2
 
-                # Calculate the expected Hamiltonian.
-                expected_h = qm_o.Hamiltonian()
+            # Calculate the expected Hamiltonian.
+            expected_h = qm_o.Hamiltonian()
+            for pauli in pauli_combination1:
+                expected_h.add_term((qm_o.PauliOperator(pauli, index1),), 1.0)
+            for pauli in pauli_combination2:
+                expected_h.add_term((qm_o.PauliOperator(pauli, index2),), 1.0)
 
-                for pauli in perm1:
-                    expected_h.add_term((qm_o.PauliOperator(pauli, index1),), 1.0)
-                for pauli in perm2:
-                    expected_h.add_term((qm_o.PauliOperator(pauli, index2),), 1.0)
-
-                # 1. Adding two Hamiltonians accumulates all terms correctly.
-                assert h == expected_h
+            # 1. Adding two Hamiltonians accumulates all terms correctly.
+            assert h == expected_h
 
 
 @pytest.mark.parametrize(
@@ -388,46 +427,87 @@ def test_Hamiltonian_add_wrt_invalid_constants(invalid_constant):
     1. ValueError arises.
     """
     h = qm_o.Hamiltonian()
-    # 1. Adding a string raises TypeError,
+    # 1. ValueError arises.
     with pytest.raises(ValueError):
         h + invalid_constant
 
 
-def test_Hamiltonian_radd_wrt_same_qubit():
+@pytest.mark.parametrize(
+    "pauli_combinations1",
+    [
+        list(itertools.permutations(qm_o.Pauli, 1)),
+        list(itertools.permutations(qm_o.Pauli, 2)),
+        list(itertools.permutations(qm_o.Pauli, 3)),
+        list(itertools.permutations(qm_o.Pauli, 4)),
+    ],
+)
+@pytest.mark.parametrize(
+    "pauli_combinations2",
+    [
+        list(itertools.permutations(qm_o.Pauli, 1)),
+        list(itertools.permutations(qm_o.Pauli, 2)),
+        list(itertools.permutations(qm_o.Pauli, 3)),
+        list(itertools.permutations(qm_o.Pauli, 4)),
+    ],
+)
+def test_Hamiltonian_radd_wrt_same_qubit(pauli_combinations1, pauli_combinations2):
     """Test Hamiltonian right addition with other Hamiltonians whose all the terms are with respect to the same qubits.
 
     Check if
     1. Adding two Hamiltonians accumulates all terms correctly.
     """
     index = 0
-    # Iterate over all possible combinations of Pauli operators on the same qubit.
-    for r in range(1, len(qm_o.Pauli) + 1):
-        for perm1 in itertools.permutations(qm_o.Pauli, r):
+    # Iterate over pauli_combinations1:
+    for pauli_combination1 in pauli_combinations1:
 
-            # Iterate over all possible combinations of Pauli operators on the same qubit.
-            for perm2 in itertools.permutations(qm_o.Pauli, r):
-                h2 = qm_o.Hamiltonian()
-                for pauli2 in perm2:
-                    h2.add_term((qm_o.PauliOperator(pauli2, index),), 1.0)
+        # Iterate over pauli_combinations2:
+        for pauli_combination2 in pauli_combinations2:
+            # Create the first Hamiltonian.
+            #    Note: We now test the right addition operator, so we need to create the first Hamiltonian every time.
+            h1 = qm_o.Hamiltonian()
+            for pauli1 in pauli_combination1:
+                h1.add_term((qm_o.PauliOperator(pauli1, index),), 1.0)
 
-                h1 = qm_o.Hamiltonian()
-                for pauli1 in perm1:
-                    h1.add_term((qm_o.PauliOperator(pauli1, index),), 1.0)
+            # Create the second Hamiltonian.
+            h2 = qm_o.Hamiltonian()
+            for pauli2 in pauli_combination2:
+                # Add terms to the same qubit as the first Hamiltonian: index.
+                h2.add_term((qm_o.PauliOperator(pauli2, index),), 1.0)
 
-                # Add the two Hamiltonians.
-                h1 += h2
+            # Add the two Hamiltonians.
+            h1 += h2
 
-                # Calculate the expected Hamiltonian.
-                expected_h = qm_o.Hamiltonian()
-                all_perms = list(perm1) + list(perm2)
-                for pauli in all_perms:
-                    expected_h.add_term((qm_o.PauliOperator(pauli, index),), 1.0)
+            # Calculate the expected Hamiltonian.
+            expected_h = qm_o.Hamiltonian()
+            all_perms = list(pauli_combination1) + list(pauli_combination2)
+            for pauli in all_perms:
+                expected_h.add_term((qm_o.PauliOperator(pauli, index),), 1.0)
 
-                # 1. Adding two Hamiltonians accumulates all terms correctly.
-                assert h1 == expected_h
+            # 1. Adding two Hamiltonians accumulates all terms correctly.
+            assert h1 == expected_h
 
 
-def test_Hamiltonian_radd_wrt_different_qubits():
+@pytest.mark.parametrize(
+    "pauli_combinations1",
+    [
+        list(itertools.permutations(qm_o.Pauli, 1)),
+        list(itertools.permutations(qm_o.Pauli, 2)),
+        list(itertools.permutations(qm_o.Pauli, 3)),
+        list(itertools.permutations(qm_o.Pauli, 4)),
+    ],
+)
+@pytest.mark.parametrize(
+    "pauli_combinations2",
+    [
+        list(itertools.permutations(qm_o.Pauli, 1)),
+        list(itertools.permutations(qm_o.Pauli, 2)),
+        list(itertools.permutations(qm_o.Pauli, 3)),
+        list(itertools.permutations(qm_o.Pauli, 4)),
+    ],
+)
+def test_Hamiltonian_radd_wrt_different_qubits(
+    pauli_combinations1, pauli_combinations2
+):
     """Test Hamiltonian right addition with other Hamiltonians whose all the terms are with respect to different qubits.
 
     Check if
@@ -435,33 +515,35 @@ def test_Hamiltonian_radd_wrt_different_qubits():
     """
     index1 = 0
     index2 = 1
-    # Iterate over all possible combinations of Pauli operators on the same qubit.
-    for r in range(1, len(qm_o.Pauli) + 1):
-        for perm1 in itertools.permutations(qm_o.Pauli, r):
+    # Iterate over pauli_combinations1:
+    for pauli_combination1 in pauli_combinations1:
 
-            # Iterate over all possible combinations of Pauli operators on the same qubit.
-            for perm2 in itertools.permutations(qm_o.Pauli, r):
-                h2 = qm_o.Hamiltonian()
-                for pauli2 in perm2:
-                    h2.add_term((qm_o.PauliOperator(pauli2, index2),), 1.0)
+        # Iterate over pauli_combinations2:
+        for pauli_combination2 in pauli_combinations2:
+            # Create the first Hamiltonian.
+            #    Note: We now test the right addition operator, so we need to create the first Hamiltonian every time.
+            h1 = qm_o.Hamiltonian()
+            for pauli1 in pauli_combination1:
+                h1.add_term((qm_o.PauliOperator(pauli1, index1),), 1.0)
 
-                h1 = qm_o.Hamiltonian()
-                for pauli1 in perm1:
-                    h1.add_term((qm_o.PauliOperator(pauli1, index1),), 1.0)
+            # Create the second Hamiltonian.
+            h2 = qm_o.Hamiltonian()
+            for pauli2 in pauli_combination2:
+                # Add terms to a different qubit than the first Hamiltonian: index2.
+                h2.add_term((qm_o.PauliOperator(pauli2, index2),), 1.0)
 
-                # Add the two Hamiltonians.
-                h1 += h2
+            # Add the two Hamiltonians.
+            h1 += h2
 
-                # Calculate the expected Hamiltonian.
-                expected_h = qm_o.Hamiltonian()
+            # Calculate the expected Hamiltonian.
+            expected_h = qm_o.Hamiltonian()
+            for pauli in pauli_combination1:
+                expected_h.add_term((qm_o.PauliOperator(pauli, index1),), 1.0)
+            for pauli in pauli_combination2:
+                expected_h.add_term((qm_o.PauliOperator(pauli, index2),), 1.0)
 
-                for pauli in perm1:
-                    expected_h.add_term((qm_o.PauliOperator(pauli, index1),), 1.0)
-                for pauli in perm2:
-                    expected_h.add_term((qm_o.PauliOperator(pauli, index2),), 1.0)
-
-                # 1. Adding two Hamiltonians accumulates all terms correctly.
-                assert h1 == expected_h
+            # 1. Adding two Hamiltonians accumulates all terms correctly.
+            assert h1 == expected_h
 
 
 @pytest.mark.parametrize(
@@ -508,42 +590,79 @@ def test_Hamiltonian_radd_wrt_invalid_constants(invalid_constant):
         h += invalid_constant
 
 
-def test_Hamiltonian_sub_wrt_same_qubit():
+@pytest.mark.parametrize(
+    "pauli_combinations1",
+    [
+        list(itertools.permutations(qm_o.Pauli, 1)),
+        list(itertools.permutations(qm_o.Pauli, 2)),
+        list(itertools.permutations(qm_o.Pauli, 3)),
+        list(itertools.permutations(qm_o.Pauli, 4)),
+    ],
+)
+@pytest.mark.parametrize(
+    "pauli_combinations2",
+    [
+        list(itertools.permutations(qm_o.Pauli, 1)),
+        list(itertools.permutations(qm_o.Pauli, 2)),
+        list(itertools.permutations(qm_o.Pauli, 3)),
+        list(itertools.permutations(qm_o.Pauli, 4)),
+    ],
+)
+def test_Hamiltonian_sub_wrt_same_qubit(pauli_combinations1, pauli_combinations2):
     """Test Hamiltonian subtraction with other Hamiltonians whose all the terms are with respect to the same qubits.
 
     Check if
     1. Subtracting two Hamiltonians accumulates all terms correctly.
     """
     index = 0
-    # Iterate over all possible combinations of Pauli operators on the same qubit.
-    for r in range(1, len(qm_o.Pauli) + 1):
-        for perm1 in itertools.permutations(qm_o.Pauli, r):
-            h1 = qm_o.Hamiltonian()
-            for pauli1 in perm1:
-                h1.add_term((qm_o.PauliOperator(pauli1, index),), 1.0)
+    # Iterate over pauli_combinations1:
+    for pauli_combination1 in pauli_combinations1:
+        # Crate the first Hamiltonian.
+        h1 = qm_o.Hamiltonian()
+        for pauli1 in pauli_combination1:
+            h1.add_term((qm_o.PauliOperator(pauli1, index),), 1.0)
 
-            # Iterate over all possible combinations of Pauli operators on the same qubit.
-            for perm2 in itertools.permutations(qm_o.Pauli, r):
-                h2 = qm_o.Hamiltonian()
-                for pauli2 in perm2:
-                    h2.add_term((qm_o.PauliOperator(pauli2, index),), 1.0)
+        # Iterate over pauli_combination2.
+        for pauli_combination2 in pauli_combinations1:
+            # Create the second Hamiltonian.
+            h2 = qm_o.Hamiltonian()
+            for pauli2 in pauli_combination2:
+                # Add terms to the same qubit as the first Hamiltonian: index.
+                h2.add_term((qm_o.PauliOperator(pauli2, index),), 1.0)
 
-                # Sub the two Hamiltonians.
-                h = h1 - h2
+            # Sub the two Hamiltonians.
+            h = h1 - h2
 
-                # Calculate the expected Hamiltonian.
-                expected_h = qm_o.Hamiltonian()
+            # Calculate the expected Hamiltonian.
+            expected_h = qm_o.Hamiltonian()
+            for pauli in pauli_combination1:
+                expected_h.add_term((qm_o.PauliOperator(pauli, index),), 1.0)
+            for pauli in pauli_combination2:
+                expected_h.add_term((qm_o.PauliOperator(pauli, index),), -1.0)
 
-                for pauli in perm1:
-                    expected_h.add_term((qm_o.PauliOperator(pauli, index),), 1.0)
-                for pauli in perm2:
-                    expected_h.add_term((qm_o.PauliOperator(pauli, index),), -1.0)
-
-                # 1. Subtracting two Hamiltonians accumulates all terms correctly.
-                assert h == expected_h
+            # 1. Subtracting two Hamiltonians accumulates all terms correctly.
+            assert h == expected_h
 
 
-def test_Hamiltonian_sub_wrt_different_qubits():
+@pytest.mark.parametrize(
+    "pauli_combinations1",
+    [
+        list(itertools.permutations(qm_o.Pauli, 1)),
+        list(itertools.permutations(qm_o.Pauli, 2)),
+        list(itertools.permutations(qm_o.Pauli, 3)),
+        list(itertools.permutations(qm_o.Pauli, 4)),
+    ],
+)
+@pytest.mark.parametrize(
+    "pauli_combinations2",
+    [
+        list(itertools.permutations(qm_o.Pauli, 1)),
+        list(itertools.permutations(qm_o.Pauli, 2)),
+        list(itertools.permutations(qm_o.Pauli, 3)),
+        list(itertools.permutations(qm_o.Pauli, 4)),
+    ],
+)
+def test_Hamiltonian_sub_wrt_different_qubits(pauli_combinations1, pauli_combinations2):
     """Test Hamiltonian subtraction with other Hamiltonians whose all the terms are with respect to different qubits.
 
     Check if
@@ -551,32 +670,33 @@ def test_Hamiltonian_sub_wrt_different_qubits():
     """
     index1 = 0
     index2 = 1
-    # Iterate over all possible combinations of Pauli operators on the same qubit.
-    for r in range(1, len(qm_o.Pauli) + 1):
-        for perm1 in itertools.permutations(qm_o.Pauli, r):
-            h1 = qm_o.Hamiltonian()
-            for pauli1 in perm1:
-                h1.add_term((qm_o.PauliOperator(pauli1, index1),), 1.0)
+    # Iterate over pauli_combinations1:
+    for pauli_combination1 in pauli_combinations1:
+        # Create the first Hamiltonian.
+        h1 = qm_o.Hamiltonian()
+        for pauli1 in pauli_combination1:
+            h1.add_term((qm_o.PauliOperator(pauli1, index1),), 1.0)
 
-            # Iterate over all possible combinations of Pauli operators on the same qubit.
-            for perm2 in itertools.permutations(qm_o.Pauli, r):
-                h2 = qm_o.Hamiltonian()
-                for pauli2 in perm2:
-                    h2.add_term((qm_o.PauliOperator(pauli2, index2),), 1.0)
+        # Iterate over pauli_combinations2.
+        for pauli_combination2 in pauli_combinations2:
+            # Create the second Hamiltonian.
+            h2 = qm_o.Hamiltonian()
+            for pauli2 in pauli_combination2:
+                # Add terms to a different qubit than the first Hamiltonian: index2.
+                h2.add_term((qm_o.PauliOperator(pauli2, index2),), 1.0)
 
-                # Sub the two Hamiltonians.
-                h = h1 - h2
+            # Sub the two Hamiltonians.
+            h = h1 - h2
 
-                # Calculate the expected Hamiltonian.
-                expected_h = qm_o.Hamiltonian()
+            # Calculate the expected Hamiltonian.
+            expected_h = qm_o.Hamiltonian()
+            for pauli in pauli_combination1:
+                expected_h.add_term((qm_o.PauliOperator(pauli, index1),), 1.0)
+            for pauli in pauli_combination2:
+                expected_h.add_term((qm_o.PauliOperator(pauli, index2),), -1.0)
 
-                for pauli in perm1:
-                    expected_h.add_term((qm_o.PauliOperator(pauli, index1),), 1.0)
-                for pauli in perm2:
-                    expected_h.add_term((qm_o.PauliOperator(pauli, index2),), -1.0)
-
-                # 1. Subtracting two Hamiltonians accumulates all terms correctly.
-                assert h == expected_h
+            # 1. Subtracting two Hamiltonians accumulates all terms correctly.
+            assert h == expected_h
 
 
 @pytest.mark.parametrize(
@@ -610,42 +730,83 @@ def test_Hamiltonian_sub_wrt_constants(constant):
     assert h == expected_h
 
 
-def test_Hamiltonian_rsub_wrt_same_qubit():
+@pytest.mark.parametrize(
+    "pauli_combinations1",
+    [
+        list(itertools.permutations(qm_o.Pauli, 1)),
+        list(itertools.permutations(qm_o.Pauli, 2)),
+        list(itertools.permutations(qm_o.Pauli, 3)),
+        list(itertools.permutations(qm_o.Pauli, 4)),
+    ],
+)
+@pytest.mark.parametrize(
+    "pauli_combinations2",
+    [
+        list(itertools.permutations(qm_o.Pauli, 1)),
+        list(itertools.permutations(qm_o.Pauli, 2)),
+        list(itertools.permutations(qm_o.Pauli, 3)),
+        list(itertools.permutations(qm_o.Pauli, 4)),
+    ],
+)
+def test_Hamiltonian_rsub_wrt_same_qubit(pauli_combinations1, pauli_combinations2):
     """Test Hamiltonian right subtraction with other Hamiltonians whose all the terms are with respect to the same qubits.
 
     Check if
     1. Subtracting two Hamiltonians accumulates all terms correctly.
     """
     index = 0
-    # Iterate over all possible combinations of Pauli operators on the same qubit.
-    for r in range(1, len(qm_o.Pauli) + 1):
-        for perm1 in itertools.permutations(qm_o.Pauli, r):
+    # Iterate over pauli_combinations1:
+    for pauli_combination1 in pauli_combinations1:
 
-            # Iterate over all possible combinations of Pauli operators on the same qubit.
-            for perm2 in itertools.permutations(qm_o.Pauli, r):
-                h2 = qm_o.Hamiltonian()
-                for pauli2 in perm2:
-                    h2.add_term((qm_o.PauliOperator(pauli2, index),), 1.0)
+        # Iterate over pauli_combinations2:
+        for pauli_combination2 in pauli_combinations2:
+            # Create the first Hamiltonian.
+            #    Note: We now test the right subtraction operator, so we need to create the first Hamiltonian every time.
+            h1 = qm_o.Hamiltonian()
+            for pauli1 in pauli_combination1:
+                h1.add_term((qm_o.PauliOperator(pauli1, index),), 1.0)
 
-                h1 = qm_o.Hamiltonian()
-                for pauli1 in perm1:
-                    h1.add_term((qm_o.PauliOperator(pauli1, index),), 1.0)
-                # Sub the two Hamiltonians.
-                h1 -= h2
+            # Create the second Hamiltonian.
+            h2 = qm_o.Hamiltonian()
+            for pauli2 in pauli_combination2:
+                # Add terms to the same qubit as the first Hamiltonian: index.
+                h2.add_term((qm_o.PauliOperator(pauli2, index),), 1.0)
 
-                # Calculate the expected Hamiltonian.
-                expected_h = qm_o.Hamiltonian()
+            # Sub the two Hamiltonians.
+            h1 -= h2
 
-                for pauli in perm1:
-                    expected_h.add_term((qm_o.PauliOperator(pauli, index),), 1.0)
-                for pauli in perm2:
-                    expected_h.add_term((qm_o.PauliOperator(pauli, index),), -1.0)
+            # Calculate the expected Hamiltonian.
+            expected_h = qm_o.Hamiltonian()
+            for pauli in pauli_combination1:
+                expected_h.add_term((qm_o.PauliOperator(pauli, index),), 1.0)
+            for pauli in pauli_combination2:
+                expected_h.add_term((qm_o.PauliOperator(pauli, index),), -1.0)
 
-                # 1. Subtracting two Hamiltonians accumulates all terms correctly.
-                assert h1 == expected_h
+            # 1. Subtracting two Hamiltonians accumulates all terms correctly.
+            assert h1 == expected_h
 
 
-def test_Hamiltonian_rsub_wrt_different_qubits():
+@pytest.mark.parametrize(
+    "pauli_combinations1",
+    [
+        list(itertools.permutations(qm_o.Pauli, 1)),
+        list(itertools.permutations(qm_o.Pauli, 2)),
+        list(itertools.permutations(qm_o.Pauli, 3)),
+        list(itertools.permutations(qm_o.Pauli, 4)),
+    ],
+)
+@pytest.mark.parametrize(
+    "pauli_combinations2",
+    [
+        list(itertools.permutations(qm_o.Pauli, 1)),
+        list(itertools.permutations(qm_o.Pauli, 2)),
+        list(itertools.permutations(qm_o.Pauli, 3)),
+        list(itertools.permutations(qm_o.Pauli, 4)),
+    ],
+)
+def test_Hamiltonian_rsub_wrt_different_qubits(
+    pauli_combinations1, pauli_combinations2
+):
     """Test Hamiltonian right subtraction with other Hamiltonians whose all the terms are with respect to different qubits.
 
     Check if
@@ -653,33 +814,35 @@ def test_Hamiltonian_rsub_wrt_different_qubits():
     """
     index1 = 0
     index2 = 1
-    # Iterate over all possible combinations of Pauli operators on the same qubit.
-    for r in range(1, len(qm_o.Pauli) + 1):
-        for perm1 in itertools.permutations(qm_o.Pauli, r):
+    # Iterate over pauli_combinations1:
+    for pauli_combination1 in pauli_combinations1:
 
-            # Iterate over all possible combinations of Pauli operators on the same qubit.
-            for perm2 in itertools.permutations(qm_o.Pauli, r):
-                h2 = qm_o.Hamiltonian()
-                for pauli2 in perm2:
-                    h2.add_term((qm_o.PauliOperator(pauli2, index2),), 1.0)
+        # Iterate over pauli_combinations2:
+        for pauli_combination2 in pauli_combinations2:
+            # Create the first Hamiltonian.
+            #    Note: We now test the right subtraction operator, so we need to create the first Hamiltonian every time.
+            h1 = qm_o.Hamiltonian()
+            for pauli1 in pauli_combination1:
+                h1.add_term((qm_o.PauliOperator(pauli1, index1),), 1.0)
 
-                h1 = qm_o.Hamiltonian()
-                for pauli1 in perm1:
-                    h1.add_term((qm_o.PauliOperator(pauli1, index1),), 1.0)
+            # Create the second Hamiltonian.
+            h2 = qm_o.Hamiltonian()
+            for pauli2 in pauli_combination2:
+                # Add terms to a different qubit than the first Hamiltonian: index2.
+                h2.add_term((qm_o.PauliOperator(pauli2, index2),), 1.0)
 
-                # Sub the two Hamiltonians.
-                h1 -= h2
+            # Sub the two Hamiltonians.
+            h1 -= h2
 
-                # Calculate the expected Hamiltonian.
-                expected_h = qm_o.Hamiltonian()
+            # Calculate the expected Hamiltonian.
+            expected_h = qm_o.Hamiltonian()
+            for pauli in pauli_combination1:
+                expected_h.add_term((qm_o.PauliOperator(pauli, index1),), 1.0)
+            for pauli in pauli_combination2:
+                expected_h.add_term((qm_o.PauliOperator(pauli, index2),), -1.0)
 
-                for pauli in perm1:
-                    expected_h.add_term((qm_o.PauliOperator(pauli, index1),), 1.0)
-                for pauli in perm2:
-                    expected_h.add_term((qm_o.PauliOperator(pauli, index2),), -1.0)
-
-                # 1. Subtracting two Hamiltonians accumulates all terms correctly.
-                assert h1 == expected_h
+            # 1. Subtracting two Hamiltonians accumulates all terms correctly.
+            assert h1 == expected_h
 
 
 def test_Hamiltonian_scalar_multiplication():
