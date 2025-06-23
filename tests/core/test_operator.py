@@ -166,21 +166,84 @@ def test_hamiltonian_creation_without_num_qubits():
     assert h.constant == 0.0
 
 
-def test_num_qubits():
+@pytest.mark.parametrize("num_qubits", [0, 1, 2, 3])
+def test_num_qubits_with_num_qubits(num_qubits):
+    """Call num_qubits property of Hamiltonian with num_qubits.
+
+    Check if
+    1. num_qubits is the same as the given num_qubits without adding terms,
+    2-1. num_qubits is the same as the given num_qubits if the largest specified qubit index + 1 is smaller than the given num_qubits.
+    2-2. num_qubits is the largest specified qubit index + 1 if the largest specified qubit index + 1 is greater than or equal to the given num_qubits.
+    """
+    hamiltonian = qm_o.Hamiltonian(num_qubits=num_qubits)
+
+    # 1. num_qubits is the same as the given num_qubits without adding terms,
+    assert hamiltonian.num_qubits == num_qubits
+
+    max_iterations = 10
+    index = 0
+    for _ in range(max_iterations):
+        hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.X, index),), 1.0)
+
+        # 2-1. num_qubits is the same as the given num_qubits if the largest specified qubit index + 1 is smaller than the given num_qubits.
+        if index + 1 < num_qubits:
+            assert hamiltonian.num_qubits == num_qubits
+        # 2-2. num_qubits is the largest specified qubit index + 1 if the largest specified qubit index + 1 is greater than or equal to the given num_qubits.
+        else:
+            assert hamiltonian.num_qubits == index + 1
+
+        index += 1
+
+
+def test_num_qubits_without_num_qubits():
+    """Call num_qubits property of Hamiltonian without num_qubits.
+
+    Check if
+    1. num_qubits is zero without adding terms,
+    2. num_qubits is the largest specified qubit index + 1.
+    """
+    hamiltonian = qm_o.Hamiltonian()
+
+    # 1. num_qubits is zero without adding terms,
+    assert hamiltonian.num_qubits == 0
+
+    max_iterations = 10
+    index = 0
+    for _ in range(max_iterations):
+        hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.X, index),), 1.0)
+
+        # 2. num_qubits is the largest specified qubit index + 1.
+        assert hamiltonian.num_qubits == index + 1
+
+        index += 1
+
+
+def test_num_qubits_manually():
+    """Call num_qubits property of manually evolved Hamiltonian.
+
+    Check if
+    1. The number of qubits is correct after evolving manually.
+    """
     h = qm_o.Hamiltonian(num_qubits=3)
     h += 1.0
+    # 1. The number of qubits is correct after evolving manually.
     assert h.num_qubits == 3
     h *= qm_o.X(0)
+    # 1. The number of qubits is correct after evolving manually.
     assert h.num_qubits == 3
     h *= qm_o.X(1)
+    # 1. The number of qubits is correct after evolving manually.
     assert h.num_qubits == 3
     h *= qm_o.X(3)
+    # 1. The number of qubits is correct after evolving manually.
     assert h.num_qubits == 4
 
     h = qm_o.Hamiltonian(num_qubits=3)
     h += qm_o.X(0)
+    # 1. The number of qubits is correct after evolving manually.
     assert h.num_qubits == 3
     h += qm_o.X(3)
+    # 1. The number of qubits is correct after evolving manually.
     assert h.num_qubits == 4
 
 
