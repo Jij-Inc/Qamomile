@@ -107,8 +107,10 @@ class QiskitTranspiler(QuantumSDKTranspiler[qk_primitives.BitArray]):
             elif isinstance(gate, qm_c.ThreeQubitGate):
                 qiskit_circuit = _three_qubit_gate(gate, qiskit_circuit)
             elif isinstance(gate, qm_c.ParametricExpGate):
-                operator=self.transpile_hamiltonian(gate.hamiltonian)
-                qiskit_circuit = _parametric_exp_gate(gate, qiskit_circuit, parameters=param_mapping, operator=operator)
+                operator = self.transpile_hamiltonian(gate.hamiltonian)
+                qiskit_circuit = _parametric_exp_gate(
+                    gate, qiskit_circuit, parameters=param_mapping, operator=operator
+                )
             elif isinstance(gate, qm_c.Operator):
                 qiskit_subcircuit = self._circuit_convert(gate.circuit, param_mapping)
                 qubit_indices = list(range(gate.circuit.num_qubits))
@@ -171,7 +173,7 @@ class QiskitTranspiler(QuantumSDKTranspiler[qk_primitives.BitArray]):
 
         # Add constant term
         if operator.constant != 0:
-            I = "I"*num_qubits
+            I = "I" * num_qubits
             qk_pauli_list.append(qk_ope.Pauli(I))
             coeff_list.append(operator.constant)
 
@@ -243,7 +245,9 @@ def _parametric_two_qubit_gate(
         case qm_c.ParametricTwoQubitGateType.RZZ:
             qk_circuit.rzz(angle, gate.control, gate.target)
         case _:
-            raise QamomileQiskitTranspileError(f"Unsupported parametric two qubit gate: {gate.gate}")
+            raise QamomileQiskitTranspileError(
+                f"Unsupported parametric two qubit gate: {gate.gate}"
+            )
     return qk_circuit
 
 
@@ -254,6 +258,7 @@ def _three_qubit_gate(
     if gate.gate == qm_c.ThreeQubitGateType.CCX:
         qk_circuit.ccx(gate.control1, gate.control2, gate.target)
     return qk_circuit
+
 
 def _parametric_exp_gate(
     gate: qm_c.ParametricExpGate,

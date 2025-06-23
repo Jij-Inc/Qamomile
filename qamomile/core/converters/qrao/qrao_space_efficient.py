@@ -51,7 +51,7 @@ Attention:
     Currently, this module does not provide the rounding algorithm.
 
 Note:
-    This module requires `jijmodeling` and `jijmodeling_transpiler` for problem representation
+    This module requires `jijmodeling` for problem representation
     and decoding functionalities.
     
 
@@ -68,6 +68,7 @@ from qamomile.core.ising_qubo import IsingModel
 import qamomile.core.operator as qm_o
 from .graph_coloring import greedy_graph_coloring, check_linear_term
 from qamomile.core.converters.utils import is_close_zero
+
 
 def numbering_space_efficient_encode(
     ising: IsingModel,
@@ -92,6 +93,7 @@ def numbering_space_efficient_encode(
         color = i % 2
         encode[i] = qm_o.PauliOperator(pauli_ope[color], qubit_index)
     return encode
+
 
 def qrac_space_efficient_encode_ising(
     ising: IsingModel,
@@ -125,19 +127,20 @@ def qrac_space_efficient_encode_ising(
         pauli_j = encoded_ope[j]
 
         if pauli_i.index == pauli_j.index:
-            hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, pauli_i.index),), np.sqrt(3) * coeff)
+            hamiltonian.add_term(
+                (qm_o.PauliOperator(qm_o.Pauli.Z, pauli_i.index),), np.sqrt(3) * coeff
+            )
         else:
             hamiltonian.add_term((pauli_i, pauli_j), 3 * coeff)
 
     return hamiltonian, encoded_ope
 
 
-
 class QRACSpaceEfficientConverter(QuantumConverter):
     """
     Space efficient  QRAO (Quantum Random Access Optimization) converter class.
 
-    This class provides methods to convert optimization problems into Space efficient  QRAO 
+    This class provides methods to convert optimization problems into Space efficient  QRAO
     relaxed Hamiltonians, and decode quantum computation results.
 
     Examples:
@@ -145,17 +148,20 @@ class QRACSpaceEfficientConverter(QuantumConverter):
         .. code::
 
             from qamomile.core.converters.qrao.qrao_space_efficient import QRACSpaceEfficientConverter
-            
-            # Initialize with a compiled optimization problem instance 
-            qrao_converter = QRACSpaceEfficientConverter(compiled_instance) 
+
+            # Initialize with a compiled optimization problem instance
+            qrao_converter = QRACSpaceEfficientConverter(compiled_instance)
 
             # Generate relaxed Hamiltonian
             cost_hamiltonian = qrao_converter.get_cost_hamiltonian()
     """
+
     def ising_encode(
         self,
         multipliers: typ.Optional[dict[str, float]] = None,
-        detail_parameters: typ.Optional[dict[str, dict[tuple[int, ...], tuple[float, float]]]] = None
+        detail_parameters: typ.Optional[
+            dict[str, dict[tuple[int, ...], tuple[float, float]]]
+        ] = None,
     ) -> IsingModel:
         ising = super().ising_encode(multipliers, detail_parameters)
         return ising
@@ -178,7 +184,7 @@ class QRACSpaceEfficientConverter(QuantumConverter):
         """
         Get the encoded Pauli operators as a list of Hamiltonians.
 
-        This method returns the Pauli Operators which correspond 
+        This method returns the Pauli Operators which correspond
         to the each variable in the Ising model.
 
         Returns:
@@ -186,7 +192,7 @@ class QRACSpaceEfficientConverter(QuantumConverter):
         """
         # return the encoded Pauli operators as list
         ising = self.get_ising()
-        
+
         zero_pauli = qm_o.Hamiltonian(num_qubits=self.num_qubits)
         pauli_operators = [zero_pauli] * ising.num_bits()
         for idx, pauli in self.pauli_encoding.items():

@@ -5,17 +5,17 @@ function Explore() {
     {
       title: 'Quick Start Guide',
       description: 'Installation instructions and a simple example to get you started.',
-      link: 'https://jij-inc.github.io/Qamomile/quickstart.html'
+      link: 'https://jij-inc.github.io/Qamomile/en/quickstart.html'
     },
     {
       title: 'API Reference',
       description: 'Complete documentation of Qamomile\'s API.',
-      link: 'https://jij-inc.github.io/Qamomile/autoapi/index.html'
+      link: 'https://jij-inc.github.io/Qamomile/en/autoapi/index.html'
     },
     {
       title: 'Advanced Topics',
       description: 'Explore advanced features and optimization techniques.',
-      link: 'https://jij-inc.github.io/Qamomile/tutorial/index.html'
+      link: 'https://jij-inc.github.io/Qamomile/en/tutorial/qaoa/index_qaoa.html'
     }
   ]
 

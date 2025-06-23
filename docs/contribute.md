@@ -21,12 +21,12 @@ Before you begin, ensure you have the following installed:
 3. Create a virtual environment and activate it:
    ```
    poetry install
-   poetry shell
+   eval $(poetry env activate)
    ```
 
 ## Making Changes to the Documentation
 
-1. Navigate to the `docs/` directory in your local repository.
+1. Navigate to the `docs/en`, `docs/ja` or both directories in your local repository.
 2. Find the appropriate Markdown (`.md`) or Jupyter Notebook (`.ipynb`) file you want to edit, or create a new one.
 3. Make your changes using your preferred text editor.
 4. If you're adding new pages, update the `_toc.yml` file to include your new page in the table of contents.
@@ -35,7 +35,7 @@ Before you begin, ensure you have the following installed:
 
 To preview your changes:
 
-1. From the `docs/` directory, run:
+1. From the `docs/en` and/or `docs/ja` directory, run:
    ```
    jupyter-book build .
    ```
@@ -66,10 +66,10 @@ To preview your changes:
 
 Our documentation is organized as follows:
 
-- `index.md`: The main landing page
-- `quickstart.md`: Guide for new users
+- `en/index.md` and `ja/index.md`: The main landing page
+- `en/quickstart.md` and `ja/quickstart.md`: Guide for new users
 - `api/`: API reference documentation for qamomile.
-- `tutorial/`: Usage examples and tutorials
+- `en/tutorial/` and `ja/tutorial`: Usage examples and tutorials
 - `contribute.md`: This guide
 
 Feel free to suggest improvements to this structure if you think it can be made more intuitive.
