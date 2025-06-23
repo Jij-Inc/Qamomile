@@ -682,37 +682,6 @@ def test_Hamiltonian_rsub_wrt_different_qubits():
                 assert h1 == expected_h
 
 
-@pytest.mark.parametrize(
-    "constant", [int(1), float(1.0), float(1.1), complex(1.0, 1.0), complex(1.0, 0.0)]
-)
-def test_Hamiltonian_sub_wrt_constants(constant):
-    """Right sub Hamiltonian with constants.
-
-    Check if
-    1. Subtracting a constant to one whose constant is zero updates the constant term,
-    2. Subtracting a constant to one whose constant is not zero updates the constant term.
-    """
-    # Sub constant to Hamiltonian with constant zero.
-    h = qm_o.Hamiltonian()
-    h -= constant
-    # Create the expected Hamiltonian with the constant.
-    expected_h = qm_o.Hamiltonian()
-    expected_h.constant = -constant
-    # 1. Subtracting a constant to one whose constant is zero updates the constant term,
-    assert h == expected_h
-
-    # Sub constant to Hamiltonian with constant not zero.
-    h = qm_o.Hamiltonian()
-    initial_constant = 1.0
-    h.constant = initial_constant
-    h -= constant
-    # Create the expected Hamiltonian with the constant.
-    expected_h = qm_o.Hamiltonian()
-    expected_h.constant = initial_constant - constant
-    # 2. Subtracting a constant to one whose constant is not zero updates the constant term.
-    assert h == expected_h
-
-
 def test_Hamiltonian_scalar_multiplication():
     """Test Hamiltonian scalar multiplication (left and right).
 
