@@ -32,3 +32,18 @@ class Utils:
         (qm_o.Pauli.I, qm_o.Pauli.Z): (qm_o.Pauli.Z, 1.0),
         (qm_o.Pauli.I, qm_o.Pauli.I): (qm_o.Pauli.I, 1.0),
     }
+
+    @staticmethod
+    def get_pauli_string(pauli: qm_o.Pauli) -> str:
+        """Get the string representation of a Pauli operator."""
+        match pauli:
+            case qm_o.Pauli.I:
+                return "I"
+            case qm_o.Pauli.X:
+                return "X"
+            case qm_o.Pauli.Y:
+                return "Y"
+            case qm_o.Pauli.Z:
+                return "Z"
+            case _:
+                raise ValueError(f"Unknown Pauli operator: {pauli}")
