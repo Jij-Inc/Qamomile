@@ -280,6 +280,34 @@ def test_num_qubits_without_num_qubits():
         index += 1
 
 
+def test_num_qubits_manually():
+    """Test num_qubits property of Hamiltonian.
+
+    Check if
+    1. num_qubits is updated correctly when adding terms or multiplying by operators on new qubits.
+    """
+    h = qm_o.Hamiltonian(num_qubits=3)
+    h += 1.0
+    # 1. num_qubits is updated correctly when adding terms or multiplying by operators on new qubits
+    assert h.num_qubits == 3
+    h *= qm_o.X(0)
+    # 1. num_qubits is updated correctly when adding terms or multiplying by operators on new qubits
+    assert h.num_qubits == 3
+    h *= qm_o.X(1)
+    # 1. num_qubits is updated correctly when adding terms or multiplying by operators on new qubits
+    assert h.num_qubits == 3
+    h *= qm_o.X(3)
+    # 1. num_qubits is updated correctly when adding terms or multiplying by operators on new qubits
+    assert h.num_qubits == 4
+    h = qm_o.Hamiltonian(num_qubits=3)
+    h += qm_o.X(0)
+    # 1. num_qubits is updated correctly when adding terms or multiplying by operators on new qubits
+    assert h.num_qubits == 3
+    h += qm_o.X(3)
+    # 1. num_qubits is updated correctly when adding terms or multiplying by operators on new qubits
+    assert h.num_qubits == 4
+
+
 @pytest.mark.parametrize(
     "pauli_combinations1",
     [
@@ -1400,29 +1428,6 @@ def test_Hamiltonian_neg_manually():
     expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 1),), -1.0)
     # 1. Negating a Hamiltonian negates all coefficients and the constant.
     assert h1 == expected_h
-
-
-def test_num_qubits():
-    """Test num_qubits property of Hamiltonian.
-
-    Check if
-    1. num_qubits is updated correctly when adding terms or multiplying by operators on new qubits.
-    """
-    # 1. num_qubits is updated correctly when adding terms or multiplying by operators on new qubits
-    h = qm_o.Hamiltonian(num_qubits=3)
-    h += 1.0
-    assert h.num_qubits == 3
-    h *= qm_o.X(0)
-    assert h.num_qubits == 3
-    h *= qm_o.X(1)
-    assert h.num_qubits == 3
-    h *= qm_o.X(3)
-    assert h.num_qubits == 4
-    h = qm_o.Hamiltonian(num_qubits=3)
-    h += qm_o.X(0)
-    assert h.num_qubits == 3
-    h += qm_o.X(3)
-    assert h.num_qubits == 4
 
 
 def test_coeff_complex():
