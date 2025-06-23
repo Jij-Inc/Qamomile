@@ -224,6 +224,9 @@ class Hamiltonian:
                 else:
                     h_str += f"{coeff}{term_str}"
             else:
+                if term_str == "":
+                    # This means the term is just a constant. We can skip this.
+                    continue
                 if abs(coeff) == 1:
                     h_str += "+" + term_str if coeff > 0 else "-" + term_str
                 else:
