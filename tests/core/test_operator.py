@@ -1,3 +1,5 @@
+import pytest
+
 import qamomile.core.operator as qm_o
 
 
@@ -23,18 +25,39 @@ def test_pauli():
 # <<< Pauli <<<
 
 
-def test_pauli_operator_creation():
-    X0 = qm_o.PauliOperator(qm_o.Pauli.X, 0)
-    assert X0.pauli == qm_o.Pauli.X
-    assert X0.index == 0
+# >>> PauliOperator >>>
+@pytest.mark.parametrize(
+    "pauli",
+    [(qm_o.Pauli.X), (qm_o.Pauli.Y), (qm_o.Pauli.Z), (qm_o.Pauli.I)],
+)
+@pytest.mark.parametrize(
+    "index",
+    [0, 1, 2],
+)
+def test_pauli_operator_creation(pauli, index):
+    """Create PauliOperators.
 
-    Y1 = qm_o.PauliOperator(qm_o.Pauli.Y, 1)
-    assert Y1.pauli == qm_o.Pauli.Y
-    assert Y1.index == 1
+    Check if
+    1. The pauli attribute is correctly set.
+    2. The index is set correctly.
+    3. The return value of repr function of PauliOperator is correct.
+    4. The return value of str function of PauliOperator is correct.
+    5. The return value of hash function of PauliOperator is a tuple of its pauli and its index in this order.
+    """
+    pauli_operator = qm_o.PauliOperator(pauli, index)
+    # 1. The pauli attribute is correctly set.
+    assert pauli_operator.pauli == pauli
+    # 2. The index is set correctly.
+    assert pauli_operator.index == index
+    # 3. The return value of repr function of PauliOperator is correct.
+    assert repr(pauli_operator) == f"{pauli.name}{index}"
+    # 4. The return value of str function of PauliOperator is correct.
+    assert str(pauli_operator) == f"{pauli.name}{index}"
+    # 5. The return value of hash function of PauliOperator is a tuple of its pauli and its index in this order.
+    assert hash(pauli_operator) == hash((pauli, index))
 
-    Z2 = qm_o.PauliOperator(qm_o.Pauli.Z, 2)
-    assert Z2.pauli == qm_o.Pauli.Z
-    assert Z2.index == 2
+
+# <<< PauliOperator <<<
 
 
 def test_add_term():
