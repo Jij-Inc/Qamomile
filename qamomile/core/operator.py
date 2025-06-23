@@ -277,6 +277,7 @@ class Hamiltonian:
                 h.add_term(term, coeff)
             h.constant += other.constant
 
+            # Additional TODO: How about other.num_qubits?
             if h.num_qubits < self.num_qubits:
                 h._num_qubits = self.num_qubits
 
@@ -326,6 +327,7 @@ class Hamiltonian:
 
             h.constant += self.constant * other.constant
 
+            # Additional TODO: How about other.num_qubits?
             if h.num_qubits < self.num_qubits:
                 h._num_qubits = self.num_qubits
 
