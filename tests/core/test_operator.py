@@ -296,8 +296,8 @@ def test_add_term_manually():
         list(itertools.permutations(qm_o.Pauli, 4)),
     ],
 )
-@pytest.mark.parametrize("coefficient", [1, 2])
-def test_to_latex(pauli_combinations, coefficient):
+@pytest.mark.parametrize("positive_coefficient", [1, 2, 1.1])
+def test_to_latex(pauli_combinations, positive_coefficient):
     """ """
     index = 0
     for pauli_combination in pauli_combinations:
@@ -306,16 +306,51 @@ def test_to_latex(pauli_combinations, coefficient):
         expected_strs = []
         for pauli in pauli_combination:
             # Add terms to the Hamiltonian.
-            h.add_term((qm_o.PauliOperator(pauli, index),), coefficient)
+            h.add_term((qm_o.PauliOperator(pauli, index),), positive_coefficient)
 
             # Create the expected string representation.
             if pauli != qm_o.Pauli.I:
                 pauli_str = Utils.get_pauli_string(pauli)
                 _expected_str = f"{pauli_str}_" + "{" + f"{index}" + "}"
-                if coefficient != 1:
-                    _expected_str = f"{coefficient:.1f}" + _expected_str
+                if positive_coefficient != 1:
+                    _expected_str = f"{positive_coefficient:.1f}" + _expected_str
                 expected_strs.append(_expected_str)
         expected_str = "+".join(expected_strs)
+
+        assert h.to_latex() == expected_str
+
+
+@pytest.mark.parametrize(
+    "pauli_combinations",
+    [
+        list(itertools.permutations(qm_o.Pauli, 1)),
+        list(itertools.permutations(qm_o.Pauli, 2)),
+        list(itertools.permutations(qm_o.Pauli, 3)),
+        list(itertools.permutations(qm_o.Pauli, 4)),
+    ],
+)
+@pytest.mark.parametrize("negative_coefficient", [-1, -2, -1.1])
+def test_to_latex(pauli_combinations, negative_coefficient):
+    """ """
+    index = 0
+    for pauli_combination in pauli_combinations:
+        h = qm_o.Hamiltonian()
+
+        expected_strs = []
+        for pauli in pauli_combination:
+            # Add terms to the Hamiltonian.
+            h.add_term((qm_o.PauliOperator(pauli, index),), negative_coefficient)
+
+            # Create the expected string representation.
+            if pauli != qm_o.Pauli.I:
+                pauli_str = Utils.get_pauli_string(pauli)
+                _expected_str = f"{pauli_str}_" + "{" + f"{index}" + "}"
+                if negative_coefficient != -1:
+                    _expected_str = f"{negative_coefficient:.1f}" + _expected_str
+                else:
+                    _expected_str = "-" + _expected_str
+                expected_strs.append(_expected_str)
+        expected_str = "".join(expected_strs)
 
         assert h.to_latex() == expected_str
 
