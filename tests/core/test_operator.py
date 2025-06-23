@@ -506,35 +506,208 @@ def test_Hamiltonian_radd_wrt_invalid_constants(invalid_constant):
         h += invalid_constant
 
 
-def test_Hamiltonian_sub():
-    """Test Hamiltonian subtraction with other Hamiltonians and scalars.
+def test_Hamiltonian_sub_wrt_same_qubit():
+    """Test Hamiltonian subtraction with other Hamiltonians whose all the terms are with respect to the same qubits.
 
     Check if
-    1. Subtracting two Hamiltonians accumulates all terms correctly,
-    2. Subtracting a scalar updates the constant term,
-    3. Subtracting a Hamiltonian from a scalar negates the terms and adds the scalar to the constant.
+    1. Subtracting two Hamiltonians accumulates all terms correctly.
     """
-    # 1. Subtracting two Hamiltonians accumulates all terms correctly
-    h1 = qm_o.Hamiltonian()
-    h1.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), 1.0)
-    h2 = qm_o.Hamiltonian()
-    h2.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 0),), 1.0)
-    h = h1 - h2
+    index = 0
+    # Iterate over all possible combinations of Pauli operators on the same qubit.
+    for r in range(1, len(qm_o.Pauli) + 1):
+        for perm1 in itertools.permutations(qm_o.Pauli, r):
+            h1 = qm_o.Hamiltonian()
+            for pauli1 in perm1:
+                h1.add_term((qm_o.PauliOperator(pauli1, index),), 1.0)
+
+            # Iterate over all possible combinations of Pauli operators on the same qubit.
+            for perm2 in itertools.permutations(qm_o.Pauli, r):
+                h2 = qm_o.Hamiltonian()
+                for pauli2 in perm2:
+                    h2.add_term((qm_o.PauliOperator(pauli2, index),), 1.0)
+
+                # Sub the two Hamiltonians.
+                h = h1 - h2
+
+                # Calculate the expected Hamiltonian.
+                expected_h = qm_o.Hamiltonian()
+
+                for pauli in perm1:
+                    expected_h.add_term((qm_o.PauliOperator(pauli, index),), 1.0)
+                for pauli in perm2:
+                    expected_h.add_term((qm_o.PauliOperator(pauli, index),), -1.0)
+
+                # 1. Subtracting two Hamiltonians accumulates all terms correctly.
+                assert h == expected_h
+
+
+def test_Hamiltonian_sub_wrt_different_qubits():
+    """Test Hamiltonian subtraction with other Hamiltonians whose all the terms are with respect to different qubits.
+
+    Check if
+    1. Subtracting two Hamiltonians accumulates all terms correctly.
+    """
+    index1 = 0
+    index2 = 1
+    # Iterate over all possible combinations of Pauli operators on the same qubit.
+    for r in range(1, len(qm_o.Pauli) + 1):
+        for perm1 in itertools.permutations(qm_o.Pauli, r):
+            h1 = qm_o.Hamiltonian()
+            for pauli1 in perm1:
+                h1.add_term((qm_o.PauliOperator(pauli1, index1),), 1.0)
+
+            # Iterate over all possible combinations of Pauli operators on the same qubit.
+            for perm2 in itertools.permutations(qm_o.Pauli, r):
+                h2 = qm_o.Hamiltonian()
+                for pauli2 in perm2:
+                    h2.add_term((qm_o.PauliOperator(pauli2, index2),), 1.0)
+
+                # Sub the two Hamiltonians.
+                h = h1 - h2
+
+                # Calculate the expected Hamiltonian.
+                expected_h = qm_o.Hamiltonian()
+
+                for pauli in perm1:
+                    expected_h.add_term((qm_o.PauliOperator(pauli, index1),), 1.0)
+                for pauli in perm2:
+                    expected_h.add_term((qm_o.PauliOperator(pauli, index2),), -1.0)
+
+                # 1. Subtracting two Hamiltonians accumulates all terms correctly.
+                assert h == expected_h
+
+
+@pytest.mark.parametrize(
+    "constant", [int(1), float(1.0), float(1.1), complex(1.0, 1.0), complex(1.0, 0.0)]
+)
+def test_Hamiltonian_sub_wrt_constants(constant):
+    """Sub Hamiltonian with constants.
+
+    Check if
+    1. Subtracting a constant to one whose constant is zero updates the constant term,
+    2. Subtracting a constant to one whose constant is not zero updates the constant term.
+    """
+    # Sub constant to Hamiltonian with constant zero.
+    h = qm_o.Hamiltonian()
+    h = h - constant
+    # Create the expected Hamiltonian with the constant.
     expected_h = qm_o.Hamiltonian()
-    expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), 1.0)
-    expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 0),), -1.0)
+    expected_h.constant = -constant
+    # 1. Subtracting a constant to one whose constant is zero updates the constant term,
     assert h == expected_h
-    # 2. Subtracting a scalar updates the constant term
-    h = h1 - 2.0
+
+    # Sub constant to Hamiltonian with constant not zero.
+    h = qm_o.Hamiltonian()
+    initial_constant = 1.0
+    h.constant = initial_constant
+    h = h - constant
+    # Create the expected Hamiltonian with the constant.
     expected_h = qm_o.Hamiltonian()
-    expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), 1.0)
-    expected_h.constant = -2.0
+    expected_h.constant = initial_constant - constant
+    # 2. Subtracting a constant to one whose constant is not zero updates the constant term.
     assert h == expected_h
-    # 3. Subtracting a Hamiltonian from a scalar negates the terms and adds the scalar to the constant
-    h = 2.0 - h1
+
+
+def test_Hamiltonian_rsub_wrt_same_qubit():
+    """Test Hamiltonian right subtraction with other Hamiltonians whose all the terms are with respect to the same qubits.
+
+    Check if
+    1. Subtracting two Hamiltonians accumulates all terms correctly.
+    """
+    index = 0
+    # Iterate over all possible combinations of Pauli operators on the same qubit.
+    for r in range(1, len(qm_o.Pauli) + 1):
+        for perm1 in itertools.permutations(qm_o.Pauli, r):
+
+            # Iterate over all possible combinations of Pauli operators on the same qubit.
+            for perm2 in itertools.permutations(qm_o.Pauli, r):
+                h2 = qm_o.Hamiltonian()
+                for pauli2 in perm2:
+                    h2.add_term((qm_o.PauliOperator(pauli2, index),), 1.0)
+
+                h1 = qm_o.Hamiltonian()
+                for pauli1 in perm1:
+                    h1.add_term((qm_o.PauliOperator(pauli1, index),), 1.0)
+                # Sub the two Hamiltonians.
+                h1 -= h2
+
+                # Calculate the expected Hamiltonian.
+                expected_h = qm_o.Hamiltonian()
+
+                for pauli in perm1:
+                    expected_h.add_term((qm_o.PauliOperator(pauli, index),), 1.0)
+                for pauli in perm2:
+                    expected_h.add_term((qm_o.PauliOperator(pauli, index),), -1.0)
+
+                # 1. Subtracting two Hamiltonians accumulates all terms correctly.
+                assert h1 == expected_h
+
+
+def test_Hamiltonian_rsub_wrt_different_qubits():
+    """Test Hamiltonian right subtraction with other Hamiltonians whose all the terms are with respect to different qubits.
+
+    Check if
+    1. Subtracting two Hamiltonians accumulates all terms correctly.
+    """
+    index1 = 0
+    index2 = 1
+    # Iterate over all possible combinations of Pauli operators on the same qubit.
+    for r in range(1, len(qm_o.Pauli) + 1):
+        for perm1 in itertools.permutations(qm_o.Pauli, r):
+
+            # Iterate over all possible combinations of Pauli operators on the same qubit.
+            for perm2 in itertools.permutations(qm_o.Pauli, r):
+                h2 = qm_o.Hamiltonian()
+                for pauli2 in perm2:
+                    h2.add_term((qm_o.PauliOperator(pauli2, index2),), 1.0)
+
+                h1 = qm_o.Hamiltonian()
+                for pauli1 in perm1:
+                    h1.add_term((qm_o.PauliOperator(pauli1, index1),), 1.0)
+
+                # Sub the two Hamiltonians.
+                h1 -= h2
+
+                # Calculate the expected Hamiltonian.
+                expected_h = qm_o.Hamiltonian()
+
+                for pauli in perm1:
+                    expected_h.add_term((qm_o.PauliOperator(pauli, index1),), 1.0)
+                for pauli in perm2:
+                    expected_h.add_term((qm_o.PauliOperator(pauli, index2),), -1.0)
+
+                # 1. Subtracting two Hamiltonians accumulates all terms correctly.
+                assert h1 == expected_h
+
+
+@pytest.mark.parametrize(
+    "constant", [int(1), float(1.0), float(1.1), complex(1.0, 1.0), complex(1.0, 0.0)]
+)
+def test_Hamiltonian_sub_wrt_constants(constant):
+    """Right sub Hamiltonian with constants.
+
+    Check if
+    1. Subtracting a constant to one whose constant is zero updates the constant term,
+    2. Subtracting a constant to one whose constant is not zero updates the constant term.
+    """
+    # Sub constant to Hamiltonian with constant zero.
+    h = qm_o.Hamiltonian()
+    h -= constant
+    # Create the expected Hamiltonian with the constant.
     expected_h = qm_o.Hamiltonian()
-    expected_h.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), -1.0)
-    expected_h.constant = 2.0
+    expected_h.constant = -constant
+    # 1. Subtracting a constant to one whose constant is zero updates the constant term,
+    assert h == expected_h
+
+    # Sub constant to Hamiltonian with constant not zero.
+    h = qm_o.Hamiltonian()
+    initial_constant = 1.0
+    h.constant = initial_constant
+    h -= constant
+    # Create the expected Hamiltonian with the constant.
+    expected_h = qm_o.Hamiltonian()
+    expected_h.constant = initial_constant - constant
+    # 2. Subtracting a constant to one whose constant is not zero updates the constant term.
     assert h == expected_h
 
 
