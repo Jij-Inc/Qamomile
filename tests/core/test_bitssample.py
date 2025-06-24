@@ -1,11 +1,38 @@
+import pytest
+
 from qamomile.core.bitssample import BitsSample, BitsSampleSet
 
 
-def test_bits_sample_creation():
-    sample = BitsSample(num_occurrences=5, bits=[0, 1, 1, 0])
-    assert sample.num_occurrences == 5
-    assert sample.bits == [0, 1, 1, 0]
-    assert sample.num_bits == 4
+# >>> BitSample >>>
+@pytest.mark.parametrize(
+    "num_occurrences, bits",
+    [
+        (5, [0, 1, 1, 0]),
+        (3, [1, 0, 1]),
+        (2, [0, 0]),
+        (1, [1]),
+        (0, []),
+    ],
+)
+def test_bits_sample_creation(num_occurrences, bits):
+    """Create a BitsSample instance and verify its attributes.
+
+    Check if
+    1. num_occurrences is set correctly,
+    2. bits is set correctly,
+    3. num_bits returns the correct length of the bits list.
+    """
+    sample = BitsSample(num_occurrences=num_occurrences, bits=bits)
+    # 1. num_occurrences is set correctly,
+    assert sample.num_occurrences == num_occurrences
+    # 2. bits is set correctly,
+    assert sample.bits == bits
+    # 3. num_bits returns the correct length of the bits list.
+    num_bits = len(bits)
+    assert sample.num_bits == num_bits
+
+
+# <<< Bit Sample <<<
 
 
 def test_bits_sample_set_creation():
@@ -76,4 +103,3 @@ def test_get_most_common_with_ties():
     assert len(most_common) == 3
     assert most_common[0].num_occurrences == most_common[1].num_occurrences == 2
     assert most_common[2].num_occurrences == 1
-
