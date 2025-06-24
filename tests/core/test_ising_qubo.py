@@ -284,6 +284,44 @@ def test_num_bits(quad, linear, constant):
     assert ising.num_bits() == expected_num_bits
 
 
+@pytest.mark.parametrize(
+    "quad, linear, constant, state",
+    [
+        # Simple case: 2 bits
+        ({(0, 1): 1.0}, {0: 2.0, 1: -1.0}, 3.0, [1, -1]),
+        # Simple case: 3 bits
+        ({(0, 1): 1.0, (1, 2): -2.0}, {0: 1.0, 2: 2.0}, 3.0, [1, -1, 1]),
+        # Only constant
+        ({}, {}, 5.0, [1, -1]),
+        # Only linear
+        ({}, {0: 2.0, 1: -3.0}, 0.0, [1, -1]),
+        # Only quad
+        ({(0, 1): 2.0}, {}, 0.0, [1, -1]),
+        # Empty model
+        ({}, {}, 0.0, []),
+    ],
+)
+def test_calc_energy(quad, linear, constant, state):
+    """Run IsingModel.calc_energy and check the energy calculation.
+
+    Check if
+    1. The energy is calculated correctly for given state.
+    """
+    # Setup: Create an Ising model with given coefficients
+    ising = IsingModel(quad=quad, linear=linear, constant=constant)
+
+    # expected_energy should be calculated as
+    #    quadratic terms * corresponding state (+1/-1) + linear terms * corresponding state (+1/-1) + constant.
+    expected_quad_energy = sum(
+        value * state[i] * state[j] for (i, j), value in ising.quad.items()
+    )
+    expected_linear_energy = sum(value * state[i] for i, value in ising.linear.items())
+    expected_energy = constant + expected_quad_energy + expected_linear_energy
+
+    # 1. The energy is calculated correctly for given state
+    assert ising.calc_energy(state) == expected_energy
+
+
 def test_normalize_by_abs_max():
     # Setup: Create an Ising model with known coefficients
     ising = IsingModel(
