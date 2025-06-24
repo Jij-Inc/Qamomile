@@ -135,6 +135,121 @@ def test_qubo_to_ising_with_simplify(qubo):
 # <<< qubo_to_ising <<<
 
 
+# >>> IsingModel >>>
+@pytest.mark.parametrize(
+    "quad, linear, constant",
+    [
+        # Standard case with both quad and linear terms
+        (
+            {(0, 1): 2.0, (1, 2): -4.0},
+            {0: 1.0, 1: 3.0},
+            6.0,
+        ),
+        # Only constant term
+        ({}, {}, 42.0),
+        # Only linear terms
+        ({}, {0: 1.0, 2: 2.0}, 1.0),
+        # Only quad terms
+        ({(0, 1): 1.0, (2, 3): 2.0}, {}, 0.0),
+        # Empty model
+        ({}, {}, 0.0),
+    ],
+)
+def test_ising_model_creation_without_index_map(quad, linear, constant):
+    """Create an IsingModel instance and verify its attributes.
+
+    Check if
+    1. The constant term is set correctly,
+    2. The linear terms are set correctly,
+    3. The quadratic terms are set correctly,
+    4. index_map is set correctly.
+    """
+    # Setup: Create an Ising model with given coefficients
+    ising = IsingModel(quad=quad, linear=linear, constant=constant)
+    # 1. The constant term is set correctly
+    assert ising.constant == constant
+    # 2. The linear terms are set correctly
+    assert ising.linear == linear
+    # 3. The quadratic terms are set correctly
+    assert ising.quad == quad
+
+    # index_map should be set as same as the given linear and quad terms.
+    expected_index_map = {}
+    for i in linear.keys():
+        expected_index_map[i] = i
+    for i, j in quad.keys():
+        expected_index_map[i] = i
+        expected_index_map[j] = j
+    # 4. index_map is set correctly.
+    assert ising.index_map == expected_index_map
+
+
+@pytest.mark.parametrize(
+    "quad, linear, constant, initial_index_map",
+    [
+        # Standard case with both quad and linear terms and custom index_map
+        (
+            {(0, 1): 2.0, (1, 2): -4.0},
+            {0: 1.0, 1: 3.0},
+            6.0,
+            {0: 10, 1: 11, 2: 12},
+        ),
+        # Only constant term and empty index_map
+        (
+            {},
+            {},
+            42.0,
+            {},
+        ),
+        # Only linear terms and custom index_map
+        (
+            {},
+            {0: 1.0, 2: 2.0},
+            1.0,
+            {0: 5, 2: 7},
+        ),
+        # Only quad terms and custom index_map
+        (
+            {(0, 1): 1.0, (2, 3): 2.0},
+            {},
+            0.0,
+            {0: 2, 1: 3, 2: 4, 3: 5},
+        ),
+        # Empty model and empty index_map
+        (
+            {},
+            {},
+            0.0,
+            {},
+        ),
+    ],
+)
+def test_ising_model_creation_with_index_map(quad, linear, constant, initial_index_map):
+    """Create an IsingModel instance and verify its attributes.
+
+    Check if
+    1. The constant term is set correctly,
+    2. The linear terms are set correctly,
+    3. The quadratic terms are set correctly,
+    4. index_map is set correctly.
+    """
+    # Setup: Create an Ising model with given coefficients
+    ising = IsingModel(
+        quad=quad, linear=linear, constant=constant, index_map=initial_index_map
+    )
+    # 1. The constant term is set correctly
+    assert ising.constant == constant
+    # 2. The linear terms are set correctly
+    assert ising.linear == linear
+    # 3. The quadratic terms are set correctly
+    assert ising.quad == quad
+    # 4. index_map is set correctly.
+    assert ising.index_map == initial_index_map
+
+
+# <<< IsingModel <<<
+
+
 def test_num_bits():
     ising = IsingModel(
         {(0, 1): 2.0, (0, 2): 1.0},
