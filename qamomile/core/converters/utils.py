@@ -1,6 +1,7 @@
 import math
 
-def is_close_zero(value: float,abs_tol = 1e-15) -> bool:
+
+def is_close_zero(value: float, abs_tol=1e-15) -> bool:
     """
     Check if a given floating-point value is close to zero within a small tolerance.
 

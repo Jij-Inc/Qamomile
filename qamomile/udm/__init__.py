@@ -5,8 +5,7 @@ This module implements algorithms for mapping various optimization problems (lik
 to unit disk grid graphs, which can be naturally encoded in neutral-atom quantum computers.
 """
 
-
 from .mwis_solver import QUBOResult, Ising_UnitDiskGraph
 from .transpiler import UDMTranspiler
 
-__all__ = ["QUBOResult", "Ising_UnitDiskGraph","UDMTranspiler"]
+__all__ = ["QUBOResult", "Ising_UnitDiskGraph", "UDMTranspiler"]

@@ -3,8 +3,7 @@ import qamomile.core.circuit as qm_c
 
 
 def convert_parameter(
-    param: qm_c.ParameterExpression,
-    parameters: dict[qm_c.Parameter, qp_c.Parameter]
+    param: qm_c.ParameterExpression, parameters: dict[qm_c.Parameter, qp_c.Parameter]
 ) -> dict[qp_c.Parameter, float]:
     """
     Convert a Qamomile parameter expression to a QuriParts parameter expression.
@@ -52,19 +51,29 @@ def convert_parameter(
                 return left
             case qm_c.BinaryOpeKind.MUL:
                 if len(left) > 0 and len(right) > 0:
-                    raise ValueError("QuriParts does not support non-linear parameter expression.")
+                    raise ValueError(
+                        "QuriParts does not support non-linear parameter expression."
+                    )
                 if len(left) > 0:
-                    param_expr = {param: value * right_const for param, value in left.items()}
+                    param_expr = {
+                        param: value * right_const for param, value in left.items()
+                    }
                 else:
-                    param_expr = {param: value * left_const for param, value in right.items()}
+                    param_expr = {
+                        param: value * left_const for param, value in right.items()
+                    }
                 param_expr[qp_c.CONST] = left_const * right_const
                 if param_expr[qp_c.CONST] == 0:
                     param_expr.pop(qp_c.CONST)
                 return param_expr
             case qm_c.BinaryOpeKind.DIV:
                 if len(right) > 0:
-                    raise ValueError("QuriParts does not support non-linear parameter expression.")
-                param_expr = {param: value / right_const for param, value in left.items()}
+                    raise ValueError(
+                        "QuriParts does not support non-linear parameter expression."
+                    )
+                param_expr = {
+                    param: value / right_const for param, value in left.items()
+                }
                 param_expr[qp_c.CONST] = left_const / right_const
                 if param_expr[qp_c.CONST] == 0:
                     param_expr.pop(qp_c.CONST)

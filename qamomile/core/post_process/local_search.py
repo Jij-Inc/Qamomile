@@ -21,6 +21,7 @@ Key Features:
 from typing import Callable, Optional
 
 import jijmodeling as jm
+import ommx.v1
 import numpy as np
 from qamomile.core.bitssample import BitsSample, BitsSampleSet
 from qamomile.core.converters.converter import QuantumConverter
@@ -40,7 +41,9 @@ class IsingMatrix:
         calc_E_diff: Calculates the change in energy if a specific bit is flipped.
     """
 
-    def __init__(self, quad: Optional[np.ndarray] = None, linear: Optional[np.ndarray] = None):
+    def __init__(
+        self, quad: Optional[np.ndarray] = None, linear: Optional[np.ndarray] = None
+    ):
         """
         Initializes an IsingMatrix instance.
 
@@ -124,7 +127,7 @@ class LocalSearch:
         self.converter = converter
         self.ising = converter.ising_encode()
 
-    def decode(self, result) -> jm.experimental.SampleSet:
+    def decode(self, result) -> ommx.v1.SampleSet:
         """
         Decodes the result obtained from a local search into a jijmodeling SampleSet.
 
@@ -132,7 +135,7 @@ class LocalSearch:
             result (np.ndarray): The final state of the Ising model after local search.
 
         Returns:
-            jm.experimental.SampleSet: The decoded results.
+            ommx.v1.SampleSet: The decoded results.
         """
         sample = BitsSample(1, np.where(result == -1, 1, 0).tolist())
         sample_set = BitsSampleSet(bitarrays=[sample])
@@ -146,9 +149,9 @@ class LocalSearch:
         """
         Performs first-improvement local search on the Ising model.
 
-        The first-improvement local search method iteratively examines each bit in the current state 
-        of the Ising model to determine if flipping that bit will reduce the system's energy. 
-        If a bit flip results in an energy decrease, the flip is accepted immediately, and the algorithm moves to the next bit. 
+        The first-improvement local search method iteratively examines each bit in the current state
+        of the Ising model to determine if flipping that bit will reduce the system's energy.
+        If a bit flip results in an energy decrease, the flip is accepted immediately, and the algorithm moves to the next bit.
         This process continues until all bits have been evaluated once.
 
         Args:
@@ -172,8 +175,8 @@ class LocalSearch:
         """
         Performs best-improvement local search on the Ising model.
 
-        The best-improvement local search method examines all possible bit flips in the current state of 
-        the Ising model to determine which single bit flip would result in the greatest decrease in energy. 
+        The best-improvement local search method examines all possible bit flips in the current state of
+        the Ising model to determine which single bit flip would result in the greatest decrease in energy.
         It then flips the bit that leads to the most significant energy reduction, provided there is at least one such improvement.
         If no flip results in a reduction in energy, the state remains unchanged.
 
@@ -201,7 +204,7 @@ class LocalSearch:
         initial_state: np.ndarray,
         max_iter: int = -1,
         local_search_method: str = "best_improvement",
-    ) -> jm.experimental.SampleSet:
+    ) -> ommx.v1.SampleSet:
         """
         Runs the local search algorithm until convergence or until a maximum number of iterations.
 
@@ -212,7 +215,7 @@ class LocalSearch:
                 Defaults to "best_improvement".
 
         Returns:
-            jm.experimental.SampleSet: The decoded solution after the local search.
+            ommx.v1.SampleSet: The decoded solution after the local search.
         """
         method_map = {
             "best_improvement": self.best_improvement,
@@ -258,4 +261,3 @@ class LocalSearch:
             counter += 1
 
         return current_state
-

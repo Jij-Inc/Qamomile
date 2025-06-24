@@ -32,8 +32,11 @@ pip install "qamomile[qiskit]"  # For Qiskit integration
 pip install "qamomile[quri-parts]"  # For QuriParts integration
 pip install "qamomile[pennylane]"  # For QuriParts integration
 pip install "qamomile[qutip]"  # For QuTiP integration
+pip install "qamomile[cudaq]"  # For CUDA-Q integration
 pip install "qamomile[udm]"  # For bloqade-analog integration
 ```
+
+Note that, CUDA-Q is currently supported only on Linux (see https://nvidia.github.io/cuda-quantum/latest/using/install/local_installation.html#dependencies-and-compatibility).
 
 ## Quick Start
 
@@ -41,7 +44,6 @@ Here's a simple example of how to use Qamomile with QAOA:
 
 ```python
 import jijmodeling as jm
-import jijmodeling_transpiler.core as jmt
 from qamomile.core.converters.qaoa import QAOAConverter
 from qamomile.qiskit.transpiler import QiskitTranspiler
 
@@ -56,8 +58,9 @@ problem += jm.sum([i, j], Q[i, j] * x[i] * x[j])
 # Prepare instance data
 instance_data = {"Q": [[0.1, 0.2, -0.1], [0.2, 0.3, 0.4], [-0.1, 0.4, 0.0]]}
 
-# Compile the problem
-compiled_instance = jmt.compile_model(problem, instance_data)
+# Have an intermediate representation of the problem with the instance data substituted
+interpreter = jm.Interpreter(instance_data)
+compiled_instance = interpreter.eval_problem(problem)
 
 # Create QAOA converter
 qaoa_converter = QAOAConverter(compiled_instance)

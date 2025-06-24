@@ -33,9 +33,7 @@ from .parameter_converter import convert_parameter
 from .exceptions import QamomileQuriPartsTranspileError
 
 
-class QuriPartsTranspiler(
-    QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
-):
+class QuriPartsTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]):
     """
     Transpiler class for converting between Qamomile and QuriParts quantum objects.
 
@@ -64,10 +62,11 @@ class QuriPartsTranspiler(
                 qamomile_circuit.num_qubits, qamomile_circuit.num_clbits
             )
             self.param_mapping = {
-                param: qp_circuit.add_parameter(param.name)
-                for param in parameters
+                param: qp_circuit.add_parameter(param.name) for param in parameters
             }
-            return self._circuit_convert(qamomile_circuit, qp_circuit, self.param_mapping)
+            return self._circuit_convert(
+                qamomile_circuit, qp_circuit, self.param_mapping
+            )
         except Exception as e:
             raise QamomileQuriPartsTranspileError(f"Error converting circuit: {str(e)}")
 
@@ -108,14 +107,14 @@ class QuriPartsTranspiler(
             elif isinstance(gate, qm_c.ThreeQubitGate):
                 qp_circuit = _three_qubit_gate(gate, qp_circuit)
             elif isinstance(gate, qm_c.ParametricExpGate):
-                qp_operator=self.transpile_hamiltonian(gate.hamiltonian)
-                qp_circuit = _parametric_exp_gate(gate, qp_circuit, parameters=param_mapping, qp_operator=qp_operator )
+                qp_operator = self.transpile_hamiltonian(gate.hamiltonian)
+                qp_circuit = _parametric_exp_gate(
+                    gate, qp_circuit, parameters=param_mapping, qp_operator=qp_operator
+                )
             elif isinstance(gate, qm_c.Operator):
                 qp_circuit = self._circuit_convert(
-                                    gate.circuit,
-                                    qp_circuit,
-                                    param_mapping
-                                )
+                    gate.circuit, qp_circuit, param_mapping
+                )
             elif isinstance(gate, qm_c.MeasurementGate):
                 # QURI-Parts circuits don't have measurement gates
                 pass
@@ -126,8 +125,7 @@ class QuriPartsTranspiler(
         return qp_circuit
 
     def convert_result(
-        self,
-        result: tuple[collections.Counter[int], int]
+        self, result: tuple[collections.Counter[int], int]
     ) -> qm_bs.BitsSampleSet:
         """
         Convert QuriParts measurement results to Qamomile BitsSampleSet.
@@ -142,11 +140,8 @@ class QuriPartsTranspiler(
         counter, num_bits = result
         int_counts = dict(counter)
         return qm_bs.BitsSampleSet.from_int_counts(int_counts, num_bits)
-    
-    def transpile_hamiltonian(
-        self,
-        operator: qm_o.Hamiltonian
-    ) -> qp_o.Operator:
+
+    def transpile_hamiltonian(self, operator: qm_o.Hamiltonian) -> qp_o.Operator:
         """
         Convert a Qamomile Hamiltonian to a QuriParts Operator.
 
@@ -171,7 +166,9 @@ class QuriPartsTranspiler(
                     case qm_o.Pauli.Z:
                         pauli_list.append((pauli.index, qp_o.SinglePauli.Z))
                     case _:
-                        raise NotImplementedError("Only Pauli X, Y, and Z are supported")
+                        raise NotImplementedError(
+                            "Only Pauli X, Y, and Z are supported"
+                        )
 
             qp_pauli_terms[qp_o.pauli_label(pauli_list)] = coeff
         h = qp_o.Operator(qp_pauli_terms)
@@ -182,7 +179,7 @@ class QuriPartsTranspiler(
 
 def _single_qubit_gate(
     gate: qm_c.SingleQubitGate,
-    qp_circuit: qp_c.LinearMappedUnboundParametricQuantumCircuit
+    qp_circuit: qp_c.LinearMappedUnboundParametricQuantumCircuit,
 ) -> qp_c.LinearMappedUnboundParametricQuantumCircuit:
     """Apply a single qubit gate to the quri-parts circuit."""
     gate_map = {
@@ -215,7 +212,7 @@ def _parametric_single_qubit_gate(
 
 def _two_qubit_gate(
     gate: qm_c.TwoQubitGate,
-    qp_circuit: qp_c.LinearMappedUnboundParametricQuantumCircuit
+    qp_circuit: qp_c.LinearMappedUnboundParametricQuantumCircuit,
 ) -> qp_c.LinearMappedUnboundParametricQuantumCircuit:
     """Apply a two qubit gate to the quri-parts circuit."""
     gate_map = {
@@ -242,21 +239,15 @@ def _parametric_two_qubit_gate(
         #     qk_circuit.crz(angle, gate.control, gate.target)
         case qm_c.ParametricTwoQubitGateType.RXX:
             qp_circuit.add_ParametricPauliRotation_gate(
-                [gate.control, gate.target],
-                pauli_ids=[1, 1],
-                angle=angle
+                [gate.control, gate.target], pauli_ids=[1, 1], angle=angle
             )
         case qm_c.ParametricTwoQubitGateType.RYY:
             qp_circuit.add_ParametricPauliRotation_gate(
-                [gate.control, gate.target],
-                pauli_ids=[2, 2],
-                angle=angle
+                [gate.control, gate.target], pauli_ids=[2, 2], angle=angle
             )
         case qm_c.ParametricTwoQubitGateType.RZZ:
             qp_circuit.add_ParametricPauliRotation_gate(
-                [gate.control, gate.target],
-                pauli_ids=[3, 3],
-                angle=angle
+                [gate.control, gate.target], pauli_ids=[3, 3], angle=angle
             )
         case _:
             raise QamomileQuriPartsTranspileError(
@@ -267,12 +258,13 @@ def _parametric_two_qubit_gate(
 
 def _three_qubit_gate(
     gate: qm_c.ThreeQubitGate,
-    qp_circuit: qp_c.LinearMappedUnboundParametricQuantumCircuit
+    qp_circuit: qp_c.LinearMappedUnboundParametricQuantumCircuit,
 ) -> qp_c.LinearMappedUnboundParametricQuantumCircuit:
     """Apply a three qubit gate to the quri-parts circuit."""
     if gate.gate == qm_c.ThreeQubitGateType.CCX:
         qp_circuit.add_TOFFOLI_gate(gate.control1, gate.control2, gate.target)
     return qp_circuit
+
 
 def _parametric_exp_gate(
     gate: qm_c.ParametricExpGate,
@@ -283,6 +275,6 @@ def _parametric_exp_gate(
     """Apply an exponential pauli rotation gate to the quri-parts circuit."""
     param_fn = convert_parameter(gate.parameter, parameters=parameters)
     for key in param_fn:
-        param_fn[key]=-param_fn[key]
+        param_fn[key] = -param_fn[key]
     add_parametric_commuting_paulis_exp_gate(qp_circuit, param_fn, qp_operator)
     return qp_circuit
