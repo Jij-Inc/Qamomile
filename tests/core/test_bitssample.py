@@ -82,11 +82,33 @@ def test_bits_sample_set_creation_with_empty_sample_set():
     assert sample_set_from_int_counts.bitarrays == sample_set.bitarrays
 
 
-def test_get_int_counts():
-    samples = [BitsSample(3, [0, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1, 0])]
+@pytest.mark.parametrize(
+    "samples",
+    [
+        ([BitsSample(3, [0, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1, 0])]),
+        ([BitsSample(1, [1]), BitsSample(4, [0])]),
+        ([BitsSample(5, [1, 0, 1]), BitsSample(2, [0, 0, 1])]),
+    ],
+)
+def test_get_int_counts(samples):
+    """Run the get_int_counts method of BitsSampleSet.
+
+    Check if
+    1. The integer counts are correctly computed from the samples.
+    """
     sample_set = BitsSampleSet(samples)
     int_counts = sample_set.get_int_counts()
-    assert int_counts == {0: 3, 1: 2, 2: 1}
+
+    # Create expected counts by converting bits to integers.
+    expected_counts = {
+        # applying str to bits converts them into a string of '0's and '1's,
+        # then joining them into a single string,
+        # and finally converting that string to an integer with base 2.
+        int("".join(map(str, bits_sample.bits)), 2): bits_sample.num_occurences
+        for bits_sample in samples
+    }
+    # 1. The integer counts are correctly computed from the samples.
+    assert int_counts == expected_counts
 
 
 def test_from_int_counts():
