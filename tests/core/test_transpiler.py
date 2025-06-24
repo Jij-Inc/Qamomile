@@ -4,6 +4,7 @@ from tests.mock import (
     InvalidTranspilerNoConvertResult,
     InvalidTranspilerNoTranspileCircuit,
     InvalidTranspilerNoTranspileHamiltonian,
+    InvalidTranspilerCallingAbstractMethods,
     ValidTranspilerWithAllImplementations,
 )
 
@@ -59,3 +60,47 @@ def test_creation_with_all_implementations():
     transpiler.transpile_hamiltonian(1)
     # 5. transpile_operators can be called without error.
     transpiler.transpile_operators([1, 2, 3])
+
+
+def test_convert_result():
+    """Run the convert_result method of InvalidTranspilerCallingAbstractMethods, which calls an abstract method.
+
+    Check if
+    1. NotImplementedError is raised.
+    """
+    transpiler = InvalidTranspilerCallingAbstractMethods()
+    with pytest.raises(NotImplementedError):
+        transpiler.convert_result(1)
+
+
+def test_transpile_circuit():
+    """Run the transpile_circuit method of InvalidTranspilerCallingAbstractMethods, which calls an abstract method.
+
+    Check if
+    1. NotImplementedError is raised.
+    """
+    transpiler = InvalidTranspilerCallingAbstractMethods()
+    with pytest.raises(NotImplementedError):
+        transpiler.transpile_circuit(1)
+
+
+def test_transpile_hamiltonian():
+    """Run the transpile_hamiltonian method of InvalidTranspilerCallingAbstractMethods, which calls an abstract method.
+
+    Check if
+    1. NotImplementedError is raised.
+    """
+    transpiler = InvalidTranspilerCallingAbstractMethods()
+    with pytest.raises(NotImplementedError):
+        transpiler.transpile_hamiltonian(1)
+
+
+def test_transpile_operators():
+    """Run the transpile_operators method of InvalidTranspilerCallingAbstractMethods, which eventually calls an abstract method.
+
+    Check if
+    1. NotImplementedError is raised.
+    """
+    transpiler = InvalidTranspilerCallingAbstractMethods()
+    with pytest.raises(NotImplementedError):
+        transpiler.transpile_operators([1, 2, 3])

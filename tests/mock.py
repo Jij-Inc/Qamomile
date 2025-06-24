@@ -49,6 +49,19 @@ class InvalidTranspilerNoTranspileHamiltonian(QuantumSDKTranspiler[int]):
         pass
 
 
+class InvalidTranspilerCallingAbstractMethods(QuantumSDKTranspiler[int]):
+    """Mock class for QuantumSDKTranspiler that calls an abstract method."""
+
+    def convert_result(self, result):
+        return super().convert_result(result)
+
+    def transpile_circuit(self, circuit):
+        return super().transpile_circuit(circuit)
+
+    def transpile_hamiltonian(self, operator):
+        return super().transpile_hamiltonian(operator)
+
+
 class ValidTranspilerWithAllImplementations(QuantumSDKTranspiler[int]):
     """Mock class for QuantumSDKTranspiler with all methods implemented."""
 
