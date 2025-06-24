@@ -14,6 +14,10 @@ Qamomileチュートリアルへようこそ！このガイドでは、量子最
 - **PennyLane**
 - **Qutip**
 
+## 対応している中性原子量子コンピュータ SDK
+
+- **bloqade-analog**
+
 ## チュートリアル一覧
 
 - [量子回路の構築](building_quantum_circuits.ipynb)：Qamomileを使って量子回路を構築する方法を学びます。
@@ -22,3 +26,4 @@ Qamomileチュートリアルへようこそ！このガイドでは、量子最
 - [QuriPartsTranspiler を使う](Using_the_QuriPartsTranspiler_in_Qamomile.ipynb)：QamomileからQuri-Partsへトランスパイルする方法を学びます。
 - [PennyLaneTranspiler を使う](Using_the_PennyLaneTranspiler_in_Qamomile.ipynb)：QamomileからPennyLaneへトランスパイルする方法を学びます。
 - [QuTiPTranspiler を使う](quantum_annealing.ipynb)：QuTiPの組み込み機能を用いて量子アニーリングを実行する方法を学びます。
+- [UDMTranspiler を使う](UDG_demo.ipynb): Qamomileからbloqade-analogへトランスパイルする方法を学びます
