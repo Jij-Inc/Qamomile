@@ -23,11 +23,13 @@ parts:
         - file: tutorial/usage/Using_the_QuriPartsTranspiler_in_Qamomile
         - file: tutorial/usage/Using_the_PennyLaneTranspiler_in_Qamomile
         - file: tutorial/usage/quantum_annealing
+        - file: tutorial/usage/UDG_demo
 
   - caption: Solving Problems with QAOA
     chapters:
     - file: tutorial/qaoa/index_qaoa
       sections:
+      - file: tutorial/qaoa/qaoa
       - file: tutorial/qaoa/maxcut
       - file: tutorial/qaoa/graph_partition
       - file: tutorial/qaoa/vertex_cover

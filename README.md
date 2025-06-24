@@ -33,6 +33,7 @@ pip install "qamomile[quri-parts]"  # For QuriParts integration
 pip install "qamomile[pennylane]"  # For QuriParts integration
 pip install "qamomile[qutip]"  # For QuTiP integration
 pip install "qamomile[cudaq]"  # For CUDA-Q integration
+pip install "qamomile[udm]"  # For bloqade-analog integration
 ```
 
 Note that, CUDA-Q is currently supported only on Linux (see https://nvidia.github.io/cuda-quantum/latest/using/install/local_installation.html#dependencies-and-compatibility).
