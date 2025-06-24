@@ -111,22 +111,73 @@ def test_get_int_counts(samples):
     assert int_counts == expected_counts
 
 
-def test_from_int_counts():
-    int_counts = {0: 3, 1: 2, 2: 1}
-    sample_set = BitsSampleSet.from_int_counts(int_counts, bit_length=2)
-    assert len(sample_set.bitarrays) == 3
-    assert any(
-        sample.bits == [0, 0] and sample.num_occurrences == 3
-        for sample in sample_set.bitarrays
-    )
-    assert any(
-        sample.bits == [1, 0] and sample.num_occurrences == 2
-        for sample in sample_set.bitarrays
-    )
-    assert any(
-        sample.bits == [0, 1] and sample.num_occurrences == 1
-        for sample in sample_set.bitarrays
-    )
+@pytest.mark.parametrize(
+    "int_counts, bit_length, expected_samples",
+    [
+        # Simple case with one bit length.
+        (
+            {0: 3, 1: 2},
+            1,
+            [
+                {"bits": [0], "num_occurrences": 3},
+                {"bits": [1], "num_occurrences": 2},
+            ],
+        ),
+        # Simple case with larger bit length.
+        (
+            {7: 1, 0: 5},
+            3,
+            [
+                {"bits": [1, 1, 1], "num_occurrences": 1},
+                {"bits": [0, 0, 0], "num_occurrences": 5},
+            ],
+        ),
+        # Simple case with larger bit length and multiple samples.
+        (
+            {0: 3, 1: 2, 2: 1},
+            2,
+            [
+                {"bits": [0, 0], "num_occurrences": 3},
+                {"bits": [1, 0], "num_occurrences": 2},
+                {"bits": [0, 1], "num_occurrences": 1},
+            ],
+        ),
+        # Simple case with only one sample.
+        ({7: 1}, 3, [{"bits": [1, 1, 1], "num_occurrences": 1}]),
+        # Empty int_counts, bit_length 3
+        ({}, 3, []),
+        # Sinple case with larger bit length than actual needed one.
+        (
+            {0: 1, 15: 1},
+            5,
+            [
+                {"bits": [0, 0, 0, 0, 0], "num_occurrences": 1},
+                {"bits": [1, 1, 1, 1, 0], "num_occurrences": 1},
+            ],
+        ),
+    ],  # TODO: Currently, from_int_counts allows bit_length to be smaller than the maximum bit length of the samples. If this is the case, it should be tested as a normal test. Otherwise create an abnormal test for it.
+)
+def test_from_int_counts(int_counts, bit_length, expected_samples):
+    """Run BitsSampleSet.from_int_counts class method.
+
+    Check if
+    1. The sample set is correctly created from a dictionary of integer counts,
+    2. Each sample has the correct bits and occurrence count.
+    """
+    sample_set = BitsSampleSet.from_int_counts(int_counts, bit_length=bit_length)
+    num_samples = len(expected_samples)
+    # 1. The sample set is correctly created from a dictionary of integer counts,
+    assert len(sample_set.bitarrays) == num_samples
+
+    for expected_sample in expected_samples:
+        # 2. Each sample has the correct bits and occurrence count.
+        assert any(
+            (
+                sample.bits == expected_sample["bits"]
+                and sample.num_occurrences == expected_sample["num_occurrences"]
+            )
+            for sample in sample_set.bitarrays
+        )
 
 
 def test_get_most_common():
