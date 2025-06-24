@@ -104,7 +104,7 @@ def test_get_int_counts(samples):
         # applying str to bits converts them into a string of '0's and '1's,
         # then joining them into a single string,
         # and finally converting that string to an integer with base 2.
-        int("".join(map(str, bits_sample.bits)), 2): bits_sample.num_occurences
+        int("".join(map(str, bits_sample.bits)), 2): bits_sample.num_occurrences
         for bits_sample in samples
     }
     # 1. The integer counts are correctly computed from the samples.
