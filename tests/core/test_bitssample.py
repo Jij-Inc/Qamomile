@@ -35,10 +35,51 @@ def test_bits_sample_creation(num_occurrences, bits):
 # <<< Bit Sample <<<
 
 
-def test_bits_sample_set_creation():
-    samples = [BitsSample(3, [0, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1, 0])]
+# >>> BitsSampleSet >>>
+@pytest.mark.parametrize(
+    "samples",
+    [
+        [BitsSample(3, [0, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1, 0])],
+        # TODO: Check if this is a valid test case.
+        [BitsSample(4, [1, 1, 0, 0]), BitsSample(2, [0, 1]), BitsSample(1, [1])],
+        [BitsSample(1, [1])],
+    ],
+)
+def test_bits_sample_set_creation(samples):
+    """Create a BitsSampleSet instance and verify its length.
+
+    Check if
+    1. The number of bitarrays in the set matches the number of samples provided.
+    """
     sample_set = BitsSampleSet(samples)
-    assert len(sample_set.bitarrays) == 3
+    # 1. The number of bitarrays in the set matches the number of samples provided.
+    num_bitarrays = len(samples)
+    assert len(sample_set.bitarrays) == num_bitarrays
+
+
+def test_bits_sample_set_creation_with_empty_sample_set():
+    """Create BitsSampleSet with an empty samples and run its methods.
+    Also, compare the instance created by BitsSampleSet.from_int_counts with an empty int_counts.
+
+    Check if
+    1. get_int_counts returns an empty dict,
+    2. get_most_common returns an empty list,
+    3. total_samples returns 0,
+    4. from_int_counts with an empty int_counts returns an empty BitsSampleSet being the same as the first creation in terms of their bitarrays.
+    """
+    sample_set = BitsSampleSet([])
+    # 1. get_int_counts returns an empty dict,
+    assert sample_set.get_int_counts() == {}
+    # 2. get_most_common returns an empty list,
+    assert sample_set.get_most_common() == []
+    # 3. total_samples returns 0.
+    assert sample_set.total_samples() == 0
+    # 4. from_int_counts with an empty int_counts returns an empty BitsSampleSet being the same as the first creation in terms of their bitarrays.
+    empty_int_counts = {}
+    sample_set_from_int_counts = BitsSampleSet.from_int_counts(
+        int_counts=empty_int_counts, bit_length=0
+    )
+    assert sample_set_from_int_counts.bitarrays == sample_set.bitarrays
 
 
 def test_get_int_counts():
@@ -81,13 +122,6 @@ def test_total_samples():
     assert sample_set.total_samples() == 6
 
 
-def test_empty_sample_set():
-    sample_set = BitsSampleSet([])
-    assert sample_set.get_int_counts() == {}
-    assert sample_set.get_most_common() == []
-    assert sample_set.total_samples() == 0
-
-
 def test_from_int_counts_with_larger_bit_length():
     int_counts = {0: 1, 15: 1}  # 15 is 1111 in binary
     sample_set = BitsSampleSet.from_int_counts(int_counts, bit_length=5)
@@ -103,3 +137,6 @@ def test_get_most_common_with_ties():
     assert len(most_common) == 3
     assert most_common[0].num_occurrences == most_common[1].num_occurrences == 2
     assert most_common[2].num_occurrences == 1
+
+
+# <<< BitsSampleSet <<<
