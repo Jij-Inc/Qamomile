@@ -5,10 +5,11 @@ import random
 import math
 import qamomile.core.operator as qm_o
 from qamomile.core.circuit import (
+    SingleQubitGateType,
+    SingleQubitGate,
     QuantumCircuit,
     Parameter,
     Value,
-    SingleQubitGateType,
     ParametricSingleQubitGateType,
     TwoQubitGateType,
     ThreeQubitGateType,
@@ -16,6 +17,58 @@ from qamomile.core.circuit import (
     ParametricExpGate,
     Operator,
 )
+
+
+# >>> SingleQubitGate >>>
+def test_single_qubit_gate_type():
+    """Verify if all single qubit gates are present in the SingleQubitGateType enum.
+
+    Check if
+    1. SingleQubitGateType.H exists,
+    2. SingleQubitGateType.X exists,
+    3. SingleQubitGateType.Y exists,
+    4. SingleQubitGateType.Z exists,
+    5. SingleQubitGateType.S exists,
+    6. SingleQubitGateType.T exists,
+    7. The length of SingleQubitGateType is 6.
+    """
+    # 1. SingleQubitGateType.H exists,
+    assert SingleQubitGateType.H
+    # 2. SingleQubitGateType.X exists,
+    assert SingleQubitGateType.X
+    # 3. SingleQubitGateType.Y exists,
+    assert SingleQubitGateType.Y
+    # 4. SingleQubitGateType.Z exists,
+    assert SingleQubitGateType.Z
+    # 5. SingleQubitGateType.S exists,
+    assert SingleQubitGateType.S
+    # 6. SingleQubitGateType.T exists,
+    assert SingleQubitGateType.T
+    # 7. The length of SingleQubitGateType is 6.
+    assert len(SingleQubitGateType) == 6
+
+
+@pytest.mark.parametrize(
+    "gate",
+    [single_qubit_gate_type for single_qubit_gate_type in SingleQubitGateType],
+)
+@pytest.mark.parametrize("qubit", [0, 1, 2])
+def test_single_qubit_gate(gate, qubit):
+    """Create an instance of SingleQubitGate.
+
+    Check if
+    1. its gate is the same as the given gate,
+    2. its qubit is the same as the given qubit.
+    """
+    single_qubit_gate = SingleQubitGate(gate, qubit)
+
+    # 1. its gate is the same as the given gate,
+    assert single_qubit_gate.gate == gate
+    # 2. its qubit is the same as the given qubit.
+    assert single_qubit_gate.qubit == qubit
+
+
+# <<< SingleQubitGate <<<
 
 
 def test_quantum_circuit_initialization():
