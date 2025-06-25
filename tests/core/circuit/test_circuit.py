@@ -25,6 +25,7 @@ from qamomile.core.circuit import (
     Value,
     Operator,
 )
+from tests.mock import UnsupportedGate
 
 
 # >>> SingleQubitGate >>>
@@ -789,3 +790,118 @@ def test_invalid_qubit_index():
     qc = QuantumCircuit(1)
     with pytest.raises(ValueError):
         qc.x(1)
+
+
+# <<< QuantumCircuit <<<
+
+
+# >>> Operator >>>
+def test_operator_creation_default_manually():
+    """Create an Operator with default parameters.
+
+    Check if
+    1. the circuit is the same as the given circuit,
+    2. the label is None,
+    """
+    qc = QuantumCircuit(2)
+    operator = Operator(qc)
+    # 1. the circuit is the same as the given circuit,
+    assert operator.circuit == qc
+    # 2. the name is None,
+    assert operator.label is None
+
+    qc = QuantumCircuit(3, 2)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.ccx(0, 1, 2)
+    qc.measure_all()
+    operator = Operator(qc)
+    # 1. the circuit is the same as the given circuit,
+    assert operator.circuit == qc
+    # 2. the name is None,
+    assert operator.label is None
+
+
+@pytest.mark.parametrize("label", ["test", "Q!U!A!N!T!U!M!O!P!E!R!A!T!O!R!", None])
+def test_operator_creation_with_label(label):
+    """Create an Operator with default parameters.
+
+    Check if
+    1. the circuit is the same as the given circuit,
+    2. the label is the given label,
+    """
+    qc = QuantumCircuit(2)
+    operator = Operator(circuit=qc, label=label)
+    # 1. the circuit is the same as the given circuit,
+    assert operator.circuit == qc
+    # 2. the label is the given label,
+    assert operator.label == label
+
+    qc = QuantumCircuit(3, 2)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.ccx(0, 1, 2)
+    qc.measure_all()
+    operator = Operator(circuit=qc, label=label)
+    # 1. the circuit is the same as the given circuit,
+    assert operator.circuit == qc
+    # 2. the label is the given label,
+    assert operator.label == label
+
+
+def test_operated_qubits():
+    """Run Operator.operated_qubits on a QuantumCircuit with various gates.
+
+    Check if
+    1. the operated qubits are as expected.
+    """
+    np.random.seed(901)  # For reproducibility
+
+    num_qubits = 10
+
+    num_attempts = 50
+    for _ in range(num_attempts):
+        qubits = np.random.randint(0, num_qubits, size=27)
+
+        qc = QuantumCircuit(num_qubits)
+        qc.h(qubits[0])
+        qc.x(qubits[1])
+        qc.y(qubits[2])
+        qc.z(qubits[3])
+        qc.s(qubits[4])
+        qc.t(qubits[5])
+        qc.cx(qubits[6], qubits[7])
+        qc.cz(qubits[8], qubits[9])
+        qc.crx(Parameter("theta"), qubits[10], qubits[11])
+        qc.cry(Parameter("phi"), qubits[12], qubits[13])
+        qc.crz(Parameter("gamma"), qubits[14], qubits[15])
+        qc.rxx(Parameter("delta"), qubits[16], qubits[17])
+        qc.ryy(Parameter("epsilon"), qubits[18], qubits[19])
+        qc.rzz(Parameter("zeta"), qubits[20], qubits[21])
+        qc.ccx(qubits[22], qubits[23], qubits[24])
+        qc.exp_evolution(Parameter("omega"), qm_o.X(qubits[25]))
+
+        qc_operator = QuantumCircuit(num_qubits)
+        qc_operator.h(qubits[26])
+        qc.append(qc_operator)
+
+        operated_qubit = set(Operator(qc).operated_qubits())
+        expected_qubits = set(qubits)
+        # 1. the operated qubits are as expected.
+        assert operated_qubit == expected_qubits
+
+
+def test_operated_qubits_with_unsupported_gate():
+    """Run Operator.operated_qubits on a QuantumCircuit with an unsupported gate.
+
+    Check if
+    1. a ValueError is raised.
+    """
+    qc = QuantumCircuit(1)
+    qc.append(UnsupportedGate())
+
+    with pytest.raises(ValueError):
+        Operator(qc).operated_qubits()
+
+
+# <<< Operator <<<
