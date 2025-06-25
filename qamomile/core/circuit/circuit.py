@@ -250,7 +250,7 @@ class QuantumCircuit:
         if isinstance(gate, (SingleQubitGate, ParametricSingleQubitGate)):
             if not gate.qubit < self.num_qubits:
                 raise ValueError(f"Invalid qubit index: {gate.qubit}")
-        elif isinstance(gate, TwoQubitGate):
+        elif isinstance(gate, (TwoQubitGate, ParametricTwoQubitGate)):
             control_q_check = gate.control < self.num_qubits
             target_q_check = gate.target < self.num_qubits
             if not (control_q_check and target_q_check):
@@ -280,6 +280,8 @@ class QuantumCircuit:
                 raise ValueError(
                     f"Invalid index. qubit: {gate.qubit}, classical bit: {gate.cbit}"
                 )
+        else:
+            raise ValueError(f"Unsupported gate type: {type(gate)}")
 
         self.gates.append(gate)
 
