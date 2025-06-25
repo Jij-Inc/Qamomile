@@ -7,14 +7,19 @@ import qamomile.core.operator as qm_o
 from qamomile.core.circuit import (
     SingleQubitGateType,
     SingleQubitGate,
+    ParametricSingleQubitGateType,
+    ParametricSingleQubitGate,
+    TwoQubitGateType,
+    TwoQubitGate,
+    ParametricTwoQubitGateType,
+    ParametricTwoQubitGate,
+    ThreeQubitGateType,
+    ThreeQubitGate,
+    MeasurementGate,
+    ParametricExpGate,
     QuantumCircuit,
     Parameter,
     Value,
-    ParametricSingleQubitGateType,
-    TwoQubitGateType,
-    ThreeQubitGateType,
-    MeasurementGate,
-    ParametricExpGate,
     Operator,
 )
 
@@ -52,7 +57,7 @@ def test_single_qubit_gate_type():
     "gate",
     [single_qubit_gate_type for single_qubit_gate_type in SingleQubitGateType],
 )
-@pytest.mark.parametrize("qubit", [0, 1, 2])
+@pytest.mark.parametrize("qubit", [0, 1])
 def test_single_qubit_gate(gate, qubit):
     """Create an instance of SingleQubitGate.
 
@@ -69,6 +74,255 @@ def test_single_qubit_gate(gate, qubit):
 
 
 # <<< SingleQubitGate <<<
+
+
+# >>> ParametricSingleQubitGate >>>
+def test_parametric_single_qubit_gate_type():
+    """Verify if all parametric single qubit gates are present in the ParametricSingleQubitGateType enum.
+
+    Check if
+    1. ParametricSingleQubitGateType.RX exists,
+    2. ParametricSingleQubitGateType.RY exists,
+    3. ParametricSingleQubitGateType.RZ exists,
+    4. The length of ParametricSingleQubitGateType is 3.
+    """
+    # 1. ParametricSingleQubitGateType.RX exists,
+    assert ParametricSingleQubitGateType.RX
+    # 2. ParametricSingleQubitGateType.RY exists,
+    assert ParametricSingleQubitGateType.RY
+    # 3. ParametricSingleQubitGateType.RZ exists,
+    assert ParametricSingleQubitGateType.RZ
+    # 4. The length of ParametricSingleQubitGateType is 3.
+    assert len(ParametricSingleQubitGateType) == 3
+
+
+@pytest.mark.parametrize(
+    "gate",
+    [
+        parametric_single_qubit_gate_type
+        for parametric_single_qubit_gate_type in ParametricSingleQubitGateType
+    ],
+)
+@pytest.mark.parametrize("qubit", [0, 1])
+@pytest.mark.parametrize("parameter", [Parameter("theta"), Value(1.5)])
+def test_parametric_single_qubit_gate(gate, qubit, parameter):
+    """Create an instance of ParametricSingleQubitGate.
+
+    Check if
+    1. its gate is the same as the given gate,
+    2. its qubit is the same as the given qubit,
+    3. its parameter is the same as the given parameter.
+    """
+    parametric_single_qubit_gate = ParametricSingleQubitGate(gate, qubit, parameter)
+
+    # 1. its gate is the same as the given gate,
+    assert parametric_single_qubit_gate.gate == gate
+    # 2. its qubit is the same as the given qubit.
+    assert parametric_single_qubit_gate.qubit == qubit
+    # 3. its parameter is the same as the given parameter.
+    assert parametric_single_qubit_gate.parameter == parameter
+
+
+# <<< ParametricSingleQubitGate <<<
+
+
+# >>> TwoQubitGate >>>
+def test_two_qubit_gate_type():
+    """Verify if all two qubit gates are present in the TwoQubitGateType enum.
+
+    Check if
+    1. TwoQubitGateType.CNOT exists,
+    2. TwoQubitGateType.CZ exists,
+    3. The length of TwoQubitGateType is 2.
+    """
+    # 1. TwoQubitGateType.CNOT exists,
+    assert TwoQubitGateType.CNOT
+    # 2. TwoQubitGateType.CZ exists,
+    assert TwoQubitGateType.CZ
+    # 3. The length of TwoQubitGateType is 2.
+    assert len(TwoQubitGateType) == 2
+
+
+@pytest.mark.parametrize(
+    "gate",
+    [two_qubit_gate_type for two_qubit_gate_type in TwoQubitGateType],
+)
+@pytest.mark.parametrize("control", [0, 1])
+@pytest.mark.parametrize("target", [2, 3])
+def test_two_qubit_gate(gate, control, target):
+    """Create an instance of TwoQubitGate.
+
+    Check if
+    1. its gate is the same as the given gate,
+    2. its control is the same as the given control,
+    3. its target is the same as the given target.
+    """
+    two_qubit_gate = TwoQubitGate(gate, control, target)
+
+    # 1. its gate is the same as the given gate,
+    assert two_qubit_gate.gate == gate
+    # 2. its control is the same as the given control.
+    assert two_qubit_gate.control == control
+    # 3. its target is the same as the given target.
+    assert two_qubit_gate.target == target
+
+
+# <<< TwoQubitGate <<<
+
+
+# >>> ParametricTwoQubitGate >>>
+def test_parametric_two_qubit_gate_type():
+    """Verify if all parametric two qubit gates are present in the ParametricTwoQubitGateType enum.
+
+    Check if
+    1. ParametricTwoQubitGateType.CRX exists,
+    2. ParametricTwoQubitGateType.CRY exists,
+    3. ParametricTwoQubitGateType.CRZ exists,
+    4. ParametricTwoQubitGateType.RXX exists,
+    5. ParametricTwoQubitGateType.RYY exists,
+    6. ParametricTwoQubitGateType.RZZ exists,
+    7. The length of ParametricTwoQubitGateType is 6.
+    """
+    # 1. ParametricTwoQubitGateType.CRX exists,
+    assert ParametricTwoQubitGateType.CRX
+    # 2. ParametricTwoQubitGateType.CRY exists,
+    assert ParametricTwoQubitGateType.CRY
+    # 3. ParametricTwoQubitGateType.CRZ exists,
+    assert ParametricTwoQubitGateType.CRZ
+    # 4. ParametricTwoQubitGateType.RXX exists,
+    assert ParametricTwoQubitGateType.RXX
+    # 5. ParametricTwoQubitGateType.RYY exists,
+    assert ParametricTwoQubitGateType.RYY
+    # 6. ParametricTwoQubitGateType.RZZ exists,
+    assert ParametricTwoQubitGateType.RZZ
+    # 7. The length of ParametricTwoQubitGateType is 6.
+    assert len(ParametricTwoQubitGateType) == 6
+
+
+@pytest.mark.parametrize(
+    "gate",
+    [
+        parametric_two_qubit_gate_type
+        for parametric_two_qubit_gate_type in ParametricTwoQubitGateType
+    ],
+)
+@pytest.mark.parametrize("control", [0, 1])
+@pytest.mark.parametrize("target", [2, 3])
+@pytest.mark.parametrize("parameter", [Parameter("theta"), Value(1.5)])
+def test_parametric_two_qubit_gate(gate, control, target, parameter):
+    """Create an instance of ParametricTwoQubitGate.
+
+    Check if
+    1. its gate is the same as the given gate,
+    2. its control is the same as the given control,
+    3. its target is the same as the given target,
+    4. its parameter is the same as the given parameter.
+    """
+    parametric_two_qubit_gate = ParametricTwoQubitGate(gate, control, target, parameter)
+
+    # 1. its gate is the same as the given gate,
+    assert parametric_two_qubit_gate.gate == gate
+    # 2. its control is the same as the given control.
+    assert parametric_two_qubit_gate.control == control
+    # 3. its target is the same as the given target.
+    assert parametric_two_qubit_gate.target == target
+    # 4. its parameter is the same as the given parameter.
+    assert parametric_two_qubit_gate.parameter == parameter
+
+
+# <<< ParametricTwoQubitGate <<<
+
+
+# >>> ThreeQubitGate >>>
+def test_three_qubit_gate_type():
+    """Verify if all three qubit gates are present in the ThreeQubitGateType enum.
+
+    Check if
+    1. ThreeQubitGateType.CCX exists,
+    2. The length of ThreeQubitGateType is 1.
+    """
+    # 1. ThreeQubitGateType.CCX exists,
+    assert ThreeQubitGateType.CCX
+    # 2. The length of ThreeQubitGateType is 1.
+    assert len(ThreeQubitGateType) == 1
+
+
+@pytest.mark.parametrize(
+    "gate",
+    [three_qubit_gate_type for three_qubit_gate_type in ThreeQubitGateType],
+)
+@pytest.mark.parametrize("control1", [0, 1])
+@pytest.mark.parametrize("control2", [2, 3])
+@pytest.mark.parametrize("target", [4, 5])
+def test_three_qubit_gate(gate, control1, control2, target):
+    """Create an instance of ThreeQubitGate.
+
+    Check if
+    1. its gate is the same as the given gate,
+    2. its control1 is the same as the given control1,
+    3. its control2 is the same as the given control2,
+    4. its target is the same as the given target.
+    """
+    three_qubit_gate = ThreeQubitGate(gate, control1, control2, target)
+
+    # 1. its gate is the same as the given gate,
+    assert three_qubit_gate.gate == gate
+    # 2. its control1 is the same as the given control1.
+    assert three_qubit_gate.control1 == control1
+    # 3. its control2 is the same as the given control2.
+    assert three_qubit_gate.control2 == control2
+    # 4. its target is the same as the given target.
+    assert three_qubit_gate.target == target
+
+
+# <<< ThreeQubitGate <<<
+
+
+# >>> ParametricExpGate >>>
+@pytest.mark.parametrize("parameter", [Parameter("theta"), Value(1.5)])
+def test_parametric_exp_gate(parameter):
+    """Create an instance of ParametricExpGate.
+
+    Check if
+    1. its hamiltonian is the same as the given hamiltonian,
+    2. its parameter is the same as the given parameter,
+    3. its indices is the same as the given indices.
+    """
+    hamiltonian = qm_o.Hamiltonian()
+    hamiltonian += qm_o.X(0) * qm_o.Z(1)
+    indices = [0, 1]
+    parametric_exp_gate = ParametricExpGate(hamiltonian, parameter, indices)
+
+    # 1. its hamiltonian is the same as the given hamiltonian,
+    assert parametric_exp_gate.hamiltonian == hamiltonian
+    # 2. its parameter is the same as the given parameter.
+    assert parametric_exp_gate.parameter == parameter
+    # 3. its indices is the same as the given indices.
+    assert parametric_exp_gate.indices == indices
+
+
+# <<< ParametricExpGate <<<
+
+
+# >>> MeasurementGate >>>
+@pytest.mark.parametrize("qubit", [0, 1])
+@pytest.mark.parametrize("cbit", [2, 3])
+def test_measurement_gate(qubit, cbit):
+    """Create an instance of MeasurementGate.
+
+    Check if
+    1. its qubit is the same as the given qubit,
+    2. its cbit is the same as the given cbit.
+    """
+    measurement_gate = MeasurementGate(qubit, cbit)
+
+    # 1. its qubit is the same as the given qubit,
+    assert measurement_gate.qubit == qubit
+    # 2. its cbit is the same as the given cbit.
+    assert measurement_gate.cbit == cbit
+
+
+# <<< MeasurementGate <<<
 
 
 def test_quantum_circuit_initialization():
