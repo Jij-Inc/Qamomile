@@ -395,6 +395,29 @@ def test_quantum_circuit_creation(num_qubits, num_cbits, name):
     assert qc.qubits_label == qc._qubits_label
 
 
+@pytest.mark.parametrize(
+    "new_qubits_label",
+    [
+        {0: "Q0", 1: "Q1"},  # Same
+        {0: "Q0", 1: "Q1", 2: "Q2"},  # Long
+        {0: "Q0"},  # Short
+    ],
+)
+def test_update_qubits_label(new_qubits_label):
+    """Update the _qubits_label of a QuantumCircuit.
+
+    Check if
+    1. the _qubits_label is updated correctly.
+    """
+    qc = QuantumCircuit(2)
+    qc.update_qubits_label(new_qubits_label)
+
+    for index, qubit_label in enumerate(qc.qubits_label):
+        if new_qubits_label.get(index, None) is not None:
+            # 1. the _qubits_label is updated correctly.
+            assert qubit_label == new_qubits_label[index]
+
+
 def test_single_qubit_gates():
     """Add all single qubit gates to a QuantumCircuit.
 
