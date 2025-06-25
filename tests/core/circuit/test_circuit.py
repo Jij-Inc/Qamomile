@@ -325,11 +325,70 @@ def test_measurement_gate(qubit, cbit):
 # <<< MeasurementGate <<<
 
 
-def test_quantum_circuit_initialization():
-    qc = QuantumCircuit(2, 2, name="test_circuit")
-    assert qc.num_qubits == 2
-    assert qc.num_clbits == 2
-    assert qc.name == "test_circuit"
+# >>> QuantumCircuit >>>
+@pytest.mark.parametrize("num_qubits", [0, 1, 2])
+def test_quantum_circuit_creation_default(num_qubits):
+    """Create a QuantumCircuit with a given number of qubits.
+
+    Check if
+    1. the number of qubits is as expected,
+    2. the number of classical bits is zero according to the default constructor,
+    3. the name of the circuit is None according to the default constructor,
+    4. the gates list is empty,
+    5. the _qubits_label is a list whose length is equal to the number of qubits,
+    6. the lement of the _qubits_label is "q{0}", "q{1}", etc,
+    7. the qubits_label returns _qubits_label.
+    """
+    qc = QuantumCircuit(num_qubits)
+    # 1. the number of qubits is as expected,
+    assert qc.num_qubits == num_qubits
+    # 2. the number of classical bits is zero according to the default constructor,
+    assert qc.num_clbits == 0
+    # 3. the name of the circuit is None according to the default constructor,
+    assert qc.name is None
+    # 4. the gates list is empty,
+    assert len(qc.gates) == 0
+    # 5. the _qubits_label is a list whose length is equal to the number of qubits,
+    assert len(qc.qubits_label) == num_qubits
+    # 6. the lement of the _qubits_label is "q{0}", "q{1}", etc,
+    for i in range(num_qubits):
+        assert qc.qubits_label[i] == f"q_{{{i}}}"
+    # 7. the qubits_label returns _qubits_label.
+    assert qc.qubits_label == qc._qubits_label
+
+
+@pytest.mark.parametrize("num_qubits", [0, 1, 2])
+@pytest.mark.parametrize("num_cbits", [0, 1])
+@pytest.mark.parametrize("name", ["test", "Q!U!A!N!T!U!M!C!I!R!C!U!I!T!", None])
+def test_quantum_circuit_creation(num_qubits, num_cbits, name):
+    """Create a QuantumCircuit with a given number of qubits.
+
+    Check if
+    1. the number of qubits is as expected,
+    2. the number of classical bits is as expected,
+    3. the name is as expected,
+    4. the gates list is empty,
+    5. the _qubits_label is a list whose length is equal to the number of qubits,
+    6. the lement of the _qubits_label is "q{0}", "q{1}", etc,
+    7. the qubits_label returns _qubits_label.
+    """
+    qc = QuantumCircuit(num_qubits=num_qubits, num_clbits=num_cbits, name=name)
+
+    # 1. the number of qubits is as expected,
+    assert qc.num_qubits == num_qubits
+    # 2. the number of classical bits is as expected,
+    assert qc.num_clbits == num_cbits
+    # 3. the name is as expected,
+    assert qc.name == name
+    # 4. the gates list is empty,
+    assert len(qc.gates) == 0
+    # 5. the _qubits_label is a list whose length is equal to the number of qubits,
+    assert len(qc.qubits_label) == num_qubits
+    # 6. the lement of the _qubits_label is "q{0}", "q{1}", etc.
+    for i in range(num_qubits):
+        assert qc.qubits_label[i] == f"q_{{{i}}}"
+    # 7. the qubits_label returns _qubits_label.
+    assert qc.qubits_label == qc._qubits_label
 
 
 def test_single_qubit_gates():
