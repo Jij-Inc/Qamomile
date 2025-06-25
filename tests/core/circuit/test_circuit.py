@@ -392,6 +392,17 @@ def test_quantum_circuit_creation(num_qubits, num_cbits, name):
 
 
 def test_single_qubit_gates():
+    """Add all single qubit gates to a QuantumCircuit.
+
+    Check if
+    1. the number of gates is 6,
+    2. the first gate is a Hadamard gate,
+    3. the second gate is an X gate,
+    4. the third gate is a Y gate,
+    5. the fourth gate is a Z gate,
+    6. the fifth gate is an S gate,
+    7. the sixth gate is a T gate,
+    """
     qc = QuantumCircuit(1)
     qc.h(0)
     qc.x(0)
@@ -399,8 +410,20 @@ def test_single_qubit_gates():
     qc.z(0)
     qc.s(0)
     qc.t(0)
+    # 1. the number of gates is 6,
     assert len(qc.gates) == 6
-    assert all(gate.gate in SingleQubitGateType for gate in qc.gates)
+    # 2. the first gate is a Hadamard gate,
+    assert qc.gates[0].gate == SingleQubitGateType.H
+    # 3. the second gate is an X gate,
+    assert qc.gates[1].gate == SingleQubitGateType.X
+    # 4. the third gate is a Y gate,
+    assert qc.gates[2].gate == SingleQubitGateType.Y
+    # 5. the fourth gate is a Z gate,
+    assert qc.gates[3].gate == SingleQubitGateType.Z
+    # 6. the fifth gate is an S gate,
+    assert qc.gates[4].gate == SingleQubitGateType.S
+    # 7. the sixth gate is a T gate,
+    assert qc.gates[5].gate == SingleQubitGateType.T
 
 
 def test_parametric_single_qubit_gates():
