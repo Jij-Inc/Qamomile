@@ -1,5 +1,7 @@
 # File: tests/circuit/test_circuit.py
+import itertools
 
+import numpy as np
 import pytest
 import random
 import math
@@ -18,6 +20,7 @@ from qamomile.core.circuit import (
     MeasurementGate,
     ParametricExpGate,
     QuantumCircuit,
+    ParameterExpression,
     Parameter,
     Value,
     Operator,
@@ -426,84 +429,338 @@ def test_single_qubit_gates():
     assert qc.gates[5].gate == SingleQubitGateType.T
 
 
-def test_parametric_single_qubit_gates():
+@pytest.mark.parametrize(
+    "parameter", [int(1), float(1.0), Parameter("theta"), Value(1.5)]
+)
+def test_parametric_single_qubit_gates(parameter):
+    """Add all parametric single qubit gates to a QuantumCircuit.
+
+    Check if
+    1. the number of gates is 3,
+    2. the first gate is an RX gate with the given parameter,
+    3. the second gate is an RY gate with the given parameter,
+    4. the third gate is an RZ gate with the given parameter,
+    5. the parameter of each gate is ParameterExpression,
+    6. the parameter of each gate is the same as the given value if it is number.
+    """
     qc = QuantumCircuit(1)
-    theta = Parameter("theta")
-    qc.rx(theta, 0)
-    qc.ry(theta, 0)
-    qc.rz(theta, 0)
-    qc2 = QuantumCircuit(1)
-    random_float = random.uniform(0, 4 * math.pi)
-    qc2.rx(random_float, 0)
-    qc2.ry(random_float, 0)
-    qc2.rz(random_float, 0)
+    qc.rx(parameter, 0)
+    qc.ry(parameter, 0)
+    qc.rz(parameter, 0)
 
+    # 1. the number of gates is 3,
     assert len(qc.gates) == 3
-    assert all(gate.gate in ParametricSingleQubitGateType for gate in qc.gates)
-    assert all(gate.parameter == theta for gate in qc.gates)
-    assert all(gate.parameter.value == random_float for gate in qc2.gates)
+    # 2. the first gate is an RX gate with the given parameter,
+    assert qc.gates[0].gate == ParametricSingleQubitGateType.RX
+    # 3. the second gate is an RY gate with the given parameter,
+    assert qc.gates[1].gate == ParametricSingleQubitGateType.RY
+    # 4. the third gate is an RZ gate with the given parameter,
+    assert qc.gates[2].gate == ParametricSingleQubitGateType.RZ
+    for gate in qc.gates:
+        # 5. the parameter of each gate is ParameterExpression,
+        assert isinstance(gate.parameter, ParameterExpression)
+
+        # 6. the parameter of each gate is the same as the given value if the gate has Value.
+        if isinstance(gate.parameter, Value):
+            if isinstance(parameter, Value):
+                assert gate.parameter.value == parameter.value
+            else:
+                assert gate.parameter.value == parameter
 
 
-def test_two_qubit_gates():
-    qc = QuantumCircuit(2)
-    qc.cnot(0, 1)
-    qc.cz(0, 1)
-    assert len(qc.gates) == 2
-    assert all(gate.gate in TwoQubitGateType for gate in qc.gates)
+@pytest.mark.parametrize("control, target", [(0, 1), (1, 0), (0, 2), (2, 0)])
+def test_two_qubit_gates(control, target):
+    """Add all two qubit gates to a QuantumCircuit.
 
-
-def test_three_qubit_gate():
+    Check if
+    1. the number of gates is 3,
+    2. the first gate is a CNOT gate,
+    3. the second gat is a CNOT gate,
+    4. the third gate is a CZ gate,
+    5. the control and target qubits of each gate are as expected.
+    """
     qc = QuantumCircuit(3)
-    qc.ccx(0, 1, 2)
+    qc.cx(control, target)
+    qc.cnot(control, target)
+    qc.cz(control, target)
+
+    # 1. the number of gates is 3,
+    assert len(qc.gates) == 3
+    # 2. the first gate is a CNOT gate,
+    assert qc.gates[0].gate == TwoQubitGateType.CNOT
+    # 3. the second gat is a CNOT gate,
+    assert qc.gates[1].gate == TwoQubitGateType.CNOT
+    # 4. the third gate is a CZ gate,
+    assert qc.gates[2].gate == TwoQubitGateType.CZ
+    # 5. the control and target qubits of each gate are as expected.
+    for gate in qc.gates:
+        assert gate.control == control
+        assert gate.target == target
+
+
+@pytest.mark.parametrize(
+    "parameter", [int(1), float(1.0), Parameter("theta"), Value(1.5)]
+)
+@pytest.mark.parametrize("control, target", [(0, 1), (1, 2)])
+def test_parametric_two_qubit_gates(parameter, control, target):
+    """Add all parametric two qubit gates to a QuantumCircuit.
+
+    Check if
+    1. the number of gates is 6,
+    2. the first gate is a CRX gate with the given parameter,
+    3. the second gate is a CRY gate with the given parameter,
+    4. the third gate is a CRZ gate with the given parameter,
+    5. the fourth gate is an RXX gate with the given parameter,
+    6. the fifth gate is an RYY gate with the given parameter,
+    7. the sixth gate is an RZZ gate with the given parameter,
+    8. the control and target qubits of each gate are as expected,
+    9. the parameter of each gate is ParameterExpression,
+    10. the parameter of each gate is the same as the given value if it is number.
+    """
+    qc = QuantumCircuit(3)
+    qc.crx(parameter, control, target)
+    qc.cry(parameter, control, target)
+    qc.crz(parameter, control, target)
+    qc.rxx(parameter, control, target)
+    qc.ryy(parameter, control, target)
+    qc.rzz(parameter, control, target)
+
+    # 1. the number of gates is 6,
+    assert len(qc.gates) == 6
+    # 2. the first gate is a CRX gate with the given parameter,
+    assert qc.gates[0].gate == ParametricTwoQubitGateType.CRX
+    # 3. the second gate is a CRY gate with the given parameter,
+    assert qc.gates[1].gate == ParametricTwoQubitGateType.CRY
+    # 4. the third gate is a CRZ gate with the given parameter,
+    assert qc.gates[2].gate == ParametricTwoQubitGateType.CRZ
+    # 5. the fourth gate is an RXX gate with the given parameter,
+    assert qc.gates[3].gate == ParametricTwoQubitGateType.RXX
+    # 6. the fifth gate is an RYY gate with the given parameter,
+    assert qc.gates[4].gate == ParametricTwoQubitGateType.RYY
+    # 7. the sixth gate is an RZZ gate with the given parameter,
+    assert qc.gates[5].gate == ParametricTwoQubitGateType.RZZ
+    # 8. the control and target qubits of each gate are as expected,
+    for gate in qc.gates:
+        assert gate.control == control
+        assert gate.target == target
+
+        # 9. the parameter of each gate is ParameterExpression,
+        assert isinstance(gate.parameter, ParameterExpression)
+
+        # 10. the parameter of each gate is the same as the given value if it is number.
+        if isinstance(gate.parameter, Value):
+            print(parameter)
+            print(type(parameter))
+            if isinstance(parameter, Value):
+                assert gate.parameter.value == parameter.value
+            else:
+                assert gate.parameter.value == parameter
+
+
+@pytest.mark.parametrize(
+    "control1, control2, target", [(0, 1, 2), (1, 2, 0), (0, 2, 4)]
+)
+def test_three_qubit_gate(control1, control2, target):
+    """Add a three qubit gate to a QuantumCircuit.
+
+    Check if
+    1. the number of gates is 1,
+    2. the gate is a CCX gate,
+    3. the control1, control2 and target qubits are as expected.
+    """
+    qc = QuantumCircuit(5)
+    qc.ccx(control1, control2, target)
+    # 1. the number of gates is 1,
     assert len(qc.gates) == 1
+    # 2. the gate is a CCX gate,
     assert qc.gates[0].gate == ThreeQubitGateType.CCX
+    # 3. the control1, control2 and target qubits are as expected.
+    for (
+        gate
+    ) in (
+        qc.gates
+    ):  # We don't need this for-loop as of now, when ksk-jij implemented this, but for the future, it might be useful.
+        assert gate.control1 == control1
+        assert gate.control2 == control2
+        assert gate.target == target
 
 
-def test_exp_evolution():
+def test_exp_evolution_manually():
+    """Add a manually constructed parametric exp evolution gate to a QuantumCircuit.
+
+    Check if
+    1. the number of gates is 1,
+    2. the gate is a ParametricExpGate,
+    3. the parameter is as expected,
+    4. the length of indices are as expected,
+    5. the hamiltonian is as expected.
+    """
     hamiltonian = qm_o.Hamiltonian()
     hamiltonian += qm_o.X(0) * qm_o.Z(1)
     qc = QuantumCircuit(2)
     theta = Parameter("theta")
     qc.exp_evolution(theta, hamiltonian)
+    # 1. the number of gates is 1,
     assert len(qc.gates) == 1
+    # 2. the gate is a ParametricExpGate,
     assert isinstance(qc.gates[0], ParametricExpGate)
     assert qc.gates[0].parameter == theta
+    # 4. the length of indices are as expected,
     assert len(qc.gates[0].indices) == 2
+    # 5. the hamiltonian is as expected.
     assert qc.gates[0].hamiltonian == hamiltonian
 
     hamiltonian2 = qm_o.Hamiltonian()
     hamiltonian2 += qm_o.X(0) * qm_o.Y(1) + qm_o.Z(0) * qm_o.X(1)
     qc2 = QuantumCircuit(2)
     qc2.exp_evolution(theta, hamiltonian)
+    # 1. the number of gates is 1,
     assert len(qc2.gates) == 1
+    # 2. the gate is a ParametricExpGate,
     assert isinstance(qc2.gates[0], ParametricExpGate)
+    # 3. the parameter is as expected,
     assert qc2.gates[0].parameter == theta
+    # 4. the length of indices are as expected,
     assert len(qc2.gates[0].indices) == 2
+    # 5. the hamiltonian is as expected.
     assert qc2.gates[0].hamiltonian == hamiltonian
 
 
 def test_invalid_exp_evolution():
+    """Add an invalid exp evolution gate to a QuantumCircuit.
+
+    Check if
+    1. a ValueError is raised.
+    """
     hamiltonian = qm_o.Hamiltonian()
     hamiltonian += qm_o.X(0) * qm_o.Z(1)
     qc = QuantumCircuit(1)
     theta = Parameter("theta")
+    # 1. a ValueError is raised.
     with pytest.raises(ValueError):
         qc.exp_evolution(theta, hamiltonian)
 
 
-def test_measurement():
-    qc = QuantumCircuit(2, 2)
-    qc.measure(0, 0)
-    qc.measure(1, 1)
-    assert len(qc.gates) == 2
+@pytest.mark.parametrize(
+    "num_qubits, num_cbits, target_qubits, target_cbits",
+    [
+        (1, 1, [0], [0]),
+        (1, 2, [0], [1]),
+        (2, 1, [1], [0]),
+        (2, 2, [0], [0]),
+        (2, 2, [1], [1]),
+        (2, 2, [0, 1], [0, 1]),
+        (2, 2, [0, 1], [1, 0]),
+    ],
+)
+def test_measurement(num_qubits, num_cbits, target_qubits, target_cbits):
+    """Add measurements to a QuantumCircuit.
+
+    Check if
+    1. the number of gates is equal to the number of target qubits,
+    2. the number of gates is equal to the number of target classical bits,
+    3. all gates are MeasurementGate instances,
+    4. each gate's qubit matches the corresponding target qubit,
+    5. each gate's cbit matches the corresponding target cbit.
+    """
+    # Create a QuantumCircuit and add measurements.
+    qc = QuantumCircuit(num_qubits, num_cbits)
+    for target_qubit, target_cbit in zip(target_qubits, target_cbits):
+        qc.measure(target_qubit, target_cbit)
+
+    # 1. the number of gates is equal to the number of target qubits,
+    assert len(qc.gates) == len(target_qubits)
+    # 2. the number of gates is equal to the number of target classical bits,
+    assert len(qc.gates) == len(target_cbits)
+    # 3. all gates are MeasurementGate instances,
     assert all(isinstance(gate, MeasurementGate) for gate in qc.gates)
+    for index, gate in enumerate(qc.gates):
+        # 4. each gate's qubit matches the corresponding target qubit,
+        assert gate.qubit == target_qubits[index]
+        # 5. each gate's cbit matches the corresponding target cbit.
+        assert gate.cbit == target_cbits[index]
 
 
-def test_measure_all():
-    qc = QuantumCircuit(3)
-    qc.measure_all()
-    assert len(qc.gates) == 3
-    assert all(isinstance(gate, MeasurementGate) for gate in qc.gates)
+@pytest.mark.parametrize("num_qubits", [1, 2])
+@pytest.mark.parametrize("num_cbits", [1, 2])
+def test_measurement_invalid(num_qubits, num_cbits):
+    """Add measurements to a QuantumCircuit with invalid indices.
+
+    Check if
+    1. a ValueError is raised when trying to measure a qubit that does not exist,
+    2. a ValueError is raised when trying to measure a classical bit that does not exist.
+    """
+    qc = QuantumCircuit(num_qubits, num_cbits)
+
+    # 1. a ValueError is raised when trying to measure a qubit that does not exist,
+    with pytest.raises(ValueError):
+        qc.measure(num_qubits, 0)
+    # 2. a ValueError is raised when trying to measure a classical bit that does not exist.
+    with pytest.raises(ValueError):
+        qc.measure(0, num_cbits)
+
+
+@pytest.mark.parametrize("num_qubits", [1, 2])
+def test_measure_all_with_less_cbits(num_qubits):
+    """Call measure_all on a QuantumCircuit without classical bits.
+
+    Check if
+    1. there is num_cbits classical bits in the circuit,
+    2. the number of gates is equal to the number of qubits,
+    3. the number of classical bits is equal to the number of qubits after measure_all is called,
+    4. all gates are MeasurementGate instances,
+    5. each gate's qubit matches its index,
+    6. each gate's cbit matches its index.
+    """
+    for num_cbits in range(num_qubits):
+        qc = QuantumCircuit(num_qubits, num_cbits)
+
+        # 1. there is num_cbits classical bits in the circuit,
+        assert qc.num_clbits == num_cbits
+
+        qc.measure_all()
+
+        # 2. the number of gates is equal to the number of qubits,
+        assert len(qc.gates) == num_qubits
+        # 3. the number of classical bits is equal to the number of qubits after measure_all is called,
+        assert qc.num_clbits == num_qubits
+        # 4. all gates are MeasurementGate instances,
+        assert all(isinstance(gate, MeasurementGate) for gate in qc.gates)
+        for index, gate in enumerate(qc.gates):
+            # 5. each gate's qubit matches its index,
+            assert gate.qubit == index
+            # 6. each gate's cbit matches its index.
+            assert gate.cbit == index
+
+
+@pytest.mark.parametrize("num_qubits", [1, 2])
+def test_measure_all_with_more_or_eqaul_cbits(num_qubits):
+    """Call measure_all on a QuantumCircuit with more or equal classical bits than qubits.
+
+    Check if
+    1. there is num_cbits classical bits in the circuit,
+    2. the number of gates is equal to the number of qubits,
+    3. all gates are MeasurementGate instances,
+    4. each gate's qubit matches its index,
+    5. each gate's cbit matches its index.
+    """
+    for num_cbits in range(num_qubits, num_qubits + 2):
+        qc = QuantumCircuit(num_qubits, num_cbits)
+
+        # 1. there is num_cbits classical bits in the circuit,
+        assert qc.num_clbits == num_cbits
+
+        qc.measure_all()
+
+        # 2. the number of gates is equal to the number of qubits,
+        assert len(qc.gates) == num_qubits
+        # 3. all gates are MeasurementGate instances,
+        assert all(isinstance(gate, MeasurementGate) for gate in qc.gates)
+        for index, gate in enumerate(qc.gates):
+            # 4. each gate's qubit matches its index,
+            assert gate.qubit == index
+            # 5. each gate's cbit matches its index.
+            assert gate.cbit == index
 
 
 def test_circuit_append():
