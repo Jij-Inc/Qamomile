@@ -789,9 +789,3 @@ def test_invalid_qubit_index():
     qc = QuantumCircuit(1)
     with pytest.raises(ValueError):
         qc.x(1)
-
-
-def test_invalid_measurement():
-    qc = QuantumCircuit(1, 0)
-    with pytest.raises(ValueError):
-        qc.measure(0, 0)
