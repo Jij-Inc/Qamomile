@@ -254,4 +254,132 @@ def test_rmul_with_real(other):
     assert expr.kind == BinaryOpeKind.MUL
 
 
+def test_neg():
+    """Negate a ParameterExpressionChildMock instance.
+
+    Check if
+    1. the returned value is BinaryOperator.
+    2. the returned value's left is Value.
+    3. the returned value's left's value is -1.0.
+    4. the returned value's right is the same as the expr.
+    5. the returned value's kind is BinaryOpeKind.MUL.
+    """
+    expr = ParameterExpressionChildMock()
+
+    result = -expr
+
+    # 1. the returned value is BinaryOperator.
+    assert isinstance(result, BinaryOperator)
+    # 2. the returned value's left is Value.
+    assert isinstance(result.left, Value)
+    # 3. the returned value's left's value is -1.0.
+    assert result.left.value == -1.0
+    # 4. the returned value's right is the same as the expr.
+    assert result.right == expr
+    # 5. the returned value's kind is BinaryOpeKind.MUL.
+    assert result.kind == BinaryOpeKind.MUL
+
+
+def test_sub():
+    """Sub two of ParameterExpressionChildMock instances.
+
+    Check if
+    1. the returned value is BinaryOperator.
+    2. the returned value's left is the same as expr1.
+    3. the returned value's right is BinaryOperator.
+    4. the returned value's right's left is Value.
+    5. the returned value's right's left's value is -1.0.
+    6. the returned value's right's right is the same as the expr2.
+    7. the returned value's right's kind is BinaryOpeKind.MUL.
+    8. the returned value's kind is BinaryOpeKind.ADD.
+    """
+    expr1 = ParameterExpressionChildMock()
+    expr2 = ParameterExpressionChildMock()
+
+    result = expr1 - expr2
+
+    # 1. the returned value is BinaryOperator.
+    assert isinstance(result, BinaryOperator)
+    # 2. the returned value's left is the same as expr1.
+    assert result.left == expr1
+    # 3. the returned value's right is BinaryOperator.
+    assert isinstance(result.right, BinaryOperator)
+    # 4. the returned value's right's left is Value.
+    assert isinstance(result.right.left, Value)
+    # 5. the returned value's right's left's value is -1.0.
+    assert result.right.left.value == -1.0
+    # 6. the returned value's right's right is the same as the expr2.
+    assert result.right.right == expr2
+    # 7. the returned value's right's kind is BinaryOpeKind.MUL.
+    assert result.right.kind == BinaryOpeKind.MUL
+    # 8. the returned value's kind is BinaryOpeKind.ADD.
+    assert result.kind == BinaryOpeKind.ADD
+
+
+@pytest.mark.parametrize("other", [1, 1.0, np.int64(1), np.float64(1.0)])
+def test_sub_with_real(other):
+    """Sub a ParameterExpressionChildMock instance with a real number.
+
+    Check if
+    1. the returned value is BinaryOperator.
+    2. the resulted value's left is the same as expr.
+    3. the returned value's right is Value.
+    4. the returned value's right's value is -other.
+    5. the returned value's kind is BinaryOpeKind.ADD.
+    """
+    expr = ParameterExpressionChildMock()
+
+    result = expr - other
+
+    # 1. the returned value is BinaryOperator.
+    assert isinstance(result, BinaryOperator)
+    # 2. the resulted value's left is the same as expr.
+    assert result.left == expr
+    # 3. the returned value's right is Value.
+    assert isinstance(result.right, Value)
+    # 4. the returned value's right's value is -other.
+    assert result.right.value == -other
+    # 5. the returned value's kind is BinaryOpeKind.ADD.
+    assert result.kind == BinaryOpeKind.ADD
+
+
+@pytest.mark.parametrize("other", [1, 1.0, np.int64(1), np.float64(1.0)])
+def test_rsub_with_real(other):
+    """Right sub a ParameterExpressionChildMock instance with a real number.
+
+    Check if
+    1. the returned value is BinaryOperator.
+    2. the returned value's left is Value.
+    3. the returned value's left's value is other.
+    4. the returned value's right is BinaryOperator.
+    5. the returned value's right's left is Value.
+    6. the returned value's right's left's value is -1.0.
+    7. the returned value's right's right is the same as the expr.
+    8. the returned value's right's kind is BinaryOpeKind.MUL.
+    9. the returned value's kind is BinaryOpeKind.ADD.
+    """
+    expr = ParameterExpressionChildMock()
+
+    result = other - expr
+
+    # 1. the returned value is BinaryOperator.
+    assert isinstance(result, BinaryOperator)
+    # 2. the returned value's left is Value.
+    assert isinstance(result.left, Value)
+    # 3. the returned value's left's value is other.
+    assert result.left.value == other
+    # 4. the returned value's right is BinaryOperator.
+    assert isinstance(result.right, BinaryOperator)
+    # 5. the returned value's right's left is Value.
+    assert isinstance(result.right.left, Value)
+    # 6. the returned value's right's left's value is -1.0.
+    assert result.right.left.value == -1.0
+    # 7. the returned value's right's right is the same as the expr.
+    assert result.right.right == expr
+    # 8. the returned value's right's kind is BinaryOpeKind.MUL.
+    assert result.right.kind == BinaryOpeKind.MUL
+    # 9. the returned value's kind is BinaryOpeKind.ADD.
+    assert result.kind == BinaryOpeKind.ADD
+
+
 # <<< ParameterExpression <<<
