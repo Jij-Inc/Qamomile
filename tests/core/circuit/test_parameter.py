@@ -618,3 +618,24 @@ def test_value_repr(value):
 
 
 # <<< Value <<<
+# >>> BinaryOpeKind >>>
+def test_binary_ope_kind():
+    """Test BinaryOpeKind enum.
+
+    Check if
+    1. BinaryOpeKind.ADD is +.
+    2. BinaryOpeKind.MUL is *.
+    3. BinaryOpeKind.DIV is /.
+    4. BinaryOpeKind has only three members.
+    """
+    # 1. BinaryOpeKind.ADD is +.
+    assert BinaryOpeKind.ADD == "+"
+    # 2. BinaryOpeKind.MUL is *.
+    assert BinaryOpeKind.MUL == "*"
+    # 3. BinaryOpeKind.DIV is /.
+    assert BinaryOpeKind.DIV == "/"
+    # 4. BinaryOpeKind has only three members.
+    assert len(BinaryOpeKind) == 3
+
+
+# <<< BinaryOpeKind <<<
