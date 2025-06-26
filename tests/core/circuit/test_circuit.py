@@ -883,15 +883,26 @@ def test_repr():
     assert repr(qc) == expected_repr
 
 
-def test_circuit_append():
+def test_circuit_append_manually():
+    """Run append on a QuantumCircuit with a manually created Operator.
+
+    Check if
+    1. the number of gates is 1,
+    2. the gate is an Operator,
+    3. the Operator contains the original circuit.
+    """
     qc1 = QuantumCircuit(2)
     qc1.h(0)
     qc1.cnot(0, 1)
 
     qc2 = QuantumCircuit(2)
     qc2.append(qc1)
+    # 1. the number of gates is 1,
     assert len(qc2.gates) == 1
+    # 2. the gate is an Operator,
     assert isinstance(qc2.gates[0], Operator)
+    # 3. the Operator contains the original circuit.
+    assert qc2.gates[0].circuit == qc1
 
 
 def test_get_parameters():
