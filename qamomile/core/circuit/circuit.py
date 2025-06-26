@@ -602,17 +602,23 @@ class QuantumCircuit:
         for i in range(self.num_qubits):
             self.measure(i, i)
 
-    def append(self, gate: typ.Union[Gate, "QuantumCircuit"]):
+    def append(
+        self,
+        gate: typ.Union[Gate, "QuantumCircuit"],
+        qubit_mapping: typ.Optional[dict[int, int]] = None,
+    ):
         """
         Append another quantum circuit to this quantum circuit.
 
         Args:
-            qc (QuantumCircuit): The quantum circuit to be appended.
+            gate (Gate | QuantumCircuit): The gate or quantum circuit to be appended.
+            qubit_mapping (dict[int, int], optional): Mapping from original qubit indices to new indices.
+                Only applied when gate is an Operator instance. Ignored for all other gate types.
         """
         if isinstance(gate, QuantumCircuit):
-            self.add_gate(gate.to_gate())
+            self.add_gate(gate.to_gate(), qubit_mapping)
         else:
-            self.add_gate(gate)
+            self.add_gate(gate, qubit_mapping)
 
     def to_gate(self, label: typ.Optional[str] = None) -> Operator:
         """
