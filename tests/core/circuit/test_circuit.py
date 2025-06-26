@@ -847,6 +847,42 @@ def test_add_gate_to_invalid_qubit():
         qc.measure(0, invalid_cbit)
 
 
+def test_repr():
+    """Call __repr__ on a QuantumCircuit.
+
+    Check if
+    1. the representation is f"[{self.gates}]".
+    """
+    qc = QuantumCircuit(3)
+    qc.h(0)
+    qc.x(0)
+    qc.y(0)
+    qc.z(0)
+    qc.s(0)
+    qc.t(0)
+    qc.rx(1.0, 0)
+    qc.ry(1.0, 0)
+    qc.rz(1.0, 0)
+    qc.cx(0, 1)
+    qc.cnot(0, 1)
+    qc.cz(0, 1)
+    qc.crx(1.0, 0, 1)
+    qc.cry(1.0, 0, 1)
+    qc.crz(1.0, 0, 1)
+    qc.rxx(1.0, 0, 1)
+    qc.ryy(1.0, 0, 1)
+    qc.rzz(1.0, 0, 1)
+    qc.ccx(0, 1, 2)
+    hamiltonian = qm_o.Hamiltonian()
+    hamiltonian += qm_o.X(0) * qm_o.Y(1) * qm_o.Z(2)
+    qc.exp_evolution(1.0, hamiltonian)
+    qc.measure_all()
+
+    expected_repr = f"{qc.gates}"
+
+    assert repr(qc) == expected_repr
+
+
 def test_circuit_append():
     qc1 = QuantumCircuit(2)
     qc1.h(0)
