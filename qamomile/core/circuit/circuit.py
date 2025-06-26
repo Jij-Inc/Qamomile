@@ -37,6 +37,7 @@ import typing as typ
 import dataclasses
 import abc
 import enum
+import numbers
 from .parameter import ParameterExpression, Parameter, Value
 from qamomile.core.operator import Hamiltonian
 
@@ -189,6 +190,29 @@ class Operator(Gate):
         return list(set(operated_qubits))
 
 
+def _validate_angle(angle: object) -> ParameterExpression:
+    """
+    Validate the given angle parameter for parametric gates.
+
+    Args:
+        angle (object): The angle parameter to validate.
+
+    Returns:
+        ParameterExpression: The validated angle as a ParameterExpression.
+
+    Raises:
+        ValueError: If angle is not a ParameterExpression or real number.
+    """
+    if isinstance(angle, ParameterExpression):
+        return angle
+    elif isinstance(angle, numbers.Real):
+        return Value(angle)
+    else:
+        raise ValueError(
+            f"Angle must be a ParameterExpression or real number, got {type(angle).__name__}"
+        )
+
+
 class QuantumCircuit:
     """
     Quantum circuit class.
@@ -250,7 +274,7 @@ class QuantumCircuit:
         if isinstance(gate, (SingleQubitGate, ParametricSingleQubitGate)):
             if not gate.qubit < self.num_qubits:
                 raise ValueError(f"Invalid qubit index: {gate.qubit}")
-        elif isinstance(gate, TwoQubitGate):
+        elif isinstance(gate, (TwoQubitGate, ParametricTwoQubitGate)):
             control_q_check = gate.control < self.num_qubits
             target_q_check = gate.target < self.num_qubits
             if not (control_q_check and target_q_check):
@@ -280,6 +304,8 @@ class QuantumCircuit:
                 raise ValueError(
                     f"Invalid index. qubit: {gate.qubit}, classical bit: {gate.cbit}"
                 )
+        else:
+            raise ValueError(f"Unsupported gate type: {type(gate)}")
 
         self.gates.append(gate)
 
@@ -313,7 +339,7 @@ class QuantumCircuit:
         self.add_gate(SingleQubitGate(SingleQubitGateType.T, index))
 
     # Methods for adding parametric single-qubit gates
-    def rx(self, angle: ParameterExpression | int | float, index: int):
+    def rx(self, angle: ParameterExpression, index: int):
         r"""Add a parametric RX gate to the quantum circuit.
 
         .. math::
@@ -324,17 +350,16 @@ class QuantumCircuit:
             \end{bmatrix}
 
         Args:
-            angle (ParameterExpression/int/float): The angle parameter for the gate.
+            angle (ParameterExpression/float): The angle parameter for the gate.
             index (int): The index of the qubit to apply the gate. 
         """
-        if isinstance(angle, (int, float)):
-            angle = Value(angle)
+        angle = _validate_angle(angle)
 
         self.add_gate(
             ParametricSingleQubitGate(ParametricSingleQubitGateType.RX, index, angle)
         )
 
-    def ry(self, angle: ParameterExpression | int | float, index: int):
+    def ry(self, angle: ParameterExpression, index: int):
         r"""Add a parametric RY gate to the quantum circuit.
 
         .. math::
@@ -345,17 +370,16 @@ class QuantumCircuit:
             \end{bmatrix}
 
         Args:
-            angle (ParameterExpression/int/float): The angle parameter for the gate.
+            angle (ParameterExpression/float): The angle parameter for the gate.
             index (int): The index of the qubit to apply the gate.
         """
-        if isinstance(angle, (int, float)):
-            angle = Value(angle)
+        angle = _validate_angle(angle)
 
         self.add_gate(
             ParametricSingleQubitGate(ParametricSingleQubitGateType.RY, index, angle)
         )
 
-    def rz(self, angle: ParameterExpression | int | float, index: int):
+    def rz(self, angle: ParameterExpression, index: int):
         r"""Add a parametric RZ gate to the quantum circuit.
 
         .. math::
@@ -366,11 +390,10 @@ class QuantumCircuit:
             \end{bmatrix}
 
         Args:
-            angle (ParameterExpression/int/float): The angle parameter for the gate.
+            angle (ParameterExpression/float): The angle parameter for the gate.
             index (int): The index of the qubit to apply the gate. 
         """
-        if isinstance(angle, (int, float)):
-            angle = Value(angle)
+        angle = _validate_angle(angle)
 
         self.add_gate(
             ParametricSingleQubitGate(ParametricSingleQubitGateType.RZ, index, angle)
@@ -392,10 +415,9 @@ class QuantumCircuit:
         """Add a CZ gate to the quantum circuit."""
         self.add_gate(TwoQubitGate(TwoQubitGateType.CZ, controled_qubit, target_qubit))
 
-    def crx(self, angle: ParameterExpression | int | float, controled_qubit: int, target_qubit: int):
+    def crx(self, angle: ParameterExpression, controled_qubit: int, target_qubit: int):
         """Add a CRX gate to the quantum circuit."""
-        if isinstance(angle, (int, float)):
-            angle = Value(angle)
+        angle = _validate_angle(angle)
 
         self.add_gate(
             ParametricTwoQubitGate(
@@ -403,10 +425,9 @@ class QuantumCircuit:
             )
         )
 
-    def cry(self, angle: ParameterExpression | int | float, controled_qubit: int, target_qubit: int):
+    def cry(self, angle: ParameterExpression, controled_qubit: int, target_qubit: int):
         """Add a CRY gate to the quantum circuit."""
-        if isinstance(angle, (int, float)):
-            angle = Value(angle)
+        angle = _validate_angle(angle)
 
         self.add_gate(
             ParametricTwoQubitGate(
@@ -414,10 +435,9 @@ class QuantumCircuit:
             )
         )
 
-    def crz(self, angle: ParameterExpression | int | float, controled_qubit: int, target_qubit: int):
+    def crz(self, angle: ParameterExpression, controled_qubit: int, target_qubit: int):
         """Add a CRZ gate to the quantum circuit."""
-        if isinstance(angle, (int, float)):
-            angle = Value(angle)
+        angle = _validate_angle(angle)
 
         self.add_gate(
             ParametricTwoQubitGate(
@@ -425,14 +445,13 @@ class QuantumCircuit:
             )
         )
 
-    def rxx(self, angle: ParameterExpression | int | float, qubit1: int, qubit2: int):
+    def rxx(self, angle: ParameterExpression, qubit1: int, qubit2: int):
         r"""Add a RXX gate to the quantum circuit.
 
         .. math::
             R_{XX}(\theta) = \exp\left(-i\theta X\otimes X/2\right)
         """
-        if isinstance(angle, (int, float)):
-            angle = Value(angle)
+        angle = _validate_angle(angle)
 
         self.add_gate(
             ParametricTwoQubitGate(
@@ -440,14 +459,13 @@ class QuantumCircuit:
             )
         )
 
-    def ryy(self, angle: ParameterExpression | int | float, qubit1: int, qubit2: int):
+    def ryy(self, angle: ParameterExpression, qubit1: int, qubit2: int):
         r"""Add a RYY gate to the quantum circuit.
 
         .. math::
             R_{YY}(\theta) = \exp\left(-i\theta Y\otimes Y/2\right)
         """
-        if isinstance(angle, (int, float)):
-            angle = Value(angle)
+        angle = _validate_angle(angle)
 
         self.add_gate(
             ParametricTwoQubitGate(
@@ -455,14 +473,13 @@ class QuantumCircuit:
             )
         )
 
-    def rzz(self, angle: ParameterExpression | int | float, qubit1: int, qubit2: int):
+    def rzz(self, angle: ParameterExpression, qubit1: int, qubit2: int):
         r"""Add a RZZ gate to the quantum circuit.
 
         .. math::
             R_{ZZ}(\theta) = \exp\left(-i\theta Z\otimes Z/2\right)
         """
-        if isinstance(angle, (int, float)):
-            angle = Value(angle)
+        angle = _validate_angle(angle)
 
         self.add_gate(
             ParametricTwoQubitGate(
@@ -477,7 +494,7 @@ class QuantumCircuit:
             ThreeQubitGate(ThreeQubitGateType.CCX, control1, control2, target)
         )
 
-    def exp_evolution(self, time: ParameterExpression | int | float, hamiltonian: Hamiltonian):
+    def exp_evolution(self, time: ParameterExpression, hamiltonian: Hamiltonian):
         r"""Add a parametric exponential gate to the quantum circuit.
         This function evolves a quantum state under the influence of a Hamiltonian, H,
         for a given time duration or parameter, t.
@@ -487,8 +504,7 @@ class QuantumCircuit:
             e^{-it H}
 
         """
-        if isinstance(time, (int, float)):
-            time = Value(time)
+        time = _validate_angle(time)
         indices = set()
         for ops, _ in hamiltonian._terms.items():
             for op in ops:
