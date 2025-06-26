@@ -266,9 +266,9 @@ class QuantumCircuit:
                     f"Invalid qubit index. controled_qubit1: {gate.control1}, controled_qubit2: {gate.control2}, target_qubit: {gate.target}"
                 )
         elif isinstance(gate, Operator):
-            if gate.circuit.num_qubits < self.num_qubits:
+            if gate.circuit.num_qubits > self.num_qubits:
                 raise ValueError(
-                    f"Invalid number of qubits. Expected: {self.num_qubits}, Actual: {gate.circuit.num_qubits}"
+                    f"Operator requires more qubits than available. Operator qubits: {gate.circuit.num_qubits}, Circuit qubits: {self.num_qubits}"
                 )
         elif isinstance(gate, ParametricExpGate):
             if gate.hamiltonian.num_qubits > self.num_qubits:
