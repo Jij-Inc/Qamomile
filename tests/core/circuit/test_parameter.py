@@ -4,8 +4,8 @@ import pytest
 from qamomile.core.circuit.parameter import (
     BinaryOpeKind,
     BinaryOperator,
-    Value,
     Parameter,
+    Value,
 )
 from tests.mock import ParameterExpressionChildMock
 
@@ -579,3 +579,42 @@ def test_eq(name):
 
 
 # <<< Parameter <<<
+# >>> Value >>>
+
+
+@pytest.mark.parametrize("value", [int(1), float(1.0), np.int64(1), np.float64(1.0)])
+def test_value_creation_with_real(value):
+    """Create a Value instance.
+
+    Check if
+    1. the value is the same as the given value.
+    """
+    val_instance = Value(value)
+    # 1. the value is the same as the given value.
+    assert val_instance.value == value
+
+
+@pytest.mark.parametrize("value", ["1", [1, 2], 1j])
+def test_value_creation_with_invalid(value):
+    """Create a Value instance with a string.
+
+    Check if
+    1. ValueError is raised.
+    """
+    with pytest.raises(ValueError):
+        Value(value)
+
+
+@pytest.mark.parametrize("value", [int(1), float(1.0), np.int64(1), np.float64(1.0)])
+def test_value_repr(value):
+    """Run __repr__ on a Value instance.
+
+    Check if
+    1. the returned value is the same as the given value.
+    """
+    val_instance = Value(value)
+    # 1. the returned value is the same as the given value.
+    assert repr(val_instance) == str(value)
+
+
+# <<< Value <<<
