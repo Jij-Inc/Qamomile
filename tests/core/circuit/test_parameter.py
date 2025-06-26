@@ -144,6 +144,18 @@ def test_mul():
     assert result.kind == BinaryOpeKind.MUL
 
 
+@pytest.mark.parametrize("other", ["1", [1, 2], 1j])
+def test_mul_with_unsupported_type(other):
+    """Mul a ParameterExpressionChildMock instance with an unsupported type.
+
+    Check if
+    1. the returned value is NotImplemented.
+    """
+    expr = ParameterExpressionChildMock()
+
+    assert expr * other == NotImplemented
+
+
 @pytest.mark.parametrize("other", [1, 1.0, np.int64(1), np.float64(1.0)])
 def test_mul_with_real(other):
     """Mul a ParameterExpressionChildMock instance with a real number.
@@ -196,6 +208,18 @@ def test_rmul_with_real(other):
     assert result.left.value == other
     # 5. the returned value's kind is BinaryOpeKind.MUL.
     assert result.kind == BinaryOpeKind.MUL
+
+
+@pytest.mark.parametrize("other", ["1", [1, 2], 1j])
+def test_rmul_with_unsupported_type(other):
+    """Right mul a ParameterExpressionChildMock instance with an unsupported type.
+
+    Check if
+    1. the returned value is NotImplemented.
+    """
+    expr = ParameterExpressionChildMock()
+
+    assert other * expr == NotImplemented
 
 
 def test_neg():
@@ -287,6 +311,18 @@ def test_sub_with_real(other):
     assert result.kind == BinaryOpeKind.ADD
 
 
+@pytest.mark.parametrize("other", ["1", [1, 2], 1j])
+def test_sub_with_unsupported_type(other):
+    """Sub a ParameterExpressionChildMock instance with an unsupported type.
+
+    Check if
+    1. the returned value is NotImplemented.
+    """
+    expr = ParameterExpressionChildMock()
+
+    assert expr - other == NotImplemented
+
+
 @pytest.mark.parametrize("other", [1, 1.0, np.int64(1), np.float64(1.0)])
 def test_rsub_with_real(other):
     """Right sub a ParameterExpressionChildMock instance with a real number.
@@ -324,6 +360,18 @@ def test_rsub_with_real(other):
     assert result.right.kind == BinaryOpeKind.MUL
     # 9. the returned value's kind is BinaryOpeKind.ADD.
     assert result.kind == BinaryOpeKind.ADD
+
+
+@pytest.mark.parametrize("other", ["1", [1, 2], 1j])
+def test_rsub_with_unsupported_type(other):
+    """Right sub a ParameterExpressionChildMock instance with an unsupported type.
+
+    Check if
+    1. the returned value is NotImplemented.
+    """
+    expr = ParameterExpressionChildMock()
+
+    assert other - expr == NotImplemented
 
 
 # <<< ParameterExpression <<<
