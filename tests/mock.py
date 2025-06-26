@@ -1,3 +1,6 @@
+from qamomile.core.circuit.parameter import ParameterExpression
+
+
 class UnsupportedBinaryOpeKind:
     """Mock class for an unsupported binary operation kind."""
 
@@ -12,5 +15,11 @@ class UnsupportedParam:
 
 class UnsupportedGate:
     """Mock class for an unsupported gate type."""
+
+    pass
+
+
+class ParameterExpressionChildMock(ParameterExpression):
+    """Mock class for ParameterExpression to simulate behavior in tests."""
 
     pass
