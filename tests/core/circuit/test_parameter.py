@@ -443,7 +443,7 @@ def test_truediv_with_zero():
 
 
 @pytest.mark.parametrize("other", ["1", [1, 2], 1j])
-def test_truedix_with_unsupported_type(other):
+def test_truediv_with_unsupported_type(other):
     """Div a ParameterExpressionChildMock instance with an unsupported type.
 
     Check if
