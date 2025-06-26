@@ -906,15 +906,131 @@ def test_circuit_append_manually():
     assert qc2.gates[0].circuit == qc1
 
 
-def test_get_parameters():
+def test_get_parameters_all_parameter():
+    """Run get_parameters on a QuantumCircuit with various gates having Parameter's.
+
+    Check if
+    1. the number of returned parameters is the same as the number of the expected parameters,
+    2. the returned parameters are the same as the expected parameters as a set.
+    """
+    parameters = []
     qc = QuantumCircuit(2)
-    theta = Parameter("theta")
-    phi = Parameter("phi")
-    qc.rx(theta, 0)
-    qc.ry(phi, 1)
-    params = qc.get_parameters()
-    assert len(params) == 2
-    assert theta in params and phi in params
+    parameters.append(Parameter("a"))
+    qc.rx(parameters[0], 0)
+    parameters.append(Parameter("b"))
+    qc.ry(parameters[1], 1)
+    parameters.append(Parameter("c"))
+    qc.rz(parameters[2], 0)
+    parameters.append(Parameter("d"))
+    qc.crx(parameters[3], 0, 1)
+    parameters.append(Parameter("e"))
+    qc.cry(parameters[4], 0, 1)
+    parameters.append(Parameter("f"))
+    qc.crz(parameters[5], 0, 1)
+    parameters.append(Parameter("g"))
+    qc.rxx(parameters[6], 0, 1)
+    parameters.append(Parameter("h"))
+    qc.ryy(parameters[7], 0, 1)
+    parameters.append(Parameter("i"))
+    qc.rzz(parameters[8], 0, 1)
+    parameters.append(Parameter("j"))
+    hamiltonian = qm_o.Hamiltonian()
+    hamiltonian += qm_o.X(0) * qm_o.Y(1) * qm_o.Z(0)
+    qc.exp_evolution(parameters[9], hamiltonian)
+    parameters.append(Parameter("k"))
+    qc_operator = QuantumCircuit(2)
+    qc_operator.rx(parameters[10], 0)
+    qc.append(qc_operator)
+
+    returned_parameters = qc.get_parameters()
+    # 1. the number of returned parameters is the same as the number of the expected parameters,
+    assert len(returned_parameters) == len(parameters)
+    # 2. the returned parameters are the same as the expected parameters as a set.
+    assert set(returned_parameters) == set(parameters)
+
+
+def test_get_parameters_all_values():
+    """Run get_parameters on a QuantumCircuit with various gates having Value's.
+
+    Check if
+    1. the returned parameters is an empty list.
+    """
+    parameters = []
+    qc = QuantumCircuit(2)
+    parameters.append(Value(1))
+    qc.rx(parameters[0], 0)
+    parameters.append(Value(1))
+    qc.ry(parameters[1], 1)
+    parameters.append(Value(1))
+    qc.rz(parameters[2], 0)
+    parameters.append(Value(1))
+    qc.crx(parameters[3], 0, 1)
+    parameters.append(Value(1))
+    qc.cry(parameters[4], 0, 1)
+    parameters.append(Value(1))
+    qc.crz(parameters[5], 0, 1)
+    parameters.append(Value(1))
+    qc.rxx(parameters[6], 0, 1)
+    parameters.append(Value(1))
+    qc.ryy(parameters[7], 0, 1)
+    parameters.append(Value(1))
+    qc.rzz(parameters[8], 0, 1)
+    parameters.append(Value(1))
+    hamiltonian = qm_o.Hamiltonian()
+    hamiltonian += qm_o.X(0) * qm_o.Y(1) * qm_o.Z(0)
+    qc.exp_evolution(parameters[9], hamiltonian)
+    parameters.append(Value(1))
+    qc_operator = QuantumCircuit(2)
+    qc_operator.rx(parameters[10], 0)
+    qc.append(qc_operator)
+
+    returned_parameters = qc.get_parameters()
+    # 1. the returned parameters is an empty list.
+    assert returned_parameters == []
+
+
+def test_get_parameters_mixed():
+    """Run get_parameters on a QuantumCircuit with mixed Parameter and Value.
+
+    Check if
+    1. the number of returned parameters is the same as the number of Parameter's in the expected parameters,
+    2. the returned parameters are the same as the expected parameters as a set.
+    """
+    parameters = []
+    qc = QuantumCircuit(2)
+    parameters.append(Parameter("a"))
+    qc.rx(parameters[0], 0)
+    parameters.append(Value(1))
+    qc.ry(parameters[1], 1)
+    parameters.append(Parameter("c"))
+    qc.rz(parameters[2], 0)
+    parameters.append(Value(1))
+    qc.crx(parameters[3], 0, 1)
+    parameters.append(Parameter("e"))
+    qc.cry(parameters[4], 0, 1)
+    parameters.append(Value(1))
+    qc.crz(parameters[5], 0, 1)
+    parameters.append(Parameter("g"))
+    qc.rxx(parameters[6], 0, 1)
+    parameters.append(Value(1))
+    qc.ryy(parameters[7], 0, 1)
+    parameters.append(Parameter("i"))
+    qc.rzz(parameters[8], 0, 1)
+    parameters.append(Value(1))
+    hamiltonian = qm_o.Hamiltonian()
+    hamiltonian += qm_o.X(0) * qm_o.Y(1) * qm_o.Z(0)
+    qc.exp_evolution(parameters[9], hamiltonian)
+    parameters.append(Value(1))
+    qc_operator = QuantumCircuit(2)
+    qc_operator.rx(parameters[10], 0)
+    qc.append(qc_operator)
+
+    returned_parameters = qc.get_parameters()
+    expected_parameters = [p for p in parameters if isinstance(p, Parameter)]
+    # 1. the number of returned parameters is the same as the number of the expected parameters,
+    assert len(returned_parameters) == len(expected_parameters)
+    # 2. the returned parameters are the same as the expected parameters as a set.
+    assert set(returned_parameters) == set(expected_parameters)
 
 
 # <<< QuantumCircuit <<<
