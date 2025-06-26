@@ -1,7 +1,12 @@
 import numpy as np
 import pytest
 
-from qamomile.core.circuit.parameter import BinaryOpeKind, BinaryOperator, Value
+from qamomile.core.circuit.parameter import (
+    BinaryOpeKind,
+    BinaryOperator,
+    Value,
+    Parameter,
+)
 from tests.mock import ParameterExpressionChildMock
 
 
@@ -491,3 +496,86 @@ def test_get_parameters():
 
 
 # <<< ParameterExpression <<<
+# >>> Parameter >>>
+
+
+@pytest.mark.parametrize("name", ["theta", "PhI"])
+def test_parameter_creation(name):
+    """Create a Parameter instance.
+
+    1. Check if the name is the same as the given name.
+    """
+    param = Parameter(name)
+    # 1. Check if the name is the same as the given name.
+    assert param.name == name
+
+
+@pytest.mark.parametrize("name", ["theta", "PhI"])
+def test_repr(name):
+    """Run __repr__ on a Parameter instance.
+
+    Check if
+    1. the returned value is the same as given name.
+    """
+    parameter = Parameter(name)
+    # 1. the returned value is the same as given name.
+    assert repr(parameter) == name
+
+
+@pytest.mark.parametrize("name", ["theta", "PhI"])
+def test_parameter_get_parameters(name):
+    """Call get_parameters on a Parameter instance.
+
+    Check if
+    1. the returned value is list.
+    2. the length of the returned list is 1.
+    3. the first element of the returned list is the same as the parameter instance.
+    """
+    param = Parameter(name)
+
+    gotten_parameters = param.get_parameters()
+
+    # 1. the returned value is list.
+    assert isinstance(gotten_parameters, list)
+    # 2. the length of the returned list is 1.
+    assert len(gotten_parameters) == 1
+    # 3. the first element of the returned list is the same as the parameter instance.
+    assert gotten_parameters[0] == param
+
+
+@pytest.mark.parametrize("name", ["theta", "PhI"])
+def test_hash(name):
+    """Parameter instance can be a key of a dictionary.
+
+    check if
+    1. no error is raised.
+    """
+    param = Parameter(name)
+
+    # 1. no error is raised.
+    {param: "THIS IS DICT!"}
+
+
+@pytest.mark.parametrize("name", ["theta", "PhI"])
+def test_eq(name):
+    """Check equality of two Parameter instances.
+
+    Check if
+    1. the returned value is True if the names of different two Parameters are the same.
+    2. the returned value is False if the names of different two Parameters are different.
+    3. the returned value is False if the other object is just a string with the same name.
+    """
+    param1 = Parameter(name)
+    param2 = Parameter(name)
+
+    # 1. the returned value is True if the names of different two Parameters are the same.
+    assert param1 == param2
+
+    param3 = Parameter(f"{name}_")
+    # 2. the returned value is False if the names of different two Parameters are different.
+    assert param1 != param3
+    # 3. the returned value is False if the other object is just a string with the same name.
+    assert param1 != name
+
+
+# <<< Parameter <<<
