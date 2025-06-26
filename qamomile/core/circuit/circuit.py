@@ -234,7 +234,75 @@ class QuantumCircuit:
     def qubits_label(self) -> list[str]:
         return self._qubits_label
 
-    def add_gate(self, gate: Gate):
+    def _apply_qubit_mapping_to_operator(
+        self, operator: Operator, qubit_mapping: dict[int, int]
+    ) -> Operator:
+        """
+        Apply qubit mapping to an Operator to create a new Operator with remapped qubits.
+
+        Args:
+            operator (Operator): The original operator.
+            qubit_mapping (dict[int, int]): Mapping from original qubit indices to new indices.
+
+        Returns:
+            Operator: A new operator with remapped qubits and adjusted num_qubits.
+        """
+        # Create a new circuit with the same number of qubits as the current circuit
+        new_circuit = QuantumCircuit(self.num_qubits, 0, operator.circuit.name)
+
+        # Apply the mapping to each gate in the operator's circuit
+        for gate in operator.circuit.gates:
+            mapped_gate = self._apply_qubit_mapping_to_gate(gate, qubit_mapping)
+            new_circuit.add_gate(mapped_gate)
+
+        return Operator(new_circuit, operator.label)
+
+    def _apply_qubit_mapping_to_gate(
+        self, gate: Gate, qubit_mapping: dict[int, int]
+    ) -> Gate:
+        """
+        Apply qubit mapping to a single gate.
+
+        Args:
+            gate (Gate): The gate to remap.
+            qubit_mapping (dict[int, int]): Mapping from original qubit indices to new indices.
+
+        Returns:
+            Gate: A new gate with remapped qubits.
+        """
+        if isinstance(gate, (SingleQubitGate, ParametricSingleQubitGate)):
+            new_qubit = qubit_mapping.get(gate.qubit, gate.qubit)
+            if isinstance(gate, SingleQubitGate):
+                return SingleQubitGate(gate.gate, new_qubit)
+            else:
+                return ParametricSingleQubitGate(gate.gate, new_qubit, gate.parameter)
+        elif isinstance(gate, (TwoQubitGate, ParametricTwoQubitGate)):
+            new_control = qubit_mapping.get(gate.control, gate.control)
+            new_target = qubit_mapping.get(gate.target, gate.target)
+            if isinstance(gate, TwoQubitGate):
+                return TwoQubitGate(gate.gate, new_control, new_target)
+            else:
+                return ParametricTwoQubitGate(
+                    gate.gate, new_control, new_target, gate.parameter
+                )
+        elif isinstance(gate, ThreeQubitGate):
+            new_control1 = qubit_mapping.get(gate.control1, gate.control1)
+            new_control2 = qubit_mapping.get(gate.control2, gate.control2)
+            new_target = qubit_mapping.get(gate.target, gate.target)
+            return ThreeQubitGate(gate.gate, new_control1, new_control2, new_target)
+        elif isinstance(gate, ParametricExpGate):
+            new_indices = [qubit_mapping.get(idx, idx) for idx in gate.indices]
+            return ParametricExpGate(gate.hamiltonian, gate.parameter, new_indices)
+        elif isinstance(gate, MeasurementGate):
+            new_qubit = qubit_mapping.get(gate.qubit, gate.qubit)
+            return MeasurementGate(new_qubit, gate.cbit)
+        elif isinstance(gate, Operator):
+            return self._apply_qubit_mapping_to_operator(gate, qubit_mapping)
+        else:
+            # Return the gate as-is if no mapping is needed
+            return gate
+
+    def add_gate(self, gate: Gate, qubit_mapping: typ.Optional[dict[int, int]] = None):
         """
         Add a gate to the quantum circuit.
 
@@ -242,6 +310,8 @@ class QuantumCircuit:
 
         Args:
             gate (Gate): A gate to be added.
+            qubit_mapping (dict[int, int], optional): Mapping from original qubit indices to new indices.
+                Only applied when gate is an Operator instance. Ignored for all other gate types.
 
         Raises:
             ValueError: If the gate's qubit indices are invalid.
@@ -266,10 +336,15 @@ class QuantumCircuit:
                     f"Invalid qubit index. controled_qubit1: {gate.control1}, controled_qubit2: {gate.control2}, target_qubit: {gate.target}"
                 )
         elif isinstance(gate, Operator):
+            # First check if operator fits, regardless of qubit_mapping
             if gate.circuit.num_qubits > self.num_qubits:
                 raise ValueError(
                     f"Operator requires more qubits than available. Operator qubits: {gate.circuit.num_qubits}, Circuit qubits: {self.num_qubits}"
                 )
+            if qubit_mapping is None:
+                qubit_mapping = {i: i for i in range(gate.circuit.num_qubits)}
+            # Apply the qubit mapping to the operator.
+            gate = self._apply_qubit_mapping_to_operator(gate, qubit_mapping)
         elif isinstance(gate, ParametricExpGate):
             if gate.hamiltonian.num_qubits > self.num_qubits:
                 raise ValueError(
