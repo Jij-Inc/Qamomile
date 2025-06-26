@@ -787,6 +787,66 @@ def test_measure_all_with_more_or_eqaul_cbits(num_qubits):
             assert gate.cbit == index
 
 
+def test_add_gate_to_invalid_qubit():
+    """Add a gate to a QuantumCircuit with an invalid qubit index.
+
+    Check if
+    1. a ValueError is raised.
+    """
+    num_qubits = 1
+    invalid_qubit = num_qubits + 1
+    num_cbits = 1
+    invalid_cbit = num_cbits + 1
+    qc = QuantumCircuit(num_qubits, num_cbits)
+    # SingleQubitGate
+    with pytest.raises(ValueError):
+        # 1. a ValueError is raised.
+        qc.x(invalid_qubit)
+    # ParametricSingleQubitGate
+    with pytest.raises(ValueError):
+        # 1. a ValueError is raised.
+        qc.rx(Parameter("theta"), invalid_qubit)
+    # TwoQubitGate
+    with pytest.raises(ValueError):
+        # 1. a ValueError is raised.
+        qc.cx(0, invalid_qubit)
+    with pytest.raises(ValueError):
+        # 1. a ValueError is raised.
+        qc.cx(invalid_qubit, 0)
+    # ParametricTwoQubitGate
+    with pytest.raises(ValueError):
+        # 1. a ValueError is raised.
+        qc.crx(Parameter("theta"), 0, invalid_qubit)
+    with pytest.raises(ValueError):
+        # 1. a ValueError is raised.
+        qc.crx(Parameter("theta"), invalid_qubit, 0)
+    # ThreeQubitGate
+    with pytest.raises(ValueError):
+        qc.ccx(0, invalid_qubit, invalid_qubit + 1)
+    with pytest.raises(ValueError):
+        qc.ccx(invalid_qubit + 1, 0, invalid_qubit)
+    with pytest.raises(ValueError):
+        qc.ccx(invalid_qubit, invalid_qubit + 1, 0)
+    # ParametricExpGate
+    hamiltonian = qm_o.Hamiltonian(num_qubits=invalid_qubit)
+    with pytest.raises(ValueError):
+        # 1. a ValueError is raised.
+        qc.exp_evolution(Parameter("theta"), hamiltonian)
+    # Operator
+    # TODO: Add tests according to how we fix issue #187.
+    qc_operator = QuantumCircuit(invalid_qubit)
+    with pytest.raises(ValueError):
+        # 1. a ValueError is raised.
+        qc.add_gate(Operator(qc_operator))
+    # MeasurementGate
+    with pytest.raises(ValueError):
+        # 1. a ValueError is raised.
+        qc.measure(invalid_qubit, 0)
+    with pytest.raises(ValueError):
+        # 1. a ValueError is raised.
+        qc.measure(0, invalid_cbit)
+
+
 def test_circuit_append():
     qc1 = QuantumCircuit(2)
     qc1.h(0)
