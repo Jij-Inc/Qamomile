@@ -271,14 +271,14 @@ class QuantumCircuit:
             Gate: A new gate with remapped qubits.
         """
         if isinstance(gate, (SingleQubitGate, ParametricSingleQubitGate)):
-            new_qubit = qubit_mapping.get(gate.qubit, gate.qubit)
+            new_qubit = qubit_mapping[gate.qubit]
             if isinstance(gate, SingleQubitGate):
                 return SingleQubitGate(gate.gate, new_qubit)
             else:
                 return ParametricSingleQubitGate(gate.gate, new_qubit, gate.parameter)
         elif isinstance(gate, (TwoQubitGate, ParametricTwoQubitGate)):
-            new_control = qubit_mapping.get(gate.control, gate.control)
-            new_target = qubit_mapping.get(gate.target, gate.target)
+            new_control = qubit_mapping[gate.control]
+            new_target = qubit_mapping[gate.target]
             if isinstance(gate, TwoQubitGate):
                 return TwoQubitGate(gate.gate, new_control, new_target)
             else:
@@ -286,15 +286,15 @@ class QuantumCircuit:
                     gate.gate, new_control, new_target, gate.parameter
                 )
         elif isinstance(gate, ThreeQubitGate):
-            new_control1 = qubit_mapping.get(gate.control1, gate.control1)
-            new_control2 = qubit_mapping.get(gate.control2, gate.control2)
-            new_target = qubit_mapping.get(gate.target, gate.target)
+            new_control1 = qubit_mapping[gate.control1]
+            new_control2 = qubit_mapping[gate.control2]
+            new_target = qubit_mapping[gate.target]
             return ThreeQubitGate(gate.gate, new_control1, new_control2, new_target)
         elif isinstance(gate, ParametricExpGate):
-            new_indices = [qubit_mapping.get(idx, idx) for idx in gate.indices]
+            new_indices = [qubit_mapping[idx] for idx in gate.indices]
             return ParametricExpGate(gate.hamiltonian, gate.parameter, new_indices)
         elif isinstance(gate, MeasurementGate):
-            new_qubit = qubit_mapping.get(gate.qubit, gate.qubit)
+            new_qubit = qubit_mapping[gate.qubit]
             return MeasurementGate(new_qubit, gate.cbit)
         elif isinstance(gate, Operator):
             return self._apply_qubit_mapping_to_operator(gate, qubit_mapping)
