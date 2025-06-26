@@ -891,6 +891,7 @@ def test_circuit_append_manually():
     2. the gate is an Operator,
     3. the Operator contains the original circuit.
     """
+    # TODO: Once append function gets qubit_mapping for Operator, we need to add more tests for it.
     qc1 = QuantumCircuit(2)
     qc1.h(0)
     qc1.cnot(0, 1)
