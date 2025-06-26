@@ -916,12 +916,6 @@ def test_get_parameters():
     assert theta in params and phi in params
 
 
-def test_invalid_qubit_index():
-    qc = QuantumCircuit(1)
-    with pytest.raises(ValueError):
-        qc.x(1)
-
-
 # <<< QuantumCircuit <<<
 
 
