@@ -374,4 +374,106 @@ def test_rsub_with_unsupported_type(other):
     assert other - expr == NotImplemented
 
 
+def test_truediv():
+    """Div two of ParameterExpressionChildMock instances.
+
+    Check if
+    1. the returned value is BinaryOperator.
+    2. the returned value's left is the same as expr1.
+    3. the returned value's right is the same as the expr2.
+    4. the returned value's kind is BinaryOpeKind.DIV.
+    """
+    expr1 = ParameterExpressionChildMock()
+    expr2 = ParameterExpressionChildMock()
+
+    result = expr1 / expr2
+
+    # 1. the returned value is BinaryOperator.
+    assert isinstance(result, BinaryOperator)
+    # 2. the returned value's left is the same as expr1.
+    assert result.left == expr1
+    # 3. the returned value's right is the same as the expr2.
+    assert result.right == expr2
+    # 4. the returned value's kind is BinaryOpeKind.DIV.
+    assert result.kind == BinaryOpeKind.DIV
+
+
+@pytest.mark.parametrize("other", [int(1), float(1.0), np.int64(1), np.float64(1.0)])
+def test_truediv_with_nonzero_real(other):
+    """Div two of ParameterExpressionChildMock instances.
+
+    Check if
+    1. the returned value is BinaryOperator.
+    2. the returned value's left is the same as expr.
+    3. the returned value's right is Value.
+    4. the returned value's right's value is the same as the given other.
+    5. the returned value's kind is BinaryOpeKind.DIV.
+    """
+    expr = ParameterExpressionChildMock()
+
+    result = expr / other
+
+    # 1. the returned value is BinaryOperator.
+    assert isinstance(result, BinaryOperator)
+    # 2. the returned value's left is the same as expr.
+    assert result.left == expr
+    # 3. the returned value's right is Value.
+    assert isinstance(result.right, Value)
+    # 4. the returned value's right's value is the same as the given other.
+    assert result.right.value == other
+    # 5. the returned value's kind is BinaryOpeKind.DIV.
+    assert result.kind == BinaryOpeKind.DIV
+
+
+def test_truediv_with_zero():
+    """Div a ParameterExpressionChildMock instance with zero.
+
+    Check if
+    1. ZeroDivisionError is raised.
+    """
+    expr = ParameterExpressionChildMock()
+
+    with pytest.raises(ZeroDivisionError):
+        expr / 0
+
+
+@pytest.mark.parametrize("other", ["1", [1, 2], 1j])
+def test_truedix_with_unsupported_type(other):
+    """Div a ParameterExpressionChildMock instance with an unsupported type.
+
+    Check if
+    1. the returned value is NotImplemented.
+    """
+    expr = ParameterExpressionChildMock()
+
+    assert other / expr == NotImplemented
+
+
+@pytest.mark.parametrize("other", [int(1), float(1.0), np.int64(1), np.float64(1.0)])
+def test_rtruediv_with_nonzero_real(other):
+    """Right div a ParameterExpressionChildMock instance with a real number.
+
+    Check if
+    1. the returned value is BinaryOperator.
+    2. the returned value's left is Value.
+    3. the returned value's left's value is the same as the given other.
+    4. the returned value's right is expr.
+    5. the returned value's kind is BinaryOpeKind.DIV.
+    """
+    expr = ParameterExpressionChildMock()
+
+    result = other / expr
+
+    # 1. the returned value is BinaryOperator.
+    assert isinstance(result, BinaryOperator)
+    # 2. the returned value's left is Value.
+    assert isinstance(result.left, Value)
+    # 3. the returned value's left's value is the same as the given other.
+    assert result.left.value == other
+    # 4. the returned value's right is expr.
+    assert result.right == expr
+    # 5. the returned value's kind is BinaryOpeKind.DIV.
+    assert result.kind == BinaryOpeKind.DIV
+
+
 # <<< ParameterExpression <<<
