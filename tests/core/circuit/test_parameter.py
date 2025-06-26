@@ -476,4 +476,18 @@ def test_rtruediv_with_nonzero_real(other):
     assert result.kind == BinaryOpeKind.DIV
 
 
+def test_get_parameters():
+    """Get parameters from a ParameterExpressionChildMock instance.
+
+    Check if
+    1. the returned value is an empty list.
+    """
+    expr = ParameterExpressionChildMock()
+
+    result = expr.get_parameters()
+
+    # 1. the returned value is an empty list.
+    assert result == []
+
+
 # <<< ParameterExpression <<<
