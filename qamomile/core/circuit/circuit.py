@@ -343,6 +343,13 @@ class QuantumCircuit:
                 )
             if qubit_mapping is None:
                 qubit_mapping = {i: i for i in range(gate.circuit.num_qubits)}
+            else:
+                # Validate that all mapping target values are within valid range
+                for target_qubit in qubit_mapping.values():
+                    if target_qubit >= self.num_qubits:
+                        raise ValueError(
+                            f"Invalid qubit mapping target: {target_qubit}. Must be < {self.num_qubits}"
+                        )
             # Apply the qubit mapping to the operator.
             gate = self._apply_qubit_mapping_to_operator(gate, qubit_mapping)
         elif isinstance(gate, ParametricExpGate):
