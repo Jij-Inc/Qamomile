@@ -289,4 +289,59 @@ def test_tsp_decode():
     }
     assert len(sampleset.sample_ids) == 1024
 
+def test_transpile_hamiltonian_with_complex_coeffs(transpiler: QiskitTranspiler):
+    """Test transpiling Hamiltonian with complex coefficients."""
+    hamiltonian = Hamiltonian()
     
+    # Add terms with complex coefficients
+    hamiltonian.add_term((PauliOperator(Pauli.X, 0),), 1.0 + 2.0j)
+    hamiltonian.add_term((PauliOperator(Pauli.Y, 1),), -0.5 + 1.5j)
+    hamiltonian.add_term((PauliOperator(Pauli.Z, 0), PauliOperator(Pauli.X, 1)), 2.0 - 1.0j)
+    
+    # Add a constant term (also complex)
+    hamiltonian.constant = 0.5 + 0.5j
+    
+    qiskit_hamiltonian = transpiler.transpile_hamiltonian(hamiltonian)
+    
+    # Verify the result
+    assert isinstance(qiskit_hamiltonian, qk_ope.SparsePauliOp)
+    assert len(qiskit_hamiltonian) == 4  # 3 Pauli terms + 1 constant term
+    
+    # Check that coefficients are complex
+    assert qiskit_hamiltonian.coeffs.dtype == np.complex128
+    
+    # Verify specific coefficients (order might vary due to dict iteration)
+    expected_coeffs = [1.0 + 2.0j, -0.5 + 1.5j, 2.0 - 1.0j, 0.5 + 0.5j]
+    
+    # Sort both arrays for comparison (since order might differ)
+    actual_sorted = np.sort_complex(qiskit_hamiltonian.coeffs)
+    expected_sorted = np.sort_complex(np.array(expected_coeffs))
+    
+    assert np.allclose(actual_sorted, expected_sorted)
+    
+    # Verify that complex coefficients are preserved correctly
+    for coeff in qiskit_hamiltonian.coeffs:
+        assert isinstance(coeff, (complex, np.complexfloating))
+
+
+def test_transpile_hamiltonian_mixed_real_complex(transpiler: QiskitTranspiler):
+    """Test transpiling Hamiltonian with mixed real and complex coefficients."""
+    hamiltonian = Hamiltonian()
+    
+    # Mix real and complex coefficients
+    hamiltonian.add_term((PauliOperator(Pauli.X, 0),), 1.0)  # Real
+    hamiltonian.add_term((PauliOperator(Pauli.Y, 1),), 1.0j)  # Pure imaginary
+    hamiltonian.add_term((PauliOperator(Pauli.Z, 2),), 2.5 + 1.5j)  # Complex
+    
+    qiskit_hamiltonian = transpiler.transpile_hamiltonian(hamiltonian)
+    
+    # Should automatically promote to complex dtype
+    assert qiskit_hamiltonian.coeffs.dtype == np.complex128
+    assert len(qiskit_hamiltonian) == 3
+    
+    # Check values
+    expected_coeffs = [1.0 + 0.0j, 0.0 + 1.0j, 2.5 + 1.5j]
+    actual_sorted = np.sort_complex(qiskit_hamiltonian.coeffs)
+    expected_sorted = np.sort_complex(np.array(expected_coeffs))
+    
+    assert np.allclose(actual_sorted, expected_sorted)  
