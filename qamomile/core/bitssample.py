@@ -54,13 +54,16 @@ class BitsSampleSet:
         This method interprets each bit array as a binary number and counts
         the occurrences of each unique integer value.
 
+        The bit array is interpreted with bits[0] as LSB (least significant bit).
+        For example, [1, 0] represents binary "01" which equals 1 in decimal.
+
         Returns:
             dict[int, int]: A dictionary mapping integer values to their occurrence counts.
         """
         int_counts = {}
         for bitarray in self.bitarrays:
-            # Convert the bit array to an integer
-            int_value = int("".join(map(str, bitarray.bits)), 2)
+            # Convert the bit array to an integer (bits[0] is LSB)
+            int_value = int("".join(map(str, bitarray.bits[::-1])), 2)
             # Add the occurrence count to the dictionary
             int_counts[int_value] = bitarray.num_occurrences
         return int_counts
@@ -73,6 +76,8 @@ class BitsSampleSet:
         Creates a BitsSampleSet from a dictionary of integer counts.
 
         This class method converts integer-based sample counts to bit array samples.
+        The resulting bit arrays have bits[0] as LSB (least significant bit).
+        For example, integer 1 with bit_length=2 becomes [1, 0].
 
         Args:
             int_counts (dict[int, int]): A dictionary mapping integer values to their occurrence counts.
@@ -81,9 +86,10 @@ class BitsSampleSet:
         Returns:
             BitsSampleSet: A new BitsSampleSet object containing the converted samples.
         """
+
         bitarrays = []
         for int_value, count in int_counts.items():
-            # Convert the integer to a bit array of the specified length
+            # Convert the integer to a bit array with bits[0] as LSB
             bitarray = list(map(int, bin(int_value)[2:].zfill(bit_length)[::-1]))
             bitarrays.append(BitsSample(count, bitarray))
 
