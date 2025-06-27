@@ -623,17 +623,17 @@ def test_binary_ope_kind():
     """Test BinaryOpeKind enum.
 
     Check if
-    1. BinaryOpeKind.ADD is +.
-    2. BinaryOpeKind.MUL is *.
-    3. BinaryOpeKind.DIV is /.
+    1. BinaryOpeKind.ADD.value is +.
+    2. BinaryOpeKind.MUL.value is *.
+    3. BinaryOpeKind.DIV.value is /.
     4. BinaryOpeKind has only three members.
     """
     # 1. BinaryOpeKind.ADD is +.
-    assert BinaryOpeKind.ADD == "+"
+    assert BinaryOpeKind.ADD.value == "+"
     # 2. BinaryOpeKind.MUL is *.
-    assert BinaryOpeKind.MUL == "*"
+    assert BinaryOpeKind.MUL.value == "*"
     # 3. BinaryOpeKind.DIV is /.
-    assert BinaryOpeKind.DIV == "/"
+    assert BinaryOpeKind.DIV.value == "/"
     # 4. BinaryOpeKind has only three members.
     assert len(BinaryOpeKind) == 3
 
