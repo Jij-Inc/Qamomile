@@ -224,8 +224,8 @@ def test_coloring_sample_decode():
     job = sampler.run([qk_circ])
     
     job_result = job.result()
-    
-    sampleset = qaoa_converter.decode(qk_transpiler, job_result[0].data['meas'])
+    bit_array = job_result[0].data.meas
+    sampleset = qaoa_converter.decode(qk_transpiler, bit_array)
     nonzero_results = {k: v for k, v in sampleset.extract_decision_variables("x", 0).items() if v != 0}
     assert nonzero_results == {(0, 0): 1, (1, 0): 1, (2, 0): 1, (3, 0): 1}
     assert len(sampleset.sample_ids) == 1024
@@ -276,8 +276,8 @@ def test_tsp_decode():
     job = sampler.run([qk_circ])
     
     job_result = job.result()
-    
-    sampleset = qaoa_converter.decode(qk_transpiler, job_result[0].data['meas'])
+    bit_array = job_result[0].data.meas
+    sampleset = qaoa_converter.decode(qk_transpiler, bit_array)
 
     results = sampleset.extract_decision_variables("x", sample_id=0)
     nonzero_results = {k: v for k, v in results.items() if v != 0}
