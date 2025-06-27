@@ -45,6 +45,24 @@ class BitsSampleSet:
 
     bitarrays: list[BitsSample]
 
+    def __post_init__(self):
+        """
+        Validates that all BitsSample instances have the same bit length.
+
+        Raises:
+            ValueError: If BitsSample instances have different bit lengths.
+        """
+        if not self.bitarrays:
+            return
+
+        expected_length = self.bitarrays[0].num_bits
+        for i, sample in enumerate(self.bitarrays):
+            if sample.num_bits != expected_length:
+                raise ValueError(
+                    f"All BitsSample instances must have the same bit length. "
+                    f"Expected {expected_length}, but sample at index {i} has {sample.num_bits} bits."
+                )
+
     def get_int_counts(self) -> dict[int, int]:
         """
         Converts the bit array samples to integer counts.
