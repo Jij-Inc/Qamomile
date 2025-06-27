@@ -155,6 +155,12 @@ class QiskitTranspiler(QuantumSDKTranspiler[qk_primitives.BitArray]):
         qk_pauli_list = []
         coeff_list = []
         for term, coeff in operator.terms.items():
+            # Check for complex coefficients (Qiskit 2.0 limitation with PauliEvolutionGate)
+            if np.iscomplex(coeff) and np.imag(coeff) != 0:
+                raise ValueError(
+                    f"Complex coefficient {coeff} found in Hamiltonian term {term}. "
+                    "PauliEvolutionGate in Qiskit 2.0+ may not support complex coefficients."
+                )
             qk_pauli_z = np.zeros(num_qubits, dtype=bool)
             qk_pauli_x = np.zeros(num_qubits, dtype=bool)
             for pauli in term:
