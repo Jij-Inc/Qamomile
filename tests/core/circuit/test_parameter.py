@@ -6,6 +6,7 @@ from qamomile.core.circuit.parameter import (
     BinaryOperator,
     Parameter,
     Value,
+    substitute_param_expr,
 )
 from tests.mock import ParameterExpressionChildMock
 
@@ -761,3 +762,171 @@ def test_binary_operator_get_parameters_with_mixed(kind):
 
 
 # <<< BinaryOperator <<<
+# >>> substitute_param_expr >>>
+
+
+@pytest.mark.parametrize("value", [1, 1.0, np.int64(1), np.float64(1.0)])
+def test_substitute_param_expr_value(value):
+    """Run substitute_param_expr with a Value instance.
+
+    Check if
+    1. The returned value is the value itself.
+    """
+    val = Value(value)
+    result = substitute_param_expr(val, {})
+    # 1. The returned value is the value itself.
+    assert result == value
+
+
+@pytest.mark.parametrize("value", [1, 1.0, np.int64(1), np.float64(1.0)])
+def test_substitute_param_expr_parameter(value):
+    """Run substitute_param_expr with a Parameter instance.
+
+    Check if
+    1. The value in mapping is returned if the name exists.
+    """
+    param = Parameter("theta")
+    # 1. The value in mapping is returned if the name exists.
+    result = substitute_param_expr(param, {"theta": value})
+    assert result == value
+
+
+def test_substitute_param_expr_parameter_not_in_mapping():
+    """Run substitute_param_expr with a Parameter instance not in mapping.
+
+    Checklist:
+    1. ValueError is raised if the parameter name does not exist in mapping.
+    """
+    param = Parameter("theta")
+    # 1. ValueError is raised if the name does not exist in mapping.
+    with pytest.raises(ValueError):
+        substitute_param_expr(param, {})
+
+
+def test_substitute_param_expr_binary_operator_add_with_values():
+    """Run substitute_param_expr with a BinaryOperator(ADD) instance with two Values.
+
+    Check if
+    1. The result is the sum of left and right values.
+    """
+    val_left = 1.0
+    left = Value(val_left)
+    val_right = 2.0
+    right = Value(val_right)
+    expr = BinaryOperator(left, right, BinaryOpeKind.ADD)
+    result = substitute_param_expr(expr, {})
+    # 1. The result is the sum of left and right values.
+    assert result == val_left + val_right
+
+
+def test_substitute_param_expr_binary_operator_add_with_parameters():
+    """Run substitute_param_expr with a BinaryOperator(ADD) instance with two Parameters.
+
+    Check if
+    1. The result is the sum of left and right values specified in mapping.
+    """
+    left = Parameter("left")
+    right = Parameter("right")
+    expr = BinaryOperator(left, right, BinaryOpeKind.ADD)
+    val_left = 1.0
+    val_right = 2.0
+    mapping = {"left": val_left, "right": val_right}
+    result = substitute_param_expr(expr, mapping)
+    # 1. The result is the sum of left and right values.
+    assert result == val_left + val_right
+
+
+def test_substitute_param_expr_binary_operator_mul_with_values():
+    """Run substitute_param_expr with a BinaryOperator(MUL) instance.
+
+    Check if
+    1. The result is the product of left and right values.
+    """
+    val_left = 3.0
+    left = Value(val_left)
+    val_right = 2.0
+    right = Value(val_right)
+    expr = BinaryOperator(left, right, BinaryOpeKind.MUL)
+    result = substitute_param_expr(expr, {})
+    # 1. The result is the product of left and right values.
+    assert result == val_left * val_right
+
+
+def test_substitute_param_expr_binary_operator_mul_with_parameters():
+    """Run substitute_param_expr with a BinaryOperator(MUL) instance with two Parameters.
+
+    Check if
+    1. The result is the product of left and right values specified in mapping.
+    """
+    left = Parameter("left")
+    right = Parameter("right")
+    expr = BinaryOperator(left, right, BinaryOpeKind.MUL)
+    val_left = 3.0
+    val_right = 2.0
+    mapping = {"left": val_left, "right": val_right}
+    result = substitute_param_expr(expr, mapping)
+    # 1. The result is the product of left and right values.
+    assert result == val_left * val_right
+
+
+def test_substitute_param_expr_binary_operator_div_with_values():
+    """Run substitute_param_expr with a BinaryOperator(DIV) instance with two Values.
+
+    Check if
+    1. The result is the division of left by right values.
+    """
+    left = Value(6.0)
+    right = Value(2.0)
+    expr = BinaryOperator(left, right, BinaryOpeKind.DIV)
+    result = substitute_param_expr(expr, {})
+    # 1. The result is the division of left by right values.
+    assert result == 3.0
+
+
+def test_substitute_param_expr_binary_operator_div_with_parameters():
+    """Run substitute_param_expr with a BinaryOperator(DIV) instance with two Parameters.
+
+    Check if
+    1. The result is the division of left by right values specified in mapping.
+    """
+    left = Parameter("left")
+    right = Parameter("right")
+    expr = BinaryOperator(left, right, BinaryOpeKind.DIV)
+    val_left = 6.0
+    val_right = 2.0
+    mapping = {"left": val_left, "right": val_right}
+    result = substitute_param_expr(expr, mapping)
+    # 1. The result is the division of left by right values.
+    assert result == 3.0
+
+
+def test_substitute_param_expr_binary_operator_div_with_0():
+    """Run substitute_param_expr with a BinaryOperator(DIV) instance with two Parameters in case of division by zero.
+
+    Check if
+    1. ZeroDivisionError is raised.
+    """
+    left = Parameter("left")
+    right = Parameter("right")
+    expr = BinaryOperator(left, right, BinaryOpeKind.DIV)
+    val_left = 6.0
+    val_right = 0.0
+    mapping = {"left": val_left, "right": val_right}
+    # 1. ZeroDivisionError is raised.
+    with pytest.raises(ZeroDivisionError):
+        substitute_param_expr(expr, mapping)
+
+
+def test_substitute_param_expr_unknown_type():
+    """Run substitute_param_expr with an unknown type.
+
+    Check if
+    1. ValueError is raised.
+    """
+    dummy = ParameterExpressionChildMock()
+    # 1. ValueError is raised.
+    with pytest.raises(ValueError):
+        substitute_param_expr(dummy, {})
+
+
+# <<< substitute_param_expr <<<
