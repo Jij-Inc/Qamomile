@@ -15,6 +15,8 @@ class BitsSample:
     Attributes:
         num_occurrences (int): The number of times this bit array occurred in the sample set.
         bits (List[int]): The bit array represented as a list of integers (0 or 1).
+                          bits[0] represents the least significant bit (LSB) and bits[-1] represents the most significant bit (MSB).
+                          e.g., [1, 0] represents "01", which is 1 in decimal.
     """
 
     num_occurrences: int
