@@ -639,3 +639,103 @@ def test_binary_ope_kind():
 
 
 # <<< BinaryOpeKind <<<
+# >>> BinaryOperator >>>
+@pytest.mark.parametrize("kind", [kind for kind in BinaryOpeKind])
+def test_binary_operator_creation(kind):
+    """Create a BinaryOperator instance.
+
+    Check if
+    1. the left is the same as the given left.
+    2. the right is the same as the given right.
+    3. the kind is the same as the given kind.
+    """
+    left = ParameterExpressionChildMock()
+    right = ParameterExpressionChildMock()
+    binary_operator = BinaryOperator(left, right, kind)
+
+    # 1. the left is the same as the given left.
+    assert binary_operator.left == left
+    # 2. the right is the same as the given right.
+    assert binary_operator.right == right
+    # 3. the kind is the same as the given kind.
+    assert binary_operator.kind == kind
+
+
+@pytest.mark.parametrize("kind", [kind for kind in BinaryOpeKind])
+def test_binary_operator_get_parameters_with_parameters(kind):
+    """Run get_parameters on a BinaryOperator instance created with two Parameters.
+
+    Check if
+    1. the returned value is a list.
+    2. the length of the returned list is 2.
+    3. the first element of the returned list is the same as the left Parameter.
+    4. the second element of the returned list is the same as the right Parameter.
+    """
+    left = Parameter("left")
+    right = Parameter("right")
+    binary_operator = BinaryOperator(left, right, kind)
+
+    parameters = binary_operator.get_parameters()
+
+    # 1. the returned value is a list.
+    assert isinstance(parameters, list)
+    # 2. the length of the returned list is 2.
+    assert len(parameters) == 2
+    # 3. the first element of the returned list is the same as the left Parameter.
+    assert parameters[0] == left
+    # 4. the second element of the returned list is the same as the right Parameter.
+    assert parameters[1] == right
+
+
+@pytest.mark.parametrize("kind", [kind for kind in BinaryOpeKind])
+def test_binary_operator_get_parameters_with_value(kind):
+    """Run get_parameters on a BinaryOperator instance created with two Values.
+
+    Check if
+    1. the returned value is an empty list.
+    """
+    left = Value(2)
+    right = Value(1.0)
+    binary_operator = BinaryOperator(left, right, kind)
+
+    parameters = binary_operator.get_parameters()
+
+    # 1. the returned value is an empty list.
+    assert parameters == []
+
+
+@pytest.mark.parametrize("kind", [kind for kind in BinaryOpeKind])
+def test_binary_operator_get_parameters_with_mixed(kind):
+    """Run get_parameters on a BinaryOperator instance created with a Parameter and a Value.
+
+    Check if
+    1. the returned value is a list.
+    2. the length of the returned list is 1.
+    3. the first element of the returned list is the same as the Parameter.
+    """
+    left = Parameter("left")
+    right = Value(1.0)
+    binary_operator = BinaryOperator(left, right, kind)
+    parameters = binary_operator.get_parameters()
+
+    # 1. the returned value is a list.
+    assert isinstance(parameters, list)
+    # 2. the length of the returned list is 1.
+    assert len(parameters) == 1
+    # 3. the first element of the returned list is the same as the Parameter.
+    assert parameters[0] == left
+
+    left = Value(1.0)
+    right = Parameter("left")
+    binary_operator = BinaryOperator(left, right, kind)
+    parameters = binary_operator.get_parameters()
+
+    # 1. the returned value is a list.
+    assert isinstance(parameters, list)
+    # 2. the length of the returned list is 1.
+    assert len(parameters) == 1
+    # 3. the first element of the returned list is the same as the Parameter.
+    assert parameters[0] == right
+
+
+# <<< BinaryOperator <<<
