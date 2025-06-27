@@ -481,6 +481,28 @@ def test_rtruediv_with_nonzero_real(other):
     assert result.kind == BinaryOpeKind.DIV
 
 
+def test_complex_expression_manually():
+    """Creat a complex expression manually.
+
+    Check if
+    1. the returned value is BinaryOperator.
+    2. the returned value's kind is BinaryOpeKind.DIV.
+    3. the returned value's left is BinaryOperator.
+    4. the returned value's right is Value.
+    """
+    theta = ParameterExpressionChildMock()
+    phi = ParameterExpressionChildMock()
+    expression = (2 * theta + phi) / 3
+    # 1. the returned value is BinaryOperator.
+    assert isinstance(expression, BinaryOperator)
+    # 2. the returned value's kind is BinaryOpeKind.DIV.
+    assert expression.kind == BinaryOpeKind.DIV
+    # 3. the returned value's left is BinaryOperator.
+    assert isinstance(expression.left, BinaryOperator)
+    # 4. the returned value's right is Value.
+    assert isinstance(expression.right, Value)
+
+
 def test_get_parameters():
     """Get parameters from a ParameterExpressionChildMock instance.
 
