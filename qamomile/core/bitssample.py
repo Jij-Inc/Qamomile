@@ -96,7 +96,23 @@ class BitsSampleSet:
 
         Returns:
             BitsSampleSet: A new BitsSampleSet object containing the converted samples.
+            
+        Raises:
+            ValueError: If any integer value requires more bits than the specified bit_length.
         """
+        # Validate that all integer values can be represented with the given bit_length
+        max_representable = (1 << bit_length) - 1  # 2^bit_length - 1
+        for int_value in int_counts.keys():
+            if int_value < 0:
+                raise ValueError(f"Negative integer values are not supported: {int_value}")
+            if int_value > max_representable:
+                required_bits = int_value.bit_length()
+                raise ValueError(
+                    f"Integer value {int_value} requires {required_bits} bits, "
+                    f"but bit_length is only {bit_length}. "
+                    f"Maximum representable value is {max_representable}."
+                )
+        
         bitarrays = []
         for int_value, count in int_counts.items():
             # Convert the integer to a bit array of the specified length
