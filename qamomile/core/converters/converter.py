@@ -42,7 +42,7 @@ import ommx.v1
 import numpy as np
 import qamomile.core.bitssample as qm_bs
 import qamomile.core.operator as qm_o
-from qamomile.core.ising_qubo import IsingModel, qubo_to_ising
+from qamomile.core.ising_qubo import IsingModel
 from qamomile.core.transpiler import QuantumSDKTranspiler
 
 ResultType = typ.TypeVar("ResultType")
@@ -215,7 +215,7 @@ class QuantumConverter(abc.ABC):
         qubo, constant = self.instance_to_qubo(multipliers, detail_parameters)
         # TODO: When simplify-True, we met some errors.
         #       Need to be fixed.
-        ising = qubo_to_ising(qubo, simplify=False)
+        ising = IsingModel.from_qubo(qubo, simplify=False)
         ising.constant += constant
 
         if isinstance(self.normalize_ising, str):
