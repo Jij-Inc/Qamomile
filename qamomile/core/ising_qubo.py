@@ -194,16 +194,3 @@ class IsingModel:
             ising_h = _h
             return cls(ising_J, ising_h, constant, index_map)
         return cls(ising_J, ising_h, constant)
-
-
-def calc_qubo_energy(qubo: dict[tuple[int, int], float], state: list[int]) -> float:
-    """Calculates the energy of the state.
-
-    Examples:
-        >>> calc_qubo_energy({(0, 0): 1.0, (0, 1): 2.0, (1, 1): 3.0}, [1, 1])
-        6.0
-    """
-    energy = 0.0
-    for (i, j), value in qubo.items():
-        energy += value * state[i] * state[j]
-    return energy

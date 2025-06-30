@@ -45,6 +45,24 @@ class BitsSampleSet:
 
     bitarrays: list[BitsSample]
 
+    def __post_init__(self):
+        """
+        Validates that all BitsSample instances have the same bit length.
+
+        Raises:
+            ValueError: If BitsSample instances have different bit lengths.
+        """
+        if not self.bitarrays:
+            return
+
+        expected_length = self.bitarrays[0].num_bits
+        for i, sample in enumerate(self.bitarrays):
+            if sample.num_bits != expected_length:
+                raise ValueError(
+                    f"All BitsSample instances must have the same bit length. "
+                    f"Expected {expected_length}, but sample at index {i} has {sample.num_bits} bits."
+                )
+
     def get_int_counts(self) -> dict[int, int]:
         """
         Converts the bit array samples to integer counts.
@@ -78,7 +96,23 @@ class BitsSampleSet:
 
         Returns:
             BitsSampleSet: A new BitsSampleSet object containing the converted samples.
+            
+        Raises:
+            ValueError: If any integer value requires more bits than the specified bit_length.
         """
+        # Validate that all integer values can be represented with the given bit_length
+        max_representable = (1 << bit_length) - 1  # 2^bit_length - 1
+        for int_value in int_counts.keys():
+            if int_value < 0:
+                raise ValueError(f"Negative integer values are not supported: {int_value}")
+            if int_value > max_representable:
+                required_bits = int_value.bit_length()
+                raise ValueError(
+                    f"Integer value {int_value} requires {required_bits} bits, "
+                    f"but bit_length is only {bit_length}. "
+                    f"Maximum representable value is {max_representable}."
+                )
+        
         bitarrays = []
         for int_value, count in int_counts.items():
             # Convert the integer to a bit array of the specified length
