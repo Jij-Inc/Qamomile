@@ -57,14 +57,14 @@ test = ["pre-commit", "pylint", "pytest (==7.2.0)", "pytest-benchmark", "pytest-
 
 [[package]]
 name = "amazon-braket-schemas"
-version = "1.24.2"
+version = "1.24.1"
 description = "An open source library that contains the schemas for Amazon Braket"
 optional = false
 python-versions = ">=3.9"
 groups = ["main"]
 files = [
-    {file = "amazon_braket_schemas-1.24.2-py3-none-any.whl", hash = "sha256:33c7682df29deba99d4339b1c13fb80b8cb4e4d3836d679a52cad7fb25caf250"},
-    {file = "amazon_braket_schemas-1.24.2.tar.gz", hash = "sha256:6427b7fe040c2b798db0eac924e8e2f6b87a7238c4d02bf0172b895bf888ac00"},
+    {file = "amazon_braket_schemas-1.24.1-py3-none-any.whl", hash = "sha256:3691b6b7e53edadccd1cc2c2bd762496bb8014ce862a97702189affe5b00327f"},
+    {file = "amazon_braket_schemas-1.24.1.tar.gz", hash = "sha256:1b01e54ab92c3cd589cd8c57bfa1684a5c3e35d4a06bf784d9e615c118d156eb"},
 ]
 
 [package.dependencies]
@@ -77,14 +77,14 @@ test = ["jsonschema", "numpy", "pre-commit", "pytest", "pytest-cov", "pytest-rer
 
 [[package]]
 name = "amazon-braket-sdk"
-version = "1.94.0"
+version = "1.93.0"
 description = "An open source library for interacting with quantum computing devices on Amazon Braket"
 optional = false
 python-versions = ">=3.9"
 groups = ["main"]
 files = [
-    {file = "amazon_braket_sdk-1.94.0-py3-none-any.whl", hash = "sha256:3925f26e525e6e4112b6d33d231e09bb4bee249f6ee1b8b3d2ac54032371529c"},
-    {file = "amazon_braket_sdk-1.94.0.tar.gz", hash = "sha256:490b73e8f6ffdf2e42a6ad47ca1f1242a0998b9569225724b00eac931228a82b"},
+    {file = "amazon_braket_sdk-1.93.0-py3-none-any.whl", hash = "sha256:11acebfeaf1fee190b95c4527cd848b05f2b7af67ab1005ec41b20fc35f30cdd"},
+    {file = "amazon_braket_sdk-1.93.0.tar.gz", hash = "sha256:b5a8ade1734c01e0bf155b224544022a3435e2b94cb485f0026480f3cf1c7637"},
 ]
 
 [package.dependencies]
@@ -592,34 +592,34 @@ files = [
 
 [[package]]
 name = "boto3"
-version = "1.38.46"
+version = "1.38.15"
 description = "The AWS SDK for Python"
 optional = false
 python-versions = ">=3.9"
 groups = ["main"]
 files = [
-    {file = "boto3-1.38.46-py3-none-any.whl", hash = "sha256:9c8e88a32a6465e5905308708cff5b17547117f06982908bdfdb0108b4a65079"},
-    {file = "boto3-1.38.46.tar.gz", hash = "sha256:d1ca2b53138afd0341e1962bd52be6071ab7a63c5b4f89228c5ef8942c40c852"},
+    {file = "boto3-1.38.15-py3-none-any.whl", hash = "sha256:f2239b8c2816dd03a2a97297d33d5f7899f23be3a261db9a09ca691c32b7ddc2"},
+    {file = "boto3-1.38.15.tar.gz", hash = "sha256:dca60f7a3ead91c05cf471f7750e54d63b92bfc0e61fa122e2e3f5140e020a8d"},
 ]
 
 [package.dependencies]
-botocore = ">=1.38.46,<1.39.0"
+botocore = ">=1.38.15,<1.39.0"
 jmespath = ">=0.7.1,<2.0.0"
-s3transfer = ">=0.13.0,<0.14.0"
+s3transfer = ">=0.12.0,<0.13.0"
 
 [package.extras]
 crt = ["botocore[crt] (>=1.21.0,<2.0a0)"]
 
 [[package]]
 name = "botocore"
-version = "1.38.46"
+version = "1.38.15"
 description = "Low-level, data-driven core of boto 3."
 optional = false
 python-versions = ">=3.9"
 groups = ["main"]
 files = [
-    {file = "botocore-1.38.46-py3-none-any.whl", hash = "sha256:89ca782ffbf2e8769ca9c89234cfa5ca577f1987d07d913ee3c68c4776b1eb5b"},
-    {file = "botocore-1.38.46.tar.gz", hash = "sha256:8798e5a418c27cf93195b077153644aea44cb171fcd56edc1ecebaa1e49e226e"},
+    {file = "botocore-1.38.15-py3-none-any.whl", hash = "sha256:9cc149ef56c3b99aff5436f26b71ad9558a45e4ac6b25b7b7046b0889279e601"},
+    {file = "botocore-1.38.15.tar.gz", hash = "sha256:6adb3b1b0739153d5dc9758e5e06f7596290999c07ed8f9167ca62a1f97c6592"},
 ]
 
 [package.dependencies]
@@ -980,7 +980,7 @@ description = "Python bindings for the CUDA-Q toolkit for heterogeneous quantum-
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "sys_platform == \"linux\" and extra == \"cudaq\""
+markers = "extra == \"cudaq\" and sys_platform == \"linux\""
 files = [
     {file = "cudaq-0.11.0.tar.gz", hash = "sha256:8dcfd2a187a66430714b812e4d8efaf4676efd76597336249028929c76fd7077"},
 ]
@@ -1801,18 +1801,18 @@ referencing = ">=0.31.0"
 
 [[package]]
 name = "juliacall"
-version = "0.9.25"
+version = "0.9.24"
 description = "Julia and Python in seamless harmony"
 optional = false
 python-versions = ">=3.8"
 groups = ["main"]
 files = [
-    {file = "juliacall-0.9.25-py3-none-any.whl", hash = "sha256:269239c1489383181cf1756f2dffea2dade12a90075de08b0c8a571ec87e3731"},
-    {file = "juliacall-0.9.25.tar.gz", hash = "sha256:4ca736c6a7939a41b68d59e5130a20e696e2c016688fc53c96f6329de3abcf96"},
+    {file = "juliacall-0.9.24-py3-none-any.whl", hash = "sha256:f1d7b718228c477aeba770290647f3b2d0052f683da891b4e9f88c1e1da0a394"},
+    {file = "juliacall-0.9.24.tar.gz", hash = "sha256:31bed223489b535e4e8db46bfff4596350c24f757b9c2d17296c07397f75948b"},
 ]
 
 [package.dependencies]
-juliapkg = ">=0.1.17,<0.2.0"
+juliapkg = ">=0.1.8,<0.2.0"
 
 [[package]]
 name = "juliapkg"
@@ -2924,14 +2924,14 @@ testing-docutils = ["pygments", "pytest (>=8,<9)", "pytest-param-files (>=0.6.0,
 
 [[package]]
 name = "narwhals"
-version = "1.44.0"
+version = "1.39.0"
 description = "Extremely lightweight compatibility layer between dataframe libraries"
 optional = false
-python-versions = ">=3.9"
+python-versions = ">=3.8"
 groups = ["main"]
 files = [
-    {file = "narwhals-1.44.0-py3-none-any.whl", hash = "sha256:a170ea0bab4cf1f323d9f8bf17f2d7042c3d73802bea321996b39bf075d57de5"},
-    {file = "narwhals-1.44.0.tar.gz", hash = "sha256:8cf0616d4f6f21225b3b56fcde96ccab6d05023561a0f162402aa9b8c33ad31d"},
+    {file = "narwhals-1.39.0-py3-none-any.whl", hash = "sha256:50b6778f4b4249eb86c88dd17c3907dd004a16ec25b02d5effaf226a2bcfb940"},
+    {file = "narwhals-1.39.0.tar.gz", hash = "sha256:6f114def701fc6a23b0523ad53700ae545ad3f5ece041c64dc3ad59e699da43f"},
 ]
 
 [package.extras]
@@ -2940,7 +2940,7 @@ dask = ["dask[dataframe] (>=2024.8)"]
 duckdb = ["duckdb (>=1.0)"]
 ibis = ["ibis-framework (>=6.0.0)", "packaging", "pyarrow-hotfix", "rich"]
 modin = ["modin"]
-pandas = ["pandas (>=1.1.3)"]
+pandas = ["pandas (>=0.25.3)"]
 polars = ["polars (>=0.20.3)"]
 pyarrow = ["pyarrow (>=11.0.0)"]
 pyspark = ["pyspark (>=3.5.0)"]
@@ -4332,7 +4332,7 @@ description = "Python for Window Extensions"
 optional = false
 python-versions = "*"
 groups = ["dev", "doc", "docs"]
-markers = "sys_platform == \"win32\" and platform_python_implementation != \"PyPy\""
+markers = "platform_python_implementation != \"PyPy\" and sys_platform == \"win32\""
 files = [
     {file = "pywin32-310-cp310-cp310-win32.whl", hash = "sha256:6dd97011efc8bf51d6793a82292419eba2c71cf8e7250cfac03bba284454abc1"},
     {file = "pywin32-310-cp310-cp310-win_amd64.whl", hash = "sha256:c3e78706e4229b915a0821941a84e7ef420bf2b77e08c9dae3c76fd03fd2ae3d"},
@@ -5078,14 +5078,14 @@ mpl = ["matplotlib (>=3.0)"]
 
 [[package]]
 name = "s3transfer"
-version = "0.13.0"
+version = "0.12.0"
 description = "An Amazon S3 Transfer Manager"
 optional = false
 python-versions = ">=3.9"
 groups = ["main"]
 files = [
-    {file = "s3transfer-0.13.0-py3-none-any.whl", hash = "sha256:0148ef34d6dd964d0d8cf4311b2b21c474693e57c2e069ec708ce043d2b527be"},
-    {file = "s3transfer-0.13.0.tar.gz", hash = "sha256:f5e6db74eb7776a37208001113ea7aa97695368242b364d73e91c981ac522177"},
+    {file = "s3transfer-0.12.0-py3-none-any.whl", hash = "sha256:35b314d7d82865756edab59f7baebc6b477189e6ab4c53050e28c1de4d9cce18"},
+    {file = "s3transfer-0.12.0.tar.gz", hash = "sha256:8ac58bc1989a3fdb7c7f3ee0918a66b160d038a147c7b5db1500930a607e9a1c"},
 ]
 
 [package.dependencies]
@@ -5236,6 +5236,18 @@ files = [
     {file = "scipy_openblas32-0.3.30.0.0-py3-none-win32.whl", hash = "sha256:6b77a125d0587c07ca78f4284bbd94394a4e6395f1ca2af5ed44deb2a90e437e"},
     {file = "scipy_openblas32-0.3.30.0.0-py3-none-win_amd64.whl", hash = "sha256:4559e0758b00aa1fd2f2e995c8e61d04d424fe8fc46dee1cc25e27e3e59674ad"},
     {file = "scipy_openblas32-0.3.30.0.0-py3-none-win_arm64.whl", hash = "sha256:3a3e9b4a7578790a27bd63a4a6d133a7de428ac3483a11bfdf8a781f5ccaee23"},
+]
+
+[[package]]
+name = "semver"
+version = "3.0.4"
+description = "Python helper for Semantic Versioning (https://semver.org)"
+optional = false
+python-versions = ">=3.7"
+groups = ["main"]
+files = [
+    {file = "semver-3.0.4-py3-none-any.whl", hash = "sha256:9c824d87ba7f7ab4a1890799cec8596f15c1241cb473404ea1cb0c55e4b04746"},
+    {file = "semver-3.0.4.tar.gz", hash = "sha256:afc7d8c584a5ed0a11033af086e8af226a9c0b206f313e0301f8dd7b6b589602"},
 ]
 
 [[package]]

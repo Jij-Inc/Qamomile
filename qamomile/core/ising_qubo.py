@@ -123,19 +123,6 @@ class IsingModel:
             self.quad[key] /= normalization_factor
 
 
-def calc_qubo_energy(qubo: dict[tuple[int, int], float], state: list[int]) -> float:
-    """Calculates the energy of the state.
-
-    Examples:
-        >>> calc_qubo_energy({(0, 0): 1.0, (0, 1): 2.0, (1, 1): 3.0}, [1, 1])
-        6.0
-    """
-    energy = 0.0
-    for (i, j), value in qubo.items():
-        energy += value * state[i] * state[j]
-    return energy
-
-
 def qubo_to_ising(
     qubo: dict[tuple[int, int], float], constant: float = 0.0, simplify=False
 ) -> IsingModel:

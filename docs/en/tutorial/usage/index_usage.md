@@ -16,6 +16,9 @@ Qamomile specializes in the conversion of mathematical models into quantum circu
 - **PennyLane**
 - **Qutip**
 
+## Supported Neutral Atom Quantum computer SDKs
+
+- **bloqade-analog**
 
 ## Tutorials
 
@@ -25,4 +28,4 @@ Qamomile specializes in the conversion of mathematical models into quantum circu
 - [Using the QuriPartsTranspiler in Qamomile](Using_the_QuriPartsTranspiler_in_Qamomile.ipynb): Learn how to transpile from Qamomile to Quri-Parts.
 - [Using the PennyLaneTranspiler in Qamomile](Using_the_PennyLaneTranspiler_in_Qamomile.ipynb): Learn how to transpile from Qamomile to PennyLane.
 - [Using the QuTiPTranspiler in Qamomile](quantum_annealing.ipynb): Learn how to run the Quantum Annealing with QuTiP's built-in functions.
-
+- [Using the UDMTranspiler in Qamomile](UDG_demo.ipynb): Learn how to transpile from Qamomlie to bloqade-analog.
