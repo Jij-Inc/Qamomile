@@ -220,19 +220,22 @@ class Hamiltonian:
             term_str = ""
 
             for op in term:
-                if op.pauli == "I":
+                if op.pauli == Pauli.I:
                     continue
 
                 pauli_str = pauli_map.get(op.pauli, "")
                 term_str += f"{pauli_str}_{{{op.index}}}"
 
-            # At first term, we don't need to add a sign
-            if counter == 0:
+            # At first term or h_str is still empty, we don't need to add a sign
+            if counter == 0 or h_str == "":
                 if abs(coeff) == 1:
                     h_str += term_str if coeff > 0 else "-" + term_str
                 else:
                     h_str += f"{coeff}{term_str}"
             else:
+                if term_str == "":
+                    # This means the term is just a constant. We can skip this.
+                    continue
                 if abs(coeff) == 1:
                     h_str += "+" + term_str if coeff > 0 else "-" + term_str
                 else:
