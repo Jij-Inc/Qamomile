@@ -16,6 +16,8 @@ To get started with Qamomile, please see the [Quick Start Guide](quickstart.ipyn
 
 ## Learn More
 
+Before diving into each documentation, we'd like to clarify the bit representation convention. Qamomile considers the first qubit as the least significant qubit, which is specified as `0`. To align with this convention, we regard the first element of a list representing classical bits as the least significant bit: `bits[0]`. These conventions are quite simple, yet can cause confusion if we don't keep this rule in mind.
+
 Explore our documentation to dive deeper into Qamomile's capabilities:
 
 - [Quick Start Guide](quickstart.ipynb): Installation instructions and a simple example to get you started.
