@@ -20,6 +20,7 @@ swept over during execution or simulation.
 import typing
 import enum
 import abc
+import numbers
 
 
 class ParameterExpression(abc.ABC):
@@ -132,7 +133,12 @@ class Value(ParameterExpression):
 
         Args:
             value (number): The constant value.
+
+        Raises:
+            ValueError: If value is not a real number.
         """
+        if not isinstance(value, numbers.Real):
+            raise ValueError(f"Value must be a real number, got {type(value).__name__}")
         self.value = value
 
     def __repr__(self):
