@@ -37,7 +37,7 @@ import numpy as np
 import typing as typ
 import qamomile.core.circuit as qm_c
 import qamomile.core.operator as qm_o
-from qamomile.core.ising_qubo import IsingModel, qubo_to_ising
+from qamomile.core.ising_qubo import IsingModel
 from qamomile.core.converters.converter import QuantumConverter
 from qamomile.core.converters.utils import is_close_zero
 import ommx.v1
@@ -127,7 +127,7 @@ class FQAOAConverter(QuantumConverter):
 
     def fqaoa_ising_encode(self) -> IsingModel:
         qubo, constant = self.fqaoa_instance_to_qubo()
-        ising = qubo_to_ising(qubo, simplify=False)
+        ising = IsingModel.from_qubo(qubo, simplify=False)
         ising.constant += constant
 
 		# normalize
