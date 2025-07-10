@@ -44,6 +44,8 @@ jupyter-book = "^1.0.2"
 sphinx-autoapi = "^3.2.1"
 networkx = "^3.3"
 matplotlib = "^3.9.2"
+ommx-pyscipopt-adapter = "^2.0.2"
+qiskit-aer = "^0.17.1"
 
 [tool.poetry.extras]
 qiskit = ["qiskit"]
@@ -64,4 +66,3 @@ mkdocs-literate-nav = "^0.6.0"
 mkdocstrings = {version = ">=0.19", extras = ["python"]}
 mkdocs-jupyter = "^0.24.7"
 mkdocs-mermaid2-plugin = "^1.1.1"
-qiskit-aer = "^0.16.0"
