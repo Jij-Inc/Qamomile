@@ -310,14 +310,10 @@ def test_transpile_hamiltonian_with_complex_coeffs(transpiler: QiskitTranspiler)
     # Check that coefficients are complex
     assert qiskit_hamiltonian.coeffs.dtype == np.complex128
     
-    # Verify specific coefficients (order might vary due to dict iteration)
+    # Verify specific coefficients
     expected_coeffs = [1.0 + 2.0j, -0.5 + 1.5j, 2.0 - 1.0j, 0.5 + 0.5j]
     
-    # Sort both arrays for comparison (since order might differ)
-    actual_sorted = np.sort_complex(qiskit_hamiltonian.coeffs)
-    expected_sorted = np.sort_complex(np.array(expected_coeffs))
-    
-    assert np.allclose(actual_sorted, expected_sorted)
+    assert np.allclose(qiskit_hamiltonian.coeffs, expected_coeffs)
     
     # Verify that complex coefficients are preserved correctly
     for coeff in qiskit_hamiltonian.coeffs:
@@ -341,7 +337,5 @@ def test_transpile_hamiltonian_mixed_real_complex(transpiler: QiskitTranspiler):
     
     # Check values
     expected_coeffs = [1.0 + 0.0j, 0.0 + 1.0j, 2.5 + 1.5j]
-    actual_sorted = np.sort_complex(qiskit_hamiltonian.coeffs)
-    expected_sorted = np.sort_complex(np.array(expected_coeffs))
     
-    assert np.allclose(actual_sorted, expected_sorted)  
+    assert np.allclose(qiskit_hamiltonian.coeffs, expected_coeffs) 
