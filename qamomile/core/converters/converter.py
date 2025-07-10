@@ -162,7 +162,7 @@ class QuantumConverter(abc.ABC):
         _parameters = detail_parameters if detail_parameters is not None else {}
 
         penalty_weights = {}
-        for constraint in self.original_instance.get_constraints():
+        for constraint in self.original_instance.constraints:
             name = constraint.name
             if name is not None and name in _multipliers:
                 multiplier = _multipliers[name]
@@ -229,7 +229,7 @@ class QuantumConverter(abc.ABC):
                     f"Invalid value for normalize_ising: {self.normalize_ising}"
                 )
 
-        deci_vars = {dv.id: dv for dv in self.original_instance.raw.decision_variables}
+        deci_vars = {dv.id: dv for dv in self.original_instance.decision_variables}
         for ising_index, qubo_index in ising.index_map.items():
             deci_var = deci_vars[qubo_index]
             # TODO: If use log encoding to represent an integer,
@@ -298,7 +298,7 @@ class QuantumConverter(abc.ABC):
 
         # Create ommx.v1.Samples
         sample_id = 0
-        entries = []
+        samples = ommx.v1.Samples(entries=[])
         for bitssample in bitssampleset.bitarrays:
             sample = {}
             for i, bit in enumerate(bitssample.bits):
@@ -311,8 +311,6 @@ class QuantumConverter(abc.ABC):
             for _ in range(bitssample.num_occurrences):
                 ids.append(sample_id)
                 sample_id += 1
-            entries.append(ommx.v1.Samples.SamplesEntry(state=state, ids=ids))
-
-        samples = ommx.v1.Samples(entries=entries)
+            samples.append(sample_ids=ids, state=state)
 
         return self.original_instance.evaluate_samples(samples)

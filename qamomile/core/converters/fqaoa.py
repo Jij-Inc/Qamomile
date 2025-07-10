@@ -91,7 +91,8 @@ class FQAOAConverter(QuantumConverter):
         """
         super().__init__(instance)
         
-        n, d = self.original_instance.decision_variables.iloc[-1]["subscripts"]
+        last_var = self.original_instance.decision_variables[-1]
+        n, d = last_var.subscripts
         self.num_integers, self.num_bits = n+1, d+1
         self.num_fermions = num_fermions
         self.var_map = self.cyclic_mapping()
@@ -142,7 +143,7 @@ class FQAOAConverter(QuantumConverter):
                 )
 
 		# index labeling
-        deci_vars = {dv.id: dv for dv in self.original_instance.raw.decision_variables}
+        deci_vars = {dv.id: dv for dv in self.original_instance.decision_variables}
         
         for ising_index, qubo_index in ising.index_map.items():
             deci_var = deci_vars[qubo_index]
@@ -162,8 +163,9 @@ class FQAOAConverter(QuantumConverter):
 			dict[tuple[int, int], int] : A variable map for ring driver.
         """
         cyclic_var_map = {}
-        for id, pos in self.original_instance.decision_variables.subscripts.items():
+        for var in self.original_instance.decision_variables:
             # l = pos[0], d = pos[1]
+            pos = var.subscripts
             cyclic_var_map[tuple(pos)] = pos[0] + self.num_integers * pos[1]
         
         return cyclic_var_map
