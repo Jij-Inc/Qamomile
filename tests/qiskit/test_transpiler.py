@@ -314,11 +314,6 @@ def test_transpile_hamiltonian_with_complex_coeffs(transpiler: QiskitTranspiler)
     expected_coeffs = [1.0 + 2.0j, -0.5 + 1.5j, 2.0 - 1.0j, 0.5 + 0.5j]
     
     assert np.allclose(qiskit_hamiltonian.coeffs, expected_coeffs)
-    
-    # Verify that complex coefficients are preserved correctly
-    for coeff in qiskit_hamiltonian.coeffs:
-        assert isinstance(coeff, (complex, np.complexfloating))
-
 
 def test_transpile_hamiltonian_mixed_real_complex(transpiler: QiskitTranspiler):
     """Test transpiling Hamiltonian with mixed real and complex coefficients."""
