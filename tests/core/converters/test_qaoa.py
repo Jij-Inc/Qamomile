@@ -113,7 +113,7 @@ def test_multipliers():
     qubo, constant = converter.instance_to_qubo(multipliers, detail_parameters)
     # 1.5*2*(x_0 + y)^2 + 1.5*(x_1 + y)^2 + 1.5*(x_2 + y)^2
     # = 6*(x_0*y) + 3*x_0 + ... + 3*(x_2*y) + 1.5*x_2 ... + 3*x_2*y + 3*y^2
-    dv_list = instance.get_decision_variables()
+    dv_list = instance.decision_variables
     dv_objects = {}
     for dv in dv_list:
         if dv.name not in dv_objects:
