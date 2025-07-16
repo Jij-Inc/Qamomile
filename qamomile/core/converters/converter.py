@@ -235,19 +235,9 @@ class QuantumConverter(abc.ABC):
 
         # Use the converted instance's decision variables after to_qubo conversion
         # This handles log-encoded variables created during to_qubo
-        if self._converted_instance is not None:
-            # Use the converted instance that includes log-encoded variables
-            deci_vars = {
-                dv.id: dv for dv in self._converted_instance.decision_variables
-            }
-        else:
-            # Fallback to original instance if conversion hasn't been done yet
-            deci_vars = {
-                dv.id: dv for dv in self.original_instance.decision_variables
-            }
-
         for ising_index, qubo_index in ising.index_map.items():
-            deci_var = deci_vars[qubo_index]
+            # self.instance_to_qubo has guranteeed the converted instance is not None.
+            deci_var = self._converted_instance.get_decision_variable_by_id(qubo_index)
             var_name = deci_var.name if deci_var.name else "unnamed"
             subscripts = deci_var.subscripts if deci_var.subscripts else []
             self.int2varlabel[ising_index] = (
