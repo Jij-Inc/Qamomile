@@ -46,11 +46,11 @@ def test_initializaiton(simple_problem):
 
 def test_fqaoa_instance_to_qubo(simple_problem):
     fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4)
-    num_constraints = len(simple_problem.get_constraints())
+    num_constraints = len(simple_problem.constraints)
     
     qubo, constant = fqaoa_converter.fqaoa_instance_to_qubo()
 
-    assert len(simple_problem.get_constraints()) == num_constraints
+    assert len(simple_problem.constraints) == num_constraints
     
 def test_fqaoa_ising_encode(simple_problem):
     fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4)

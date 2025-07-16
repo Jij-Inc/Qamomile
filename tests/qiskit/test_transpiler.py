@@ -55,8 +55,7 @@ def create_graph_coloring_operator_ansatz_initial_state(
 ):
     n = num_color * num_nodes
     qc = QamomileCircuit(n)
-    deci_vars = compiled_instance.raw.decision_variables
-    var_map = {tuple(dc.subscripts): dc.id for dc in deci_vars if dc.name == "x"}
+    var_map = {tuple(dc.subscripts): dc.id for dc in compiled_instance.decision_variables if dc.name == "x"}
     for pos in apply_vars:
         qc.x(var_map[pos])  # set all nodes to color 0
     return qc
@@ -102,7 +101,7 @@ def create_tsp_initial_state(
     n = num_nodes * num_nodes
     qc = qm.circuit.QuantumCircuit(n)
     var_map = {
-        tuple(dc.subscripts): dc.id for dc in compiled_instance.raw.decision_variables}
+        tuple(dc.subscripts): dc.id for dc in compiled_instance.decision_variables}
 
     for i in range(num_nodes):
         qc.x(var_map[(i, i)])
