@@ -143,10 +143,8 @@ class FQAOAConverter(QuantumConverter):
                 )
 
 		# index labeling
-        deci_vars = {dv.id: dv for dv in self.original_instance.decision_variables}
-        
         for ising_index, qubo_index in ising.index_map.items():
-            deci_var = deci_vars[qubo_index]
+            deci_var = self.original_instance.get_decision_variable_by_id(qubo_index)
             var_name = deci_var.name
             subscripts = tuple(deci_var.subscripts)
             
