@@ -238,12 +238,12 @@ class QuantumConverter(abc.ABC):
         if self._converted_instance is not None:
             # Use the converted instance that includes log-encoded variables
             deci_vars = {
-                dv.id: dv for dv in self._converted_instance.raw.decision_variables
+                dv.id: dv for dv in self._converted_instance.decision_variables
             }
         else:
             # Fallback to original instance if conversion hasn't been done yet
             deci_vars = {
-                dv.id: dv for dv in self.original_instance.raw.decision_variables
+                dv.id: dv for dv in self.original_instance.decision_variables
             }
 
         for ising_index, qubo_index in ising.index_map.items():
