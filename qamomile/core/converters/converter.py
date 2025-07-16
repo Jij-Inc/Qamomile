@@ -116,6 +116,7 @@ class QuantumConverter(abc.ABC):
         self.normalize_ising = normalize_ising
 
         self._ising: typ.Optional[IsingModel] = None
+        self._converted_instance: typ.Optional[ommx.v1.Instance] = None
 
     def instance_to_qubo(
         self,
@@ -140,7 +141,7 @@ class QuantumConverter(abc.ABC):
             where $A_s$ is the multiplier for constraint $s$ and $\lambda_i$ is the detailed parameter for constraint $s$ with subscripts $i$.
 
         Returns:
-            tuple[dict[int, float], float]: A tuple containing the QUBO dictionary and the constant term.
+            tuple[dict[tuple[int, int], float], float]: A tuple containing the QUBO dictionary and the constant term.
 
 
         Example:
@@ -177,6 +178,9 @@ class QuantumConverter(abc.ABC):
 
         instance_copy = copy.deepcopy(self.original_instance)
         qubo, constant = instance_copy.to_qubo(penalty_weights=penalty_weights)
+
+        # Store the modified instance for later access to slack and log-encoded variables.
+        self._converted_instance = instance_copy
 
         return qubo, constant
 
@@ -229,13 +233,13 @@ class QuantumConverter(abc.ABC):
                     f"Invalid value for normalize_ising: {self.normalize_ising}"
                 )
 
+        # Use the converted instance's decision variables after to_qubo conversion
+        # This handles log-encoded variables created during to_qubo
         for ising_index, qubo_index in ising.index_map.items():
-            deci_var = self.original_instance.get_decision_variable_by_id(qubo_index)
-            # TODO: If use log encoding to represent an integer,
-            #       var_name is ommx.log_encode and subscripts represents [original variable index, encoded binary index].
-            #       Need to be fixed.
-            var_name = deci_var.name
-            subscripts = deci_var.subscripts
+            # self.instance_to_qubo has guranteeed the converted instance is not None.
+            deci_var = self._converted_instance.get_decision_variable_by_id(qubo_index)
+            var_name = deci_var.name if deci_var.name else "unnamed"
+            subscripts = deci_var.subscripts if deci_var.subscripts else []
             self.int2varlabel[ising_index] = (
                 var_name + "_{" + ",".join(map(str, subscripts)) + "}"
             )
