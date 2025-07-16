@@ -62,7 +62,7 @@ class HamiltonianBuilder:
         self._subsituted_expr: ommx.v1.Instance = subsituted_expr
 
         var_map = {}
-        for dc in subsituted_expr.raw.decision_variables:
+        for dc in subsituted_expr.decision_variables:
             if dc.name not in var_map:
                 var_map[dc.name] = {}
             var_map[dc.name][tuple(dc.subscripts)] = dc.id
@@ -124,11 +124,16 @@ class HamiltonianBuilder:
             qm_o.Hamiltonian: Qamomile Hamiltonian operator.
         """
         hamiltonian = qm_o.Hamiltonian()
-        hamiltonian.constant = self._subsituted_expr.objective.raw.constant
-        hamiltonian.constant += self._subsituted_expr.objective.raw.linear.constant
+        hamiltonian.constant = self._subsituted_expr.objective.constant_term
 
-        for indices, coeff in self._subsituted_expr.objective.terms.items():
-            operators = tuple([self._reverse_var_map[i] for i in indices])
+        # Handle linear terms
+        for var_id, coeff in self._subsituted_expr.objective.linear_terms.items():
+            operators = tuple([self._reverse_var_map[var_id]])
+            hamiltonian.add_term(operators, coeff)
+
+        # Handle quadratic terms
+        for (var_id1, var_id2), coeff in self._subsituted_expr.objective.quadratic_terms.items():
+            operators = tuple([self._reverse_var_map[var_id1], self._reverse_var_map[var_id2]])
             hamiltonian.add_term(operators, coeff)
 
         return hamiltonian
