@@ -26,7 +26,7 @@ function Explore() {
         <p className="explore-description">
           Explore our documentation to
           <br className="sp-only" />
-          dive deeper into Qamomile's capabilities.
+          dive deeper into Qamomile&apos;s capabilities.
         </p>
 
         <div className="explore-grid">
