@@ -1,9 +1,7 @@
 import { motion } from 'framer-motion'
 import { useEffect, useState } from 'react'
 import JijLogo from '../../assets/Jij_logo.svg'
-
-// import JijZeptLogo from '../../assets/JijZept_logo.png'
-
+import JijZeptLogo from '../../assets/JijZept_logo.png'
 import './JijLanding.css'
 
 function JijLanding() {
@@ -156,8 +154,7 @@ function JijLanding() {
             viewport={{ once: true }}
             transition={{ duration: 0.6 }}
           >
-            {/* <img src={JijZeptLogo} alt="JijZept" className="jijzept-logo-img" /> */}
-            <h2 style={{fontSize: '3rem', color: '#3498DB'}}>JijZept</h2>
+            <img src={JijZeptLogo} alt="JijZept" className="jijzept-logo-img" />
           </motion.div>
           <motion.p 
             className="platform-description"

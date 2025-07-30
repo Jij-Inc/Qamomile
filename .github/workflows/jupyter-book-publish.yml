@@ -36,9 +36,12 @@ jobs:
           npm ci
           npm run build
           mkdir -p ../_build/html
-          cp dist/index.html ../_build/html/landing.html
+          cp dist/landing.html ../_build/html/landing.html
+          cp dist/jij.html ../_build/html/jij.html
           cp ../index.html ../_build/html/index.html
           cp dist/*.png ../_build/html/
+          cp dist/*.svg ../_build/html/
+          cp -r dist/assets ../_build/html/
           cd ../..
       - name: Setup Pages
         uses: actions/configure-pages@v5
