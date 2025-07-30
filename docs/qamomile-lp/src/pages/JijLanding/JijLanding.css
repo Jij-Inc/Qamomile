@@ -3,6 +3,7 @@
   overflow-x: hidden;
 }
 
+
 /* Back Button */
 .back-button {
   position: fixed;
@@ -23,6 +24,7 @@
   background: rgba(26, 26, 46, 1);
   transform: translateX(-5px);
 }
+
 
 /* Hero Section */
 .jij-hero {
@@ -265,6 +267,7 @@
   box-shadow: 0 5px 20px rgba(138, 43, 226, 0.3);
 }
 
+
 .item-header {
   display: flex;
   justify-content: space-between;
@@ -324,6 +327,7 @@
   background: #95a5a6;
   color: white;
 }
+
 
 /* Features Section */
 .jij-features {
@@ -590,6 +594,7 @@
     top: -4px;
   }
 
+
   .jij-tagline {
     font-size: 1.2rem;
     padding: 0 1rem;
@@ -643,4 +648,5 @@
   .platform-stack {
     padding: 1.5rem;
   }
+
 }

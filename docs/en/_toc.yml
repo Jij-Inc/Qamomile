@@ -43,6 +43,7 @@ parts:
       sections:
         - file: tutorial/opt_advance/graph_coloring_alternating_ansatz
         - file: tutorial/opt_advance/qrao_tutorial
+        - file: tutorial/opt_advance/portfolio_optimization
 
   - caption: Quantum Chemistry
     chapters:
@@ -54,3 +55,7 @@ parts:
   - caption: API Reference
     chapters:
     - file: autoapi/index
+
+  - caption: "Release Note"
+    chapters:
+      - file: release_note/v0.8.0

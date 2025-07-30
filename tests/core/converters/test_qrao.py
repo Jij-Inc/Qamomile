@@ -1,6 +1,6 @@
 import numpy as np
 import jijmodeling as jm
-from qamomile.core.ising_qubo import IsingModel, qubo_to_ising
+from qamomile.core.ising_qubo import IsingModel
 from qamomile.core.converters.qrao.graph_coloring import (
     greedy_graph_coloring,
     check_linear_term,

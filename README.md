@@ -7,7 +7,7 @@ Qamomile is a powerful SDK designed for quantum optimization algorithms, special
 
 Documentation: [https://jij-inc.github.io/Qamomile/](https://jij-inc.github.io/Qamomile/)
 
-LP: [https://jij-inc.github.io/Qamomile/landing.html](https://jij-inc.github.io/Qamomile/landing.html)
+LP: [https://jij-inc.github.io/Qamomile/landing.html](https://jij-inc.github.io/Qamomile/landing.html)
 
 ## Features
 
@@ -88,4 +88,4 @@ We welcome contributions! Please see our [Contributing Guide](docs/contribute.md
 
 ## License
 
-Qamomile is released under the [Apache 2.0 License](LICENSE).
+Qamomile is released under the [Apache 2.0 License](LICENSE.txt).
