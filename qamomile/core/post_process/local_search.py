@@ -21,7 +21,7 @@ Key Features:
 from typing import Callable, Optional
 
 import jijmodeling as jm
-import ommx.v1
+from ommx.v1 import SampleSet
 import numpy as np
 from qamomile.core.bitssample import BitsSample, BitsSampleSet
 from qamomile.core.converters.converter import QuantumConverter
@@ -127,7 +127,7 @@ class LocalSearch:
         self.converter = converter
         self.ising = converter.ising_encode()
 
-    def decode(self, result) -> ommx.v1.SampleSet:
+    def decode(self, result) -> SampleSet:
         """
         Decodes the result obtained from a local search into a jijmodeling SampleSet.
 
@@ -135,7 +135,7 @@ class LocalSearch:
             result (np.ndarray): The final state of the Ising model after local search.
 
         Returns:
-            ommx.v1.SampleSet: The decoded results.
+            SampleSet: The decoded results.
         """
         sample = BitsSample(1, np.where(result == -1, 1, 0).tolist())
         sample_set = BitsSampleSet(bitarrays=[sample])
@@ -204,7 +204,7 @@ class LocalSearch:
         initial_state: np.ndarray,
         max_iter: int = -1,
         local_search_method: str = "best_improvement",
-    ) -> ommx.v1.SampleSet:
+    ) -> SampleSet:
         """
         Runs the local search algorithm until convergence or until a maximum number of iterations.
 
@@ -215,7 +215,7 @@ class LocalSearch:
                 Defaults to "best_improvement".
 
         Returns:
-            ommx.v1.SampleSet: The decoded solution after the local search.
+            SampleSet: The decoded solution after the local search.
         """
         method_map = {
             "best_improvement": self.best_improvement,

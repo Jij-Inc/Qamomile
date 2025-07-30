@@ -36,13 +36,13 @@ Example:
 import abc
 import enum
 import typing as typ
-
+import copy
 import jijmodeling as jm
 import ommx.v1
 import numpy as np
 import qamomile.core.bitssample as qm_bs
 import qamomile.core.operator as qm_o
-from qamomile.core.ising_qubo import IsingModel, qubo_to_ising
+from qamomile.core.ising_qubo import IsingModel
 from qamomile.core.transpiler import QuantumSDKTranspiler
 
 ResultType = typ.TypeVar("ResultType")
@@ -104,7 +104,6 @@ class QuantumConverter(abc.ABC):
                 Defaults to None.
 
         """
-
         self.original_instance: ommx.v1.Instance = instance
 
         # TODO: Support other relaxation methods.
@@ -117,6 +116,7 @@ class QuantumConverter(abc.ABC):
         self.normalize_ising = normalize_ising
 
         self._ising: typ.Optional[IsingModel] = None
+        self._converted_instance: typ.Optional[ommx.v1.Instance] = None
 
     def instance_to_qubo(
         self,
@@ -141,7 +141,7 @@ class QuantumConverter(abc.ABC):
             where $A_s$ is the multiplier for constraint $s$ and $\lambda_i$ is the detailed parameter for constraint $s$ with subscripts $i$.
 
         Returns:
-            tuple[dict[int, float], float]: A tuple containing the QUBO dictionary and the constant term.
+            tuple[dict[tuple[int, int], float], float]: A tuple containing the QUBO dictionary and the constant term.
 
 
         Example:
@@ -163,7 +163,7 @@ class QuantumConverter(abc.ABC):
         _parameters = detail_parameters if detail_parameters is not None else {}
 
         penalty_weights = {}
-        for constraint in self.original_instance.get_constraints():
+        for constraint in self.original_instance.constraints:
             name = constraint.name
             if name is not None and name in _multipliers:
                 multiplier = _multipliers[name]
@@ -176,7 +176,12 @@ class QuantumConverter(abc.ABC):
             const_id = constraint.id
             penalty_weights[const_id] = multiplier
 
-        qubo, constant = self.original_instance.to_qubo(penalty_weights=penalty_weights)
+        instance_copy = copy.deepcopy(self.original_instance)
+        qubo, constant = instance_copy.to_qubo(penalty_weights=penalty_weights)
+
+        # Store the modified instance for later access to slack and log-encoded variables.
+        self._converted_instance = instance_copy
+
         return qubo, constant
 
     def get_ising(self) -> IsingModel:
@@ -215,7 +220,7 @@ class QuantumConverter(abc.ABC):
         qubo, constant = self.instance_to_qubo(multipliers, detail_parameters)
         # TODO: When simplify-True, we met some errors.
         #       Need to be fixed.
-        ising = qubo_to_ising(qubo, simplify=False)
+        ising = IsingModel.from_qubo(qubo, simplify=False)
         ising.constant += constant
 
         if isinstance(self.normalize_ising, str):
@@ -228,14 +233,13 @@ class QuantumConverter(abc.ABC):
                     f"Invalid value for normalize_ising: {self.normalize_ising}"
                 )
 
-        deci_vars = {dv.id: dv for dv in self.original_instance.raw.decision_variables}
+        # Use the converted instance's decision variables after to_qubo conversion
+        # This handles log-encoded variables created during to_qubo
         for ising_index, qubo_index in ising.index_map.items():
-            deci_var = deci_vars[qubo_index]
-            # TODO: If use log encoding to represent an integer,
-            #       var_name is ommx.log_encode and subscripts represents [original variable index, encoded binary index].
-            #       Need to be fixed.
-            var_name = deci_var.name
-            subscripts = deci_var.subscripts
+            # self.instance_to_qubo has guranteeed the converted instance is not None.
+            deci_var = self._converted_instance.get_decision_variable_by_id(qubo_index)
+            var_name = deci_var.name if deci_var.name else "unnamed"
+            subscripts = deci_var.subscripts if deci_var.subscripts else []
             self.int2varlabel[ising_index] = (
                 var_name + "_{" + ",".join(map(str, subscripts)) + "}"
             )
@@ -297,7 +301,7 @@ class QuantumConverter(abc.ABC):
 
         # Create ommx.v1.Samples
         sample_id = 0
-        entries = []
+        samples = ommx.v1.Samples(entries=[])
         for bitssample in bitssampleset.bitarrays:
             sample = {}
             for i, bit in enumerate(bitssample.bits):
@@ -310,8 +314,6 @@ class QuantumConverter(abc.ABC):
             for _ in range(bitssample.num_occurrences):
                 ids.append(sample_id)
                 sample_id += 1
-            entries.append(ommx.v1.Samples.SamplesEntry(state=state, ids=ids))
-
-        samples = ommx.v1.Samples(entries=entries)
+            samples.append(sample_ids=ids, state=state)
 
         return self.original_instance.evaluate_samples(samples)

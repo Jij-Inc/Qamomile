@@ -1,6 +1,6 @@
 import numpy as np
 import jijmodeling as jm
-from qamomile.core.ising_qubo import IsingModel, qubo_to_ising
+from qamomile.core.ising_qubo import IsingModel
 from qamomile.core.converters.qrao.qrao32 import create_x_prime, create_y_prime, create_z_prime, qrac32_encode_ising, create_prime_operator,QRAC32Converter
 import qamomile.core.operator as qm_o
 from qamomile.core.converters.qrao.graph_coloring import (

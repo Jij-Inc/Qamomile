@@ -54,3 +54,7 @@ parts:
   - caption: API Reference
     chapters:
     - file: autoapi/index
+
+  - caption: "Release Note"
+    chapters:
+      - file: release_note/v0.8.0

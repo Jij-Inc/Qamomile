@@ -100,7 +100,7 @@ class QuantumSDKTranspiler(typ.Generic[ResultType], abc.ABC):
         """
         raise NotImplementedError()
 
-    def transpile_operators(self, operators: list[qm_o.Hamiltonian]):
+    def transpile_hamiltonians(self, operators: list[qm_o.Hamiltonian]):
         """
         Transpile a list of Qamomile Hamiltonians to the target SDK's operator representation.
 
