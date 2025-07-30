@@ -3,6 +3,29 @@
   overflow-x: hidden;
 }
 
+
+/* Back Button */
+.back-button {
+  position: fixed;
+  top: 2rem;
+  left: 2rem;
+  z-index: 100;
+  padding: 0.75rem 1.5rem;
+  background: rgba(26, 26, 46, 0.9);
+  color: white;
+  text-decoration: none;
+  border-radius: 30px;
+  font-weight: 500;
+  transition: all 0.3s ease;
+  backdrop-filter: blur(10px);
+}
+
+.back-button:hover {
+  background: rgba(26, 26, 46, 1);
+  transform: translateX(-5px);
+}
+
+
 /* Hero Section */
 .jij-hero {
   position: relative;
@@ -542,6 +565,13 @@
 
 /* Responsive Design */
 @media (max-width: 768px) {
+  .back-button {
+    top: 1rem;
+    left: 1rem;
+    padding: 0.5rem 1rem;
+    font-size: 0.875rem;
+  }
+
   .jij-logo-image {
     width: 200px;
   }
@@ -563,31 +593,7 @@
     height: 8px;
     top: -4px;
   }
-  
-  .stack-row {
-    grid-template-columns: 1fr;
-  }
-  
-  .hardware-layers {
-    grid-template-columns: 1fr;
-  }
-  
-  .jijzept-header {
-    flex-direction: column;
-  }
-  
-  .jijzept-logo-img {
-    height: 40px;
-  }
-  
-  .jijzept-header h2 {
-    font-size: 2rem;
-  }
-  
-  .platform-stack {
-    padding: 1.5rem;
-  }
-  
+
 
   .jij-tagline {
     font-size: 1.2rem;
@@ -618,4 +624,29 @@
     width: 100%;
     max-width: 300px;
   }
+  
+  .stack-row {
+    grid-template-columns: 1fr;
+  }
+  
+  .hardware-layers {
+    grid-template-columns: 1fr;
+  }
+  
+  .jijzept-header {
+    flex-direction: column;
+  }
+  
+  .jijzept-logo-img {
+    height: 120px;
+  }
+  
+  .jijzept-header h2 {
+    font-size: 2rem;
+  }
+  
+  .platform-stack {
+    padding: 1.5rem;
+  }
+
 }

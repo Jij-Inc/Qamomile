@@ -1,15 +1,20 @@
 // vite.config.js
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-import { viteSingleFile } from 'vite-plugin-singlefile'
+import { resolve } from 'path'
 
 export default defineConfig({
-  plugins: [react(), viteSingleFile()],
+  base: '/Qamomile/',
+  plugins: [react()],
   build: {
     assetsInlineLimit: 0, // 画像のインライン化を防ぐ
     // CSS をインライン化
     cssCodeSplit: false,
     rollupOptions: {
+      input: {
+        main: resolve(__dirname, 'index.html'),
+        jij: resolve(__dirname, 'jij.html')
+      },
       output: {
         // すべてのJSを1ファイルにまとめる
         manualChunks: undefined,

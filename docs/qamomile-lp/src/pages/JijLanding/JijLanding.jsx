@@ -1,7 +1,9 @@
 import { motion } from 'framer-motion'
 import { useEffect, useState } from 'react'
 import JijLogo from '../../assets/Jij_logo.svg'
-import JijZeptLogo from '../../assets/JijZept_logo.png'
+
+// import JijZeptLogo from '../../assets/JijZept_logo.png'
+
 import './JijLanding.css'
 
 function JijLanding() {
@@ -30,6 +32,9 @@ function JijLanding() {
 
   return (
     <div className="jij-landing">
+
+      <a href="/Qamomile/landing.html" className="back-button">← Back to Qamomile</a>
+
       <section className="jij-hero">
         <div className="quantum-background">
           {particles.map(particle => (
@@ -151,8 +156,8 @@ function JijLanding() {
             viewport={{ once: true }}
             transition={{ duration: 0.6 }}
           >
-            <img src={JijZeptLogo} alt="JijZept" className="jijzept-logo-img" />
-            {/* <h2>Platform</h2> */}
+            {/* <img src={JijZeptLogo} alt="JijZept" className="jijzept-logo-img" /> */}
+            <h2 style={{fontSize: '3rem', color: '#3498DB'}}>JijZept</h2>
           </motion.div>
           <motion.p 
             className="platform-description"
@@ -316,7 +321,9 @@ function JijLanding() {
               Visit Jij Website
             </motion.a>
             <motion.a 
-              href="/" 
+
+              href="/Qamomile/landing.html" 
+
               className="cta-button secondary"
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.95 }}
