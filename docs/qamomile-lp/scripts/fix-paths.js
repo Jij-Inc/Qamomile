@@ -6,12 +6,8 @@ const fixPaths = () => {
   const indexPath = path.join('dist', 'index.html')
   let indexContent = fs.readFileSync(indexPath, 'utf-8')
   
-  // アセットパスの修正
-  indexContent = indexContent.replace(/\/assets\//g, './assets/')
-  indexContent = indexContent.replace(/\/image-/g, './image-')
-  indexContent = indexContent.replace(/\/Jij_logo\.svg/g, './Jij_logo.svg')
-  indexContent = indexContent.replace(/\/JijZept_logo\.png/g, './JijZept_logo.png')
-  indexContent = indexContent.replace(/\/src\/assets\/Jij_logo\.svg/g, './assets/Jij_logo.svg')
+  // Remove base path and fix asset paths
+  indexContent = indexContent.replace(/\/Qamomile\//g, './')
   
   fs.writeFileSync(path.join('dist', 'landing.html'), indexContent)
   
@@ -20,11 +16,8 @@ const fixPaths = () => {
   if (fs.existsSync(jijPath)) {
     let jijContent = fs.readFileSync(jijPath, 'utf-8')
     
-    // アセットパスの修正
-    jijContent = jijContent.replace(/\/assets\//g, './assets/')
-    jijContent = jijContent.replace(/\/Jij_logo\.svg/g, './Jij_logo.svg')
-    jijContent = jijContent.replace(/\/JijZept_logo\.png/g, './JijZept_logo.png')
-    jijContent = jijContent.replace(/\/src\/assets\/Jij_logo\.svg/g, './assets/Jij_logo.svg')
+    // Remove base path and fix asset paths
+    jijContent = jijContent.replace(/\/Qamomile\//g, './')
     
     fs.writeFileSync(jijPath, jijContent)
   }
