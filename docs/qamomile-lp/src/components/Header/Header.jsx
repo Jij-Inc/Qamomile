@@ -10,7 +10,7 @@ function Header() {
           <a href="https://jij-inc.github.io/Qamomile/en/autoapi/index.html">API</a>
           <a href="https://jij-inc.github.io/Qamomile/en/quickstart.html">Guide</a>
           <a href="https://discord.gg/Km5dKF9JjG">Community</a>
-          <a href="https://www.j-ij.com/">Jij Inc.</a>
+          <a href="/Qamomile/jij.html">Jij Inc.</a>
         </div>
       </nav>
     </header>

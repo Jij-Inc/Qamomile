@@ -1,0 +1,646 @@
+.jij-landing {
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* Back Button */
+.back-button {
+  position: fixed;
+  top: 2rem;
+  left: 2rem;
+  z-index: 100;
+  padding: 0.75rem 1.5rem;
+  background: rgba(26, 26, 46, 0.9);
+  color: white;
+  text-decoration: none;
+  border-radius: 30px;
+  font-weight: 500;
+  transition: all 0.3s ease;
+  backdrop-filter: blur(10px);
+}
+
+.back-button:hover {
+  background: rgba(26, 26, 46, 1);
+  transform: translateX(-5px);
+}
+
+/* Hero Section */
+.jij-hero {
+  position: relative;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 100%);
+  overflow: hidden;
+}
+
+.quantum-background {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+}
+
+.quantum-particle {
+  position: absolute;
+  background: radial-gradient(circle, #8A2BE2 0%, #4169E1 50%, transparent 70%);
+  border-radius: 50%;
+  filter: blur(1px);
+  box-shadow: 0 0 15px rgba(138, 43, 226, 0.6);
+}
+
+.quantum-grid {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-image: 
+    linear-gradient(rgba(138, 43, 226, 0.1) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(138, 43, 226, 0.1) 1px, transparent 1px);
+  background-size: 50px 50px;
+  animation: grid-move 20s linear infinite;
+}
+
+@keyframes grid-move {
+  0% { transform: translate(0, 0); }
+  100% { transform: translate(50px, 50px); }
+}
+
+/* Single Orbit Animation */
+.single-orbit-container {
+  position: absolute;
+  width: 200px;
+  height: 200px;
+  z-index: 1;
+}
+
+.orbit-right {
+  top: 50%;
+  right: 10%;
+  transform: translate(0, -50%);
+}
+
+.orbit-left {
+  top: 20%;
+  left: 15%;
+  transform: translate(0, -50%);
+  width: 150px;
+  height: 150px;
+}
+
+.single-orbit {
+  width: 100%;
+  height: 100%;
+  border: 2px solid rgba(138, 43, 226, 0.3);
+  border-radius: 50%;
+  position: relative;
+}
+
+.orbit-electron {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: radial-gradient(circle, #00D4FF 0%, #4169E1 100%);
+  border-radius: 50%;
+  top: -6px;
+  left: 50%;
+  transform: translateX(-50%);
+  box-shadow: 0 0 15px rgba(0, 212, 255, 0.8);
+}
+
+.jij-hero-content {
+  position: relative;
+  z-index: 10;
+  text-align: center;
+  padding: 2rem;
+}
+
+.jij-logo-image {
+  width: 300px;
+  height: auto;
+  margin: 0 auto 2rem;
+  display: block;
+  filter: brightness(0) invert(1) drop-shadow(0 0 40px rgba(138, 43, 226, 0.6));
+  animation: glow 3s ease-in-out infinite alternate;
+}
+
+@keyframes glow {
+  from { filter: brightness(0) invert(1) drop-shadow(0 0 20px rgba(138, 43, 226, 0.5)); }
+  to { filter: brightness(0) invert(1) drop-shadow(0 0 40px rgba(65, 105, 225, 0.8)); }
+}
+
+.jij-tagline {
+  font-size: 1.5rem;
+  color: #ffffff;
+  margin-top: 2rem;
+  font-weight: 300;
+  letter-spacing: 0.05em;
+  opacity: 0.9;
+}
+
+.jij-mission {
+  font-size: 1.2rem;
+  color: rgba(255, 255, 255, 0.8);
+  margin-top: 1.5rem;
+  font-weight: 400;
+  max-width: 600px;
+  margin-left: auto;
+  margin-right: auto;
+  line-height: 1.6;
+  font-style: italic;
+}
+
+/* About Section */
+.jij-about {
+  padding: 100px 0;
+  background: #ffffff;
+  position: relative;
+}
+
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 2rem;
+}
+
+.about-content {
+  text-align: center;
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.about-content h2 {
+  font-size: 3rem;
+  margin-bottom: 2rem;
+  background: linear-gradient(135deg, #8A2BE2 0%, #4169E1 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.about-content p {
+  font-size: 1.25rem;
+  line-height: 1.8;
+  color: #333;
+}
+
+/* Platform Section */
+.jij-platform {
+  padding: 100px 0;
+  background: #f8f9fa;
+}
+
+.jijzept-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.jijzept-logo-img {
+  height: 200px;
+  width: auto;
+}
+
+.jijzept-header h2 {
+  font-size: 3rem;
+  margin: 0;
+  color: #1a1a2e;
+}
+
+.platform-description {
+  text-align: center;
+  font-size: 1.25rem;
+  color: #666;
+  margin-bottom: 4rem;
+}
+
+.platform-stack {
+  max-width: 1000px;
+  margin: 0 auto;
+  position: relative;
+  background: white;
+  border-radius: 20px;
+  padding: 2rem;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+}
+
+.stack-layer {
+  background: #999;
+  color: white;
+  padding: 1rem 2rem;
+  border-radius: 10px;
+  margin-bottom: 2rem;
+  text-align: center;
+}
+
+.layer-label {
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.stack-components {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.stack-item {
+  background: #3498DB;
+  color: white;
+  padding: 1.5rem 2rem;
+  border-radius: 15px;
+  transition: all 0.3s ease;
+}
+
+.stack-item.qamomile {
+  position: relative;
+  background: linear-gradient(135deg, #8A2BE2 0%, #4169E1 100%);
+  box-shadow: 0 5px 20px rgba(138, 43, 226, 0.3);
+}
+
+.item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.item-header h3 {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+.badge {
+  padding: 0.25rem 0.75rem;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.badge.oss {
+  background: rgba(46, 204, 113, 0.2);
+  border: 1px solid rgba(46, 204, 113, 0.5);
+}
+
+.badge.commercial {
+  background: rgba(255, 255, 255, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+}
+
+.stack-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+
+.hardware-layers {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.hardware-layer {
+  padding: 1.5rem;
+  border-radius: 10px;
+  text-align: center;
+  font-weight: 600;
+}
+
+.hardware-layer.classical {
+  background: #7f8c8d;
+  color: white;
+}
+
+.hardware-layer.quantum {
+  background: #95a5a6;
+  color: white;
+}
+
+/* Features Section */
+.jij-features {
+  padding: 100px 0;
+  background: white;
+}
+
+.jij-features h2 {
+  text-align: center;
+  font-size: 3rem;
+  margin-bottom: 4rem;
+  color: #1a1a2e;
+}
+
+.features-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 3rem;
+  margin-top: 3rem;
+}
+
+.feature-card {
+  background: white;
+  padding: 3rem 2rem;
+  border-radius: 20px;
+  text-align: center;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+  transition: all 0.3s ease;
+  cursor: pointer;
+}
+
+.feature-card:hover {
+  box-shadow: 0 20px 40px rgba(138, 43, 226, 0.2);
+}
+
+.feature-icon {
+  width: 100px;
+  height: 100px;
+  margin: 0 auto 2rem;
+  position: relative;
+}
+
+/* Quantum Icon Animation */
+.quantum-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.quantum-orbit {
+  position: absolute;
+  width: 80px;
+  height: 80px;
+  border: 2px solid #8A2BE2;
+  border-radius: 50%;
+  animation: orbit-rotate 3s linear infinite;
+}
+
+.quantum-orbit::before {
+  content: '';
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: #4169E1;
+  border-radius: 50%;
+  top: -5px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.quantum-nucleus {
+  width: 30px;
+  height: 30px;
+  background: radial-gradient(circle, #8A2BE2 0%, #4169E1 100%);
+  border-radius: 50%;
+  position: relative;
+  z-index: 1;
+}
+
+@keyframes orbit-rotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Optimization Icon */
+.optimization-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.optimization-graph {
+  width: 80px;
+  height: 80px;
+  background: linear-gradient(135deg, #4169E1 0%, #00D4FF 100%);
+  clip-path: polygon(10% 90%, 30% 60%, 50% 70%, 70% 30%, 90% 40%, 90% 90%, 10% 90%);
+  animation: graph-pulse 2s ease-in-out infinite;
+}
+
+@keyframes graph-pulse {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(0.8); }
+}
+
+/* Innovation Icon */
+.innovation-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.innovation-spark {
+  width: 60px;
+  height: 60px;
+  background: #8A2BE2;
+  position: relative;
+  animation: spark-rotate 4s linear infinite;
+}
+
+.innovation-spark::before,
+.innovation-spark::after {
+  content: '';
+  position: absolute;
+  width: 60px;
+  height: 60px;
+  background: #4169E1;
+}
+
+.innovation-spark::before {
+  transform: rotate(30deg);
+}
+
+.innovation-spark::after {
+  transform: rotate(60deg);
+}
+
+.innovation-spark,
+.innovation-spark::before,
+.innovation-spark::after {
+  clip-path: polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%);
+}
+
+@keyframes spark-rotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.feature-card h3 {
+  font-size: 1.5rem;
+  margin-bottom: 1rem;
+  color: #1a1a2e;
+}
+
+.feature-card p {
+  font-size: 1rem;
+  color: #666;
+  line-height: 1.6;
+}
+
+/* CTA Section */
+.jij-cta {
+  padding: 100px 0;
+  background: linear-gradient(135deg, #1a1a2e 0%, #0a0a0a 100%);
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+
+.jij-cta::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: radial-gradient(circle at 20% 50%, rgba(138, 43, 226, 0.2) 0%, transparent 50%),
+              radial-gradient(circle at 80% 50%, rgba(65, 105, 225, 0.2) 0%, transparent 50%);
+}
+
+.cta-content {
+  position: relative;
+  z-index: 1;
+}
+
+.cta-content h2 {
+  font-size: 3rem;
+  color: white;
+  margin-bottom: 1rem;
+}
+
+.cta-content p {
+  font-size: 1.25rem;
+  color: rgba(255, 255, 255, 0.8);
+  margin-bottom: 3rem;
+}
+
+.cta-buttons {
+  display: flex;
+  gap: 2rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.cta-button {
+  padding: 1rem 3rem;
+  border-radius: 50px;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 1.1rem;
+  transition: all 0.3s ease;
+  display: inline-block;
+}
+
+.cta-button.primary {
+  background: linear-gradient(135deg, #8A2BE2 0%, #4169E1 100%);
+  color: white;
+  box-shadow: 0 10px 30px rgba(138, 43, 226, 0.3);
+}
+
+.cta-button.primary:hover {
+  box-shadow: 0 15px 40px rgba(138, 43, 226, 0.5);
+  transform: translateY(-2px);
+}
+
+.cta-button.secondary {
+  background: transparent;
+  color: white;
+  border: 2px solid white;
+}
+
+.cta-button.secondary:hover {
+  background: white;
+  color: #1a1a2e;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  .back-button {
+    top: 1rem;
+    left: 1rem;
+    padding: 0.5rem 1rem;
+    font-size: 0.875rem;
+  }
+
+  .jij-logo-image {
+    width: 200px;
+  }
+  
+  .single-orbit-container.orbit-right {
+    width: 150px;
+    height: 150px;
+    right: 5%;
+  }
+  
+  .single-orbit-container.orbit-left {
+    width: 100px;
+    height: 100px;
+    left: 10%;
+  }
+  
+  .orbit-electron {
+    width: 8px;
+    height: 8px;
+    top: -4px;
+  }
+
+  .jij-tagline {
+    font-size: 1.2rem;
+    padding: 0 1rem;
+  }
+
+  .about-content h2,
+  .jij-features h2,
+  .cta-content h2 {
+    font-size: 2rem;
+  }
+
+  .features-grid {
+    grid-template-columns: 1fr;
+    gap: 2rem;
+  }
+
+  .feature-card {
+    padding: 2rem 1.5rem;
+  }
+
+  .cta-buttons {
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .cta-button {
+    width: 100%;
+    max-width: 300px;
+  }
+  
+  .stack-row {
+    grid-template-columns: 1fr;
+  }
+  
+  .hardware-layers {
+    grid-template-columns: 1fr;
+  }
+  
+  .jijzept-header {
+    flex-direction: column;
+  }
+  
+  .jijzept-logo-img {
+    height: 120px;
+  }
+  
+  .jijzept-header h2 {
+    font-size: 2rem;
+  }
+  
+  .platform-stack {
+    padding: 1.5rem;
+  }
+}
