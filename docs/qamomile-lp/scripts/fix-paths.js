@@ -11,6 +11,7 @@ const fixPaths = () => {
   indexContent = indexContent.replace(/\/image-/g, './image-')
   indexContent = indexContent.replace(/\/Jij_logo\.svg/g, './Jij_logo.svg')
   indexContent = indexContent.replace(/\/JijZept_logo\.png/g, './JijZept_logo.png')
+  indexContent = indexContent.replace(/\/src\/assets\/Jij_logo\.svg/g, './assets/Jij_logo.svg')
   
   fs.writeFileSync(path.join('dist', 'landing.html'), indexContent)
   
@@ -23,6 +24,7 @@ const fixPaths = () => {
     jijContent = jijContent.replace(/\/assets\//g, './assets/')
     jijContent = jijContent.replace(/\/Jij_logo\.svg/g, './Jij_logo.svg')
     jijContent = jijContent.replace(/\/JijZept_logo\.png/g, './JijZept_logo.png')
+    jijContent = jijContent.replace(/\/src\/assets\/Jij_logo\.svg/g, './assets/Jij_logo.svg')
     
     fs.writeFileSync(jijPath, jijContent)
   }
