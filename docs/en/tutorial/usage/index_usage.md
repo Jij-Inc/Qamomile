@@ -29,3 +29,4 @@ Qamomile specializes in the conversion of mathematical models into quantum circu
 - [Using the PennyLaneTranspiler in Qamomile](Using_the_PennyLaneTranspiler_in_Qamomile.ipynb): Learn how to transpile from Qamomile to PennyLane.
 - [Using the QuTiPTranspiler in Qamomile](quantum_annealing.ipynb): Learn how to run the Quantum Annealing with QuTiP's built-in functions.
 - [Using the UDMTranspiler in Qamomile](UDG_demo.ipynb): Learn how to transpile from Qamomlie to bloqade-analog.
+- [Using the CudaqTranspiler in Qamomile](qudaq_transpiler_usage.ipynb): Learn how to transpile from Qamomile to CUDA-Q.
