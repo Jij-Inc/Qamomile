@@ -3,7 +3,7 @@
 
 title: Qamomile Documentation
 author: Jij Inc.
-logo: qamomile_logo.png
+logo: "qamomile_logo.png"
 
 # Force re-execution of notebooks on each build.
 # See https://jupyterbook.org/content/execute.html
@@ -70,3 +70,7 @@ sphinx:
       # コードハイライトの設定
       pygments_style: 'sphinx'
       highlight_language: 'python'
+      html_theme_options:
+        logo:
+          image_light: "../assets/png/qamomile_logo_white_back.png"
+          image_dark: "../assets/png/qamomile_with_title_white.png"
