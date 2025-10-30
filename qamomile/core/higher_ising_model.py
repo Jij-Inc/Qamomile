@@ -71,6 +71,10 @@ class HigherIsingModel:
             \tilde{H} = \frac{1}{W}\sum_{ij}J_{ij}Z_iZ_j + \frac{1}{W}\sum_ih_iZ_i + \frac{1}{W}C
 
         """
+        # Skip normalization if there are no coefficients.
+        if not self.coefficients:
+            return
+
         # Get the maximum absolute value of the coefficients.
         max_abs = max(abs(v) for v in self.coefficients.values())
         # Normalize by the maximum absolute value.
@@ -96,6 +100,10 @@ class HigherIsingModel:
             :filter: docname in docnames
 
         """
+        # Skip normalization if there are no coefficients.
+        if not self.coefficients:
+            return
+
         # Calculate the sum of squares of the coefficients.
         linear_sum_sq = 0.0
         nonlinear_sum_sq = 0.0
