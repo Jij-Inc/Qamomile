@@ -13,11 +13,12 @@ class HigherIsingModel:
 
     def __post_init__(self) -> None:
         """Initialise the index map."""
-        # Iterate over the keys of its coefficients
-        # and set the position to the key of the index map and the kye to the value of the index map.
-        unique_indices = {idx for key in self.coefficients.keys() for idx in key}
-        for hubo_index, ising_index in enumerate(sorted(unique_indices)):
-            self.index_map[ising_index] = hubo_index
+        if len(self.index_map) == 0:
+            # Iterate over the keys of its coefficients
+            # and set the position to the key of the index map and the kye to the value of the index map.
+            unique_indices = {idx for key in self.coefficients.keys() for idx in key}
+            for key in unique_indices.keys():
+                self.index_map[key] = key
 
     @property
     def num_bits(self) -> int:
