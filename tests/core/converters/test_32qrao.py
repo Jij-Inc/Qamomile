@@ -98,7 +98,7 @@ def test_qrac32_encode_ising():
     #     (Z2,): np.sqrt(max_color_group_size) * 2.0,
     # }
 
-    assert len(encoding) == ising.num_bits()
+    assert len(encoding) == ising.num_bits
     assert qrac_hamiltonian == expected_hamiltonian
 
 

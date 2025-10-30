@@ -98,7 +98,7 @@ class FQAOAConverter(QuantumConverter):
         self.num_fermions = num_fermions
         self.var_map = self.cyclic_mapping()
         self.ising = self.fqaoa_get_ising()
-        self.num_qubits = self.ising.num_bits()
+        self.num_qubits = self.ising.num_bits
 
     def fqaoa_instance_to_qubo(self) -> tuple[dict[tuple[int, int], float], float]:
         """
