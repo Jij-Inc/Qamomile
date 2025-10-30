@@ -21,9 +21,20 @@ class HigherIsingModel:
 
     @property
     def num_bits(self) -> int:
-        """Returns the number of variables in the model."""
-        # Returns the number of unique keys.
-        return len(self.index_map)
+        """Returns the number of variables in the model.
+
+        Finds the maximum index across all terms in the model and returns max_index + 1.
+        For example, if the model has terms with indices (0, 1, 5), num_bits will be 6.
+        """
+        if not self.coefficients:
+            return 0
+
+        max_index = -1
+        for indices in self.coefficients.keys():
+            if indices:  # Skip empty tuples (constant terms)
+                max_index = max(max_index, max(indices))
+
+        return max_index + 1
 
     def calc_energy(self, state: list[int]) -> float:
         """Calculate the energy of the state.
