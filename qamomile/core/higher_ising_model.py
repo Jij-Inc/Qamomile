@@ -2,6 +2,8 @@ from __future__ import annotations
 import itertools
 import dataclasses
 
+import numpy as np
+
 
 @dataclasses.dataclass
 class HigherIsingModel:
@@ -105,27 +107,26 @@ class HigherIsingModel:
         if not self.coefficients:
             return
 
-        # Calculate the sum of squares of the coefficients.
-        linear_sum_sq = 0.0
-        nonlinear_sum_sq = 0.0
-        linear_count = 0
-        nonlinear_count = 0
-
+        # Get square sum and count for each kind of term.
+        counts = {}  # key: term order, value: (sum of squares, count)
         for indices, coeff in self.coefficients.items():
-            if len(indices) == 1:
-                linear_sum_sq += coeff**2
-                linear_count += 1
-            else:  # len(indices) >= 2
-                nonlinear_sum_sq += coeff**2
-                nonlinear_count += 1
+            order = len(indices)
+            if order not in counts:
+                counts[order] = [0.0, 0]
 
-        # Calculate the root mean square.
+            # Add the square of the coefficient to the sum of squares.
+            counts[order][0] += coeff**2
+            # Increment the count of terms.
+            counts[order][1] += 1
+
+        # Compute the mean square for each kind of term.
         rms_components = 0.0
-        if linear_count > 0:
-            rms_components += linear_sum_sq / linear_count
-        if nonlinear_count > 0:
-            rms_components += nonlinear_sum_sq / nonlinear_count
-        rms = rms_components**0.5
+        for order, (sum_squares, count) in counts.items():
+            if count > 0:  # This check is redundant but safe.
+                mean_square = sum_squares / count
+                rms_components += mean_square
+
+        rms = np.sqrt(rms_components)
 
         # Normalize by the root mean square.
         self.normalize_by_factor(factor=rms)
