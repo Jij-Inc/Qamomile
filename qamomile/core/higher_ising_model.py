@@ -15,25 +15,36 @@ class HigherIsingModel:
         """Initialise the index map."""
         # Iterate over the keys of its coefficients
         # and set the position to the key of the index map and the kye to the value of the index map.
-        pass
+        unique_indices = {idx for key in self.coefficients.keys() for idx in key}
+        for hubo_index, ising_index in enumerate(sorted(unique_indices)):
+            self.index_map[ising_index] = hubo_index
 
+    @property
     def num_bits(self) -> int:
         """Returns the number of variables in the model."""
         # Returns the number of unique keys.
-        pass
+        return len(self.index_map)
 
     def calc_energy(self, state: list[int]) -> float:
         """Calculate the energy of the state.
 
         Examples:
-            >>> higher_ising = HigherIsingModel({(0, 1): 2.0}, {0: 4.0, 1: 5.0}, 6.0)
+            >>> higher_ising = HigherIsingModel({(0, 1): 2.0, (0,): 4.0, (1,): 5.0}, 6.0)
             >>> higher_ising.calc_energy([1, -1])
             3.0
 
         """
         # Initialise the energy with the constant term.
+        energy = self.constant
+
         # Iterate over the keys of its coefficients and calculate the energy with the given state.
-        pass
+        for indices, coeff in self.coefficients.items():
+            term = coeff
+            for idx in indices:
+                term *= state[idx]
+            energy += term
+
+        return energy
 
     def ising2hubo_index(self, ising_index: int) -> int:
         """Return the corresponding hubo index for the given ising index.
@@ -60,10 +71,10 @@ class HigherIsingModel:
             \tilde{H} = \frac{1}{W}\sum_{ij}J_{ij}Z_iZ_j + \frac{1}{W}\sum_ih_iZ_i + \frac{1}{W}C
 
         """
-        # Skip normalization if there are no coefficients.
         # Get the maximum absolute value of the coefficients.
-        # Normalise each coefficient and the constant term by dividing by the maximum absolute value.
-        pass
+        max_abs = max(abs(v) for v in self.coefficients.values())
+        # Normalize by the maximum absolute value.
+        self.normalize_by_factor(factor=max_abs)
 
     def normalize_by_rms(self):
         r"""Normalize coefficients by the root mean square.
@@ -85,11 +96,30 @@ class HigherIsingModel:
             :filter: docname in docnames
 
         """
-        # Skip normalization if there are no coefficients.
         # Calculate the sum of squares of the coefficients.
+        linear_sum_sq = 0.0
+        nonlinear_sum_sq = 0.0
+        linear_count = 0
+        nonlinear_count = 0
+
+        for indices, coeff in self.coefficients.items():
+            if len(indices) == 1:
+                linear_sum_sq += coeff**2
+                linear_count += 1
+            else:  # len(indices) >= 2
+                nonlinear_sum_sq += coeff**2
+                nonlinear_count += 1
+
         # Calculate the root mean square.
-        # Normalise each coefficient and the constant term by dividing by the root mean square.
-        pass
+        rms_components = 0.0
+        if linear_count > 0:
+            rms_components += linear_sum_sq / linear_count
+        if nonlinear_count > 0:
+            rms_components += nonlinear_sum_sq / nonlinear_count
+        rms = rms_components**0.5
+
+        # Normalize by the root mean square.
+        self.normalize_by_factor(factor=rms)
 
     def normalize_by_factor(self, factor: float) -> None:
         r"""Normalize coefficients by a given factor.
@@ -103,8 +133,16 @@ class HigherIsingModel:
             factor (float): The normalization factor.
         """
         # Skip normalization if there are no coefficients.
+        if not self.coefficients:
+            return
+        # Skip normalization if the factor is zero to avoid division by zero.
+        if factor == 0:
+            return
+
         # Normalise each coefficient and the constant term by dividing by the given factor.
-        pass
+        for key in self.coefficients:
+            self.coefficients[key] /= factor
+        self.constant /= factor
 
     @classmethod
     def from_hubo(
@@ -133,7 +171,35 @@ class HigherIsingModel:
 
         This relationship is leveraged to map the binary variables \(x_i\) in HUBO to the spin variables \(z_i\) in the Ising model.
 
+        Args:
+            hubo (dict[tuple[int, ...], float]): HUBO coefficients
+            constant (float): Constant term in the HUBO
+            simplify (bool): If True, remove coefficients close to zero (not yet implemented)
+
+        Returns:
+            HigherIsingModel: The equivalent Ising model
+
         """
         # Initialise the coefficients and constant term for the Higher Ising model.
-        # Transform each term in the HUBO to the corresponding term in the Higher Ising model.
-        pass
+        coefficients = {}
+        ising_constant = constant  # Start with the input constant
+
+        for indices, value in hubo.items():
+            n = len(indices)
+            base = value / (2**n)
+            for r in range(n + 1):
+                for subset in itertools.combinations(indices, r):
+                    sign = (-1) ** r
+                    if len(subset) == 0:  # Constant term
+                        ising_constant += base * sign
+                    else:
+                        coefficient = tuple(sorted(subset))
+                        coefficients[coefficient] = (
+                            coefficients.get(coefficient, 0) + base * sign
+                        )
+
+        # Optionally simplify by removing near-zero coefficients
+        if simplify:
+            coefficients = {k: v for k, v in coefficients.items() if abs(v) != 0.0}
+
+        return HigherIsingModel(coefficients=coefficients, constant=ising_constant)
