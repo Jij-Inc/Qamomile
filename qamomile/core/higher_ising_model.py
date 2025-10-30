@@ -15,7 +15,7 @@ class HigherIsingModel:
         """Initialise the index map."""
         if len(self.index_map) == 0:
             # Iterate over the keys of its coefficients
-            # and set the position to the key of the index map and the kye to the value of the index map.
+            # and set the position to the key of the index map and the key to the value of the index map.
             unique_indices = {idx for key in self.coefficients.keys() for idx in key}
             for key in unique_indices.keys():
                 self.index_map[key] = key
