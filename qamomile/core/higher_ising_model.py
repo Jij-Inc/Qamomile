@@ -19,8 +19,8 @@ class HigherIsingModel:
             # Iterate over the keys of its coefficients
             # and set the position to the key of the index map and the key to the value of the index map.
             unique_indices = {idx for key in self.coefficients.keys() for idx in key}
-            for hubo_index, ising_index in enumerate(sorted(unique_indices)):
-                self.index_map[ising_index] = hubo_index
+            for index in unique_indices:
+                self.index_map[index] = index
 
     @property
     def num_bits(self) -> int:
