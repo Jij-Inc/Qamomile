@@ -15,17 +15,32 @@ def test_creation_with_defaults(seed):
     - the values of the index_map are the positions of the sorted unique integers.
     """
     # Fix the numpy.random.seed for reproducibility.
+    numpy.random.seed(seed)
 
-    # Create the random coefficients.
+    # Create the random coefficients (up to 5th order with random indices).
+    coefficients = {}
+    num_terms = numpy.random.randint(5, 15)  # 5-14 terms
+    for _ in range(num_terms):
+        order = numpy.random.randint(1, 6)  # 1st to 5th order
+        indices = tuple(sorted(numpy.random.choice(20, size=order, replace=False)))
+        coefficients[indices] = numpy.random.randn()
 
     # Create the random constant term.
+    constant = numpy.random.rand()
 
     # Create the HigherIsingModel.
+    model = HigherIsingModel(coefficients=coefficients, constant=constant)
 
     # - the coefficients are the same as the input,
+    assert model.coefficients == coefficients
     # - the constant term is the same as the input,
+    assert model.constant == constant
     # - the keys of the index_map are the unique values of the integers of the coefficients' key.
+    unique_indices = {idx for key in coefficients.keys() for idx in key}
+    assert set(model.index_map.keys()) == unique_indices
     # - the values of the index_map are the positions of the sorted unique integers.
+    for index in unique_indices:
+        assert model.index_map[index] == index
 
 
 @pytest.mark.parametrize("seed", [901 + i for i in range(100)])
@@ -36,16 +51,30 @@ def test_creation_with_index_map(seed):
     - the index_map is the same as the input.
     """
     # Fix the numpy.random.seed for reproducibility.
+    numpy.random.seed(seed)
 
-    # Create the random coefficients.
+    # Create the random coefficients (up to 5th order with random indices).
+    coefficients = {}
+    num_terms = numpy.random.randint(5, 15)  # 5-14 terms
+    for _ in range(num_terms):
+        order = numpy.random.randint(1, 6)  # 1st to 5th order
+        indices = tuple(sorted(numpy.random.choice(20, size=order, replace=False)))
+        coefficients[indices] = numpy.random.randn()
 
     # Create the random constant term.
+    constant = numpy.random.rand()
 
-    # Create a random index_map.
+    # Create a random index_map for all unique indices in coefficients.
+    unique_indices = {idx for key in coefficients.keys() for idx in key}
+    index_map = {idx: numpy.random.randint(100, 200) for idx in unique_indices}
 
     # Create the HigherIsingModel.
+    model = HigherIsingModel(
+        coefficients=coefficients, constant=constant, index_map=index_map
+    )
 
     # - the index_map is the same as the input.
+    assert model.index_map == index_map
 
 
 @pytest.mark.parametrize(
@@ -76,14 +105,16 @@ def test_num_bits_manually(coefficients, constant, expected_num_bits):
     - the num_bits property returns the expected number of bits.
     """
     # Create the HigherIsingModel.
+    model = HigherIsingModel(coefficients=coefficients, constant=constant)
 
     # - the num_bits property returns the expected number of bits.
+    assert model.num_bits == expected_num_bits
 
 
 @pytest.mark.parametrize(
     "coefficients, constant, state, expected_energy",
     [
-        ({(0, 1): 2.0, (0,): 4.0, (1,): 5.0}, 6.0, [1, -1], -1.0),
+        ({(0, 1): 2.0, (0,): 4.0, (1,): 5.0}, 6.0, [1, -1], 3.0),
         ({(0, 2): -1.0, (1,): 3.0}, -2.0, [-1, 1, -1], 0.0),
         ({(0, 1, 2): 1.5, (2,): -2.0}, 1.0, [1, 1, 1], 0.5),
         ({}, 5.0, [1, -1, 1], 5.0),
@@ -96,8 +127,10 @@ def test_calc_energy_manually(coefficients, constant, state, expected_energy):
     - the calc_energy method returns the expected energy.
     """
     # Create the HigherIsingModel.
+    model = HigherIsingModel(coefficients=coefficients, constant=constant)
 
     # - the calc_energy method returns the expected energy.
+    assert numpy.isclose(model.calc_energy(state), expected_energy)
 
 
 def test_normalize_by_abs_max_empty():
@@ -108,11 +141,16 @@ def test_normalize_by_abs_max_empty():
     - the constant term remains unchanged.
     """
     # Create an empty HigherIsingModel.
+    constant = 5.0
+    model = HigherIsingModel(coefficients={}, constant=constant)
 
     # Run normalize_by_abs_max.
+    model.normalize_by_abs_max()
 
     # - the coefficients remain empty,
+    assert model.coefficients == {}
     # - the constant term remains unchanged.
+    assert model.constant == constant
 
 
 @pytest.mark.parametrize("seed", [901 + i for i in range(100)])
@@ -124,19 +162,33 @@ def test_normalize_by_abs_max(seed):
     - the constant term is scaled correctly.
     """
     # Fix the numpy.random.seed for reproducibility.
+    numpy.random.seed(seed)
 
-    # Create random coefficients.
+    # Create random coefficients (up to 5th order with random indices).
+    coefficients = {}
+    num_terms = numpy.random.randint(5, 15)  # 5-14 terms
+    for _ in range(num_terms):
+        order = numpy.random.randint(1, 6)  # 1st to 5th order
+        indices = tuple(sorted(numpy.random.choice(20, size=order, replace=False)))
+        coefficients[indices] = numpy.random.randn()
 
     # Create a random constant term.
+    constant = numpy.random.randn()
 
     # Create the HigherIsingModel.
+    model = HigherIsingModel(coefficients=coefficients.copy(), constant=constant)
 
     # Calculate the expected normalization factor before normalization.
+    max_abs = max(abs(v) for v in coefficients.values())
 
     # Run normalize_by_abs_max.
+    model.normalize_by_abs_max()
 
     # - all coefficients are scaled correctly,
+    for key, value in coefficients.items():
+        assert numpy.isclose(model.coefficients[key], value / max_abs)
     # - the constant term is scaled correctly.
+    assert numpy.isclose(model.constant, constant / max_abs)
 
 
 def test_normalize_by_rms_empty():
@@ -147,11 +199,16 @@ def test_normalize_by_rms_empty():
     - the constant term remains unchanged.
     """
     # Create an empty HigherIsingModel.
+    constant = 5.0
+    model = HigherIsingModel(coefficients={}, constant=constant)
 
     # Run normalize_by_rms.
+    model.normalize_by_rms()
 
     # - the coefficients remain empty,
+    assert model.coefficients == {}
     # - the constant term remains unchanged.
+    assert model.constant == constant
 
 
 @pytest.mark.parametrize("seed", [901 + i for i in range(100)])
@@ -163,19 +220,47 @@ def test_normalize_by_rms(seed):
     - the constant term is scaled correctly.
     """
     # Fix the numpy.random.seed for reproducibility.
+    numpy.random.seed(seed)
 
-    # Create random coefficients.
+    # Create random coefficients (up to 5th order with random indices).
+    coefficients = {}
+    num_terms = numpy.random.randint(5, 15)  # 5-14 terms
+    for _ in range(num_terms):
+        order = numpy.random.randint(1, 6)  # 1st to 5th order
+        indices = tuple(sorted(numpy.random.choice(20, size=order, replace=False)))
+        coefficients[indices] = numpy.random.randn()
 
     # Create a random constant term.
+    constant = numpy.random.randn()
 
     # Create the HigherIsingModel.
+    model = HigherIsingModel(coefficients=coefficients.copy(), constant=constant)
 
     # Calculate the expected normalization factor before normalization.
+    counts = {}
+    for indices, coeff in coefficients.items():
+        order = len(indices)
+        if order not in counts:
+            counts[order] = [0.0, 0]
+        counts[order][0] += coeff**2
+        counts[order][1] += 1
+
+    rms_components = 0.0
+    for order, (sum_squares, count) in counts.items():
+        if count > 0:
+            mean_square = sum_squares / count
+            rms_components += mean_square
+
+    rms = numpy.sqrt(rms_components)
 
     # Run normalize_by_rms.
+    model.normalize_by_rms()
 
     # - all coefficients are scaled correctly,
+    for key, value in coefficients.items():
+        assert numpy.isclose(model.coefficients[key], value / rms)
     # - the constant term is scaled correctly.
+    assert numpy.isclose(model.constant, constant / rms)
 
 
 def test_normalize_by_factor_empty():
@@ -186,11 +271,16 @@ def test_normalize_by_factor_empty():
     - the constant term remains unchanged.
     """
     # Create an empty HigherIsingModel.
+    constant = 5.0
+    model = HigherIsingModel(coefficients={}, constant=constant)
 
     # Run normalize_by_factor.
+    model.normalize_by_factor(factor=2.0)
 
     # - the coefficients remain empty,
+    assert model.coefficients == {}
     # - the constant term remains unchanged.
+    assert model.constant == constant
 
 
 def test_normalize_by_factor_0():
@@ -201,41 +291,67 @@ def test_normalize_by_factor_0():
     - the constant term remains unchanged.
     """
     # Create random coefficients.
+    coefficients = {
+        (0, 1): 2.0,
+        (2,): 3.0,
+        (1, 3, 5): -1.5,
+    }
 
     # Create a random constant term.
+    constant = 7.0
 
     # Create the HigherIsingModel.
+    model = HigherIsingModel(coefficients=coefficients.copy(), constant=constant)
 
     # Store the coefficients and constant term before normalization.
+    original_coefficients = coefficients.copy()
+    original_constant = constant
 
     # Run normalize_by_factor with factor 0.
+    model.normalize_by_factor(factor=0.0)
 
     # - the coefficients remain unchanged,
+    assert model.coefficients == original_coefficients
     # - the constant term remains unchanged.
+    assert model.constant == original_constant
 
 
 @pytest.mark.parametrize("seed", [901 + i for i in range(100)])
 def test_normalize_by_factor(seed):
-    """Run normalize_by_rms on a non-empty HigherIsingModel.
+    """Run normalize_by_factor on a non-empty HigherIsingModel.
 
     Check if
     - all coefficients are scaled correctly,
     - the constant term is scaled correctly.
     """
     # Fix the numpy.random.seed for reproducibility.
+    numpy.random.seed(seed)
 
-    # Create random coefficients.
+    # Create random coefficients (up to 5th order with random indices).
+    coefficients = {}
+    num_terms = numpy.random.randint(5, 15)  # 5-14 terms
+    for _ in range(num_terms):
+        order = numpy.random.randint(1, 6)  # 1st to 5th order
+        indices = tuple(sorted(numpy.random.choice(20, size=order, replace=False)))
+        coefficients[indices] = numpy.random.randn()
 
     # Create a random constant term.
+    constant = numpy.random.randn()
 
     # Create the HigherIsingModel.
+    model = HigherIsingModel(coefficients=coefficients.copy(), constant=constant)
 
-    # Calculate the expected normalization factor before normalization.
+    # Create a random normalization factor.
+    factor = numpy.random.rand() + 0.5  # Ensure factor is not too close to zero
 
-    # Run normalize_by_rms.
+    # Run normalize_by_factor.
+    model.normalize_by_factor(factor=factor)
 
     # - all coefficients are scaled correctly,
+    for key, value in coefficients.items():
+        assert numpy.isclose(model.coefficients[key], value / factor)
     # - the constant term is scaled correctly.
+    assert numpy.isclose(model.constant, constant / factor)
 
 
 def test_from_hubo_manually():
