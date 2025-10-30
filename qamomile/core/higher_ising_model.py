@@ -17,8 +17,8 @@ class HigherIsingModel:
             # Iterate over the keys of its coefficients
             # and set the position to the key of the index map and the key to the value of the index map.
             unique_indices = {idx for key in self.coefficients.keys() for idx in key}
-            for key in unique_indices.keys():
-                self.index_map[key] = key
+            for hubo_index, ising_index in enumerate(sorted(unique_indices)):
+                self.index_map[ising_index] = hubo_index
 
     @property
     def num_bits(self) -> int:
@@ -57,17 +57,6 @@ class HigherIsingModel:
             energy += term
 
         return energy
-
-    def ising2hubo_index(self, ising_index: int) -> int:
-        """Return the corresponding hubo index for the given ising index.
-
-        Args:
-            ising_index (int): the index in the Ising model
-
-        Returns:
-            int: the hubo index
-        """
-        return self.index_map[ising_index]
 
     def normalize_by_abs_max(self) -> None:
         r"""Normalize coefficients by the absolute maximum value.
