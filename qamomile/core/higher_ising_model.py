@@ -84,12 +84,13 @@ class HigherIsingModel:
         The coefficients for normalized is defined as:
 
         .. math::
-            W = \max(|J_{ij}|, |h_i|)
+            W = \max(|w_{i_0, \dots, i_k}|)
 
+        where w are coefficients and their subscriptions imply a term to be applied.
         We normalize the Ising Hamiltonian as
 
         .. math::
-            \tilde{H} = \frac{1}{W}\sum_{ij}J_{ij}Z_iZ_j + \frac{1}{W}\sum_ih_iZ_i + \frac{1}{W}C
+            \tilde{H} = \frac{1}{W} \left( C + \sum_i w_i Z_i + \cdots + \sum_{i_0, \dots, i_k} w_{i_0, \dots, i_k} Z_{i_0}\dots Z_{i_k} \right)
 
         """
         # Skip normalization if there are no coefficients.
@@ -107,14 +108,14 @@ class HigherIsingModel:
         The coefficients for normalized is defined as:
 
         .. math::
-            W = \sqrt{ \frac{1}{E_2}\sum(w_ij^2) + \frac{1}{E_1}\sum(w_i^2) }
+            W = \sqrt{\frac{1}{\lvert E_k \rvert} \sum_{\{u_1, \dots, u_k\}} (w_{u_1,...,u_k}^{(k)})^2 + \cdots + \frac{1}{\lvert E_1 \rvert} \sum_u (w_u^{(1)})^2}
 
-        where w_ij are quadratic coefficients and w_i are linear coefficients.
-        E_2 and E_1 are the number of quadratic and linear terms respectively.
+        where w are coefficients and their subscriptions imply a term to be applied.
+        E_i are the number of i-th order terms.
         We normalize the Ising Hamiltonian as
 
         .. math::
-            \tilde{H} = \frac{1}{W}\sum_{ij}J_{ij}Z_iZ_j + \frac{1}{W}\sum_ih_iZ_i + \frac{1}{W}C
+            \tilde{H} = \frac{1}{W} \left( C + \sum_i w_i Z_i + \cdots + \sum_{i_0, \dots, i_k} w_{i_0, \dots, i_k} Z_{i_0}\dots Z_{i_k} \right)
         This method is proposed in :cite:`Sureshbabu2024parametersettingin`
 
         .. bibliography::
