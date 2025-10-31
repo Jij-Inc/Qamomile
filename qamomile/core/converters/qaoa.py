@@ -59,7 +59,7 @@ class QAOAConverter(QuantumConverter):
     """
 
     @property
-    def hubo_support(self) -> bool:
+    def _hubo_support(self) -> bool:
         """Property to show if this class supports HUBO.
 
         Returns:
