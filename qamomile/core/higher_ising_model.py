@@ -161,7 +161,7 @@ class HigherIsingModel:
         where W is the given normalization factor.
 
         Args:
-            factor (float): The normalization factor.
+            factor (float): the normalization factor
         """
         # Skip normalization if there are no coefficients.
         if not self.coefficients:
