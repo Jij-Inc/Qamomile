@@ -104,6 +104,9 @@ class QuantumConverter(abc.ABC):
                 - "rms": Normalize by root mean square
                 Defaults to None.
 
+        Raises:
+            ValueError: If an unsupported relaxation method is provided.
+            ValueError: If the instance is HUBO but the converter does not support HUBO.
         """
         self.original_instance: ommx.v1.Instance = instance
 
@@ -112,6 +115,10 @@ class QuantumConverter(abc.ABC):
             raise ValueError(
                 "Relaxation method other than SquaredPenalty is not supported yet."
             )
+
+        # If the problem is HUBO and the conveter does not support, then raise an error.
+        if not (self.is_qubo or self._hubo_support):
+            raise ValueError(f"The instance is HUBO, but {self} does not support HUBO.")
 
         self.int2varlabel: dict[int, str] = {}
         self.normalize_ising = normalize_ising
@@ -131,7 +138,7 @@ class QuantumConverter(abc.ABC):
 
     @property
     @abc.abstractmethod
-    def hubo_support(self) -> bool:
+    def _hubo_support(self) -> bool:
         """Property to show if this class supports HUBO.
 
         Raises:
@@ -326,7 +333,7 @@ class QuantumConverter(abc.ABC):
             ising = IsingModel.from_qubo(qubo, simplify=False)
             ising.constant += constant
         # If the problem is HUBO and the class supports HUBO, convert to HUBO first.
-        elif self.hubo_support:
+        elif self._hubo_support:
             hubo, constant = self.instance_to_hubo(multipliers, detail_parameters)
             ising = HigherIsingModel.from_hubo(hubo, simplify=False)
             ising.constant += constant
