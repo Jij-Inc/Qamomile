@@ -28,6 +28,9 @@ class HigherIsingModel:
 
         Finds the maximum index across all terms in the model and returns max_index + 1.
         For example, if the model has terms with indices (0, 1, 5), num_bits will be 6.
+
+        Returns:
+            int: Number of variables in the model.
         """
         if not self.coefficients:
             return 0
@@ -41,6 +44,12 @@ class HigherIsingModel:
 
     def calc_energy(self, state: list[int]) -> float:
         """Calculate the energy of the state.
+
+        Args:
+            state (list[int]): A list of spin values (+1 or -1) representing the state of each variable.
+
+        Returns:
+            float: The calculated energy of the given state.
 
         Examples:
             >>> higher_ising = HigherIsingModel({(0, 1): 2.0, (0,): 4.0, (1,): 5.0}, 6.0)
