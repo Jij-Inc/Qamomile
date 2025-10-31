@@ -29,8 +29,6 @@ Note: This module requires `jijmodeling` for problem representation.
 
 """
 
-import typing as typ
-import qamomile.core.bitssample as qm_bs
 import qamomile.core.circuit as qm_c
 import qamomile.core.operator as qm_o
 from qamomile.core.converters.converter import QuantumConverter
