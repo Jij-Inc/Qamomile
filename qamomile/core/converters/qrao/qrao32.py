@@ -200,6 +200,15 @@ class QRAC32Converter(QuantumConverter):
 
     max_color_group_size = 3
 
+    @property
+    def hubo_support(self) -> bool:
+        """Property to show if this class supports HUBO.
+
+        Returns:
+            bool: if this class supports HUBO
+        """
+        return False
+
     def ising_encode(
         self,
         multipliers: typ.Optional[dict[str, float]] = None,
