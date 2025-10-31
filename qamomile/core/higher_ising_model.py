@@ -48,6 +48,9 @@ class HigherIsingModel:
         Args:
             state (list[int]): A list of spin values (+1 or -1) representing the state of each variable.
 
+        Raises:
+            ValueError: If any element in state is not close to +1 or -1.
+
         Returns:
             float: The calculated energy of the given state.
 
@@ -57,6 +60,12 @@ class HigherIsingModel:
             3.0
 
         """
+        # Validate the given state.
+        if not np.allclose(np.abs(state), 1.0):
+            raise ValueError(
+                "All elements in state must be close to +1 or -1 since it is a spin."
+            )
+
         # Initialise the energy with the constant term.
         energy = self.constant
 
