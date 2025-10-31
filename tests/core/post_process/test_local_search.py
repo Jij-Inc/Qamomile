@@ -32,7 +32,7 @@ def local_search_instance(qaoa_converter):
 def test_to_ising_matrix(ising_matrix, qaoa_converter):
     qaoa_encoded = qaoa_converter.ising_encode()
     ising_matrix.to_ising_matrix(qaoa_encoded)
-    size = qaoa_encoded.num_bits()
+    size = qaoa_encoded.num_bits
 
     assert isinstance(ising_matrix.quad, np.ndarray)
     assert isinstance(ising_matrix.linear, np.ndarray)
@@ -50,7 +50,7 @@ def test_calc_E_diff(ising_matrix, qaoa_converter):
 
 
 def test_run(local_search_instance, qaoa_converter):
-    size = qaoa_converter.ising_encode().num_bits()
+    size = qaoa_converter.ising_encode().num_bits
     state = np.random.choice([-1, 1], size=size)
 
     invalid_method = "non_existent_method"

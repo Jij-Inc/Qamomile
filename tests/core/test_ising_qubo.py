@@ -21,31 +21,31 @@ def test_num_bits():
         {2: 5.0, 3: 2.0, 4: 1.0, 5: 1.0, 6: 1.0},
         6.0,
     )
-    assert ising.num_bits() == 7
+    assert ising.num_bits == 7
 
     ising = IsingModel({}, {0: 1.0, 1: 1.0, 2: 5.0, 3: 2.0}, 6.0)
-    assert ising.num_bits() == 4
+    assert ising.num_bits == 4
 
     ising = IsingModel(
         {(0, 1): 2.0, (0, 2): 1.0},
         {},
         6.0,
     )
-    assert ising.num_bits() == 3
+    assert ising.num_bits == 3
 
     ising = IsingModel(
         {},
         {},
         6.0,
     )
-    assert ising.num_bits() == 0
+    assert ising.num_bits == 0
 
     ising = IsingModel(
         {},
         {0: 1.0},
         6.0,
     )
-    assert ising.num_bits() == 1
+    assert ising.num_bits == 1
 
 
 def test_normalize_by_abs_max():

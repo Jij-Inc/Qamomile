@@ -114,6 +114,15 @@ class QRAC21Converter(QuantumConverter):
 
     max_color_group_size = 2
 
+    @property
+    def _hubo_support(self) -> bool:
+        """Property to show if this class supports HUBO.
+
+        Returns:
+            bool: if this class supports HUBO
+        """
+        return False
+
     def ising_encode(
         self,
         multipliers: typ.Optional[dict[str, float]] = None,
@@ -160,7 +169,7 @@ class QRAC21Converter(QuantumConverter):
         ising = self.get_ising()
         num_qubits = len(self.color_group)
         zero_pauli = qm_o.Hamiltonian(num_qubits=num_qubits)
-        pauli_operators = [zero_pauli] * ising.num_bits()
+        pauli_operators = [zero_pauli] * ising.num_bits
         for idx, pauli in self.pauli_encoding.items():
             observable = qm_o.Hamiltonian(num_qubits=num_qubits)
             observable.add_term((pauli,), 1.0)
