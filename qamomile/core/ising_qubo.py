@@ -1,126 +1,87 @@
+from __future__ import annotations
 import dataclasses
-import typing as typ
 
-import numpy as np
+from qamomile.core.higher_ising_model import HigherIsingModel
 
 
 @dataclasses.dataclass
-class IsingModel:
-    quad: dict[tuple[int, int], float]
-    linear: dict[int, float]
-    constant: float
-    index_map: dict[int, int] = dataclasses.field(default_factory=dict)
+class IsingModel(HigherIsingModel):
+    """Ising model as a special case of Higher Ising Model.
 
-    def __post_init__(self):
-        if len(self.index_map) == 0:
-            self.index_map = {i: i for i in self.linear.keys()}
-            for i, j in self.quad.keys():
+    This class represents a quadratic Ising model, which is a special case of
+    the Higher Ising Model where all terms are at most quadratic.
+
+    The model internally uses HigherIsingModel's coefficients representation,
+    but provides quad and linear properties for backward compatibility.
+    """
+
+    def __init__(
+        self,
+        quad: dict[tuple[int, int], float],
+        linear: dict[int, float],
+        constant: float,
+        index_map: dict[int, int] | None = None,
+    ):
+        """Initialize IsingModel.
+
+        Args:
+            quad: Quadratic coefficients J_ij
+            linear: Linear coefficients h_i
+            constant: Constant term
+            index_map: Mapping from Ising indices to QUBO indices
+        """
+        # Convert quad and linear to coefficients format for parent class
+        coefficients: dict[tuple[int, ...], float] = {}
+
+        # Add quadratic terms
+        for (i, j), value in quad.items():
+            key = tuple(sorted([i, j]))
+            coefficients[key] = value
+
+        # Add linear terms
+        for i, value in linear.items():
+            coefficients[(i,)] = value
+
+        # Initialize parent class
+        super().__init__(coefficients=coefficients, constant=constant)
+
+        # Override index_map if provided, otherwise use default behavior
+        if index_map is not None:
+            self.index_map = index_map
+        else:
+            self.index_map = {i: i for i in linear.keys()}
+            for i, j in quad.keys():
                 self.index_map[i] = i
                 self.index_map[j] = j
 
-    def num_bits(self) -> int:
-        num_bits = max(self.linear.keys(), default=-1)
-        num_bits = max(
-            num_bits, max((max(pair) for pair in self.quad.keys()), default=num_bits)
-        )
-        return num_bits + 1
+    @property
+    def quad(self) -> dict[tuple[int, int], float]:
+        """Extract quadratic coefficients from parent's coefficients."""
+        quad = {}
+        for key, value in self.coefficients.items():
+            if len(key) == 2:
+                quad[key] = value
+        return quad
 
-    def calc_energy(self, state: list[int]) -> float:
-        """Calculates the energy of the state.
-
-        Examples:
-            >>> ising = IsingModel({(0, 1): 2.0}, {0: 4.0, 1: 5.0}, 6.0)
-            >>> ising.calc_energy([1, -1])
-            3.0
-
-        """
-        energy = self.constant
-        for (i, j), value in self.quad.items():
-            energy += value * state[i] * state[j]
-        for i, value in self.linear.items():
-            energy += value * state[i]
-        return energy
+    @property
+    def linear(self) -> dict[int, float]:
+        """Extract linear coefficients from parent's coefficients."""
+        linear = {}
+        for key, value in self.coefficients.items():
+            if len(key) == 1:
+                linear[key[0]] = value
+        return linear
 
     def ising2qubo_index(self, index: int) -> int:
+        """Alias for ising2hubo_index for backward compatibility.
+
+        Args:
+            index: Ising index
+
+        Returns:
+            QUBO index
+        """
         return self.index_map[index]
-
-    def normalize_by_abs_max(self):
-        r"""Normalize coefficients by the absolute maximum value.
-
-        The coefficients for normalized is defined as:
-
-        .. math::
-            W = \max(|J_{ij}|, |h_i|)
-
-        We normalize the Ising Hamiltonian as
-
-        .. math::
-            \tilde{H} = \frac{1}{W}\sum_{ij}J_{ij}Z_iZ_j + \frac{1}{W}\sum_ih_iZ_i + \frac{1}{W}C
-
-        """
-
-        if not self.linear and not self.quad:
-            return  # 係数が存在しない場合は正規化しない
-
-        max_coeff = max(
-            max((abs(value) for value in self.linear.values()), default=0),
-            max((abs(value) for value in self.quad.values()), default=0),
-        )
-
-        if max_coeff == 0:
-            return  # すべての係数が0の場合は正規化しない
-
-        self.constant /= max_coeff
-        for key in self.linear:
-            self.linear[key] /= max_coeff
-        for key in self.quad:
-            self.quad[key] /= max_coeff
-
-    def normalize_by_rms(self):
-        r"""Normalize coefficients by the root mean square.
-
-        The coefficients for normalized is defined as:
-
-        .. math::
-            W = \sqrt{ \frac{1}{E_2}\sum(w_ij^2) + \frac{1}{E_1}\sum(w_i^2) }
-
-        where w_ij are quadratic coefficients and w_i are linear coefficients.
-        E_2 and E_1 are the number of quadratic and linear terms respectively.
-        We normalize the Ising Hamiltonian as
-
-        .. math::
-            \tilde{H} = \frac{1}{W}\sum_{ij}J_{ij}Z_iZ_j + \frac{1}{W}\sum_ih_iZ_i + \frac{1}{W}C
-        This method is proposed in :cite:`Sureshbabu2024parametersettingin`
-
-        .. bibliography::
-            :filter: docname in docnames
-
-        """
-        if not self.linear and not self.quad:
-            return  # 係数が存在しない場合は正規化しない
-
-        # numpyのarrayに変換して二乗和を計算
-        quad_coeffs = np.array(list(self.quad.values()))
-        linear_coeffs = np.array(list(self.linear.values()))
-
-        E2 = len(self.quad)
-        E1 = len(self.linear)
-
-        # np.sum(quad_coeffs ** 2)はnp.dot(quad_coeffs, quad_coeffs)より効率的
-        quad_variance = np.sum(quad_coeffs**2) / E2 if E2 > 0 else 0
-        linear_variance = np.sum(linear_coeffs**2) / E1 if E1 > 0 else 0
-
-        normalization_factor = np.sqrt(quad_variance + linear_variance)
-
-        if normalization_factor == 0:
-            return  # すべての係数が0の場合は正規化しない
-
-        # 正規化
-        self.constant /= normalization_factor
-        for key in self.linear:
-            self.linear[key] /= normalization_factor
-        for key in self.quad:
-            self.quad[key] /= normalization_factor
 
     @classmethod
     def from_qubo(

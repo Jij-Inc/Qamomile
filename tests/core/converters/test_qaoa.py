@@ -151,7 +151,7 @@ def test_ommx_support_error_case():
     (...)    107         qm_c.QuantumCircuit: The complete QAOA ansatz circuit.
         108     '''
     --> 109     ising = self.get_ising()
-        110     num_qubits = ising.num_bits()
+        110     num_qubits = ising.num_bits
         111     qaoa_circuit = qm_c.QuantumCircuit(num_qubits, 0, name="QAOA")
 
     File ~/dev/git/Qamomile/qamomile/core/converters/converter.py:192, in QuantumConverter.get_ising(self)

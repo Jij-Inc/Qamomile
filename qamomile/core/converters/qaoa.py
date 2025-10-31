@@ -75,7 +75,7 @@ class QAOAConverter(QuantumConverter):
             qm_c.QuantumCircuit: The cost ansatz circuit.
         """
         ising = self.get_ising()
-        num_qubits = ising.num_bits()
+        num_qubits = ising.num_bits
 
         cost = qm_c.QuantumCircuit(num_qubits, 0, name=name)
 
@@ -107,7 +107,7 @@ class QAOAConverter(QuantumConverter):
             qm_c.QuantumCircuit: The complete QAOA ansatz circuit.
         """
         ising = self.get_ising()
-        num_qubits = ising.num_bits()
+        num_qubits = ising.num_bits
         qaoa_circuit = qm_c.QuantumCircuit(num_qubits, 0, name="QAOA")
 
         # Apply initial Hadamard gates if specified

@@ -1,12 +1,20 @@
 import numpy as np
 import jijmodeling as jm
 from qamomile.core.ising_qubo import IsingModel
-from qamomile.core.converters.qrao.qrao32 import create_x_prime, create_y_prime, create_z_prime, qrac32_encode_ising, create_prime_operator,QRAC32Converter
+from qamomile.core.converters.qrao.qrao32 import (
+    create_x_prime,
+    create_y_prime,
+    create_z_prime,
+    qrac32_encode_ising,
+    create_prime_operator,
+    QRAC32Converter,
+)
 import qamomile.core.operator as qm_o
 from qamomile.core.converters.qrao.graph_coloring import (
     greedy_graph_coloring,
     check_linear_term,
 )
+
 
 def test_create_x_prime():
     X_prime = create_x_prime(0)
@@ -16,10 +24,11 @@ def test_create_x_prime():
     Z0 = qm_o.PauliOperator(qm_o.Pauli.Z, 0)
     Z1 = qm_o.PauliOperator(qm_o.Pauli.Z, 1)
     expected = qm_o.Hamiltonian()
-    expected.add_term((X0,X1), 1 / 2 * coeff)
-    expected.add_term((X0,Z1), 1 / 2 * coeff)
+    expected.add_term((X0, X1), 1 / 2 * coeff)
+    expected.add_term((X0, Z1), 1 / 2 * coeff)
     expected.add_term((Z0,), 1 * coeff)
     assert X_prime == expected
+
 
 def test_create_y_prime():
     Y_prime = create_y_prime(0)
@@ -29,10 +38,11 @@ def test_create_y_prime():
     Y0 = qm_o.PauliOperator(qm_o.Pauli.Y, 0)
     Y1 = qm_o.PauliOperator(qm_o.Pauli.Y, 1)
     expected = qm_o.Hamiltonian()
-    expected.add_term((X1,), 1 / 2  * coeff)
-    expected.add_term((Z1,), 1  * coeff)
-    expected.add_term((Y0,Y1), 1 / 2  * coeff)
+    expected.add_term((X1,), 1 / 2 * coeff)
+    expected.add_term((Z1,), 1 * coeff)
+    expected.add_term((Y0, Y1), 1 / 2 * coeff)
     assert Y_prime == expected
+
 
 def test_create_z_prime():
     Z_prime = create_z_prime(0)
@@ -42,10 +52,11 @@ def test_create_z_prime():
     Z0 = qm_o.PauliOperator(qm_o.Pauli.Z, 0)
     Z1 = qm_o.PauliOperator(qm_o.Pauli.Z, 1)
     expected = qm_o.Hamiltonian()
-    expected.add_term((Z0,Z1), 1 * coeff)
+    expected.add_term((Z0, Z1), 1 * coeff)
     expected.add_term((X0,), -1 / 2 * coeff)
-    expected.add_term((Z0,X1), -1 / 2 * coeff)
+    expected.add_term((Z0, X1), -1 / 2 * coeff)
     assert Z_prime == expected
+
 
 def test_qrac32_encode_ising():
     X1 = qm_o.PauliOperator(qm_o.Pauli.X, 1)
@@ -87,12 +98,13 @@ def test_qrac32_encode_ising():
     #     (Z2,): np.sqrt(max_color_group_size) * 2.0,
     # }
 
-    assert len(encoding) == ising.num_bits()
+    assert len(encoding) == ising.num_bits
     assert qrac_hamiltonian == expected_hamiltonian
+
 
 def test_QRAC32Converter():
     problem = jm.Problem("sample")
-    x = jm.BinaryVar("x", shape = (3,))
+    x = jm.BinaryVar("x", shape=(3,))
     problem += x[1] * x[2] + x[0]
     instance = jm.Interpreter({}).eval_problem(problem)
 
