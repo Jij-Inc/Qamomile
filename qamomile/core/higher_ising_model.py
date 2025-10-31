@@ -28,6 +28,9 @@ class HigherIsingModel:
 
         Finds the maximum index across all terms in the model and returns max_index + 1.
         For example, if the model has terms with indices (0, 1, 5), num_bits will be 6.
+
+        Returns:
+            int: Number of variables in the model.
         """
         if not self.coefficients:
             return 0
@@ -42,12 +45,27 @@ class HigherIsingModel:
     def calc_energy(self, state: list[int]) -> float:
         """Calculate the energy of the state.
 
+        Args:
+            state (list[int]): A list of spin values (+1 or -1) representing the state of each variable.
+
+        Raises:
+            ValueError: If any element in state is not close to +1 or -1.
+
+        Returns:
+            float: The calculated energy of the given state.
+
         Examples:
             >>> higher_ising = HigherIsingModel({(0, 1): 2.0, (0,): 4.0, (1,): 5.0}, 6.0)
             >>> higher_ising.calc_energy([1, -1])
             3.0
 
         """
+        # Validate the given state.
+        if not np.allclose(np.abs(state), 1.0):
+            raise ValueError(
+                "All elements in state must be close to +1 or -1 since it is a spin."
+            )
+
         # Initialise the energy with the constant term.
         energy = self.constant
 
@@ -66,12 +84,13 @@ class HigherIsingModel:
         The coefficients for normalized is defined as:
 
         .. math::
-            W = \max(|J_{ij}|, |h_i|)
+            W = \max(|w_{i_0, \dots, i_k}|)
 
+        where w are coefficients and their subscriptions imply a term to be applied.
         We normalize the Ising Hamiltonian as
 
         .. math::
-            \tilde{H} = \frac{1}{W}\sum_{ij}J_{ij}Z_iZ_j + \frac{1}{W}\sum_ih_iZ_i + \frac{1}{W}C
+            \tilde{H} = \frac{1}{W} \left( C + \sum_i w_i Z_i + \cdots + \sum_{i_0, \dots, i_k} w_{i_0, \dots, i_k} Z_{i_0}\dots Z_{i_k} \right)
 
         """
         # Skip normalization if there are no coefficients.
@@ -89,14 +108,14 @@ class HigherIsingModel:
         The coefficients for normalized is defined as:
 
         .. math::
-            W = \sqrt{ \frac{1}{E_2}\sum(w_ij^2) + \frac{1}{E_1}\sum(w_i^2) }
+            W = \sqrt{\frac{1}{\lvert E_k \rvert} \sum_{\{u_1, \dots, u_k\}} (w_{u_1,...,u_k}^{(k)})^2 + \cdots + \frac{1}{\lvert E_1 \rvert} \sum_u (w_u^{(1)})^2}
 
-        where w_ij are quadratic coefficients and w_i are linear coefficients.
-        E_2 and E_1 are the number of quadratic and linear terms respectively.
+        where w are coefficients and their subscriptions imply a term to be applied.
+        E_i are the number of i-th order terms.
         We normalize the Ising Hamiltonian as
 
         .. math::
-            \tilde{H} = \frac{1}{W}\sum_{ij}J_{ij}Z_iZ_j + \frac{1}{W}\sum_ih_iZ_i + \frac{1}{W}C
+            \tilde{H} = \frac{1}{W} \left( C + \sum_i w_i Z_i + \cdots + \sum_{i_0, \dots, i_k} w_{i_0, \dots, i_k} Z_{i_0}\dots Z_{i_k} \right)
         This method is proposed in :cite:`Sureshbabu2024parametersettingin`
 
         .. bibliography::
@@ -137,10 +156,12 @@ class HigherIsingModel:
         We normalize the Ising Hamiltonian as
 
         .. math::
-            \tilde{H} = \frac{1}{factor}\sum_{ij}J_{ij}Z_iZ_j + \frac{1}{factor}\sum_ih_iZ_i + \frac{1}{factor}C
+            \tilde{H} = \frac{1}{W} \left( C + \sum_i w_i Z_i + \cdots + \sum_{i_0, \dots, i_k} w_{i_0, \dots, i_k} Z_{i_0}\dots Z_{i_k} \right)
+
+        where W is the given normalization factor.
 
         Args:
-            factor (float): The normalization factor.
+            factor (float): the normalization factor
         """
         # Skip normalization if there are no coefficients.
         if not self.coefficients:
@@ -210,6 +231,8 @@ class HigherIsingModel:
 
         # Optionally simplify by removing near-zero coefficients
         if simplify:
-            coefficients = {k: v for k, v in coefficients.items() if abs(v) != 0.0}
+            coefficients = {
+                k: v for k, v in coefficients.items() if np.isclose(abs(v), 0.0)
+            }
 
         return HigherIsingModel(coefficients=coefficients, constant=ising_constant)

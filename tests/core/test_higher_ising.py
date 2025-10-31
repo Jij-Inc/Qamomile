@@ -111,6 +111,20 @@ def test_num_bits_manually(coefficients, constant, expected_num_bits):
     assert model.num_bits == expected_num_bits
 
 
+def test_calc_energy_non_spin():
+    """Run calc_energy method with a non-spin state.
+
+    Check if
+    - the calc_energy method raises a ValueError.
+    """
+    # Create the HigherIsingModel.
+    higher_ising = HigherIsingModel({(0, 1): 2.0, (0,): 4.0, (1,): 5.0}, 6.0)
+
+    # - the calc_energy method raises a ValueError.
+    with pytest.raises(ValueError):
+        higher_ising.calc_energy([1, 0])  # 0 is not a valid spin value
+
+
 @pytest.mark.parametrize(
     "coefficients, constant, state, expected_energy",
     [
