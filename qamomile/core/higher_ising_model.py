@@ -156,7 +156,9 @@ class HigherIsingModel:
         We normalize the Ising Hamiltonian as
 
         .. math::
-            \tilde{H} = \frac{1}{factor}\sum_{ij}J_{ij}Z_iZ_j + \frac{1}{factor}\sum_ih_iZ_i + \frac{1}{factor}C
+            \tilde{H} = \frac{1}{W} \left( C + \sum_i w_i Z_i + \cdots + \sum_{i_0, \dots, i_k} w_{i_0, \dots, i_k} Z_{i_0}\dots Z_{i_k} \right)
+
+        where W is the given normalization factor.
 
         Args:
             factor (float): The normalization factor.
