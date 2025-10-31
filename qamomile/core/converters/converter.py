@@ -37,9 +37,9 @@ import abc
 import enum
 import typing as typ
 import copy
-import jijmodeling as jm
+
 import ommx.v1
-import numpy as np
+
 import qamomile.core.bitssample as qm_bs
 import qamomile.core.operator as qm_o
 from qamomile.core.ising_qubo import IsingModel
