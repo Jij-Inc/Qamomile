@@ -90,3 +90,18 @@ class Utils:
         problem += jm.prod(i, x[i])
         problem += jm.sum(i, a[i] * x[i])
         return problem
+
+    @staticmethod
+    def get_n_body_problem_with_constraints():
+        N = jm.Placeholder("N")
+        x = jm.BinaryVar("x", shape=(N,))
+        a = jm.Placeholder("a", shape=(N,))
+        i = jm.Element("i", belong_to=(0, N))
+
+        problem = jm.Problem("N-body problem")
+
+        problem += jm.prod(i, x[i])
+        problem += jm.sum(i, a[i] * x[i])
+
+        problem += jm.Constraint("constraint", jm.sum(i, x[i]) > 0)
+        return problem

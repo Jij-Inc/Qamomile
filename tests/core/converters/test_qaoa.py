@@ -209,7 +209,7 @@ def test_ommx_support_error_case():
         {"N": 4, "a": [0.5, -0.5, 0.5, -0.5]},
     ],
 )
-def test_n_body_problem(qaoa_converter, instance_data):
+def test_n_body_problem(instance_data):
     """Run get_qaoa_ansatz and get_cost_hamiltonian for N-body problem with different instance data.
 
     Check if

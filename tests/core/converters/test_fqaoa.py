@@ -5,6 +5,7 @@ import numpy as np
 import jijmodeling as jm
 import ommx.v1
 import qiskit.primitives as qk_pr
+
 from qamomile.qiskit import QiskitTranspiler
 from qamomile.core.converters.fqaoa import FQAOAConverter
 from qamomile.core.ising_qubo import IsingModel
@@ -12,6 +13,8 @@ import qamomile.core.circuit as qm_c
 from qamomile.core.circuit.circuit import ParametricTwoQubitGate
 import qamomile.core.operator as qm_o
 import qamomile.core.bitssample as qm_bs
+
+from tests.utils import Utils
 
 
 @pytest.fixture
@@ -169,3 +172,26 @@ def test_get_cost_ansatz(simple_problem):
     df_test_sampleset = test_sampleset.summary
 
     assert (df_test_sampleset["feasible"] == True).sum() == 1000
+
+
+@pytest.mark.parametrize(
+    "instance_data",
+    [
+        {"N": 3, "a": [-1.0, 1.0, -1.0]},
+        {"N": 4, "a": [0.5, -0.5, 0.5, -0.5]},
+    ],
+)
+def test_n_body_problem_with_constraints(instance_data):
+    """Create FQAOAConverter with a HUBO problem.
+
+    Check if
+    - ValueError is raised.
+    """
+    # Get the N-body problem.
+    n_body_problem = Utils.get_n_body_problem()
+    # Get the ommx instance.
+    interpreter = jm.Interpreter(instance_data)
+    instance = interpreter.eval_problem(n_body_problem)
+    # - ValueError is raised.
+    with pytest.raises(ValueError):
+        FQAOAConverter(instance, num_fermions=0)
