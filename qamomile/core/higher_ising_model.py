@@ -210,6 +210,8 @@ class HigherIsingModel:
 
         # Optionally simplify by removing near-zero coefficients
         if simplify:
-            coefficients = {k: v for k, v in coefficients.items() if abs(v) != 0.0}
+            coefficients = {
+                k: v for k, v in coefficients.items() if np.isclose(abs(v), 0.0)
+            }
 
         return HigherIsingModel(coefficients=coefficients, constant=ising_constant)
