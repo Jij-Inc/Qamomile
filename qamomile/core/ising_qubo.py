@@ -72,17 +72,6 @@ class IsingModel(HigherIsingModel):
                 linear[key[0]] = value
         return linear
 
-    def ising2qubo_index(self, index: int) -> int:
-        """Alias for ising2hubo_index for backward compatibility.
-
-        Args:
-            index: Ising index
-
-        Returns:
-            QUBO index
-        """
-        return self.index_map[index]
-
     @classmethod
     def from_qubo(
         cls, qubo: dict[tuple[int, int], float], constant: float = 0.0, simplify=False

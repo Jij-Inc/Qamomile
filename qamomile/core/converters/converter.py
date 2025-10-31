@@ -417,7 +417,7 @@ class QuantumConverter(abc.ABC):
         for bitssample in bitssampleset.bitarrays:
             sample = {}
             for i, bit in enumerate(bitssample.bits):
-                index = ising.ising2qubo_index(i)
+                index = ising.index_map[i]
                 sample[index] = bit
             state = ommx.v1.State(entries=sample)
             # `num_occurrences` is encoded into sample ID list.
