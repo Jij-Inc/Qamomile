@@ -1,5 +1,4 @@
 import dataclasses
-import typing as typ
 
 import numpy as np
 
@@ -10,6 +9,9 @@ class IsingModel:
     linear: dict[int, float]
     constant: float
     index_map: dict[int, int] = dataclasses.field(default_factory=dict)
+    original_to_zero_origin_map: dict[int, int] = dataclasses.field(
+        default_factory=dict
+    )
 
     def __post_init__(self):
         if len(self.index_map) == 0:
@@ -18,12 +20,44 @@ class IsingModel:
                 self.index_map[i] = i
                 self.index_map[j] = j
 
+        # Reindex to zero-origin.
+        indices = set(self.linear.keys())
+        for i, j in self.quad.keys():
+            indices.add(i)
+            indices.add(j)
+        indices = sorted(indices)
+        self.original_to_zero_origin_map = {}
+        for new_index, original_index in enumerate(indices):
+            self.original_to_zero_origin_map[original_index] = new_index
+        # Rebuild quad and linear with new indices.
+        new_quad = {}
+        for (i, j), value in self.quad.items():
+            new_i = self.original_to_zero_origin_map[i]
+            new_j = self.original_to_zero_origin_map[j]
+            new_quad[(new_i, new_j)] = value
+        self.quad = new_quad
+        new_linear = {}
+        for i, value in self.linear.items():
+            new_i = self.original_to_zero_origin_map[i]
+            new_linear[new_i] = value
+        self.linear = new_linear
+
+    @property
+    def zero_origin_to_original_map(self) -> dict[int, int]:
+        """A mapping from rebuilt indices (zero-origin) to the original indices.
+
+        Returns:
+            dict[int, int]: a mapping from rebuilt indices to original indices.
+        """
+        return {v: k for k, v in self.original_to_zero_origin_map.items()}
+
     def num_bits(self) -> int:
-        num_bits = max(self.linear.keys(), default=-1)
-        num_bits = max(
-            num_bits, max((max(pair) for pair in self.quad.keys()), default=num_bits)
-        )
-        return num_bits + 1
+        """Return the number of bits, which is the number of variables.
+
+        Returns:
+            int: the number of bits.
+        """
+        return len(self.original_to_zero_origin_map)
 
     def calc_energy(self, state: list[int]) -> float:
         """Calculates the energy of the state.
@@ -42,7 +76,15 @@ class IsingModel:
         return energy
 
     def ising2qubo_index(self, index: int) -> int:
-        return self.index_map[index]
+        """Convert the rebuilt index (zero-origin) to the original index through the index_map.
+
+        Args:
+            index (int): a rebuilt index (zero-origin).
+
+        Returns:
+            int: the original index.
+        """
+        return self.index_map[self.zero_origin_to_original_map[index]]
 
     def normalize_by_abs_max(self):
         r"""Normalize coefficients by the absolute maximum value.
