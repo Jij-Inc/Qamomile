@@ -175,8 +175,6 @@ def test_ommx_support_error_case():
 
     KeyError: 7
     """
-    import jijmodeling as jm
-
     # Define Knapsack problem
     v = jm.Placeholder("v", ndim=1)
     N = v.len_at(0, latex="N")
