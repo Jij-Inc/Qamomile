@@ -194,7 +194,7 @@ class QRACSpaceEfficientConverter(QuantumConverter):
         ising = self.get_ising()
 
         zero_pauli = qm_o.Hamiltonian(num_qubits=self.num_qubits)
-        pauli_operators = [zero_pauli] * ising.num_bits()
+        pauli_operators = [zero_pauli] * ising.num_bits
         for idx, pauli in self.pauli_encoding.items():
             observable = qm_o.Hamiltonian(num_qubits=self.num_qubits)
             observable.add_term((pauli,), 1.0)

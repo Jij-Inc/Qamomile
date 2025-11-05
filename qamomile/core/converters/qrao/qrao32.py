@@ -246,7 +246,7 @@ class QRAC32Converter(QuantumConverter):
         ising = self.get_ising()
         num_qubits = len(self.color_group)
         zero_pauli = qm_o.Hamiltonian(num_qubits=num_qubits * 2)
-        pauli_operators = [zero_pauli] * ising.num_bits()
+        pauli_operators = [zero_pauli] * ising.num_bits
         for idx, pauli in self.pauli_encoding.items():
             observable = create_prime_operator(pauli)
             pauli_operators[idx] = observable

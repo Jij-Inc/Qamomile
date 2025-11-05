@@ -71,7 +71,7 @@ class IsingMatrix:
         Returns:
             IsingMatrix: The converted Ising model in matrix form.
         """
-        size = ising.num_bits()
+        size = ising.num_bits
 
         quad_matrix = np.zeros((size, size))
         for (i, j), value in ising.quad.items():
