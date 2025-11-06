@@ -32,15 +32,8 @@ class HigherIsingModel:
         Returns:
             int: Number of variables in the model.
         """
-        if not self.coefficients:
-            return 0
-
-        max_index = -1
-        for indices in self.coefficients.keys():
-            if indices:  # Skip empty tuples (constant terms)
-                max_index = max(max_index, max(indices))
-
-        return max_index + 1
+        unique_indices = {idx for key in self.coefficients.keys() for idx in key}
+        return len(unique_indices)
 
     def calc_energy(self, state: list[int]) -> float:
         """Calculate the energy of the state.
