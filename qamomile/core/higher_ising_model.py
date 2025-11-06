@@ -32,7 +32,7 @@ class HigherIsingModel:
         Returns:
             int: Number of variables in the model.
         """
-        unique_indices = {idx for key in self.coefficients.keys() for idx in key}
+        unique_indices = set().union(*self.coefficients)
         return len(unique_indices)
 
     def calc_energy(self, state: list[int]) -> float:
