@@ -14,13 +14,45 @@ class HigherIsingModel:
     index_map: dict[int, int] = dataclasses.field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Initialise the index map."""
+        """Post initiaise the HigherIsingModel.
+        In this process, the coefficients are re-indexed to zero-origin indices.
+        However, the index_map is kept as it is because it could be provided by users.
+        Thus, index_map is a mapping from the original indices to original indices specified by users or indentity.
+        original_to_zero_origin_map is a mapping from the original indices to zero-origin indices.
+        coefficients are rebuilt with zero-origin indices. However, we also keep _original_coefficients for reference.
+        """
+        unique_indices = set().union(*self.coefficients)
         if len(self.index_map) == 0:
-            # Iterate over the keys of its coefficients
-            # and set the position to the key of the index map and the key to the value of the index map.
-            unique_indices = {idx for key in self.coefficients.keys() for idx in key}
+            # Identity mapping by default.
             for index in unique_indices:
                 self.index_map[index] = index
+
+        # Prepare the original coefficients itself.
+        # This variable is just for reference and is not used in calculations.
+        self._original_coefficients = self.coefficients.copy()
+
+        # Prepare the mapping from the original (problem) indices to zero-origin indices mapping.
+        self.original_to_zero_origin_map: dict[int, int] = {}
+        sorted_indices = sorted(unique_indices)
+        for new_index, original_index in enumerate(sorted_indices):
+            self.original_to_zero_origin_map[original_index] = new_index
+        # Rebuild the coefficients with new indices.
+        new_coefficients = {}
+        for original_indices, value in self.coefficients.items():
+            zero_origin_indices = tuple(
+                self.original_to_zero_origin_map[i] for i in original_indices
+            )
+            new_coefficients[zero_origin_indices] = value
+        self.coefficients = new_coefficients
+
+    @property
+    def zero_origin_to_original_map(self) -> dict[int, int]:
+        """A mapping from rebuilt indices (zero-origin) to the original indices.
+
+        Returns:
+            dict[int, int]: a mapping from rebuilt indices to original indices.
+        """
+        return {v: k for k, v in self.original_to_zero_origin_map.items()}
 
     @property
     def num_bits(self) -> int:
@@ -32,6 +64,17 @@ class HigherIsingModel:
         """
         unique_indices = set().union(*self.coefficients)
         return len(unique_indices)
+
+    def ising2original_index(self, index: int) -> int:
+        """Convert the rebuilt index (zero-origin) to the original index through the index_map.
+
+        Args:
+            index (int): a rebuilt index (zero-origin).
+
+        Returns:
+            int: the original index.
+        """
+        return self.index_map[self.zero_origin_to_original_map[index]]
 
     def calc_energy(self, state: list[int]) -> float:
         """Calculate the energy of the state.
