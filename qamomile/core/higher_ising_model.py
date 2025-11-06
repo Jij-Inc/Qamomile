@@ -65,16 +65,16 @@ class HigherIsingModel:
         unique_indices = set().union(*self.coefficients)
         return len(unique_indices)
 
-    def ising2original_index(self, index: int) -> int:
+    def ising2original_index(self, ising_index: int) -> int:
         """Convert the rebuilt index (zero-origin) to the original index through the index_map.
 
         Args:
-            index (int): a rebuilt index (zero-origin).
+            virtual_qubit_index (int): a rebuilt index (zero-origin) for a virtual qubit
 
         Returns:
             int: the original index.
         """
-        return self.index_map[self.zero_origin_to_original_map[index]]
+        return self.index_map[self.zero_origin_to_original_map[ising_index]]
 
     def calc_energy(self, state: list[int]) -> float:
         """Calculate the energy of the state.
