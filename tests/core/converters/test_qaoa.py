@@ -175,8 +175,6 @@ def test_ommx_support_error_case():
 
     KeyError: 7
     """
-    import jijmodeling as jm
-
     # Define Knapsack problem
     v = jm.Placeholder("v", ndim=1)
     N = v.len_at(0, latex="N")
@@ -198,3 +196,69 @@ def test_ommx_support_error_case():
 
     # Build a QAOA ansatz (p = 1)
     QAOAConverter(compiled_instance).get_qaoa_ansatz(p=1)
+
+
+def test_decode_error():
+    """This test raised the follwing error with the version whose commit ID 01402581faf790965440f9cedc87f1c6f63606b3.
+
+    ---------------------------------------------------------------------------
+    KeyError                                  Traceback (most recent call last)
+    Cell In[19], line 8
+        6 print(job_result.data["meas"].get_counts())
+        7 print(qaoa_converter._ising)
+    ----> 8 sampleset = qaoa_converter.decode(qk_transpiler, job_result.data["meas"])
+        9 energies = []
+        10 frequencies = []
+
+    File ~/dev/git/Qamomile/qamomile/core/converters/converter.py:283, in QuantumConverter.decode(self, transpiler, result)
+        268 '''
+        269 Decode quantum computation results into a SampleSet.
+        270
+    (...)    280     ommx.v1.SampleSet: The decoded results as a SampleSet.
+        281 '''
+        282 bitssampleset = transpiler.convert_result(result)
+    --> 283 return self.decode_bits_to_sampleset(bitssampleset)
+
+    File ~/dev/git/Qamomile/qamomile/core/converters/converter.py:308, in QuantumConverter.decode_bits_to_sampleset(self, bitssampleset)
+        306 sample = {}
+        307 for i, bit in enumerate(bitssample.bits):
+    --> 308     index = ising.ising2qubo_index(i)
+        309     sample[index] = bit
+        310 state = ommx.v1.State(entries=sample)
+
+    File ~/dev/git/Qamomile/qamomile/core/ising_qubo.py:45, in IsingModel.ising2qubo_index(self, index)
+        44 def ising2qubo_index(self, index: int) -> int:
+    ---> 45     return self.index_map[index]
+
+    KeyError: 0
+    """
+    # Define a problem having decision variables not starting from index 0.
+    N = jm.Placeholder("N")
+    x = jm.BinaryVar("x", shape=(N,))
+    problem = jm.Problem("N-body problem")
+    problem += x[1] * x[2]
+    # Compile the problem.
+    instance_data = {"N": 3}
+    interpreter = jm.Interpreter(instance_data)
+    instance = interpreter.eval_problem(problem)
+    instance.objective.degree()
+    # Get the circuit.
+    qaoa_converter = QAOAConverter(instance)
+    qaoa_circuit = qaoa_converter.get_qaoa_ansatz(p=1)
+
+    from qamomile.qiskit import QiskitTranspiler
+    import qiskit.primitives as qk_pr
+
+    # Transpile the circuit.
+    qk_transpiler = QiskitTranspiler()
+    qk_circuit = qk_transpiler.transpile_circuit(qaoa_circuit)
+
+    # Run it on a simulator with random parameters.
+    sampler = qk_pr.StatevectorSampler()
+    qk_circuit.measure_all()
+    parameters = {
+        param: np.random.rand() * 2 * np.pi for param in qk_circuit.parameters
+    }
+    job = sampler.run([(qk_circuit, parameters)], shots=10000)
+    job_result = job.result()[0]
+    qaoa_converter.decode(qk_transpiler, job_result.data["meas"])

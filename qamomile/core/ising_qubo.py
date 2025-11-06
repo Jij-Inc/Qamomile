@@ -2,6 +2,7 @@ from __future__ import annotations
 import dataclasses
 
 from qamomile.core.higher_ising_model import HigherIsingModel
+from qamomile.core.converters.utils import is_close_zero
 
 
 @dataclasses.dataclass
@@ -72,17 +73,6 @@ class IsingModel(HigherIsingModel):
                 linear[key[0]] = value
         return linear
 
-    def ising2qubo_index(self, index: int) -> int:
-        """Alias for ising2hubo_index for backward compatibility.
-
-        Args:
-            index: Ising index
-
-        Returns:
-            QUBO index
-        """
-        return self.index_map[index]
-
     @classmethod
     def from_qubo(
         cls, qubo: dict[tuple[int, int], float], constant: float = 0.0, simplify=False
@@ -137,21 +127,14 @@ class IsingModel(HigherIsingModel):
             ising_h[j] = -value / 4.0 + ising_h.get(j, 0.0)
 
         if simplify:
-            index_map = {}
             _J, _h = {}, {}
             for i, hi in ising_h.items():
-                if hi != 0.0:
-                    if i not in index_map:
-                        index_map[i] = len(index_map)
-                    _h[index_map[i]] = hi
+                if not is_close_zero(hi):
+                    _h[i] = hi
             for (i, j), Jij in ising_J.items():
-                if Jij != 0.0:
-                    if i not in index_map:
-                        index_map[i] = len(index_map)
-                    if j not in index_map:
-                        index_map[j] = len(index_map)
-                    _J[(index_map[i], index_map[j])] = Jij
+                if not is_close_zero(Jij):
+                    _J[(i, j)] = Jij
             ising_J = _J
             ising_h = _h
-            return cls(ising_J, ising_h, constant, index_map)
+            return cls(ising_J, ising_h, constant)
         return cls(ising_J, ising_h, constant)

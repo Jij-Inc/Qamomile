@@ -9,7 +9,7 @@ def test_creation_with_defaults(seed):
     """Create a HigherIsingModel.
 
     Check if
-    - the coefficients are the same as the input,
+    - the coefficients are the same as the input through original_to_zero_origin_map,
     - the constant term is the same as the input,
     - the keys of the index_map are the unique values of the integers of the coefficients' key.
     - the values of the index_map are the positions of the sorted unique integers.
@@ -29,10 +29,14 @@ def test_creation_with_defaults(seed):
     constant = numpy.random.rand()
 
     # Create the HigherIsingModel.
-    model = HigherIsingModel(coefficients=coefficients, constant=constant)
+    model = HigherIsingModel(coefficients=coefficients.copy(), constant=constant)
 
-    # - the coefficients are the same as the input,
-    assert model.coefficients == coefficients
+    # - the coefficients are the same as the input through original_to_zero_origin_map,
+    for original_indices, coefficient in coefficients.items():
+        zero_origin_indices = tuple(
+            model.original_to_zero_origin_map[idx] for idx in original_indices
+        )
+        assert numpy.isclose(coefficient, model.coefficients[zero_origin_indices])
     # - the constant term is the same as the input,
     assert model.constant == constant
     # - the keys of the index_map are the unique values of the integers of the coefficients' key.
@@ -96,6 +100,7 @@ def test_creation_with_index_map(seed):
         [{(0,): 1.0}, 6.0, 1],
         [{(0, 1): 1.0}, 6.0, 2],
         [{(0, 1, 2): 1.0}, 6.0, 3],
+        [{(1,): 1}, 0, 1],
     ],
 )
 def test_num_bits_manually(coefficients, constant, expected_num_bits):
@@ -199,8 +204,13 @@ def test_normalize_by_abs_max(seed):
     model.normalize_by_abs_max()
 
     # - all coefficients are scaled correctly,
-    for key, value in coefficients.items():
-        assert numpy.isclose(model.coefficients[key], value / max_abs)
+    for original_indices, coefficient in coefficients.items():
+        zero_origin_indices = tuple(
+            model.original_to_zero_origin_map[idx] for idx in original_indices
+        )
+        assert numpy.isclose(
+            model.coefficients[zero_origin_indices], coefficient / max_abs
+        )
     # - the constant term is scaled correctly.
     assert numpy.isclose(model.constant, constant / max_abs)
 
@@ -271,8 +281,11 @@ def test_normalize_by_rms(seed):
     model.normalize_by_rms()
 
     # - all coefficients are scaled correctly,
-    for key, value in coefficients.items():
-        assert numpy.isclose(model.coefficients[key], value / rms)
+    for original_indices, coefficient in coefficients.items():
+        zero_origin_indices = tuple(
+            model.original_to_zero_origin_map[idx] for idx in original_indices
+        )
+        assert numpy.isclose(model.coefficients[zero_origin_indices], coefficient / rms)
     # - the constant term is scaled correctly.
     assert numpy.isclose(model.constant, constant / rms)
 
@@ -318,14 +331,17 @@ def test_normalize_by_factor_0():
     model = HigherIsingModel(coefficients=coefficients.copy(), constant=constant)
 
     # Store the coefficients and constant term before normalization.
-    original_coefficients = coefficients.copy()
     original_constant = constant
 
     # Run normalize_by_factor with factor 0.
     model.normalize_by_factor(factor=0.0)
 
     # - the coefficients remain unchanged,
-    assert model.coefficients == original_coefficients
+    for original_indices, coefficient in coefficients.items():
+        zero_origin_indices = tuple(
+            model.original_to_zero_origin_map[idx] for idx in original_indices
+        )
+        assert numpy.isclose(coefficient, model.coefficients[zero_origin_indices])
     # - the constant term remains unchanged.
     assert model.constant == original_constant
 
@@ -362,8 +378,13 @@ def test_normalize_by_factor(seed):
     model.normalize_by_factor(factor=factor)
 
     # - all coefficients are scaled correctly,
-    for key, value in coefficients.items():
-        assert numpy.isclose(model.coefficients[key], value / factor)
+    for original_indices, coefficient in coefficients.items():
+        zero_origin_indices = tuple(
+            model.original_to_zero_origin_map[idx] for idx in original_indices
+        )
+        assert numpy.isclose(
+            model.coefficients[zero_origin_indices], coefficient / factor
+        )
     # - the constant term is scaled correctly.
     assert numpy.isclose(model.constant, constant / factor)
 
@@ -396,7 +417,10 @@ def test_from_hubo_manually():
 
     # - the coefficients are as expected,
     for key, value in expected_coefficients.items():
-        assert numpy.isclose(higher_ising.coefficients[key], value)
+        zero_origin_indices = tuple(
+            higher_ising.original_to_zero_origin_map[idx] for idx in key
+        )
+        assert numpy.isclose(higher_ising.coefficients[zero_origin_indices], value)
     # - the constant term is as expected.
     assert numpy.isclose(higher_ising.constant, expected_constant)
     # - the index_map is as expected.
