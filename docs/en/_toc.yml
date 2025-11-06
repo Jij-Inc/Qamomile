@@ -51,7 +51,12 @@ parts:
     - file: tutorial/chemistry/index_chemistry
       sections:
         - file: tutorial/chemistry/vqe_for_hydrogen
-    
+  
+  - caption: Collaboration
+    chapters:
+    - file: tutorial/collaboration/index_collaboration
+      sections:
+        - file: tutorial/collaboration/maxcut-qamomile-with-fire-opal
 
   - caption: API Reference
     chapters:

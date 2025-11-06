@@ -25,6 +25,7 @@ Explore our documentation to dive deeper into Qamomile's capabilities:
     - [Solving Problems with QAOA](tutorial/qaoa/index_qaoa.md)
     - [Advanced techniques for Quantum Optimization](tutorial/opt_advance/index_advance.md)
     - [Quantum Chemistry](tutorial/chemistry/index_chemistry.md)
+    - [Collaboration](tutorial/collaboration/index_collaboration.md)
 
 ## Contributing
 

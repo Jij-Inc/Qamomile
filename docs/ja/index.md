@@ -25,6 +25,7 @@ Qamomileの機能をより深く理解するために、以下のドキュメン
     - [QAOAによる問題解決](tutorial/qaoa/index_qaoa.md)
     - [量子最適化のための高度な手法](tutorial/opt_advance/index_advance.md)
     - [量子化学](tutorial/chemistry/index_chemistry.md)
+    - [コラボレーション](tutorial/collaboration/index_collaboration.md)
 
 ## コントリビューションについて
 
