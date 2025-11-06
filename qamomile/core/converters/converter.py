@@ -330,9 +330,7 @@ class QuantumConverter(abc.ABC):
         # If the problem is QUBO, use instance_to_qubo.
         if self.is_qubo:
             qubo, constant = self.instance_to_qubo(multipliers, detail_parameters)
-            # TODO: When simplify-True, we met some errors.
-            #       Need to be fixed.
-            ising = IsingModel.from_qubo(qubo, simplify=False)
+            ising = IsingModel.from_qubo(qubo, simplify=simplify)
             ising.constant += constant
         # If the problem is HUBO and the class supports HUBO, convert to HUBO first.
         elif self._hubo_support:
