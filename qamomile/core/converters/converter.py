@@ -218,9 +218,7 @@ class QuantumConverter(abc.ABC):
         """
 
         qubo, constant = self.instance_to_qubo(multipliers, detail_parameters)
-        # TODO: When simplify-True, we met some errors.
-        #       Need to be fixed.
-        ising = IsingModel.from_qubo(qubo, simplify=False)
+        ising = IsingModel.from_qubo(qubo, simplify=True)
         ising.constant += constant
 
         if isinstance(self.normalize_ising, str):
