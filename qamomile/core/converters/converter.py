@@ -200,6 +200,7 @@ class QuantumConverter(abc.ABC):
         self,
         multipliers: typ.Optional[dict[str, float]] = None,
         detail_parameters: typ.Optional[dict[str, dict[tuple[int, ...], float]]] = None,
+        simplify: bool = True,
     ) -> IsingModel:
         """
         Encode the problem to an Ising model.
@@ -211,6 +212,7 @@ class QuantumConverter(abc.ABC):
             multipliers (Optional[dict[str, float]]): Multipliers for constraint terms.
             detail_parameters (Optional[dict[str, dict[tuple[int, ...], float]]]):
                 Detailed parameters for the encoding process.
+            simplify (bool): Whether to simplify the Ising model by removing zero coefficients. Defaults to True.
 
         Returns:
             IsingModel: The encoded Ising model.
@@ -218,7 +220,7 @@ class QuantumConverter(abc.ABC):
         """
 
         qubo, constant = self.instance_to_qubo(multipliers, detail_parameters)
-        ising = IsingModel.from_qubo(qubo, simplify=True)
+        ising = IsingModel.from_qubo(qubo, simplify=simplify)
         ising.constant += constant
 
         if isinstance(self.normalize_ising, str):
