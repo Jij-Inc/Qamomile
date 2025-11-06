@@ -24,10 +24,8 @@ class HigherIsingModel:
 
     @property
     def num_bits(self) -> int:
-        """Returns the number of variables in the model.
-
-        Finds the maximum index across all terms in the model and returns max_index + 1.
-        For example, if the model has terms with indices (0, 1, 5), num_bits will be 6.
+        """Returns the number of variables in the model,
+        which is the number of bits since those variables are supposedly binary.
 
         Returns:
             int: Number of variables in the model.
