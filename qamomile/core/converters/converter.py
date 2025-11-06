@@ -306,6 +306,7 @@ class QuantumConverter(abc.ABC):
         self,
         multipliers: typ.Optional[dict[str, float]] = None,
         detail_parameters: typ.Optional[dict[str, dict[tuple[int, ...], float]]] = None,
+        simplify: bool = True,
     ) -> IsingModel | HigherIsingModel:
         """
         Encode the problem to an Ising model.
@@ -317,6 +318,7 @@ class QuantumConverter(abc.ABC):
             multipliers (Optional[dict[str, float]]): Multipliers for constraint terms.
             detail_parameters (Optional[dict[str, dict[tuple[int, ...], float]]]):
                 Detailed parameters for the encoding process.
+            simplify (bool): Whether to simplify the Ising model by removing zero coefficients. Defaults to True.
 
         Raises:
             ValueError: If the instance is HUBO but HUBO is not supported.
@@ -335,7 +337,7 @@ class QuantumConverter(abc.ABC):
         # If the problem is HUBO and the class supports HUBO, convert to HUBO first.
         elif self._hubo_support:
             hubo, constant = self.instance_to_hubo(multipliers, detail_parameters)
-            ising = HigherIsingModel.from_hubo(hubo, simplify=False)
+            ising = HigherIsingModel.from_hubo(hubo, simplify=simplify)
             ising.constant += constant
         else:
             raise ValueError("The instance is HUBO, but HUBO is not supported.")
@@ -424,7 +426,7 @@ class QuantumConverter(abc.ABC):
         for bitssample in bitssampleset.bitarrays:
             sample = {}
             for i, bit in enumerate(bitssample.bits):
-                index = ising.index_map[i]
+                index = ising.ising2original_index(i)
                 sample[index] = bit
             state = ommx.v1.State(entries=sample)
             # `num_occurrences` is encoded into sample ID list.

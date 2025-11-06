@@ -7,40 +7,101 @@ import numpy as np
 
 @dataclasses.dataclass
 class HigherIsingModel:
-    """A model for accepting HUBO problems."""
+    """A model for accepting HUBO problems.
+
+    This model has two index types, original indices and zero-origin indices.
+    The original indices are the indices used in the given coefficients.
+    The zero-origin indices are re-indexed indices starting from 0 and continuous.
+    The coefficients are re-indexed to use zero-origin indices in the post-initialisation process.
+    Thus, the coefficients attribute uses zero-origin indices.
+    Furthermore, this model has three mappings; `index_map`, `original_to_zero_origin_map` and `zero_origin_to_original_map`
+    because this model re-indexes the given coefficients to zero-origin indices in the post-initialisation process.
+
+    `index_map` is a mapping from the original indices to the original indices specified by users or identity.
+    Let's say the given coefficients are `{(2, 3): 1.0, (3,): -1.0}` and the `index_map` is `{2: 5, 3:7}`,
+    and then the original indices are 2 and 3, and those mapped indices are 5 and 7.
+    This mapping is used in `ising2original_index` method and QuantumConverter class to label qubits.
+    `ising2original_index` method is also used in QuantumConverter class to decode the sampled bits into classical solutions.
+    Which means this mapping is used only in quantum algorithms.
+    If user did not have any specific mapping in mind, the identity mapping, in this example case `{2: 2, 3: 3}`, is used by default.
+
+    `original_to_zero_origin_map` is a mapping from the original indices to zero-origin indices.
+    In this case, the `original_to_zero_origin_map` is `{2:0, 3:1}`.
+    This mapping is used internally in this class to manage the coefficients with zero-origin indices
+    and helps to easily manage quantum optimisation algorithms such as QAOA.
+
+    `zero_origin_to_original_map` is the inverse mapping of `original_to_zero_origin_map`.
+    In this case, the `zero_origin_to_original_map` is `{0:2, 1:3}`.
+    This mapping is used in `ising2original_index` method to convert the zero-origin index to the original index.
+    And, again, this mapping is used only in quantum algorithms to decode the sampled bits into classical solutions.
+    """
 
     coefficients: dict[tuple[int, ...], float]
     constant: float
     index_map: dict[int, int] = dataclasses.field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Initialise the index map."""
+        """Post initiaise the HigherIsingModel.
+        In this process, the coefficients are re-indexed to zero-origin indices.
+        However, the `index_map` is kept as it is because it could be provided by users.
+        Thus, `index_map` is a mapping from the original indices to original indices specified by users or indentity.
+        `original_to_zero_origin_map` is a mapping from the original indices to zero-origin indices.
+        coefficients are rebuilt with zero-origin indices. However, we also keep `_original_coefficients` for reference.
+        """
+        unique_indices = set().union(*self.coefficients)
         if len(self.index_map) == 0:
-            # Iterate over the keys of its coefficients
-            # and set the position to the key of the index map and the key to the value of the index map.
-            unique_indices = {idx for key in self.coefficients.keys() for idx in key}
+            # Identity mapping by default.
             for index in unique_indices:
                 self.index_map[index] = index
 
+        # Prepare the original coefficients itself.
+        # This variable is just for reference and is not used in calculations.
+        self._original_coefficients = self.coefficients.copy()
+
+        # Prepare the mapping from the original (problem) indices to zero-origin indices mapping.
+        self.original_to_zero_origin_map: dict[int, int] = {}
+        sorted_indices = sorted(unique_indices)
+        for new_index, original_index in enumerate(sorted_indices):
+            self.original_to_zero_origin_map[original_index] = new_index
+        # Rebuild the coefficients with new indices.
+        new_coefficients = {}
+        for original_indices, value in self.coefficients.items():
+            zero_origin_indices = tuple(
+                self.original_to_zero_origin_map[i] for i in original_indices
+            )
+            new_coefficients[zero_origin_indices] = value
+        self.coefficients = new_coefficients
+
+    @property
+    def zero_origin_to_original_map(self) -> dict[int, int]:
+        """A mapping from rebuilt indices (zero-origin) to the original indices.
+
+        Returns:
+            dict[int, int]: a mapping from rebuilt indices to original indices.
+        """
+        return {v: k for k, v in self.original_to_zero_origin_map.items()}
+
     @property
     def num_bits(self) -> int:
-        """Returns the number of variables in the model.
-
-        Finds the maximum index across all terms in the model and returns max_index + 1.
-        For example, if the model has terms with indices (0, 1, 5), num_bits will be 6.
+        """Returns the number of variables in the model,
+        which is the number of bits since those variables are supposedly binary.
 
         Returns:
             int: Number of variables in the model.
         """
-        if not self.coefficients:
-            return 0
+        unique_indices = set().union(*self.coefficients)
+        return len(unique_indices)
 
-        max_index = -1
-        for indices in self.coefficients.keys():
-            if indices:  # Skip empty tuples (constant terms)
-                max_index = max(max_index, max(indices))
+    def ising2original_index(self, ising_index: int) -> int:
+        """Convert the rebuilt index (zero-origin) to the original index through the index_map.
 
-        return max_index + 1
+        Args:
+            ising_index (int): a rebuilt index (zero-origin) for a virtual qubit
+
+        Returns:
+            int: the original index.
+        """
+        return self.index_map[self.zero_origin_to_original_map[ising_index]]
 
     def calc_energy(self, state: list[int]) -> float:
         """Calculate the energy of the state.
@@ -179,7 +240,7 @@ class HigherIsingModel:
     def from_hubo(
         cls, hubo: dict[tuple[int, ...], float], constant: float = 0.0, simplify=False
     ) -> HigherIsingModel:
-        r"""Converts a Quadratic Unconstrained Binary Optimization (QUBO) problem to an equivalent Ising model.
+        r"""Converts a Higher order Unconstrained Binary Optimisation (HUBO) problem to an equivalent Ising model.
 
         HUBO:
             .. math::
