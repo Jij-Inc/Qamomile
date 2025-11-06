@@ -69,7 +69,7 @@ class HigherIsingModel:
         """Convert the rebuilt index (zero-origin) to the original index through the index_map.
 
         Args:
-            virtual_qubit_index (int): a rebuilt index (zero-origin) for a virtual qubit
+            ising_index (int): a rebuilt index (zero-origin) for a virtual qubit
 
         Returns:
             int: the original index.
