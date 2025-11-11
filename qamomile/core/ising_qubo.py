@@ -116,7 +116,7 @@ class IsingModel(HigherIsingModel):
         """
         ising_J: dict[tuple[int, int], float] = {}
         ising_h: dict[int, float] = {}
-        constant = 0.0
+        constant = constant
         for (i, j), value in qubo.items():
             if i != j:
                 ising_J[(i, j)] = value / 4.0 + ising_J.get((i, j), 0.0)
