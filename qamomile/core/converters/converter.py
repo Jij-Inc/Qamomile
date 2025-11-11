@@ -330,13 +330,15 @@ class QuantumConverter(abc.ABC):
         # If the problem is QUBO, use instance_to_qubo.
         if self.is_qubo:
             qubo, constant = self.instance_to_qubo(multipliers, detail_parameters)
-            ising = IsingModel.from_qubo(qubo, simplify=simplify)
-            ising.constant += constant
+            ising = IsingModel.from_qubo(
+                qubo=qubo, constant=constant, simplify=simplify
+            )
         # If the problem is HUBO and the class supports HUBO, convert to HUBO first.
         elif self._hubo_support:
             hubo, constant = self.instance_to_hubo(multipliers, detail_parameters)
-            ising = HigherIsingModel.from_hubo(hubo, simplify=simplify)
-            ising.constant += constant
+            ising = HigherIsingModel.from_hubo(
+                hubo=hubo, constant=constant, simplify=simplify
+            )
         else:
             raise ValueError("The instance is HUBO, but HUBO is not supported.")
 
