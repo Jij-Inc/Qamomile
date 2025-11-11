@@ -98,22 +98,22 @@ jobs:
           name: doc-jupyter-book
           path: 'docs/_build/html'
 
-  deploy:
-    needs: [build-lp, build-jupyter-book, integrate-pages]
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: doc-jupyter-book
-          path: .
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: "."
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+  # deploy:
+  #   needs: [build-lp, build-jupyter-book, integrate-pages]
+  #   environment:
+  #     name: github-pages
+  #     url: ${{ steps.deployment.outputs.page_url }}
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Download all artifacts
+  #       uses: actions/download-artifact@v4
+  #       with:
+  #         name: doc-jupyter-book
+  #         path: .
+  #     - name: Upload artifact
+  #       uses: actions/upload-pages-artifact@v3
+  #       with:
+  #         path: "."
+  #     - name: Deploy to GitHub Pages
+  #       id: deployment
+  #       uses: actions/deploy-pages@v4
