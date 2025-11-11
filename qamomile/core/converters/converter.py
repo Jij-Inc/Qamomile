@@ -123,7 +123,7 @@ class QuantumConverter(abc.ABC):
         self.int2varlabel: dict[int, str] = {}
         self.normalize_ising = normalize_ising
 
-        self._ising: IsingModel | HigherIsingModel = None
+        self._ising: typ.Optional[IsingModel | HigherIsingModel] = None
         self._converted_instance: typ.Optional[ommx.v1.Instance] = None
 
     @property
