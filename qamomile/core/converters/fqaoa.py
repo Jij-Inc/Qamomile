@@ -100,6 +100,15 @@ class FQAOAConverter(QuantumConverter):
         self.ising = self.fqaoa_get_ising()
         self.num_qubits = self.ising.num_bits
 
+    @property
+    def _hubo_support(self) -> bool:
+        """Property to show if this class supports HUBO.
+
+        Returns:
+            bool: if this class supports HUBO
+        """
+        return False
+
     def fqaoa_instance_to_qubo(self) -> tuple[dict[tuple[int, int], float], float]:
         """
         Convert the instance to QUBO format.

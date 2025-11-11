@@ -9,6 +9,8 @@ import qamomile.core.circuit as qm_c
 import qamomile.core.operator as qm_o
 import qamomile.core.bitssample as qm_bs
 
+from tests.utils import Utils
+
 
 @pytest.fixture
 def simple_qubo_problem():
@@ -196,6 +198,31 @@ def test_ommx_support_error_case():
 
     # Build a QAOA ansatz (p = 1)
     QAOAConverter(compiled_instance).get_qaoa_ansatz(p=1)
+
+
+@pytest.mark.parametrize(
+    "instance_data",
+    [
+        {"N": 3, "a": [-1.0, 1.0, -1.0]},
+        {"N": 4, "a": [0.5, -0.5, 0.5, -0.5]},
+    ],
+)
+def test_n_body_problem(instance_data):
+    """Run get_qaoa_ansatz and get_cost_hamiltonian for N-body problem with different instance data.
+
+    Check if
+    - no errors are raised.
+    """
+    # Get the N-body problem.
+    n_body_problem = Utils.get_n_body_problem()
+    # Get the ommx instance.
+    interpreter = jm.Interpreter(instance_data)
+    instance = interpreter.eval_problem(n_body_problem)
+    # Create QAOA converter.
+    qaoa_converter = QAOAConverter(instance)
+    # Get ansatz and cost hamiltonian.
+    qaoa_circuit = qaoa_converter.get_qaoa_ansatz(p=1)
+    qaoa_cost = qaoa_converter.get_cost_hamiltonian()
 
 
 def test_decode_error():

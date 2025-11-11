@@ -1,5 +1,7 @@
 import numpy as np
 import jijmodeling as jm
+import pytest
+
 from qamomile.core.ising_qubo import IsingModel
 from qamomile.core.converters.qrao.qrao32 import (
     create_x_prime,
@@ -14,6 +16,8 @@ from qamomile.core.converters.qrao.graph_coloring import (
     greedy_graph_coloring,
     check_linear_term,
 )
+
+from tests.utils import Utils
 
 
 def test_create_x_prime():
@@ -115,3 +119,26 @@ def test_QRAC32Converter():
 
     pauli_list = converter.get_encoded_pauli_list()
     assert len(pauli_list) == 3
+
+
+@pytest.mark.parametrize(
+    "instance_data",
+    [
+        {"N": 3, "a": [-1.0, 1.0, -1.0]},
+        {"N": 4, "a": [0.5, -0.5, 0.5, -0.5]},
+    ],
+)
+def test_n_body_problem(instance_data):
+    """Create 31QRACConverter with a HUBO problem.
+
+    Check if
+    - ValueError is raised.
+    """
+    # Get the N-body problem.
+    n_body_problem = Utils.get_n_body_problem()
+    # Get the ommx instance.
+    interpreter = jm.Interpreter(instance_data)
+    instance = interpreter.eval_problem(n_body_problem)
+    # - ValueError is raised.
+    with pytest.raises(ValueError):
+        QRAC32Converter(instance)

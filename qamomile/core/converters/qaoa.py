@@ -29,8 +29,6 @@ Note: This module requires `jijmodeling` for problem representation.
 
 """
 
-import typing as typ
-import qamomile.core.bitssample as qm_bs
 import qamomile.core.circuit as qm_c
 import qamomile.core.operator as qm_o
 from qamomile.core.converters.converter import QuantumConverter
@@ -60,12 +58,23 @@ class QAOAConverter(QuantumConverter):
 
     """
 
+    @property
+    def _hubo_support(self) -> bool:
+        """Property to show if this class supports HUBO.
+
+        Returns:
+            bool: if this class supports HUBO
+        """
+        return True
+
     def get_cost_ansatz(
         self, gamma: qm_c.Parameter, name: str = "Cost"
     ) -> qm_c.QuantumCircuit:
         """
         Generate the cost ansatz circuit (:math:`e^{-\gamma H_P}`) for QAOA.
         This function is mainly used when you have designed your own mixer Hamiltonian and only need the cost Hamiltonian.
+
+        Supports both QUBO (quadratic) and HUBO (higher-order) problems by using HigherIsingModel.
 
         Args:
             gamma (qm_c.Parameter): The gamma parameter for the cost ansatz.
@@ -79,15 +88,13 @@ class QAOAConverter(QuantumConverter):
 
         cost = qm_c.QuantumCircuit(num_qubits, 0, name=name)
 
-        # Apply RZ gates for linear terms
-        for i, hi in ising.linear.items():
-            if not is_close_zero(hi):
-                cost.rz(2 * hi * gamma, i)
+        # Process all terms using coefficients (supports arbitrary order)
+        for indices, coeff in ising.coefficients.items():
+            if is_close_zero(coeff):
+                continue
 
-        # Apply CNOT and RZ gates for quadratic terms
-        for (i, j), Jij in ising.quad.items():
-            if not is_close_zero(Jij):
-                cost.rzz(2 * Jij * gamma, i, j)
+            angle = 2 * gamma * coeff
+            cost.phase_gadget(angle=angle, qubits=list(indices))
 
         cost.update_qubits_label(self.int2varlabel)
 
@@ -98,6 +105,8 @@ class QAOAConverter(QuantumConverter):
     ) -> qm_c.QuantumCircuit:
         """
         Generate the complete QAOA ansatz circuit.
+
+        Supports both QUBO (quadratic) and HUBO (higher-order) problems by using HigherIsingModel.
 
         Args:
             p (int): Number of QAOA layers.
@@ -136,27 +145,22 @@ class QAOAConverter(QuantumConverter):
         """
         Construct the cost Hamiltonian for QAOA.
 
+        Supports both QUBO (quadratic) and HUBO (higher-order) problems by using HigherIsingModel.
+
         Returns:
             qm_o.Hamiltonian: The cost Hamiltonian.
         """
         hamiltonian = qm_o.Hamiltonian()
         ising = self.get_ising()
 
-        # Add linear terms
-        for i, hi in ising.linear.items():
-            if not is_close_zero(hi):
-                hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, i),), hi)
-
-        # Add quadratic terms
-        for (i, j), Jij in ising.quad.items():
-            if not is_close_zero(Jij):
-                hamiltonian.add_term(
-                    (
-                        qm_o.PauliOperator(qm_o.Pauli.Z, i),
-                        qm_o.PauliOperator(qm_o.Pauli.Z, j),
-                    ),
-                    Jij,
+        # Add all terms using coefficients (supports arbitrary order)
+        for indices, coeff in ising.coefficients.items():
+            if not is_close_zero(coeff):
+                # Create a tuple of Pauli-Z operators for all indices in the term
+                pauli_operators = tuple(
+                    qm_o.PauliOperator(qm_o.Pauli.Z, idx) for idx in indices
                 )
+                hamiltonian.add_term(pauli_operators, coeff)
 
         hamiltonian.constant = ising.constant
         return hamiltonian

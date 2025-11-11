@@ -37,12 +37,13 @@ import abc
 import enum
 import typing as typ
 import copy
-import jijmodeling as jm
+
 import ommx.v1
-import numpy as np
+
 import qamomile.core.bitssample as qm_bs
 import qamomile.core.operator as qm_o
 from qamomile.core.ising_qubo import IsingModel
+from qamomile.core.higher_ising_model import HigherIsingModel
 from qamomile.core.transpiler import QuantumSDKTranspiler
 
 ResultType = typ.TypeVar("ResultType")
@@ -103,6 +104,9 @@ class QuantumConverter(abc.ABC):
                 - "rms": Normalize by root mean square
                 Defaults to None.
 
+        Raises:
+            ValueError: If an unsupported relaxation method is provided.
+            ValueError: If the instance is HUBO but the converter does not support HUBO.
         """
         self.original_instance: ommx.v1.Instance = instance
 
@@ -112,11 +116,38 @@ class QuantumConverter(abc.ABC):
                 "Relaxation method other than SquaredPenalty is not supported yet."
             )
 
+        # If the problem is HUBO and the conveter does not support, then raise an error.
+        if not (self.is_qubo or self._hubo_support):
+            raise ValueError(f"The instance is HUBO, but {self} does not support HUBO.")
+
         self.int2varlabel: dict[int, str] = {}
         self.normalize_ising = normalize_ising
 
-        self._ising: typ.Optional[IsingModel] = None
+        self._ising: typ.Optional[IsingModel | HigherIsingModel] = None
         self._converted_instance: typ.Optional[ommx.v1.Instance] = None
+
+    @property
+    def is_qubo(self) -> bool:
+        """Return if the instance is QUBO.
+        If the degree is more than 2, it is not QUBO but HUBO.
+
+        Returns:
+            bool: if the instance is QUBO
+        """
+        return self.original_instance.objective.degree() <= 2
+
+    @property
+    @abc.abstractmethod
+    def _hubo_support(self) -> bool:
+        """Property to show if this class supports HUBO.
+
+        Raises:
+            NotImplementedError: if this property is not implemented in subclass
+
+        Returns:
+            bool: if this class supports HUBO
+        """
+        raise NotImplementedError()
 
     def instance_to_qubo(
         self,
@@ -159,6 +190,87 @@ class QuantumConverter(abc.ABC):
                 qubo, constant = converter.instance_to_qubo(multipliers, detail_parameters)
 
         """
+        penalty_weights = self.get_penalty_weights(
+            multipliers=multipliers, detail_parameters=detail_parameters
+        )
+        instance_copy = copy.deepcopy(self.original_instance)
+        qubo, constant = instance_copy.to_qubo(penalty_weights=penalty_weights)
+
+        # Store the modified instance for later access to slack and log-encoded variables.
+        self._converted_instance = instance_copy
+
+        return qubo, constant
+
+    def instance_to_hubo(
+        self,
+        multipliers: typ.Optional[dict[str, float]] = None,
+        detail_parameters: typ.Optional[dict[str, dict[tuple[int, ...], float]]] = None,
+    ) -> tuple[dict[tuple[int, ...], float], float]:
+        """
+        Convert the instance to HUBO format.
+
+        This method converts the optimization problem instance into a HUBO (Higher-order Unconstrained Binary Optimization)
+        representation, which is suitable for quantum computation. HUBO generalizes QUBO by allowing polynomial terms
+        of arbitrary order (linear, quadratic, cubic, quartic, quintic, etc.).
+
+        Args:
+            multipliers (Optional[dict[str, float]]): Multipliers for constraint terms.
+            detail_parameters (Optional[dict[str, dict[tuple[int, ...], float]]]):
+                Detailed parameters for the encoding process.
+
+        Note:
+            $\min_x f(x)$~s.t. $g_{s, i}(x) = 0~\forall s, i$ is converted to
+            $\min_x f(x) + \sum_{s \in \{\text{'const1'}, \cdots\}} A_s \sum_i \lambda_i g_i(x)$.
+
+            where $A_s$ is the multiplier for constraint $s$ and $\lambda_i$ is the detailed parameter for constraint $s$ with subscripts $i$.
+
+        Returns:
+            tuple[dict[tuple[int, ...], float], float]: A tuple containing the HUBO dictionary and the constant term.
+                The keys in the HUBO dictionary are tuples of variable indices with arbitrary length (1 for linear,
+                2 for quadratic, 3 for cubic, etc.), and values are the corresponding coefficients.
+
+
+        Example:
+            .. code::
+                imoprt jijmodeling as jm
+                n = jm.Placeholder("n")
+                x = jm.BinaryVar("x", shape=(n,))
+                y = jm.BinaryVar("y")
+                problem = jm.Problem("sample")
+                i = jm.Element("i", (0, n))
+                problem += jm.Constraint("const1", x[i] + y == 1, forall=i)
+                intepreter = jm.Interpreter({"n": 3})
+                multipliers = {"const1": 1.0}
+                detail_parameters = {"const1": {(0,): 2.0}}
+                hubo, constant = converter.instance_to_hubo(multipliers, detail_parameters)
+
+        """
+        penalty_weights = self.get_penalty_weights(
+            multipliers=multipliers, detail_parameters=detail_parameters
+        )
+        instance_copy = copy.deepcopy(self.original_instance)
+        hubo, constant = instance_copy.to_hubo(penalty_weights=penalty_weights)
+
+        # Store the modified instance for later access to slack and log-encoded variables.
+        self._converted_instance = instance_copy
+
+        return hubo, constant
+
+    def get_penalty_weights(
+        self,
+        multipliers: typ.Optional[dict[str, float]] = None,
+        detail_parameters: typ.Optional[dict[str, dict[tuple[int, ...], float]]] = None,
+    ) -> dict[int, float]:
+        """Get penalty weights computed with the given parameters.
+
+        Args:
+            multipliers (Optional[dict[str, float]]): Multipliers for constraint terms.
+            detail_parameters (Optional[dict[str, dict[tuple[int, ...], float]]]):
+                Detailed parameters for the encoding process.
+
+        Returns:
+            dict[int, float]: a dictionary mapping constraint IDs to their penalty weights
+        """
         _multipliers = multipliers if multipliers is not None else {}
         _parameters = detail_parameters if detail_parameters is not None else {}
 
@@ -176,20 +288,14 @@ class QuantumConverter(abc.ABC):
             const_id = constraint.id
             penalty_weights[const_id] = multiplier
 
-        instance_copy = copy.deepcopy(self.original_instance)
-        qubo, constant = instance_copy.to_qubo(penalty_weights=penalty_weights)
+        return penalty_weights
 
-        # Store the modified instance for later access to slack and log-encoded variables.
-        self._converted_instance = instance_copy
-
-        return qubo, constant
-
-    def get_ising(self) -> IsingModel:
+    def get_ising(self) -> IsingModel | HigherIsingModel:
         """
         Get the Ising model representation of the problem.
 
         Returns:
-            IsingModel: The Ising model representation.
+            IsingModel | HigherIsingModel: The Ising model representation.
 
         """
         if self._ising is None:
@@ -201,7 +307,7 @@ class QuantumConverter(abc.ABC):
         multipliers: typ.Optional[dict[str, float]] = None,
         detail_parameters: typ.Optional[dict[str, dict[tuple[int, ...], float]]] = None,
         simplify: bool = True,
-    ) -> IsingModel:
+    ) -> IsingModel | HigherIsingModel:
         """
         Encode the problem to an Ising model.
 
@@ -214,14 +320,27 @@ class QuantumConverter(abc.ABC):
                 Detailed parameters for the encoding process.
             simplify (bool): Whether to simplify the Ising model by removing zero coefficients. Defaults to True.
 
+        Raises:
+            ValueError: If the instance is HUBO but HUBO is not supported.
+
         Returns:
-            IsingModel: The encoded Ising model.
+            IsingModel | HigherIsingModel: The encoded Ising model.
 
         """
-
-        qubo, constant = self.instance_to_qubo(multipliers, detail_parameters)
-        ising = IsingModel.from_qubo(qubo, simplify=simplify)
-        ising.constant += constant
+        # If the problem is QUBO, use instance_to_qubo.
+        if self.is_qubo:
+            qubo, constant = self.instance_to_qubo(multipliers, detail_parameters)
+            ising = IsingModel.from_qubo(
+                qubo=qubo, constant=constant, simplify=simplify
+            )
+        # If the problem is HUBO and the class supports HUBO, convert to HUBO first.
+        elif self._hubo_support:
+            hubo, constant = self.instance_to_hubo(multipliers, detail_parameters)
+            ising = HigherIsingModel.from_hubo(
+                hubo=hubo, constant=constant, simplify=simplify
+            )
+        else:
+            raise ValueError("The instance is HUBO, but HUBO is not supported.")
 
         if isinstance(self.normalize_ising, str):
             if self.normalize_ising == "abs_max":
@@ -235,9 +354,11 @@ class QuantumConverter(abc.ABC):
 
         # Use the converted instance's decision variables after to_qubo conversion
         # This handles log-encoded variables created during to_qubo
-        for ising_index, qubo_index in ising.index_map.items():
+        for ising_index, problem_index in ising.index_map.items():
             # self.instance_to_qubo has guranteeed the converted instance is not None.
-            deci_var = self._converted_instance.get_decision_variable_by_id(qubo_index)
+            deci_var = self._converted_instance.get_decision_variable_by_id(
+                problem_index
+            )
             var_name = deci_var.name if deci_var.name else "unnamed"
             subscripts = deci_var.subscripts if deci_var.subscripts else []
             self.int2varlabel[ising_index] = (
