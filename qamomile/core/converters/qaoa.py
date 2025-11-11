@@ -93,26 +93,8 @@ class QAOAConverter(QuantumConverter):
             if is_close_zero(coeff):
                 continue
 
-            order = len(indices)
-
-            if order == 1:
-                # Linear term: apply RZ gate
-                cost.rz(2 * coeff * gamma, indices[0])
-            elif order == 2:
-                # Quadratic term: apply RZZ gate
-                cost.rzz(2 * coeff * gamma, indices[0], indices[1])
-            else:
-                # Higher-order terms: use CNOT chain
-                # Build CNOT chain from indices[0] to indices[-1]
-                for k in range(order - 1):
-                    cost.cnot(indices[k], indices[k + 1])
-
-                # Apply RZ gate to the last qubit
-                cost.rz(2 * coeff * gamma, indices[-1])
-
-                # Reverse CNOT chain
-                for k in range(order - 2, -1, -1):
-                    cost.cnot(indices[k], indices[k + 1])
+            angle = 2 * gamma * coeff
+            cost.phase_gadget(angle=angle, qubits=list(indices))
 
         cost.update_qubits_label(self.int2varlabel)
 
