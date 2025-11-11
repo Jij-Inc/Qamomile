@@ -505,7 +505,7 @@ class QuantumCircuit:
         elif num_qubits == 2:
             # If it is two qubits, just add RZZ gate.
             self.rzz(angle, qubits[0], qubits[1])
-        else:
+        elif num_qubits > 2:
             # If it is more than three qubits, use Phase-Gadgets.
 
             # Build CNOT chain over the qubits.
@@ -516,6 +516,15 @@ class QuantumCircuit:
             # Reverse CNOT chain over the qubits
             for k in range(num_qubits - 2, -1, -1):
                 self.cnot(qubits[k], qubits[k + 1])
+        elif num_qubits == 0:
+            # If no qubits are given, raise an error.
+            raise ValueError("No qubits are given for phase_gadget.")
+        else:
+            # This case should be unreachable.
+            # If this line is reached, raise an assertion error and developers must check the code logic.
+            assert (
+                False
+            ), "This is supposed to be unreachable line. Check the code logic."
 
     # Method for adding three-qubit gate
     def ccx(self, control1: int, control2: int, target: int):
