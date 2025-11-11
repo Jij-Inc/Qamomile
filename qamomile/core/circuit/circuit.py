@@ -487,6 +487,36 @@ class QuantumCircuit:
             )
         )
 
+    def phase_gadget(self, angle: ParameterExpression, qubits: list[int]):
+        r"""Add phase-gadgets to implement any-qubit RZ...Z gate to the quantum circuit.
+
+        .. math::
+            R_{ZZ...Z}(\theta) = \exp\left(-i\theta Z\otimes Z \otimes ... \otimes Z /2\right)
+        """
+        # Validate the angle.
+        angle = _validate_angle(angle)
+
+        # Get the number of qubits to be processed.
+        num_qubits = len(qubits)
+
+        if num_qubits == 1:
+            # If it is a single qubit, just add RZ gate.
+            self.rz(angle, qubits[0])
+        elif num_qubits == 2:
+            # If it is two qubits, just add RZZ gate.
+            self.rzz(angle, qubits[0], qubits[1])
+        else:
+            # If it is more than three qubits, use Phase-Gadgets.
+
+            # Build CNOT chain over the qubits.
+            for k in range(num_qubits - 1):
+                self.cnot(qubits[k], qubits[k + 1])
+            # Apply RZ gate to the last qubit.
+            self.rz(angle, qubits[-1])
+            # Reverse CNOT chain over the qubits
+            for k in range(num_qubits - 2, -1, -1):
+                self.cnot(qubits[k], qubits[k + 1])
+
     # Method for adding three-qubit gate
     def ccx(self, control1: int, control2: int, target: int):
         """Add a Toffoli gate to the quantum circuit."""
