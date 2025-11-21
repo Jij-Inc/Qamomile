@@ -46,7 +46,7 @@ class QuTiPTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
             NotImplementedError: If an unsupported Pauli operator is encountered.
         """
         n = operator.num_qubits
-        H = tensor([qzero(2)] * n)
+        H = tensor(*[qzero(2)] * n)
         for term, coeff in operator.terms.items():
             op_list = [qeye(2)] * n
             for pauli in term:
@@ -63,7 +63,7 @@ class QuTiPTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
                         )
             H += coeff * tensor(op_list)
         if operator.constant != 0:
-            H += operator.constant * qeye(2**n)
+            H += operator.constant * qeye([2]*n)
         return Qobj(H)
 
     def transpile_circuit(self) -> None:
