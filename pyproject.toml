@@ -18,9 +18,9 @@ packages = [
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"
-quri-parts-qulacs = {version = "^0.19.0", extras = ["quri-parts"]}
-quri-parts-core = "^0.19.0"
-quri-parts-circuit = "^0.19.0"
+quri-parts-qulacs = {version = ">=0.24.1,<0.25.0", extras = ["quri-parts"]}
+quri-parts-core = ">=0.24.1,<0.25.0"
+quri-parts-circuit = ">=0.24.1,<0.25.0"
 qiskit = "^2.1.0"
 matplotlib = "^3.9.2"
 qutip = "^5.0.4"
