@@ -63,7 +63,7 @@ class QuTiPTranspiler(QuantumSDKTranspiler[tuple[collections.Counter[int], int]]
                         )
             H += coeff * tensor(op_list)
         if operator.constant != 0:
-            H += operator.constant * qeye(2**n)
+            H += operator.constant * qeye([2]*n)
         return Qobj(H)
 
     def transpile_circuit(self) -> None:
