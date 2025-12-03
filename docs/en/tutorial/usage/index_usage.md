@@ -7,6 +7,7 @@ Qamomile specializes in the conversion of mathematical models into quantum circu
 
 - **QAOA**: Quantum Approximate Optimization Algorithm
 - **QRAO**: Quantum Random Approximation Optimization
+- **FQAOA**: Fermionic Quantum Approximate Optimization Algorithm
 
 
 ## Supported Quantum Circuit SDKs
@@ -15,6 +16,7 @@ Qamomile specializes in the conversion of mathematical models into quantum circu
 - **Quri-parts**
 - **PennyLane**
 - **Qutip**
+- **CUDA-Q**
 
 ## Supported Neutral Atom Quantum computer SDKs
 
