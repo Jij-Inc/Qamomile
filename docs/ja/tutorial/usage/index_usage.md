@@ -6,6 +6,7 @@ Qamomileチュートリアルへようこそ！このガイドでは、量子最
 
 - **QAOA**：量子近似最適化アルゴリズム（Quantum Approximate Optimization Algorithm）
 - **QRAO**：量子ランダム近似最適化（Quantum Random Approximation Optimization）
+- **FQAOA**：フェルミオン量子近似最適化アルゴリズム（Fermionic Quantum Approximate Optimization Algorithm）
 
 ## 対応している量子回路 SDK
 
@@ -13,6 +14,7 @@ Qamomileチュートリアルへようこそ！このガイドでは、量子最
 - **Quri-parts**
 - **PennyLane**
 - **Qutip**
+- **CUDA-Q**
 
 ## 対応している中性原子量子コンピュータ SDK
 
