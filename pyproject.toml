@@ -29,6 +29,7 @@ cudaq = {version = "^0.11.0", markers = "sys_platform == 'linux'"}
 jijmodeling = "^1.12.3"
 ommx = "^2.0.2"
 bloqade-analog = ">=0.16.5"
+autoray = "<0.8.0"
 
 [tool.poetry.group.dev.dependencies]
 jupyter = "^1.0.0"
