@@ -34,11 +34,18 @@ from .circuit import (
 class GateComponent(typ.NamedTuple):
     """Gate component for plotting quantum circuits.
 
-       <-->  = gate width
-       ----
-    --|    |--
-       ----
-         ^-- gate (center) position
+    Attributes:
+        gate: The quantum gate object.
+        position: The center position of the gate on the x-axis (time step).
+        width: The width of the gate in the circuit diagram.
+
+    The gate width and position are used to calculate the layout::
+
+        <-->  = gate width
+        ----
+        |    |
+        ----
+          ^-- gate (center) position
 
     """
 

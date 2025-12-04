@@ -26,16 +26,21 @@ class UDMTranspiler(QuantumSDKTranspiler[collections.OrderedDict]):
         self.num_vars = num_vars
 
     def convert_result(self, result: collections.OrderedDict) -> qm_bs.BitsSampleSet:
-        """
-        Convert the SDK-specific bitstring->count result into a list of
-        jijmodeling Solution objects.
+        """Convert the SDK-specific bitstring->count result into a BitsSampleSet.
 
         Steps:
+
         1. Parse each bitstring into a list of ints (0/1).
         2. Map through the QUBOResult using map_config_back to recover
            the original binary assignments.
         3. Build a jijmodeling Solution with the variable assignments
            and the measurement count as weight.
+
+        Args:
+            result: Ordered dictionary mapping bitstrings to counts.
+
+        Returns:
+            BitsSampleSet: The converted sample set.
         """
         sorted_counts = {
             k: v

@@ -145,12 +145,14 @@ class HigherIsingModel:
         The coefficients for normalized is defined as:
 
         .. math::
+
             W = \max(|w_{i_0, \dots, i_k}|)
 
         where w are coefficients and their subscriptions imply a term to be applied.
         We normalize the Ising Hamiltonian as
 
         .. math::
+
             \tilde{H} = \frac{1}{W} \left( C + \sum_i w_i Z_i + \cdots + \sum_{i_0, \dots, i_k} w_{i_0, \dots, i_k} Z_{i_0}\dots Z_{i_k} \right)
 
         """
@@ -169,6 +171,7 @@ class HigherIsingModel:
         The coefficients for normalized is defined as:
 
         .. math::
+
             W = \sqrt{\frac{1}{\lvert E_k \rvert} \sum_{\{u_1, \dots, u_k\}} (w_{u_1,...,u_k}^{(k)})^2 + \cdots + \frac{1}{\lvert E_1 \rvert} \sum_u (w_u^{(1)})^2}
 
         where w are coefficients and their subscriptions imply a term to be applied.
@@ -176,8 +179,10 @@ class HigherIsingModel:
         We normalize the Ising Hamiltonian as
 
         .. math::
+
             \tilde{H} = \frac{1}{W} \left( C + \sum_i w_i Z_i + \cdots + \sum_{i_0, \dots, i_k} w_{i_0, \dots, i_k} Z_{i_0}\dots Z_{i_k} \right)
-        This method is proposed in :cite:`Sureshbabu2024parametersettingin`
+
+        This method is proposed in :cite:`Sureshbabu2024parametersettingin`.
 
         .. bibliography::
             :filter: docname in docnames
@@ -243,25 +248,36 @@ class HigherIsingModel:
         r"""Converts a Higher order Unconstrained Binary Optimisation (HUBO) problem to an equivalent Ising model.
 
         HUBO:
-            .. math::
-                \sum_{i} H_i x_i + \sum_{i, j} H_{i, j} x_i x_j + \sum_{i, j, k} H_{i, j, k} x_i x_j x_k,~\text{s.t.}~x_i \in \{0, 1\}
-
-        Higher Ising model:
-            .. math::
-                \sum_{i} J_i z_i + \sum_{i, j} J_{i, j} z_i z_j + \sum_{i, j, k} J_{i, j, k} z_i z_j z_k, ~\text{s.t.}~z_i \in \{-1, 1\}
-
-        Correspondence:
-            .. math::
-                x_i = \frac{1 - z_i}{2}
-            where :math:`(x_i \in \{0, 1\})` and :math:`(z_i \in \{-1, 1\})`.
-
-        This transformation is derived from the conventions used to describe the eigenstates and eigenvalues of the Pauli Z operator in quantum computing.
-        Specifically, the eigenstates |0⟩ and |1⟩ of the Pauli Z operator correspond to the eigenvalues +1 and -1, respectively:
 
         .. math::
+
+            \sum_{i} H_i x_i + \sum_{i, j} H_{i, j} x_i x_j + \sum_{i, j, k} H_{i, j, k} x_i x_j x_k,~\text{s.t.}~x_i \in \{0, 1\}
+
+        Higher Ising model:
+
+        .. math::
+
+            \sum_{i} J_i z_i + \sum_{i, j} J_{i, j} z_i z_j + \sum_{i, j, k} J_{i, j, k} z_i z_j z_k, ~\text{s.t.}~z_i \in \{-1, 1\}
+
+        Correspondence:
+
+        .. math::
+
+            x_i = \frac{1 - z_i}{2}
+
+        where :math:`(x_i \in \{0, 1\})` and :math:`(z_i \in \{-1, 1\})`.
+
+        This transformation is derived from the conventions used to describe the eigenstates
+        and eigenvalues of the Pauli Z operator in quantum computing.
+        Specifically, the eigenstates :math:`|0\rangle` and :math:`|1\rangle` of the Pauli Z operator
+        correspond to the eigenvalues +1 and -1, respectively:
+
+        .. math::
+
             Z|0\rangle = |0\rangle, \quad Z|1\rangle = -|1\rangle
 
-        This relationship is leveraged to map the binary variables \(x_i\) in HUBO to the spin variables \(z_i\) in the Ising model.
+        This relationship is leveraged to map the binary variables :math:`x_i` in HUBO
+        to the spin variables :math:`z_i` in the Ising model.
 
         Args:
             hubo (dict[tuple[int, ...], float]): HUBO coefficients

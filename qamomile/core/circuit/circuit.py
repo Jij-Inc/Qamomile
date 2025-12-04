@@ -140,11 +140,17 @@ class ThreeQubitGate(Gate):
 @dataclasses.dataclass
 class ParametricExpGate(Gate):
     r"""Parametric exponential gate class.
+
+    This gate represents the time evolution operator:
+
     .. math::
-            e^{-it H}
+
+        e^{-it H}
+
     where:
-        - t is the parametric variable, representing the evolution time or phase angle.
-        - H is the Hamiltonian of the system.
+
+    - t is the parametric variable, representing the evolution time or phase angle.
+    - H is the Hamiltonian of the system.
     """
 
     hamiltonian: Hamiltonian
@@ -535,11 +541,14 @@ class QuantumCircuit:
 
     def exp_evolution(self, time: ParameterExpression, hamiltonian: Hamiltonian):
         r"""Add a parametric exponential gate to the quantum circuit.
+
         This function evolves a quantum state under the influence of a Hamiltonian, H,
         for a given time duration or parameter, t.
 
         The time evolution operator for this gate is given by:
+
         .. math::
+
             e^{-it H}
 
         """

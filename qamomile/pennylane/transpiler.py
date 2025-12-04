@@ -1,19 +1,25 @@
 """
 Qamomile to Pennylane Transpiler Module
 
-This module provides functionality to convert Qamomile Hamiltonians to their Pennylane equivalents. It includes a `PennylaneTranspiler` class that implements the `QuantumSDKTranspiler` interface for Pennylane compatibility.
+This module provides functionality to convert Qamomile Hamiltonians to their Pennylane equivalents.
+It includes a ``PennylaneTranspiler`` class that implements the ``QuantumSDKTranspiler`` interface
+for Pennylane compatibility.
 
 Key Features:
+
 - Convert Qamomile Hamiltonians to Pennylane Hamiltonians.
 
 Usage Example:
-    ```python
-    from qamomile.Pennylane.transpiler import PennylaneTranspiler
+
+.. code-block:: python
+
+    from qamomile.pennylane.transpiler import PennylaneTranspiler
 
     transpiler = PennylaneTranspiler()
     pennylane_operator = transpiler.transpile_hamiltonian(qamomile_hamiltonian)
-    ```
+
 Requirements:
+
 - Qamomile
 - Pennylane
 """

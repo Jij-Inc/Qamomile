@@ -166,25 +166,26 @@ class QuantumConverter(abc.ABC):
                 Detailed parameters for the encoding process.
 
         Note:
-            $\min_x f(x)$~s.t. $g_{s, i}(x) = 0~\forall s, i$ is converted to
-            $\min_x f(x) + \sum_{s \in \{\text{'const1'}, \cdots\}} A_s \sum_i \lambda_i g_i(x)$.
+            The problem :math:`\min_x f(x)` subject to :math:`g_{s, i}(x) = 0` for all :math:`s, i`
+            is converted to :math:`\min_x f(x) + \sum_{s} A_s \sum_i \lambda_i g_i(x)`.
 
-            where $A_s$ is the multiplier for constraint $s$ and $\lambda_i$ is the detailed parameter for constraint $s$ with subscripts $i$.
+            where :math:`A_s` is the multiplier for constraint :math:`s` and :math:`\lambda_i`
+            is the detailed parameter for constraint :math:`s` with subscripts :math:`i`.
 
         Returns:
             tuple[dict[tuple[int, int], float], float]: A tuple containing the QUBO dictionary and the constant term.
 
-
         Example:
-            .. code::
-                imoprt jijmodeling as jm
+            .. code-block:: python
+
+                import jijmodeling as jm
                 n = jm.Placeholder("n")
                 x = jm.BinaryVar("x", shape=(n,))
                 y = jm.BinaryVar("y")
                 problem = jm.Problem("sample")
                 i = jm.Element("i", (0, n))
                 problem += jm.Constraint("const1", x[i] + y == 1, forall=i)
-                intepreter = jm.Interpreter({"n": 3})
+                interpreter = jm.Interpreter({"n": 3})
                 multipliers = {"const1": 1.0}
                 detail_parameters = {"const1": {(0,): 2.0}}
                 qubo, constant = converter.instance_to_qubo(multipliers, detail_parameters)
@@ -219,27 +220,28 @@ class QuantumConverter(abc.ABC):
                 Detailed parameters for the encoding process.
 
         Note:
-            $\min_x f(x)$~s.t. $g_{s, i}(x) = 0~\forall s, i$ is converted to
-            $\min_x f(x) + \sum_{s \in \{\text{'const1'}, \cdots\}} A_s \sum_i \lambda_i g_i(x)$.
+            The problem :math:`\min_x f(x)` subject to :math:`g_{s, i}(x) = 0` for all :math:`s, i`
+            is converted to :math:`\min_x f(x) + \sum_{s} A_s \sum_i \lambda_i g_i(x)`.
 
-            where $A_s$ is the multiplier for constraint $s$ and $\lambda_i$ is the detailed parameter for constraint $s$ with subscripts $i$.
+            where :math:`A_s` is the multiplier for constraint :math:`s` and :math:`\lambda_i`
+            is the detailed parameter for constraint :math:`s` with subscripts :math:`i`.
 
         Returns:
             tuple[dict[tuple[int, ...], float], float]: A tuple containing the HUBO dictionary and the constant term.
                 The keys in the HUBO dictionary are tuples of variable indices with arbitrary length (1 for linear,
                 2 for quadratic, 3 for cubic, etc.), and values are the corresponding coefficients.
 
-
         Example:
-            .. code::
-                imoprt jijmodeling as jm
+            .. code-block:: python
+
+                import jijmodeling as jm
                 n = jm.Placeholder("n")
                 x = jm.BinaryVar("x", shape=(n,))
                 y = jm.BinaryVar("y")
                 problem = jm.Problem("sample")
                 i = jm.Element("i", (0, n))
                 problem += jm.Constraint("const1", x[i] + y == 1, forall=i)
-                intepreter = jm.Interpreter({"n": 3})
+                interpreter = jm.Interpreter({"n": 3})
                 multipliers = {"const1": 1.0}
                 detail_parameters = {"const1": {(0,): 2.0}}
                 hubo, constant = converter.instance_to_hubo(multipliers, detail_parameters)

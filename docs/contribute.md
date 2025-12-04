@@ -19,7 +19,7 @@ Before you begin, ensure you have the following installed:
    cd Qamomile
    ```
 3. Create a virtual environment and activate it:
-   ```
+   ```bash
    poetry install
    eval $(poetry env activate)
    ```

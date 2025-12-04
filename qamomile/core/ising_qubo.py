@@ -80,24 +80,36 @@ class IsingModel(HigherIsingModel):
         r"""Converts a Quadratic Unconstrained Binary Optimization (QUBO) problem to an equivalent Ising model.
 
         QUBO:
-            .. math::
-                \sum_{ij} Q_{ij} x_i x_j,~\text{s.t.}~x_i \in \{0, 1\}
-
-        Ising model:
-            .. math::
-                \sum_{ij} J_{ij} z_i z_j + \sum_i h_i z_i, ~\text{s.t.}~z_i \in \{-1, 1\}
-
-        Correspondence:
-            .. math::
-                x_i = \frac{1 - z_i}{2}
-            where :math:`(x_i \in \{0, 1\})` and :math:`(z_i \in \{-1, 1\})`.
-
-        This transformation is derived from the conventions used to describe the eigenstates and eigenvalues of the Pauli Z operator in quantum computing. Specifically, the eigenstates |0⟩ and |1⟩ of the Pauli Z operator correspond to the eigenvalues +1 and -1, respectively:
 
         .. math::
+
+            \sum_{ij} Q_{ij} x_i x_j,~\text{s.t.}~x_i \in \{0, 1\}
+
+        Ising model:
+
+        .. math::
+
+            \sum_{ij} J_{ij} z_i z_j + \sum_i h_i z_i, ~\text{s.t.}~z_i \in \{-1, 1\}
+
+        Correspondence:
+
+        .. math::
+
+            x_i = \frac{1 - z_i}{2}
+
+        where :math:`(x_i \in \{0, 1\})` and :math:`(z_i \in \{-1, 1\})`.
+
+        This transformation is derived from the conventions used to describe the eigenstates
+        and eigenvalues of the Pauli Z operator in quantum computing.
+        Specifically, the eigenstates :math:`|0\rangle` and :math:`|1\rangle` of the Pauli Z operator
+        correspond to the eigenvalues +1 and -1, respectively:
+
+        .. math::
+
             Z|0\rangle = |0\rangle, \quad Z|1\rangle = -|1\rangle
 
-        This relationship is leveraged to map the binary variables \(x_i\) in QUBO to the spin variables \(z_i\) in the Ising model.
+        This relationship is leveraged to map the binary variables :math:`x_i` in QUBO
+        to the spin variables :math:`z_i` in the Ising model.
 
         Examples:
             >>> qubo = {(0, 0): 1.0, (0, 1): 2.0, (1, 1): 3.0}
