@@ -29,4 +29,4 @@ Qamomileチュートリアルへようこそ！このガイドでは、量子最
 - [PennyLaneTranspiler を使う](Using_the_PennyLaneTranspiler_in_Qamomile.ipynb)：QamomileからPennyLaneへトランスパイルする方法を学びます。
 - [QuTiPTranspiler を使う](quantum_annealing.ipynb)：QuTiPの組み込み機能を用いて量子アニーリングを実行する方法を学びます。
 - [UDMTranspiler を使う](UDG_demo.ipynb): Qamomileからbloqade-analogへトランスパイルする方法を学びます
-- [CudaqTranspiler を使う](qudaq_transpiler_usage.ipynb): QamomileからCUDA-Qへトランスパイルする方法を学びます
+- [CudaqTranspiler を使う](cudaq_transpiler_usage.ipynb): QamomileからCUDA-Qへトランスパイルする方法を学びます

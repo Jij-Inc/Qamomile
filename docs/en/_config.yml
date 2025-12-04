@@ -10,6 +10,10 @@ logo: "qamomile_logo.png"
 execute:
   execute_notebooks: "off"
 
+# Exclude files from the build
+exclude_patterns:
+  - "tutorial/qaoa/maxcut-qamomile-with-fire-opal.ipynb"
+
 parse:
   myst_enable_extensions:
     - colon_fence
@@ -51,20 +55,27 @@ sphinx:
       - 'sphinx_copybutton'
     config:
       add_module_names: False
-      autoapi_type: 'python'
       autoapi_dirs: ['../../qamomile']
       autoapi_add_toctree_entry: True
       autoapi_options:
         - members
-        - undoc-members
         - show-inheritance
         - show-module-summary
         - imported-members
-        - no-index
-      autoapi_python_class_content: 'both'
+      autoapi_python_class_content: 'class'
       language: en
       html_search_language: en
-      suppress_warnings: ["etoc.toctree"]
+      suppress_warnings:
+        - "etoc.toctree"
+        - "etoc.ref"
+        - "autoapi.python_import_resolution"
+        - "ref.*"
+        - "autosectionlabel.*"
+        - "app.add_object"
+        - "myst.header"
+        - "myst.xref_missing"
+        - "toc.not_readable"
+        - "toc.excluded"
       mathjax_path: https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
       bibtex_reference_style: author_year
       # コードハイライトの設定

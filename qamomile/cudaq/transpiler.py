@@ -1,19 +1,25 @@
 """
 Qamomile to CUDA-Q Transpiler Module
 
-This module provides functionality to convert Qamomile Hamiltonians to their CUDA-Q equivalents. It includes a `CudaqTranspiler` class that implements the `QuantumSDKTranspiler` interface for CUDA-Q compatibility.
+This module provides functionality to convert Qamomile Hamiltonians to their CUDA-Q equivalents.
+It includes a ``CudaqTranspiler`` class that implements the ``QuantumSDKTranspiler`` interface
+for CUDA-Q compatibility.
 
 Key Features:
+
 - Convert Qamomile Hamiltonians to CUDA-Q Hamiltonians.
 
 Usage Example:
-    ```python
+
+.. code-block:: python
+
     from qamomile.cudaq.transpiler import CudaqTranspiler
 
     transpiler = CudaqTranspiler()
     cudaq_operator = transpiler.transpile_hamiltonian(qamomile_hamiltonian)
-    ```
+
 Requirements:
+
 - Qamomile
 - cudaq
 """
