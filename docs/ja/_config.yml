@@ -74,3 +74,10 @@ sphinx:
         logo:
           image_light: "../assets/png/qamomile_logo_white_back.png"
           image_dark: "../assets/png/qamomile_with_title_white.png"
+        repository_url: "https://github.com/Jij-Inc/Qamomile"
+        repository_branch: "main"
+        path_to_docs: "docs/ja"
+        launch_buttons:
+          notebook_interface: "classic"
+          binderhub_url: "https://mybinder.org"
+          colab_url: "https://colab.research.google.com"
