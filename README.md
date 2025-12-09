@@ -89,3 +89,20 @@ We welcome contributions! Please see our [Contributing Guide](docs/contribute.md
 ## License
 
 Qamomile is released under the [Apache 2.0 License](LICENSE.txt).
+
+## Citation
+
+If you use Qamomile in your research, please cite our paper:
+
+```bibtex
+@INPROCEEDINGS{11249901,
+  author={Huang, Wei-Hao and Matsuyama, Hiromichi and Tam, Wai-Hong and Sato, Keisuke and Yamashiro, Yu},
+  booktitle={2025 IEEE International Conference on Quantum Computing and Engineering (QCE)},
+  title={Qamomile: A Cross-SDK Bridge for Quantum Optimization},
+  year={2025},
+  volume={02},
+  number={},
+  pages={516-517},
+  keywords={Quantum computing;Quantum algorithm;Quantum advantage;Optimization models;Bridge circuits;Reproducibility of results;Hardware;Quantum circuit;Optimization;Software development management;Quantum optimization;QAOA;QRAO;intermediate representation;QUBO;quantum SDK;NISQ computing},
+  doi={10.1109/QCE65121.2025.10423}}
+```
