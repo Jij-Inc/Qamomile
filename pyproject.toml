@@ -1,69 +1,25 @@
-[build-system]
-requires = ["poetry-core>=1.5.2", "poetry-dynamic-versioning>=0.21.4"]
-build-backend = "poetry_dynamic_versioning.backend"
-
-[tool.poetry-dynamic-versioning]
-enable = true
-style = "pep440"
-
-[tool.poetry]
+[project]
 name = "qamomile"
-version = "0.0.0" # using poetry-dynamic-versioning
-description = ""
-authors = ["Jij Inc. <info@j-ij.com>"]
+version = "0.1.0"
+description = "Add your description here"
 readme = "README.md"
-packages = [
-    {include = "qamomile"},
+requires-python = ">=3.12"
+dependencies = [
+    "jijmodeling>=1.14.1",
+    "ommx>=2.3.3",
+    "sympy>=1.14.0",
 ]
 
-[tool.poetry.dependencies]
-python = ">=3.10,<3.13"
-quri-parts-qulacs = {version = ">=0.24.1,<0.25.0", extras = ["quri-parts"]}
-quri-parts-core = ">=0.24.1,<0.25.0"
-quri-parts-circuit = ">=0.24.1,<0.25.0"
-qiskit = "^2.1.0"
-matplotlib = "^3.9.2"
-qutip = "^5.0.4"
-pennylane = "^0.39.0"
-cudaq = {version = "^0.11.0", markers = "sys_platform == 'linux'"}
-jijmodeling = "^1.12.3"
-ommx = "^2.0.2"
-bloqade-analog = ">=0.16.5"
-autoray = "<0.8.0"
+[tool.setuptools.packages.find]
+include = ["qamomile*"]
 
-[tool.poetry.group.dev.dependencies]
-jupyter = "^1.0.0"
-matplotlib = "^3.7.1"
-pylatexenc = "^2.10"
-pytest = "^7.3.2"
-ruff = "^0.5.6"
-black = "^25.1.0"
-
-
-[tool.poetry.group.doc.dependencies]
-jupyter-book = "^1.0.2"
-sphinx-autoapi = "^3.2.1"
-networkx = "^3.3"
-matplotlib = "^3.9.2"
-ommx-pyscipopt-adapter = "^2.0.2"
-qiskit-aer = "^0.17.1"
-
-[tool.poetry.extras]
-qiskit = ["qiskit"]
-quri-parts = ["quri-parts-qulacs"]
-qutip = ["qutip"]
-pennylane = ["pennylane"]
-cudaq = ["cudaq"]
-
-[tool.pytest.ini_options]
-addopts = "--doctest-modules"
-
-[tool.poetry.group.docs.dependencies]
-mkdocs = "^1.4.2"
-mkdocs-material = "^9.1.5"
-mkdocs-gen-files = ">=0.4,<0.6"
-mkdocs-section-index = "^0.3.5"
-mkdocs-literate-nav = "^0.6.0"
-mkdocstrings = {version = ">=0.19", extras = ["python"]}
-mkdocs-jupyter = "^0.24.7"
-mkdocs-mermaid2-plugin = "^1.1.1"
+[dependency-groups]
+dev = [
+    "jupyter>=1.1.1",
+    "jupyter-book>=2.1.0",
+    "jupytext>=1.18.1",
+    "matplotlib>=3.10.8",
+    "pytest>=9.0.2",
+    "ruff>=0.14.11",
+    "zuban>=0.4.1",
+]
