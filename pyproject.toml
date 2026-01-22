@@ -1,6 +1,10 @@
+[build-system]
+requires = ["setuptools>=70.0", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "qamomile"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -42,3 +46,5 @@ addopts = "-m 'not docs'"
 markers = [
     "docs: marks tests that run documentation examples",
 ]
+
+[tool.setuptools_scm]
