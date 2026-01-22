@@ -1,11 +1,11 @@
 import dataclasses
-from typing import TYPE_CHECKING, Dict
+from typing import TYPE_CHECKING
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.value import Value
 
 if TYPE_CHECKING:
-    import sympy as sp
+    pass
 
     # from qamomile.estimator.cost import SynthesisConfig
     # from qamomile.estimator.resource_estimator import (

@@ -2,17 +2,17 @@ import inspect
 import warnings
 from typing import Any, Callable, Generic, ParamSpec, Type, TypeVar, cast
 
+import numpy as np
+
 from qamomile.circuit.frontend.ast_transform import transform_control_flow
 from qamomile.circuit.frontend.func_to_block import (
     create_dummy_input,
     func_to_block,
-    handle_type_map,
     is_array_type,
 )
-from qamomile.circuit.frontend.handle.primitives import Float, Handle
-from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
 from qamomile.circuit.frontend.handle import Qubit
-
+from qamomile.circuit.frontend.handle.primitives import Float, Handle, UInt
+from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
 from qamomile.circuit.ir.block_value import BlockValue
 from qamomile.circuit.ir.graph import Graph
 from qamomile.circuit.ir.types import FloatType, UIntType
@@ -115,9 +115,26 @@ class QKernel(Generic[P, R]):
 
         wrapped_results = []
         for val, handle_type in zip(results, self.output_types):
-            # Instantiate the specific Handle type (Qubit, UInt, etc.)
-            # Assuming handle classes accept 'value' in constructor based on Handle definition
-            wrapped_results.append(handle_type(value=val))
+            if is_array_type(handle_type):
+                # Use _create_from_value to avoid __post_init__ side effects
+                actual_class = getattr(handle_type, "__origin__", handle_type)
+                # Extract shape from ArrayValue if available
+                if isinstance(val, ArrayValue) and val.shape:
+                    shape = tuple(
+                        UInt(value=dim_val)
+                        if not dim_val.is_constant()
+                        else dim_val.params.get("const", 0)
+                        for dim_val in val.shape
+                    )
+                else:
+                    # Fallback: empty shape (will need runtime resolution)
+                    shape = ()
+                wrapped_results.append(
+                    actual_class._create_from_value(value=val, shape=shape)
+                )
+            else:
+                # Instantiate the specific Handle type (Qubit, UInt, etc.)
+                wrapped_results.append(handle_type(value=val))
 
         # Return tuple or single value to match Python function signature
         if len(wrapped_results) == 1:
@@ -130,7 +147,11 @@ class QKernel(Generic[P, R]):
         if param_type in (float, Float):
             return True
         if is_array_type(param_type):
-            element_type = getattr(param_type, "element_type", None)
+            # For generic aliases like Vector[Float], get element type from __args__
+            if hasattr(param_type, "__args__") and param_type.__args__:
+                element_type = param_type.__args__[0]
+            else:
+                element_type = getattr(param_type, "element_type", None)
             return element_type in (float, Float)
         return False
 
@@ -184,7 +205,11 @@ class QKernel(Generic[P, R]):
             return Float(value=value)
 
         if is_array_type(param_type):
-            element_type = getattr(param_type, "element_type", None)
+            # For generic aliases like Vector[Float], get element type from __args__
+            if hasattr(param_type, "__args__") and param_type.__args__:
+                element_type = param_type.__args__[0]
+            else:
+                element_type = getattr(param_type, "element_type", None)
 
             if element_type not in (Float, float):
                 raise TypeError("Array parameter must have Float element type")
@@ -198,7 +223,9 @@ class QKernel(Generic[P, R]):
             )
 
             # Create instance without calling __init__
-            instance = object.__new__(param_type)
+            # For generic aliases, use __origin__ to get the actual class
+            actual_class = getattr(param_type, "__origin__", param_type)
+            instance = object.__new__(actual_class)
             instance.value = array_value
             instance._shape = ()
             instance._borrowed_indices = {}
@@ -207,12 +234,14 @@ class QKernel(Generic[P, R]):
             instance.name = name
             instance.id = str(id(instance))
             instance._consumed = False
+            instance.element_type = element_type
             return instance
 
         raise TypeError(f"Cannot create parameter for type {param_type}")
 
     def _create_bound_input(self, param_type: Any, name: str, value: Any) -> Handle:
         """Create a Handle for a bound (concrete) value."""
+        # Scalar float
         if param_type in (float, Float):
             return Float(
                 value=Value(
@@ -223,20 +252,39 @@ class QKernel(Generic[P, R]):
                 init_value=float(value),
             )
 
+        # Scalar int/UInt
+        if param_type in (int, UInt):
+            return UInt(
+                value=Value(
+                    type=UIntType(),
+                    name=name,
+                    params={"const": int(value)},
+                ),
+                init_value=int(value),
+            )
+
         if is_array_type(param_type):
-            element_type = getattr(param_type, "element_type", None)
+            # For generic aliases like Vector[Float], get element type from __args__
+            if hasattr(param_type, "__args__") and param_type.__args__:
+                element_type = param_type.__args__[0]
+            else:
+                element_type = getattr(param_type, "element_type", None)
 
-            if element_type not in (Float, float):
-                raise TypeError("Array must have Float element type for binding")
-
-            if not isinstance(value, (list, tuple)):
+            # Determine IR type for the element
+            if element_type in (Float, float):
+                ir_element_type = FloatType()
+            elif element_type in (UInt, int):
+                ir_element_type = UIntType()
+            else:
                 raise TypeError(
-                    f"Expected list/tuple for array parameter '{name}', "
-                    f"got {type(value)}"
+                    f"Unsupported element type for array binding: {element_type}"
                 )
 
-            # Infer shape from the provided value
-            shape = (len(value),)
+            # Convert to numpy array to handle multi-dimensional arrays
+            arr = np.asarray(value)
+
+            # Infer shape from the array
+            shape = arr.shape
             shape_values = tuple(
                 Value(type=UIntType(), name=f"dim_{i}", params={"const": dim})
                 for i, dim in enumerate(shape)
@@ -244,14 +292,16 @@ class QKernel(Generic[P, R]):
 
             # Store the bound values in params
             array_value = ArrayValue(
-                type=FloatType(),
+                type=ir_element_type,
                 name=name,
                 shape=shape_values,
-                params={"const_array": list(value)},
+                params={"const_array": arr.tolist()},
             )
 
             # Create instance without calling __init__
-            instance = object.__new__(param_type)
+            # For generic aliases, use __origin__ to get the actual class
+            actual_class = getattr(param_type, "__origin__", param_type)
+            instance = object.__new__(actual_class)
             instance.value = array_value
             instance._shape = shape
             instance._borrowed_indices = {}
@@ -260,6 +310,7 @@ class QKernel(Generic[P, R]):
             instance.name = name
             instance.id = str(id(instance))
             instance._consumed = False
+            instance.element_type = element_type
             return instance
 
         raise TypeError(f"Cannot create bound value for type {param_type}")

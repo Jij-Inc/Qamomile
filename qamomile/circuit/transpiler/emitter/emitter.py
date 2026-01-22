@@ -1,6 +1,5 @@
 import typing
 import abc
-import dataclasses
 
 from qamomile.circuit.ir.block_value import BlockValue
 
@@ -16,11 +15,12 @@ class EmitResult(abc.ABC, typing.Generic[T]):
 
 
 class Emitter(abc.ABC, typing.Generic[T]):
-    def __init__(self, block: BlockValue, bind: dict[str, int | float | list[int] | list[float]]) -> None:
+    def __init__(
+        self, block: BlockValue, bind: dict[str, int | float | list[int] | list[float]]
+    ) -> None:
         self.block = block
         self.bind = bind
-    
+
     @abc.abstractmethod
     def emit(self, block: BlockValue) -> EmitResult[T]:
         pass
-

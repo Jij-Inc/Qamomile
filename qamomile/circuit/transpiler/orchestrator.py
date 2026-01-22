@@ -1,6 +1,5 @@
 import abc
 import dataclasses
-import enum
 
 from qamomile.circuit.ir.operation.operation import Operation, OperationKind
 
@@ -23,11 +22,15 @@ class Runnable(abc.ABC):
     def reset_global_vars(self):
         self._global_vars = {}
 
-    def return_assingnments(self, return_values: list) -> dict[str, int | float | bool | list]:
+    def return_assingnments(
+        self, return_values: list
+    ) -> dict[str, int | float | bool | list]:
         return {}
+
 
 class QuantumRunnable(Runnable):
     pass
+
 
 class ClassicalRunnable(Runnable):
     pass
@@ -62,7 +65,9 @@ def separate_operations(
 
 @dataclasses.dataclass
 class Orchestrator:
-    global_variables: dict[str, float | int | bool | list] = dataclasses.field(default_factory=dict)
+    global_variables: dict[str, float | int | bool | list] = dataclasses.field(
+        default_factory=dict
+    )
     operations: list[Runnable] = dataclasses.field(default_factory=list)
     return_ids: list[tuple[str, int]] = dataclasses.field(default_factory=list)
 

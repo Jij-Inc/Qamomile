@@ -2,9 +2,17 @@ import typing
 
 import qamomile.circuit.ir.types as ir_type
 from qamomile.circuit.ir.operation.operation import QInitOperation
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import Value, ArrayValue
 
-from .handle import Bit, Float, Handle, Qubit, UInt
+from .handle import (
+    Bit,
+    Float,
+    Qubit,
+    UInt,
+    Vector,
+    Matrix,
+    Tensor,
+)
 from .tracer import get_current_tracer
 
 
@@ -16,10 +24,12 @@ def uint(arg: str) -> UInt: ...
 
 def uint(arg: int | str) -> UInt:
     name = str(arg) if isinstance(arg, str) else "uint_const"
-    value = Value(type=ir_type.UIntType(), name=name)
     if isinstance(arg, int):
+        # Set params={"const": arg} so Value.is_constant() returns True
+        value = Value(type=ir_type.UIntType(), name=name, params={"const": arg})
         return UInt(value=value, init_value=arg)
     else:
+        value = Value(type=ir_type.UIntType(), name=name)
         return UInt(name=arg, value=value)
 
 
@@ -71,3 +81,46 @@ def qubit(name: str) -> Qubit:
     tracer.add_operation(qinit_op)
 
     return Qubit(value=value)
+
+
+@typing.overload
+def qubit_array(shape: int | UInt, name: str) -> Vector[Qubit]: ...
+
+
+@typing.overload
+def qubit_array(shape: tuple[int | UInt, int | UInt], name: str) -> Matrix[Qubit]: ...
+
+
+@typing.overload
+def qubit_array(shape: tuple[int | UInt, ...], name: str) -> Tensor[Qubit]: ...
+
+
+def qubit_array(
+    shape: UInt | int | tuple[UInt | int, ...],
+    name: str,
+) -> Vector[Qubit] | Matrix[Qubit] | Tensor[Qubit]:
+    """Create a new qubit array (vector/matrix/tensor) and emit QInitOperations."""
+
+    if not isinstance(shape, tuple):
+        shape = (shape,)
+
+    if len(shape) == 0:
+        raise ValueError("Shape must have at least one dimension.")
+
+    dims: list[UInt] = [dim if isinstance(dim, UInt) else uint(dim) for dim in shape]
+
+    raw_shape_values = tuple(d.value for d in dims)
+
+    array_value = ArrayValue(
+        type=ir_type.QubitType(), name=name, shape=raw_shape_values
+    )
+
+    shape_tuple = tuple(dims)
+    ndim = len(dims)
+
+    if ndim == 1:
+        return Vector[Qubit](value=array_value, _shape=(shape_tuple[0],))
+    elif ndim == 2:
+        return Matrix[Qubit](value=array_value, _shape=(shape_tuple[0], shape_tuple[1]))
+    else:
+        return Tensor[Qubit](value=array_value, _shape=shape_tuple)

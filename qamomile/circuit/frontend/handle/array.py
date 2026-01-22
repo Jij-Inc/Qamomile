@@ -10,6 +10,7 @@ from qamomile.circuit.ir.operation.operation import QInitOperation, CInitOperati
 from qamomile.circuit.ir.types import ValueType
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.transpiler.errors import QubitConsumedError, UnreturnedBorrowError
 
 from .handle import Handle
 from .primitives import Bit, Float, Qubit, UInt
@@ -42,18 +43,19 @@ class ArrayBase(Handle, Generic[T]):
             cinit_op = CInitOperation(operands=[], results=[self.value])
             tracer = get_current_tracer()
             tracer.add_operation(cinit_op)
-        
+
         type_map: dict[ValueType, typing.Type[Handle]] = {
             QubitType(): Qubit,
             UIntType(): UInt,
             FloatType(): Float,
             BitType(): Bit,
         }
-        self.element_type = type_map[self.value.type] # type: ignore
-
+        self.element_type = type_map[self.value.type]  # type: ignore
 
     @classmethod
-    def create(cls, shape: tuple[int | UInt, ...], name: str, el_type: typing.Type[T]) -> 'ArrayBase[T]':
+    def create(
+        cls, shape: tuple[int | UInt, ...], name: str, el_type: typing.Type[T]
+    ) -> "ArrayBase[T]":
         """Create an ArrayValue for the given shape and name."""
         shape_values = tuple(
             Value(type=UIntType(), name=f"dim_{i}", params={"const": dim})
@@ -96,6 +98,12 @@ class ArrayBase(Handle, Generic[T]):
         Returns:
             A new ArrayBase instance of the appropriate type.
         """
+        type_map: dict[ValueType, typing.Type[Handle]] = {
+            QubitType(): Qubit,
+            UIntType(): UInt,
+            FloatType(): Float,
+            BitType(): Bit,
+        }
         instance = object.__new__(cls)
         instance.value = value
         instance._shape = shape
@@ -105,13 +113,13 @@ class ArrayBase(Handle, Generic[T]):
         instance.name = name
         instance.id = str(uuid.uuid4())
         instance._consumed = False
+        instance.element_type = type_map[value.type]
         return instance
 
     @property
     def shape(self) -> tuple[int | UInt, ...]:
         """Return the shape of the array."""
         return self._shape
-
 
     def _make_uint_index(self, idx: int) -> UInt:
         """Create a UInt from an integer index."""
@@ -130,11 +138,44 @@ class ArrayBase(Handle, Generic[T]):
                 parts.append(idx.value.name)
         return ",".join(parts)
 
-    def _get_element(self, indices: tuple[UInt, ...]) -> T:
-        """Get an element at the given indices."""
-        self._borrowed_indices[tuple(str(idx.id) for idx in indices)] = indices
+    def _make_indices_key(self, indices: tuple[UInt, ...]) -> tuple[str, ...]:
+        """Create a key for tracking borrowed indices.
 
+        Uses the actual index value (for constants) or the value's uuid (for symbolic).
+        """
+        key_parts = []
+        for idx in indices:
+            if idx.value.is_constant():
+                # Use the constant value as the key
+                key_parts.append(f"const:{idx.value.params['const']}")
+            else:
+                # Use the value's uuid for symbolic indices
+                key_parts.append(f"sym:{idx.value.uuid}")
+        return tuple(key_parts)
+
+    def _get_element(self, indices: tuple[UInt, ...]) -> T:
+        """Get an element at the given indices.
+
+        Raises:
+            QubitConsumedError: If this element is already borrowed (for quantum arrays).
+        """
+        indices_key = self._make_indices_key(indices)
         index_str = self._format_index(indices)
+
+        # Check if already borrowed (only enforce for quantum types)
+        if indices_key in self._borrowed_indices and self.value.type.is_quantum():
+            raise QubitConsumedError(
+                f"Array element '{self.value.name}[{index_str}]' is already borrowed.\n"
+                f"Return it before borrowing again.\n\n"
+                f"Fix:\n"
+                f"  q = {self.value.name}[{index_str}]\n"
+                f"  q = qm.h(q)\n"
+                f"  {self.value.name}[{index_str}] = q  # Return the element first",
+                handle_name=f"{self.value.name}[{index_str}]",
+                operation_name="array element access",
+            )
+
+        self._borrowed_indices[indices_key] = indices
 
         params: dict[str, int | float] = {}
         if self.value.is_parameter():
@@ -153,9 +194,38 @@ class ArrayBase(Handle, Generic[T]):
 
     def _set_element(self, indices: tuple[UInt, ...]) -> None:
         """Mark an element as returned (no longer borrowed)."""
-        indices_key = tuple(str(idx.id) for idx in indices)
+        indices_key = self._make_indices_key(indices)
         if indices_key in self._borrowed_indices:
             self._borrowed_indices.pop(indices_key)
+
+    def validate_all_returned(self) -> None:
+        """Validate all borrowed elements have been returned.
+
+        This method is useful for ensuring that all borrowed elements
+        have been properly written back before using the array in
+        operations that require the entire array.
+
+        Raises:
+            UnreturnedBorrowError: If any elements are still borrowed.
+        """
+        if not self._borrowed_indices or not self.value.type.is_quantum():
+            return
+
+        # Format borrowed indices for error message
+        borrowed_strs = []
+        for indices in self._borrowed_indices.values():
+            index_str = self._format_index(indices)
+            borrowed_strs.append(f"{self.value.name}[{index_str}]")
+
+        raise UnreturnedBorrowError(
+            f"Array '{self.value.name}' has unreturned borrowed elements.\n"
+            f"Borrowed elements: {', '.join(borrowed_strs)}\n\n"
+            f"Fix: Write back all borrowed elements before using the array:\n"
+            f"  q = {self.value.name}[i]\n"
+            f"  q = qm.h(q)\n"
+            f"  {self.value.name}[i] = q  # Return the element",
+            handle_name=self.value.name,
+        )
 
 
 @dataclasses.dataclass
@@ -185,7 +255,6 @@ class Vector(ArrayBase[T]):
     _borrowed_indices: dict[tuple[str, ...], tuple[UInt, ...]] = dataclasses.field(
         default_factory=dict
     )
-
 
     @overload
     def __getitem__(self, index: int) -> T: ...

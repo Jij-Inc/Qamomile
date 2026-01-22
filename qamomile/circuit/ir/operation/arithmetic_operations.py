@@ -53,12 +53,13 @@ class BinOpKind(enum.Enum):
     SUB = enum.auto()
     MUL = enum.auto()
     DIV = enum.auto()
+    FLOORDIV = enum.auto()
     POW = enum.auto()
 
 
 @dataclasses.dataclass
 class BinOp(BinaryOperationBase):
-    """Binary arithmetic operation (ADD, SUB, MUL, DIV, POW)."""
+    """Binary arithmetic operation (ADD, SUB, MUL, DIV, FLOORDIV, POW)."""
 
     kind: BinOpKind | None = None
 
@@ -72,36 +73,6 @@ class BinOp(BinaryOperationBase):
     @property
     def operation_kind(self) -> OperationKind:
         return OperationKind.CLASSICAL
-
-    def _validate_kind(self, operation_name: str):
-        """Validate that kind is specified. Call from __post_init__."""
-        if not self.kind:
-            raise ValueError(f"kind must be specified for {operation_name}.")
-
-    @property
-    def lhs(self) -> Value:
-        """Left-hand side operand."""
-        return self.operands[0]
-
-    @property
-    def rhs(self) -> Value:
-        """Right-hand side operand."""
-        return self.operands[1]
-
-    @property
-    def output(self) -> Value:
-        """Output result."""
-        return self.results[0]
-
-    def _create_binary_signature(self) -> Signature:
-        """Create signature for binary operation."""
-        return Signature(
-            operands=[
-                ParamHint(name="lhs", type=self.operands[0].type),
-                ParamHint(name="rhs", type=self.operands[1].type),
-            ],
-            results=[ParamHint(name="output", type=self.results[0].type)],
-        )
 
 
 class CompOpKind(enum.Enum):

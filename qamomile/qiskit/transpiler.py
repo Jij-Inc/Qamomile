@@ -1,327 +1,292 @@
-"""Qiskit backend transpiler implementation."""
+"""Qiskit backend transpiler implementation.
+
+This module provides QiskitTranspiler for converting Qamomile QKernels
+into Qiskit QuantumCircuits.
+"""
 
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import Any, Sequence, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from qiskit import QuantumCircuit
+    from qamomile.circuit.observable import Observable
 
-from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.operation import QInitOperation
-from qamomile.circuit.ir.operation.gate import (
-    GateOperation,
-    GateOperationType,
-    MeasureOperation,
-    ControlledUOperation,
+from qamomile.circuit.ir.operation.control_flow import (
+    ForOperation,
+    IfOperation,
+    WhileOperation,
 )
-from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation
-from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.transpiler import Transpiler
 from qamomile.circuit.transpiler.passes.emit import EmitPass
+from qamomile.circuit.transpiler.passes.separate import SeparatePass
+from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
 from qamomile.circuit.transpiler.executable import (
-    ExecutionContext,
     QuantumExecutor,
-    CompiledQuantumSegment,
+    ParameterMetadata,
 )
 
+from qamomile.qiskit.emitter import QiskitGateEmitter
 
-class QiskitEmitPass(EmitPass["QuantumCircuit"]):
-    """Qiskit-specific emission pass."""
 
-    def _emit_quantum_segment(
+class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
+    """Qiskit-specific emission pass.
+
+    Extends StandardEmitPass with Qiskit-specific control flow handling
+    using context managers.
+    """
+
+    def __init__(
         self,
-        operations: list[Operation],
-        bindings: dict[str, Any],
-    ) -> tuple["QuantumCircuit", dict[str, int], dict[str, int]]:
-        """Generate Qiskit QuantumCircuit from operations."""
-        from qiskit import QuantumCircuit
+        bindings: dict[str, Any] | None = None,
+        parameters: list[str] | None = None,
+        use_native_composite: bool = True,
+    ):
+        """Initialize the Qiskit emit pass.
 
-        # Count qubits and clbits needed
-        qubit_map: dict[str, int] = {}
-        clbit_map: dict[str, int] = {}
-        qubit_count = 0
-        clbit_count = 0
-
-        # First pass: allocate qubits/clbits
-        self._allocate_resources(
-            operations, qubit_map, clbit_map
-        )
-        qubit_count = len(qubit_map)
-        clbit_count = len(clbit_map)
-
-        # Create circuit
-        circuit = QuantumCircuit(qubit_count, clbit_count)
-
-        # Second pass: emit gates
-        self._emit_operations(circuit, operations, qubit_map, clbit_map, bindings)
-
-        return circuit, qubit_map, clbit_map
-
-    def _allocate_resources(
-        self,
-        operations: list[Operation],
-        qubit_map: dict[str, int],
-        clbit_map: dict[str, int],
-    ) -> None:
-        """Allocate qubit and clbit indices from operations."""
-        for op in operations:
-            if isinstance(op, QInitOperation):
-                result = op.results[0]
-                if result.uuid not in qubit_map:
-                    qubit_map[result.uuid] = len(qubit_map)
-            elif isinstance(op, MeasureOperation):
-                result = op.results[0]
-                if result.uuid not in clbit_map:
-                    clbit_map[result.uuid] = len(clbit_map)
-            elif isinstance(op, GateOperation):
-                # Track qubit versions
-                for operand in op.operands:
-                    if operand.uuid not in qubit_map:
-                        qubit_map[operand.uuid] = len(qubit_map)
-                for result in op.results:
-                    if result.uuid not in qubit_map:
-                        # Same physical qubit, new version
-                        # Use the operand's index
-                        if op.operands:
-                            qubit_map[result.uuid] = qubit_map.get(
-                                op.operands[0].uuid, len(qubit_map)
-                            )
-            elif isinstance(op, ForOperation):
-                self._allocate_resources(op.operations, qubit_map, clbit_map)
-            elif isinstance(op, IfOperation):
-                self._allocate_resources(op.true_operations, qubit_map, clbit_map)
-                self._allocate_resources(op.false_operations, qubit_map, clbit_map)
-
-    def _emit_operations(
-        self,
-        circuit: QuantumCircuit,
-        operations: list[Operation],
-        qubit_map: dict[str, int],
-        clbit_map: dict[str, int],
-        bindings: dict[str, Any],
-    ) -> None:
-        """Emit operations to the circuit."""
-        for op in operations:
-            if isinstance(op, QInitOperation):
-                continue  # Already handled in allocation
-
-            elif isinstance(op, GateOperation):
-                self._emit_gate(circuit, op, qubit_map, bindings)
-
-            elif isinstance(op, MeasureOperation):
-                qubit_uuid = op.operands[0].uuid
-                clbit_uuid = op.results[0].uuid
-                if qubit_uuid in qubit_map and clbit_uuid in clbit_map:
-                    qubit_idx = qubit_map[qubit_uuid]
-                    clbit_idx = clbit_map[clbit_uuid]
-                    circuit.measure(qubit_idx, clbit_idx)
-
-            elif isinstance(op, ForOperation):
-                self._emit_for(circuit, op, qubit_map, clbit_map, bindings)
-
-            elif isinstance(op, IfOperation):
-                self._emit_if(circuit, op, qubit_map, clbit_map, bindings)
-
-    def _emit_gate(
-        self,
-        circuit: QuantumCircuit,
-        op: GateOperation,
-        qubit_map: dict[str, int],
-        bindings: dict[str, Any],
-    ) -> None:
-        """Emit a single gate operation."""
-        # Get qubit indices from operands
-        qubit_indices = []
-        for v in op.operands:
-            if v.uuid in qubit_map:
-                qubit_indices.append(qubit_map[v.uuid])
-
-        if not qubit_indices:
-            return
-
-        match op.gate_type:
-            case GateOperationType.H:
-                circuit.h(qubit_indices[0])
-            case GateOperationType.X:
-                circuit.x(qubit_indices[0])
-            case GateOperationType.Y:
-                circuit.y(qubit_indices[0])
-            case GateOperationType.Z:
-                circuit.z(qubit_indices[0])
-            case GateOperationType.T:
-                circuit.t(qubit_indices[0])
-            case GateOperationType.S:
-                circuit.s(qubit_indices[0])
-            case GateOperationType.CX:
-                if len(qubit_indices) >= 2:
-                    circuit.cx(qubit_indices[0], qubit_indices[1])
-            case GateOperationType.CZ:
-                if len(qubit_indices) >= 2:
-                    circuit.cz(qubit_indices[0], qubit_indices[1])
-            case GateOperationType.SWAP:
-                if len(qubit_indices) >= 2:
-                    circuit.swap(qubit_indices[0], qubit_indices[1])
-            case GateOperationType.TOFFOLI:
-                if len(qubit_indices) >= 3:
-                    circuit.ccx(qubit_indices[0], qubit_indices[1], qubit_indices[2])
-            case GateOperationType.P:
-                angle = self._resolve_angle(op, bindings)
-                circuit.p(angle, qubit_indices[0])
-            case GateOperationType.RX:
-                angle = self._resolve_angle(op, bindings)
-                circuit.rx(angle, qubit_indices[0])
-            case GateOperationType.RY:
-                angle = self._resolve_angle(op, bindings)
-                circuit.ry(angle, qubit_indices[0])
-            case GateOperationType.RZ:
-                angle = self._resolve_angle(op, bindings)
-                circuit.rz(angle, qubit_indices[0])
-            case GateOperationType.CP:
-                if len(qubit_indices) >= 2:
-                    angle = self._resolve_angle(op, bindings)
-                    circuit.cp(angle, qubit_indices[0], qubit_indices[1])
-            case GateOperationType.RZZ:
-                if len(qubit_indices) >= 2:
-                    angle = self._resolve_angle(op, bindings)
-                    circuit.rzz(angle, qubit_indices[0], qubit_indices[1])
-
-        # Update qubit_map for new versions (results)
-        for i, result in enumerate(op.results):
-            if i < len(qubit_indices):
-                qubit_map[result.uuid] = qubit_indices[i]
-
-    def _resolve_angle(
-        self,
-        op: GateOperation,
-        bindings: dict[str, Any],
-    ) -> float:
-        """Resolve angle parameter for rotation gates.
-
-        The angle is typically stored in the last operand as a classical value.
+        Args:
+            bindings: Parameter bindings for the circuit
+            parameters: List of parameter names to preserve as backend parameters
+            use_native_composite: If True, use native Qiskit implementations
+                                  for QFT/IQFT. If False, use manual decomposition.
         """
-        # Check if there's an angle operand (classical value)
-        for operand in op.operands:
-            if operand.type.is_classical():
-                # Check if it's a constant
-                if operand.is_constant():
-                    return float(operand.get_const())
-                # Check if it's a parameter
-                if operand.is_parameter():
-                    param_name = operand.parameter_name()
-                    if param_name in bindings:
-                        return float(bindings[param_name])
-                # Check by name in bindings
-                if operand.name in bindings:
-                    return float(bindings[operand.name])
+        emitter = QiskitGateEmitter()
+        composite_emitters = self._init_emitters() if use_native_composite else []
+        super().__init__(emitter, bindings, parameters, composite_emitters)
+        self._use_native_composite = use_native_composite
 
-        return 0.0
+    def _init_emitters(self) -> list:
+        """Initialize native CompositeGate emitters."""
+        from qamomile.qiskit.emitters import QiskitQFTEmitter
+
+        return [QiskitQFTEmitter()]
 
     def _emit_for(
         self,
-        circuit: QuantumCircuit,
+        circuit: "QuantumCircuit",
         op: ForOperation,
         qubit_map: dict[str, int],
         clbit_map: dict[str, int],
         bindings: dict[str, Any],
+        force_unroll: bool = False,
     ) -> None:
-        """Emit a for loop.
+        """Emit a for loop using Qiskit's native for_loop context manager."""
+        start = (
+            self._resolver.resolve_int_value(op.operands[0], bindings)
+            if len(op.operands) > 0
+            else 0
+        )
+        stop = (
+            self._resolver.resolve_int_value(op.operands[1], bindings)
+            if len(op.operands) > 1
+            else 1
+        )
+        step = (
+            self._resolver.resolve_int_value(op.operands[2], bindings)
+            if len(op.operands) > 2
+            else 1
+        )
 
-        For now, we unroll the loop if we can determine the count.
-        """
-        # Get loop count from operand
-        loop_count = 1
-        if op.operands:
-            loop_val = op.operands[0]
-            if loop_val.is_constant():
-                loop_count = int(loop_val.get_const())
-            elif loop_val.is_parameter():
-                param_name = loop_val.parameter_name()
-                loop_count = int(bindings.get(param_name, 1))
-            elif loop_val.name in bindings:
-                loop_count = int(bindings[loop_val.name])
+        if start is None or stop is None or step is None:
+            self._emit_for_unrolled(circuit, op, qubit_map, clbit_map, bindings)
+            return
 
-        # Unroll the loop
-        for _ in range(loop_count):
+        indexset = range(start, stop, step)
+        if len(indexset) == 0:
+            return
+
+        if force_unroll:
+            self._emit_for_unrolled(circuit, op, qubit_map, clbit_map, bindings)
+            return
+
+        if self._loop_analyzer.should_unroll(op, bindings):
+            self._emit_for_unrolled(circuit, op, qubit_map, clbit_map, bindings)
+            return
+
+        # Use Qiskit's native for_loop context manager
+        with circuit.for_loop(indexset) as loop_param:
+            loop_bindings = bindings.copy()
+            loop_bindings[op.loop_var] = loop_param
             self._emit_operations(
-                circuit, op.operations, qubit_map, clbit_map, bindings
+                circuit, op.operations, qubit_map, clbit_map, loop_bindings
             )
 
     def _emit_if(
         self,
-        circuit: QuantumCircuit,
+        circuit: "QuantumCircuit",
         op: IfOperation,
         qubit_map: dict[str, int],
         clbit_map: dict[str, int],
         bindings: dict[str, Any],
     ) -> None:
-        """Emit an if/else using Qiskit's conditional operations."""
-        condition = op.condition
-        condition_uuid = condition.uuid
+        """Emit if/else using Qiskit's if_test context manager."""
+        condition_uuid = op.condition.uuid
 
-        if condition_uuid in clbit_map:
-            clbit_idx = clbit_map[condition_uuid]
-            # Use Qiskit's if_test for dynamic circuits
-            with circuit.if_test((circuit.clbits[clbit_idx], 1)) as else_:
-                self._emit_operations(
-                    circuit, op.true_operations, qubit_map, clbit_map, bindings
-                )
-            with else_:
-                self._emit_operations(
-                    circuit, op.false_operations, qubit_map, clbit_map, bindings
-                )
+        if condition_uuid not in clbit_map:
+            return
+
+        clbit_idx = clbit_map[condition_uuid]
+
+        with circuit.if_test((circuit.clbits[clbit_idx], 1)) as else_:
+            self._emit_operations(
+                circuit, op.true_operations, qubit_map, clbit_map, bindings
+            )
+        with else_:
+            self._emit_operations(
+                circuit, op.false_operations, qubit_map, clbit_map, bindings
+            )
+
+    def _emit_while(
+        self,
+        circuit: "QuantumCircuit",
+        op: WhileOperation,
+        qubit_map: dict[str, int],
+        clbit_map: dict[str, int],
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit while loop using Qiskit's while_loop context manager."""
+        if not op.operands:
+            raise ValueError("WhileOperation requires a condition operand")
+
+        condition = op.operands[0]
+        condition_value = condition.value if hasattr(condition, "value") else condition
+        condition_uuid = (
+            condition_value.uuid
+            if hasattr(condition_value, "uuid")
+            else str(condition_value)
+        )
+
+        if condition_uuid not in clbit_map:
+            raise ValueError("While loop condition not found in classical bit map.")
+
+        clbit_idx = clbit_map[condition_uuid]
+
+        with circuit.while_loop((circuit.clbits[clbit_idx], 1)):
+            self._emit_operations(
+                circuit, op.operations, qubit_map, clbit_map, bindings
+            )
 
 
 class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
-    """Qiskit quantum executor using AerSimulator or other backends."""
+    """Qiskit quantum executor using AerSimulator or other backends.
 
-    def __init__(self, backend=None, shots: int = 1024):
-        """Initialize executor with backend.
+    Example:
+        executor = QiskitExecutor()  # Uses AerSimulator by default
+        counts = executor.execute(circuit, shots=1000)
+        # counts: {"00": 512, "11": 512}
+
+        # With expectation value estimation
+        from qamomile.qiskit.observable import QiskitExpectationEstimator
+        executor = QiskitExecutor(estimator=QiskitExpectationEstimator())
+        exp_val = executor.estimate(circuit, observable)
+    """
+
+    def __init__(self, backend=None, estimator=None):
+        """Initialize executor with backend and optional estimator.
 
         Args:
             backend: Qiskit backend (defaults to AerSimulator if available)
-            shots: Number of measurement shots
+            estimator: Optional QiskitExpectationEstimator for expectation values
         """
         self.backend = backend
-        self.shots = shots
+        self._estimator = estimator
 
         if self.backend is None:
             try:
                 from qiskit_aer import AerSimulator
+
                 self.backend = AerSimulator()
             except ImportError:
                 pass
 
-    def submit(
-        self,
-        compiled_segment: CompiledQuantumSegment["QuantumCircuit"],
-        context: ExecutionContext,
-    ) -> Any:
-        """Submit circuit for execution."""
+    def execute(self, circuit: "QuantumCircuit", shots: int) -> dict[str, int]:
+        """Execute circuit and return bitstring counts.
+
+        Args:
+            circuit: The quantum circuit to execute
+            shots: Number of measurement shots
+
+        Returns:
+            Dictionary mapping bitstrings to counts (e.g., {"00": 512, "11": 512})
+        """
         from qiskit import transpile
 
-        circuit = compiled_segment.circuit
+        if self.backend is None:
+            raise RuntimeError("No backend available for execution")
 
-        if self.backend is not None:
-            transpiled = transpile(circuit, self.backend)
-            job = self.backend.run(transpiled, shots=self.shots)
-            return job
-        return None
+        circuit_with_meas = self._ensure_measurements(circuit)
+        transpiled = transpile(circuit_with_meas, self.backend)
+        job = self.backend.run(transpiled, shots=shots)
+        return job.result().get_counts()
 
-    def get_result(self, job: Any) -> dict[str, Any]:
-        """Extract results from execution."""
-        if job is None:
-            return {}
+    def bind_parameters(
+        self,
+        circuit: "QuantumCircuit",
+        bindings: dict[str, Any],
+        parameter_metadata: ParameterMetadata,
+    ) -> "QuantumCircuit":
+        """Bind parameter values to the Qiskit circuit.
 
-        result = job.result()
-        counts = result.get_counts()
-        return {"counts": counts}
+        Args:
+            circuit: The parameterized circuit
+            bindings: Dict mapping parameter names (indexed format) to values
+            parameter_metadata: Metadata about circuit parameters
+
+        Returns:
+            New circuit with parameters bound
+        """
+        qiskit_bindings = {}
+        for param_info in parameter_metadata.parameters:
+            if param_info.name in bindings:
+                qiskit_bindings[param_info.backend_param] = bindings[param_info.name]
+
+        return circuit.assign_parameters(qiskit_bindings)
+
+    def estimate(
+        self,
+        circuit: "QuantumCircuit",
+        observable: "Observable",
+        params: Sequence[float] | None = None,
+    ) -> float:
+        """Estimate the expectation value of an observable.
+
+        Args:
+            circuit: Qiskit QuantumCircuit (state preparation ansatz)
+            observable: The observable to measure
+            params: Optional parameter values for parametric circuits
+
+        Returns:
+            The estimated expectation value
+
+        Raises:
+            RuntimeError: If no estimator is configured
+        """
+        if self._estimator is None:
+            # Try to create default estimator
+            from qamomile.qiskit.observable import QiskitExpectationEstimator
+            self._estimator = QiskitExpectationEstimator()
+
+        return self._estimator.estimate(circuit, observable, params)
+
+    def _ensure_measurements(self, circuit: "QuantumCircuit") -> "QuantumCircuit":
+        """Ensure circuit has measurements, adding measure_all if needed."""
+        if circuit.num_clbits > 0:
+            return circuit
+
+        circuit_copy = circuit.copy()
+        circuit_copy.measure_all()
+        return circuit_copy
 
 
 class QiskitTranspiler(Transpiler["QuantumCircuit"]):
     """Qiskit backend transpiler.
 
     Converts Qamomile QKernels into Qiskit QuantumCircuits.
+
+    Args:
+        use_native_composite: If True (default), use native Qiskit library
+                              implementations for QFT/IQFT. If False, use
+                              manual decomposition for all composite gates.
 
     Example:
         from qamomile.qiskit import QiskitTranspiler
@@ -338,24 +303,37 @@ class QiskitTranspiler(Transpiler["QuantumCircuit"]):
         print(circuit.draw())
     """
 
+    def __init__(self, use_native_composite: bool = True):
+        """Initialize the Qiskit transpiler.
+
+        Args:
+            use_native_composite: If True, use native Qiskit implementations
+                                  for QFT/IQFT. If False, use manual decomposition.
+        """
+        self._use_native_composite = use_native_composite
+
+    def _create_separate_pass(self) -> SeparatePass:
+        return SeparatePass()
+
     def _create_emit_pass(
         self,
         bindings: dict[str, Any] | None = None,
+        parameters: list[str] | None = None,
     ) -> EmitPass["QuantumCircuit"]:
-        return QiskitEmitPass(bindings)
+        return QiskitEmitPass(
+            bindings, parameters, use_native_composite=self._use_native_composite
+        )
 
     def executor(
         self,
         backend=None,
-        shots: int = 1024,
     ) -> QiskitExecutor:
         """Create a Qiskit executor.
 
         Args:
             backend: Qiskit backend (defaults to AerSimulator)
-            shots: Number of measurement shots
 
         Returns:
             QiskitExecutor configured with the backend
         """
-        return QiskitExecutor(backend, shots)
+        return QiskitExecutor(backend)

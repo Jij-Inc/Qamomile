@@ -10,12 +10,16 @@ from typing import TYPE_CHECKING
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.value import Value
 
+if TYPE_CHECKING:
+    from qamomile.circuit.observable import Observable
+
 
 class SegmentKind(Enum):
     """Type of computation segment."""
 
     QUANTUM = auto()
     CLASSICAL = auto()
+    EXPVAL = auto()
 
 
 @dataclasses.dataclass
@@ -70,6 +74,31 @@ class ClassicalSegment(Segment):
 
 
 @dataclasses.dataclass
+class ExpvalSegment(Segment):
+    """A segment for expectation value computation.
+
+    Represents computing <psi|H|psi> where psi is the quantum state
+    and H is a Hamiltonian observable.
+
+    This segment bridges a quantum circuit (state preparation) to
+    a classical expectation value.
+
+    Attributes:
+        hamiltonian_value: The IR Value representing the Hamiltonian
+        qubits_value: The IR Value representing the quantum state
+        result_ref: UUID of the result Float value
+    """
+
+    hamiltonian_value: Value | None = None
+    qubits_value: Value | None = None
+    result_ref: str = ""
+
+    @property
+    def kind(self) -> SegmentKind:
+        return SegmentKind.EXPVAL
+
+
+@dataclasses.dataclass
 class HybridBoundary:
     """Represents a measurement or encode operation at quantum/classical boundary.
 
@@ -112,3 +141,7 @@ class SeparatedProgram:
     def classical_segments(self) -> list[ClassicalSegment]:
         """Get all classical segments."""
         return [s for s in self.segments if isinstance(s, ClassicalSegment)]
+
+    def expval_segments(self) -> list[ExpvalSegment]:
+        """Get all expectation value segments."""
+        return [s for s in self.segments if isinstance(s, ExpvalSegment)]

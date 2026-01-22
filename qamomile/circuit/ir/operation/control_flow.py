@@ -24,13 +24,15 @@ class ForOperation(Operation):
     """Represents a for loop operation.
 
     Example:
-        for i in range(n):
+        for i in range(start, stop, step):
             body
 
     Attributes:
         loop_var: Name of the loop variable (e.g., "i")
         operations: List of operations in the loop body
-        operands[0]: Loop count n (UInt type)
+        operands[0]: start (UInt type)
+        operands[1]: stop (UInt type)
+        operands[2]: step (UInt type)
     """
 
     loop_var: str = ""
@@ -38,7 +40,14 @@ class ForOperation(Operation):
 
     @property
     def signature(self) -> Signature:
-        return Signature(operands=[ParamHint("n", UIntType())], results=[])
+        return Signature(
+            operands=[
+                ParamHint("start", UIntType()),
+                ParamHint("stop", UIntType()),
+                ParamHint("step", UIntType()),
+            ],
+            results=[],
+        )
 
     @property
     def operation_kind(self) -> OperationKind:

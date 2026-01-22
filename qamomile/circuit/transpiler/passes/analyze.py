@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING
 
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.operation import OperationKind
-from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation, WhileOperation
 from qamomile.circuit.ir.operation.gate import MeasureOperation
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.passes import Pass
+from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowVisitor
 from qamomile.circuit.transpiler.errors import DependencyError, ValidationError
 
 
@@ -34,9 +33,7 @@ class AnalyzePass(Pass[Block, Block]):
     def run(self, input: Block) -> Block:
         """Analyze the block and validate dependencies."""
         if input.kind != BlockKind.LINEAR:
-            raise ValidationError(
-                f"AnalyzePass expects LINEAR block, got {input.kind}"
-            )
+            raise ValidationError(f"AnalyzePass expects LINEAR block, got {input.kind}")
 
         # Check inputs/outputs are classical
         self._validate_io_classical(input)
@@ -80,32 +77,24 @@ class AnalyzePass(Pass[Block, Block]):
         operations: list[Operation],
     ) -> dict[str, set[str]]:
         """Build a map from each value UUID to the UUIDs it depends on."""
-        graph: dict[str, set[str]] = {}
 
-        def process_ops(ops: list[Operation]) -> None:
-            for op in ops:
+        class DependencyGraphBuilder(ControlFlowVisitor):
+            def __init__(self):
+                self.graph: dict[str, set[str]] = {}
+
+            def visit_operation(self, op: Operation) -> None:
                 # Each result depends on all operands
-                operand_uuids = set()
-                for v in op.operands:
-                    if isinstance(v, Value):
-                        operand_uuids.add(v.uuid)
-
+                operand_uuids = {
+                    v.uuid for v in op.operands if isinstance(v, Value)
+                }
                 for result in op.results:
-                    if result.uuid not in graph:
-                        graph[result.uuid] = set()
-                    graph[result.uuid].update(operand_uuids)
+                    if result.uuid not in self.graph:
+                        self.graph[result.uuid] = set()
+                    self.graph[result.uuid].update(operand_uuids)
 
-                # Recurse into control flow
-                if isinstance(op, ForOperation):
-                    process_ops(op.operations)
-                elif isinstance(op, IfOperation):
-                    process_ops(op.true_operations)
-                    process_ops(op.false_operations)
-                elif isinstance(op, WhileOperation):
-                    process_ops(op.operations)
-
-        process_ops(operations)
-        return graph
+        builder = DependencyGraphBuilder()
+        builder.visit_operations(operations)
+        return builder.graph
 
     def _validate_quantum_dependencies(
         self,
@@ -135,67 +124,54 @@ class AnalyzePass(Pass[Block, Block]):
             dependency_graph, measurement_uuids, derived_from_measurement
         )
 
-        def check_op(op: Operation) -> None:
-            if op.operation_kind != OperationKind.QUANTUM:
-                return
+        outer_self = self
 
-            # Check each operand of quantum operation
-            for operand in op.operands:
-                if not isinstance(operand, Value):
-                    continue
+        class QuantumDependencyValidator(ControlFlowVisitor):
+            def visit_operation(self, op: Operation) -> None:
+                if op.operation_kind != OperationKind.QUANTUM:
+                    return
 
-                if self._depends_on_measurement(
-                    operand.uuid,
-                    dependency_graph,
-                    measurement_uuids,
-                    parameter_uuids,
-                    derived_from_measurement,
-                ):
-                    raise DependencyError(
-                        f"Quantum operation '{type(op).__name__}' depends on "
-                        f"measurement result via value '{operand.name}'. "
-                        f"JIT compilation not supported - classical values "
-                        f"used in quantum ops must be parameters or constants.",
-                        quantum_op=type(op).__name__,
-                        classical_value=operand.name,
-                    )
+                for operand in op.operands:
+                    if not isinstance(operand, Value):
+                        continue
 
-        def process_ops(ops: list[Operation]) -> None:
-            for op in ops:
-                check_op(op)
-                if isinstance(op, ForOperation):
-                    process_ops(op.operations)
-                elif isinstance(op, IfOperation):
-                    process_ops(op.true_operations)
-                    process_ops(op.false_operations)
-                elif isinstance(op, WhileOperation):
-                    process_ops(op.operations)
+                    if outer_self._depends_on_measurement(
+                        operand.uuid,
+                        dependency_graph,
+                        measurement_uuids,
+                        parameter_uuids,
+                        derived_from_measurement,
+                    ):
+                        raise DependencyError(
+                            f"Quantum operation '{type(op).__name__}' depends on "
+                            f"measurement result via value '{operand.name}'. "
+                            f"JIT compilation not supported - classical values "
+                            f"used in quantum ops must be parameters or constants.",
+                            quantum_op=type(op).__name__,
+                            classical_value=operand.name,
+                        )
 
-        process_ops(operations)
+        validator = QuantumDependencyValidator()
+        validator.visit_operations(operations)
 
     def _find_measurement_results(
         self,
         operations: list[Operation],
     ) -> set[str]:
         """Find all value UUIDs that are measurement results."""
-        results: set[str] = set()
 
-        def process_ops(ops: list[Operation]) -> None:
-            for op in ops:
+        class MeasurementResultCollector(ControlFlowVisitor):
+            def __init__(self):
+                self.result_uuids: set[str] = set()
+
+            def visit_operation(self, op: Operation) -> None:
                 if isinstance(op, MeasureOperation):
                     for result in op.results:
-                        results.add(result.uuid)
+                        self.result_uuids.add(result.uuid)
 
-                if isinstance(op, ForOperation):
-                    process_ops(op.operations)
-                elif isinstance(op, IfOperation):
-                    process_ops(op.true_operations)
-                    process_ops(op.false_operations)
-                elif isinstance(op, WhileOperation):
-                    process_ops(op.operations)
-
-        process_ops(operations)
-        return results
+        collector = MeasurementResultCollector()
+        collector.visit_operations(operations)
+        return collector.result_uuids
 
     def _find_measurement_derived_values(
         self,

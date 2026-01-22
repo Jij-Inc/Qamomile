@@ -6,7 +6,7 @@ from qamomile.circuit.ir.types.primitives import BlockType
 from .operation import Operation, OperationKind, ParamHint, Signature
 
 if TYPE_CHECKING:
-    from qamomile.circuit.ir.block_value import BlockValue
+    pass
 
 
 @dataclasses.dataclass
@@ -14,7 +14,7 @@ class CallBlockOperation(Operation):
     @property
     def signature(self) -> Signature:
         from qamomile.circuit.ir.block_value import BlockValue
-        
+
         if not isinstance(self.operands[0], BlockValue):
             raise TypeError("The first operand must be a BlockValue.")
         block: BlockValue = self.operands[0]

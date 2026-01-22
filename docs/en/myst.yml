@@ -1,0 +1,33 @@
+# See docs at: https://mystmd.org/guide/frontmatter
+version: 1
+project:
+  id: qamomile-docs-en
+  title: Qamomile Documentation
+  description: A powerful SDK for quantum optimization algorithms
+  keywords:
+    - quantum computing
+    - optimization
+    - QAOA
+    - qiskit
+  authors:
+    - name: Jij Inc.
+  github: https://github.com/Jij-Inc/Qamomile
+  jupyter: true
+  execute:
+    cache: true
+  toc:
+    - file: index
+    - title: Tutorials
+      children:
+        - file: transpile/transpile_flow
+        - file: tutorial/qpe
+        - file: tutorial/qaoa
+
+site:
+  template: book-theme
+  title: Qamomile Documentation
+  options:
+    logo: ../assets/qamomile_logo.png
+  nav:
+    - title: GitHub
+      url: https://github.com/Jij-Inc/Qamomile

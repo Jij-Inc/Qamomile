@@ -6,7 +6,7 @@ from .primitives import ValueType, UIntType, QuantumTypeMixin
 
 
 @dataclasses.dataclass
-class QUIntType(ValueType, QuantumTypeMixin):
+class QUIntType(QuantumTypeMixin, ValueType):
     """Quantum unsigned integer type.
 
     Represents a quantum register encoding an unsigned integer value
@@ -23,7 +23,7 @@ class QUIntType(ValueType, QuantumTypeMixin):
 
 
 @dataclasses.dataclass
-class QFixedType(ValueType, QuantumTypeMixin):
+class QFixedType(QuantumTypeMixin, ValueType):
     """Quantum fixed-point type.
 
     Represents a quantum register encoding a fixed-point number
@@ -34,8 +34,8 @@ class QFixedType(ValueType, QuantumTypeMixin):
         fractional_bits: Number of bits for the fractional part.
     """
 
-    integer_bits: int | Value[UIntType]
-    fractional_bits: int | Value[UIntType]
+    integer_bits: int | Value[UIntType] = 0
+    fractional_bits: int | Value[UIntType] = 0
 
     def label(self) -> str:
         return f"QFixed[{self.integer_bits}.{self.fractional_bits}]"

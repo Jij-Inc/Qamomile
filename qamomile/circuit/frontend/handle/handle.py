@@ -14,6 +14,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOpKind,
 )
 from qamomile.circuit.ir.value import Value
+from qamomile.circuit.transpiler.errors import QubitConsumedError
 
 if typing.TYPE_CHECKING:
     from .array import ArrayBase
@@ -50,11 +51,46 @@ class Handle(abc.ABC):
     name: str | None = None
     id: str = dataclasses.field(default_factory=lambda: str(uuid.uuid4()))
     _consumed: bool = False
+    _consumed_by: str | None = None
 
-    def consume(self) -> "Handle":
-        if self._consumed:
-            raise RuntimeError(f"Handle {self} has already been consumed.")
+    def _should_enforce_linear(self) -> bool:
+        """Check if this handle type requires linear enforcement.
+
+        Only quantum types (Qubit) require linear type enforcement.
+        Classical values (Float, UInt, Bit) can be used multiple times.
+        """
+        return self.value.type.is_quantum()
+
+    def consume(self, operation_name: str = "unknown") -> "Handle":
+        """Mark this handle as consumed and return a fresh handle.
+
+        Args:
+            operation_name: Name of the operation consuming this handle,
+                           used for error messages.
+
+        Returns:
+            A new handle pointing to the same underlying value.
+
+        Raises:
+            QubitConsumedError: If this handle was already consumed
+                               and is a quantum type.
+        """
+        if self._consumed and self._should_enforce_linear():
+            display_name = self.name or f"qubit_{self.id[:8]}"
+            raise QubitConsumedError(
+                f"Qubit '{display_name}' was already consumed by '{self._consumed_by}' "
+                f"and cannot be used again in '{operation_name}'.\n\n"
+                f"Linear type rule: Each qubit handle can only be used once. "
+                f"After a gate operation, reassign the result to use the new handle.\n\n"
+                f"Fix:\n"
+                f"  q = qm.h(q)  # Reassign to capture the new handle\n"
+                f"  q = qm.x(q)  # Use the reassigned handle",
+                handle_name=display_name,
+                operation_name=operation_name,
+                first_use_location=self._consumed_by,
+            )
         self._consumed = True
+        self._consumed_by = operation_name
 
         # Use type(self) to preserve the actual subclass type (Qubit, UInt, etc.)
         cls = type(self)
@@ -65,8 +101,8 @@ class Handle(abc.ABC):
         new_handle.name = self.name
         new_handle.id = self.id
         new_handle._consumed = False
+        new_handle._consumed_by = None
         return new_handle
-
 
 
 class ArithmeticMixin:
@@ -78,14 +114,12 @@ class ArithmeticMixin:
         - _coerce(): Method to convert Python literals to Handle
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.value = self.value # type: ignore
+    value: Value  # Declare for type checking
 
     def _coerce(self, other) -> "Handle":
         """Convert int/float to Handle if needed (to be implemented in subclass)."""
         raise NotImplementedError("_coerce must be implemented in subclass.")
-    
+
     def _make_result(self) -> "Handle":
         """Create a result Handle for an operation (to be implemented in subclass)."""
         raise NotImplementedError("_make_result must be implemented in subclass.")
@@ -135,5 +169,3 @@ class ArithmeticMixin:
         result = self._make_float_result()
         _emit_binop(other.value, self.value, result.value, BinOpKind.DIV)
         return result
-
-

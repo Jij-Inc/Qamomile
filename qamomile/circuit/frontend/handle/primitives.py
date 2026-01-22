@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import dataclasses
 
-from qamomile.circuit.ir.types.primitives import BitType, FloatType, QubitType, UIntType
+from qamomile.circuit.ir.types.primitives import (
+    BitType,
+    FloatType,
+    UIntType,
+    QubitType,
+)
+from qamomile.circuit.ir.types import QFixedType
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind, CompOpKind
 
@@ -12,6 +18,11 @@ from .handle import ArithmeticMixin, Handle, _emit_binop, _emit_compop
 @dataclasses.dataclass
 class Qubit(Handle):
     value: Value[QubitType]
+
+
+@dataclasses.dataclass
+class QFixed(Handle):
+    value: Value[QFixedType]
 
 
 @dataclasses.dataclass
@@ -80,6 +91,28 @@ class UInt(ArithmeticMixin, Handle):
         _emit_compop(self.value, other.value, result.value, CompOpKind.GE)
         return result
 
+    # Override arithmetic operations with proper type hints for UInt
+    def __add__(self, other: "int | UInt") -> "UInt":
+        other = self._coerce(other)
+        result = self._make_result()
+        _emit_binop(self.value, other.value, result.value, BinOpKind.ADD)
+        return result
+
+    def __radd__(self, other: "int | UInt") -> "UInt":
+        return self.__add__(other)
+
+    def __sub__(self, other: "int | UInt") -> "UInt":
+        other = self._coerce(other)
+        result = self._make_result()
+        _emit_binop(self.value, other.value, result.value, BinOpKind.SUB)
+        return result
+
+    def __rsub__(self, other: "int | UInt") -> "UInt":
+        other = self._coerce(other)
+        result = self._make_result()
+        _emit_binop(other.value, self.value, result.value, BinOpKind.SUB)
+        return result
+
     # UInt-specific multiplication (handles float case differently)
     def __mul__(self, other) -> "UInt | Float":
         if isinstance(other, float):
@@ -96,21 +129,40 @@ class UInt(ArithmeticMixin, Handle):
     def __rmul__(self, other) -> "UInt | Float":
         return self.__mul__(other)
 
-    # UInt-specific floor division
-    def __floordiv__(self, other) -> "UInt":
+    # UInt-specific true division (always returns Float)
+    def __truediv__(self, other: "int | float | UInt | Float") -> "Float":
         other = self._coerce(other)
-        result = self._make_result()
+        result = self._make_float_result()
         _emit_binop(self.value, other.value, result.value, BinOpKind.DIV)
         return result
 
+    def __rtruediv__(self, other: "int | float | UInt | Float") -> "Float":
+        other = self._coerce(other)
+        result = self._make_float_result()
+        _emit_binop(other.value, self.value, result.value, BinOpKind.DIV)
+        return result
+
+    # UInt-specific floor division
+    def __floordiv__(self, other: "int | UInt") -> "UInt":
+        other = self._coerce(other)
+        result = self._make_result()
+        _emit_binop(self.value, other.value, result.value, BinOpKind.FLOORDIV)
+        return result
+
+    def __rfloordiv__(self, other: "int | UInt") -> "UInt":
+        other = self._coerce(other)
+        result = self._make_result()
+        _emit_binop(other.value, self.value, result.value, BinOpKind.FLOORDIV)
+        return result
+
     # UInt-specific power operation
-    def __pow__(self, other) -> "UInt":
+    def __pow__(self, other: "int | UInt") -> "UInt":
         other = self._coerce(other)
         result = self._make_result()
         _emit_binop(self.value, other.value, result.value, BinOpKind.POW)
         return result
 
-    def __rpow__(self, other) -> "UInt":
+    def __rpow__(self, other: "int | UInt") -> "UInt":
         other = self._coerce(other)
         result = self._make_result()
         _emit_binop(other.value, self.value, result.value, BinOpKind.POW)
@@ -143,6 +195,49 @@ class Float(ArithmeticMixin, Handle):
         if isinstance(other, (int, float)):
             return self._make_float(float(other))
         return other
+
+    # Override arithmetic operations with proper type hints for Float
+    def __add__(self, other: "int | float | Float") -> "Float":
+        other = self._coerce(other)
+        result = self._make_result()
+        _emit_binop(self.value, other.value, result.value, BinOpKind.ADD)
+        return result
+
+    def __radd__(self, other: "int | float | Float") -> "Float":
+        return self.__add__(other)
+
+    def __sub__(self, other: "int | float | Float") -> "Float":
+        other = self._coerce(other)
+        result = self._make_result()
+        _emit_binop(self.value, other.value, result.value, BinOpKind.SUB)
+        return result
+
+    def __rsub__(self, other: "int | float | Float") -> "Float":
+        other = self._coerce(other)
+        result = self._make_result()
+        _emit_binop(other.value, self.value, result.value, BinOpKind.SUB)
+        return result
+
+    def __mul__(self, other: "int | float | Float") -> "Float":
+        other = self._coerce(other)
+        result = self._make_result()
+        _emit_binop(self.value, other.value, result.value, BinOpKind.MUL)
+        return result
+
+    def __rmul__(self, other: "int | float | Float") -> "Float":
+        return self.__mul__(other)
+
+    def __truediv__(self, other: "int | float | Float") -> "Float":
+        other = self._coerce(other)
+        result = self._make_float_result()
+        _emit_binop(self.value, other.value, result.value, BinOpKind.DIV)
+        return result
+
+    def __rtruediv__(self, other: "int | float | Float") -> "Float":
+        other = self._coerce(other)
+        result = self._make_float_result()
+        _emit_binop(other.value, self.value, result.value, BinOpKind.DIV)
+        return result
 
 
 @dataclasses.dataclass

@@ -3,9 +3,10 @@ import typing
 
 import qamomile.circuit.ir.types as ir_types
 from qamomile.circuit.ir.operation.operation import QInitOperation
+from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.block_value import BlockValue
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType, ValueType
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import ArrayValue, Value
 
 from qamomile.circuit.frontend.handle.primitives import (
     Bit,
@@ -14,10 +15,8 @@ from qamomile.circuit.frontend.handle.primitives import (
     Qubit,
     UInt,
 )
-from qamomile.circuit.frontend.handle.array import ArrayBase, Matrix, Vector, Tensor
 from qamomile.circuit.frontend.tracer import Tracer, trace, get_current_tracer
 
-from .constructors import bit, float_, qubit, uint
 
 TYPE_MAPPING: dict[typing.Any, typing.Any] = {
     int: UIntType,
@@ -28,15 +27,20 @@ TYPE_MAPPING: dict[typing.Any, typing.Any] = {
 
 def is_array_type(t) -> bool:
     """Check if type is a Vector, Matrix, or Tensor subclass."""
-    return hasattr(t, "__mro__") and any(
+    # Handle generic aliases like Vector[Qubit], Matrix[Bit], etc.
+    actual_type = getattr(t, "__origin__", t)
+
+    return hasattr(actual_type, "__mro__") and any(
         c.__name__ in ("Vector", "Matrix", "Tensor", "ArrayBase")
-        for c in getattr(t, "__mro__", [])
+        for c in getattr(actual_type, "__mro__", [])
     )
 
 
 def _get_ndim(param_type) -> int:
     """Get the number of dimensions for an array type."""
-    type_name = param_type.__name__
+    # Handle generic aliases like Vector[Qubit], Matrix[Bit], etc.
+    actual_type = getattr(param_type, "__origin__", param_type)
+    type_name = actual_type.__name__
     if "Vector" in type_name:
         return 1
     elif "Matrix" in type_name:
@@ -50,13 +54,23 @@ def handle_type_map(handle_type: type[Handle] | type) -> ValueType:
     """Map Handle type to ValueType."""
     # Handle Array types
     if is_array_type(handle_type):
-        element_type = getattr(handle_type, "element_type", None)
+        # For generic aliases like Vector[Bit], get element type from __args__
+        element_type = None
+        if hasattr(handle_type, "__args__") and handle_type.__args__:
+            element_type = handle_type.__args__[0]
+        else:
+            element_type = getattr(handle_type, "element_type", None)
+
         if element_type:
             return handle_type_map(element_type)
         raise TypeError(f"Array type missing element_type: {handle_type}")
 
+    # Ensure handle_type is a class before calling issubclass
+    if not isinstance(handle_type, type):
+        raise TypeError(f"Unsupported type annotation '{handle_type}'")
+
     if not issubclass(handle_type, Handle):
-        if handle_type in TYPE_MAPPING:  # type: ignore[unreachable]
+        if handle_type in TYPE_MAPPING:
             return TYPE_MAPPING[handle_type]()
         else:
             raise TypeError(f"Unsupported type annotation '{handle_type}'")
@@ -86,16 +100,18 @@ def create_dummy_handle(
     Used for creating input parameters during tracing.
     """
     if isinstance(value_type, ir_types.UIntType):
-        return UInt(value=Value(type=value_type, name=name))
+        # Mark as parameter so it can be bound at emit time
+        return UInt(value=Value(type=value_type, name=name, params={"parameter": name}))
     elif isinstance(value_type, ir_types.FloatType):
-        return Float(value=Value(type=value_type, name=name))
+        # Mark as parameter so it can be bound at emit time
+        return Float(
+            value=Value(type=value_type, name=name, params={"parameter": name})
+        )
     elif isinstance(value_type, ir_types.BitType):
         return Bit(value=Value(type=value_type, name=name))
     elif isinstance(value_type, ir_types.QubitType):
         value = Value(type=value_type, name=name)
         if emit_init:
-
-
             qinit_op = QInitOperation(operands=[], results=[value])
             tracer = get_current_tracer()
             tracer.add_operation(qinit_op)
@@ -119,11 +135,14 @@ def create_dummy_input(
     """
     if is_array_type(param_type):
         # For Vector/Matrix/Tensor, create a placeholder instance with symbolic shape
-        element_type = getattr(param_type, "element_type", None)
+        # For generic aliases like Vector[Qubit], get element type from __args__
+        element_type = None
+        if hasattr(param_type, "__args__") and param_type.__args__:
+            element_type = param_type.__args__[0]
+        else:
+            element_type = getattr(param_type, "element_type", None)
         if element_type is None:
             raise TypeError(f"Array type missing element_type: {param_type}")
-
-        from qamomile.circuit.ir.value import ArrayValue
 
         element_ir_type = handle_type_map(element_type)
 
@@ -147,7 +166,9 @@ def create_dummy_input(
         shape_handles = tuple(UInt(value=dim_value) for dim_value in shape_values)
 
         # Create instance without calling __init__ (which requires size/shape)
-        instance = object.__new__(param_type)
+        # For generic aliases like Vector[Qubit], use __origin__ to get the actual class
+        actual_class = getattr(param_type, "__origin__", param_type)
+        instance = object.__new__(actual_class)
         instance.value = array_value
         instance._shape = shape_handles  # Tuple of symbolic UInt
         instance._borrowed_indices = {}
@@ -156,6 +177,7 @@ def create_dummy_input(
         instance.name = name
         instance.id = str(id(instance))
         instance._consumed = False
+        instance.element_type = element_type  # Set element type for array access
         return instance
 
     # Scalar Handle types: map to ValueType first, then create dummy
@@ -200,12 +222,6 @@ def func_to_block(func: typing.Callable) -> BlockValue:
         _output_type = handle_type_map(signature.return_annotation)
     # ======================= Check Input Types
 
-    output_types: ValueType | tuple[ValueType, ...] | None = None
-    if isinstance(_output_type, list):
-        output_types = tuple(_output_type)
-    else:
-        output_types = _output_type
-
     # Create dummy inputs from the original type annotations (preserving Array types)
     # Use emit_init=False to avoid emitting QInitOperation for BlockValue's internal inputs
     dummy_inputs = {
@@ -236,6 +252,13 @@ def func_to_block(func: typing.Callable) -> BlockValue:
         else:
             if hasattr(result, "value"):
                 return_values.append(result.value)
+
+    # Always emit ReturnOperation (even for void returns with empty operands)
+    return_op = ReturnOperation(operands=return_values, results=[])
+    tracer.add_operation(return_op)
+
+    # Re-fetch operations after adding ReturnOperation
+    operations = tracer.operations
 
     return BlockValue(
         name=func.__name__,

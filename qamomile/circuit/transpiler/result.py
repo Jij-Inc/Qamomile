@@ -1,6 +1,6 @@
 """EmitResult data structures for transpiler output."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Generic, TypeVar, Union
 
 T = TypeVar("T")  # Backend circuit type

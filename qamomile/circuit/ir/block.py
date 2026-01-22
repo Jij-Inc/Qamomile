@@ -69,7 +69,6 @@ class Block:
         Returns:
             A new Block in HIERARCHICAL state
         """
-        from qamomile.circuit.ir.block_value import BlockValue
 
         return cls(
             name=block_value.name,

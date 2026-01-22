@@ -46,10 +46,10 @@ def _count_qinit(op: QInitOperation) -> sp.Expr:
             elif dim.is_parameter():
                 param_name = dim.parameter_name()
                 if param_name is not None:
-                    el_count *= sp.Symbol(param_name) # type: ignore
+                    el_count *= sp.Symbol(param_name)  # type: ignore
             else:
                 # Use name as symbol
-                el_count *= sp.Symbol(dim.name) # type: ignore
+                el_count *= sp.Symbol(dim.name)  # type: ignore
         return el_count
 
     # Single qubit
@@ -83,13 +83,13 @@ def _count_from_operations(operations: list[Operation]) -> sp.Expr:
             case WhileOperation():
                 # Same as for loop - assume uncomputation
                 inner_count = _count_from_operations(op.operations)
-                count += inner_count # type: ignore
+                count += inner_count  # type: ignore
 
             case IfOperation():
                 # Take maximum of both branches
                 true_count = _count_from_operations(op.true_operations)
                 false_count = _count_from_operations(op.false_operations)
-                count += sp.Max(true_count, false_count) # type: ignore
+                count += sp.Max(true_count, false_count)  # type: ignore
 
             case CallBlockOperation():
                 # Recursively count qubits in called block
@@ -97,7 +97,7 @@ def _count_from_operations(operations: list[Operation]) -> sp.Expr:
 
                 block = op.operands[0]
                 if isinstance(block, BlockValue):
-                    count += qubits_counter(block) # type: ignore
+                    count += qubits_counter(block)  # type: ignore
 
             case ControlledUOperation():
                 # Recursively count qubits in the unitary block
@@ -105,18 +105,21 @@ def _count_from_operations(operations: list[Operation]) -> sp.Expr:
 
                 block = op.block
                 if isinstance(block, BlockValue):
-                    count += qubits_counter(block) # type: ignore
+                    count += qubits_counter(block)  # type: ignore
 
             case _:
                 continue
 
     return sp.simplify(count)
 
+
 @overload
 def qubits_counter(block: BlockValue) -> sp.Expr: ...
 
+
 @overload
 def qubits_counter(block: list[Operation]) -> sp.Expr: ...
+
 
 def qubits_counter(block: BlockValue | list[Operation]) -> sp.Expr:
     """Count the number of qubits required by a BlockValue.

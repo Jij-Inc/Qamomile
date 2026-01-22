@@ -1,0 +1,33 @@
+# See docs at: https://mystmd.org/guide/frontmatter
+version: 1
+project:
+  id: qamomile-docs-ja
+  title: Qamomile ドキュメント
+  description: 量子最適化アルゴリズムのための強力なSDK
+  keywords:
+    - 量子コンピューティング
+    - 最適化
+    - QAOA
+    - qiskit
+  authors:
+    - name: Jij Inc.
+  github: https://github.com/Jij-Inc/Qamomile
+  jupyter: true
+  execute:
+    cache: true
+  toc:
+    - file: index
+    - title: チュートリアル
+      children:
+        - file: transpile/transpile_flow
+        - file: tutorial/qpe
+        - file: tutorial/qaoa
+
+site:
+  template: book-theme
+  title: Qamomile ドキュメント
+  options:
+    logo: ../assets/qamomile_logo.png
+  nav:
+    - title: GitHub
+      url: https://github.com/Jij-Inc/Qamomile

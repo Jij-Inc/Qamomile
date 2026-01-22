@@ -3,10 +3,15 @@ import typing
 
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
 from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
-from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation, WhileOperation
+from qamomile.circuit.ir.operation.control_flow import (
+    ForOperation,
+    IfOperation,
+    WhileOperation,
+)
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, Qubit, UInt
 from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
+
 
 class WhileLoop:
     pass
@@ -62,10 +67,7 @@ def while_loop(cond: typing.Callable) -> typing.Generator[WhileLoop, None, None]
 
 @contextlib.contextmanager
 def for_loop(
-    start,
-    stop,
-    step=1,
-    var_name: str = "_loop_idx"
+    start, stop, step=1, var_name: str = "_loop_idx"
 ) -> typing.Generator[UInt, None, None]:
     """Builder function to create a for loop in Qamomile frontend.
 
@@ -109,14 +111,9 @@ def for_loop(
     # ForOperationを作成
     # operands: [start, stop, step]
     for_op = ForOperation(loop_var=var_name, operations=body_tracer.operations)
-    for_op.operands.append(start)
-    for_op.operands.append(stop)
-
-    if isinstance(step, int):
-        step_value = Value(type=UIntType(), name="const_step", params={"const": step})
-        for_op.operands.append(step_value)
-    else:
-        for_op.operands.append(step)
+    for_op.operands.append(_value_to_ir_value(start, "start"))
+    for_op.operands.append(_value_to_ir_value(stop, "stop"))
+    for_op.operands.append(_value_to_ir_value(step, "step"))
 
     parent_tracer.add_operation(for_op)
 
@@ -159,7 +156,6 @@ def _value_to_ir_value(val: typing.Any, name_prefix: str = "const") -> Value:
 
     # Convert primitive to Value
     if isinstance(val, (int, float, bool)):
-
         if isinstance(val, bool):
             return Value(type=BitType(), name=name_prefix, params={"const": val})
         elif isinstance(val, float):
@@ -195,8 +191,8 @@ def _create_phi_for_values(
     # Create Phi output value
     phi_output = Value(type=true_v.type, name=f"{true_v.name}_phi")
 
-    # Create PhiOp
-    phi_op = PhiOp(operands=[condition_value, true_v, false_v], results=[phi_output])
+    # Create PhiOp (operation is tracked via if_operation.results)
+    _phi_op = PhiOp(operands=[condition_value, true_v, false_v], results=[phi_output])
     if_operation.results.append(phi_output)
 
     # Create appropriate Handle type for the merged value
@@ -312,3 +308,27 @@ def emit_if(
         return merged_results[0]
     else:
         return tuple(merged_results)
+
+
+def range(
+    stop_or_start: "int | UInt",
+    stop: "int | UInt | None" = None,
+    step: "int | UInt" = 1,
+) -> typing.Iterator[UInt]:
+    """Symbolic range for use in qkernel for-loops.
+
+    This function accepts UInt (symbolic) values and is transformed
+    by the AST transformer into for_loop() calls.
+
+    Usage:
+        for i in qmc.range(n):  # 0 to n-1
+        for i in qmc.range(start, stop):  # start to stop-1
+        for i in qmc.range(start, stop, step):
+
+    Note:
+        This function is a placeholder - the actual looping is handled by
+        the AST transformer which converts range() calls to for_loop().
+    """
+    # This is a dummy implementation - AST transformer replaces this with for_loop()
+    # The function signature accepts UInt for type checking purposes
+    return iter([])

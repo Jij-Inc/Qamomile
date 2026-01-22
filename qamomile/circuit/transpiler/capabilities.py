@@ -1,38 +1,58 @@
-"""Backend capabilities for transpilation."""
+"""Backend capability definitions for transpiler optimization."""
 
-from __future__ import annotations
+import enum
+from typing import Protocol, runtime_checkable
 
-import dataclasses
 
+class BackendCapability(enum.Flag):
+    """Capabilities that a backend may support natively.
 
-@dataclasses.dataclass
-class BackendCapabilities:
-    """Describes what features a quantum backend supports.
-
-    Used by SeparatePass to determine what transformations are needed.
+    Use these flags to indicate which composite gates and features
+    a backend supports, allowing the transpiler to use native
+    implementations when available.
     """
 
+    NONE = 0
+
+    # Composite gate support
+    NATIVE_QFT = enum.auto()  # Native Quantum Fourier Transform
+    NATIVE_IQFT = enum.auto()  # Native Inverse QFT
+    NATIVE_QPE = enum.auto()  # Native Quantum Phase Estimation
+
     # Control flow support
-    supports_dynamic_circuits: bool = False
-    """Whether the backend can execute if/else based on measurement results."""
+    DYNAMIC_CIRCUITS = enum.auto()  # Mid-circuit measurement + conditionals
+    FOR_LOOP = enum.auto()  # Native for loop support
+    WHILE_LOOP = enum.auto()  # Native while loop support
 
-    # Quantum register types
-    supports_qfixed: bool = False
-    """Whether the backend natively supports QFixed (fixed-point quantum registers)."""
+    # Classical operations
+    CLASSICAL_FEEDFORWARD = enum.auto()  # Classical ops mid-circuit
 
-    supports_quint: bool = False
-    """Whether the backend natively supports QUInt (quantum unsigned integers)."""
+    # Common combinations
+    BASIC_COMPOSITE = NATIVE_QFT | NATIVE_IQFT
+    FULL_COMPOSITE = BASIC_COMPOSITE | NATIVE_QPE
+    FULL_CONTROL_FLOW = DYNAMIC_CIRCUITS | FOR_LOOP | WHILE_LOOP
 
-    # Hardware constraints
-    max_qubits: int | None = None
-    """Maximum number of qubits available (None = unlimited)."""
 
-    max_classical_bits: int | None = None
-    """Maximum number of classical bits available (None = unlimited)."""
+@runtime_checkable
+class CapableBackend(Protocol):
+    """Protocol for backends that declare their capabilities.
 
-    # Loop support
-    supports_for_loops: bool = False
-    """Whether the backend supports for loops natively (vs unrolling required)."""
+    Implement this protocol in backend-specific EmitPass classes
+    to enable capability-based optimizations.
+    """
 
-    supports_while_loops: bool = False
-    """Whether the backend supports while loops natively."""
+    @property
+    def capabilities(self) -> BackendCapability:
+        """Return the capabilities this backend supports."""
+        ...
+
+    def has_capability(self, cap: BackendCapability) -> bool:
+        """Check if this backend has a specific capability.
+
+        Args:
+            cap: The capability to check for.
+
+        Returns:
+            True if the backend has the capability, False otherwise.
+        """
+        ...

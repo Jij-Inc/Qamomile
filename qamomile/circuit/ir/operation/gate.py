@@ -1,7 +1,14 @@
 import dataclasses
 import enum
 
-from qamomile.circuit.ir.types.primitives import BitType, BlockType, QubitType
+from qamomile.circuit.ir.types.primitives import (
+    BitType,
+    BlockType,
+    FloatType,
+    QubitType,
+)
+from qamomile.circuit.ir.types import QFixedType
+from qamomile.circuit.ir.value import Value
 
 from .operation import Operation, OperationKind, ParamHint, Signature
 
@@ -28,6 +35,9 @@ class GateOperationType(enum.Enum):
 @dataclasses.dataclass
 class GateOperation(Operation):
     gate_type: GateOperationType | None = None
+    theta: float | Value | None = (
+        None  # Angle parameter for rotation gates (RX, RY, RZ, P, etc.)
+    )
 
     def __post_init__(self):
         if not self.gate_type:
@@ -77,9 +87,16 @@ class ControlledUOperation(Operation):
     The results structure is:
     - results[0:num_controls]: Control qubits (returned)
     - results[num_controls:]: Target qubits (returned from U)
+
+    Attributes:
+        num_controls: Number of control qubits (default: 1)
+        power: Number of times to apply U. Default is 1 (apply U once).
+               For QPE, this is 2^k where k is the counting qubit index.
+               The emitter will create Controlled(U^power), not Controlled(U)^power.
     """
 
     num_controls: int = 1
+    power: int = 1
 
     @property
     def block(self):
@@ -126,3 +143,61 @@ class ControlledUOperation(Operation):
     @property
     def operation_kind(self) -> OperationKind:
         return OperationKind.QUANTUM
+
+
+@dataclasses.dataclass
+class MeasureVectorOperation(Operation):
+    """Measure a vector of qubits.
+
+    Takes a Vector[Qubit] (ArrayValue) and produces a Vector[Bit] (ArrayValue).
+    This operation measures all qubits in the vector as a single operation.
+
+    operands: [ArrayValue of qubits]
+    results: [ArrayValue of bits]
+    """
+
+    @property
+    def signature(self) -> Signature:
+        return Signature(
+            operands=[ParamHint(name="qubits", type=QubitType())],
+            results=[ParamHint(name="bits", type=BitType())],
+        )
+
+    @property
+    def operation_kind(self) -> OperationKind:
+        return OperationKind.HYBRID
+
+
+@dataclasses.dataclass
+class MeasureQFixedOperation(Operation):
+    """Measure a quantum fixed-point number.
+
+    This operation measures all qubits in a QFixed register and produces
+    a Float result. During transpilation, this is lowered to individual
+    MeasureOperations plus a DecodeQFixedOperation.
+
+    Attributes:
+        num_bits: Total number of bits in the fixed-point representation.
+        int_bits: Number of integer bits (0 for pure fractional like QPE phase).
+
+    operands: [QFixed value (contains qubit_values in params)]
+    results: [Float value]
+
+    Encoding:
+        For QPE phase (int_bits=0):
+            float_value = 0.b0b1b2... = b0*0.5 + b1*0.25 + b2*0.125 + ...
+    """
+
+    num_bits: int = 0
+    int_bits: int = 0  # For QPE phase, this is 0 (all bits are fractional)
+
+    @property
+    def signature(self) -> Signature:
+        return Signature(
+            operands=[ParamHint(name="qfixed", type=QFixedType())],
+            results=[ParamHint(name="float_out", type=FloatType())],
+        )
+
+    @property
+    def operation_kind(self) -> OperationKind:
+        return OperationKind.HYBRID  # Quantum measurement + classical decode

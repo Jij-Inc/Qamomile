@@ -4,7 +4,11 @@ import textwrap
 from typing import Any, Callable
 
 
-from qamomile.circuit.frontend.operation.control_flow import emit_if, for_loop, while_loop
+from qamomile.circuit.frontend.operation.control_flow import (
+    emit_if,
+    for_loop,
+    while_loop,
+)
 
 
 class VariableCollector(ast.NodeVisitor):
@@ -271,7 +275,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 "Only 'for i in range(...)' or 'for i in qm.range(...)' is supported"
             )
 
-        num_args = len(node.iter.args) # type: ignore
+        num_args = len(node.iter.args)  # type: ignore
         if num_args < 1 or num_args > 3:
             raise NotImplementedError(
                 "range() requires 1-3 arguments: range(stop), range(start, stop), or range(start, stop, step)"
@@ -286,11 +290,11 @@ class ControlFlowTransformer(ast.NodeTransformer):
             stop_arg = node.iter.args[0]  # type: ignore
             step_arg = ast.Constant(value=1)
         elif num_args == 2:
-            start_arg = node.iter.args[0] # type: ignore
+            start_arg = node.iter.args[0]  # type: ignore
             stop_arg = node.iter.args[1]  # type: ignore
             step_arg = ast.Constant(value=1)
         else:  # num_args == 3
-            start_arg = node.iter.args[0] # type: ignore
+            start_arg = node.iter.args[0]  # type: ignore
             stop_arg = node.iter.args[1]  # type: ignore
             step_arg = node.iter.args[2]  # type: ignore
 
@@ -388,7 +392,6 @@ def transform_control_flow(func: Callable):
             node.decorator_list = []
 
     ast.fix_missing_locations(tree)
-
 
     # 元の関数のグローバル変数を継承
     name_space = func.__globals__.copy()
