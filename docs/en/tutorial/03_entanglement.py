@@ -78,15 +78,13 @@ for value, count in result_two.results:
 # The **CNOT gate** (also called Controlled-NOT or CX gate) is the most fundamental two-qubit gate.
 #
 # ### Operation
-# - **Control bit**: When this qubit is `|1⟩`, it acts on the target
-# - **Target bit**: Flips if the control bit is `|1⟩`
+# - **Control bit**: When this qubit is $|1\rangle$, it acts on the target
+# - **Target bit**: Flips if the control bit is $|1\rangle$
 #
-# ```
-# |00⟩ → |00⟩  (control is 0, so target unchanged)
-# |01⟩ → |01⟩  (control is 0, so target unchanged)
-# |10⟩ → |11⟩  (control is 1, so target flips)
-# |11⟩ → |10⟩  (control is 1, so target flips)
-# ```
+# $$|00\rangle \rightarrow |00\rangle \quad \text{(control is 0, so target unchanged)}$$
+# $$|01\rangle \rightarrow |01\rangle \quad \text{(control is 0, so target unchanged)}$$
+# $$|10\rangle \rightarrow |11\rangle \quad \text{(control is 1, so target flips)}$$
+# $$|11\rangle \rightarrow |10\rangle \quad \text{(control is 1, so target flips)}$$
 
 # %%
 @qm.qkernel
@@ -95,7 +93,7 @@ def cnot_example() -> tuple[qm.Bit, qm.Bit]:
     q0 = qm.qubit(name="control")
     q1 = qm.qubit(name="target")
 
-    # Set control bit to |1⟩
+    # Set control bit to $|1\rangle$
     q0 = qm.x(q0)
 
     # Apply CNOT gate
@@ -140,7 +138,7 @@ print("\nSince the control bit is 1, the target also flips to (1, 1)")
 # %%
 @qm.qkernel
 def bell_state() -> tuple[qm.Bit, qm.Bit]:
-    """Create Bell state |Φ+⟩ = (|00⟩ + |11⟩)/√2"""
+    """Create Bell state $|\Phi^+\rangle = (|00\rangle + |11\rangle)/\sqrt{2}$"""
     q0 = qm.qubit(name="q0")
     q1 = qm.qubit(name="q1")
 
@@ -191,7 +189,7 @@ print(qiskit_bell.draw(output="text"))
 # %%
 @qm.qkernel
 def bell_phi_plus() -> tuple[qm.Bit, qm.Bit]:
-    """|Φ+⟩ = (|00⟩ + |11⟩)/√2"""
+    """$|\Phi^+\rangle = (|00\rangle + |11\rangle)/\sqrt{2}$"""
     q0, q1 = qm.qubit(name="q0"), qm.qubit(name="q1")
     q0 = qm.h(q0)
     q0, q1 = qm.cx(q0, q1)
@@ -200,7 +198,7 @@ def bell_phi_plus() -> tuple[qm.Bit, qm.Bit]:
 
 @qm.qkernel
 def bell_phi_minus() -> tuple[qm.Bit, qm.Bit]:
-    """|Φ−⟩ = (|00⟩ − |11⟩)/√2"""
+    """$|\Phi^-\rangle = (|00\rangle - |11\rangle)/\sqrt{2}$"""
     q0, q1 = qm.qubit(name="q0"), qm.qubit(name="q1")
     q0 = qm.h(q0)
     q0, q1 = qm.cx(q0, q1)
@@ -210,7 +208,7 @@ def bell_phi_minus() -> tuple[qm.Bit, qm.Bit]:
 
 @qm.qkernel
 def bell_psi_plus() -> tuple[qm.Bit, qm.Bit]:
-    """|Ψ+⟩ = (|01⟩ + |10⟩)/√2"""
+    """$|\Psi^+\rangle = (|01\rangle + |10\rangle)/\sqrt{2}$"""
     q0, q1 = qm.qubit(name="q0"), qm.qubit(name="q1")
     q0 = qm.h(q0)
     q0, q1 = qm.cx(q0, q1)
@@ -220,7 +218,7 @@ def bell_psi_plus() -> tuple[qm.Bit, qm.Bit]:
 
 @qm.qkernel
 def bell_psi_minus() -> tuple[qm.Bit, qm.Bit]:
-    """|Ψ−⟩ = (|01⟩ − |10⟩)/√2"""
+    """$|\Psi^-\rangle = (|01\rangle - |10\rangle)/\sqrt{2}$"""
     q0, q1 = qm.qubit(name="q0"), qm.qubit(name="q1")
     q0 = qm.h(q0)
     q0, q1 = qm.cx(q0, q1)
@@ -243,7 +241,7 @@ for name, circuit in bell_states:
     exec_b = transpiler.transpile(circuit)
     result_b = exec_b.sample(transpiler.executor(), shots=1000).result()
 
-    print(f"|{name}⟩:")
+    print(f"$|{name}\\rangle$:")
     for value, count in result_b.results:
         print(f"  {value}: {count}")
     print()
@@ -263,7 +261,7 @@ def array_example() -> qm.Vector[qm.Bit]:
     # Access by index
     qubits[0] = qm.h(qubits[0])
     qubits[1] = qm.x(qubits[1])
-    # qubits[2] is left as |0⟩
+    # qubits[2] is left as $|0\rangle$
 
     # Measure the entire array
     return qm.measure(qubits)
@@ -349,7 +347,7 @@ exec_ghz3 = transpiler.transpile(ghz_state, bindings={"n": 3})
 result_ghz3 = exec_ghz3.sample(transpiler.executor(), shots=1000).result()
 
 print("=== 3-Qubit GHZ State ===")
-print("|GHZ⟩ = (|000⟩ + |111⟩)/√2\n")
+print("$|GHZ\\rangle = (|000\\rangle + |111\\rangle)/\\sqrt{2}$\n")
 for value, count in result_ghz3.results:
     percentage = count / 1000 * 100
     print(f"  {value}: {count} ({percentage:.1f}%)")
@@ -360,7 +358,7 @@ exec_ghz5 = transpiler.transpile(ghz_state, bindings={"n": 5})
 result_ghz5 = exec_ghz5.sample(transpiler.executor(), shots=1000).result()
 
 print("\n=== 5-Qubit GHZ State ===")
-print("|GHZ⟩ = (|00000⟩ + |11111⟩)/√2\n")
+print("$|GHZ\\rangle = (|00000\\rangle + |11111\\rangle)/\\sqrt{2}$\n")
 for value, count in result_ghz5.results:
     percentage = count / 1000 * 100
     print(f"  {value}: {count} ({percentage:.1f}%)")
@@ -397,13 +395,13 @@ def swap_example() -> tuple[qm.Bit, qm.Bit]:
     q0 = qm.qubit(name="q0")
     q1 = qm.qubit(name="q1")
 
-    # Set q0 to |1⟩, keep q1 as |0⟩
+    # Set q0 to $|1\rangle$, keep q1 as $|0\rangle$
     q0 = qm.x(q0)
 
     # Exchange with SWAP
     q0, q1 = qm.swap(q0, q1)
 
-    # After swap: q0=|0⟩, q1=|1⟩
+    # After swap: q0=$|0\rangle$, q1=$|1\rangle$
     return qm.measure(q0), qm.measure(q1)
 
 
@@ -412,8 +410,8 @@ exec_swap = transpiler.transpile(swap_example)
 result_swap = exec_swap.sample(transpiler.executor(), shots=1000).result()
 
 print("=== SWAP Gate Example ===")
-print("Before SWAP: q0=|1⟩, q1=|0⟩")
-print("After SWAP: q0=|0⟩, q1=|1⟩\n")
+print("Before SWAP: q0=$|1\\rangle$, q1=$|0\\rangle$")
+print("After SWAP: q0=$|0\\rangle$, q1=$|1\\rangle$\n")
 for value, count in result_swap.results:
     print(f"  Result: {value}, Count: {count}")
 
@@ -455,7 +453,7 @@ for value, count in result_rzz.results:
 # %% [markdown]
 # ### CP Gate (Controlled Phase Gate)
 #
-# Adds phase to the target when the control bit is |1⟩.
+# Adds phase to the target when the control bit is $|1\rangle$.
 # Used in Quantum Fourier Transform (QFT).
 
 # %%

@@ -48,7 +48,7 @@ transpiler = QiskitTranspiler()
 #
 # $$H|1\rangle = \frac{|0\rangle - |1\rangle}{\sqrt{2}}$$
 #
-# In other words, applying the H gate to `|0⟩` creates a state where `|0⟩` and `|1⟩` have equal probability.
+# In other words, applying the H gate to $|0\rangle$ creates a state where $|0\rangle$ and $|1\rangle$ have equal probability.
 
 # %%
 @qm.qkernel
@@ -105,8 +105,8 @@ def double_hadamard() -> qm.Bit:
     """Apply H gate twice"""
     q = qm.qubit(name="q")
 
-    q = qm.h(q)  # First: |0⟩ → (|0⟩+|1⟩)/√2
-    q = qm.h(q)  # Second: (|0⟩+|1⟩)/√2 → |0⟩
+    q = qm.h(q)  # First: $|0\rangle \rightarrow (|0\rangle+|1\rangle)/\sqrt{2}$
+    q = qm.h(q)  # Second: $(|0\rangle+|1\rangle)/\sqrt{2} \rightarrow |0\rangle$
 
     return qm.measure(q)
 
@@ -133,30 +133,30 @@ for value, count in result2.results:
 # $$H \cdot H |0\rangle = H \cdot \frac{|0\rangle + |1\rangle}{\sqrt{2}} = |0\rangle$$
 
 # %% [markdown]
-# ## 3. The |+⟩ and |−⟩ States
+# ## 3. The $|+\rangle$ and $|-\rangle$ States
 #
 # Superposition states have names:
 #
-# - **|+⟩ state**: $\frac{|0\rangle + |1\rangle}{\sqrt{2}}$ (H|0⟩)
-# - **|−⟩ state**: $\frac{|0\rangle - |1\rangle}{\sqrt{2}}$ (H|1⟩)
+# - **$|+\rangle$ state**: $\frac{|0\rangle + |1\rangle}{\sqrt{2}}$ (H$|0\rangle$)
+# - **$|-\rangle$ state**: $\frac{|0\rangle - |1\rangle}{\sqrt{2}}$ (H$|1\rangle$)
 #
 # These have the same measurement probability distribution (50/50), but they are different quantum states.
 
 # %%
 @qm.qkernel
 def plus_state() -> qm.Bit:
-    """Create |+⟩ state"""
+    """Create $|+\rangle$ state"""
     q = qm.qubit(name="q")
-    q = qm.h(q)  # |0⟩ → |+⟩
+    q = qm.h(q)  # $|0\rangle \rightarrow |+\rangle$
     return qm.measure(q)
 
 
 @qm.qkernel
 def minus_state() -> qm.Bit:
-    """Create |−⟩ state"""
+    """Create $|-\rangle$ state"""
     q = qm.qubit(name="q")
-    q = qm.x(q)  # |0⟩ → |1⟩
-    q = qm.h(q)  # |1⟩ → |−⟩
+    q = qm.x(q)  # $|0\rangle \rightarrow |1\rangle$
+    q = qm.h(q)  # $|1\rangle \rightarrow |-\rangle$
     return qm.measure(q)
 
 
@@ -168,11 +168,11 @@ exec_minus = transpiler.transpile(minus_state)
 result_plus = exec_plus.sample(transpiler.executor(), shots=1000).result()
 result_minus = exec_minus.sample(transpiler.executor(), shots=1000).result()
 
-print("=== |+⟩ State Measurement Results ===")
+print("=== $|+\\rangle$ State Measurement Results ===")
 for value, count in result_plus.results:
     print(f"  Measurement result: {value}, Count: {count}")
 
-print("\n=== |−⟩ State Measurement Results ===")
+print("\n=== $|-\\rangle$ State Measurement Results ===")
 for value, count in result_minus.results:
     print(f"  Measurement result: {value}, Count: {count}")
 
@@ -279,7 +279,7 @@ for params in params_list:
 # %% [markdown]
 # ## 6. The Phase Gate (P Gate)
 #
-# The **phase gate** P(θ) adds a phase $e^{i\theta}$ to the `|1⟩` state.
+# The **phase gate** P(θ) adds a phase $e^{i\theta}$ to the $|1\rangle$ state.
 #
 # $$P(\theta)|0\rangle = |0\rangle$$
 # $$P(\theta)|1\rangle = e^{i\theta}|1\rangle$$
@@ -293,7 +293,7 @@ def phase_example() -> qm.Bit:
     q = qm.qubit(name="q")
 
     q = qm.h(q)           # Create superposition
-    q = qm.p(q, math.pi)  # Add phase π to |1⟩ (sign flip)
+    q = qm.p(q, math.pi)  # Add phase π to $|1\rangle$ (sign flip)
     q = qm.h(q)           # Interfere
 
     return qm.measure(q)
@@ -314,8 +314,8 @@ for value, count in result_phase.results:
 #
 # This is an example of quantum interference:
 # 1. H gate creates superposition
-# 2. P(π) flips the sign of the |1⟩ component
-# 3. The second H gate causes interference, leaving only |1⟩
+# 2. P(π) flips the sign of the $|1\rangle$ component
+# 3. The second H gate causes interference, leaving only $|1\rangle$
 
 # %% [markdown]
 # ## 7. Circuit Visualization: Rotation Gates
@@ -340,7 +340,7 @@ print(qiskit_param.draw(output="text"))
 # | X rotation | `qm.rx(q, θ)` | Rotates around X-axis |
 # | Y rotation | `qm.ry(q, θ)` | Rotates around Y-axis |
 # | Z rotation | `qm.rz(q, θ)` | Rotates around Z-axis |
-# | Phase | `qm.p(q, θ)` | Adds phase to |1⟩ |
+# | Phase | `qm.p(q, θ)` | Adds phase to $\|1\rangle$ |
 #
 # ### Key Concepts
 # - **Superposition**: A state holding both 0 and 1 simultaneously. Collapses probabilistically upon measurement
