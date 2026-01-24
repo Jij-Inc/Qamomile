@@ -20,7 +20,7 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
 from qamomile.circuit.ir.operation.expval import ExpvalOp
-from qamomile.circuit.ir.value import Value, ArrayValue
+from qamomile.circuit.ir.value import Value, ArrayValue, ValueBase
 from qamomile.circuit.ir.types.primitives import BitType, QubitType, UIntType
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowVisitor
@@ -383,7 +383,7 @@ class SeparatePass(Pass[Block, SeparatedProgram]):
             def visit_operation(self, op: Operation) -> None:
                 # Operands not defined in this segment are inputs
                 for operand in op.operands:
-                    if isinstance(operand, Value):
+                    if isinstance(operand, ValueBase):
                         if (
                             operand.uuid not in value_definitions
                             or value_definitions[operand.uuid] != segment_index

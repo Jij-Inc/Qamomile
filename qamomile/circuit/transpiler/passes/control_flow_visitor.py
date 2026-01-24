@@ -129,10 +129,10 @@ class ValueCollector(ControlFlowVisitor):
         self.result_uuids: set[str] = set()
 
     def visit_operation(self, op: Operation) -> None:
-        from qamomile.circuit.ir.value import Value
+        from qamomile.circuit.ir.value import ValueBase
 
         for operand in op.operands:
-            if isinstance(operand, Value):
+            if isinstance(operand, ValueBase):
                 self.operand_uuids.add(operand.uuid)
 
         for result in op.results:
