@@ -2,6 +2,7 @@ from .handle import Handle
 from .primitives import Qubit, QFixed, UInt, Float, Bit
 from .array import Vector, Matrix, Tensor
 from .hamiltonian import HamiltonianExpr
+from .containers import Tuple, Dict
 
 __all__ = [
     "Handle",
@@ -14,4 +15,6 @@ __all__ = [
     "Matrix",
     "Tensor",
     "HamiltonianExpr",
+    "Tuple",
+    "Dict",
 ]

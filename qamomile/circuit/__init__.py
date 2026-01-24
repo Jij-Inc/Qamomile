@@ -4,6 +4,7 @@ from .frontend.composite_gate import CompositeGate, composite_gate
 from .frontend.constructors import bit, float_, qubit, qubit_array, uint
 from .frontend.handle import (
     Bit,
+    Dict,
     Float,
     HamiltonianExpr,
     Handle,
@@ -11,11 +12,12 @@ from .frontend.handle import (
     QFixed,
     Qubit,
     Tensor,
+    Tuple,
     UInt,
     Vector,
 )
 from .frontend.operation.cast import cast
-from .frontend.operation.control_flow import range
+from .frontend.operation.control_flow import range, items, for_items
 from .frontend.operation.controlled import controlled
 from .frontend.operation.expval import expval
 from .frontend.operation.measurement import measure
@@ -48,12 +50,16 @@ __all__ = [
     "swap",
     "measure",
     "expval",
+    "for_items",
+    "items",
     "range",
     "Bit",
+    "Dict",
     "Float",
     "Handle",
     "Qubit",
     "QFixed",
+    "Tuple",
     "UInt",
     "Vector",
     "Matrix",

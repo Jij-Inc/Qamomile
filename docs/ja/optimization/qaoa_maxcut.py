@@ -79,7 +79,7 @@ nx.draw_networkx(
 )
 
 plt.tight_layout()
-plt.show()
+# plt.show()
 
 
 # %% [markdown]
@@ -183,24 +183,22 @@ def ising_cost(
     for e in qmc.range(num_e):
         i = edges[e, 0]
         j = edges[e, 1]
-        angle = 2 * Jij[e] * gamma
-        q[i], q[j] = qmc.rzz(q[i], q[j], angle)
+        q[i], q[j] = qmc.rzz(q[i], q[j], gamma * Jij[e])
     n = hi.shape[0]
     for i in qmc.range(n):
-        angle = 2 * hi[i] * gamma
-        q[i] = qmc.rz(q[i], angle)
+        q[i] = qmc.rz(q[i], gamma * hi[i])
     return q
 
 
 @qmc.qkernel
 def x_mixer(
     q: qmc.Vector[qmc.Qubit],
+    hi: qmc.Vector[qmc.Float],  # Workaround: pass hi to get shape (q.shape not propagated in nested calls)
     beta: qmc.Float,
 ) -> qmc.Vector[qmc.Qubit]:
-    n = q.shape[0]
+    n = hi.shape[0]
     for i in qmc.range(n):
-        angle = 2 * beta
-        q[i] = qmc.rx(q[i], angle)
+        q[i] = qmc.rx(q[i], 2 * beta)
     return q
 
 
@@ -215,11 +213,13 @@ def qaoa_state(
 ) -> qmc.Vector[qmc.Qubit]:
     n = hi.shape[0]
     q = qmc.qubit_array(n, name="qaoa_state")
+    for i in qmc.range(n):
+        q[i] = qmc.h(q[i])
     for iter in qmc.range(p):
         gamma = gammas[iter]
         beta = betas[iter]
         q = ising_cost(q, edges, Jij, hi, gamma)
-        q = x_mixer(q, beta)
+        q = x_mixer(q, hi, beta)
     return q
 
 
@@ -233,16 +233,17 @@ from qamomile.core.ising_qubo import IsingModel
 ising = IsingModel.from_qubo(qubo)
 
 # %%
+num_qubits = ising.num_bits
 edges = []
 Jij = []
-hi = []
+hi = [0.0] * num_qubits  # 全qubitに対して0で初期化
 
 for indices, value in ising.coefficients.items():
     if len(indices) == 2:
         edges.append([indices[0], indices[1]])
         Jij.append(value)
     elif len(indices) == 1:
-        hi.append((indices[0], value))
+        hi[indices[0]] = value  # 正しいインデックスに値を設定
 
 # %%
 import qamomile.circuit as qmc
@@ -270,4 +271,102 @@ executor = transpiler.transpile(qaoa, bindings={"edges": edges, "Jij": Jij, "hi"
 job = executor.sample(transpiler.executor(), bindings={"betas": [0.1, 0.2], "gammas": [0.3, 0.4]}, shots=1024)
 # %%
 job.result()
+# %%
+qkcirc = executor.get_first_circuit()
+print(qkcirc.draw())
+# %%
+from qamomile.circuit.transpiler.transpiler import Transpiler
+from qamomile.circuit.transpiler.executable import ExecutableProgram
+
+
+class QAOAConverter:
+    def __init__(self, instance: ommx.v1.Instance):
+        self.instance = instance
+
+    def transpile(
+        self,
+        transpiler: Transpiler,
+        p: int,
+    ) -> ExecutableProgram:
+        qubo, offset = self.instance.to_qubo()
+        ising = IsingModel.from_qubo(qubo)
+
+        edges = []
+        Jij = []
+        hi = [0.0 for _ in range(ising.num_bits)]
+
+        for indices, value in ising.coefficients.items():
+            if len(indices) == 2:
+                edges.append([indices[0], indices[1]])
+                Jij.append(value)
+            elif len(indices) == 1:
+                hi[indices[0]] = value
+
+        qaoa_kernel = qaoa
+
+        executor = transpiler.transpile(
+            qaoa_kernel,
+            bindings={"edges": edges, "Jij": Jij, "hi": hi, "p": p},
+            parameters=["betas", "gammas"],
+        )
+        return executor
+
+
+qaoa_converter = QAOAConverter(instance)
+executor = qaoa_converter.transpile(transpiler, p=2)
+
+
+# %%
+results = executor.sample(transpiler.executor(), bindings={"betas": [0.1, 0.2], "gammas": [0.3, 0.4]}, shots=1024)
+# %%
+
+import scipy.optimize as opt
+
+def calculate_ising_energy(bitstring, edges, Jij, hi):
+    """tutorial/qaoa.py と同じエネルギー計算"""
+    spins = [1 if bit == 0 else -1 for bit in bitstring]
+    energy = 0.0
+    # 相互作用項
+    for (i, j), J in zip(edges, Jij):
+        energy += J * spins[i] * spins[j]
+    # バイアス項
+    for i, h in enumerate(hi):
+        energy += h * spins[i]
+    return energy
+
+
+# Run QAOA with parameter optimization
+energy_list = []
+def objective(params):
+    p = 2
+    gammas = params[:p]
+    betas = params[p:]
+    results = executor.sample(
+        transpiler.executor(),
+        bindings={"betas": betas, "gammas": gammas},
+        shots=1024,
+    )
+    counts = results.result()
+    energy = 0.0
+    for bitstring, count in counts.results:
+        e = calculate_ising_energy(bitstring, edges, Jij, hi)
+        energy += e * count
+    energy_list.append(energy / 1024)
+    return energy / 1024
+
+
+# ランダムな初期値（tutorial版と同じ）
+np.random.seed(42)
+p = 2
+initial_params = np.concatenate([
+    np.random.uniform(0, np.pi, size=p),      # gammas
+    np.random.uniform(0, np.pi/2, size=p),    # betas
+])
+result = opt.minimize(objective, initial_params, method="COBYLA", options={"maxiter": 100})
+print("Optimized parameters:", result.x)
+
+
+# %%
+import matplotlib.pyplot as plt
+plt.plot(energy_list)
 # %%

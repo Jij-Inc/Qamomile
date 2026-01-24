@@ -9,6 +9,7 @@ from qamomile.circuit.frontend.func_to_block import (
     create_dummy_input,
     func_to_block,
     is_array_type,
+    is_dict_type,
 )
 from qamomile.circuit.frontend.handle import Qubit
 from qamomile.circuit.frontend.handle.primitives import Float, Handle, UInt
@@ -16,7 +17,8 @@ from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
 from qamomile.circuit.ir.block_value import BlockValue
 from qamomile.circuit.ir.graph import Graph
 from qamomile.circuit.ir.types import FloatType, UIntType
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.value import ArrayValue, Value, DictValue
+from qamomile.circuit.frontend.handle.containers import Dict
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -121,10 +123,7 @@ class QKernel(Generic[P, R]):
                 # Extract shape from ArrayValue if available
                 if isinstance(val, ArrayValue) and val.shape:
                     shape = tuple(
-                        UInt(value=dim_val)
-                        if not dim_val.is_constant()
-                        else dim_val.params.get("const", 0)
-                        for dim_val in val.shape
+                        UInt(value=dim_val) for dim_val in val.shape
                     )
                 else:
                     # Fallback: empty shape (will need runtime resolution)
@@ -312,6 +311,17 @@ class QKernel(Generic[P, R]):
             instance._consumed = False
             instance.element_type = element_type
             return instance
+
+        # Dict binding - store dict data for transpile-time unrolling
+        if is_dict_type(param_type):
+            # Create DictValue with parameter binding
+            # The actual dict data is stored and used during emit pass unrolling
+            dict_value = DictValue(
+                name=name,
+                entries=[],  # Empty - data stored in params
+                params={"parameter": name, "bound_data": value},
+            )
+            return Dict(value=dict_value, _entries=[])
 
         raise TypeError(f"Cannot create bound value for type {param_type}")
 

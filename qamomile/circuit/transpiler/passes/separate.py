@@ -9,6 +9,7 @@ from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.operation import OperationKind
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
+    ForItemsOperation,
     IfOperation,
     WhileOperation,
 )
@@ -288,6 +289,8 @@ class SeparatePass(Pass[Block, SeparatedProgram]):
 
         # Control flow - determine by inner operations
         if isinstance(op, ForOperation):
+            inner_kinds = {self._effective_kind(inner) for inner in op.operations}
+        elif isinstance(op, ForItemsOperation):
             inner_kinds = {self._effective_kind(inner) for inner in op.operations}
         elif isinstance(op, IfOperation):
             inner_kinds = {self._effective_kind(inner) for inner in op.true_operations}

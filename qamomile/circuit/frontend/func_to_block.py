@@ -5,8 +5,15 @@ import qamomile.circuit.ir.types as ir_types
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.block_value import BlockValue
-from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType, ValueType
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.types.primitives import (
+    BitType,
+    FloatType,
+    UIntType,
+    ValueType,
+    TupleType,
+    DictType,
+)
+from qamomile.circuit.ir.value import ArrayValue, Value, TupleValue, DictValue
 
 from qamomile.circuit.frontend.handle.primitives import (
     Bit,
@@ -15,6 +22,7 @@ from qamomile.circuit.frontend.handle.primitives import (
     Qubit,
     UInt,
 )
+from qamomile.circuit.frontend.handle.containers import Tuple, Dict
 from qamomile.circuit.frontend.tracer import Tracer, trace, get_current_tracer
 
 
@@ -50,6 +58,26 @@ def _get_ndim(param_type) -> int:
     return 1
 
 
+def is_tuple_type(t) -> bool:
+    """Check if type is a Tuple handle type."""
+    actual_type = getattr(t, "__origin__", t)
+    if actual_type is Tuple:
+        return True
+    if hasattr(actual_type, "__mro__"):
+        return any(c.__name__ == "Tuple" for c in actual_type.__mro__)
+    return False
+
+
+def is_dict_type(t) -> bool:
+    """Check if type is a Dict handle type."""
+    actual_type = getattr(t, "__origin__", t)
+    if actual_type is Dict:
+        return True
+    if hasattr(actual_type, "__mro__"):
+        return any(c.__name__ == "Dict" for c in actual_type.__mro__)
+    return False
+
+
 def handle_type_map(handle_type: type[Handle] | type) -> ValueType:
     """Map Handle type to ValueType."""
     # Handle Array types
@@ -64,6 +92,23 @@ def handle_type_map(handle_type: type[Handle] | type) -> ValueType:
         if element_type:
             return handle_type_map(element_type)
         raise TypeError(f"Array type missing element_type: {handle_type}")
+
+    # Handle Tuple types (e.g., Tuple[UInt, UInt])
+    if is_tuple_type(handle_type):
+        if hasattr(handle_type, "__args__") and handle_type.__args__:
+            element_types = tuple(
+                handle_type_map(t) for t in handle_type.__args__
+            )
+            return TupleType(element_types=element_types)
+        raise TypeError(f"Tuple type missing element types: {handle_type}")
+
+    # Handle Dict types (e.g., Dict[Tuple[UInt, UInt], Float])
+    if is_dict_type(handle_type):
+        if hasattr(handle_type, "__args__") and len(handle_type.__args__) == 2:
+            key_type = handle_type_map(handle_type.__args__[0])
+            value_type = handle_type_map(handle_type.__args__[1])
+            return DictType(key_type=key_type, value_type=value_type)
+        raise TypeError(f"Dict type missing key/value types: {handle_type}")
 
     # Ensure handle_type is a class before calling issubclass
     if not isinstance(handle_type, type):
@@ -133,6 +178,57 @@ def create_dummy_input(
 
     This creates input Handles for function parameters.
     """
+    # Handle Tuple types (e.g., Tuple[UInt, UInt])
+    if is_tuple_type(param_type):
+        if hasattr(param_type, "__args__") and param_type.__args__:
+            # Create symbolic element Values
+            element_values = []
+            element_handles = []
+            for i, elem_type in enumerate(param_type.__args__):
+                elem_handle = create_dummy_input(elem_type, f"{name}_{i}", emit_init)
+                element_handles.append(elem_handle)
+                element_values.append(elem_handle.value)
+
+            tuple_value = TupleValue(
+                name=name,
+                elements=tuple(element_values),
+                params={"parameter": name},
+            )
+
+            # Create Tuple handle
+            tuple_handle = object.__new__(Tuple)
+            tuple_handle.value = tuple_value
+            tuple_handle._elements = tuple(element_handles)
+            tuple_handle.parent = None
+            tuple_handle.indices = ()
+            tuple_handle.name = name
+            tuple_handle.id = str(id(tuple_handle))
+            tuple_handle._consumed = False
+            return tuple_handle
+        raise TypeError(f"Tuple type missing element types: {param_type}")
+
+    # Handle Dict types (e.g., Dict[Tuple[UInt, UInt], Float])
+    if is_dict_type(param_type):
+        if hasattr(param_type, "__args__") and len(param_type.__args__) == 2:
+            dict_value = DictValue(
+                name=name,
+                entries=[],  # Entries will be bound at transpile time
+                params={"parameter": name},
+            )
+
+            # Create Dict handle
+            dict_handle = object.__new__(Dict)
+            dict_handle.value = dict_value
+            dict_handle._entries = []
+            dict_handle._size = None
+            dict_handle.parent = None
+            dict_handle.indices = ()
+            dict_handle.name = name
+            dict_handle.id = str(id(dict_handle))
+            dict_handle._consumed = False
+            return dict_handle
+        raise TypeError(f"Dict type missing key/value types: {param_type}")
+
     if is_array_type(param_type):
         # For Vector/Matrix/Tensor, create a placeholder instance with symbolic shape
         # For generic aliases like Vector[Qubit], get element type from __args__

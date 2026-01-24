@@ -15,6 +15,7 @@ from .gate import (
 )
 from .classical_ops import DecodeQFixedOperation
 from .cast import CastOperation
+from .control_flow import ForItemsOperation
 from .hamiltonian_ops import (
     PauliCreateOp,
     HamiltonianAddOp,
@@ -39,6 +40,8 @@ __all__ = [
     "ControlledUOperation",
     "DecodeQFixedOperation",
     "CastOperation",
+    # Control flow operations
+    "ForItemsOperation",
     # Hamiltonian operations
     "PauliCreateOp",
     "HamiltonianAddOp",

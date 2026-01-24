@@ -142,5 +142,104 @@ class ArrayValue(Value[T]):
             version=self.version + 1,
             params=self.params.copy(),
             uuid=str(uuid.uuid4()),  # New uuid for each version
+            shape=self.shape,  # Explicitly preserve shape
             # logical_id stays the same (inherited from dataclasses.replace)
         )
+
+
+@dataclasses.dataclass
+class TupleValue:
+    """Value representing a tuple of values.
+
+    Used for structured data like Ising model indices (i, j).
+    """
+
+    name: str
+    elements: tuple[Value, ...]
+    params: dict[str, typing.Any] = dataclasses.field(default_factory=dict)
+    uuid: str = dataclasses.field(default_factory=lambda: str(uuid.uuid4()))
+    # logical_id identifies the same tuple across SSA versions
+    logical_id: str = dataclasses.field(default_factory=lambda: str(uuid.uuid4()))
+
+    def next_version(self) -> "TupleValue":
+        """Create a new TupleValue with a fresh uuid but same logical_id."""
+        return TupleValue(
+            name=self.name,
+            elements=self.elements,
+            params=self.params.copy(),
+            uuid=str(uuid.uuid4()),
+            logical_id=self.logical_id,
+        )
+
+    def is_parameter(self) -> bool:
+        """Check if this tuple is a parameter (has symbolic elements)."""
+        return "parameter" in self.params
+
+    def parameter_name(self) -> str | None:
+        """Get the parameter name if this is a parameter."""
+        return self.params.get("parameter")
+
+    def is_constant(self) -> bool:
+        """Check if all elements are constants."""
+        return all(
+            isinstance(e, Value) and e.is_constant() for e in self.elements
+        )
+
+
+class _DictValueType:
+    """Placeholder type for DictValue that satisfies the type interface.
+
+    DictValue is always classical (stores key-value pairs for data like Ising coefficients).
+    """
+
+    def is_quantum(self) -> bool:
+        return False
+
+    def is_classical(self) -> bool:
+        return True
+
+    def label(self) -> str:
+        return "Dict"
+
+
+@dataclasses.dataclass
+class DictValue:
+    """Value representing a dictionary mapping keys to values.
+
+    Used for structured data like Ising coefficients {(i, j): Jij}.
+    Entries are stored as a list of (key, value) pairs for consistent ordering.
+    """
+
+    name: str
+    entries: list[tuple[TupleValue | Value, Value]]
+    params: dict[str, typing.Any] = dataclasses.field(default_factory=dict)
+    uuid: str = dataclasses.field(default_factory=lambda: str(uuid.uuid4()))
+    # logical_id identifies the same dict across SSA versions
+    logical_id: str = dataclasses.field(default_factory=lambda: str(uuid.uuid4()))
+
+    def next_version(self) -> "DictValue":
+        """Create a new DictValue with a fresh uuid but same logical_id."""
+        return DictValue(
+            name=self.name,
+            entries=self.entries,
+            params=self.params.copy(),
+            uuid=str(uuid.uuid4()),
+            logical_id=self.logical_id,
+        )
+
+    @property
+    def type(self) -> _DictValueType:
+        """Return type interface for compatibility with Value."""
+        return _DictValueType()
+
+    def is_parameter(self) -> bool:
+        """Check if this dict is a parameter (bound at transpile time)."""
+        return "parameter" in self.params
+
+    def parameter_name(self) -> str | None:
+        """Get the parameter name if this is a parameter."""
+        return self.params.get("parameter")
+
+    def __len__(self) -> int:
+        """Return the number of entries."""
+        return len(self.entries)

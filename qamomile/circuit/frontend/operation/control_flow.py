@@ -5,11 +5,13 @@ from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
 from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
+    ForItemsOperation,
     IfOperation,
     WhileOperation,
 )
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, Qubit, UInt
+from qamomile.circuit.frontend.handle.containers import Dict, DictItemsIterator
 from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
 
 
@@ -332,3 +334,94 @@ def range(
     # This is a dummy implementation - AST transformer replaces this with for_loop()
     # The function signature accepts UInt for type checking purposes
     return iter([])
+
+
+def items(d: Dict) -> DictItemsIterator:
+    """Iterate over dictionary key-value pairs.
+
+    This function returns an iterator over (key, value) pairs from a Dict.
+    Used for iterating over Ising coefficients and similar data structures.
+
+    Usage:
+        for (i, j), Jij in qmc.items(ising):
+            q[i], q[j] = qmc.rzz(q[i], q[j], gamma * Jij)
+
+    Args:
+        d: A Dict handle to iterate over
+
+    Returns:
+        DictItemsIterator yielding (key, value) pairs
+    """
+    return d.items()
+
+
+@contextlib.contextmanager
+def for_items(
+    d: Dict,
+    key_var_names: list[str],
+    value_var_name: str,
+) -> typing.Generator[tuple[typing.Any, typing.Any], None, None]:
+    """Builder function to create a for-items loop in Qamomile frontend.
+
+    This context manager creates a ForItemsOperation that iterates over
+    dictionary (key, value) pairs. The operation is always unrolled at
+    transpile time since quantum backends cannot natively iterate over
+    classical data structures.
+
+    Args:
+        d: Dict handle to iterate over
+        key_var_names: Names of key unpacking variables (e.g., ["i", "j"] for tuple keys)
+        value_var_name: Name of value variable (e.g., "Jij")
+
+    Yields:
+        Tuple of (key_handles, value_handle) for use in loop body
+
+    Example:
+        ```python
+        @qkernel
+        def ising_cost(
+            q: Vector[Qubit],
+            ising: Dict[Tuple[UInt, UInt], Float],
+            gamma: Float,
+        ) -> Vector[Qubit]:
+            for (i, j), Jij in qmc.items(ising):
+                q[i], q[j] = qmc.rzz(q[i], q[j], gamma * Jij)
+            return q
+        ```
+    """
+    parent_tracer = get_current_tracer()
+    body_tracer = Tracer()
+
+    # Create symbolic key handles (UInt for each key variable)
+    key_handles = []
+    for kv_name in key_var_names:
+        key_handle = UInt(
+            value=Value(type=UIntType(), name=kv_name),
+            init_value=0,  # Placeholder, actual value bound at emit time
+        )
+        key_handles.append(key_handle)
+
+    # Create symbolic value handle (Float for Ising coefficients)
+    value_handle = Float(
+        value=Value(type=FloatType(), name=value_var_name),
+        init_value=0.0,  # Placeholder, actual value bound at emit time
+    )
+
+    # Package key handles: tuple for multiple keys, single handle otherwise
+    if len(key_handles) == 1:
+        key_result = key_handles[0]
+    else:
+        key_result = tuple(key_handles)
+
+    with trace(body_tracer):
+        yield (key_result, value_handle)
+
+    # Create ForItemsOperation with captured body operations
+    for_items_op = ForItemsOperation(
+        key_vars=key_var_names,
+        value_var=value_var_name,
+        operations=body_tracer.operations,
+    )
+    for_items_op.operands.append(d.value)  # The DictValue being iterated
+
+    parent_tracer.add_operation(for_items_op)

@@ -42,3 +42,44 @@ class ParameterMetadata:
             if p.name == name:
                 return p
         return None
+
+    def get_ordered_params(self) -> list[Any]:
+        """Get backend parameter objects in definition order.
+
+        Useful for backends that require positional parameter binding
+        (e.g., QURI Parts).
+
+        Returns:
+            List of backend_param objects in the order they were defined.
+
+        Example:
+            # For QURI Parts that uses positional binding:
+            param_values = [bindings[p.name] for p in metadata.parameters]
+            bound_circuit = circuit.bind_parameters(param_values)
+        """
+        return [p.backend_param for p in self.parameters]
+
+    def to_binding_dict(self, bindings: dict[str, Any]) -> dict[Any, Any]:
+        """Convert indexed bindings to backend parameter bindings.
+
+        Transforms user-provided bindings (with indexed names like "gammas[0]")
+        into a dictionary mapping backend parameter objects to values.
+        Useful for backends that use dict-based parameter binding (e.g., Qiskit).
+
+        Args:
+            bindings: Dictionary mapping parameter names to values.
+                      e.g., {"gammas[0]": 0.1, "gammas[1]": 0.2, "theta": 0.5}
+
+        Returns:
+            Dictionary mapping backend_param objects to values.
+
+        Example:
+            # For Qiskit that uses dict-based binding:
+            qiskit_bindings = metadata.to_binding_dict(bindings)
+            bound_circuit = circuit.assign_parameters(qiskit_bindings)
+        """
+        return {
+            p.backend_param: bindings[p.name]
+            for p in self.parameters
+            if p.name in bindings
+        }
