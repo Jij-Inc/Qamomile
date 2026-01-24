@@ -13,11 +13,11 @@
 # ---
 
 # %% [markdown]
-# # QAOA for the Max-Cut
+# # QAOA による最大カット問題の解法
 #
-# In this section, we will solve the Maxcut Problem using QAOA with the help of the JijModeling and Qamomile libraries.
+# このセクションでは、JijModeling と Qamomile リを使用して、QAOA で最大カット問題を解きます。
 #
-# First, let’s install and import the main libraries we will be using.
+# まず、使用する主要なライブラリをインポートします。
 
 # %%
 import jijmodeling as jm
@@ -26,9 +26,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # %% [markdown]
-# ## What is the Max-Cut Problem
+# ## 最大カット問題とは
 #
-# The Max-Cut problem is the problem of dividing the nodes of a graph into two groups such that the number of edges cut (or the total weight of the edges cut, if the edges have weights) is maximized. Applications include network partitioning and image processing (segmentation), among others.
+# 最大カット問題は、グラフのノードを2つのグループに分割して、カットされるエッジの数(またはエッジに重みがある場合はカットされるエッジの総重み)が最大になるようにする問題です。応用例としては、ネットワーク分割や画像処理(セグメンテーション)などがあります。
 
 # %%
 import networkx as nx
@@ -83,15 +83,15 @@ plt.tight_layout()
 
 
 # %% [markdown]
-# ## Constructing the Mathematical Model
+# ## 数理モデルの構築
 #
-# The Max-Cut problem can be formulated with the following equation:
+# 最大カット問題は次の式で定式化できます:
 #
 # $$
 #   \max \quad \frac{1}{2} \sum_{(i,j) \in E} (1 - s_i s_j)  
 # $$
 #
-# Note that this equation is expressed using Ising variables $ s \in \{ +1, -1 \} $. In this case, we want to formulate it using the binary variables $ x \in \{ 0, 1 \} $ from JijModeling. Therefore, we perform the conversion between Ising variables and binary variables using the following equations:
+# この式はイジング変数 $ s \in \{ +1, -1 \} $ を使って表現されています。ここでは、JijModeling のバイナリ変数 $ x \in \{ 0, 1 \} $ を使って定式化したいので、次の式を使ってイジング変数とバイナリ変数の変換を行います:
 #
 # $$
 #     x_i = \frac{1 + s_i}{2} \quad \Rightarrow \quad s_i = 2x_i - 1
@@ -121,9 +121,9 @@ problem = Maxcut_problem()
 problem
 
 # %% [markdown]
-# ## Preparing Instance Data
+# ## インスタンスデータの準備
 #
-# Next, we will solve the Max-Cut Problem for the following graph. The data for the specific problem being solved is referred to as instance data.
+# 次に、以下のグラフに対して最大カット問題を解きます。解く具体的な問題のデータは、インスタンスデータと呼ばれます。
 
 # %%
 import networkx as nx
@@ -152,221 +152,251 @@ data = {"V": V, "E": E}
 data
 
 # %% [markdown]
-# ## Creating a Compiled Instance
-# We perform compilation using `JijModeling.Interpreter` and `ommx.Instance` by providing the formulation and the instance data prepared earlier. This process yields an intermediate representation of the problem with the instance data substituted.
+# ## コンパイル済みインスタンスの作成
+# 先ほど準備した定式化とインスタンスデータを使って、`JijModeling.Interpreter` と `ommx.Instance` でコンパイルを実行します。このプロセスにより、インスタンスデータが代入された問題の中間表現が得られます。
 
 # %%
 interpreter = jm.Interpreter(data)
 instance = interpreter.eval_problem(problem)
 
 # %% [markdown]
-# ## Converting Compiled Instance to QAOA Circuit and Hamiltonian
+# ## コンパイル済みインスタンスから QAOA 回路とハミルトニアンへの変換
 #
-# We generate the QAOA circuit and Hamiltonian from the compiled Instance. The converter used to generate these is `qm.optimization.qaoa.QAOAConverter`.
+# コンパイル済みインスタンスから QAOA 回路とハミルトニアンを生成します。これらを生成するために使用するコンバーターは `qm.optimization.qaoa.QAOAConverter` です。
 #
-# By creating an instance of this class and using `ising_encode`, you can internally generate the Ising Hamiltonian from the compiled Instance. Parameters that arise during the conversion to QUBO can also be set here. If not set, default values are used.
+# このクラスのインスタンスを作成して `ising_encode` を使用すると、コンパイル済みインスタンスから内部的にイジングハミルトニアンを生成できます。QUBO への変換時に発生するパラメータもここで設定できます。設定しない場合は、デフォルト値が使用されます。
 #
-# Once the Ising Hamiltonian is generated, you can generate the QAOA quantum circuit and the Hamiltonian respectively. These can be executed using the `get_qaoa_ansatz` and `get_cost_hamiltonian` methods. The number of QAOA layers, $p$, is fixed to be $7$ here.  
+# イジングハミルトニアンが生成されたら、QAOA 量子回路とハミルトニアンをそれぞれ生成できます。これらは `get_qaoa_ansatz` と `get_cost_hamiltonian` メソッドを使って実行できます。ここでは QAOA の層数 $p$ を 3 に固定しています。  
 
 # %%
 import qamomile.circuit as qmc
-
-@qmc.qkernel
-def ising_cost(
-    q: qmc.Vector[qmc.Qubit],
-    edges: qmc.Matrix[qmc.UInt],  # (|E|, 2) matrix
-    Jij: qmc.Vector[qmc.Float],  # (|E|,) vector
-    hi: qmc.Vector[qmc.Float],  # (|V|,) vector,
-    gamma: qmc.Float,
-) -> qmc.Vector[qmc.Qubit]:
-    num_e = edges.shape[0]
-    for e in qmc.range(num_e):
-        i = edges[e, 0]
-        j = edges[e, 1]
-        q[i], q[j] = qmc.rzz(q[i], q[j], gamma * Jij[e])
-    n = hi.shape[0]
-    for i in qmc.range(n):
-        q[i] = qmc.rz(q[i], gamma * hi[i])
-    return q
-
-
-@qmc.qkernel
-def x_mixer(
-    q: qmc.Vector[qmc.Qubit],
-    hi: qmc.Vector[qmc.Float],  # Workaround: pass hi to get shape (q.shape not propagated in nested calls)
-    beta: qmc.Float,
-) -> qmc.Vector[qmc.Qubit]:
-    n = hi.shape[0]
-    for i in qmc.range(n):
-        q[i] = qmc.rx(q[i], 2 * beta)
-    return q
-
-
-@qmc.qkernel
-def qaoa_state(
-    edges: qmc.Matrix[qmc.UInt],  # (|E|, 2) matrix
-    Jij: qmc.Vector[qmc.Float],  # (|E|,) vector
-    hi: qmc.Vector[qmc.Float],  # (|V|,) vector,
-    p: qmc.UInt,
-    gammas: qmc.Vector[qmc.Float],  # (p,) vector
-    betas: qmc.Vector[qmc.Float],  # (p,) vector
-) -> qmc.Vector[qmc.Qubit]:
-    n = hi.shape[0]
-    q = qmc.qubit_array(n, name="qaoa_state")
-    for i in qmc.range(n):
-        q[i] = qmc.h(q[i])
-    for iter in qmc.range(p):
-        gamma = gammas[iter]
-        beta = betas[iter]
-        q = ising_cost(q, edges, Jij, hi, gamma)
-        q = x_mixer(q, hi, beta)
-    return q
-
-
-# %%
-qubo, offset = instance.to_qubo()
-
-# %%
-from qamomile.core.ising_qubo import IsingModel
-
-
-ising = IsingModel.from_qubo(qubo)
-
-# %%
-num_qubits = ising.num_bits
-edges = []
-Jij = []
-hi = [0.0] * num_qubits  # 全qubitに対して0で初期化
-
-for indices, value in ising.coefficients.items():
-    if len(indices) == 2:
-        edges.append([indices[0], indices[1]])
-        Jij.append(value)
-    elif len(indices) == 1:
-        hi[indices[0]] = value  # 正しいインデックスに値を設定
-
-# %%
-import qamomile.circuit as qmc
-
-@qmc.qkernel
-def qaoa(
-    edges: qmc.Matrix[qmc.UInt],
-    Jij: qmc.Vector[qmc.Float],
-    hi: qmc.Vector[qmc.Float],
-    p: qmc.UInt,
-    gammas: qmc.Vector[qmc.Float],
-    betas: qmc.Vector[qmc.Float],
-) -> qmc.Vector[qmc.Bit]:
-    q = qaoa_state(edges, Jij, hi, p, gammas, betas)
-    return qmc.measure(q)
-
-
-# %%
-from qamomile.qiskit.transpiler import QiskitTranspiler
+from qamomile.optimization.qaoa import QAOAConverter
+from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
-executor = transpiler.transpile(qaoa, bindings={"edges": edges, "Jij": Jij, "hi": hi, "p": 2}, parameters=["betas", "gammas"])
+
+# Create the QAOA converter and transpile
+p = 3  # Number of QAOA layers
+converter = QAOAConverter(instance)
+executable = converter.transpile(
+    transpiler=transpiler,
+    p=p,
+)
+
+# %% [markdown]
+# 生成された量子回路を見てみましょう。この回路は、コスト層とミキサー層を交互に配置した QAOA アンザッツを実装しています。
 
 # %%
-job = executor.sample(transpiler.executor(), bindings={"betas": [0.1, 0.2], "gammas": [0.3, 0.4]}, shots=1024)
-# %%
-job.result()
-# %%
-qkcirc = executor.get_first_circuit()
-print(qkcirc.draw())
-# %%
-from qamomile.circuit.transpiler.transpiler import Transpiler
-from qamomile.circuit.transpiler.executable import ExecutableProgram
+qiskit_circuit = executable.get_first_circuit()
+if qiskit_circuit is not None:
+    print(f"Number of qubits: {qiskit_circuit.num_qubits}")
+    print(f"Circuit depth: {qiskit_circuit.depth()}")
 
-
-class QAOAConverter:
-    def __init__(self, instance: ommx.v1.Instance):
-        self.instance = instance
-
-    def transpile(
-        self,
-        transpiler: Transpiler,
-        p: int,
-    ) -> ExecutableProgram:
-        qubo, offset = self.instance.to_qubo()
-        ising = IsingModel.from_qubo(qubo)
-
-        edges = []
-        Jij = []
-        hi = [0.0 for _ in range(ising.num_bits)]
-
-        for indices, value in ising.coefficients.items():
-            if len(indices) == 2:
-                edges.append([indices[0], indices[1]])
-                Jij.append(value)
-            elif len(indices) == 1:
-                hi[indices[0]] = value
-
-        qaoa_kernel = qaoa
-
-        executor = transpiler.transpile(
-            qaoa_kernel,
-            bindings={"edges": edges, "Jij": Jij, "hi": hi, "p": p},
-            parameters=["betas", "gammas"],
-        )
-        return executor
-
-
-qaoa_converter = QAOAConverter(instance)
-executor = qaoa_converter.transpile(transpiler, p=2)
-
+# %% [markdown]
+# ## エネルギー計算
+#
+# QAOA を最適化するには、測定結果から期待エネルギーを計算する必要があります。
+# コンバーターはイジングモデルへのアクセスを提供し、これを使ってエネルギーを計算します。
 
 # %%
-results = executor.sample(transpiler.executor(), bindings={"betas": [0.1, 0.2], "gammas": [0.3, 0.4]}, shots=1024)
+def calculate_ising_energy(bitstring: list[int], ising_model) -> float:
+    """
+    ビット列からイジングモデルのエネルギーを計算します。
+
+    ビット列 z_i ∈ {0, 1} をスピン s_i ∈ {-1, +1} に変換します。
+    規約: s_i = 1 - 2*z_i (z_i=0 → s_i=+1, z_i=1 → s_i=-1)
+    """
+    # Convert bits to spins
+    spins = [1 - 2 * b for b in bitstring]
+    return ising_model.calc_energy(spins)
+
+
+def calculate_expectation_value(sample_result, ising_model) -> float:
+    """
+    測定結果から期待エネルギー値を計算します。
+    """
+    total_energy = 0.0
+    total_counts = 0
+
+    for bitstring, count in sample_result.results:
+        energy = calculate_ising_energy(bitstring, ising_model)
+        total_energy += energy * count
+        total_counts += count
+
+    return total_energy / total_counts
+
+
+# %% [markdown]
+# ## VQE 最適化
+#
+# 変分最適化ループを設定します。scipy の COBYLA オプティマイザーを使用して、
+# 最適な QAOA パラメータ(各層の gamma と beta)を見つけます。
+
 # %%
+from scipy.optimize import minimize
 
-import scipy.optimize as opt
+# 最適化履歴を保存するリスト
+energy_history = []
 
-def calculate_ising_energy(bitstring, edges, Jij, hi):
-    """tutorial/qaoa.py と同じエネルギー計算"""
-    spins = [1 if bit == 0 else -1 for bit in bitstring]
-    energy = 0.0
-    # 相互作用項
-    for (i, j), J in zip(edges, Jij):
-        energy += J * spins[i] * spins[j]
-    # バイアス項
-    for i, h in enumerate(hi):
-        energy += h * spins[i]
+
+def objective_function(params, transpiler, executable, ising_model, shots=1024):
+    """
+    VQE 最適化のための目的関数。
+
+    Args:
+        params: 結合された [gammas, betas] パラメータ
+        transpiler: 量子トランスパイラー
+        executable: コンパイル済み QAOA 回路
+        ising_model: エネルギー計算用イジングモデル
+        shots: 測定ショット数
+
+    Returns:
+        期待エネルギー値
+    """
+    p = len(params) // 2
+    gammas = params[:p]
+    betas = params[p:]
+
+    job = executable.sample(
+        transpiler.executor(),
+        bindings={
+            "gammas": gammas,
+            "betas": betas,
+        },
+        shots=shots,
+    )
+    result = job.result()
+
+    energy = calculate_expectation_value(result, ising_model)
+    energy_history.append(energy)
+
     return energy
 
 
-# Run QAOA with parameter optimization
-energy_list = []
-def objective(params):
-    p = 2
-    gammas = params[:p]
-    betas = params[p:]
-    results = executor.sample(
-        transpiler.executor(),
-        bindings={"betas": betas, "gammas": gammas},
-        shots=1024,
-    )
-    counts = results.result()
-    energy = 0.0
-    for bitstring, count in counts.results:
-        e = calculate_ising_energy(bitstring, edges, Jij, hi)
-        energy += e * count
-    energy_list.append(energy / 1024)
-    return energy / 1024
-
-
-# ランダムな初期値（tutorial版と同じ）
+# %%
+# 最適化を実行
 np.random.seed(42)
-p = 2
-initial_params = np.concatenate([
-    np.random.uniform(0, np.pi, size=p),      # gammas
-    np.random.uniform(0, np.pi/2, size=p),    # betas
+
+# 初期パラメータ: gamma は [0, 2π]、beta は [0, π] の範囲
+init_params = np.concatenate([
+    np.random.uniform(0, 2 * np.pi, size=p),  # gammas
+    np.random.uniform(0, np.pi, size=p),       # betas
 ])
-result = opt.minimize(objective, initial_params, method="COBYLA", options={"maxiter": 100})
-print("Optimized parameters:", result.x)
 
+# 履歴をクリア
+energy_history = []
+
+print(f"p={p} 層で QAOA 最適化を開始...")
+print(f"初期パラメータ: gammas={init_params[:p]}, betas={init_params[p:]}")
+
+# COBYLA 法で最適化
+result_opt = minimize(
+    objective_function,
+    init_params,
+    args=(transpiler, executable, converter.ising),
+    method="COBYLA",
+    options={"maxiter": 100, "disp": True},
+)
+
+print(f"\n最適化されたパラメータ:")
+print(f"  gammas: {result_opt.x[:p]}")
+print(f"  betas: {result_opt.x[p:]}")
+print(f"最終エネルギー: {result_opt.fun:.4f}")
+
+# %% [markdown]
+# ## 最適化結果の可視化
+#
+# 最適化プロセスの収束を可視化してみましょう。
 
 # %%
-import matplotlib.pyplot as plt
-plt.plot(energy_list)
+plt.figure(figsize=(10, 5))
+plt.plot(energy_history, marker='o', markersize=3)
+plt.xlabel("反復回数")
+plt.ylabel("エネルギー")
+plt.title("QAOA 最適化の収束")
+plt.grid(True)
+plt.tight_layout()
+# plt.show()
+
+# %% [markdown]
+# ## 最終解の解析
+#
+# 最適化された回路からサンプリングして、結果を解析してみましょう。
+
 # %%
+# 最適化されたパラメータでサンプリング
+optimal_gammas = result_opt.x[:p]
+optimal_betas = result_opt.x[p:]
+
+job_final = executable.sample(
+    transpiler.executor(),
+    bindings={
+        "gammas": optimal_gammas,
+        "betas": optimal_betas,
+    },
+    shots=4096,
+)
+result_final = job_final.result()
+
+# エネルギーで結果をソート
+results_with_energy = []
+for bitstring, count in result_final.results:
+    energy = calculate_ising_energy(bitstring, converter.ising)
+    results_with_energy.append((bitstring, count, energy))
+
+results_with_energy.sort(key=lambda x: x[2])
+
+print("測定結果 (エネルギーでソート):")
+print("-" * 60)
+for bitstring, count, energy in results_with_energy[:10]:
+    bitstring_str = "".join(map(str, bitstring))
+    probability = count / 4096
+    print(f"  {bitstring_str}: count={count:4d}, probability={probability:.3f}, energy={energy:.4f}")
+
+# %% [markdown]
+# ## 解の可視化
+#
+# QAOA で見つかった最良解を元のグラフ上で可視化してみましょう。
+
+# %%
+# 最良解を取得(最低エネルギー)
+best_bitstring, best_count, best_energy = results_with_energy[0]
+best_solution = {(i,): float(bit) for i, bit in enumerate(best_bitstring)}
+
+print(f"\n見つかった最良解:")
+print(f"  ビット列: {''.join(map(str, best_bitstring))}")
+print(f"  エネルギー: {best_energy:.4f}")
+
+# 解を可視化
+edge_colors, node_colors = get_edge_colors(G, best_solution)
+cut_edges = sum(1 for c in edge_colors if c == "r")
+
+fig, ax = plt.subplots(figsize=(6, 5))
+ax.set_title(f"QAOA の解 (カットされたエッジ数: {cut_edges})")
+nx.draw_networkx(
+    G,
+    pos,
+    ax=ax,
+    node_size=500,
+    width=3,
+    with_labels=True,
+    edge_color=edge_colors,
+    node_color=node_colors,
+)
+plt.tight_layout()
+# plt.show()
+
+# %% [markdown]
+# ## まとめ
+#
+# このチュートリアルでは、Qamomile を使って QAOA で最大カット問題を解く方法を実演しました:
+#
+# 1. **問題の定式化**: JijModeling を使って最大カットを QUBO/イジング問題として定式化しました
+# 2. **回路生成**: Qamomile の `QAOAConverter` が QAOA 回路を自動生成しました
+# 3. **VQE 最適化**: scipy の COBYLA オプティマイザーを使って最適な QAOA パラメータを見つけました
+# 4. **解の解析**: 測定結果を解析し、解を可視化しました
+#
+# QAOA で Qamomile を使う主な利点:
+# - 数理定式化からイジングモデルを自動生成
+# - バックエンドに依存しない回路定義(Qiskit、Quri-Parts、PennyLane などで動作)
+# - 古典最適化ライブラリとの簡単な統合

@@ -4,6 +4,7 @@ import ommx.v1
 
 from qamomile.circuit.transpiler.transpiler import Transpiler
 from qamomile.circuit.transpiler.executable import ExecutableProgram
+from qamomile.circuit.transpiler.job import SampleResult
 from .ising_qubo import IsingModel
 
 
@@ -27,7 +28,7 @@ class MathematicalProblemConverter(abc.ABC):
     @abc.abstractmethod
     def decode(
         self,
-        samples: list
-    ) -> ommx.v1.Solution:
+        samples: SampleResult[list[int]]
+    ) -> ommx.v1.SampleSet:
         raise NotImplementedError()
 
