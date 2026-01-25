@@ -1,21 +1,20 @@
-"""Tests for the expval (expectation value) operation."""
+"""Tests for the expval (expectation value) operation with Observable bindings."""
 
 import pytest
 import qamomile.circuit as qm
+import qamomile.observable as qm_o
 from qamomile.circuit.ir.operation import ExpvalOp
-from qamomile.circuit.ir.operation.hamiltonian_ops import PauliCreateOp
 
 
 class TestExpvalFrontend:
-    """Test expval frontend function."""
+    """Test expval frontend function with Observable parameter."""
 
     def test_expval_basic(self):
-        """Test basic expval with single qubit and Z observable."""
+        """Test basic expval with Observable parameter."""
 
         @qm.qkernel
-        def test_kernel(q0: qm.Qubit, q1: qm.Qubit) -> qm.Float:
+        def test_kernel(q0: qm.Qubit, q1: qm.Qubit, H: qm.Observable) -> qm.Float:
             q0 = qm.h(q0)
-            H = qm.pauli.Z(0)
             exp_val = qm.expval((q0, q1), H)
             return exp_val
 
@@ -29,30 +28,25 @@ class TestExpvalFrontend:
         expval_op = next(op for op in block.operations if isinstance(op, ExpvalOp))
         assert expval_op.output is not None
         assert expval_op.qubits is not None
-        assert expval_op.hamiltonian is not None
+        assert expval_op.observable is not None
 
-    def test_expval_with_complex_hamiltonian(self):
-        """Test expval with multi-term Hamiltonian."""
+    def test_expval_with_vector(self):
+        """Test expval with Vector[Qubit]."""
 
         @qm.qkernel
-        def test_kernel(q0: qm.Qubit, q1: qm.Qubit) -> qm.Float:
-            q0 = qm.h(q0)
-            q0, q1 = qm.cx(q0, q1)
-
-            # Create ZZ + 0.5*(X0 + X1) Hamiltonian
-            H = qm.pauli.Z(0) * qm.pauli.Z(1) + 0.5 * (qm.pauli.X(0) + qm.pauli.X(1))
-            exp_val = qm.expval((q0, q1), H)
+        def test_kernel(n: qm.UInt, H: qm.Observable) -> qm.Float:
+            q = qm.qubit_array(n, "q")
+            q[0] = qm.h(q[0])
+            q[0], q[1] = qm.cx(q[0], q[1])
+            exp_val = qm.expval(q, H)
             return exp_val
 
-        block = test_kernel.build()
+        # Build with n=2 binding (H can be unbound for IR test)
+        block = test_kernel.build(n=2)
 
         # Should have ExpvalOp
         has_expval = any(isinstance(op, ExpvalOp) for op in block.operations)
         assert has_expval
-
-        # Should have multiple PauliCreateOp operations
-        pauli_ops = [op for op in block.operations if isinstance(op, PauliCreateOp)]
-        assert len(pauli_ops) >= 3  # Z(0), Z(1), X(0), X(1)
 
 
 class TestExpvalOp:
@@ -63,8 +57,7 @@ class TestExpvalOp:
         from qamomile.circuit.ir.operation.operation import OperationKind
 
         @qm.qkernel
-        def test_kernel(q0: qm.Qubit) -> qm.Float:
-            H = qm.pauli.Z(0)
+        def test_kernel(q0: qm.Qubit, H: qm.Observable) -> qm.Float:
             exp_val = qm.expval((q0,), H)
             return exp_val
 
@@ -78,8 +71,7 @@ class TestExpvalOp:
         from qamomile.circuit.ir.types.primitives import FloatType
 
         @qm.qkernel
-        def test_kernel(q0: qm.Qubit) -> qm.Float:
-            H = qm.pauli.Z(0)
+        def test_kernel(q0: qm.Qubit, H: qm.Observable) -> qm.Float:
             exp_val = qm.expval((q0,), H)
             return exp_val
 
@@ -106,18 +98,14 @@ class TestExpvalSegment:
         """Test CompiledExpvalSegment has expected fields."""
         from qamomile.circuit.transpiler.compiled_segments import CompiledExpvalSegment
         from qamomile.circuit.transpiler.segments import ExpvalSegment
-
-        segment = ExpvalSegment()
-        # CompiledExpvalSegment expects an Observable, so we can't fully instantiate
-        # but we can check the dataclass fields exist
         import dataclasses
 
         fields = {f.name for f in dataclasses.fields(CompiledExpvalSegment)}
         assert "segment" in fields
-        assert "observable" in fields
+        assert "hamiltonian" in fields
         assert "quantum_segment_index" in fields
         assert "result_ref" in fields
-        assert "qubit_map" in fields  # New field for Pauli index mapping
+        assert "qubit_map" in fields
 
 
 class TestExpvalJob:
@@ -135,7 +123,7 @@ class TestExpvalJob:
 
 
 class TestExpvalTranspiler:
-    """Test transpiler with ExpvalOp."""
+    """Test transpiler with ExpvalOp and Observable bindings."""
 
     def test_separate_pass_creates_expval_segment(self):
         """Test that separate pass creates ExpvalSegment for ExpvalOp."""
@@ -144,9 +132,8 @@ class TestExpvalTranspiler:
         from qamomile.circuit.transpiler.segments import SegmentKind
 
         @qm.qkernel
-        def test_kernel(q0: qm.Qubit, q1: qm.Qubit) -> qm.Float:
+        def test_kernel(q0: qm.Qubit, q1: qm.Qubit, H: qm.Observable) -> qm.Float:
             q0 = qm.h(q0)
-            H = qm.pauli.Z(0)
             exp_val = qm.expval((q0, q1), H)
             return exp_val
 
@@ -158,36 +145,83 @@ class TestExpvalTranspiler:
         separated = transpiler.separate(linear)
 
         # Should have expval segment
-        assert len(separated.expval_segments()) == 1
-        assert separated.expval_segments()[0].kind == SegmentKind.EXPVAL
-        assert separated.expval_segments()[0].result_ref != ""
+        assert separated.expval is not None
+        assert separated.expval.kind == SegmentKind.EXPVAL
+        assert separated.expval.result_ref != ""
+
+    def test_transpile_with_hamiltonian_binding(self):
+        """Test full transpilation with Hamiltonian binding."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        # Build Hamiltonian in Python
+        H = qm_o.Z(0) * qm_o.Z(1) + 0.5 * (qm_o.X(0) + qm_o.X(1))
+
+        @qm.qkernel
+        def vqe(n: qm.UInt, H: qm.Observable) -> qm.Float:
+            q = qm.qubit_array(n, "q")
+            q[0] = qm.h(q[0])
+            q[0], q[1] = qm.cx(q[0], q[1])
+            return qm.expval(q, H)
+
+        transpiler = QiskitTranspiler()
+
+        # Transpile with Hamiltonian in bindings
+        executable = transpiler.transpile(
+            vqe,
+            bindings={"H": H, "n": 2}
+        )
+
+        # Should have compiled expval segment
+        assert len(executable.compiled_expval) == 1
+        compiled_expval = executable.compiled_expval[0]
+
+        # Check hamiltonian field
+        assert isinstance(compiled_expval.hamiltonian, qm_o.Hamiltonian)
+
+    def test_transpile_without_hamiltonian_binding_raises(self):
+        """Test that transpilation without Hamiltonian binding raises error."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qm.qkernel
+        def vqe(n: qm.UInt, H: qm.Observable) -> qm.Float:
+            q = qm.qubit_array(n, "q")
+            return qm.expval(q, H)
+
+        transpiler = QiskitTranspiler()
+
+        # Should raise RuntimeError because H is not in bindings
+        with pytest.raises(RuntimeError, match="Observable.*not found in bindings"):
+            transpiler.transpile(vqe, bindings={"n": 2})
 
 
-class TestObservableRemapQubits:
-    """Test Observable.remap_qubits method."""
+class TestHamiltonianRemapQubits:
+    """Test Hamiltonian.remap_qubits method."""
 
-    def test_observable_remap_qubits(self):
-        """Test Observable.remap_qubits delegates to ConcreteHamiltonian."""
-        from qamomile.circuit.observable import Observable, ConcreteHamiltonian
-        from qamomile.circuit.ir.types.hamiltonian import PauliKind
+    def test_hamiltonian_remap_qubits(self):
+        """Test Hamiltonian.remap_qubits."""
+        # Create Hamiltonian with Z on qubit 0
+        H = qm_o.Z(0)
 
-        h = ConcreteHamiltonian.single_pauli(PauliKind.Z, 0, 1.0)
-        obs = Observable(h)
+        # Remap qubit 0 to qubit 5
+        H_remapped = H.remap_qubits({0: 5})
 
-        obs_remapped = obs.remap_qubits({0: 5})
+        # Check that qubit was remapped
+        assert H_remapped.num_qubits == 6  # max index is 5
 
-        assert obs_remapped.num_qubits == 6  # max index is 5
-        assert ((PauliKind.Z, 5),) in obs_remapped.hamiltonian.terms
+        # Check that the term is now on qubit 5
+        assert len(H_remapped.terms) == 1
+        operators = list(H_remapped.terms.keys())[0]
+        assert len(operators) == 1
+        assert operators[0].index == 5
+        assert operators[0].pauli == qm_o.Pauli.Z
 
-    def test_observable_remap_empty_returns_same_hamiltonian(self):
+    def test_hamiltonian_remap_empty_returns_same(self):
         """Test that empty mapping preserves the Hamiltonian."""
-        from qamomile.circuit.observable import Observable, ConcreteHamiltonian
-        from qamomile.circuit.ir.types.hamiltonian import PauliKind
+        H = qm_o.Z(0)
+        H_remapped = H.remap_qubits({})
 
-        h = ConcreteHamiltonian.single_pauli(PauliKind.Z, 0, 1.0)
-        obs = Observable(h)
-
-        obs_remapped = obs.remap_qubits({})
-
-        # Hamiltonian should be the same object
-        assert obs_remapped.hamiltonian is h
+        # Should be unchanged
+        assert H_remapped.num_qubits == H.num_qubits
+        assert H_remapped.terms == H.terms

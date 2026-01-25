@@ -11,12 +11,12 @@ from qamomile.circuit.frontend.func_to_block import (
     is_array_type,
     is_dict_type,
 )
-from qamomile.circuit.frontend.handle import Qubit
+from qamomile.circuit.frontend.handle import Qubit, Observable
 from qamomile.circuit.frontend.handle.primitives import Float, Handle, UInt
 from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
 from qamomile.circuit.ir.block_value import BlockValue
 from qamomile.circuit.ir.graph import Graph
-from qamomile.circuit.ir.types import FloatType, UIntType
+from qamomile.circuit.ir.types import FloatType, UIntType, ObservableType
 from qamomile.circuit.ir.value import ArrayValue, Value, DictValue
 from qamomile.circuit.frontend.handle.containers import Dict
 
@@ -185,12 +185,16 @@ class QKernel(Generic[P, R]):
                 if element_type is Qubit:
                     continue
 
-            # Non-qubit, non-parameter types must be in kwargs or have a default value
+            # Observable types are provided via bindings
+            if param_type is Observable:
+                continue
+
+            # Non-qubit, non-parameter, non-observable types must be in kwargs or have a default value
             if name not in kwargs:
                 if param.default is inspect.Parameter.empty:
                     raise ValueError(
                         f"Argument '{name}' must be provided or have a default value "
-                        f"(not a parameter or Qubit type)"
+                        f"(not a parameter, Qubit, or Observable type)"
                     )
 
     def _create_parameter_input(self, param_type: Any, name: str) -> Handle:
@@ -202,6 +206,14 @@ class QKernel(Generic[P, R]):
                 params={"parameter": name},
             )
             return Float(value=value)
+
+        if param_type is Observable:
+            value = Value(
+                type=ObservableType(),
+                name=name,
+                params={"parameter": name},
+            )
+            return Observable(value=value)
 
         if is_array_type(param_type):
             # For generic aliases like Vector[Float], get element type from __args__
@@ -380,7 +392,11 @@ class QKernel(Generic[P, R]):
             for name, param in self.signature.parameters.items():
                 param_type = param.annotation
 
-                if name in parameters:
+                # Observable types are always treated as parameters (resolved during emit)
+                if param_type is Observable:
+                    handle = self._create_parameter_input(param_type, name)
+                    tracked_parameters[name] = handle.value
+                elif name in parameters:
                     # Create parameter placeholder
                     handle = self._create_parameter_input(param_type, name)
                     tracked_parameters[name] = handle.value

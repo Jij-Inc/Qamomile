@@ -13,6 +13,7 @@ from qamomile.circuit.ir.types.primitives import (
     TupleType,
     DictType,
 )
+from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.value import ArrayValue, Value, TupleValue, DictValue
 
 from qamomile.circuit.frontend.handle.primitives import (
@@ -22,6 +23,7 @@ from qamomile.circuit.frontend.handle.primitives import (
     Qubit,
     UInt,
 )
+from qamomile.circuit.frontend.handle.hamiltonian import Observable
 from qamomile.circuit.frontend.handle.containers import Tuple, Dict
 from qamomile.circuit.frontend.tracer import Tracer, trace, get_current_tracer
 
@@ -128,6 +130,8 @@ def handle_type_map(handle_type: type[Handle] | type) -> ValueType:
         return BitType()
     elif handle_type is Qubit:
         return ir_types.QubitType()
+    elif handle_type is Observable:
+        return ObservableType()
     else:
         raise TypeError(f"Unsupported Handle type '{handle_type}'")
 
@@ -161,6 +165,11 @@ def create_dummy_handle(
             tracer = get_current_tracer()
             tracer.add_operation(qinit_op)
         return Qubit(value=value)
+    elif isinstance(value_type, ObservableType):
+        # Observable parameters are provided via bindings
+        return Observable(
+            value=Value(type=value_type, name=name, params={"parameter": name})
+        )
     else:
         raise TypeError(f"Unsupported ValueType '{value_type}'")
 

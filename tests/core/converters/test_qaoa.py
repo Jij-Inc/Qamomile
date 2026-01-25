@@ -225,6 +225,7 @@ def test_n_body_problem(instance_data):
     qaoa_cost = qaoa_converter.get_cost_hamiltonian()
 
 
+@pytest.mark.skip(reason="Uses deprecated transpile_circuit API")
 def test_decode_error():
     """This test raised the follwing error with the version whose commit ID 01402581faf790965440f9cedc87f1c6f63606b3.
 

@@ -392,14 +392,14 @@ for theta_val in [0.0, 1.57, 3.14]:  # 0, π/2, π
 # def estimate(
 #     self,
 #     circuit: T,              # 状態準備回路
-#     observable: Observable,  # 測定するオブザーバブル
+#     hamiltonian: qm_o.Hamiltonian,  # 測定するハミルトニアン
 #     params: Sequence[float] | None = None  # パラメータ値
 # ) -> float:
 #     """期待値 <ψ|H|ψ> を計算"""
 # ```
 
 # %%
-from qamomile.circuit.observable import Observable
+import qamomile.observable as qm_o
 from typing import Sequence
 
 
@@ -440,21 +440,21 @@ class MyFullExecutor(QuantumExecutor[QuantumCircuit]):
     def estimate(
         self,
         circuit: QuantumCircuit,
-        observable: Observable,
+        hamiltonian: qm_o.Hamiltonian,
         params: Sequence[float] | None = None,
     ) -> float:
-        """オブザーバブルの期待値を計算
+        """ハミルトニアンの期待値を計算
 
         Qiskit Estimatorプリミティブを使用します。
         """
         from qiskit.primitives import Estimator
-        from qamomile.qiskit.observable import to_sparse_pauli_op
+        from qamomile.qiskit.observable import hamiltonian_to_sparse_pauli_op
 
         if self._estimator is None:
             self._estimator = Estimator()
 
-        # ObservableをQiskit形式に変換
-        sparse_pauli_op = to_sparse_pauli_op(observable.hamiltonian)
+        # HamiltonianをQiskit形式に変換
+        sparse_pauli_op = hamiltonian_to_sparse_pauli_op(hamiltonian)
 
         # パラメータ値を設定
         param_values = list(params) if params is not None else []

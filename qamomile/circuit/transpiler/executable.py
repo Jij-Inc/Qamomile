@@ -87,6 +87,23 @@ class ExecutableProgram(Generic[T]):
         """Check if this program has unbound parameters."""
         return len(self.parameter_names) > 0
 
+    @property
+    def quantum_circuit(self) -> T:
+        """Get the single quantum circuit.
+
+        Returns the quantum circuit from the single quantum segment.
+        This property enforces Qamomile's C→Q→C execution pattern.
+
+        Returns:
+            The backend-specific quantum circuit
+
+        Raises:
+            ExecutionError: If no quantum circuit exists
+        """
+        if not self.compiled_quantum:
+            raise ExecutionError("No quantum circuit")
+        return self.compiled_quantum[0].circuit
+
     def _convert_user_bindings(
         self,
         bindings: dict[str, Any] | None,

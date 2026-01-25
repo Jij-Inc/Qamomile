@@ -13,7 +13,7 @@ from qamomile.circuit.transpiler.segments import (
 )
 
 if TYPE_CHECKING:
-    from qamomile.circuit.observable import Observable
+    import qamomile.observable as qm_o
 
 T = TypeVar("T")  # Backend circuit type
 
@@ -46,14 +46,14 @@ class CompiledClassicalSegment:
 
 @dataclasses.dataclass
 class CompiledExpvalSegment:
-    """A compiled expectation value segment with concrete observable.
+    """A compiled expectation value segment with concrete Hamiltonian.
 
     This segment computes <psi|H|psi> where psi is the quantum state
-    from a quantum circuit and H is the concrete Hamiltonian observable.
+    from a quantum circuit and H is a qamomile.observable.Hamiltonian.
 
     Attributes:
         segment: The original ExpvalSegment
-        observable: The concrete Observable to measure
+        hamiltonian: The qamomile.observable.Hamiltonian to measure
         quantum_segment_index: Index of the quantum segment providing the state
         result_ref: UUID where to store the expectation value result
         qubit_map: Mapping from Pauli index to physical qubit index.
@@ -61,7 +61,7 @@ class CompiledExpvalSegment:
     """
 
     segment: ExpvalSegment
-    observable: "Observable"
+    hamiltonian: "qm_o.Hamiltonian"
     quantum_segment_index: int = 0
     result_ref: str = ""
     qubit_map: dict[int, int] = dataclasses.field(default_factory=dict)

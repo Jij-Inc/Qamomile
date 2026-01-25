@@ -379,72 +379,36 @@ class ControlFlowTransformer(ast.NodeTransformer):
     def _transform_for_sequence(
         self, node: ast.For, flattened_body: list[ast.stmt]
     ) -> ast.With:
-        """Transform 'for item in seq' to 'for _idx in range(seq.shape[0]): item = seq[_idx]'.
+        """Prohibit direct sequence iteration to prevent common bugs.
 
-        This handles direct sequence iteration by converting it to index-based iteration.
-        The sequence must have a .shape attribute (like Vector[Qubit]).
+        Direct iteration like 'for item in vector:' doesn't support in-place
+        modification in @qkernel contexts. This method raises an error to
+        prevent silent bugs where reassignments don't affect the original array.
+
+        Raises:
+            SyntaxError: Always raised to prevent direct iteration.
         """
-        # Get loop variable name
+        # Get the source code representation if possible
         if isinstance(node.target, ast.Name):
             item_var = node.target.id
         else:
-            raise NotImplementedError(
-                "Only simple variable supported for sequence iteration. "
-                f"Got: {ast.dump(node.target)}"
-            )
+            item_var = "item"
 
-        # Generate unique index variable name
-        idx_var = self._get_unique_name("seq_idx")
+        # Try to get a readable representation of the iterable
+        iter_str = ast.unparse(node.iter) if hasattr(ast, 'unparse') else "vector"
 
-        # Create seq.shape[0] access
-        shape_access = ast.Subscript(
-            value=ast.Attribute(
-                value=node.iter,
-                attr="shape",
-                ctx=ast.Load(),
-            ),
-            slice=ast.Constant(value=0),
-            ctx=ast.Load(),
-        )
-
-        # Create item = seq[_idx] assignment
-        assign_item = ast.Assign(
-            targets=[ast.Name(id=item_var, ctx=ast.Store())],
-            value=ast.Subscript(
-                value=node.iter,
-                slice=ast.Name(id=idx_var, ctx=ast.Load()),
-                ctx=ast.Load(),
-            ),
-            lineno=node.lineno,
-            col_offset=node.col_offset,
-        )
-
-        # New body: item assignment + original body
-        new_body = [assign_item] + flattened_body
-
-        # Create for_loop(0, seq.shape[0], 1, idx_var) call
-        for_loop_call = ast.Call(
-            func=ast.Name(id="for_loop", ctx=ast.Load()),
-            args=[
-                ast.Constant(value=0),
-                shape_access,
-                ast.Constant(value=1),
-                ast.Constant(value=idx_var),
-            ],
-            keywords=[],
-        )
-
-        # Create with for_loop(...) as _idx:
-        with_item = ast.withitem(
-            context_expr=for_loop_call,
-            optional_vars=ast.Name(id=idx_var, ctx=ast.Store()),
-        )
-
-        return ast.With(
-            items=[with_item],
-            body=new_body,
-            lineno=node.lineno,
-            col_offset=node.col_offset,
+        raise SyntaxError(
+            f"Direct iteration over sequences is not supported in @qkernel functions.\n"
+            f"Line {node.lineno}: 'for {item_var} in {iter_str}:'\n\n"
+            f"Direct iteration cannot modify elements in-place, leading to silent bugs.\n"
+            f"Use explicit index-based iteration instead:\n\n"
+            f"  # Incorrect (current code):\n"
+            f"  for {item_var} in {iter_str}:\n"
+            f"      {item_var} = qmc.operation({item_var})\n\n"
+            f"  # Correct:\n"
+            f"  n = {iter_str}.shape[0]\n"
+            f"  for i in qmc.range(n):\n"
+            f"      {iter_str}[i] = qmc.operation({iter_str}[i])\n"
         )
 
     def _transform_for_items(

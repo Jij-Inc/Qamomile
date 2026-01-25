@@ -14,7 +14,7 @@ from .primitives import (
     DictType,
 )
 from .q_register import QUIntType, QFixedType
-from .hamiltonian import PauliKind, HamiltonianExprType
+from .hamiltonian import ObservableType
 
 __all__ = [
     "ValueType",
@@ -26,6 +26,5 @@ __all__ = [
     "DictType",
     "QUIntType",
     "QFixedType",
-    "PauliKind",
-    "HamiltonianExprType",
+    "ObservableType",
 ]

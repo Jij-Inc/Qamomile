@@ -16,14 +16,6 @@ from .gate import (
 from .classical_ops import DecodeQFixedOperation
 from .cast import CastOperation
 from .control_flow import ForItemsOperation
-from .hamiltonian_ops import (
-    PauliCreateOp,
-    HamiltonianAddOp,
-    HamiltonianMulOp,
-    HamiltonianScaleOp,
-    HamiltonianNegOp,
-    HamiltonianIdentityOp,
-)
 from .expval import ExpvalOp
 
 __all__ = [
@@ -42,13 +34,6 @@ __all__ = [
     "CastOperation",
     # Control flow operations
     "ForItemsOperation",
-    # Hamiltonian operations
-    "PauliCreateOp",
-    "HamiltonianAddOp",
-    "HamiltonianMulOp",
-    "HamiltonianScaleOp",
-    "HamiltonianNegOp",
-    "HamiltonianIdentityOp",
     # Expectation value operation
     "ExpvalOp",
 ]

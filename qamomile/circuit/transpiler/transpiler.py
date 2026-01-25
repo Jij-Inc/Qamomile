@@ -21,7 +21,7 @@ from qamomile.circuit.transpiler.passes.substitution import (
     SubstitutionPass,
     SubstitutionRule,
 )
-from qamomile.circuit.transpiler.segments import SeparatedProgram
+from qamomile.circuit.transpiler.segments import SimplifiedProgram
 from qamomile.circuit.transpiler.executable import ExecutableProgram, QuantumExecutor
 
 if TYPE_CHECKING:
@@ -264,14 +264,17 @@ class Transpiler(ABC, Generic[T]):
         """Pass 2: Validate and analyze dependencies."""
         return self._analyze_pass.run(block)
 
-    def separate(self, block: Block) -> SeparatedProgram:
-        """Pass 3: Lower and split into quantum and classical segments."""
+    def separate(self, block: Block) -> SimplifiedProgram:
+        """Pass 3: Lower and split into quantum and classical segments.
+
+        Validates C→Q→C pattern with single quantum segment.
+        """
         separate_pass = self._create_separate_pass()
         return separate_pass.run(block)
 
     def emit(
         self,
-        separated: SeparatedProgram,
+        separated: SimplifiedProgram,
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
     ) -> ExecutableProgram[T]:

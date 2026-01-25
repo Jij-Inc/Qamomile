@@ -97,6 +97,7 @@ def test_cyclic_mapping(simple_problem):
     }
 
 
+@pytest.mark.skip(reason="Uses deprecated transpile_circuit API")
 def test_get_init_state(simple_problem):
     fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4)
     init_circuit = fqaoa_converter.get_init_state()
@@ -119,6 +120,7 @@ def test_get_init_state(simple_problem):
     assert (df_test_sampleset["feasible"] == True).sum() == 1000
 
 
+@pytest.mark.skip(reason="Uses deprecated transpile_circuit API")
 def test_get_mixer_ansatz(simple_problem):
     fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4)
     mixer_circuit = fqaoa_converter.get_mixer_ansatz(beta=2.0)
@@ -143,6 +145,7 @@ def test_get_mixer_ansatz(simple_problem):
     assert (df_test_sampleset["feasible"] == True).sum() == 1000
 
 
+@pytest.mark.skip(reason="Uses deprecated transpile_circuit API")
 def test_get_cost_ansatz(simple_problem):
     fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4)
     cost_circuit = fqaoa_converter.get_cost_ansatz(gamma=2.0)

@@ -11,7 +11,7 @@ from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.value import Value
 
 if TYPE_CHECKING:
-    from qamomile.circuit.observable import Observable
+    import qamomile.observable as qm_o
 
 
 class SegmentKind(Enum):
@@ -117,31 +117,47 @@ class HybridBoundary:
     value_ref: str
 
 
-@dataclasses.dataclass
-class SeparatedProgram:
-    """Result of the separation pass.
+class MultipleQuantumSegmentsError(Exception):
+    """Raised when program has multiple quantum segments.
 
-    Contains alternating quantum and classical segments with
-    explicit boundaries between them.
+    Qamomile enforces a single quantum circuit execution pattern:
+        [Classical Prep] → Quantum Circuit → [Classical Post/Expval]
+
+    Your program has multiple quantum segments, suggesting quantum operations
+    that depend on measurement results (JIT compilation not supported).
     """
 
-    segments: list[Segment] = dataclasses.field(default_factory=list)
+    pass
+
+
+@dataclasses.dataclass
+class SimplifiedProgram:
+    """Enforces Classical → Quantum → Classical pattern.
+
+    Structure:
+    - [Optional] Classical preprocessing (parameter computation, etc.)
+    - Single quantum segment (REQUIRED)
+    - [Optional] Expval segment OR classical postprocessing
+
+    This replaces SeparatedProgram to enforce Qamomile's execution model:
+    all quantum operations must be in a single quantum circuit.
+    """
+
+    # Single quantum segment (REQUIRED)
+    quantum: QuantumSegment
+
+    # Optional classical preprocessing (parameter computation, etc.)
+    classical_prep: ClassicalSegment | None = None
+
+    # Optional expval computation (alternative to measurement)
+    expval: ExpvalSegment | None = None
+
+    # Optional classical postprocessing (decode measurements, etc.)
+    classical_post: ClassicalSegment | None = None
+
+    # Boundaries for tracking quantum-classical transitions
     boundaries: list[HybridBoundary] = dataclasses.field(default_factory=list)
 
-    # Original parameters for binding
+    # Original parameters and outputs
     parameters: dict[str, Value] = dataclasses.field(default_factory=dict)
-
-    # Final output references
     output_refs: list[str] = dataclasses.field(default_factory=list)
-
-    def quantum_segments(self) -> list[QuantumSegment]:
-        """Get all quantum segments."""
-        return [s for s in self.segments if isinstance(s, QuantumSegment)]
-
-    def classical_segments(self) -> list[ClassicalSegment]:
-        """Get all classical segments."""
-        return [s for s in self.segments if isinstance(s, ClassicalSegment)]
-
-    def expval_segments(self) -> list[ExpvalSegment]:
-        """Get all expectation value segments."""
-        return [s for s in self.segments if isinstance(s, ExpvalSegment)]

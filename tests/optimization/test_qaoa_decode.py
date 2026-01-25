@@ -1,137 +1,139 @@
-"""Tests for QAOA converter decode functionality."""
-
-import pytest
-import numpy as np
-import ommx.v1
-from qamomile.optimization.qaoa import QAOAConverter, _convert_sampleresult_to_bitssampleset
-from qamomile.circuit.transpiler.job import SampleResult
-import qamomile.core.bitssample as qm_bs
+import qamomile.circuit as qmc
+from qamomile.optimization.qaoa import QAOAConverter
+from qamomile.qiskit.transpiler import QiskitTranspiler
+from qamomile.optimization.binary_model import binary, BinaryExpr, BinaryModel
+import jijmodeling as jm
 
 
-@pytest.fixture
-def simple_qubo_instance():
-    """Create a simple QUBO instance for testing."""
-    # Create a simple 2-variable QUBO problem
-    # min: x0 + 2*x1 + 3*x0*x1
+def test_simple_qaoa_decode():
+    x = binary(0)
+    y = binary(1)
+    z = binary(2)
 
-    # Create decision variables
-    x = [ommx.v1.DecisionVariable.binary(i) for i in range(2)]
+    problem = BinaryExpr()
+    problem += x * y
+    problem += -1 * y * z
+    problem += x
+    problem += -0.1*z
 
-    # Create objective: x0 + 2*x1 + 3*x0*x1
-    objective = x[0] + 2 * x[1] + 3 * x[0] * x[1]
+    model = BinaryModel(problem)
 
-    instance = ommx.v1.Instance.from_components(
-        decision_variables=x,
-        objective=objective,
-        constraints=[],
-        sense=ommx.v1.Instance.MINIMIZE,
-    )
+    # x y - y z + x
+    # binary to spin: x = (1 - s_x) / 2
+    # x = (1 - s_x) / 2
+    # x y = (1 - s_x) / 2 * (1 - s_y) / 2 = 1/4(1 - s_x - s_y + s_x s_y)
+    # - y z = - (1 - s_y) / 2 * (1 - s_z) / 2 = -1/4(1 - s_y - s_z + s_y s_z)
+    # --------------------------------------------
+    # total 
+    # = 1/2-1/2*0.1 -3/4 s_x + 1/4 s_x s_y + (1/4 + 1/2*0.1) s_z - 1/4 s_y s_z
 
-    return instance
+    converter = QAOAConverter(model)
 
-
-@pytest.fixture
-def qaoa_converter(simple_qubo_instance):
-    """Create QAOAConverter for testing."""
-    return QAOAConverter(simple_qubo_instance)
-
-
-def test_convert_sampleresult_to_bitssampleset():
-    """Test conversion from SampleResult to BitsSampleSet."""
-    # Create a mock SampleResult
-    result = SampleResult(
-        results=[([0, 1, 0], 10), ([1, 1, 1], 5), ([0, 0, 0], 3)],
-        shots=18
-    )
-
-    # Convert to BitsSampleSet
-    bitssampleset = _convert_sampleresult_to_bitssampleset(result)
-
-    # Verify structure
-    assert isinstance(bitssampleset, qm_bs.BitsSampleSet)
-    assert len(bitssampleset.bitarrays) == 3
-
-    # Verify first sample
-    assert bitssampleset.bitarrays[0].bits == [0, 1, 0]
-    assert bitssampleset.bitarrays[0].num_occurrences == 10
-
-    # Verify second sample
-    assert bitssampleset.bitarrays[1].bits == [1, 1, 1]
-    assert bitssampleset.bitarrays[1].num_occurrences == 5
-
-    # Verify third sample
-    assert bitssampleset.bitarrays[2].bits == [0, 0, 0]
-    assert bitssampleset.bitarrays[2].num_occurrences == 3
+    assert converter.spin_model.constant == 1/2 - 1/2*0.1
+    assert converter.spin_model.linear == {0: -3/4, 2: 1/4 + 1/2*0.1}
+    assert converter.spin_model.quad == {(0, 1): 1/4, (1, 2): -1/4}
 
 
-def test_convert_empty_sampleresult():
-    """Test conversion with empty SampleResult."""
-    result = SampleResult(results=[], shots=0)
-    bitssampleset = _convert_sampleresult_to_bitssampleset(result)
+    transpiler = QiskitTranspiler()
+    executable = converter.transpile(transpiler, p=2)  # p=2に変更してより表現力を高める
 
-    assert isinstance(bitssampleset, qm_bs.BitsSampleSet)
-    assert len(bitssampleset.bitarrays) == 0
+    import scipy
 
+    def _obj(params):
+        gammas_val = [params[0], params[1]]
+        betas_val = [params[2], params[3]]
+        bindings = {"gammas": gammas_val, "betas": betas_val}
+        job = executable.sample(transpiler.executor(), shots=100, bindings=bindings)  # さらにshotsを増やす
+        result = job.result()
 
-def test_qaoa_converter_decode_simple(qaoa_converter):
-    """Test decode method with simple SampleResult."""
-    # Create a mock SampleResult with 2-bit strings
-    sample_result = SampleResult(
-        results=[([0, 0], 512), ([1, 1], 512)],
-        shots=1024
-    )
+        sampleset = converter.decode(result)
+        argmin_index = np.argmin(sampleset.energy)
+        best_energy = sampleset.energy[argmin_index]
+        best_occurrence = sampleset.num_occurrences[argmin_index]
+        return best_energy * best_occurrence
 
-    # Decode to SampleSet
-    sampleset = qaoa_converter.decode(sample_result)
+    import numpy as np
+    x0 = [2.6, 0.11, 0.52, 0.45]
+    bounds = [(0, np.pi), (0, np.pi), (0, np.pi/2), (0, np.pi/2)]
+    res = scipy.optimize.minimize(_obj, x0=x0, bounds=bounds, method='COBYLA', options={'maxiter': 100})
 
-    # Verify result type
-    assert isinstance(sampleset, ommx.v1.SampleSet)
+    gammas_opt = [res.x[0], res.x[1]]
+    betas_opt = [res.x[2], res.x[3]]
+    bindings_opt = {"gammas": gammas_opt, "betas": betas_opt}
+    job_opt = executable.sample(transpiler.executor(), shots=1000, bindings=bindings_opt)
+    result_opt = job_opt.result()
+    binary_result = converter.decode(result_opt)
+    print(binary_result)
 
-    # Verify total number of samples
-    assert len(sampleset.sample_ids) == 1024
-
-    # Verify we have objectives computed
-    assert hasattr(sampleset, 'objectives')
-
-
-def test_qaoa_converter_decode_single_sample(qaoa_converter):
-    """Test decode with single sample."""
-    sample_result = SampleResult(
-        results=[([0, 1], 1)],
-        shots=1
-    )
-
-    sampleset = qaoa_converter.decode(sample_result)
-
-    assert isinstance(sampleset, ommx.v1.SampleSet)
-    assert len(sampleset.sample_ids) == 1
+    # Optimal solution: x=0, y=1, z=1 with energy = 0*1 - 1*1 + 0 - 0.1*1 = -1.1
+    best_sample, best_energy, _ = binary_result.lowest()
+    assert best_sample == {0: 0, 1: 1, 2: 1}
+    assert abs(best_energy - (-1.1)) < 1e-6
 
 
-def test_qaoa_converter_decode_multiple_occurrences(qaoa_converter):
-    """Test that num_occurrences is properly handled."""
-    sample_result = SampleResult(
-        results=[([0, 0], 100), ([0, 1], 50), ([1, 0], 30), ([1, 1], 20)],
-        shots=200
-    )
 
-    sampleset = qaoa_converter.decode(sample_result)
+def test_qaoa_decode():
+    x = jm.BinaryVar("x")
+    y = jm.BinaryVar("y")
+    z = jm.BinaryVar("z")
 
-    # Total samples should equal total occurrences
-    assert len(sampleset.sample_ids) == 200
+    problem = jm.Problem("sample")
+    problem += x * y
+    problem += -1 * y * z
+    problem += x
+    problem += -0.1*z
+
+    interpreter = jm.Interpreter({})
+    instance = interpreter.eval_problem(problem)
+
+    converter = QAOAConverter(instance)
+
+    # x y - y z + x
+    # binary to spin: x = (1 - s_x) / 2
+    # x = (1 - s_x) / 2
+    # x y = (1 - s_x) / 2 * (1 - s_y) / 2 = 1/4(1 - s_x - s_y + s_x s_y)
+    # - y z = - (1 - s_y) / 2 * (1 - s_z) / 2 = -1/4(1 - s_y - s_z + s_y s_z)
+    # --------------------------------------------
+    # total 
+    # = 1/2-1/2*0.1 -3/4 s_x + 1/4 s_x s_y + (1/4 + 1/2*0.1) s_z - 1/4 s_y s_z
+
+    assert converter.spin_model.constant == 1/2 - 1/2*0.1
+    assert converter.spin_model.linear == {0: -3/4, 2: 1/4 + 1/2*0.1}
+    assert converter.spin_model.quad == {(0, 1): 1/4, (1, 2): -1/4}
 
 
-def test_decode_preserves_ising_mapping(qaoa_converter):
-    """Test that Ising index mapping is correctly applied."""
-    sample_result = SampleResult(
-        results=[([0, 0], 1), ([1, 1], 1)],
-        shots=2
-    )
+    transpiler = QiskitTranspiler()
+    executable = converter.transpile(transpiler, p=2)  # p=2に変更してより表現力を高める
 
-    sampleset = qaoa_converter.decode(sample_result)
+    import scipy
 
-    # Verify that samples have valid OMMX structure
-    assert isinstance(sampleset, ommx.v1.SampleSet)
+    def _obj(params):
+        gammas_val = [params[0], params[1]]
+        betas_val = [params[2], params[3]]
+        bindings = {"gammas": gammas_val, "betas": betas_val}
+        job = executable.sample(transpiler.executor(), shots=100, bindings=bindings)  # さらにshotsを増やす
+        result = job.result()
 
-    # The converter should map Ising indices to original problem variable IDs
-    # This is tested by verifying the decode doesn't raise errors
-    assert len(sampleset.sample_ids) == 2
+        sampleset = converter.decode(result)
+        argmin_index = np.argmin(sampleset.energy)
+        best_energy = sampleset.energy[argmin_index]
+        best_occurrence = sampleset.num_occurrences[argmin_index]
+        return best_energy * best_occurrence
+
+    import numpy as np
+    x0 = [2.6, 0.11, 0.52, 0.45]
+    bounds = [(0, np.pi), (0, np.pi), (0, np.pi/2), (0, np.pi/2)]
+    res = scipy.optimize.minimize(_obj, x0=x0, bounds=bounds, method='COBYLA', options={'maxiter': 100})
+
+    gammas_opt = [res.x[0], res.x[1]]
+    betas_opt = [res.x[2], res.x[3]]
+    bindings_opt = {"gammas": gammas_opt, "betas": betas_opt}
+    job_opt = executable.sample(transpiler.executor(), shots=1000, bindings=bindings_opt)
+    result_opt = job_opt.result()
+
+    binary_result = converter.decode(result_opt)
+
+    # Optimal solution: x=0, y=1, z=1 with energy = 0*1 - 1*1 + 0 - 0.1*1 = -1.1
+    best_sample, best_energy, _ = binary_result.lowest()
+    assert best_sample == {0: 0, 1: 1, 2: 1}
+    assert abs(best_energy - (-1.1)) < 1e-6

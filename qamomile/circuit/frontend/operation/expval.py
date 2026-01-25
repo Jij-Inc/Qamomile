@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from qamomile.circuit.frontend.handle import Float, Qubit, Vector, HamiltonianExpr
+from qamomile.circuit.frontend.handle import Float, Qubit, Vector, Observable
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.types.primitives import FloatType
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 def expval(
     qubits: Vector[Qubit] | tuple[Qubit, ...],
-    hamiltonian: HamiltonianExpr,
+    hamiltonian: Observable,
 ) -> Float:
     """Compute the expectation value of an observable on a quantum state.
 
@@ -33,25 +33,31 @@ def expval(
     Args:
         qubits: The quantum register holding the prepared state.
             Can be a Vector[Qubit] or a tuple of individual Qubits.
-        hamiltonian: The HamiltonianExpr observable to measure.
+        hamiltonian: The Observable parameter representing the Hamiltonian.
+            The actual qamomile.observable.Hamiltonian is provided via bindings.
 
     Returns:
         Float containing the expectation value.
 
     Example:
         ```python
+        import qamomile.circuit as qm
+        import qamomile.observable as qm_o
+
+        # Build Hamiltonian in Python
+        H = qm_o.Z(0) * qm_o.Z(1) + 0.5 * (qm_o.X(0) + qm_o.X(1))
+
         @qm.qkernel
-        def vqe_step(q: qm.Vector[qm.Qubit], theta: qm.Float) -> qm.Float:
+        def vqe_step(q: qm.Vector[qm.Qubit], H: qm.Observable) -> qm.Float:
             # Ansatz
             q[0] = qm.ry(q[0], theta)
             q[0], q[1] = qm.cx(q[0], q[1])
 
-            # Observable definition
-            H = qm.pauli.Z(0) * qm.pauli.Z(1) + 0.5 * (qm.pauli.X(0) + qm.pauli.X(1))
-
             # Expectation value -> Float
-            exp_val = qm.expval(q, H)
-            return exp_val
+            return qm.expval(q, H)
+
+        # Pass Hamiltonian via bindings
+        executable = transpiler.transpile(vqe_step, bindings={"H": H})
         ```
     """
     # Convert qubits to Value

@@ -57,7 +57,7 @@ from typing import Any, Generic, Sequence, TypeVar, TYPE_CHECKING
 from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
 
 if TYPE_CHECKING:
-    from qamomile.circuit.observable import Observable
+    import qamomile.observable as qm_o
 
 T = TypeVar("T")  # Backend circuit type
 
@@ -139,20 +139,20 @@ class QuantumExecutor(ABC, Generic[T]):
     def estimate(
         self,
         circuit: T,
-        observable: "Observable",
+        hamiltonian: "qm_o.Hamiltonian",
         params: Sequence[float] | None = None,
     ) -> float:
-        """Estimate the expectation value of an observable.
+        """Estimate the expectation value of a Hamiltonian.
 
         This method computes <psi|H|psi> where psi is the quantum state
-        prepared by the circuit and H is the observable Hamiltonian.
+        prepared by the circuit and H is the Hamiltonian.
 
         Backends can override this method to provide optimized implementations
         using their native estimator primitives.
 
         Args:
             circuit: The quantum circuit (state preparation ansatz)
-            observable: The observable to measure
+            hamiltonian: The qamomile.observable.Hamiltonian to measure
             params: Optional parameter values for parametric circuits
 
         Returns:

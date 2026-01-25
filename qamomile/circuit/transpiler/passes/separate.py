@@ -28,28 +28,30 @@ from qamomile.circuit.transpiler.segments import (
     ClassicalSegment,
     ExpvalSegment,
     HybridBoundary,
+    MultipleQuantumSegmentsError,
     QuantumSegment,
     Segment,
-    SeparatedProgram,
+    SimplifiedProgram,
 )
 
 
-class SeparatePass(Pass[Block, SeparatedProgram]):
+class SeparatePass(Pass[Block, SimplifiedProgram]):
     """Separate a block into quantum and classical segments.
 
     This pass:
     1. Materializes return operations (syncs output_values from ReturnOperation)
-    2. Splits the operation list into alternating quantum and classical segments
+    2. Splits the operation list into quantum and classical segments
+    3. Validates single quantum segment (enforces C→Q→C pattern)
 
     Input: Block (typically ANALYZED or LINEAR)
-    Output: SeparatedProgram with segments and boundaries
+    Output: SimplifiedProgram with single quantum segment and optional prep/post
     """
 
     @property
     def name(self) -> str:
         return "separate"
 
-    def run(self, input: Block) -> SeparatedProgram:
+    def run(self, input: Block) -> SimplifiedProgram:
         """Separate the block into segments."""
         # Phase 1: Materialize return operations
         block = self._materialize_return(input)
@@ -178,10 +180,74 @@ class SeparatePass(Pass[Block, SeparatedProgram]):
     # Phase 3: Separate into segments
     # =========================================================================
 
-    def _separate_segments(self, block: Block) -> SeparatedProgram:
-        """Separate the block into quantum and classical segments."""
+    def _separate_segments(self, block: Block) -> SimplifiedProgram:
+        """Separate the block into quantum and classical segments.
+
+        Validates single quantum segment and returns SimplifiedProgram
+        with enforced C→Q→C pattern.
+        """
+        # Step 1: Build segments using existing logic
+        segments = self._build_segments_list(block)
+
+        # Step 2: VALIDATE single quantum segment
+        quantum_segs = [s for s in segments if isinstance(s, QuantumSegment)]
+        if len(quantum_segs) == 0:
+            from qamomile.circuit.transpiler.errors import SeparationError
+
+            raise SeparationError("No quantum segment found")
+        if len(quantum_segs) > 1:
+            raise MultipleQuantumSegmentsError(
+                f"Found {len(quantum_segs)} quantum segments. "
+                f"Only single quantum execution is supported. "
+                f"This typically happens when quantum operations depend on "
+                f"measurement results (JIT compilation not supported)."
+            )
+
+        # Step 3: Extract segments by position relative to quantum
+        quantum = quantum_segs[0]
+        quantum_idx = segments.index(quantum)
+
+        classical_segs = [s for s in segments if isinstance(s, ClassicalSegment)]
+        expval_segs = [s for s in segments if isinstance(s, ExpvalSegment)]
+
+        # Classical before quantum = prep
+        classical_prep = None
+        for seg in classical_segs:
+            if segments.index(seg) < quantum_idx:
+                classical_prep = seg
+                break  # Should only be one prep segment
+
+        # Classical after quantum = post
+        classical_post = None
+        for seg in classical_segs:
+            if segments.index(seg) > quantum_idx:
+                classical_post = seg
+                break  # Should only be one post segment
+
+        # Expval (should be after quantum)
+        expval = expval_segs[0] if expval_segs else None
+
+        # Get boundaries from segment building
+        boundaries = self._boundaries
+
+        # Step 4: Build SimplifiedProgram
+        return SimplifiedProgram(
+            quantum=quantum,
+            classical_prep=classical_prep,
+            expval=expval,
+            classical_post=classical_post,
+            boundaries=boundaries,
+            parameters=block.parameters,
+            output_refs=[v.uuid for v in block.output_values],
+        )
+
+    def _build_segments_list(self, block: Block) -> list[Segment]:
+        """Build list of segments from block operations.
+
+        Extracted from _separate_segments to allow reuse.
+        """
         segments: list[Segment] = []
-        boundaries: list[HybridBoundary] = []
+        self._boundaries: list[HybridBoundary] = []
 
         current_ops: list[Operation] = []
         current_kind: OperationKind | None = None
@@ -243,7 +309,7 @@ class SeparatePass(Pass[Block, SeparatedProgram]):
                     target_segment_index=len(segments) + 1,  # Next segment after flush
                     value_ref=op.results[0].uuid if op.results else "",
                 )
-                boundaries.append(boundary)
+                self._boundaries.append(boundary)
                 continue
 
             if current_kind is None:
@@ -270,12 +336,7 @@ class SeparatePass(Pass[Block, SeparatedProgram]):
         # Compute input/output refs for each segment
         self._compute_segment_io(segments, block)
 
-        return SeparatedProgram(
-            segments=segments,
-            boundaries=boundaries,
-            parameters=block.parameters,
-            output_refs=[v.uuid for v in block.output_values],
-        )
+        return segments
 
     def _effective_kind(self, op: Operation) -> OperationKind:
         """Determine the effective kind of an operation.

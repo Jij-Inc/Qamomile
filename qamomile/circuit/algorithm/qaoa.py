@@ -20,8 +20,9 @@ def x_mixier_circuit(
     q: qmc.Vector[qmc.Qubit],
     beta: qmc.Float,
 ) -> qmc.Vector[qmc.Qubit]:
-    for qi in q:
-        qi = qmc.rx(qi, angle=2.0 * beta)
+    n = q.shape[0]
+    for i in qmc.range(n):
+        q[i] = qmc.rx(q[i], angle=2.0 * beta)
     return q
 
 
@@ -45,8 +46,8 @@ def superposition_vector(
     n: qmc.UInt
 ) -> qmc.Vector[qmc.Qubit]:
     q = qmc.qubit_array(n, name="q")
-    for qi in q:
-        qi = qmc.h(qi)
+    for i in qmc.range(n):
+        q[i] = qmc.h(q[i])
     return q
 
 

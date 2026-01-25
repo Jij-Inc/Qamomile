@@ -1,12 +1,10 @@
-# Pauli operators submodule (qm.pauli.X, qm.pauli.Z, etc.)
-from . import pauli
 from .frontend.composite_gate import CompositeGate, composite_gate
 from .frontend.constructors import bit, float_, qubit, qubit_array, uint
 from .frontend.handle import (
     Bit,
     Dict,
     Float,
-    HamiltonianExpr,
+    Observable,
     Handle,
     Matrix,
     QFixed,
@@ -64,9 +62,7 @@ __all__ = [
     "Vector",
     "Matrix",
     "Tensor",
-    "HamiltonianExpr",
-    # Pauli submodule
-    "pauli",
+    "Observable",
     # stdlib
     "qpe",
     "iqft",

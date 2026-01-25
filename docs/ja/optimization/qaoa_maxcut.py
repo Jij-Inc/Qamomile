@@ -187,10 +187,25 @@ executable = converter.transpile(
 # 生成された量子回路を見てみましょう。この回路は、コスト層とミキサー層を交互に配置した QAOA アンザッツを実装しています。
 
 # %%
-qiskit_circuit = executable.get_first_circuit()
-if qiskit_circuit is not None:
-    print(f"Number of qubits: {qiskit_circuit.num_qubits}")
-    print(f"Circuit depth: {qiskit_circuit.depth()}")
+qiskit_circuit = executable.get_circuits()[0]
+print(qiskit_circuit.draw())
+
+
+# %%
+job = executable.sample(
+    transpiler.executor(),
+    bindings={
+        "gammas": [0.1] * p,
+        "betas": [0.2] * p,
+    },
+    shots=1024,
+)
+
+# %%
+result = job.result()
+sampleset = converter.decode(result)
+
+sampleset.objectives
 
 # %% [markdown]
 # ## エネルギー計算
@@ -234,24 +249,19 @@ def calculate_expectation_value(sample_result, ising_model) -> float:
 
 # %%
 from scipy.optimize import minimize
+from qamomile.circuit.transpiler.executable import ExecutableProgram
 
 # 最適化履歴を保存するリスト
 energy_history = []
 
 
-def objective_function(params, transpiler, executable, ising_model, shots=1024):
+def objective_function(
+    params,
+    ising_model,
+    shots=1024
+):
     """
     VQE 最適化のための目的関数。
-
-    Args:
-        params: 結合された [gammas, betas] パラメータ
-        transpiler: 量子トランスパイラー
-        executable: コンパイル済み QAOA 回路
-        ising_model: エネルギー計算用イジングモデル
-        shots: 測定ショット数
-
-    Returns:
-        期待エネルギー値
     """
     p = len(params) // 2
     gammas = params[:p]
@@ -266,6 +276,9 @@ def objective_function(params, transpiler, executable, ising_model, shots=1024):
         shots=shots,
     )
     result = job.result()
+
+    solution = converter.decode(result)
+    obj = solution.objectives[0]
 
     energy = calculate_expectation_value(result, ising_model)
     energy_history.append(energy)

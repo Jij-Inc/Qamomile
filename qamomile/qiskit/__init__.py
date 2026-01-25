@@ -1,14 +1,8 @@
 from qamomile.qiskit.transpiler import QiskitTranspiler, QiskitExecutor
-from qamomile.qiskit.observable import (
-    QiskitObservableEmitter,
-    QiskitExpectationEstimator,
-    to_sparse_pauli_op,
-)
+from qamomile.qiskit.observable import hamiltonian_to_sparse_pauli_op
 
 __all__ = [
     "QiskitTranspiler",
     "QiskitExecutor",
-    "QiskitObservableEmitter",
-    "QiskitExpectationEstimator",
-    "to_sparse_pauli_op",
+    "hamiltonian_to_sparse_pauli_op",
 ]
