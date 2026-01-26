@@ -19,9 +19,15 @@ project:
     - file: index
     - title: チュートリアル
       children:
-        - file: transpile/transpile_flow
+        - file: tutorial/01_introduction
+        - file: tutorial/02_single_qubit
+        - file: tutorial/03_entanglement
+        - file: tutorial/04_algorithms
         - file: tutorial/qpe
         - file: tutorial/qaoa
+    - title: トランスパイル
+      children:
+        - file: transpile/transpile_flow
 
 site:
   template: book-theme
