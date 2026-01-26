@@ -340,7 +340,7 @@ print(qiskit_param.draw(output="text"))
 # | X rotation | `qm.rx(q, θ)` | Rotates around X-axis |
 # | Y rotation | `qm.ry(q, θ)` | Rotates around Y-axis |
 # | Z rotation | `qm.rz(q, θ)` | Rotates around Z-axis |
-# | Phase | `qm.p(q, θ)` | Adds phase to $\|1\rangle$ |
+# | Phase | `qm.p(q, θ)` | Adds phase to $\lvert 1\rangle$ |
 #
 # ### Key Concepts
 # - **Superposition**: A state holding both 0 and 1 simultaneously. Collapses probabilistically upon measurement

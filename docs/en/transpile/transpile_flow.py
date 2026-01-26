@@ -30,7 +30,7 @@ import qamomile.circuit as qmc
 # %% [markdown]
 # ### QPE Overview
 #
-# Quantum Phase Estimation is an algorithm that estimates the phase φ of the eigenvalue e^{2πiφ} of a unitary operator U.
+# Quantum Phase Estimation is an algorithm that estimates the phase $\phi$ of the eigenvalue $e^{2\pi i\phi}$ of a unitary operator $U$.
 #
 # In Qamomile, you can easily implement QPE using the `qpe()` function:
 # - Input: target state, phase register, unitary operation
