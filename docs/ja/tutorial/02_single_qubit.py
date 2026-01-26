@@ -28,6 +28,7 @@
 
 # %%
 import math
+
 import qamomile.circuit as qm
 from qamomile.qiskit import QiskitTranspiler
 
@@ -48,7 +49,7 @@ transpiler = QiskitTranspiler()
 #
 # $$H|1\rangle = \frac{|0\rangle - |1\rangle}{\sqrt{2}}$$
 #
-# つまり、`|0⟩` に H ゲートを適用すると、`|0⟩` と `|1⟩` が等しい確率で出る状態になります。
+# つまり、$|0\rangle$ に H ゲートを適用すると、$|0\rangle$ と $|1\rangle$ が等しい確率で出る状態になります。
 
 # %%
 @qm.qkernel
@@ -133,12 +134,12 @@ for value, count in result2.results:
 # $$H \cdot H |0\rangle = H \cdot \frac{|0\rangle + |1\rangle}{\sqrt{2}} = |0\rangle$$
 
 # %% [markdown]
-# ## 3. |+⟩ 状態と |−⟩ 状態
+# ## 3. $|+\rangle$ 状態と $|-\rangle$ 状態
 #
 # 重ね合わせ状態には名前がついています：
 #
-# - **|+⟩ 状態**: $\frac{|0\rangle + |1\rangle}{\sqrt{2}}$ （H|0⟩）
-# - **|−⟩ 状態**: $\frac{|0\rangle - |1\rangle}{\sqrt{2}}$ （H|1⟩）
+# - **$|+\rangle$ 状態**: $\frac{|0\rangle + |1\rangle}{\sqrt{2}}$ （$H|0\rangle$）
+# - **$|-\rangle$ 状態**: $\frac{|0\rangle - |1\rangle}{\sqrt{2}}$ （$H|1\rangle$）
 #
 # これらは測定すると同じ確率分布（50/50）になりますが、量子的には異なる状態です。
 
@@ -279,7 +280,7 @@ for params in params_list:
 # %% [markdown]
 # ## 6. 位相ゲート（Pゲート）
 #
-# **位相ゲート** P(θ) は、`|1⟩` 状態に位相 $e^{i\theta}$ を付加します。
+# **位相ゲート** $P(\theta)$ は、$|1\rangle$ 状態に位相 $e^{i\theta}$ を付加します。
 #
 # $$P(\theta)|0\rangle = |0\rangle$$
 # $$P(\theta)|1\rangle = e^{i\theta}|1\rangle$$
@@ -310,12 +311,12 @@ for value, count in result_phase.results:
 # %% [markdown]
 # ### 結果の説明
 #
-# H → P(π) → H の組み合わせは、Xゲートと同じ効果があります！
+# $H \rightarrow P(\pi) \rightarrow H$ の組み合わせは、Xゲートと同じ効果があります！
 #
 # これは量子干渉の一例です：
 # 1. Hゲートで重ね合わせを作る
-# 2. P(π)で|1⟩成分の符号を反転
-# 3. 2回目のHゲートで干渉させると、|1⟩だけが残る
+# 2. $P(\pi)$ で $|1\rangle$ 成分の符号を反転
+# 3. 2回目のHゲートで干渉させると、$|1\rangle$ だけが残る
 
 # %% [markdown]
 # ## 7. 回路の可視化：回転ゲート
@@ -340,7 +341,7 @@ print(qiskit_param.draw(output="text"))
 # | X回転 | `qm.rx(q, θ)` | X軸周りに回転 |
 # | Y回転 | `qm.ry(q, θ)` | Y軸周りに回転 |
 # | Z回転 | `qm.rz(q, θ)` | Z軸周りに回転 |
-# | 位相 | `qm.p(q, θ)` | |1⟩に位相を付加 |
+# | 位相 | `qm.p(q, θ)` | $\|1\rangle$に位相を付加 |
 #
 # ### 重要な概念
 # - **重ね合わせ**: 0と1を同時に持つ状態。測定すると確率的に一方に崩壊
@@ -365,4 +366,5 @@ print(qiskit_param.draw(output="text"))
 # ```
 #
 # 次のチュートリアル（`03_entanglement.py`）では、複数の量子ビットを扱い、
+# 量子力学の最も不思議な現象である**エンタングルメント（量子もつれ）**について学びます。
 # 量子力学の最も不思議な現象である**エンタングルメント（量子もつれ）**について学びます。

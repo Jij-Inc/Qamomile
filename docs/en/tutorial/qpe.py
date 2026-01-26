@@ -57,7 +57,7 @@ def iqft(qubits: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
 # %%
 @qmc.qkernel
 def phase_gate(q: qmc.Qubit, theta: float, iter: int) -> qmc.Qubit:
-    """Phase gate: P(θ)|1⟩ = e^{iθ}|1⟩"""
+    """Phase gate: $P(\theta)|1\rangle = e^{i\theta}|1\rangle$"""
     for _ in qmc.range(iter):
         q = qmc.p(q, theta)
     return q
@@ -69,7 +69,7 @@ def qpe(phase: float) -> qmc.Vector[qmc.Bit]:
     phase_register = qmc.qubit_array(3, name="phase_reg")
     target = qmc.qubit(name="target")
 
-    target = qmc.x(target)  # |0⟩ → |1⟩
+    target = qmc.x(target)  # $|0\rangle \rightarrow |1\rangle$
 
     controlled_phase_gate = qmc.controlled(phase_gate)
 
@@ -200,14 +200,14 @@ print(qiskit_circuit.draw(output="text"))
 # Simple phase gate for qmc.qpe() (single application only)
 @qmc.qkernel
 def p_gate(q: qmc.Qubit, theta: float) -> qmc.Qubit:
-    """Simple phase gate: P(θ)|1⟩ = e^{iθ}|1⟩"""
+    """Simple phase gate: $P(\theta)|1\rangle = e^{i\theta}|1\rangle$"""
     return qmc.p(q, theta)
 
 @qmc.qkernel
 def qpe_3bit(phase: float) -> qmc.Float:
     q_phase = qmc.qubit_array(3, name="phase_reg")
     target = qmc.qubit(name="target")
-    target = qmc.x(target)  # |0⟩ → |1⟩
+    target = qmc.x(target)  # $|0\rangle \rightarrow |1\rangle$
     # Use p_gate (qmc.qpe() internally repeats 2^k times)
     phase_q: qmc.QFixed = qmc.qpe(target, q_phase, p_gate, theta=phase)
     return qmc.measure(phase_q)
