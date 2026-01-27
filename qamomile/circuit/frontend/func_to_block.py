@@ -35,7 +35,7 @@ TYPE_MAPPING: dict[typing.Any, typing.Any] = {
 }
 
 
-def is_array_type(t) -> bool:
+def is_array_type(t: typing.Any) -> bool:
     """Check if type is a Vector, Matrix, or Tensor subclass."""
     # Handle generic aliases like Vector[Qubit], Matrix[Bit], etc.
     actual_type = getattr(t, "__origin__", t)
@@ -46,7 +46,7 @@ def is_array_type(t) -> bool:
     )
 
 
-def _get_ndim(param_type) -> int:
+def _get_ndim(param_type: typing.Any) -> int:
     """Get the number of dimensions for an array type."""
     # Handle generic aliases like Vector[Qubit], Matrix[Bit], etc.
     actual_type = getattr(param_type, "__origin__", param_type)
@@ -60,7 +60,7 @@ def _get_ndim(param_type) -> int:
     return 1
 
 
-def is_tuple_type(t) -> bool:
+def is_tuple_type(t: typing.Any) -> bool:
     """Check if type is a Tuple handle type."""
     actual_type = getattr(t, "__origin__", t)
     if actual_type is Tuple:
@@ -70,7 +70,7 @@ def is_tuple_type(t) -> bool:
     return False
 
 
-def is_dict_type(t) -> bool:
+def is_dict_type(t: typing.Any) -> bool:
     """Check if type is a Dict handle type."""
     actual_type = getattr(t, "__origin__", t)
     if actual_type is Dict:
@@ -98,9 +98,7 @@ def handle_type_map(handle_type: type[Handle] | type) -> ValueType:
     # Handle Tuple types (e.g., Tuple[UInt, UInt])
     if is_tuple_type(handle_type):
         if hasattr(handle_type, "__args__") and handle_type.__args__:
-            element_types = tuple(
-                handle_type_map(t) for t in handle_type.__args__
-            )
+            element_types = tuple(handle_type_map(t) for t in handle_type.__args__)
             return TupleType(element_types=element_types)
         raise TypeError(f"Tuple type missing element types: {handle_type}")
 
@@ -119,8 +117,7 @@ def handle_type_map(handle_type: type[Handle] | type) -> ValueType:
     if not issubclass(handle_type, Handle):
         if handle_type in TYPE_MAPPING:
             return TYPE_MAPPING[handle_type]()
-        else:
-            raise TypeError(f"Unsupported type annotation '{handle_type}'")
+        raise TypeError(f"Unsupported type annotation '{handle_type}'")
 
     if handle_type is UInt:
         return UIntType()
@@ -175,7 +172,7 @@ def create_dummy_handle(
 
 
 def create_dummy_input(
-    param_type, name: str = "param", emit_init: bool = True
+    param_type: typing.Any, name: str = "param", emit_init: bool = True
 ) -> Handle:
     """Create a dummy input based on parameter type annotation.
 
@@ -304,6 +301,19 @@ def func_to_block(func: typing.Callable) -> BlockValue:
     """
     signature = inspect.signature(func)
 
+    # Resolve type hints to handle string annotations (from __future__ import annotations)
+    try:
+        func_globals = getattr(func, "__globals__", {})
+        type_hints = typing.get_type_hints(func, globalns=func_globals, localns=None)
+    except Exception:
+        # Fallback to raw annotations if get_type_hints fails
+        type_hints = {}
+        for param in signature.parameters.values():
+            if param.annotation is not inspect.Parameter.empty:
+                type_hints[param.name] = param.annotation
+        if signature.return_annotation is not inspect.Signature.empty:
+            type_hints["return"] = signature.return_annotation
+
     # Check type annotations ================
 
     # ========= Check Input Types =========
@@ -312,25 +322,31 @@ def func_to_block(func: typing.Callable) -> BlockValue:
         if param.annotation is inspect.Parameter.empty:
             raise TypeError(f"Parameter '{param.name}' must have a type annotation")
 
-        input_types[param.name] = handle_type_map(param.annotation)
+        # Use resolved type hint instead of raw annotation
+        param_type = type_hints.get(param.name, param.annotation)
+        input_types[param.name] = handle_type_map(param_type)
 
     if signature.return_annotation is inspect.Signature.empty:
         raise TypeError("Return type must have a type annotation")
 
     # ======== Check Output Types ========
+    # Use resolved return type hint instead of raw annotation
+    return_type = type_hints.get("return", signature.return_annotation)
     _output_type: ValueType | list[ValueType] | None = None
-    if getattr(signature.return_annotation, "__origin__", None) is tuple:
+    if getattr(return_type, "__origin__", None) is tuple:
         _output_type = []
-        for ret_type in signature.return_annotation.__args__:
+        for ret_type in return_type.__args__:
             _output_type.append(handle_type_map(ret_type))
     else:
-        _output_type = handle_type_map(signature.return_annotation)
+        _output_type = handle_type_map(return_type)
     # ======================= Check Input Types
 
-    # Create dummy inputs from the original type annotations (preserving Array types)
+    # Create dummy inputs from resolved type hints (preserving Array types)
     # Use emit_init=False to avoid emitting QInitOperation for BlockValue's internal inputs
     dummy_inputs = {
-        name: create_dummy_input(param.annotation, name, emit_init=False)
+        name: create_dummy_input(
+            type_hints.get(name, param.annotation), name, emit_init=False
+        )
         for name, param in signature.parameters.items()
     }
 

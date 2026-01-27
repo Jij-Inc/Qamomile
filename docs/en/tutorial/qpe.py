@@ -198,14 +198,16 @@ print(qiskit_circuit.draw(output="text"))
 
 # %%
 # Simple phase gate for qmc.qpe() (single application only)
+
+
 @qmc.qkernel
 def p_gate(q: qmc.Qubit, theta: float) -> qmc.Qubit:
     """Simple phase gate: P(θ)|1⟩ = e^{iθ}|1⟩"""
     return qmc.p(q, theta)
 
 @qmc.qkernel
-def qpe_3bit(phase: float) -> qmc.Float:
-    q_phase = qmc.qubit_array(3, name="phase_reg")
+def quantum_phase_estimation(phase: float, n: qmc.UInt) -> qmc.Float:
+    q_phase = qmc.qubit_array(n, name="phase_reg")
     target = qmc.qubit(name="target")
     target = qmc.x(target)  # |0⟩ → |1⟩
     # Use p_gate (qmc.qpe() internally repeats 2^k times)
@@ -222,7 +224,7 @@ def qpe_3bit(phase: float) -> qmc.Float:
 # %%
 transpiler = QiskitTranspiler()
 test_phase = math.pi / 2  # θ = π/2, expected output ≈ 0.25 (since θ/(2π) = 0.25)
-executable = transpiler.transpile(qpe_3bit, bindings={"phase": test_phase})
+executable = transpiler.transpile(quantum_phase_estimation, bindings={"phase": test_phase, "n": 3})
 
 executor = transpiler.executor()
 job = executable.sample(executor)

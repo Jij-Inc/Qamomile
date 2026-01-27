@@ -15,16 +15,17 @@ Example:
         return qmc.measure(phase)
 """
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Union
 
 import qamomile.circuit as qmc
-from qamomile.circuit.frontend.handle import Qubit, Vector, QFixed
+from qamomile.circuit.frontend.handle import QFixed, Qubit, Vector
+from qamomile.circuit.frontend.operation.control_flow import for_loop
 from qamomile.circuit.frontend.tracer import get_current_tracer
+from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
 )
-from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.types import QFixedType
 from qamomile.circuit.ir.value import Value
 
@@ -51,16 +52,16 @@ def qpe(
     Returns:
         QFixed: Phase register as quantum fixed-point number
     """
-    n = _get_size(counting)
+    n = counting.shape[0]  # UInt handle (symbolic or concrete)
     controlled_u = qmc.controlled(unitary)
 
     # 1. Hadamard gates on counting qubits
-    for i in range(n):
+    with for_loop(0, n, var_name="i") as i:
         counting[i] = qmc.h(counting[i])
 
     # 2. Controlled-U^(2^k) operations
     # Uses power parameter to emit Controlled(U^(2^k)), NOT Controlled(U)^(2^k)
-    for k in range(n):
+    with for_loop(0, n, var_name="k") as k:
         counting[k], target = controlled_u(counting[k], target, power=2**k, **params)
 
     # 3. Inverse QFT (emit as CompositeGateOperation for native backend support)
@@ -78,10 +79,14 @@ def _emit_iqft_and_cast_to_qfixed(qubits: Vector[Qubit]) -> QFixed:
     individual H, CP, SWAP gates), this emits a single CompositeGateOperation
     that the Qiskit emitter can render as native Qiskit QFT.inverse().
     """
-    n = _get_size(qubits)
+    n = qubits.shape[0]
+
+    # Get concrete size for CompositeGateOperation
+    # IQFT CompositeGateOperation requires concrete int for num_target_qubits
+    concrete_n = _get_concrete_size(n)
 
     # Collect input qubit values - borrow elements once
-    qubit_handles = [qubits[i] for i in range(n)]
+    qubit_handles = [qubits[i] for i in range(concrete_n)]
     operands = [h.value for h in qubit_handles]
 
     # Create result values (new versions) - these will be the qubit UUIDs for QFixed
@@ -97,7 +102,7 @@ def _emit_iqft_and_cast_to_qfixed(qubits: Vector[Qubit]) -> QFixed:
         results=iqft_results,
         gate_type=CompositeGateType.IQFT,
         num_control_qubits=0,
-        num_target_qubits=n,
+        num_target_qubits=concrete_n,
         has_implementation=False,  # Use native backend
     )
 
@@ -118,7 +123,7 @@ def _emit_iqft_and_cast_to_qfixed(qubits: Vector[Qubit]) -> QFixed:
             "cast_source_logical_id": qubits.value.logical_id,
             "cast_qubit_uuids": qubit_uuids,
             "cast_qubit_logical_ids": qubit_logical_ids,
-            "num_bits": n,
+            "num_bits": concrete_n,
             "int_bits": int_bits,
             "qubit_values": qubit_uuids,  # This is what MeasureQFixedOperation uses
         },
@@ -137,9 +142,18 @@ def _emit_iqft_and_cast_to_qfixed(qubits: Vector[Qubit]) -> QFixed:
     return QFixed(value=result_value)
 
 
-def _get_size(arr: Vector[Qubit]) -> int:
-    """Get array size as Python int."""
-    size = arr.shape[0]
+def _get_concrete_size(size: Union[int, Any]) -> int:
+    """Get array size as Python int (only for CompositeGateOperation metadata).
+
+    Args:
+        size: Array size, either an int or a handle with value information.
+
+    Returns:
+        Concrete integer size.
+
+    Raises:
+        ValueError: If the size cannot be resolved to a concrete integer.
+    """
     if isinstance(size, int):
         return size
     if hasattr(size, "value") and size.value.is_constant():

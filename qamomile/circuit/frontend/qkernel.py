@@ -1,6 +1,6 @@
 import inspect
 import warnings
-from typing import Any, Callable, Generic, ParamSpec, Type, TypeVar, cast
+from typing import Any, Callable, Generic, ParamSpec, TypeVar, cast, get_type_hints
 
 import numpy as np
 
@@ -11,14 +11,14 @@ from qamomile.circuit.frontend.func_to_block import (
     is_array_type,
     is_dict_type,
 )
-from qamomile.circuit.frontend.handle import Qubit, Observable
+from qamomile.circuit.frontend.handle import Observable, Qubit
+from qamomile.circuit.frontend.handle.containers import Dict
 from qamomile.circuit.frontend.handle.primitives import Float, Handle, UInt
 from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
 from qamomile.circuit.ir.block_value import BlockValue
 from qamomile.circuit.ir.graph import Graph
-from qamomile.circuit.ir.types import FloatType, UIntType, ObservableType
-from qamomile.circuit.ir.value import ArrayValue, Value, DictValue
-from qamomile.circuit.frontend.handle.containers import Dict
+from qamomile.circuit.ir.types import FloatType, ObservableType, UIntType
+from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -45,23 +45,39 @@ class QKernel(Generic[P, R]):
         self.name = func.__name__
         self.signature = inspect.signature(func)
 
+        # Resolve type hints to handle string annotations (from __future__ import annotations)
+        try:
+            func_globals = getattr(func, "__globals__", {})
+            type_hints = get_type_hints(func, globalns=func_globals, localns=None)
+        except Exception:
+            # Fallback to raw annotations if get_type_hints fails
+            type_hints = {}
+            for param in self.signature.parameters.values():
+                if param.annotation is not inspect.Parameter.empty:
+                    type_hints[param.name] = param.annotation
+            if self.signature.return_annotation is not inspect.Signature.empty:
+                type_hints["return"] = self.signature.return_annotation
+
         # Check type annotations
-        input_types: dict[str, Type[Handle]] = {}
+        input_types: dict[str, type[Handle]] = {}
         for param in self.signature.parameters.values():
             if param.annotation is inspect.Parameter.empty:
                 raise TypeError(f"Parameter '{param.name}' must have a type annotation")
-            input_types[param.name] = param.annotation
+            # Use resolved type hint instead of raw annotation
+            input_types[param.name] = type_hints.get(param.name, param.annotation)
 
         if self.signature.return_annotation is inspect.Signature.empty:
             raise TypeError("Return type must have a type annotation")
 
-        output_types: list[Type[Handle]] = []
+        output_types: list[type[Handle]] = []
+        # Use resolved return type hint instead of raw annotation
+        return_type = type_hints.get("return", self.signature.return_annotation)
         # check return is tuple or single
-        if getattr(self.signature.return_annotation, "__origin__", None) is tuple:
-            for ret_type in self.signature.return_annotation.__args__:
+        if getattr(return_type, "__origin__", None) is tuple:
+            for ret_type in return_type.__args__:
                 output_types.append(ret_type)
         else:
-            output_types.append(self.signature.return_annotation)
+            output_types.append(return_type)
 
         self.input_types = input_types
         self.output_types = output_types
@@ -122,9 +138,7 @@ class QKernel(Generic[P, R]):
                 actual_class = getattr(handle_type, "__origin__", handle_type)
                 # Extract shape from ArrayValue if available
                 if isinstance(val, ArrayValue) and val.shape:
-                    shape = tuple(
-                        UInt(value=dim_val) for dim_val in val.shape
-                    )
+                    shape = tuple(UInt(value=dim_val) for dim_val in val.shape)
                 else:
                     # Fallback: empty shape (will need runtime resolution)
                     shape = ()

@@ -404,12 +404,12 @@ class ExecutableProgram(Generic[T]):
                 expval_seg = self.compiled_expval[index]
 
                 # Apply qubit mapping to remap Pauli indices to physical qubits
-                observable = expval_seg.observable
+                hamiltonian = expval_seg.hamiltonian
                 if expval_seg.qubit_map:
-                    observable = observable.remap_qubits(expval_seg.qubit_map)
+                    hamiltonian = hamiltonian.remap_qubits(expval_seg.qubit_map)
 
                 # Use executor's estimate method
-                exp_val = executor.estimate(circuit, observable)
+                exp_val = executor.estimate(circuit, hamiltonian)
                 context.set(expval_seg.result_ref, exp_val)
                 result_value = exp_val
 

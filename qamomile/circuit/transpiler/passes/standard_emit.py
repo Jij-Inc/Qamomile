@@ -40,7 +40,6 @@ from qamomile.circuit.transpiler.passes.emit_base import (
     ValueResolver,
     LoopAnalyzer,
     CompositeDecomposer,
-    QubitResolutionResult,
 )
 from qamomile.circuit.transpiler.errors import (
     QubitIndexResolutionError,
@@ -215,7 +214,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                     is_array_element=v.parent_array is not None,
                     parent_array_name=v.parent_array.name if v.parent_array else None,
                     element_indices_names=element_indices_names,
-                    failure_reason=result.failure_reason or ResolutionFailureReason.UNKNOWN,
+                    failure_reason=result.failure_reason
+                    or ResolutionFailureReason.UNKNOWN,
                     failure_details=result.failure_details,
                 )
                 failed_operands.append(info)
@@ -240,7 +240,9 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                             operand_name=v.name,
                             operand_uuid=v.uuid,
                             is_array_element=v.parent_array is not None,
-                            parent_array_name=v.parent_array.name if v.parent_array else None,
+                            parent_array_name=v.parent_array.name
+                            if v.parent_array
+                            else None,
                             element_indices_names=element_indices_names,
                             failure_reason=ResolutionFailureReason.UNKNOWN,
                             failure_details="No indices resolved but no specific failure recorded",
@@ -501,7 +503,9 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             if len(op.key_vars) > 1:
                 # Key is a tuple, unpack to multiple variables
                 for i, kv_name in enumerate(op.key_vars):
-                    loop_bindings[kv_name] = key[i] if hasattr(key, "__getitem__") else key
+                    loop_bindings[kv_name] = (
+                        key[i] if hasattr(key, "__getitem__") else key
+                    )
             elif len(op.key_vars) == 1:
                 # Single key variable
                 loop_bindings[op.key_vars[0]] = key
@@ -1084,9 +1088,21 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             block_value, num_targets, local_bindings
         )
 
+        # Resolve power value from bindings if it's a Value
+        power_value = op.power
+        if isinstance(power_value, Value):
+            power_value = self._value_resolver.resolve_value(power_value, bindings)
+
+        # Handle UInt or other non-int types by getting numeric value
+        if hasattr(power_value, "value") and hasattr(power_value.value, "get_const"):
+            const_val = power_value.value.get_const()
+            if const_val is not None:
+                power_value = int(const_val)
+
         if unitary_gate is not None:
-            if op.power > 1:
-                unitary_gate = self._emitter.gate_power(unitary_gate, op.power)
+            # Only apply power if it's a concrete int value > 1
+            if isinstance(power_value, int) and power_value > 1:
+                unitary_gate = self._emitter.gate_power(unitary_gate, power_value)
             controlled_gate = self._emitter.gate_controlled(
                 unitary_gate, op.num_controls
             )
@@ -1094,7 +1110,19 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 circuit, controlled_gate, control_indices + target_indices
             )
         else:
-            for _ in range(op.power):
+            # Only unroll if power_value is a concrete int
+            if isinstance(power_value, int):
+                for _ in range(power_value):
+                    for ctrl_idx in control_indices:
+                        self._emit_controlled_block(
+                            circuit,
+                            block_value,
+                            ctrl_idx,
+                            target_indices,
+                            local_bindings,
+                        )
+            else:
+                # If power is symbolic, emit once (power will be handled by other means)
                 for ctrl_idx in control_indices:
                     self._emit_controlled_block(
                         circuit, block_value, ctrl_idx, target_indices, local_bindings

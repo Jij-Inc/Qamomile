@@ -74,6 +74,11 @@ def cx(control: Qubit, target: Qubit) -> tuple[Qubit, Qubit]:
     return _apply_two_qubit_gate(control, target, GateOperationType.CX)
 
 
+def cz(control: Qubit, target: Qubit) -> tuple[Qubit, Qubit]:
+    """CZ (Controlled-Z) gate."""
+    return _apply_two_qubit_gate(control, target, GateOperationType.CZ)
+
+
 def p(qubit: Qubit, theta: float | Float) -> Qubit:
     """Phase gate: P(theta)|1> = e^{i*theta}|1>."""
     # Consume the input handle (enforces linear type)
