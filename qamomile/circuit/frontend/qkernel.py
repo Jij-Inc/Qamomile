@@ -1,4 +1,6 @@
+import ast
 import inspect
+import textwrap
 import warnings
 from typing import Any, Callable, Generic, ParamSpec, TypeVar, cast, get_type_hints
 
@@ -155,9 +157,9 @@ class QKernel(Generic[P, R]):
         else:
             return cast(R, tuple(wrapped_results))
 
-    def _is_float_or_array_float(self, param_type: Any) -> bool:
-        """Check if type is float, Float, or Array[Float, ...]."""
-        if param_type in (float, Float):
+    def _is_parameterizable_type(self, param_type: Any) -> bool:
+        """Check if a type can be used as a symbolic parameter."""
+        if param_type in (float, Float, int, UInt):
             return True
         if is_array_type(param_type):
             # For generic aliases like Vector[Float], get element type from __args__
@@ -165,8 +167,39 @@ class QKernel(Generic[P, R]):
                 element_type = param_type.__args__[0]
             else:
                 element_type = getattr(param_type, "element_type", None)
-            return element_type in (float, Float)
+            return element_type in (float, Float, int, UInt)
         return False
+
+    def _auto_detect_parameters(self, kwargs: dict[str, Any]) -> list[str]:
+        """Auto-detect parameters: non-Qubit arguments without value or default."""
+        detected: list[str] = []
+        for name, param in self.signature.parameters.items():
+            param_type = param.annotation
+
+            # Skip Qubit types
+            if param_type is Qubit:
+                continue
+            if is_array_type(param_type):
+                if hasattr(param_type, "__args__") and param_type.__args__:
+                    elem = param_type.__args__[0]
+                else:
+                    elem = getattr(param_type, "element_type", None)
+                if elem is Qubit:
+                    continue
+
+            # Skip if value provided in kwargs
+            if name in kwargs:
+                continue
+
+            # Skip if has default value
+            if param.default is not inspect.Parameter.empty:
+                continue
+
+            # Auto-detect if parameterizable type
+            if self._is_parameterizable_type(param_type):
+                detected.append(name)
+
+        return detected
 
     def _validate_parameters(self, parameters: list[str]) -> None:
         """Validate that parameter names exist and have valid types."""
@@ -176,10 +209,10 @@ class QKernel(Generic[P, R]):
 
             param_type = self.input_types[name]
 
-            if not self._is_float_or_array_float(param_type):
+            if not self._is_parameterizable_type(param_type):
                 raise TypeError(
                     f"Parameter '{name}' has type {param_type}, "
-                    f"but only float and Array[Float] can be parameters"
+                    f"but only float, int, UInt, and their arrays can be parameters"
                 )
 
     def _validate_kwargs(self, parameters: list[str], kwargs: dict[str, Any]) -> None:
@@ -229,6 +262,14 @@ class QKernel(Generic[P, R]):
             )
             return Observable(value=value)
 
+        if param_type in (int, UInt):
+            value = Value(
+                type=UIntType(),
+                name=name,
+                params={"parameter": name},
+            )
+            return UInt(value=value)
+
         if is_array_type(param_type):
             # For generic aliases like Vector[Float], get element type from __args__
             if hasattr(param_type, "__args__") and param_type.__args__:
@@ -236,12 +277,19 @@ class QKernel(Generic[P, R]):
             else:
                 element_type = getattr(param_type, "element_type", None)
 
-            if element_type not in (Float, float):
-                raise TypeError("Array parameter must have Float element type")
+            # Determine IR type for the element
+            if element_type in (Float, float):
+                ir_element_type = FloatType()
+            elif element_type in (UInt, int):
+                ir_element_type = UIntType()
+            else:
+                raise TypeError(
+                    f"Array parameter must have Float or UInt element type, got {element_type}"
+                )
 
             # Create placeholder ArrayValue (shape determined at runtime)
             array_value = ArrayValue(
-                type=FloatType(),
+                type=ir_element_type,
                 name=name,
                 shape=(),  # Empty - will be set at runtime
                 params={"parameter": name},
@@ -263,6 +311,59 @@ class QKernel(Generic[P, R]):
             return instance
 
         raise TypeError(f"Cannot create parameter for type {param_type}")
+
+    def _extract_return_names(self) -> list[str] | None:
+        """Extract return variable names from AST.
+
+        Returns:
+            List of variable names from return statement, or None if extraction fails.
+        """
+        try:
+            source = inspect.getsource(self.raw_func)
+            # Dedent the source to handle nested functions
+            source = textwrap.dedent(source)
+            tree = ast.parse(source)
+
+            # Find the function definition (look for the first FunctionDef in the module)
+            for node in tree.body:
+                if isinstance(node, ast.FunctionDef):
+                    # Look for Return statements in the function body
+                    for stmt in node.body:
+                        if isinstance(stmt, ast.Return) and stmt.value is not None:
+                            return_value = stmt.value
+
+                            # Handle tuple return: return q0, q1, q2
+                            if isinstance(return_value, ast.Tuple):
+                                names = []
+                                for elt in return_value.elts:
+                                    if isinstance(elt, ast.Name):
+                                        names.append(elt.id)
+                                    elif isinstance(elt, ast.Subscript):
+                                        # Handle subscript like qs[0]
+                                        names.append(ast.unparse(elt))
+                                    else:
+                                        # For complex expressions, use unparsed form
+                                        names.append(ast.unparse(elt))
+                                return names
+
+                            # Handle single return: return q
+                            elif isinstance(return_value, ast.Name):
+                                return [return_value.id]
+
+                            # Handle subscript: return qs[0]
+                            elif isinstance(return_value, ast.Subscript):
+                                return [ast.unparse(return_value)]
+
+                            # For other expressions, use unparsed form
+                            else:
+                                return [ast.unparse(return_value)]
+
+            # No return statement found
+            return None
+
+        except Exception:
+            # If AST parsing fails, return None (no right labels)
+            return None
 
     def _create_bound_input(self, param_type: Any, name: str, value: Any) -> Handle:
         """Create a Handle for a bound (concrete) value."""
@@ -360,14 +461,17 @@ class QKernel(Generic[P, R]):
 
         Args:
             parameters: List of argument names to keep as unbound parameters.
-                       Only float and Array[Float] types are allowed.
+                       - None (default): Auto-detect parameters (non-Qubit args without value/default)
+                       - []: No parameters (all non-Qubit args must have value/default)
+                       - ["name"]: Explicit parameter list
+                       Only float, int, UInt, and their arrays are allowed as parameters.
             **kwargs: Concrete values for non-parameter arguments.
 
         Returns:
             Graph: The traced computation graph ready for transpilation.
 
         Raises:
-            TypeError: If a non-float type is specified as parameter.
+            TypeError: If a non-parameterizable type is specified as parameter.
             ValueError: If required arguments are missing.
 
         Example:
@@ -377,7 +481,10 @@ class QKernel(Generic[P, R]):
                 q = qm.rx(q, theta)
                 return q
 
-            # theta as parameter
+            # Auto-detect theta as parameter
+            graph = circuit.build()
+
+            # Explicit parameter list
             graph = circuit.build(parameters=["theta"])
 
             # theta bound to concrete value
@@ -389,7 +496,7 @@ class QKernel(Generic[P, R]):
             ```
         """
         if parameters is None:
-            parameters = []
+            parameters = self._auto_detect_parameters(kwargs)
 
         # Validate parameters argument
         self._validate_parameters(parameters)
@@ -449,6 +556,65 @@ class QKernel(Generic[P, R]):
             name=self.name,
             parameters=tracked_parameters,
         )
+
+    def draw(
+        self,
+        inline: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        """Visualize the circuit using Matplotlib.
+
+        This method builds the computation graph and creates a static visualization.
+        Parameters are auto-detected: non-Qubit arguments without concrete values
+        are shown as symbolic parameters.
+
+        Args:
+            inline: If True, expand CallBlockOperation contents (inlining).
+                   If False (default), show CallBlockOperation as boxes.
+            **kwargs: Concrete values for arguments. Arguments not provided here
+                     (and without defaults) will be shown as symbolic parameters.
+
+        Returns:
+            matplotlib.figure.Figure object.
+
+        Raises:
+            ImportError: If matplotlib is not installed.
+
+        Example:
+            ```python
+            import qamomile.circuit as qm
+
+            @qm.qkernel
+            def inner(q: qm.Qubit) -> qm.Qubit:
+                return qm.x(q)
+
+            @qm.qkernel
+            def circuit(q: qm.Qubit, theta: float) -> qm.Qubit:
+                q = inner(q)
+                q = qm.h(q)
+                q = qm.rx(q, theta)
+                return q
+
+            # Draw with auto-detected symbolic parameter (theta)
+            fig = circuit.draw()
+
+            # Draw with bound parameter
+            fig = circuit.draw(theta=0.5)
+
+            # Draw with blocks as boxes (default)
+            fig = circuit.draw()
+
+            # Draw with blocks expanded (inlined)
+            fig = circuit.draw(inline=True)
+            ```
+        """
+        from qamomile.circuit.visualization import MatplotlibDrawer
+
+        graph = self.build(parameters=None, **kwargs)
+        # Extract return variable names from AST and set them in the graph
+        graph.output_names = self._extract_return_names() or []
+        drawer = MatplotlibDrawer(graph)
+        return drawer.draw(inline=inline)
 
 
 def qkernel(func: Callable[P, R]) -> QKernel[P, R]:
