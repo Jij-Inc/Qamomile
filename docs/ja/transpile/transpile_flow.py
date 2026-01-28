@@ -24,9 +24,6 @@
 # まずは基本的な使い方を確認しましょう。
 
 # %%
-import qamomile.circuit as qmc
-
-
 # %% [markdown]
 # ### QPEの概要
 #
@@ -37,9 +34,11 @@ import qamomile.circuit as qmc
 # - 出力: `QFixed`（量子固定小数点数）
 #
 # `QFixed`を`measure()`で測定すると、自動的に`Float`にデコードされます。
-
 # %%
 import math
+
+import qamomile.circuit as qmc
+
 
 # 位相ゲートをユニタリとして定義
 # P(θ)|1⟩ = e^{iθ}|1⟩ なので、|1⟩は固有値e^{iθ}を持つ固有状態
@@ -73,6 +72,7 @@ def qpe_3bit(phase: float) -> qmc.Float:
     # QFixedを測定してFloatに変換
     return qmc.measure(phase_q)
 
+
 # %%
 # Transpile and Execute
 from qamomile.qiskit import QiskitTranspiler
@@ -91,17 +91,19 @@ for value, count in result.results:
 
 # %% [markdown]
 # bitstringではなくてFloatとして測定されていることがわかります。
-# 
+#
 # ## Inline Pass
 # トランスパイルの各ステップを詳しく見ていきましょう。
 # まずは`Inline`パスです。これは、すべての`CallBlockOperation`をインライン展開します。
 # 先ほどのQPEの例だとインライン展開するものがないので、別の例を見てみましょう。
+
 
 # %%
 @qmc.qkernel
 def add_one(q: qmc.Qubit) -> qmc.Qubit:
     """Add one to a qubit (|0⟩ → |1⟩, |1⟩ → |0⟩)"""
     return qmc.x(q)
+
 
 @qmc.qkernel
 def add_two(q: qmc.Qubit) -> qmc.Qubit:
@@ -110,12 +112,14 @@ def add_two(q: qmc.Qubit) -> qmc.Qubit:
     q = add_one(q)
     return q
 
+
 @qmc.qkernel
 def add_three(q: qmc.Qubit) -> qmc.Qubit:
     """Add three to a qubit by calling add_two and add_one"""
     q = add_two(q)
     q = add_one(q)
     return q
+
 
 # %# [markdown]
 # これらのカーネルをインライン展開してみましょう。
@@ -127,6 +131,7 @@ from qamomile.circuit.ir.operation.gate import GateOperation
 
 transpiler = QiskitTranspiler()
 
+
 def print_block_operations(block: Block):
     for op in block.operations:
         print(op.__class__.__name__ + ":", end="")
@@ -136,6 +141,7 @@ def print_block_operations(block: Block):
             print(op.gate_type)
         else:
             print("")
+
 
 # インライン展開前
 block = transpiler.to_block(add_three)
@@ -153,20 +159,37 @@ print_block_operations(inlined_block)
 # `add_three`が`add_two`と`add_one`の中身、つまり`X`ゲート3回に展開されていることがわかります。
 
 # %% [markdown]
-# ## Analyze Pass and Separate Pass
-# 次に`Analyze`パスです。これは、依存関係の解析と検証を行います。特に計算パスに対して変更は行われません。
-# その次に`Separate`パスです。これは、量子セグメントと古典セグメントに分離します。
+# ## Linear Validate, Constant Fold, Analyze, Separate Pass
+#
+# インライン展開の後、トランスパイラーはいくつかの追加パスを実行します：
+#
+# - **Linear Validate**: 線形型の検証 — 各量子ビットが最大1回しか消費されないことを保証します（量子複製不可能定理）。量子ビットが再利用された場合 `LinearTypeError` を送出します。
+# - **Constant Fold**: すべてのオペランドが定数または束縛パラメータである算術式（`BinOp`）をコンパイル時に評価します。これにより `phase * 2` のような式が古典操作として残り、セグメント分離を壊すことを防ぎます。
+# - **Analyze**: ブロックの入出力型が古典型であることの検証、依存関係グラフの構築、および量子操作が測定結果に依存していないことの検証を行います。
+# - **Separate**: プログラムを `classical_prep → quantum → classical_post` の構造に分離します。
+#
 # これらのパスをQPEの例で見てみましょう。
 
 # %%
-block = transpiler.to_block(qpe_3bit)
+block = transpiler.to_block(qpe_3bit, bindings={"phase": test_phase})
 inlined_block = transpiler.inline(block)
-analyzed_block = transpiler.analyze(inlined_block)
+validated_block = transpiler.linear_validate(inlined_block)
+folded_block = transpiler.constant_fold(validated_block, bindings={"phase": test_phase})
+analyzed_block = transpiler.analyze(folded_block)
 separated_program = transpiler.separate(analyzed_block)
 
 
 # %%
-for i, segment in enumerate(separated_program.segments):
+segments = []
+if separated_program.classical_prep:
+    segments.append(separated_program.classical_prep)
+segments.append(separated_program.quantum)
+if separated_program.expval:
+    segments.append(separated_program.expval)
+if separated_program.classical_post:
+    segments.append(separated_program.classical_post)
+
+for i, segment in enumerate(segments):
     print(f"Segment {i}: {segment.kind.name}")
     for op in segment.operations:
         print(" ", op.__class__.__name__)
@@ -179,7 +202,9 @@ for i, segment in enumerate(separated_program.segments):
 # %%
 print(f"Boundaries: {len(separated_program.boundaries)}")
 for boundary in separated_program.boundaries:
-    print(f"  {boundary.operation.__class__.__name__}: segment {boundary.source_segment_index} → {boundary.target_segment_index}")
+    print(
+        f"  {boundary.operation.__class__.__name__}: segment {boundary.source_segment_index} → {boundary.target_segment_index}"
+    )
 
 # %% [markdown]
 # ## Emit Pass
@@ -208,8 +233,17 @@ print(circuit.draw(output="text"))
 
 # 古典処理の確認
 print("\n=== 古典後処理 ===")
-print(f"Total segments: {len(separated_program.segments)}")
-for i, segment in enumerate(separated_program.segments):
+segments = []
+if separated_program.classical_prep:
+    segments.append(separated_program.classical_prep)
+segments.append(separated_program.quantum)
+if separated_program.expval:
+    segments.append(separated_program.expval)
+if separated_program.classical_post:
+    segments.append(separated_program.classical_post)
+
+print(f"Total segments: {len(segments)}")
+for i, segment in enumerate(segments):
     print(f"Segment {i}: {segment.kind.name}")
     if segment.kind.name == "CLASSICAL":
         for op in segment.operations:
@@ -227,5 +261,3 @@ for i, segment in enumerate(separated_program.segments):
 #
 # これにより、最初の例で見たように`Measured value: 0.25`という`Float`値が得られます。
 # ユーザーは生のビット列を意識せずに、高レベルな型（`QFixed` → `Float`）で結果を受け取れます。
-
-
