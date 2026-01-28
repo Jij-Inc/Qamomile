@@ -51,13 +51,11 @@
 # In quantum computers, we use **qubits** (quantum bits).
 # Qubits can exist in a **superposition** of 0 and 1.
 #
-# ```
-# Qubit: Superposition of |0⟩ and |1⟩ (undetermined until measured)
-# ```
+# **Qubit**: Superposition of $|0\rangle$ and $|1\rangle$ (undetermined until measured)
 #
 # Notation explanation:
-# - `|0⟩` (ket 0): The "0" state of a qubit
-# - `|1⟩` (ket 1): The "1" state of a qubit
+# - $|0\rangle$ (ket 0): The "0" state of a qubit
+# - $|1\rangle$ (ket 1): The "1" state of a qubit
 #
 # ### Measurement
 #
@@ -79,8 +77,8 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # One of the most basic quantum gates is the **X gate**.
 # The X gate flips the state of a qubit:
-# - `|0⟩` → `|1⟩`
-# - `|1⟩` → `|0⟩`
+# - $|0\rangle \rightarrow |1\rangle$
+# - $|1\rangle \rightarrow |0\rangle$
 #
 # It works the same as a "NOT gate" in classical computers.
 
@@ -88,10 +86,10 @@ from qamomile.qiskit import QiskitTranspiler
 @qm.qkernel
 def x_gate_circuit() -> qm.Bit:
     """First quantum circuit applying the X gate"""
-    # Create a qubit (initial state is |0⟩)
+    # Create a qubit (initial state is $|0\rangle$)
     q = qm.qubit(name="q")
 
-    # Apply X gate to transform |0⟩ → |1⟩
+    # Apply X gate to transform $|0\rangle \rightarrow |1\rangle$
     q = qm.x(q)
 
     # Measure and return the result
@@ -103,7 +101,7 @@ def x_gate_circuit() -> qm.Bit:
 #
 # 1. **`@qm.qkernel`**: Decorator indicating this function is a quantum kernel (a function defining a quantum circuit)
 # 2. **`-> qm.Bit`**: Return type. The measurement result becomes a classical bit (`Bit`)
-# 3. **`qm.qubit(name="q")`**: Creates one qubit. Initial state is `|0⟩`
+# 3. **`qm.qubit(name="q")`**: Creates one qubit. Initial state is $|0\rangle$
 # 4. **`q = qm.x(q)`**: Applies the X gate. **Important: You must reassign the result**
 # 5. **`qm.measure(q)`**: Measures the qubit and gets the result as a classical bit
 
@@ -234,7 +232,7 @@ for value, count in result.results:
 # %% [markdown]
 # ### Result Explanation
 #
-# Applying the X gate to `|0⟩` produces `|1⟩`.
+# Applying the X gate to $|0\rangle$ produces $|1\rangle$.
 # Therefore, the measurement result should always be **1**.
 #
 # Confirm that in the results above, all 1000 measurements yielded `1`.
@@ -293,7 +291,7 @@ for value, count in result_id.results:
     print(f"  Measurement result: {value}, Count: {count}")
 
 # %% [markdown]
-# Since the initial state of a qubit is `|0⟩`, the measurement result is always **0** if nothing is applied.
+# Since the initial state of a qubit is $|0\rangle$, the measurement result is always **0** if nothing is applied.
 
 # %% [markdown]
 # ## 8. Summary
@@ -301,7 +299,7 @@ for value, count in result_id.results:
 # In this tutorial, you learned:
 #
 # 1. **Qamomile basics**: Define quantum circuits with the `@qm.qkernel` decorator
-# 2. **Qubits**: Create with `qm.qubit()`, initial state is `|0⟩`
+# 2. **Qubits**: Create with `qm.qubit()`, initial state is $|0\rangle$
 # 3. **Quantum gates**: Manipulate states with gates like `qm.x()`
 # 4. **Linear type system**: **Always reassign** after applying gates (`q = qm.x(q)`)
 # 5. **Measurement**: Convert quantum states to classical bits with `qm.measure()`

@@ -51,13 +51,13 @@ def iqft(qubits: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
 # ### Phase Gate の定義
 # 今回はQPEのターゲットとしてPhase Gateを使用します。Phase Gateは以下のように定義されます。
 # $$P(\theta)|1\rangle = e^{i\theta}|1\rangle$$
-# ここで、$|1\rangle$は固有状態であり、$e^{i\theta}$は対応する固有値です。
+# ここで、$|1\rangle$ は固有状態であり、$e^{i\theta}$ は対応する固有値です。
 # この固有値をQPEで推定します。
 
 # %%
 @qmc.qkernel
 def phase_gate(q: qmc.Qubit, theta: float, iter: int) -> qmc.Qubit:
-    """Phase gate: P(θ)|1⟩ = e^{iθ}|1⟩"""
+    """Phase gate: $P(\\theta)|1\\rangle = e^{i\\theta}|1\\rangle$"""
     for _ in qmc.range(iter):
         q = qmc.p(q, theta)
     return q
@@ -200,7 +200,7 @@ print(qiskit_circuit.draw(output="text"))
 # qmc.qpe()用のシンプルなphase gate（1回適用のみ）
 @qmc.qkernel
 def p_gate(q: qmc.Qubit, theta: float) -> qmc.Qubit:
-    """Simple phase gate: P(θ)|1⟩ = e^{iθ}|1⟩"""
+    """Simple phase gate: $P(\\theta)|1\\rangle = e^{i\\theta}|1\\rangle$"""
     return qmc.p(q, theta)
 
 @qmc.qkernel
@@ -213,8 +213,8 @@ def qpe_3bit(phase: float) -> qmc.Float:
     return qmc.measure(phase_q)
 
 # %% [markdown]
-# phaseを格納するregisterを用意し、ターゲット状態を初期化した後、qpe()関数を呼び出すだけでQPEが実装できます。
-# 測定結果はQFixed型で返されるため、measure()関数で測定してFloat型に変換します。measureは渡される型に応じて自動的にデコードを行います。
+# phaseを格納するregisterを用意し、ターゲット状態を初期化した後、`qpe()`関数を呼び出すだけでQPEが実装できます。
+# 測定結果は`QFixed`型で返されるため、`measure()`関数で測定して`Float`型に変換します。`measure()`は渡される型に応じて自動的にデコードを行います。
 # 
 # ### Qiskitを用いたシミュレーション実行
 # 先ほどと同様にQiskitシミュレータで実行し、結果を確認します。
@@ -231,9 +231,9 @@ for value, count in result.results:
     print(f"Measured value: {value}, Count: {count}")
 
 # %% [markdown]
-# Qamomileのqpe()関数を使用しても、同様にQPEを実装して実行できることがわかりました。このようにqamomileではQFixed型を使用して量子固定小数点数を扱うことで、量子アルゴリズムの実装が簡素化されます。
-# またその場合、measure()関数を使用してQFixedをFloatに変換するだけで、デコードも自動的に行われます。
-# qpe関数を利用した場合の生成される量子回路も確認してみましょう。
+# Qamomileの`qpe()`関数を使用しても、同様にQPEを実装して実行できることがわかりました。このようにqamomileでは`QFixed`型を使用して量子固定小数点数を扱うことで、量子アルゴリズムの実装が簡素化されます。
+# またその場合、`measure()`関数を使用して`QFixed`を`Float`に変換するだけで、デコードも自動的に行われます。
+# `qpe()`関数を利用した場合の生成される量子回路も確認してみましょう。
 
 # %%
 qiskit_circuit = executable.get_first_circuit()
