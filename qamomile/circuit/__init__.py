@@ -1,28 +1,29 @@
-# Pauli operators submodule (qm.pauli.X, qm.pauli.Z, etc.)
-from . import pauli
+# Frontend API
 from .frontend.composite_gate import CompositeGate, composite_gate
 from .frontend.constructors import bit, float_, qubit, qubit_array, uint
 from .frontend.handle import (
     Bit,
+    Dict,
     Float,
-    HamiltonianExpr,
     Handle,
     Matrix,
+    Observable,
     QFixed,
     Qubit,
     Tensor,
+    Tuple,
     UInt,
     Vector,
 )
 from .frontend.operation.cast import cast
-from .frontend.operation.control_flow import range
+from .frontend.operation.control_flow import for_items, items, range
 from .frontend.operation.controlled import controlled
 from .frontend.operation.expval import expval
 from .frontend.operation.measurement import measure
-from .frontend.operation.qubit_gates import cp, cx, h, p, rx, ry, rz, rzz, swap, x
+from .frontend.operation.qubit_gates import cp, cx, cz, h, p, rx, ry, rz, rzz, swap, x
 from .frontend.qkernel import QKernel, qkernel
 
-# Standard library
+# Standard library circuits
 from .stdlib import iqft, qft, qpe
 
 __all__ = [
@@ -39,6 +40,7 @@ __all__ = [
     "h",
     "x",
     "cx",
+    "cz",
     "p",
     "rx",
     "ry",
@@ -48,19 +50,21 @@ __all__ = [
     "swap",
     "measure",
     "expval",
+    "for_items",
+    "items",
     "range",
     "Bit",
+    "Dict",
     "Float",
     "Handle",
     "Qubit",
     "QFixed",
+    "Tuple",
     "UInt",
     "Vector",
     "Matrix",
     "Tensor",
-    "HamiltonianExpr",
-    # Pauli submodule
-    "pauli",
+    "Observable",
     # stdlib
     "qpe",
     "iqft",

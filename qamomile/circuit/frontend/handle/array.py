@@ -234,19 +234,20 @@ class Vector(ArrayBase[T]):
 
     Example:
         ```python
-        import qamomile as qm
+        import qamomile.circuit as qmc
 
         # Create a vector of 3 qubits
-        qubits: qm.Vector[qm.Qubit] = qm.Vector(size=3)
+        qubits: qmc.Vector[qmc.Qubit] = qmc.qubit_array(3, name="qubits")
 
         # Access elements
         q0 = qubits[0]
-        q0 = qm.h(q0)
+        q0 = qmc.h(q0)
         qubits[0] = q0
 
-        # Iterate over elements
-        for q in qubits:
-            q = qm.h(q)
+        # Apply H gate to all qubits (CORRECT)
+        n = qubits.shape[0]
+        for i in qmc.range(n):
+            qubits[i] = qmc.h(qubits[i])
         ```
     """
 
@@ -274,12 +275,34 @@ class Vector(ArrayBase[T]):
         self._set_element((index,))
 
     def __iter__(self) -> Iterator[T]:
-        """Iterate over elements of the vector."""
-        size = self._shape[0]
-        if isinstance(size, UInt):
-            raise TypeError("Cannot iterate over vector with symbolic size")
-        for i in range(size):
-            yield self[i]
+        """Iteration over Vector is prohibited to prevent common bugs.
+
+        Direct iteration like 'for item in vector:' doesn't support in-place
+        modification in @qkernel contexts. Use explicit index-based loops instead.
+
+        Raises:
+            TypeError: Always raised to prevent iteration.
+
+        Example:
+            Instead of:
+                for qi in qubits:
+                    qi = qm.h(qi)  # This doesn't modify qubits!
+
+            Use:
+                for i in qmc.range(len(qubits)):
+                    qubits[i] = qm.h(qubits[i])  # This works correctly
+        """
+        raise TypeError(
+            "Direct iteration over Vector is not supported in @qkernel functions.\n"
+            "Vector iteration cannot modify elements in-place, leading to silent bugs.\n\n"
+            "Use explicit index-based iteration instead:\n"
+            "  # Incorrect:\n"
+            "  for item in vector:\n"
+            "      item = qmc.operation(item)\n\n"
+            "  # Correct:\n"
+            "  for i in qmc.range(len(vector)):\n"
+            "      vector[i] = qmc.operation(vector[i])\n"
+        )
 
 
 @dataclasses.dataclass

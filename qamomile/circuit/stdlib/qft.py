@@ -3,6 +3,11 @@
 This module provides QFT and IQFT as CompositeGate classes, serving as
 a reference for implementing custom composite gates using the frontend API.
 
+Multiple decomposition strategies are available:
+    - "standard": Full precision QFT with O(n^2) gates
+    - "approximate": Truncated rotations with O(n*k) gates (default k=3)
+    - "approximate_k2": Truncated rotations with k=2
+
 Example:
     from qamomile.circuit.stdlib.qft import QFT, IQFT, qft, iqft
 
@@ -14,9 +19,13 @@ Example:
         qubits = iqft(qubits)
         return qubits
 
-    # Or using class directly
+    # Or using class directly with strategy selection
     qft_gate = QFT(3)
-    result = qft_gate(q0, q1, q2)
+    result = qft_gate(q0, q1, q2, strategy="approximate")
+
+    # Compare resources
+    standard_resources = qft_gate.get_resources_for_strategy("standard")
+    approx_resources = qft_gate.get_resources_for_strategy("approximate")
 """
 
 from __future__ import annotations
@@ -32,6 +41,14 @@ from qamomile.circuit.ir.operation.composite_gate import (
     ResourceMetadata,
 )
 
+# Import strategies
+from qamomile.circuit.stdlib.qft_strategies import (
+    StandardQFTStrategy,
+    ApproximateQFTStrategy,
+    StandardIQFTStrategy,
+    ApproximateIQFTStrategy,
+)
+
 if TYPE_CHECKING:
     pass
 
@@ -42,12 +59,24 @@ class QFT(CompositeGate):
     The QFT is the quantum analog of the discrete Fourier transform.
     It's a key component of many quantum algorithms.
 
+    Available strategies:
+        - "standard": Full precision QFT (default)
+        - "approximate": Truncated rotations (k=3)
+        - "approximate_k2": Truncated rotations (k=2)
+
     Example:
         # Create QFT for 3 qubits
         qft_gate = QFT(3)
 
-        # Apply to qubits
+        # Apply to qubits (uses default strategy)
         result = qft_gate(q0, q1, q2)
+
+        # Apply with specific strategy
+        result = qft_gate(q0, q1, q2, strategy="approximate")
+
+        # Compare resources between strategies
+        standard = qft_gate.get_resources_for_strategy("standard")
+        approx = qft_gate.get_resources_for_strategy("approximate")
 
         # Or use the factory function
         qubits = qft(qubit_vector)
@@ -55,6 +84,15 @@ class QFT(CompositeGate):
 
     gate_type = CompositeGateType.QFT
     custom_name = "qft"
+
+    # Initialize strategy registry for QFT
+    _strategies = {
+        "standard": StandardQFTStrategy(),
+        "approximate": ApproximateQFTStrategy(truncation_depth=3),
+        "approximate_k2": ApproximateQFTStrategy(truncation_depth=2),
+        "approximate_k4": ApproximateQFTStrategy(truncation_depth=4),
+    }
+    _default_strategy = "standard"
 
     def __init__(self, num_qubits: int):
         """Initialize QFT gate.
@@ -132,6 +170,11 @@ class IQFT(CompositeGate):
     - Shor's algorithm
     - Quantum counting
 
+    Available strategies:
+        - "standard": Full precision IQFT (default)
+        - "approximate": Truncated rotations (k=3)
+        - "approximate_k2": Truncated rotations (k=2)
+
     Example:
         # Create IQFT for 3 qubits
         iqft_gate = IQFT(3)
@@ -139,12 +182,24 @@ class IQFT(CompositeGate):
         # Apply to qubits
         result = iqft_gate(q0, q1, q2)
 
+        # Apply with specific strategy
+        result = iqft_gate(q0, q1, q2, strategy="approximate")
+
         # Or use the factory function
         qubits = iqft(qubit_vector)
     """
 
     gate_type = CompositeGateType.IQFT
     custom_name = "iqft"
+
+    # Initialize strategy registry for IQFT
+    _strategies = {
+        "standard": StandardIQFTStrategy(),
+        "approximate": ApproximateIQFTStrategy(truncation_depth=3),
+        "approximate_k2": ApproximateIQFTStrategy(truncation_depth=2),
+        "approximate_k4": ApproximateIQFTStrategy(truncation_depth=4),
+    }
+    _default_strategy = "standard"
 
     def __init__(self, num_qubits: int):
         """Initialize IQFT gate.

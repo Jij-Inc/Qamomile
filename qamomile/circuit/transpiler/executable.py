@@ -87,6 +87,23 @@ class ExecutableProgram(Generic[T]):
         """Check if this program has unbound parameters."""
         return len(self.parameter_names) > 0
 
+    @property
+    def quantum_circuit(self) -> T:
+        """Get the single quantum circuit.
+
+        Returns the quantum circuit from the single quantum segment.
+        This property enforces Qamomile's C→Q→C execution pattern.
+
+        Returns:
+            The backend-specific quantum circuit
+
+        Raises:
+            ExecutionError: If no quantum circuit exists
+        """
+        if not self.compiled_quantum:
+            raise ExecutionError("No quantum circuit")
+        return self.compiled_quantum[0].circuit
+
     def _convert_user_bindings(
         self,
         bindings: dict[str, Any] | None,
@@ -387,12 +404,12 @@ class ExecutableProgram(Generic[T]):
                 expval_seg = self.compiled_expval[index]
 
                 # Apply qubit mapping to remap Pauli indices to physical qubits
-                observable = expval_seg.observable
+                hamiltonian = expval_seg.hamiltonian
                 if expval_seg.qubit_map:
-                    observable = observable.remap_qubits(expval_seg.qubit_map)
+                    hamiltonian = hamiltonian.remap_qubits(expval_seg.qubit_map)
 
                 # Use executor's estimate method
-                exp_val = executor.estimate(circuit, observable)
+                exp_val = executor.estimate(circuit, hamiltonian)
                 context.set(expval_seg.result_ref, exp_val)
                 result_value = exp_val
 

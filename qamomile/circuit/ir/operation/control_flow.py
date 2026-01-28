@@ -55,6 +55,42 @@ class ForOperation(Operation):
 
 
 @dataclasses.dataclass
+class ForItemsOperation(Operation):
+    """Represents iteration over dict/iterable items.
+
+    Example:
+        for (i, j), Jij in qmc.items(ising):
+            body
+
+    Attributes:
+        key_vars: Names of key unpacking variables (e.g., ["i", "j"] for tuple keys)
+        value_var: Name of value variable (e.g., "Jij")
+        operations: List of operations in the loop body
+        operands[0]: The dict/iterable value (DictValue type)
+
+    Note:
+        This operation is always unrolled at transpile time since quantum
+        backends cannot natively iterate over classical data structures.
+    """
+
+    key_vars: list[str] = dataclasses.field(default_factory=list)
+    value_var: str = ""
+    operations: list[Operation] = dataclasses.field(default_factory=list)
+
+    @property
+    def signature(self) -> Signature:
+        # Signature is flexible - operand is the dict/iterable being iterated
+        return Signature(
+            operands=[ParamHint("iterable", BlockType())],  # BlockType as placeholder
+            results=[],
+        )
+
+    @property
+    def operation_kind(self) -> OperationKind:
+        return OperationKind.CONTROL
+
+
+@dataclasses.dataclass
 class IfOperation(Operation):
     """Represents an if-else conditional operation.
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import abc
 import dataclasses
-from typing import TYPE_CHECKING, Callable, Sequence, Any, overload
+from typing import TYPE_CHECKING, Callable, ClassVar, Sequence, Any, overload
 
 from qamomile.circuit.frontend.handle.primitives import Qubit
 from qamomile.circuit.frontend.tracer import get_current_tracer, trace, Tracer
@@ -18,6 +18,7 @@ from qamomile.circuit.ir.value import Value
 if TYPE_CHECKING:
     from qamomile.circuit.ir.block_value import BlockValue
     from qamomile.circuit.frontend.handle.array import Vector
+    from qamomile.circuit.frontend.decomposition import DecompositionStrategy
 
 
 class CompositeGate(abc.ABC):
@@ -68,6 +69,72 @@ class CompositeGate(abc.ABC):
 
     gate_type: CompositeGateType = CompositeGateType.CUSTOM
     custom_name: str = ""
+
+    # Strategy registry: maps strategy name to DecompositionStrategy
+    _strategies: ClassVar[dict[str, "DecompositionStrategy"]] = {}
+    _default_strategy: ClassVar[str] = "standard"
+
+    @classmethod
+    def register_strategy(
+        cls,
+        name: str,
+        strategy: "DecompositionStrategy",
+    ) -> None:
+        """Register a decomposition strategy for this gate type.
+
+        Args:
+            name: Strategy identifier (e.g., "standard", "approximate")
+            strategy: DecompositionStrategy instance
+
+        Example:
+            QFT.register_strategy("approximate", ApproximateQFTStrategy(k=3))
+        """
+        # Create a new dict if inheriting from parent class
+        if "_strategies" not in cls.__dict__:
+            cls._strategies = {}
+        cls._strategies[name] = strategy
+
+    @classmethod
+    def get_strategy(
+        cls,
+        name: str | None = None,
+    ) -> "DecompositionStrategy | None":
+        """Get a registered decomposition strategy.
+
+        Args:
+            name: Strategy name, or None for default strategy
+
+        Returns:
+            DecompositionStrategy instance, or None if not found
+        """
+        target_name = name or cls._default_strategy
+        return cls._strategies.get(target_name)
+
+    @classmethod
+    def list_strategies(cls) -> list[str]:
+        """List all registered strategy names.
+
+        Returns:
+            List of strategy names
+        """
+        return list(cls._strategies.keys())
+
+    @classmethod
+    def set_default_strategy(cls, name: str) -> None:
+        """Set the default decomposition strategy.
+
+        Args:
+            name: Strategy name to use as default
+
+        Raises:
+            ValueError: If strategy is not registered
+        """
+        if name not in cls._strategies:
+            raise ValueError(
+                f"Strategy '{name}' not registered. "
+                f"Available: {list(cls._strategies.keys())}"
+            )
+        cls._default_strategy = name
 
     @property
     @abc.abstractmethod
@@ -129,6 +196,43 @@ class CompositeGate(abc.ABC):
         """
         return None
 
+    def _decompose_with_strategy(
+        self,
+        qubits: "tuple[Qubit, ...] | Vector[Qubit]",
+        strategy_name: str | None = None,
+    ) -> "tuple[Qubit, ...] | Vector[Qubit] | None":
+        """Decompose using a specific strategy.
+
+        Args:
+            qubits: Input qubits
+            strategy_name: Strategy to use, or None for default
+
+        Returns:
+            Output qubits, or None if no strategy/decomposition available
+        """
+        strategy = self.get_strategy(strategy_name)
+        if strategy is not None:
+            return strategy.decompose(qubits)  # type: ignore
+        # Fall back to _decompose if no strategy registered
+        return self._decompose(qubits)
+
+    def get_resources_for_strategy(
+        self,
+        strategy_name: str | None = None,
+    ) -> ResourceMetadata | None:
+        """Get resource metadata for a specific strategy.
+
+        Args:
+            strategy_name: Strategy to query, or None for default
+
+        Returns:
+            ResourceMetadata for the strategy, or None if not available
+        """
+        strategy = self.get_strategy(strategy_name)
+        if strategy is not None:
+            return strategy.resources(self.num_target_qubits)
+        return self._resources()
+
     def get_implementation(self) -> "BlockValue | None":
         """Get the implementation BlockValue, if any.
 
@@ -180,14 +284,17 @@ class CompositeGate(abc.ABC):
     def _build_decomposition_block(
         self,
         target_qubits: "tuple[Qubit, ...] | Vector[Qubit]",
+        strategy_name: str | None = None,
     ) -> "BlockValue | None":
-        """Build a BlockValue by tracing _decompose().
+        """Build a BlockValue by tracing _decompose() or a strategy.
 
-        This method creates a BlockValue from the _decompose() implementation
-        by running it in a tracing context.
+        This method creates a BlockValue from the decomposition implementation
+        by running it in a tracing context. If a strategy is specified and
+        registered, it uses the strategy's decompose method.
 
         Args:
             target_qubits: The target qubits to decompose
+            strategy_name: Optional strategy name to use for decomposition
 
         Returns:
             BlockValue containing the traced operations, or None
@@ -197,8 +304,12 @@ class CompositeGate(abc.ABC):
         from qamomile.circuit.ir.value import ArrayValue, Value
         from qamomile.circuit.ir.types.primitives import QubitType, UIntType
 
-        # Check if _decompose is overridden
-        if self._decompose.__func__ is CompositeGate._decompose:  # type: ignore
+        # Determine which decomposition method to use
+        strategy = self.get_strategy(strategy_name) if strategy_name else None
+        has_strategy = strategy is not None
+        has_decompose = self._decompose.__func__ is not CompositeGate._decompose  # type: ignore
+
+        if not has_strategy and not has_decompose:
             return None
 
         # Create a fresh tracer for decomposition
@@ -228,7 +339,10 @@ class CompositeGate(abc.ABC):
                 input_values.append(q_value)
 
             with trace(decomp_tracer):
-                result = self._decompose(tuple(fresh_qubits))
+                if has_strategy:
+                    result = strategy.decompose(tuple(fresh_qubits))  # type: ignore
+                else:
+                    result = self._decompose(tuple(fresh_qubits))
         else:
             # For tuple input, create fresh Qubit handles
             fresh_qubits = []
@@ -244,7 +358,10 @@ class CompositeGate(abc.ABC):
                 input_values.append(q_value)
 
             with trace(decomp_tracer):
-                result = self._decompose(tuple(fresh_qubits))
+                if has_strategy:
+                    result = strategy.decompose(tuple(fresh_qubits))  # type: ignore
+                else:
+                    result = self._decompose(tuple(fresh_qubits))
 
         if result is None:
             return None
@@ -271,12 +388,15 @@ class CompositeGate(abc.ABC):
         self,
         *target_qubits: Qubit,
         controls: Sequence[Qubit] = (),
+        strategy: str | None = None,
     ) -> tuple[Qubit, ...]:
         """Apply this composite gate to qubits.
 
         Args:
             *target_qubits: Target qubits for the gate
             controls: Optional control qubits
+            strategy: Optional strategy name for decomposition.
+                If None, uses the default strategy (or _decompose if no strategies).
 
         Returns:
             Tuple of output qubits (controls + targets)
@@ -294,7 +414,7 @@ class CompositeGate(abc.ABC):
             )
 
         # Try to get implementation from _decompose() first, then get_implementation()
-        impl = self._build_decomposition_block(target_qubits)
+        impl = self._build_decomposition_block(target_qubits, strategy)
         if impl is None:
             impl = self.get_implementation()
         has_impl = impl is not None
@@ -317,6 +437,9 @@ class CompositeGate(abc.ABC):
         for tgt in target_qubits:
             results.append(tgt.value.next_version())
 
+        # Get resource metadata for the selected strategy
+        resource_meta = self.get_resources_for_strategy(strategy)
+
         # Create operation
         op = CompositeGateOperation(
             operands=operands,
@@ -325,9 +448,10 @@ class CompositeGate(abc.ABC):
             num_control_qubits=len(controls),
             num_target_qubits=len(target_qubits),
             custom_name=self.custom_name,
-            resource_metadata=self.get_resource_metadata(),
+            resource_metadata=resource_meta,
             has_implementation=has_impl,
             composite_gate_instance=self,  # Store reference for emit pass
+            strategy_name=strategy,  # Pass strategy name to operation
         )
 
         # Emit to tracer

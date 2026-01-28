@@ -75,6 +75,8 @@ class CompositeGateOperation(Operation):
         has_implementation: Whether this operation has an implementation BlockValue
         composite_gate_instance: Optional reference to the CompositeGate class instance
             that created this operation (for accessing _decompose() at emit time)
+        strategy_name: Optional name of the decomposition strategy to use.
+            If None, the default strategy is used during emission.
     """
 
     gate_type: CompositeGateType = CompositeGateType.CUSTOM
@@ -84,6 +86,7 @@ class CompositeGateOperation(Operation):
     resource_metadata: ResourceMetadata | None = None
     has_implementation: bool = True
     composite_gate_instance: Any = None  # Reference to CompositeGate instance
+    strategy_name: str | None = None  # Selected decomposition strategy
 
     @property
     def implementation(self) -> "BlockValue | None":

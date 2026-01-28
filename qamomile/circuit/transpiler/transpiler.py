@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from qamomile.circuit.frontend.qkernel import QKernel
+from qamomile.circuit.frontend.decomposition import DecompositionConfig
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.transpiler.errors import QamomileCompileError
 from qamomile.circuit.transpiler.passes.inline import InlinePass
@@ -14,13 +16,85 @@ from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
 from qamomile.circuit.transpiler.passes.linear_validate import LinearValidationPass
 from qamomile.circuit.transpiler.passes.separate import SeparatePass
 from qamomile.circuit.transpiler.passes.emit import EmitPass
-from qamomile.circuit.transpiler.segments import SeparatedProgram
+from qamomile.circuit.transpiler.passes.substitution import (
+    SubstitutionConfig,
+    SubstitutionPass,
+    SubstitutionRule,
+)
+from qamomile.circuit.transpiler.segments import SimplifiedProgram
 from qamomile.circuit.transpiler.executable import ExecutableProgram, QuantumExecutor
 
 if TYPE_CHECKING:
     pass
 
 T = TypeVar("T")  # Backend circuit type
+
+
+@dataclass
+class TranspilerConfig:
+    """Configuration for the transpiler pipeline.
+
+    This configuration allows customizing the compilation behavior,
+    including decomposition strategies and subroutine substitutions.
+
+    Attributes:
+        decomposition: Configuration for decomposition strategies.
+            Controls which strategies are used for composite gates.
+        substitutions: Configuration for subroutine/gate substitutions.
+            Allows replacing blocks or setting gate strategies.
+
+    Example:
+        config = TranspilerConfig(
+            decomposition=DecompositionConfig(
+                strategy_overrides={"qft": "approximate"},
+            ),
+            substitutions=SubstitutionConfig(
+                rules=[
+                    SubstitutionRule("my_oracle", target=optimized_oracle),
+                ],
+            ),
+        )
+        transpiler = QiskitTranspiler(config=config)
+    """
+
+    decomposition: DecompositionConfig = field(default_factory=DecompositionConfig)
+    substitutions: SubstitutionConfig = field(default_factory=SubstitutionConfig)
+
+    @classmethod
+    def with_strategies(
+        cls,
+        strategy_overrides: dict[str, str] | None = None,
+        **kwargs: Any,
+    ) -> "TranspilerConfig":
+        """Create config with strategy overrides.
+
+        Args:
+            strategy_overrides: Map of gate name to strategy name
+            **kwargs: Additional config options
+
+        Returns:
+            TranspilerConfig instance
+
+        Example:
+            config = TranspilerConfig.with_strategies(
+                strategy_overrides={"qft": "approximate", "iqft": "approximate"}
+            )
+        """
+        decomp = DecompositionConfig(
+            strategy_overrides=strategy_overrides or {},
+        )
+
+        # Convert strategy overrides to substitution rules
+        rules = []
+        if strategy_overrides:
+            for gate_name, strategy in strategy_overrides.items():
+                rules.append(SubstitutionRule(source_name=gate_name, strategy=strategy))
+
+        return cls(
+            decomposition=decomp,
+            substitutions=SubstitutionConfig(rules=rules),
+            **kwargs,
+        )
 
 
 class Transpiler(ABC, Generic[T]):
@@ -46,12 +120,36 @@ class Transpiler(ABC, Generic[T]):
 
         # Option 3: Just get the circuit (no execution)
         circuit = transpiler.to_circuit(kernel, bindings={"theta": 0.5})
+
+        # With configuration (strategy overrides)
+        config = TranspilerConfig.with_strategies({"qft": "approximate"})
+        transpiler = QiskitTranspiler(config=config)
     """
 
     # Generic passes (can be overridden by subclasses)
     _inline_pass: InlinePass = InlinePass()
     _linear_validate_pass: LinearValidationPass = LinearValidationPass()
     _analyze_pass: AnalyzePass = AnalyzePass()
+
+    @property
+    def config(self) -> TranspilerConfig:
+        """Get the transpiler configuration.
+
+        Returns a default TranspilerConfig if not explicitly set.
+        This property ensures backward compatibility with subclasses
+        that don't call super().__init__().
+        """
+        if not hasattr(self, "_config") or self._config is None:
+            self._config = TranspilerConfig()
+        return self._config
+
+    def set_config(self, config: TranspilerConfig) -> None:
+        """Set the transpiler configuration.
+
+        Args:
+            config: Transpiler configuration to use
+        """
+        self._config = config
 
     @abstractmethod
     def _create_separate_pass(self) -> SeparatePass:
@@ -120,6 +218,22 @@ class Transpiler(ABC, Generic[T]):
 
     # === Pipeline Passes ===
 
+    def substitute(self, block: Block) -> Block:
+        """Pass 0.5: Apply substitutions (optional).
+
+        This pass replaces CallBlockOperation targets and sets
+        strategy names on CompositeGateOperations based on config.
+
+        Args:
+            block: Block to transform
+
+        Returns:
+            Block with substitutions applied
+        """
+        if not self.config.substitutions.rules:
+            return block
+        return SubstitutionPass(self.config.substitutions).run(block)
+
     def inline(self, block: Block) -> Block:
         """Pass 1: Inline all CallBlockOperations."""
         return self._inline_pass.run(block)
@@ -150,14 +264,17 @@ class Transpiler(ABC, Generic[T]):
         """Pass 2: Validate and analyze dependencies."""
         return self._analyze_pass.run(block)
 
-    def separate(self, block: Block) -> SeparatedProgram:
-        """Pass 3: Lower and split into quantum and classical segments."""
+    def separate(self, block: Block) -> SimplifiedProgram:
+        """Pass 3: Lower and split into quantum and classical segments.
+
+        Validates C→Q→C pattern with single quantum segment.
+        """
         separate_pass = self._create_separate_pass()
         return separate_pass.run(block)
 
     def emit(
         self,
-        separated: SeparatedProgram,
+        separated: SimplifiedProgram,
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
     ) -> ExecutableProgram[T]:
@@ -191,10 +308,22 @@ class Transpiler(ABC, Generic[T]):
 
         Raises:
             QamomileCompileError: If compilation fails (validation, dependency errors)
+
+        Pipeline:
+            1. to_block: Convert QKernel to Block
+            2. substitute: Apply substitutions (if configured)
+            3. inline: Inline CallBlockOperations
+            4. linear_validate: Validate linear type semantics
+            5. constant_fold: Fold constant expressions
+            6. analyze: Validate and analyze dependencies
+            7. separate: Split into quantum/classical segments
+            8. emit: Generate backend-specific code
         """
         # Pass bindings and parameters to to_block for proper shape resolution
         block = self.to_block(kernel, bindings, parameters)
-        linear = self.inline(block)
+        # Apply substitutions if configured
+        substituted = self.substitute(block)
+        linear = self.inline(substituted)
         validated = self.linear_validate(linear)
         folded = self.constant_fold(validated, bindings)
         analyzed = self.analyze(folded)

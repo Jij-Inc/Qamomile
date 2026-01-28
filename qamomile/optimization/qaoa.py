@@ -1,95 +1,87 @@
-r"""
-This module implements the Quantum Approximate Optimization Algorithm (QAOA) converter
-for the Qamomile framework :cite:`farhi2014quantum`.
-The parameterized state :math:`|\\vec{\\beta},\\vec{\gamma}\\rangle` of :math:`p`-layer QAOA is defined as:
-
-.. math::
-    |\\vec{\\beta},\\vec{\gamma}\\rangle = U(\\vec{\\beta},\\vec{\gamma})|0\\rangle^{\otimes n} = e^{-i\\beta_{p-1} H_M}e^{-i\gamma_{p-1} H_P} \cdots e^{-i\\beta_0 H_M}e^{-i\gamma_0 H_P} H^{\otimes n}|0\\rangle^{\otimes n}
-
-where :math:`H_P` is the cost Hamiltonian, :math:`H_M` is the mixer Hamiltonian and :math:`\gamma_l` and :math:`\\beta_l` are the variational parameters.
-The 2 :math:`p` variational parameters are optimized classically to minimize the expectation value :math:`\langle \\vec{\\beta},\\vec{\gamma}|H_P|\\vec{\\beta},\\vec{\gamma}\\rangle`.
-
-This module provides functionality to convert optimization problems which written by `jijmodeling`
-into QAOA circuits (:math:`U(\\vec{\\beta},\\vec{\gamma})`), construct cost Hamiltonians (:math:`H_P`), and decode quantum computation results.
-
-The `QAOAConverter` class extends the `QuantumConverter` base class, specializing in
-QAOA-specific operations such as ansatz circuit generation and result decoding.
-
-
-Key Features:
-- Generation of QAOA ansatz circuits
-- Construction of cost Hamiltonians for QAOA
-- Decoding of quantum computation results into classical optimization solutions
-
-
-Note: This module requires `jijmodeling` for problem representation.
-
-.. bibliography::
-    :filter: docname in docnames
-
-"""
-
-import ommx.v1
-
 import qamomile.circuit as qmc
+import qamomile.core.bitssample as qm_bs
+import ommx.v1
+from qamomile.circuit.algorithm.qaoa import qaoa_state
 from qamomile.circuit.transpiler.transpiler import Transpiler
-from qamomile.circuit.transpiler.executable import QuantumExecutor
-import qamomile.core.circuit as qm_c
-import qamomile.core.operator as qm_o
-from qamomile.core.converters.converter import QuantumConverter
-from qamomile.core.converters.utils import is_close_zero
+from qamomile.circuit.transpiler.executable import ExecutableProgram, QuantumExecutor
+from qamomile.circuit.transpiler.job import SampleResult
+from qamomile.observable.hamiltonian import Hamiltonian
+
+from .binary_model import BinarySampleSet
+from .converter import MathematicalProblemConverter
+
+class QAOAConverter(MathematicalProblemConverter):
+
+    def transpile(
+        self, 
+        transpiler: Transpiler,
+        *,
+        p: int
+    ) -> ExecutableProgram:
+        
+        @qmc.qkernel
+        def qaoa_sampling(
+            p: qmc.UInt,
+            quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+            linear: qmc.Dict[qmc.UInt, qmc.Float],
+            gammas: qmc.Vector[qmc.Float],
+            betas: qmc.Vector[qmc.Float],
+            n: qmc.UInt,
+        ) -> qmc.Vector[qmc.Bit]:
+            q = qaoa_state(
+                p,
+                quad,
+                linear,
+                n,
+                gammas,
+                betas,
+            )
+            return qmc.measure(q)
+
+        executable = transpiler.transpile(
+            qaoa_sampling,
+            bindings={
+                "linear": self.spin_model.linear,
+                "quad": self.spin_model.quad,
+                "n": self.spin_model.num_bits,
+                "p": p
+            },
+            parameters=["gammas", "betas"],
+        )
+        return executable
 
 
-@qmc.qkernel
-def ising_cost(
-    q: qmc.Vector[qmc.Qubit],
-    edges: qmc.Matrix[qmc.UInt],  # (|E|, 2) matrix
-    Jij: qmc.Vector[qmc.Float],  # (|E|,) vector
-    hi: qmc.Vector[qmc.Float],  # (|V|,) vector,
-    gamma: qmc.Float,
-) -> qmc.Vector[qmc.Qubit]:
-    num_e = edges.shape[0]
-    for e in qmc.range(num_e):
-        i = edges[e, 0]
-        j = edges[e, 1]
-        angle = 2 * Jij[e] * gamma
-        q[i], q[j] = qmc.rzz(q[i], q[j], angle)
-    n = hi.shape[0]
-    for i in qmc.range(n):
-        angle = 2 * hi[i] * gamma
-        q[i] = qmc.rz(q[i], angle)
-    return q
+    def decode(
+        self,
+        samples: SampleResult[list[int]],
+    ) -> BinarySampleSet:
+        """Decode quantum measurement results.
 
+        Returns results in the original vartype (BINARY or SPIN) that was
+        provided when constructing the converter.
+        """
+        from .binary_model import VarType
 
-@qmc.qkernel
-def x_mixer(
-    q: qmc.Vector[qmc.Qubit],
-    beta: qmc.Float,
-) -> qmc.Vector[qmc.Qubit]:
-    n = q.shape[0]
-    for i in qmc.range(n):
-        angle = 2 * beta
-        q[i] = qmc.rx(q[i], angle)
-    return q
+        # First decode in SPIN domain
+        spin_sampleset = self.spin_model.decode_from_sampleresult(samples)
 
+        # If original problem was BINARY, convert back
+        if self.original_vartype == VarType.BINARY:
+            binary_samples = []
+            for spin_sample in spin_sampleset.samples:
+                # Convert SPIN (±1) to BINARY (0/1): x = (1 - s) / 2
+                binary_sample = {
+                    idx: (1 - spin_val) // 2
+                    for idx, spin_val in spin_sample.items()
+                }
+                binary_samples.append(binary_sample)
 
-@qmc.qkernel
-def qaoa_state(
-    edges: qmc.Matrix[qmc.UInt],  # (|E|, 2) matrix
-    Jij: qmc.Vector[qmc.Float],  # (|E|,) vector
-    hi: qmc.Vector[qmc.Float],  # (|V|,) vector,
-    p: qmc.UInt,
-    gammas: qmc.Vector[qmc.Float],  # (p,) vector
-    betas: qmc.Vector[qmc.Float],  # (p,) vector
-) -> qmc.Vector[qmc.Qubit]:
-    n = hi.shape[0]
-    q = qmc.qubit_array(n, name="qaoa_state")
-    for iter in qmc.range(p):
-        gamma = gammas[iter]
-        beta = betas[iter]
-        q = ising_cost(q, edges, Jij, hi, gamma)
-        q = x_mixer(q, beta)
-    return q
-
-
-
+            return BinarySampleSet(
+                samples=binary_samples,
+                num_occurrences=spin_sampleset.num_occurrences,
+                energy=spin_sampleset.energy,
+                vartype=VarType.BINARY
+            )
+        else:
+            # Already in SPIN, return as-is
+            return spin_sampleset

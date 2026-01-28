@@ -57,13 +57,14 @@ class BlockValue(Value[BlockType]):
             call_op = block_value.call(a=a, b=b)
             ```
         """
-        # Import here to avoid circular dependency
         from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 
         inputs = [kwargs[label] for label in self.label_args]
 
-        # Use logical_id to track physical qubit identity across SSA versions
+        # Use logical_id to track physical identity across SSA versions
+        # All value types (Value, ArrayValue, TupleValue, DictValue) now have logical_id
         dummy_inputs = {v.logical_id: idx for idx, v in enumerate(self.input_values)}
+
         results = []
         for dummy_return in self.return_values:
             if dummy_return.logical_id in dummy_inputs:

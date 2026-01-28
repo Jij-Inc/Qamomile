@@ -5,8 +5,16 @@ import qamomile.circuit.ir.types as ir_types
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.block_value import BlockValue
-from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType, ValueType
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.types.primitives import (
+    BitType,
+    FloatType,
+    UIntType,
+    ValueType,
+    TupleType,
+    DictType,
+)
+from qamomile.circuit.ir.types.hamiltonian import ObservableType
+from qamomile.circuit.ir.value import ArrayValue, Value, TupleValue, DictValue
 
 from qamomile.circuit.frontend.handle.primitives import (
     Bit,
@@ -15,6 +23,8 @@ from qamomile.circuit.frontend.handle.primitives import (
     Qubit,
     UInt,
 )
+from qamomile.circuit.frontend.handle.hamiltonian import Observable
+from qamomile.circuit.frontend.handle.containers import Tuple, Dict
 from qamomile.circuit.frontend.tracer import Tracer, trace, get_current_tracer
 
 
@@ -25,7 +35,7 @@ TYPE_MAPPING: dict[typing.Any, typing.Any] = {
 }
 
 
-def is_array_type(t) -> bool:
+def is_array_type(t: typing.Any) -> bool:
     """Check if type is a Vector, Matrix, or Tensor subclass."""
     # Handle generic aliases like Vector[Qubit], Matrix[Bit], etc.
     actual_type = getattr(t, "__origin__", t)
@@ -36,7 +46,7 @@ def is_array_type(t) -> bool:
     )
 
 
-def _get_ndim(param_type) -> int:
+def _get_ndim(param_type: typing.Any) -> int:
     """Get the number of dimensions for an array type."""
     # Handle generic aliases like Vector[Qubit], Matrix[Bit], etc.
     actual_type = getattr(param_type, "__origin__", param_type)
@@ -48,6 +58,26 @@ def _get_ndim(param_type) -> int:
     elif "Tensor" in type_name:
         return 3
     return 1
+
+
+def is_tuple_type(t: typing.Any) -> bool:
+    """Check if type is a Tuple handle type."""
+    actual_type = getattr(t, "__origin__", t)
+    if actual_type is Tuple:
+        return True
+    if hasattr(actual_type, "__mro__"):
+        return any(c.__name__ == "Tuple" for c in actual_type.__mro__)
+    return False
+
+
+def is_dict_type(t: typing.Any) -> bool:
+    """Check if type is a Dict handle type."""
+    actual_type = getattr(t, "__origin__", t)
+    if actual_type is Dict:
+        return True
+    if hasattr(actual_type, "__mro__"):
+        return any(c.__name__ == "Dict" for c in actual_type.__mro__)
+    return False
 
 
 def handle_type_map(handle_type: type[Handle] | type) -> ValueType:
@@ -65,6 +95,21 @@ def handle_type_map(handle_type: type[Handle] | type) -> ValueType:
             return handle_type_map(element_type)
         raise TypeError(f"Array type missing element_type: {handle_type}")
 
+    # Handle Tuple types (e.g., Tuple[UInt, UInt])
+    if is_tuple_type(handle_type):
+        if hasattr(handle_type, "__args__") and handle_type.__args__:
+            element_types = tuple(handle_type_map(t) for t in handle_type.__args__)
+            return TupleType(element_types=element_types)
+        raise TypeError(f"Tuple type missing element types: {handle_type}")
+
+    # Handle Dict types (e.g., Dict[Tuple[UInt, UInt], Float])
+    if is_dict_type(handle_type):
+        if hasattr(handle_type, "__args__") and len(handle_type.__args__) == 2:
+            key_type = handle_type_map(handle_type.__args__[0])
+            value_type = handle_type_map(handle_type.__args__[1])
+            return DictType(key_type=key_type, value_type=value_type)
+        raise TypeError(f"Dict type missing key/value types: {handle_type}")
+
     # Ensure handle_type is a class before calling issubclass
     if not isinstance(handle_type, type):
         raise TypeError(f"Unsupported type annotation '{handle_type}'")
@@ -72,8 +117,7 @@ def handle_type_map(handle_type: type[Handle] | type) -> ValueType:
     if not issubclass(handle_type, Handle):
         if handle_type in TYPE_MAPPING:
             return TYPE_MAPPING[handle_type]()
-        else:
-            raise TypeError(f"Unsupported type annotation '{handle_type}'")
+        raise TypeError(f"Unsupported type annotation '{handle_type}'")
 
     if handle_type is UInt:
         return UIntType()
@@ -83,6 +127,8 @@ def handle_type_map(handle_type: type[Handle] | type) -> ValueType:
         return BitType()
     elif handle_type is Qubit:
         return ir_types.QubitType()
+    elif handle_type is Observable:
+        return ObservableType()
     else:
         raise TypeError(f"Unsupported Handle type '{handle_type}'")
 
@@ -116,12 +162,17 @@ def create_dummy_handle(
             tracer = get_current_tracer()
             tracer.add_operation(qinit_op)
         return Qubit(value=value)
+    elif isinstance(value_type, ObservableType):
+        # Observable parameters are provided via bindings
+        return Observable(
+            value=Value(type=value_type, name=name, params={"parameter": name})
+        )
     else:
         raise TypeError(f"Unsupported ValueType '{value_type}'")
 
 
 def create_dummy_input(
-    param_type, name: str = "param", emit_init: bool = True
+    param_type: typing.Any, name: str = "param", emit_init: bool = True
 ) -> Handle:
     """Create a dummy input based on parameter type annotation.
 
@@ -133,6 +184,57 @@ def create_dummy_input(
 
     This creates input Handles for function parameters.
     """
+    # Handle Tuple types (e.g., Tuple[UInt, UInt])
+    if is_tuple_type(param_type):
+        if hasattr(param_type, "__args__") and param_type.__args__:
+            # Create symbolic element Values
+            element_values = []
+            element_handles = []
+            for i, elem_type in enumerate(param_type.__args__):
+                elem_handle = create_dummy_input(elem_type, f"{name}_{i}", emit_init)
+                element_handles.append(elem_handle)
+                element_values.append(elem_handle.value)
+
+            tuple_value = TupleValue(
+                name=name,
+                elements=tuple(element_values),
+                params={"parameter": name},
+            )
+
+            # Create Tuple handle
+            tuple_handle = object.__new__(Tuple)
+            tuple_handle.value = tuple_value
+            tuple_handle._elements = tuple(element_handles)
+            tuple_handle.parent = None
+            tuple_handle.indices = ()
+            tuple_handle.name = name
+            tuple_handle.id = str(id(tuple_handle))
+            tuple_handle._consumed = False
+            return tuple_handle
+        raise TypeError(f"Tuple type missing element types: {param_type}")
+
+    # Handle Dict types (e.g., Dict[Tuple[UInt, UInt], Float])
+    if is_dict_type(param_type):
+        if hasattr(param_type, "__args__") and len(param_type.__args__) == 2:
+            dict_value = DictValue(
+                name=name,
+                entries=[],  # Entries will be bound at transpile time
+                params={"parameter": name},
+            )
+
+            # Create Dict handle
+            dict_handle = object.__new__(Dict)
+            dict_handle.value = dict_value
+            dict_handle._entries = []
+            dict_handle._size = None
+            dict_handle.parent = None
+            dict_handle.indices = ()
+            dict_handle.name = name
+            dict_handle.id = str(id(dict_handle))
+            dict_handle._consumed = False
+            return dict_handle
+        raise TypeError(f"Dict type missing key/value types: {param_type}")
+
     if is_array_type(param_type):
         # For Vector/Matrix/Tensor, create a placeholder instance with symbolic shape
         # For generic aliases like Vector[Qubit], get element type from __args__
@@ -199,6 +301,19 @@ def func_to_block(func: typing.Callable) -> BlockValue:
     """
     signature = inspect.signature(func)
 
+    # Resolve type hints to handle string annotations (from __future__ import annotations)
+    try:
+        func_globals = getattr(func, "__globals__", {})
+        type_hints = typing.get_type_hints(func, globalns=func_globals, localns=None)
+    except Exception:
+        # Fallback to raw annotations if get_type_hints fails
+        type_hints = {}
+        for param in signature.parameters.values():
+            if param.annotation is not inspect.Parameter.empty:
+                type_hints[param.name] = param.annotation
+        if signature.return_annotation is not inspect.Signature.empty:
+            type_hints["return"] = signature.return_annotation
+
     # Check type annotations ================
 
     # ========= Check Input Types =========
@@ -207,25 +322,31 @@ def func_to_block(func: typing.Callable) -> BlockValue:
         if param.annotation is inspect.Parameter.empty:
             raise TypeError(f"Parameter '{param.name}' must have a type annotation")
 
-        input_types[param.name] = handle_type_map(param.annotation)
+        # Use resolved type hint instead of raw annotation
+        param_type = type_hints.get(param.name, param.annotation)
+        input_types[param.name] = handle_type_map(param_type)
 
     if signature.return_annotation is inspect.Signature.empty:
         raise TypeError("Return type must have a type annotation")
 
     # ======== Check Output Types ========
+    # Use resolved return type hint instead of raw annotation
+    return_type = type_hints.get("return", signature.return_annotation)
     _output_type: ValueType | list[ValueType] | None = None
-    if getattr(signature.return_annotation, "__origin__", None) is tuple:
+    if getattr(return_type, "__origin__", None) is tuple:
         _output_type = []
-        for ret_type in signature.return_annotation.__args__:
+        for ret_type in return_type.__args__:
             _output_type.append(handle_type_map(ret_type))
     else:
-        _output_type = handle_type_map(signature.return_annotation)
+        _output_type = handle_type_map(return_type)
     # ======================= Check Input Types
 
-    # Create dummy inputs from the original type annotations (preserving Array types)
+    # Create dummy inputs from resolved type hints (preserving Array types)
     # Use emit_init=False to avoid emitting QInitOperation for BlockValue's internal inputs
     dummy_inputs = {
-        name: create_dummy_input(param.annotation, name, emit_init=False)
+        name: create_dummy_input(
+            type_hints.get(name, param.annotation), name, emit_init=False
+        )
         for name, param in signature.parameters.items()
     }
 

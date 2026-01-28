@@ -38,6 +38,7 @@ from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
+    ForItemsOperation,
     IfOperation,
     WhileOperation,
 )
@@ -127,6 +128,10 @@ class ResourceAllocator:
                 self._allocate_gate(op, qubit_map)
 
             elif isinstance(op, ForOperation):
+                self._allocate_recursive(op.operations, qubit_map, clbit_map, bindings)
+
+            elif isinstance(op, ForItemsOperation):
+                # ForItemsOperation allocates resources for its loop body
                 self._allocate_recursive(op.operations, qubit_map, clbit_map, bindings)
 
             elif isinstance(op, IfOperation):

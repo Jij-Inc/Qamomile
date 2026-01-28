@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 from qamomile.circuit.frontend.operation.control_flow import (
     emit_if,
+    for_items,
     for_loop,
     while_loop,
 )
@@ -259,6 +260,39 @@ class ControlFlowTransformer(ast.NodeTransformer):
 
         return False
 
+    def _is_items_call(self, node: ast.expr) -> bool:
+        """Check if node is an items() or qm.items() call."""
+        if not isinstance(node, ast.Call):
+            return False
+
+        # items(d) - direct call
+        if isinstance(node.func, ast.Name) and node.func.id == "items":
+            return True
+
+        # qm.items(d) or qmc.items(d) - module call
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "items":
+            return True
+
+        return False
+
+    def _extract_tuple_vars(self, target: ast.expr) -> list[str]:
+        """Extract variable names from tuple unpacking target.
+
+        Examples:
+            i -> ["i"]
+            (i, j) -> ["i", "j"]
+            ((i, j), k) -> ["i", "j", "k"]
+        """
+        if isinstance(target, ast.Name):
+            return [target.id]
+        elif isinstance(target, ast.Tuple):
+            var_names = []
+            for elt in target.elts:
+                var_names.extend(self._extract_tuple_vars(elt))
+            return var_names
+        else:
+            raise NotImplementedError(f"Unsupported target type: {type(target)}")
+
     def visit_For(self, node: ast.For) -> Any:
         # ネストされた制御フローを先に変換
         new_body = [self.visit(stmt) for stmt in node.body]
@@ -269,11 +303,27 @@ class ControlFlowTransformer(ast.NodeTransformer):
             else:
                 flattened_body.append(item)
 
-        # for i in range(...) または for i in qm.range(...) の場合のみサポート
-        if not self._is_range_call(node.iter):
-            raise NotImplementedError(
-                "Only 'for i in range(...)' or 'for i in qm.range(...)' is supported"
-            )
+        # Check for items() iteration first
+        if self._is_items_call(node.iter):
+            return self._transform_for_items(node, flattened_body)
+
+        # Check for range() iteration
+        if self._is_range_call(node.iter):
+            return self._transform_for_range(node, flattened_body)
+
+        # Handle direct sequence iteration (for item in seq:)
+        return self._transform_for_sequence(node, flattened_body)
+
+    def _transform_for_range(
+        self, node: ast.For, flattened_body: list[ast.stmt]
+    ) -> ast.With:
+        """Transform 'for i in range(...)' to 'with for_loop(...)'.
+
+        Supports patterns:
+            for i in range(stop):  ->  for_loop(0, stop, 1)
+            for i in range(start, stop):  ->  for_loop(start, stop, 1)
+            for i in range(start, stop, step):  ->  for_loop(start, stop, step)
+        """
 
         num_args = len(node.iter.args)  # type: ignore
         if num_args < 1 or num_args > 3:
@@ -315,6 +365,110 @@ class ControlFlowTransformer(ast.NodeTransformer):
         with_item = ast.withitem(
             context_expr=for_loop_call,
             optional_vars=node.target,  # i をそのまま使用
+        )
+
+        with_stmt = ast.With(
+            items=[with_item],
+            body=flattened_body,
+            lineno=node.lineno,
+            col_offset=node.col_offset,
+        )
+
+        return with_stmt
+
+    def _transform_for_sequence(
+        self, node: ast.For, flattened_body: list[ast.stmt]
+    ) -> ast.With:
+        """Prohibit direct sequence iteration to prevent common bugs.
+
+        Direct iteration like 'for item in vector:' doesn't support in-place
+        modification in @qkernel contexts. This method raises an error to
+        prevent silent bugs where reassignments don't affect the original array.
+
+        Raises:
+            SyntaxError: Always raised to prevent direct iteration.
+        """
+        # Get the source code representation if possible
+        if isinstance(node.target, ast.Name):
+            item_var = node.target.id
+        else:
+            item_var = "item"
+
+        # Try to get a readable representation of the iterable
+        iter_str = ast.unparse(node.iter) if hasattr(ast, 'unparse') else "vector"
+
+        raise SyntaxError(
+            f"Direct iteration over sequences is not supported in @qkernel functions.\n"
+            f"Line {node.lineno}: 'for {item_var} in {iter_str}:'\n\n"
+            f"Direct iteration cannot modify elements in-place, leading to silent bugs.\n"
+            f"Use explicit index-based iteration instead:\n\n"
+            f"  # Incorrect (current code):\n"
+            f"  for {item_var} in {iter_str}:\n"
+            f"      {item_var} = qmc.operation({item_var})\n\n"
+            f"  # Correct:\n"
+            f"  n = {iter_str}.shape[0]\n"
+            f"  for i in qmc.range(n):\n"
+            f"      {iter_str}[i] = qmc.operation({iter_str}[i])\n"
+        )
+
+    def _transform_for_items(
+        self, node: ast.For, flattened_body: list[ast.stmt]
+    ) -> ast.With:
+        """Transform 'for (k, v) in items(d)' or 'for (k, v) in d.items()' to 'with for_items(d, [...], "v")'.
+
+        Supports patterns:
+            for key, value in items(d):  ->  for_items(d, ["key"], "value")
+            for key, value in d.items():  ->  for_items(d, ["key"], "value")
+            for (i, j), value in items(d):  ->  for_items(d, ["i", "j"], "value")
+            for (i, j), value in d.items():  ->  for_items(d, ["i", "j"], "value")
+        """
+        # Extract the dict argument from items(d) or d.items() call
+        if node.iter.args:  # type: ignore  # items(d) pattern
+            dict_arg = node.iter.args[0]  # type: ignore
+        elif isinstance(node.iter.func, ast.Attribute):  # type: ignore  # d.items() pattern
+            dict_arg = node.iter.func.value  # type: ignore
+        else:
+            raise NotImplementedError("items() requires a dict argument")
+
+        # Parse the target pattern: (key, value) or just key, value
+        if isinstance(node.target, ast.Tuple) and len(node.target.elts) == 2:
+            key_target = node.target.elts[0]
+            value_target = node.target.elts[1]
+        else:
+            raise NotImplementedError(
+                "items() iteration requires 'for key, value in items(d)' pattern. "
+                f"Got: {ast.dump(node.target)}"
+            )
+
+        # Extract key variable names (may be tuple like (i, j))
+        key_vars = self._extract_tuple_vars(key_target)
+
+        # Extract value variable name (must be a simple name)
+        if not isinstance(value_target, ast.Name):
+            raise NotImplementedError(
+                "Value target in items() iteration must be a simple variable, "
+                f"got: {ast.dump(value_target)}"
+            )
+        value_var = value_target.id
+
+        # Create for_items(dict, key_vars, value_var) call
+        for_items_call = ast.Call(
+            func=ast.Name(id="for_items", ctx=ast.Load()),
+            args=[
+                dict_arg,
+                ast.List(
+                    elts=[ast.Constant(value=kv) for kv in key_vars],
+                    ctx=ast.Load(),
+                ),
+                ast.Constant(value=value_var),
+            ],
+            keywords=[],
+        )
+
+        # Create with statement: with for_items(...) as (key, value):
+        with_item = ast.withitem(
+            context_expr=for_items_call,
+            optional_vars=node.target,
         )
 
         with_stmt = ast.With(
@@ -399,6 +553,7 @@ def transform_control_flow(func: Callable):
         {
             "while_loop": while_loop,
             "for_loop": for_loop,
+            "for_items": for_items,
             "emit_if": emit_if,
             "Any": Any,  # For type annotations in generated code
         }

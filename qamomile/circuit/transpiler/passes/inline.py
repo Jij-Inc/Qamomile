@@ -14,6 +14,7 @@ from qamomile.circuit.ir.operation.composite_gate import (
 )
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
+    ForItemsOperation,
     IfOperation,
     WhileOperation,
 )
@@ -102,6 +103,14 @@ class InlinePass(Pass[Block, Block]):
                 new_op = self._substitute_values(new_op, value_map)
                 result.append(new_op)
 
+            elif isinstance(op, ForItemsOperation):
+                # Recurse into loop body, preserve the ForItems structure
+                serialized_body = self._serialize_operations(op.operations, value_map)
+                new_op = dataclasses.replace(op, operations=serialized_body)
+                # Apply value substitutions to operands (the dict being iterated)
+                new_op = self._substitute_values(new_op, value_map)
+                result.append(new_op)
+
             elif isinstance(op, IfOperation):
                 # Recurse into both branches, preserve the If structure
                 serialized_true = self._serialize_operations(
@@ -183,11 +192,18 @@ class InlinePass(Pass[Block, Block]):
         cloned_ops = remapper.clone_operations(block.operations)
         uuid_remap = remapper.uuid_remap
 
-        # Update local_map to use the remapped UUIDs for block inputs
+        # Build remapped_local_map with cloned UUIDs
         remapped_local_map: dict[str, Value] = {}
         for old_uuid, value in local_map.items():
             new_uuid = uuid_remap.get(old_uuid, old_uuid)
             remapped_local_map[new_uuid] = value
+
+        # CRITICAL FIX: For any value that was cloned, ensure the cloned
+        # version also maps back to the resolved argument. This handles the case
+        # where operations reference a cloned parent_array.
+        for old_uuid, new_uuid in uuid_remap.items():
+            if old_uuid in local_map and new_uuid not in remapped_local_map:
+                remapped_local_map[new_uuid] = local_map[old_uuid]
 
         # Recursively serialize the cloned operations
         inlined = self._serialize_operations(cloned_ops, remapped_local_map)
@@ -200,11 +216,13 @@ class InlinePass(Pass[Block, Block]):
         for block_return, call_result in zip(return_values, call_op.results):
             remapped_uuid = uuid_remap.get(block_return.uuid, block_return.uuid)
             if remapped_uuid in remapped_local_map:
-                # The return value was mapped during inlining
+                # The return value was mapped during inlining (modified input)
                 value_map[call_result.uuid] = remapped_local_map[remapped_uuid]
             else:
-                # Find the value in the inlined operations
-                value_map[call_result.uuid] = call_result
+                # The return value is a newly created value (not a modified input)
+                # Use the cloned return value directly, which is what the inlined
+                # operations reference in their results
+                value_map[call_result.uuid] = block_return
 
         return inlined
 

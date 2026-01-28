@@ -27,6 +27,7 @@ from qamomile.circuit.ir.operation.composite_gate import (
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
+    ForItemsOperation,
     IfOperation,
     WhileOperation,
 )
@@ -39,7 +40,6 @@ from qamomile.circuit.transpiler.passes.emit_base import (
     ValueResolver,
     LoopAnalyzer,
     CompositeDecomposer,
-    QubitResolutionResult,
 )
 from qamomile.circuit.transpiler.errors import (
     QubitIndexResolutionError,
@@ -160,6 +160,9 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                     circuit, op, qubit_map, clbit_map, bindings, force_unroll
                 )
 
+            elif isinstance(op, ForItemsOperation):
+                self._emit_for_items(circuit, op, qubit_map, clbit_map, bindings)
+
             elif isinstance(op, IfOperation):
                 self._emit_if(circuit, op, qubit_map, clbit_map, bindings)
 
@@ -211,7 +214,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                     is_array_element=v.parent_array is not None,
                     parent_array_name=v.parent_array.name if v.parent_array else None,
                     element_indices_names=element_indices_names,
-                    failure_reason=result.failure_reason or ResolutionFailureReason.UNKNOWN,
+                    failure_reason=result.failure_reason
+                    or ResolutionFailureReason.UNKNOWN,
                     failure_details=result.failure_details,
                 )
                 failed_operands.append(info)
@@ -236,7 +240,9 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                             operand_name=v.name,
                             operand_uuid=v.uuid,
                             is_array_element=v.parent_array is not None,
-                            parent_array_name=v.parent_array.name if v.parent_array else None,
+                            parent_array_name=v.parent_array.name
+                            if v.parent_array
+                            else None,
                             element_indices_names=element_indices_names,
                             failure_reason=ResolutionFailureReason.UNKNOWN,
                             failure_details="No indices resolved but no specific failure recorded",
@@ -464,6 +470,110 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 circuit, op.operations, qubit_map, clbit_map, loop_bindings
             )
 
+    def _emit_for_items(
+        self,
+        circuit: T,
+        op: ForItemsOperation,
+        qubit_map: dict[str, int],
+        clbit_map: dict[str, int],
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit for-items loop (always unrolled).
+
+        This handles iteration over Dict items, e.g.:
+            for (i, j), Jij in qmc.items(ising):
+                ...
+        """
+        if not op.operands:
+            return
+
+        dict_value = op.operands[0]
+        entries = self._resolve_dict_entries(dict_value, bindings)
+
+        if entries is None:
+            raise ValueError(
+                f"Cannot unroll for-items loop: dict entries could not be resolved. "
+                f"Dict value: {dict_value.name if hasattr(dict_value, 'name') else dict_value}"
+            )
+
+        for key, value in entries:
+            loop_bindings = bindings.copy()
+
+            # Bind key variables (tuple unpacking)
+            if len(op.key_vars) > 1:
+                # Key is a tuple, unpack to multiple variables
+                for i, kv_name in enumerate(op.key_vars):
+                    loop_bindings[kv_name] = (
+                        key[i] if hasattr(key, "__getitem__") else key
+                    )
+            elif len(op.key_vars) == 1:
+                # Single key variable
+                loop_bindings[op.key_vars[0]] = key
+
+            # Bind value variable
+            loop_bindings[op.value_var] = value
+
+            self._emit_operations(
+                circuit, op.operations, qubit_map, clbit_map, loop_bindings
+            )
+
+    def _resolve_dict_entries(
+        self,
+        dict_value: Any,
+        bindings: dict[str, Any],
+    ) -> list[tuple[Any, Any]] | None:
+        """Resolve DictValue to concrete (key, value) pairs.
+
+        Args:
+            dict_value: The DictValue IR node being iterated
+            bindings: Current parameter bindings
+
+        Returns:
+            List of (key, value) tuples, or None if cannot be resolved
+        """
+        # Check for bound_data in params (from _create_bound_input)
+        if hasattr(dict_value, "params") and "bound_data" in dict_value.params:
+            bound = dict_value.params["bound_data"]
+            if isinstance(bound, dict):
+                return list(bound.items())
+            elif hasattr(bound, "items"):
+                return list(bound.items())
+            return bound
+
+        # Check if dict_value is a parameter that should be bound
+        if hasattr(dict_value, "is_parameter") and dict_value.is_parameter():
+            param_name = dict_value.parameter_name()
+            if param_name and param_name in bindings:
+                bound = bindings[param_name]
+                if isinstance(bound, dict):
+                    return list(bound.items())
+                elif hasattr(bound, "items"):
+                    return list(bound.items())
+                return bound
+
+        # Check by name in bindings
+        if hasattr(dict_value, "name") and dict_value.name in bindings:
+            bound = bindings[dict_value.name]
+            if isinstance(bound, dict):
+                return list(bound.items())
+            elif hasattr(bound, "items"):
+                return list(bound.items())
+            return bound
+
+        # Check if dict_value has entries directly (from IR)
+        if hasattr(dict_value, "entries") and dict_value.entries:
+            # Resolve each entry
+            resolved_entries = []
+            for key_val, value_val in dict_value.entries:
+                key = self._resolver.resolve_classical_value(key_val, bindings)
+                value = self._resolver.resolve_classical_value(value_val, bindings)
+                if key is not None and value is not None:
+                    resolved_entries.append((key, value))
+            if resolved_entries:
+                return resolved_entries
+
+        return None
+
     def _emit_if(
         self,
         circuit: T,
@@ -552,13 +662,17 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         qubit_indices: list[int],
         bindings: dict[str, Any],
     ) -> None:
-        """Emit composite gate using decomposition."""
+        """Emit composite gate using decomposition.
+
+        If the operation has a strategy_name set, it attempts to use
+        the corresponding strategy from the CompositeGate class.
+        """
         if op.gate_type == CompositeGateType.QPE:
             self._emit_qpe_manual(circuit, op, qubit_indices, bindings)
         elif op.gate_type == CompositeGateType.QFT:
-            self._emit_qft_manual(circuit, qubit_indices)
+            self._emit_qft_with_strategy(circuit, op, qubit_indices)
         elif op.gate_type == CompositeGateType.IQFT:
-            self._emit_iqft_manual(circuit, qubit_indices)
+            self._emit_iqft_with_strategy(circuit, op, qubit_indices)
         elif not op.has_implementation:
             if qubit_indices:
                 self._emitter.emit_barrier(circuit, qubit_indices)
@@ -568,6 +682,121 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 self._emit_custom_composite(circuit, op, impl, qubit_indices, bindings)
             elif qubit_indices:
                 self._emitter.emit_barrier(circuit, qubit_indices)
+
+    def _emit_qft_with_strategy(
+        self,
+        circuit: T,
+        op: CompositeGateOperation,
+        qubit_indices: list[int],
+    ) -> None:
+        """Emit QFT considering strategy selection.
+
+        If a strategy is specified and 'approximate', uses truncated rotations.
+        Otherwise falls back to standard QFT.
+        """
+        strategy_name = op.strategy_name
+
+        # Check if using approximate strategy
+        if strategy_name and "approximate" in strategy_name:
+            # Extract truncation depth from strategy name (e.g., "approximate_k3")
+            truncation_depth = 3  # default
+            if "_k" in strategy_name:
+                try:
+                    truncation_depth = int(strategy_name.split("_k")[1])
+                except (ValueError, IndexError):
+                    pass
+            self._emit_approximate_qft(circuit, qubit_indices, truncation_depth)
+        else:
+            self._emit_qft_manual(circuit, qubit_indices)
+
+    def _emit_iqft_with_strategy(
+        self,
+        circuit: T,
+        op: CompositeGateOperation,
+        qubit_indices: list[int],
+    ) -> None:
+        """Emit IQFT considering strategy selection.
+
+        If a strategy is specified and 'approximate', uses truncated rotations.
+        Otherwise falls back to standard IQFT.
+        """
+        strategy_name = op.strategy_name
+
+        if strategy_name and "approximate" in strategy_name:
+            truncation_depth = 3
+            if "_k" in strategy_name:
+                try:
+                    truncation_depth = int(strategy_name.split("_k")[1])
+                except (ValueError, IndexError):
+                    pass
+            self._emit_approximate_iqft(circuit, qubit_indices, truncation_depth)
+        else:
+            self._emit_iqft_manual(circuit, qubit_indices)
+
+    def _emit_approximate_qft(
+        self,
+        circuit: T,
+        qubit_indices: list[int],
+        truncation_depth: int,
+    ) -> None:
+        """Emit approximate QFT with truncated rotations.
+
+        Args:
+            circuit: Target circuit
+            qubit_indices: Qubit indices
+            truncation_depth: Maximum exponent for controlled phase gates
+        """
+        n = len(qubit_indices)
+        if n == 0:
+            return
+
+        k = truncation_depth
+
+        for i in range(n):
+            self._emitter.emit_h(circuit, qubit_indices[i])
+            # Only apply rotations with exponent <= truncation_depth
+            for j in range(i + 1, min(i + k + 1, n)):
+                exponent = j - i
+                if exponent <= k:
+                    angle = math.pi / (2**exponent)
+                    self._emitter.emit_cp(
+                        circuit, qubit_indices[j], qubit_indices[i], angle
+                    )
+
+        for i in range(n // 2):
+            self._emitter.emit_swap(circuit, qubit_indices[i], qubit_indices[n - 1 - i])
+
+    def _emit_approximate_iqft(
+        self,
+        circuit: T,
+        qubit_indices: list[int],
+        truncation_depth: int,
+    ) -> None:
+        """Emit approximate IQFT with truncated rotations.
+
+        Args:
+            circuit: Target circuit
+            qubit_indices: Qubit indices
+            truncation_depth: Maximum exponent for controlled phase gates
+        """
+        n = len(qubit_indices)
+        if n == 0:
+            return
+
+        k = truncation_depth
+
+        for i in range(n - 1, -1, -1):
+            self._emitter.emit_h(circuit, qubit_indices[i])
+            for j in range(max(0, i - k), i):
+                exponent = i - j
+                if exponent <= k:
+                    angle = -math.pi / (2**exponent)
+                    self._emitter.emit_cp(
+                        circuit, qubit_indices[j], qubit_indices[i], angle
+                    )
+
+        for i in range(n // 2):
+            self._emitter.emit_swap(circuit, qubit_indices[i], qubit_indices[n - 1 - i])
 
     def _emit_qft_manual(self, circuit: T, qubit_indices: list[int]) -> None:
         """Emit QFT using decomposition."""
@@ -859,9 +1088,21 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             block_value, num_targets, local_bindings
         )
 
+        # Resolve power value from bindings if it's a Value
+        power_value = op.power
+        if isinstance(power_value, Value):
+            power_value = self._value_resolver.resolve_value(power_value, bindings)
+
+        # Handle UInt or other non-int types by getting numeric value
+        if hasattr(power_value, "value") and hasattr(power_value.value, "get_const"):
+            const_val = power_value.value.get_const()
+            if const_val is not None:
+                power_value = int(const_val)
+
         if unitary_gate is not None:
-            if op.power > 1:
-                unitary_gate = self._emitter.gate_power(unitary_gate, op.power)
+            # Only apply power if it's a concrete int value > 1
+            if isinstance(power_value, int) and power_value > 1:
+                unitary_gate = self._emitter.gate_power(unitary_gate, power_value)
             controlled_gate = self._emitter.gate_controlled(
                 unitary_gate, op.num_controls
             )
@@ -869,7 +1110,19 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 circuit, controlled_gate, control_indices + target_indices
             )
         else:
-            for _ in range(op.power):
+            # Only unroll if power_value is a concrete int
+            if isinstance(power_value, int):
+                for _ in range(power_value):
+                    for ctrl_idx in control_indices:
+                        self._emit_controlled_block(
+                            circuit,
+                            block_value,
+                            ctrl_idx,
+                            target_indices,
+                            local_bindings,
+                        )
+            else:
+                # If power is symbolic, emit once (power will be handled by other means)
                 for ctrl_idx in control_indices:
                     self._emit_controlled_block(
                         circuit, block_value, ctrl_idx, target_indices, local_bindings

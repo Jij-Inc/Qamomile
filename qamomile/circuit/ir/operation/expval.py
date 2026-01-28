@@ -8,7 +8,7 @@ respect to a quantum state.
 import dataclasses
 
 from qamomile.circuit.ir.types.primitives import FloatType
-from qamomile.circuit.ir.types.hamiltonian import HamiltonianExprType
+from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.value import Value
 
 from .operation import Operation, OperationKind, ParamHint, Signature
@@ -22,17 +22,17 @@ class ExpvalOp(Operation):
     psi is the quantum state and H is the Hamiltonian observable.
 
     The operation bridges quantum and classical computation:
-    - Input: quantum state (qubits) + Hamiltonian expression
+    - Input: quantum state (qubits) + Observable reference
     - Output: classical Float (expectation value)
 
     Attributes:
         operands[0]: qubits - The quantum register (Vector[Qubit] or individual qubits)
-        operands[1]: hamiltonian - The HamiltonianExpr to measure
+        operands[1]: observable - The Observable parameter (Hamiltonian from bindings)
         results[0]: exp_val - The estimated expectation value (Float)
 
     Example IR:
         %qubits = ... # quantum state after ansatz
-        %H = HamiltonianAddOp(...) # Z0*Z1 + 0.5*X0
+        %H = Parameter(type=ObservableType, name="H")
         %exp_val = ExpvalOp(%qubits, %H)  # <psi|H|psi>
     """
 
@@ -42,8 +42,13 @@ class ExpvalOp(Operation):
         return self.operands[0]
 
     @property
+    def observable(self) -> Value:
+        """The Observable parameter operand."""
+        return self.operands[1]
+
+    @property
     def hamiltonian(self) -> Value:
-        """The Hamiltonian observable operand."""
+        """Alias for observable (deprecated, use observable instead)."""
         return self.operands[1]
 
     @property
@@ -56,7 +61,7 @@ class ExpvalOp(Operation):
         return Signature(
             operands=[
                 ParamHint(name="qubits", type=None),  # Any qubit type (Vector or tuple)
-                ParamHint(name="hamiltonian", type=HamiltonianExprType()),
+                ParamHint(name="observable", type=ObservableType()),
             ],
             results=[ParamHint(name="exp_val", type=FloatType())],
         )

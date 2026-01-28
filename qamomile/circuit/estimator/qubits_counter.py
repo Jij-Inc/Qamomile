@@ -146,6 +146,7 @@ def qubits_counter(block: BlockValue | list[Operation]) -> sp.Expr:
         >>> count = qubits_counter(block)
         >>> print(count)  # e.g., "n + 3" for parametric n
     """
+    from qamomile.circuit.ir.block_value import BlockValue
 
     ops = block.operations if isinstance(block, BlockValue) else block
     return _count_from_operations(ops)

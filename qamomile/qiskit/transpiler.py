@@ -10,7 +10,7 @@ from typing import Any, Sequence, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from qiskit import QuantumCircuit
-    from qamomile.circuit.observable import Observable
+    import qamomile.observable as qm_o
 
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
@@ -245,14 +245,14 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
     def estimate(
         self,
         circuit: "QuantumCircuit",
-        observable: "Observable",
+        hamiltonian: "qm_o.Hamiltonian",
         params: Sequence[float] | None = None,
     ) -> float:
-        """Estimate the expectation value of an observable.
+        """Estimate the expectation value of a Hamiltonian.
 
         Args:
             circuit: Qiskit QuantumCircuit (state preparation ansatz)
-            observable: The observable to measure
+            hamiltonian: The qamomile.observable.Hamiltonian to measure
             params: Optional parameter values for parametric circuits
 
         Returns:
@@ -262,11 +262,43 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
             RuntimeError: If no estimator is configured
         """
         if self._estimator is None:
-            # Try to create default estimator
-            from qamomile.qiskit.observable import QiskitExpectationEstimator
-            self._estimator = QiskitExpectationEstimator()
+            # Create default Qiskit Estimator
+            try:
+                # Try qiskit_aer Estimator first (supports more features)
+                from qiskit_aer.primitives import Estimator
+                self._estimator = Estimator()
+            except ImportError:
+                try:
+                    from qiskit.primitives import StatevectorEstimator
+                    self._estimator = StatevectorEstimator()
+                except ImportError:
+                    # Fallback for older Qiskit versions
+                    from qiskit.primitives import Estimator
+                    self._estimator = Estimator()
 
-        return self._estimator.estimate(circuit, observable, params)
+        # Convert Hamiltonian to SparsePauliOp
+        from qamomile.qiskit.observable import hamiltonian_to_sparse_pauli_op
+        sparse_pauli_op = hamiltonian_to_sparse_pauli_op(hamiltonian)
+
+        # Run estimation
+        if params is not None:
+            param_values = list(params)
+        else:
+            param_values = []
+
+        # Check if this is V1 or V2 interface
+        # V2 interface (new): run([(circuit, observable, params)])
+        # V1 interface (old): run(circuits, observables, parameter_values)
+        try:
+            # Try V2 interface first
+            job = self._estimator.run([(circuit, sparse_pauli_op, param_values)])
+            result = job.result()
+            return float(result[0].data.evs)
+        except (TypeError, AttributeError):
+            # Fall back to V1 interface
+            job = self._estimator.run([circuit], [sparse_pauli_op], [param_values] if param_values else None)
+            result = job.result()
+            return float(result.values[0])
 
     def _ensure_measurements(self, circuit: "QuantumCircuit") -> "QuantumCircuit":
         """Ensure circuit has measurements, adding measure_all if needed."""

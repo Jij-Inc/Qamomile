@@ -8,7 +8,7 @@ from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.operation import OperationKind
 from qamomile.circuit.ir.operation.gate import MeasureOperation
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import Value, ValueBase
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowVisitor
 from qamomile.circuit.transpiler.errors import DependencyError, ValidationError
@@ -83,9 +83,9 @@ class AnalyzePass(Pass[Block, Block]):
                 self.graph: dict[str, set[str]] = {}
 
             def visit_operation(self, op: Operation) -> None:
-                # Each result depends on all operands
+                # Each result depends on all operands (using ValueBase for all value types)
                 operand_uuids = {
-                    v.uuid for v in op.operands if isinstance(v, Value)
+                    v.uuid for v in op.operands if isinstance(v, ValueBase)
                 }
                 for result in op.results:
                     if result.uuid not in self.graph:
@@ -132,7 +132,7 @@ class AnalyzePass(Pass[Block, Block]):
                     return
 
                 for operand in op.operands:
-                    if not isinstance(operand, Value):
+                    if not isinstance(operand, ValueBase):
                         continue
 
                     if outer_self._depends_on_measurement(

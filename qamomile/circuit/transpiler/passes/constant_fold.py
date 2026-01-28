@@ -8,7 +8,7 @@ from typing import Any
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import Value, ValueBase
 
 from . import Pass
 from .control_flow_visitor import OperationTransformer
@@ -161,7 +161,7 @@ class ConstantFoldingPass(Pass[Block, Block]):
         changed = False
 
         for operand in op.operands:
-            if isinstance(operand, Value) and operand.uuid in folded_values:
+            if isinstance(operand, ValueBase) and operand.uuid in folded_values:
                 new_operands.append(folded_values[operand.uuid])
                 changed = True
             else:

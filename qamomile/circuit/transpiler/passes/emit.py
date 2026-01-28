@@ -16,8 +16,7 @@ from qamomile.circuit.transpiler.segments import (
     ClassicalSegment,
     ExpvalSegment,
     QuantumSegment,
-    SeparatedProgram,
-    SegmentKind,
+    SimplifiedProgram,
 )
 from qamomile.circuit.transpiler.executable import (
     CompiledClassicalSegment,
@@ -26,8 +25,7 @@ from qamomile.circuit.transpiler.executable import (
     ExecutableProgram,
     ParameterMetadata,
 )
-from qamomile.circuit.transpiler.hamiltonian_eval import evaluate_hamiltonian
-from qamomile.circuit.observable import Observable
+import qamomile.observable as qm_o
 
 T = TypeVar("T")  # Backend circuit type
 C = TypeVar("C", covariant=True)  # Circuit type for emitter
@@ -89,13 +87,13 @@ class CompositeGateEmitter(Protocol[C]):
         ...
 
 
-class EmitPass(Pass[SeparatedProgram, ExecutableProgram[T]], Generic[T]):
+class EmitPass(Pass[SimplifiedProgram, ExecutableProgram[T]], Generic[T]):
     """Base class for backend-specific emission passes.
 
     Subclasses implement _emit_quantum_segment() to generate
     backend-specific quantum circuits.
 
-    Input: SeparatedProgram
+    Input: SimplifiedProgram (enforces C→Q→C pattern)
     Output: ExecutableProgram with compiled segments
     """
 
@@ -118,35 +116,35 @@ class EmitPass(Pass[SeparatedProgram, ExecutableProgram[T]], Generic[T]):
         self.bindings = bindings or {}
         self.parameters = set(parameters) if parameters else set()
 
-    def run(self, input: SeparatedProgram) -> ExecutableProgram[T]:
-        """Emit backend code for all segments."""
-        compiled_quantum: list[CompiledQuantumSegment[T]] = []
+    def run(self, input: SimplifiedProgram) -> ExecutableProgram[T]:
+        """Emit backend code from simplified program."""
+        # Compile quantum segment (always present)
+        compiled_quantum = [self._compile_quantum(input.quantum)]
+
+        # Compile optional segments
         compiled_classical: list[CompiledClassicalSegment] = []
         compiled_expval: list[CompiledExpvalSegment] = []
         execution_order: list[tuple[str, int]] = []
 
-        # Track the last quantum segment index for expval reference
-        last_quantum_idx = -1
+        # Build execution order based on what's present
+        if input.classical_prep:
+            compiled_classical.append(self._compile_classical(input.classical_prep))
+            execution_order.append(("classical", 0))
 
-        for segment in input.segments:
-            if segment.kind == SegmentKind.QUANTUM:
-                assert isinstance(segment, QuantumSegment)
-                compiled = self._compile_quantum(segment)
-                compiled_quantum.append(compiled)
-                last_quantum_idx = len(compiled_quantum) - 1
-                execution_order.append(("quantum", last_quantum_idx))
-            elif segment.kind == SegmentKind.EXPVAL:
-                assert isinstance(segment, ExpvalSegment)
-                compiled = self._compile_expval(
-                    segment, last_quantum_idx, input, compiled_quantum
-                )
-                compiled_expval.append(compiled)
-                execution_order.append(("expval", len(compiled_expval) - 1))
-            else:
-                assert isinstance(segment, ClassicalSegment)
-                compiled = self._compile_classical(segment)
-                compiled_classical.append(compiled)
-                execution_order.append(("classical", len(compiled_classical) - 1))
+        # Quantum always present
+        execution_order.append(("quantum", 0))
+
+        # Expval or classical post (mutually exclusive in practice)
+        if input.expval:
+            compiled_expval.append(
+                self._compile_expval(input.expval, 0, input, compiled_quantum)
+            )
+            execution_order.append(("expval", 0))
+
+        if input.classical_post:
+            idx = 1 if input.classical_prep else 0
+            compiled_classical.append(self._compile_classical(input.classical_post))
+            execution_order.append(("classical", idx))
 
         return ExecutableProgram(
             compiled_quantum=compiled_quantum,
@@ -200,42 +198,37 @@ class EmitPass(Pass[SeparatedProgram, ExecutableProgram[T]], Generic[T]):
         self,
         segment: ExpvalSegment,
         quantum_segment_index: int,
-        program: SeparatedProgram,
+        program: SimplifiedProgram,
         compiled_quantum: list[CompiledQuantumSegment[T]],
     ) -> CompiledExpvalSegment:
-        """Compile an expval segment by evaluating the Hamiltonian.
+        """Compile expval segment by retrieving bound Hamiltonian.
 
         Args:
             segment: The ExpvalSegment to compile
             quantum_segment_index: Index of the quantum segment providing the state
-            program: The full separated program (for parameter access)
+            program: The full simplified program (for parameter access)
             compiled_quantum: List of already compiled quantum segments
 
         Returns:
-            CompiledExpvalSegment with concrete Observable
+            CompiledExpvalSegment with qm_o.Hamiltonian
         """
-        # Build a minimal block from the Hamiltonian operations
-        # We need to find all Hamiltonian operations that lead to this value
-        from qamomile.circuit.ir.block import Block
+        observable_value = segment.hamiltonian_value
 
-        # Create a block containing the operations that define the Hamiltonian
-        # For now, we'll evaluate from the segment's operations
-        block = Block(
-            operations=segment.operations,
-            parameters=program.parameters,
-        )
-
-        # Evaluate the Hamiltonian
-        concrete_h = evaluate_hamiltonian(block, self.bindings)
-
-        if concrete_h is None:
+        # Retrieve Hamiltonian from bindings
+        if observable_value.name not in self.bindings:
             raise RuntimeError(
-                "Failed to evaluate Hamiltonian for expval operation. "
-                "Make sure all Hamiltonian operations are included."
+                f"Observable '{observable_value.name}' not found in bindings. "
+                f"Hamiltonians must be provided as bindings."
             )
 
-        # Create Observable from ConcreteHamiltonian
-        observable = Observable(concrete_h)
+        hamiltonian = self.bindings[observable_value.name]
+
+        # Validate type
+        if not isinstance(hamiltonian, qm_o.Hamiltonian):
+            raise TypeError(
+                f"Expected qamomile.observable.Hamiltonian, "
+                f"got {type(hamiltonian)}"
+            )
 
         # Build qubit mapping from Pauli index to physical qubit index
         qubit_map = self._build_qubit_map(
@@ -244,9 +237,14 @@ class EmitPass(Pass[SeparatedProgram, ExecutableProgram[T]], Generic[T]):
             compiled_quantum,
         )
 
+        # Apply qubit remapping if needed
+        if qubit_map:
+            hamiltonian = hamiltonian.remap_qubits(qubit_map)
+
+        # Create CompiledExpvalSegment with qm_o.Hamiltonian directly
         return CompiledExpvalSegment(
             segment=segment,
-            observable=observable,
+            hamiltonian=hamiltonian,
             quantum_segment_index=quantum_segment_index,
             result_ref=segment.result_ref,
             qubit_map=qubit_map,
