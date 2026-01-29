@@ -24,9 +24,6 @@
 # Let's start by confirming the basic usage.
 
 # %%
-import qamomile.circuit as qmc
-
-
 # %% [markdown]
 # ### QPE Overview
 #
@@ -37,9 +34,11 @@ import qamomile.circuit as qmc
 # - Output: `QFixed` (quantum fixed-point number)
 #
 # When you measure `QFixed` with `measure()`, it is automatically decoded to `Float`.
-
 # %%
 import math
+
+import qamomile.circuit as qmc
+
 
 # Define a phase gate as the unitary
 # P(θ)|1⟩ = e^{iθ}|1⟩, so |1⟩ is an eigenstate with eigenvalue e^{iθ}
@@ -73,6 +72,7 @@ def qpe_3bit(phase: float) -> qmc.Float:
     # Measure QFixed and convert to Float
     return qmc.measure(phase_q)
 
+
 # %%
 # Transpile and Execute
 from qamomile.qiskit import QiskitTranspiler
@@ -97,11 +97,13 @@ for value, count in result.results:
 # First is the `Inline` pass. This expands all `CallBlockOperation`s inline.
 # Since there's nothing to inline in the QPE example above, let's look at a different example.
 
+
 # %%
 @qmc.qkernel
 def add_one(q: qmc.Qubit) -> qmc.Qubit:
     """Add one to a qubit (|0⟩ → |1⟩, |1⟩ → |0⟩)"""
     return qmc.x(q)
+
 
 @qmc.qkernel
 def add_two(q: qmc.Qubit) -> qmc.Qubit:
@@ -110,12 +112,14 @@ def add_two(q: qmc.Qubit) -> qmc.Qubit:
     q = add_one(q)
     return q
 
+
 @qmc.qkernel
 def add_three(q: qmc.Qubit) -> qmc.Qubit:
     """Add three to a qubit by calling add_two and add_one"""
     q = add_two(q)
     q = add_one(q)
     return q
+
 
 # %# [markdown]
 # Let's try inlining these kernels.
@@ -127,6 +131,7 @@ from qamomile.circuit.ir.operation.gate import GateOperation
 
 transpiler = QiskitTranspiler()
 
+
 def print_block_operations(block: Block):
     for op in block.operations:
         print(op.__class__.__name__ + ":", end="")
@@ -136,6 +141,7 @@ def print_block_operations(block: Block):
             print(op.gate_type)
         else:
             print("")
+
 
 # Before inlining
 block = transpiler.to_block(add_three)
@@ -153,20 +159,37 @@ print_block_operations(inlined_block)
 # You can see that `add_three` has been expanded into the contents of `add_two` and `add_one`, which is three X gates.
 
 # %% [markdown]
-# ## Analyze Pass and Separate Pass
-# Next is the `Analyze` pass. This performs dependency analysis and validation. It doesn't make any changes to the computation path.
-# After that comes the `Separate` pass. This separates the program into quantum segments and classical segments.
+# ## Linear Validate, Constant Fold, Analyze, and Separate Passes
+#
+# After inlining, the transpiler performs several additional passes:
+#
+# - **Linear Validate**: Validates linear type semantics — ensures each quantum value is consumed at most once (no-cloning principle). Raises `LinearTypeError` if a qubit is reused.
+# - **Constant Fold**: Evaluates arithmetic expressions (`BinOp`) at compile time when all operands are constants or bound parameters. This ensures that expressions like `phase * 2` don't remain as classical operations that would break segment separation.
+# - **Analyze**: Validates that the block's I/O types are classical, builds a dependency graph, and ensures no quantum operation depends on a measurement result.
+# - **Separate**: Separates the program into a `classical_prep → quantum → classical_post` structure.
+#
 # Let's look at these passes using the QPE example.
 
 # %%
-block = transpiler.to_block(qpe_3bit)
+block = transpiler.to_block(qpe_3bit, bindings={"phase": test_phase})
 inlined_block = transpiler.inline(block)
-analyzed_block = transpiler.analyze(inlined_block)
+validated_block = transpiler.linear_validate(inlined_block)
+folded_block = transpiler.constant_fold(validated_block, bindings={"phase": test_phase})
+analyzed_block = transpiler.analyze(folded_block)
 separated_program = transpiler.separate(analyzed_block)
 
 
 # %%
-for i, segment in enumerate(separated_program.segments):
+segments = []
+if separated_program.classical_prep:
+    segments.append(separated_program.classical_prep)
+segments.append(separated_program.quantum)
+if separated_program.expval:
+    segments.append(separated_program.expval)
+if separated_program.classical_post:
+    segments.append(separated_program.classical_post)
+
+for i, segment in enumerate(segments):
     print(f"Segment {i}: {segment.kind.name}")
     for op in segment.operations:
         print(" ", op.__class__.__name__)
@@ -179,7 +202,9 @@ for i, segment in enumerate(separated_program.segments):
 # %%
 print(f"Boundaries: {len(separated_program.boundaries)}")
 for boundary in separated_program.boundaries:
-    print(f"  {boundary.operation.__class__.__name__}: segment {boundary.source_segment_index} → {boundary.target_segment_index}")
+    print(
+        f"  {boundary.operation.__class__.__name__}: segment {boundary.source_segment_index} → {boundary.target_segment_index}"
+    )
 
 # %% [markdown]
 # ## Emit Pass
@@ -208,8 +233,17 @@ print(circuit.draw(output="text"))
 
 # Check classical processing
 print("\n=== Classical Post-processing ===")
-print(f"Total segments: {len(separated_program.segments)}")
-for i, segment in enumerate(separated_program.segments):
+segments = []
+if separated_program.classical_prep:
+    segments.append(separated_program.classical_prep)
+segments.append(separated_program.quantum)
+if separated_program.expval:
+    segments.append(separated_program.expval)
+if separated_program.classical_post:
+    segments.append(separated_program.classical_post)
+
+print(f"Total segments: {len(segments)}")
+for i, segment in enumerate(segments):
     print(f"Segment {i}: {segment.kind.name}")
     if segment.kind.name == "CLASSICAL":
         for op in segment.operations:
@@ -227,4 +261,3 @@ for i, segment in enumerate(separated_program.segments):
 #
 # This is how we get `Float` values like `Measured value: 0.25` as shown in the first example.
 # Users can receive results in high-level types (`QFixed` → `Float`) without being aware of raw bitstrings.
-
