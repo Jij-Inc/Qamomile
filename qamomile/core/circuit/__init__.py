@@ -26,26 +26,6 @@ from .parameter import (
     BinaryOpeKind,
 )
 
-# Import main classes and functions from circuit.py
-from .circuit import (
-    QuantumCircuit,
-    Gate,
-    SingleQubitGate,
-    ParametricSingleQubitGate,
-    TwoQubitGate,
-    ThreeQubitGate,
-    Operator,
-    SingleQubitGateType,
-    ParametricSingleQubitGateType,
-    TwoQubitGateType,
-    ThreeQubitGateType,
-    ParametricTwoQubitGate,
-    ParametricTwoQubitGateType,
-    ParametricExpGate,
-    MeasurementGate,
-)
-
-
 # Define what should be imported when using "from circuit import *"
 __all__ = [
     "Parameter",
