@@ -15,6 +15,8 @@ if TYPE_CHECKING:
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+from qamomile.circuit.ir.operation.control_flow import ForOperation
+from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.value import Value, ArrayValue
@@ -89,27 +91,37 @@ class MatplotlibDrawer:
     - Inline mode (inline=True): Expands CallBlockOperation contents
     """
 
-    def __init__(self, graph: Graph, style: CircuitStyle | None = None):
+    def __init__(
+        self, graph: Graph, style: CircuitStyle | None = None, fold_loops: bool = True
+    ):
         """Initialize the drawer.
 
         Args:
             graph: Computation graph to visualize.
             style: Visual style configuration. Uses DEFAULT_STYLE if None.
+            fold_loops: If True (default), display ForOperation as blocks instead of unrolling.
+                       If False, expand loops and show all iterations.
         """
         self.graph = graph
         self.style = style or DEFAULT_STYLE
         self.inline = False
+        self.fold_loops = fold_loops
 
-    def draw(self, inline: bool = False) -> matplotlib.figure.Figure:
+    def draw(
+        self, inline: bool = False, fold_loops: bool | None = None
+    ) -> matplotlib.figure.Figure:
         """Generate a matplotlib Figure of the circuit.
 
         Args:
             inline: If True, expand CallBlockOperation. If False, show as boxes.
+            fold_loops: If provided, override the instance fold_loops setting.
 
         Returns:
             matplotlib.figure.Figure object.
         """
         self.inline = inline
+        if fold_loops is not None:
+            self.fold_loops = fold_loops
         graph = self.graph
 
         # Build qubit mapping
@@ -303,6 +315,88 @@ class MatplotlibDrawer:
                                 changed = True
 
         return chain
+
+    def _analyze_loop_affected_qubits(
+        self,
+        op: ForOperation,
+        qubit_map: dict[int, int],
+        value_id_map: dict[int, int] | None = None,
+    ) -> list[int]:
+        """Analyze which qubits are affected by a ForOperation.
+
+        Args:
+            op: ForOperation to analyze.
+            qubit_map: Mapping from Value ID to qubit index.
+            value_id_map: Mapping from dummy value IDs to actual value IDs.
+
+        Returns:
+            List of affected qubit indices.
+        """
+        if value_id_map is None:
+            value_id_map = {}
+
+        affected = set()
+
+        def get_qubit_index(operand) -> int | None:
+            """Get qubit index for an operand, handling array elements."""
+            operand_id = value_id_map.get(id(operand), id(operand))
+
+            # Direct lookup
+            if operand_id in qubit_map:
+                return qubit_map[operand_id]
+
+            # Check if this is an array element - use parent array's qubit index
+            if hasattr(operand, "parent_array") and operand.parent_array is not None:
+                parent_id = id(operand.parent_array)
+                if parent_id in qubit_map:
+                    # For array elements, we need to determine which wire(s) are affected
+                    # If the index is constant, use the specific wire
+                    # If the index is symbolic (loop variable), all wires in the array are affected
+                    if hasattr(operand, "element_indices") and operand.element_indices:
+                        idx_value = operand.element_indices[0]
+                        if idx_value.is_constant():
+                            idx = idx_value.get_const()
+                            if idx is not None and isinstance(idx, int):
+                                # Specific element - add that wire
+                                base_idx = qubit_map[parent_id]
+                                return base_idx + idx
+                        else:
+                            # Symbolic index - conservatively mark all array qubits
+                            base_idx = qubit_map[parent_id]
+                            # We need array size - check parent's shape
+                            if (
+                                hasattr(operand.parent_array, "shape")
+                                and operand.parent_array.shape
+                            ):
+                                size_val = operand.parent_array.shape[0]
+                                if size_val.is_constant():
+                                    size = size_val.get_const()
+                                    if size is not None and isinstance(size, int):
+                                        for i in range(size):
+                                            affected.add(base_idx + i)
+                            return None  # Already added all
+                    return qubit_map[parent_id]
+
+            return None
+
+        def collect_from_ops(ops: list[Operation]) -> None:
+            for inner_op in ops:
+                if isinstance(inner_op, GateOperation):
+                    for operand in inner_op.operands:
+                        idx = get_qubit_index(operand)
+                        if idx is not None:
+                            affected.add(idx)
+                elif isinstance(inner_op, CallBlockOperation):
+                    for operand in inner_op.operands[1:]:  # Skip BlockValue
+                        idx = get_qubit_index(operand)
+                        if idx is not None:
+                            affected.add(idx)
+                elif isinstance(inner_op, ForOperation):
+                    # Recursively collect from nested loops
+                    collect_from_ops(inner_op.operations)
+
+        collect_from_ops(op.operations)
+        return list(affected)
 
     def _estimate_gate_width(
         self, op: GateOperation, param_values: dict | None = None
@@ -656,9 +750,12 @@ class MatplotlibDrawer:
             int, float
         ] = {}  # Track right edge of last box per qubit
 
-        # Initialize right edges to ensure minimum gap between labels and first gate/block
+        # Initialize right edges to 0.0 for layout calculation (logical coordinates)
+        # The initial_wire_position offset is applied during the drawing phase
         for q_idx in set(qubit_map.values()):
-            qubit_right_edges[q_idx] = 0.3
+            qubit_right_edges[q_idx] = 0.0
+            # Pre-initialize qubit_columns to ensure entries exist
+            _ = qubit_columns[q_idx]
 
         def process_operations(
             ops: list[Operation],
@@ -668,7 +765,7 @@ class MatplotlibDrawer:
             scope_path: tuple = (),
             param_values: dict[int, float | int | str] | None = None,
         ) -> None:
-            nonlocal column, max_depth
+            nonlocal column, max_depth, actual_width
             if value_id_map is None:
                 value_id_map = {}
             if param_values is None:
@@ -682,6 +779,98 @@ class MatplotlibDrawer:
                 if isinstance(op, QInitOperation):
                     # Initialization doesn't take space
                     positions[op_key] = 0
+                    continue
+
+                if isinstance(op, ExpvalOp):
+                    raise NotImplementedError(
+                        f"Visualization of ExpvalOp is not yet supported. "
+                        f"The circuit contains an expectation value calculation: {op}"
+                    )
+
+                if isinstance(op, ForOperation):
+                    # Handle ForOperation: either fold as box or expand iterations
+                    start_val = op.operands[0].get_const() if op.operands else 0
+                    stop_val_raw = (
+                        op.operands[1].get_const() if len(op.operands) > 1 else 0
+                    )
+                    step_val = (
+                        op.operands[2].get_const() if len(op.operands) > 2 else 1
+                    )
+
+                    # Handle None values for start and step
+                    if start_val is None:
+                        start_val = 0
+                    if step_val is None:
+                        step_val = 1
+
+                    # Skip zero-iteration loops only if stop is concrete
+                    # If stop is symbolic (None), we can't determine iteration count
+                    stop_val = stop_val_raw if stop_val_raw is not None else 0
+                    if stop_val_raw is not None:
+                        if step_val > 0 and start_val >= stop_val:
+                            continue
+                        if step_val < 0 and start_val <= stop_val:
+                            continue
+
+                    if self.fold_loops:
+                        # Draw as a box (folded)
+                        affected_qubits = self._analyze_loop_affected_qubits(
+                            op, qubit_map, value_id_map
+                        )
+
+                        if affected_qubits:
+                            start_column = max(qubit_columns[q] for q in affected_qubits)
+                        elif qubit_columns:
+                            start_column = max(qubit_columns.values())
+                        else:
+                            start_column = 0
+
+                        # Use fixed width for folded loop box
+                        loop_width = self.style.folded_loop_width
+                        op_half_width = loop_width / 2
+                        gap = self.style.gate_gap
+
+                        # Overlap prevention
+                        for q in affected_qubits:
+                            if q in qubit_right_edges:
+                                required_center = (
+                                    qubit_right_edges[q] + gap + op_half_width
+                                )
+                                start_column = max(start_column, required_center)
+
+                        positions[op_key] = start_column
+                        block_widths[op_key] = loop_width
+
+                        # Update qubit columns and right edges
+                        for q in affected_qubits:
+                            qubit_columns[q] = start_column + op_half_width + gap
+                            qubit_right_edges[q] = start_column + op_half_width
+
+                        column = max(column, start_column + 1)
+                        actual_width = max(actual_width, start_column + op_half_width + 0.5)
+                    else:
+                        # Expand loop: process each iteration
+                        num_iterations = (
+                            (stop_val - start_val + step_val - 1) // step_val
+                            if step_val > 0
+                            else (start_val - stop_val - step_val - 1) // (-step_val)
+                        )
+                        for iteration in range(num_iterations):
+                            iter_value = start_val + iteration * step_val
+                            # Create param_values for this iteration
+                            child_param_values = dict(param_values)
+                            # Map loop variable to current iteration value
+                            # The loop_var name is stored in ForOperation
+                            child_param_values[f"_loop_{op.loop_var}"] = iter_value
+
+                            # Process body operations for this iteration
+                            process_operations(
+                                op.operations,
+                                value_id_map,
+                                depth + 1,
+                                scope_path=(*op_key, iteration),
+                                param_values=child_param_values,
+                            )
                     continue
 
                 if isinstance(op, CallBlockOperation) and self.inline:
@@ -854,6 +1043,27 @@ class MatplotlibDrawer:
                         operand_id = value_id_map.get(id(operand), id(operand))
                         if operand_id in qubit_map:
                             affected_qubits.append(qubit_map[operand_id])
+                        # Handle array element access via parent_array
+                        elif (
+                            hasattr(operand, "parent_array")
+                            and operand.parent_array is not None
+                        ):
+                            parent_id = id(operand.parent_array)
+                            if parent_id in qubit_map:
+                                # Get the element index
+                                if (
+                                    hasattr(operand, "element_indices")
+                                    and operand.element_indices
+                                ):
+                                    idx_value = operand.element_indices[0]
+                                    if idx_value.is_constant():
+                                        idx = idx_value.get_const()
+                                        if idx is not None and isinstance(idx, int):
+                                            base_idx = qubit_map[parent_id]
+                                            affected_qubits.append(base_idx + idx)
+                                            continue
+                                # Fallback to base index
+                                affected_qubits.append(qubit_map[parent_id])
 
                     # Find the earliest column where all affected qubits are free
                     if affected_qubits:
@@ -920,7 +1130,6 @@ class MatplotlibDrawer:
                         qubit_right_edges[q] = min_column + op_half_width
 
                     # Update actual_width (simplified — use op_half_width directly)
-                    nonlocal actual_width
                     op_actual_width = min_column + op_half_width + 0.5
                     actual_width = max(actual_width, op_actual_width)
 
@@ -1216,6 +1425,72 @@ class MatplotlibDrawer:
                 if isinstance(op, QInitOperation):
                     # Skip initialization (no visual representation)
                     continue
+                elif isinstance(op, ExpvalOp):
+                    raise NotImplementedError(
+                        f"Visualization of ExpvalOp is not yet supported. "
+                        f"The circuit contains an expectation value calculation: {op}"
+                    )
+                elif isinstance(op, ForOperation):
+                    # Handle ForOperation based on fold_loops setting
+                    start_val = op.operands[0].get_const() if op.operands else 0
+                    stop_val_raw = (
+                        op.operands[1].get_const() if len(op.operands) > 1 else 0
+                    )
+                    step_val = (
+                        op.operands[2].get_const() if len(op.operands) > 2 else 1
+                    )
+
+                    # Handle None values for start and step
+                    if start_val is None:
+                        start_val = 0
+                    if step_val is None:
+                        step_val = 1
+
+                    # Skip zero-iteration loops only if stop is concrete
+                    stop_val = stop_val_raw if stop_val_raw is not None else 0
+                    if stop_val_raw is not None:
+                        if step_val > 0 and start_val >= stop_val:
+                            continue
+                        if step_val < 0 and start_val <= stop_val:
+                            continue
+
+                    if self.fold_loops:
+                        # Draw as a box
+                        if op_key in positions:
+                            op_width = block_widths.get(op_key)
+                            self._draw_for_loop_box(
+                                fig, op, qubit_map, positions[op_key], op_width
+                            )
+                    else:
+                        # Expand loop: draw each iteration's operations
+                        # Can't expand if stop is symbolic
+                        if stop_val_raw is None:
+                            # Skip expansion for symbolic loops, treat as folded
+                            if op_key in positions:
+                                op_width = block_widths.get(op_key)
+                                self._draw_for_loop_box(
+                                    fig, op, qubit_map, positions[op_key], op_width
+                                )
+                            continue
+
+                        num_iterations = (
+                            (stop_val - start_val + step_val - 1) // step_val
+                            if step_val > 0
+                            else (start_val - stop_val - step_val - 1) // (-step_val)
+                        )
+                        for iteration in range(num_iterations):
+                            iter_value = start_val + iteration * step_val
+                            # Create param_values for this iteration
+                            child_param_values = dict(param_values)
+                            child_param_values[f"_loop_{op.loop_var}"] = iter_value
+
+                            # Draw body operations for this iteration
+                            draw_ops(
+                                op.operations,
+                                value_id_map,
+                                scope_path=(*op_key, iteration),
+                                param_values=child_param_values,
+                            )
                 elif isinstance(op, GateOperation):
                     self._draw_gate(
                         fig,
@@ -1536,6 +1811,21 @@ class MatplotlibDrawer:
             # Try direct value ID mapping
             if operand_id in qubit_map:
                 qubit_idx = qubit_map[operand_id]
+            # Try parent array for array element access
+            elif hasattr(operand, "parent_array") and operand.parent_array is not None:
+                parent_id = id(operand.parent_array)
+                if parent_id in qubit_map:
+                    # Get the element index
+                    if hasattr(operand, "element_indices") and operand.element_indices:
+                        idx_value = operand.element_indices[0]
+                        if idx_value.is_constant():
+                            idx = idx_value.get_const()
+                            if idx is not None and isinstance(idx, int):
+                                base_idx = qubit_map[parent_id]
+                                qubit_idx = base_idx + idx
+                    if qubit_idx is None:
+                        # Fallback to base index
+                        qubit_idx = qubit_map[parent_id]
             # Fallback: try using logical_id if available
             elif hasattr(operand, "logical_id") and operand.logical_id:
                 # Search for logical_id in the qubit_map by checking all mapped values
@@ -1871,6 +2161,89 @@ class MatplotlibDrawer:
             va="center",
             color=self.style.block_text_color,
             fontsize=self.style.font_size,
+            zorder=PORDER_TEXT,
+        )
+
+    def _draw_for_loop_box(
+        self,
+        fig: matplotlib.figure.Figure,
+        op: ForOperation,
+        qubit_map: dict[int, int],
+        x_pos: float,
+        block_width: float | None = None,
+    ) -> None:
+        """Draw a ForOperation as a box (folded mode).
+
+        Args:
+            fig: matplotlib Figure.
+            op: ForOperation.
+            qubit_map: Qubit to wire index mapping.
+            x_pos: X position.
+            block_width: Pre-calculated block width from layout phase.
+        """
+        import matplotlib.patches as mpatches
+
+        ax = fig._qm_ax
+
+        # Get affected qubits
+        affected_qubits = self._analyze_loop_affected_qubits(op, qubit_map)
+
+        if not affected_qubits:
+            return
+
+        # Convert to y coordinates using variable spacing
+        y_coords = [self.qubit_y[q] for q in affected_qubits]
+        min_y = min(y_coords)
+        max_y = max(y_coords)
+
+        # Get loop range for label
+        start_val = op.operands[0].get_const() if op.operands else 0
+        stop_val = op.operands[1].get_const() if len(op.operands) > 1 else 0
+        step_val = op.operands[2].get_const() if len(op.operands) > 2 else 1
+
+        if start_val is None:
+            start_val = "?"
+        if stop_val is None:
+            stop_val = "?"
+        if step_val is None or step_val == 1:
+            label = f"for {op.loop_var} in [{start_val}..{stop_val})"
+        else:
+            label = f"for {op.loop_var} in [{start_val}..{stop_val}):{step_val}"
+
+        # Use pre-calculated width or default
+        if block_width is not None:
+            width = block_width
+        else:
+            width = self.style.folded_loop_width
+
+        # Draw box spanning all qubits
+        height = max_y - min_y + self.style.gate_height
+        y_center = (min_y + max_y) / 2
+
+        rect = mpatches.FancyBboxPatch(
+            (x_pos - width / 2, min_y - self.style.gate_height / 2),
+            width,
+            height,
+            boxstyle=mpatches.BoxStyle.Round(
+                pad=0, rounding_size=self.style.gate_corner_radius
+            ),
+            facecolor=self.style.for_loop_face_color,
+            edgecolor=self.style.for_loop_edge_color,
+            linewidth=1.5,
+            linestyle="-",  # Solid line for for-loop boxes
+            zorder=PORDER_GATE,
+        )
+        ax.add_patch(rect)
+
+        # Draw label
+        ax.text(
+            x_pos,
+            y_center,
+            label,
+            ha="center",
+            va="center",
+            color=self.style.for_loop_text_color,
+            fontsize=self.style.subfont_size,
             zorder=PORDER_TEXT,
         )
 

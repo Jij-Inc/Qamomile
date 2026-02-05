@@ -560,6 +560,7 @@ class QKernel(Generic[P, R]):
     def draw(
         self,
         inline: bool = False,
+        fold_loops: bool = True,
         **kwargs: Any,
     ) -> Any:
         """Visualize the circuit using Matplotlib.
@@ -571,6 +572,8 @@ class QKernel(Generic[P, R]):
         Args:
             inline: If True, expand CallBlockOperation contents (inlining).
                    If False (default), show CallBlockOperation as boxes.
+            fold_loops: If True (default), display ForOperation as blocks instead of unrolling.
+                       If False, expand loops and show all iterations.
             **kwargs: Concrete values for arguments. Arguments not provided here
                      (and without defaults) will be shown as symbolic parameters.
 
@@ -606,6 +609,9 @@ class QKernel(Generic[P, R]):
 
             # Draw with blocks expanded (inlined)
             fig = circuit.draw(inline=True)
+
+            # Draw with loops folded (shown as blocks)
+            fig = circuit.draw(fold_loops=True)
             ```
         """
         from qamomile.circuit.visualization import MatplotlibDrawer
@@ -613,7 +619,7 @@ class QKernel(Generic[P, R]):
         graph = self.build(parameters=None, **kwargs)
         # Extract return variable names from AST and set them in the graph
         graph.output_names = self._extract_return_names() or []
-        drawer = MatplotlibDrawer(graph)
+        drawer = MatplotlibDrawer(graph, fold_loops=fold_loops)
         return drawer.draw(inline=inline)
 
 

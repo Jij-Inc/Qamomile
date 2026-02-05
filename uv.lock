@@ -1804,6 +1804,12 @@ wheels = [
 ]
 
 [[package]]
+name = "pylatexenc"
+version = "2.10"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/5d/ab/34ec41718af73c00119d0351b7a2531d2ebddb51833a36448fc7b862be60/pylatexenc-2.10.tar.gz", hash = "sha256:3dd8fd84eb46dc30bee1e23eaab8d8fb5a7f507347b23e5f38ad9675c84f40d3", size = 162597, upload-time = "2021-04-06T07:56:07.854Z" }
+
+[[package]]
 name = "pyparsing"
 version = "3.3.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1826,6 +1832,22 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/d1/db/7ef3487e0fb0049ddb5ce41d3a49c235bf9ad299b6a25d5780a89f19230f/pytest-9.0.2.tar.gz", hash = "sha256:75186651a92bd89611d1d9fc20f0b4345fd827c41ccd5c299a868a05d70edf11", size = 1568901, upload-time = "2025-12-06T21:30:51.014Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/3b/ab/b3226f0bd7cdcf710fbede2b3548584366da3b19b5021e74f5bde2a8fa3f/pytest-9.0.2-py3-none-any.whl", hash = "sha256:711ffd45bf766d5264d487b917733b453d917afd2b0ad65223959f59089f875b", size = 374801, upload-time = "2025-12-06T21:30:49.154Z" },
+]
+
+[[package]]
+name = "pytest-mpl"
+version = "0.18.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jinja2" },
+    { name = "matplotlib" },
+    { name = "packaging" },
+    { name = "pillow" },
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9c/40/ba3caed7a54a6a5fe035ecc62dbb473f6f41ecade2ea3e0474f7e8e65c5c/pytest_mpl-0.18.0.tar.gz", hash = "sha256:04c949ea1278a38ca3d8d675871f6c5a0958bfedfaf4fd8bfd4e25e5861759a7", size = 880354, upload-time = "2025-11-15T13:54:52.69Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/eb/01/f9128b75808840fc070042c57168c800da57d2d80b97071dc6f07c793d58/pytest_mpl-0.18.0-py3-none-any.whl", hash = "sha256:e474b7676957c521104dbe351df937da5e582231cd34daeb43b9d1ecc048e5c0", size = 28063, upload-time = "2025-11-15T13:54:51.147Z" },
 ]
 
 [[package]]
@@ -1967,6 +1989,7 @@ dependencies = [
     { name = "jijmodeling" },
     { name = "ommx" },
     { name = "plotly" },
+    { name = "pylatexenc" },
     { name = "qiskit" },
     { name = "qiskit-aer" },
     { name = "sympy" },
@@ -1986,6 +2009,7 @@ dev = [
     { name = "jupytext" },
     { name = "matplotlib" },
     { name = "pytest" },
+    { name = "pytest-mpl" },
     { name = "quri-parts-circuit" },
     { name = "quri-parts-core" },
     { name = "quri-parts-qulacs" },
@@ -1998,6 +2022,7 @@ requires-dist = [
     { name = "jijmodeling", specifier = ">=1.14.1" },
     { name = "ommx", specifier = ">=2.3.3" },
     { name = "plotly", specifier = ">=5.0.0" },
+    { name = "pylatexenc", specifier = ">=2.10" },
     { name = "qiskit", specifier = ">=2.3.0" },
     { name = "qiskit-aer", specifier = ">=0.17.2" },
     { name = "quri-parts-circuit", marker = "extra == 'quri-parts'", specifier = ">=0.21.1" },
@@ -2014,6 +2039,7 @@ dev = [
     { name = "jupytext", specifier = ">=1.18.1" },
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "pytest", specifier = ">=9.0.2" },
+    { name = "pytest-mpl", specifier = ">=0.17.0" },
     { name = "quri-parts-circuit", specifier = ">=0.21.1" },
     { name = "quri-parts-core", specifier = ">=0.21.1" },
     { name = "quri-parts-qulacs", specifier = ">=0.21.1" },
@@ -2072,6 +2098,10 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/1c/ca/a1cd95daf75d09d2dc1744cde95d5d18fed61a0e4922788fb916a7cd8152/qiskit_aer-0.17.2-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:2749e6027f67e1f6b9d328d2dda2d4bf926aebd3653edc62e94c45d8237294d8", size = 12376191, upload-time = "2025-09-17T13:54:38.092Z" },
     { url = "https://files.pythonhosted.org/packages/d6/69/e2f979e2fca054b0092fc52c46da050298513b9b03531305bc3f340c7669/qiskit_aer-0.17.2-cp313-cp313-win32.whl", hash = "sha256:c3ffd40a64bfcf8a6d10cbfdca8734d49ec57502fd70dc63aae9ed3819249dd6", size = 6922275, upload-time = "2025-09-17T13:54:40.024Z" },
     { url = "https://files.pythonhosted.org/packages/ae/91/195cb69d3af4359544939378879093764bd35d8abd7ac0de840bb5477d27/qiskit_aer-0.17.2-cp313-cp313-win_amd64.whl", hash = "sha256:b38c5dfdc6cb2bacac78a47b0df8247123051564007fdecedb8ffbd4256f0f09", size = 9563116, upload-time = "2025-09-17T13:54:42.061Z" },
+    { url = "https://files.pythonhosted.org/packages/2c/1b/b0516cd3d0e83ebe30e8d04d2a156dac883fd8ac4521deb12de582b2fc78/qiskit_aer-0.17.2-cp314-cp314-macosx_10_15_x86_64.whl", hash = "sha256:c282b9b65f2b011d740e76b0ab44201c70d8d48894ddc12e22442acbb81cc7eb", size = 2393891, upload-time = "2026-02-04T21:30:47.913Z" },
+    { url = "https://files.pythonhosted.org/packages/65/5b/c8bf7942ca12d50c4c8c9fde82f25ebcd6198b98f66c51616a9225d541bc/qiskit_aer-0.17.2-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:193de16895ee989a5259331d0f1b1dcad606d506e5e831683ff165e82851a7ac", size = 2117650, upload-time = "2026-02-04T21:30:55.486Z" },
+    { url = "https://files.pythonhosted.org/packages/ff/27/f7b518f0928792e454ca9018d712769abf96033902e41bb3b648ff14833b/qiskit_aer-0.17.2-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b84564d563fb06adb454f3528dcc343be327c30cbd5f9f40aec7efd21d241e55", size = 14160447, upload-time = "2026-02-04T21:30:57.829Z" },
+    { url = "https://files.pythonhosted.org/packages/f6/c1/59fe9c10e8d53533990ccf1bdf87ac74f77ced57d63a233f759df02bd361/qiskit_aer-0.17.2-cp314-cp314-win_amd64.whl", hash = "sha256:5d7b22dd945df4c69d57e966efb549cf9186055e5f32c649a91b7dd1eb133f07", size = 9697912, upload-time = "2026-02-04T21:30:59.913Z" },
 ]
 
 [[package]]
