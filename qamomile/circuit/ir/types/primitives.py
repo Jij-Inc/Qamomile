@@ -107,12 +107,15 @@ class DictType(ClassicalTypeMixin, ValueType):
 
     Unlike simple types, DictType stores the key and value types,
     so equality and hashing depend on those types.
+    When key_type and value_type are None, represents a generic Dict type.
     """
 
-    key_type: "ValueType"
-    value_type: "ValueType"
+    key_type: "ValueType | None" = None
+    value_type: "ValueType | None" = None
 
     def label(self) -> str:
+        if self.key_type is None or self.value_type is None:
+            return "Dict"
         return f"Dict[{self.key_type.label()}, {self.value_type.label()}]"
 
     def __eq__(self, other: object) -> bool:
