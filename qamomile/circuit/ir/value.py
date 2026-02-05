@@ -13,7 +13,7 @@ import dataclasses
 import typing
 import uuid
 
-from .types import ValueType
+from .types import DictType, ValueType
 
 T = typing.TypeVar("T", bound=ValueType)
 
@@ -271,22 +271,6 @@ class TupleValue:
 # =============================================================================
 
 
-class _DictValueType:
-    """Placeholder type for DictValue that satisfies the type interface.
-
-    DictValue is always classical (stores key-value pairs for data like Ising coefficients).
-    """
-
-    def is_quantum(self) -> bool:
-        return False
-
-    def is_classical(self) -> bool:
-        return True
-
-    def label(self) -> str:
-        return "Dict"
-
-
 @dataclasses.dataclass
 class DictValue:
     """A dictionary mapping keys to values.
@@ -315,9 +299,9 @@ class DictValue:
         )
 
     @property
-    def type(self) -> _DictValueType:
+    def type(self) -> DictType:
         """Return type interface for compatibility with Value."""
-        return _DictValueType()
+        return DictType()
 
     def is_parameter(self) -> bool:
         """Check if this dict is a parameter (bound at transpile time)."""
