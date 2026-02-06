@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import dataclasses
 
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind, CompOpKind
+from qamomile.circuit.ir.types import QFixedType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
     FloatType,
-    UIntType,
     QubitType,
+    UIntType,
 )
-from qamomile.circuit.ir.types import QFixedType
 from qamomile.circuit.ir.value import Value
-from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind, CompOpKind
 
 from .handle import ArithmeticMixin, Handle, _emit_binop, _emit_compop
 
@@ -63,6 +63,12 @@ class UInt(ArithmeticMixin, Handle):
             )
         return other
 
+    def _result_for(self, other: "UInt | Float") -> "UInt | Float":
+        """Create the appropriate result type based on the coerced operand."""
+        if isinstance(other, Float):
+            return self._make_float_result()
+        return self._make_result()
+
     def __lt__(self, other) -> "Bit":
         if isinstance(other, int):
             other = self._make_uint(other)
@@ -91,46 +97,38 @@ class UInt(ArithmeticMixin, Handle):
         _emit_compop(self.value, other.value, result.value, CompOpKind.GE)
         return result
 
-    # Override arithmetic operations with proper type hints for UInt
-    def __add__(self, other: "int | UInt") -> "UInt":
+    def __add__(self, other: "int | float | UInt | Float") -> "UInt | Float":
         other = self._coerce(other)
-        result = self._make_result()
+        result = self._result_for(other)
         _emit_binop(self.value, other.value, result.value, BinOpKind.ADD)
         return result
 
-    def __radd__(self, other: "int | UInt") -> "UInt":
+    def __radd__(self, other: "int | float | UInt | Float") -> "UInt | Float":
         return self.__add__(other)
 
-    def __sub__(self, other: "int | UInt") -> "UInt":
+    def __sub__(self, other: "int | float | UInt | Float") -> "UInt | Float":
         other = self._coerce(other)
-        result = self._make_result()
+        result = self._result_for(other)
         _emit_binop(self.value, other.value, result.value, BinOpKind.SUB)
         return result
 
-    def __rsub__(self, other: "int | UInt") -> "UInt":
+    def __rsub__(self, other: "int | float | UInt | Float") -> "UInt | Float":
         other = self._coerce(other)
-        result = self._make_result()
+        result = self._result_for(other)
         _emit_binop(other.value, self.value, result.value, BinOpKind.SUB)
         return result
 
-    # UInt-specific multiplication (handles float case differently)
-    def __mul__(self, other) -> "UInt | Float":
-        if isinstance(other, float):
-            other_value = Value(
-                type=FloatType(), name="float_const", params={"const": other}
-            )
-            result = self._make_float_result()
-            _emit_binop(self.value, other_value, result.value, BinOpKind.MUL)
-            return result
+    def __mul__(self, other: "int | float | UInt | Float") -> "UInt | Float":
+        other = self._coerce(other)
+        result = self._result_for(other)
+        _emit_binop(self.value, other.value, result.value, BinOpKind.MUL)
+        return result
 
-        # Use mixin's default implementation for int/UInt
-        return super().__mul__(other)  # type: ignore
-
-    def __rmul__(self, other) -> "UInt | Float":
+    def __rmul__(self, other: "int | float | UInt | Float") -> "UInt | Float":
         return self.__mul__(other)
 
-    # UInt-specific true division (always returns Float)
     def __truediv__(self, other: "int | float | UInt | Float") -> "Float":
+        """UInt true division always returns Float."""
         other = self._coerce(other)
         result = self._make_float_result()
         _emit_binop(self.value, other.value, result.value, BinOpKind.DIV)
@@ -142,29 +140,27 @@ class UInt(ArithmeticMixin, Handle):
         _emit_binop(other.value, self.value, result.value, BinOpKind.DIV)
         return result
 
-    # UInt-specific floor division
-    def __floordiv__(self, other: "int | UInt") -> "UInt":
+    def __floordiv__(self, other: "int | float | UInt | Float") -> "UInt | Float":
         other = self._coerce(other)
-        result = self._make_result()
+        result = self._result_for(other)
         _emit_binop(self.value, other.value, result.value, BinOpKind.FLOORDIV)
         return result
 
-    def __rfloordiv__(self, other: "int | UInt") -> "UInt":
+    def __rfloordiv__(self, other: "int | float | UInt | Float") -> "UInt | Float":
         other = self._coerce(other)
-        result = self._make_result()
+        result = self._result_for(other)
         _emit_binop(other.value, self.value, result.value, BinOpKind.FLOORDIV)
         return result
 
-    # UInt-specific power operation
-    def __pow__(self, other: "int | UInt") -> "UInt":
+    def __pow__(self, other: "int | float | UInt | Float") -> "UInt | Float":
         other = self._coerce(other)
-        result = self._make_result()
+        result = self._result_for(other)
         _emit_binop(self.value, other.value, result.value, BinOpKind.POW)
         return result
 
-    def __rpow__(self, other: "int | UInt") -> "UInt":
+    def __rpow__(self, other: "int | float | UInt | Float") -> "UInt | Float":
         other = self._coerce(other)
-        result = self._make_result()
+        result = self._result_for(other)
         _emit_binop(other.value, self.value, result.value, BinOpKind.POW)
         return result
 
