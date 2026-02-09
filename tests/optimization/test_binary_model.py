@@ -2,7 +2,6 @@ import numpy as np
 import pytest
 
 from qamomile.optimization.binary_model import BinaryModel, BinaryExpr, VarType
-from qamomile.optimization.higher_ising_model import HigherIsingModel
 
 
 # ---- coefficients property ----
@@ -104,12 +103,10 @@ def test_calc_energy_empty():
     """calc_energy on empty model should return constant."""
     expr = BinaryExpr(vartype=VarType.SPIN, constant=5.0, coefficients={})
     model = BinaryModel(expr)
-    # No variables, so state is empty-ish. But num_bits=0,
-    # so we call with an empty list.
     assert np.isclose(model.calc_energy([]), 5.0)
 
 
-# ---- calc_energy equivalence with HigherIsingModel ----
+# ---- calc_energy with known values ----
 
 
 @pytest.mark.parametrize(
@@ -121,28 +118,15 @@ def test_calc_energy_empty():
         ({}, 5.0, [], 5.0),
     ],
 )
-def test_calc_energy_matches_higher_ising(
-    coefficients, constant, state, expected_energy
-):
-    """BinaryModel.calc_energy should produce same results as HigherIsingModel.calc_energy."""
-    # HigherIsingModel reference
-    if coefficients:
-        him = HigherIsingModel(coefficients=coefficients.copy(), constant=constant)
-        him_energy = him.calc_energy(state)
-        assert np.isclose(him_energy, expected_energy)
-
-    # BinaryModel
+def test_calc_energy_spin_known_values(coefficients, constant, state, expected_energy):
+    """BinaryModel.calc_energy should produce correct results for known SPIN cases."""
     expr = BinaryExpr(
         vartype=VarType.SPIN,
         constant=constant,
         coefficients=coefficients.copy(),
     )
     bm = BinaryModel(expr)
-    bm_energy = bm.calc_energy(state)
-    assert np.isclose(bm_energy, expected_energy)
-
-    if coefficients:
-        assert np.isclose(bm_energy, him_energy)
+    assert np.isclose(bm.calc_energy(state), expected_energy)
 
 
 # ---- from_qubo with simplify ----
@@ -178,48 +162,35 @@ def test_from_ising_simplify():
 
 
 def test_from_hubo_manually():
-    """from_hubo should produce same results as HigherIsingModel.from_hubo for a manual case."""
+    """from_hubo should return a BINARY model with HUBO coefficients stored correctly."""
     hubo = {(0,): 1.0, (0, 1): 2.0, (0, 1, 3): 4.0}
     constant = 8.0
 
-    # Expected values (from test_higher_ising_model.py)
-    expected_coefficients = {
-        (0,): -12 / 8,
-        (1,): -8 / 8,
-        (2,): -4 / 8,  # index 3 maps to sequential 2
-        (0, 1): 8 / 8,
-        (0, 2): 4 / 8,
-        (1, 2): 4 / 8,
-        (0, 1, 2): -4 / 8,
-    }
-    expected_constant = 76 / 8
-
-    # HigherIsingModel reference
-    him = HigherIsingModel.from_hubo(hubo=hubo, constant=constant)
-
-    # BinaryModel
+    # BinaryModel returns BINARY
     bm = BinaryModel.from_hubo(hubo=hubo, constant=constant)
 
-    # Check BinaryModel is SPIN
-    assert bm.vartype == VarType.SPIN
+    # Check BinaryModel is BINARY
+    assert bm.vartype == VarType.BINARY
+    assert np.isclose(bm.constant, constant)
+    assert bm.num_bits == 3  # indices 0, 1, 3 → sequential 0, 1, 2
 
-    # Check constant
-    assert np.isclose(bm.constant, expected_constant)
-    assert np.isclose(bm.constant, him.constant)
+    # Check HUBO coefficients are stored correctly
+    assert np.isclose(bm.coefficients[(0,)], 1.0)
+    assert np.isclose(bm.coefficients[(0, 1)], 2.0)
+    assert np.isclose(bm.coefficients[(0, 1, 2)], 4.0)  # index 3 → sequential 2
 
-    # Check coefficients match expected
-    for key, value in expected_coefficients.items():
-        assert np.isclose(bm.coefficients[key], value), (
-            f"Mismatch at {key}: expected {value}, got {bm.coefficients.get(key)}"
-        )
+    # Verify energy equivalence via round-trip: BINARY → SPIN → BINARY
+    spin_bm = bm.change_vartype(VarType.SPIN)
+    roundtrip_bm = spin_bm.change_vartype(VarType.BINARY)
 
-    # Check number of variables
-    assert bm.num_bits == him.num_bits == 3
+    for bits in range(2**bm.num_bits):
+        state = [(bits >> i) & 1 for i in range(bm.num_bits)]
+        assert np.isclose(bm.calc_energy(state), roundtrip_bm.calc_energy(state))
 
 
 @pytest.mark.parametrize("seed", [901 + i for i in range(50)])
 def test_from_hubo_equivalence_random(seed):
-    """from_hubo should produce numerically equivalent results to HigherIsingModel.from_hubo."""
+    """from_hubo round-trip BINARY→SPIN→BINARY should preserve energy."""
     np.random.seed(seed)
 
     # Generate random HUBO
@@ -231,46 +202,33 @@ def test_from_hubo_equivalence_random(seed):
         hubo[indices] = np.random.randn()
     constant = np.random.randn()
 
-    # HigherIsingModel reference
-    him = HigherIsingModel.from_hubo(hubo=hubo, constant=constant)
-
-    # BinaryModel
+    # BinaryModel from HUBO (BINARY)
     bm = BinaryModel.from_hubo(hubo=hubo, constant=constant)
+    assert bm.vartype == VarType.BINARY
 
-    # Constants should match
-    assert np.isclose(bm.constant, him.constant), (
-        f"Constants differ: BM={bm.constant}, HIM={him.constant}"
-    )
+    # Round-trip: BINARY → SPIN → BINARY
+    spin_bm = bm.change_vartype(VarType.SPIN)
+    roundtrip_bm = spin_bm.change_vartype(VarType.BINARY)
 
-    # Number of bits should match
-    assert bm.num_bits == him.num_bits
+    assert bm.num_bits == roundtrip_bm.num_bits
 
-    # Compare coefficients: for each coefficient in HigherIsingModel, check BinaryModel has it
-    for key, value in him.coefficients.items():
-        if np.isclose(value, 0.0):
-            continue
-        assert key in bm.coefficients, f"Key {key} missing in BinaryModel"
-        assert np.isclose(bm.coefficients[key], value), (
-            f"Mismatch at {key}: BM={bm.coefficients[key]}, HIM={value}"
-        )
-
-    # Verify energy equivalence for random states
+    # Verify energy equivalence for random binary states
     if bm.num_bits > 0:
         for _ in range(5):
-            state = [np.random.choice([-1, 1]) for _ in range(bm.num_bits)]
+            state = [np.random.choice([0, 1]) for _ in range(bm.num_bits)]
             bm_energy = bm.calc_energy(state)
-            him_energy = him.calc_energy(state)
-            assert np.isclose(bm_energy, him_energy), (
-                f"Energy mismatch: BM={bm_energy}, HIM={him_energy} for state={state}"
+            rt_energy = roundtrip_bm.calc_energy(state)
+            assert np.isclose(bm_energy, rt_energy), (
+                f"Energy mismatch: BM={bm_energy}, RT={rt_energy} for state={state}"
             )
 
 
 def test_from_hubo_with_simplify():
-    """from_hubo with simplify should remove near-zero terms before conversion."""
+    """from_hubo with simplify should remove near-zero terms."""
     hubo = {(0,): 1.0, (0, 1): 1e-16, (1,): 2.0}
     bm = BinaryModel.from_hubo(hubo=hubo, constant=0.0, simplify=True)
-    assert bm.vartype == VarType.SPIN
-    # The near-zero term (0,1) should have been removed before conversion
+    assert bm.vartype == VarType.BINARY
+    # The near-zero term (0,1) should have been removed
     assert bm.num_bits == 2
 
 
@@ -290,7 +248,7 @@ def test_from_hubo_with_simplify():
     ],
 )
 def test_num_bits(coefficients, constant, expected_num_bits):
-    """num_bits should match HigherIsingModel's behavior."""
+    """num_bits should return the number of unique variable indices."""
     expr = BinaryExpr(
         vartype=VarType.SPIN, constant=constant, coefficients=coefficients
     )
@@ -478,39 +436,41 @@ def test_change_vartype_spin_4th_order_roundtrip():
 
 
 def test_from_hubo_4th_order():
-    """from_hubo with 4th-order terms should match HigherIsingModel."""
+    """from_hubo with 4th-order terms: BINARY→SPIN→BINARY round-trip should preserve energy."""
     hubo = {(0, 1, 2, 3): 2.0, (0, 1): 1.0, (2,): -1.0}
     constant = 3.0
 
-    him = HigherIsingModel.from_hubo(hubo=hubo, constant=constant)
     bm = BinaryModel.from_hubo(hubo=hubo, constant=constant)
+    assert bm.vartype == VarType.BINARY
 
-    assert np.isclose(bm.constant, him.constant)
-    assert bm.num_bits == him.num_bits
+    # Round-trip: BINARY → SPIN → BINARY
+    spin_bm = bm.change_vartype(VarType.SPIN)
+    roundtrip_bm = spin_bm.change_vartype(VarType.BINARY)
 
-    # Energy equivalence for all spin states
+    # Energy equivalence for all binary states
     for bits in range(2**bm.num_bits):
-        state = [1 if (bits >> i) & 1 == 0 else -1 for i in range(bm.num_bits)]
-        assert np.isclose(bm.calc_energy(state), him.calc_energy(state)), (
+        state = [(bits >> i) & 1 for i in range(bm.num_bits)]
+        assert np.isclose(bm.calc_energy(state), roundtrip_bm.calc_energy(state)), (
             f"Energy mismatch for state {state}"
         )
 
 
 def test_from_hubo_5th_order():
-    """from_hubo with 5th-order terms should match HigherIsingModel."""
+    """from_hubo with 5th-order terms: BINARY→SPIN→BINARY round-trip should preserve energy."""
     hubo = {(0, 1, 2, 3, 4): 1.0, (0, 2): 0.5, (3,): -1.0}
     constant = 0.0
 
-    him = HigherIsingModel.from_hubo(hubo=hubo, constant=constant)
     bm = BinaryModel.from_hubo(hubo=hubo, constant=constant)
+    assert bm.vartype == VarType.BINARY
 
-    assert np.isclose(bm.constant, him.constant)
-    assert bm.num_bits == him.num_bits
+    # Round-trip: BINARY → SPIN → BINARY
+    spin_bm = bm.change_vartype(VarType.SPIN)
+    roundtrip_bm = spin_bm.change_vartype(VarType.BINARY)
 
-    # Energy equivalence for all spin states
+    # Energy equivalence for all binary states
     for bits in range(2**bm.num_bits):
-        state = [1 if (bits >> i) & 1 == 0 else -1 for i in range(bm.num_bits)]
-        assert np.isclose(bm.calc_energy(state), him.calc_energy(state)), (
+        state = [(bits >> i) & 1 for i in range(bm.num_bits)]
+        assert np.isclose(bm.calc_energy(state), roundtrip_bm.calc_energy(state)), (
             f"Energy mismatch for state {state}"
         )
 
@@ -542,6 +502,6 @@ def test_from_hubo_duplicate_accumulation():
     hubo = {(0, 1, 2): 2.0, (2, 0, 1): 3.0}
     model = BinaryModel.from_hubo(hubo=hubo, constant=0.0)
     # Both should be sorted to (0,1,2) and accumulated = 5.0
-    # After conversion to SPIN, verify the model works
-    assert model.vartype == VarType.SPIN
+    assert model.vartype == VarType.BINARY
     assert model.num_bits == 3
+    assert np.isclose(model.higher[(0, 1, 2)], 5.0)

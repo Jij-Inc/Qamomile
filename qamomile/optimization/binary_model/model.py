@@ -104,18 +104,16 @@ class BinaryModel(Generic[VT]):
         constant: float = 0.0,
         simplify: bool = False,
     ) -> "BinaryModel":
-        """Create a SPIN BinaryModel from HUBO (binary higher-order) coefficients.
-
-        Converts HUBO binary variables (x_i in {0,1}) to spin variables (z_i in {-1,1})
-        using x_i = (1 - z_i) / 2.
+        """Create a BINARY BinaryModel from HUBO coefficients.
 
         Args:
             hubo: HUBO coefficients mapping index tuples to values.
+                  Duplicate index tuples (e.g. (0,1,2) and (2,0,1)) are accumulated.
             constant: Constant offset term.
             simplify: If True, remove near-zero coefficients.
 
         Returns:
-            BinaryModel with SPIN vartype.
+            BinaryModel with BINARY vartype.
         """
         expr = BinaryExpr(vartype=VarType.BINARY, constant=constant, coefficients={})
         for indices, coeff in hubo.items():
@@ -125,8 +123,7 @@ class BinaryModel(Generic[VT]):
             expr.coefficients = {
                 k: v for k, v in expr.coefficients.items() if not is_close_zero(v)
             }
-        binary_model = cls(expr)  # type: ignore
-        return binary_model.change_vartype(VarType.SPIN)
+        return cls(expr)  # type: ignore
 
     @property
     def linear(self) -> dict[int, float]:
