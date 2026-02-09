@@ -133,35 +133,31 @@ class MatplotlibDrawer:
     - Inline mode (inline=True): Expands CallBlockOperation contents
     """
 
-    def __init__(
-        self, graph: Graph, style: CircuitStyle | None = None, fold_loops: bool = True
-    ):
+    def __init__(self, graph: Graph, style: CircuitStyle | None = None):
         """Initialize the drawer.
 
         Args:
             graph: Computation graph to visualize.
             style: Visual style configuration. Uses DEFAULT_STYLE if None.
-            fold_loops: If True (default), display ForOperation as blocks instead of unrolling.
-                       If False, expand loops and show all iterations.
         """
         self.graph = graph
         self.style = style or DEFAULT_STYLE
         self.inline = False
-        self.fold_loops = fold_loops
+        self.fold_loops = True
 
-    def draw(self, inline: bool = False, fold_loops: bool | None = None) -> Figure:
+    def draw(self, inline: bool = False, fold_loops: bool = True) -> Figure:
         """Generate a matplotlib Figure of the circuit.
 
         Args:
             inline: If True, expand CallBlockOperation. If False, show as boxes.
-            fold_loops: If provided, override the instance fold_loops setting.
+            fold_loops: If True (default), display ForOperation as blocks instead of unrolling.
+                       If False, expand loops and show all iterations.
 
         Returns:
             Figure object.
         """
         self.inline = inline
-        if fold_loops is not None:
-            self.fold_loops = fold_loops
+        self.fold_loops = fold_loops
         graph = self.graph
 
         # Build qubit mapping
@@ -263,6 +259,37 @@ class MatplotlibDrawer:
         if pixels_per_data_unit > 0:
             return bbox.height / pixels_per_data_unit
         return self.style.fallback_text_height
+
+    @staticmethod
+    def _is_zero_iteration_loop(
+        start_val: int, stop_val_raw: int | None, step_val: int
+    ) -> bool:
+        """Check if a loop has zero iterations.
+
+        Returns True only when stop is concrete and the range is empty.
+        """
+        if stop_val_raw is None:
+            return False
+        if step_val > 0 and start_val >= stop_val_raw:
+            return True
+        if step_val < 0 and start_val <= stop_val_raw:
+            return True
+        return False
+
+    def _compute_border_padding(self, depth: int) -> float:
+        """Compute border padding for a given nesting depth.
+
+        Args:
+            depth: Nesting depth of the block.
+
+        Returns:
+            Border padding value, clamped to min_block_padding.
+        """
+        return max(
+            self.style.min_block_padding,
+            self.style.border_padding_base
+            - depth * self.style.border_padding_depth_factor,
+        )
 
     def _analyze_loop_affected_qubits(
         self,
@@ -542,8 +569,7 @@ class MatplotlibDrawer:
         """Compute number of loop iterations from resolved range values."""
         if step_val > 0:
             return (stop_val - start_val + step_val - 1) // step_val
-        else:
-            return (start_val - stop_val - step_val - 1) // (-step_val)
+        return (start_val - stop_val - step_val - 1) // (-step_val)
 
     def _build_block_value_mappings(
         self,
@@ -784,13 +810,10 @@ class MatplotlibDrawer:
         """
         start_val, stop_val_raw, step_val = self._evaluate_loop_range(op, param_values)
 
-        # Skip zero-iteration loops only if stop is concrete
+        if self._is_zero_iteration_loop(start_val, stop_val_raw, step_val):
+            return True
+
         stop_val = stop_val_raw if stop_val_raw is not None else 0
-        if stop_val_raw is not None:
-            if step_val > 0 and start_val >= stop_val:
-                return True
-            if step_val < 0 and start_val <= stop_val:
-                return True
 
         if self.fold_loops:
             # Draw as a box (folded)
@@ -851,6 +874,24 @@ class MatplotlibDrawer:
                 )
         return False
 
+    def _max_block_gate_width(
+        self, operations: list[Operation], param_values: dict | None = None
+    ) -> float:
+        """Find the maximum estimated gate width among GateOperations in a block.
+
+        Args:
+            operations: List of operations to scan.
+            param_values: Parameter values for gate width estimation.
+
+        Returns:
+            Maximum gate width, at least style.gate_width.
+        """
+        max_width = self.style.gate_width
+        for op in operations:
+            if isinstance(op, GateOperation):
+                max_width = max(max_width, self._estimate_gate_width(op, param_values))
+        return max_width
+
     def _prepare_inline_block(
         self,
         state: LayoutState,
@@ -862,11 +903,7 @@ class MatplotlibDrawer:
         Advances qubit_right_edges for border extent and returns qubit_start_columns.
         """
         max_gate_width = self.style.gate_width
-        border_padding = max(
-            self.style.min_block_padding,
-            self.style.border_padding_base
-            - depth * self.style.border_padding_depth_factor,
-        )
+        border_padding = self._compute_border_padding(depth)
         border_extent = max_gate_width / 2 + border_padding
         for q in affected_qubits:
             if q in state.qubit_right_edges:
@@ -904,11 +941,9 @@ class MatplotlibDrawer:
             block_value, actual_inputs, logical_id_remap, param_values
         )
 
-        max_gate_width = self.style.gate_width
-        for block_op in block_value.operations:
-            if isinstance(block_op, GateOperation):
-                gate_width = self._estimate_gate_width(block_op, child_param_values)
-                max_gate_width = max(max_gate_width, gate_width)
+        max_gate_width = self._max_block_gate_width(
+            block_value.operations, child_param_values
+        )
 
         process_operations_fn(
             block_value.operations,
@@ -959,11 +994,9 @@ class MatplotlibDrawer:
             block_value, actual_inputs, logical_id_remap, param_values
         )
 
-        max_gate_width = self.style.gate_width
-        for block_op in block_value.operations:
-            if isinstance(block_op, GateOperation):
-                gate_width = self._estimate_gate_width(block_op, child_param_values)
-                max_gate_width = max(max_gate_width, gate_width)
+        max_gate_width = self._max_block_gate_width(
+            block_value.operations, child_param_values
+        )
 
         process_operations_fn(
             block_value.operations,
@@ -1015,11 +1048,9 @@ class MatplotlibDrawer:
             block_value, actual_inputs, logical_id_remap, param_values
         )
 
-        max_gate_width = self.style.gate_width
-        for block_op in block_value.operations:
-            if isinstance(block_op, GateOperation):
-                gate_width = self._estimate_gate_width(block_op, child_param_values)
-                max_gate_width = max(max_gate_width, gate_width)
+        max_gate_width = self._max_block_gate_width(
+            block_value.operations, child_param_values
+        )
 
         process_operations_fn(
             block_value.operations,
@@ -1080,11 +1111,7 @@ class MatplotlibDrawer:
                 }
             )
 
-            border_padding = max(
-                self.style.min_block_padding,
-                self.style.border_padding_base
-                - depth * self.style.border_padding_depth_factor,
-            )
+            border_padding = self._compute_border_padding(depth)
             gate_border_right = actual_end + max_gate_width / 2 + border_padding
             box_left = actual_start - max_gate_width / 2 - border_padding
             title_text_width = len(block_name) * self.style.char_width_base
@@ -1186,13 +1213,11 @@ class MatplotlibDrawer:
             state.first_gate_x = min_column
             state.first_gate_half_width = op_half_width
 
-        # Update qubit columns — use actual right edge + gap for tight spacing.
+        # Update qubit columns and right edges
+        right_edge = min_column + op_half_width
         for q in span_qubits:
-            state.qubit_columns[q] = min_column + op_half_width + self.style.gate_gap
-
-        # Track right edge for future overlap checks
-        for q in span_qubits:
-            state.qubit_right_edges[q] = min_column + op_half_width
+            state.qubit_columns[q] = right_edge + self.style.gate_gap
+            state.qubit_right_edges[q] = right_edge
 
         # Record measurement positions for wire termination
         if isinstance(op, MeasureOperation):
@@ -1441,11 +1466,7 @@ class MatplotlibDrawer:
         if block_ranges:
             for br in block_ranges:
                 depth = br["depth"]
-                padding = max(
-                    self.style.min_block_padding,
-                    self.style.border_padding_base
-                    - depth * self.style.border_padding_depth_factor,
-                )  # Updated formula
+                padding = self._compute_border_padding(depth)
                 mgw = br.get("max_gate_width", self.style.gate_width)
                 gate_border_right = br["end_x"] + mgw / 2 + padding
                 border_left = br["start_x"] - mgw / 2 - padding
@@ -1559,6 +1580,135 @@ class MatplotlibDrawer:
         # Output labels on the right side are intentionally not drawn
         # to keep the circuit diagram cleaner
 
+    def _draw_inline_block_ops(
+        self,
+        fig: Figure,
+        block_value: BlockValue,
+        actual_inputs: list,
+        op_key: tuple,
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+        draw_ops_fn,
+    ) -> None:
+        """Recursively draw inlined block operations.
+
+        Shared logic for CallBlock, CompositeGate, and ControlledU inline drawing.
+        """
+        new_logical_id_remap, child_param_values = self._build_block_value_mappings(
+            block_value, actual_inputs, logical_id_remap, param_values
+        )
+        draw_ops_fn(
+            block_value.operations,
+            new_logical_id_remap,
+            scope_path=op_key,
+            param_values=child_param_values,
+        )
+
+    def _draw_call_block_or_inline(
+        self,
+        fig: Figure,
+        op: CallBlockOperation,
+        op_key: tuple,
+        qubit_map: dict[str, int],
+        positions: dict,
+        block_widths: dict,
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+        draw_ops_fn,
+    ) -> None:
+        """Draw a CallBlockOperation: inline or as box."""
+        if self.inline:
+            block_value = op.operands[0]
+            if isinstance(block_value, BlockValue):
+                self._draw_inline_block_ops(
+                    fig,
+                    block_value,
+                    op.operands[1:],
+                    op_key,
+                    logical_id_remap,
+                    param_values,
+                    draw_ops_fn,
+                )
+        elif op_key in positions:
+            self._draw_call_block(
+                fig,
+                op,
+                qubit_map,
+                positions[op_key],
+                block_widths.get(op_key),
+                logical_id_remap=logical_id_remap,
+            )
+
+    def _draw_composite_or_inline(
+        self,
+        fig: Figure,
+        op: CompositeGateOperation,
+        op_key: tuple,
+        qubit_map: dict[str, int],
+        positions: dict,
+        block_widths: dict,
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+        draw_ops_fn,
+    ) -> None:
+        """Draw a CompositeGateOperation: inline or as box."""
+        if self.inline and op.has_implementation:
+            block_value = op.implementation
+            if isinstance(block_value, BlockValue):
+                self._draw_inline_block_ops(
+                    fig,
+                    block_value,
+                    list(op.operands[1:]),
+                    op_key,
+                    logical_id_remap,
+                    param_values,
+                    draw_ops_fn,
+                )
+        elif op_key in positions:
+            self._draw_composite_gate(
+                fig,
+                op,
+                qubit_map,
+                positions[op_key],
+                block_widths.get(op_key),
+                logical_id_remap,
+            )
+
+    def _draw_controlled_u_or_inline(
+        self,
+        fig: Figure,
+        op: ControlledUOperation,
+        op_key: tuple,
+        qubit_map: dict[str, int],
+        positions: dict,
+        block_widths: dict,
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+        draw_ops_fn,
+    ) -> None:
+        """Draw a ControlledUOperation: inline or as box."""
+        if self.inline:
+            block_value = op.block
+            if isinstance(block_value, BlockValue):
+                self._draw_inline_block_ops(
+                    fig,
+                    block_value,
+                    list(op.target_operands),
+                    op_key,
+                    logical_id_remap,
+                    param_values,
+                    draw_ops_fn,
+                )
+        elif op_key in positions:
+            self._draw_controlled_u(
+                fig,
+                op,
+                qubit_map,
+                positions[op_key],
+                block_widths.get(op_key),
+                logical_id_remap,
+            )
+
     def _draw_for_op(
         self,
         fig: Figure,
@@ -1574,13 +1724,8 @@ class MatplotlibDrawer:
         """Handle drawing a ForOperation (fold or expand)."""
         start_val, stop_val_raw, step_val = self._evaluate_loop_range(op, param_values)
 
-        # Skip zero-iteration loops only if stop is concrete
-        stop_val = stop_val_raw if stop_val_raw is not None else 0
-        if stop_val_raw is not None:
-            if step_val > 0 and start_val >= stop_val:
-                return
-            if step_val < 0 and start_val <= stop_val:
-                return
+        if self._is_zero_iteration_loop(start_val, stop_val_raw, step_val):
+            return
 
         if self.fold_loops:
             if op_key in positions:
@@ -1611,7 +1756,7 @@ class MatplotlibDrawer:
                 return
 
             num_iterations = self._compute_loop_iterations(
-                start_val, stop_val, step_val
+                start_val, stop_val_raw, step_val
             )
             for iteration in range(num_iterations):
                 iter_value = start_val + iteration * step_val
@@ -1727,22 +1872,21 @@ class MatplotlibDrawer:
             for op in ops:
                 op_key = (*scope_path, id(op))
 
-                if isinstance(op, QInitOperation):
-                    # Skip initialization (no visual representation)
+                if isinstance(op, (QInitOperation, CastOperation)):
                     continue
-                elif isinstance(op, CastOperation):
-                    # Passthrough: no visual representation
-                    continue
-                elif isinstance(op, ExpvalOp):
+
+                if isinstance(op, ExpvalOp):
                     raise NotImplementedError(
                         f"Visualization of ExpvalOp is not yet supported. "
                         f"The circuit contains an expectation value calculation: {op}"
                     )
-                elif isinstance(op, (WhileOperation, IfOperation, ForItemsOperation)):
+
+                if isinstance(op, (WhileOperation, IfOperation, ForItemsOperation)):
                     raise NotImplementedError(
                         f"Visualization of {type(op).__name__} is not yet supported."
                     )
-                elif isinstance(op, ForOperation):
+
+                if isinstance(op, ForOperation):
                     self._draw_for_op(
                         fig,
                         op,
@@ -1754,7 +1898,9 @@ class MatplotlibDrawer:
                         param_values,
                         draw_ops,
                     )
-                elif isinstance(op, GateOperation):
+                    continue
+
+                if isinstance(op, GateOperation):
                     if op_key in positions:
                         self._draw_gate(
                             fig,
@@ -1764,103 +1910,58 @@ class MatplotlibDrawer:
                             logical_id_remap,
                             param_values,
                         )
-                elif isinstance(op, CallBlockOperation):
-                    if self.inline:
-                        # Recursively draw block operations
-                        block_value = op.operands[0]
-                        if isinstance(block_value, BlockValue):
-                            actual_inputs = op.operands[1:]  # Actual arguments
-                            new_logical_id_remap, child_param_values = (
-                                self._build_block_value_mappings(
-                                    block_value,
-                                    actual_inputs,
-                                    logical_id_remap,
-                                    param_values,
-                                )
-                            )
+                    continue
 
-                            draw_ops(
-                                block_value.operations,
-                                new_logical_id_remap,
-                                scope_path=op_key,
-                                param_values=child_param_values,
-                            )
-                    else:
-                        # Draw as box
-                        if op_key in positions:
-                            op_width = block_widths.get(op_key)
-                            self._draw_call_block(
-                                fig,
-                                op,
-                                qubit_map,
-                                positions[op_key],
-                                op_width,
-                                logical_id_remap=logical_id_remap,
-                            )
-                elif isinstance(op, CompositeGateOperation):
-                    if self.inline and op.has_implementation:
-                        block_value = op.implementation
-                        if isinstance(block_value, BlockValue):
-                            actual_inputs = list(op.operands[1:])  # Skip BlockValue
-                            new_logical_id_remap, child_param_values = (
-                                self._build_block_value_mappings(
-                                    block_value,
-                                    actual_inputs,
-                                    logical_id_remap,
-                                    param_values,
-                                )
-                            )
+                if isinstance(op, CallBlockOperation):
+                    self._draw_call_block_or_inline(
+                        fig,
+                        op,
+                        op_key,
+                        qubit_map,
+                        positions,
+                        block_widths,
+                        logical_id_remap,
+                        param_values,
+                        draw_ops,
+                    )
+                    continue
 
-                            draw_ops(
-                                block_value.operations,
-                                new_logical_id_remap,
-                                scope_path=op_key,
-                                param_values=child_param_values,
-                            )
-                    elif op_key in positions:
-                        self._draw_composite_gate(
-                            fig,
-                            op,
-                            qubit_map,
-                            positions[op_key],
-                            block_widths.get(op_key),
-                            logical_id_remap,
-                        )
-                elif isinstance(op, ControlledUOperation):
-                    if self.inline:
-                        block_value = op.block
-                        if isinstance(block_value, BlockValue):
-                            actual_inputs = list(op.target_operands)
-                            new_logical_id_remap, child_param_values = (
-                                self._build_block_value_mappings(
-                                    block_value,
-                                    actual_inputs,
-                                    logical_id_remap,
-                                    param_values,
-                                )
-                            )
+                if isinstance(op, CompositeGateOperation):
+                    self._draw_composite_or_inline(
+                        fig,
+                        op,
+                        op_key,
+                        qubit_map,
+                        positions,
+                        block_widths,
+                        logical_id_remap,
+                        param_values,
+                        draw_ops,
+                    )
+                    continue
 
-                            draw_ops(
-                                block_value.operations,
-                                new_logical_id_remap,
-                                scope_path=op_key,
-                                param_values=child_param_values,
-                            )
-                    elif op_key in positions:
-                        self._draw_controlled_u(
-                            fig,
-                            op,
-                            qubit_map,
-                            positions[op_key],
-                            block_widths.get(op_key),
-                            logical_id_remap,
-                        )
-                elif isinstance(op, MeasureOperation):
+                if isinstance(op, ControlledUOperation):
+                    self._draw_controlled_u_or_inline(
+                        fig,
+                        op,
+                        op_key,
+                        qubit_map,
+                        positions,
+                        block_widths,
+                        logical_id_remap,
+                        param_values,
+                        draw_ops,
+                    )
+                    continue
+
+                if isinstance(op, MeasureOperation):
                     if op_key in positions:
                         self._draw_measurement(
                             fig, op, qubit_map, positions[op_key], logical_id_remap
                         )
-                elif isinstance(op, MeasureVectorOperation):
+                    continue
+
+                if isinstance(op, MeasureVectorOperation):
                     if op_key in positions:
                         self._draw_measurement_vector(
                             fig, op, qubit_map, positions[op_key], logical_id_remap
@@ -2012,11 +2113,7 @@ class MatplotlibDrawer:
         text_height = self._calculate_text_height(ax, name, self.style.subfont_size)
 
         # Depth-based padding to separate nested block boundaries
-        padding = max(
-            self.style.min_block_padding,
-            self.style.border_padding_base
-            - depth * self.style.border_padding_depth_factor,
-        )
+        padding = self._compute_border_padding(depth)
 
         lp = self.style.label_padding
         label_height = text_height + 2 * lp
@@ -2935,30 +3032,16 @@ class MatplotlibDrawer:
         min_y = min(y_coords)
         max_y = max(y_coords)
 
-        # Get loop range for label using _evaluate_value for symbolic expressions
-        start_val = (
-            self._evaluate_value(op.operands[0], param_values) if op.operands else 0
-        )
-        stop_val = (
-            self._evaluate_value(op.operands[1], param_values)
-            if len(op.operands) > 1
-            else 0
-        )
-        step_val = (
-            self._evaluate_value(op.operands[2], param_values)
-            if len(op.operands) > 2
-            else 1
-        )
+        # Get loop range for label
+        start_val, stop_val_raw, step_val = self._evaluate_loop_range(op, param_values)
 
         start_str = self._safe_int_str(start_val)
-        stop_str = self._safe_int_str(stop_val)
+        stop_str = self._safe_int_str(stop_val_raw)
         step_str = self._safe_int_str(step_val)
 
-        if (start_val is None or start_val == 0) and (
-            step_val is None or step_val == 1
-        ):
+        if start_val == 0 and step_val == 1:
             range_str = f"qm.range({stop_str})"
-        elif step_val is None or step_val == 1:
+        elif step_val == 1:
             range_str = f"qm.range({start_str}, {stop_str})"
         else:
             range_str = f"qm.range({start_str}, {stop_str}, {step_str})"
@@ -3039,8 +3122,7 @@ class MatplotlibDrawer:
         # Normal range: truncate decimals
         if abs_val >= 10:
             return f"{value:.1f}"  # e.g., "12.3"
-        else:
-            return f"{value:.2f}"  # e.g., "0.79"
+        return f"{value:.2f}"  # e.g., "0.79"
 
     def _format_symbolic_param(self, name: str) -> str:
         """Format symbolic parameter name for display with TeX notation.

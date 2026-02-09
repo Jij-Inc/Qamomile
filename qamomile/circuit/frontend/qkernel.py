@@ -619,8 +619,8 @@ class QKernel(Generic[P, R]):
         graph = self.build(parameters=None, **kwargs)
         # Extract return variable names from AST and set them in the graph
         graph.output_names = self._extract_return_names() or []
-        drawer = MatplotlibDrawer(graph, fold_loops=fold_loops)
-        return drawer.draw(inline=inline)
+        drawer = MatplotlibDrawer(graph)
+        return drawer.draw(inline=inline, fold_loops=fold_loops)
 
 
 def qkernel(func: Callable[P, R]) -> QKernel[P, R]:
