@@ -4,6 +4,8 @@ import enum
 from collections import Counter
 from typing import Generic, TypeVar
 
+from qamomile.optimization.utils import is_close_zero
+
 
 class VarType(enum.StrEnum):
     BINARY = "BINARY"
@@ -70,7 +72,9 @@ class BinaryExpr(Generic[VT]):
                     new_coefficients.get(inds, 0.0) + coeff * self.constant
                 )
             self.constant = self.constant * other.constant + constant_delta
-            self.coefficients = {k: v for k, v in new_coefficients.items() if v != 0.0}
+            self.coefficients = {
+                k: v for k, v in new_coefficients.items() if not is_close_zero(v)
+            }
         else:
             raise TypeError("Unsupported type for multiplication with BinaryExpr.")
         return self
