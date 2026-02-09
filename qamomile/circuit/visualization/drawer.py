@@ -676,18 +676,24 @@ class MatplotlibDrawer:
 
         child_param_values = dict(param_values)
         for dummy_input, actual_input in zip(block_value.input_values, actual_inputs):
-            if isinstance(actual_input, Value):
-                const = actual_input.get_const()
-                if const is not None:
-                    child_param_values[dummy_input.logical_id] = const
-                elif actual_input.logical_id in param_values:
-                    child_param_values[dummy_input.logical_id] = param_values[
-                        actual_input.logical_id
-                    ]
-                elif actual_input.is_parameter():
-                    child_param_values[dummy_input.logical_id] = (
-                        actual_input.parameter_name() or actual_input.name
-                    )
+            # The IR guarantees that operands are always Value instances, so this assertion should always pass.
+            # If it fails, there is a bug in the IR construction.
+            assertion_message = (
+                "[FOR DEVELOPER] Operation.operands elements must be Value instances. "
+                "If this assertion fails, there is a bug in the IR construction."
+            )
+            assert isinstance(actual_input, Value), assertion_message
+            const = actual_input.get_const()
+            if const is not None:
+                child_param_values[dummy_input.logical_id] = const
+            elif actual_input.logical_id in param_values:
+                child_param_values[dummy_input.logical_id] = param_values[
+                    actual_input.logical_id
+                ]
+            elif actual_input.is_parameter():
+                child_param_values[dummy_input.logical_id] = (
+                    actual_input.parameter_name() or actual_input.name
+                )
 
         return new_logical_id_remap, child_param_values
 
@@ -757,7 +763,19 @@ class MatplotlibDrawer:
         def map_block_results(
             operands, results, logical_id_remap: dict[str, str]
         ) -> None:
-            """Map block output results to same qubits as corresponding inputs."""
+            """Map block output logical_ids to the same wire indices as their inputs.
+
+            For each (operand, result) pair that is a qubit, resolves the operand's
+            logical_id via logical_id_remap, looks up its wire index in qubit_map,
+            and assigns the same index to the result's logical_id. If the operand
+            is not yet registered, both are assigned a new wire index.
+
+            Args:
+                operands: Input values passed to the block (actual arguments).
+                results: Output values returned from the block.
+                logical_id_remap: Mapping from formal-parameter logical_ids to
+                    actual-argument logical_ids.
+            """
             nonlocal next_idx
             for operand, result in zip(operands, results):
                 if not isinstance(result.type, QubitType):
@@ -775,79 +793,118 @@ class MatplotlibDrawer:
             ops: list[Operation],
             logical_id_remap: dict[str, str] | None = None,
         ) -> None:
+            """Register qubit logical_ids by walking operations recursively.
+
+            For QInitOperation, registers new qubits (scalar or array elements).
+            For CallBlockOperation (inline=True), builds a logical_id_remap from
+            block formal parameters to actual arguments, then recurses into the
+            block body. For CastOperation, propagates the source qubit's wire
+            index to the cast result.
+
+            GateOperation and similar are no-ops because next_version() preserves
+            logical_id.
+
+            Args:
+                ops: List of operations to process.
+                logical_id_remap: Mapping from block formal-parameter logical_ids
+                    to actual-argument logical_ids. Only non-empty when recursing
+                    into inlined CallBlockOperations.
+            """
             nonlocal next_idx
             if logical_id_remap is None:
                 logical_id_remap = {}
 
             for op in ops:
                 if isinstance(op, QInitOperation):
-                    qubit = op.results[0]
+                    qubits = op.results[0]
 
-                    # Check if this is an ArrayValue (qubit array)
-                    if isinstance(qubit, ArrayValue):
-                        if isinstance(qubit.type, QubitType):
-                            if len(qubit.shape) == 1:  # 1D array (Vector)
-                                size_value = qubit.shape[0]
-                                if size_value.is_constant():
-                                    array_size = size_value.get_const()
-                                    if array_size is not None and isinstance(
-                                        array_size, int
-                                    ):
-                                        for i in range(array_size):
-                                            element_key = f"{qubit.logical_id}_[{i}]"
-                                            if element_key not in qubit_map:
-                                                qubit_map[element_key] = next_idx
-                                                qubit_names[next_idx] = (
-                                                    f"{qubit.name}[{i}]"
-                                                )
-                                                next_idx += 1
-                                        # Store base index for array
-                                        qubit_map[qubit.logical_id] = qubit_map.get(
-                                            f"{qubit.logical_id}_[0]", next_idx
-                                        )
-                                        continue
-                                else:
-                                    raise ValueError(
-                                        f"Cannot visualize circuit: qubit array "
-                                        f"'{qubit.name}' has symbolic size. "
-                                        f"Please provide concrete values for all "
-                                        f"size parameters when calling draw()."
-                                    )
+                    # If the qubits is an array, we need to register each element separately.
+                    if isinstance(qubits, ArrayValue):
+                        # If this assertion fails without adding a new quantum array type, there are some bugs.
+                        # If you added a new quantum array type, please also update the visualization logic here.
+                        assertion_message = f"[FOR DEVELOPER] QInitOperation produced non-qubit array type: {qubits.type}"
+                        assert isinstance(qubits.type, QubitType), assertion_message
 
-                    # Scalar qubit
-                    if qubit.logical_id not in qubit_map:
-                        qubit_map[qubit.logical_id] = next_idx
-                        qubit_names[next_idx] = qubit.name
-                        next_idx += 1
+                        if len(qubits.shape) == 1:  # 1D array (Vector)
+                            size_value = qubits.shape[0]
+                            if not size_value.is_constant():
+                                raise ValueError(
+                                    f"Cannot visualize circuit: qubit array "
+                                    f"'{qubits.name}' has symbolic size. "
+                                    f"Please provide concrete values for all "
+                                    f"size parameters when calling draw()."
+                                )
+
+                            array_size = size_value.get_const()
+
+                            # As we have already verified if it is constant, this assertion must be passed.
+                            # If it fails, there is a bug in the code leading to this point.
+                            assertion_message = "[FOR DEVELOPER] The given qubit must have a known integer size as a constant here, however, apparently not, which means there is a bug in the code leading to this point."
+                            assert array_size is not None, assertion_message
+
+                            # In QKernel._create_bound_input, the size of qubit arrays is always converted into integer by int function.
+                            # If this assertion fails without adding a new quantum array type, there are some bugs.
+                            assertion_message = f"[FOR DEVELOPER] Qubit array '{qubits.name}' has non-integer size: {array_size}"
+                            assert isinstance(array_size, int), assertion_message
+
+                            for i in range(array_size):
+                                element_key = f"{qubits.logical_id}_[{i}]"
+                                if element_key not in qubit_map:
+                                    qubit_map[element_key] = next_idx
+                                    qubit_names[next_idx] = f"{qubits.name}[{i}]"
+                                    next_idx += 1
+                            # Store base index for array
+                            qubit_map[qubits.logical_id] = qubit_map.get(
+                                f"{qubits.logical_id}_[0]", next_idx
+                            )
+                            continue
+                        # TODO: 2D, 3D arrays if needed.
+                        else:
+                            raise NotImplementedError(
+                                f"Cannot visualize circuit: qubit array "
+                                f"'{qubits.name}' has unsupported rank "
+                                f"{len(qubits.shape)}."
+                            )
+                    # If the qubits is actually just a qubit, then register the qubit.
+                    # This else branch relied on the specification that QInitOperation is always producing qubits.
+                    else:
+                        if qubits.logical_id not in qubit_map:
+                            qubit_map[qubits.logical_id] = next_idx
+                            qubit_names[next_idx] = qubits.name
+                            next_idx += 1
 
                 elif isinstance(op, CallBlockOperation):
                     if self.inline:
                         block_value = op.operands[0]
-                        if isinstance(block_value, BlockValue):
-                            new_remap = dict(logical_id_remap)
-                            actual_inputs = op.operands[1:]
+                        # The IR guarantees that operands[0] of CallBlockOperation is always a BlockValue,
+                        # so this assertion should always pass.
+                        # If it fails, there is a bug in the IR construction.
+                        assertion_message = (
+                            "[FOR DEVELOPER] CallBlockOperation.operands[0] must be a BlockValue. "
+                            "If this assertion fails, there is a bug in the IR construction."
+                        )
+                        assert isinstance(block_value, BlockValue), assertion_message
+                        new_remap = dict(logical_id_remap)
+                        actual_inputs = op.operands[1:]
 
-                            for dummy_input, actual_input in zip(
-                                block_value.input_values, actual_inputs
-                            ):
-                                if not isinstance(dummy_input.type, QubitType):
-                                    continue
-                                actual_lid = logical_id_remap.get(
-                                    actual_input.logical_id, actual_input.logical_id
-                                )
-                                new_remap[dummy_input.logical_id] = actual_lid
-
-                                # Ensure actual_input is registered
-                                if actual_lid not in qubit_map:
-                                    qubit_map[actual_lid] = next_idx
-                                    next_idx += 1
-
-                            build_chains(block_value.operations, new_remap)
-                            map_block_results(
-                                op.operands[1:], op.results, logical_id_remap
+                        for dummy_input, actual_input in zip(
+                            block_value.input_values, actual_inputs, strict=True
+                        ):
+                            if not isinstance(dummy_input.type, QubitType):
+                                continue
+                            actual_lid = logical_id_remap.get(
+                                actual_input.logical_id, actual_input.logical_id
                             )
-                    else:
-                        map_block_results(op.operands[1:], op.results, logical_id_remap)
+                            new_remap[dummy_input.logical_id] = actual_lid
+
+                            # Ensure actual_input is registered
+                            if actual_lid not in qubit_map:
+                                qubit_map[actual_lid] = next_idx
+                                next_idx += 1
+
+                        build_chains(block_value.operations, new_remap)
+
+                    map_block_results(op.operands[1:], op.results, logical_id_remap)
 
                 elif isinstance(op, CastOperation):
                     if op.operands and op.results:
@@ -1028,8 +1085,14 @@ class MatplotlibDrawer:
             process_operations_fn: Callback to recursively lay out child operations.
         """
         block_value = op.operands[0]
-        if not isinstance(block_value, BlockValue):
-            return
+        # The IR guarantees that operands[0] of CallBlockOperation is always a BlockValue,
+        # so this assertion should always pass.
+        # If it fails, there is a bug in the IR construction.
+        assertion_message = (
+            "[FOR DEVELOPER] CallBlockOperation.operands[0] must be a BlockValue. "
+            "If this assertion fails, there is a bug in the IR construction."
+        )
+        assert isinstance(block_value, BlockValue), assertion_message
 
         affected_qubits = []
         for operand in op.operands[1:]:
@@ -1092,8 +1155,14 @@ class MatplotlibDrawer:
             process_operations_fn: Callback to recursively lay out child operations.
         """
         block_value = op.block
-        if not isinstance(block_value, BlockValue):
-            return
+        # The IR guarantees that ControlledUOperation.block is always a BlockValue,
+        # so this assertion should always pass.
+        # If it fails, there is a bug in the IR construction.
+        assertion_message = (
+            "[FOR DEVELOPER] ControlledUOperation.block must be a BlockValue. "
+            "If this assertion fails, there is a bug in the IR construction."
+        )
+        assert isinstance(block_value, BlockValue), assertion_message
 
         affected_qubits = []
         for operand in list(op.control_operands) + list(op.target_operands):
@@ -1157,8 +1226,15 @@ class MatplotlibDrawer:
             process_operations_fn: Callback to recursively lay out child operations.
         """
         block_value = op.implementation
-        if not isinstance(block_value, BlockValue):
-            return
+        # The IR guarantees that implementation returns a BlockValue when has_implementation is True,
+        # so this assertion should always pass.
+        # If it fails, there is a bug in the IR construction.
+        assertion_message = (
+            "[FOR DEVELOPER] CompositeGateOperation.implementation must return a BlockValue "
+            "when has_implementation is True. "
+            "If this assertion fails, there is a bug in the IR construction."
+        )
+        assert isinstance(block_value, BlockValue), assertion_message
 
         affected_qubits = []
         for operand in list(op.control_qubits) + list(op.target_qubits):
@@ -1765,16 +1841,23 @@ class MatplotlibDrawer:
         """
         if self.inline:
             block_value = op.operands[0]
-            if isinstance(block_value, BlockValue):
-                self._draw_inline_block_ops(
-                    fig,
-                    block_value,
-                    op.operands[1:],
-                    op_key,
-                    logical_id_remap,
-                    param_values,
-                    draw_ops_fn,
-                )
+            # The IR guarantees that operands[0] of CallBlockOperation is always a BlockValue,
+            # so this assertion should always pass.
+            # If it fails, there is a bug in the IR construction.
+            assertion_message = (
+                "[FOR DEVELOPER] CallBlockOperation.operands[0] must be a BlockValue. "
+                "If this assertion fails, there is a bug in the IR construction."
+            )
+            assert isinstance(block_value, BlockValue), assertion_message
+            self._draw_inline_block_ops(
+                fig,
+                block_value,
+                op.operands[1:],
+                op_key,
+                logical_id_remap,
+                param_values,
+                draw_ops_fn,
+            )
         elif op_key in positions:
             self._draw_call_block(
                 fig,
@@ -1812,16 +1895,24 @@ class MatplotlibDrawer:
         """
         if self.inline and op.has_implementation:
             block_value = op.implementation
-            if isinstance(block_value, BlockValue):
-                self._draw_inline_block_ops(
-                    fig,
-                    block_value,
-                    list(op.operands[1:]),
-                    op_key,
-                    logical_id_remap,
-                    param_values,
-                    draw_ops_fn,
-                )
+            # The IR guarantees that implementation returns a BlockValue when has_implementation is True,
+            # so this assertion should always pass.
+            # If it fails, there is a bug in the IR construction.
+            assertion_message = (
+                "[FOR DEVELOPER] CompositeGateOperation.implementation must return a BlockValue "
+                "when has_implementation is True. "
+                "If this assertion fails, there is a bug in the IR construction."
+            )
+            assert isinstance(block_value, BlockValue), assertion_message
+            self._draw_inline_block_ops(
+                fig,
+                block_value,
+                list(op.operands[1:]),
+                op_key,
+                logical_id_remap,
+                param_values,
+                draw_ops_fn,
+            )
         elif op_key in positions:
             self._draw_composite_gate(
                 fig,
@@ -1859,16 +1950,23 @@ class MatplotlibDrawer:
         """
         if self.inline:
             block_value = op.block
-            if isinstance(block_value, BlockValue):
-                self._draw_inline_block_ops(
-                    fig,
-                    block_value,
-                    list(op.target_operands),
-                    op_key,
-                    logical_id_remap,
-                    param_values,
-                    draw_ops_fn,
-                )
+            # The IR guarantees that ControlledUOperation.block is always a BlockValue,
+            # so this assertion should always pass.
+            # If it fails, there is a bug in the IR construction.
+            assertion_message = (
+                "[FOR DEVELOPER] ControlledUOperation.block must be a BlockValue. "
+                "If this assertion fails, there is a bug in the IR construction."
+            )
+            assert isinstance(block_value, BlockValue), assertion_message
+            self._draw_inline_block_ops(
+                fig,
+                block_value,
+                list(op.target_operands),
+                op_key,
+                logical_id_remap,
+                param_values,
+                draw_ops_fn,
+            )
         elif op_key in positions:
             self._draw_controlled_u(
                 fig,
@@ -3164,23 +3262,30 @@ class MatplotlibDrawer:
 
         elif isinstance(op, CallBlockOperation):
             block_value = op.operands[0]
-            if isinstance(block_value, BlockValue):
-                block_name = block_value.name or "block"
+            # The IR guarantees that operands[0] of CallBlockOperation is always a BlockValue,
+            # so this assertion should always pass.
+            # If it fails, there is a bug in the IR construction.
+            assertion_message = (
+                "[FOR DEVELOPER] CallBlockOperation.operands[0] must be a BlockValue. "
+                "If this assertion fails, there is a bug in the IR construction."
+            )
+            assert isinstance(block_value, BlockValue), assertion_message
+            block_name = block_value.name or "block"
 
-                # Get qubit operand
-                if len(op.operands) > 1:
-                    operand = op.operands[1]
-                    array_name = None
-                    if (
-                        hasattr(operand, "parent_array")
-                        and operand.parent_array is not None
-                    ):
-                        array_name = operand.parent_array.name or "qubits"
+            # Get qubit operand
+            if len(op.operands) > 1:
+                operand = op.operands[1]
+                array_name = None
+                if (
+                    hasattr(operand, "parent_array")
+                    and operand.parent_array is not None
+                ):
+                    array_name = operand.parent_array.name or "qubits"
 
-                    if array_name:
-                        idx_str = self._resolve_index_expression(operand, loop_var)
-                        return f"{array_name}[{idx_str}] = {block_name}({array_name}[{idx_str}])"
-                return f"{block_name}(...)"
+                if array_name:
+                    idx_str = self._resolve_index_expression(operand, loop_var)
+                    return f"{array_name}[{idx_str}] = {block_name}({array_name}[{idx_str}])"
+            return f"{block_name}(...)"
 
         return None
 
@@ -3429,8 +3534,14 @@ class MatplotlibDrawer:
             Display label string, e.g. "block(0.5)" or "my_kernel".
         """
         block_value = op.operands[0]
-        if not isinstance(block_value, BlockValue):
-            return "block"
+        # The IR guarantees that operands[0] of CallBlockOperation is always a BlockValue,
+        # so this assertion should always pass.
+        # If it fails, there is a bug in the IR construction.
+        assertion_message = (
+            "[FOR DEVELOPER] CallBlockOperation.operands[0] must be a BlockValue. "
+            "If this assertion fails, there is a bug in the IR construction."
+        )
+        assert isinstance(block_value, BlockValue), assertion_message
 
         label = block_value.name or "block"
 
@@ -3441,19 +3552,22 @@ class MatplotlibDrawer:
                 hasattr(actual_input, "logical_id")
                 and actual_input.logical_id in qubit_map
             ):
-                if isinstance(actual_input, Value):
-                    const = actual_input.get_const()
-                    if const is not None:
-                        params.append(self._format_parameter(const))
-                    elif actual_input.is_parameter():
-                        param_name = actual_input.parameter_name() or arg_name
-                        params.append(self._format_symbolic_param(param_name))
-                    else:
-                        params.append(arg_name)
-                elif isinstance(actual_input, (int, float)):
-                    params.append(self._format_parameter(actual_input))
+                # The IR guarantees that operands are always Value instances,
+                # so this assertion should always pass.
+                # If it fails, there is a bug in the IR construction.
+                assertion_message = (
+                    "[FOR DEVELOPER] Operation.operands elements must be Value instances. "
+                    "If this assertion fails, there is a bug in the IR construction."
+                )
+                assert isinstance(actual_input, Value), assertion_message
+                const = actual_input.get_const()
+                if const is not None:
+                    params.append(self._format_parameter(const))
+                elif actual_input.is_parameter():
+                    param_name = actual_input.parameter_name() or arg_name
+                    params.append(self._format_symbolic_param(param_name))
                 else:
-                    params.append(str(actual_input))
+                    params.append(arg_name)
 
         if params:
             label = f"{label}({', '.join(params)})"
