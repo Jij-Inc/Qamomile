@@ -195,6 +195,9 @@ class BinaryModel(Generic[VT]):
             # BINARY to SPIN: x = (1 - s) / 2
             for inds, coeff in self._expr.coefficients.items():
                 # For efficiency, we handle up to quadratic terms directly
+                # Note: This branch is currently dead code because BinaryExpr
+                # stores constant terms in `constant`, not as coefficients[()].
+                # Kept as a defensive guard for correctness.
                 if len(inds) == 0:
                     term = BinaryExpr(
                         vartype=VarType.SPIN, constant=coeff, coefficients={}
@@ -231,6 +234,9 @@ class BinaryModel(Generic[VT]):
             # SPIN to BINARY: s = 1 - 2x
             for inds, coeff in self._expr.coefficients.items():
                 # For efficiency, we handle up to quadratic terms directly
+                # Note: This branch is currently dead code because BinaryExpr
+                # stores constant terms in `constant`, not as coefficients[()].
+                # Kept as a defensive guard for correctness.
                 if len(inds) == 0:
                     term = BinaryExpr(
                         vartype=VarType.BINARY, constant=coeff, coefficients={}
