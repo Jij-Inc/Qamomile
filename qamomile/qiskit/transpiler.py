@@ -22,11 +22,10 @@ Note: This module requires both Qamomile and Qiskit to be installed.
 """
 
 import numpy as np
-from typing import Dict
+from typing import Any, Dict, Mapping
 
 import qiskit
 import qiskit.circuit
-import qiskit.primitives as qk_primitives
 import qiskit.quantum_info as qk_ope
 
 import qamomile.core.bitssample as qm_bs
@@ -38,13 +37,16 @@ from .parameter_converter import convert_parameter
 from .exceptions import QamomileQiskitTranspileError
 
 
-class QiskitTranspiler(QuantumSDKTranspiler[qk_primitives.BitArray]):
+class QiskitTranspiler(QuantumSDKTranspiler[Any]):
     """
     Transpiler class for converting between Qamomile and Qiskit quantum objects.
 
     This class implements the QuantumSDKTranspiler interface for Qiskit compatibility,
     providing methods to convert circuits, Hamiltonians, and measurement results.
     """
+
+    def __init__(self, num_bits: int | None = None):
+        self.num_bits = num_bits
 
     def transpile_circuit(
         self, qamomile_circuit: qm_c.QuantumCircuit
@@ -125,18 +127,86 @@ class QiskitTranspiler(QuantumSDKTranspiler[qk_primitives.BitArray]):
                 )
         return qiskit_circuit
 
-    def convert_result(self, result: qk_primitives.BitArray) -> qm_bs.BitsSampleSet:
+    def convert_result(self, result: Any) -> qm_bs.BitsSampleSet:
         """
-        Convert Qiskit measurement results to Qamomile BitsSampleSet.
+        Convert measurement results to Qamomile BitsSampleSet.
 
         Args:
-            result (qk_primitives.BitArray): Qiskit measurement results.
+            result: Measurement results from Qiskit BitArray, qBraid Result/ResultData,
+                or raw counts mapping.
 
         Returns:
             qm.BitsSampleSet: Converted Qamomile BitsSampleSet.
         """
-        int_counts = result.get_int_counts()
-        return qm_bs.BitsSampleSet.from_int_counts(int_counts, result.num_bits)
+        # Native Qiskit primitives path
+        if hasattr(result, "get_int_counts") and hasattr(result, "num_bits"):
+            int_counts = result.get_int_counts()
+            return qm_bs.BitsSampleSet.from_int_counts(int_counts, result.num_bits)
+
+        int_counts, bit_length = self._extract_int_counts_and_bit_length(result)
+        return qm_bs.BitsSampleSet.from_int_counts(int_counts, bit_length)
+
+    def _extract_int_counts_and_bit_length(
+        self, result: Any
+    ) -> tuple[dict[int, int], int]:
+        if isinstance(result, Mapping):
+            return self._counts_mapping_to_int_counts(result)
+
+        data = None
+        if hasattr(result, "data") and hasattr(result.data, "get_counts"):
+            data = result.data
+        elif hasattr(result, "get_counts"):
+            data = result
+
+        if data is None:
+            raise TypeError(f"Unsupported result type for conversion: {type(result)!r}")
+
+        try:
+            counts_decimal = data.get_counts(decimal=True)
+            if isinstance(counts_decimal, list):
+                counts_decimal = counts_decimal[0]
+            if isinstance(counts_decimal, Mapping) and counts_decimal:
+                int_counts = {int(k): int(v) for k, v in counts_decimal.items()}
+                return int_counts, self._infer_bit_length(data, int_counts)
+        except TypeError:
+            # Some SDKs may not support the decimal argument.
+            pass
+
+        counts = data.get_counts()
+        if isinstance(counts, list):
+            counts = counts[0]
+        return self._counts_mapping_to_int_counts(counts)
+
+    def _counts_mapping_to_int_counts(
+        self, counts: Mapping[Any, Any]
+    ) -> tuple[dict[int, int], int]:
+        if not counts:
+            return {}, self.num_bits or 0
+
+        first_key = next(iter(counts.keys()))
+        if isinstance(first_key, str):
+            int_counts = {int(k, 2): int(v) for k, v in counts.items()}
+            bit_length = self.num_bits or max(len(k) for k in counts)
+            return int_counts, bit_length
+
+        int_counts = {int(k): int(v) for k, v in counts.items()}
+        bit_length = self.num_bits or max(1, max(int_counts).bit_length())
+        return int_counts, bit_length
+
+    def _infer_bit_length(self, data: Any, int_counts: dict[int, int]) -> int:
+        if self.num_bits is not None:
+            return self.num_bits
+
+        try:
+            counts_binary = data.get_counts()
+            if isinstance(counts_binary, list):
+                counts_binary = counts_binary[0]
+            if counts_binary and isinstance(next(iter(counts_binary.keys())), str):
+                return max(len(k) for k in counts_binary)
+        except Exception:
+            pass
+
+        return max(1, max(int_counts).bit_length())
 
     def transpile_hamiltonian(self, operator: qm_o.Hamiltonian) -> qk_ope.SparsePauliOp:
         """

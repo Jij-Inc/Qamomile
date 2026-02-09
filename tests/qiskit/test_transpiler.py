@@ -184,6 +184,34 @@ def test_convert_result(transpiler: QiskitTranspiler):
     assert result.total_samples() == 1000
 
 
+def test_convert_result_from_counts_mapping():
+    transpiler = QiskitTranspiler(num_bits=2)
+    result = transpiler.convert_result({"00": 500, "11": 500})
+
+    assert isinstance(result, qm_bs.BitsSampleSet)
+    assert result.get_int_counts() == {0: 500, 3: 500}
+    assert result.total_samples() == 1000
+
+
+def test_convert_result_from_qbraid_like_result():
+    class MockResultData:
+        def get_counts(self, decimal=False):
+            if decimal:
+                return {0: 500, 3: 500}
+            return {"00": 500, "11": 500}
+
+    class MockQbraidResult:
+        def __init__(self):
+            self.data = MockResultData()
+
+    transpiler = QiskitTranspiler(num_bits=2)
+    result = transpiler.convert_result(MockQbraidResult())
+
+    assert isinstance(result, qm_bs.BitsSampleSet)
+    assert result.get_int_counts() == {0: 500, 3: 500}
+    assert result.total_samples() == 1000
+
+
 def test_transpile_hamiltonian(transpiler: QiskitTranspiler):
     hamiltonian = Hamiltonian()
     hamiltonian.add_term((PauliOperator(Pauli.X, 0),), 1.0)
@@ -226,6 +254,45 @@ def test_coloring_sample_decode():
     bit_array = job_result[0].data.meas
     sampleset = qaoa_converter.decode(qk_transpiler, bit_array)
     nonzero_results = {k: v for k, v in sampleset.extract_decision_variables("x", 0).items() if v != 0}
+    assert nonzero_results == {(0, 0): 1, (1, 0): 1, (2, 0): 1, (3, 0): 1}
+    assert len(sampleset.sample_ids) == 1024
+
+
+def test_coloring_sample_decode_qbraid_like_result():
+    problem = graph_coloring_problem()
+    instance_data = graph_coloring_instance()
+    compiled_instance = jm.Interpreter(instance_data).eval_problem(problem)
+    apply_vars = [(0, 0), (1, 0), (2, 0), (3, 0)]
+    initial_circuit = create_graph_coloring_operator_ansatz_initial_state(
+        compiled_instance, instance_data["V"], instance_data["N"], apply_vars
+    )
+    qaoa_converter = qm.qaoa.QAOAConverter(compiled_instance)
+    qaoa_converter.ising_encode(multipliers={"one-color": 1})
+
+    sampler = qk_pr.StatevectorSampler()
+    qk_transpiler = QiskitTranspiler(num_bits=initial_circuit.num_qubits)
+    qk_circ = qk_transpiler.transpile_circuit(initial_circuit)
+    qk_circ.measure_all()
+    bit_array = sampler.run([qk_circ]).result()[0].data.meas
+    counts = bit_array.get_counts()
+
+    class MockResultData:
+        def __init__(self, counts):
+            self._counts = counts
+
+        def get_counts(self, decimal=False):
+            if decimal:
+                return {int(k, 2): v for k, v in self._counts.items()}
+            return self._counts
+
+    class MockQbraidResult:
+        def __init__(self, counts):
+            self.data = MockResultData(counts)
+
+    sampleset = qaoa_converter.decode(qk_transpiler, MockQbraidResult(counts))
+    nonzero_results = {
+        k: v for k, v in sampleset.extract_decision_variables("x", 0).items() if v != 0
+    }
     assert nonzero_results == {(0, 0): 1, (1, 0): 1, (2, 0): 1, (3, 0): 1}
     assert len(sampleset.sample_ids) == 1024
 
