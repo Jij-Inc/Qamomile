@@ -38,8 +38,8 @@ class CircuitStyle:
     # Color scheme
     background_color: str = "#FFFFFF"
     wire_color: str = "#000000"
-    gate_face_color: str = "#F2C94C"  # Chamomile yellow
-    gate_symbol_color: str = "#F2C94C"  # Chamomile yellow for multi-qubit gate symbols
+    gate_face_color: str = "#E8B878"  # Warm honey amber (chamomile tea)
+    gate_symbol_color: str = "#E8B878"  # Warm honey amber for multi-qubit gate symbols
     gate_symbol_edge_color: str = "#000000"  # Black edge for multi-qubit gate symbols
     gate_text_color: str = "#000000"  # Black
     connection_line_color: str = (
@@ -53,9 +53,9 @@ class CircuitStyle:
     measure_symbol_color: str = "#6B5F55"  # Dark taupe for measurement symbol
 
     # For-loop box colors (distinct from gates and blocks)
-    for_loop_face_color: str = "#E8D5F0"  # Soft lavender
+    for_loop_face_color: str = "#F0E4D0"  # Warm cream
     for_loop_text_color: str = "#000000"  # Black
-    for_loop_edge_color: str = "#9B7EAE"  # Medium purple
+    for_loop_edge_color: str = "#C4A882"  # Warm tan
 
     # Font sizes
     font_size: int = 13
