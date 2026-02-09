@@ -140,14 +140,11 @@ class BinaryModel(Generic[VT]):
     @property
     def coefficients(self) -> dict[tuple[int, ...], float]:
         """All coefficients as a single flat dictionary using sequential indices."""
-        result: dict[tuple[int, ...], float] = {}
-        for idx, coeff in self._linear.items():
-            result[(idx,)] = coeff
-        for inds, coeff in self._quad.items():
-            result[inds] = coeff
-        for inds, coeff in self._higher.items():
-            result[inds] = coeff
-        return result
+        return {
+            tuple(sorted(self.index_origin_to_new[i] for i in inds)): coeff
+            for inds, coeff in self._expr.coefficients.items()
+            if not is_close_zero(coeff)
+        }
 
     def calc_energy(self, state: list[int]) -> float:
         """Calculate the energy for a given variable assignment.
