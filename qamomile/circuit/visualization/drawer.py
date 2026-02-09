@@ -217,6 +217,11 @@ class MatplotlibDrawer:
     def _measure_text_bbox(self, ax, text: str, fontsize: int):
         """Measure rendered text bbox in display pixels.
 
+        Args:
+            ax: matplotlib Axes used for rendering.
+            text: Text string to measure.
+            fontsize: Font size in points.
+
         Returns:
             matplotlib Bbox of the text in display coordinates.
         """
@@ -233,7 +238,16 @@ class MatplotlibDrawer:
         return bbox
 
     def _calculate_text_width(self, ax, text: str, fontsize: int) -> float:
-        """Calculate actual rendered text width in data coordinates."""
+        """Calculate actual rendered text width in data coordinates.
+
+        Args:
+            ax: matplotlib Axes used for rendering.
+            text: Text string to measure.
+            fontsize: Font size in points.
+
+        Returns:
+            Text width in data coordinate units.
+        """
         bbox = self._measure_text_bbox(ax, text, fontsize)
 
         xlim = ax.get_xlim()
@@ -247,7 +261,16 @@ class MatplotlibDrawer:
         return len(text) * self.style.fallback_char_width
 
     def _calculate_text_height(self, ax, text: str, fontsize: int) -> float:
-        """Calculate actual rendered text height in data coordinates."""
+        """Calculate actual rendered text height in data coordinates.
+
+        Args:
+            ax: matplotlib Axes used for rendering.
+            text: Text string to measure.
+            fontsize: Font size in points.
+
+        Returns:
+            Text height in data coordinate units.
+        """
         bbox = self._measure_text_bbox(ax, text, fontsize)
 
         ylim = ax.get_ylim()
@@ -267,6 +290,14 @@ class MatplotlibDrawer:
         """Check if a loop has zero iterations.
 
         Returns True only when stop is concrete and the range is empty.
+
+        Args:
+            start_val: Loop start value.
+            stop_val_raw: Loop stop value, or None if symbolic.
+            step_val: Loop step value.
+
+        Returns:
+            True if the loop would produce zero iterations.
         """
         if stop_val_raw is None:
             return False
@@ -365,6 +396,15 @@ class MatplotlibDrawer:
         """Evaluate a Value to a concrete number using param_values and BinOp resolution.
 
         Handles constants, named parameters, and binary arithmetic expressions.
+
+        Args:
+            value: IR Value to evaluate.
+            param_values: Mapping from logical_ids or parameter names to concrete values.
+            operations: Operation list to search for defining BinOps.
+                Falls back to self.graph.operations if None.
+
+        Returns:
+            Concrete numeric value, or None if unresolvable.
         """
         # 1. Direct constant
         if value.is_constant():
@@ -414,7 +454,14 @@ class MatplotlibDrawer:
 
     @staticmethod
     def _safe_int_str(val: int | float | None) -> str:
-        """Convert a numeric value to an integer string, handling non-integer floats."""
+        """Convert a numeric value to an integer string, handling non-integer floats.
+
+        Args:
+            val: Numeric value to convert, or None.
+
+        Returns:
+            Integer string representation, or "?" if val is None.
+        """
         if val is None:
             return "?"
         try:
@@ -432,6 +479,11 @@ class MatplotlibDrawer:
         Scans loop body operations for BinOp (e.g., j = i + 1) and stores
         evaluated results by value ID in param_values. This allows subsequent
         index resolution to find the concrete values.
+
+        Args:
+            operations: List of operations in the loop body.
+            param_values: Mutable mapping updated in-place with resolved
+                intermediate values keyed by logical_id.
         """
         for op in operations:
             if isinstance(op, BinOp) and op.results:
@@ -451,6 +503,12 @@ class MatplotlibDrawer:
 
         Handles logical_id_remap lookup, direct qubit_map, parent_array + element_indices,
         and BinOp evaluation for computed indices.
+
+        Args:
+            operand: IR Value representing a qubit operand.
+            qubit_map: Mapping from logical_id to qubit wire index.
+            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
+            param_values: Parameter values for evaluating computed indices.
 
         Returns:
             Qubit wire index or None if unresolvable.
@@ -497,6 +555,12 @@ class MatplotlibDrawer:
         For ArrayValue operands with known size, returns all element indices.
         For scalar operands, wraps the single index in a list.
 
+        Args:
+            operand: IR Value representing a qubit operand.
+            qubit_map: Mapping from logical_id to qubit wire index.
+            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
+            param_values: Parameter values for evaluating computed indices.
+
         Returns:
             List of qubit wire indices (may be empty if unresolvable).
         """
@@ -532,9 +596,16 @@ class MatplotlibDrawer:
     ) -> tuple[int, int | None, int]:
         """Evaluate ForOperation start/stop/step to concrete values.
 
+        Args:
+            op: ForOperation whose range to evaluate.
+            param_values: Parameter values for resolving symbolic operands.
+
         Returns:
             (start_val, stop_val_or_None, step_val) where stop_val is None
             if unresolvable (symbolic).
+
+        Raises:
+            ValueError: If step evaluates to zero.
         """
         start_val = (
             self._evaluate_value(op.operands[0], param_values) if op.operands else 0
@@ -566,7 +637,16 @@ class MatplotlibDrawer:
     def _compute_loop_iterations(
         self, start_val: int, stop_val: int, step_val: int
     ) -> int:
-        """Compute number of loop iterations from resolved range values."""
+        """Compute number of loop iterations from resolved range values.
+
+        Args:
+            start_val: Loop start value.
+            stop_val: Loop stop value (must be concrete).
+            step_val: Loop step value (non-zero).
+
+        Returns:
+            Number of iterations.
+        """
         if step_val > 0:
             return (stop_val - start_val + step_val - 1) // step_val
         return (start_val - stop_val - step_val - 1) // (-step_val)
@@ -582,6 +662,12 @@ class MatplotlibDrawer:
 
         Maps dummy block input logical_ids to actual input logical_ids,
         building the mappings needed for recursive processing.
+
+        Args:
+            block_value: BlockValue whose input mappings to build.
+            actual_inputs: Actual input Values passed to the block.
+            logical_id_remap: Current logical_id remapping (copied, not mutated).
+            param_values: Current parameter values (copied, not mutated).
 
         Returns:
             (new_logical_id_remap, child_param_values)
@@ -618,6 +704,13 @@ class MatplotlibDrawer:
 
         Uses character-based estimation suitable for layout phase
         (before figure creation). Also serves as floor for drawing phase.
+
+        Args:
+            op: GateOperation whose width to estimate.
+            param_values: Parameter values for resolving gate labels.
+
+        Returns:
+            Estimated gate width in data coordinate units.
         """
         label, has_param = self._get_gate_label(op, param_values)
         if not has_param:
@@ -638,6 +731,12 @@ class MatplotlibDrawer:
         """Estimate box width for a text label (blocks, composite gates, controlled-U).
 
         Strips TeX formatting for visual length estimation.
+
+        Args:
+            label: Text label to estimate width for.
+
+        Returns:
+            Estimated box width in data coordinate units.
         """
         visual_label = label.replace("$", "")
         visual_label = re.sub(r"\\[a-zA-Z]+", "X", visual_label)
@@ -788,7 +887,18 @@ class MatplotlibDrawer:
     ) -> bool:
         """Handle ForOperation layout: fold as box or expand iterations.
 
-        Returns True if the loop was zero-iteration (should be skipped).
+        Args:
+            state: Current layout state to update.
+            op: ForOperation to lay out.
+            op_key: Unique tuple key identifying this operation in state.positions.
+            qubit_map: Mapping from logical_id to qubit wire index.
+            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
+            param_values: Parameter values for resolving loop range.
+            depth: Current nesting depth.
+            process_operations_fn: Callback to recursively lay out child operations.
+
+        Returns:
+            True if the loop was zero-iteration (should be skipped).
         """
         start_val, stop_val_raw, step_val = self._evaluate_loop_range(op, param_values)
 
@@ -883,6 +993,14 @@ class MatplotlibDrawer:
         """Common pre-processing for inline block layout.
 
         Advances qubit_right_edges for border extent and returns qubit_start_columns.
+
+        Args:
+            state: Current layout state to update.
+            affected_qubits: List of qubit indices affected by the block.
+            depth: Current nesting depth for padding calculation.
+
+        Returns:
+            Mapping from qubit index to its start column before block content.
         """
         max_gate_width = self.style.gate_width
         border_padding = self._compute_border_padding(depth)
@@ -903,7 +1021,18 @@ class MatplotlibDrawer:
         depth: int,
         process_operations_fn,
     ) -> None:
-        """Layout a CallBlockOperation in inline mode."""
+        """Layout a CallBlockOperation in inline mode.
+
+        Args:
+            state: Current layout state to update.
+            op: CallBlockOperation to lay out.
+            op_key: Unique tuple key identifying this operation.
+            qubit_map: Mapping from logical_id to qubit wire index.
+            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
+            param_values: Parameter values for resolving expressions.
+            depth: Current nesting depth.
+            process_operations_fn: Callback to recursively lay out child operations.
+        """
         block_value = op.operands[0]
         if not isinstance(block_value, BlockValue):
             return
@@ -956,7 +1085,18 @@ class MatplotlibDrawer:
         depth: int,
         process_operations_fn,
     ) -> None:
-        """Layout a ControlledUOperation in inline mode."""
+        """Layout a ControlledUOperation in inline mode.
+
+        Args:
+            state: Current layout state to update.
+            op: ControlledUOperation to lay out.
+            op_key: Unique tuple key identifying this operation.
+            qubit_map: Mapping from logical_id to qubit wire index.
+            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
+            param_values: Parameter values for resolving expressions.
+            depth: Current nesting depth.
+            process_operations_fn: Callback to recursively lay out child operations.
+        """
         block_value = op.block
         if not isinstance(block_value, BlockValue):
             return
@@ -1010,7 +1150,18 @@ class MatplotlibDrawer:
         depth: int,
         process_operations_fn,
     ) -> None:
-        """Layout a CompositeGateOperation in inline mode."""
+        """Layout a CompositeGateOperation in inline mode.
+
+        Args:
+            state: Current layout state to update.
+            op: CompositeGateOperation to lay out.
+            op_key: Unique tuple key identifying this operation.
+            qubit_map: Mapping from logical_id to qubit wire index.
+            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
+            param_values: Parameter values for resolving expressions.
+            depth: Current nesting depth.
+            process_operations_fn: Callback to recursively lay out child operations.
+        """
         block_value = op.implementation
         if not isinstance(block_value, BlockValue):
             return
@@ -1062,7 +1213,17 @@ class MatplotlibDrawer:
         max_gate_width: float,
         depth: int,
     ) -> None:
-        """Common post-processing for inline block layout: compute block range and update edges."""
+        """Finalize inline block layout by computing block range and updating edges.
+
+        Args:
+            state: Current layout state to update.
+            op_key: Unique tuple key identifying this operation.
+            block_name: Display name for the block border label.
+            affected_qubits: List of qubit indices affected by the block.
+            qubit_start_columns: Mapping from qubit index to column before block content.
+            max_gate_width: Maximum gate width within the block.
+            depth: Current nesting depth.
+        """
         qubit_end_columns = {q: state.qubit_columns[q] for q in affected_qubits}
         if affected_qubits:
             block_op_columns = []
@@ -1118,7 +1279,16 @@ class MatplotlibDrawer:
         logical_id_remap: dict[str, str],
         param_values: dict,
     ) -> None:
-        """Layout a generic operation (gate, measurement, block box)."""
+        """Layout a generic operation (gate, measurement, block box).
+
+        Args:
+            state: Current layout state to update.
+            op: Operation to lay out.
+            op_key: Unique tuple key identifying this operation.
+            qubit_map: Mapping from logical_id to qubit wire index.
+            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
+            param_values: Parameter values for resolving gate labels.
+        """
         # Find which qubits this operation touches
         affected_qubits = []
         for i, operand in enumerate(op.operands):
@@ -1231,6 +1401,10 @@ class MatplotlibDrawer:
         self, graph: Graph, qubit_map: dict[str, int]
     ) -> dict[str, int | dict]:
         """Calculate layout positions for operations.
+
+        Args:
+            graph: IR Graph containing operations to lay out.
+            qubit_map: Mapping from logical_id to qubit wire index.
 
         Returns:
             Layout dictionary with:
@@ -1376,7 +1550,11 @@ class MatplotlibDrawer:
         }
 
     def _create_empty_figure(self) -> Figure:
-        """Create an empty figure for circuits with no qubits."""
+        """Create an empty figure for circuits with no qubits.
+
+        Returns:
+            matplotlib Figure with "Empty circuit" text.
+        """
         # Use Figure directly to avoid pyplot auto-display in Jupyter
         fig = Figure(figsize=(4, 2))
         # Attach canvas for Jupyter display
@@ -1557,6 +1735,15 @@ class MatplotlibDrawer:
         """Recursively draw inlined block operations.
 
         Shared logic for CallBlock, CompositeGate, and ControlledU inline drawing.
+
+        Args:
+            fig: matplotlib Figure.
+            block_value: BlockValue containing the operations to draw.
+            actual_inputs: Actual input Values passed to the block.
+            op_key: Unique tuple key identifying this operation.
+            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
+            param_values: Parameter values for resolving expressions.
+            draw_ops_fn: Callback to recursively draw child operations.
         """
         new_logical_id_remap, child_param_values = self._build_block_value_mappings(
             block_value, actual_inputs, logical_id_remap, param_values
@@ -1580,7 +1767,19 @@ class MatplotlibDrawer:
         param_values: dict,
         draw_ops_fn,
     ) -> None:
-        """Draw a CallBlockOperation: inline or as box."""
+        """Draw a CallBlockOperation: inline or as box.
+
+        Args:
+            fig: matplotlib Figure.
+            op: CallBlockOperation to draw.
+            op_key: Unique tuple key identifying this operation.
+            qubit_map: Mapping from logical_id to qubit wire index.
+            positions: Layout positions mapping op_key to x coordinate.
+            block_widths: Layout widths mapping op_key to box width.
+            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
+            param_values: Parameter values for resolving expressions.
+            draw_ops_fn: Callback to recursively draw child operations.
+        """
         if self.inline:
             block_value = op.operands[0]
             if isinstance(block_value, BlockValue):
@@ -1615,7 +1814,19 @@ class MatplotlibDrawer:
         param_values: dict,
         draw_ops_fn,
     ) -> None:
-        """Draw a CompositeGateOperation: inline or as box."""
+        """Draw a CompositeGateOperation: inline or as box.
+
+        Args:
+            fig: matplotlib Figure.
+            op: CompositeGateOperation to draw.
+            op_key: Unique tuple key identifying this operation.
+            qubit_map: Mapping from logical_id to qubit wire index.
+            positions: Layout positions mapping op_key to x coordinate.
+            block_widths: Layout widths mapping op_key to box width.
+            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
+            param_values: Parameter values for resolving expressions.
+            draw_ops_fn: Callback to recursively draw child operations.
+        """
         if self.inline and op.has_implementation:
             block_value = op.implementation
             if isinstance(block_value, BlockValue):
@@ -1650,7 +1861,19 @@ class MatplotlibDrawer:
         param_values: dict,
         draw_ops_fn,
     ) -> None:
-        """Draw a ControlledUOperation: inline or as box."""
+        """Draw a ControlledUOperation: inline or as box.
+
+        Args:
+            fig: matplotlib Figure.
+            op: ControlledUOperation to draw.
+            op_key: Unique tuple key identifying this operation.
+            qubit_map: Mapping from logical_id to qubit wire index.
+            positions: Layout positions mapping op_key to x coordinate.
+            block_widths: Layout widths mapping op_key to box width.
+            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
+            param_values: Parameter values for resolving expressions.
+            draw_ops_fn: Callback to recursively draw child operations.
+        """
         if self.inline:
             block_value = op.block
             if isinstance(block_value, BlockValue):
@@ -1685,7 +1908,19 @@ class MatplotlibDrawer:
         param_values: dict,
         draw_ops_fn,
     ) -> None:
-        """Handle drawing a ForOperation (fold or expand)."""
+        """Handle drawing a ForOperation (fold or expand).
+
+        Args:
+            fig: matplotlib Figure.
+            op: ForOperation to draw.
+            op_key: Unique tuple key identifying this operation.
+            qubit_map: Mapping from logical_id to qubit wire index.
+            positions: Layout positions mapping op_key to x coordinate.
+            block_widths: Layout widths mapping op_key to box width.
+            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
+            param_values: Parameter values for resolving loop range.
+            draw_ops_fn: Callback to recursively draw child operations.
+        """
         start_val, stop_val_raw, step_val = self._evaluate_loop_range(op, param_values)
 
         if self._is_zero_iteration_loop(start_val, stop_val_raw, step_val):
@@ -1944,6 +2179,11 @@ class MatplotlibDrawer:
         covering it. Multi-qubit borders contribute label height only at
         the topmost qubit.
 
+        Args:
+            num_qubits: Total number of qubits.
+            block_ranges: List of block range dicts from layout phase, each
+                containing 'qubit_indices', 'depth', 'start_x', 'end_x'.
+
         Returns:
             List indexed by qubit index. Qubit 0 is at highest y (top).
         """
@@ -2062,6 +2302,7 @@ class MatplotlibDrawer:
             qubit_indices: List of qubit indices affected by the block.
             depth: Nesting depth for nested blocks.
             max_gate_width: Maximum gate width in the block (for parametric gates).
+            max_depth: Maximum nesting depth across all blocks (for label offset).
             overlap_index: Index for blocks at the same horizontal position (to avoid label overlap).
         """
         # Use provided max_gate_width or default
@@ -2207,7 +2448,18 @@ class MatplotlibDrawer:
         has_param: bool,
         param_values: dict | None,
     ) -> float:
-        """Compute the draw width for a gate, handling parametric gates."""
+        """Compute the draw width for a gate, handling parametric gates.
+
+        Args:
+            ax: matplotlib Axes used for text measurement.
+            op: GateOperation whose width to compute.
+            label: Pre-computed gate label string.
+            has_param: Whether the gate has parameters (affects width).
+            param_values: Parameter values for resolving gate labels.
+
+        Returns:
+            Gate draw width in data coordinate units.
+        """
         if has_param:
             text_width = self._calculate_text_width(ax, label, self.style.font_size)
             calculated_width = text_width + 2 * self.style.text_padding
@@ -2373,7 +2625,13 @@ class MatplotlibDrawer:
                 ax.add_patch(right_dot)
 
     def _draw_control_dot(self, ax, x: float, y: float) -> None:
-        """Draw a control dot for controlled gates."""
+        """Draw a control dot for controlled gates.
+
+        Args:
+            ax: matplotlib Axes.
+            x: X coordinate of the dot center.
+            y: Y coordinate of the dot center.
+        """
         circle = mpatches.Circle(
             (x, y),
             radius=0.1,
@@ -2384,7 +2642,13 @@ class MatplotlibDrawer:
         ax.add_patch(circle)
 
     def _draw_target_x(self, ax, x: float, y: float) -> None:
-        """Draw a target X (plus sign in circle) for CNOT."""
+        """Draw a target X (plus sign in circle) for CNOT.
+
+        Args:
+            ax: matplotlib Axes.
+            x: X coordinate of the target center.
+            y: Y coordinate of the target center.
+        """
         # Outer circle
         circle = mpatches.Circle(
             (x, y),
@@ -2415,7 +2679,13 @@ class MatplotlibDrawer:
         ax.add_line(line2)
 
     def _draw_swap_x(self, ax, x: float, y: float) -> None:
-        """Draw an X marker for SWAP gate."""
+        """Draw an X marker for SWAP gate.
+
+        Args:
+            ax: matplotlib Axes.
+            x: X coordinate of the marker center.
+            y: Y coordinate of the marker center.
+        """
         size = 0.15
         line1 = mlines.Line2D(
             [x - size, x + size],
@@ -2525,7 +2795,16 @@ class MatplotlibDrawer:
         block_width: float | None = None,
         logical_id_remap: dict[str, str] | None = None,
     ) -> None:
-        """Draw a CompositeGateOperation as a labeled box."""
+        """Draw a CompositeGateOperation as a labeled box.
+
+        Args:
+            fig: matplotlib Figure.
+            op: CompositeGateOperation to draw.
+            qubit_map: Mapping from logical_id to qubit wire index.
+            x_pos: X position for the box center.
+            block_width: Pre-calculated box width, or None for default.
+            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
+        """
         if logical_id_remap is None:
             logical_id_remap = {}
         ax = fig._qm_ax
@@ -2585,7 +2864,16 @@ class MatplotlibDrawer:
         block_width: float | None = None,
         logical_id_remap: dict[str, str] | None = None,
     ) -> None:
-        """Draw a ControlledUOperation with control dots and target box."""
+        """Draw a ControlledUOperation with control dots and target box.
+
+        Args:
+            fig: matplotlib Figure.
+            op: ControlledUOperation to draw.
+            qubit_map: Mapping from logical_id to qubit wire index.
+            x_pos: X position for the gate center.
+            block_width: Pre-calculated box width, or None for default.
+            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
+        """
         if logical_id_remap is None:
             logical_id_remap = {}
         ax = fig._qm_ax
@@ -2706,7 +2994,13 @@ class MatplotlibDrawer:
         )
 
     def _draw_measurement_box(self, ax, x_pos: float, y: float) -> None:
-        """Draw a single measurement box with meter symbol at the given position."""
+        """Draw a single measurement box with meter symbol at the given position.
+
+        Args:
+            ax: matplotlib Axes.
+            x_pos: X coordinate of the box center.
+            y: Y coordinate of the box center.
+        """
         width = self.style.gate_width
         height = self.style.gate_height
 
@@ -2733,7 +3027,15 @@ class MatplotlibDrawer:
         x_pos: float,
         logical_id_remap: dict[str, str] | None = None,
     ) -> None:
-        """Draw a MeasureOperation as an M box with meter symbol."""
+        """Draw a MeasureOperation as an M box with meter symbol.
+
+        Args:
+            fig: matplotlib Figure.
+            op: MeasureOperation to draw.
+            qubit_map: Mapping from logical_id to qubit wire index.
+            x_pos: X position for the measurement box center.
+            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
+        """
         if not op.operands:
             return
 
@@ -2751,7 +3053,15 @@ class MatplotlibDrawer:
         x_pos: float,
         logical_id_remap: dict[str, str] | None = None,
     ) -> None:
-        """Draw a MeasureVectorOperation as M boxes on all measured qubits."""
+        """Draw a MeasureVectorOperation as M boxes on all measured qubits.
+
+        Args:
+            fig: matplotlib Figure.
+            op: MeasureVectorOperation to draw.
+            qubit_map: Mapping from logical_id to qubit wire index.
+            x_pos: X position for the measurement box centers.
+            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
+        """
         if not op.operands:
             return
 
@@ -2922,6 +3232,13 @@ class MatplotlibDrawer:
         """Format a Value as a human-readable expression string.
 
         Recursively resolves BinOp chains to produce expressions like "i+1", "2*i".
+
+        Args:
+            value: IR Value to format.
+            loop_var: Name of the loop variable for display.
+
+        Returns:
+            Human-readable expression string.
         """
         # Constant
         if value.is_constant():
@@ -3118,7 +3435,16 @@ class MatplotlibDrawer:
             return f"${name}$"
 
     def _get_block_label(self, op: CallBlockOperation, qubit_map: dict) -> str:
-        """Get display label for a CallBlockOperation, including parameters."""
+        """Get display label for a CallBlockOperation, including parameters.
+
+        Args:
+            op: CallBlockOperation to label.
+            qubit_map: Mapping from logical_id to qubit wire index (used to
+                distinguish qubit args from parameter args).
+
+        Returns:
+            Display label string, e.g. "block(0.5)" or "my_kernel".
+        """
         block_value = op.operands[0]
         if not isinstance(block_value, BlockValue):
             return "block"
@@ -3157,6 +3483,8 @@ class MatplotlibDrawer:
 
         Args:
             op: Gate operation.
+            param_values: Mapping from logical_ids to resolved parameter values,
+                used for inline block expansion.
 
         Returns:
             Tuple of (label_string, has_parameter).
