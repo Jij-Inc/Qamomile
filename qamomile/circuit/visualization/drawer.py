@@ -48,7 +48,6 @@ from qamomile.circuit.ir.value import ArrayValue, Value
 
 from .style import DEFAULT_STYLE, CircuitStyle
 
-
 # Z-order for drawing priority (inspired by Qiskit)
 PORDER_WIRE = 1  # Wire lines (lowest priority)
 PORDER_GATE = 10  # Gate boxes
@@ -747,9 +746,7 @@ class MatplotlibDrawer:
                                 op.operands[1:], op.results, logical_id_remap
                             )
                     else:
-                        map_block_results(
-                            op.operands[1:], op.results, logical_id_remap
-                        )
+                        map_block_results(op.operands[1:], op.results, logical_id_remap)
 
                 elif isinstance(op, CastOperation):
                     if op.operands and op.results:
@@ -2404,7 +2401,9 @@ class MatplotlibDrawer:
         qubit_indices = []
         for operand in op.operands[1:]:  # Skip BlockValue
             qubit_indices.extend(
-                self._resolve_operand_to_qubit_indices(operand, qubit_map, logical_id_remap)
+                self._resolve_operand_to_qubit_indices(
+                    operand, qubit_map, logical_id_remap
+                )
             )
 
         if not qubit_indices:
@@ -2473,7 +2472,9 @@ class MatplotlibDrawer:
         # Collect qubit indices from control + target qubits
         qubit_indices = []
         for qval in op.control_qubits + op.target_qubits:
-            idx = self._resolve_operand_to_qubit_index(qval, qubit_map, logical_id_remap)
+            idx = self._resolve_operand_to_qubit_index(
+                qval, qubit_map, logical_id_remap
+            )
             if idx is not None:
                 qubit_indices.append(idx)
 
@@ -2531,14 +2532,18 @@ class MatplotlibDrawer:
         # Resolve control qubit y-coordinates
         control_y = []
         for qval in op.control_operands:
-            idx = self._resolve_operand_to_qubit_index(qval, qubit_map, logical_id_remap)
+            idx = self._resolve_operand_to_qubit_index(
+                qval, qubit_map, logical_id_remap
+            )
             if idx is not None:
                 control_y.append(self.qubit_y[idx])
 
         # Resolve target qubit y-coordinates
         target_y = []
         for qval in op.target_operands:
-            idx = self._resolve_operand_to_qubit_index(qval, qubit_map, logical_id_remap)
+            idx = self._resolve_operand_to_qubit_index(
+                qval, qubit_map, logical_id_remap
+            )
             if idx is not None:
                 target_y.append(self.qubit_y[idx])
 
