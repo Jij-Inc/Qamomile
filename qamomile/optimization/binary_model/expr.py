@@ -1,10 +1,8 @@
 from __future__ import annotations
 import dataclasses
 import enum
+from collections import Counter
 from typing import Generic, TypeVar
-
-import numpy as np
-from qamomile.circuit.transpiler.job import SampleResult
 
 
 class VarType(enum.StrEnum):
@@ -12,7 +10,7 @@ class VarType(enum.StrEnum):
     SPIN = "SPIN"
 
 
-VT = TypeVar('VT', bound=VarType)
+VT = TypeVar("VT", bound=VarType)
 
 
 @dataclasses.dataclass
@@ -25,8 +23,21 @@ class BinaryExpr(Generic[VT]):
         return BinaryExpr(
             vartype=self.vartype,
             constant=self.constant,
-            coefficients=self.coefficients.copy()
+            coefficients=self.coefficients.copy(),
         )
+
+    def _reduce_indices(self, inds: tuple[int, ...]) -> tuple[int, ...]:
+        """Apply idempotency rules to reduce repeated indices.
+
+        For SPIN: z_i^2 = 1, so pairs of identical indices cancel.
+        For BINARY: x_i^2 = x_i, so duplicates reduce to single.
+        """
+        if self.vartype == VarType.SPIN:
+            counts = Counter(inds)
+            return tuple(idx for idx, count in sorted(counts.items()) if count % 2 == 1)
+        elif self.vartype == VarType.BINARY:
+            return tuple(sorted(set(inds)))
+        return inds
 
     # Support *= operation
     def __imul__(self, other: int | float | BinaryExpr[VT]) -> BinaryExpr[VT]:
@@ -38,17 +49,28 @@ class BinaryExpr(Generic[VT]):
             if self.vartype != other.vartype:
                 raise ValueError("Cannot multiply BinaryExpr with different vartypes.")
             new_coefficients: dict[tuple[int, ...], float] = {}
+            constant_delta = 0.0
             for inds1, coeff1 in self.coefficients.items():
                 for inds2, coeff2 in other.coefficients.items():
-                    new_inds = tuple(sorted(inds1 + inds2))
-                    new_coefficients[new_inds] = new_coefficients.get(new_inds, 0.0) + coeff1 * coeff2
+                    new_inds = self._reduce_indices(tuple(sorted(inds1 + inds2)))
+                    product = coeff1 * coeff2
+                    if len(new_inds) == 0:
+                        constant_delta += product
+                    else:
+                        new_coefficients[new_inds] = (
+                            new_coefficients.get(new_inds, 0.0) + product
+                        )
             # Handle constant term multiplication
             for inds, coeff in self.coefficients.items():
-                new_coefficients[inds] = new_coefficients.get(inds, 0.0) + coeff * other.constant
+                new_coefficients[inds] = (
+                    new_coefficients.get(inds, 0.0) + coeff * other.constant
+                )
             for inds, coeff in other.coefficients.items():
-                new_coefficients[inds] = new_coefficients.get(inds, 0.0) + coeff * self.constant
-            self.constant *= other.constant
-            self.coefficients = new_coefficients
+                new_coefficients[inds] = (
+                    new_coefficients.get(inds, 0.0) + coeff * self.constant
+                )
+            self.constant = self.constant * other.constant + constant_delta
+            self.coefficients = {k: v for k, v in new_coefficients.items() if v != 0.0}
         else:
             raise TypeError("Unsupported type for multiplication with BinaryExpr.")
         return self
@@ -94,10 +116,9 @@ def binary(index: int) -> BinaryExpr[VarType]:
         BinaryExpr[VarType.BINARY]: The binary variable expression.
     """
     return BinaryExpr(
-        vartype=VarType.BINARY,
-        constant=0.0,
-        coefficients={(index,): 1.0}
+        vartype=VarType.BINARY, constant=0.0, coefficients={(index,): 1.0}
     )
+
 
 def spin(index: int) -> BinaryExpr[VarType]:
     """Create a spin variable expression.
@@ -108,8 +129,4 @@ def spin(index: int) -> BinaryExpr[VarType]:
     Returns:
         BinaryExpr[VarType.SPIN]: The spin variable expression.
     """
-    return BinaryExpr(
-        vartype=VarType.SPIN,
-        constant=0.0,
-        coefficients={(index,): 1.0}
-    )
+    return BinaryExpr(vartype=VarType.SPIN, constant=0.0, coefficients={(index,): 1.0})

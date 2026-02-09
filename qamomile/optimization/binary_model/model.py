@@ -11,11 +11,7 @@ from .sampleset import BinarySampleSet
 
 
 class BinaryModel(Generic[VT]):
-    def __init__(
-        self,
-        expr: BinaryExpr[VT],
-        index_map: dict[int, int] | None = None,
-    ) -> None:
+    def __init__(self, expr: BinaryExpr[VT]) -> None:
         self._expr = expr
 
         # Bidirectional index mapping
@@ -27,13 +23,6 @@ class BinaryModel(Generic[VT]):
             index_origin_to_new[old_i] = new_i
         self.index_new_to_origin = index_new_to_origin
         self.index_origin_to_new = index_origin_to_new
-
-        # External index mapping: original coefficient index -> user-specified ID.
-        # Defaults to identity if not provided.
-        if index_map is not None:
-            self._index_map = index_map
-        else:
-            self._index_map = {i: i for i in unique_indices}
 
         # internal coefficients with new indices
         self._linear: dict[int, float] = {}
@@ -74,7 +63,6 @@ class BinaryModel(Generic[VT]):
         qubo: dict[tuple[int, int], float],
         constant: float = 0.0,
         simplify: bool = False,
-        index_map: dict[int, int] | None = None,
     ) -> "BinaryModel":
         expr = BinaryExpr(vartype=VarType.BINARY, constant=constant, coefficients={})
         for (i, j), coeff in qubo.items():
@@ -87,7 +75,7 @@ class BinaryModel(Generic[VT]):
             expr.coefficients = {
                 k: v for k, v in expr.coefficients.items() if not is_close_zero(v)
             }
-        return cls(expr, index_map=index_map)  # type: ignore
+        return cls(expr)  # type: ignore
 
     @classmethod
     def from_ising(
@@ -96,7 +84,6 @@ class BinaryModel(Generic[VT]):
         quad: dict[tuple[int, int], float],
         constant: float = 0.0,
         simplify: bool = False,
-        index_map: dict[int, int] | None = None,
     ) -> "BinaryModel":
         expr = BinaryExpr(vartype=VarType.SPIN, constant=constant, coefficients={})
         for i, coeff in linear.items():
@@ -108,7 +95,7 @@ class BinaryModel(Generic[VT]):
             expr.coefficients = {
                 k: v for k, v in expr.coefficients.items() if not is_close_zero(v)
             }
-        return cls(expr, index_map=index_map)  # type: ignore
+        return cls(expr)  # type: ignore
 
     @classmethod
     def from_hubo(
@@ -116,7 +103,6 @@ class BinaryModel(Generic[VT]):
         hubo: dict[tuple[int, ...], float],
         constant: float = 0.0,
         simplify: bool = False,
-        index_map: dict[int, int] | None = None,
     ) -> "BinaryModel":
         """Create a SPIN BinaryModel from HUBO (binary higher-order) coefficients.
 
@@ -127,7 +113,6 @@ class BinaryModel(Generic[VT]):
             hubo: HUBO coefficients mapping index tuples to values.
             constant: Constant offset term.
             simplify: If True, remove near-zero coefficients.
-            index_map: Optional external index mapping.
 
         Returns:
             BinaryModel with SPIN vartype.
@@ -140,7 +125,7 @@ class BinaryModel(Generic[VT]):
             expr.coefficients = {
                 k: v for k, v in expr.coefficients.items() if not is_close_zero(v)
             }
-        binary_model = cls(expr, index_map=index_map)  # type: ignore
+        binary_model = cls(expr)  # type: ignore
         return binary_model.change_vartype(VarType.SPIN)
 
     @property
@@ -166,35 +151,6 @@ class BinaryModel(Generic[VT]):
         for inds, coeff in self._higher.items():
             result[inds] = coeff
         return result
-
-    @property
-    def index_map(self) -> dict[int, int]:
-        """External index mapping: original coefficient index -> user-specified ID."""
-        return self._index_map
-
-    @property
-    def original_to_zero_origin_map(self) -> dict[int, int]:
-        """Alias for index_origin_to_new (HigherIsingModel compatibility)."""
-        return self.index_origin_to_new
-
-    @property
-    def zero_origin_to_original_map(self) -> dict[int, int]:
-        """Alias for index_new_to_origin (HigherIsingModel compatibility)."""
-        return self.index_new_to_origin
-
-    def ising2original_index(self, ising_index: int) -> int:
-        """Convert a sequential (zero-origin) qubit index to the external variable ID.
-
-        Maps: sequential index -> original coefficient index -> user-specified ID
-
-        Args:
-            ising_index: Zero-origin sequential index (qubit index).
-
-        Returns:
-            The external variable ID from the index_map.
-        """
-        original_index = self.index_new_to_origin[ising_index]
-        return self._index_map[original_index]
 
     def calc_energy(self, state: list[int]) -> float:
         """Calculate the energy for a given variable assignment.
@@ -229,7 +185,7 @@ class BinaryModel(Generic[VT]):
 
     def change_vartype(self, vartype: VarType) -> "BinaryModel":
         if self._expr.vartype == vartype:
-            return BinaryModel(self._expr.copy(), index_map=self._index_map.copy())
+            return BinaryModel(self._expr.copy())
 
         # Carry over the original constant — it's vartype-independent.
         new_expr = BinaryExpr(
@@ -321,7 +277,7 @@ class BinaryModel(Generic[VT]):
         else:
             raise ValueError("Unsupported vartype conversion.")
 
-        return BinaryModel(new_expr, index_map=self._index_map.copy())
+        return BinaryModel(new_expr)
 
     def normalize_by_factor(
         self, factor: float, replace: bool = False
@@ -339,7 +295,7 @@ class BinaryModel(Generic[VT]):
             self._expr = normalized_expr
             self._update_internal_coefficients()
             return self
-        return BinaryModel(normalized_expr, index_map=self._index_map.copy())
+        return BinaryModel(normalized_expr)
 
     def normalize_by_abs_max(self, replace: bool = False) -> BinaryModel[VT]:
         """Normalize the BinaryModel by its absolute maximum coefficient.
@@ -352,7 +308,7 @@ class BinaryModel(Generic[VT]):
             self._expr = normalized_expr
             self._update_internal_coefficients()
             return self
-        return BinaryModel(normalized_expr, index_map=self._index_map.copy())
+        return BinaryModel(normalized_expr)
 
     def normalize_by_rms(self, replace: bool = False) -> BinaryModel[VT]:
         """Normalize the BinaryModel by its root mean square.
@@ -365,7 +321,7 @@ class BinaryModel(Generic[VT]):
             self._expr = normalized_expr
             self._update_internal_coefficients()
             return self
-        return BinaryModel(normalized_expr, index_map=self._index_map.copy())
+        return BinaryModel(normalized_expr)
 
     def decode_from_sampleresult(
         self, result: SampleResult[list[int]]

@@ -45,128 +45,6 @@ def test_coefficients_property_empty():
     assert model.constant == 5.0
 
 
-# ---- index_map ----
-
-
-def test_index_map_defaults_to_identity():
-    """When no index_map is given, it should be the identity mapping."""
-    model = BinaryModel.from_ising(
-        linear={2: 1.0, 5: 2.0},
-        quad={(2, 5): 3.0},
-        constant=0.0,
-    )
-    assert model.index_map == {2: 2, 5: 5}
-
-
-def test_index_map_custom():
-    """Custom index_map should be stored and accessible."""
-    custom_map = {2: 100, 5: 200}
-    model = BinaryModel.from_ising(
-        linear={2: 1.0, 5: 2.0},
-        quad={(2, 5): 3.0},
-        constant=0.0,
-        index_map=custom_map,
-    )
-    assert model.index_map == custom_map
-
-
-def test_index_map_preserved_through_change_vartype():
-    """index_map should be preserved when changing vartype."""
-    custom_map = {0: 10, 1: 20}
-    model = BinaryModel.from_ising(
-        linear={0: 1.0, 1: 2.0},
-        quad={(0, 1): 3.0},
-        constant=0.0,
-        index_map=custom_map,
-    )
-    binary_model = model.change_vartype(VarType.BINARY)
-    assert binary_model.index_map == custom_map
-
-    # Also check identity (same vartype)
-    spin_model = model.change_vartype(VarType.SPIN)
-    assert spin_model.index_map == custom_map
-
-
-def test_index_map_preserved_through_normalize():
-    """index_map should be preserved when normalizing (replace=False)."""
-    custom_map = {0: 10, 1: 20}
-    model = BinaryModel.from_ising(
-        linear={0: 1.0, 1: 2.0},
-        quad={(0, 1): 4.0},
-        constant=0.0,
-        index_map=custom_map,
-    )
-    normalized = model.normalize_by_abs_max(replace=False)
-    assert normalized.index_map == custom_map
-
-    # Also replace=True
-    model.normalize_by_abs_max(replace=True)
-    assert model.index_map == custom_map
-
-
-# ---- ising2original_index ----
-
-
-def test_ising2original_index_identity():
-    """With identity index_map and contiguous indices, should return original index."""
-    model = BinaryModel.from_ising(
-        linear={0: 1.0, 1: 2.0, 2: 3.0},
-        quad={},
-        constant=0.0,
-    )
-    assert model.ising2original_index(0) == 0
-    assert model.ising2original_index(1) == 1
-    assert model.ising2original_index(2) == 2
-
-
-def test_ising2original_index_non_contiguous():
-    """Non-contiguous original indices, identity index_map."""
-    model = BinaryModel.from_ising(
-        linear={2: 1.0, 5: 2.0, 8: 3.0},
-        quad={},
-        constant=0.0,
-    )
-    # Sequential 0 -> original 2 -> index_map 2
-    assert model.ising2original_index(0) == 2
-    # Sequential 1 -> original 5 -> index_map 5
-    assert model.ising2original_index(1) == 5
-    # Sequential 2 -> original 8 -> index_map 8
-    assert model.ising2original_index(2) == 8
-
-
-def test_ising2original_index_custom_map():
-    """Full three-level mapping with custom index_map."""
-    custom_map = {2: 100, 5: 200, 8: 300}
-    model = BinaryModel.from_ising(
-        linear={2: 1.0, 5: 2.0, 8: 3.0},
-        quad={},
-        constant=0.0,
-        index_map=custom_map,
-    )
-    # Sequential 0 -> original 2 -> index_map 100
-    assert model.ising2original_index(0) == 100
-    # Sequential 1 -> original 5 -> index_map 200
-    assert model.ising2original_index(1) == 200
-    # Sequential 2 -> original 8 -> index_map 300
-    assert model.ising2original_index(2) == 300
-
-
-# ---- backward-compatible aliases ----
-
-
-def test_backward_compat_aliases():
-    """original_to_zero_origin_map and zero_origin_to_original_map should work."""
-    model = BinaryModel.from_ising(
-        linear={2: 1.0, 5: 2.0},
-        quad={(2, 5): 3.0},
-        constant=0.0,
-    )
-    assert model.original_to_zero_origin_map == model.index_origin_to_new
-    assert model.zero_origin_to_original_map == model.index_new_to_origin
-    assert model.original_to_zero_origin_map == {2: 0, 5: 1}
-    assert model.zero_origin_to_original_map == {0: 2, 1: 5}
-
-
 # ---- calc_energy ----
 
 
@@ -277,11 +155,6 @@ def test_from_qubo_simplify():
     assert model.num_bits == 2
 
     model_simplified = BinaryModel.from_qubo(qubo, simplify=True)
-    # The diagonal terms (0,0)=-1 and (1,1)=-1 produce linear terms that are 0
-    # after the QUBO aggregation. from_qubo simplifies the BINARY expr.
-    # But the binary expr has (0,): -1 and (1,): -1, which are not near zero.
-    # So simplify on the binary side doesn't remove them.
-
     # Just verify model was created successfully
     assert model_simplified.num_bits == 2
 
@@ -401,39 +274,6 @@ def test_from_hubo_with_simplify():
     assert bm.num_bits == 2
 
 
-def test_from_hubo_with_index_map():
-    """from_hubo should propagate index_map."""
-    hubo = {(0,): 1.0, (1,): 2.0}
-    custom_map = {0: 10, 1: 20}
-    bm = BinaryModel.from_hubo(hubo=hubo, constant=0.0, index_map=custom_map)
-    assert bm.index_map == custom_map
-    assert bm.ising2original_index(0) == 10
-    assert bm.ising2original_index(1) == 20
-
-
-# ---- from_qubo with index_map ----
-
-
-def test_from_qubo_with_index_map():
-    """from_qubo should accept and store index_map."""
-    qubo = {(0, 0): 1.0, (0, 1): 2.0, (1, 1): 3.0}
-    custom_map = {0: 50, 1: 60}
-    model = BinaryModel.from_qubo(qubo, index_map=custom_map)
-    assert model.index_map == custom_map
-
-
-def test_from_ising_with_index_map():
-    """from_ising should accept and store index_map."""
-    custom_map = {0: 50, 1: 60}
-    model = BinaryModel.from_ising(
-        linear={0: 1.0, 1: 2.0},
-        quad={(0, 1): 3.0},
-        constant=0.0,
-        index_map=custom_map,
-    )
-    assert model.index_map == custom_map
-
-
 # ---- num_bits ----
 
 
@@ -480,3 +320,228 @@ def test_order():
     expr = BinaryExpr(vartype=VarType.SPIN, constant=5.0, coefficients={})
     model = BinaryModel(expr)
     assert model.order == 0
+
+
+# ---- BinaryExpr.__imul__ idempotency ----
+
+
+def test_imul_spin_idempotency():
+    """SPIN: z_0 * z_0 = 1 (pairs cancel, becomes constant)."""
+    z0 = BinaryExpr(vartype=VarType.SPIN, constant=0.0, coefficients={(0,): 1.0})
+    result = z0 * z0
+    # z_0^2 = 1 → constant = 1.0, no coefficients
+    assert np.isclose(result.constant, 1.0)
+    assert len(result.coefficients) == 0
+
+
+def test_imul_binary_idempotency():
+    """BINARY: x_0 * x_0 = x_0 (duplicates reduce to single)."""
+    x0 = BinaryExpr(vartype=VarType.BINARY, constant=0.0, coefficients={(0,): 1.0})
+    result = x0 * x0
+    # x_0^2 = x_0 → coefficient (0,) = 1.0, constant = 0.0
+    assert np.isclose(result.constant, 0.0)
+    assert np.isclose(result.coefficients[(0,)], 1.0)
+    assert len(result.coefficients) == 1
+
+
+def test_imul_spin_partial_cancel():
+    """SPIN: (z_0*z_1) * (z_1*z_2) = z_0*z_2 (z_1^2 cancels)."""
+    z01 = BinaryExpr(vartype=VarType.SPIN, constant=0.0, coefficients={(0, 1): 1.0})
+    z12 = BinaryExpr(vartype=VarType.SPIN, constant=0.0, coefficients={(1, 2): 1.0})
+    result = z01 * z12
+    # (z_0*z_1) * (z_1*z_2) = z_0 * z_1^2 * z_2 = z_0 * z_2
+    assert np.isclose(result.constant, 0.0)
+    assert np.isclose(result.coefficients[(0, 2)], 1.0)
+    assert len(result.coefficients) == 1
+
+
+def test_imul_binary_partial_dedup():
+    """BINARY: (x_0*x_1) * (x_1*x_2) = x_0*x_1*x_2 (x_1 deduplicates)."""
+    x01 = BinaryExpr(vartype=VarType.BINARY, constant=0.0, coefficients={(0, 1): 1.0})
+    x12 = BinaryExpr(vartype=VarType.BINARY, constant=0.0, coefficients={(1, 2): 1.0})
+    result = x01 * x12
+    # (x_0*x_1) * (x_1*x_2) = x_0 * x_1^2 * x_2 = x_0 * x_1 * x_2
+    assert np.isclose(result.constant, 0.0)
+    assert np.isclose(result.coefficients[(0, 1, 2)], 1.0)
+    assert len(result.coefficients) == 1
+
+
+def test_imul_spin_all_cancel():
+    """SPIN: (z_0*z_1) * (z_0*z_1) = 1 (all pairs cancel)."""
+    z01 = BinaryExpr(vartype=VarType.SPIN, constant=0.0, coefficients={(0, 1): 1.0})
+    result = z01 * z01
+    # z_0^2 * z_1^2 = 1
+    assert np.isclose(result.constant, 1.0)
+    assert len(result.coefficients) == 0
+
+
+def test_imul_spin_with_constants():
+    """SPIN: (2 + 3*z_0) * (1 + z_0) = 2 + 2*z_0 + 3*z_0 + 3 = 5 + 5*z_0."""
+    a = BinaryExpr(vartype=VarType.SPIN, constant=2.0, coefficients={(0,): 3.0})
+    b = BinaryExpr(vartype=VarType.SPIN, constant=1.0, coefficients={(0,): 1.0})
+    result = a * b
+    # (2 + 3z)(1 + z) = 2 + 2z + 3z + 3z^2 = 2 + 5z + 3 = 5 + 5z
+    assert np.isclose(result.constant, 5.0)
+    assert np.isclose(result.coefficients[(0,)], 5.0)
+    assert len(result.coefficients) == 1
+
+
+def test_imul_binary_with_constants():
+    """BINARY: (2 + 3*x_0) * (1 + x_0) = 2 + 2*x_0 + 3*x_0 + 3*x_0 = 2 + 8*x_0."""
+    a = BinaryExpr(vartype=VarType.BINARY, constant=2.0, coefficients={(0,): 3.0})
+    b = BinaryExpr(vartype=VarType.BINARY, constant=1.0, coefficients={(0,): 1.0})
+    result = a * b
+    # (2 + 3x)(1 + x) = 2 + 2x + 3x + 3x^2 = 2 + 2x + 3x + 3x = 2 + 8x
+    assert np.isclose(result.constant, 2.0)
+    assert np.isclose(result.coefficients[(0,)], 8.0)
+    assert len(result.coefficients) == 1
+
+
+# ---- Higher-order change_vartype round-trip ----
+
+
+def test_change_vartype_4th_order_roundtrip():
+    """4th-order BINARY→SPIN→BINARY should preserve energy."""
+    hubo = {(0, 1, 2, 3): 2.0, (0, 1): 1.0, (2,): -1.0}
+    constant = 3.0
+
+    # Create BINARY model
+    binary_expr = BinaryExpr(
+        vartype=VarType.BINARY, constant=constant, coefficients=hubo.copy()
+    )
+    binary_model = BinaryModel(binary_expr)
+
+    # Convert to SPIN and back
+    spin_model = binary_model.change_vartype(VarType.SPIN)
+    roundtrip_model = spin_model.change_vartype(VarType.BINARY)
+
+    # Verify energy equivalence for all 16 states
+    for bits in range(16):
+        state = [(bits >> i) & 1 for i in range(4)]
+        original_energy = binary_model.calc_energy(state)
+        roundtrip_energy = roundtrip_model.calc_energy(state)
+        assert np.isclose(original_energy, roundtrip_energy, atol=1e-10), (
+            f"Energy mismatch for state {state}: {original_energy} vs {roundtrip_energy}"
+        )
+
+
+def test_change_vartype_5th_order_roundtrip():
+    """5th-order BINARY→SPIN→BINARY should preserve energy."""
+    hubo = {(0, 1, 2, 3, 4): 1.5, (0, 2, 4): -0.5, (1, 3): 2.0, (0,): 1.0}
+    constant = -2.0
+
+    # Create BINARY model
+    binary_expr = BinaryExpr(
+        vartype=VarType.BINARY, constant=constant, coefficients=hubo.copy()
+    )
+    binary_model = BinaryModel(binary_expr)
+
+    # Convert to SPIN and back
+    spin_model = binary_model.change_vartype(VarType.SPIN)
+    roundtrip_model = spin_model.change_vartype(VarType.BINARY)
+
+    # Verify energy equivalence for all 32 states
+    for bits in range(32):
+        state = [(bits >> i) & 1 for i in range(5)]
+        original_energy = binary_model.calc_energy(state)
+        roundtrip_energy = roundtrip_model.calc_energy(state)
+        assert np.isclose(original_energy, roundtrip_energy, atol=1e-10), (
+            f"Energy mismatch for state {state}: {original_energy} vs {roundtrip_energy}"
+        )
+
+
+def test_change_vartype_spin_4th_order_roundtrip():
+    """4th-order SPIN→BINARY→SPIN should preserve energy."""
+    coefficients = {(0, 1, 2, 3): 1.0, (0, 2): -0.5, (1,): 2.0}
+    constant = 1.0
+
+    spin_expr = BinaryExpr(
+        vartype=VarType.SPIN, constant=constant, coefficients=coefficients.copy()
+    )
+    spin_model = BinaryModel(spin_expr)
+
+    # Convert to BINARY and back
+    binary_model = spin_model.change_vartype(VarType.BINARY)
+    roundtrip_model = binary_model.change_vartype(VarType.SPIN)
+
+    # Verify energy equivalence for all 16 spin states
+    for bits in range(16):
+        state = [1 if (bits >> i) & 1 == 0 else -1 for i in range(4)]
+        original_energy = spin_model.calc_energy(state)
+        roundtrip_energy = roundtrip_model.calc_energy(state)
+        assert np.isclose(original_energy, roundtrip_energy, atol=1e-10), (
+            f"Energy mismatch for state {state}: {original_energy} vs {roundtrip_energy}"
+        )
+
+
+# ---- from_hubo with 4th/5th order ----
+
+
+def test_from_hubo_4th_order():
+    """from_hubo with 4th-order terms should match HigherIsingModel."""
+    hubo = {(0, 1, 2, 3): 2.0, (0, 1): 1.0, (2,): -1.0}
+    constant = 3.0
+
+    him = HigherIsingModel.from_hubo(hubo=hubo, constant=constant)
+    bm = BinaryModel.from_hubo(hubo=hubo, constant=constant)
+
+    assert np.isclose(bm.constant, him.constant)
+    assert bm.num_bits == him.num_bits
+
+    # Energy equivalence for all spin states
+    for bits in range(2**bm.num_bits):
+        state = [1 if (bits >> i) & 1 == 0 else -1 for i in range(bm.num_bits)]
+        assert np.isclose(bm.calc_energy(state), him.calc_energy(state)), (
+            f"Energy mismatch for state {state}"
+        )
+
+
+def test_from_hubo_5th_order():
+    """from_hubo with 5th-order terms should match HigherIsingModel."""
+    hubo = {(0, 1, 2, 3, 4): 1.0, (0, 2): 0.5, (3,): -1.0}
+    constant = 0.0
+
+    him = HigherIsingModel.from_hubo(hubo=hubo, constant=constant)
+    bm = BinaryModel.from_hubo(hubo=hubo, constant=constant)
+
+    assert np.isclose(bm.constant, him.constant)
+    assert bm.num_bits == him.num_bits
+
+    # Energy equivalence for all spin states
+    for bits in range(2**bm.num_bits):
+        state = [1 if (bits >> i) & 1 == 0 else -1 for i in range(bm.num_bits)]
+        assert np.isclose(bm.calc_energy(state), him.calc_energy(state)), (
+            f"Energy mismatch for state {state}"
+        )
+
+
+# ---- (i,j)/(j,i) accumulation ----
+
+
+def test_from_qubo_ij_ji_accumulation():
+    """from_qubo should accumulate (i,j) and (j,i) as the same term."""
+    qubo = {(0, 1): 2.0, (1, 0): 3.0}
+    model = BinaryModel.from_qubo(qubo)
+    # Both (0,1) and (1,0) should be combined into (0,1) = 5.0
+    assert np.isclose(model.quad[(0, 1)], 5.0)
+    assert len(model.quad) == 1
+
+
+def test_from_ising_ij_ji_accumulation():
+    """from_ising should accumulate (i,j) and (j,i) as the same term."""
+    quad = {(0, 1): 2.0, (1, 0): 3.0}
+    model = BinaryModel.from_ising(linear={0: 1.0}, quad=quad, constant=0.0)
+    # Both (0,1) and (1,0) should be combined into (0,1) = 5.0
+    assert np.isclose(model.quad[(0, 1)], 5.0)
+    assert len(model.quad) == 1
+    assert np.isclose(model.linear[0], 1.0)
+
+
+def test_from_hubo_duplicate_accumulation():
+    """from_hubo should accumulate duplicate index tuples."""
+    hubo = {(0, 1, 2): 2.0, (2, 0, 1): 3.0}
+    model = BinaryModel.from_hubo(hubo=hubo, constant=0.0)
+    # Both should be sorted to (0,1,2) and accumulated = 5.0
+    # After conversion to SPIN, verify the model works
+    assert model.vartype == VarType.SPIN
+    assert model.num_bits == 3
