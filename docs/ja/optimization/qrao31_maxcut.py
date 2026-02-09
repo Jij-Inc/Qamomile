@@ -182,13 +182,16 @@ hamiltonin = converter.get_cost_hamiltonian()
 
 # %% [markdown]
 # VQEを用いてこのハミルトニアンの基底状態を探索します。
-from qamomile.circuit.algorithm.hardware_efficient_ansatz import hardware_efficient_ansatz
+from qamomile.circuit.algorithm.basic import ry_layer, rz_layer, cz_entangling_layer
 
 
 @qmc.qkernel
 def vqe(n: qmc.UInt, h: qmc.Observable, depth: qmc.UInt, theta: qmc.Vector[qmc.Float]) -> qmc.Float:
     q = qmc.qubit_array(n, "q")
-    q = hardware_efficient_ansatz(q, depth, theta)
+    for layer in qmc.range(depth):
+        q = ry_layer(q, theta, 2 * n * layer)
+        q = rz_layer(q, theta, 2 * n * layer + n)
+        q = cz_entangling_layer(q)
     return qmc.expval(q, h)
 
 
@@ -211,12 +214,11 @@ executable = transpiler.transpile(
 
 # %%
 from scipy.optimize import minimize
-from qamomile.circuit.algorithm.hardware_efficient_ansatz import num_parameters
 
 # パラメータ数を計算
 depth = 2
 n_qubits = hamiltonin.num_qubits
-n_params = num_parameters(n_qubits, depth)
+n_params = 2 * n_qubits * depth  # ry_layer + rz_layer each consume n_qubits params per layer
 
 print(f"量子ビット数: {n_qubits}")
 print(f"深さ: {depth}")
@@ -304,7 +306,10 @@ for idx, pauli_op in converter.pauli_encoding.items():
 @qmc.qkernel
 def measure_pauli(n: qmc.UInt, h: qmc.Observable, depth: qmc.UInt, theta: qmc.Vector[qmc.Float]) -> qmc.Float:
     q = qmc.qubit_array(n, "q")
-    q = hardware_efficient_ansatz(q, depth, theta)
+    for layer in qmc.range(depth):
+        q = ry_layer(q, theta, 2 * n * layer)
+        q = rz_layer(q, theta, 2 * n * layer + n)
+        q = cz_entangling_layer(q)
     return qmc.expval(q, h)
 
 
