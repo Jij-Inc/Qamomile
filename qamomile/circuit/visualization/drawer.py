@@ -661,24 +661,6 @@ class MatplotlibDrawer:
         qubit_names: dict[int, str] = {}
         next_idx = 0
 
-        def resolve_qubit_idx(operand, logical_id_remap: dict[str, str]) -> int | None:
-            """Resolve operand to qubit index via logical_id."""
-            # Array element access
-            if hasattr(operand, "parent_array") and operand.parent_array is not None:
-                if len(operand.element_indices) == 1:
-                    idx_value = operand.element_indices[0]
-                    if idx_value.is_constant():
-                        idx = idx_value.get_const()
-                        if idx is not None and isinstance(idx, int):
-                            parent_lid = operand.parent_array.logical_id
-                            parent_lid = logical_id_remap.get(parent_lid, parent_lid)
-                            element_key = f"{parent_lid}_[{idx}]"
-                            if element_key in qubit_map:
-                                return qubit_map[element_key]
-
-            lid = logical_id_remap.get(operand.logical_id, operand.logical_id)
-            return qubit_map.get(lid)
-
         def map_block_results(
             operands, results, logical_id_remap: dict[str, str]
         ) -> None:
@@ -1508,24 +1490,6 @@ class MatplotlibDrawer:
         fig._qm_ax = ax
 
         return fig
-
-    def _build_output_label_map(self, qubit_map: dict[str, int]) -> dict[int, str]:
-        """Build mapping from wire index to output variable names.
-
-        Args:
-            qubit_map: Mapping from logical_id to wire index.
-
-        Returns:
-            Dictionary mapping wire index to output variable name.
-        """
-        result = {}
-        for i, value in enumerate(self.graph.output_values):
-            if i >= len(self.graph.output_names):
-                break
-            wire = qubit_map.get(value.logical_id)
-            if wire is not None:
-                result[wire] = self.graph.output_names[i]
-        return result
 
     def _draw_wires(
         self,
