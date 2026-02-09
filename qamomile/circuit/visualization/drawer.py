@@ -145,6 +145,13 @@ class MatplotlibDrawer:
         self.inline = False
         self.fold_loops = True
 
+        self.qubit_y: list[float] = []
+        self.qubit_end_positions: dict[int, float] = {}
+        self.qubit_names: dict[int, str] = {}
+        self._num_qubits: int = 0
+        self._max_above: dict[int, float] = {}
+        self._max_below: dict[int, float] = {}
+
     def draw(self, inline: bool = False, fold_loops: bool = True) -> Figure:
         """Generate a matplotlib Figure of the circuit.
 
@@ -188,6 +195,197 @@ class MatplotlibDrawer:
         self._add_jupyter_display_support(fig)
 
         return fig
+
+    def _build_qubit_map(self, graph: Graph) -> dict[str, int]:
+        """Build mapping from qubit logical_id to wire indices.
+
+        In SSA form, each operation creates new Values via next_version(),
+        which preserves logical_id. This means all versions of a qubit share
+        the same logical_id, so we only need logical_id-based tracking.
+
+        Args:
+            graph: Computation graph.
+
+        Returns:
+            Dictionary mapping logical_id (str) to wire index (0-based).
+        """
+        qubit_map: dict[str, int] = {}
+        qubit_names: dict[int, str] = {}
+        next_idx = 0
+
+        def map_block_results(
+            operands, results, logical_id_remap: dict[str, str]
+        ) -> None:
+            """Map block output logical_ids to the same wire indices as their inputs.
+
+            For each (operand, result) pair that is a qubit, resolves the operand's
+            logical_id via logical_id_remap, looks up its wire index in qubit_map,
+            and assigns the same index to the result's logical_id. If the operand
+            is not yet registered, both are assigned a new wire index.
+
+            Args:
+                operands: Input values passed to the block (actual arguments).
+                results: Output values returned from the block.
+                logical_id_remap: Mapping from formal-parameter logical_ids to
+                    actual-argument logical_ids.
+            """
+            nonlocal next_idx
+            for operand, result in zip(operands, results, strict=True):
+                if not isinstance(result.type, QubitType):
+                    continue
+                lid = logical_id_remap.get(operand.logical_id, operand.logical_id)
+                qubit_idx = qubit_map.get(lid)
+                if qubit_idx is not None:
+                    qubit_map[result.logical_id] = qubit_idx
+                else:
+                    qubit_map[operand.logical_id] = next_idx
+                    qubit_map[result.logical_id] = next_idx
+                    next_idx += 1
+
+        def build_chains(
+            ops: list[Operation],
+            logical_id_remap: dict[str, str] | None = None,
+        ) -> None:
+            """Register qubit logical_ids by walking operations recursively.
+
+            For QInitOperation, registers new qubits (scalar or array elements).
+            For CallBlockOperation (inline=True), builds a logical_id_remap from
+            block formal parameters to actual arguments, then recurses into the
+            block body. For CastOperation, propagates the source qubit's wire
+            index to the cast result.
+
+            GateOperation and similar are no-ops because next_version() preserves
+            logical_id.
+
+            Args:
+                ops: List of operations to process.
+                logical_id_remap: Mapping from block formal-parameter logical_ids
+                    to actual-argument logical_ids. Only non-empty when recursing
+                    into inlined CallBlockOperations.
+            """
+            nonlocal next_idx
+            if logical_id_remap is None:
+                logical_id_remap = {}
+
+            for op in ops:
+                if isinstance(op, QInitOperation):
+                    qubits = op.results[0]
+
+                    # If the qubits is an array, we need to register each element separately.
+                    if isinstance(qubits, ArrayValue):
+                        # If this assertion fails without adding a new quantum array type, there are some bugs.
+                        # If you added a new quantum array type, please also update the visualization logic here.
+                        assertion_message = f"[FOR DEVELOPER] QInitOperation produced non-qubit array type: {qubits.type}"
+                        assert isinstance(qubits.type, QubitType), assertion_message
+
+                        if len(qubits.shape) == 1:  # 1D array (Vector)
+                            size_value = qubits.shape[0]
+                            if not size_value.is_constant():
+                                raise ValueError(
+                                    f"Cannot visualize circuit: qubit array "
+                                    f"'{qubits.name}' has symbolic size. "
+                                    f"Please provide concrete values for all "
+                                    f"size parameters when calling draw()."
+                                )
+
+                            array_size = size_value.get_const()
+
+                            # As we have already verified if it is constant, this assertion must be passed.
+                            # If it fails, there is a bug in the code leading to this point.
+                            assertion_message = "[FOR DEVELOPER] The given qubit must have a known integer size as a constant here, however, apparently not, which means there is a bug in the code leading to this point."
+                            assert array_size is not None, assertion_message
+
+                            # In QKernel._create_bound_input, the size of qubit arrays is always converted into integer by int function.
+                            # If this assertion fails without adding a new quantum array type, there are some bugs.
+                            assertion_message = f"[FOR DEVELOPER] Qubit array '{qubits.name}' has non-integer size: {array_size}"
+                            assert isinstance(array_size, int), assertion_message
+
+                            for i in range(array_size):
+                                element_key = f"{qubits.logical_id}_[{i}]"
+                                if element_key not in qubit_map:
+                                    qubit_map[element_key] = next_idx
+                                    qubit_names[next_idx] = f"{qubits.name}[{i}]"
+                                    next_idx += 1
+                            # Store base index for array
+                            qubit_map[qubits.logical_id] = qubit_map.get(
+                                f"{qubits.logical_id}_[0]", next_idx
+                            )
+                            continue
+                        # TODO: 2D, 3D arrays if needed.
+                        else:
+                            raise NotImplementedError(
+                                f"Cannot visualize circuit: qubit array "
+                                f"'{qubits.name}' has unsupported rank "
+                                f"{len(qubits.shape)}."
+                            )
+                    # If the qubits is actually just a qubit, then register the qubit.
+                    # This else branch relied on the specification that QInitOperation is always producing qubits.
+                    else:
+                        if qubits.logical_id not in qubit_map:
+                            qubit_map[qubits.logical_id] = next_idx
+                            qubit_names[next_idx] = qubits.name
+                            next_idx += 1
+
+                elif isinstance(op, CallBlockOperation):
+                    if self.inline:
+                        block_value = op.operands[0]
+                        # The IR guarantees that operands[0] of CallBlockOperation is always a BlockValue,
+                        # so this assertion should always pass.
+                        # If it fails, there is a bug in the IR construction.
+                        assertion_message = (
+                            "[FOR DEVELOPER] CallBlockOperation.operands[0] must be a BlockValue. "
+                            "If this assertion fails, there is a bug in the IR construction."
+                        )
+                        assert isinstance(block_value, BlockValue), assertion_message
+                        new_remap = dict(logical_id_remap)
+                        actual_inputs = op.operands[1:]
+
+                        for dummy_input, actual_input in zip(
+                            block_value.input_values, actual_inputs, strict=True
+                        ):
+                            if not isinstance(dummy_input.type, QubitType):
+                                continue
+                            actual_lid = logical_id_remap.get(
+                                actual_input.logical_id, actual_input.logical_id
+                            )
+                            new_remap[dummy_input.logical_id] = actual_lid
+
+                            # Ensure actual_input is registered
+                            if actual_lid not in qubit_map:
+                                qubit_map[actual_lid] = next_idx
+                                next_idx += 1
+
+                        build_chains(block_value.operations, new_remap)
+
+                    qubit_operands = [
+                        v for v in op.operands[1:] if isinstance(v.type, QubitType)
+                    ]
+                    qubit_results = [
+                        v for v in op.results if isinstance(v.type, QubitType)
+                    ]
+                    map_block_results(qubit_operands, qubit_results, logical_id_remap)
+
+                elif isinstance(op, CastOperation):
+                    assert op.operands and op.results, (
+                        "[FOR DEVELOPER] CastOperation must have operands and results. "
+                        "If this assertion fails, there is a bug in the IR construction."
+                    )
+                    source = op.operands[0]
+                    result = op.results[0]
+                    source_lid = logical_id_remap.get(
+                        source.logical_id, source.logical_id
+                    )
+                    qubit_idx = qubit_map.get(source_lid)
+                    if qubit_idx is not None:
+                        qubit_map[result.logical_id] = qubit_idx
+
+                # GateOperation, ControlledUOperation, CompositeGateOperation:
+                # No-op — next_version() preserves logical_id
+
+        build_chains(graph.operations)
+        self.qubit_names = qubit_names
+        self._num_qubits = next_idx
+        return qubit_map
 
     def _add_jupyter_display_support(self, fig: Figure) -> None:
         """Add Jupyter display support to the figure.
@@ -742,188 +940,6 @@ class MatplotlibDrawer:
         visual_label = re.sub(r"\\[a-zA-Z]+", "X", visual_label)
         text_width = len(visual_label) * self.style.char_width_gate
         return max(text_width + 2 * self.style.text_padding, self.style.gate_width)
-
-    def _build_qubit_map(self, graph: Graph) -> dict[str, int]:
-        """Build mapping from qubit logical_id to wire indices.
-
-        In SSA form, each operation creates new Values via next_version(),
-        which preserves logical_id. This means all versions of a qubit share
-        the same logical_id, so we only need logical_id-based tracking.
-
-        Args:
-            graph: Computation graph.
-
-        Returns:
-            Dictionary mapping logical_id (str) to wire index (0-based).
-        """
-        qubit_map: dict[str, int] = {}
-        qubit_names: dict[int, str] = {}
-        next_idx = 0
-
-        def map_block_results(
-            operands, results, logical_id_remap: dict[str, str]
-        ) -> None:
-            """Map block output logical_ids to the same wire indices as their inputs.
-
-            For each (operand, result) pair that is a qubit, resolves the operand's
-            logical_id via logical_id_remap, looks up its wire index in qubit_map,
-            and assigns the same index to the result's logical_id. If the operand
-            is not yet registered, both are assigned a new wire index.
-
-            Args:
-                operands: Input values passed to the block (actual arguments).
-                results: Output values returned from the block.
-                logical_id_remap: Mapping from formal-parameter logical_ids to
-                    actual-argument logical_ids.
-            """
-            nonlocal next_idx
-            for operand, result in zip(operands, results):
-                if not isinstance(result.type, QubitType):
-                    continue
-                lid = logical_id_remap.get(operand.logical_id, operand.logical_id)
-                qubit_idx = qubit_map.get(lid)
-                if qubit_idx is not None:
-                    qubit_map[result.logical_id] = qubit_idx
-                else:
-                    qubit_map[operand.logical_id] = next_idx
-                    qubit_map[result.logical_id] = next_idx
-                    next_idx += 1
-
-        def build_chains(
-            ops: list[Operation],
-            logical_id_remap: dict[str, str] | None = None,
-        ) -> None:
-            """Register qubit logical_ids by walking operations recursively.
-
-            For QInitOperation, registers new qubits (scalar or array elements).
-            For CallBlockOperation (inline=True), builds a logical_id_remap from
-            block formal parameters to actual arguments, then recurses into the
-            block body. For CastOperation, propagates the source qubit's wire
-            index to the cast result.
-
-            GateOperation and similar are no-ops because next_version() preserves
-            logical_id.
-
-            Args:
-                ops: List of operations to process.
-                logical_id_remap: Mapping from block formal-parameter logical_ids
-                    to actual-argument logical_ids. Only non-empty when recursing
-                    into inlined CallBlockOperations.
-            """
-            nonlocal next_idx
-            if logical_id_remap is None:
-                logical_id_remap = {}
-
-            for op in ops:
-                if isinstance(op, QInitOperation):
-                    qubits = op.results[0]
-
-                    # If the qubits is an array, we need to register each element separately.
-                    if isinstance(qubits, ArrayValue):
-                        # If this assertion fails without adding a new quantum array type, there are some bugs.
-                        # If you added a new quantum array type, please also update the visualization logic here.
-                        assertion_message = f"[FOR DEVELOPER] QInitOperation produced non-qubit array type: {qubits.type}"
-                        assert isinstance(qubits.type, QubitType), assertion_message
-
-                        if len(qubits.shape) == 1:  # 1D array (Vector)
-                            size_value = qubits.shape[0]
-                            if not size_value.is_constant():
-                                raise ValueError(
-                                    f"Cannot visualize circuit: qubit array "
-                                    f"'{qubits.name}' has symbolic size. "
-                                    f"Please provide concrete values for all "
-                                    f"size parameters when calling draw()."
-                                )
-
-                            array_size = size_value.get_const()
-
-                            # As we have already verified if it is constant, this assertion must be passed.
-                            # If it fails, there is a bug in the code leading to this point.
-                            assertion_message = "[FOR DEVELOPER] The given qubit must have a known integer size as a constant here, however, apparently not, which means there is a bug in the code leading to this point."
-                            assert array_size is not None, assertion_message
-
-                            # In QKernel._create_bound_input, the size of qubit arrays is always converted into integer by int function.
-                            # If this assertion fails without adding a new quantum array type, there are some bugs.
-                            assertion_message = f"[FOR DEVELOPER] Qubit array '{qubits.name}' has non-integer size: {array_size}"
-                            assert isinstance(array_size, int), assertion_message
-
-                            for i in range(array_size):
-                                element_key = f"{qubits.logical_id}_[{i}]"
-                                if element_key not in qubit_map:
-                                    qubit_map[element_key] = next_idx
-                                    qubit_names[next_idx] = f"{qubits.name}[{i}]"
-                                    next_idx += 1
-                            # Store base index for array
-                            qubit_map[qubits.logical_id] = qubit_map.get(
-                                f"{qubits.logical_id}_[0]", next_idx
-                            )
-                            continue
-                        # TODO: 2D, 3D arrays if needed.
-                        else:
-                            raise NotImplementedError(
-                                f"Cannot visualize circuit: qubit array "
-                                f"'{qubits.name}' has unsupported rank "
-                                f"{len(qubits.shape)}."
-                            )
-                    # If the qubits is actually just a qubit, then register the qubit.
-                    # This else branch relied on the specification that QInitOperation is always producing qubits.
-                    else:
-                        if qubits.logical_id not in qubit_map:
-                            qubit_map[qubits.logical_id] = next_idx
-                            qubit_names[next_idx] = qubits.name
-                            next_idx += 1
-
-                elif isinstance(op, CallBlockOperation):
-                    if self.inline:
-                        block_value = op.operands[0]
-                        # The IR guarantees that operands[0] of CallBlockOperation is always a BlockValue,
-                        # so this assertion should always pass.
-                        # If it fails, there is a bug in the IR construction.
-                        assertion_message = (
-                            "[FOR DEVELOPER] CallBlockOperation.operands[0] must be a BlockValue. "
-                            "If this assertion fails, there is a bug in the IR construction."
-                        )
-                        assert isinstance(block_value, BlockValue), assertion_message
-                        new_remap = dict(logical_id_remap)
-                        actual_inputs = op.operands[1:]
-
-                        for dummy_input, actual_input in zip(
-                            block_value.input_values, actual_inputs, strict=True
-                        ):
-                            if not isinstance(dummy_input.type, QubitType):
-                                continue
-                            actual_lid = logical_id_remap.get(
-                                actual_input.logical_id, actual_input.logical_id
-                            )
-                            new_remap[dummy_input.logical_id] = actual_lid
-
-                            # Ensure actual_input is registered
-                            if actual_lid not in qubit_map:
-                                qubit_map[actual_lid] = next_idx
-                                next_idx += 1
-
-                        build_chains(block_value.operations, new_remap)
-
-                    map_block_results(op.operands[1:], op.results, logical_id_remap)
-
-                elif isinstance(op, CastOperation):
-                    if op.operands and op.results:
-                        source = op.operands[0]
-                        result = op.results[0]
-                        source_lid = logical_id_remap.get(
-                            source.logical_id, source.logical_id
-                        )
-                        qubit_idx = qubit_map.get(source_lid)
-                        if qubit_idx is not None:
-                            qubit_map[result.logical_id] = qubit_idx
-
-                # GateOperation, ControlledUOperation, CompositeGateOperation:
-                # No-op — next_version() preserves logical_id
-
-        build_chains(graph.operations)
-        self.qubit_names = qubit_names
-        self._num_qubits = next_idx
-        return qubit_map
 
     def _layout_for_operation(
         self,
@@ -1658,12 +1674,12 @@ class MatplotlibDrawer:
         base_margin = 0.6  # minimum: gate half-height + comfortable padding
         clearance = 0.2  # extra breathing room beyond the border edge
 
-        if hasattr(self, "_max_above") and self._max_above:
+        if self._max_above:
             y_margin_top = max(self._max_above.get(0, 0), base_margin) + clearance
         else:
             y_margin_top = base_margin
 
-        if hasattr(self, "_max_below") and self._max_below:
+        if self._max_below:
             y_margin_bottom = (
                 max(self._max_below.get(num_qubits - 1, 0), base_margin) + clearance
             )
