@@ -6,16 +6,28 @@ using matplotlib, focusing on clarity and simplicity.
 
 from __future__ import annotations
 
+import io
+import math
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import matplotlib.lines as mlines
+import matplotlib.patches as mpatches
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
+from matplotlib.font_manager import FontProperties
+
 if TYPE_CHECKING:
-    import matplotlib.figure
     from qamomile.circuit.ir.graph import Graph
 
+from qamomile.circuit.ir.block_value import BlockValue
 from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+from qamomile.circuit.ir.operation.cast import CastOperation
+from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
@@ -23,8 +35,6 @@ from qamomile.circuit.ir.operation.control_flow import (
     WhileOperation,
 )
 from qamomile.circuit.ir.operation.expval import ExpvalOp
-from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
 from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     GateOperation,
@@ -33,7 +43,8 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureVectorOperation,
 )
 from qamomile.circuit.ir.operation.operation import QInitOperation
-from qamomile.circuit.ir.value import Value, ArrayValue
+from qamomile.circuit.ir.types.primitives import QubitType
+from qamomile.circuit.ir.value import ArrayValue, Value
 
 from .style import DEFAULT_STYLE, CircuitStyle
 
@@ -139,9 +150,7 @@ class MatplotlibDrawer:
         self.inline = False
         self.fold_loops = fold_loops
 
-    def draw(
-        self, inline: bool = False, fold_loops: bool | None = None
-    ) -> matplotlib.figure.Figure:
+    def draw(self, inline: bool = False, fold_loops: bool | None = None) -> Figure:
         """Generate a matplotlib Figure of the circuit.
 
         Args:
@@ -149,7 +158,7 @@ class MatplotlibDrawer:
             fold_loops: If provided, override the instance fold_loops setting.
 
         Returns:
-            matplotlib.figure.Figure object.
+            Figure object.
         """
         self.inline = inline
         if fold_loops is not None:
@@ -191,7 +200,7 @@ class MatplotlibDrawer:
 
         return fig
 
-    def _add_jupyter_display_support(self, fig: matplotlib.figure.Figure) -> None:
+    def _add_jupyter_display_support(self, fig: Figure) -> None:
         """Add Jupyter display support to the figure.
 
         This adds _repr_png_() method to enable automatic display in Jupyter notebooks.
@@ -199,7 +208,6 @@ class MatplotlibDrawer:
         Args:
             fig: matplotlib Figure to enhance.
         """
-        import io
 
         def _repr_png_():
             """Return PNG representation for Jupyter display."""
@@ -211,112 +219,51 @@ class MatplotlibDrawer:
         # Attach the method to the figure instance
         fig._repr_png_ = _repr_png_
 
-    def _calculate_text_width(self, ax, text: str, fontsize: int) -> float:
-        """Calculate actual rendered text width in data coordinates.
-
-        Args:
-            ax: matplotlib Axes.
-            text: Text string to measure.
-            fontsize: Font size.
+    def _measure_text_bbox(self, ax, text: str, fontsize: int):
+        """Measure rendered text bbox in display pixels.
 
         Returns:
-            Width in data coordinates.
+            matplotlib Bbox of the text in display coordinates.
         """
-        from matplotlib.backends.backend_agg import FigureCanvasAgg
-        from matplotlib.font_manager import FontProperties
-
-        # Ensure figure has a canvas for rendering
         if ax.figure.canvas is None or not hasattr(ax.figure.canvas, "get_renderer"):
             FigureCanvasAgg(ax.figure)
 
         renderer = ax.figure.canvas.get_renderer()
-
-        # Get font properties
         font_props = FontProperties(size=fontsize)
-
-        # Create temporary text to get bbox in display coordinates
         temp_text = ax.text(
             0, 0, text, fontsize=fontsize, fontproperties=font_props, visible=False
         )
         bbox = temp_text.get_window_extent(renderer=renderer)
         temp_text.remove()
+        return bbox
 
-        # Convert pixels to data coordinates using the current x-axis scale
-        # Get the width of 1 data unit in pixels
+    def _calculate_text_width(self, ax, text: str, fontsize: int) -> float:
+        """Calculate actual rendered text width in data coordinates."""
+        bbox = self._measure_text_bbox(ax, text, fontsize)
+
         xlim = ax.get_xlim()
-        fig_width_inches = ax.figure.get_figwidth()
-        # Approximate: bbox width in points, convert to data units
-        # Use a more reliable conversion: points to data units via DPI and figure size
-        bbox_width_points = bbox.width
-        # Get axes position in figure coordinates
         ax_bbox = ax.get_position()
-        ax_width_inches = ax_bbox.width * fig_width_inches
+        ax_width_inches = ax_bbox.width * ax.figure.get_figwidth()
         data_range = xlim[1] - xlim[0]
-        # pixels per inch * inches per data unit
-        dpi = ax.figure.dpi
-        pixels_per_inch = dpi
-        inches_per_data_unit = ax_width_inches / data_range
-        pixels_per_data_unit = pixels_per_inch * inches_per_data_unit
+        pixels_per_data_unit = ax.figure.dpi * ax_width_inches / data_range
 
         if pixels_per_data_unit > 0:
-            data_width = bbox_width_points / pixels_per_data_unit
-        else:
-            # Fallback to character-based estimate
-            data_width = len(text) * 0.15
-
-        return data_width
+            return bbox.width / pixels_per_data_unit
+        return len(text) * self.style.fallback_char_width
 
     def _calculate_text_height(self, ax, text: str, fontsize: int) -> float:
-        """Calculate actual rendered text height in data coordinates.
+        """Calculate actual rendered text height in data coordinates."""
+        bbox = self._measure_text_bbox(ax, text, fontsize)
 
-        Args:
-            ax: matplotlib Axes.
-            text: Text string to measure.
-            fontsize: Font size.
-
-        Returns:
-            Height in data coordinates.
-        """
-        from matplotlib.backends.backend_agg import FigureCanvasAgg
-        from matplotlib.font_manager import FontProperties
-
-        # Ensure figure has a canvas for rendering
-        if ax.figure.canvas is None or not hasattr(ax.figure.canvas, "get_renderer"):
-            FigureCanvasAgg(ax.figure)
-
-        renderer = ax.figure.canvas.get_renderer()
-
-        # Get font properties
-        font_props = FontProperties(size=fontsize)
-
-        # Create temporary text to get bbox in display coordinates
-        temp_text = ax.text(
-            0, 0, text, fontsize=fontsize, fontproperties=font_props, visible=False
-        )
-        bbox = temp_text.get_window_extent(renderer=renderer)
-        temp_text.remove()
-
-        # Convert pixels to data coordinates using the current y-axis scale
-        # Get the height of 1 data unit in pixels
         ylim = ax.get_ylim()
-        fig_height_inches = ax.figure.get_figheight()
-        # Get axes position in figure coordinates
         ax_bbox = ax.get_position()
-        ax_height_inches = ax_bbox.height * fig_height_inches
+        ax_height_inches = ax_bbox.height * ax.figure.get_figheight()
         data_range = ylim[1] - ylim[0]
-        # pixels per inch * inches per data unit
-        dpi = ax.figure.dpi
-        pixels_per_inch = dpi
-        inches_per_data_unit = ax_height_inches / data_range
-        pixels_per_data_unit = pixels_per_inch * inches_per_data_unit
+        pixels_per_data_unit = ax.figure.dpi * ax_height_inches / data_range
 
         if pixels_per_data_unit > 0:
-            data_height = bbox.height / pixels_per_data_unit
-        else:
-            # Fallback to a reasonable estimate
-            data_height = 0.15
-
-        return data_height
+            return bbox.height / pixels_per_data_unit
+        return self.style.fallback_text_height
 
     def _trace_value_chain(
         self, start_value: Value, operations: list[Operation]
@@ -428,11 +375,6 @@ class MatplotlibDrawer:
 
         Handles constants, named parameters, and binary arithmetic expressions.
         """
-        from qamomile.circuit.ir.operation.arithmetic_operations import (
-            BinOp,
-            BinOpKind,
-        )
-
         # 1. Direct constant
         if value.is_constant():
             return value.get_const()
@@ -471,7 +413,7 @@ class MatplotlibDrawer:
                     elif op.kind == BinOpKind.FLOORDIV:
                         return lhs_val // rhs_val if rhs_val != 0 else None
                     elif op.kind == BinOpKind.POW:
-                        result = lhs_val ** rhs_val
+                        result = lhs_val**rhs_val
                         if isinstance(rhs_val, (int, float)) and rhs_val < 0:
                             return result
                         return int(result)
@@ -500,14 +442,10 @@ class MatplotlibDrawer:
         evaluated results by value ID in param_values. This allows subsequent
         index resolution to find the concrete values.
         """
-        from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
-
         for op in operations:
             if isinstance(op, BinOp) and op.results:
                 result_value = op.results[0]
-                resolved = self._evaluate_value(
-                    result_value, param_values, operations
-                )
+                resolved = self._evaluate_value(result_value, param_values, operations)
                 if resolved is not None:
                     param_values[id(result_value)] = resolved
 
@@ -606,12 +544,18 @@ class MatplotlibDrawer:
             (start_val, stop_val_or_None, step_val) where stop_val is None
             if unresolvable (symbolic).
         """
-        start_val = self._evaluate_value(op.operands[0], param_values) if op.operands else 0
+        start_val = (
+            self._evaluate_value(op.operands[0], param_values) if op.operands else 0
+        )
         stop_val = (
-            self._evaluate_value(op.operands[1], param_values) if len(op.operands) > 1 else 0
+            self._evaluate_value(op.operands[1], param_values)
+            if len(op.operands) > 1
+            else 0
         )
         step_val = (
-            self._evaluate_value(op.operands[2], param_values) if len(op.operands) > 2 else 1
+            self._evaluate_value(op.operands[2], param_values)
+            if len(op.operands) > 2
+            else 1
         )
 
         if start_val is None:
@@ -621,7 +565,11 @@ class MatplotlibDrawer:
         if step_val == 0:
             raise ValueError("ForOperation step must not be zero")
 
-        return int(start_val), stop_val if stop_val is None else int(stop_val), int(step_val)
+        return (
+            int(start_val),
+            stop_val if stop_val is None else int(stop_val),
+            int(step_val),
+        )
 
     def _compute_loop_iterations(
         self, start_val: int, stop_val: int, step_val: int
@@ -681,8 +629,6 @@ class MatplotlibDrawer:
         Uses character-based estimation suitable for layout phase
         (before figure creation). Also serves as floor for drawing phase.
         """
-        import re
-
         label, has_param = self._get_gate_label(op, param_values)
         if not has_param:
             return self.style.gate_width
@@ -697,6 +643,16 @@ class MatplotlibDrawer:
         text_width = effective_len * char_width
         padding = self.style.text_padding  # match drawing phase
         return max(self.style.gate_width, text_width + 2 * padding)
+
+    def _estimate_label_box_width(self, label: str) -> float:
+        """Estimate box width for a text label (blocks, composite gates, controlled-U).
+
+        Strips TeX formatting for visual length estimation.
+        """
+        visual_label = label.replace("$", "")
+        visual_label = re.sub(r"\\[a-zA-Z]+", "X", visual_label)
+        text_width = len(visual_label) * self.style.char_width_gate
+        return max(text_width + 2 * self.style.text_padding, self.style.gate_width)
 
     def _build_qubit_map(self, graph: Graph) -> dict[int, int]:
         """Build mapping from qubit Value IDs to wire indices.
@@ -719,6 +675,69 @@ class MatplotlibDrawer:
         qubit_names: dict[int, str] = {}  # Qubit index -> Display name
         next_idx = 0
 
+        def resolve_qubit_idx(operand, operand_id, is_remapped):
+            """Resolve operand to qubit index via array element, logical_id, or value_to_qubit."""
+            qubit_idx = None
+            if hasattr(operand, "parent_array") and operand.parent_array is not None:
+                if len(operand.element_indices) == 1:
+                    idx_value = operand.element_indices[0]
+                    if idx_value.is_constant():
+                        idx = idx_value.get_const()
+                        if idx is not None and isinstance(idx, int):
+                            element_key = f"{operand.parent_array.logical_id}_[{idx}]"
+                            qubit_idx = logical_id_to_qubit.get(element_key)
+
+            if qubit_idx is None and not is_remapped:
+                if hasattr(operand, "logical_id") and operand.logical_id:
+                    qubit_idx = logical_id_to_qubit.get(operand.logical_id)
+            if qubit_idx is None and operand_id in value_to_qubit:
+                qubit_idx = value_to_qubit[operand_id]
+            return qubit_idx
+
+        def register_result(result, result_id, qubit_idx, is_remapped):
+            """Register a result value in value_to_qubit and logical_id_to_qubit."""
+            value_to_qubit[result_id] = qubit_idx
+            if not is_remapped:
+                if hasattr(result, "logical_id") and result.logical_id:
+                    logical_id_to_qubit[result.logical_id] = qubit_idx
+                if hasattr(result, "parent_array") and result.parent_array is not None:
+                    if len(result.element_indices) == 1:
+                        idx_value = result.element_indices[0]
+                        if idx_value.is_constant():
+                            idx = idx_value.get_const()
+                            if idx is not None and isinstance(idx, int):
+                                element_key = (
+                                    f"{result.parent_array.logical_id}_[{idx}]"
+                                )
+                                logical_id_to_qubit[element_key] = qubit_idx
+
+        def map_block_results(operands, results, value_id_map):
+            """Map block output results to same qubits as corresponding inputs."""
+            nonlocal next_idx
+            for operand, result in zip(operands, results):
+                if not isinstance(result.type, QubitType):
+                    continue
+
+                operand_id = value_id_map.get(id(operand), id(operand))
+                result_id = value_id_map.get(id(result), id(result))
+
+                qubit_idx = None
+                if hasattr(operand, "logical_id") and operand.logical_id:
+                    qubit_idx = logical_id_to_qubit.get(operand.logical_id)
+                if qubit_idx is None and operand_id in value_to_qubit:
+                    qubit_idx = value_to_qubit[operand_id]
+
+                if qubit_idx is not None:
+                    value_to_qubit[result_id] = qubit_idx
+                    if hasattr(result, "logical_id") and result.logical_id:
+                        logical_id_to_qubit[result.logical_id] = qubit_idx
+                else:
+                    value_to_qubit[operand_id] = next_idx
+                    value_to_qubit[result_id] = next_idx
+                    if hasattr(result, "logical_id") and result.logical_id:
+                        logical_id_to_qubit[result.logical_id] = next_idx
+                    next_idx += 1
+
         def build_chains(
             ops: list[Operation],
             value_id_map: dict[int, int]
@@ -736,19 +755,15 @@ class MatplotlibDrawer:
 
                     # Check if this is an ArrayValue (qubit array)
                     if isinstance(qubit, ArrayValue):
-                        from qamomile.circuit.ir.types.primitives import QubitType
-
                         if isinstance(qubit.type, QubitType):
                             # Try to expand the array if size is known
                             if len(qubit.shape) == 1:  # 1D array (Vector)
                                 size_value = qubit.shape[0]
-                                # Check if size is constant
                                 if size_value.is_constant():
                                     array_size = size_value.get_const()
                                     if array_size is not None and isinstance(
                                         array_size, int
                                     ):
-                                        # Create individual qubit wires for each array element
                                         for i in range(array_size):
                                             element_key = f"{qubit.logical_id}_[{i}]"
                                             if element_key not in logical_id_to_qubit:
@@ -759,7 +774,6 @@ class MatplotlibDrawer:
                                                     f"{qubit.name}[{i}]"
                                                 )
                                                 next_idx += 1
-                                        # Also register the array itself
                                         value_to_qubit[qubit_id] = (
                                             logical_id_to_qubit.get(
                                                 f"{qubit.logical_id}_[0]", next_idx
@@ -782,112 +796,50 @@ class MatplotlibDrawer:
                             next_idx += 1
                         value_to_qubit[qubit_id] = logical_id_to_qubit[qubit.logical_id]
                     else:
-                        # Fallback to value ID
                         if qubit_id not in value_to_qubit:
                             value_to_qubit[qubit_id] = next_idx
                             qubit_names[next_idx] = qubit.name
                             next_idx += 1
 
                 elif isinstance(op, GateOperation):
-                    # Assign results to the same qubit as their operands
-                    # For multi-qubit gates, operand[i] -> result[i]
                     for i, (operand, result) in enumerate(zip(op.operands, op.results)):
                         operand_id = value_id_map.get(id(operand), id(operand))
                         result_id = value_id_map.get(id(result), id(result))
-
-                        qubit_idx = None
-                        # When inside an inlined block (value_id_map non-empty and operand was
-                        # remapped), skip logical_id lookup on the shared dummy object — its
-                        # logical_id belongs to the BlockValue, not to the actual qubit
                         is_remapped = value_id_map and id(operand) in value_id_map
 
-                        # Check if operand is an array element
-                        if (
-                            hasattr(operand, "parent_array")
-                            and operand.parent_array is not None
-                        ):
-                            # Get the array element index
-                            if len(operand.element_indices) == 1:
-                                idx_value = operand.element_indices[0]
-                                if idx_value.is_constant():
-                                    idx = idx_value.get_const()
-                                    if idx is not None and isinstance(idx, int):
-                                        # Build the element key
-                                        element_key = (
-                                            f"{operand.parent_array.logical_id}_[{idx}]"
-                                        )
-                                        qubit_idx = logical_id_to_qubit.get(element_key)
-
-                        if qubit_idx is None and not is_remapped:
-                            if hasattr(operand, "logical_id") and operand.logical_id:
-                                qubit_idx = logical_id_to_qubit.get(operand.logical_id)
-                        if qubit_idx is None and operand_id in value_to_qubit:
-                            qubit_idx = value_to_qubit[operand_id]
+                        qubit_idx = resolve_qubit_idx(operand, operand_id, is_remapped)
 
                         if qubit_idx is not None:
-                            value_to_qubit[result_id] = qubit_idx
-                            # Record name if not already set
                             if qubit_idx not in qubit_names:
                                 qubit_names[qubit_idx] = operand.name
-                            # Only write logical_id for non-remapped (real) values
-                            if not is_remapped:
-                                if hasattr(result, "logical_id") and result.logical_id:
-                                    logical_id_to_qubit[result.logical_id] = qubit_idx
-                                # Also track array elements
-                                if (
-                                    hasattr(result, "parent_array")
-                                    and result.parent_array is not None
-                                ):
-                                    if len(result.element_indices) == 1:
-                                        idx_value = result.element_indices[0]
-                                        if idx_value.is_constant():
-                                            idx = idx_value.get_const()
-                                            if idx is not None and isinstance(idx, int):
-                                                element_key = f"{result.parent_array.logical_id}_[{idx}]"
-                                                logical_id_to_qubit[element_key] = (
-                                                    qubit_idx
-                                                )
+                            register_result(result, result_id, qubit_idx, is_remapped)
 
                 elif isinstance(op, CallBlockOperation):
                     if self.inline:
-                        # If inlining, process block operations recursively
-                        from qamomile.circuit.ir.block_value import BlockValue
-
                         block_value = op.operands[0]
                         if isinstance(block_value, BlockValue):
-                            # Create mapping from dummy values to actual values
                             new_value_id_map = dict(value_id_map)
-                            actual_inputs = op.operands[1:]  # Actual arguments
+                            actual_inputs = op.operands[1:]
 
-                            # Map all values in each qubit chain to the corresponding actual qubit
                             for i, (dummy_input, actual_input) in enumerate(
                                 zip(block_value.input_values, actual_inputs)
                             ):
-                                # Skip non-Qubit types (e.g., Float, Int)
-                                from qamomile.circuit.ir.types.primitives import (
-                                    QubitType,
-                                )
-
                                 if not isinstance(dummy_input.type, QubitType):
                                     continue
 
                                 actual_id = value_id_map.get(
                                     id(actual_input), id(actual_input)
                                 )
-
-                                # Map the dummy input itself
                                 new_value_id_map[id(dummy_input)] = actual_id
 
-                                # Trace all values in the SSA chain for this qubit
                                 chain_ids = self._trace_value_chain(
                                     dummy_input, block_value.operations
                                 )
                                 for chain_id in chain_ids:
                                     new_value_id_map[chain_id] = actual_id
 
-                                # Ensure actual_input is registered in value_to_qubit
+                                # Ensure actual_input is registered
                                 if actual_id not in value_to_qubit:
-                                    # Try to use logical_id first
                                     qubit_idx = None
                                     if (
                                         hasattr(actual_input, "logical_id")
@@ -896,16 +848,11 @@ class MatplotlibDrawer:
                                         qubit_idx = logical_id_to_qubit.get(
                                             actual_input.logical_id
                                         )
-
-                                    # Try to find existing mapping from original value ID
                                     if qubit_idx is None:
                                         original_id = id(actual_input)
                                         if original_id in value_to_qubit:
                                             qubit_idx = value_to_qubit[original_id]
-
-                                    # Only allocate new qubit index if not found anywhere
                                     if qubit_idx is None:
-                                        # This should ideally not happen - indicates a mapping issue
                                         qubit_idx = next_idx
                                         next_idx += 1
 
@@ -919,174 +866,45 @@ class MatplotlibDrawer:
                                         )
 
                             build_chains(block_value.operations, new_value_id_map)
-
-                            # Also map block results to the same qubit as inputs (needed for subsequent operations)
-                            for i, (operand, result) in enumerate(
-                                zip(op.operands[1:], op.results)
-                            ):
-                                # Skip non-Qubit types (e.g., Float, Int)
-                                from qamomile.circuit.ir.types.primitives import (
-                                    QubitType,
-                                )
-
-                                if not isinstance(result.type, QubitType):
-                                    continue
-
-                                operand_id = value_id_map.get(id(operand), id(operand))
-                                result_id = value_id_map.get(id(result), id(result))
-
-                                # Try to use logical_id first
-                                qubit_idx = None
-                                if (
-                                    hasattr(operand, "logical_id")
-                                    and operand.logical_id
-                                ):
-                                    qubit_idx = logical_id_to_qubit.get(
-                                        operand.logical_id
-                                    )
-                                if qubit_idx is None and operand_id in value_to_qubit:
-                                    qubit_idx = value_to_qubit[operand_id]
-
-                                if qubit_idx is not None:
-                                    value_to_qubit[result_id] = qubit_idx
-                                    if (
-                                        hasattr(result, "logical_id")
-                                        and result.logical_id
-                                    ):
-                                        logical_id_to_qubit[result.logical_id] = (
-                                            qubit_idx
-                                        )
-                                else:
-                                    # If operand is not in value_to_qubit, allocate a new qubit
-                                    value_to_qubit[operand_id] = next_idx
-                                    value_to_qubit[result_id] = next_idx
-                                    if (
-                                        hasattr(result, "logical_id")
-                                        and result.logical_id
-                                    ):
-                                        logical_id_to_qubit[result.logical_id] = (
-                                            next_idx
-                                        )
-                                    next_idx += 1
+                            map_block_results(op.operands[1:], op.results, value_id_map)
                     else:
-                        # Map block results to the same qubit as inputs
-                        for i, (operand, result) in enumerate(
-                            zip(op.operands[1:], op.results)
-                        ):
-                            # Skip non-Qubit types (e.g., Float, Int)
-                            from qamomile.circuit.ir.types.primitives import QubitType
-
-                            if not isinstance(result.type, QubitType):
-                                continue
-
-                            operand_id = value_id_map.get(id(operand), id(operand))
-                            result_id = value_id_map.get(id(result), id(result))
-
-                            # Try to use logical_id first
-                            qubit_idx = None
-                            if hasattr(operand, "logical_id") and operand.logical_id:
-                                qubit_idx = logical_id_to_qubit.get(operand.logical_id)
-                            if qubit_idx is None and operand_id in value_to_qubit:
-                                qubit_idx = value_to_qubit[operand_id]
-
-                            if qubit_idx is not None:
-                                value_to_qubit[result_id] = qubit_idx
-                                if hasattr(result, "logical_id") and result.logical_id:
-                                    logical_id_to_qubit[result.logical_id] = qubit_idx
-                            else:
-                                # If operand is not in value_to_qubit, allocate a new qubit
-                                value_to_qubit[operand_id] = next_idx
-                                value_to_qubit[result_id] = next_idx
-                                if hasattr(result, "logical_id") and result.logical_id:
-                                    logical_id_to_qubit[result.logical_id] = next_idx
-                                next_idx += 1
+                        map_block_results(op.operands[1:], op.results, value_id_map)
 
                 elif isinstance(op, CastOperation):
-                    # Cast does not allocate new qubits - map result to same wire as source
                     if op.operands and op.results:
                         source = op.operands[0]
                         result = op.results[0]
                         source_id = value_id_map.get(id(source), id(source))
                         result_id = value_id_map.get(id(result), id(result))
 
-                        qubit_idx = None
-                        if hasattr(source, "logical_id") and source.logical_id:
-                            qubit_idx = logical_id_to_qubit.get(source.logical_id)
-                        if qubit_idx is None and source_id in value_to_qubit:
-                            qubit_idx = value_to_qubit[source_id]
-
+                        qubit_idx = resolve_qubit_idx(source, source_id, False)
                         if qubit_idx is not None:
                             value_to_qubit[result_id] = qubit_idx
                             if hasattr(result, "logical_id") and result.logical_id:
                                 logical_id_to_qubit[result.logical_id] = qubit_idx
 
                 elif isinstance(op, ControlledUOperation):
-                    # Map control and target operands to results
                     controls = list(op.control_operands)
                     targets = list(op.target_operands)
-                    all_qubit_operands = controls + targets
-                    for operand, result in zip(all_qubit_operands, op.results):
+                    for operand, result in zip(controls + targets, op.results):
                         operand_id = value_id_map.get(id(operand), id(operand))
                         result_id = value_id_map.get(id(result), id(result))
                         is_remapped = value_id_map and id(operand) in value_id_map
 
-                        qubit_idx = None
-                        if (
-                            hasattr(operand, "parent_array")
-                            and operand.parent_array is not None
-                        ):
-                            if len(operand.element_indices) == 1:
-                                idx_value = operand.element_indices[0]
-                                if idx_value.is_constant():
-                                    idx = idx_value.get_const()
-                                    if idx is not None and isinstance(idx, int):
-                                        element_key = f"{operand.parent_array.logical_id}_[{idx}]"
-                                        qubit_idx = logical_id_to_qubit.get(element_key)
-
-                        if qubit_idx is None and not is_remapped:
-                            if hasattr(operand, "logical_id") and operand.logical_id:
-                                qubit_idx = logical_id_to_qubit.get(operand.logical_id)
-                        if qubit_idx is None and operand_id in value_to_qubit:
-                            qubit_idx = value_to_qubit[operand_id]
-
+                        qubit_idx = resolve_qubit_idx(operand, operand_id, is_remapped)
                         if qubit_idx is not None:
-                            value_to_qubit[result_id] = qubit_idx
-                            if not is_remapped:
-                                if hasattr(result, "logical_id") and result.logical_id:
-                                    logical_id_to_qubit[result.logical_id] = qubit_idx
+                            register_result(result, result_id, qubit_idx, is_remapped)
 
                 elif isinstance(op, CompositeGateOperation):
-                    # Map control_qubits + target_qubits operands to results
                     all_qubit_operands = op.control_qubits + op.target_qubits
                     for operand, result in zip(all_qubit_operands, op.results):
                         operand_id = value_id_map.get(id(operand), id(operand))
                         result_id = value_id_map.get(id(result), id(result))
                         is_remapped = value_id_map and id(operand) in value_id_map
 
-                        qubit_idx = None
-                        if (
-                            hasattr(operand, "parent_array")
-                            and operand.parent_array is not None
-                        ):
-                            if len(operand.element_indices) == 1:
-                                idx_value = operand.element_indices[0]
-                                if idx_value.is_constant():
-                                    idx = idx_value.get_const()
-                                    if idx is not None and isinstance(idx, int):
-                                        element_key = f"{operand.parent_array.logical_id}_[{idx}]"
-                                        qubit_idx = logical_id_to_qubit.get(element_key)
-
-                        if qubit_idx is None and not is_remapped:
-                            if hasattr(operand, "logical_id") and operand.logical_id:
-                                qubit_idx = logical_id_to_qubit.get(operand.logical_id)
-                        if qubit_idx is None and operand_id in value_to_qubit:
-                            qubit_idx = value_to_qubit[operand_id]
-
+                        qubit_idx = resolve_qubit_idx(operand, operand_id, is_remapped)
                         if qubit_idx is not None:
-                            value_to_qubit[result_id] = qubit_idx
-                            if not is_remapped:
-                                if hasattr(result, "logical_id") and result.logical_id:
-                                    logical_id_to_qubit[result.logical_id] = qubit_idx
+                            register_result(result, result_id, qubit_idx, is_remapped)
 
         build_chains(graph.operations)
         self.qubit_names = qubit_names
@@ -1108,9 +926,7 @@ class MatplotlibDrawer:
 
         Returns True if the loop was zero-iteration (should be skipped).
         """
-        start_val, stop_val_raw, step_val = self._evaluate_loop_range(
-            op, param_values
-        )
+        start_val, stop_val_raw, step_val = self._evaluate_loop_range(op, param_values)
 
         # Skip zero-iteration loops only if stop is concrete
         stop_val = stop_val_raw if stop_val_raw is not None else 0
@@ -1141,9 +957,7 @@ class MatplotlibDrawer:
             # Overlap prevention
             for q in affected_qubits:
                 if q in state.qubit_right_edges:
-                    required_center = (
-                        state.qubit_right_edges[q] + gap + op_half_width
-                    )
+                    required_center = state.qubit_right_edges[q] + gap + op_half_width
                     start_column = max(start_column, required_center)
 
             state.positions[op_key] = start_column
@@ -1155,7 +969,9 @@ class MatplotlibDrawer:
                 state.qubit_right_edges[q] = start_column + op_half_width
 
             state.column = max(state.column, start_column + 1)
-            state.actual_width = max(state.actual_width, start_column + op_half_width + 0.5)
+            state.actual_width = max(
+                state.actual_width, start_column + op_half_width + 0.5
+            )
         else:
             # Expand loop: process each iteration
             num_iterations = self._compute_loop_iterations(
@@ -1190,7 +1006,11 @@ class MatplotlibDrawer:
         Advances qubit_right_edges for border extent and returns qubit_start_columns.
         """
         max_gate_width = self.style.gate_width
-        border_padding = max(self.style.min_block_padding, self.style.border_padding_base - depth * self.style.border_padding_depth_factor)
+        border_padding = max(
+            self.style.min_block_padding,
+            self.style.border_padding_base
+            - depth * self.style.border_padding_depth_factor,
+        )
         border_extent = max_gate_width / 2 + border_padding
         for q in affected_qubits:
             if q in state.qubit_right_edges:
@@ -1209,8 +1029,6 @@ class MatplotlibDrawer:
         process_operations_fn,
     ) -> None:
         """Layout a CallBlockOperation in inline mode."""
-        from qamomile.circuit.ir.block_value import BlockValue
-
         block_value = op.operands[0]
         if not isinstance(block_value, BlockValue):
             return
@@ -1237,13 +1055,21 @@ class MatplotlibDrawer:
                 max_gate_width = max(max_gate_width, gate_width)
 
         process_operations_fn(
-            block_value.operations, new_value_id_map, depth + 1,
-            scope_path=op_key, param_values=child_param_values,
+            block_value.operations,
+            new_value_id_map,
+            depth + 1,
+            scope_path=op_key,
+            param_values=child_param_values,
         )
 
         self._finalize_inline_block_layout(
-            state, op_key, block_value.name or "block",
-            affected_qubits, qubit_start_columns, max_gate_width, depth,
+            state,
+            op_key,
+            block_value.name or "block",
+            affected_qubits,
+            qubit_start_columns,
+            max_gate_width,
+            depth,
         )
 
     def _layout_inline_controlled_u(
@@ -1258,8 +1084,6 @@ class MatplotlibDrawer:
         process_operations_fn,
     ) -> None:
         """Layout a ControlledUOperation in inline mode."""
-        from qamomile.circuit.ir.block_value import BlockValue
-
         block_value = op.block
         if not isinstance(block_value, BlockValue):
             return
@@ -1286,14 +1110,22 @@ class MatplotlibDrawer:
                 max_gate_width = max(max_gate_width, gate_width)
 
         process_operations_fn(
-            block_value.operations, new_value_id_map, depth + 1,
-            scope_path=op_key, param_values=child_param_values,
+            block_value.operations,
+            new_value_id_map,
+            depth + 1,
+            scope_path=op_key,
+            param_values=child_param_values,
         )
 
         u_name = getattr(block_value, "name", "U") or "U"
         self._finalize_inline_block_layout(
-            state, op_key, u_name,
-            affected_qubits, qubit_start_columns, max_gate_width, depth,
+            state,
+            op_key,
+            u_name,
+            affected_qubits,
+            qubit_start_columns,
+            max_gate_width,
+            depth,
         )
 
     def _layout_inline_composite_gate(
@@ -1308,8 +1140,6 @@ class MatplotlibDrawer:
         process_operations_fn,
     ) -> None:
         """Layout a CompositeGateOperation in inline mode."""
-        from qamomile.circuit.ir.block_value import BlockValue
-
         block_value = op.implementation
         if not isinstance(block_value, BlockValue):
             return
@@ -1336,13 +1166,21 @@ class MatplotlibDrawer:
                 max_gate_width = max(max_gate_width, gate_width)
 
         process_operations_fn(
-            block_value.operations, new_value_id_map, depth + 1,
-            scope_path=op_key, param_values=child_param_values,
+            block_value.operations,
+            new_value_id_map,
+            depth + 1,
+            scope_path=op_key,
+            param_values=child_param_values,
         )
 
         self._finalize_inline_block_layout(
-            state, op_key, op.name,
-            affected_qubits, qubit_start_columns, max_gate_width, depth,
+            state,
+            op_key,
+            op.name,
+            affected_qubits,
+            qubit_start_columns,
+            max_gate_width,
+            depth,
         )
 
     def _finalize_inline_block_layout(
@@ -1361,7 +1199,11 @@ class MatplotlibDrawer:
             block_op_columns = []
             op_key_len = len(op_key)
             for pos_key, pos_val in state.positions.items():
-                if len(pos_key) > op_key_len and pos_key[:op_key_len] == op_key and pos_val > 0:
+                if (
+                    len(pos_key) > op_key_len
+                    and pos_key[:op_key_len] == op_key
+                    and pos_val > 0
+                ):
                     block_op_columns.append(pos_val)
 
             if block_op_columns:
@@ -1371,18 +1213,31 @@ class MatplotlibDrawer:
                 actual_start = min(qubit_start_columns.values())
                 actual_end = max(qubit_end_columns.values()) - 1
 
-            state.block_ranges.append({
-                "name": block_name,
-                "start_x": actual_start, "end_x": actual_end,
-                "qubit_indices": affected_qubits, "depth": depth,
-                "max_gate_width": max_gate_width,
-            })
+            state.block_ranges.append(
+                {
+                    "name": block_name,
+                    "start_x": actual_start,
+                    "end_x": actual_end,
+                    "qubit_indices": affected_qubits,
+                    "depth": depth,
+                    "max_gate_width": max_gate_width,
+                }
+            )
 
-            border_padding = max(self.style.min_block_padding, self.style.border_padding_base - depth * self.style.border_padding_depth_factor)
+            border_padding = max(
+                self.style.min_block_padding,
+                self.style.border_padding_base
+                - depth * self.style.border_padding_depth_factor,
+            )
             gate_border_right = actual_end + max_gate_width / 2 + border_padding
             box_left = actual_start - max_gate_width / 2 - border_padding
             title_text_width = len(block_name) * self.style.char_width_base
-            label_right = box_left + self.style.label_horizontal_padding + title_text_width + self.style.label_horizontal_padding
+            label_right = (
+                box_left
+                + self.style.label_horizontal_padding
+                + title_text_width
+                + self.style.label_horizontal_padding
+            )
             border_right_edge = max(gate_border_right, label_right)
 
             for q in affected_qubits:
@@ -1407,7 +1262,11 @@ class MatplotlibDrawer:
                 continue
             if isinstance(op, ControlledUOperation) and i == 0:
                 continue
-            if isinstance(op, CompositeGateOperation) and op.has_implementation and i == 0:
+            if (
+                isinstance(op, CompositeGateOperation)
+                and op.has_implementation
+                and i == 0
+            ):
                 continue
             affected_qubits.extend(
                 self._resolve_operand_to_qubit_indices(
@@ -1426,54 +1285,24 @@ class MatplotlibDrawer:
         op_half_width = self.style.gate_width / 2  # default
 
         if isinstance(op, GateOperation):
-            import math
-
             estimated_w = self._estimate_gate_width(op, param_values)
             columns_needed = max(1, math.ceil(estimated_w))
             op_half_width = estimated_w / 2
         elif isinstance(op, CallBlockOperation):
-            # Calculate box width for CallBlockOperation (same logic as _draw_call_block)
             label = self._get_block_label(op, qubit_map)
-
-            # Character-based width calculation (conservative estimate)
-            char_width = self.style.char_width_gate
-            import re
-
-            visual_label = label.replace("$", "")
-            visual_label = re.sub(r"\\[a-zA-Z]+", "X", visual_label)
-            text_width = len(visual_label) * char_width
-            text_padding = self.style.text_padding
-            box_width = max(
-                text_width + 2 * text_padding, self.style.gate_width
-            )
-
-            # Store box width for later use in drawing
+            box_width = self._estimate_label_box_width(label)
             state.block_widths[op_key] = box_width
-
-            # Convert width to columns (round up to ensure enough space)
             columns_needed = max(1, int(box_width) + 1)
             op_half_width = box_width / 2
         elif isinstance(op, CompositeGateOperation):
-            label = op.name.upper()
-            char_width = self.style.char_width_gate
-            text_width = len(label) * char_width
-            text_padding = self.style.text_padding
-            box_width = max(
-                text_width + 2 * text_padding, self.style.gate_width
-            )
+            box_width = self._estimate_label_box_width(op.name.upper())
             state.block_widths[op_key] = box_width
             columns_needed = max(1, int(box_width) + 1)
             op_half_width = box_width / 2
         elif isinstance(op, ControlledUOperation):
-            block_val = op.block
-            u_name = getattr(block_val, "name", "U") or "U"
+            u_name = getattr(op.block, "name", "U") or "U"
             label = f"{u_name}^{op.power}" if op.power > 1 else u_name
-            char_width = self.style.char_width_gate
-            text_width = len(label) * char_width
-            text_padding = self.style.text_padding
-            box_width = max(
-                text_width + 2 * text_padding, self.style.gate_width
-            )
+            box_width = self._estimate_label_box_width(label)
             state.block_widths[op_key] = box_width
             columns_needed = max(1, int(box_width) + 1)
             op_half_width = box_width / 2
@@ -1524,9 +1353,7 @@ class MatplotlibDrawer:
                         size_value = operand.shape[0]
                         if size_value.is_constant():
                             array_size = size_value.get_const()
-                            if array_size is not None and isinstance(
-                                array_size, int
-                            ):
+                            if array_size is not None and isinstance(array_size, int):
                                 measure_qubits = list(
                                     range(base_idx, base_idx + array_size)
                                 )
@@ -1599,32 +1426,58 @@ class MatplotlibDrawer:
                     continue
 
                 if isinstance(op, ForOperation):
-                    skip = self._layout_for_operation(
-                        state, op, op_key, qubit_map, value_id_map,
-                        param_values, depth, process_operations,
+                    self._layout_for_operation(
+                        state,
+                        op,
+                        op_key,
+                        qubit_map,
+                        value_id_map,
+                        param_values,
+                        depth,
+                        process_operations,
                     )
-                    if skip:
-                        continue
                     continue
 
                 if isinstance(op, CallBlockOperation) and self.inline:
                     self._layout_inline_call_block(
-                        state, op, op_key, qubit_map, value_id_map,
-                        param_values, depth, process_operations,
+                        state,
+                        op,
+                        op_key,
+                        qubit_map,
+                        value_id_map,
+                        param_values,
+                        depth,
+                        process_operations,
                     )
                     continue
 
                 if isinstance(op, ControlledUOperation) and self.inline:
                     self._layout_inline_controlled_u(
-                        state, op, op_key, qubit_map, value_id_map,
-                        param_values, depth, process_operations,
+                        state,
+                        op,
+                        op_key,
+                        qubit_map,
+                        value_id_map,
+                        param_values,
+                        depth,
+                        process_operations,
                     )
                     continue
 
-                if isinstance(op, CompositeGateOperation) and self.inline and op.has_implementation:
+                if (
+                    isinstance(op, CompositeGateOperation)
+                    and self.inline
+                    and op.has_implementation
+                ):
                     self._layout_inline_composite_gate(
-                        state, op, op_key, qubit_map, value_id_map,
-                        param_values, depth, process_operations,
+                        state,
+                        op,
+                        op_key,
+                        qubit_map,
+                        value_id_map,
+                        param_values,
+                        depth,
+                        process_operations,
                     )
                     continue
 
@@ -1653,15 +1506,14 @@ class MatplotlibDrawer:
             "max_depth": state.max_depth,
             "block_widths": state.block_widths,
             "actual_width": state.actual_width,
-            "first_gate_x": state.first_gate_x if state.first_gate_x is not None else 1.0,
+            "first_gate_x": state.first_gate_x
+            if state.first_gate_x is not None
+            else 1.0,
             "first_gate_half_width": state.first_gate_half_width,
         }
 
-    def _create_empty_figure(self) -> matplotlib.figure.Figure:
+    def _create_empty_figure(self) -> Figure:
         """Create an empty figure for circuits with no qubits."""
-        from matplotlib.figure import Figure
-        from matplotlib.backends.backend_agg import FigureCanvasAgg
-
         # Use Figure directly to avoid pyplot auto-display in Jupyter
         fig = Figure(figsize=(4, 2))
         # Attach canvas for Jupyter display
@@ -1683,7 +1535,7 @@ class MatplotlibDrawer:
 
         return fig
 
-    def _create_figure(self, num_qubits: int, layout: dict) -> matplotlib.figure.Figure:
+    def _create_figure(self, num_qubits: int, layout: dict) -> Figure:
         """Create matplotlib figure with appropriate size.
 
         Args:
@@ -1693,9 +1545,6 @@ class MatplotlibDrawer:
         Returns:
             matplotlib Figure.
         """
-        from matplotlib.figure import Figure
-        from matplotlib.backends.backend_agg import FigureCanvasAgg
-
         width = layout["width"]
         block_ranges = layout.get("block_ranges", [])
 
@@ -1736,7 +1585,11 @@ class MatplotlibDrawer:
         if block_ranges:
             for br in block_ranges:
                 depth = br["depth"]
-                padding = max(self.style.min_block_padding, self.style.border_padding_base - depth * self.style.border_padding_depth_factor)  # Updated formula
+                padding = max(
+                    self.style.min_block_padding,
+                    self.style.border_padding_base
+                    - depth * self.style.border_padding_depth_factor,
+                )  # Updated formula
                 mgw = br.get("max_gate_width", self.style.gate_width)
                 gate_border_right = br["end_x"] + mgw / 2 + padding
                 border_left = br["start_x"] - mgw / 2 - padding
@@ -1746,7 +1599,9 @@ class MatplotlibDrawer:
                 title_char_width = self.style.char_width_base
                 label_left = border_left + self.style.label_horizontal_padding
                 title_text_width = len(block_name) * title_char_width
-                label_right = label_left + title_text_width + self.style.label_horizontal_padding
+                label_right = (
+                    label_left + title_text_width + self.style.label_horizontal_padding
+                )
                 border_right = max(gate_border_right, label_right)
 
                 x_right = max(x_right, border_right + 0.3)
@@ -1797,7 +1652,7 @@ class MatplotlibDrawer:
 
     def _draw_wires(
         self,
-        fig: matplotlib.figure.Figure,
+        fig: Figure,
         num_qubits: int,
         layout: dict,
         qubit_map: dict[int, int],
@@ -1810,8 +1665,6 @@ class MatplotlibDrawer:
             layout: Layout dictionary.
             qubit_map: Qubit to wire index mapping.
         """
-        import matplotlib.lines as mlines
-
         ax = fig._qm_ax
         # Compute wire start/end symmetrically from gate edges
         actual_width = layout.get("actual_width", layout["width"])
@@ -1852,7 +1705,7 @@ class MatplotlibDrawer:
 
     def _draw_for_op(
         self,
-        fig: matplotlib.figure.Figure,
+        fig: Figure,
         op: ForOperation,
         op_key: tuple,
         qubit_map: dict[int, int],
@@ -1863,9 +1716,7 @@ class MatplotlibDrawer:
         draw_ops_fn,
     ) -> None:
         """Handle drawing a ForOperation (fold or expand)."""
-        start_val, stop_val_raw, step_val = self._evaluate_loop_range(
-            op, param_values
-        )
+        start_val, stop_val_raw, step_val = self._evaluate_loop_range(op, param_values)
 
         # Skip zero-iteration loops only if stop is concrete
         stop_val = stop_val_raw if stop_val_raw is not None else 0
@@ -1879,7 +1730,11 @@ class MatplotlibDrawer:
             if op_key in positions:
                 op_width = block_widths.get(op_key)
                 self._draw_for_loop_box(
-                    fig, op, qubit_map, positions[op_key], op_width,
+                    fig,
+                    op,
+                    qubit_map,
+                    positions[op_key],
+                    op_width,
                     param_values=param_values,
                     value_id_map=value_id_map,
                 )
@@ -1889,7 +1744,11 @@ class MatplotlibDrawer:
                 if op_key in positions:
                     op_width = block_widths.get(op_key)
                     self._draw_for_loop_box(
-                        fig, op, qubit_map, positions[op_key], op_width,
+                        fig,
+                        op,
+                        qubit_map,
+                        positions[op_key],
+                        op_width,
                         param_values=param_values,
                         value_id_map=value_id_map,
                     )
@@ -1916,7 +1775,7 @@ class MatplotlibDrawer:
 
     def _draw_operations(
         self,
-        fig: matplotlib.figure.Figure,
+        fig: Figure,
         graph: Graph,
         qubit_map: dict[int, int],
         layout: dict,
@@ -2029,8 +1888,15 @@ class MatplotlibDrawer:
                     )
                 elif isinstance(op, ForOperation):
                     self._draw_for_op(
-                        fig, op, op_key, qubit_map, positions, block_widths,
-                        value_id_map, param_values, draw_ops,
+                        fig,
+                        op,
+                        op_key,
+                        qubit_map,
+                        positions,
+                        block_widths,
+                        value_id_map,
+                        param_values,
+                        draw_ops,
                     )
                 elif isinstance(op, GateOperation):
                     if op_key in positions:
@@ -2045,13 +1911,16 @@ class MatplotlibDrawer:
                 elif isinstance(op, CallBlockOperation):
                     if self.inline:
                         # Recursively draw block operations
-                        from qamomile.circuit.ir.block_value import BlockValue
-
                         block_value = op.operands[0]
                         if isinstance(block_value, BlockValue):
                             actual_inputs = op.operands[1:]  # Actual arguments
-                            new_value_id_map, child_param_values = self._build_block_value_mappings(
-                                block_value, actual_inputs, value_id_map, param_values
+                            new_value_id_map, child_param_values = (
+                                self._build_block_value_mappings(
+                                    block_value,
+                                    actual_inputs,
+                                    value_id_map,
+                                    param_values,
+                                )
                             )
 
                             draw_ops(
@@ -2065,48 +1934,70 @@ class MatplotlibDrawer:
                         if op_key in positions:
                             op_width = block_widths.get(op_key)
                             self._draw_call_block(
-                                fig, op, qubit_map, positions[op_key], op_width,
+                                fig,
+                                op,
+                                qubit_map,
+                                positions[op_key],
+                                op_width,
                                 value_id_map=value_id_map,
                             )
                 elif isinstance(op, CompositeGateOperation):
                     if self.inline and op.has_implementation:
-                        from qamomile.circuit.ir.block_value import BlockValue
-
                         block_value = op.implementation
                         if isinstance(block_value, BlockValue):
                             actual_inputs = list(op.operands[1:])  # Skip BlockValue
-                            new_value_id_map, child_param_values = self._build_block_value_mappings(
-                                block_value, actual_inputs, value_id_map, param_values
+                            new_value_id_map, child_param_values = (
+                                self._build_block_value_mappings(
+                                    block_value,
+                                    actual_inputs,
+                                    value_id_map,
+                                    param_values,
+                                )
                             )
 
                             draw_ops(
-                                block_value.operations, new_value_id_map,
-                                scope_path=op_key, param_values=child_param_values,
+                                block_value.operations,
+                                new_value_id_map,
+                                scope_path=op_key,
+                                param_values=child_param_values,
                             )
                     elif op_key in positions:
                         self._draw_composite_gate(
-                            fig, op, qubit_map, positions[op_key],
-                            block_widths.get(op_key), value_id_map,
+                            fig,
+                            op,
+                            qubit_map,
+                            positions[op_key],
+                            block_widths.get(op_key),
+                            value_id_map,
                         )
                 elif isinstance(op, ControlledUOperation):
                     if self.inline:
-                        from qamomile.circuit.ir.block_value import BlockValue
-
                         block_value = op.block
                         if isinstance(block_value, BlockValue):
                             actual_inputs = list(op.target_operands)
-                            new_value_id_map, child_param_values = self._build_block_value_mappings(
-                                block_value, actual_inputs, value_id_map, param_values
+                            new_value_id_map, child_param_values = (
+                                self._build_block_value_mappings(
+                                    block_value,
+                                    actual_inputs,
+                                    value_id_map,
+                                    param_values,
+                                )
                             )
 
                             draw_ops(
-                                block_value.operations, new_value_id_map,
-                                scope_path=op_key, param_values=child_param_values,
+                                block_value.operations,
+                                new_value_id_map,
+                                scope_path=op_key,
+                                param_values=child_param_values,
                             )
                     elif op_key in positions:
                         self._draw_controlled_u(
-                            fig, op, qubit_map, positions[op_key],
-                            block_widths.get(op_key), value_id_map,
+                            fig,
+                            op,
+                            qubit_map,
+                            positions[op_key],
+                            block_widths.get(op_key),
+                            value_id_map,
                         )
                 elif isinstance(op, MeasureOperation):
                     if op_key in positions:
@@ -2142,13 +2033,13 @@ class MatplotlibDrawer:
                 return [0.0] * num_qubits
             return [float(num_qubits - 1 - q) for q in range(num_qubits)]
 
-        gate_half = self.style.gate_height / 2  # 0.325
+        gate_half = self.style.gate_height / 2
         base_padding = 0.4
-        label_height = 0.25  # text_height + 2*label_padding
-        label_step = label_height + 0.1  # 0.35 per depth level
-        overlap_step = label_height + 0.15  # 0.40 per extra overlap
-        clearance = 0.15
-        base_spacing = 1.0
+        label_height = self.style.qubit_y_label_height
+        label_step = label_height + self.style.label_step_gap
+        overlap_step = label_height + self.style.overlap_step_gap
+        clearance = self.style.qubit_clearance
+        base_spacing = self.style.qubit_base_spacing
 
         # Compute max_depth for inverted label offset
         max_depth = max((b["depth"] for b in block_ranges), default=0)
@@ -2174,7 +2065,10 @@ class MatplotlibDrawer:
         for br in block_ranges:
             qubits = sorted(br["qubit_indices"])
             depth = br["depth"]
-            padding = max(0.1, base_padding - depth * 0.15)
+            padding = max(
+                self.style.min_block_padding,
+                base_padding - depth * self.style.qubit_clearance,
+            )
 
             top_q = qubits[0]  # smallest index = topmost (highest y)
             bottom_q = qubits[-1]  # largest index = bottommost (lowest y)
@@ -2249,8 +2143,6 @@ class MatplotlibDrawer:
             max_gate_width: Maximum gate width in the block (for parametric gates).
             overlap_index: Index for blocks at the same horizontal position (to avoid label overlap).
         """
-        import matplotlib.patches as mpatches
-
         # Use provided max_gate_width or default
         if max_gate_width is None:
             max_gate_width = self.style.gate_width
@@ -2264,19 +2156,22 @@ class MatplotlibDrawer:
         text_height = self._calculate_text_height(ax, name, self.style.subfont_size)
 
         # Depth-based padding to separate nested block boundaries
-        # Outer blocks (depth=0) have maximum padding, inner blocks have less
-        base_padding = 0.3  # Base padding for outermost blocks
-        depth_reduction = 0.1  # Padding reduction per depth level
-        padding = max(0.1, base_padding - depth * depth_reduction)
+        padding = max(
+            self.style.min_block_padding,
+            self.style.border_padding_base
+            - depth * self.style.border_padding_depth_factor,
+        )
 
-        label_padding = 0.05  # Extra space above and below text
-        label_height = text_height + 2 * label_padding
+        lp = self.style.label_padding
+        label_height = text_height + 2 * lp
 
         # Vertical offset for labels based on depth and overlap index
-        # depth: for nested blocks at different depths (inverted: outer blocks get MORE offset)
-        # overlap_index: for blocks at the same depth and horizontal position
-        depth_label_offset = (max_depth - depth) * (label_height + 0.1)
-        overlap_label_offset = overlap_index * (label_height + 0.15)
+        depth_label_offset = (max_depth - depth) * (
+            label_height + self.style.label_step_gap
+        )
+        overlap_label_offset = overlap_index * (
+            label_height + self.style.overlap_step_gap
+        )
         label_vertical_offset = depth_label_offset + overlap_label_offset
 
         # Calculate initial box boundaries based on gates
@@ -2284,17 +2179,16 @@ class MatplotlibDrawer:
         gate_box_right = end_x + max_gate_width / 2 + padding
 
         # Calculate label position
-        label_left = gate_box_left + 0.1  # Label starts with small offset from box
+        label_left = gate_box_left + self.style.label_horizontal_padding
 
         # Extend box_right if title text is wider than gate-based width
-        title_char_width = (
-            0.12  # subfont_size(8pt) estimate, accounts for equal-aspect scaling
-        )
-        title_text_width = len(name) * title_char_width
+        title_text_width = len(name) * self.style.char_width_base
 
         # Expand box symmetrically if title needs more space
         gate_width_span = gate_box_right - gate_box_left
-        required_width = max(gate_width_span, title_text_width + 0.4)
+        required_width = max(
+            gate_width_span, title_text_width + 2 * self.style.text_padding
+        )
         if required_width > gate_width_span:
             extra = (required_width - gate_width_span) / 2
             box_left = gate_box_left - extra
@@ -2331,7 +2225,7 @@ class MatplotlibDrawer:
         # Draw block name label (above the box, with vertical offset for nested blocks)
         ax.text(
             label_left,
-            box_top - label_padding,
+            box_top - lp,
             name,
             ha="left",
             va="top",
@@ -2342,7 +2236,7 @@ class MatplotlibDrawer:
 
     def _draw_gate(
         self,
-        fig: matplotlib.figure.Figure,
+        fig: Figure,
         op: GateOperation,
         qubit_map: dict[int, int],
         x_pos: int,
@@ -2388,6 +2282,22 @@ class MatplotlibDrawer:
             # Multi-qubit gate
             self._draw_multi_qubit_gate(ax, op, x_pos, y_coords, param_values)
 
+    def _compute_gate_draw_width(
+        self,
+        ax,
+        op: GateOperation,
+        label: str,
+        has_param: bool,
+        param_values: dict | None,
+    ) -> float:
+        """Compute the draw width for a gate, handling parametric gates."""
+        if has_param:
+            text_width = self._calculate_text_width(ax, label, self.style.font_size)
+            calculated_width = text_width + 2 * self.style.text_padding
+            estimated_width = self._estimate_gate_width(op, param_values)
+            return max(estimated_width, calculated_width)
+        return self.style.gate_width
+
     def _draw_single_qubit_gate(
         self,
         ax,
@@ -2405,23 +2315,9 @@ class MatplotlibDrawer:
             y: Y coordinate.
             param_values: Mapping from dummy value IDs to resolved parameter values.
         """
-        import matplotlib.patches as mpatches
-
-        # Gate label
         label, has_param = self._get_gate_label(op, param_values)
-
-        # Use unified font size for all gates
         font_size = self.style.font_size
-
-        # Calculate width dynamically for parametric gates
-        if has_param:
-            text_width = self._calculate_text_width(ax, label, font_size)
-            padding = self.style.text_padding
-            calculated_width = text_width + 2 * padding
-            estimated_width = self._estimate_gate_width(op, param_values)
-            width = max(estimated_width, calculated_width)
-        else:
-            width = self.style.gate_width
+        width = self._compute_gate_draw_width(ax, op, label, has_param, param_values)
 
         height = self.style.gate_height
 
@@ -2469,8 +2365,6 @@ class MatplotlibDrawer:
             y_coords: Y coordinates of involved qubits.
             param_values: Mapping from dummy value IDs to resolved parameter values.
         """
-        import matplotlib.lines as mlines
-
         min_y = min(y_coords)
         max_y = max(y_coords)
 
@@ -2486,19 +2380,8 @@ class MatplotlibDrawer:
 
         # Draw control and target markers based on gate type
         label, has_param = self._get_gate_label(op, param_values)
-
-        # Use unified font size for all gates
         font_size = self.style.font_size
-
-        # Calculate width dynamically for parametric gates
-        if has_param:
-            text_width = self._calculate_text_width(ax, label, font_size)
-            padding = self.style.text_padding
-            calculated_width = text_width + 2 * padding
-            estimated_width = self._estimate_gate_width(op, param_values)
-            width = max(estimated_width, calculated_width)
-        else:
-            width = self.style.gate_width
+        width = self._compute_gate_draw_width(ax, op, label, has_param, param_values)
 
         if op.gate_type == GateOperationType.CX:
             # CNOT: control dot on first qubit, target circle on second
@@ -2514,8 +2397,6 @@ class MatplotlibDrawer:
                 self._draw_swap_x(ax, x, y)
         else:
             # Generic multi-qubit gate: draw a single unified box spanning all qubits
-            import matplotlib.patches as mpatches
-
             # Calculate box dimensions to span all qubits
             height = max_y - min_y + self.style.gate_height
             y_center = (min_y + max_y) / 2
@@ -2576,8 +2457,6 @@ class MatplotlibDrawer:
 
     def _draw_control_dot(self, ax, x: float, y: float) -> None:
         """Draw a control dot for controlled gates."""
-        import matplotlib.patches as mpatches
-
         circle = mpatches.Circle(
             (x, y),
             radius=0.1,
@@ -2589,9 +2468,6 @@ class MatplotlibDrawer:
 
     def _draw_target_x(self, ax, x: float, y: float) -> None:
         """Draw a target X (plus sign in circle) for CNOT."""
-        import matplotlib.patches as mpatches
-        import matplotlib.lines as mlines
-
         # Outer circle
         circle = mpatches.Circle(
             (x, y),
@@ -2623,8 +2499,6 @@ class MatplotlibDrawer:
 
     def _draw_swap_x(self, ax, x: float, y: float) -> None:
         """Draw an X marker for SWAP gate."""
-        import matplotlib.lines as mlines
-
         size = 0.15
         line1 = mlines.Line2D(
             [x - size, x + size],
@@ -2645,7 +2519,7 @@ class MatplotlibDrawer:
 
     def _draw_call_block(
         self,
-        fig: matplotlib.figure.Figure,
+        fig: Figure,
         op: CallBlockOperation,
         qubit_map: dict[int, int],
         x_pos: float,
@@ -2662,8 +2536,6 @@ class MatplotlibDrawer:
             block_width: Pre-calculated block width from layout phase.
             value_id_map: Mapping from dummy value IDs to actual value IDs.
         """
-        import matplotlib.patches as mpatches
-
         if value_id_map is None:
             value_id_map = {}
 
@@ -2673,9 +2545,7 @@ class MatplotlibDrawer:
         qubit_indices = []
         for operand in op.operands[1:]:  # Skip BlockValue
             qubit_indices.extend(
-                self._resolve_operand_to_qubit_indices(
-                    operand, qubit_map, value_id_map
-                )
+                self._resolve_operand_to_qubit_indices(operand, qubit_map, value_id_map)
             )
 
         if not qubit_indices:
@@ -2694,16 +2564,7 @@ class MatplotlibDrawer:
         if block_width is not None:
             width = block_width
         else:
-            # Fallback: use character-based estimate (same as layout phase)
-            char_width = self.style.char_width_gate
-            # Strip TeX for visual length (e.g., $\theta$ renders as 1 char)
-            import re
-
-            visual_label = label.replace("$", "")
-            visual_label = re.sub(r"\\[a-zA-Z]+", "X", visual_label)
-            text_width = len(visual_label) * char_width
-            text_padding = self.style.text_padding
-            width = max(text_width + 2 * text_padding, self.style.gate_width)
+            width = self._estimate_label_box_width(label)
 
         # Draw box spanning all qubits
         height = max_y - min_y + self.style.gate_height
@@ -2738,7 +2599,7 @@ class MatplotlibDrawer:
 
     def _draw_composite_gate(
         self,
-        fig: matplotlib.figure.Figure,
+        fig: Figure,
         op: CompositeGateOperation,
         qubit_map: dict[int, int],
         x_pos: float,
@@ -2746,8 +2607,6 @@ class MatplotlibDrawer:
         value_id_map: dict[int, int] | None = None,
     ) -> None:
         """Draw a CompositeGateOperation as a labeled box."""
-        import matplotlib.patches as mpatches
-
         if value_id_map is None:
             value_id_map = {}
         ax = fig._qm_ax
@@ -2755,9 +2614,7 @@ class MatplotlibDrawer:
         # Collect qubit indices from control + target qubits
         qubit_indices = []
         for qval in op.control_qubits + op.target_qubits:
-            idx = self._resolve_operand_to_qubit_index(
-                qval, qubit_map, value_id_map
-            )
+            idx = self._resolve_operand_to_qubit_index(qval, qubit_map, value_id_map)
             if idx is not None:
                 qubit_indices.append(idx)
 
@@ -2800,7 +2657,7 @@ class MatplotlibDrawer:
 
     def _draw_controlled_u(
         self,
-        fig: matplotlib.figure.Figure,
+        fig: Figure,
         op: ControlledUOperation,
         qubit_map: dict[int, int],
         x_pos: float,
@@ -2808,9 +2665,6 @@ class MatplotlibDrawer:
         value_id_map: dict[int, int] | None = None,
     ) -> None:
         """Draw a ControlledUOperation with control dots and target box."""
-        import matplotlib.lines as mlines
-        import matplotlib.patches as mpatches
-
         if value_id_map is None:
             value_id_map = {}
         ax = fig._qm_ax
@@ -2818,18 +2672,14 @@ class MatplotlibDrawer:
         # Resolve control qubit y-coordinates
         control_y = []
         for qval in op.control_operands:
-            idx = self._resolve_operand_to_qubit_index(
-                qval, qubit_map, value_id_map
-            )
+            idx = self._resolve_operand_to_qubit_index(qval, qubit_map, value_id_map)
             if idx is not None:
                 control_y.append(self.qubit_y[idx])
 
         # Resolve target qubit y-coordinates
         target_y = []
         for qval in op.target_operands:
-            idx = self._resolve_operand_to_qubit_index(
-                qval, qubit_map, value_id_map
-            )
+            idx = self._resolve_operand_to_qubit_index(qval, qubit_map, value_id_map)
             if idx is not None:
                 target_y.append(self.qubit_y[idx])
 
@@ -2900,8 +2750,6 @@ class MatplotlibDrawer:
             width: Width of the containing box.
             height: Height of the containing box.
         """
-        import matplotlib.patches as mpatches
-
         # Calculate arc radius based on box size
         arc_radius = min(width, height) * 0.25
 
@@ -2932,47 +2780,11 @@ class MatplotlibDrawer:
             zorder=PORDER_TEXT,
         )
 
-    def _draw_measurement(
-        self,
-        fig: matplotlib.figure.Figure,
-        op: MeasureOperation,
-        qubit_map: dict[int, int],
-        x_pos: float,
-        value_id_map: dict[int, int] | None = None,
-    ) -> None:
-        """Draw a MeasureOperation as an M box with meter symbol.
-
-        Args:
-            fig: matplotlib Figure.
-            op: MeasureOperation.
-            qubit_map: Qubit to wire index mapping.
-            x_pos: X position.
-            value_id_map: Mapping from dummy value IDs to actual value IDs.
-        """
-        import matplotlib.patches as mpatches
-
-        if value_id_map is None:
-            value_id_map = {}
-
-        ax = fig._qm_ax
-
-        # Get the qubit being measured
-        if not op.operands:
-            return
-
-        operand = op.operands[0]
-        qubit_idx = self._resolve_operand_to_qubit_index(
-            operand, qubit_map, value_id_map
-        )
-
-        if qubit_idx is None:
-            return
-
-        y = self.qubit_y[qubit_idx]
+    def _draw_measurement_box(self, ax, x_pos: float, y: float) -> None:
+        """Draw a single measurement box with meter symbol at the given position."""
         width = self.style.gate_width
         height = self.style.gate_height
 
-        # Draw measurement box
         rect = mpatches.FancyBboxPatch(
             (x_pos - width / 2, y - height / 2),
             width,
@@ -2986,72 +2798,44 @@ class MatplotlibDrawer:
             zorder=PORDER_GATE,
         )
         ax.add_patch(rect)
-
-        # Draw meter symbol (half-circle arc + arrow)
         self._draw_meter_symbol(ax, x_pos, y, width, height)
+
+    def _draw_measurement(
+        self,
+        fig: Figure,
+        op: MeasureOperation,
+        qubit_map: dict[int, int],
+        x_pos: float,
+        value_id_map: dict[int, int] | None = None,
+    ) -> None:
+        """Draw a MeasureOperation as an M box with meter symbol."""
+        if not op.operands:
+            return
+
+        qubit_idx = self._resolve_operand_to_qubit_index(
+            op.operands[0], qubit_map, value_id_map or {}
+        )
+        if qubit_idx is not None:
+            self._draw_measurement_box(fig._qm_ax, x_pos, self.qubit_y[qubit_idx])
 
     def _draw_measurement_vector(
         self,
-        fig: matplotlib.figure.Figure,
+        fig: Figure,
         op: MeasureVectorOperation,
         qubit_map: dict[int, int],
         x_pos: float,
         value_id_map: dict[int, int] | None = None,
     ) -> None:
-        """Draw a MeasureVectorOperation as M boxes on all measured qubits.
-
-        Args:
-            fig: matplotlib Figure.
-            op: MeasureVectorOperation.
-            qubit_map: Qubit to wire index mapping.
-            x_pos: X position.
-            value_id_map: Mapping from dummy value IDs to actual value IDs.
-        """
-        import matplotlib.patches as mpatches
-
-        if value_id_map is None:
-            value_id_map = {}
-
-        ax = fig._qm_ax
-
-        # Get the qubit array being measured
+        """Draw a MeasureVectorOperation as M boxes on all measured qubits."""
         if not op.operands:
             return
 
-        operand = op.operands[0]
-
-        # Get all qubit indices from the array (expands ArrayValue)
         qubit_indices = self._resolve_operand_to_qubit_indices(
-            operand, qubit_map, value_id_map
+            op.operands[0], qubit_map, value_id_map or {}
         )
-
-        if not qubit_indices:
-            return
-
-        width = self.style.gate_width
-        height = self.style.gate_height
-
-        # Draw measurement box on each qubit
+        ax = fig._qm_ax
         for qubit_idx in qubit_indices:
-            y = self.qubit_y[qubit_idx]
-
-            # Draw measurement box
-            rect = mpatches.FancyBboxPatch(
-                (x_pos - width / 2, y - height / 2),
-                width,
-                height,
-                boxstyle=mpatches.BoxStyle.Round(
-                    pad=0, rounding_size=self.style.gate_corner_radius
-                ),
-                facecolor=self.style.measure_face_color,
-                edgecolor=self.style.wire_color,
-                linewidth=1,
-                zorder=PORDER_GATE,
-            )
-            ax.add_patch(rect)
-
-            # Draw meter symbol (half-circle arc + arrow)
-            self._draw_meter_symbol(ax, x_pos, y, width, height)
+            self._draw_measurement_box(ax, x_pos, self.qubit_y[qubit_idx])
 
     def _get_gate_params_for_expression(self, op: GateOperation) -> str | None:
         """Get gate parameters as a string for expression format.
@@ -3161,8 +2945,6 @@ class MatplotlibDrawer:
             return "measure(...)"
 
         elif isinstance(op, CallBlockOperation):
-            from qamomile.circuit.ir.block_value import BlockValue
-
             block_value = op.operands[0]
             if isinstance(block_value, BlockValue):
                 block_name = block_value.name or "block"
@@ -3202,7 +2984,11 @@ class MatplotlibDrawer:
         # Constant index (e.g., j = 1; qubits[j])
         const = idx_value.get_const()
         if const is not None:
-            return str(int(const)) if isinstance(const, float) and const == int(const) else str(const)
+            return (
+                str(int(const))
+                if isinstance(const, float) and const == int(const)
+                else str(const)
+            )
 
         # Try to find the defining BinOp operation for this value
         return self._format_value_as_expression(idx_value, loop_var)
@@ -3212,11 +2998,6 @@ class MatplotlibDrawer:
 
         Recursively resolves BinOp chains to produce expressions like "i+1", "2*i".
         """
-        from qamomile.circuit.ir.operation.arithmetic_operations import (
-            BinOp,
-            BinOpKind,
-        )
-
         # Constant
         if value.is_constant():
             c = value.get_const()
@@ -3253,7 +3034,7 @@ class MatplotlibDrawer:
 
     def _draw_for_loop_box(
         self,
-        fig: matplotlib.figure.Figure,
+        fig: Figure,
         op: ForOperation,
         qubit_map: dict[int, int],
         x_pos: float,
@@ -3272,8 +3053,6 @@ class MatplotlibDrawer:
             param_values: Parameter values for resolving symbolic expressions.
             value_id_map: Mapping from dummy value IDs to actual value IDs.
         """
-        import matplotlib.patches as mpatches
-
         if param_values is None:
             param_values = {}
 
@@ -3293,15 +3072,27 @@ class MatplotlibDrawer:
         max_y = max(y_coords)
 
         # Get loop range for label using _evaluate_value for symbolic expressions
-        start_val = self._evaluate_value(op.operands[0], param_values) if op.operands else 0
-        stop_val = self._evaluate_value(op.operands[1], param_values) if len(op.operands) > 1 else 0
-        step_val = self._evaluate_value(op.operands[2], param_values) if len(op.operands) > 2 else 1
+        start_val = (
+            self._evaluate_value(op.operands[0], param_values) if op.operands else 0
+        )
+        stop_val = (
+            self._evaluate_value(op.operands[1], param_values)
+            if len(op.operands) > 1
+            else 0
+        )
+        step_val = (
+            self._evaluate_value(op.operands[2], param_values)
+            if len(op.operands) > 2
+            else 1
+        )
 
         start_str = self._safe_int_str(start_val)
         stop_str = self._safe_int_str(stop_val)
         step_str = self._safe_int_str(step_val)
 
-        if (start_val is None or start_val == 0) and (step_val is None or step_val == 1):
+        if (start_val is None or start_val == 0) and (
+            step_val is None or step_val == 1
+        ):
             range_str = f"qm.range({stop_str})"
         elif step_val is None or step_val == 1:
             range_str = f"qm.range({start_str}, {stop_str})"
@@ -3418,8 +3209,6 @@ class MatplotlibDrawer:
 
     def _get_block_label(self, op: CallBlockOperation, qubit_map: dict) -> str:
         """Get display label for a CallBlockOperation, including parameters."""
-        from qamomile.circuit.ir.block_value import BlockValue
-
         block_value = op.operands[0]
         if not isinstance(block_value, BlockValue):
             return "block"

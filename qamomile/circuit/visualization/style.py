@@ -42,7 +42,9 @@ class CircuitStyle:
     gate_symbol_color: str = "#F2C94C"  # Chamomile yellow for multi-qubit gate symbols
     gate_symbol_edge_color: str = "#000000"  # Black edge for multi-qubit gate symbols
     gate_text_color: str = "#000000"  # Black
-    connection_line_color: str = "#000000"  # Color for connection lines in multi-qubit gates
+    connection_line_color: str = (
+        "#000000"  # Color for connection lines in multi-qubit gates
+    )
     block_face_color: str = "#5B7F61"  # Sage green for block boxes
     block_text_color: str = "#FFFFFF"  # White text for blocks
     block_border_color: str = "#4A6B50"  # Dark sage for inline block borders
@@ -125,6 +127,14 @@ class CircuitStyle:
     # Nested block padding (Issue 8)
     nested_padding_decay: float = 0.85  # Padding decay factor per nesting depth
     min_block_padding: float = 0.1  # Minimum block padding
+
+    # Qubit y-position spacing constants
+    qubit_base_spacing: float = 1.0  # Base spacing between qubit wires
+    qubit_clearance: float = 0.15  # Clearance between adjacent qubit extents
+    label_step_gap: float = 0.1  # Gap added per depth level for labels
+    overlap_step_gap: float = 0.15  # Gap added per overlapping border
+    label_padding: float = 0.05  # Extra space above/below label text
+    qubit_y_label_height: float = 0.25  # Height reserved for block labels in y-spacing
 
     # Figure size constants
     figure_scale_factor: float = 0.8  # Scaling factor for figure dimensions
