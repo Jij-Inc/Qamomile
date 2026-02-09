@@ -94,6 +94,7 @@ class CircuitStyle:
 
     # Wire layout
     initial_wire_position: float = 0.3  # Initial position for qubit wires after labels
+    wire_extension: float = 0.3  # Wire extension beyond first/last gate edges
 
     # Width calculation constants
     operation_width_padding: float = 0.4  # Added to operation box width
@@ -119,11 +120,11 @@ class CircuitStyle:
     folded_call_block_width: float = 1.5  # Fixed width for folded CallBlock boxes
 
     # Gate text padding (Issue 3)
-    gate_text_padding: float = 0.15  # Padding around gate text (left and right)
+    gate_text_padding: float = 0.10  # Padding around gate text (left and right)
 
     # Nested block padding (Issue 8)
     nested_padding_decay: float = 0.85  # Padding decay factor per nesting depth
-    min_block_padding: float = 0.05  # Minimum block padding
+    min_block_padding: float = 0.1  # Minimum block padding
 
     # Figure size constants
     figure_scale_factor: float = 0.8  # Scaling factor for figure dimensions
