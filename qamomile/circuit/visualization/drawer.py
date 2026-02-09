@@ -165,12 +165,6 @@ class MatplotlibDrawer:
         # Use the total number of wires tracked during map building
         num_qubits = self._num_qubits
 
-        if num_qubits == 0:
-            # Empty circuit
-            fig = self._create_empty_figure()
-            self._add_jupyter_display_support(fig)
-            return fig
-
         # Initialize qubit end positions (for wire termination at measurements)
         self.qubit_end_positions: dict[int, float] = {}
 
@@ -1549,33 +1543,6 @@ class MatplotlibDrawer:
             "first_gate_half_width": state.first_gate_half_width,
         }
 
-    def _create_empty_figure(self) -> Figure:
-        """Create an empty figure for circuits with no qubits.
-
-        Returns:
-            matplotlib Figure with "Empty circuit" text.
-        """
-        # Use Figure directly to avoid pyplot auto-display in Jupyter
-        fig = Figure(figsize=(4, 2))
-        # Attach canvas for Jupyter display
-        FigureCanvasAgg(fig)
-        ax = fig.add_subplot(111)
-
-        ax.text(
-            0.5,
-            0.5,
-            "Empty circuit",
-            ha="center",
-            va="center",
-            transform=ax.transAxes,
-        )
-        ax.axis("off")
-
-        # Store ax in figure for later access
-        fig._qm_ax = ax
-
-        return fig
-
     def _create_figure(self, num_qubits: int, layout: dict) -> Figure:
         """Create matplotlib figure with appropriate size.
 
@@ -1586,6 +1553,22 @@ class MatplotlibDrawer:
         Returns:
             matplotlib Figure.
         """
+        if num_qubits == 0:
+            fig = Figure(figsize=(4, 2))
+            FigureCanvasAgg(fig)
+            ax = fig.add_subplot(111)
+            ax.text(
+                0.5,
+                0.5,
+                "Empty circuit",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
+            ax.axis("off")
+            fig._qm_ax = ax
+            return fig
+
         width = layout["width"]
         block_ranges = layout.get("block_ranges", [])
 
