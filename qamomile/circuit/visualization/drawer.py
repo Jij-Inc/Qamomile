@@ -265,71 +265,37 @@ class MatplotlibDrawer:
             return bbox.height / pixels_per_data_unit
         return self.style.fallback_text_height
 
-    def _trace_value_chain(
-        self, start_value: Value, operations: list[Operation]
-    ) -> set[int]:
-        """Trace all values in the SSA chain starting from a given value.
-
-        This finds all intermediate values created from the start_value through
-        gate operations within a block. For multi-qubit gates, only the
-        corresponding result (same index) is added to the chain.
-
-        Args:
-            start_value: The starting value (typically a block input).
-            operations: List of operations in the block.
-
-        Returns:
-            Set of value IDs in the chain.
-        """
-        chain = {id(start_value)}
-        changed = True
-
-        while changed:
-            changed = False
-            for op in operations:
-                if isinstance(op, GateOperation):
-                    # For each operand in the chain, add the corresponding result
-                    for i, operand in enumerate(op.operands):
-                        if id(operand) in chain and i < len(op.results):
-                            result = op.results[i]
-                            if id(result) not in chain:
-                                chain.add(id(result))
-                                changed = True
-
-        return chain
-
     def _analyze_loop_affected_qubits(
         self,
         op: ForOperation,
-        qubit_map: dict[int, int],
-        value_id_map: dict[int, int] | None = None,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str] | None = None,
     ) -> list[int]:
         """Analyze which qubits are affected by a ForOperation.
 
         Args:
             op: ForOperation to analyze.
-            qubit_map: Mapping from Value ID to qubit index.
-            value_id_map: Mapping from dummy value IDs to actual value IDs.
+            qubit_map: Mapping from logical_id to qubit index.
+            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
 
         Returns:
             List of affected qubit indices.
         """
-        if value_id_map is None:
-            value_id_map = {}
+        if logical_id_remap is None:
+            logical_id_remap = {}
 
         affected = set()
 
         def get_qubit_index_or_expand(operand) -> int | None:
             """Get qubit index, expanding symbolic array indices into `affected`."""
-            # Handle symbolic array element indices specially:
-            # when the index is not constant, conservatively mark all array qubits
             if hasattr(operand, "parent_array") and operand.parent_array is not None:
-                parent_id = id(operand.parent_array)
-                if parent_id in qubit_map:
+                parent_lid = operand.parent_array.logical_id
+                parent_lid = logical_id_remap.get(parent_lid, parent_lid)
+                if parent_lid in qubit_map:
                     if hasattr(operand, "element_indices") and operand.element_indices:
                         idx_value = operand.element_indices[0]
                         if not idx_value.is_constant():
-                            base_idx = qubit_map[parent_id]
+                            base_idx = qubit_map[parent_lid]
                             if (
                                 hasattr(operand.parent_array, "shape")
                                 and operand.parent_array.shape
@@ -343,7 +309,7 @@ class MatplotlibDrawer:
                             return None  # Already added all
 
             return self._resolve_operand_to_qubit_index(
-                operand, qubit_map, value_id_map
+                operand, qubit_map, logical_id_remap
             )
 
         def collect_from_ops(ops: list[Operation]) -> None:
@@ -359,7 +325,6 @@ class MatplotlibDrawer:
                         if idx is not None:
                             affected.add(idx)
                 elif isinstance(inner_op, ForOperation):
-                    # Recursively collect from nested loops
                     collect_from_ops(inner_op.operations)
 
         collect_from_ops(op.operations)
@@ -387,8 +352,8 @@ class MatplotlibDrawer:
                 if isinstance(v, (int, float)):
                     return v
 
-        # 3. Check param_values by value id
-        vid = id(value)
+        # 3. Check param_values by logical_id
+        vid = value.logical_id
         if vid in param_values:
             v = param_values[vid]
             if isinstance(v, (int, float)):
@@ -447,38 +412,39 @@ class MatplotlibDrawer:
                 result_value = op.results[0]
                 resolved = self._evaluate_value(result_value, param_values, operations)
                 if resolved is not None:
-                    param_values[id(result_value)] = resolved
+                    param_values[result_value.logical_id] = resolved
 
     def _resolve_operand_to_qubit_index(
         self,
         operand: Value,
-        qubit_map: dict[int, int],
-        value_id_map: dict[int, int] | None = None,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str] | None = None,
         param_values: dict | None = None,
     ) -> int | None:
         """Resolve a single operand to its qubit wire index.
 
-        Handles value_id_map lookup, direct qubit_map, parent_array + element_indices,
+        Handles logical_id_remap lookup, direct qubit_map, parent_array + element_indices,
         and BinOp evaluation for computed indices.
 
         Returns:
             Qubit wire index or None if unresolvable.
         """
-        if value_id_map is None:
-            value_id_map = {}
+        if logical_id_remap is None:
+            logical_id_remap = {}
         if param_values is None:
             param_values = {}
 
-        operand_id = value_id_map.get(id(operand), id(operand))
+        resolved_lid = logical_id_remap.get(operand.logical_id, operand.logical_id)
 
         # Direct lookup
-        if operand_id in qubit_map:
-            return qubit_map[operand_id]
+        if resolved_lid in qubit_map:
+            return qubit_map[resolved_lid]
 
         # Parent array element access
         if hasattr(operand, "parent_array") and operand.parent_array is not None:
-            parent_id = id(operand.parent_array)
-            if parent_id in qubit_map:
+            parent_lid = operand.parent_array.logical_id
+            parent_lid = logical_id_remap.get(parent_lid, parent_lid)
+            if parent_lid in qubit_map:
                 if hasattr(operand, "element_indices") and operand.element_indices:
                     idx_value = operand.element_indices[0]
                     idx = None
@@ -487,17 +453,17 @@ class MatplotlibDrawer:
                     else:
                         idx = self._evaluate_value(idx_value, param_values)
                     if idx is not None:
-                        return qubit_map[parent_id] + int(idx)
+                        return qubit_map[parent_lid] + int(idx)
                 # Fallback to base index
-                return qubit_map[parent_id]
+                return qubit_map[parent_lid]
 
         return None
 
     def _resolve_operand_to_qubit_indices(
         self,
         operand: Value,
-        qubit_map: dict[int, int],
-        value_id_map: dict[int, int] | None = None,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str] | None = None,
         param_values: dict | None = None,
     ) -> list[int]:
         """Resolve an operand to qubit wire indices, expanding ArrayValue.
@@ -508,19 +474,19 @@ class MatplotlibDrawer:
         Returns:
             List of qubit wire indices (may be empty if unresolvable).
         """
-        if value_id_map is None:
-            value_id_map = {}
+        if logical_id_remap is None:
+            logical_id_remap = {}
 
-        operand_id = value_id_map.get(id(operand), id(operand))
+        resolved_lid = logical_id_remap.get(operand.logical_id, operand.logical_id)
 
         # Expand ArrayValue to all individual qubits
         if (
             isinstance(operand, ArrayValue)
             and hasattr(operand, "shape")
             and operand.shape
-            and operand_id in qubit_map
+            and resolved_lid in qubit_map
         ):
-            base_idx = qubit_map[operand_id]
+            base_idx = qubit_map[resolved_lid]
             size_value = operand.shape[0]
             if size_value.is_constant():
                 array_size = size_value.get_const()
@@ -529,7 +495,7 @@ class MatplotlibDrawer:
 
         # Single operand resolution
         idx = self._resolve_operand_to_qubit_index(
-            operand, qubit_map, value_id_map, param_values
+            operand, qubit_map, logical_id_remap, param_values
         )
         if idx is not None:
             return [idx]
@@ -584,42 +550,41 @@ class MatplotlibDrawer:
         self,
         block_value,
         actual_inputs: list,
-        value_id_map: dict[int, int],
+        logical_id_remap: dict[str, str],
         param_values: dict,
-    ) -> tuple[dict[int, int], dict]:
-        """Build value_id_map and child_param_values for a BlockValue.
+    ) -> tuple[dict[str, str], dict]:
+        """Build logical_id_remap and child_param_values for a BlockValue.
 
-        Traces SSA chains from block inputs to actual inputs, building
-        the mappings needed for recursive processing.
+        Maps dummy block input logical_ids to actual input logical_ids,
+        building the mappings needed for recursive processing.
 
         Returns:
-            (new_value_id_map, child_param_values)
+            (new_logical_id_remap, child_param_values)
         """
-        new_value_id_map = dict(value_id_map)
+        new_logical_id_remap = dict(logical_id_remap)
 
         for dummy_input, actual_input in zip(block_value.input_values, actual_inputs):
-            actual_id = value_id_map.get(id(actual_input), id(actual_input))
-            new_value_id_map[id(dummy_input)] = actual_id
-            if id(actual_input) != actual_id:
-                new_value_id_map[id(actual_input)] = actual_id
-            chain_ids = self._trace_value_chain(dummy_input, block_value.operations)
-            for chain_id in chain_ids:
-                new_value_id_map[chain_id] = actual_id
+            actual_lid = logical_id_remap.get(
+                actual_input.logical_id, actual_input.logical_id
+            )
+            new_logical_id_remap[dummy_input.logical_id] = actual_lid
 
         child_param_values = dict(param_values)
         for dummy_input, actual_input in zip(block_value.input_values, actual_inputs):
             if isinstance(actual_input, Value):
                 const = actual_input.get_const()
                 if const is not None:
-                    child_param_values[id(dummy_input)] = const
-                elif id(actual_input) in param_values:
-                    child_param_values[id(dummy_input)] = param_values[id(actual_input)]
+                    child_param_values[dummy_input.logical_id] = const
+                elif actual_input.logical_id in param_values:
+                    child_param_values[dummy_input.logical_id] = param_values[
+                        actual_input.logical_id
+                    ]
                 elif actual_input.is_parameter():
-                    child_param_values[id(dummy_input)] = (
+                    child_param_values[dummy_input.logical_id] = (
                         actual_input.parameter_name() or actual_input.name
                     )
 
-        return new_value_id_map, child_param_values
+        return new_logical_id_remap, child_param_values
 
     def _estimate_gate_width(
         self, op: GateOperation, param_values: dict | None = None
@@ -654,109 +619,73 @@ class MatplotlibDrawer:
         text_width = len(visual_label) * self.style.char_width_gate
         return max(text_width + 2 * self.style.text_padding, self.style.gate_width)
 
-    def _build_qubit_map(self, graph: Graph) -> dict[int, int]:
-        """Build mapping from qubit Value IDs to wire indices.
+    def _build_qubit_map(self, graph: Graph) -> dict[str, int]:
+        """Build mapping from qubit logical_id to wire indices.
 
-        In SSA form, each operation creates new Values, but they represent
-        the same qubit. We need to track these SSA chains and map all values
-        in a chain to the same wire index.
-
-        Uses logical_id for more robust tracking across inline blocks.
+        In SSA form, each operation creates new Values via next_version(),
+        which preserves logical_id. This means all versions of a qubit share
+        the same logical_id, so we only need logical_id-based tracking.
 
         Args:
             graph: Computation graph.
 
         Returns:
-            Dictionary mapping Value ID to wire index (0-based).
+            Dictionary mapping logical_id (str) to wire index (0-based).
         """
-        # Track both logical_id and value_id mappings
-        logical_id_to_qubit: dict[str, int] = {}  # logical_id -> Qubit index
-        value_to_qubit: dict[int, int] = {}  # Value ID -> Qubit index
-        qubit_names: dict[int, str] = {}  # Qubit index -> Display name
+        qubit_map: dict[str, int] = {}
+        qubit_names: dict[int, str] = {}
         next_idx = 0
 
-        def resolve_qubit_idx(operand, operand_id, is_remapped):
-            """Resolve operand to qubit index via array element, logical_id, or value_to_qubit."""
-            qubit_idx = None
+        def resolve_qubit_idx(operand, logical_id_remap: dict[str, str]) -> int | None:
+            """Resolve operand to qubit index via logical_id."""
+            # Array element access
             if hasattr(operand, "parent_array") and operand.parent_array is not None:
                 if len(operand.element_indices) == 1:
                     idx_value = operand.element_indices[0]
                     if idx_value.is_constant():
                         idx = idx_value.get_const()
                         if idx is not None and isinstance(idx, int):
-                            element_key = f"{operand.parent_array.logical_id}_[{idx}]"
-                            qubit_idx = logical_id_to_qubit.get(element_key)
+                            parent_lid = operand.parent_array.logical_id
+                            parent_lid = logical_id_remap.get(parent_lid, parent_lid)
+                            element_key = f"{parent_lid}_[{idx}]"
+                            if element_key in qubit_map:
+                                return qubit_map[element_key]
 
-            if qubit_idx is None and not is_remapped:
-                if hasattr(operand, "logical_id") and operand.logical_id:
-                    qubit_idx = logical_id_to_qubit.get(operand.logical_id)
-            if qubit_idx is None and operand_id in value_to_qubit:
-                qubit_idx = value_to_qubit[operand_id]
-            return qubit_idx
+            lid = logical_id_remap.get(operand.logical_id, operand.logical_id)
+            return qubit_map.get(lid)
 
-        def register_result(result, result_id, qubit_idx, is_remapped):
-            """Register a result value in value_to_qubit and logical_id_to_qubit."""
-            value_to_qubit[result_id] = qubit_idx
-            if not is_remapped:
-                if hasattr(result, "logical_id") and result.logical_id:
-                    logical_id_to_qubit[result.logical_id] = qubit_idx
-                if hasattr(result, "parent_array") and result.parent_array is not None:
-                    if len(result.element_indices) == 1:
-                        idx_value = result.element_indices[0]
-                        if idx_value.is_constant():
-                            idx = idx_value.get_const()
-                            if idx is not None and isinstance(idx, int):
-                                element_key = (
-                                    f"{result.parent_array.logical_id}_[{idx}]"
-                                )
-                                logical_id_to_qubit[element_key] = qubit_idx
-
-        def map_block_results(operands, results, value_id_map):
+        def map_block_results(
+            operands, results, logical_id_remap: dict[str, str]
+        ) -> None:
             """Map block output results to same qubits as corresponding inputs."""
             nonlocal next_idx
             for operand, result in zip(operands, results):
                 if not isinstance(result.type, QubitType):
                     continue
-
-                operand_id = value_id_map.get(id(operand), id(operand))
-                result_id = value_id_map.get(id(result), id(result))
-
-                qubit_idx = None
-                if hasattr(operand, "logical_id") and operand.logical_id:
-                    qubit_idx = logical_id_to_qubit.get(operand.logical_id)
-                if qubit_idx is None and operand_id in value_to_qubit:
-                    qubit_idx = value_to_qubit[operand_id]
-
+                lid = logical_id_remap.get(operand.logical_id, operand.logical_id)
+                qubit_idx = qubit_map.get(lid)
                 if qubit_idx is not None:
-                    value_to_qubit[result_id] = qubit_idx
-                    if hasattr(result, "logical_id") and result.logical_id:
-                        logical_id_to_qubit[result.logical_id] = qubit_idx
+                    qubit_map[result.logical_id] = qubit_idx
                 else:
-                    value_to_qubit[operand_id] = next_idx
-                    value_to_qubit[result_id] = next_idx
-                    if hasattr(result, "logical_id") and result.logical_id:
-                        logical_id_to_qubit[result.logical_id] = next_idx
+                    qubit_map[operand.logical_id] = next_idx
+                    qubit_map[result.logical_id] = next_idx
                     next_idx += 1
 
         def build_chains(
             ops: list[Operation],
-            value_id_map: dict[int, int]
-            | None = None,  # Dummy value ID → Actual value ID
+            logical_id_remap: dict[str, str] | None = None,
         ) -> None:
             nonlocal next_idx
-            if value_id_map is None:
-                value_id_map = {}
+            if logical_id_remap is None:
+                logical_id_remap = {}
 
             for op in ops:
                 if isinstance(op, QInitOperation):
-                    # Allocate new qubit and start a chain
                     qubit = op.results[0]
-                    qubit_id = value_id_map.get(id(qubit), id(qubit))
 
                     # Check if this is an ArrayValue (qubit array)
                     if isinstance(qubit, ArrayValue):
                         if isinstance(qubit.type, QubitType):
-                            # Try to expand the array if size is known
                             if len(qubit.shape) == 1:  # 1D array (Vector)
                                 size_value = qubit.shape[0]
                                 if size_value.is_constant():
@@ -766,18 +695,15 @@ class MatplotlibDrawer:
                                     ):
                                         for i in range(array_size):
                                             element_key = f"{qubit.logical_id}_[{i}]"
-                                            if element_key not in logical_id_to_qubit:
-                                                logical_id_to_qubit[element_key] = (
-                                                    next_idx
-                                                )
+                                            if element_key not in qubit_map:
+                                                qubit_map[element_key] = next_idx
                                                 qubit_names[next_idx] = (
                                                     f"{qubit.name}[{i}]"
                                                 )
                                                 next_idx += 1
-                                        value_to_qubit[qubit_id] = (
-                                            logical_id_to_qubit.get(
-                                                f"{qubit.logical_id}_[0]", next_idx
-                                            )
+                                        # Store base index for array
+                                        qubit_map[qubit.logical_id] = qubit_map.get(
+                                            f"{qubit.logical_id}_[0]", next_idx
                                         )
                                         continue
                                 else:
@@ -788,136 +714,69 @@ class MatplotlibDrawer:
                                         f"size parameters when calling draw()."
                                     )
 
-                    # Use logical_id for consistent tracking
-                    if hasattr(qubit, "logical_id") and qubit.logical_id:
-                        if qubit.logical_id not in logical_id_to_qubit:
-                            logical_id_to_qubit[qubit.logical_id] = next_idx
-                            qubit_names[next_idx] = qubit.name
-                            next_idx += 1
-                        value_to_qubit[qubit_id] = logical_id_to_qubit[qubit.logical_id]
-                    else:
-                        if qubit_id not in value_to_qubit:
-                            value_to_qubit[qubit_id] = next_idx
-                            qubit_names[next_idx] = qubit.name
-                            next_idx += 1
-
-                elif isinstance(op, GateOperation):
-                    for i, (operand, result) in enumerate(zip(op.operands, op.results)):
-                        operand_id = value_id_map.get(id(operand), id(operand))
-                        result_id = value_id_map.get(id(result), id(result))
-                        is_remapped = value_id_map and id(operand) in value_id_map
-
-                        qubit_idx = resolve_qubit_idx(operand, operand_id, is_remapped)
-
-                        if qubit_idx is not None:
-                            if qubit_idx not in qubit_names:
-                                qubit_names[qubit_idx] = operand.name
-                            register_result(result, result_id, qubit_idx, is_remapped)
+                    # Scalar qubit
+                    if qubit.logical_id not in qubit_map:
+                        qubit_map[qubit.logical_id] = next_idx
+                        qubit_names[next_idx] = qubit.name
+                        next_idx += 1
 
                 elif isinstance(op, CallBlockOperation):
                     if self.inline:
                         block_value = op.operands[0]
                         if isinstance(block_value, BlockValue):
-                            new_value_id_map = dict(value_id_map)
+                            new_remap = dict(logical_id_remap)
                             actual_inputs = op.operands[1:]
 
-                            for i, (dummy_input, actual_input) in enumerate(
-                                zip(block_value.input_values, actual_inputs)
+                            for dummy_input, actual_input in zip(
+                                block_value.input_values, actual_inputs
                             ):
                                 if not isinstance(dummy_input.type, QubitType):
                                     continue
-
-                                actual_id = value_id_map.get(
-                                    id(actual_input), id(actual_input)
+                                actual_lid = logical_id_remap.get(
+                                    actual_input.logical_id, actual_input.logical_id
                                 )
-                                new_value_id_map[id(dummy_input)] = actual_id
-
-                                chain_ids = self._trace_value_chain(
-                                    dummy_input, block_value.operations
-                                )
-                                for chain_id in chain_ids:
-                                    new_value_id_map[chain_id] = actual_id
+                                new_remap[dummy_input.logical_id] = actual_lid
 
                                 # Ensure actual_input is registered
-                                if actual_id not in value_to_qubit:
-                                    qubit_idx = None
-                                    if (
-                                        hasattr(actual_input, "logical_id")
-                                        and actual_input.logical_id
-                                    ):
-                                        qubit_idx = logical_id_to_qubit.get(
-                                            actual_input.logical_id
-                                        )
-                                    if qubit_idx is None:
-                                        original_id = id(actual_input)
-                                        if original_id in value_to_qubit:
-                                            qubit_idx = value_to_qubit[original_id]
-                                    if qubit_idx is None:
-                                        qubit_idx = next_idx
-                                        next_idx += 1
+                                if actual_lid not in qubit_map:
+                                    qubit_map[actual_lid] = next_idx
+                                    next_idx += 1
 
-                                    value_to_qubit[actual_id] = qubit_idx
-                                    if (
-                                        hasattr(actual_input, "logical_id")
-                                        and actual_input.logical_id
-                                    ):
-                                        logical_id_to_qubit[actual_input.logical_id] = (
-                                            qubit_idx
-                                        )
-
-                            build_chains(block_value.operations, new_value_id_map)
-                            map_block_results(op.operands[1:], op.results, value_id_map)
+                            build_chains(block_value.operations, new_remap)
+                            map_block_results(
+                                op.operands[1:], op.results, logical_id_remap
+                            )
                     else:
-                        map_block_results(op.operands[1:], op.results, value_id_map)
+                        map_block_results(
+                            op.operands[1:], op.results, logical_id_remap
+                        )
 
                 elif isinstance(op, CastOperation):
                     if op.operands and op.results:
                         source = op.operands[0]
                         result = op.results[0]
-                        source_id = value_id_map.get(id(source), id(source))
-                        result_id = value_id_map.get(id(result), id(result))
-
-                        qubit_idx = resolve_qubit_idx(source, source_id, False)
+                        source_lid = logical_id_remap.get(
+                            source.logical_id, source.logical_id
+                        )
+                        qubit_idx = qubit_map.get(source_lid)
                         if qubit_idx is not None:
-                            value_to_qubit[result_id] = qubit_idx
-                            if hasattr(result, "logical_id") and result.logical_id:
-                                logical_id_to_qubit[result.logical_id] = qubit_idx
+                            qubit_map[result.logical_id] = qubit_idx
 
-                elif isinstance(op, ControlledUOperation):
-                    controls = list(op.control_operands)
-                    targets = list(op.target_operands)
-                    for operand, result in zip(controls + targets, op.results):
-                        operand_id = value_id_map.get(id(operand), id(operand))
-                        result_id = value_id_map.get(id(result), id(result))
-                        is_remapped = value_id_map and id(operand) in value_id_map
-
-                        qubit_idx = resolve_qubit_idx(operand, operand_id, is_remapped)
-                        if qubit_idx is not None:
-                            register_result(result, result_id, qubit_idx, is_remapped)
-
-                elif isinstance(op, CompositeGateOperation):
-                    all_qubit_operands = op.control_qubits + op.target_qubits
-                    for operand, result in zip(all_qubit_operands, op.results):
-                        operand_id = value_id_map.get(id(operand), id(operand))
-                        result_id = value_id_map.get(id(result), id(result))
-                        is_remapped = value_id_map and id(operand) in value_id_map
-
-                        qubit_idx = resolve_qubit_idx(operand, operand_id, is_remapped)
-                        if qubit_idx is not None:
-                            register_result(result, result_id, qubit_idx, is_remapped)
+                # GateOperation, ControlledUOperation, CompositeGateOperation:
+                # No-op — next_version() preserves logical_id
 
         build_chains(graph.operations)
         self.qubit_names = qubit_names
         self._num_qubits = next_idx
-        return value_to_qubit
+        return qubit_map
 
     def _layout_for_operation(
         self,
         state: LayoutState,
         op: ForOperation,
         op_key: tuple,
-        qubit_map: dict[int, int],
-        value_id_map: dict[int, int],
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
         param_values: dict,
         depth: int,
         process_operations_fn,
@@ -939,7 +798,7 @@ class MatplotlibDrawer:
         if self.fold_loops:
             # Draw as a box (folded)
             affected_qubits = self._analyze_loop_affected_qubits(
-                op, qubit_map, value_id_map
+                op, qubit_map, logical_id_remap
             )
 
             if affected_qubits:
@@ -988,7 +847,7 @@ class MatplotlibDrawer:
 
                 process_operations_fn(
                     op.operations,
-                    value_id_map,
+                    logical_id_remap,
                     depth + 1,
                     scope_path=(*op_key, iteration),
                     param_values=child_param_values,
@@ -1022,8 +881,8 @@ class MatplotlibDrawer:
         state: LayoutState,
         op: CallBlockOperation,
         op_key: tuple,
-        qubit_map: dict[int, int],
-        value_id_map: dict[int, int],
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
         param_values: dict,
         depth: int,
         process_operations_fn,
@@ -1037,15 +896,15 @@ class MatplotlibDrawer:
         for operand in op.operands[1:]:
             affected_qubits.extend(
                 self._resolve_operand_to_qubit_indices(
-                    operand, qubit_map, value_id_map, param_values
+                    operand, qubit_map, logical_id_remap, param_values
                 )
             )
 
         qubit_start_columns = self._prepare_inline_block(state, affected_qubits, depth)
 
         actual_inputs = op.operands[1:]
-        new_value_id_map, child_param_values = self._build_block_value_mappings(
-            block_value, actual_inputs, value_id_map, param_values
+        new_logical_id_remap, child_param_values = self._build_block_value_mappings(
+            block_value, actual_inputs, logical_id_remap, param_values
         )
 
         max_gate_width = self.style.gate_width
@@ -1056,7 +915,7 @@ class MatplotlibDrawer:
 
         process_operations_fn(
             block_value.operations,
-            new_value_id_map,
+            new_logical_id_remap,
             depth + 1,
             scope_path=op_key,
             param_values=child_param_values,
@@ -1077,8 +936,8 @@ class MatplotlibDrawer:
         state: LayoutState,
         op: ControlledUOperation,
         op_key: tuple,
-        qubit_map: dict[int, int],
-        value_id_map: dict[int, int],
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
         param_values: dict,
         depth: int,
         process_operations_fn,
@@ -1091,7 +950,7 @@ class MatplotlibDrawer:
         affected_qubits = []
         for operand in list(op.control_operands) + list(op.target_operands):
             idx = self._resolve_operand_to_qubit_index(
-                operand, qubit_map, value_id_map, param_values
+                operand, qubit_map, logical_id_remap, param_values
             )
             if idx is not None:
                 affected_qubits.append(idx)
@@ -1099,8 +958,8 @@ class MatplotlibDrawer:
         qubit_start_columns = self._prepare_inline_block(state, affected_qubits, depth)
 
         actual_inputs = list(op.target_operands)
-        new_value_id_map, child_param_values = self._build_block_value_mappings(
-            block_value, actual_inputs, value_id_map, param_values
+        new_logical_id_remap, child_param_values = self._build_block_value_mappings(
+            block_value, actual_inputs, logical_id_remap, param_values
         )
 
         max_gate_width = self.style.gate_width
@@ -1111,7 +970,7 @@ class MatplotlibDrawer:
 
         process_operations_fn(
             block_value.operations,
-            new_value_id_map,
+            new_logical_id_remap,
             depth + 1,
             scope_path=op_key,
             param_values=child_param_values,
@@ -1133,8 +992,8 @@ class MatplotlibDrawer:
         state: LayoutState,
         op: CompositeGateOperation,
         op_key: tuple,
-        qubit_map: dict[int, int],
-        value_id_map: dict[int, int],
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
         param_values: dict,
         depth: int,
         process_operations_fn,
@@ -1147,7 +1006,7 @@ class MatplotlibDrawer:
         affected_qubits = []
         for operand in list(op.control_qubits) + list(op.target_qubits):
             idx = self._resolve_operand_to_qubit_index(
-                operand, qubit_map, value_id_map, param_values
+                operand, qubit_map, logical_id_remap, param_values
             )
             if idx is not None:
                 affected_qubits.append(idx)
@@ -1155,8 +1014,8 @@ class MatplotlibDrawer:
         qubit_start_columns = self._prepare_inline_block(state, affected_qubits, depth)
 
         actual_inputs = list(op.operands[1:])
-        new_value_id_map, child_param_values = self._build_block_value_mappings(
-            block_value, actual_inputs, value_id_map, param_values
+        new_logical_id_remap, child_param_values = self._build_block_value_mappings(
+            block_value, actual_inputs, logical_id_remap, param_values
         )
 
         max_gate_width = self.style.gate_width
@@ -1167,7 +1026,7 @@ class MatplotlibDrawer:
 
         process_operations_fn(
             block_value.operations,
-            new_value_id_map,
+            new_logical_id_remap,
             depth + 1,
             scope_path=op_key,
             param_values=child_param_values,
@@ -1249,8 +1108,8 @@ class MatplotlibDrawer:
         state: LayoutState,
         op: Operation,
         op_key: tuple,
-        qubit_map: dict[int, int],
-        value_id_map: dict[int, int],
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
         param_values: dict,
     ) -> None:
         """Layout a generic operation (gate, measurement, block box)."""
@@ -1270,7 +1129,7 @@ class MatplotlibDrawer:
                 continue
             affected_qubits.extend(
                 self._resolve_operand_to_qubit_indices(
-                    operand, qubit_map, value_id_map, param_values
+                    operand, qubit_map, logical_id_remap, param_values
                 )
             )
 
@@ -1346,9 +1205,9 @@ class MatplotlibDrawer:
             measure_qubits = list(affected_qubits)
             operand = op.operands[0] if op.operands else None
             if operand is not None and isinstance(operand, ArrayValue):
-                parent_id = id(operand)
-                if parent_id in qubit_map:
-                    base_idx = qubit_map[parent_id]
+                parent_lid = operand.logical_id
+                if parent_lid in qubit_map:
+                    base_idx = qubit_map[parent_lid]
                     if len(operand.shape) == 1:
                         size_value = operand.shape[0]
                         if size_value.is_constant():
@@ -1365,7 +1224,7 @@ class MatplotlibDrawer:
         state.actual_width = max(state.actual_width, op_actual_width)
 
     def _layout_operations(
-        self, graph: Graph, qubit_map: dict[int, int]
+        self, graph: Graph, qubit_map: dict[str, int]
     ) -> dict[str, int | dict]:
         """Calculate layout positions for operations.
 
@@ -1389,14 +1248,14 @@ class MatplotlibDrawer:
 
         def process_operations(
             ops: list[Operation],
-            value_id_map: dict[int, int]
-            | None = None,  # Dummy value ID → Actual value ID
+            logical_id_remap: dict[str, str]
+            | None = None,  # Dummy logical_id → Actual logical_id
             depth: int = 0,  # Nesting depth for blocks
             scope_path: tuple = (),
             param_values: dict[int, float | int | str] | None = None,
         ) -> None:
-            if value_id_map is None:
-                value_id_map = {}
+            if logical_id_remap is None:
+                logical_id_remap = {}
             if param_values is None:
                 param_values = {}
 
@@ -1431,7 +1290,7 @@ class MatplotlibDrawer:
                         op,
                         op_key,
                         qubit_map,
-                        value_id_map,
+                        logical_id_remap,
                         param_values,
                         depth,
                         process_operations,
@@ -1444,7 +1303,7 @@ class MatplotlibDrawer:
                         op,
                         op_key,
                         qubit_map,
-                        value_id_map,
+                        logical_id_remap,
                         param_values,
                         depth,
                         process_operations,
@@ -1457,7 +1316,7 @@ class MatplotlibDrawer:
                         op,
                         op_key,
                         qubit_map,
-                        value_id_map,
+                        logical_id_remap,
                         param_values,
                         depth,
                         process_operations,
@@ -1474,7 +1333,7 @@ class MatplotlibDrawer:
                         op,
                         op_key,
                         qubit_map,
-                        value_id_map,
+                        logical_id_remap,
                         param_values,
                         depth,
                         process_operations,
@@ -1493,7 +1352,7 @@ class MatplotlibDrawer:
                     ),
                 ):
                     self._layout_generic_operation(
-                        state, op, op_key, qubit_map, value_id_map, param_values
+                        state, op, op_key, qubit_map, logical_id_remap, param_values
                     )
 
         process_operations(graph.operations)
@@ -1632,11 +1491,11 @@ class MatplotlibDrawer:
 
         return fig
 
-    def _build_output_label_map(self, qubit_map: dict[int, int]) -> dict[int, str]:
+    def _build_output_label_map(self, qubit_map: dict[str, int]) -> dict[int, str]:
         """Build mapping from wire index to output variable names.
 
         Args:
-            qubit_map: Mapping from Value ID to wire index.
+            qubit_map: Mapping from logical_id to wire index.
 
         Returns:
             Dictionary mapping wire index to output variable name.
@@ -1645,7 +1504,7 @@ class MatplotlibDrawer:
         for i, value in enumerate(self.graph.output_values):
             if i >= len(self.graph.output_names):
                 break
-            wire = qubit_map.get(id(value))
+            wire = qubit_map.get(value.logical_id)
             if wire is not None:
                 result[wire] = self.graph.output_names[i]
         return result
@@ -1655,7 +1514,7 @@ class MatplotlibDrawer:
         fig: Figure,
         num_qubits: int,
         layout: dict,
-        qubit_map: dict[int, int],
+        qubit_map: dict[str, int],
     ) -> None:
         """Draw qubit wires and labels.
 
@@ -1708,10 +1567,10 @@ class MatplotlibDrawer:
         fig: Figure,
         op: ForOperation,
         op_key: tuple,
-        qubit_map: dict[int, int],
+        qubit_map: dict[str, int],
         positions: dict,
         block_widths: dict,
-        value_id_map: dict[int, int],
+        logical_id_remap: dict[str, str],
         param_values: dict,
         draw_ops_fn,
     ) -> None:
@@ -1736,7 +1595,7 @@ class MatplotlibDrawer:
                     positions[op_key],
                     op_width,
                     param_values=param_values,
-                    value_id_map=value_id_map,
+                    logical_id_remap=logical_id_remap,
                 )
         else:
             # Can't expand if stop is symbolic
@@ -1750,7 +1609,7 @@ class MatplotlibDrawer:
                         positions[op_key],
                         op_width,
                         param_values=param_values,
-                        value_id_map=value_id_map,
+                        logical_id_remap=logical_id_remap,
                     )
                 return
 
@@ -1768,7 +1627,7 @@ class MatplotlibDrawer:
 
                 draw_ops_fn(
                     op.operations,
-                    value_id_map,
+                    logical_id_remap,
                     scope_path=(*op_key, iteration),
                     param_values=child_param_values,
                 )
@@ -1777,7 +1636,7 @@ class MatplotlibDrawer:
         self,
         fig: Figure,
         graph: Graph,
-        qubit_map: dict[int, int],
+        qubit_map: dict[str, int],
         layout: dict,
     ) -> None:
         """Draw all operations.
@@ -1858,13 +1717,13 @@ class MatplotlibDrawer:
 
         def draw_ops(
             ops: list[Operation],
-            value_id_map: dict[int, int]
-            | None = None,  # Dummy value ID → Actual value ID
+            logical_id_remap: dict[str, str]
+            | None = None,  # Dummy logical_id → Actual logical_id
             scope_path: tuple = (),
             param_values: dict[int, float | int | str] | None = None,
         ) -> None:
-            if value_id_map is None:
-                value_id_map = {}
+            if logical_id_remap is None:
+                logical_id_remap = {}
             if param_values is None:
                 param_values = {}
 
@@ -1894,7 +1753,7 @@ class MatplotlibDrawer:
                         qubit_map,
                         positions,
                         block_widths,
-                        value_id_map,
+                        logical_id_remap,
                         param_values,
                         draw_ops,
                     )
@@ -1905,7 +1764,7 @@ class MatplotlibDrawer:
                             op,
                             qubit_map,
                             positions[op_key],
-                            value_id_map,
+                            logical_id_remap,
                             param_values,
                         )
                 elif isinstance(op, CallBlockOperation):
@@ -1914,18 +1773,18 @@ class MatplotlibDrawer:
                         block_value = op.operands[0]
                         if isinstance(block_value, BlockValue):
                             actual_inputs = op.operands[1:]  # Actual arguments
-                            new_value_id_map, child_param_values = (
+                            new_logical_id_remap, child_param_values = (
                                 self._build_block_value_mappings(
                                     block_value,
                                     actual_inputs,
-                                    value_id_map,
+                                    logical_id_remap,
                                     param_values,
                                 )
                             )
 
                             draw_ops(
                                 block_value.operations,
-                                new_value_id_map,
+                                new_logical_id_remap,
                                 scope_path=op_key,
                                 param_values=child_param_values,
                             )
@@ -1939,25 +1798,25 @@ class MatplotlibDrawer:
                                 qubit_map,
                                 positions[op_key],
                                 op_width,
-                                value_id_map=value_id_map,
+                                logical_id_remap=logical_id_remap,
                             )
                 elif isinstance(op, CompositeGateOperation):
                     if self.inline and op.has_implementation:
                         block_value = op.implementation
                         if isinstance(block_value, BlockValue):
                             actual_inputs = list(op.operands[1:])  # Skip BlockValue
-                            new_value_id_map, child_param_values = (
+                            new_logical_id_remap, child_param_values = (
                                 self._build_block_value_mappings(
                                     block_value,
                                     actual_inputs,
-                                    value_id_map,
+                                    logical_id_remap,
                                     param_values,
                                 )
                             )
 
                             draw_ops(
                                 block_value.operations,
-                                new_value_id_map,
+                                new_logical_id_remap,
                                 scope_path=op_key,
                                 param_values=child_param_values,
                             )
@@ -1968,25 +1827,25 @@ class MatplotlibDrawer:
                             qubit_map,
                             positions[op_key],
                             block_widths.get(op_key),
-                            value_id_map,
+                            logical_id_remap,
                         )
                 elif isinstance(op, ControlledUOperation):
                     if self.inline:
                         block_value = op.block
                         if isinstance(block_value, BlockValue):
                             actual_inputs = list(op.target_operands)
-                            new_value_id_map, child_param_values = (
+                            new_logical_id_remap, child_param_values = (
                                 self._build_block_value_mappings(
                                     block_value,
                                     actual_inputs,
-                                    value_id_map,
+                                    logical_id_remap,
                                     param_values,
                                 )
                             )
 
                             draw_ops(
                                 block_value.operations,
-                                new_value_id_map,
+                                new_logical_id_remap,
                                 scope_path=op_key,
                                 param_values=child_param_values,
                             )
@@ -1997,17 +1856,17 @@ class MatplotlibDrawer:
                             qubit_map,
                             positions[op_key],
                             block_widths.get(op_key),
-                            value_id_map,
+                            logical_id_remap,
                         )
                 elif isinstance(op, MeasureOperation):
                     if op_key in positions:
                         self._draw_measurement(
-                            fig, op, qubit_map, positions[op_key], value_id_map
+                            fig, op, qubit_map, positions[op_key], logical_id_remap
                         )
                 elif isinstance(op, MeasureVectorOperation):
                     if op_key in positions:
                         self._draw_measurement_vector(
-                            fig, op, qubit_map, positions[op_key], value_id_map
+                            fig, op, qubit_map, positions[op_key], logical_id_remap
                         )
 
         draw_ops(graph.operations)
@@ -2238,9 +2097,9 @@ class MatplotlibDrawer:
         self,
         fig: Figure,
         op: GateOperation,
-        qubit_map: dict[int, int],
+        qubit_map: dict[str, int],
         x_pos: int,
-        value_id_map: dict[int, int] | None = None,
+        logical_id_remap: dict[str, str] | None = None,
         param_values: dict[int, float | int | str] | None = None,
     ) -> None:
         """Draw a gate operation.
@@ -2250,11 +2109,11 @@ class MatplotlibDrawer:
             op: Gate operation.
             qubit_map: Qubit to wire index mapping.
             x_pos: X position for the gate.
-            value_id_map: Mapping from dummy value IDs to actual value IDs.
-            param_values: Mapping from dummy value IDs to resolved parameter values.
+            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
+            param_values: Mapping from logical_ids to resolved parameter values.
         """
-        if value_id_map is None:
-            value_id_map = {}
+        if logical_id_remap is None:
+            logical_id_remap = {}
         if param_values is None:
             param_values = {}
 
@@ -2264,7 +2123,7 @@ class MatplotlibDrawer:
         qubit_indices = []
         for operand in op.operands:
             idx = self._resolve_operand_to_qubit_index(
-                operand, qubit_map, value_id_map, param_values
+                operand, qubit_map, logical_id_remap, param_values
             )
             if idx is not None:
                 qubit_indices.append(idx)
@@ -2313,7 +2172,7 @@ class MatplotlibDrawer:
             op: Gate operation.
             x: X coordinate.
             y: Y coordinate.
-            param_values: Mapping from dummy value IDs to resolved parameter values.
+            param_values: Mapping from logical_ids to resolved parameter values.
         """
         label, has_param = self._get_gate_label(op, param_values)
         font_size = self.style.font_size
@@ -2363,7 +2222,7 @@ class MatplotlibDrawer:
             op: Gate operation.
             x: X coordinate.
             y_coords: Y coordinates of involved qubits.
-            param_values: Mapping from dummy value IDs to resolved parameter values.
+            param_values: Mapping from logical_ids to resolved parameter values.
         """
         min_y = min(y_coords)
         max_y = max(y_coords)
@@ -2521,10 +2380,10 @@ class MatplotlibDrawer:
         self,
         fig: Figure,
         op: CallBlockOperation,
-        qubit_map: dict[int, int],
+        qubit_map: dict[str, int],
         x_pos: float,
         block_width: float | None = None,
-        value_id_map: dict[int, int] | None = None,
+        logical_id_remap: dict[str, str] | None = None,
     ) -> None:
         """Draw a CallBlockOperation as a box.
 
@@ -2534,10 +2393,10 @@ class MatplotlibDrawer:
             qubit_map: Qubit to wire index mapping.
             x_pos: X position.
             block_width: Pre-calculated block width from layout phase.
-            value_id_map: Mapping from dummy value IDs to actual value IDs.
+            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
         """
-        if value_id_map is None:
-            value_id_map = {}
+        if logical_id_remap is None:
+            logical_id_remap = {}
 
         ax = fig._qm_ax
 
@@ -2545,7 +2404,7 @@ class MatplotlibDrawer:
         qubit_indices = []
         for operand in op.operands[1:]:  # Skip BlockValue
             qubit_indices.extend(
-                self._resolve_operand_to_qubit_indices(operand, qubit_map, value_id_map)
+                self._resolve_operand_to_qubit_indices(operand, qubit_map, logical_id_remap)
             )
 
         if not qubit_indices:
@@ -2601,20 +2460,20 @@ class MatplotlibDrawer:
         self,
         fig: Figure,
         op: CompositeGateOperation,
-        qubit_map: dict[int, int],
+        qubit_map: dict[str, int],
         x_pos: float,
         block_width: float | None = None,
-        value_id_map: dict[int, int] | None = None,
+        logical_id_remap: dict[str, str] | None = None,
     ) -> None:
         """Draw a CompositeGateOperation as a labeled box."""
-        if value_id_map is None:
-            value_id_map = {}
+        if logical_id_remap is None:
+            logical_id_remap = {}
         ax = fig._qm_ax
 
         # Collect qubit indices from control + target qubits
         qubit_indices = []
         for qval in op.control_qubits + op.target_qubits:
-            idx = self._resolve_operand_to_qubit_index(qval, qubit_map, value_id_map)
+            idx = self._resolve_operand_to_qubit_index(qval, qubit_map, logical_id_remap)
             if idx is not None:
                 qubit_indices.append(idx)
 
@@ -2659,27 +2518,27 @@ class MatplotlibDrawer:
         self,
         fig: Figure,
         op: ControlledUOperation,
-        qubit_map: dict[int, int],
+        qubit_map: dict[str, int],
         x_pos: float,
         block_width: float | None = None,
-        value_id_map: dict[int, int] | None = None,
+        logical_id_remap: dict[str, str] | None = None,
     ) -> None:
         """Draw a ControlledUOperation with control dots and target box."""
-        if value_id_map is None:
-            value_id_map = {}
+        if logical_id_remap is None:
+            logical_id_remap = {}
         ax = fig._qm_ax
 
         # Resolve control qubit y-coordinates
         control_y = []
         for qval in op.control_operands:
-            idx = self._resolve_operand_to_qubit_index(qval, qubit_map, value_id_map)
+            idx = self._resolve_operand_to_qubit_index(qval, qubit_map, logical_id_remap)
             if idx is not None:
                 control_y.append(self.qubit_y[idx])
 
         # Resolve target qubit y-coordinates
         target_y = []
         for qval in op.target_operands:
-            idx = self._resolve_operand_to_qubit_index(qval, qubit_map, value_id_map)
+            idx = self._resolve_operand_to_qubit_index(qval, qubit_map, logical_id_remap)
             if idx is not None:
                 target_y.append(self.qubit_y[idx])
 
@@ -2804,16 +2663,16 @@ class MatplotlibDrawer:
         self,
         fig: Figure,
         op: MeasureOperation,
-        qubit_map: dict[int, int],
+        qubit_map: dict[str, int],
         x_pos: float,
-        value_id_map: dict[int, int] | None = None,
+        logical_id_remap: dict[str, str] | None = None,
     ) -> None:
         """Draw a MeasureOperation as an M box with meter symbol."""
         if not op.operands:
             return
 
         qubit_idx = self._resolve_operand_to_qubit_index(
-            op.operands[0], qubit_map, value_id_map or {}
+            op.operands[0], qubit_map, logical_id_remap or {}
         )
         if qubit_idx is not None:
             self._draw_measurement_box(fig._qm_ax, x_pos, self.qubit_y[qubit_idx])
@@ -2822,16 +2681,16 @@ class MatplotlibDrawer:
         self,
         fig: Figure,
         op: MeasureVectorOperation,
-        qubit_map: dict[int, int],
+        qubit_map: dict[str, int],
         x_pos: float,
-        value_id_map: dict[int, int] | None = None,
+        logical_id_remap: dict[str, str] | None = None,
     ) -> None:
         """Draw a MeasureVectorOperation as M boxes on all measured qubits."""
         if not op.operands:
             return
 
         qubit_indices = self._resolve_operand_to_qubit_indices(
-            op.operands[0], qubit_map, value_id_map or {}
+            op.operands[0], qubit_map, logical_id_remap or {}
         )
         ax = fig._qm_ax
         for qubit_idx in qubit_indices:
@@ -3036,11 +2895,11 @@ class MatplotlibDrawer:
         self,
         fig: Figure,
         op: ForOperation,
-        qubit_map: dict[int, int],
+        qubit_map: dict[str, int],
         x_pos: float,
         block_width: float | None = None,
         param_values: dict | None = None,
-        value_id_map: dict[int, int] | None = None,
+        logical_id_remap: dict[str, str] | None = None,
     ) -> None:
         """Draw a ForOperation as a box (folded mode).
 
@@ -3051,7 +2910,7 @@ class MatplotlibDrawer:
             x_pos: X position.
             block_width: Pre-calculated block width from layout phase.
             param_values: Parameter values for resolving symbolic expressions.
-            value_id_map: Mapping from dummy value IDs to actual value IDs.
+            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
         """
         if param_values is None:
             param_values = {}
@@ -3060,7 +2919,7 @@ class MatplotlibDrawer:
 
         # Get affected qubits
         affected_qubits = self._analyze_loop_affected_qubits(
-            op, qubit_map, value_id_map
+            op, qubit_map, logical_id_remap
         )
 
         if not affected_qubits:
@@ -3218,7 +3077,10 @@ class MatplotlibDrawer:
         # Collect non-qubit parameter values
         params = []
         for arg_name, actual_input in zip(block_value.label_args, op.operands[1:]):
-            if id(actual_input) not in qubit_map:
+            if not (
+                hasattr(actual_input, "logical_id")
+                and actual_input.logical_id in qubit_map
+            ):
                 if isinstance(actual_input, Value):
                     const = actual_input.get_const()
                     if const is not None:
@@ -3284,8 +3146,8 @@ class MatplotlibDrawer:
                     param_str = self._format_parameter(const_val)
                 elif op.theta.is_parameter():
                     # Check if resolved through param_values (inline block expansion)
-                    if param_values and id(op.theta) in param_values:
-                        resolved = param_values[id(op.theta)]
+                    if param_values and op.theta.logical_id in param_values:
+                        resolved = param_values[op.theta.logical_id]
                         if isinstance(resolved, (int, float)):
                             param_str = self._format_parameter(resolved)
                         else:
