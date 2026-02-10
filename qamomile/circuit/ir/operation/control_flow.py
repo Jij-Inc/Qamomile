@@ -109,6 +109,7 @@ class IfOperation(Operation):
     Attributes:
         true_operations: List of operations in the true branch
         false_operations: List of operations in the false branch (may be empty)
+        phi_ops: List of PhiOp instances merging values from both branches
         operands[0]: condition (Bit type from measurement or comparison)
         results: Phi-merged output values from both branches
     """
