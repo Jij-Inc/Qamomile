@@ -850,17 +850,17 @@ class MatplotlibDrawer:
             ValueError: If step evaluates to zero.
         """
         start_val = (
-            self._evaluate_value(op.operands[0], param_values) if op.operands else 0
+            self._evaluate_value(op.operands[0], param_values) if op.operands else None
         )
         stop_val = (
             self._evaluate_value(op.operands[1], param_values)
             if len(op.operands) > 1
-            else 0
+            else None
         )
         step_val = (
             self._evaluate_value(op.operands[2], param_values)
             if len(op.operands) > 2
-            else 1
+            else None
         )
 
         if start_val is None:
@@ -1163,6 +1163,16 @@ class MatplotlibDrawer:
             block_value, actual_inputs, logical_id_remap, param_values
         )
 
+        # Include qubits created inside the block body via QInitOperation
+        for body_op in block_value.operations:
+            if isinstance(body_op, QInitOperation):
+                result_val = body_op.results[0]
+                lid = result_val.logical_id
+                if lid in qubit_map:
+                    idx = qubit_map[lid]
+                    if idx not in affected_qubits:
+                        affected_qubits.append(idx)
+
         max_gate_width = self._max_block_gate_width(
             block_value.operations, child_param_values
         )
@@ -1195,6 +1205,42 @@ class MatplotlibDrawer:
             depth=depth,
         )
 
+    def _estimate_folded_loop_width(
+        self, op: ForOperation, param_values: dict
+    ) -> float:
+        """Estimate box width needed for folded ForOperation text."""
+        start_val, stop_val_raw, step_val = self._evaluate_loop_range(op, param_values)
+
+        start_str = self._safe_int_str(start_val)
+        stop_str = self._safe_int_str(stop_val_raw)
+        step_str = self._safe_int_str(step_val)
+
+        if start_val == 0 and step_val == 1:
+            range_str = f"qm.range({stop_str})"
+        elif step_val == 1:
+            range_str = f"qm.range({start_str}, {stop_str})"
+        else:
+            range_str = f"qm.range({start_str}, {stop_str}, {step_str})"
+        header = f"for {op.loop_var} in {range_str}"
+
+        lines = [header]
+        for body_op in op.operations:
+            expr = self._format_operation_as_expression(body_op, op.loop_var)
+            if expr:
+                lines.append(expr)
+                if len(lines) > 4:  # header + 3 lines + "..."
+                    lines.append("...")
+                    break
+
+        max_chars = max(len(line) for line in lines)
+        subfont_char_width = (
+            self.style.char_width_base * self.style.subfont_size / self.style.font_size
+        )
+        text_width = max_chars * subfont_char_width
+        return max(
+            self.style.folded_loop_width, text_width + 2 * self.style.text_padding
+        )
+
     def _measure_for_operation(
         self,
         op: ForOperation,
@@ -1209,8 +1255,6 @@ class MatplotlibDrawer:
         if self._is_zero_iteration_loop(start_val, stop_val_raw, step_val):
             return SkipMeasure()
 
-        stop_val = stop_val_raw if stop_val_raw is not None else 0
-
         affected_qubits = self._analyze_loop_affected_qubits(
             op, qubit_map, logical_id_remap
         )
@@ -1219,11 +1263,21 @@ class MatplotlibDrawer:
             return LoopMeasure(
                 fold=True,
                 affected_qubits=affected_qubits,
-                folded_width=self.style.folded_loop_width,
+                folded_width=self._estimate_folded_loop_width(op, param_values),
+            )
+
+        # Cannot unfold if stop is symbolic — fall back to folded box
+        if stop_val_raw is None:
+            return LoopMeasure(
+                fold=True,
+                affected_qubits=affected_qubits,
+                folded_width=self._estimate_folded_loop_width(op, param_values),
             )
 
         # Unfolded: measure each iteration
-        num_iterations = self._compute_loop_iterations(start_val, stop_val, step_val)
+        num_iterations = self._compute_loop_iterations(
+            start_val, stop_val_raw, step_val
+        )
         iteration_children: list[list[MeasureNode]] = []
         iteration_widths: list[float] = []
         iter_param_values_list: list[dict] = []
@@ -1590,6 +1644,13 @@ class MatplotlibDrawer:
                 }
             )
 
+        # Expand first_gate_half_width to cover border extent
+        if state.first_gate_x is not None and affected_qubits:
+            border_left = actual_start - max_gate_width / 2 - border_padding
+            current_left = state.first_gate_x - state.first_gate_half_width
+            if border_left < current_left:
+                state.first_gate_half_width = state.first_gate_x - border_left
+
         # Compute border right edge (same logic as _finalize_inline_block_layout)
         gate_border_right = actual_end + max_gate_width / 2 + border_padding
         box_left = actual_start - max_gate_width / 2 - border_padding
@@ -1641,6 +1702,10 @@ class MatplotlibDrawer:
 
             state.positions[op_key] = start_column
             state.block_widths[op_key] = loop_width
+
+            if state.first_gate_x is None:
+                state.first_gate_x = start_column
+                state.first_gate_half_width = op_half_width
 
             for q in affected_qubits:
                 state.qubit_columns[q] = start_column + op_half_width + gap
@@ -1960,6 +2025,16 @@ class MatplotlibDrawer:
 
                 x_right = max(x_right, border_right + 0.3)
                 x_left = min(x_left, border_left - 0.3)
+
+        # Account for folded ForOperation boxes in figure sizing
+        positions = layout.get("positions", {})
+        block_widths_dict = layout.get("block_widths", {})
+        for key, bw in block_widths_dict.items():
+            if key in positions:
+                box_left = positions[key] - bw / 2
+                box_right = positions[key] + bw / 2
+                x_left = min(x_left, box_left - 0.3)
+                x_right = max(x_right, box_right + 0.3)
 
         # Extend x_right if output_names are present (for right-side labels)
         if self.graph.output_names:
