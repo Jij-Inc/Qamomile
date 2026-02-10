@@ -323,6 +323,9 @@ def emit_if(
     # Note: The AST transformer guarantees both branches return the same
     # variable list in the same order, so true_val and false_val always
     # have the same type. We only need to check one side.
+    assert len(true_result) == len(false_result), (
+        f"Branch result length mismatch: true={len(true_result)}, false={len(false_result)}"
+    )
     merged_results = []
     for true_val, false_val in zip(true_result, false_result):
         if isinstance(true_val, (Handle, Value)):
