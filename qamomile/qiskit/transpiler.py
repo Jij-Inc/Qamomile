@@ -21,11 +21,13 @@ Usage:
 Note: This module requires both Qamomile and Qiskit to be installed.
 """
 
+from collections.abc import Mapping
 import numpy as np
-from typing import Any, Dict, Mapping
+from typing import Dict, Protocol, TypeAlias
 
 import qiskit
 import qiskit.circuit
+import qiskit.primitives as qk_primitives
 import qiskit.quantum_info as qk_ope
 
 import qamomile.core.bitssample as qm_bs
@@ -37,7 +39,24 @@ from .parameter_converter import convert_parameter
 from .exceptions import QamomileQiskitTranspileError
 
 
-class QiskitTranspiler(QuantumSDKTranspiler[Any]):
+CountsMapping: TypeAlias = Mapping[int, int] | Mapping[str, int]
+CountsResult: TypeAlias = CountsMapping | list[CountsMapping]
+
+
+class _SupportsCounts(Protocol):
+    def get_counts(self, decimal: bool = False) -> CountsResult: ...
+
+
+class _SupportsDataCounts(Protocol):
+    data: _SupportsCounts
+
+
+ResultType: TypeAlias = (
+    qk_primitives.BitArray | _SupportsCounts | _SupportsDataCounts | CountsMapping
+)
+
+
+class QiskitTranspiler(QuantumSDKTranspiler[ResultType]):
     """
     Transpiler class for converting between Qamomile and Qiskit quantum objects.
 
@@ -127,7 +146,7 @@ class QiskitTranspiler(QuantumSDKTranspiler[Any]):
                 )
         return qiskit_circuit
 
-    def convert_result(self, result: Any) -> qm_bs.BitsSampleSet:
+    def convert_result(self, result: ResultType) -> qm_bs.BitsSampleSet:
         """
         Convert measurement results to Qamomile BitsSampleSet.
 
@@ -147,12 +166,12 @@ class QiskitTranspiler(QuantumSDKTranspiler[Any]):
         return qm_bs.BitsSampleSet.from_int_counts(int_counts, bit_length)
 
     def _extract_int_counts_and_bit_length(
-        self, result: Any
+        self, result: ResultType
     ) -> tuple[dict[int, int], int]:
         if isinstance(result, Mapping):
             return self._counts_mapping_to_int_counts(result)
 
-        data = None
+        data: _SupportsCounts | None = None
         if hasattr(result, "data") and hasattr(result.data, "get_counts"):
             data = result.data
         elif hasattr(result, "get_counts"):
@@ -178,7 +197,7 @@ class QiskitTranspiler(QuantumSDKTranspiler[Any]):
         return self._counts_mapping_to_int_counts(counts)
 
     def _counts_mapping_to_int_counts(
-        self, counts: Mapping[Any, Any]
+        self, counts: CountsMapping
     ) -> tuple[dict[int, int], int]:
         if not counts:
             return {}, self.num_bits or 0
@@ -193,7 +212,9 @@ class QiskitTranspiler(QuantumSDKTranspiler[Any]):
         bit_length = self.num_bits or max(1, max(int_counts).bit_length())
         return int_counts, bit_length
 
-    def _infer_bit_length(self, data: Any, int_counts: dict[int, int]) -> int:
+    def _infer_bit_length(
+        self, data: _SupportsCounts, int_counts: dict[int, int]
+    ) -> int:
         if self.num_bits is not None:
             return self.num_bits
 
