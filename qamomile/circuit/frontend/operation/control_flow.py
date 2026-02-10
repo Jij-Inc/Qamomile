@@ -136,11 +136,16 @@ def _create_handle_from_value(value: Value, template_handle: Handle) -> Handle:
         return Handle(value=value)
 
 
-def _fresh_handle_copy(h):
+def _fresh_handle_copy_for_tracing(h: typing.Any) -> typing.Any:
     """Create a Handle copy with consumed state reset for branch tracing.
 
-    Each branch of if-else is mutually exclusive, so tracing requires
-    independent Handle objects to avoid consumed conflicts.
+    This function intentionally accesses Handle's private ``_consumed`` and
+    ``_consumed_by`` attributes.  This is the **only** place where such access
+    is acceptable: if-else branches are mutually exclusive, so both must be
+    traceable independently.  Exposing a general-purpose copy method on Handle
+    would undermine the linear-type enforcement that prevents qubit reuse bugs.
+
+    Non-Handle values (int, float, etc.) are returned unchanged.
     """
     if not isinstance(h, Handle):
         return h
@@ -212,8 +217,9 @@ def _create_phi_for_values(
             f"true branch has {true_v.type}, false branch has {false_v.type}"
         )
 
-    # Create Phi output value
-    phi_output = Value(type=true_v.type, name=f"{true_v.name}_phi")
+    # Create Phi output value (indexed to avoid name collisions)
+    phi_index = len(if_operation.results)
+    phi_output = Value(type=true_v.type, name=f"{true_v.name}_phi_{phi_index}")
 
     # Create PhiOp and store in IfOperation
     _phi_op = PhiOp(operands=[condition_value, true_v, false_v], results=[phi_output])
@@ -301,8 +307,8 @@ def emit_if(
     )
 
     # 2. Trace both branches (fresh copies avoid consumed conflicts)
-    true_vars = [_fresh_handle_copy(v) for v in variables]
-    false_vars = [_fresh_handle_copy(v) for v in variables]
+    true_vars = [_fresh_handle_copy_for_tracing(v) for v in variables]
+    false_vars = [_fresh_handle_copy_for_tracing(v) for v in variables]
     true_tracer, true_result = _trace_branch(true_func, true_vars)
     false_tracer, false_result = _trace_branch(false_func, false_vars)
 
@@ -314,6 +320,9 @@ def emit_if(
     if_op.operands.append(condition_value)
 
     # 4. Create Phi functions for each variable to merge branches
+    # Note: The AST transformer guarantees both branches return the same
+    # variable list in the same order, so true_val and false_val always
+    # have the same type. We only need to check one side.
     merged_results = []
     for true_val, false_val in zip(true_result, false_result):
         if isinstance(true_val, (Handle, Value)):

@@ -39,6 +39,28 @@ class TestIfElseQubitConsumed:
         graph = circuit.build()
         assert graph is not None
 
+    def test_if_else_no_qubit_consumed_error(self):
+        """Regression: both branches on same qubit must not raise QubitConsumedError."""
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit) -> Qubit:
+            cond = qm.measure(q0)
+            if cond:
+                q1 = qm.x(q1)
+            else:
+                q1 = qm.h(q1)
+            return q1
+
+        # Previously raised QubitConsumedError because emit_if passed
+        # the same Handle object to both branches.
+        try:
+            graph = circuit.build()
+        except QubitConsumedError:
+            pytest.fail(
+                "QubitConsumedError should not be raised for exclusive if-else branches"
+            )
+        assert graph is not None
+
     def test_if_else_multiple_qubits_in_branches(self):
         """Multiple qubits operated on in both branches should work."""
 
