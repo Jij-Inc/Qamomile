@@ -11,7 +11,7 @@ import math
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Union
 
 import matplotlib.lines as mlines
 import matplotlib.patches as mpatches
@@ -122,6 +122,56 @@ class LayoutState:
         default_factory=lambda: defaultdict(lambda: 1)
     )
     qubit_right_edges: dict[int, float] = field(default_factory=dict)
+
+
+@dataclass
+class GateMeasure:
+    """Width measurement for a gate/measurement/block-box operation."""
+
+    estimated_width: float
+    half_width: float
+    columns_needed: int
+    is_block_box: bool = False
+    box_width: float | None = None
+
+
+@dataclass
+class BlockMeasure:
+    """Width measurement for an inlined block."""
+
+    label: str
+    label_width: float
+    content_width: float
+    final_width: float
+    max_gate_width: float
+    border_padding: float
+    children: list[MeasureNode]
+    affected_qubits: list[int]
+    depth: int
+
+
+@dataclass
+class LoopMeasure:
+    """Width measurement for a ForOperation."""
+
+    fold: bool
+    affected_qubits: list[int]
+    folded_width: float | None = None
+    iteration_children: list[list[MeasureNode]] | None = None
+    iteration_widths: list[float] | None = None
+    uniform_width: float | None = None
+    num_iterations: int = 0
+    iter_param_values: list[dict] | None = None
+
+
+@dataclass
+class SkipMeasure:
+    """Marker for zero-space operations."""
+
+    pass
+
+
+MeasureNode = Union[GateMeasure, BlockMeasure, LoopMeasure, SkipMeasure]
 
 
 class MatplotlibDrawer:
@@ -941,98 +991,6 @@ class MatplotlibDrawer:
         text_width = len(visual_label) * self.style.char_width_gate
         return max(text_width + 2 * self.style.text_padding, self.style.gate_width)
 
-    def _layout_for_operation(
-        self,
-        state: LayoutState,
-        op: ForOperation,
-        op_key: tuple,
-        qubit_map: dict[str, int],
-        logical_id_remap: dict[str, str],
-        param_values: dict,
-        depth: int,
-        process_operations_fn,
-    ) -> bool:
-        """Handle ForOperation layout: fold as box or expand iterations.
-
-        Args:
-            state: Current layout state to update.
-            op: ForOperation to lay out.
-            op_key: Unique tuple key identifying this operation in state.positions.
-            qubit_map: Mapping from logical_id to qubit wire index.
-            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
-            param_values: Parameter values for resolving loop range.
-            depth: Current nesting depth.
-            process_operations_fn: Callback to recursively lay out child operations.
-
-        Returns:
-            True if the loop was zero-iteration (should be skipped).
-        """
-        start_val, stop_val_raw, step_val = self._evaluate_loop_range(op, param_values)
-
-        if self._is_zero_iteration_loop(start_val, stop_val_raw, step_val):
-            return True
-
-        stop_val = stop_val_raw if stop_val_raw is not None else 0
-
-        if self.fold_loops:
-            # Draw as a box (folded)
-            affected_qubits = self._analyze_loop_affected_qubits(
-                op, qubit_map, logical_id_remap
-            )
-
-            if affected_qubits:
-                start_column = max(state.qubit_columns[q] for q in affected_qubits)
-            elif state.qubit_columns:
-                start_column = max(state.qubit_columns.values())
-            else:
-                start_column = 0
-
-            # Use fixed width for folded loop box
-            loop_width = self.style.folded_loop_width
-            op_half_width = loop_width / 2
-            gap = self.style.gate_gap
-
-            # Overlap prevention
-            for q in affected_qubits:
-                if q in state.qubit_right_edges:
-                    required_center = state.qubit_right_edges[q] + gap + op_half_width
-                    start_column = max(start_column, required_center)
-
-            state.positions[op_key] = start_column
-            state.block_widths[op_key] = loop_width
-
-            # Update qubit columns and right edges
-            for q in affected_qubits:
-                state.qubit_columns[q] = start_column + op_half_width + gap
-                state.qubit_right_edges[q] = start_column + op_half_width
-
-            state.column = max(state.column, start_column + 1)
-            state.actual_width = max(
-                state.actual_width, start_column + op_half_width + 0.5
-            )
-        else:
-            # Expand loop: process each iteration
-            num_iterations = self._compute_loop_iterations(
-                start_val, stop_val, step_val
-            )
-            for iteration in range(num_iterations):
-                iter_value = start_val + iteration * step_val
-                child_param_values = dict(param_values)
-                child_param_values[f"_loop_{op.loop_var}"] = iter_value
-
-                self._evaluate_loop_body_intermediates(
-                    op.operations, child_param_values
-                )
-
-                process_operations_fn(
-                    op.operations,
-                    logical_id_remap,
-                    depth + 1,
-                    scope_path=(*op_key, iteration),
-                    param_values=child_param_values,
-                )
-        return False
-
     def _max_block_gate_width(
         self, operations: list[Operation], param_values: dict | None = None
     ) -> float:
@@ -1051,313 +1009,379 @@ class MatplotlibDrawer:
                 max_width = max(max_width, self._estimate_gate_width(op, param_values))
         return max_width
 
-    def _prepare_inline_block(
+    # ------------------------------------------------------------------
+    # Measure Phase: compute widths without assigning coordinates
+    # ------------------------------------------------------------------
+
+    def _measure_generic_operation(
         self,
-        state: LayoutState,
-        affected_qubits: list[int],
-        depth: int,
-    ) -> dict[int, float]:
-        """Common pre-processing for inline block layout.
-
-        Advances qubit_right_edges for border extent and returns qubit_start_columns.
-
-        Args:
-            state: Current layout state to update.
-            affected_qubits: List of qubit indices affected by the block.
-            depth: Current nesting depth for padding calculation.
-
-        Returns:
-            Mapping from qubit index to its start column before block content.
-        """
-        max_gate_width = self.style.gate_width
-        border_padding = self._compute_border_padding(depth)
-        border_extent = max_gate_width / 2 + border_padding
-        for q in affected_qubits:
-            if q in state.qubit_right_edges:
-                state.qubit_right_edges[q] += border_extent - self.style.gate_width / 2
-        return {q: state.qubit_columns[q] for q in affected_qubits}
-
-    def _layout_inline_call_block(
-        self,
-        state: LayoutState,
-        op: CallBlockOperation,
-        op_key: tuple,
+        op: Operation,
         qubit_map: dict[str, int],
         logical_id_remap: dict[str, str],
         param_values: dict,
-        depth: int,
-        process_operations_fn,
-    ) -> None:
-        """Layout a CallBlockOperation in inline mode.
-
-        Args:
-            state: Current layout state to update.
-            op: CallBlockOperation to lay out.
-            op_key: Unique tuple key identifying this operation.
-            qubit_map: Mapping from logical_id to qubit wire index.
-            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
-            param_values: Parameter values for resolving expressions.
-            depth: Current nesting depth.
-            process_operations_fn: Callback to recursively lay out child operations.
-        """
-        block_value = op.operands[0]
-        # The IR guarantees that operands[0] of CallBlockOperation is always a BlockValue,
-        # so this assertion should always pass.
-        # If it fails, there is a bug in the IR construction.
-        assertion_message = (
-            "[FOR DEVELOPER] CallBlockOperation.operands[0] must be a BlockValue. "
-            "If this assertion fails, there is a bug in the IR construction."
-        )
-        assert isinstance(block_value, BlockValue), assertion_message
-
-        affected_qubits = []
-        for operand in op.operands[1:]:
-            affected_qubits.extend(
-                self._resolve_operand_to_qubit_indices(
-                    operand, qubit_map, logical_id_remap, param_values
-                )
+    ) -> GateMeasure:
+        """Measure width of a generic operation (gate, measurement, block box)."""
+        if isinstance(op, GateOperation):
+            estimated_w = self._estimate_gate_width(op, param_values)
+            return GateMeasure(
+                estimated_width=estimated_w,
+                half_width=estimated_w / 2,
+                columns_needed=max(1, math.ceil(estimated_w)),
+            )
+        elif isinstance(op, CallBlockOperation):
+            label = self._get_block_label(op, qubit_map)
+            box_width = self._estimate_label_box_width(label)
+            return GateMeasure(
+                estimated_width=box_width,
+                half_width=box_width / 2,
+                columns_needed=max(1, int(box_width) + 1),
+                is_block_box=True,
+                box_width=box_width,
+            )
+        elif isinstance(op, CompositeGateOperation):
+            box_width = self._estimate_label_box_width(op.name.upper())
+            return GateMeasure(
+                estimated_width=box_width,
+                half_width=box_width / 2,
+                columns_needed=max(1, int(box_width) + 1),
+                is_block_box=True,
+                box_width=box_width,
+            )
+        elif isinstance(op, ControlledUOperation):
+            u_name = getattr(op.block, "name", "U") or "U"
+            label = f"{u_name}^{op.power}" if op.power > 1 else u_name
+            box_width = self._estimate_label_box_width(label)
+            return GateMeasure(
+                estimated_width=box_width,
+                half_width=box_width / 2,
+                columns_needed=max(1, int(box_width) + 1),
+                is_block_box=True,
+                box_width=box_width,
+            )
+        else:
+            # MeasureOperation, MeasureVectorOperation, etc.
+            w = self.style.gate_width
+            return GateMeasure(
+                estimated_width=w,
+                half_width=w / 2,
+                columns_needed=1,
             )
 
-        qubit_start_columns = self._prepare_inline_block(state, affected_qubits, depth)
-
-        actual_inputs = op.operands[1:]
-        new_logical_id_remap, child_param_values = self._build_block_value_mappings(
-            block_value, actual_inputs, logical_id_remap, param_values
-        )
-
-        max_gate_width = self._max_block_gate_width(
-            block_value.operations, child_param_values
-        )
-
-        process_operations_fn(
-            block_value.operations,
-            new_logical_id_remap,
-            depth + 1,
-            scope_path=op_key,
-            param_values=child_param_values,
-        )
-
-        self._finalize_inline_block_layout(
-            state,
-            op_key,
-            block_value.name or "block",
-            affected_qubits,
-            qubit_start_columns,
-            max_gate_width,
-            depth,
-        )
-
-    def _layout_inline_controlled_u(
+    def _compute_content_width(
         self,
-        state: LayoutState,
-        op: ControlledUOperation,
-        op_key: tuple,
-        qubit_map: dict[str, int],
-        logical_id_remap: dict[str, str],
-        param_values: dict,
-        depth: int,
-        process_operations_fn,
-    ) -> None:
-        """Layout a ControlledUOperation in inline mode.
-
-        Args:
-            state: Current layout state to update.
-            op: ControlledUOperation to lay out.
-            op_key: Unique tuple key identifying this operation.
-            qubit_map: Mapping from logical_id to qubit wire index.
-            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
-            param_values: Parameter values for resolving expressions.
-            depth: Current nesting depth.
-            process_operations_fn: Callback to recursively lay out child operations.
-        """
-        block_value = op.block
-        # The IR guarantees that ControlledUOperation.block is always a BlockValue,
-        # so this assertion should always pass.
-        # If it fails, there is a bug in the IR construction.
-        assertion_message = (
-            "[FOR DEVELOPER] ControlledUOperation.block must be a BlockValue. "
-            "If this assertion fails, there is a bug in the IR construction."
-        )
-        assert isinstance(block_value, BlockValue), assertion_message
-
-        affected_qubits = []
-        for operand in list(op.control_operands) + list(op.target_operands):
-            idx = self._resolve_operand_to_qubit_index(
-                operand, qubit_map, logical_id_remap, param_values
-            )
-            if idx is not None:
-                affected_qubits.append(idx)
-
-        qubit_start_columns = self._prepare_inline_block(state, affected_qubits, depth)
-
-        actual_inputs = list(op.target_operands)
-        new_logical_id_remap, child_param_values = self._build_block_value_mappings(
-            block_value, actual_inputs, logical_id_remap, param_values
-        )
-
-        max_gate_width = self._max_block_gate_width(
-            block_value.operations, child_param_values
-        )
-
-        process_operations_fn(
-            block_value.operations,
-            new_logical_id_remap,
-            depth + 1,
-            scope_path=op_key,
-            param_values=child_param_values,
-        )
-
-        u_name = getattr(block_value, "name", "U") or "U"
-        self._finalize_inline_block_layout(
-            state,
-            op_key,
-            u_name,
-            affected_qubits,
-            qubit_start_columns,
-            max_gate_width,
-            depth,
-        )
-
-    def _layout_inline_composite_gate(
-        self,
-        state: LayoutState,
-        op: CompositeGateOperation,
-        op_key: tuple,
-        qubit_map: dict[str, int],
-        logical_id_remap: dict[str, str],
-        param_values: dict,
-        depth: int,
-        process_operations_fn,
-    ) -> None:
-        """Layout a CompositeGateOperation in inline mode.
-
-        Args:
-            state: Current layout state to update.
-            op: CompositeGateOperation to lay out.
-            op_key: Unique tuple key identifying this operation.
-            qubit_map: Mapping from logical_id to qubit wire index.
-            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
-            param_values: Parameter values for resolving expressions.
-            depth: Current nesting depth.
-            process_operations_fn: Callback to recursively lay out child operations.
-        """
-        block_value = op.implementation
-        # The IR guarantees that implementation returns a BlockValue when has_implementation is True,
-        # so this assertion should always pass.
-        # If it fails, there is a bug in the IR construction.
-        assertion_message = (
-            "[FOR DEVELOPER] CompositeGateOperation.implementation must return a BlockValue "
-            "when has_implementation is True. "
-            "If this assertion fails, there is a bug in the IR construction."
-        )
-        assert isinstance(block_value, BlockValue), assertion_message
-
-        affected_qubits = []
-        for operand in list(op.control_qubits) + list(op.target_qubits):
-            idx = self._resolve_operand_to_qubit_index(
-                operand, qubit_map, logical_id_remap, param_values
-            )
-            if idx is not None:
-                affected_qubits.append(idx)
-
-        qubit_start_columns = self._prepare_inline_block(state, affected_qubits, depth)
-
-        actual_inputs = list(op.operands[1:])
-        new_logical_id_remap, child_param_values = self._build_block_value_mappings(
-            block_value, actual_inputs, logical_id_remap, param_values
-        )
-
-        max_gate_width = self._max_block_gate_width(
-            block_value.operations, child_param_values
-        )
-
-        process_operations_fn(
-            block_value.operations,
-            new_logical_id_remap,
-            depth + 1,
-            scope_path=op_key,
-            param_values=child_param_values,
-        )
-
-        self._finalize_inline_block_layout(
-            state,
-            op_key,
-            op.name,
-            affected_qubits,
-            qubit_start_columns,
-            max_gate_width,
-            depth,
-        )
-
-    def _finalize_inline_block_layout(
-        self,
-        state: LayoutState,
-        op_key: tuple,
-        block_name: str,
-        affected_qubits: list[int],
-        qubit_start_columns: dict[int, float],
+        children: list[MeasureNode],
         max_gate_width: float,
         depth: int,
-    ) -> None:
-        """Finalize inline block layout by computing block range and updating edges.
+    ) -> float:
+        """Compute the total content width of a list of measure nodes.
 
-        Args:
-            state: Current layout state to update.
-            op_key: Unique tuple key identifying this operation.
-            block_name: Display name for the block border label.
-            affected_qubits: List of qubit indices affected by the block.
-            qubit_start_columns: Mapping from qubit index to column before block content.
-            max_gate_width: Maximum gate width within the block.
-            depth: Current nesting depth.
+        This is the width that the content occupies inside a block, including
+        inter-gate gaps and border extent on both sides.
         """
-        qubit_end_columns = {q: state.qubit_columns[q] for q in affected_qubits}
-        if affected_qubits:
-            block_op_columns = []
-            op_key_len = len(op_key)
-            for pos_key, pos_val in state.positions.items():
-                if (
-                    len(pos_key) > op_key_len
-                    and pos_key[:op_key_len] == op_key
-                    and pos_val > 0
-                ):
-                    block_op_columns.append(pos_val)
+        border_padding = self._compute_border_padding(depth)
+        border_extent = max_gate_width / 2 + border_padding
 
-            if block_op_columns:
-                actual_start = min(block_op_columns)
-                actual_end = max(block_op_columns)
-            else:
-                actual_start = min(qubit_start_columns.values())
-                actual_end = max(qubit_end_columns.values()) - 1
+        gap = self.style.gate_gap
+        total = 0.0
+        count = 0
 
-            state.block_ranges.append(
-                {
-                    "name": block_name,
-                    "start_x": actual_start,
-                    "end_x": actual_end,
-                    "qubit_indices": affected_qubits,
-                    "depth": depth,
-                    "max_gate_width": max_gate_width,
-                }
-            )
+        for child in children:
+            if isinstance(child, SkipMeasure):
+                continue
+            if isinstance(child, GateMeasure):
+                total += child.estimated_width
+            elif isinstance(child, BlockMeasure):
+                total += child.final_width
+            elif isinstance(child, LoopMeasure):
+                if child.fold:
+                    total += child.folded_width or 0.0
+                else:
+                    # Unfolded: uniform_width * num_iterations + gaps between iterations
+                    uw = child.uniform_width or 0.0
+                    total += uw * child.num_iterations
+                    if child.num_iterations > 1:
+                        total += gap * (child.num_iterations - 1)
+            count += 1
 
-            border_padding = self._compute_border_padding(depth)
-            gate_border_right = actual_end + max_gate_width / 2 + border_padding
-            box_left = actual_start - max_gate_width / 2 - border_padding
-            title_text_width = len(block_name) * self.style.char_width_base
-            label_right = (
-                box_left
-                + self.style.label_horizontal_padding
-                + title_text_width
-                + self.style.label_horizontal_padding
-            )
-            border_right_edge = max(gate_border_right, label_right)
+        if count > 1:
+            total += gap * (count - 1)
 
-            for q in affected_qubits:
-                state.qubit_right_edges[q] = border_right_edge
-                state.qubit_columns[q] = border_right_edge + self.style.gate_gap
+        # Add border extent on both sides
+        total += 2 * border_extent
 
-    def _layout_generic_operation(
+        return total
+
+    def _measure_inline_block(
         self,
+        op: CallBlockOperation | ControlledUOperation | CompositeGateOperation,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+        depth: int,
+    ) -> BlockMeasure:
+        """Measure width of an inlined block operation."""
+        # Extract block_value, affected_qubits, and actual_inputs based on op type
+        if isinstance(op, CallBlockOperation):
+            block_value = op.operands[0]
+            assert isinstance(block_value, BlockValue)
+            affected_qubits: list[int] = []
+            for operand in op.operands[1:]:
+                affected_qubits.extend(
+                    self._resolve_operand_to_qubit_indices(
+                        operand, qubit_map, logical_id_remap, param_values
+                    )
+                )
+            actual_inputs = op.operands[1:]
+            block_name = block_value.name or "block"
+        elif isinstance(op, ControlledUOperation):
+            block_value = op.block
+            assert isinstance(block_value, BlockValue)
+            affected_qubits = []
+            for operand in list(op.control_operands) + list(op.target_operands):
+                idx = self._resolve_operand_to_qubit_index(
+                    operand, qubit_map, logical_id_remap, param_values
+                )
+                if idx is not None:
+                    affected_qubits.append(idx)
+            actual_inputs = list(op.target_operands)
+            u_name = getattr(block_value, "name", "U") or "U"
+            block_name = u_name
+        else:  # CompositeGateOperation
+            block_value = op.implementation
+            assert isinstance(block_value, BlockValue)
+            affected_qubits = []
+            for operand in list(op.control_qubits) + list(op.target_qubits):
+                idx = self._resolve_operand_to_qubit_index(
+                    operand, qubit_map, logical_id_remap, param_values
+                )
+                if idx is not None:
+                    affected_qubits.append(idx)
+            actual_inputs = list(op.operands[1:])
+            block_name = op.name
+
+        new_logical_id_remap, child_param_values = self._build_block_value_mappings(
+            block_value, actual_inputs, logical_id_remap, param_values
+        )
+
+        max_gate_width = self._max_block_gate_width(
+            block_value.operations, child_param_values
+        )
+
+        children = self._measure_operations(
+            block_value.operations,
+            qubit_map,
+            new_logical_id_remap,
+            child_param_values,
+            depth + 1,
+        )
+
+        border_padding = self._compute_border_padding(depth)
+        content_width = self._compute_content_width(children, max_gate_width, depth)
+
+        # Label width using the same estimation as _estimate_label_box_width
+        label_width = self._estimate_label_box_width(block_name)
+
+        final_width = max(label_width, content_width)
+
+        return BlockMeasure(
+            label=block_name,
+            label_width=label_width,
+            content_width=content_width,
+            final_width=final_width,
+            max_gate_width=max_gate_width,
+            border_padding=border_padding,
+            children=children,
+            affected_qubits=affected_qubits,
+            depth=depth,
+        )
+
+    def _measure_for_operation(
+        self,
+        op: ForOperation,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+        depth: int,
+    ) -> LoopMeasure | SkipMeasure:
+        """Measure width of a ForOperation."""
+        start_val, stop_val_raw, step_val = self._evaluate_loop_range(op, param_values)
+
+        if self._is_zero_iteration_loop(start_val, stop_val_raw, step_val):
+            return SkipMeasure()
+
+        stop_val = stop_val_raw if stop_val_raw is not None else 0
+
+        affected_qubits = self._analyze_loop_affected_qubits(
+            op, qubit_map, logical_id_remap
+        )
+
+        if self.fold_loops:
+            return LoopMeasure(
+                fold=True,
+                affected_qubits=affected_qubits,
+                folded_width=self.style.folded_loop_width,
+            )
+
+        # Unfolded: measure each iteration
+        num_iterations = self._compute_loop_iterations(start_val, stop_val, step_val)
+        iteration_children: list[list[MeasureNode]] = []
+        iteration_widths: list[float] = []
+        iter_param_values_list: list[dict] = []
+
+        for iteration in range(num_iterations):
+            iter_value = start_val + iteration * step_val
+            child_param_values = dict(param_values)
+            child_param_values[f"_loop_{op.loop_var}"] = iter_value
+
+            self._evaluate_loop_body_intermediates(op.operations, child_param_values)
+
+            children = self._measure_operations(
+                op.operations,
+                qubit_map,
+                logical_id_remap,
+                child_param_values,
+                depth + 1,
+            )
+
+            # Content width for this iteration (without border — loops don't have borders per iteration)
+            iter_width = 0.0
+            gap = self.style.gate_gap
+            count = 0
+            for child in children:
+                if isinstance(child, SkipMeasure):
+                    continue
+                if isinstance(child, GateMeasure):
+                    iter_width += child.estimated_width
+                elif isinstance(child, BlockMeasure):
+                    iter_width += child.final_width
+                elif isinstance(child, LoopMeasure):
+                    if child.fold:
+                        iter_width += child.folded_width or 0.0
+                    else:
+                        uw = child.uniform_width or 0.0
+                        iter_width += uw * child.num_iterations
+                        if child.num_iterations > 1:
+                            iter_width += gap * (child.num_iterations - 1)
+                count += 1
+            if count > 1:
+                iter_width += gap * (count - 1)
+
+            iteration_children.append(children)
+            iteration_widths.append(iter_width)
+            iter_param_values_list.append(child_param_values)
+
+        uniform_width = max(iteration_widths) if iteration_widths else 0.0
+
+        return LoopMeasure(
+            fold=False,
+            affected_qubits=affected_qubits,
+            iteration_children=iteration_children,
+            iteration_widths=iteration_widths,
+            uniform_width=uniform_width,
+            num_iterations=num_iterations,
+            iter_param_values=iter_param_values_list,
+        )
+
+    def _measure_operations(
+        self,
+        ops: list[Operation],
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str] | None = None,
+        param_values: dict | None = None,
+        depth: int = 0,
+    ) -> list[MeasureNode]:
+        """Measure Phase: compute widths for all operations without placing them."""
+        if logical_id_remap is None:
+            logical_id_remap = {}
+        if param_values is None:
+            param_values = {}
+
+        result: list[MeasureNode] = []
+
+        for op in ops:
+            if isinstance(op, QInitOperation):
+                result.append(SkipMeasure())
+                continue
+
+            if isinstance(op, ExpvalOp):
+                # TODO: Support ExpvalOp visualization by treating it as a special block with its own label and content.
+                raise NotImplementedError(
+                    f"Visualization of ExpvalOp is not yet supported. "
+                    f"The circuit contains an expectation value calculation: {op}"
+                )
+
+            if isinstance(op, (WhileOperation, IfOperation, ForItemsOperation)):
+                # TODO: Support WhileOperation, IfOperation, and ForItemsOperation visualization.
+                raise NotImplementedError(
+                    f"Visualization of {type(op).__name__} is not yet supported."
+                )
+
+            if isinstance(op, CastOperation):
+                result.append(SkipMeasure())
+                continue
+
+            if isinstance(op, ForOperation):
+                result.append(
+                    self._measure_for_operation(
+                        op, qubit_map, logical_id_remap, param_values, depth
+                    )
+                )
+                continue
+
+            if isinstance(op, CallBlockOperation) and self.inline:
+                result.append(
+                    self._measure_inline_block(
+                        op, qubit_map, logical_id_remap, param_values, depth
+                    )
+                )
+                continue
+
+            if isinstance(op, ControlledUOperation) and self.inline:
+                result.append(
+                    self._measure_inline_block(
+                        op, qubit_map, logical_id_remap, param_values, depth
+                    )
+                )
+                continue
+
+            if (
+                isinstance(op, CompositeGateOperation)
+                and self.inline
+                and op.has_implementation
+            ):
+                result.append(
+                    self._measure_inline_block(
+                        op, qubit_map, logical_id_remap, param_values, depth
+                    )
+                )
+                continue
+
+            if isinstance(
+                op,
+                (
+                    GateOperation,
+                    CallBlockOperation,
+                    MeasureOperation,
+                    MeasureVectorOperation,
+                    CompositeGateOperation,
+                    ControlledUOperation,
+                ),
+            ):
+                result.append(
+                    self._measure_generic_operation(
+                        op, qubit_map, logical_id_remap, param_values
+                    )
+                )
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Place Phase: assign coordinates using pre-computed widths
+    # ------------------------------------------------------------------
+
+    def _place_generic_operation(
+        self,
+        measure: GateMeasure,
         state: LayoutState,
         op: Operation,
         op_key: tuple,
@@ -1365,20 +1389,10 @@ class MatplotlibDrawer:
         logical_id_remap: dict[str, str],
         param_values: dict,
     ) -> None:
-        """Layout a generic operation (gate, measurement, block box).
-
-        Args:
-            state: Current layout state to update.
-            op: Operation to lay out.
-            op_key: Unique tuple key identifying this operation.
-            qubit_map: Mapping from logical_id to qubit wire index.
-            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
-            param_values: Parameter values for resolving gate labels.
-        """
+        """Place a generic operation using pre-computed width from Measure Phase."""
         # Find which qubits this operation touches
-        affected_qubits = []
+        affected_qubits: list[int] = []
         for i, operand in enumerate(op.operands):
-            # Skip BlockValue for CallBlockOperation, ControlledUOperation, and CompositeGateOperation
             if isinstance(op, CallBlockOperation) and i == 0:
                 continue
             if isinstance(op, ControlledUOperation) and i == 0:
@@ -1401,40 +1415,20 @@ class MatplotlibDrawer:
         else:
             min_column = state.column
 
-        # Calculate required columns and operation half-width
-        columns_needed = 1
-        op_half_width = self.style.gate_width / 2  # default
+        op_half_width = measure.half_width
+        columns_needed = measure.columns_needed
 
-        if isinstance(op, GateOperation):
-            estimated_w = self._estimate_gate_width(op, param_values)
-            columns_needed = max(1, math.ceil(estimated_w))
-            op_half_width = estimated_w / 2
-        elif isinstance(op, CallBlockOperation):
-            label = self._get_block_label(op, qubit_map)
-            box_width = self._estimate_label_box_width(label)
-            state.block_widths[op_key] = box_width
-            columns_needed = max(1, int(box_width) + 1)
-            op_half_width = box_width / 2
-        elif isinstance(op, CompositeGateOperation):
-            box_width = self._estimate_label_box_width(op.name.upper())
-            state.block_widths[op_key] = box_width
-            columns_needed = max(1, int(box_width) + 1)
-            op_half_width = box_width / 2
-        elif isinstance(op, ControlledUOperation):
-            u_name = getattr(op.block, "name", "U") or "U"
-            label = f"{u_name}^{op.power}" if op.power > 1 else u_name
-            box_width = self._estimate_label_box_width(label)
-            state.block_widths[op_key] = box_width
-            columns_needed = max(1, int(box_width) + 1)
-            op_half_width = box_width / 2
+        # Store block_widths for block-box mode operations
+        if measure.is_block_box and measure.box_width is not None:
+            state.block_widths[op_key] = measure.box_width
 
-        # For multi-qubit gates, also check and update intermediate qubits
+        # For multi-qubit gates, also check intermediate qubits
         if len(affected_qubits) > 1:
             span_qubits = list(range(min(affected_qubits), max(affected_qubits) + 1))
         else:
             span_qubits = list(affected_qubits)
 
-        # Overlap prevention: ensure this box's left edge clears previous box's right edge
+        # Overlap prevention
         for q in span_qubits:
             if q in state.qubit_right_edges:
                 required_center = (
@@ -1446,7 +1440,7 @@ class MatplotlibDrawer:
         state.positions[op_key] = min_column
         state.column = max(state.column, min_column + columns_needed)
 
-        # Track first gate position and half-width for wire symmetry
+        # Track first gate position
         if state.first_gate_x is None:
             state.first_gate_x = min_column
             state.first_gate_half_width = op_half_width
@@ -1483,10 +1477,367 @@ class MatplotlibDrawer:
         op_actual_width = min_column + op_half_width + 0.5
         state.actual_width = max(state.actual_width, op_actual_width)
 
+    def _place_inline_block(
+        self,
+        measure: BlockMeasure,
+        state: LayoutState,
+        op: CallBlockOperation | ControlledUOperation | CompositeGateOperation,
+        op_key: tuple,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+        depth: int,
+        place_fn,
+    ) -> None:
+        """Place an inlined block using pre-computed widths."""
+        affected_qubits = measure.affected_qubits
+
+        # Fix Issue 002: Align all affected qubits to the maximum right edge
+        if affected_qubits:
+            max_edge = max(state.qubit_right_edges.get(q, 0.0) for q in affected_qubits)
+            for q in affected_qubits:
+                state.qubit_right_edges[q] = max_edge
+                state.qubit_columns[q] = max_edge + self.style.gate_gap
+
+        # Advance for border extent (left padding)
+        border_padding = measure.border_padding
+        max_gate_width = measure.max_gate_width
+        border_extent = max_gate_width / 2 + border_padding
+
+        for q in affected_qubits:
+            if q in state.qubit_right_edges:
+                state.qubit_right_edges[q] += border_extent - self.style.gate_width / 2
+                state.qubit_columns[q] = (
+                    state.qubit_right_edges[q] + self.style.gate_gap
+                )
+
+        # Fix Issue 001: Center content when label is wider
+        center_offset = 0.0
+        if measure.final_width > measure.content_width:
+            center_offset = (measure.final_width - measure.content_width) / 2
+            for q in affected_qubits:
+                state.qubit_right_edges[q] += center_offset
+                state.qubit_columns[q] = (
+                    state.qubit_right_edges[q] + self.style.gate_gap
+                )
+
+        state.max_depth = max(state.max_depth, depth + 1)
+
+        # Build block mappings for recursive placement
+        if isinstance(op, CallBlockOperation):
+            block_value = op.operands[0]
+            assert isinstance(block_value, BlockValue)
+            actual_inputs = op.operands[1:]
+        elif isinstance(op, ControlledUOperation):
+            block_value = op.block
+            assert isinstance(block_value, BlockValue)
+            actual_inputs = list(op.target_operands)
+        else:  # CompositeGateOperation
+            block_value = op.implementation
+            assert isinstance(block_value, BlockValue)
+            actual_inputs = list(op.operands[1:])
+
+        new_logical_id_remap, child_param_values = self._build_block_value_mappings(
+            block_value, actual_inputs, logical_id_remap, param_values
+        )
+
+        # Recursively place block content
+        place_fn(
+            block_value.operations,
+            measure.children,
+            qubit_map,
+            state,
+            new_logical_id_remap,
+            child_param_values,
+            depth + 1,
+            op_key,
+        )
+
+        # Compute block range from placed children
+        block_op_columns = []
+        op_key_len = len(op_key)
+        for pos_key, pos_val in state.positions.items():
+            if (
+                len(pos_key) > op_key_len
+                and pos_key[:op_key_len] == op_key
+                and pos_val > 0
+            ):
+                block_op_columns.append(pos_val)
+
+        if block_op_columns:
+            actual_start = min(block_op_columns)
+            actual_end = max(block_op_columns)
+        else:
+            # Empty block: use current qubit positions
+            if affected_qubits:
+                actual_start = min(
+                    state.qubit_columns.get(q, 0) for q in affected_qubits
+                )
+                actual_end = actual_start
+            else:
+                actual_start = state.column
+                actual_end = state.column
+
+        if affected_qubits:
+            state.block_ranges.append(
+                {
+                    "name": measure.label,
+                    "start_x": actual_start,
+                    "end_x": actual_end,
+                    "qubit_indices": affected_qubits,
+                    "depth": depth,
+                    "max_gate_width": max_gate_width,
+                }
+            )
+
+        # Compute border right edge (same logic as _finalize_inline_block_layout)
+        gate_border_right = actual_end + max_gate_width / 2 + border_padding
+        box_left = actual_start - max_gate_width / 2 - border_padding
+        title_text_width = len(measure.label) * self.style.char_width_base
+        label_right = (
+            box_left
+            + self.style.label_horizontal_padding
+            + title_text_width
+            + self.style.label_horizontal_padding
+        )
+        border_right_edge = max(gate_border_right, label_right)
+
+        for q in affected_qubits:
+            state.qubit_right_edges[q] = border_right_edge
+            state.qubit_columns[q] = border_right_edge + self.style.gate_gap
+
+    def _place_for_operation(
+        self,
+        measure: LoopMeasure,
+        state: LayoutState,
+        op: ForOperation,
+        op_key: tuple,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+        depth: int,
+        place_fn,
+    ) -> None:
+        """Place a ForOperation using pre-computed widths."""
+        affected_qubits = measure.affected_qubits
+
+        if measure.fold:
+            # Folded mode: same as current logic
+            if affected_qubits:
+                start_column = max(state.qubit_columns[q] for q in affected_qubits)
+            elif state.qubit_columns:
+                start_column = max(state.qubit_columns.values())
+            else:
+                start_column = 0
+
+            loop_width = measure.folded_width or self.style.folded_loop_width
+            op_half_width = loop_width / 2
+            gap = self.style.gate_gap
+
+            for q in affected_qubits:
+                if q in state.qubit_right_edges:
+                    required_center = state.qubit_right_edges[q] + gap + op_half_width
+                    start_column = max(start_column, required_center)
+
+            state.positions[op_key] = start_column
+            state.block_widths[op_key] = loop_width
+
+            for q in affected_qubits:
+                state.qubit_columns[q] = start_column + op_half_width + gap
+                state.qubit_right_edges[q] = start_column + op_half_width
+
+            state.column = max(state.column, start_column + 1)
+            state.actual_width = max(
+                state.actual_width, start_column + op_half_width + 0.5
+            )
+        else:
+            # Unfolded mode: place each iteration with uniform width
+            assert measure.iteration_children is not None
+            assert measure.iter_param_values is not None
+
+            for iteration in range(measure.num_iterations):
+                iter_children = measure.iteration_children[iteration]
+                child_param_values = measure.iter_param_values[iteration]
+
+                # Align qubits at iteration start
+                if affected_qubits:
+                    max_edge = max(
+                        state.qubit_right_edges.get(q, 0.0) for q in affected_qubits
+                    )
+                    for q in affected_qubits:
+                        state.qubit_right_edges[q] = max_edge
+                        state.qubit_columns[q] = max_edge + self.style.gate_gap
+
+                # Place iteration operations
+                place_fn(
+                    op.operations,
+                    iter_children,
+                    qubit_map,
+                    state,
+                    logical_id_remap,
+                    child_param_values,
+                    depth + 1,
+                    (*op_key, iteration),
+                )
+
+                # Fix Issue 003: Ensure uniform width per iteration
+                # After placing, advance all affected qubits to uniform_width
+                if affected_qubits and measure.uniform_width is not None:
+                    # Find the starting edge for this iteration
+                    # and ensure we've consumed at least uniform_width
+                    current_max_edge = max(
+                        state.qubit_right_edges.get(q, 0.0) for q in affected_qubits
+                    )
+                    required_edge = max_edge + measure.uniform_width
+                    if required_edge > current_max_edge:
+                        for q in affected_qubits:
+                            state.qubit_right_edges[q] = required_edge
+                            state.qubit_columns[q] = required_edge + self.style.gate_gap
+
+    def _place_operations(
+        self,
+        ops: list[Operation],
+        measure_nodes: list[MeasureNode],
+        qubit_map: dict[str, int],
+        state: LayoutState,
+        logical_id_remap: dict[str, str] | None = None,
+        param_values: dict | None = None,
+        depth: int = 0,
+        scope_path: tuple = (),
+    ) -> None:
+        """Place Phase: assign coordinates using pre-computed widths."""
+        if logical_id_remap is None:
+            logical_id_remap = {}
+        if param_values is None:
+            param_values = {}
+
+        state.max_depth = max(state.max_depth, depth)
+
+        measure_iter = iter(measure_nodes)
+
+        for op in ops:
+            op_key = (*scope_path, id(op))
+
+            if isinstance(op, QInitOperation):
+                state.positions[op_key] = 0
+                next(measure_iter)  # consume SkipMeasure
+                continue
+
+            if isinstance(op, ExpvalOp):
+                raise NotImplementedError(
+                    f"Visualization of ExpvalOp is not yet supported. "
+                    f"The circuit contains an expectation value calculation: {op}"
+                )
+
+            if isinstance(op, (WhileOperation, IfOperation, ForItemsOperation)):
+                raise NotImplementedError(
+                    f"Visualization of {type(op).__name__} is not yet supported."
+                )
+
+            if isinstance(op, CastOperation):
+                next(measure_iter)  # consume SkipMeasure
+                continue
+
+            if isinstance(op, ForOperation):
+                measure_node = next(measure_iter)
+                if isinstance(measure_node, SkipMeasure):
+                    continue  # zero-iteration loop
+                assert isinstance(measure_node, LoopMeasure)
+                self._place_for_operation(
+                    measure_node,
+                    state,
+                    op,
+                    op_key,
+                    qubit_map,
+                    logical_id_remap,
+                    param_values,
+                    depth,
+                    self._place_operations,
+                )
+                continue
+
+            if isinstance(op, CallBlockOperation) and self.inline:
+                measure_node = next(measure_iter)
+                assert isinstance(measure_node, BlockMeasure)
+                self._place_inline_block(
+                    measure_node,
+                    state,
+                    op,
+                    op_key,
+                    qubit_map,
+                    logical_id_remap,
+                    param_values,
+                    depth,
+                    self._place_operations,
+                )
+                continue
+
+            if isinstance(op, ControlledUOperation) and self.inline:
+                measure_node = next(measure_iter)
+                assert isinstance(measure_node, BlockMeasure)
+                self._place_inline_block(
+                    measure_node,
+                    state,
+                    op,
+                    op_key,
+                    qubit_map,
+                    logical_id_remap,
+                    param_values,
+                    depth,
+                    self._place_operations,
+                )
+                continue
+
+            if (
+                isinstance(op, CompositeGateOperation)
+                and self.inline
+                and op.has_implementation
+            ):
+                measure_node = next(measure_iter)
+                assert isinstance(measure_node, BlockMeasure)
+                self._place_inline_block(
+                    measure_node,
+                    state,
+                    op,
+                    op_key,
+                    qubit_map,
+                    logical_id_remap,
+                    param_values,
+                    depth,
+                    self._place_operations,
+                )
+                continue
+
+            if isinstance(
+                op,
+                (
+                    GateOperation,
+                    CallBlockOperation,
+                    MeasureOperation,
+                    MeasureVectorOperation,
+                    CompositeGateOperation,
+                    ControlledUOperation,
+                ),
+            ):
+                measure_node = next(measure_iter)
+                assert isinstance(measure_node, GateMeasure)
+                self._place_generic_operation(
+                    measure_node,
+                    state,
+                    op,
+                    op_key,
+                    qubit_map,
+                    logical_id_remap,
+                    param_values,
+                )
+
     def _layout_operations(
         self, graph: Graph, qubit_map: dict[str, int]
     ) -> dict[str, int | dict]:
-        """Calculate layout positions for operations.
+        """Calculate layout positions for operations using 2-phase approach.
+
+        Phase 1 (Measure): Recursively compute widths without assigning coordinates.
+        Phase 2 (Place): Assign coordinates using pre-computed widths.
 
         Args:
             graph: IR Graph containing operations to lay out.
@@ -1495,132 +1846,23 @@ class MatplotlibDrawer:
         Returns:
             Layout dictionary with:
             - 'width': Total circuit width in coordinate units
-            - 'positions': dict[int, int] mapping operation ID to x positions
+            - 'positions': dict mapping operation key to x positions
             - 'block_ranges': list[dict] block boundary information (when inline=True)
             - 'max_depth': Maximum nesting depth of blocks
-            - 'block_widths': dict[int, float] mapping operation ID to box widths (for CallBlockOperation)
+            - 'block_widths': dict mapping operation key to box widths
             - 'actual_width': Actual circuit width considering box widths
         """
-        state = LayoutState()
+        # Phase 1: Measure — compute widths
+        measure_nodes = self._measure_operations(graph.operations, qubit_map)
 
-        # Initialize right edges to initial_wire_position so that the first gate
-        # is placed far enough right to avoid overlapping wire labels.
+        # Phase 2: Place — assign coordinates
+        state = LayoutState()
         for q_idx in set(qubit_map.values()):
             state.qubit_right_edges[q_idx] = self.style.initial_wire_position
-            # Pre-initialize qubit_columns to ensure entries exist
             _ = state.qubit_columns[q_idx]
 
-        def process_operations(
-            ops: list[Operation],
-            logical_id_remap: dict[str, str]
-            | None = None,  # Dummy logical_id → Actual logical_id
-            depth: int = 0,  # Nesting depth for blocks
-            scope_path: tuple = (),
-            param_values: dict[int, float | int | str] | None = None,
-        ) -> None:
-            if logical_id_remap is None:
-                logical_id_remap = {}
-            if param_values is None:
-                param_values = {}
+        self._place_operations(graph.operations, measure_nodes, qubit_map, state)
 
-            state.max_depth = max(state.max_depth, depth)
-
-            for op in ops:
-                op_key = (*scope_path, id(op))
-
-                if isinstance(op, QInitOperation):
-                    # Initialization doesn't take space
-                    state.positions[op_key] = 0
-                    continue
-
-                if isinstance(op, ExpvalOp):
-                    raise NotImplementedError(
-                        f"Visualization of ExpvalOp is not yet supported. "
-                        f"The circuit contains an expectation value calculation: {op}"
-                    )
-
-                if isinstance(op, (WhileOperation, IfOperation, ForItemsOperation)):
-                    raise NotImplementedError(
-                        f"Visualization of {type(op).__name__} is not yet supported."
-                    )
-
-                if isinstance(op, CastOperation):
-                    # Passthrough: no visual space needed
-                    continue
-
-                if isinstance(op, ForOperation):
-                    self._layout_for_operation(
-                        state,
-                        op,
-                        op_key,
-                        qubit_map,
-                        logical_id_remap,
-                        param_values,
-                        depth,
-                        process_operations,
-                    )
-                    continue
-
-                if isinstance(op, CallBlockOperation) and self.inline:
-                    self._layout_inline_call_block(
-                        state,
-                        op,
-                        op_key,
-                        qubit_map,
-                        logical_id_remap,
-                        param_values,
-                        depth,
-                        process_operations,
-                    )
-                    continue
-
-                if isinstance(op, ControlledUOperation) and self.inline:
-                    self._layout_inline_controlled_u(
-                        state,
-                        op,
-                        op_key,
-                        qubit_map,
-                        logical_id_remap,
-                        param_values,
-                        depth,
-                        process_operations,
-                    )
-                    continue
-
-                if (
-                    isinstance(op, CompositeGateOperation)
-                    and self.inline
-                    and op.has_implementation
-                ):
-                    self._layout_inline_composite_gate(
-                        state,
-                        op,
-                        op_key,
-                        qubit_map,
-                        logical_id_remap,
-                        param_values,
-                        depth,
-                        process_operations,
-                    )
-                    continue
-
-                if isinstance(
-                    op,
-                    (
-                        GateOperation,
-                        CallBlockOperation,
-                        MeasureOperation,
-                        MeasureVectorOperation,
-                        CompositeGateOperation,
-                        ControlledUOperation,
-                    ),
-                ):
-                    self._layout_generic_operation(
-                        state, op, op_key, qubit_map, logical_id_remap, param_values
-                    )
-
-        process_operations(graph.operations)
-        # Ensure actual_width is at least as large as column
         state.actual_width = max(state.actual_width, state.column)
         return {
             "width": state.column,
