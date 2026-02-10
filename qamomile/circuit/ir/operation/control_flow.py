@@ -1,9 +1,15 @@
+from __future__ import annotations
+
 import dataclasses
+import typing
 
 from qamomile.circuit.ir.types.primitives import BitType, BlockType, UIntType
 from qamomile.circuit.ir.value import Value
 
 from .operation import Operation, OperationKind, ParamHint, Signature
+
+if typing.TYPE_CHECKING:
+    from .arithmetic_operations import PhiOp
 
 
 @dataclasses.dataclass
@@ -109,6 +115,7 @@ class IfOperation(Operation):
 
     true_operations: list[Operation] = dataclasses.field(default_factory=list)
     false_operations: list[Operation] = dataclasses.field(default_factory=list)
+    phi_ops: list[PhiOp] = dataclasses.field(default_factory=list)
 
     @property
     def condition(self) -> Value:

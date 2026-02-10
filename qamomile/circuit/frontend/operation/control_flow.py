@@ -1,4 +1,5 @@
 import contextlib
+import copy
 import typing
 
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
@@ -135,6 +136,20 @@ def _create_handle_from_value(value: Value, template_handle: Handle) -> Handle:
         return Handle(value=value)
 
 
+def _fresh_handle_copy(h):
+    """Create a Handle copy with consumed state reset for branch tracing.
+
+    Each branch of if-else is mutually exclusive, so tracing requires
+    independent Handle objects to avoid consumed conflicts.
+    """
+    if not isinstance(h, Handle):
+        return h
+    c = copy.copy(h)
+    c._consumed = False
+    c._consumed_by = None
+    return c
+
+
 def _value_to_ir_value(val: typing.Any, name_prefix: str = "const") -> Value:
     """Convert a Python value or Handle to an IR Value.
 
@@ -190,11 +205,19 @@ def _create_phi_for_values(
     true_v = _value_to_ir_value(true_val, "true_const")
     false_v = _value_to_ir_value(false_val, "false_const")
 
+    # Type mismatch check
+    if true_v.type != false_v.type:
+        raise TypeError(
+            f"Type mismatch in if-else branches: "
+            f"true branch has {true_v.type}, false branch has {false_v.type}"
+        )
+
     # Create Phi output value
     phi_output = Value(type=true_v.type, name=f"{true_v.name}_phi")
 
-    # Create PhiOp (operation is tracked via if_operation.results)
+    # Create PhiOp and store in IfOperation
     _phi_op = PhiOp(operands=[condition_value, true_v, false_v], results=[phi_output])
+    if_operation.phi_ops.append(_phi_op)
     if_operation.results.append(phi_output)
 
     # Create appropriate Handle type for the merged value
@@ -277,9 +300,11 @@ def emit_if(
         else condition_result
     )
 
-    # 2. Trace both branches
-    true_tracer, true_result = _trace_branch(true_func, variables)
-    false_tracer, false_result = _trace_branch(false_func, variables)
+    # 2. Trace both branches (fresh copies avoid consumed conflicts)
+    true_vars = [_fresh_handle_copy(v) for v in variables]
+    false_vars = [_fresh_handle_copy(v) for v in variables]
+    true_tracer, true_result = _trace_branch(true_func, true_vars)
+    false_tracer, false_result = _trace_branch(false_func, false_vars)
 
     # 3. Create IfOperation
     if_op = IfOperation(
@@ -291,13 +316,13 @@ def emit_if(
     # 4. Create Phi functions for each variable to merge branches
     merged_results = []
     for true_val, false_val in zip(true_result, false_result):
-        try:
+        if isinstance(true_val, (Handle, Value)):
             phi_output, merged_handle = _create_phi_for_values(
                 condition_value, true_val, false_val, if_op
             )
             merged_results.append(merged_handle)
-        except TypeError:
-            # Skip phi creation for non-Value types
+        else:
+            # Non-Handle/Value values (int, float, etc.) don't need phi
             merged_results.append(true_val)
 
     # 5. Add IfOperation to parent tracer
