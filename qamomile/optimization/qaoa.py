@@ -8,7 +8,7 @@ from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.observable.hamiltonian import Hamiltonian
 
 from .binary_model import BinarySampleSet
-from .converter import MathematicalProblemConverter
+from .converters.converter import MathematicalProblemConverter
 
 class QAOAConverter(MathematicalProblemConverter):
 
@@ -49,39 +49,3 @@ class QAOAConverter(MathematicalProblemConverter):
             parameters=["gammas", "betas"],
         )
         return executable
-
-
-    def decode(
-        self,
-        samples: SampleResult[list[int]],
-    ) -> BinarySampleSet:
-        """Decode quantum measurement results.
-
-        Returns results in the original vartype (BINARY or SPIN) that was
-        provided when constructing the converter.
-        """
-        from .binary_model import VarType
-
-        # First decode in SPIN domain
-        spin_sampleset = self.spin_model.decode_from_sampleresult(samples)
-
-        # If original problem was BINARY, convert back
-        if self.original_vartype == VarType.BINARY:
-            binary_samples = []
-            for spin_sample in spin_sampleset.samples:
-                # Convert SPIN (±1) to BINARY (0/1): x = (1 - s) / 2
-                binary_sample = {
-                    idx: (1 - spin_val) // 2
-                    for idx, spin_val in spin_sample.items()
-                }
-                binary_samples.append(binary_sample)
-
-            return BinarySampleSet(
-                samples=binary_samples,
-                num_occurrences=spin_sampleset.num_occurrences,
-                energy=spin_sampleset.energy,
-                vartype=VarType.BINARY
-            )
-        else:
-            # Already in SPIN, return as-is
-            return spin_sampleset

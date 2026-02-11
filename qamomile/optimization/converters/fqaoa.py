@@ -15,7 +15,7 @@ The :math:`2p` variational parameters are optimized classically to minimize the 
 This module provides functionality to convert optimization problems which written by `jijmodeling`
 into FQAOA circuits (:math:`U(\\vec{\\beta}, \\vec{\\gamma})`), construct cost Hamiltonians (:math:`H_P`), and decode quantum computation results.
 
-The `QAOAConverter` class extends the `QuantumConverter` base class, specializing in
+The `FQAOAConverter` class extends the `MathematicalProblemConverter` base class, specializing in
 FQAOA-specific operations such as ansatz circuit generation and result decoding.
 
 
@@ -32,18 +32,16 @@ Note:
 
 """
 
-import copy
 import numpy as np
 import typing as typ
 import ommx.v1
 
 import qamomile.circuit as qm_c
-import qamomile.observable as qm_o
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.transpiler import Transpiler
-from qamomile.optimization.ising_model import IsingModel
+from qamomile.optimization.binary_model import BinaryModel
 from qamomile.optimization.utils import is_close_zero
-from qamomile.optimization.converter import MathematicalProblemConverter
+from qamomile.optimization.converters.converter import MathematicalProblemConverter
 
 
 @qm_c.qkernel
@@ -176,7 +174,6 @@ class FQAOAConverter(MathematicalProblemConverter):
         self,
         instance: ommx.v1.Instance,
         num_fermions: int,
-        normalize_model: bool = False,
         normalize_ising: typ.Optional[typ.Literal["abs_max", "rms"]] = None,
     ):
         """
@@ -185,10 +182,8 @@ class FQAOAConverter(MathematicalProblemConverter):
         This method initializes the converter with the compiled instance of the optimization problem.
 
         Args:
-            compiled_instance: ommx.v1.Instance.
+            instance: ommx.v1.Instance.
             num_fermions (int): Number of fermions. This means the constraint :math:`M = \\sum_{l,d} x_{l,d}`.
-            normalize_model (bool): The objective function and the constraints are normalized using the maximum absolute value of the coefficients contained in each.\
-                Defaults to False
             normalize_ising (Literal["abs_max", "rms"] | None): The normalization method for the Ising Hamiltonian. \
                 Available options:
                 - "abs_max": Normalize by absolute maximum value
@@ -196,78 +191,44 @@ class FQAOAConverter(MathematicalProblemConverter):
                 Defaults to None.
 
         """
+        if instance.objective.degree() > 2:
+            raise ValueError("FQAOAConverter supports only QUBO instances.")
+
         self.num_fermions = num_fermions
-        self.normalize_model = normalize_model
         self.normalize_ising = normalize_ising
         self.int2varlabel: dict[int, str] = {}
-        self._ising: typ.Optional[IsingModel] = None
 
-        if isinstance(instance, ommx.v1.Instance) and instance.objective.degree() > 2:
-            raise ValueError("FQAOAConverter supports only QUBO instances.")
+        # FQAOA uses uniform_penalty_weight=0.0 (constraints handled by fermion number conservation)
+        qubo, constant = instance.to_qubo(uniform_penalty_weight=0.0)
+        binary_model = BinaryModel.from_qubo(qubo, constant)
 
-        super().__init__(instance)
+        # Store the original instance for cyclic_mapping and index labeling
+        self._original_instance = instance
+
+        # Pass the BinaryModel to the base class (which converts to SPIN internally)
+        super().__init__(binary_model)
 
     def __post_init__(self) -> None:
-        if self.instance is None:
-            raise TypeError("FQAOAConverter requires an ommx.v1.Instance")
-
-        if self.instance.objective.degree() > 2:
-            raise ValueError("FQAOAConverter supports only QUBO instances.")
-
-        self.original_instance = self.instance
-        last_var = self.original_instance.decision_variables[-1]
+        last_var = self._original_instance.decision_variables[-1]
         n, d = last_var.subscripts
         self.num_integers, self.num_bits = n + 1, d + 1
         self.var_map = self.cyclic_mapping()
-        self.ising = self.fqaoa_get_ising()
-        self.num_qubits = self.ising.num_bits
+        self.num_qubits = self.spin_model.num_bits
 
-    def fqaoa_instance_to_qubo(self) -> tuple[dict[tuple[int, int], float], float]:
-        """
-        Convert the instance to QUBO format.
-
-        This method converts the optimization problem instance into a QUBO (Quadratic Unconstrained Binary Optimization)
-        representation, which is suitable for quantum computation.
-
-        Returns:
-            tuple[dict[int, float], float]: A tuple containing the QUBO dictionary and the constant term.
-
-        """
-        instance_copy = copy.deepcopy(self.original_instance)
-        qubo, constant = instance_copy.to_qubo(uniform_penalty_weight=0.0)
-        return qubo, constant
-
-    def fqaoa_get_ising(self) -> IsingModel:
-        """
-        Get the Ising model representation of the problem.
-
-        Returns:
-            IsingModel: The Ising model representation.
-
-        """
-        if self._ising is None:
-            self._ising = self.fqaoa_ising_encode()
-        return self._ising
-
-    def fqaoa_ising_encode(self) -> IsingModel:
-        qubo, constant = self.fqaoa_instance_to_qubo()
-        ising = IsingModel.from_qubo(qubo, simplify=False)
-        ising.constant += constant
-
-        # normalize
+        # Apply normalization if requested
         if isinstance(self.normalize_ising, str):
             if self.normalize_ising == "abs_max":
-                ising.normalize_by_abs_max()
+                self.spin_model.normalize_by_abs_max(replace=True)
             elif self.normalize_ising == "rms":
-                ising.normalize_by_rms()
+                self.spin_model.normalize_by_rms(replace=True)
             else:
                 raise ValueError(
                     f"Invalid value for normalize_ising: {self.normalize_ising}"
                 )
 
-        # index labeling
-        for ising_index, qubo_index in ising.index_map.items():
-            deci_var = self.original_instance.get_decision_variable_by_id(qubo_index)
+        # Build index labels using the cyclic (fermionic) mapping
+        for new_index, orig_index in self.spin_model.index_new_to_origin.items():
+            deci_var = self._original_instance.get_decision_variable_by_id(orig_index)
             var_name = deci_var.name
             subscripts = tuple(deci_var.subscripts)
 
@@ -275,8 +236,6 @@ class FQAOAConverter(MathematicalProblemConverter):
             self.int2varlabel[fermionic_index] = (
                 var_name + "_{" + ",".join(map(str, subscripts)) + "}"
             )
-
-        return ising
 
     def cyclic_mapping(self) -> dict[tuple[int, int], int]:
         """
@@ -286,7 +245,7 @@ class FQAOAConverter(MathematicalProblemConverter):
                         dict[tuple[int, int], int] : A variable map for ring driver.
         """
         cyclic_var_map = {}
-        for var in self.original_instance.decision_variables:
+        for var in self._original_instance.decision_variables:
             # l = pos[0], d = pos[1]
             pos = var.subscripts
             cyclic_var_map[tuple(pos)] = pos[0] + self.num_integers * pos[1]
@@ -367,6 +326,7 @@ class FQAOAConverter(MathematicalProblemConverter):
                 matrix[:, j + 1] = np.sin(angle) * col_1 + np.cos(angle) * col_2
 
         return givens_angles
+
     def get_init_state(self) -> qm_c.QKernel:
         """Generate the initial state preparation kernel for FQAOA."""
         unitary_rows = self.get_fermi_orbital()
@@ -396,8 +356,8 @@ class FQAOAConverter(MathematicalProblemConverter):
 
     def get_cost_ansatz(self) -> qm_c.QKernel:
         """Generate the cost ansatz kernel (:math:`e^{-\\gamma H_P}`)."""
-        linear = self.ising.linear
-        quad = self.ising.quad
+        linear = self.spin_model.linear
+        quad = self.spin_model.quad
 
         @qm_c.qkernel
         def cost(
@@ -414,8 +374,8 @@ class FQAOAConverter(MathematicalProblemConverter):
         num_fermions = self.num_fermions
         unitary_rows = self.get_fermi_orbital()
         givens_rotations = self._givens_decomposition(unitary_rows)
-        linear = self.ising.linear
-        quad = self.ising.quad
+        linear = self.spin_model.linear
+        quad = self.spin_model.quad
 
         @qm_c.qkernel
         def fqaoa_state(
@@ -447,10 +407,10 @@ class FQAOAConverter(MathematicalProblemConverter):
 
         # Filter near-zero coefficients to keep loops compact
         linear = {
-            i: hi for i, hi in self.ising.linear.items() if not is_close_zero(hi)
+            i: hi for i, hi in self.spin_model.linear.items() if not is_close_zero(hi)
         }
         quad = {
-            ij: Jij for ij, Jij in self.ising.quad.items() if not is_close_zero(Jij)
+            ij: Jij for ij, Jij in self.spin_model.quad.items() if not is_close_zero(Jij)
         }
 
         last_qubit = num_qubits - 1
@@ -494,30 +454,3 @@ class FQAOAConverter(MathematicalProblemConverter):
             bindings={"linear": linear, "quad": quad},
             parameters=["betas", "gammas"],
         )
-
-    def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
-        """
-        Construct the cost Hamiltonian (:math:`H_P`) for FQAOA.
-
-        Returns:
-            qm_o.Hamiltonian: The cost Hamiltonian.
-        """
-        hamiltonian = qm_o.Hamiltonian()
-
-        # Add linear terms
-        for i, hi in self.ising.linear.items():
-            if not is_close_zero(hi):
-                hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, i),), hi)
-
-        # Add quadratic terms
-        for (i, j), Jij in self.ising.quad.items():
-            if not is_close_zero(Jij):
-                hamiltonian.add_term(
-                    (
-                        qm_o.PauliOperator(qm_o.Pauli.Z, i),
-                        qm_o.PauliOperator(qm_o.Pauli.Z, j),
-                    ),
-                    Jij,
-                )
-
-        return hamiltonian

@@ -14,7 +14,7 @@ import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.optimization.utils import is_close_zero
 from qamomile.optimization.binary_model import BinaryModel, VarType
-from qamomile.optimization.converter import MathematicalProblemConverter
+from qamomile.optimization.converters.converter import MathematicalProblemConverter
 
 from .graph_coloring import greedy_graph_coloring, check_linear_term
 

@@ -4,7 +4,7 @@ import jijmodeling as jm
 import ommx.v1
 
 from qamomile.optimization.converters.fqaoa import FQAOAConverter
-from qamomile.optimization.ising_model import IsingModel
+from qamomile.optimization.binary_model import BinaryModel
 from qamomile.circuit.estimator import count_gates
 from qamomile.qiskit import QiskitTranspiler
 
@@ -45,22 +45,12 @@ def test_initializaiton(simple_problem):
     assert fqaoa_converter.num_bits == 2
     assert fqaoa_converter.num_fermions == 4
     assert isinstance(fqaoa_converter.var_map, dict)
-    assert isinstance(fqaoa_converter.ising, IsingModel)
+    assert isinstance(fqaoa_converter.spin_model, BinaryModel)
     assert fqaoa_converter.num_qubits == 8
 
 
-def test_fqaoa_instance_to_qubo(simple_problem):
+def test_int2varlabel(simple_problem):
     fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4)
-    num_constraints = len(simple_problem.constraints)
-
-    fqaoa_converter.fqaoa_instance_to_qubo()
-
-    assert len(simple_problem.constraints) == num_constraints
-
-
-def test_fqaoa_ising_encode(simple_problem):
-    fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4)
-    fqaoa_converter.fqaoa_ising_encode()
 
     assert fqaoa_converter.int2varlabel == {
         0: "x_{0,0}",
