@@ -37,11 +37,6 @@ class MatplotlibDrawer:
         """
         self.graph = graph
         self.style = style or DEFAULT_STYLE
-        self.inline = False
-        self.fold_loops = True
-        self.expand_composite = False
-        self.inline_depth: int | None = None
-        self._last_analyzer: CircuitAnalyzer | None = None
 
     def draw(
         self,
@@ -65,11 +60,6 @@ class MatplotlibDrawer:
         Returns:
             Figure object.
         """
-        self.inline = inline
-        self.fold_loops = fold_loops
-        self.expand_composite = expand_composite
-        self.inline_depth = inline_depth
-
         analyzer = CircuitAnalyzer(
             self.graph, self.style, inline, fold_loops, expand_composite, inline_depth
         )
@@ -80,46 +70,3 @@ class MatplotlibDrawer:
 
         renderer = MatplotlibRenderer(analyzer, self.style)
         return renderer.render(self.graph, qubit_map, qubit_names, num_qubits, layout)
-
-    # --- Backward-compatible test helpers ---
-
-    def _build_qubit_map(self, graph: Graph) -> dict[str, int]:
-        """Backward-compatible wrapper for tests."""
-        analyzer = CircuitAnalyzer(
-            graph,
-            self.style,
-            self.inline,
-            self.fold_loops,
-            self.expand_composite,
-            self.inline_depth,
-        )
-        qubit_map, _, _ = analyzer.build_qubit_map(graph)
-        self._last_analyzer = analyzer
-        return qubit_map
-
-    def _layout_operations(
-        self, graph: Graph, qubit_map: dict[str, int]
-    ) -> dict[str, int | dict]:
-        """Backward-compatible wrapper returning dict for tests."""
-        analyzer = self._last_analyzer
-        if analyzer is None:
-            analyzer = CircuitAnalyzer(
-                graph,
-                self.style,
-                self.inline,
-                self.fold_loops,
-                self.expand_composite,
-                self.inline_depth,
-            )
-        engine = CircuitLayoutEngine(analyzer, self.style)
-        layout = engine.compute_layout(graph, qubit_map, len(qubit_map))
-        return {
-            "width": layout.width,
-            "positions": layout.positions,
-            "block_ranges": layout.block_ranges,
-            "max_depth": layout.max_depth,
-            "block_widths": layout.block_widths,
-            "actual_width": layout.actual_width,
-            "first_gate_x": layout.first_gate_x,
-            "first_gate_half_width": layout.first_gate_half_width,
-        }

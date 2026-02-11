@@ -676,6 +676,80 @@ class CircuitAnalyzer:
         collect_from_ops(op.operations)
         return list(affected)
 
+    def _collect_if_affected_qubits(
+        self,
+        op: IfOperation,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str] | None = None,
+        param_values: dict | None = None,
+    ) -> list[int]:
+        """Collect qubit indices affected by an IfOperation.
+
+        Recursively walks both true and false branches to collect all
+        qubit indices that are operands of any operation.
+
+        Args:
+            op: IfOperation to analyze.
+            qubit_map: Mapping from logical_id to qubit wire index.
+            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
+            param_values: Parameter values for resolving expressions.
+
+        Returns:
+            List of affected qubit indices.
+        """
+        if logical_id_remap is None:
+            logical_id_remap = {}
+        if param_values is None:
+            param_values = {}
+
+        affected: set[int] = set()
+
+        def collect_qubits(ops: list[Operation]) -> None:
+            for inner_op in ops:
+                operands: list = []
+                if isinstance(inner_op, GateOperation):
+                    operands = list(inner_op.operands)
+                elif isinstance(inner_op, CallBlockOperation):
+                    operands = list(inner_op.operands[1:])
+                elif isinstance(inner_op, ControlledUOperation):
+                    operands = list(inner_op.operands[1:])
+                elif isinstance(inner_op, CompositeGateOperation):
+                    operands = list(inner_op.control_qubits) + list(
+                        inner_op.target_qubits
+                    )
+                elif isinstance(inner_op, MeasureOperation):
+                    operands = list(inner_op.operands[:1])
+                elif isinstance(inner_op, MeasureVectorOperation):
+                    if inner_op.operands:
+                        indices = self._resolve_operand_to_qubit_indices(
+                            inner_op.operands[0], qubit_map, logical_id_remap
+                        )
+                        affected.update(indices)
+                    continue
+                elif isinstance(inner_op, ForOperation):
+                    collect_qubits(inner_op.operations)
+                    continue
+                elif isinstance(inner_op, WhileOperation):
+                    collect_qubits(inner_op.operations)
+                    continue
+                elif isinstance(inner_op, IfOperation):
+                    collect_qubits(inner_op.true_operations)
+                    collect_qubits(inner_op.false_operations)
+                    continue
+                elif isinstance(inner_op, ForItemsOperation):
+                    collect_qubits(inner_op.operations)
+                    continue
+                for operand in operands:
+                    idx = self._resolve_operand_to_qubit_index(
+                        operand, qubit_map, logical_id_remap, param_values
+                    )
+                    if idx is not None:
+                        affected.add(idx)
+
+        collect_qubits(op.true_operations)
+        collect_qubits(op.false_operations)
+        return list(affected)
+
     def _evaluate_value(
         self,
         value: Value,

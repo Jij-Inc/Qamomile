@@ -99,21 +99,9 @@ class MatplotlibRenderer:
         self.qubit_names = qubit_names
         self._inlined_op_keys = layout.inlined_op_keys
 
-        # Convert layout to dict for internal methods that expect dict
-        layout_dict = {
-            "width": layout.width,
-            "positions": layout.positions,
-            "block_ranges": layout.block_ranges,
-            "max_depth": layout.max_depth,
-            "block_widths": layout.block_widths,
-            "actual_width": layout.actual_width,
-            "first_gate_x": layout.first_gate_x,
-            "first_gate_half_width": layout.first_gate_half_width,
-        }
-
-        fig = self._create_figure(num_qubits, layout_dict)
-        self._draw_wires(fig, num_qubits, layout_dict, qubit_map)
-        self._draw_operations(fig, graph, qubit_map, layout_dict)
+        fig = self._create_figure(num_qubits)
+        self._draw_wires(fig, num_qubits, qubit_map)
+        self._draw_operations(fig, graph, qubit_map)
         self._add_jupyter_display_support(fig)
         return fig
 
@@ -205,12 +193,11 @@ class MatplotlibRenderer:
             return bbox.height / pixels_per_data_unit
         return self.style.fallback_text_height
 
-    def _create_figure(self, num_qubits: int, layout: dict) -> Figure:
+    def _create_figure(self, num_qubits: int) -> Figure:
         """Create matplotlib figure with appropriate size.
 
         Args:
             num_qubits: Number of qubits.
-            layout: Layout dictionary.
 
         Returns:
             matplotlib Figure.
@@ -231,8 +218,8 @@ class MatplotlibRenderer:
             fig._qm_ax = ax
             return fig
 
-        width = layout["width"]
-        block_ranges = layout.get("block_ranges", [])
+        width = self.layout.width
+        block_ranges = self.layout.block_ranges
 
         # Use Figure directly to avoid pyplot auto-display in Jupyter
         fig = Figure(figsize=(6, 2))  # Temporary size, will be updated
@@ -262,12 +249,12 @@ class MatplotlibRenderer:
 
         # Dynamic horizontal limits based on block border extents
         # Use first gate position and wire extension for symmetric left margin
-        first_gate_x = layout.get("first_gate_x", 1.0)
+        first_gate_x = self.layout.first_gate_x
         wire_ext = self.style.wire_extension
         # Left limit: wire extends wire_extension past first gate, plus label space
-        first_gate_hw = layout.get("first_gate_half_width", self.style.gate_width / 2)
+        first_gate_hw = self.layout.first_gate_half_width
         x_left = first_gate_x - first_gate_hw - wire_ext - 0.7
-        x_right = max(width + 0.5, layout.get("actual_width", width) + wire_ext + 0.2)
+        x_right = max(width + 0.5, self.layout.actual_width + wire_ext + 0.2)
 
         if block_ranges:
             for br in block_ranges:
@@ -291,8 +278,8 @@ class MatplotlibRenderer:
                 x_left = min(x_left, border_left - 0.3)
 
         # Account for folded ForOperation boxes in figure sizing
-        positions = layout.get("positions", {})
-        block_widths_dict = layout.get("block_widths", {})
+        positions = self.layout.positions
+        block_widths_dict = self.layout.block_widths
         for key, bw in block_widths_dict.items():
             if key in positions:
                 box_left = positions[key] - bw / 2
@@ -329,7 +316,6 @@ class MatplotlibRenderer:
         self,
         fig: Figure,
         num_qubits: int,
-        layout: dict,
         qubit_map: dict[str, int],
     ) -> None:
         """Draw qubit wires and labels.
@@ -337,15 +323,14 @@ class MatplotlibRenderer:
         Args:
             fig: matplotlib Figure.
             num_qubits: Number of qubits.
-            layout: Layout dictionary.
             qubit_map: Qubit to wire index mapping.
         """
         ax = fig._qm_ax
         # Compute wire start/end symmetrically from gate edges
-        actual_width = layout.get("actual_width", layout["width"])
-        first_gate_x = layout.get("first_gate_x", 1.0)
+        actual_width = self.layout.actual_width
+        first_gate_x = self.layout.first_gate_x
         wire_ext = self.style.wire_extension
-        first_gate_hw = layout.get("first_gate_half_width", self.style.gate_width / 2)
+        first_gate_hw = self.layout.first_gate_half_width
         wire_start = first_gate_x - first_gate_hw - wire_ext
         default_wire_end = actual_width + wire_ext
 
@@ -387,6 +372,7 @@ class MatplotlibRenderer:
         logical_id_remap: dict[str, str],
         param_values: dict,
         draw_ops_fn: Callable[..., None],
+        qubit_map: dict[str, int] | None = None,
     ) -> None:
         """Recursively draw inlined block operations.
 
@@ -400,11 +386,19 @@ class MatplotlibRenderer:
             logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
             param_values: Parameter values for resolving expressions.
             draw_ops_fn: Callback to recursively draw child operations.
+            qubit_map: Qubit to wire index mapping for resolving array elements.
         """
         new_logical_id_remap, child_param_values = (
             self.analyzer._build_block_value_mappings(
-                block_value, actual_inputs, logical_id_remap, param_values
+                block_value,
+                actual_inputs,
+                logical_id_remap,
+                param_values,
+                qubit_map=qubit_map,
             )
+        )
+        self.analyzer._evaluate_loop_body_intermediates(
+            block_value.operations, child_param_values
         )
         draw_ops_fn(
             block_value.operations,
@@ -456,6 +450,7 @@ class MatplotlibRenderer:
                 logical_id_remap,
                 param_values,
                 draw_ops_fn,
+                qubit_map=qubit_map,
             )
         elif op_key in positions:
             self._draw_call_block(
@@ -512,6 +507,7 @@ class MatplotlibRenderer:
                 logical_id_remap,
                 param_values,
                 draw_ops_fn,
+                qubit_map=qubit_map,
             )
         elif op_key in positions:
             self._draw_composite_gate(
@@ -567,6 +563,7 @@ class MatplotlibRenderer:
                 logical_id_remap,
                 param_values,
                 draw_ops_fn,
+                qubit_map=qubit_map,
             )
         elif op_key in positions:
             self._draw_controlled_u(
@@ -663,7 +660,6 @@ class MatplotlibRenderer:
         fig: Figure,
         graph: Graph,
         qubit_map: dict[str, int],
-        layout: dict,
     ) -> None:
         """Draw all operations.
 
@@ -671,11 +667,10 @@ class MatplotlibRenderer:
             fig: matplotlib Figure.
             graph: Computation graph.
             qubit_map: Qubit to wire index mapping.
-            layout: Layout dictionary.
         """
-        positions = layout["positions"]
-        block_ranges = layout.get("block_ranges", [])
-        block_widths = layout.get("block_widths", {})
+        positions = self.layout.positions
+        block_ranges = self.layout.block_ranges
+        block_widths = self.layout.block_widths
 
         # First, draw block borders (behind gates)
         # Compute max_depth for inverted label offset
@@ -1907,7 +1902,7 @@ class MatplotlibRenderer:
 
         # Draw header at top of box
         header_y = box_top - self.style.label_vertical_offset - 0.15
-        ax.text(
+        header_text = ax.text(
             x_pos,
             header_y,
             label,
@@ -1917,13 +1912,15 @@ class MatplotlibRenderer:
             fontsize=self.style.subfont_size,
             fontweight="bold",
             zorder=PORDER_TEXT,
+            clip_on=True,
         )
+        header_text.set_clip_path(rect)
 
         # Draw operation text centered in remaining space
         if expressions:
             body_text = "\n".join(expressions)
             body_center_y = (box_bottom + header_y) / 2
-            ax.text(
+            body_text_obj = ax.text(
                 x_pos,
                 body_center_y,
                 body_text,
@@ -1933,7 +1930,9 @@ class MatplotlibRenderer:
                 fontsize=self.style.subfont_size,
                 family="monospace",
                 zorder=PORDER_TEXT,
+                clip_on=True,
             )
+            body_text_obj.set_clip_path(rect)
 
     def _draw_expval_op(
         self,
@@ -2154,44 +2153,9 @@ class MatplotlibRenderer:
         ax = fig._qm_ax
 
         # Get affected qubits
-        affected: set[int] = set()
-
-        def collect_qubits(ops: list[Operation]) -> None:
-            """Recursively collect qubit indices from operations into `affected` set."""
-            for inner_op in ops:
-                operands: list = []
-                if isinstance(inner_op, GateOperation):
-                    operands = list(inner_op.operands)
-                elif isinstance(inner_op, CallBlockOperation):
-                    operands = list(inner_op.operands[1:])
-                elif isinstance(inner_op, ControlledUOperation):
-                    operands = list(inner_op.operands[1:])
-                elif isinstance(inner_op, CompositeGateOperation):
-                    operands = list(inner_op.control_qubits) + list(
-                        inner_op.target_qubits
-                    )
-                elif isinstance(inner_op, MeasureOperation):
-                    operands = list(inner_op.operands[:1])
-                elif isinstance(inner_op, ForOperation):
-                    collect_qubits(inner_op.operations)
-                    continue
-                elif isinstance(inner_op, WhileOperation):
-                    collect_qubits(inner_op.operations)
-                    continue
-                elif isinstance(inner_op, IfOperation):
-                    collect_qubits(inner_op.true_operations)
-                    collect_qubits(inner_op.false_operations)
-                    continue
-                for operand in operands:
-                    idx = self.analyzer._resolve_operand_to_qubit_index(
-                        operand, qubit_map, logical_id_remap or {}, param_values
-                    )
-                    if idx is not None:
-                        affected.add(idx)
-
-        collect_qubits(op.true_operations)
-        collect_qubits(op.false_operations)
-        affected_qubits = list(affected)
+        affected_qubits = self.analyzer._collect_if_affected_qubits(
+            op, qubit_map, logical_id_remap, param_values
+        )
 
         if not affected_qubits:
             return

@@ -188,7 +188,9 @@ class CircuitLayoutEngine:
         inter-gate gaps and border extent on both sides.
         """
         border_padding = self.analyzer._compute_border_padding(depth)
-        border_extent = max_gate_width / 2 + border_padding
+        border_extent = (
+            max_gate_width / 2 + border_padding + self.style.gate_text_padding
+        )
 
         total = self._sum_children_widths(children)
 
@@ -471,44 +473,9 @@ class CircuitLayoutEngine:
     ) -> IfMeasure:
         """Measure width of an IfOperation (fold or unfold)."""
         # Collect affected qubits from both branches
-        affected: set[int] = set()
-
-        def collect_qubits(ops: list[Operation]) -> None:
-            """Recursively collect qubit indices from operations into `affected` set."""
-            for inner_op in ops:
-                operands: list = []
-                if isinstance(inner_op, GateOperation):
-                    operands = list(inner_op.operands)
-                elif isinstance(inner_op, CallBlockOperation):
-                    operands = list(inner_op.operands[1:])
-                elif isinstance(inner_op, ControlledUOperation):
-                    operands = list(inner_op.operands[1:])
-                elif isinstance(inner_op, CompositeGateOperation):
-                    operands = list(inner_op.control_qubits) + list(
-                        inner_op.target_qubits
-                    )
-                elif isinstance(inner_op, MeasureOperation):
-                    operands = list(inner_op.operands[:1])
-                elif isinstance(inner_op, ForOperation):
-                    collect_qubits(inner_op.operations)
-                    continue
-                elif isinstance(inner_op, WhileOperation):
-                    collect_qubits(inner_op.operations)
-                    continue
-                elif isinstance(inner_op, IfOperation):
-                    collect_qubits(inner_op.true_operations)
-                    collect_qubits(inner_op.false_operations)
-                    continue
-                for operand in operands:
-                    idx = self.analyzer._resolve_operand_to_qubit_index(
-                        operand, qubit_map, logical_id_remap, param_values
-                    )
-                    if idx is not None:
-                        affected.add(idx)
-
-        collect_qubits(op.true_operations)
-        collect_qubits(op.false_operations)
-        affected_qubits = list(affected)
+        affected_qubits = self.analyzer._collect_if_affected_qubits(
+            op, qubit_map, logical_id_remap, param_values
+        )
 
         # Build condition label
         cond = op.condition
@@ -892,7 +859,9 @@ class CircuitLayoutEngine:
         # Advance for border extent (left padding)
         border_padding = measure.border_padding
         max_gate_width = measure.max_gate_width
-        border_extent = max_gate_width / 2 + border_padding
+        border_extent = (
+            max_gate_width / 2 + border_padding + self.style.gate_text_padding
+        )
 
         # Compute first child's half-width for accurate left offset
         first_child_half = self.style.gate_width / 2  # fallback
