@@ -561,6 +561,8 @@ class QKernel(Generic[P, R]):
         self,
         inline: bool = False,
         fold_loops: bool = True,
+        expand_composite: bool = False,
+        inline_depth: int | None = None,
         **kwargs: Any,
     ) -> Any:
         """Visualize the circuit using Matplotlib.
@@ -574,6 +576,11 @@ class QKernel(Generic[P, R]):
                    If False (default), show CallBlockOperation as boxes.
             fold_loops: If True (default), display ForOperation as blocks instead of unrolling.
                        If False, expand loops and show all iterations.
+            expand_composite: If True, expand CompositeGateOperation (QFT, QPE, etc.).
+                            If False (default), show as boxes. Independent of inline.
+            inline_depth: Maximum nesting depth for inline expansion. None means
+                         unlimited (default). 0 means no inlining, 1 means top-level
+                         only, etc. Only affects CallBlock/ControlledU, not CompositeGate.
             **kwargs: Concrete values for arguments. Arguments not provided here
                      (and without defaults) will be shown as symbolic parameters.
 
@@ -612,6 +619,9 @@ class QKernel(Generic[P, R]):
 
             # Draw with loops folded (shown as blocks)
             fig = circuit.draw(fold_loops=True)
+
+            # Draw with composite gates expanded
+            fig = circuit.draw(expand_composite=True)
             ```
         """
         from qamomile.circuit.visualization import MatplotlibDrawer
@@ -620,7 +630,12 @@ class QKernel(Generic[P, R]):
         # Extract return variable names from AST and set them in the graph
         graph.output_names = self._extract_return_names() or []
         drawer = MatplotlibDrawer(graph)
-        return drawer.draw(inline=inline, fold_loops=fold_loops)
+        return drawer.draw(
+            inline=inline,
+            fold_loops=fold_loops,
+            expand_composite=expand_composite,
+            inline_depth=inline_depth,
+        )
 
 
 def qkernel(func: Callable[P, R]) -> QKernel[P, R]:

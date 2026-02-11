@@ -57,9 +57,29 @@ class CircuitStyle:
     for_loop_text_color: str = "#000000"  # Black
     for_loop_edge_color: str = "#C4A882"  # Warm tan
 
+    # While-loop box colors
+    while_loop_face_color: str = "#E0D4F0"  # Light lavender
+    while_loop_text_color: str = "#000000"  # Black
+    while_loop_edge_color: str = "#A88BC8"  # Muted purple
+
+    # ForItems box colors
+    for_items_face_color: str = "#D0E8D0"  # Light sage
+    for_items_text_color: str = "#000000"  # Black
+    for_items_edge_color: str = "#90B890"  # Muted green
+
+    # If-operation box colors
+    if_face_color: str = "#F0D8D0"  # Light coral
+    if_text_color: str = "#000000"  # Black
+    if_edge_color: str = "#C8A898"  # Muted tan
+
+    # ExpvalOp box colors
+    expval_face_color: str = "#D4E8F0"  # Light blue
+    expval_text_color: str = "#000000"  # Black
+    expval_edge_color: str = "#8AB4C8"  # Muted blue
+
     # Font sizes
     font_size: int = 13
-    subfont_size: int = 8
+    subfont_size: int = 10
     param_font_size: int = 9  # Font size for parametric gates
 
     # Layout
@@ -127,6 +147,9 @@ class CircuitStyle:
     # Nested block padding (Issue 8)
     nested_padding_decay: float = 0.85  # Padding decay factor per nesting depth
     min_block_padding: float = 0.1  # Minimum block padding
+
+    # Folded box vertical padding for text
+    folded_box_text_v_padding: float = 0.15
 
     # Qubit y-position spacing constants
     qubit_base_spacing: float = 1.0  # Base spacing between qubit wires

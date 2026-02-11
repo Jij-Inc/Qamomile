@@ -28,6 +28,7 @@ from qamomile.circuit.ir.operation.composite_gate import (
 )
 from qamomile.circuit.ir.types import QFixedType
 from qamomile.circuit.ir.value import Value
+from qamomile.circuit.stdlib.qft import IQFT as IQFTGate
 
 if TYPE_CHECKING:
     from qamomile.circuit.frontend.qkernel import QKernel
@@ -96,14 +97,19 @@ def _emit_iqft_and_cast_to_qfixed(qubits: Vector[Qubit]) -> QFixed:
     for i, h in enumerate(qubit_handles):
         qubits[i] = h
 
+    # Build IQFT implementation BlockValue for visualization (expand_composite)
+    iqft_gate = IQFTGate(concrete_n)
+    impl_block = iqft_gate._build_decomposition_block(tuple(qubit_handles))
+
     # Create CompositeGateOperation for IQFT
     iqft_op = CompositeGateOperation(
-        operands=operands,
+        operands=([impl_block] if impl_block else []) + operands,
         results=iqft_results,
         gate_type=CompositeGateType.IQFT,
         num_control_qubits=0,
         num_target_qubits=concrete_n,
-        has_implementation=False,  # Use native backend
+        has_implementation=impl_block is not None,
+        composite_gate_instance=iqft_gate,
     )
 
     tracer = get_current_tracer()
