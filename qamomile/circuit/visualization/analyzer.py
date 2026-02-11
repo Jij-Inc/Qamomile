@@ -855,6 +855,45 @@ class CircuitAnalyzer:
 
         return None
 
+    def _resolve_symbolic_array_name(
+        self, value: Value, param_values: dict
+    ) -> str | None:
+        """Try to resolve array element indices for symbolic display.
+
+        For array elements like phis[i] where the array is symbolic but
+        indices can be resolved (e.g., loop variable i=0), produces
+        "phis[0]" instead of "phis[i]".
+
+        Args:
+            value: IR Value that may be an array element.
+            param_values: Mapping from logical_ids/names to concrete values.
+
+        Returns:
+            Resolved name string (e.g., "phis[0]"), or None if not applicable.
+        """
+        if not (
+            hasattr(value, "parent_array")
+            and value.parent_array is not None
+            and hasattr(value, "element_indices")
+            and value.element_indices
+        ):
+            return None
+
+        parent_name = value.parent_array.name or "params"
+        resolved_indices = []
+        for idx_val in value.element_indices:
+            resolved = self._evaluate_value(idx_val, param_values)
+            if resolved is not None:
+                resolved_indices.append(
+                    str(int(resolved))
+                    if isinstance(resolved, float) and resolved == int(resolved)
+                    else str(resolved)
+                )
+            else:
+                return None
+
+        return f"{parent_name}[{','.join(resolved_indices)}]"
+
     @staticmethod
     def _safe_int_str(val: int | float | None) -> str:
         """Convert a numeric value to an integer string, handling non-integer floats.
@@ -1448,11 +1487,18 @@ class CircuitAnalyzer:
 
         return None
 
-    def _get_gate_params_for_expression(self, op: GateOperation) -> str | None:
+    def _get_gate_params_for_expression(
+        self,
+        op: GateOperation,
+        loop_vars: set[str] | None = None,
+        body_operations: list | None = None,
+    ) -> str | None:
         """Get gate parameters as a string for expression format.
 
         Args:
             op: GateOperation.
+            loop_vars: Set of loop variable names in scope (e.g., {"i", "j"}).
+            body_operations: Operations list for resolving index expressions.
 
         Returns:
             Parameter string (e.g., "0.5") or None if no parameters.
@@ -1480,6 +1526,15 @@ class CircuitAnalyzer:
                 const = theta.get_const()
                 if const is not None:
                     return self._format_parameter(const)
+                elif (
+                    hasattr(theta, "parent_array")
+                    and theta.parent_array is not None
+                ):
+                    array_name = theta.parent_array.name or "params"
+                    idx_str = self._resolve_index_expression(
+                        theta, loop_vars or set(), body_operations
+                    )
+                    return self._format_symbolic_param(f"{array_name}[{idx_str}]")
                 elif theta.is_parameter():
                     param_name = theta.parameter_name() or "θ"
                     return self._format_symbolic_param(param_name)
@@ -1491,6 +1546,17 @@ class CircuitAnalyzer:
                 const = operand.get_const()
                 if const is not None and isinstance(const, (int, float)):
                     params.append(self._format_parameter(const))
+                elif (
+                    hasattr(operand, "parent_array")
+                    and operand.parent_array is not None
+                ):
+                    array_name = operand.parent_array.name or "params"
+                    idx_str = self._resolve_index_expression(
+                        operand, loop_vars or set(), body_operations
+                    )
+                    params.append(
+                        self._format_symbolic_param(f"{array_name}[{idx_str}]")
+                    )
                 elif hasattr(operand, "is_parameter") and operand.is_parameter():
                     param_name = operand.parameter_name() or "θ"
                     params.append(self._format_symbolic_param(param_name))
@@ -1546,7 +1612,7 @@ class CircuitAnalyzer:
             if not qubit_strs:
                 return None
 
-            params = self._get_gate_params_for_expression(op)
+            params = self._get_gate_params_for_expression(op, loop_vars, body_operations)
             result_str = ",".join(qubit_strs)
             args_str = ",".join(qubit_strs)
             if params:
@@ -1742,33 +1808,41 @@ class CircuitAnalyzer:
         return f"{value:.2f}"  # e.g., "0.79"
 
     def _format_symbolic_param(self, name: str) -> str:
-        """Format symbolic parameter name for display with TeX notation.
+        """Format symbolic parameter name for display.
 
-        All symbolic parameters are wrapped in $...$ for consistent math rendering.
+        Greek-letter names get TeX rendering ($\\theta$).
+        Non-Greek names are returned as plain text (no italic).
 
         Args:
             name: Parameter name.
 
         Returns:
-            TeX-formatted string:
-            - Contains backslash (e.g., r"\theta"): use as-is (already TeX command)
-            - Contains underscore (e.g., "theta_2"): make subscript → $theta_{2}$
-            - Known TeX symbol (e.g., "theta"): convert to TeX command → $\theta$
-            - Otherwise: wrap in $...$ → $name$
+            TeX-formatted string for Greek names, plain text otherwise.
         """
         if "\\" in name:
             # Already a TeX command like \theta, \phi
             return f"${name}$"
-        elif "_" in name:
-            # Subscript notation like theta_2 → $\theta_{2}$
+
+        # Handle array subscript notation (e.g., "phi[0]", "phis[i]")
+        bracket_pos = name.find("[")
+        if bracket_pos > 0:
+            base = name[:bracket_pos]
+            rest = name[bracket_pos:]  # e.g., "[i]" or "[0]"
+            if base in _TEX_SYMBOLS:
+                return f"$\\{base}{rest}$"
+            return name  # plain text, e.g., "phis[i]"
+
+        # Handle underscore notation (e.g., "theta_2", "x_2")
+        if "_" in name:
             parts = name.split("_", 1)
-            prefix = f"\\{parts[0]}" if parts[0] in _TEX_SYMBOLS else parts[0]
-            return f"${prefix}_{{{parts[1]}}}$"
-        else:
-            # Known TeX symbol → $\theta$, unknown → $name$
-            if name in _TEX_SYMBOLS:
-                return f"$\\{name}$"
-            return f"${name}$"
+            if parts[0] in _TEX_SYMBOLS:
+                return f"$\\{parts[0]}_{{{parts[1]}}}$"
+            return name  # plain text, e.g., "x_2"
+
+        # Simple name
+        if name in _TEX_SYMBOLS:
+            return f"$\\{name}$"
+        return name  # plain text, e.g., "phis"
 
     def _get_block_label(
         self, op: CallBlockOperation, qubit_map: dict[str, int]
@@ -1886,9 +1960,15 @@ class CircuitAnalyzer:
                         ):
                             param_str = self._format_parameter(evaluated)
                         else:
-                            # Symbolic parameter with parameter_name
-                            name = op.theta.parameter_name() or op.theta.name
-                            param_str = self._format_symbolic_param(name)
+                            # Try resolving array indices (e.g., phis[i] → phis[0])
+                            resolved_name = self._resolve_symbolic_array_name(
+                                op.theta, param_values or {}
+                            )
+                            if resolved_name is not None:
+                                param_str = self._format_symbolic_param(resolved_name)
+                            else:
+                                name = op.theta.parameter_name() or op.theta.name
+                                param_str = self._format_symbolic_param(name)
                 else:
                     # Generic Value — try evaluating (handles array elements, BinOps)
                     evaluated = self._evaluate_value(op.theta, param_values or {})
@@ -1903,7 +1983,15 @@ class CircuitAnalyzer:
                             param_values[op.theta.logical_id]
                         )
                     else:
-                        param_str = self._format_symbolic_param(op.theta.name or "?")
+                        resolved_name = self._resolve_symbolic_array_name(
+                            op.theta, param_values or {}
+                        )
+                        if resolved_name is not None:
+                            param_str = self._format_symbolic_param(resolved_name)
+                        else:
+                            param_str = self._format_symbolic_param(
+                                op.theta.name or "?"
+                            )
             else:
                 # Unknown type, convert to string
                 param_str = str(op.theta)
