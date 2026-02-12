@@ -1,6 +1,8 @@
 from __future__ import annotations
 from typing import Generic
 
+import numpy as np
+
 from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.optimization.utils import is_close_zero
 from .expr import BinaryExpr, VarType, VT
@@ -30,7 +32,6 @@ class BinaryModel(Generic[VT]):
         self.order = 0
         self._update_internal_coefficients()
 
-
     @property
     def num_bits(self) -> int:
         return len(self.index_new_to_origin)
@@ -38,7 +39,7 @@ class BinaryModel(Generic[VT]):
     @property
     def vartype(self) -> VT:
         return self._expr.vartype
-    
+
     def _update_internal_coefficients(self) -> None:
         order = 0
         for inds, coeff in self._expr.coefficients.items():
@@ -57,108 +58,229 @@ class BinaryModel(Generic[VT]):
         self.order = order
 
     @classmethod
-    def from_qubo(cls, qubo: dict[tuple[int, int], float], constant: float = 0.0) -> "BinaryModel":
+    def from_qubo(
+        cls,
+        qubo: dict[tuple[int, int], float],
+        constant: float = 0.0,
+        simplify: bool = False,
+    ) -> "BinaryModel":
         expr = BinaryExpr(vartype=VarType.BINARY, constant=constant, coefficients={})
         for (i, j), coeff in qubo.items():
             if i == j:
-                expr.coefficients[(i,)] = coeff
+                expr.coefficients[(i,)] = expr.coefficients.get((i,), 0.0) + coeff
             else:
-                expr.coefficients[tuple(sorted((i, j)))] = coeff
+                key = tuple(sorted((i, j)))
+                expr.coefficients[key] = expr.coefficients.get(key, 0.0) + coeff
+        if simplify:
+            expr.coefficients = {
+                k: v for k, v in expr.coefficients.items() if not is_close_zero(v)
+            }
         return cls(expr)  # type: ignore
-
 
     @classmethod
-    def from_ising(cls, linear: dict[int, float], quad: dict[tuple[int, int], float], constant: float = 0.0) -> "BinaryModel":
+    def from_ising(
+        cls,
+        linear: dict[int, float],
+        quad: dict[tuple[int, int], float],
+        constant: float = 0.0,
+        simplify: bool = False,
+    ) -> "BinaryModel":
         expr = BinaryExpr(vartype=VarType.SPIN, constant=constant, coefficients={})
         for i, coeff in linear.items():
-            expr.coefficients[(i,)] = coeff
+            expr.coefficients[(i,)] = expr.coefficients.get((i,), 0.0) + coeff
         for (i, j), coeff in quad.items():
-            expr.coefficients[tuple(sorted((i, j)))] = coeff
+            key = tuple(sorted((i, j)))
+            expr.coefficients[key] = expr.coefficients.get(key, 0.0) + coeff
+        if simplify:
+            expr.coefficients = {
+                k: v for k, v in expr.coefficients.items() if not is_close_zero(v)
+            }
         return cls(expr)  # type: ignore
 
+    @classmethod
+    def from_hubo(
+        cls,
+        hubo: dict[tuple[int, ...], float],
+        constant: float = 0.0,
+        simplify: bool = False,
+    ) -> "BinaryModel":
+        """Create a BINARY BinaryModel from HUBO coefficients.
+
+        Args:
+            hubo: HUBO coefficients mapping index tuples to values.
+                  Duplicate index tuples (e.g. (0,1,2) and (2,0,1)) are accumulated.
+            constant: Constant offset term.
+            simplify: If True, remove near-zero coefficients.
+
+        Returns:
+            BinaryModel with BINARY vartype.
+        """
+        expr = BinaryExpr(vartype=VarType.BINARY, constant=constant, coefficients={})
+        for indices, coeff in hubo.items():
+            key = tuple(sorted(indices))
+            expr.coefficients[key] = expr.coefficients.get(key, 0.0) + coeff
+        if simplify:
+            expr.coefficients = {
+                k: v for k, v in expr.coefficients.items() if not is_close_zero(v)
+            }
+        return cls(expr)  # type: ignore
 
     @property
     def linear(self) -> dict[int, float]:
         return self._linear
-    
+
     @property
     def quad(self) -> dict[tuple[int, int], float]:
         return self._quad
-    
+
     @property
     def higher(self) -> dict[tuple[int, ...], float]:
         return self._higher
+
+    @property
+    def coefficients(self) -> dict[tuple[int, ...], float]:
+        """All coefficients as a single flat dictionary using sequential indices."""
+        return {
+            tuple(sorted(self.index_origin_to_new[i] for i in inds)): coeff
+            for inds, coeff in self._expr.coefficients.items()
+            if not is_close_zero(coeff)
+        }
+
+    def calc_energy(self, state: list[int]) -> float:
+        """Calculate the energy for a given variable assignment.
+
+        Args:
+            state: Variable values indexed by sequential (zero-origin) indices.
+                   For SPIN: values must be +1 or -1.
+                   For BINARY: values must be 0 or 1.
+
+        Returns:
+            The energy value.
+
+        Raises:
+            ValueError: If state values are invalid for the vartype.
+        """
+        if self.vartype == VarType.SPIN:
+            if not np.allclose(np.abs(state), 1.0):
+                raise ValueError(
+                    "All elements must be close to +1 or -1 for SPIN vartype."
+                )
+        elif self.vartype == VarType.BINARY:
+            if not all(v in (0, 1) for v in state):
+                raise ValueError("All elements must be 0 or 1 for BINARY vartype.")
+
+        energy = self.constant
+        for inds, coeff in self.coefficients.items():
+            term = coeff
+            for idx in inds:
+                term *= state[idx]
+            energy += term
+        return energy
 
     def change_vartype(self, vartype: VarType) -> "BinaryModel":
         if self._expr.vartype == vartype:
             return BinaryModel(self._expr.copy())
 
-        new_expr = BinaryExpr(vartype=vartype, constant=0.0, coefficients={})
+        # Carry over the original constant — it's vartype-independent.
+        new_expr = BinaryExpr(
+            vartype=vartype, constant=self._expr.constant, coefficients={}
+        )
 
         # binary spin corerspondence is based on Z|0> = |0>, Z|1> = -|1>
         # that means
-        # binary | spin 
+        # binary | spin
         #   0    |  1
         #   1    | -1
         if vartype == VarType.SPIN:
             # BINARY to SPIN: x = (1 - s) / 2
             for inds, coeff in self._expr.coefficients.items():
-                term = BinaryExpr(vartype=VarType.SPIN, constant=0.0, coefficients={}) 
                 # For efficiency, we handle up to quadratic terms directly
+                # Note: This branch is currently dead code because BinaryExpr
+                # stores constant terms in `constant`, not as coefficients[()].
+                # Kept as a defensive guard for correctness.
                 if len(inds) == 0:
-                    term.constant = coeff
+                    term = BinaryExpr(
+                        vartype=VarType.SPIN, constant=coeff, coefficients={}
+                    )
                 elif len(inds) == 1:
                     i = inds[0]
-                    term.constant = coeff * 0.5
-                    term.coefficients[(i,)] = -coeff * 0.5
+                    term = BinaryExpr(
+                        vartype=VarType.SPIN,
+                        constant=coeff * 0.5,
+                        coefficients={(i,): -coeff * 0.5},
+                    )
                 elif len(inds) == 2:
                     i, j = inds
                     _coeff = coeff * 0.25
-                    term.constant = _coeff
-                    term.coefficients[(i,)] = -_coeff
-                    term.coefficients[(j,)] = -_coeff
-                    term.coefficients[(i, j)] = _coeff
+                    term = BinaryExpr(
+                        vartype=VarType.SPIN,
+                        constant=_coeff,
+                        coefficients={(i,): -_coeff, (j,): -_coeff, (i, j): _coeff},
+                    )
                 else:
-                    # For higher order terms, expand similarly
+                    # For higher order terms, expand coeff * prod((1 - s_i) / 2)
+                    term = BinaryExpr(
+                        vartype=VarType.SPIN, constant=coeff, coefficients={}
+                    )
                     for i in inds:
-                        single_term = BinaryExpr(vartype=VarType.SPIN, constant=0.5, coefficients={(i,): -0.5})
+                        single_term = BinaryExpr(
+                            vartype=VarType.SPIN,
+                            constant=0.5,
+                            coefficients={(i,): -0.5},
+                        )
                         term *= single_term
                 new_expr += term
         elif vartype == VarType.BINARY:
             # SPIN to BINARY: s = 1 - 2x
             for inds, coeff in self._expr.coefficients.items():
-                term = BinaryExpr(vartype=VarType.BINARY, constant=0.0, coefficients={}) 
                 # For efficiency, we handle up to quadratic terms directly
+                # Note: This branch is currently dead code because BinaryExpr
+                # stores constant terms in `constant`, not as coefficients[()].
+                # Kept as a defensive guard for correctness.
                 if len(inds) == 0:
-                    term.constant = coeff
+                    term = BinaryExpr(
+                        vartype=VarType.BINARY, constant=coeff, coefficients={}
+                    )
                 elif len(inds) == 1:
                     i = inds[0]
-                    term.constant = coeff
-                    term.coefficients[(i,)] = -2 * coeff
+                    term = BinaryExpr(
+                        vartype=VarType.BINARY,
+                        constant=coeff,
+                        coefficients={(i,): -2 * coeff},
+                    )
                 elif len(inds) == 2:
                     i, j = inds
                     _coeff = coeff
-                    term.constant = _coeff
-                    term.coefficients[(i,)] = -2 * _coeff
-                    term.coefficients[(j,)] = -2 * _coeff
-                    term.coefficients[(i, j)] = 4 * _coeff
+                    term = BinaryExpr(
+                        vartype=VarType.BINARY,
+                        constant=_coeff,
+                        coefficients={
+                            (i,): -2 * _coeff,
+                            (j,): -2 * _coeff,
+                            (i, j): 4 * _coeff,
+                        },
+                    )
                 else:
-                    # For higher order terms, expand similarly
+                    # For higher order terms, expand coeff * prod(1 - 2*x_i)
+                    term = BinaryExpr(
+                        vartype=VarType.BINARY, constant=coeff, coefficients={}
+                    )
                     for i in inds:
-                        single_term = BinaryExpr(vartype=VarType.BINARY, constant=1.0, coefficients={(i,): -2.0})
+                        single_term = BinaryExpr(
+                            vartype=VarType.BINARY,
+                            constant=1.0,
+                            coefficients={(i,): -2.0},
+                        )
                         term *= single_term
                 new_expr += term
-    
+
         else:
             raise ValueError("Unsupported vartype conversion.")
-    
+
         return BinaryModel(new_expr)
 
-
     def normalize_by_factor(
-        self,
-        factor: float,
-        replace: bool = False
+        self, factor: float, replace: bool = False
     ) -> BinaryModel[VT]:
         """Normalize the BinaryModel by a given factor.
 
@@ -175,10 +297,7 @@ class BinaryModel(Generic[VT]):
             return self
         return BinaryModel(normalized_expr)
 
-    def normalize_by_abs_max(
-        self,
-        replace: bool = False
-    ) -> BinaryModel[VT]:
+    def normalize_by_abs_max(self, replace: bool = False) -> BinaryModel[VT]:
         """Normalize the BinaryModel by its absolute maximum coefficient.
 
         Returns:
@@ -191,10 +310,7 @@ class BinaryModel(Generic[VT]):
             return self
         return BinaryModel(normalized_expr)
 
-    def normalize_by_rms(
-        self,
-        replace: bool = False
-    ) -> BinaryModel[VT]:
+    def normalize_by_rms(self, replace: bool = False) -> BinaryModel[VT]:
         """Normalize the BinaryModel by its root mean square.
 
         Returns:
@@ -208,8 +324,7 @@ class BinaryModel(Generic[VT]):
         return BinaryModel(normalized_expr)
 
     def decode_from_sampleresult(
-        self,
-        result: SampleResult[list[int]]
+        self, result: SampleResult[list[int]]
     ) -> BinarySampleSet[VT]:
         """Decode quantum measurement results into samples with energies.
 
@@ -273,6 +388,5 @@ class BinaryModel(Generic[VT]):
             samples=samples,
             num_occurrences=num_occurrences,
             energy=energies,
-            vartype=self.vartype
+            vartype=self.vartype,
         )
-
