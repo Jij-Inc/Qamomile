@@ -1,14 +1,13 @@
+import abc
+
 import ommx.v1
 
 import qamomile.observable as qm_o
-from qamomile.circuit.transpiler.transpiler import Transpiler
-from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.optimization.binary_model import BinaryModel, VarType, BinarySampleSet
-from qamomile.optimization.utils import is_close_zero
 
 
-class MathematicalProblemConverter:
+class MathematicalProblemConverter(abc.ABC):
 
     def __init__(
         self,
@@ -31,40 +30,18 @@ class MathematicalProblemConverter:
     def __post_init__(self) -> None:
         pass
 
+    @abc.abstractmethod
     def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
-        """Construct the cost Hamiltonian from the spin model.
+        """Construct the cost Hamiltonian.
 
-        Builds a Pauli-Z Hamiltonian from the spin model's linear, quadratic,
-        and higher-order terms.
+        Subclasses must implement this method to build the appropriate
+        Hamiltonian for their specific algorithm (e.g., Pauli-Z for QAOA,
+        QRAC-encoded for QRAO).
 
         Returns:
             qm_o.Hamiltonian: The cost Hamiltonian.
         """
-        hamiltonian = qm_o.Hamiltonian()
-
-        for i, hi in self.spin_model.linear.items():
-            if not is_close_zero(hi):
-                hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, i),), hi)
-
-        for (i, j), Jij in self.spin_model.quad.items():
-            if not is_close_zero(Jij):
-                hamiltonian.add_term(
-                    (
-                        qm_o.PauliOperator(qm_o.Pauli.Z, i),
-                        qm_o.PauliOperator(qm_o.Pauli.Z, j),
-                    ),
-                    Jij,
-                )
-
-        for indices, coeff in self.spin_model.higher.items():
-            if not is_close_zero(coeff):
-                pauli_ops = tuple(
-                    qm_o.PauliOperator(qm_o.Pauli.Z, idx) for idx in indices
-                )
-                hamiltonian.add_term(pauli_ops, coeff)
-
-        hamiltonian.constant = self.spin_model.constant
-        return hamiltonian
+        ...
 
     def decode(
         self,

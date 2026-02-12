@@ -37,6 +37,7 @@ import typing as typ
 import ommx.v1
 
 import qamomile.circuit as qm_c
+import qamomile.observable as qm_o
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.transpiler import Transpiler
 from qamomile.circuit.algorithm.fqaoa import (
@@ -63,7 +64,7 @@ class FQAOAConverter(MathematicalProblemConverter):
 
     .. code::
 
-        from qamomile.optimization.converters.fqaoa import FQAOAConverter
+        from qamomile.optimization.fqaoa import FQAOAConverter
 
         # Initialize with a compiled optimization problem instance
         fqaoa_converter = FQAOAConverter(compiled_instance, num_fermion=4)
@@ -231,6 +232,34 @@ class FQAOAConverter(MathematicalProblemConverter):
                 matrix[:, j + 1] = np.sin(angle) * col_1 + np.cos(angle) * col_2
 
         return givens_angles
+
+    def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
+        """Construct the Ising cost Hamiltonian from the spin model.
+
+        Builds a Pauli-Z Hamiltonian from the spin model's linear and
+        quadratic terms.
+
+        Returns:
+            qm_o.Hamiltonian: The cost Hamiltonian.
+        """
+        hamiltonian = qm_o.Hamiltonian()
+
+        for i, hi in self.spin_model.linear.items():
+            if not is_close_zero(hi):
+                hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, i),), hi)
+
+        for (i, j), Jij in self.spin_model.quad.items():
+            if not is_close_zero(Jij):
+                hamiltonian.add_term(
+                    (
+                        qm_o.PauliOperator(qm_o.Pauli.Z, i),
+                        qm_o.PauliOperator(qm_o.Pauli.Z, j),
+                    ),
+                    Jij,
+                )
+
+        hamiltonian.constant = self.spin_model.constant
+        return hamiltonian
 
     def get_init_state(self) -> qm_c.QKernel:
         """Generate the initial state preparation kernel for FQAOA."""

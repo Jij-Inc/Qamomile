@@ -3,7 +3,7 @@ import numpy as np
 import jijmodeling as jm
 import ommx.v1
 
-from qamomile.optimization.converters.fqaoa import FQAOAConverter
+from qamomile.optimization.fqaoa import FQAOAConverter
 from qamomile.optimization.binary_model import BinaryModel
 from qamomile.circuit.estimator import count_gates
 from qamomile.qiskit import QiskitTranspiler
