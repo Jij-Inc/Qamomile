@@ -51,7 +51,7 @@ class MatplotlibDrawer:
             inline: If True, expand CallBlockOperation. If False, show as boxes.
             fold_loops: If True (default), display ForOperation as blocks instead of unrolling.
                        If False, expand loops and show all iterations.
-            expand_composite: If True, expand CompositeGateOperation (QFT, QPE, etc.).
+            expand_composite: If True, expand CompositeGateOperation (QFT, IQFT, etc.).
                             If False (default), show as boxes. Independent of inline.
             inline_depth: Maximum nesting depth for inline expansion. None means
                          unlimited (default). 0 means no inlining, 1 means top-level

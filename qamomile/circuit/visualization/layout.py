@@ -176,6 +176,31 @@ class CircuitLayoutEngine:
 
         return total
 
+    def _max_width_from_children(self, children: list[MeasureNode]) -> float:
+        """Find the maximum GateMeasure.estimated_width in the children tree."""
+        max_w = 0.0
+        for child in children:
+            if isinstance(child, GateMeasure):
+                max_w = max(max_w, child.estimated_width)
+            elif isinstance(child, BlockMeasure):
+                max_w = max(max_w, self._max_width_from_children(child.children))
+            elif isinstance(child, LoopMeasure):
+                if child.iteration_children:
+                    for iter_children in child.iteration_children:
+                        max_w = max(
+                            max_w, self._max_width_from_children(iter_children)
+                        )
+            elif isinstance(child, IfMeasure):
+                if child.true_children:
+                    max_w = max(
+                        max_w, self._max_width_from_children(child.true_children)
+                    )
+                if child.false_children:
+                    max_w = max(
+                        max_w, self._max_width_from_children(child.false_children)
+                    )
+        return max_w
+
     def _compute_content_width(
         self,
         children: list[MeasureNode],
@@ -299,6 +324,12 @@ class CircuitLayoutEngine:
             depth + 1,
         )
 
+        # Update max_gate_width from measured children (loop iterations may
+        # resolve symbolic params, producing wider gate labels than the
+        # initial _max_block_gate_width estimate)
+        children_max = self._max_width_from_children(children)
+        max_gate_width = max(max_gate_width, children_max)
+
         border_padding = self.analyzer._compute_border_padding(depth)
         content_width = self._compute_content_width(children, max_gate_width, depth)
 
@@ -344,7 +375,6 @@ class CircuitLayoutEngine:
         scale = self.style.subfont_size / self.style.font_size
         header_width = len(header) * self.style.char_width_base * scale
         max_body_chars = max((len(line) for line in body_lines), default=0)
-        max_body_chars = min(max_body_chars, self.style.max_folded_body_chars)
         body_width = max_body_chars * self.style.char_width_monospace * scale
         text_width = max(header_width, body_width)
         return max(
@@ -879,10 +909,23 @@ class CircuitLayoutEngine:
                 first_child_half = fc.folded_width / 2
             elif isinstance(fc, IfMeasure) and fc.fold and fc.folded_width is not None:
                 first_child_half = fc.folded_width / 2
+            elif isinstance(fc, LoopMeasure) and not fc.fold and fc.iteration_children:
+                first_iter = fc.iteration_children[0]
+                for sub in first_iter:
+                    if isinstance(sub, GateMeasure):
+                        first_child_half = sub.half_width
+                        break
+                    elif isinstance(sub, BlockMeasure):
+                        first_child_half = sub.final_width / 2
+                        break
+                    elif isinstance(sub, SkipMeasure):
+                        continue
+                    else:
+                        break
 
         min_border_advance = max(
             0.0,
-            border_padding + self.style.gate_text_padding - self.style.gate_gap,
+            border_padding + self.style.gate_text_padding,
         )
         advance = max(min_border_advance, border_extent - first_child_half)
         for q in affected_qubits:

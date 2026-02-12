@@ -802,8 +802,15 @@ class MatplotlibRenderer:
                     block_center_x = (bl + br) / 2
                     ctrl_y_list = [self.qubit_y[q] for q in ctrl_indices]
 
-                    # Vertical line connects control dots to border edge
-                    all_y_endpoints = ctrl_y_list + [box_bottom, box_top]
+                    # Only include box edge(s) that face control qubits
+                    border_endpoints: list[float] = []
+                    min_ctrl = min(ctrl_y_list)
+                    max_ctrl = max(ctrl_y_list)
+                    if max_ctrl > box_top:
+                        border_endpoints.append(box_top)
+                    if min_ctrl < box_bottom:
+                        border_endpoints.append(box_bottom)
+                    all_y_endpoints = ctrl_y_list + border_endpoints
                     line_min_y = min(all_y_endpoints)
                     line_max_y = max(all_y_endpoints)
                     ax.add_line(
@@ -1938,14 +1945,7 @@ class MatplotlibRenderer:
 
         # Draw operation text centered in remaining space
         if expressions:
-            max_chars = self.style.max_folded_body_chars
-            truncated = []
-            for expr in expressions:
-                if len(expr) > max_chars:
-                    truncated.append(expr[: max_chars - 1] + "\u2026")
-                else:
-                    truncated.append(expr)
-            body_text = "\n".join(truncated)
+            body_text = "\n".join(expressions)
             body_center_y = (box_bottom + header_y) / 2
             body_text_obj = ax.text(
                 x_pos,

@@ -1665,6 +1665,32 @@ class CircuitAnalyzer:
                     return f"{prefix}{array_name}[{idx_str}] = {block_name}({array_name}[{idx_str}])"
             return f"{prefix}{block_name}(...)"
 
+        elif isinstance(op, ControlledUOperation):
+            block_value = op.block
+            block_name = (
+                block_value.name if isinstance(block_value, BlockValue) else "U"
+            ) or "U"
+
+            def _operand_str(v: Value) -> str | None:
+                if hasattr(v, "parent_array") and v.parent_array is not None:
+                    arr = v.parent_array.name or "qubits"
+                    idx = self._resolve_index_expression(v, loop_vars, body_operations)
+                    return f"{arr}[{idx}]"
+                if hasattr(v, "name") and v.name:
+                    return v.name
+                return None
+
+            parts = [
+                s
+                for v in list(op.control_operands) + list(op.target_operands)
+                if (s := _operand_str(v)) is not None
+            ]
+            if not parts:
+                return f"{prefix}{block_name}(...)"
+            result_str = ",".join(parts)
+            args_str = ",".join(parts)
+            return f"{prefix}{result_str} = {block_name}({args_str})"
+
         elif isinstance(op, ForOperation):
             if max_depth <= 0:
                 return f"{prefix}..."
