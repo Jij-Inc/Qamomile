@@ -130,6 +130,7 @@ class CircuitAnalyzer:
                             operand.parent_array.logical_id,
                         )
                         if parent_lid in qubit_map:
+                            qubit_map[result.logical_id] = qubit_map[parent_lid]
                             continue
 
                     qubit_map[operand.logical_id] = next_idx
@@ -288,6 +289,13 @@ class CircuitAnalyzer:
                     qubit_idx = qubit_map.get(source_lid)
                     if qubit_idx is not None:
                         qubit_map[result.logical_id] = qubit_idx
+                    else:
+                        resolved = self._resolve_array_element_lid(
+                            source, qubit_map, logical_id_remap, param_values
+                        )
+                        resolved_idx = qubit_map.get(resolved)
+                        if resolved_idx is not None:
+                            qubit_map[result.logical_id] = resolved_idx
 
                 elif isinstance(
                     op, ControlledUOperation
@@ -415,7 +423,7 @@ class CircuitAnalyzer:
                         if dict_value
                         else None
                     )
-                    if materialized is not None and not self.fold_loops:
+                    if materialized is not None and (not self.fold_loops or self.inline):
                         for entry_key, entry_value in materialized:
                             child_pv = dict(param_values)
                             if isinstance(entry_key, tuple):
