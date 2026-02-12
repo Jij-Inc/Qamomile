@@ -98,7 +98,7 @@ class CircuitStyle:
     char_width_gate: float = 0.14  # Character width for gate text estimation
     char_width_block: float = 0.17  # Character width for block label estimation
     char_width_monospace: float = (
-        0.24  # Character width for monospace text (loop operations)
+        0.30  # Character width for monospace text (loop operations)
     )
     text_padding: float = 0.25  # Padding around text in boxes
     border_padding_base: float = 0.3  # Base padding for block borders
@@ -150,6 +150,9 @@ class CircuitStyle:
 
     # Folded box vertical padding for text
     folded_box_text_v_padding: float = 0.15
+
+    # Max characters for folded loop body text (truncated with ellipsis)
+    max_folded_body_chars: int = 40
 
     # Qubit y-position spacing constants
     qubit_base_spacing: float = 1.0  # Base spacing between qubit wires

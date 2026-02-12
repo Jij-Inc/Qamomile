@@ -261,8 +261,9 @@ class MatplotlibRenderer:
                 depth = br["depth"]
                 padding = self.analyzer._compute_border_padding(depth)
                 mgw = br.get("max_gate_width", self.style.gate_width)
-                gate_border_right = br["end_x"] + mgw / 2 + padding
-                border_left = br["start_x"] - mgw / 2 - padding
+                gtp = self.style.gate_text_padding
+                gate_border_right = br["end_x"] + mgw / 2 + padding + gtp
+                border_left = br["start_x"] - mgw / 2 - padding - gtp
 
                 # Account for title width (same logic as _draw_inlined_block_border)
                 block_name = br.get("name", "block")
@@ -671,6 +672,7 @@ class MatplotlibRenderer:
         positions = self.layout.positions
         block_ranges = self.layout.block_ranges
         block_widths = self.layout.block_widths
+        gate_widths = self.layout.gate_widths
 
         # First, draw block borders (behind gates)
         # Compute max_depth for inverted label offset
@@ -705,8 +707,9 @@ class MatplotlibRenderer:
                         outer_padding = self.analyzer._compute_border_padding(
                             outer["depth"]
                         )
+                        outer_gtp = self.style.gate_text_padding
                         outer_box_left = (
-                            outer["start_x"] - outer_mgw / 2 - outer_padding
+                            outer["start_x"] - outer_mgw / 2 - outer_padding - outer_gtp
                         )
                         _, outer_box_right = self.analyzer._compute_block_box_bounds(
                             outer.get("name", "block"),
@@ -718,11 +721,11 @@ class MatplotlibRenderer:
                         margin = 0.1
                         if inner_box_left - margin < outer_box_left:
                             outer["start_x"] = (
-                                inner_box_left - margin + outer_mgw / 2 + outer_padding
+                                inner_box_left - margin + outer_mgw / 2 + outer_padding + outer_gtp
                             )
                         if inner_box_right + margin > outer_box_right:
                             outer["end_x"] = (
-                                inner_box_right + margin - outer_mgw / 2 - outer_padding
+                                inner_box_right + margin - outer_mgw / 2 - outer_padding - outer_gtp
                             )
 
         # Group blocks by topmost qubit, then calculate overlap_index based on horizontal overlap
@@ -922,6 +925,7 @@ class MatplotlibRenderer:
                             positions[op_key],
                             logical_id_remap,
                             param_values,
+                            layout_width=gate_widths.get(op_key),
                         )
                     continue
 
@@ -1119,6 +1123,7 @@ class MatplotlibRenderer:
         x_pos: int,
         logical_id_remap: dict[str, str] | None = None,
         param_values: dict[int, float | int | str] | None = None,
+        layout_width: float | None = None,
     ) -> None:
         """Draw a gate operation.
 
@@ -1129,6 +1134,7 @@ class MatplotlibRenderer:
             x_pos: X position for the gate.
             logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
             param_values: Mapping from logical_ids to resolved parameter values.
+            layout_width: Width from layout phase. If provided, used instead of re-computing.
         """
         if logical_id_remap is None:
             logical_id_remap = {}
@@ -1154,10 +1160,14 @@ class MatplotlibRenderer:
 
         if len(qubit_indices) == 1:
             # Single-qubit gate
-            self._draw_single_qubit_gate(ax, op, x_pos, y_coords[0], param_values)
+            self._draw_single_qubit_gate(
+                ax, op, x_pos, y_coords[0], param_values, layout_width
+            )
         else:
             # Multi-qubit gate
-            self._draw_multi_qubit_gate(ax, op, x_pos, y_coords, param_values)
+            self._draw_multi_qubit_gate(
+                ax, op, x_pos, y_coords, param_values, layout_width
+            )
 
     def _compute_gate_draw_width(
         self,
@@ -1193,6 +1203,7 @@ class MatplotlibRenderer:
         x: float,
         y: float,
         param_values: dict | None = None,
+        layout_width: float | None = None,
     ) -> None:
         """Draw a single-qubit gate box.
 
@@ -1202,10 +1213,14 @@ class MatplotlibRenderer:
             x: X coordinate.
             y: Y coordinate.
             param_values: Mapping from logical_ids to resolved parameter values.
+            layout_width: Width from layout phase. If provided, used instead of re-computing.
         """
         label, has_param = self.analyzer._get_gate_label(op, param_values)
         font_size = self.style.font_size
-        width = self._compute_gate_draw_width(ax, op, label, has_param, param_values)
+        if layout_width is not None:
+            width = layout_width
+        else:
+            width = self._compute_gate_draw_width(ax, op, label, has_param, param_values)
 
         height = self.style.gate_height
 
@@ -1243,6 +1258,7 @@ class MatplotlibRenderer:
         x: float,
         y_coords: list[float],
         param_values: dict | None = None,
+        layout_width: float | None = None,
     ) -> None:
         """Draw a multi-qubit gate.
 
@@ -1252,6 +1268,7 @@ class MatplotlibRenderer:
             x: X coordinate.
             y_coords: Y coordinates of involved qubits.
             param_values: Mapping from logical_ids to resolved parameter values.
+            layout_width: Width from layout phase. If provided, used instead of re-computing.
         """
         min_y = min(y_coords)
         max_y = max(y_coords)
@@ -1269,7 +1286,10 @@ class MatplotlibRenderer:
         # Draw control and target markers based on gate type
         label, has_param = self.analyzer._get_gate_label(op, param_values)
         font_size = self.style.font_size
-        width = self._compute_gate_draw_width(ax, op, label, has_param, param_values)
+        if layout_width is not None:
+            width = layout_width
+        else:
+            width = self._compute_gate_draw_width(ax, op, label, has_param, param_values)
 
         if op.gate_type == GateOperationType.CX:
             # CNOT: control dot on first qubit, target circle on second
@@ -1918,7 +1938,14 @@ class MatplotlibRenderer:
 
         # Draw operation text centered in remaining space
         if expressions:
-            body_text = "\n".join(expressions)
+            max_chars = self.style.max_folded_body_chars
+            truncated = []
+            for expr in expressions:
+                if len(expr) > max_chars:
+                    truncated.append(expr[: max_chars - 1] + "\u2026")
+                else:
+                    truncated.append(expr)
+            body_text = "\n".join(truncated)
             body_center_y = (box_bottom + header_y) / 2
             body_text_obj = ax.text(
                 x_pos,

@@ -505,8 +505,9 @@ class CircuitAnalyzer:
         box_right expands rightward if the label text needs more space.
         """
         padding = self._compute_border_padding(depth)
-        box_left = start_x - max_gate_width / 2 - padding
-        gate_box_right = end_x + max_gate_width / 2 + padding
+        gtp = self.style.gate_text_padding
+        box_left = start_x - max_gate_width / 2 - padding - gtp
+        gate_box_right = end_x + max_gate_width / 2 + padding + gtp
         title_text_width = len(name) * self.style.char_width_base
         label_right = (
             box_left
@@ -1786,6 +1787,20 @@ class CircuitAnalyzer:
                     BinOpKind.POW: "**",
                 }.get(op.kind, "?")
                 return f"{lhs_str}{op_symbol}{rhs_str}"
+
+        # Array element access (e.g., edges[_e, 0])
+        if hasattr(value, "parent_array") and value.parent_array is not None:
+            array_name = value.parent_array.name or "arr"
+            if hasattr(value, "element_indices") and value.element_indices:
+                idx_parts = []
+                for idx in value.element_indices:
+                    idx_parts.append(
+                        self._format_value_as_expression(
+                            idx, loop_vars, operations
+                        )
+                    )
+                return f"{array_name}[{','.join(idx_parts)}]"
+            return array_name
 
         return next(iter(loop_vars)) if loop_vars else "?"
 

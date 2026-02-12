@@ -344,6 +344,7 @@ class CircuitLayoutEngine:
         scale = self.style.subfont_size / self.style.font_size
         header_width = len(header) * self.style.char_width_base * scale
         max_body_chars = max((len(line) for line in body_lines), default=0)
+        max_body_chars = min(max_body_chars, self.style.max_folded_body_chars)
         body_width = max_body_chars * self.style.char_width_monospace * scale
         text_width = max(header_width, body_width)
         return max(
@@ -795,6 +796,7 @@ class CircuitLayoutEngine:
 
         # Place operation
         state.positions[op_key] = min_column
+        state.gate_widths[op_key] = measure.estimated_width
         state.column = max(state.column, min_column + columns_needed)
 
         # Track first gate position
@@ -878,9 +880,14 @@ class CircuitLayoutEngine:
             elif isinstance(fc, IfMeasure) and fc.fold and fc.folded_width is not None:
                 first_child_half = fc.folded_width / 2
 
+        min_border_advance = max(
+            0.0,
+            border_padding + self.style.gate_text_padding - self.style.gate_gap,
+        )
+        advance = max(min_border_advance, border_extent - first_child_half)
         for q in affected_qubits:
             if q in state.qubit_right_edges:
-                state.qubit_right_edges[q] += border_extent - first_child_half
+                state.qubit_right_edges[q] += advance
                 state.qubit_columns[q] = (
                     state.qubit_right_edges[q] + self.style.gate_gap
                 )
@@ -1000,7 +1007,7 @@ class CircuitLayoutEngine:
 
         # Expand first_gate_half_width to cover border extent
         if state.first_gate_x is not None and affected_qubits:
-            border_left = actual_start - max_gate_width / 2 - border_padding
+            border_left = actual_start - max_gate_width / 2 - border_padding - self.style.gate_text_padding
             current_left = state.first_gate_x - state.first_gate_half_width
             if border_left < current_left:
                 state.first_gate_half_width = state.first_gate_x - border_left
@@ -1447,6 +1454,7 @@ class CircuitLayoutEngine:
             block_ranges=state.block_ranges,
             max_depth=state.max_depth,
             block_widths=state.block_widths,
+            gate_widths=state.gate_widths,
             actual_width=state.actual_width,
             first_gate_x=state.first_gate_x if state.first_gate_x is not None else 1.0,
             first_gate_half_width=state.first_gate_half_width,
