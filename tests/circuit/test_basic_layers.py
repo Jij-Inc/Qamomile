@@ -83,8 +83,16 @@ def test_rx_layer_transpiled(num_qubits, offset):
     )
 
     qc = executor.compiled_quantum[0].circuit
-    rx_count = sum(1 for inst in qc.data if inst.operation.name == "rx")
-    assert rx_count == num_qubits, f"Expected {num_qubits} RX gates, got {rx_count}"
+    rx_gates = [inst for inst in qc.data if inst.operation.name == "rx"]
+    assert len(rx_gates) == num_qubits, f"Expected {num_qubits} RX gates, got {len(rx_gates)}"
+
+    # Verify parameter values match thetas[offset], thetas[offset+1], ...
+    expected_params = [thetas_val[offset + i] for i in range(num_qubits)]
+    for i, inst in enumerate(rx_gates):
+        actual = float(inst.operation.params[0])
+        assert abs(actual - expected_params[i]) < 1e-10, (
+            f"RX gate {i}: expected angle {expected_params[i]}, got {actual}"
+        )
 
 
 @pytest.mark.parametrize("num_qubits,offset", [(3, 0), (4, 2), (2, 5)])
@@ -112,8 +120,16 @@ def test_ry_layer_transpiled(num_qubits, offset):
     )
 
     qc = executor.compiled_quantum[0].circuit
-    ry_count = sum(1 for inst in qc.data if inst.operation.name == "ry")
-    assert ry_count == num_qubits, f"Expected {num_qubits} RY gates, got {ry_count}"
+    ry_gates = [inst for inst in qc.data if inst.operation.name == "ry"]
+    assert len(ry_gates) == num_qubits, f"Expected {num_qubits} RY gates, got {len(ry_gates)}"
+
+    # Verify parameter values match thetas[offset], thetas[offset+1], ...
+    expected_params = [thetas_val[offset + i] for i in range(num_qubits)]
+    for i, inst in enumerate(ry_gates):
+        actual = float(inst.operation.params[0])
+        assert abs(actual - expected_params[i]) < 1e-10, (
+            f"RY gate {i}: expected angle {expected_params[i]}, got {actual}"
+        )
 
 
 @pytest.mark.parametrize("num_qubits,offset", [(3, 0), (4, 2), (2, 5)])
@@ -141,8 +157,16 @@ def test_rz_layer_transpiled(num_qubits, offset):
     )
 
     qc = executor.compiled_quantum[0].circuit
-    rz_count = sum(1 for inst in qc.data if inst.operation.name == "rz")
-    assert rz_count == num_qubits, f"Expected {num_qubits} RZ gates, got {rz_count}"
+    rz_gates = [inst for inst in qc.data if inst.operation.name == "rz"]
+    assert len(rz_gates) == num_qubits, f"Expected {num_qubits} RZ gates, got {len(rz_gates)}"
+
+    # Verify parameter values match thetas[offset], thetas[offset+1], ...
+    expected_params = [thetas_val[offset + i] for i in range(num_qubits)]
+    for i, inst in enumerate(rz_gates):
+        actual = float(inst.operation.params[0])
+        assert abs(actual - expected_params[i]) < 1e-10, (
+            f"RZ gate {i}: expected angle {expected_params[i]}, got {actual}"
+        )
 
 
 @pytest.mark.parametrize("num_qubits", [2, 4, 6])
