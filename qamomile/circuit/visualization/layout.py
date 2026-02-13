@@ -311,8 +311,10 @@ class CircuitLayoutEngine:
             else:
                 iter_key = (*node.node_key, i)
 
-            # Align affected qubits before each iteration/branch
-            if affected_qubits:
+            # Align affected qubits only for IF branches (mutually exclusive
+            # alternatives).  For FOR/FOR_ITEMS, skip synchronization so gates
+            # on independent qubits pack at the same x-position.
+            if affected_qubits and node.kind == VUnfoldedKind.IF:
                 max_edge = max(
                     state.qubit_right_edges.get(q, 0.0) for q in affected_qubits
                 )
