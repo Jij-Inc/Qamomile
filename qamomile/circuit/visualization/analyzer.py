@@ -893,15 +893,7 @@ class CircuitAnalyzer:
             qubit_map=qubit_map,
         )
 
-        # Pre-evaluate BinOps in block body so computed values are available
-        for body_op in block_value.operations:
-            if isinstance(body_op, BinOp) and body_op.results:
-                result_val = body_op.results[0]
-                evaluated = self._evaluate_value(
-                    result_val, child_param_values, block_value.operations
-                )
-                if evaluated is not None:
-                    child_param_values[result_val.logical_id] = evaluated
+        self._evaluate_loop_body_intermediates(block_value.operations, child_param_values)
 
         # Include qubits created inside the block body via QInitOperation
         for body_op in block_value.operations:
@@ -1122,6 +1114,7 @@ class CircuitAnalyzer:
             )
 
         # Unfolded: build both branches
+        self._evaluate_loop_body_intermediates(op.true_operations, param_values)
         true_children = self._build_visual_nodes(
             op.true_operations,
             qubit_map,
@@ -1132,6 +1125,7 @@ class CircuitAnalyzer:
         )
         true_width = self._sum_visual_widths(true_children)
 
+        self._evaluate_loop_body_intermediates(op.false_operations, param_values)
         false_children = self._build_visual_nodes(
             op.false_operations,
             qubit_map,
@@ -1231,6 +1225,8 @@ class CircuitAnalyzer:
             if val is not None:
                 child_param_values[f"_loop_{op.value_var}"] = val
 
+            self._evaluate_loop_body_intermediates(op.operations, child_param_values)
+
             children = self._build_visual_nodes(
                 op.operations,
                 qubit_map,
@@ -1275,12 +1271,14 @@ class CircuitAnalyzer:
     def _compute_folded_text_width(self, header: str, body_lines: list[str]) -> float:
         """Compute the width needed for a folded block's text content."""
         scale = self.style.subfont_size / self.style.font_size
-        header_width = len(header) * self.style.char_width_base * scale
+        header_width = len(header) * self.style.char_width_bold * scale
         max_body_chars = max((len(line) for line in body_lines), default=0)
         body_width = max_body_chars * self.style.char_width_monospace * scale
         text_width = max(header_width, body_width)
+        margin = 0.15  # Extra margin for folded blocks
         return max(
-            self.style.folded_loop_width, text_width + 2 * self.style.text_padding
+            self.style.folded_loop_width,
+            text_width + 2 * self.style.text_padding + margin,
         )
 
     def _sum_visual_widths(self, children: list[VisualNode]) -> float:
