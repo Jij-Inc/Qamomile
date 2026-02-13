@@ -5,6 +5,15 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+__all__ = [
+    "PORDER_GATE",
+    "PORDER_LINE",
+    "PORDER_TEXT",
+    "PORDER_WIRE",
+    "LayoutResult",
+    "LayoutState",
+]
+
 # Z-order for drawing priority (inspired by Qiskit)
 PORDER_WIRE = 1  # Wire lines (lowest priority)
 PORDER_GATE = 10  # Gate boxes

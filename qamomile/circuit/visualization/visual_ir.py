@@ -12,6 +12,20 @@ import enum
 from dataclasses import dataclass, field
 from qamomile.circuit.ir.operation.gate import GateOperationType
 
+__all__ = [
+    "GateOperationType",
+    "VFoldedBlock",
+    "VFoldedKind",
+    "VGate",
+    "VGateKind",
+    "VInlineBlock",
+    "VSkip",
+    "VUnfoldedKind",
+    "VUnfoldedSequence",
+    "VisualCircuit",
+    "VisualNode",
+]
+
 
 class VGateKind(enum.Enum):
     """Classification of VGate nodes for rendering dispatch."""

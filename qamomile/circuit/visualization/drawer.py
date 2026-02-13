@@ -24,6 +24,13 @@ from .renderer import MatplotlibRenderer
 from .style import DEFAULT_STYLE, CircuitStyle
 
 
+def _get_array_element_type(pt: Any) -> type | None:
+    """Extract element type from an array type annotation."""
+    if hasattr(pt, "__args__") and pt.__args__:
+        return pt.__args__[0]
+    return getattr(pt, "element_type", None)
+
+
 class MatplotlibDrawer:
     """Matplotlib-based circuit drawer with Qiskit-style layout.
 
@@ -72,10 +79,10 @@ class MatplotlibDrawer:
 
         vc = analyzer.build_visual_ir(self.graph, qubit_map, qubit_names, num_qubits)
 
-        engine = CircuitLayoutEngine(analyzer, self.style)
+        engine = CircuitLayoutEngine(self.style)
         layout = engine.compute_layout(vc)
 
-        renderer = MatplotlibRenderer(analyzer, self.style)
+        renderer = MatplotlibRenderer(self.style)
         return renderer.render(vc, layout)
 
     # ------------------------------------------------------------------
@@ -130,13 +137,8 @@ class MatplotlibDrawer:
         """Check if kernel has any Qubit array parameters (Vector[Qubit], etc.)."""
         for param in kernel.signature.parameters.values():
             pt = param.annotation
-            if is_array_type(pt):
-                if hasattr(pt, "__args__") and pt.__args__:
-                    elem = pt.__args__[0]
-                else:
-                    elem = getattr(pt, "element_type", None)
-                if elem is Qubit:
-                    return True
+            if is_array_type(pt) and _get_array_element_type(pt) is Qubit:
+                return True
         return False
 
     @staticmethod
@@ -154,10 +156,7 @@ class MatplotlibDrawer:
             if key in kernel.signature.parameters:
                 pt = kernel.signature.parameters[key].annotation
                 if is_array_type(pt):
-                    if hasattr(pt, "__args__") and pt.__args__:
-                        elem = pt.__args__[0]
-                    else:
-                        elem = getattr(pt, "element_type", None)
+                    elem = _get_array_element_type(pt)
                     if elem is Qubit and isinstance(val, int):
                         qubit_sizes[key] = val
                         continue
@@ -168,10 +167,7 @@ class MatplotlibDrawer:
         for name, param in kernel.signature.parameters.items():
             pt = param.annotation
             if is_array_type(pt):
-                if hasattr(pt, "__args__") and pt.__args__:
-                    elem = pt.__args__[0]
-                else:
-                    elem = getattr(pt, "element_type", None)
+                elem = _get_array_element_type(pt)
                 if elem is Qubit and name not in qubit_sizes:
                     missing.append(name)
         if missing:

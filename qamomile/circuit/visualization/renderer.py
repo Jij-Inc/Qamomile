@@ -16,9 +16,6 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.font_manager import FontProperties
 
-from qamomile.circuit.ir.operation.gate import GateOperationType
-
-from .analyzer import CircuitAnalyzer
 from .geometry import (
     compute_block_box_bounds,
     compute_border_padding,
@@ -33,6 +30,7 @@ from .types import (
     LayoutResult,
 )
 from .visual_ir import (
+    GateOperationType,
     VFoldedBlock,
     VFoldedKind,
     VGate,
@@ -56,8 +54,7 @@ class MatplotlibRenderer:
     using matplotlib primitives.
     """
 
-    def __init__(self, analyzer: CircuitAnalyzer, style: CircuitStyle):
-        self.analyzer = analyzer
+    def __init__(self, style: CircuitStyle):
         self.style = style
         # These are set during render()
         self.layout: LayoutResult | None = None

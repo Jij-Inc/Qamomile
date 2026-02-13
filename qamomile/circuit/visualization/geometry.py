@@ -8,6 +8,12 @@ from __future__ import annotations
 
 from .style import CircuitStyle
 
+__all__ = [
+    "compute_block_box_bounds",
+    "compute_border_padding",
+    "compute_nested_block_box_bounds",
+]
+
 
 def compute_border_padding(style: CircuitStyle, depth: int) -> float:
     """Compute border padding for a given nesting depth.

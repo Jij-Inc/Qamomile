@@ -6,6 +6,8 @@ inspired by Qiskit's matplotlib drawer styling approach.
 
 from dataclasses import dataclass
 
+__all__ = ["CircuitStyle", "DEFAULT_STYLE"]
+
 
 @dataclass
 class CircuitStyle:

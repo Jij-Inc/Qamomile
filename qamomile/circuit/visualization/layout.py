@@ -9,7 +9,6 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 
-from .analyzer import CircuitAnalyzer
 from .geometry import compute_block_box_bounds
 from .style import CircuitStyle
 from .types import (
@@ -39,8 +38,7 @@ class CircuitLayoutEngine:
     Has no matplotlib dependency.
     """
 
-    def __init__(self, analyzer: CircuitAnalyzer, style: CircuitStyle):
-        self.analyzer = analyzer
+    def __init__(self, style: CircuitStyle):
         self.style = style
 
     # ------------------------------------------------------------------

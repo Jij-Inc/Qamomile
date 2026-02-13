@@ -14,8 +14,6 @@ dependencies = [
     "qiskit>=2.3.0",
     "qiskit-aer>=0.17.2",
     "sympy>=1.14.0",
-    "plotly>=5.0.0",
-    "pylatexenc>=2.10",
 ]
 
 [tool.setuptools.packages.find]
