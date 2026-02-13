@@ -626,15 +626,13 @@ class QKernel(Generic[P, R]):
         """
         from qamomile.circuit.visualization import MatplotlibDrawer
 
-        graph = self.build(parameters=None, **kwargs)
-        # Extract return variable names from AST and set them in the graph
-        graph.output_names = self._extract_return_names() or []
-        drawer = MatplotlibDrawer(graph)
-        return drawer.draw(
+        return MatplotlibDrawer.draw_kernel(
+            self,
             inline=inline,
             fold_loops=fold_loops,
             expand_composite=expand_composite,
             inline_depth=inline_depth,
+            **kwargs,
         )
 
 
