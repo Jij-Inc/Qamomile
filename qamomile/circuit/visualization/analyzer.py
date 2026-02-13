@@ -864,6 +864,11 @@ class CircuitAnalyzer:
                     affected_qubits.append(idx)
             actual_inputs = list(op.target_operands)
             u_name = getattr(block_value, "name", "U") or "U"
+            power_val = (
+                op.power
+                if isinstance(op.power, int)
+                else getattr(op.power, "init_value", op.power)
+            )
             block_name = u_name
         elif isinstance(op, CompositeGateOperation):
             block_value = op.implementation
@@ -919,7 +924,17 @@ class CircuitAnalyzer:
         content_width = self._compute_visual_content_width(
             children, max_gate_width, depth
         )
-        label_width = self._estimate_label_box_width(block_name)
+        power = (
+            power_val
+            if isinstance(op, ControlledUOperation)
+            and isinstance(power_val, int)
+            and power_val > 1
+            else 1
+        )
+        label_display = (
+            f"{block_name}  pow={power}" if power > 1 else block_name
+        )
+        label_width = self._estimate_label_box_width(label_display)
         final_width = max(label_width, content_width)
 
         ctrl_indices = (
@@ -931,6 +946,7 @@ class CircuitAnalyzer:
             children=children,
             affected_qubits=affected_qubits,
             control_qubit_indices=ctrl_indices,
+            power=power,
             depth=depth,
             border_padding=border_padding,
             max_gate_width=max_gate_width,
@@ -1948,7 +1964,18 @@ class CircuitAnalyzer:
         can be resolved via _evaluate_value.
         """
         lid = logical_id_remap.get(value.logical_id, value.logical_id)
-        if lid in qubit_map:
+        # For symbolic array elements, skip cached UUID lookup —
+        # the cached qubit_map entry may be stale from a different loop
+        # iteration (e.g., map_block_results registers result.lid which
+        # shares operand.lid via SSA).
+        is_symbolic_array_element = (
+            hasattr(value, "parent_array")
+            and value.parent_array is not None
+            and hasattr(value, "element_indices")
+            and value.element_indices
+            and not value.element_indices[0].is_constant()
+        )
+        if lid in qubit_map and not is_symbolic_array_element:
             return lid
         if hasattr(value, "parent_array") and value.parent_array is not None:
             parent_lid = logical_id_remap.get(

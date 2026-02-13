@@ -236,6 +236,7 @@ class CircuitLayoutEngine:
                     "end_x": actual_end,
                     "qubit_indices": affected_qubits,
                     "control_qubit_indices": node.control_qubit_indices,
+                    "power": node.power,
                     "depth": depth,
                     "max_gate_width": max_gate_width,
                 }

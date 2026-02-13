@@ -32,6 +32,7 @@ def compute_block_box_bounds(
     end_x: float,
     depth: int,
     max_gate_width: float,
+    power: int = 1,
 ) -> tuple[float, float]:
     """Compute (box_left, box_right) for an inlined block border.
 
@@ -45,6 +46,7 @@ def compute_block_box_bounds(
         end_x: X position of the last gate in the block.
         depth: Nesting depth of the block.
         max_gate_width: Width of the widest gate in the block.
+        power: Power annotation value (displayed as "pow=N" when > 1).
 
     Returns:
         Tuple of (box_left, box_right).
@@ -53,7 +55,8 @@ def compute_block_box_bounds(
     gtp = style.gate_text_padding
     box_left = start_x - max_gate_width / 2 - padding - gtp
     gate_box_right = end_x + max_gate_width / 2 + padding + gtp
-    title_text_width = len(name) * style.char_width_base
+    display_name = f"{name}  pow={power}" if power > 1 else name
+    title_text_width = len(display_name) * style.char_width_base
     label_right = (
         box_left
         + style.label_horizontal_padding

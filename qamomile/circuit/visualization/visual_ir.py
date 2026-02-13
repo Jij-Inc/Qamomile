@@ -80,6 +80,7 @@ class VInlineBlock:
     children: list[VisualNode]
     affected_qubits: list[int]
     control_qubit_indices: list[int]
+    power: int
     depth: int
     border_padding: float
     max_gate_width: float

@@ -207,6 +207,7 @@ class MatplotlibRenderer:
                     max_depth=max_depth,
                     overlap_index=overlap_count,
                     is_controlled=bool(ctrl_indices),
+                    power=block_info.get("power", 1),
                 )
 
                 # Draw control dots and vertical line for ControlledUOperation
@@ -220,6 +221,7 @@ class MatplotlibRenderer:
                         block_info["end_x"],
                         block_info["depth"],
                         mgw,
+                        block_info.get("power", 1),
                     )
                     block_center_x = (bl + br) / 2
                     ctrl_y_list = [self.qubit_y[q] for q in ctrl_indices]
@@ -263,6 +265,7 @@ class MatplotlibRenderer:
         max_depth: int = 0,
         overlap_index: int = 0,
         is_controlled: bool = False,
+        power: int = 1,
     ) -> tuple[float, float]:
         """Draw dashed border around inlined block operations.
 
@@ -275,7 +278,10 @@ class MatplotlibRenderer:
         min_y = min(y_coords)
         max_y = max(y_coords)
 
-        text_height = self._calculate_text_height(ax, name, self.style.subfont_size)
+        display_name = f"{name}  pow={power}" if power > 1 else name
+        text_height = self._calculate_text_height(
+            ax, display_name, self.style.subfont_size
+        )
         padding = compute_border_padding(self.style, depth)
 
         lp = self.style.label_padding
@@ -290,7 +296,7 @@ class MatplotlibRenderer:
         label_vertical_offset = depth_label_offset + overlap_label_offset
 
         box_left, box_right = compute_block_box_bounds(
-            self.style, name, start_x, end_x, depth, max_gate_width
+            self.style, name, start_x, end_x, depth, max_gate_width, power
         )
         label_left = box_left + self.style.label_horizontal_padding
 
@@ -351,6 +357,19 @@ class MatplotlibRenderer:
             color=self.style.block_border_color,
             zorder=PORDER_TEXT,
         )
+
+        if power > 1:
+            power_right = box_right - self.style.label_horizontal_padding
+            ax.text(
+                power_right,
+                box_top - lp,
+                f"pow={power}",
+                ha="right",
+                va="top",
+                fontsize=self.style.subfont_size,
+                color=self.style.block_border_color,
+                zorder=PORDER_TEXT,
+            )
 
         return box_bottom, box_top
 
@@ -1019,11 +1038,17 @@ class MatplotlibRenderer:
                 gate_border_right = br["end_x"] + mgw / 2 + padding + gtp
                 border_left = br["start_x"] - mgw / 2 - padding - gtp
 
-                # Account for title width
+                # Account for title width (including power annotation)
                 block_name = br.get("name", "block")
+                block_power = br.get("power", 1)
+                display_name = (
+                    f"{block_name}  pow={block_power}"
+                    if block_power > 1
+                    else block_name
+                )
                 title_char_width = self.style.char_width_base
                 label_left = border_left + self.style.label_horizontal_padding
-                title_text_width = len(block_name) * title_char_width
+                title_text_width = len(display_name) * title_char_width
                 label_right = (
                     label_left + title_text_width + self.style.label_horizontal_padding
                 )
