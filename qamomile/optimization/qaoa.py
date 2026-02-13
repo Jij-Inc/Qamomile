@@ -4,7 +4,7 @@ from qamomile.circuit.algorithm.qaoa import qaoa_state
 from qamomile.circuit.transpiler.transpiler import Transpiler
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 
-from .converters.converter import MathematicalProblemConverter
+from .converter import MathematicalProblemConverter
 from .utils import is_close_zero
 
 class QAOAConverter(MathematicalProblemConverter):

@@ -50,7 +50,7 @@ from qamomile.circuit.algorithm.fqaoa import (
 )
 from qamomile.optimization.binary_model import BinaryModel
 from qamomile.optimization.utils import is_close_zero
-from qamomile.optimization.converters.converter import MathematicalProblemConverter
+from qamomile.optimization.converter import MathematicalProblemConverter
 
 
 class FQAOAConverter(MathematicalProblemConverter):
