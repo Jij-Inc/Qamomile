@@ -3,7 +3,6 @@ import jijmodeling as jm
 
 from qamomile.optimization.fqaoa import FQAOAConverter
 from qamomile.optimization.binary_model import BinaryModel
-from qamomile.circuit.estimator import count_gates
 from qamomile.qiskit import QiskitTranspiler
 
 from tests.utils import Utils
@@ -60,32 +59,6 @@ def test_cyclic_mapping(simple_problem):
         (2, 1): 6,
         (3, 1): 7,
     }
-
-
-def test_get_init_state(simple_problem):
-    fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4)
-    init_kernel = fqaoa_converter.get_init_state()
-
-    counts = count_gates(init_kernel.block)
-    assert counts.total != 0
-
-
-def test_get_mixer_ansatz(simple_problem):
-    fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4)
-    mixer_kernel = fqaoa_converter.get_mixer_ansatz()
-
-    counts = count_gates(mixer_kernel.block)
-    assert counts.total != 0
-
-
-def test_get_cost_ansatz(simple_problem):
-    fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4)
-    cost_kernel = fqaoa_converter.get_cost_ansatz()
-
-    # cost_layer uses Dict iteration (ForItemsOperation) which count_gates
-    # does not currently support.  Verify the block has operations instead.
-    block = cost_kernel.block
-    assert len(block.operations) > 0
 
 
 def test_get_fqaoa_ansatz_transpile(simple_problem):

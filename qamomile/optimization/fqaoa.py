@@ -41,10 +41,6 @@ import qamomile.observable as qm_o
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.transpiler import Transpiler
 from qamomile.circuit.algorithm.fqaoa import (
-    initial_occupations,
-    givens_rotations,
-    mixer_layer,
-    cost_layer,
     fqaoa_state,
 )
 from qamomile.optimization.binary_model import BinaryModel
@@ -68,10 +64,9 @@ class FQAOAConverter(MathematicalProblemConverter):
         # Initialize with a compiled optimization problem instance
         fqaoa_converter = FQAOAConverter(compiled_instance, num_fermions=4)
 
-        # Generate QAOA circuit and cost Hamiltonian
-        p = 2  # Number of QAOA layers
-        fqaoa_kernel = fqaoa_converter.get_fqaoa_ansatz(p)
+        # Generate cost Hamiltonian and transpile
         cost_hamiltonian = fqaoa_converter.get_cost_hamiltonian()
+        executable = fqaoa_converter.transpile(transpiler, p=2)
 
     """
 
@@ -266,61 +261,6 @@ class FQAOAConverter(MathematicalProblemConverter):
 
         hamiltonian.constant = self.spin_model.constant
         return hamiltonian
-
-    def get_init_state(self) -> qm_c.QKernel:
-        """Generate the initial state preparation kernel for FQAOA."""
-
-        @qm_c.qkernel
-        def init_state(
-            num_fermions: qm_c.UInt,
-            num_qubits: qm_c.UInt,
-            givens_i: qm_c.Vector[qm_c.UInt],
-            givens_j: qm_c.Vector[qm_c.UInt],
-            givens_theta: qm_c.Vector[qm_c.Float],
-        ) -> qm_c.Vector[qm_c.Qubit]:
-            q = qm_c.qubit_array(num_qubits, name="q")
-            q = initial_occupations(q, num_fermions)
-            q = givens_rotations(q, givens_i, givens_j, givens_theta)
-            return q
-
-        return init_state
-
-    def get_mixer_ansatz(self, hopping: float = 1.0) -> qm_c.QKernel:
-        """Generate the fermionic mixer ansatz kernel (:math:`e^{-\\beta H_d}`)."""
-
-        @qm_c.qkernel
-        def mixer(
-            q: qm_c.Vector[qm_c.Qubit],
-            beta: qm_c.Float,
-            hopping: qm_c.Float,
-            num_qubits: qm_c.UInt,
-        ) -> qm_c.Vector[qm_c.Qubit]:
-            return mixer_layer(q, beta, hopping, num_qubits)
-
-        return mixer
-
-    def get_cost_ansatz(self) -> qm_c.QKernel:
-        """Generate the cost ansatz kernel (:math:`e^{-\\gamma H_P}`)."""
-
-        @qm_c.qkernel
-        def cost(
-            q: qm_c.Vector[qm_c.Qubit],
-            gamma: qm_c.Float,
-            linear: qm_c.Dict[qm_c.UInt, qm_c.Float],
-            quad: qm_c.Dict[qm_c.Tuple[qm_c.UInt, qm_c.UInt], qm_c.Float],
-        ) -> qm_c.Vector[qm_c.Qubit]:
-            return cost_layer(q, gamma, linear, quad)
-
-        return cost
-
-    def get_fqaoa_ansatz(self, p: int, hopping: float = 1.0) -> qm_c.QKernel:
-        """Generate the FQAOA ansatz kernel.
-
-        Returns the module-level :func:`fqaoa_state` ``@qkernel`` from
-        ``qamomile.circuit.algorithm.fqaoa``.  Call it via ``transpiler.transpile``
-        with appropriate ``bindings`` and ``parameters``.
-        """
-        return fqaoa_state
 
     def transpile(
         self,
