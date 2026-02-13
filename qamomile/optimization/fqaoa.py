@@ -25,7 +25,7 @@ Key Features:
         - Decoding of quantum computation results into classical optimization solutions
 
 Note:
-        This module requires `jijmodeling` and `jijmodeling_transpiler` for problem representation.
+        This module requires `jijmodeling` and `ommx` for problem representation.
 
 .. bibliography::
     :filter: docname in docnames
@@ -41,12 +41,12 @@ import qamomile.observable as qm_o
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.transpiler import Transpiler
 from qamomile.circuit.algorithm.fqaoa import (
-    _apply_initial_occupations,
-    _apply_givens_rotations,
-    _apply_hopping_gate,
-    _apply_mixer_layer,
-    _apply_cost_layer,
-    _apply_fqaoa_layers,
+    initial_occupations,
+    givens_rotations,
+    hopping_gate,
+    mixer_layer,
+    cost_layer,
+    fqaoa_layers,
 )
 from qamomile.optimization.binary_model import BinaryModel
 from qamomile.optimization.utils import is_close_zero
@@ -67,7 +67,7 @@ class FQAOAConverter(MathematicalProblemConverter):
         from qamomile.optimization.fqaoa import FQAOAConverter
 
         # Initialize with a compiled optimization problem instance
-        fqaoa_converter = FQAOAConverter(compiled_instance, num_fermion=4)
+        fqaoa_converter = FQAOAConverter(compiled_instance, num_fermions=4)
 
         # Generate QAOA circuit and cost Hamiltonian
         p = 2  # Number of QAOA layers
@@ -102,7 +102,6 @@ class FQAOAConverter(MathematicalProblemConverter):
 
         self.num_fermions = num_fermions
         self.normalize_ising = normalize_ising
-        self.int2varlabel: dict[int, str] = {}
 
         # FQAOA uses uniform_penalty_weight=0.0 (constraints handled by fermion number conservation)
         qubo, constant = instance.to_qubo(uniform_penalty_weight=0.0)
@@ -131,17 +130,6 @@ class FQAOAConverter(MathematicalProblemConverter):
                 raise ValueError(
                     f"Invalid value for normalize_ising: {self.normalize_ising}"
                 )
-
-        # Build index labels using the cyclic (fermionic) mapping
-        for new_index, orig_index in self.spin_model.index_new_to_origin.items():
-            deci_var = self._original_instance.get_decision_variable_by_id(orig_index)
-            var_name = deci_var.name
-            subscripts = tuple(deci_var.subscripts)
-
-            fermionic_index = self.var_map[subscripts]
-            self.int2varlabel[fermionic_index] = (
-                var_name + "_{" + ",".join(map(str, subscripts)) + "}"
-            )
 
     def cyclic_mapping(self) -> dict[tuple[int, int], int]:
         """
@@ -188,7 +176,7 @@ class FQAOAConverter(MathematicalProblemConverter):
 
         return orbital
 
-    def _givens_decomposition(self, fermi_orbital):
+    def _givens_decomposition(self, fermi_orbital: np.ndarray) -> list[list]:
         m, n = fermi_orbital.shape
         matrix = fermi_orbital.copy()
 
@@ -264,13 +252,13 @@ class FQAOAConverter(MathematicalProblemConverter):
     def get_init_state(self) -> qm_c.QKernel:
         """Generate the initial state preparation kernel for FQAOA."""
         unitary_rows = self.get_fermi_orbital()
-        givens_rotations = self._givens_decomposition(unitary_rows)
+        givens_rotation_data = self._givens_decomposition(unitary_rows)
         num_fermions = self.num_fermions
 
         @qm_c.qkernel
         def init_state(q: qm_c.Vector[qm_c.Qubit]) -> qm_c.Vector[qm_c.Qubit]:
-            q = _apply_initial_occupations(q, num_fermions)
-            q = _apply_givens_rotations(q, givens_rotations)
+            q = initial_occupations(q, num_fermions)
+            q = givens_rotations(q, givens_rotation_data)
             return q
 
         return init_state
@@ -284,7 +272,7 @@ class FQAOAConverter(MathematicalProblemConverter):
             q: qm_c.Vector[qm_c.Qubit],
             beta: qm_c.Float,
         ) -> qm_c.Vector[qm_c.Qubit]:
-            return _apply_mixer_layer(q, beta, hopping, num_qubits)
+            return mixer_layer(q, beta, hopping, num_qubits)
 
         return mixer
 
@@ -298,7 +286,7 @@ class FQAOAConverter(MathematicalProblemConverter):
             q: qm_c.Vector[qm_c.Qubit],
             gamma: qm_c.Float,
         ) -> qm_c.Vector[qm_c.Qubit]:
-            return _apply_cost_layer(q, gamma, linear, quad)
+            return cost_layer(q, gamma, linear, quad)
 
         return cost
 
@@ -307,7 +295,7 @@ class FQAOAConverter(MathematicalProblemConverter):
         num_qubits = self.num_qubits
         num_fermions = self.num_fermions
         unitary_rows = self.get_fermi_orbital()
-        givens_rotations = self._givens_decomposition(unitary_rows)
+        givens_rotation_data = self._givens_decomposition(unitary_rows)
         linear = self.spin_model.linear
         quad = self.spin_model.quad
 
@@ -317,11 +305,9 @@ class FQAOAConverter(MathematicalProblemConverter):
             gammas: qm_c.Vector[qm_c.Float],
         ) -> qm_c.Vector[qm_c.Qubit]:
             q = qm_c.qubit_array(num_qubits, name="q")
-            q = _apply_initial_occupations(q, num_fermions)
-            q = _apply_givens_rotations(q, givens_rotations)
-            q = _apply_fqaoa_layers(
-                q, betas, gammas, p, linear, quad, hopping, num_qubits
-            )
+            q = initial_occupations(q, num_fermions)
+            q = givens_rotations(q, givens_rotation_data)
+            q = fqaoa_layers(q, betas, gammas, p, linear, quad, hopping, num_qubits)
             return q
 
         return fqaoa_state
@@ -337,14 +323,16 @@ class FQAOAConverter(MathematicalProblemConverter):
         num_qubits = self.num_qubits
         num_fermions = self.num_fermions
         unitary_rows = self.get_fermi_orbital()
-        givens_rotations = self._givens_decomposition(unitary_rows)
+        givens_rotation_data = self._givens_decomposition(unitary_rows)
 
         # Filter near-zero coefficients to keep loops compact
         linear = {
             i: hi for i, hi in self.spin_model.linear.items() if not is_close_zero(hi)
         }
         quad = {
-            ij: Jij for ij, Jij in self.spin_model.quad.items() if not is_close_zero(Jij)
+            ij: Jij
+            for ij, Jij in self.spin_model.quad.items()
+            if not is_close_zero(Jij)
         }
 
         last_qubit = num_qubits - 1
@@ -363,9 +351,9 @@ class FQAOAConverter(MathematicalProblemConverter):
                 q[i] = qm_c.x(q[i])
 
             # Givens rotations (precomputed constants)
-            q = _apply_givens_rotations(q, givens_rotations)
+            q = givens_rotations(q, givens_rotation_data)
 
-            for layer in range(p):
+            for layer in qm_c.range(p):
                 # Cost layer
                 for i, hi in qm_c.items(linear):
                     q[i] = qm_c.rz(q[i], 2 * hi * gammas[layer])
@@ -374,12 +362,12 @@ class FQAOAConverter(MathematicalProblemConverter):
 
                 # Mixer layer
                 for i in qm_c.range(0, last_qubit, 2):
-                    q = _apply_hopping_gate(q, i, i + 1, betas[layer], hopping)
+                    q = hopping_gate(q, i, i + 1, betas[layer], hopping)
                 for i in qm_c.range(1, last_qubit, 2):
-                    q = _apply_hopping_gate(q, i, i + 1, betas[layer], hopping)
+                    q = hopping_gate(q, i, i + 1, betas[layer], hopping)
                 # Boundary hop (wrap in control flow to avoid segment splits)
                 for _ in qm_c.range(1):
-                    q = _apply_hopping_gate(q, 0, last_qubit, betas[layer], hopping)
+                    q = hopping_gate(q, 0, last_qubit, betas[layer], hopping)
 
             return qm_c.measure(q)
 

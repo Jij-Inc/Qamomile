@@ -1,7 +1,5 @@
 import pytest
-import numpy as np
 import jijmodeling as jm
-import ommx.v1
 
 from qamomile.optimization.fqaoa import FQAOAConverter
 from qamomile.optimization.binary_model import BinaryModel
@@ -38,7 +36,7 @@ def simple_problem():
     return instance
 
 
-def test_initializaiton(simple_problem):
+def test_initialization(simple_problem):
     fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4)
 
     assert fqaoa_converter.num_integers == 4
@@ -47,21 +45,6 @@ def test_initializaiton(simple_problem):
     assert isinstance(fqaoa_converter.var_map, dict)
     assert isinstance(fqaoa_converter.spin_model, BinaryModel)
     assert fqaoa_converter.num_qubits == 8
-
-
-def test_int2varlabel(simple_problem):
-    fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4)
-
-    assert fqaoa_converter.int2varlabel == {
-        0: "x_{0,0}",
-        1: "x_{1,0}",
-        2: "x_{2,0}",
-        3: "x_{3,0}",
-        4: "x_{0,1}",
-        5: "x_{1,1}",
-        6: "x_{2,1}",
-        7: "x_{3,1}",
-    }
 
 
 def test_cyclic_mapping(simple_problem):
