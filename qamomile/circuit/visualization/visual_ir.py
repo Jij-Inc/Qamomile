@@ -1,0 +1,144 @@
+"""Visual IR: pre-resolved intermediate representation for circuit visualization.
+
+This module defines the Visual IR node types that carry all resolved information
+(labels, qubit indices, widths) needed by Layout and Renderer. The Visual IR
+serves as the decoupling boundary between Analyzer (which understands IR semantics)
+and Layout/Renderer (which only need pre-resolved visual information).
+"""
+
+from __future__ import annotations
+
+import enum
+from dataclasses import dataclass, field
+from typing import Union
+
+from qamomile.circuit.ir.operation.gate import GateOperationType
+
+
+class VGateKind(enum.Enum):
+    """Classification of VGate nodes for rendering dispatch."""
+
+    GATE = enum.auto()
+    MEASURE = enum.auto()
+    MEASURE_VECTOR = enum.auto()
+    BLOCK_BOX = enum.auto()
+    COMPOSITE_BOX = enum.auto()
+    CONTROLLED_U_BOX = enum.auto()
+    EXPVAL = enum.auto()
+
+
+class VFoldedKind(enum.Enum):
+    """Classification of folded control-flow blocks."""
+
+    FOR = enum.auto()
+    WHILE = enum.auto()
+    FOR_ITEMS = enum.auto()
+    IF = enum.auto()
+
+
+class VUnfoldedKind(enum.Enum):
+    """Classification of unfolded control-flow sequences."""
+
+    FOR = enum.auto()
+    FOR_ITEMS = enum.auto()
+    IF = enum.auto()
+
+
+@dataclass
+class VGate:
+    """Pre-resolved gate, measurement, block-box, or expval node.
+
+    Carries all information needed for layout and rendering:
+    - label: TeX-formatted display text (e.g. "$R_x(0.5)$")
+    - qubit_indices: resolved wire indices for all operands
+    - estimated_width: pre-computed width for layout
+    - kind: determines rendering strategy
+    - gate_type: for CX/SWAP/TOFFOLI special drawing
+    """
+
+    node_key: tuple
+    label: str
+    qubit_indices: list[int]
+    estimated_width: float
+    kind: VGateKind
+    gate_type: GateOperationType | None = None
+    has_param: bool = False
+    box_width: float | None = None
+    control_count: int = 0  # For CONTROLLED_U_BOX: first N indices are controls
+
+
+@dataclass
+class VInlineBlock:
+    """Inlined CallBlock/ControlledU/CompositeGate with visible border.
+
+    Carries pre-resolved children, affected qubits, and pre-computed widths
+    so that Layout and Renderer need no Analyzer access.
+    """
+
+    node_key: tuple
+    label: str
+    children: list[VisualNode]
+    affected_qubits: list[int]
+    control_qubit_indices: list[int]
+    depth: int
+    border_padding: float
+    max_gate_width: float
+    label_width: float
+    content_width: float
+    final_width: float
+
+
+@dataclass
+class VFoldedBlock:
+    """Folded control-flow block (For/While/ForItems/If).
+
+    Rendered as a single box with header label and body summary text.
+    """
+
+    node_key: tuple
+    header_label: str
+    body_lines: list[str]
+    affected_qubits: list[int]
+    folded_width: float
+    kind: VFoldedKind
+
+
+@dataclass
+class VUnfoldedSequence:
+    """Unfolded control-flow sequence (For/ForItems/If).
+
+    For loops: iterations[i] = children of iteration i.
+    For if: iterations[0] = true branch, iterations[1] = false branch (if exists).
+    """
+
+    node_key: tuple
+    iterations: list[list[VisualNode]]
+    affected_qubits: list[int]
+    kind: VUnfoldedKind
+    iteration_widths: list[float] = field(default_factory=list)
+    condition_label: str | None = None
+
+
+@dataclass
+class VSkip:
+    """Zero-space node for QInit, Cast, or zero-iteration loops."""
+
+    node_key: tuple = ()
+
+
+VisualNode = Union[VGate, VInlineBlock, VFoldedBlock, VUnfoldedSequence, VSkip]
+
+
+@dataclass
+class VisualCircuit:
+    """Root container for the Visual IR tree.
+
+    Carries the node tree plus qubit mapping information needed by Layout
+    and Renderer.
+    """
+
+    children: list[VisualNode]
+    qubit_map: dict[str, int]
+    qubit_names: dict[int, str]
+    num_qubits: int
+    output_names: list[str] = field(default_factory=list)

@@ -28,12 +28,26 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureOperation,
     MeasureVectorOperation,
 )
+from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.types.primitives import QubitType
 from qamomile.circuit.ir.value import ArrayValue, Value
 
+from .geometry import compute_border_padding
 from .style import CircuitStyle
 from .types import _TEX_SYMBOLS
+from .visual_ir import (
+    VFoldedBlock,
+    VFoldedKind,
+    VGate,
+    VGateKind,
+    VInlineBlock,
+    VSkip,
+    VUnfoldedKind,
+    VUnfoldedSequence,
+    VisualCircuit,
+    VisualNode,
+)
 
 if TYPE_CHECKING:
     from qamomile.circuit.ir.graph import Graph
@@ -423,7 +437,9 @@ class CircuitAnalyzer:
                         if dict_value
                         else None
                     )
-                    if materialized is not None and (not self.fold_loops or self.inline):
+                    if materialized is not None and (
+                        not self.fold_loops or self.inline
+                    ):
                         for entry_key, entry_value in materialized:
                             child_pv = dict(param_values)
                             if isinstance(entry_key, tuple):
@@ -451,6 +467,842 @@ class CircuitAnalyzer:
 
         build_chains(graph.operations, depth=0, param_values={})
         return qubit_map, qubit_names, next_idx
+
+    # ------------------------------------------------------------------
+    # Visual IR construction
+    # ------------------------------------------------------------------
+
+    def build_visual_ir(
+        self,
+        graph: Graph,
+        qubit_map: dict[str, int],
+        qubit_names: dict[int, str],
+        num_qubits: int,
+    ) -> VisualCircuit:
+        """Build a Visual IR tree from the IR graph.
+
+        Walks all operations, resolving labels, qubit indices, and widths
+        into pre-computed VisualNode dataclasses. The resulting VisualCircuit
+        can be consumed by Layout and Renderer without any Analyzer access.
+
+        Args:
+            graph: IR computation graph.
+            qubit_map: Mapping from logical_id to wire index.
+            qubit_names: Mapping from wire index to display name.
+            num_qubits: Total number of qubit wires.
+
+        Returns:
+            VisualCircuit containing the VisualNode tree.
+        """
+        children = self._build_visual_nodes(
+            graph.operations, qubit_map, {}, {}, depth=0, scope_path=()
+        )
+        return VisualCircuit(
+            children=children,
+            qubit_map=qubit_map,
+            qubit_names=qubit_names,
+            num_qubits=num_qubits,
+            output_names=getattr(graph, "output_names", None) or [],
+        )
+
+    def _build_visual_nodes(
+        self,
+        ops: list[Operation],
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+        depth: int,
+        scope_path: tuple,
+    ) -> list[VisualNode]:
+        """Recursively build VisualNode list from IR operations.
+
+        This is the core dispatch method that replaces both Layout's
+        _measure_operations and Renderer's draw_ops dispatch.
+        """
+        result: list[VisualNode] = []
+
+        for op in ops:
+            node_key = (*scope_path, id(op))
+
+            if isinstance(op, QInitOperation):
+                result.append(VSkip(node_key=node_key))
+                continue
+
+            if isinstance(op, CastOperation):
+                result.append(VSkip(node_key=node_key))
+                continue
+
+            if isinstance(op, BinOp):
+                continue  # No visual representation
+
+            if isinstance(op, ExpvalOp):
+                node = self._build_vexpval(
+                    op, node_key, qubit_map, logical_id_remap, param_values
+                )
+                result.append(node)
+                continue
+
+            if isinstance(op, WhileOperation):
+                node = self._build_vwhile(
+                    op, node_key, qubit_map, logical_id_remap, param_values
+                )
+                result.append(node)
+                continue
+
+            if isinstance(op, IfOperation):
+                node = self._build_vif(
+                    op,
+                    node_key,
+                    qubit_map,
+                    logical_id_remap,
+                    param_values,
+                    depth,
+                    scope_path,
+                )
+                result.append(node)
+                continue
+
+            if isinstance(op, ForItemsOperation):
+                node = self._build_vfor_items(
+                    op,
+                    node_key,
+                    qubit_map,
+                    logical_id_remap,
+                    param_values,
+                    depth,
+                    scope_path,
+                )
+                result.append(node)
+                continue
+
+            if isinstance(op, ForOperation):
+                node = self._build_vfor(
+                    op,
+                    node_key,
+                    qubit_map,
+                    logical_id_remap,
+                    param_values,
+                    depth,
+                    scope_path,
+                )
+                result.append(node)
+                continue
+
+            if isinstance(op, CallBlockOperation) and self._should_inline_at_depth(
+                depth
+            ):
+                node = self._build_vinline_block(
+                    op,
+                    node_key,
+                    qubit_map,
+                    logical_id_remap,
+                    param_values,
+                    depth,
+                    scope_path,
+                )
+                result.append(node)
+                continue
+
+            if isinstance(op, ControlledUOperation) and self._should_inline_at_depth(
+                depth
+            ):
+                node = self._build_vinline_block(
+                    op,
+                    node_key,
+                    qubit_map,
+                    logical_id_remap,
+                    param_values,
+                    depth,
+                    scope_path,
+                )
+                result.append(node)
+                continue
+
+            if (
+                isinstance(op, CompositeGateOperation)
+                and self.expand_composite
+                and op.has_implementation
+            ):
+                node = self._build_vinline_block(
+                    op,
+                    node_key,
+                    qubit_map,
+                    logical_id_remap,
+                    param_values,
+                    depth,
+                    scope_path,
+                )
+                result.append(node)
+                continue
+
+            # Generic: GateOperation, CallBlock/ControlledU/CompositeGate (box mode),
+            # MeasureOperation, MeasureVectorOperation
+            if isinstance(
+                op,
+                (
+                    GateOperation,
+                    CallBlockOperation,
+                    MeasureOperation,
+                    MeasureVectorOperation,
+                    CompositeGateOperation,
+                    ControlledUOperation,
+                ),
+            ):
+                node = self._build_vgate(
+                    op, node_key, qubit_map, logical_id_remap, param_values
+                )
+                result.append(node)
+
+        return result
+
+    def _build_vgate(
+        self,
+        op: Operation,
+        node_key: tuple,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+    ) -> VGate:
+        """Build a VGate node for gates, measurements, and block boxes."""
+        if isinstance(op, GateOperation):
+            label, has_param = self._get_gate_label(op, param_values)
+            estimated_width = self._estimate_gate_width(op, param_values)
+            qubit_indices: list[int] = []
+            for operand in op.operands:
+                idx = self._resolve_operand_to_qubit_index(
+                    operand, qubit_map, logical_id_remap, param_values
+                )
+                if idx is not None:
+                    qubit_indices.append(idx)
+            return VGate(
+                node_key=node_key,
+                label=label,
+                qubit_indices=qubit_indices,
+                estimated_width=estimated_width,
+                kind=VGateKind.GATE,
+                gate_type=op.gate_type,
+                has_param=has_param,
+            )
+
+        if isinstance(op, MeasureOperation):
+            w = self.style.gate_width
+            qubit_indices = []
+            if op.operands:
+                idx = self._resolve_operand_to_qubit_index(
+                    op.operands[0], qubit_map, logical_id_remap, param_values
+                )
+                if idx is not None:
+                    qubit_indices.append(idx)
+            return VGate(
+                node_key=node_key,
+                label="M",
+                qubit_indices=qubit_indices,
+                estimated_width=w,
+                kind=VGateKind.MEASURE,
+            )
+
+        if isinstance(op, MeasureVectorOperation):
+            w = self.style.gate_width
+            qubit_indices = []
+            if op.operands:
+                qubit_indices = self._resolve_operand_to_qubit_indices(
+                    op.operands[0], qubit_map, logical_id_remap, param_values
+                )
+            return VGate(
+                node_key=node_key,
+                label="M",
+                qubit_indices=qubit_indices,
+                estimated_width=w,
+                kind=VGateKind.MEASURE_VECTOR,
+            )
+
+        if isinstance(op, CallBlockOperation):
+            label = self._get_block_label(op, qubit_map)
+            box_width = self._estimate_label_box_width(label)
+            qubit_indices = []
+            for operand in op.operands[1:]:  # Skip BlockValue
+                qubit_indices.extend(
+                    self._resolve_operand_to_qubit_indices(
+                        operand, qubit_map, logical_id_remap, param_values
+                    )
+                )
+            return VGate(
+                node_key=node_key,
+                label=label,
+                qubit_indices=qubit_indices,
+                estimated_width=box_width,
+                kind=VGateKind.BLOCK_BOX,
+                box_width=box_width,
+            )
+
+        if isinstance(op, CompositeGateOperation):
+            label = op.name.upper()
+            box_width = self._estimate_label_box_width(label)
+            qubit_indices = []
+            for qval in list(op.control_qubits) + list(op.target_qubits):
+                idx = self._resolve_operand_to_qubit_index(
+                    qval, qubit_map, logical_id_remap, param_values
+                )
+                if idx is not None:
+                    qubit_indices.append(idx)
+            return VGate(
+                node_key=node_key,
+                label=label,
+                qubit_indices=qubit_indices,
+                estimated_width=box_width,
+                kind=VGateKind.COMPOSITE_BOX,
+                box_width=box_width,
+            )
+
+        if isinstance(op, ControlledUOperation):
+            u_name = getattr(op.block, "name", "U") or "U"
+            power_val = (
+                op.power
+                if isinstance(op.power, int)
+                else getattr(op.power, "init_value", op.power)
+            )
+            label = (
+                f"{u_name}^{power_val}"
+                if isinstance(power_val, int) and power_val > 1
+                else u_name
+            )
+            box_width = self._estimate_label_box_width(label)
+            # Control qubits first, then target qubits
+            control_indices: list[int] = []
+            for qval in op.control_operands:
+                idx = self._resolve_operand_to_qubit_index(
+                    qval, qubit_map, logical_id_remap, param_values
+                )
+                if idx is not None:
+                    control_indices.append(idx)
+            target_indices: list[int] = []
+            for qval in op.target_operands:
+                idx = self._resolve_operand_to_qubit_index(
+                    qval, qubit_map, logical_id_remap, param_values
+                )
+                if idx is not None:
+                    target_indices.append(idx)
+            return VGate(
+                node_key=node_key,
+                label=label,
+                qubit_indices=control_indices + target_indices,
+                estimated_width=box_width,
+                kind=VGateKind.CONTROLLED_U_BOX,
+                box_width=box_width,
+                control_count=len(control_indices),
+            )
+
+        raise TypeError(
+            f"Unsupported operation type for _build_vgate: {type(op).__name__}"
+        )
+
+    def _build_vexpval(
+        self,
+        op: ExpvalOp,
+        node_key: tuple,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+    ) -> VGate:
+        """Build a VGate node for an ExpvalOp."""
+        label = "<H>"
+        box_width = self._estimate_label_box_width(label)
+        qubit_indices: list[int] = []
+        if op.operands:
+            qubit_indices = self._resolve_operand_to_qubit_indices(
+                op.operands[0], qubit_map, logical_id_remap, param_values
+            )
+        return VGate(
+            node_key=node_key,
+            label=label,
+            qubit_indices=qubit_indices,
+            estimated_width=box_width,
+            kind=VGateKind.EXPVAL,
+            box_width=box_width,
+        )
+
+    def _build_vinline_block(
+        self,
+        op: CallBlockOperation | ControlledUOperation | CompositeGateOperation,
+        node_key: tuple,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+        depth: int,
+        scope_path: tuple,
+    ) -> VInlineBlock:
+        """Build a VInlineBlock node for an inlined block operation."""
+        # Extract block_value, affected_qubits, and actual_inputs based on op type
+        if isinstance(op, CallBlockOperation):
+            block_value = op.operands[0]
+            assert isinstance(block_value, BlockValue)
+            affected_qubits: list[int] = []
+            for operand in op.operands[1:]:
+                affected_qubits.extend(
+                    self._resolve_operand_to_qubit_indices(
+                        operand, qubit_map, logical_id_remap, param_values
+                    )
+                )
+            actual_inputs = op.operands[1:]
+            block_name = block_value.name or "block"
+        elif isinstance(op, ControlledUOperation):
+            block_value = op.block
+            assert isinstance(block_value, BlockValue)
+            control_qubit_indices: list[int] = []
+            for operand in op.control_operands:
+                idx = self._resolve_operand_to_qubit_index(
+                    operand, qubit_map, logical_id_remap, param_values
+                )
+                if idx is not None:
+                    control_qubit_indices.append(idx)
+            affected_qubits = list(control_qubit_indices)
+            for operand in op.target_operands:
+                idx = self._resolve_operand_to_qubit_index(
+                    operand, qubit_map, logical_id_remap, param_values
+                )
+                if idx is not None:
+                    affected_qubits.append(idx)
+            actual_inputs = list(op.target_operands)
+            u_name = getattr(block_value, "name", "U") or "U"
+            block_name = u_name
+        elif isinstance(op, CompositeGateOperation):
+            block_value = op.implementation
+            assert isinstance(block_value, BlockValue)
+            affected_qubits = []
+            for operand in list(op.control_qubits) + list(op.target_qubits):
+                idx = self._resolve_operand_to_qubit_index(
+                    operand, qubit_map, logical_id_remap, param_values
+                )
+                if idx is not None:
+                    affected_qubits.append(idx)
+            actual_inputs = list(op.target_qubits)
+            block_name = op.name
+        else:
+            raise TypeError(f"Unsupported inline block type: {type(op).__name__}")
+
+        new_logical_id_remap, child_param_values = self._build_block_value_mappings(
+            block_value,
+            actual_inputs,
+            logical_id_remap,
+            param_values,
+            qubit_map=qubit_map,
+        )
+
+        # Include qubits created inside the block body via QInitOperation
+        for body_op in block_value.operations:
+            if isinstance(body_op, QInitOperation):
+                result_val = body_op.results[0]
+                lid = result_val.logical_id
+                if lid in qubit_map:
+                    idx = qubit_map[lid]
+                    if idx not in affected_qubits:
+                        affected_qubits.append(idx)
+
+        max_gate_width = self._max_block_gate_width(
+            block_value.operations, child_param_values
+        )
+
+        children = self._build_visual_nodes(
+            block_value.operations,
+            qubit_map,
+            new_logical_id_remap,
+            child_param_values,
+            depth + 1,
+            node_key,
+        )
+
+        # Update max_gate_width from children
+        children_max = self._max_visual_gate_width(children)
+        max_gate_width = max(max_gate_width, children_max)
+
+        border_padding = compute_border_padding(self.style, depth)
+        content_width = self._compute_visual_content_width(
+            children, max_gate_width, depth
+        )
+        label_width = self._estimate_label_box_width(block_name)
+        final_width = max(label_width, content_width)
+
+        ctrl_indices = (
+            control_qubit_indices if isinstance(op, ControlledUOperation) else []
+        )
+        return VInlineBlock(
+            node_key=node_key,
+            label=block_name,
+            children=children,
+            affected_qubits=affected_qubits,
+            control_qubit_indices=ctrl_indices,
+            depth=depth,
+            border_padding=border_padding,
+            max_gate_width=max_gate_width,
+            label_width=label_width,
+            content_width=content_width,
+            final_width=final_width,
+        )
+
+    def _build_vfor(
+        self,
+        op: ForOperation,
+        node_key: tuple,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+        depth: int,
+        scope_path: tuple,
+    ) -> VFoldedBlock | VUnfoldedSequence | VSkip:
+        """Build a Visual IR node for a ForOperation."""
+        start_val, stop_val_raw, step_val = self._evaluate_loop_range(op, param_values)
+
+        if self._is_zero_iteration_loop(start_val, stop_val_raw, step_val):
+            return VSkip(node_key=node_key)
+
+        affected_qubits = self._analyze_loop_affected_qubits(
+            op, qubit_map, logical_id_remap, param_values
+        )
+
+        # Folded mode: fold_loops=True or symbolic stop
+        if self.fold_loops or stop_val_raw is None:
+            header, body_lines, folded_width = self._compute_folded_for_info(
+                op, param_values
+            )
+            return VFoldedBlock(
+                node_key=node_key,
+                header_label=header,
+                body_lines=body_lines,
+                affected_qubits=affected_qubits,
+                folded_width=folded_width,
+                kind=VFoldedKind.FOR,
+            )
+
+        # Unfolded: measure each iteration
+        num_iterations = self._compute_loop_iterations(
+            start_val, stop_val_raw, step_val
+        )
+        iterations: list[list[VisualNode]] = []
+        iteration_widths: list[float] = []
+
+        for iteration in range(num_iterations):
+            iter_value = start_val + iteration * step_val
+            child_param_values = dict(param_values)
+            child_param_values[f"_loop_{op.loop_var}"] = iter_value
+
+            self._evaluate_loop_body_intermediates(op.operations, child_param_values)
+
+            children = self._build_visual_nodes(
+                op.operations,
+                qubit_map,
+                logical_id_remap,
+                child_param_values,
+                depth + 1,
+                (*node_key, iteration),
+            )
+            iter_width = self._sum_visual_widths(children)
+            iterations.append(children)
+            iteration_widths.append(iter_width)
+
+        return VUnfoldedSequence(
+            node_key=node_key,
+            iterations=iterations,
+            affected_qubits=affected_qubits,
+            kind=VUnfoldedKind.FOR,
+            iteration_widths=iteration_widths,
+        )
+
+    def _build_vwhile(
+        self,
+        op: WhileOperation,
+        node_key: tuple,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+    ) -> VFoldedBlock:
+        """Build a VFoldedBlock for a WhileOperation (always folded)."""
+        affected_qubits = self._analyze_loop_affected_qubits(
+            op, qubit_map, logical_id_remap, param_values
+        )
+        header = "while cond:"
+        body_lines: list[str] = []
+        for body_op in op.operations:
+            expr = self._format_operation_as_expression(
+                body_op,
+                set(),
+                body_operations=op.operations,
+            )
+            if expr:
+                body_lines.extend(expr.split("\n"))
+        # Truncate to 3 lines
+        if len(body_lines) > 3:
+            body_lines = body_lines[:3] + ["..."]
+
+        folded_width = self._compute_folded_text_width(header, body_lines)
+
+        return VFoldedBlock(
+            node_key=node_key,
+            header_label=header,
+            body_lines=body_lines,
+            affected_qubits=affected_qubits,
+            folded_width=folded_width,
+            kind=VFoldedKind.WHILE,
+        )
+
+    def _build_vif(
+        self,
+        op: IfOperation,
+        node_key: tuple,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+        depth: int,
+        scope_path: tuple,
+    ) -> VFoldedBlock | VUnfoldedSequence:
+        """Build a Visual IR node for an IfOperation."""
+        affected_qubits = self._collect_if_affected_qubits(
+            op, qubit_map, logical_id_remap, param_values
+        )
+
+        cond = op.condition
+        cond_name = getattr(cond, "name", None) or "cond"
+        condition_label = f"if {cond_name}:"
+
+        if self.fold_loops:
+            body_lines: list[str] = []
+            for body_op in op.true_operations:
+                expr = self._format_operation_as_expression(
+                    body_op,
+                    set(),
+                    body_operations=op.true_operations,
+                )
+                if expr:
+                    body_lines.extend(expr.split("\n"))
+            if len(body_lines) > 3:
+                body_lines = body_lines[:3] + ["..."]
+
+            folded_width = self._compute_folded_text_width(condition_label, body_lines)
+
+            return VFoldedBlock(
+                node_key=node_key,
+                header_label=condition_label,
+                body_lines=body_lines,
+                affected_qubits=affected_qubits,
+                folded_width=folded_width,
+                kind=VFoldedKind.IF,
+            )
+
+        # Unfolded: build both branches
+        true_children = self._build_visual_nodes(
+            op.true_operations,
+            qubit_map,
+            logical_id_remap,
+            param_values,
+            depth + 1,
+            (*node_key, "true"),
+        )
+        true_width = self._sum_visual_widths(true_children)
+
+        false_children = self._build_visual_nodes(
+            op.false_operations,
+            qubit_map,
+            logical_id_remap,
+            param_values,
+            depth + 1,
+            (*node_key, "false"),
+        )
+        false_width = self._sum_visual_widths(false_children)
+
+        iterations = [true_children]
+        iteration_widths = [true_width]
+        if false_children:
+            iterations.append(false_children)
+            iteration_widths.append(false_width)
+
+        return VUnfoldedSequence(
+            node_key=node_key,
+            iterations=iterations,
+            affected_qubits=affected_qubits,
+            kind=VUnfoldedKind.IF,
+            iteration_widths=iteration_widths,
+            condition_label=condition_label,
+        )
+
+    def _build_vfor_items(
+        self,
+        op: ForItemsOperation,
+        node_key: tuple,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+        depth: int,
+        scope_path: tuple,
+    ) -> VFoldedBlock | VUnfoldedSequence | VSkip:
+        """Build a Visual IR node for a ForItemsOperation."""
+        affected_qubits = self._analyze_loop_affected_qubits(
+            op, qubit_map, logical_id_remap, param_values
+        )
+
+        # Build label
+        key_str = ", ".join(op.key_vars) if op.key_vars else "k"
+        if len(op.key_vars) > 1:
+            key_str = f"({key_str})"
+        dict_value = op.operands[0] if op.operands else None
+        dict_name = getattr(dict_value, "name", "dict") if dict_value else "dict"
+        header = f"for {key_str}, {op.value_var} in {dict_name}"
+
+        # Materialize entries
+        materialized = (
+            self._materialize_dict_entries(dict_value) if dict_value else None
+        )
+
+        if self.fold_loops or materialized is None:
+            folded_width = self._compute_folded_text_width(header, [])
+            return VFoldedBlock(
+                node_key=node_key,
+                header_label=header,
+                body_lines=[],
+                affected_qubits=affected_qubits,
+                folded_width=folded_width,
+                kind=VFoldedKind.FOR_ITEMS,
+            )
+
+        entries = materialized
+        if not entries:
+            return VSkip(node_key=node_key)
+
+        # Unfolded: iterate materialized entries
+        iterations: list[list[VisualNode]] = []
+        iteration_widths: list[float] = []
+
+        for entry_key, entry_value in entries:
+            child_param_values = dict(param_values)
+            # Set key variables
+            if hasattr(entry_key, "elements"):
+                for key_var, elem in zip(op.key_vars, entry_key.elements):
+                    val = elem.get_const() if hasattr(elem, "get_const") else None
+                    if val is not None:
+                        child_param_values[f"_loop_{key_var}"] = val
+            elif isinstance(entry_key, tuple):
+                for key_var, elem in zip(op.key_vars, entry_key):
+                    child_param_values[f"_loop_{key_var}"] = elem
+            else:
+                if op.key_vars:
+                    if hasattr(entry_key, "get_const"):
+                        val = entry_key.get_const()
+                    else:
+                        val = entry_key
+                    if val is not None:
+                        child_param_values[f"_loop_{op.key_vars[0]}"] = val
+            # Set value variable
+            if hasattr(entry_value, "get_const"):
+                val = entry_value.get_const()
+            else:
+                val = entry_value
+            if val is not None:
+                child_param_values[f"_loop_{op.value_var}"] = val
+
+            children = self._build_visual_nodes(
+                op.operations,
+                qubit_map,
+                logical_id_remap,
+                child_param_values,
+                depth + 1,
+                (*node_key, len(iterations)),
+            )
+            iter_width = self._sum_visual_widths(children)
+            iterations.append(children)
+            iteration_widths.append(iter_width)
+
+        return VUnfoldedSequence(
+            node_key=node_key,
+            iterations=iterations,
+            affected_qubits=affected_qubits,
+            kind=VUnfoldedKind.FOR_ITEMS,
+            iteration_widths=iteration_widths,
+        )
+
+    def _compute_folded_for_info(
+        self, op: ForOperation, param_values: dict
+    ) -> tuple[str, list[str], float]:
+        """Compute header, body lines, and folded width for a ForOperation."""
+        range_str = self._format_range_str(op, set(), param_values)
+        header = f"for {op.loop_var} in {range_str}"
+
+        body_lines: list[str] = []
+        for body_op in op.operations:
+            expr = self._format_operation_as_expression(
+                body_op,
+                {op.loop_var},
+                param_values=param_values,
+                body_operations=op.operations,
+            )
+            if expr:
+                body_lines.extend(expr.split("\n"))
+
+        folded_width = self._compute_folded_text_width(header, body_lines)
+        return header, body_lines, folded_width
+
+    def _compute_folded_text_width(self, header: str, body_lines: list[str]) -> float:
+        """Compute the width needed for a folded block's text content."""
+        scale = self.style.subfont_size / self.style.font_size
+        header_width = len(header) * self.style.char_width_base * scale
+        max_body_chars = max((len(line) for line in body_lines), default=0)
+        body_width = max_body_chars * self.style.char_width_monospace * scale
+        text_width = max(header_width, body_width)
+        return max(
+            self.style.folded_loop_width, text_width + 2 * self.style.text_padding
+        )
+
+    def _sum_visual_widths(self, children: list[VisualNode]) -> float:
+        """Sum widths of VisualNode children with inter-element gaps."""
+        gap = self.style.gate_gap
+        total = 0.0
+        count = 0
+
+        for child in children:
+            if isinstance(child, VSkip):
+                continue
+            elif isinstance(child, VGate):
+                total += child.estimated_width
+            elif isinstance(child, VInlineBlock):
+                total += child.final_width
+            elif isinstance(child, VFoldedBlock):
+                total += child.folded_width
+            elif isinstance(child, VUnfoldedSequence):
+                total += sum(child.iteration_widths)
+                n_iters = len(child.iterations)
+                if n_iters > 1:
+                    total += gap * (n_iters - 1)
+            count += 1
+
+        if count > 1:
+            total += gap * (count - 1)
+
+        return total
+
+    def _max_visual_gate_width(self, children: list[VisualNode]) -> float:
+        """Find the maximum VGate.estimated_width in the VisualNode tree."""
+        max_w = 0.0
+        for child in children:
+            if isinstance(child, VGate):
+                max_w = max(max_w, child.estimated_width)
+            elif isinstance(child, VInlineBlock):
+                max_w = max(max_w, self._max_visual_gate_width(child.children))
+            elif isinstance(child, VUnfoldedSequence):
+                for iter_children in child.iterations:
+                    max_w = max(max_w, self._max_visual_gate_width(iter_children))
+        return max_w
+
+    def _compute_visual_content_width(
+        self,
+        children: list[VisualNode],
+        max_gate_width: float,
+        depth: int,
+    ) -> float:
+        """Compute the total content width of VisualNode children inside a block."""
+        border_padding = compute_border_padding(self.style, depth)
+        border_extent = (
+            max_gate_width / 2 + border_padding + self.style.gate_text_padding
+        )
+        total = self._sum_visual_widths(children)
+        total += 2 * border_extent
+        return total
 
     @staticmethod
     def _is_zero_iteration_loop(
@@ -1535,10 +2387,7 @@ class CircuitAnalyzer:
                 const = theta.get_const()
                 if const is not None:
                     return self._format_parameter(const)
-                elif (
-                    hasattr(theta, "parent_array")
-                    and theta.parent_array is not None
-                ):
+                elif hasattr(theta, "parent_array") and theta.parent_array is not None:
                     array_name = theta.parent_array.name or "params"
                     idx_str = self._resolve_index_expression(
                         theta, loop_vars or set(), body_operations
@@ -1621,7 +2470,9 @@ class CircuitAnalyzer:
             if not qubit_strs:
                 return None
 
-            params = self._get_gate_params_for_expression(op, loop_vars, body_operations)
+            params = self._get_gate_params_for_expression(
+                op, loop_vars, body_operations
+            )
             result_str = ",".join(qubit_strs)
             args_str = ",".join(qubit_strs)
             if params:
@@ -1821,9 +2672,7 @@ class CircuitAnalyzer:
                 idx_parts = []
                 for idx in value.element_indices:
                     idx_parts.append(
-                        self._format_value_as_expression(
-                            idx, loop_vars, operations
-                        )
+                        self._format_value_as_expression(idx, loop_vars, operations)
                     )
                 return f"{array_name}[{','.join(idx_parts)}]"
             return array_name

@@ -65,8 +65,10 @@ class MatplotlibDrawer:
         )
         qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(self.graph)
 
+        vc = analyzer.build_visual_ir(self.graph, qubit_map, qubit_names, num_qubits)
+
         engine = CircuitLayoutEngine(analyzer, self.style)
-        layout = engine.compute_layout(self.graph, qubit_map, num_qubits)
+        layout = engine.compute_layout(vc)
 
         renderer = MatplotlibRenderer(analyzer, self.style)
-        return renderer.render(self.graph, qubit_map, qubit_names, num_qubits, layout)
+        return renderer.render(vc, layout)
