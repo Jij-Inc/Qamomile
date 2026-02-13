@@ -164,7 +164,9 @@ class UUIDRemapper:
             # Regular Value or ArrayValue
             new_parent_array: ArrayValue | None = None
             if value.parent_array is not None:
-                new_parent_array = cast(ArrayValue, self.clone_value(value.parent_array))
+                new_parent_array = cast(
+                    ArrayValue, self.clone_value(value.parent_array)
+                )
 
             new_element_indices: tuple[Value, ...] | None = None
             if value.element_indices:
@@ -274,28 +276,32 @@ class ValueSubstitutor:
 
         # Handle regular Value/ArrayValue
         if isinstance(v, Value):
+            replacements: dict[str, object] = {}
+
             # Check if this is an array element whose parent_array should be substituted
             if v.parent_array is not None and v.parent_array.uuid in self._value_map:
                 new_parent = self._value_map[v.parent_array.uuid]
                 if isinstance(new_parent, ArrayValue):
-                    # Create a new value with the substituted parent_array
-                    return dataclasses.replace(v, parent_array=new_parent)
+                    replacements["parent_array"] = new_parent
 
             # Also check element_indices for substitution
             if v.element_indices:
                 new_indices = []
-                changed = False
+                indices_changed = False
                 for idx in v.element_indices:
                     if idx.uuid in self._value_map:
                         sub_idx = self._value_map[idx.uuid]
                         if isinstance(sub_idx, Value):
                             new_indices.append(sub_idx)
-                            changed = True
+                            indices_changed = True
                         else:
                             new_indices.append(idx)
                     else:
                         new_indices.append(idx)
-                if changed:
-                    return dataclasses.replace(v, element_indices=tuple(new_indices))
+                if indices_changed:
+                    replacements["element_indices"] = tuple(new_indices)
+
+            if replacements:
+                return dataclasses.replace(v, **replacements)
 
         return v

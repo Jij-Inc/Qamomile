@@ -3,8 +3,6 @@ import abc
 import ommx.v1
 
 import qamomile.observable as qm_o
-from qamomile.circuit.transpiler.transpiler import Transpiler
-from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.optimization.binary_model import BinaryModel, VarType, BinarySampleSet
 
@@ -34,55 +32,47 @@ class MathematicalProblemConverter(abc.ABC):
 
     @abc.abstractmethod
     def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
-        raise NotImplementedError()
+        """Construct the cost Hamiltonian.
 
-    # @abc.abstractmethod
-    # def transpile(
-    #     self, 
-    #     transpiler: Transpiler,
-    #     *,
-    #     p: int
-    # ) -> ExecutableProgram:
-    #     raise NotImplementedError()
+        Subclasses must implement this method to build the appropriate
+        Hamiltonian for their specific algorithm (e.g., Pauli-Z for QAOA,
+        QRAC-encoded for QRAO).
 
-    # @abc.abstractmethod
-    # def decode(
-    #     self,
-    #     samples: SampleResult[list[int]]
-    # ) -> BinarySampleSet:
-    #     raise NotImplementedError()
+        Returns:
+            qm_o.Hamiltonian: The cost Hamiltonian.
+        """
+        ...
 
-    # def decode_to_samples_without_eval(
-    #     self,
-    #     binary_sampleset: BinarySampleSet,
-    # ) -> ommx.v1.Samples:
-    #     samples = ommx.v1.Samples({})
-    #     sample_id = 0
+    def decode(
+        self,
+        samples: SampleResult[list[int]],
+    ) -> BinarySampleSet:
+        """Decode quantum measurement results.
 
-    #     _samples = binary_sampleset.samples
-    #     _num_occurrences = binary_sampleset.num_occurrences
-    #     index_map = self.spin_model.index_new_to_origin
-    #     for sample, num_occurrences in zip(_samples, _num_occurrences):
-    #         entries = {index_map[var]: bit for var, bit in sample.items()}
-    #         state = ommx.v1.State(entries)
+        Returns results in the original vartype (BINARY or SPIN) that was
+        provided when constructing the converter.
+        """
+        # First decode in SPIN domain
+        spin_sampleset = self.spin_model.decode_from_sampleresult(samples)
 
-    #         # Generate sample IDs for each occurrence
-    #         ids = []
-    #         for _ in range(num_occurrences):
-    #             ids.append(sample_id)
-    #             sample_id += 1
-    #         samples.append(ids, state)
-    
-    #     return samples
+        # If original problem was BINARY, convert back
+        if self.original_vartype == VarType.BINARY:
+            binary_samples = []
+            for spin_sample in spin_sampleset.samples:
+                # Convert SPIN (+/-1) to BINARY (0/1): x = (1 - s) / 2
+                binary_sample = {
+                    idx: (1 - spin_val) // 2
+                    for idx, spin_val in spin_sample.items()
+                }
+                binary_samples.append(binary_sample)
 
-    # def decode_to_sampleset(
-    #     self,
-    #     result: SampleResult[list[int]],
-    # ) -> ommx.v1.SampleSet:
-    #     """
-    #     """
-    #     binary_sampleset = self.decode(result)
-    #     samples = self.decode_to_samples_without_eval(binary_sampleset)
-    #     sample_set = self.instance.evaluate_samples(samples)
-    #     return sample_set
+            return BinarySampleSet(
+                samples=binary_samples,
+                num_occurrences=spin_sampleset.num_occurrences,
+                energy=spin_sampleset.energy,
+                vartype=VarType.BINARY,
+            )
+        else:
+            # Already in SPIN, return as-is
+            return spin_sampleset
 
