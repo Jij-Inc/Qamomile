@@ -1245,7 +1245,7 @@ class MatplotlibRenderer:
     def _draw_meter_symbol(
         self, ax: Axes, x_pos: float, y: float, width: float, height: float
     ) -> None:
-        """Draw a meter symbol (half-circle arc + arrow) for measurement.
+        """Draw a meter symbol (half-circle arc + needle) for measurement.
 
         Args:
             ax: matplotlib Axes.
@@ -1256,10 +1256,11 @@ class MatplotlibRenderer:
         """
         # Calculate arc radius based on box size
         arc_radius = min(width, height) * 0.25
+        arc_center_y = y - arc_radius * 0.3
 
         # Draw half-circle arc (bottom half)
         arc = mpatches.Arc(
-            (x_pos, y - arc_radius * 0.3),
+            (x_pos, arc_center_y),
             arc_radius * 2,
             arc_radius * 2,
             angle=0,
@@ -1271,16 +1272,15 @@ class MatplotlibRenderer:
         )
         ax.add_patch(arc)
 
-        # Draw arrow (needle pointing up-right from arc center)
-        ax.annotate(
-            "",
-            xy=(x_pos + arc_radius * 1.0, y + arc_radius * 0.8),
-            xytext=(x_pos, y - arc_radius * 0.3),
-            arrowprops=dict(
-                arrowstyle="->",
-                color=self.style.measure_symbol_color,
-                lw=1.5,
-            ),
+        # Draw needle (simple line pointing up-right from arc center)
+        needle_end_x = x_pos + arc_radius * 0.55
+        needle_end_y = y + arc_radius * 0.35
+        ax.plot(
+            [x_pos, needle_end_x],
+            [arc_center_y, needle_end_y],
+            color=self.style.measure_symbol_color,
+            linewidth=1.5,
+            solid_capstyle="round",
             zorder=PORDER_TEXT,
         )
 
