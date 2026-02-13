@@ -543,24 +543,16 @@ class CircuitAnalyzer:
                 continue
 
             if isinstance(op, WhileOperation):
-                node = self._build_vwhile(
-                    op, node_key, qubit_map, logical_id_remap, param_values
+                raise NotImplementedError(
+                    "Circuit visualization does not yet support WhileOperation. "
+                    "This feature will be added in a future release."
                 )
-                result.append(node)
-                continue
 
             if isinstance(op, IfOperation):
-                node = self._build_vif(
-                    op,
-                    node_key,
-                    qubit_map,
-                    logical_id_remap,
-                    param_values,
-                    depth,
-                    scope_path,
+                raise NotImplementedError(
+                    "Circuit visualization does not yet support IfOperation. "
+                    "This feature will be added in a future release."
                 )
-                result.append(node)
-                continue
 
             if isinstance(op, ForItemsOperation):
                 node = self._build_vfor_items(
