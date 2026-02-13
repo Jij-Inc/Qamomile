@@ -2586,15 +2586,21 @@ class CircuitAnalyzer:
                     return v.name
                 return None
 
-            parts = [
+            all_operands = list(op.control_operands) + list(op.target_operands)
+            qubit_parts = [
                 s
-                for v in list(op.control_operands) + list(op.target_operands)
-                if (s := _operand_str(v)) is not None
+                for v in all_operands
+                if isinstance(v.type, QubitType) and (s := _operand_str(v)) is not None
             ]
-            if not parts:
+            param_parts = [
+                s
+                for v in all_operands
+                if not isinstance(v.type, QubitType) and (s := _operand_str(v)) is not None
+            ]
+            if not qubit_parts:
                 return f"{prefix}{block_name}(...)"
-            result_str = ",".join(parts)
-            args_str = ",".join(parts)
+            result_str = ",".join(qubit_parts)
+            args_str = ",".join(qubit_parts + param_parts)
             return f"{prefix}{result_str} = {block_name}({args_str})"
 
         elif isinstance(op, ForOperation):
