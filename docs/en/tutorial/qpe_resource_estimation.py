@@ -23,12 +23,9 @@
 
 # %%
 import math
+
 import qamomile.circuit as qmc
 from qamomile.circuit.estimator import estimate_resources
-from qamomile.circuit.estimator.algorithmic import estimate_qpe
-import sympy as sp
-import matplotlib.pyplot as plt
-import pandas as pd
 
 # %% [markdown]
 # ## Section 1: Introduction to Algebraic Resource Estimation
@@ -54,6 +51,7 @@ import pandas as pd
 #
 # First, let's estimate resources for a Bell state to understand how `estimate_resources()` works.
 
+
 # %%
 @qmc.qkernel
 def bell_state() -> qmc.Vector[qmc.Qubit]:
@@ -63,6 +61,10 @@ def bell_state() -> qmc.Vector[qmc.Qubit]:
     q[0], q[1] = qmc.cx(q[0], q[1])
     return q
 
+
+bell_state.draw()
+
+# %%
 # Simply pass the qkernel's block to estimate_resources
 est = estimate_resources(bell_state.block)
 
@@ -81,6 +83,7 @@ print(f"  Circuit depth: {est.depth.total_depth}")
 #
 # Now let's try a parametric circuit - a GHZ state with variable size.
 
+
 # %%
 @qmc.qkernel
 def ghz_state(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
@@ -88,9 +91,13 @@ def ghz_state(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
     q = qmc.qubit_array(n, name="q")
     q[0] = qmc.h(q[0])
     for i in qmc.range(n - 1):
-        q[i], q[i+1] = qmc.cx(q[i], q[i+1])
+        q[i], q[i + 1] = qmc.cx(q[i], q[i + 1])
     return q
 
+
+ghz_state.draw(n=4, fold_loops=False)
+
+# %%
 # Estimate with symbolic parameter n
 est_ghz = estimate_resources(ghz_state.block)
 
@@ -148,6 +155,7 @@ print(f"  Two-qubit gates: {est_ghz_100.gates.two_qubit}")
 #
 # IQFT is the final step of QPE that converts the phase information into measurable basis states.
 
+
 # %%
 @qmc.qkernel
 def iqft(qubits: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
@@ -164,12 +172,18 @@ def iqft(qubits: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
         qubits[j] = qmc.h(qubits[j])
     return qubits
 
+
+iqft.draw(qubits=4, fold_loops=False)
+# %%
+
+
 # Let's estimate IQFT resources with symbolic n
 @qmc.qkernel
 def iqft_n(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
     """IQFT with n qubits"""
     qubits = qmc.qubit_array(n, name="q")
     return iqft(qubits)
+
 
 est_iqft = estimate_resources(iqft_n.block)
 print("IQFT Resource Estimate (symbolic n):")
@@ -190,6 +204,7 @@ print(f"  Depth: {est_iqft.depth.total_depth}")
 #
 # This has eigenvalue $e^{i\theta}$ for eigenstate $|1\rangle$.
 
+
 # %%
 @qmc.qkernel
 def phase_gate(q: qmc.Qubit, theta: float, iter: int) -> qmc.Qubit:
@@ -198,10 +213,14 @@ def phase_gate(q: qmc.Qubit, theta: float, iter: int) -> qmc.Qubit:
         q = qmc.p(q, theta)
     return q
 
+
+phase_gate.draw(iter=4, fold_loops=False)
+
 # %% [markdown]
 # ### Step 3: Implement QPE from Scratch
 #
 # Now we implement the full QPE algorithm using basic gates.
+
 
 # %%
 @qmc.qkernel
@@ -223,8 +242,10 @@ def qpe_manual(theta: float, m: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     controlled_phase = qmc.controlled(phase_gate)
     for i in qmc.range(m):
         # Apply U^(2^i) = P(2^i * theta)
-        iterations = 2 ** i
-        counting[i], target = controlled_phase(counting[i], target, theta=theta, iter=iterations)
+        iterations = 2**i
+        counting[i], target = controlled_phase(
+            counting[i], target, theta=theta, iter=iterations
+        )
 
     # Step 3: Apply IQFT
     counting = iqft(counting)
@@ -234,6 +255,9 @@ def qpe_manual(theta: float, m: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     return bits
 
 
+qpe_manual.draw(theta=math.pi / 2, m=3, fold_loops=False, inline=True)
+
+# %%
 est_qpe_manual = estimate_resources(qpe_manual.block)
 print("\nManual QPE Resource Estimate (symbolic m):")
 print(f"  Qubits: {est_qpe_manual.qubits}")
@@ -254,16 +278,17 @@ print(f"  Depth: {est_qpe_manual.depth.total_depth}")
 #
 # Qamomile provides a built-in `qmc.qpe()` function for convenience. Let's compare with our manual implementation.
 
-# %%
 
-@qmc.qkernel                                                                                                                                                   
-def simple_phase_gate(q: qmc.Qubit, theta: float) -> qmc.Qubit:                                                                                                
-    """qmc.qpe()用のシンプルな位相ゲート: P(θ)|1⟩ = e^{iθ}|1⟩                                                                                                  
-                                                                                                                                                               
-    注意: このバージョンは位相ゲートを1回だけ適用します。                                                                                                      
-    qmc.qpe()と一緒に使用すると、繰り返し（2^k回）はpowerパラメータで処理されます。                                                                            
-    """                                                                                                                                                        
-    return qmc.p(q, theta) 
+# %%
+@qmc.qkernel
+def simple_phase_gate(q: qmc.Qubit, theta: float) -> qmc.Qubit:
+    """qmc.qpe()用のシンプルな位相ゲート: P(θ)|1⟩ = e^{iθ}|1⟩
+
+    注意: このバージョンは位相ゲートを1回だけ適用します。
+    qmc.qpe()と一緒に使用すると、繰り返し（2^k回）はpowerパラメータで処理されます。
+    """
+    return qmc.p(q, theta)
+
 
 @qmc.qkernel
 def qpe_builtin(theta: float, n: qmc.UInt) -> qmc.Float:
@@ -276,6 +301,10 @@ def qpe_builtin(theta: float, n: qmc.UInt) -> qmc.Float:
     phase = qmc.qpe(target, counting, simple_phase_gate, theta=theta)
     return qmc.measure(phase)
 
+
+qpe_builtin.draw(theta=math.pi / 2, n=3, fold_loops=False, inline=True)
+
+# %%
 est_builtin = estimate_resources(qpe_builtin.block)
 est_builtin = est_builtin.simplify()
 

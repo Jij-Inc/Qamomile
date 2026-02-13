@@ -96,6 +96,7 @@ transpiler = QiskitTranspiler()
 #
 # First, let's define various oracles.
 
+
 # %%
 # === Constant oracle (always returns 0) ===
 @qm.qkernel
@@ -107,6 +108,11 @@ def oracle_constant_0(
     return inputs, ancilla
 
 
+# We can specify the size of qm.Vector[qm.Qubit] by the argument name to draw().
+oracle_constant_0.draw(inputs=5)
+
+
+# %%
 # === Constant oracle (always returns 1) ===
 @qm.qkernel
 def oracle_constant_1(
@@ -118,6 +124,10 @@ def oracle_constant_1(
     return inputs, ancilla
 
 
+oracle_constant_1.draw(inputs=5)
+
+
+# %%
 # === Balanced oracle (XOR parity) ===
 @qm.qkernel
 def oracle_balanced_xor(
@@ -130,6 +140,10 @@ def oracle_balanced_xor(
     return inputs, ancilla
 
 
+oracle_balanced_xor.draw(inputs=5, fold_loops=False)
+
+
+# %%
 # === Balanced oracle (first bit only) ===
 @qm.qkernel
 def oracle_balanced_first_bit(
@@ -139,6 +153,8 @@ def oracle_balanced_first_bit(
     inputs[0], ancilla = qm.cx(inputs[0], ancilla)
     return inputs, ancilla
 
+
+oracle_balanced_first_bit.draw(inputs=5)
 
 # %% [markdown]
 # ### The Main Deutsch-Jozsa Algorithm
@@ -154,6 +170,7 @@ def oracle_balanced_first_bit(
 # **Interpreting results**:
 # - All $|0\rangle$ → constant function
 # - Otherwise → balanced function
+
 
 # %%
 @qm.qkernel
@@ -181,6 +198,16 @@ def deutsch_jozsa_constant_0(n: int) -> qm.Vector[qm.Bit]:
     return qm.measure(inputs)
 
 
+deutsch_jozsa_constant_0.draw(n=3, fold_loops=False)
+
+# %% [markdown]
+# You can also unfold inlined QKernels by inline=True in draw().
+
+# %%
+deutsch_jozsa_constant_0.draw(n=3, fold_loops=False, inline=True)
+
+
+# %%
 @qm.qkernel
 def deutsch_jozsa_constant_1(n: int) -> qm.Vector[qm.Bit]:
     """Deutsch-Jozsa with constant oracle (f=1)"""
@@ -201,6 +228,10 @@ def deutsch_jozsa_constant_1(n: int) -> qm.Vector[qm.Bit]:
     return qm.measure(inputs)
 
 
+deutsch_jozsa_constant_1.draw(n=3, fold_loops=False, inline=True)
+
+
+# %%
 @qm.qkernel
 def deutsch_jozsa_balanced_xor(n: int) -> qm.Vector[qm.Bit]:
     """Deutsch-Jozsa with balanced oracle (XOR)"""
@@ -221,6 +252,10 @@ def deutsch_jozsa_balanced_xor(n: int) -> qm.Vector[qm.Bit]:
     return qm.measure(inputs)
 
 
+deutsch_jozsa_balanced_xor.draw(n=3, fold_loops=False, inline=True)
+
+
+# %%
 @qm.qkernel
 def deutsch_jozsa_balanced_first(n: int) -> qm.Vector[qm.Bit]:
     """Deutsch-Jozsa with balanced oracle (first bit)"""
@@ -240,6 +275,8 @@ def deutsch_jozsa_balanced_first(n: int) -> qm.Vector[qm.Bit]:
 
     return qm.measure(inputs)
 
+
+deutsch_jozsa_balanced_first.draw(n=3, fold_loops=False, inline=True)
 
 # %% [markdown]
 # ## 5. Execution and Results
