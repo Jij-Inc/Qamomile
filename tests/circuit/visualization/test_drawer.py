@@ -196,6 +196,47 @@ class TestMatplotlibDrawer:
         fig = drawer.draw()
         assert fig is not None
 
+    def test_controlled_power_inline(self):
+        """Test controlled block with power > 1 draws nested boxes without overlap."""
+
+        @qm.qkernel
+        def simple_phase(q: qm.Qubit) -> qm.Qubit:
+            q = qm.p(q, 0.5)
+            return q
+
+        @qm.qkernel
+        def controlled_power(
+            ctrl: qm.Qubit, target: qm.Qubit
+        ) -> tuple[qm.Qubit, qm.Qubit]:
+            cu = qm.controlled(simple_phase)
+            ctrl, target = cu(ctrl, target, power=4)
+            return ctrl, target
+
+        # inline=True: should draw nested boxes (outer with "pow=4", inner with name)
+        fig = controlled_power.draw(inline=True)
+        assert fig is not None
+
+        # inline=False: should draw as VGate box
+        fig = controlled_power.draw(inline=False)
+        assert fig is not None
+
+    def test_controlled_power_1_inline(self):
+        """Test controlled block with power=1 (default) has single box."""
+
+        @qm.qkernel
+        def inner(q: qm.Qubit) -> qm.Qubit:
+            q = qm.h(q)
+            return q
+
+        @qm.qkernel
+        def outer(ctrl: qm.Qubit, target: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
+            cu = qm.controlled(inner)
+            ctrl, target = cu(ctrl, target)
+            return ctrl, target
+
+        fig = outer.draw(inline=True)
+        assert fig is not None
+
     def test_cp_gate(self):
         """Test drawing controlled-phase gate."""
 

@@ -931,11 +931,19 @@ class CircuitAnalyzer:
             and power_val > 1
             else 1
         )
-        label_display = (
-            f"{block_name}  pow={power}" if power > 1 else block_name
-        )
-        label_width = self._estimate_label_box_width(label_display)
-        final_width = max(label_width, content_width)
+        # Inner box label width (block name only, no power text)
+        label_width = self._estimate_label_box_width(block_name)
+        if power > 1:
+            # Account for outer wrapper box: margin on each side + pow label width
+            m = self.style.power_wrapper_margin
+            pow_label_width = self._estimate_label_box_width(f"pow={power}")
+            final_width = max(
+                label_width + 2 * m,
+                pow_label_width + 2 * m,
+                content_width + 2 * m,
+            )
+        else:
+            final_width = max(label_width, content_width)
 
         ctrl_indices = (
             control_qubit_indices if isinstance(op, ControlledUOperation) else []

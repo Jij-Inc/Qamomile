@@ -19,7 +19,11 @@ from matplotlib.font_manager import FontProperties
 from qamomile.circuit.ir.operation.gate import GateOperationType
 
 from .analyzer import CircuitAnalyzer
-from .geometry import compute_block_box_bounds, compute_border_padding
+from .geometry import (
+    compute_block_box_bounds,
+    compute_border_padding,
+    compute_nested_block_box_bounds,
+)
 from .style import CircuitStyle
 from .types import (
     PORDER_GATE,
@@ -125,6 +129,7 @@ class MatplotlibRenderer:
                             inner["end_x"],
                             inner["depth"],
                             inner_mgw,
+                            inner.get("power", 1),
                         )
                         outer_mgw = outer.get("max_gate_width", self.style.gate_width)
                         outer_padding = compute_border_padding(
@@ -141,6 +146,7 @@ class MatplotlibRenderer:
                             outer["end_x"],
                             outer["depth"],
                             outer_mgw,
+                            outer.get("power", 1),
                         )
                         margin = 0.1
                         if inner_box_left - margin < outer_box_left:
@@ -269,7 +275,8 @@ class MatplotlibRenderer:
     ) -> tuple[float, float]:
         """Draw dashed border around inlined block operations.
 
-        Uses geometry.py functions for box bounds computation.
+        When power > 1, draws nested boxes: an outer wrapper with "pow=N"
+        and an inner box with the block name.
         """
         if max_gate_width is None:
             max_gate_width = self.style.gate_width
@@ -278,9 +285,8 @@ class MatplotlibRenderer:
         min_y = min(y_coords)
         max_y = max(y_coords)
 
-        display_name = f"{name}  pow={power}" if power > 1 else name
         text_height = self._calculate_text_height(
-            ax, display_name, self.style.subfont_size
+            ax, name, self.style.subfont_size
         )
         padding = compute_border_padding(self.style, depth)
 
@@ -295,13 +301,14 @@ class MatplotlibRenderer:
         )
         label_vertical_offset = depth_label_offset + overlap_label_offset
 
-        box_left, box_right = compute_block_box_bounds(
-            self.style, name, start_x, end_x, depth, max_gate_width, power
+        (inner_left, inner_right), (outer_left, outer_right) = (
+            compute_nested_block_box_bounds(
+                self.style, name, start_x, end_x, depth, max_gate_width, power
+            )
         )
-        label_left = box_left + self.style.label_horizontal_padding
 
-        box_bottom = min_y - self.style.gate_height / 2 - padding
-        box_top = (
+        inner_bottom = min_y - self.style.gate_height / 2 - padding
+        inner_top = (
             max_y
             + self.style.gate_height / 2
             + padding
@@ -310,59 +317,38 @@ class MatplotlibRenderer:
         )
 
         block_zorder = PORDER_WIRE + 0.5 + depth * 0.1
-        if is_controlled:
-            rect = mpatches.Rectangle(
-                (box_left, box_bottom),
-                box_right - box_left,
-                box_top - box_bottom,
-                facecolor=self.style.background_color,
-                edgecolor=self.style.block_border_color,
-                linewidth=1.5,
-                linestyle="-",
-                zorder=block_zorder,
-            )
-            ax.add_patch(rect)
-            wire_zorder = block_zorder + 0.05
-            for q in qubit_indices:
-                wire_y = self.qubit_y[q]
-                ax.add_line(
-                    mlines.Line2D(
-                        [box_left, box_right],
-                        [wire_y, wire_y],
-                        color=self.style.wire_color,
-                        linewidth=1.0,
-                        zorder=wire_zorder,
-                    )
-                )
-        else:
-            rect = mpatches.Rectangle(
-                (box_left, box_bottom),
-                box_right - box_left,
-                box_top - box_bottom,
-                facecolor="none",
-                edgecolor=self.style.block_border_color,
-                linewidth=1.5,
-                linestyle="--",
-                zorder=block_zorder,
-            )
-            ax.add_patch(rect)
-
-        ax.text(
-            label_left,
-            box_top - lp,
-            name,
-            ha="left",
-            va="top",
-            fontsize=self.style.subfont_size,
-            color=self.style.block_border_color,
-            zorder=PORDER_TEXT,
-        )
+        linestyle = "-" if is_controlled else "--"
+        facecolor = self.style.background_color if is_controlled else "none"
 
         if power > 1:
-            power_right = box_right - self.style.label_horizontal_padding
+            # Outer wrapper box for "pow=N"
+            m = self.style.power_wrapper_margin
+            pow_text_height = self._calculate_text_height(
+                ax, f"pow={power}", self.style.subfont_size
+            )
+            pow_label_height = pow_text_height + 2 * lp
+
+            outer_bottom = inner_bottom - m
+            outer_top = inner_top + pow_label_height + m
+
+            outer_zorder = block_zorder - 0.01
+            outer_rect = mpatches.Rectangle(
+                (outer_left, outer_bottom),
+                outer_right - outer_left,
+                outer_top - outer_bottom,
+                facecolor=facecolor,
+                edgecolor=self.style.block_border_color,
+                linewidth=1.5,
+                linestyle=linestyle,
+                zorder=outer_zorder,
+            )
+            ax.add_patch(outer_rect)
+
+            # "pow=N" label on outer box (right-aligned)
+            pow_right = outer_right - self.style.label_horizontal_padding
             ax.text(
-                power_right,
-                box_top - lp,
+                pow_right,
+                outer_top - lp,
                 f"pow={power}",
                 ha="right",
                 va="top",
@@ -371,7 +357,50 @@ class MatplotlibRenderer:
                 zorder=PORDER_TEXT,
             )
 
-        return box_bottom, box_top
+        # Inner box
+        inner_rect = mpatches.Rectangle(
+            (inner_left, inner_bottom),
+            inner_right - inner_left,
+            inner_top - inner_bottom,
+            facecolor=facecolor,
+            edgecolor=self.style.block_border_color,
+            linewidth=1.5,
+            linestyle=linestyle,
+            zorder=block_zorder,
+        )
+        ax.add_patch(inner_rect)
+
+        if is_controlled:
+            wire_zorder = block_zorder + 0.05
+            for q in qubit_indices:
+                wire_y = self.qubit_y[q]
+                ax.add_line(
+                    mlines.Line2D(
+                        [inner_left, inner_right],
+                        [wire_y, wire_y],
+                        color=self.style.wire_color,
+                        linewidth=1.0,
+                        zorder=wire_zorder,
+                    )
+                )
+
+        # Block name on inner box label bar
+        inner_label_left = inner_left + self.style.label_horizontal_padding
+        ax.text(
+            inner_label_left,
+            inner_top - lp,
+            name,
+            ha="left",
+            va="top",
+            fontsize=self.style.subfont_size,
+            color=self.style.block_border_color,
+            zorder=PORDER_TEXT,
+        )
+
+        # Return outermost bounds for control dot logic
+        if power > 1:
+            return outer_bottom, outer_top
+        return inner_bottom, inner_top
 
     def _draw_visual_nodes(
         self,
@@ -1031,28 +1060,18 @@ class MatplotlibRenderer:
 
         if block_ranges:
             for br in block_ranges:
-                depth = br["depth"]
-                padding = compute_border_padding(self.style, depth)
-                mgw = br.get("max_gate_width", self.style.gate_width)
-                gtp = self.style.gate_text_padding
-                gate_border_right = br["end_x"] + mgw / 2 + padding + gtp
-                border_left = br["start_x"] - mgw / 2 - padding - gtp
-
-                # Account for title width (including power annotation)
                 block_name = br.get("name", "block")
                 block_power = br.get("power", 1)
-                display_name = (
-                    f"{block_name}  pow={block_power}"
-                    if block_power > 1
-                    else block_name
+                mgw = br.get("max_gate_width", self.style.gate_width)
+                border_left, border_right = compute_block_box_bounds(
+                    self.style,
+                    block_name,
+                    br["start_x"],
+                    br["end_x"],
+                    br["depth"],
+                    mgw,
+                    block_power,
                 )
-                title_char_width = self.style.char_width_base
-                label_left = border_left + self.style.label_horizontal_padding
-                title_text_width = len(display_name) * title_char_width
-                label_right = (
-                    label_left + title_text_width + self.style.label_horizontal_padding
-                )
-                border_right = max(gate_border_right, label_right)
 
                 x_right = max(x_right, border_right + 0.3)
                 x_left = min(x_left, border_left - 0.3)

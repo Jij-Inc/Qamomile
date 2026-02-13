@@ -148,6 +148,9 @@ class CircuitStyle:
     nested_padding_decay: float = 0.85  # Padding decay factor per nesting depth
     min_block_padding: float = 0.1  # Minimum block padding
 
+    # Power wrapper box margin (gap between inner and outer box when power > 1)
+    power_wrapper_margin: float = 0.20
+
     # Folded box vertical padding for text
     folded_box_text_v_padding: float = 0.15
 
