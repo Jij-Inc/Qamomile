@@ -15,7 +15,6 @@ TUTORIAL_PATTERNS = [
     "docs/ja/tutorial/*.py",
     "docs/en/transpile/*.py",
     "docs/ja/transpile/*.py",
-    "docs/en/optimization/*.py",
 ]
 
 
