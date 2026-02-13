@@ -817,9 +817,9 @@ class MatplotlibRenderer:
             text_color = self.style.while_loop_text_color
             linestyle = "--"
         elif node.kind == VFoldedKind.FOR_ITEMS:
-            face_color = self.style.for_items_face_color
-            edge_color = self.style.for_items_edge_color
-            text_color = self.style.for_items_text_color
+            face_color = self.style.for_loop_face_color
+            edge_color = self.style.for_loop_edge_color
+            text_color = self.style.for_loop_text_color
             linestyle = "-"
         elif node.kind == VFoldedKind.IF:
             face_color = self.style.if_face_color
@@ -860,7 +860,7 @@ class MatplotlibRenderer:
         ax.add_patch(rect)
 
         # For ForOperation: header at top + body text below
-        if node.kind == VFoldedKind.FOR and body_lines:
+        if node.kind in (VFoldedKind.FOR, VFoldedKind.FOR_ITEMS) and body_lines:
             header_y = box_top - self.style.label_vertical_offset - 0.15
             header_text = ax.text(
                 x_pos,

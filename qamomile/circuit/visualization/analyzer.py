@@ -1180,11 +1180,23 @@ class CircuitAnalyzer:
         )
 
         if self.fold_loops or materialized is None:
-            folded_width = self._compute_folded_text_width(header, [])
+            loop_vars = set(op.key_vars) | {op.value_var}
+            body_lines: list[str] = []
+            for body_op in op.operations:
+                expr = self._format_operation_as_expression(
+                    body_op,
+                    loop_vars,
+                    param_values=param_values,
+                    body_operations=op.operations,
+                )
+                if expr:
+                    body_lines.extend(expr.split("\n"))
+
+            folded_width = self._compute_folded_text_width(header, body_lines)
             return VFoldedBlock(
                 node_key=node_key,
                 header_label=header,
-                body_lines=[],
+                body_lines=body_lines,
                 affected_qubits=affected_qubits,
                 folded_width=folded_width,
                 kind=VFoldedKind.FOR_ITEMS,
