@@ -99,25 +99,6 @@ class TestQRAC31Converter:
         assert converter.num_qubits > 0
         assert converter.spin_model is not None
 
-    def test_ansatz_kernel(self):
-        """Test that ansatz kernel is generated correctly."""
-        x = binary(0)
-        y = binary(1)
-
-        problem = BinaryExpr()
-        problem += x * y
-
-        model = BinaryModel(problem)
-        converter = QRAC31Converter(model)
-
-        kernel = converter.get_ansatz_kernel(depth=2)
-        assert kernel is not None
-
-        # Check parameter count
-        expected_params = converter.num_parameters(depth=2)
-        assert expected_params == 2 * converter.num_qubits * 2
-
-
 class TestSignRounder:
     """Tests for SignRounder."""
 
@@ -213,10 +194,6 @@ class TestEndToEnd:
         # Check encoding
         assert converter.num_qubits >= 2
         assert len(converter.encoder.pauli_encoding) == 3
-
-        # Get ansatz kernel
-        kernel = converter.get_ansatz_kernel(depth=1)
-        assert kernel is not None
 
         # Simulate rounding results (as if from VQE)
         # For MaxCut, optimal is alternating: [+1, -1, +1] or [-1, +1, -1]

@@ -7,11 +7,11 @@ from .qaoa import (
     superposition_vector,
     qaoa_state,
 )
-from .hardware_efficient_ansatz import (
-    ry_rz_layer,
+from .basic import (
+    rx_layer,
+    ry_layer,
+    rz_layer,
     cz_entangling_layer,
-    hardware_efficient_ansatz,
-    num_parameters,
 )
 from .fqaoa import (
     _apply_initial_occupations,
@@ -30,8 +30,10 @@ __all__ = [
     "qaoa_circuit",
     "superposition_vector",
     "qaoa_state",
-    # Hardware-efficient ansatz
-    "ry_rz_layer",
+    # Basic layers
+    "rx_layer",
+    "ry_layer",
+    "rz_layer",
     "cz_entangling_layer",
     "hardware_efficient_ansatz",
     "num_parameters",
