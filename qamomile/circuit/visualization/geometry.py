@@ -71,9 +71,9 @@ def compute_nested_block_box_bounds(
         return (inner_left, inner_right), (inner_left, inner_right)
 
     # Outer box: expand by wrapper margin
-    m = style.power_wrapper_margin
-    outer_left = inner_left - m
-    outer_right_from_inner = inner_right + m
+    margin = style.power_wrapper_margin
+    outer_left = inner_left - margin
+    outer_right_from_inner = inner_right + margin
 
     # Ensure outer box is wide enough for "pow=N" label
     pow_label = f"pow={power}"

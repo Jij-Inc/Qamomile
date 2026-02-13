@@ -256,7 +256,12 @@ class CircuitLayoutEngine:
 
         # Compute border right edge using shared helper
         _, border_right_edge = compute_block_box_bounds(
-            self.style, node.label, actual_start, actual_end, depth, max_gate_width,
+            self.style,
+            node.label,
+            actual_start,
+            actual_end,
+            depth,
+            max_gate_width,
             node.power,
         )
 
@@ -491,7 +496,11 @@ class CircuitLayoutEngine:
             depth_offset = (max_depth - depth) * label_step
             overlap_offset = max(0, qubit_max_overlaps.get(top_q, 0) - 1) * overlap_step
             extent_above = (
-                gate_half + padding + label_height + depth_offset + overlap_offset
+                gate_half
+                + padding
+                + label_height
+                + depth_offset
+                + overlap_offset
                 + power_extra_above
             )
             max_above[top_q] = max(max_above[top_q], extent_above)

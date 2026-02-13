@@ -7,17 +7,21 @@ circuit analysis, layout computation, and rendering.
 from __future__ import annotations
 
 import inspect
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from matplotlib.figure import Figure
+
+from qamomile.circuit.frontend.constructors import qubit_array
+from qamomile.circuit.frontend.func_to_block import create_dummy_input, is_array_type
+from qamomile.circuit.frontend.handle import Observable, Qubit
+from qamomile.circuit.frontend.tracer import Tracer, trace
+from qamomile.circuit.ir.graph import Graph
+from qamomile.circuit.ir.value import Value
 
 from .analyzer import CircuitAnalyzer
 from .layout import CircuitLayoutEngine
 from .renderer import MatplotlibRenderer
 from .style import DEFAULT_STYLE, CircuitStyle
-
-if TYPE_CHECKING:
-    from qamomile.circuit.ir.graph import Graph
 
 
 class MatplotlibDrawer:
@@ -124,9 +128,6 @@ class MatplotlibDrawer:
     @staticmethod
     def _has_qubit_array_params(kernel: Any) -> bool:
         """Check if kernel has any Qubit array parameters (Vector[Qubit], etc.)."""
-        from qamomile.circuit.frontend.func_to_block import is_array_type
-        from qamomile.circuit.frontend.handle import Qubit
-
         for param in kernel.signature.parameters.values():
             pt = param.annotation
             if is_array_type(pt):
@@ -146,16 +147,6 @@ class MatplotlibDrawer:
         array sizes via ``qubit_array()``) from other kwargs, then traces the
         kernel to produce a Graph.
         """
-        from qamomile.circuit.frontend.constructors import qubit_array
-        from qamomile.circuit.frontend.func_to_block import (
-            create_dummy_input,
-            is_array_type,
-        )
-        from qamomile.circuit.frontend.handle import Observable, Qubit
-        from qamomile.circuit.frontend.tracer import Tracer, trace
-        from qamomile.circuit.ir.graph import Graph
-        from qamomile.circuit.ir.value import Value
-
         # Separate qubit array sizes from other kwargs
         qubit_sizes: dict[str, int] = {}
         build_kwargs: dict[str, Any] = {}
@@ -220,9 +211,7 @@ class MatplotlibDrawer:
                         param_type, name, build_kwargs[name]
                     )
                 elif param.default is not inspect.Parameter.empty:
-                    handle = kernel._create_bound_input(
-                        param_type, name, param.default
-                    )
+                    handle = kernel._create_bound_input(param_type, name, param.default)
                 else:
                     handle = create_dummy_input(param_type, name)
                 dummy_inputs[name] = handle

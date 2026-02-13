@@ -285,9 +285,7 @@ class MatplotlibRenderer:
         min_y = min(y_coords)
         max_y = max(y_coords)
 
-        text_height = self._calculate_text_height(
-            ax, name, self.style.subfont_size
-        )
+        text_height = self._calculate_text_height(ax, name, self.style.subfont_size)
         padding = compute_border_padding(self.style, depth)
 
         lp = self.style.label_padding
@@ -322,14 +320,14 @@ class MatplotlibRenderer:
 
         if power > 1:
             # Outer wrapper box for "pow=N"
-            m = self.style.power_wrapper_margin
+            margin = self.style.power_wrapper_margin
             pow_text_height = self._calculate_text_height(
                 ax, f"pow={power}", self.style.subfont_size
             )
             pow_label_height = pow_text_height + 2 * lp
 
-            outer_bottom = inner_bottom - m
-            outer_top = inner_top + pow_label_height + m
+            outer_bottom = inner_bottom - margin
+            outer_top = inner_top + pow_label_height + margin
 
             outer_zorder = block_zorder - 0.01
             outer_rect = mpatches.Rectangle(

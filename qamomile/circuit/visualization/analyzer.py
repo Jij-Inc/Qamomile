@@ -685,7 +685,7 @@ class CircuitAnalyzer:
             )
 
         if isinstance(op, MeasureOperation):
-            w = self.style.gate_width
+            gate_width = self.style.gate_width
             qubit_indices = []
             if op.operands:
                 idx = self._resolve_operand_to_qubit_index(
@@ -697,12 +697,12 @@ class CircuitAnalyzer:
                 node_key=node_key,
                 label="M",
                 qubit_indices=qubit_indices,
-                estimated_width=w,
+                estimated_width=gate_width,
                 kind=VGateKind.MEASURE,
             )
 
         if isinstance(op, MeasureVectorOperation):
-            w = self.style.gate_width
+            gate_width = self.style.gate_width
             qubit_indices = []
             if op.operands:
                 qubit_indices = self._resolve_operand_to_qubit_indices(
@@ -712,7 +712,7 @@ class CircuitAnalyzer:
                 node_key=node_key,
                 label="M",
                 qubit_indices=qubit_indices,
-                estimated_width=w,
+                estimated_width=gate_width,
                 kind=VGateKind.MEASURE_VECTOR,
             )
 
@@ -893,7 +893,9 @@ class CircuitAnalyzer:
             qubit_map=qubit_map,
         )
 
-        self._evaluate_loop_body_intermediates(block_value.operations, child_param_values)
+        self._evaluate_loop_body_intermediates(
+            block_value.operations, child_param_values
+        )
 
         # Include qubits created inside the block body via QInitOperation
         for body_op in block_value.operations:
@@ -937,12 +939,12 @@ class CircuitAnalyzer:
         label_width = self._estimate_label_box_width(block_name)
         if power > 1:
             # Account for outer wrapper box: margin on each side + pow label width
-            m = self.style.power_wrapper_margin
+            margin = self.style.power_wrapper_margin
             pow_label_width = self._estimate_label_box_width(f"pow={power}")
             final_width = max(
-                label_width + 2 * m,
-                pow_label_width + 2 * m,
-                content_width + 2 * m,
+                label_width + 2 * margin,
+                pow_label_width + 2 * margin,
+                content_width + 2 * margin,
             )
         else:
             final_width = max(label_width, content_width)
@@ -1171,12 +1173,16 @@ class CircuitAnalyzer:
         if len(op.key_vars) > 1:
             key_str = f"({key_str})"
         dict_value = op.operands[0] if op.operands else None
-        dict_name = getattr(dict_value, "name", "dict") if dict_value is not None else "dict"
+        dict_name = (
+            getattr(dict_value, "name", "dict") if dict_value is not None else "dict"
+        )
         header = f"for {key_str}, {op.value_var} in {dict_name}"
 
         # Materialize entries
         materialized = (
-            self._materialize_dict_entries(dict_value) if dict_value is not None else None
+            self._materialize_dict_entries(dict_value)
+            if dict_value is not None
+            else None
         )
 
         if self.fold_loops or materialized is None:
@@ -1682,24 +1688,24 @@ class CircuitAnalyzer:
         if value.is_parameter():
             name = value.parameter_name()
             if name and name in param_values:
-                v = param_values[name]
-                if isinstance(v, (int, float)):
-                    return v
+                param_value = param_values[name]
+                if isinstance(param_value, (int, float)):
+                    return param_value
 
         # 3. Check param_values by logical_id
         vid = value.logical_id
         if vid in param_values:
-            v = param_values[vid]
-            if isinstance(v, (int, float)):
-                return v
+            param_value = param_values[vid]
+            if isinstance(param_value, (int, float)):
+                return param_value
 
         # 3.5. Loop variable name-based lookup
         if value.name:
             loop_key = f"_loop_{value.name}"
             if loop_key in param_values:
-                v = param_values[loop_key]
-                if isinstance(v, (int, float)):
-                    return v
+                param_value = param_values[loop_key]
+                if isinstance(param_value, (int, float)):
+                    return param_value
 
         # 3.6. Array element access (e.g. edges[idx, 0])
         if hasattr(value, "parent_array") and value.parent_array is not None:
@@ -1859,11 +1865,11 @@ class CircuitAnalyzer:
             if isinstance(pv, str):
                 return pv
         # Constant
-        c = value.get_const()
-        if c is not None:
-            if isinstance(c, float) and c == int(c):
-                return str(int(c))
-            return str(c)
+        const = value.get_const()
+        if const is not None:
+            if isinstance(const, float) and const == int(const):
+                return str(int(const))
+            return str(const)
         # Named parameter
         if value.is_parameter():
             name = value.parameter_name() or value.name
@@ -2595,7 +2601,8 @@ class CircuitAnalyzer:
             param_parts = [
                 s
                 for v in all_operands
-                if not isinstance(v.type, QubitType) and (s := _operand_str(v)) is not None
+                if not isinstance(v.type, QubitType)
+                and (s := _operand_str(v)) is not None
             ]
             if not qubit_parts:
                 return f"{prefix}{block_name}(...)"

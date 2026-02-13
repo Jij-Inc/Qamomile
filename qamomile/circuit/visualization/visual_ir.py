@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass, field
-from typing import Union
-
 from qamomile.circuit.ir.operation.gate import GateOperationType
 
 
@@ -127,7 +125,7 @@ class VSkip:
     node_key: tuple = ()
 
 
-VisualNode = Union[VGate, VInlineBlock, VFoldedBlock, VUnfoldedSequence, VSkip]
+VisualNode = VGate | VInlineBlock | VFoldedBlock | VUnfoldedSequence | VSkip
 
 
 @dataclass

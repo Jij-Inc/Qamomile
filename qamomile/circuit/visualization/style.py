@@ -95,7 +95,9 @@ class CircuitStyle:
     char_width_base: float = (
         0.12  # Base character width estimate for text sizing (titles, labels)
     )
-    char_width_bold: float = 0.14  # Character width for bold text estimation (folded block headers)
+    char_width_bold: float = (
+        0.14  # Character width for bold text estimation (folded block headers)
+    )
     char_width_gate: float = 0.14  # Character width for gate text estimation
     char_width_block: float = 0.17  # Character width for block label estimation
     char_width_monospace: float = (
