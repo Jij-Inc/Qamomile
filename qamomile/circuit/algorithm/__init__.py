@@ -21,6 +21,7 @@ from .fqaoa import (
     mixer_layer,
     cost_layer,
     fqaoa_layers,
+    fqaoa_state,
 )
 
 __all__ = [
@@ -43,4 +44,5 @@ __all__ = [
     "mixer_layer",
     "cost_layer",
     "fqaoa_layers",
+    "fqaoa_state",
 ]

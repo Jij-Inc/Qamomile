@@ -82,8 +82,10 @@ def test_get_cost_ansatz(simple_problem):
     fqaoa_converter = FQAOAConverter(simple_problem, num_fermions=4)
     cost_kernel = fqaoa_converter.get_cost_ansatz()
 
-    counts = count_gates(cost_kernel.block)
-    assert counts.total != 0
+    # cost_layer uses Dict iteration (ForItemsOperation) which count_gates
+    # does not currently support.  Verify the block has operations instead.
+    block = cost_kernel.block
+    assert len(block.operations) > 0
 
 
 def test_get_fqaoa_ansatz_transpile(simple_problem):

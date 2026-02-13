@@ -43,10 +43,9 @@ from qamomile.circuit.transpiler.transpiler import Transpiler
 from qamomile.circuit.algorithm.fqaoa import (
     initial_occupations,
     givens_rotations,
-    hopping_gate,
     mixer_layer,
     cost_layer,
-    fqaoa_layers,
+    fqaoa_state,
 )
 from qamomile.optimization.binary_model import BinaryModel
 from qamomile.optimization.utils import is_close_zero
@@ -221,6 +220,25 @@ class FQAOAConverter(MathematicalProblemConverter):
 
         return givens_angles
 
+    def _flatten_givens_data(
+        self,
+        givens_angles: list[list],
+    ) -> tuple[list[int], list[int], list[float]]:
+        """Convert givens decomposition output to three parallel lists.
+
+        Returns:
+            Tuple of (indices_i, indices_j, angles) suitable for binding
+            to ``Vector[UInt]``, ``Vector[UInt]``, ``Vector[Float]`` parameters.
+        """
+        indices_i: list[int] = []
+        indices_j: list[int] = []
+        angles: list[float] = []
+        for (i, j), theta in givens_angles:
+            indices_i.append(i)
+            indices_j.append(j)
+            angles.append(float(theta))
+        return indices_i, indices_j, angles
+
     def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
         """Construct the Ising cost Hamiltonian from the spin model.
 
@@ -251,26 +269,31 @@ class FQAOAConverter(MathematicalProblemConverter):
 
     def get_init_state(self) -> qm_c.QKernel:
         """Generate the initial state preparation kernel for FQAOA."""
-        unitary_rows = self.get_fermi_orbital()
-        givens_rotation_data = self._givens_decomposition(unitary_rows)
-        num_fermions = self.num_fermions
 
         @qm_c.qkernel
-        def init_state(q: qm_c.Vector[qm_c.Qubit]) -> qm_c.Vector[qm_c.Qubit]:
+        def init_state(
+            num_fermions: qm_c.UInt,
+            num_qubits: qm_c.UInt,
+            givens_i: qm_c.Vector[qm_c.UInt],
+            givens_j: qm_c.Vector[qm_c.UInt],
+            givens_theta: qm_c.Vector[qm_c.Float],
+        ) -> qm_c.Vector[qm_c.Qubit]:
+            q = qm_c.qubit_array(num_qubits, name="q")
             q = initial_occupations(q, num_fermions)
-            q = givens_rotations(q, givens_rotation_data)
+            q = givens_rotations(q, givens_i, givens_j, givens_theta)
             return q
 
         return init_state
 
     def get_mixer_ansatz(self, hopping: float = 1.0) -> qm_c.QKernel:
         """Generate the fermionic mixer ansatz kernel (:math:`e^{-\\beta H_d}`)."""
-        num_qubits = self.num_qubits
 
         @qm_c.qkernel
         def mixer(
             q: qm_c.Vector[qm_c.Qubit],
             beta: qm_c.Float,
+            hopping: qm_c.Float,
+            num_qubits: qm_c.UInt,
         ) -> qm_c.Vector[qm_c.Qubit]:
             return mixer_layer(q, beta, hopping, num_qubits)
 
@@ -278,38 +301,25 @@ class FQAOAConverter(MathematicalProblemConverter):
 
     def get_cost_ansatz(self) -> qm_c.QKernel:
         """Generate the cost ansatz kernel (:math:`e^{-\\gamma H_P}`)."""
-        linear = self.spin_model.linear
-        quad = self.spin_model.quad
 
         @qm_c.qkernel
         def cost(
             q: qm_c.Vector[qm_c.Qubit],
             gamma: qm_c.Float,
+            linear: qm_c.Dict[qm_c.UInt, qm_c.Float],
+            quad: qm_c.Dict[qm_c.Tuple[qm_c.UInt, qm_c.UInt], qm_c.Float],
         ) -> qm_c.Vector[qm_c.Qubit]:
             return cost_layer(q, gamma, linear, quad)
 
         return cost
 
     def get_fqaoa_ansatz(self, p: int, hopping: float = 1.0) -> qm_c.QKernel:
-        """Generate the FQAOA ansatz kernel."""
-        num_qubits = self.num_qubits
-        num_fermions = self.num_fermions
-        unitary_rows = self.get_fermi_orbital()
-        givens_rotation_data = self._givens_decomposition(unitary_rows)
-        linear = self.spin_model.linear
-        quad = self.spin_model.quad
+        """Generate the FQAOA ansatz kernel.
 
-        @qm_c.qkernel
-        def fqaoa_state(
-            betas: qm_c.Vector[qm_c.Float],
-            gammas: qm_c.Vector[qm_c.Float],
-        ) -> qm_c.Vector[qm_c.Qubit]:
-            q = qm_c.qubit_array(num_qubits, name="q")
-            q = initial_occupations(q, num_fermions)
-            q = givens_rotations(q, givens_rotation_data)
-            q = fqaoa_layers(q, betas, gammas, p, linear, quad, hopping, num_qubits)
-            return q
-
+        Returns the module-level :func:`fqaoa_state` ``@qkernel`` from
+        ``qamomile.circuit.algorithm.fqaoa``.  Call it via ``transpiler.transpile``
+        with appropriate ``bindings`` and ``parameters``.
+        """
         return fqaoa_state
 
     def transpile(
@@ -320,10 +330,9 @@ class FQAOAConverter(MathematicalProblemConverter):
         hopping: float = 1.0,
     ) -> ExecutableProgram:
         """Compile FQAOA ansatz into an executable program with measurements."""
-        num_qubits = self.num_qubits
-        num_fermions = self.num_fermions
         unitary_rows = self.get_fermi_orbital()
-        givens_rotation_data = self._givens_decomposition(unitary_rows)
+        givens_data = self._givens_decomposition(unitary_rows)
+        gi, gj, gtheta = self._flatten_givens_data(givens_data)
 
         # Filter near-zero coefficients to keep loops compact
         linear = {
@@ -335,44 +344,47 @@ class FQAOAConverter(MathematicalProblemConverter):
             if not is_close_zero(Jij)
         }
 
-        last_qubit = num_qubits - 1
-
         @qm_c.qkernel
         def fqaoa_sampling(
-            betas: qm_c.Vector[qm_c.Float],
-            gammas: qm_c.Vector[qm_c.Float],
+            p: qm_c.UInt,
             linear: qm_c.Dict[qm_c.UInt, qm_c.Float],
             quad: qm_c.Dict[qm_c.Tuple[qm_c.UInt, qm_c.UInt], qm_c.Float],
+            num_qubits: qm_c.UInt,
+            num_fermions: qm_c.UInt,
+            givens_i: qm_c.Vector[qm_c.UInt],
+            givens_j: qm_c.Vector[qm_c.UInt],
+            givens_theta: qm_c.Vector[qm_c.Float],
+            hopping: qm_c.Float,
+            gammas: qm_c.Vector[qm_c.Float],
+            betas: qm_c.Vector[qm_c.Float],
         ) -> qm_c.Vector[qm_c.Bit]:
-            q = qm_c.qubit_array(num_qubits, name="q")
-
-            # Initial occupations
-            for i in qm_c.range(num_fermions):
-                q[i] = qm_c.x(q[i])
-
-            # Givens rotations (precomputed constants)
-            q = givens_rotations(q, givens_rotation_data)
-
-            for layer in qm_c.range(p):
-                # Cost layer
-                for i, hi in qm_c.items(linear):
-                    q[i] = qm_c.rz(q[i], 2 * hi * gammas[layer])
-                for (i, j), Jij in qm_c.items(quad):
-                    q[i], q[j] = qm_c.rzz(q[i], q[j], 2 * Jij * gammas[layer])
-
-                # Mixer layer
-                for i in qm_c.range(0, last_qubit, 2):
-                    q = hopping_gate(q, i, i + 1, betas[layer], hopping)
-                for i in qm_c.range(1, last_qubit, 2):
-                    q = hopping_gate(q, i, i + 1, betas[layer], hopping)
-                # Boundary hop (wrap in control flow to avoid segment splits)
-                for _ in qm_c.range(1):
-                    q = hopping_gate(q, 0, last_qubit, betas[layer], hopping)
-
+            q = fqaoa_state(
+                p,
+                linear,
+                quad,
+                num_qubits,
+                num_fermions,
+                givens_i,
+                givens_j,
+                givens_theta,
+                hopping,
+                gammas,
+                betas,
+            )
             return qm_c.measure(q)
 
         return transpiler.transpile(
             fqaoa_sampling,
-            bindings={"linear": linear, "quad": quad},
-            parameters=["betas", "gammas"],
+            bindings={
+                "p": p,
+                "linear": linear,
+                "quad": quad,
+                "num_qubits": self.num_qubits,
+                "num_fermions": self.num_fermions,
+                "givens_i": gi,
+                "givens_j": gj,
+                "givens_theta": gtheta,
+                "hopping": hopping,
+            },
+            parameters=["gammas", "betas"],
         )

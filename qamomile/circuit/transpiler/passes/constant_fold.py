@@ -156,7 +156,12 @@ class ConstantFoldingPass(Pass[Block, Block]):
         op: Operation,
         folded_values: dict[str, Value],
     ) -> Operation:
-        """Substitute folded constant values in operation operands."""
+        """Substitute folded constant values in operation operands.
+
+        Also propagates folded values into ``element_indices`` of Value
+        operands so that gate operations referencing a folded BinOp result
+        as a qubit index are updated correctly.
+        """
         new_operands: list[Any] = []
         changed = False
 
@@ -164,6 +169,22 @@ class ConstantFoldingPass(Pass[Block, Block]):
             if isinstance(operand, ValueBase) and operand.uuid in folded_values:
                 new_operands.append(folded_values[operand.uuid])
                 changed = True
+            elif isinstance(operand, Value) and operand.element_indices:
+                new_indices = []
+                indices_changed = False
+                for idx in operand.element_indices:
+                    if idx.uuid in folded_values:
+                        new_indices.append(folded_values[idx.uuid])
+                        indices_changed = True
+                    else:
+                        new_indices.append(idx)
+                if indices_changed:
+                    new_operands.append(
+                        dataclasses.replace(operand, element_indices=tuple(new_indices))
+                    )
+                    changed = True
+                else:
+                    new_operands.append(operand)
             else:
                 new_operands.append(operand)
 
