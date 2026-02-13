@@ -46,6 +46,7 @@ def iqft(qubits: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
     return qubits
 
 
+iqft.draw(qubits=3, fold_loops=False)
 
 # %% [markdown]
 # ### Phase Gate の定義
@@ -61,6 +62,10 @@ def phase_gate(q: qmc.Qubit, theta: float, iter: int) -> qmc.Qubit:
     for _ in qmc.range(iter):
         q = qmc.p(q, theta)
     return q
+
+
+phase_gate.draw()
+
 
 # %%
 # QPEの実装
@@ -88,6 +93,9 @@ def qpe(phase: float) -> qmc.Vector[qmc.Bit]:
     bits = qmc.measure(phase_register)
 
     return bits
+
+
+qpe.draw(fold_loops=False, inline=True)
 
 # %% [markdown]
 # ### 異なる量子SDKでのQPE実行
@@ -204,13 +212,16 @@ def p_gate(q: qmc.Qubit, theta: float) -> qmc.Qubit:
     return qmc.p(q, theta)
 
 @qmc.qkernel
-def qpe_3bit(phase: float) -> qmc.Float:
-    q_phase = qmc.qubit_array(3, name="phase_reg")
+def quantum_phase_estimation(phase: float, n: qmc.UInt) -> qmc.Float:
+    q_phase = qmc.qubit_array(n, name="phase_reg")
     target = qmc.qubit(name="target")
     target = qmc.x(target)  # |0⟩ → |1⟩
     # p_gateを使用（qmc.qpe()が内部で2^k回繰り返す）
     phase_q: qmc.QFixed = qmc.qpe(target, q_phase, p_gate, theta=phase)
     return qmc.measure(phase_q)
+
+
+quantum_phase_estimation.draw(n=3, fold_loops=False, inline=True)
 
 # %% [markdown]
 # phaseを格納するregisterを用意し、ターゲット状態を初期化した後、`qpe()`関数を呼び出すだけでQPEが実装できます。
@@ -222,7 +233,9 @@ def qpe_3bit(phase: float) -> qmc.Float:
 # %%
 transpiler = QiskitTranspiler()
 test_phase = math.pi / 2  # θ = π/2, expected output ≈ 0.25 (since θ/(2π) = 0.25)
-executable = transpiler.transpile(qpe_3bit, bindings={"phase": test_phase})
+executable = transpiler.transpile(
+    quantum_phase_estimation, bindings={"phase": test_phase, "n": 3}
+)
 
 executor = transpiler.executor()
 job = executable.sample(executor)

@@ -94,6 +94,9 @@ def x_gate_circuit() -> qm.Bit:
     return qm.measure(q)
 
 
+x_gate_circuit.draw()
+
+
 # %% [markdown]
 # ### コードの解説
 #
@@ -186,6 +189,8 @@ def good_example() -> qm.Bit:
     return qm.measure(q)
 
 
+good_example.draw()
+
 # %%
 # 正しい回路は問題なくトランスパイルできます
 transpiler_test = QiskitTranspiler()
@@ -277,6 +282,8 @@ def identity_circuit() -> qm.Bit:
     # 何もゲートを適用しない
     return qm.measure(q)
 
+
+identity_circuit.draw()
 
 # %%
 # 実行
