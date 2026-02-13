@@ -36,7 +36,7 @@ import numpy as np
 import typing as typ
 import ommx.v1
 
-import qamomile.circuit as qm_c
+import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.transpiler import Transpiler
@@ -283,19 +283,19 @@ class FQAOAConverter(MathematicalProblemConverter):
             if not is_close_zero(Jij)
         }
 
-        @qm_c.qkernel
+        @qmc.qkernel
         def fqaoa_sampling(
-            p: qm_c.UInt,
-            linear: qm_c.Dict[qm_c.UInt, qm_c.Float],
-            quad: qm_c.Dict[qm_c.Tuple[qm_c.UInt, qm_c.UInt], qm_c.Float],
-            num_qubits: qm_c.UInt,
-            num_fermions: qm_c.UInt,
-            givens_ij: qm_c.Matrix[qm_c.UInt],
-            givens_theta: qm_c.Vector[qm_c.Float],
-            hopping: qm_c.Float,
-            gammas: qm_c.Vector[qm_c.Float],
-            betas: qm_c.Vector[qm_c.Float],
-        ) -> qm_c.Vector[qm_c.Bit]:
+            p: qmc.UInt,
+            linear: qmc.Dict[qmc.UInt, qmc.Float],
+            quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+            num_qubits: qmc.UInt,
+            num_fermions: qmc.UInt,
+            givens_ij: qmc.Matrix[qmc.UInt],
+            givens_theta: qmc.Vector[qmc.Float],
+            hopping: qmc.Float,
+            gammas: qmc.Vector[qmc.Float],
+            betas: qmc.Vector[qmc.Float],
+        ) -> qmc.Vector[qmc.Bit]:
             q = fqaoa_state(
                 p,
                 linear,
@@ -308,7 +308,7 @@ class FQAOAConverter(MathematicalProblemConverter):
                 gammas,
                 betas,
             )
-            return qm_c.measure(q)
+            return qmc.measure(q)
 
         return transpiler.transpile(
             fqaoa_sampling,
