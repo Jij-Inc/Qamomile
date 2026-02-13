@@ -1086,6 +1086,28 @@ class MatplotlibRenderer:
                 x_left = min(x_left, box_left - 0.3)
                 x_right = max(x_right, box_right + 0.3)
 
+        # Account for folded block vertical extents in figure sizing
+        for key, info in self.layout.folded_block_extents.items():
+            if key not in positions:
+                continue
+            qubits = info["affected_qubits"]
+            if not qubits:
+                continue
+            y_coords = [self.qubit_y[q] for q in qubits]
+            min_qy, max_qy = min(y_coords), max(y_coords)
+            y_center_fb = (min_qy + max_qy) / 2
+            num_lines = info["num_text_lines"]
+            min_text_height = (
+                num_lines * self.style.line_height
+                + 2 * self.style.folded_box_text_v_padding
+            )
+            qubit_span = max_qy - min_qy + self.style.gate_height
+            box_height = max(qubit_span, min_text_height)
+            box_top_fb = y_center_fb + box_height / 2
+            box_bottom_fb = y_center_fb - box_height / 2
+            y_top = max(y_top, box_top_fb + 0.3)
+            y_bottom = min(y_bottom, box_bottom_fb - 0.3)
+
         # Extend x_right if output_names are present (for right-side labels)
         if self._output_names:
             max_label_len = max(len(name) for name in self._output_names)

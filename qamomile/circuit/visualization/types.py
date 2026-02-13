@@ -85,6 +85,7 @@ class LayoutState:
     qubit_end_positions: dict[int, float] = field(default_factory=dict)
     inlined_op_keys: set[tuple] = field(default_factory=set)
     gate_widths: dict[tuple, float] = field(default_factory=dict)
+    folded_block_extents: dict[tuple, dict] = field(default_factory=dict)
 
 
 @dataclass
@@ -103,5 +104,6 @@ class LayoutResult:
     qubit_end_positions: dict[int, float] = field(default_factory=dict)
     inlined_op_keys: set[tuple] = field(default_factory=set)
     gate_widths: dict[tuple, float] = field(default_factory=dict)
+    folded_block_extents: dict[tuple, dict] = field(default_factory=dict)
     max_above: dict[int, float] = field(default_factory=dict)
     max_below: dict[int, float] = field(default_factory=dict)

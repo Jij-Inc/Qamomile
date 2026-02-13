@@ -298,6 +298,11 @@ class CircuitLayoutEngine:
         state.column = max(state.column, start_column + 1)
         state.actual_width = max(state.actual_width, start_column + op_half_width + 0.5)
 
+        state.folded_block_extents[node.node_key] = {
+            "affected_qubits": affected_qubits,
+            "num_text_lines": 1 + len(node.body_lines),
+        }
+
     def _place_vunfolded_sequence(
         self, node: VUnfoldedSequence, state: LayoutState, depth: int
     ) -> None:
@@ -398,6 +403,7 @@ class CircuitLayoutEngine:
             qubit_y=qubit_y,
             qubit_end_positions=state.qubit_end_positions,
             inlined_op_keys=state.inlined_op_keys,
+            folded_block_extents=state.folded_block_extents,
             max_above=max_above,
             max_below=max_below,
         )
