@@ -434,7 +434,7 @@ class CircuitAnalyzer:
                     dict_value = op.operands[0] if op.operands else None
                     materialized = (
                         self._materialize_dict_entries(dict_value)
-                        if dict_value
+                        if dict_value is not None
                         else None
                     )
                     if materialized is not None and (
@@ -893,6 +893,16 @@ class CircuitAnalyzer:
             qubit_map=qubit_map,
         )
 
+        # Pre-evaluate BinOps in block body so computed values are available
+        for body_op in block_value.operations:
+            if isinstance(body_op, BinOp) and body_op.results:
+                result_val = body_op.results[0]
+                evaluated = self._evaluate_value(
+                    result_val, child_param_values, block_value.operations
+                )
+                if evaluated is not None:
+                    child_param_values[result_val.logical_id] = evaluated
+
         # Include qubits created inside the block body via QInitOperation
         for body_op in block_value.operations:
             if isinstance(body_op, QInitOperation):
@@ -1167,12 +1177,12 @@ class CircuitAnalyzer:
         if len(op.key_vars) > 1:
             key_str = f"({key_str})"
         dict_value = op.operands[0] if op.operands else None
-        dict_name = getattr(dict_value, "name", "dict") if dict_value else "dict"
+        dict_name = getattr(dict_value, "name", "dict") if dict_value is not None else "dict"
         header = f"for {key_str}, {op.value_var} in {dict_name}"
 
         # Materialize entries
         materialized = (
-            self._materialize_dict_entries(dict_value) if dict_value else None
+            self._materialize_dict_entries(dict_value) if dict_value is not None else None
         )
 
         if self.fold_loops or materialized is None:

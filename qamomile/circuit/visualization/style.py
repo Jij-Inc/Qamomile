@@ -98,7 +98,7 @@ class CircuitStyle:
     char_width_gate: float = 0.14  # Character width for gate text estimation
     char_width_block: float = 0.17  # Character width for block label estimation
     char_width_monospace: float = (
-        0.30  # Character width for monospace text (loop operations)
+        0.17  # Character width for monospace text (loop operations)
     )
     text_padding: float = 0.25  # Padding around text in boxes
     border_padding_base: float = 0.3  # Base padding for block borders
