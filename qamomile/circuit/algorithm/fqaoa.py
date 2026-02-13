@@ -50,19 +50,20 @@ def givens_rotation(
 @qm_c.qkernel
 def givens_rotations(
     q: qm_c.Vector[qm_c.Qubit],
-    givens_i: qm_c.Vector[qm_c.UInt],
-    givens_j: qm_c.Vector[qm_c.UInt],
+    givens_ij: qm_c.Matrix[qm_c.UInt],
     givens_theta: qm_c.Vector[qm_c.Float],
 ) -> qm_c.Vector[qm_c.Qubit]:
     """Apply a sequence of Givens rotations.
 
-    The rotation data is represented as three parallel vectors:
-    ``givens_i[k]``, ``givens_j[k]`` are the qubit indices and
-    ``givens_theta[k]`` is the rotation angle for the *k*-th rotation.
+    Args:
+        q: Qubit register.
+        givens_ij: Matrix of shape ``(N, 2)`` where each row ``[i, j]``
+            contains the qubit indices for one Givens rotation.
+        givens_theta: Vector of length ``N`` with the rotation angles.
     """
-    n_rotations = givens_i.shape[0]
+    n_rotations = givens_ij.shape[0]
     for k in qm_c.range(n_rotations):
-        q = givens_rotation(q, givens_i[k], givens_j[k], givens_theta[k])
+        q = givens_rotation(q, givens_ij[k, 0], givens_ij[k, 1], givens_theta[k])
     return q
 
 
@@ -145,8 +146,7 @@ def fqaoa_state(
     quad: qm_c.Dict[qm_c.Tuple[qm_c.UInt, qm_c.UInt], qm_c.Float],
     num_qubits: qm_c.UInt,
     num_fermions: qm_c.UInt,
-    givens_i: qm_c.Vector[qm_c.UInt],
-    givens_j: qm_c.Vector[qm_c.UInt],
+    givens_ij: qm_c.Matrix[qm_c.UInt],
     givens_theta: qm_c.Vector[qm_c.Float],
     hopping: qm_c.Float,
     gammas: qm_c.Vector[qm_c.Float],
@@ -160,9 +160,9 @@ def fqaoa_state(
         quad: Quadratic coefficients of Ising model.
         num_qubits: Number of qubits.
         num_fermions: Number of fermions for initial state.
-        givens_i: First qubit indices for Givens rotations.
-        givens_j: Second qubit indices for Givens rotations.
-        givens_theta: Angles for Givens rotations.
+        givens_ij: Matrix of shape ``(N, 2)`` with qubit index pairs for
+            Givens rotations.
+        givens_theta: Vector of length ``N`` with Givens rotation angles.
         hopping: Hopping integral for the mixer.
         gammas: Vector of gamma parameters.
         betas: Vector of beta parameters.
@@ -172,6 +172,6 @@ def fqaoa_state(
     """
     q = qm_c.qubit_array(num_qubits, name="q")
     q = initial_occupations(q, num_fermions)
-    q = givens_rotations(q, givens_i, givens_j, givens_theta)
+    q = givens_rotations(q, givens_ij, givens_theta)
     q = fqaoa_layers(q, betas, gammas, p, linear, quad, hopping, num_qubits)
     return q

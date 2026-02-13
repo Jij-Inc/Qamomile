@@ -218,21 +218,20 @@ class FQAOAConverter(MathematicalProblemConverter):
     def _flatten_givens_data(
         self,
         givens_angles: list[list],
-    ) -> tuple[list[int], list[int], list[float]]:
-        """Convert givens decomposition output to three parallel lists.
+    ) -> tuple[np.ndarray, list[float]]:
+        """Convert givens decomposition output to a matrix and a vector.
 
         Returns:
-            Tuple of (indices_i, indices_j, angles) suitable for binding
-            to ``Vector[UInt]``, ``Vector[UInt]``, ``Vector[Float]`` parameters.
+            Tuple of ``(givens_ij, givens_theta)`` where *givens_ij* is a
+            ``(N, 2)`` uint array of qubit index pairs and *givens_theta* is
+            a list of rotation angles.
         """
-        indices_i: list[int] = []
-        indices_j: list[int] = []
+        indices_ij: list[list[int]] = []
         angles: list[float] = []
         for (i, j), theta in givens_angles:
-            indices_i.append(i)
-            indices_j.append(j)
+            indices_ij.append([i, j])
             angles.append(float(theta))
-        return indices_i, indices_j, angles
+        return np.array(indices_ij, dtype=np.uint64), angles
 
     def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
         """Construct the Ising cost Hamiltonian from the spin model.
@@ -272,7 +271,7 @@ class FQAOAConverter(MathematicalProblemConverter):
         """Compile FQAOA ansatz into an executable program with measurements."""
         unitary_rows = self.get_fermi_orbital()
         givens_data = self._givens_decomposition(unitary_rows)
-        gi, gj, gtheta = self._flatten_givens_data(givens_data)
+        givens_ij, gtheta = self._flatten_givens_data(givens_data)
 
         # Filter near-zero coefficients to keep loops compact
         linear = {
@@ -291,8 +290,7 @@ class FQAOAConverter(MathematicalProblemConverter):
             quad: qm_c.Dict[qm_c.Tuple[qm_c.UInt, qm_c.UInt], qm_c.Float],
             num_qubits: qm_c.UInt,
             num_fermions: qm_c.UInt,
-            givens_i: qm_c.Vector[qm_c.UInt],
-            givens_j: qm_c.Vector[qm_c.UInt],
+            givens_ij: qm_c.Matrix[qm_c.UInt],
             givens_theta: qm_c.Vector[qm_c.Float],
             hopping: qm_c.Float,
             gammas: qm_c.Vector[qm_c.Float],
@@ -304,8 +302,7 @@ class FQAOAConverter(MathematicalProblemConverter):
                 quad,
                 num_qubits,
                 num_fermions,
-                givens_i,
-                givens_j,
+                givens_ij,
                 givens_theta,
                 hopping,
                 gammas,
@@ -321,8 +318,7 @@ class FQAOAConverter(MathematicalProblemConverter):
                 "quad": quad,
                 "num_qubits": self.num_qubits,
                 "num_fermions": self.num_fermions,
-                "givens_i": gi,
-                "givens_j": gj,
+                "givens_ij": givens_ij,
                 "givens_theta": gtheta,
                 "hopping": hopping,
             },
