@@ -1,5 +1,5 @@
 ---
-name: review-branch
+name: local-review
 description: Review code on the current branch for Qamomile philosophy and convention compliance. Compares changed files against `main` (or a specified target branch) and evaluates them against Qamomile's design principles.
 argument-hint: <target-branch (default: main)>
 model: opus
