@@ -57,7 +57,9 @@ def qrac31_encode_ising(
         if is_close_zero(coeff):
             continue
 
-        # TODO: Check coefficients should be depend a size of color group
+        # The coefficient sqrt(3) is used uniformly regardless of actual group size.
+        # In (3,1,p)-QRAC, all qubits use the same encoding state, so the bias
+        # factor 1/sqrt(3) applies even when a qubit encodes fewer than 3 variables.
         pauli = encoded_ope[idx]
         hamiltonian.add_term((pauli,), np.sqrt(3) * coeff)
 
