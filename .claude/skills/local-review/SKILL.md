@@ -51,12 +51,16 @@ Dependencies flow only downstream (left to right). Upstream (reverse) dependenci
 - Emitter pattern: gate-by-gate conversion to backend-specific primitives.
 - Composite gate emitters: pluggable strategy pattern for native optimized implementations (e.g., QFT).
 
-### E. Error Design
+### E. Error Design & Exception Safety
 
 - All compilation errors inherit from `QamomileCompileError`.
 - Errors provide **rich diagnostic info**: context, suggestions, and available bindings.
 - Use `@dataclass` for structured diagnostic data (e.g., `OperandResolutionInfo`).
 - Error class docstrings include **correct and incorrect code examples**.
+- **Exception chaining**: When re-raising exceptions, MUST use `raise NewError(...) from e` to preserve the original traceback.
+- **No bare `except`**: Never use bare `except:` or `except Exception:` without re-raising. Catch specific exception types only.
+- **Fallback pattern**: When catching an exception for graceful degradation, use `warnings.warn()` to notify the user and document the fallback behavior.
+- **Exception safety**: Verify that stateful operations (e.g., tracer state, value versioning) are properly cleaned up on error paths.
 
 ### F. Module Organization
 
@@ -79,10 +83,14 @@ Dependencies flow only downstream (left to right). Upstream (reverse) dependenci
 - `pytest` with markers (`docs`, gate categories, backends).
 - Base test suites for backend validation (`TranspilerTestSuite`).
 - **`@pytest.mark.parametrize` must be used wherever possible** — if a test has multiple cases, parametrize them.
-- **Random testing (`np.random`) must be used wherever possible** — don't only test fixed values; also test with random inputs to catch edge cases.
+- **Random testing (`np.random`) must be used wherever possible** — don't only test fixed values; also test with random inputs to catch edge cases. Fix seeds for reproducibility.
 - **Test docstrings**: Google-style Args/Returns are NOT needed. Instead, write a clear 1-2 line description of **what the test verifies**.
 - Module-level `@qkernel` definitions are required (for `inspect.getsource()` to work).
 - Documentation tests run tutorial `.py` files as Python scripts.
+- **Edge case coverage**: Tests MUST include edge cases — empty inputs, single-element arrays, and boundary values (e.g., angles 0, π, 2π).
+- **Negative testing**: Tests MUST verify that invalid inputs raise the correct exception types (use `pytest.raises`).
+- **Test isolation**: No shared mutable state between tests. Use `@pytest.fixture` for setup.
+- **Numerical assertions**: Use `np.allclose()` or `np.testing.assert_allclose()` with explicit `atol`/`rtol` — never `==` for floating-point arrays.
 
 ### I. Documentation
 
@@ -91,6 +99,19 @@ Dependencies flow only downstream (left to right). Upstream (reverse) dependenci
 - Jupyter Book 2 with MyST Markdown Engine.
 - Bilingual: English (`docs/en/`) and Japanese (`docs/ja/`).
 - Tutorials follow progressive complexity.
+
+### J. Numerical Correctness
+
+- **No `==`/`!=` for floats**: Floating-point comparisons MUST use `math.isclose()` or the project's `is_close_zero()` utility — never `==` or `!=`.
+- **Array comparisons in tests**: Use `np.allclose()` or `np.testing.assert_allclose()` — never element-wise `==`.
+- **Tolerance propagation**: Be aware that chained floating-point computations accumulate error. Document tolerance assumptions when the computation chain is long.
+- **Numerical edge cases**: Docstrings should note behavior for extreme values (very small/large coefficients, near-zero values) when relevant.
+
+### K. Performance & Memory Awareness
+
+- **Unnecessary copies**: Avoid redundant `numpy.copy()` or `.copy()` in hot paths. Prefer views or in-place operations where mutation is safe.
+- **Mutable default arguments**: NEVER use mutable defaults (`def f(x=[])`). Use `def f(x: list[int] | None = None): x = x if x is not None else []`.
+- **Generators vs lists**: For large iterations, prefer generators or iterators over materialized lists when the result is consumed only once.
 
 ---
 
@@ -135,11 +156,13 @@ For each changed file, systematically check:
 2. **Layer dependency direction** (Section B) — Does this file respect the dependency direction? Any upstream imports?
 3. **@qkernel & converter correctness** (Section C) — Are circuit building blocks properly decorated? Proper type annotations? Correct loop/iteration patterns? Does `transpile()` delegate to qkernels?
 4. **Backend pattern** (Section D) — If a backend file: does it follow the Transpiler/Emitter/Executor pattern?
-5. **Error handling** (Section E) — Are errors in the `QamomileCompileError` hierarchy? Do they provide diagnostic info?
+5. **Error handling & exception safety** (Section E) — Are errors in the `QamomileCompileError` hierarchy? Do they provide diagnostic info? Exception chaining with `from`? No bare `except`? Fallback patterns use `warnings.warn`?
 6. **Module organization** (Section F) — Proper `__all__`? TYPE_CHECKING guards?
 7. **Python style** (Section G) — Google-style docstrings on ALL functions/classes with type hints? Modern Python syntax? No dead code?
-8. **Testing** (Section H) — Are tests parametrized? Random testing used? Clear docstrings describing what is tested?
+8. **Testing** (Section H) — Are tests parametrized? Random testing used? Clear docstrings describing what is tested? Edge cases and negative tests covered? Numerical assertions use `np.allclose`?
 9. **Documentation** (Section I) — `.py` and `.ipynb` in sync? Proper Jupytext format?
+10. **Numerical correctness** (Section J) — Float comparisons use `isclose`/`is_close_zero`? Tests use `np.allclose`? Tolerance assumptions documented?
+11. **Performance & memory** (Section K) — Unnecessary copies? Mutable default arguments? Large iterations use generators?
 
 ### Step 5: Impact Analysis and Potential Bug Detection
 
@@ -157,7 +180,8 @@ For each significant change, describe:
 Verify that all necessary changes were made — not just the primary change but all dependent updates:
 - **Call site updates**: If a function signature changed, were ALL callers updated?
 - **`__init__.py` / `__all__` updates**: If a public symbol was added, removed, or renamed, were exports updated?
-- **Test coverage**: Were tests added or updated to cover the new/changed behavior? Are there missing test cases?
+- **Test coverage**: Were tests added or updated to cover the new/changed behavior? Are there missing test cases? Do tests cover edge cases (empty inputs, boundary values) and negative cases (invalid inputs raise correct exceptions)?
+- **Numerical tolerance**: If new floating-point comparisons were added, do they use `isclose`/`allclose` with appropriate tolerance?
 - **Documentation updates**: If behavior changed, were docs/tutorials updated to reflect it?
 - **Bilateral docs**: If English docs were updated, were Japanese docs also updated (and vice versa)?
 
@@ -174,10 +198,10 @@ Look for latent bugs that the change may introduce in files that were **not** mo
 Display a structured review report directly in the conversation.
 
 Use the following severity levels:
-- **P0 (Bug)**: Incorrect behavior, runtime error, linear type violation, silent data corruption, or **breaking changes in related (unchanged) files** caused by the modifications
-- **P1 (Significant Design Issue)**: Violates core Qamomile philosophy (layer boundaries, @qkernel pattern, backend abstraction), .py/.ipynb desync, or **incomplete modifications** (e.g., changed interface but callers not updated, missing `__all__` update)
-- **P2 (Moderate)**: Missing docstrings, un-parametrized tests, missing random tests, inconsistencies, missing test coverage for new behavior
-- **P3 (Minor/Nit)**: Style, naming, import ordering
+- **P0 (Bug)**: Incorrect behavior, runtime error, linear type violation, silent data corruption, **breaking changes in related (unchanged) files** caused by the modifications, mutable default arguments, bare `except` swallowing errors, floating-point `==` in production code, missing exception chaining causing lost diagnostics
+- **P1 (Significant Design Issue)**: Violates core Qamomile philosophy (layer boundaries, @qkernel pattern, backend abstraction), .py/.ipynb desync, **incomplete modifications** (e.g., changed interface but callers not updated, missing `__all__` update), missing tolerance in numerical test assertions
+- **P2 (Moderate)**: Missing docstrings, un-parametrized tests, missing random tests, inconsistencies, missing test coverage for new behavior, missing edge case or negative tests, unnecessary copies in hot paths
+- **P3 (Minor/Nit)**: Style, naming, import ordering, unfixed random seed, suboptimal generator vs list choice
 
 For each finding, include:
 1. The severity level
