@@ -7,13 +7,7 @@ shared functionality across all QRAC converter variants.
 from __future__ import annotations
 import abc
 
-import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.circuit.algorithm.basic import (
-    ry_layer,
-    rz_layer,
-    cz_entangling_layer,
-)
 from qamomile.optimization.binary_model import BinarySampleSet, VarType
 from qamomile.optimization.converter import MathematicalProblemConverter
 
@@ -21,11 +15,49 @@ from qamomile.optimization.converter import MathematicalProblemConverter
 class QRACConverterBase(MathematicalProblemConverter):
     """Abstract base for all QRAC-based converters.
 
-    Provides shared methods for ansatz generation, parameter counting,
-    and result decoding. Subclasses must implement:
-    - num_qubits (property)
-    - get_cost_hamiltonian()
-    - get_encoded_pauli_list()
+    Provides shared methods for result decoding and energy calculation.
+    Subclasses must implement:
+
+    - ``num_qubits`` (property)
+    - ``get_cost_hamiltonian()``
+    - ``get_encoded_pauli_list()``
+
+    Ansatz Construction:
+        This converter does not provide a built-in ansatz, giving users
+        full control over their variational circuit design. Use building
+        blocks from :mod:`qamomile.circuit.algorithm.basic` to compose
+        your own ansatz:
+
+        .. code-block:: python
+
+            import qamomile.circuit as qmc
+            from qamomile.circuit.algorithm.basic import (
+                ry_layer, rz_layer, cz_entangling_layer,
+            )
+
+            @qmc.qkernel
+            def my_ansatz(
+                n: qmc.UInt,
+                depth: qmc.UInt,
+                thetas: qmc.Vector[qmc.Float],
+            ) -> qmc.Vector[qmc.Qubit]:
+                q = qmc.allocate(n)
+                for i in qmc.range(n):
+                    q[i] = qmc.h(q[i])
+                for d in qmc.range(depth):
+                    offset = d * 2 * n
+                    q = ry_layer(q, thetas, offset)
+                    q = rz_layer(q, thetas, offset + n)
+                    q = cz_entangling_layer(q)
+                return q
+
+        Available layers in ``qamomile.circuit.algorithm.basic``:
+
+        - ``rx_layer``, ``ry_layer``, ``rz_layer``: Single-qubit rotation layers
+        - ``cz_entangling_layer``: CZ entangling with linear connectivity
+
+        The total number of variational parameters depends on the ansatz
+        design. For the example above it is ``2 * num_qubits * depth``.
     """
 
     @property
@@ -39,47 +71,6 @@ class QRACConverterBase(MathematicalProblemConverter):
 
     @abc.abstractmethod
     def get_encoded_pauli_list(self) -> list[qm_o.Hamiltonian]: ...
-
-    def get_ansatz_kernel(self, depth: int) -> qmc.QKernel:
-        """Generate a hardware-efficient ansatz kernel for VQE.
-
-        Each layer applies RY and RZ rotations followed by CZ entangling gates.
-
-        Args:
-            depth: Number of variational layers.
-
-        Returns:
-            QKernel representing the hardware-efficient ansatz.
-        """
-
-        @qmc.qkernel
-        def qrao_ansatz(
-            n: qmc.UInt,
-            depth: qmc.UInt,
-            thetas: qmc.Vector[qmc.Float],
-        ) -> qmc.Vector[qmc.Qubit]:
-            q = qmc.allocate(n)
-            for i in qmc.range(n):
-                q[i] = qmc.h(q[i])
-            for d in qmc.range(depth):
-                offset = d * 2 * n
-                q = ry_layer(q, thetas, offset)
-                q = rz_layer(q, thetas, offset + n)
-                q = cz_entangling_layer(q)
-            return q
-
-        return qrao_ansatz
-
-    def num_parameters(self, depth: int) -> int:
-        """Calculate total number of variational parameters.
-
-        Args:
-            depth: Number of variational layers.
-
-        Returns:
-            Total parameter count (2 * num_qubits * depth).
-        """
-        return 2 * self.num_qubits * depth
 
     def decode_from_rounded(self, spins: list[int]) -> BinarySampleSet:
         """Decode rounded spin values into a BinarySampleSet.

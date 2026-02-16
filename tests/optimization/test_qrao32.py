@@ -185,23 +185,6 @@ class TestQRAC32Converter:
         hamiltonian = converter.get_cost_hamiltonian()
         assert hamiltonian is not None
 
-    def test_ansatz_kernel(self):
-        """Test that ansatz kernel is generated correctly."""
-        x = binary(0)
-        y = binary(1)
-
-        problem = BinaryExpr()
-        problem += x * y
-
-        model = BinaryModel(problem)
-        converter = QRAC32Converter(model)
-
-        kernel = converter.get_ansatz_kernel(depth=2)
-        assert kernel is not None
-
-        expected_params = converter.num_parameters(depth=2)
-        assert expected_params == 2 * converter.num_qubits * 2
-
     def test_encoded_pauli_list(self):
         """Test encoded Pauli list generation."""
         x = binary(0)
@@ -279,9 +262,6 @@ class TestQRAC32EndToEnd:
 
         assert converter.num_qubits >= 4  # At least 2 logical -> 4 physical
         assert len(converter.encoder.pauli_encoding) == 3
-
-        kernel = converter.get_ansatz_kernel(depth=1)
-        assert kernel is not None
 
         rounder = SignRounder()
         mock_expectations = [0.9, -0.8, 0.7]

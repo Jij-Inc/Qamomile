@@ -184,24 +184,6 @@ class TestSpaceEfficientConverter:
         # 4 variables -> 2 qubits with 2:1 compression
         assert converter.num_qubits >= 2
 
-    def test_ansatz_kernel(self):
-        """Test that ansatz kernel is generated correctly."""
-        x = binary(0)
-        y = binary(1)
-
-        problem = BinaryExpr()
-        problem += x * y
-
-        model = BinaryModel(problem)
-        converter = QRACSpaceEfficientConverter(model)
-        converter.get_cost_hamiltonian()  # Need to call first to set num_qubits
-
-        kernel = converter.get_ansatz_kernel(depth=2)
-        assert kernel is not None
-
-        expected_params = converter.num_parameters(depth=2)
-        assert expected_params == 2 * converter.num_qubits * 2
-
     def test_encoded_pauli_list(self):
         """Test encoded Pauli list generation."""
         x = binary(0)
@@ -282,9 +264,6 @@ class TestSpaceEfficientEndToEnd:
         assert converter.num_qubits >= 1
 
         assert len(converter.encoder.pauli_encoding) == 3
-
-        kernel = converter.get_ansatz_kernel(depth=1)
-        assert kernel is not None
 
         rounder = SignRounder()
         mock_expectations = [0.9, -0.8, 0.7]
