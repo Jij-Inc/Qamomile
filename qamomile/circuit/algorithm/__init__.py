@@ -13,6 +13,16 @@ from .basic import (
     rz_layer,
     cz_entangling_layer,
 )
+from .fqaoa import (
+    initial_occupations,
+    givens_rotation,
+    givens_rotations,
+    hopping_gate,
+    mixer_layer,
+    cost_layer,
+    fqaoa_layers,
+    fqaoa_state,
+)
 
 __all__ = [
     # QAOA
@@ -26,4 +36,13 @@ __all__ = [
     "ry_layer",
     "rz_layer",
     "cz_entangling_layer",
+    # FQAOA
+    "initial_occupations",
+    "givens_rotation",
+    "givens_rotations",
+    "hopping_gate",
+    "mixer_layer",
+    "cost_layer",
+    "fqaoa_layers",
+    "fqaoa_state",
 ]
