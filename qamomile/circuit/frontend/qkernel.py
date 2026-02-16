@@ -7,6 +7,7 @@ from typing import Any, Callable, Generic, ParamSpec, TypeVar, cast, get_type_hi
 import numpy as np
 
 from qamomile.circuit.frontend.ast_transform import transform_control_flow
+from qamomile.circuit.frontend.constructors import qubit_array
 from qamomile.circuit.frontend.func_to_block import (
     create_dummy_input,
     func_to_block,
@@ -24,6 +25,13 @@ from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+
+def _get_array_element_type(pt: Any) -> type | None:
+    """Extract element type from an array type annotation."""
+    if hasattr(pt, "__args__") and pt.__args__:
+        return pt.__args__[0]
+    return getattr(pt, "element_type", None)
 
 
 class QKernel(Generic[P, R]):
@@ -316,54 +324,39 @@ class QKernel(Generic[P, R]):
         """Extract return variable names from AST.
 
         Returns:
-            List of variable names from return statement, or None if extraction fails.
+            List of variable names from return statement, or None if not found.
         """
-        try:
-            source = inspect.getsource(self.raw_func)
-            # Dedent the source to handle nested functions
-            source = textwrap.dedent(source)
-            tree = ast.parse(source)
+        source = inspect.getsource(self.raw_func)
+        source = textwrap.dedent(source)
+        tree = ast.parse(source)
 
-            # Find the function definition (look for the first FunctionDef in the module)
-            for node in tree.body:
-                if isinstance(node, ast.FunctionDef):
-                    # Look for Return statements in the function body
-                    for stmt in node.body:
-                        if isinstance(stmt, ast.Return) and stmt.value is not None:
-                            return_value = stmt.value
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef):
+                for stmt in node.body:
+                    if isinstance(stmt, ast.Return) and stmt.value is not None:
+                        return_value = stmt.value
 
-                            # Handle tuple return: return q0, q1, q2
-                            if isinstance(return_value, ast.Tuple):
-                                names = []
-                                for elt in return_value.elts:
-                                    if isinstance(elt, ast.Name):
-                                        names.append(elt.id)
-                                    elif isinstance(elt, ast.Subscript):
-                                        # Handle subscript like qs[0]
-                                        names.append(ast.unparse(elt))
-                                    else:
-                                        # For complex expressions, use unparsed form
-                                        names.append(ast.unparse(elt))
-                                return names
+                        if isinstance(return_value, ast.Tuple):
+                            names = []
+                            for elt in return_value.elts:
+                                if isinstance(elt, ast.Name):
+                                    names.append(elt.id)
+                                elif isinstance(elt, ast.Subscript):
+                                    names.append(ast.unparse(elt))
+                                else:
+                                    names.append(ast.unparse(elt))
+                            return names
 
-                            # Handle single return: return q
-                            elif isinstance(return_value, ast.Name):
-                                return [return_value.id]
+                        elif isinstance(return_value, ast.Name):
+                            return [return_value.id]
 
-                            # Handle subscript: return qs[0]
-                            elif isinstance(return_value, ast.Subscript):
-                                return [ast.unparse(return_value)]
+                        elif isinstance(return_value, ast.Subscript):
+                            return [ast.unparse(return_value)]
 
-                            # For other expressions, use unparsed form
-                            else:
-                                return [ast.unparse(return_value)]
+                        else:
+                            return [ast.unparse(return_value)]
 
-            # No return statement found
-            return None
-
-        except Exception:
-            # If AST parsing fails, return None (no right labels)
-            return None
+        return None
 
     def _create_bound_input(self, param_type: Any, name: str, value: Any) -> Handle:
         """Create a Handle for a bound (concrete) value."""
@@ -540,6 +533,119 @@ class QKernel(Generic[P, R]):
         input_values = [h.value for h in dummy_inputs.values()]
 
         output_values = []
+        if result is not None:
+            if isinstance(result, tuple):
+                for r in result:
+                    if hasattr(r, "value"):
+                        output_values.append(r.value)
+            else:
+                if hasattr(result, "value"):
+                    output_values.append(result.value)
+
+        return Graph(
+            operations=tracer.operations,
+            input_values=input_values,
+            output_values=output_values,
+            output_names=self._extract_return_names() or [],
+            name=self.name,
+            parameters=tracked_parameters,
+        )
+
+    def _has_qubit_array_params(self) -> bool:
+        """Check if kernel has any Qubit array parameters (Vector[Qubit], etc.)."""
+        for param in self.signature.parameters.values():
+            pt = param.annotation
+            if is_array_type(pt) and _get_array_element_type(pt) is Qubit:
+                return True
+        return False
+
+    def _build_graph_for_visualization(self, **kwargs: Any) -> Graph:
+        """Build a computation graph suitable for visualization.
+
+        Handles Vector[Qubit] parameters by accepting integer sizes.
+        Sets output_names from AST extraction.
+
+        Args:
+            **kwargs: Concrete values for kernel arguments. For Vector[Qubit]
+                     parameters, pass an integer size.
+
+        Returns:
+            Graph with output_names set.
+        """
+        if self._has_qubit_array_params():
+            graph = self._build_graph_with_qubit_arrays(kwargs)
+        else:
+            graph = self.build(parameters=None, **kwargs)
+        graph.output_names = self._extract_return_names() or []
+        return graph
+
+    def _build_graph_with_qubit_arrays(self, kwargs: dict[str, Any]) -> Graph:
+        """Build computation graph with Vector[Qubit] support for visualization.
+
+        Separates integer-valued kwargs for Qubit array parameters (used as
+        array sizes via ``qubit_array()``) from other kwargs, then traces the
+        kernel to produce a Graph.
+        """
+        qubit_sizes: dict[str, int] = {}
+        build_kwargs: dict[str, Any] = {}
+        for key, val in kwargs.items():
+            if key in self.signature.parameters:
+                pt = self.signature.parameters[key].annotation
+                if is_array_type(pt):
+                    elem = _get_array_element_type(pt)
+                    if elem is Qubit and isinstance(val, int):
+                        qubit_sizes[key] = val
+                        continue
+            build_kwargs[key] = val
+
+        missing = []
+        for name, param in self.signature.parameters.items():
+            pt = param.annotation
+            if is_array_type(pt):
+                elem = _get_array_element_type(pt)
+                if elem is Qubit and name not in qubit_sizes:
+                    missing.append(name)
+        if missing:
+            names = ", ".join(f"'{n}'" for n in missing)
+            raise ValueError(
+                f"Vector[Qubit] parameter(s) {names} require an integer size "
+                f"for visualization. Example: draw({missing[0]}=3)"
+            )
+
+        parameters = self._auto_detect_parameters(build_kwargs)
+        self._validate_parameters(parameters)
+
+        tracer = Tracer()
+        tracked_parameters: dict[str, Value] = {}
+
+        with trace(tracer):
+            dummy_inputs: dict[str, Any] = {}
+            for name, param in self.signature.parameters.items():
+                param_type = param.annotation
+                if param_type is Observable:
+                    handle = self._create_parameter_input(param_type, name)
+                    tracked_parameters[name] = handle.value
+                elif name in parameters:
+                    if is_array_type(param_type):
+                        handle = create_dummy_input(param_type, name)
+                    else:
+                        handle = self._create_parameter_input(param_type, name)
+                    tracked_parameters[name] = handle.value
+                elif name in qubit_sizes:
+                    handle = qubit_array(qubit_sizes[name], name)
+                elif name in build_kwargs:
+                    handle = self._create_bound_input(
+                        param_type, name, build_kwargs[name]
+                    )
+                elif param.default is not inspect.Parameter.empty:
+                    handle = self._create_bound_input(param_type, name, param.default)
+                else:
+                    handle = create_dummy_input(param_type, name)
+                dummy_inputs[name] = handle
+            result = self.func(**dummy_inputs)
+
+        input_values = [h.value for h in dummy_inputs.values()]
+        output_values: list[Value] = []
         if result is not None:
             if isinstance(result, tuple):
                 for r in result:

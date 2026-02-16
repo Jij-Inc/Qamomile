@@ -6,29 +6,16 @@ circuit analysis, layout computation, and rendering.
 
 from __future__ import annotations
 
-import inspect
 from typing import Any
 
 from matplotlib.figure import Figure
 
-from qamomile.circuit.frontend.constructors import qubit_array
-from qamomile.circuit.frontend.func_to_block import create_dummy_input, is_array_type
-from qamomile.circuit.frontend.handle import Observable, Qubit
-from qamomile.circuit.frontend.tracer import Tracer, trace
 from qamomile.circuit.ir.graph import Graph
-from qamomile.circuit.ir.value import Value
 
 from .analyzer import CircuitAnalyzer
 from .layout import CircuitLayoutEngine
 from .renderer import MatplotlibRenderer
 from .style import DEFAULT_STYLE, CircuitStyle
-
-
-def _get_array_element_type(pt: Any) -> type | None:
-    """Extract element type from an array type annotation."""
-    if hasattr(pt, "__args__") and pt.__args__:
-        return pt.__args__[0]
-    return getattr(pt, "element_type", None)
 
 
 class MatplotlibDrawer:
@@ -85,10 +72,6 @@ class MatplotlibDrawer:
         renderer = MatplotlibRenderer(self.style)
         return renderer.render(vc, layout)
 
-    # ------------------------------------------------------------------
-    # QKernel integration: build graph with Vector[Qubit] support
-    # ------------------------------------------------------------------
-
     @classmethod
     def draw_kernel(
         cls,
@@ -119,115 +102,11 @@ class MatplotlibDrawer:
         Returns:
             Figure object.
         """
-        if cls._has_qubit_array_params(kernel):
-            graph = cls._build_graph_for_draw(kernel, kwargs)
-        else:
-            graph = kernel.build(parameters=None, **kwargs)
-        graph.output_names = kernel._extract_return_names() or []
+        graph = kernel._build_graph_for_visualization(**kwargs)
         drawer = cls(graph, style)
         return drawer.draw(
             inline=inline,
             fold_loops=fold_loops,
             expand_composite=expand_composite,
             inline_depth=inline_depth,
-        )
-
-    @staticmethod
-    def _has_qubit_array_params(kernel: Any) -> bool:
-        """Check if kernel has any Qubit array parameters (Vector[Qubit], etc.)."""
-        for param in kernel.signature.parameters.values():
-            pt = param.annotation
-            if is_array_type(pt) and _get_array_element_type(pt) is Qubit:
-                return True
-        return False
-
-    @staticmethod
-    def _build_graph_for_draw(kernel: Any, kwargs: dict[str, Any]) -> Graph:
-        """Build a computation graph with Vector[Qubit] support for visualization.
-
-        Separates integer-valued kwargs for Qubit array parameters (used as
-        array sizes via ``qubit_array()``) from other kwargs, then traces the
-        kernel to produce a Graph.
-        """
-        # Separate qubit array sizes from other kwargs
-        qubit_sizes: dict[str, int] = {}
-        build_kwargs: dict[str, Any] = {}
-        for key, val in kwargs.items():
-            if key in kernel.signature.parameters:
-                pt = kernel.signature.parameters[key].annotation
-                if is_array_type(pt):
-                    elem = _get_array_element_type(pt)
-                    if elem is Qubit and isinstance(val, int):
-                        qubit_sizes[key] = val
-                        continue
-            build_kwargs[key] = val
-
-        # Validate: all Vector[Qubit] params must have sizes
-        missing = []
-        for name, param in kernel.signature.parameters.items():
-            pt = param.annotation
-            if is_array_type(pt):
-                elem = _get_array_element_type(pt)
-                if elem is Qubit and name not in qubit_sizes:
-                    missing.append(name)
-        if missing:
-            names = ", ".join(f"'{n}'" for n in missing)
-            raise ValueError(
-                f"Vector[Qubit] parameter(s) {names} require an integer size "
-                f"for visualization. Example: draw({missing[0]}=3)"
-            )
-
-        parameters = kernel._auto_detect_parameters(build_kwargs)
-        kernel._validate_parameters(parameters)
-
-        tracer = Tracer()
-        tracked_parameters: dict[str, Value] = {}
-
-        with trace(tracer):
-            dummy_inputs: dict[str, Any] = {}
-            for name, param in kernel.signature.parameters.items():
-                param_type = param.annotation
-                if param_type is Observable:
-                    handle = kernel._create_parameter_input(param_type, name)
-                    tracked_parameters[name] = handle.value
-                elif name in parameters:
-                    if is_array_type(param_type):
-                        # Use create_dummy_input for arrays so they get
-                        # symbolic shapes (e.g. edges.shape[0] works).
-                        # _create_parameter_input creates _shape=() which
-                        # causes IndexError on shape access.
-                        handle = create_dummy_input(param_type, name)
-                    else:
-                        handle = kernel._create_parameter_input(param_type, name)
-                    tracked_parameters[name] = handle.value
-                elif name in qubit_sizes:
-                    handle = qubit_array(qubit_sizes[name], name)
-                elif name in build_kwargs:
-                    handle = kernel._create_bound_input(
-                        param_type, name, build_kwargs[name]
-                    )
-                elif param.default is not inspect.Parameter.empty:
-                    handle = kernel._create_bound_input(param_type, name, param.default)
-                else:
-                    handle = create_dummy_input(param_type, name)
-                dummy_inputs[name] = handle
-            result = kernel.func(**dummy_inputs)
-
-        input_values = [h.value for h in dummy_inputs.values()]
-        output_values: list[Value] = []
-        if result is not None:
-            if isinstance(result, tuple):
-                for r in result:
-                    if hasattr(r, "value"):
-                        output_values.append(r.value)
-            else:
-                if hasattr(result, "value"):
-                    output_values.append(result.value)
-
-        return Graph(
-            operations=tracer.operations,
-            input_values=input_values,
-            output_values=output_values,
-            name=kernel.name,
-            parameters=tracked_parameters,
         )

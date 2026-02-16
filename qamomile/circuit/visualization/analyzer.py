@@ -6,6 +6,7 @@ for the circuit visualization pipeline. It has no matplotlib dependency.
 
 from __future__ import annotations
 
+import math
 import re
 from typing import TYPE_CHECKING
 
@@ -1370,48 +1371,6 @@ class CircuitAnalyzer:
             return True
         return False
 
-    def _compute_border_padding(self, depth: int) -> float:
-        """Compute border padding for a given nesting depth.
-
-        Args:
-            depth: Nesting depth of the block.
-
-        Returns:
-            Border padding value, clamped to min_block_padding.
-        """
-        return max(
-            self.style.min_block_padding,
-            self.style.border_padding_base
-            - depth * self.style.border_padding_depth_factor,
-        )
-
-    def _compute_block_box_bounds(
-        self,
-        name: str,
-        start_x: float,
-        end_x: float,
-        depth: int,
-        max_gate_width: float,
-    ) -> tuple[float, float]:
-        """Compute (box_left, box_right) for an inlined block border.
-
-        Label expansion is right-only: box_left is always gate-based,
-        box_right expands rightward if the label text needs more space.
-        """
-        padding = self._compute_border_padding(depth)
-        gtp = self.style.gate_text_padding
-        box_left = start_x - max_gate_width / 2 - padding - gtp
-        gate_box_right = end_x + max_gate_width / 2 + padding + gtp
-        title_text_width = len(name) * self.style.char_width_base
-        label_right = (
-            box_left
-            + self.style.label_horizontal_padding
-            + title_text_width
-            + self.style.label_horizontal_padding
-        )
-        box_right = max(gate_box_right, label_right)
-        return box_left, box_right
-
     def _analyze_loop_affected_qubits(
         self,
         op: ForOperation,
@@ -2751,7 +2710,10 @@ class CircuitAnalyzer:
             - Normal numbers: 1-2 decimal places
             - Max length: ~5 characters
         """
-        if value == 0:
+        if isinstance(value, int):
+            if value == 0:
+                return "0"
+        elif math.isclose(value, 0.0, abs_tol=1e-15):
             return "0"
 
         abs_val = abs(value)
