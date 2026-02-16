@@ -1088,10 +1088,20 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             block_value, num_targets, local_bindings
         )
 
-        # Resolve power value from bindings if it's a Value
+        # Resolve power value from bindings
         power_value = op.power
         if isinstance(power_value, Value):
-            power_value = self._value_resolver.resolve_value(power_value, bindings)
+            power_value = self._resolver.resolve_classical_value(
+                power_value, bindings
+            )
+        elif hasattr(power_value, "value"):
+            # Handle type (e.g., UInt) - resolve inner Value via bindings
+            inner_value = power_value.value
+            resolved = self._resolver.resolve_classical_value(
+                inner_value, bindings
+            )
+            if resolved is not None:
+                power_value = int(resolved)
 
         # Handle UInt or other non-int types by getting numeric value
         if hasattr(power_value, "value") and hasattr(power_value.value, "get_const"):
