@@ -293,3 +293,62 @@ class TestSpaceEfficientEndToEnd:
 
         result = converter.decode_from_rounded(spins)
         assert len(result.samples) == 1
+
+
+class TestSpaceEfficientEncodeIsingCoefficients:
+    """Tests for exact Hamiltonian coefficient verification."""
+
+    def test_numbering_encode_exact(self):
+        """Test exact encoding map from numbering_space_efficient_encode."""
+        ising = BinaryModel.from_ising(
+            linear={2: 5.0, 3: 2.0},
+            quad={(0, 1): 2.0, (0, 2): 1.0},
+            constant=6.0,
+        )
+        encoding = numbering_space_efficient_encode(ising)
+        expected_encoding = {
+            0: qm_o.PauliOperator(qm_o.Pauli.X, 0),
+            1: qm_o.PauliOperator(qm_o.Pauli.Y, 0),
+            2: qm_o.PauliOperator(qm_o.Pauli.X, 1),
+            3: qm_o.PauliOperator(qm_o.Pauli.Y, 1),
+        }
+        assert encoding == expected_encoding
+
+    def test_encode_ising_exact_coefficients(self):
+        """Test exact Hamiltonian coefficients for space-efficient encoding."""
+        ising = BinaryModel.from_ising(
+            linear={2: 5.0, 3: 2.0},
+            quad={(0, 1): 2.0, (0, 2): 1.0},
+            constant=6.0,
+        )
+
+        expected_hamiltonian = qm_o.Hamiltonian()
+        expected_hamiltonian.constant = 6.0
+
+        expected_hamiltonian.add_term(
+            (qm_o.PauliOperator(qm_o.Pauli.X, 1),), np.sqrt(3) * 5.0
+        )
+        expected_hamiltonian.add_term(
+            (qm_o.PauliOperator(qm_o.Pauli.Y, 1),), np.sqrt(3) * 2.0
+        )
+        # (0,2) interaction: different qubits -> 3 * coeff * P_i * P_j
+        expected_hamiltonian.add_term(
+            (qm_o.PauliOperator(qm_o.Pauli.X, 0), qm_o.PauliOperator(qm_o.Pauli.X, 1)),
+            3 * 1.0,
+        )
+        # (0,1) interaction: same qubit -> sqrt(3) * coeff * Z
+        expected_hamiltonian.add_term(
+            (qm_o.PauliOperator(qm_o.Pauli.Z, 0),), np.sqrt(3) * 2.0
+        )
+
+        expected_encoding = {
+            0: qm_o.PauliOperator(qm_o.Pauli.X, 0),
+            1: qm_o.PauliOperator(qm_o.Pauli.Y, 0),
+            2: qm_o.PauliOperator(qm_o.Pauli.X, 1),
+            3: qm_o.PauliOperator(qm_o.Pauli.Y, 1),
+        }
+
+        hamiltonian, encoding = qrac_space_efficient_encode_ising(ising)
+
+        assert hamiltonian == expected_hamiltonian
+        assert encoding == expected_encoding

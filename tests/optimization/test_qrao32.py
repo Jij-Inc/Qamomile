@@ -9,7 +9,9 @@ from qamomile.optimization.qrao.qrao32 import (
     create_y_prime,
     create_z_prime,
     create_prime_operator,
+    qrac32_encode_ising,
 )
+from qamomile.optimization.qrao.graph_coloring import greedy_graph_coloring, check_linear_term
 from qamomile.optimization.binary_model import binary, BinaryExpr, BinaryModel, VarType
 import qamomile.observable as qm_o
 
@@ -18,23 +20,46 @@ class TestPrimeOperators:
     """Tests for prime operator construction."""
 
     def test_create_x_prime(self):
-        """Test X' operator construction."""
-        x_prime = create_x_prime(0)
-        assert x_prime is not None
-        # X' is a sum of Pauli terms, should be a Hamiltonian
-        assert isinstance(x_prime, qm_o.Hamiltonian)
+        """Test X' operator construction with exact coefficients."""
+        X_prime = create_x_prime(0)
+        coeff = 1.0 / np.sqrt(6)
+        X0 = qm_o.PauliOperator(qm_o.Pauli.X, 0)
+        X1 = qm_o.PauliOperator(qm_o.Pauli.X, 1)
+        Z0 = qm_o.PauliOperator(qm_o.Pauli.Z, 0)
+        Z1 = qm_o.PauliOperator(qm_o.Pauli.Z, 1)
+        expected = qm_o.Hamiltonian()
+        expected.add_term((X0, X1), 1 / 2 * coeff)
+        expected.add_term((X0, Z1), 1 / 2 * coeff)
+        expected.add_term((Z0,), 1 * coeff)
+        assert X_prime == expected
 
     def test_create_y_prime(self):
-        """Test Y' operator construction."""
-        y_prime = create_y_prime(0)
-        assert y_prime is not None
-        assert isinstance(y_prime, qm_o.Hamiltonian)
+        """Test Y' operator construction with exact coefficients."""
+        Y_prime = create_y_prime(0)
+        coeff = 1.0 / np.sqrt(6)
+        X1 = qm_o.PauliOperator(qm_o.Pauli.X, 1)
+        Z1 = qm_o.PauliOperator(qm_o.Pauli.Z, 1)
+        Y0 = qm_o.PauliOperator(qm_o.Pauli.Y, 0)
+        Y1 = qm_o.PauliOperator(qm_o.Pauli.Y, 1)
+        expected = qm_o.Hamiltonian()
+        expected.add_term((X1,), 1 / 2 * coeff)
+        expected.add_term((Z1,), 1 * coeff)
+        expected.add_term((Y0, Y1), 1 / 2 * coeff)
+        assert Y_prime == expected
 
     def test_create_z_prime(self):
-        """Test Z' operator construction."""
-        z_prime = create_z_prime(0)
-        assert z_prime is not None
-        assert isinstance(z_prime, qm_o.Hamiltonian)
+        """Test Z' operator construction with exact coefficients."""
+        Z_prime = create_z_prime(0)
+        coeff = 1.0 / np.sqrt(6)
+        X0 = qm_o.PauliOperator(qm_o.Pauli.X, 0)
+        X1 = qm_o.PauliOperator(qm_o.Pauli.X, 1)
+        Z0 = qm_o.PauliOperator(qm_o.Pauli.Z, 0)
+        Z1 = qm_o.PauliOperator(qm_o.Pauli.Z, 1)
+        expected = qm_o.Hamiltonian()
+        expected.add_term((Z0, Z1), 1 * coeff)
+        expected.add_term((X0,), -1 / 2 * coeff)
+        expected.add_term((Z0, X1), -1 / 2 * coeff)
+        assert Z_prime == expected
 
     def test_create_prime_operator_x(self):
         """Test prime operator dispatch for X."""
@@ -265,3 +290,46 @@ class TestQRAC32EndToEnd:
 
         result = converter.decode_from_rounded(spins)
         assert len(result.samples) == 1
+
+
+class TestQRAC32EncodeIsingCoefficients:
+    """Tests for exact Hamiltonian coefficient verification using qrac32_encode_ising."""
+
+    def test_encode_ising_exact_coefficients(self):
+        """Test exact coefficients for QRAC32 Ising encoding with prime operators."""
+        Z0 = qm_o.PauliOperator(qm_o.Pauli.Z, 0)
+        Z1 = qm_o.PauliOperator(qm_o.Pauli.Z, 1)
+        X1 = qm_o.PauliOperator(qm_o.Pauli.X, 1)
+        Z2 = qm_o.PauliOperator(qm_o.Pauli.Z, 2)
+
+        ising = BinaryModel.from_ising(
+            linear={2: 5.0, 3: 2.0},
+            quad={(0, 1): 2.0, (0, 2): 1.0},
+            constant=6.0,
+        )
+
+        max_color_group_size = 3
+        _, color_group = greedy_graph_coloring(
+            ising.quad.keys(), max_color_group_size=max_color_group_size
+        )
+        color_group = check_linear_term(
+            color_group, list(ising.linear.keys()), max_color_group_size
+        )
+
+        qrac_hamiltonian, encoding = qrac32_encode_ising(ising, color_group)
+
+        # Build expected Hamiltonian using prime operators
+        expected_hamiltonian = qm_o.Hamiltonian()
+        expected_hamiltonian.constant = 6.0
+        Z0_prime = create_prime_operator(Z0)
+        Z1_prime = create_prime_operator(Z1)
+        Z2_prime = create_prime_operator(Z2)
+        X1_prime = create_prime_operator(X1)
+
+        expected_hamiltonian += 6 * 2.0 * Z0_prime * Z1_prime
+        expected_hamiltonian += 6 * 1.0 * Z0_prime * X1_prime
+        expected_hamiltonian += np.sqrt(6) * 5.0 * X1_prime
+        expected_hamiltonian += np.sqrt(6) * 2.0 * Z2_prime
+
+        assert len(encoding) == ising.num_bits
+        assert qrac_hamiltonian == expected_hamiltonian

@@ -1,10 +1,15 @@
 """Tests for QRAO21 (Quantum Random Access Optimization with (2,1,p)-QRAC)."""
 
 import pytest
+import numpy as np
 from math import sqrt
 
 from qamomile.optimization.qrao import QRAC21Converter, QRAC21Encoder, SignRounder
+from qamomile.optimization.qrao.qrao21 import qrac21_encode_ising
+from qamomile.optimization.qrao.qrao31 import qrac31_encode_ising
+from qamomile.optimization.qrao.graph_coloring import greedy_graph_coloring, check_linear_term
 from qamomile.optimization.binary_model import binary, BinaryExpr, BinaryModel, VarType
+import qamomile.observable as qm_o
 
 
 class TestQRAC21Encoder:
@@ -218,3 +223,83 @@ class TestQRAC21EndToEnd:
 
         result = converter.decode_from_rounded(spins)
         assert len(result.samples) == 1
+
+
+class TestQRAC21EncodeIsingCoefficients:
+    """Tests for exact Hamiltonian coefficient verification using qrac21_encode_ising."""
+
+    def test_linear_term_with_graph_coloring(self):
+        """Test exact coefficients for QRAC21 Ising encoding."""
+        X1 = qm_o.PauliOperator(qm_o.Pauli.X, 1)
+        X2 = qm_o.PauliOperator(qm_o.Pauli.X, 2)
+        X3 = qm_o.PauliOperator(qm_o.Pauli.X, 3)
+        Z0 = qm_o.PauliOperator(qm_o.Pauli.Z, 0)
+        Z1 = qm_o.PauliOperator(qm_o.Pauli.Z, 1)
+        Z2 = qm_o.PauliOperator(qm_o.Pauli.Z, 2)
+        Z3 = qm_o.PauliOperator(qm_o.Pauli.Z, 3)
+
+        ising = BinaryModel.from_ising(
+            linear={2: 5.0, 3: 2.0, 4: 1.0, 5: 1.0, 6: 1.0},
+            quad={(0, 1): 2.0, (0, 2): 1.0},
+            constant=6.0,
+        )
+
+        max_color_group_size = 2
+        _, color_group = greedy_graph_coloring(
+            ising.quad.keys(), max_color_group_size=max_color_group_size
+        )
+        color_group = check_linear_term(
+            color_group, list(ising.linear.keys()), max_color_group_size
+        )
+
+        qrac_hamiltonian, encoding = qrac21_encode_ising(ising, color_group)
+        num_terms = len(ising.linear) + len(ising.quad)
+
+        expected_hamiltonian = {
+            (Z0, Z1): max_color_group_size * 2.0,
+            (Z0, X1): max_color_group_size * 1.0,
+            (X1,): np.sqrt(max_color_group_size) * 5.0,
+            (Z2,): np.sqrt(max_color_group_size) * 2.0,
+            (X2,): np.sqrt(max_color_group_size) * 1.0,
+            (Z3,): np.sqrt(max_color_group_size) * 1.0,
+            (X3,): np.sqrt(max_color_group_size) * 1.0,
+        }
+        assert len(qrac_hamiltonian.terms) == num_terms
+        assert qrac_hamiltonian.num_qubits < ising.num_bits
+        assert len(encoding) == ising.num_bits
+        assert qrac_hamiltonian.terms == expected_hamiltonian
+
+    def test_no_quadratic_terms(self):
+        """Test QRAC21 encoding with only linear terms."""
+        Z0 = qm_o.PauliOperator(qm_o.Pauli.Z, 0)
+        X0 = qm_o.PauliOperator(qm_o.Pauli.X, 0)
+        Z1 = qm_o.PauliOperator(qm_o.Pauli.Z, 1)
+        X1 = qm_o.PauliOperator(qm_o.Pauli.X, 1)
+
+        ising = BinaryModel.from_ising(
+            linear={0: 1.0, 1: 1.0, 2: 5.0, 3: 2.0},
+            quad={},
+            constant=6.0,
+        )
+
+        max_color_group_size = 2
+        _, color_group = greedy_graph_coloring(
+            ising.quad.keys(), max_color_group_size=max_color_group_size
+        )
+        color_group = check_linear_term(
+            color_group, list(ising.linear.keys()), max_color_group_size
+        )
+
+        qrac_hamiltonian, encoding = qrac21_encode_ising(ising, color_group)
+        num_terms = len(ising.linear) + len(ising.quad)
+
+        expected_hamiltonian = {
+            (Z0,): np.sqrt(max_color_group_size) * 1.0,
+            (X0,): np.sqrt(max_color_group_size) * 1.0,
+            (Z1,): np.sqrt(max_color_group_size) * 5.0,
+            (X1,): np.sqrt(max_color_group_size) * 2.0,
+        }
+        assert len(qrac_hamiltonian.terms) == num_terms
+        assert qrac_hamiltonian.num_qubits < ising.num_bits
+        assert len(encoding) == ising.num_bits
+        assert qrac_hamiltonian.terms == expected_hamiltonian

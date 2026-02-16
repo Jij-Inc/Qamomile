@@ -9,9 +9,10 @@ import abc
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.circuit.algorithm.hardware_efficient_ansatz import (
-    hardware_efficient_ansatz,
-    num_parameters as _hea_num_parameters,
+from qamomile.circuit.algorithm.basic import (
+    ry_layer,
+    rz_layer,
+    cz_entangling_layer,
 )
 from qamomile.optimization.binary_model import BinarySampleSet, VarType
 from qamomile.optimization.converter import MathematicalProblemConverter
@@ -42,6 +43,8 @@ class QRACConverterBase(MathematicalProblemConverter):
     def get_ansatz_kernel(self, depth: int) -> qmc.QKernel:
         """Generate a hardware-efficient ansatz kernel for VQE.
 
+        Each layer applies RY and RZ rotations followed by CZ entangling gates.
+
         Args:
             depth: Number of variational layers.
 
@@ -58,7 +61,11 @@ class QRACConverterBase(MathematicalProblemConverter):
             q = qmc.allocate(n)
             for i in qmc.range(n):
                 q[i] = qmc.h(q[i])
-            q = hardware_efficient_ansatz(q, depth, thetas)
+            for d in qmc.range(depth):
+                offset = d * 2 * n
+                q = ry_layer(q, thetas, offset)
+                q = rz_layer(q, thetas, offset + n)
+                q = cz_entangling_layer(q)
             return q
 
         return qrao_ansatz
@@ -72,7 +79,7 @@ class QRACConverterBase(MathematicalProblemConverter):
         Returns:
             Total parameter count (2 * num_qubits * depth).
         """
-        return _hea_num_parameters(self.num_qubits, depth)
+        return 2 * self.num_qubits * depth
 
     def decode_from_rounded(self, spins: list[int]) -> BinarySampleSet:
         """Decode rounded spin values into a BinarySampleSet.
