@@ -1,31 +1,30 @@
-"""resolve_int_value が BinOp 結果の UUID で正しく lookup することを検証"""
+"""Test that resolve_int_value uses UUID-based lookup for BinOp results."""
 
-import pytest
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.ir.types.primitives import UIntType
 from qamomile.circuit.transpiler.passes.emit_base import ValueResolver
 
 
 class TestResolveIntValueUuidLookup:
-    """resolve_int_value が UUID を name より優先して lookup することを検証"""
+    """Test that resolve_int_value prefers UUID over name for binding lookup."""
 
     def test_uuid_lookup_prevents_name_collision(self):
-        """同じ name を持つ複数の BinOp 結果で、UUID を使って正しい値を取得できることを検証"""
+        """UUID lookup returns the correct value when multiple BinOp results share the same name."""
         resolver = ValueResolver()
 
-        # BinOp 結果1: n // 2 = 4 (uuid_a, name="uint_tmp")
+        # BinOp result 1: n // 2 = 4 (uuid_a, name="uint_tmp")
         val_a = Value(type=UIntType(), name="uint_tmp")
-        # BinOp 結果2: n * 2 = 16 (uuid_b, name="uint_tmp")
+        # BinOp result 2: n * 2 = 16 (uuid_b, name="uint_tmp")
         val_b = Value(type=UIntType(), name="uint_tmp")
 
-        # _evaluate_binop が行う格納を再現
+        # Reproduce the storage pattern of _evaluate_binop
         bindings: dict[str, int] = {}
         bindings[val_a.uuid] = 4
         bindings[val_a.name] = 4  # "uint_tmp" = 4
         bindings[val_b.uuid] = 16
-        bindings[val_b.name] = 16  # "uint_tmp" = 16 (上書き!)
+        bindings[val_b.name] = 16  # "uint_tmp" = 16 (overwritten!)
 
-        # val_a で lookup → UUID なら 4、name なら 16
+        # Lookup via val_a: UUID should return 4, name would return 16
         result = resolver.resolve_int_value(val_a, bindings)
         assert result == 4, (
             f"Expected 4 (n//2), got {result}. "
@@ -33,18 +32,18 @@ class TestResolveIntValueUuidLookup:
         )
 
     def test_uuid_lookup_falls_back_to_name(self):
-        """UUID が bindings にない場合は name にフォールバックすることを検証"""
+        """Falls back to name-based lookup when UUID is not in bindings."""
         resolver = ValueResolver()
 
         val = Value(type=UIntType(), name="some_var")
         bindings: dict[str, int] = {"some_var": 42}
-        # UUID は bindings にない
+        # UUID is not in bindings
 
         result = resolver.resolve_int_value(val, bindings)
         assert result == 42
 
     def test_constant_value_unaffected(self):
-        """定数 Value は UUID/name lookup に関係なく正しく解決されることを検証"""
+        """Constant Values resolve correctly regardless of UUID/name lookup."""
         resolver = ValueResolver()
 
         val = Value(type=UIntType(), name="const", params={"const": 7})
