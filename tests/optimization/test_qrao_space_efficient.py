@@ -187,12 +187,24 @@ class TestSpaceEfficientConverter:
         assert len(hamiltonian.terms) == 5
         assert hamiltonian.constant == pytest.approx(0.5)
 
-    def test_num_qubits_after_encoding(self):
-        """Test num_qubits is set after get_cost_hamiltonian."""
+    def test_num_qubits_before_get_cost_hamiltonian(self):
+        """Test num_qubits is valid even before get_cost_hamiltonian."""
         problem = BinaryExpr()
         for i in range(4):
             problem += binary(i)
-        # Add interaction to make it non-trivial
+        problem += binary(0) * binary(1)
+
+        model = BinaryModel(problem)
+        converter = QRACSpaceEfficientConverter(model)
+
+        # num_qubits should be correct immediately (delegated to encoder)
+        assert converter.num_qubits == 2
+
+    def test_num_qubits_after_get_cost_hamiltonian(self):
+        """Test num_qubits is consistent after get_cost_hamiltonian."""
+        problem = BinaryExpr()
+        for i in range(4):
+            problem += binary(i)
         problem += binary(0) * binary(1)
 
         model = BinaryModel(problem)
@@ -216,6 +228,30 @@ class TestSpaceEfficientConverter:
 
         pauli_list = converter.get_encoded_pauli_list()
         assert len(pauli_list) == converter.spin_model.num_bits
+
+    def test_encoded_pauli_list_before_get_cost_hamiltonian(self):
+        """Test get_encoded_pauli_list works before get_cost_hamiltonian.
+
+        Regression test: previously _num_qubits was 0 until get_cost_hamiltonian
+        was called, causing Hamiltonians with num_qubits=0.
+        """
+        x = binary(0)
+        y = binary(1)
+        z = binary(2)
+
+        problem = BinaryExpr()
+        problem += x * y + y * z
+
+        model = BinaryModel(problem)
+        converter = QRACSpaceEfficientConverter(model)
+
+        # Call get_encoded_pauli_list BEFORE get_cost_hamiltonian
+        pauli_list = converter.get_encoded_pauli_list()
+        assert len(pauli_list) == converter.spin_model.num_bits
+
+        # Each Hamiltonian should have the correct num_qubits (2, not 0)
+        for h in pauli_list:
+            assert h.num_qubits == 2
 
 
 class TestSpaceEfficientEndToEnd:

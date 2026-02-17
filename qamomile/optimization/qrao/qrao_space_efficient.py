@@ -135,11 +135,10 @@ class QRACSpaceEfficientConverter(QRACConverterBase[QRACSpaceEfficientEncoder]):
         super().__post_init__()
         self._encoder = QRACSpaceEfficientEncoder(self.spin_model)
         self.pauli_encoding: dict[int, qm_o.PauliOperator] = {}
-        self._num_qubits: int = 0
 
     @property
     def num_qubits(self) -> int:
-        return self._num_qubits
+        return self._encoder.num_qubits
 
     def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
         """Generate the cost Hamiltonian for the space-efficient QRAC-encoded problem.
@@ -149,7 +148,6 @@ class QRACSpaceEfficientConverter(QRACConverterBase[QRACSpaceEfficientEncoder]):
         """
         hamiltonian, pauli_encoding = qrac_space_efficient_encode_ising(self.spin_model)
         self.pauli_encoding = pauli_encoding
-        self._num_qubits = hamiltonian.num_qubits
         return hamiltonian
 
     def get_encoded_pauli_list(self) -> list[qm_o.Hamiltonian]:
@@ -159,10 +157,11 @@ class QRACSpaceEfficientConverter(QRACConverterBase[QRACSpaceEfficientEncoder]):
             list[Hamiltonian]: List of Hamiltonians for each variable's Pauli operator.
         """
         ising = self.spin_model
-        zero_pauli = qm_o.Hamiltonian(num_qubits=self._num_qubits)
+        num_qubits = self._encoder.num_qubits
+        zero_pauli = qm_o.Hamiltonian(num_qubits=num_qubits)
         pauli_operators = [zero_pauli] * ising.num_bits
         for idx, pauli in self.pauli_encoding.items():
-            observable = qm_o.Hamiltonian(num_qubits=self._num_qubits)
+            observable = qm_o.Hamiltonian(num_qubits=num_qubits)
             observable.add_term((pauli,), 1.0)
             pauli_operators[idx] = observable
         return pauli_operators
