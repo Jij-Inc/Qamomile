@@ -11,12 +11,31 @@ from __future__ import annotations
 from math import sqrt
 from typing import Literal
 
+import numpy as np
+
 from qamomile.optimization.binary_model import BinaryModel
 from qamomile.optimization.utils import is_close_zero
 from .graph_coloring import greedy_graph_coloring, check_linear_term
 
 
 PauliType = Literal["X", "Y", "Z"]
+
+
+def _build_var_occupancy(color_group: dict[int, list[int]]) -> dict[int, int]:
+    """Map each variable index to the occupancy of its qubit.
+
+    Args:
+        color_group: Mapping from qubit index to list of variable indices.
+
+    Returns:
+        Mapping from variable index to the number of variables on its qubit.
+    """
+    var_occupancy: dict[int, int] = {}
+    for var_list in color_group.values():
+        k = len(var_list)
+        for var_idx in var_list:
+            var_occupancy[var_idx] = k
+    return var_occupancy
 
 
 class QRAC31Encoder:
@@ -27,9 +46,10 @@ class QRAC31Encoder:
     different qubits.
 
     The relaxed Hamiltonian is:
-        H̃ = Σ_{ij} 3·J_{ij}·P_{f(i)}·P_{f(j)} + Σ_i √3·h_i·P_{f(i)}
+        H̃ = Σ_{ij} √k_i·√k_j·J_{ij}·P_{f(i)}·P_{f(j)} + Σ_i √k_i·h_i·P_{f(i)}
 
-    where f(i) = (qubit_index, pauli_type) maps variable i to a Pauli operator.
+    where f(i) = (qubit_index, pauli_type) maps variable i to a Pauli operator,
+    and k_i is the number of variables encoded on the qubit containing variable i.
 
     Attributes:
         max_color_group_size: Maximum variables per qubit (3 for QRAC31)
@@ -83,18 +103,21 @@ class QRAC31Encoder:
         self._build_relaxed_hamiltonian()
 
     def _build_relaxed_hamiltonian(self) -> None:
-        """Compute relaxed Hamiltonian coefficients."""
-        # Linear terms: √3 * h_i * P_{f(i)}
+        """Compute relaxed Hamiltonian coefficients with per-occupancy scaling."""
+        var_occupancy = _build_var_occupancy(self._color_group)
+
+        # Linear terms: √k_i * h_i * P_{f(i)}
         for var_idx, coeff in self.spin_model.linear.items():
             if is_close_zero(coeff):
                 continue
             qubit, pauli = self._pauli_encoding[var_idx]
             key = (qubit, pauli)
+            k = var_occupancy[var_idx]
             self._linear_hamiltonian[key] = (
-                self._linear_hamiltonian.get(key, 0.0) + self.linear_coeff_scale * coeff
+                self._linear_hamiltonian.get(key, 0.0) + np.sqrt(k) * coeff
             )
 
-        # Quadratic terms: 3 * J_{ij} * P_{f(i)} * P_{f(j)}
+        # Quadratic terms: √k_i * √k_j * J_{ij} * P_{f(i)} * P_{f(j)}
         for (i, j), coeff in self.spin_model.quad.items():
             if is_close_zero(coeff):
                 continue
@@ -104,8 +127,9 @@ class QRAC31Encoder:
             term_i = (qi, pi)
             term_j = (qj, pj)
             key = (term_i, term_j) if term_i <= term_j else (term_j, term_i)
+            ki, kj = var_occupancy[i], var_occupancy[j]
             self._quad_hamiltonian[key] = (
-                self._quad_hamiltonian.get(key, 0.0) + self.quad_coeff_scale * coeff
+                self._quad_hamiltonian.get(key, 0.0) + np.sqrt(ki) * np.sqrt(kj) * coeff
             )
 
         self._constant = self.spin_model.constant
@@ -161,7 +185,9 @@ class QRAC21Encoder:
     Up to 2 variables per qubit, using Z and X Paulis.
 
     The relaxed Hamiltonian is:
-        H̃ = Σ_{ij} 2·J_{ij}·P_{f(i)}·P_{f(j)} + Σ_i √2·h_i·P_{f(i)}
+        H̃ = Σ_{ij} √k_i·√k_j·J_{ij}·P_{f(i)}·P_{f(j)} + Σ_i √k_i·h_i·P_{f(i)}
+
+    where k_i is the number of variables encoded on the qubit containing variable i.
     """
 
     max_color_group_size: int = 2
@@ -194,13 +220,16 @@ class QRAC21Encoder:
         self._build_relaxed_hamiltonian()
 
     def _build_relaxed_hamiltonian(self) -> None:
+        var_occupancy = _build_var_occupancy(self._color_group)
+
         for var_idx, coeff in self.spin_model.linear.items():
             if is_close_zero(coeff):
                 continue
             qubit, pauli = self._pauli_encoding[var_idx]
             key = (qubit, pauli)
+            k = var_occupancy[var_idx]
             self._linear_hamiltonian[key] = (
-                self._linear_hamiltonian.get(key, 0.0) + self.linear_coeff_scale * coeff
+                self._linear_hamiltonian.get(key, 0.0) + np.sqrt(k) * coeff
             )
         for (i, j), coeff in self.spin_model.quad.items():
             if is_close_zero(coeff):
@@ -210,8 +239,9 @@ class QRAC21Encoder:
             term_i = (qi, pi)
             term_j = (qj, pj)
             key = (term_i, term_j) if term_i <= term_j else (term_j, term_i)
+            ki, kj = var_occupancy[i], var_occupancy[j]
             self._quad_hamiltonian[key] = (
-                self._quad_hamiltonian.get(key, 0.0) + self.quad_coeff_scale * coeff
+                self._quad_hamiltonian.get(key, 0.0) + np.sqrt(ki) * np.sqrt(kj) * coeff
             )
         self._constant = self.spin_model.constant
 
