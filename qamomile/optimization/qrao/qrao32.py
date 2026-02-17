@@ -17,7 +17,7 @@ from qamomile.optimization.utils import is_close_zero
 from qamomile.optimization.binary_model import BinaryModel, VarType
 
 from .base import QRACConverterBase
-from .encoder import QRAC32Encoder
+from .encoder import QRAC32Encoder, _build_var_occupancy
 from .qrao31 import color_group_to_qrac_encode
 
 
@@ -108,6 +108,7 @@ def qrac32_encode_ising(
         Tuple of (relaxed Hamiltonian, encoding map).
     """
     encoded_ope = color_group_to_qrac_encode(color_group)
+    var_occupancy = _build_var_occupancy(color_group)
 
     hamiltonian = qm_o.Hamiltonian()
     hamiltonian.constant = ising.constant
@@ -117,7 +118,8 @@ def qrac32_encode_ising(
             continue
         pauli = encoded_ope[idx]
         prime_i = create_prime_operator(pauli)
-        hamiltonian += np.sqrt(6) * coeff * prime_i
+        k = var_occupancy[idx]
+        hamiltonian += np.sqrt(2 * k) * coeff * prime_i
 
     for (i, j), coeff in ising.quad.items():
         if is_close_zero(coeff):
@@ -129,7 +131,8 @@ def qrac32_encode_ising(
         prime_i = create_prime_operator(pauli_i)
         pauli_j = encoded_ope[j]
         prime_j = create_prime_operator(pauli_j)
-        hamiltonian += 6 * coeff * prime_i * prime_j
+        ki, kj = var_occupancy[i], var_occupancy[j]
+        hamiltonian += np.sqrt(2 * ki) * np.sqrt(2 * kj) * coeff * prime_i * prime_j
 
     return hamiltonian, encoded_ope
 

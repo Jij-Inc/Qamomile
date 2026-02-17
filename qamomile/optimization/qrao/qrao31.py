@@ -14,7 +14,7 @@ from qamomile.optimization.utils import is_close_zero
 from qamomile.optimization.binary_model import BinaryModel, VarType
 
 from .base import QRACConverterBase
-from .encoder import QRAC31Encoder
+from .encoder import QRAC31Encoder, _build_var_occupancy
 
 
 def color_group_to_qrac_encode(
@@ -46,24 +46,20 @@ def qrac31_encode_ising(
     ising: BinaryModel[typing.Literal[VarType.SPIN]], color_group: dict[int, list[int]]
 ) -> tuple[qm_o.Hamiltonian, dict[int, qm_o.PauliOperator]]:
     encoded_ope = color_group_to_qrac_encode(color_group)
-
-    offset = ising.constant
+    var_occupancy = _build_var_occupancy(color_group)
 
     hamiltonian = qm_o.Hamiltonian()
-    hamiltonian.constant = offset
+    hamiltonian.constant = ising.constant
 
-    # convert linear parts of the objective function into Hamiltonian.
+    # Linear terms: √k_i * h_i * P_{f(i)}
     for idx, coeff in ising.linear.items():
         if is_close_zero(coeff):
             continue
-
-        # The coefficient sqrt(3) is used uniformly regardless of actual group size.
-        # In (3,1,p)-QRAC, all qubits use the same encoding state, so the bias
-        # factor 1/sqrt(3) applies even when a qubit encodes fewer than 3 variables.
         pauli = encoded_ope[idx]
-        hamiltonian.add_term((pauli,), np.sqrt(3) * coeff)
+        k = var_occupancy[idx]
+        hamiltonian.add_term((pauli,), np.sqrt(k) * coeff)
 
-    # create Pauli terms
+    # Quadratic terms: √k_i * √k_j * J_{ij} * P_{f(i)} * P_{f(j)}
     for (i, j), coeff in ising.quad.items():
         if is_close_zero(coeff):
             continue
@@ -74,14 +70,8 @@ def qrac31_encode_ising(
 
         pauli_i = encoded_ope[i]
         pauli_j = encoded_ope[j]
-
-        hamiltonian.add_term((pauli_i, pauli_j), 3 * coeff)
-
-    for inds, coeff in ising.higher.items():
-        if is_close_zero(coeff):
-            continue
-        paulis = tuple(encoded_ope[i] for i in inds)
-        hamiltonian.add_term(paulis, (np.sqrt(3) ** len(inds)) * coeff)
+        ki, kj = var_occupancy[i], var_occupancy[j]
+        hamiltonian.add_term((pauli_i, pauli_j), np.sqrt(ki) * np.sqrt(kj) * coeff)
 
     return hamiltonian, encoded_ope
 

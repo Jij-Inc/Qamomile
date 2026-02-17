@@ -15,7 +15,7 @@ from qamomile.optimization.utils import is_close_zero
 from qamomile.optimization.binary_model import BinaryModel, VarType
 
 from .base import QRACConverterBase
-from .encoder import QRAC21Encoder
+from .encoder import QRAC21Encoder, _build_var_occupancy
 from .qrao31 import color_group_to_qrac_encode
 
 
@@ -33,6 +33,7 @@ def qrac21_encode_ising(
         Tuple of (relaxed Hamiltonian, encoding map).
     """
     encoded_ope = color_group_to_qrac_encode(color_group)
+    var_occupancy = _build_var_occupancy(color_group)
 
     hamiltonian = qm_o.Hamiltonian()
     hamiltonian.constant = ising.constant
@@ -41,7 +42,8 @@ def qrac21_encode_ising(
         if is_close_zero(coeff):
             continue
         pauli = encoded_ope[idx]
-        hamiltonian.add_term((pauli,), np.sqrt(2) * coeff)
+        k = var_occupancy[idx]
+        hamiltonian.add_term((pauli,), np.sqrt(k) * coeff)
 
     for (i, j), coeff in ising.quad.items():
         if is_close_zero(coeff):
@@ -51,13 +53,8 @@ def qrac21_encode_ising(
             continue
         pauli_i = encoded_ope[i]
         pauli_j = encoded_ope[j]
-        hamiltonian.add_term((pauli_i, pauli_j), 2 * coeff)
-
-    for inds, coeff in ising.higher.items():
-        if is_close_zero(coeff):
-            continue
-        paulis = tuple(encoded_ope[i] for i in inds)
-        hamiltonian.add_term(paulis, (np.sqrt(2) ** len(inds)) * coeff)
+        ki, kj = var_occupancy[i], var_occupancy[j]
+        hamiltonian.add_term((pauli_i, pauli_j), np.sqrt(ki) * np.sqrt(kj) * coeff)
 
     return hamiltonian, encoded_ope
 
