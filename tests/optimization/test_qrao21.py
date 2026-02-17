@@ -192,14 +192,16 @@ class TestQRAC21EncodeIsingCoefficients:
         qrac_hamiltonian, encoding = qrac21_encode_ising(ising, color_group)
         num_terms = len(ising.linear) + len(ising.quad)
 
+        # color_group: {0:[0], 1:[1,2], 2:[3,4], 3:[5,6]}
+        # Occupancies: var 0→k=1, vars 1-6→k=2
         expected_hamiltonian = {
-            (Z0, Z1): max_color_group_size * 2.0,
-            (Z0, X1): max_color_group_size * 1.0,
-            (X1,): np.sqrt(max_color_group_size) * 5.0,
-            (Z2,): np.sqrt(max_color_group_size) * 2.0,
-            (X2,): np.sqrt(max_color_group_size) * 1.0,
-            (Z3,): np.sqrt(max_color_group_size) * 1.0,
-            (X3,): np.sqrt(max_color_group_size) * 1.0,
+            (Z0, Z1): np.sqrt(1) * np.sqrt(2) * 2.0,
+            (Z0, X1): np.sqrt(1) * np.sqrt(2) * 1.0,
+            (X1,): np.sqrt(2) * 5.0,
+            (Z2,): np.sqrt(2) * 2.0,
+            (X2,): np.sqrt(2) * 1.0,
+            (Z3,): np.sqrt(2) * 1.0,
+            (X3,): np.sqrt(2) * 1.0,
         }
         assert len(qrac_hamiltonian.terms) == num_terms
         assert qrac_hamiltonian.num_qubits < ising.num_bits

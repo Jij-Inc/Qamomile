@@ -263,10 +263,13 @@ class TestQRAC32EncodeIsingCoefficients:
         Z2_prime = create_prime_operator(Z2)
         X1_prime = create_prime_operator(X1)
 
-        expected_hamiltonian += 6 * 2.0 * Z0_prime * Z1_prime
-        expected_hamiltonian += 6 * 1.0 * Z0_prime * X1_prime
-        expected_hamiltonian += np.sqrt(6) * 5.0 * X1_prime
-        expected_hamiltonian += np.sqrt(6) * 2.0 * Z2_prime
+        # color_group: {0:[0], 1:[1,2], 2:[3]}
+        # Occupancies: var 0→k=1, var 1→k=2, var 2→k=2, var 3→k=1
+        # (3,2,p) formula: linear √(2k), quad √(2k_i)·√(2k_j)
+        expected_hamiltonian += np.sqrt(2 * 1) * np.sqrt(2 * 2) * 2.0 * Z0_prime * Z1_prime
+        expected_hamiltonian += np.sqrt(2 * 1) * np.sqrt(2 * 2) * 1.0 * Z0_prime * X1_prime
+        expected_hamiltonian += np.sqrt(2 * 2) * 5.0 * X1_prime
+        expected_hamiltonian += np.sqrt(2 * 1) * 2.0 * Z2_prime
 
         assert len(encoding) == ising.num_bits
         assert qrac_hamiltonian == expected_hamiltonian

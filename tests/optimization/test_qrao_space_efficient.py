@@ -261,20 +261,21 @@ class TestSpaceEfficientEncodeIsingCoefficients:
         expected_hamiltonian = qm_o.Hamiltonian()
         expected_hamiltonian.constant = 6.0
 
+        # All qubits encode 2 variables (k=2 for all)
         expected_hamiltonian.add_term(
-            (qm_o.PauliOperator(qm_o.Pauli.X, 1),), np.sqrt(3) * 5.0
+            (qm_o.PauliOperator(qm_o.Pauli.X, 1),), np.sqrt(2) * 5.0
         )
         expected_hamiltonian.add_term(
-            (qm_o.PauliOperator(qm_o.Pauli.Y, 1),), np.sqrt(3) * 2.0
+            (qm_o.PauliOperator(qm_o.Pauli.Y, 1),), np.sqrt(2) * 2.0
         )
-        # (0,2) interaction: different qubits -> 3 * coeff * P_i * P_j
+        # (0,2) interaction: different qubits -> √k_0 * √k_2 * coeff * P_i * P_j
         expected_hamiltonian.add_term(
             (qm_o.PauliOperator(qm_o.Pauli.X, 0), qm_o.PauliOperator(qm_o.Pauli.X, 1)),
-            3 * 1.0,
+            np.sqrt(2) * np.sqrt(2) * 1.0,
         )
-        # (0,1) interaction: same qubit -> sqrt(3) * coeff * Z
+        # (0,1) interaction: same qubit -> √k_0 * √k_1 * coeff * Z
         expected_hamiltonian.add_term(
-            (qm_o.PauliOperator(qm_o.Pauli.Z, 0),), np.sqrt(3) * 2.0
+            (qm_o.PauliOperator(qm_o.Pauli.Z, 0),), np.sqrt(2) * np.sqrt(2) * 2.0
         )
 
         expected_encoding = {
