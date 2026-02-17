@@ -13,25 +13,26 @@ project:
     - name: Jij Inc.
   github: https://github.com/Jij-Inc/Qamomile
   jupyter: true
-  execute:
-    cache: true
   toc:
-    - file: index
+    - file: index.md
     - title: Tutorials
       children:
-        - file: tutorial/01_introduction
-        - file: tutorial/02_single_qubit
-        - file: tutorial/03_entanglement
-        - file: tutorial/04_algorithms
-        - file: tutorial/qpe
-        - file: tutorial/qaoa
+        - file: tutorial/01_introduction.ipynb
+        - file: tutorial/02_type_system.ipynb
+        - file: tutorial/03_gates.ipynb
+        - file: tutorial/04_quantum_essentials.ipynb
+        - file: tutorial/05_stdlib.ipynb
+        - file: tutorial/06_first_algorithm.ipynb
+        - file: tutorial/07_parametric_circuits.ipynb
+        - file: tutorial/08_resource_estimation.ipynb
+        - file: tutorial/09_transpile.ipynb
+        - file: tutorial/10_custom_executor.ipynb
     - title: Optimization
       children:
-        - file: optimization/qaoa
-        - file: optimization/fqaoa
-    - title: Transpile
-      children:
-        - file: transpile/transpile_flow
+        - file: optimization/qaoa.ipynb
+        - file: optimization/fqaoa.ipynb
+        - file: optimization/qrao31.ipynb
+        - file: optimization/custom_converter.ipynb
 
 site:
   template: book-theme

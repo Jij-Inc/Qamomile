@@ -37,4 +37,4 @@ print(f"Counts: {result.counts}")
 ## Links
 
 - [GitHub Repository](https://github.com/Jij-Inc/Qamomile)
-- [API Reference](https://jij-inc.github.io/Qamomile/en/)
+- [API Reference](api/index.md)

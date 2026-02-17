@@ -1,7 +1,6 @@
 # ---
 # jupyter:
 #   jupytext:
-#     cell_metadata_filter: -all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -20,7 +19,7 @@
 # By customizing an Executor, you can run circuits on cloud quantum devices
 # such as IBM Quantum and AWS Braket.
 #
-# ## What You'll Learn
+# ## What You Will Learn
 # - The role and structure of QuantumExecutor
 # - How to create a minimal custom Executor
 # - How to connect to IBM Quantum cloud
@@ -30,20 +29,20 @@
 # %%
 from qiskit import QuantumCircuit
 
-import qamomile.circuit as qm
+import qamomile.circuit as qmc
 
 # %% [markdown]
 # ## 1. What is QuantumExecutor?
 #
-# **QuantumExecutor** is an interface for executing Qamomile's compiled circuits
+# **QuantumExecutor** is an interface for executing Qamomile's transpiled circuits
 # on actual quantum backends.
 #
 # The Qamomile pipeline looks like this:
 #
 # ```
-# @qm.qkernel (Python function)
+# @qmc.qkernel (Python function)
 #     ↓ transpile()
-# ExecutableProgram (compiled program)
+# ExecutableProgram (transpiled program)
 #     ↓ sample() / run()
 # QuantumExecutor executes the circuit
 #     ↓
@@ -83,6 +82,9 @@ import qamomile.circuit as qm
 # **Important**: The returned bitstrings are in big-endian format.
 # - "011" means qubit[2]=0, qubit[1]=1, qubit[0]=1
 # - The leftmost bit is the highest indexed qubit
+#
+# This matches the qubit ordering convention described in
+# [01_introduction](01_introduction.ipynb).
 # %% [markdown]
 # ## 3. Creating a Minimal Custom Executor
 #
@@ -136,14 +138,14 @@ class MySimpleExecutor(QuantumExecutor[QuantumCircuit]):
 
 
 # %%
-@qm.qkernel
-def bell_state() -> tuple[qm.Bit, qm.Bit]:
+@qmc.qkernel
+def bell_state() -> tuple[qmc.Bit, qmc.Bit]:
     """Generate Bell state"""
-    q0 = qm.qubit(name="q0")
-    q1 = qm.qubit(name="q1")
-    q0 = qm.h(q0)
-    q0, q1 = qm.cx(q0, q1)
-    return qm.measure(q0), qm.measure(q1)
+    q0 = qmc.qubit(name="q0")
+    q1 = qmc.qubit(name="q1")
+    q0 = qmc.h(q0)
+    q0, q1 = qmc.cx(q0, q1)
+    return qmc.measure(q0), qmc.measure(q1)
 
 
 bell_state.draw()
@@ -212,25 +214,16 @@ class IBMQuantumExecutor(QuantumExecutor[QuantumCircuit]):
                 - "ibmq_qasm_simulator": Cloud simulator
             channel: Channel ("ibm_quantum" or "ibm_cloud")
         """
-        # Uncomment to actually use
-        # from qiskit_ibm_runtime import QiskitRuntimeService
-        # self.service = QiskitRuntimeService(channel=channel)
-        # self.backend_name = backend_name
-        self.service = None
+        from qiskit_ibm_runtime import QiskitRuntimeService
+
+        self.service = QiskitRuntimeService(channel=channel)
         self.backend_name = backend_name
-        self._channel = channel
 
     def execute(self, circuit: QuantumCircuit, shots: int) -> dict[str, int]:
         """Execute circuit on IBM Quantum
 
         Uses the SamplerV2 Primitive for execution.
         """
-        if self.service is None:
-            raise RuntimeError(
-                "IBM Quantum Service is not configured.\n"
-                "Please configure your token with QiskitRuntimeService.save_account()."
-            )
-
         from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
         from qiskit_ibm_runtime import SamplerV2 as Sampler
 
@@ -253,23 +246,33 @@ class IBMQuantumExecutor(QuantumExecutor[QuantumCircuit]):
 
 
 # %% [markdown]
-# ### Usage Example (Simulation)
+# ### Running on IBM Quantum
 #
-# Even without an IBM Quantum account, you can test locally as follows:
+# If you have IBM Quantum credentials configured, the executor will connect
+# to the cloud and run your circuit on real hardware. If credentials are not
+# available, we fall back to the local simulator.
 
 # %%
-# Test with local simulator
-print("=== IBM Quantum Executor (Local Mock) ===")
-print("Note: Actual IBM Quantum connection requires account setup")
-print()
-
-# Use local AerSimulator as substitute for testing
-local_executor = MySimpleExecutor()
-job = executable.sample(local_executor, shots=1000)
-result = job.result()
-print("Local simulation results:")
-for value, count in result.results:
-    print(f"  {value}: {count} times")
+try:
+    ibm_executor = IBMQuantumExecutor(backend_name="ibm_brisbane")
+    job = executable.sample(ibm_executor, shots=1000)
+    result = job.result()
+    print("=== IBM Quantum Results ===")
+    for value, count in result.results:
+        print(f"  {value}: {count} times")
+except Exception as e:
+    print(f"IBM Quantum not available: {e}")
+    print()
+    print("To use IBM Quantum, configure your credentials:")
+    print("  from qiskit_ibm_runtime import QiskitRuntimeService")
+    print('  QiskitRuntimeService.save_account(channel="ibm_quantum", token="YOUR_TOKEN")')
+    print()
+    print("Running on local simulator instead:")
+    local_executor = MySimpleExecutor()
+    job = executable.sample(local_executor, shots=1000)
+    result = job.result()
+    for value, count in result.results:
+        print(f"  {value}: {count} times")
 
 # %% [markdown]
 # ## 5. Implementing Parameter Binding
@@ -353,14 +356,14 @@ class MyParametricExecutor(QuantumExecutor[QuantumCircuit]):
 
 
 # %%
-@qm.qkernel
-def parametric_circuit(theta: qm.Float) -> qm.Bit:
+@qmc.qkernel
+def parametric_circuit(theta: qmc.Float) -> qmc.Bit:
     """Parameterized circuit"""
-    q = qm.qubit(name="q")
-    q = qm.h(q)
-    q = qm.rz(q, theta)
-    q = qm.h(q)
-    return qm.measure(q)
+    q = qmc.qubit(name="q")
+    q = qmc.h(q)
+    q = qmc.rz(q, theta)
+    q = qmc.h(q)
+    return qmc.measure(q)
 
 
 parametric_circuit.draw()
@@ -451,27 +454,76 @@ class MyFullExecutor(QuantumExecutor[QuantumCircuit]):
     ) -> float:
         """Calculate Hamiltonian expectation value
 
-        Uses the Qiskit Estimator primitive.
+        Uses the Qiskit StatevectorEstimator primitive.
         """
-        from qiskit.primitives import Estimator
+        from qiskit.primitives import StatevectorEstimator
 
         from qamomile.qiskit.observable import hamiltonian_to_sparse_pauli_op
 
         if self._estimator is None:
-            self._estimator = Estimator()
+            self._estimator = StatevectorEstimator()
 
         # Convert Hamiltonian to Qiskit format
         sparse_pauli_op = hamiltonian_to_sparse_pauli_op(hamiltonian)
 
-        # Set parameter values
-        param_values = list(params) if params is not None else []
-
         # Calculate expectation value
-        job = self._estimator.run([(circuit, sparse_pauli_op, param_values)])
+        job = self._estimator.run([(circuit, sparse_pauli_op)])
         result = job.result()
 
         return float(result[0].data.evs)
 
+
+# %% [markdown]
+# ### Testing Expectation Value Calculation
+#
+# Let's test the `estimate()` method with a simple Hamiltonian.
+# We create $H = Z_0 + 0.5 \cdot Z_0 Z_1$ and compute $\langle\psi|H|\psi\rangle$
+# for a Bell state.
+#
+# In Qamomile, expectation values are computed by using `qmc.expval()` inside a
+# qkernel. The Hamiltonian is passed as an `Observable` parameter via bindings.
+
+# %%
+# Create a simple Hamiltonian: H = Z0 + 0.5 * Z0*Z1
+hamiltonian = qm_o.Z(0) + 0.5 * qm_o.Z(0) * qm_o.Z(1)
+
+print("Hamiltonian:", hamiltonian)
+
+
+# %%
+# Define a circuit that prepares a Bell state and computes expval
+@qmc.qkernel
+def bell_expval(H: qmc.Observable) -> qmc.Float:
+    """Prepare a Bell state and compute <ψ|H|ψ>"""
+    q = qmc.qubit_array(2, name="q")
+    q[0] = qmc.h(q[0])
+    q[0], q[1] = qmc.cx(q[0], q[1])
+    return qmc.expval(q, H)
+
+
+bell_expval.draw()
+
+# %%
+# Transpile with the Hamiltonian bound
+executable_expval = transpiler.transpile(bell_expval, bindings={"H": hamiltonian})
+
+# Calculate expectation value with our custom executor
+full_executor = MyFullExecutor()
+job_expval = executable_expval.run(full_executor)
+expectation = job_expval.result()
+
+print("=== Expectation Value Calculation ===")
+print("  Hamiltonian: Z0 + 0.5 * Z0*Z1")
+print("  State: Bell state (|00⟩ + |11⟩)/√2")
+print(f"  <ψ|H|ψ> = {expectation:.4f}")
+print()
+print("  Expected: For Bell state, <Z0> = 0, <Z0*Z1> = 1")
+print("  So <H> = 0 + 0.5 * 1 = 0.5")
+
+# %% [markdown]
+# The expectation value of $Z_0$ is 0 for a Bell state (equal probability of $|0\rangle$ and $|1\rangle$),
+# while $Z_0 Z_1$ gives 1 (both qubits are always correlated).
+# Therefore $\langle H \rangle = 0 + 0.5 \times 1 = 0.5$.
 
 # %% [markdown]
 # ## 7. Summary
@@ -519,5 +571,14 @@ class MyFullExecutor(QuantumExecutor[QuantumCircuit]):
 #
 # ### Next Steps
 #
-# - **qaoa.py**: Use custom Executors in QAOA algorithms
-# - **qpe.py**: Quantum Phase Estimation algorithm
+# - See the optimization section for QAOA with production converters
+# - See 05_stdlib.py for QPE and standard library functions
+
+# %% [markdown]
+# ## What We Learned
+#
+# - **The role and structure of QuantumExecutor** — `QuantumExecutor[T]` is an abstract base class with `execute()`, `bind_parameters()`, and `estimate()` that bridges transpiled programs and backends.
+# - **How to create a minimal custom Executor** — Implement only `execute()` returning `dict[str, int]` (big-endian bitstring counts) to run circuits on any backend.
+# - **How to connect to IBM Quantum cloud** — Use `qiskit-ibm-runtime` with `SamplerV2` to submit circuits to real IBM quantum devices.
+# - **How to implement parameter binding** — Implement `bind_parameters()` using `ParameterMetadata.to_binding_dict()` to support parametric circuits without retranspiling.
+# - **How to implement expectation value calculation (estimate)** — Implement `estimate()` with an Estimator primitive to compute $\langle\psi|H|\psi\rangle$ for variational algorithms.

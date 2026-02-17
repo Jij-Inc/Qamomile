@@ -293,7 +293,7 @@ print(f"Initial parameters: gammas={init_params[:p]}, betas={init_params[p:]}")
 result_opt = minimize(
     objective_function,
     init_params,
-    args=(transpiler, executable, converter.ising),
+    args=(transpiler, executable, converter.spin_model),
     method="COBYLA",
     options={"maxiter": 100, "disp": True},
 )
@@ -341,7 +341,7 @@ result_final = job_final.result()
 # Sort results by energy
 results_with_energy = []
 for bitstring, count in result_final.results:
-    energy = calculate_ising_energy(bitstring, converter.ising)
+    energy = calculate_ising_energy(bitstring, converter.spin_model)
     results_with_energy.append((bitstring, count, energy))
 
 results_with_energy.sort(key=lambda x: x[2])
@@ -398,5 +398,5 @@ plt.tight_layout()
 #
 # Key advantages of using Qamomile for QAOA:
 # - Automatic Ising model generation from mathematical formulations
-# - Backend-agnostic circuit definition (works with Qiskit, Quri-Parts, PennyLane, etc.)
+# - Backend-agnostic circuit definition (currently Qiskit; CUDA-Q and QURI Parts coming soon)
 # - Easy integration with classical optimization libraries

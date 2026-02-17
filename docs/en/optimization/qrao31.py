@@ -13,9 +13,9 @@
 # ---
 
 # %% [markdown]
-# # Solving the MaxCut Problem with QAOA
+# # Solving the MaxCut Problem with QRAO
 #
-# In this section, we use JijModeling and Qamomile to solve the MaxCut problem with QAOA.
+# In this section, we use JijModeling and Qamomile to solve the MaxCut problem with QRAO.
 #
 # First, we import the main libraries we'll be using.
 
@@ -182,120 +182,76 @@ instance = interpreter.eval_problem(problem)
 
 # %%
 import qamomile.circuit as qmc
-from qamomile.optimization.qaoa import QAOAConverter
+from qamomile.optimization.qrao.qrao31 import QRAC31Converter
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
 
-# Create the QAOA converter and transpile
-p = 3  # Number of QAOA layers
-converter = QAOAConverter(instance)
-executable = converter.transpile(
-    transpiler=transpiler,
-    p=p,
-)
+# Create the QRAO31 Hamiltonian
+converter = QRAC31Converter(instance)
+hamiltonin = converter.get_cost_hamiltonian()
+
 
 # %% [markdown]
-# Let's look at the generated quantum circuit. This circuit implements a QAOA ansatz
-# with alternating cost and mixer layers.
-
-# %%
-qiskit_circuit = executable.get_circuits()[0]
-print(qiskit_circuit.draw())
+# We will use VQE to search for the ground state of this Hamiltonian.
+from qamomile.circuit.algorithm.basic import ry_layer, rz_layer, cz_entangling_layer
 
 
-# %%
-job = executable.sample(
-    transpiler.executor(),
+@qmc.qkernel
+def vqe(n: qmc.UInt, h: qmc.Observable, depth: qmc.UInt, theta: qmc.Vector[qmc.Float]) -> qmc.Float:
+    q = qmc.qubit_array(n, "q")
+    for layer in qmc.range(depth):
+        q = ry_layer(q, theta, 2 * n * layer)
+        q = rz_layer(q, theta, 2 * n * layer + n)
+        q = cz_entangling_layer(q)
+    return qmc.expval(q, h)
+
+
+transpiler = QiskitTranspiler()
+executable = transpiler.transpile(
+    vqe,
     bindings={
-        "gammas": [0.1] * p,
-        "betas": [0.2] * p,
+        "n": hamiltonin.num_qubits,
+        "h": hamiltonin,
+        "depth": 2,
     },
-    shots=1024,
+    parameters=["theta"]
 )
-
-# %%
-result = job.result()
-sampleset = converter.decode(result)
-
-sampleset.objectives
-
-# %% [markdown]
-# ## Energy Calculation
-#
-# To optimize QAOA, we need to calculate the expected energy from measurement results.
-# The converter provides access to the Ising model, which we use to calculate energy.
-
-# %%
-def calculate_ising_energy(bitstring: list[int], ising_model) -> float:
-    """
-    Calculate the Ising model energy from a bitstring.
-
-    Convert bitstring z_i ∈ {0, 1} to spins s_i ∈ {-1, +1}.
-    Convention: s_i = 1 - 2*z_i (z_i=0 → s_i=+1, z_i=1 → s_i=-1)
-    """
-    # Convert bits to spins
-    spins = [1 - 2 * b for b in bitstring]
-    return ising_model.calc_energy(spins)
-
-
-def calculate_expectation_value(sample_result, ising_model) -> float:
-    """
-    Calculate the expected energy value from measurement results.
-    """
-    total_energy = 0.0
-    total_counts = 0
-
-    for bitstring, count in sample_result.results:
-        energy = calculate_ising_energy(bitstring, ising_model)
-        total_energy += energy * count
-        total_counts += count
-
-    return total_energy / total_counts
-
 
 # %% [markdown]
 # ## VQE Optimization
 #
 # We set up a variational optimization loop. Using scipy's COBYLA optimizer,
-# we find the optimal QAOA parameters (gamma and beta for each layer).
+# we find the optimal VQE parameters.
 
 # %%
 from scipy.optimize import minimize
-from qamomile.circuit.transpiler.executable import ExecutableProgram
+
+# Calculate parameter count
+depth = 2
+n_qubits = hamiltonin.num_qubits
+n_params = 2 * n_qubits * depth  # ry_layer + rz_layer each consume n_qubits params per layer
+
+print(f"Number of qubits: {n_qubits}")
+print(f"Depth: {depth}")
+print(f"Number of parameters: {n_params}")
 
 # List to store optimization history
 energy_history = []
 
 
-def objective_function(
-    params,
-    ising_model,
-    shots=1024
-):
+def objective_function(params, executable):
     """
     Objective function for VQE optimization.
     """
-    p = len(params) // 2
-    gammas = params[:p]
-    betas = params[p:]
-
-    job = executable.sample(
+    job = executable.run(
         transpiler.executor(),
         bindings={
-            "gammas": gammas,
-            "betas": betas,
+            "theta": params,
         },
-        shots=shots,
     )
-    result = job.result()
-
-    solution = converter.decode(result)
-    obj = solution.objectives[0]
-
-    energy = calculate_expectation_value(result, ising_model)
+    energy = job.result()
     energy_history.append(energy)
-
     return energy
 
 
@@ -303,30 +259,25 @@ def objective_function(
 # Run optimization
 np.random.seed(42)
 
-# Initial parameters: gamma in [0, 2π], beta in [0, π]
-init_params = np.concatenate([
-    np.random.uniform(0, 2 * np.pi, size=p),  # gammas
-    np.random.uniform(0, np.pi, size=p),       # betas
-])
+# Initial parameters
+init_params = np.random.uniform(0, 2 * np.pi, size=n_params)
 
 # Clear history
 energy_history = []
 
-print(f"Starting QAOA optimization with p={p} layers...")
-print(f"Initial parameters: gammas={init_params[:p]}, betas={init_params[p:]}")
+print(f"Starting VQE optimization...")
+print(f"Initial parameter count: {len(init_params)}")
 
 # Optimize with COBYLA
 result_opt = minimize(
     objective_function,
     init_params,
-    args=(transpiler, executable, converter.ising),
+    args=(executable,),
     method="COBYLA",
     options={"maxiter": 100, "disp": True},
 )
 
-print(f"\nOptimized parameters:")
-print(f"  gammas: {result_opt.x[:p]}")
-print(f"  betas: {result_opt.x[p:]}")
+print(f"\nOptimization complete")
 print(f"Final energy: {result_opt.fun:.4f}")
 
 # %% [markdown]
@@ -339,66 +290,121 @@ plt.figure(figsize=(10, 5))
 plt.plot(energy_history, marker='o', markersize=3)
 plt.xlabel("Iteration")
 plt.ylabel("Energy")
-plt.title("QAOA Optimization Convergence")
+plt.title("VQE Optimization Convergence")
 plt.grid(True)
 plt.tight_layout()
 # plt.show()
 
 # %% [markdown]
-# ## Analyzing the Final Solution
+# ## QRAO31 Decoding Process
 #
-# Let's sample from the optimized circuit and analyze the results.
+# In QRAO31, each variable is encoded into a specific Pauli operator (X, Y, Z).
+# From the optimized state, we measure the expectation value of each Pauli operator
+# to recover the original variable values.
+#
+# If the expectation value is positive, we infer +1 (spin representation), and if negative, -1.
 
 # %%
-# Sample with optimized parameters
-optimal_gammas = result_opt.x[:p]
-optimal_betas = result_opt.x[p:]
+# Create circuits to measure expectation values of Pauli operators for each variable
+pauli_observables = converter.get_encoded_pauli_list()
 
-job_final = executable.sample(
-    transpiler.executor(),
-    bindings={
-        "gammas": optimal_gammas,
-        "betas": optimal_betas,
-    },
-    shots=4096,
-)
-result_final = job_final.result()
+print(f"Number of Pauli operators to measure: {len(pauli_observables)}")
+print(f"Variable index to Pauli operator mapping:")
+for idx, pauli_op in converter.pauli_encoding.items():
+    print(f"  Variable {idx} -> {pauli_op}")
 
-# Sort results by energy
-results_with_energy = []
-for bitstring, count in result_final.results:
-    energy = calculate_ising_energy(bitstring, converter.ising)
-    results_with_energy.append((bitstring, count, energy))
 
-results_with_energy.sort(key=lambda x: x[2])
+# %%
+# Measure expectation values of each Pauli operator
+@qmc.qkernel
+def measure_pauli(n: qmc.UInt, h: qmc.Observable, depth: qmc.UInt, theta: qmc.Vector[qmc.Float]) -> qmc.Float:
+    q = qmc.qubit_array(n, "q")
+    for layer in qmc.range(depth):
+        q = ry_layer(q, theta, 2 * n * layer)
+        q = rz_layer(q, theta, 2 * n * layer + n)
+        q = cz_entangling_layer(q)
+    return qmc.expval(q, h)
 
-print("Measurement results (sorted by energy):")
-print("-" * 60)
-for bitstring, count, energy in results_with_energy[:10]:
-    bitstring_str = "".join(map(str, bitstring))
-    probability = count / 4096
-    print(f"  {bitstring_str}: count={count:4d}, probability={probability:.3f}, energy={energy:.4f}")
+
+expectations = []
+optimal_params = result_opt.x
+
+for i, pauli_obs in enumerate(pauli_observables):
+    executable_pauli = transpiler.transpile(
+        measure_pauli,
+        bindings={
+            "n": n_qubits,
+            "h": pauli_obs,
+            "depth": depth,
+        },
+        parameters=["theta"]
+    )
+
+    job = executable_pauli.run(
+        transpiler.executor(),
+        bindings={
+            "theta": optimal_params,
+        },
+    )
+    expectation = job.result()
+    expectations.append(expectation)
+
+print("Pauli expectation values for each variable:")
+for i, exp in enumerate(expectations):
+    print(f"  Variable {i}: {exp:.4f}")
+
+# %% [markdown]
+# ## Recovering the Solution
+#
+# We use SignRounder to recover the original variable values (spins) from expectation values.
+
+# %%
+from qamomile.optimization.qrao import SignRounder
+
+rounder = SignRounder()
+spins = rounder.round(expectations)
+
+print("Recovered spin values (+1 or -1):")
+for i, spin in enumerate(spins):
+    print(f"  Variable {i}: {spin}")
+
+# Convert spins to binary (spin=+1 -> binary=0, spin=-1 -> binary=1)
+binary_solution = [(1 - s) // 2 for s in spins]
+
+print("\nBinary solution (0 or 1):")
+for i, bit in enumerate(binary_solution):
+    print(f"  Variable {i}: {bit}")
 
 # %% [markdown]
 # ## Visualizing the Solution
 #
-# Let's visualize the best solution found by QAOA on the original graph.
+# Let's visualize the solution found by QRAO31 on the original graph.
 
 # %%
-# Get best solution (lowest energy)
-best_bitstring, best_count, best_energy = results_with_energy[0]
-best_solution = {(i,): float(bit) for i, bit in enumerate(best_bitstring)}
+# Convert solution to dictionary format
+solution_dict = {(i,): float(bit) for i, bit in enumerate(binary_solution)}
 
-print(f"\nBest solution found:")
-print(f"  Bitstring: {''.join(map(str, best_bitstring))}")
-print(f"  Energy: {best_energy:.4f}")
+# Calculate energy
+# Energy calculation in spin representation
+def calculate_maxcut_value(graph, binary_solution):
+    """Calculate the objective function value for the MaxCut problem"""
+    cut_count = 0
+    for u, v in graph.edges():
+        if binary_solution[u] != binary_solution[v]:
+            cut_count += 1
+    return cut_count
+
+cut_value = calculate_maxcut_value(G, binary_solution)
+
+print(f"\nSolution found:")
+print(f"  Binary string: {''.join(map(str, binary_solution))}")
+print(f"  Number of cut edges: {cut_value}")
 
 # Visualize solution
-edge_colors, node_colors = get_edge_colors(G, best_solution)
-cut_edges = sum(1 for c in edge_colors if c == "r")
+edge_colors, node_colors = get_edge_colors(G, solution_dict)
 
 fig, ax = plt.subplots(figsize=(6, 5))
-ax.set_title(f"QAOA Solution (Cut Edges: {cut_edges})")
+ax.set_title(f"QRAO31 Solution (Cut Edges: {cut_value})")
 nx.draw_networkx(
     G,
     pos,
@@ -415,14 +421,20 @@ plt.tight_layout()
 # %% [markdown]
 # ## Summary
 #
-# In this tutorial, we demonstrated how to solve the MaxCut problem with QAOA using Qamomile:
+# In this tutorial, we demonstrated how to solve the MaxCut problem with QRAO31 using Qamomile:
 #
 # 1. **Problem formulation**: We formulated MaxCut as a QUBO/Ising problem using JijModeling
-# 2. **Circuit generation**: Qamomile's `QAOAConverter` automatically generated the QAOA circuit
-# 3. **VQE optimization**: We found optimal QAOA parameters using scipy's COBYLA optimizer
-# 4. **Solution analysis**: We analyzed the measurement results and visualized the solution
+# 2. **QRAO31 encoding**: `QRAC31Converter` encoded 3 variables into 1 qubit, reducing qubit count
+# 3. **VQE optimization**: We found optimal parameters using a hardware-efficient ansatz
+# 4. **Decoding**: We measured expectation values of Pauli operators and recovered original variable values with SignRounder
+# 5. **Solution analysis**: We analyzed the measurement results and visualized the solution
 #
-# Key advantages of using Qamomile for QAOA:
-# - Automatic generation of Ising models from mathematical formulations
-# - Backend-agnostic circuit definitions (works with Qiskit, Quri-Parts, PennyLane, etc.)
-# - Easy integration with classical optimization libraries
+# Key advantages of using Qamomile for QRAO31:
+# - **Qubit reduction**: Can represent up to 3x more variables with fewer qubits
+# - **Automatic conversion from mathematical formulations**: Automatically generates QRAC-encoded Hamiltonian from JijModeling
+# - **Backend-agnostic**: Currently Qiskit; CUDA-Q and QURI Parts coming soon
+# - **Integration with classical optimization**: Easy integration with classical optimization libraries like scipy
+#
+# QRAO31 is a powerful technique for efficiently using the limited qubits available on NISQ devices.
+
+# %%
