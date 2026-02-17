@@ -73,11 +73,8 @@ class QRAC21Converter(QRACConverterBase):
         >>> hamiltonian = converter.get_cost_hamiltonian()
     """
 
-    @property
-    def _hubo_support(self) -> bool:
-        return False
-
     def __post_init__(self) -> None:
+        super().__post_init__()
         self._encoder = QRAC21Encoder(self.spin_model)
         self.color_group = self._encoder.color_group
         self.pauli_encoding: dict[int, qm_o.PauliOperator] = {}

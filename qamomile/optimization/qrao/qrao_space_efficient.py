@@ -100,11 +100,8 @@ class QRACSpaceEfficientConverter(QRACConverterBase):
         >>> hamiltonian = converter.get_cost_hamiltonian()
     """
 
-    @property
-    def _hubo_support(self) -> bool:
-        return False
-
     def __post_init__(self) -> None:
+        super().__post_init__()
         self._encoder = QRACSpaceEfficientEncoder(self.spin_model)
         self.pauli_encoding: dict[int, qm_o.PauliOperator] = {}
         self._num_qubits: int = 0
