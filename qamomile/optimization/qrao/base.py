@@ -6,12 +6,15 @@ shared functionality across all QRAC converter variants.
 
 from __future__ import annotations
 import abc
+from typing import Generic, TypeVar
 
 import qamomile.observable as qm_o
 from qamomile.optimization.converter import MathematicalProblemConverter
 
+EncoderT = TypeVar("EncoderT")
 
-class QRACConverterBase(MathematicalProblemConverter, abc.ABC):
+
+class QRACConverterBase(MathematicalProblemConverter, abc.ABC, Generic[EncoderT]):
     """Abstract base for all QRAC-based converters.
 
     Subclasses must implement:
@@ -72,3 +75,8 @@ class QRACConverterBase(MathematicalProblemConverter, abc.ABC):
 
     @abc.abstractmethod
     def get_encoded_pauli_list(self) -> list[qm_o.Hamiltonian]: ...
+
+    @property
+    def encoder(self) -> EncoderT:
+        """The QRAC encoder used by this converter."""
+        return self._encoder

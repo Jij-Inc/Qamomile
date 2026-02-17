@@ -98,7 +98,7 @@ def qrac_space_efficient_encode_ising(
     return hamiltonian, encoded_ope
 
 
-class QRACSpaceEfficientConverter(QRACConverterBase):
+class QRACSpaceEfficientConverter(QRACConverterBase[QRACSpaceEfficientEncoder]):
     """Space Efficient QRAC Converter for Quantum Random Access Optimization.
 
     Uses sequential numbering with constant 2:1 compression ratio.
@@ -118,10 +118,6 @@ class QRACSpaceEfficientConverter(QRACConverterBase):
     @property
     def num_qubits(self) -> int:
         return self._num_qubits
-
-    @property
-    def encoder(self) -> QRACSpaceEfficientEncoder:
-        return self._encoder
 
     def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
         """Generate the cost Hamiltonian for the space-efficient QRAC-encoded problem.

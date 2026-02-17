@@ -137,7 +137,7 @@ def qrac32_encode_ising(
     return hamiltonian, encoded_ope
 
 
-class QRAC32Converter(QRACConverterBase):
+class QRAC32Converter(QRACConverterBase[QRAC32Encoder]):
     """QRAC(3,2,p) Converter for Quantum Random Access Optimization.
 
     Converts optimization problems into QRAC-encoded form using 2-local
@@ -158,10 +158,6 @@ class QRAC32Converter(QRACConverterBase):
     def num_qubits(self) -> int:
         """Physical qubit count (2x logical qubits)."""
         return len(self.color_group) * 2
-
-    @property
-    def encoder(self) -> QRAC32Encoder:
-        return self._encoder
 
     def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
         """Generate the cost Hamiltonian for the QRAC-encoded problem.

@@ -59,7 +59,7 @@ def qrac21_encode_ising(
     return hamiltonian, encoded_ope
 
 
-class QRAC21Converter(QRACConverterBase):
+class QRAC21Converter(QRACConverterBase[QRAC21Encoder]):
     """QRAC(2,1,p) Converter for Quantum Random Access Optimization.
 
     Converts optimization problems into QRAC-encoded form with reduced qubit count.
@@ -79,10 +79,6 @@ class QRAC21Converter(QRACConverterBase):
     @property
     def num_qubits(self) -> int:
         return len(self.color_group)
-
-    @property
-    def encoder(self) -> QRAC21Encoder:
-        return self._encoder
 
     def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
         """Generate the cost Hamiltonian for the QRAC-encoded problem.
