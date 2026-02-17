@@ -1,21 +1,33 @@
-"""QRAC Encoders for Quantum Random Access Optimization.
+"""QRAC Encoder base classes and utilities.
 
-This module implements the encoding logic for various QRAC variants:
-- (2,1,p)-QRAC: Maps up to 2 variables per qubit using X, Z.
-- (3,1,p)-QRAC: Maps up to 3 variables per qubit using X, Y, Z.
-- (3,2,p)-QRAC: Maps up to 3 variables per 2 qubits using prime operators.
-- Space-efficient QRAC: Sequential numbering with X, Y, constant 2:1 compression.
+This module provides:
+- ``BaseQRACEncoder``: Abstract base for all QRAC encoders with validation.
+- ``GraphColoringQRACEncoder``: Intermediate base for graph-coloring-based encoders.
+- Utility functions for Pauli encoding, occupancy mapping, and physical qubit mapping.
+
+Concrete encoder classes live alongside their converters:
+- ``QRAC21Encoder`` in ``qrao21.py``
+- ``QRAC31Encoder`` in ``qrao31.py``
+- ``QRAC32Encoder`` in ``qrao32.py``
+- ``QRACSpaceEfficientEncoder`` in ``qrao_space_efficient.py``
 """
 
 from __future__ import annotations
+
+import abc
 from typing import Literal
 
 import qamomile.observable as qm_o
-from qamomile.optimization.binary_model import BinaryModel
+from qamomile.optimization.binary_model import BinaryModel, VarType
 from .graph_coloring import greedy_graph_coloring, check_linear_term
 
 
 PauliType = Literal["X", "Y", "Z"]
+
+
+# ---------------------------------------------------------------------------
+# Utility functions
+# ---------------------------------------------------------------------------
 
 
 def color_group_to_qrac_encode(
@@ -86,67 +98,49 @@ def build_physical_qubit_map(
     return color_to_phys, current
 
 
-class QRAC31Encoder:
-    """(3,1,p)-QRAC Encoder.
+# ---------------------------------------------------------------------------
+# Base encoder classes
+# ---------------------------------------------------------------------------
 
-    Encodes Ising model variables into Pauli operators on qubits using
-    graph coloring to ensure that interacting variables are assigned to
-    different qubits.
 
-    The relaxed Hamiltonian is:
-        H̃ = Σ_{ij} √k_i·√k_j·J_{ij}·P_{f(i)}·P_{f(j)} + Σ_i √k_i·h_i·P_{f(i)}
+class BaseQRACEncoder(abc.ABC):
+    """Abstract base for all QRAC encoders.
 
-    where f(i) = (qubit_index, pauli_type) maps variable i to a Pauli operator,
-    and k_i is the number of variables encoded on the qubit containing variable i.
+    Provides:
+    - Input validation (spin vartype, no HUBO terms).
+    - Common ``pauli_encoding`` property and ``get_pauli_for_variable`` method.
+    - Abstract hooks for ``_perform_encoding`` and ``num_qubits``.
 
-    Attributes:
-        max_color_group_size: Maximum variables per qubit (3 for QRAC31)
-        linear_coeff_scale: Scaling factor for linear terms (√3)
-        quad_coeff_scale: Scaling factor for quadratic terms (3)
+    Subclasses must implement ``_perform_encoding`` and ``num_qubits``.
     """
 
-    max_color_group_size: int = 3
-
     def __init__(self, spin_model: BinaryModel) -> None:
-        """Initialize encoder with a spin model.
-
-        Args:
-            spin_model: BinaryModel in SPIN vartype
-        """
+        self._validate(spin_model)
         self.spin_model = spin_model
-        self._color_group: dict[int, list[int]] = {}
         self._pauli_encoding: dict[int, tuple[int, PauliType]] = {}
-
         self._perform_encoding()
 
+    @staticmethod
+    def _validate(spin_model: BinaryModel) -> None:
+        """Validate that the model is suitable for QRAC encoding."""
+        if spin_model.vartype != VarType.SPIN:
+            raise ValueError("Encoder requires a SPIN-type BinaryModel.")
+        if spin_model.higher:
+            raise ValueError(
+                "Encoder does not support higher-order (HUBO) terms. "
+                "All interaction terms must be at most quadratic."
+            )
+
+    @abc.abstractmethod
     def _perform_encoding(self) -> None:
-        """Perform graph coloring and Pauli encoding."""
-        # 1. Graph coloring on interaction graph
-        edges = list(self.spin_model.quad.keys())
-        _, self._color_group = greedy_graph_coloring(edges, self.max_color_group_size)
-
-        # 2. Add linear-only variables to color groups
-        self._color_group = check_linear_term(
-            self._color_group,
-            list(self.spin_model.linear.keys()),
-            self.max_color_group_size,
-        )
-
-        # 3. Assign Pauli operators to variables
-        paulis: list[PauliType] = ["Z", "X", "Y"]
-        for qubit, var_list in self._color_group.items():
-            for pauli_idx, var_idx in enumerate(var_list):
-                self._pauli_encoding[var_idx] = (qubit, paulis[pauli_idx])
+        """Perform the QRAC encoding (populate ``_pauli_encoding``)."""
+        ...
 
     @property
+    @abc.abstractmethod
     def num_qubits(self) -> int:
         """Number of qubits after QRAC encoding."""
-        return len(self._color_group)
-
-    @property
-    def color_group(self) -> dict[int, list[int]]:
-        """Mapping from qubit index to list of variable indices."""
-        return self._color_group
+        ...
 
     @property
     def pauli_encoding(self) -> dict[int, tuple[int, PauliType]]:
@@ -165,27 +159,29 @@ class QRAC31Encoder:
         return self._pauli_encoding[var_idx]
 
 
-class QRAC21Encoder:
-    """(2,1,p)-QRAC Encoder.
+class GraphColoringQRACEncoder(BaseQRACEncoder, abc.ABC):
+    """Base for graph-coloring-based QRAC encoders (21, 31, 32).
 
-    Encodes Ising model variables into Pauli operators using 2-coloring.
-    Up to 2 variables per qubit, using Z and X Paulis.
+    Subclasses only need to set ``max_color_group_size`` and ``paulis``.
 
-    The relaxed Hamiltonian is:
-        H̃ = Σ_{ij} √k_i·√k_j·J_{ij}·P_{f(i)}·P_{f(j)} + Σ_i √k_i·h_i·P_{f(i)}
-
-    where k_i is the number of variables encoded on the qubit containing variable i.
+    The encoding process:
+    1. Graph coloring on the interaction graph.
+    2. Adds linear-only variables to color groups.
+    3. Assigns Pauli operators to variables within each qubit.
     """
 
-    max_color_group_size: int = 2
+    max_color_group_size: int
+    """Maximum number of variables per qubit."""
+
+    paulis: list[PauliType]
+    """Pauli types to assign within each color group (in order)."""
 
     def __init__(self, spin_model: BinaryModel) -> None:
-        self.spin_model = spin_model
         self._color_group: dict[int, list[int]] = {}
-        self._pauli_encoding: dict[int, tuple[int, PauliType]] = {}
-        self._perform_encoding()
+        super().__init__(spin_model)
 
     def _perform_encoding(self) -> None:
+        """Perform graph coloring and Pauli encoding."""
         edges = list(self.spin_model.quad.keys())
         _, self._color_group = greedy_graph_coloring(edges, self.max_color_group_size)
         self._color_group = check_linear_term(
@@ -193,112 +189,16 @@ class QRAC21Encoder:
             list(self.spin_model.linear.keys()),
             self.max_color_group_size,
         )
-        paulis: list[PauliType] = ["Z", "X"]
         for qubit, var_list in self._color_group.items():
             for pauli_idx, var_idx in enumerate(var_list):
-                self._pauli_encoding[var_idx] = (qubit, paulis[pauli_idx])
-
-    @property
-    def num_qubits(self) -> int:
-        return len(self._color_group)
+                self._pauli_encoding[var_idx] = (qubit, self.paulis[pauli_idx])
 
     @property
     def color_group(self) -> dict[int, list[int]]:
+        """Mapping from qubit index to list of variable indices."""
         return self._color_group
 
     @property
-    def pauli_encoding(self) -> dict[int, tuple[int, PauliType]]:
-        return self._pauli_encoding
-
-    def get_pauli_for_variable(self, var_idx: int) -> tuple[int, PauliType]:
-        return self._pauli_encoding[var_idx]
-
-
-class QRAC32Encoder:
-    """(3,2,p)-QRAC Encoder.
-
-    Same graph coloring as (3,1,p) but uses 2-local prime operators for
-    color groups with k>=2 variables. Groups with k=1 use a single
-    physical qubit with a regular Pauli operator.
-
-    Physical qubit allocation per color group:
-        k=1: 1 physical qubit (regular Pauli, scale=1)
-        k=2: 2 physical qubits (prime operators, scale=√(2·2)=2)
-        k=3: 2 physical qubits (prime operators, scale=√(2·3)=√6)
-    """
-
-    max_color_group_size: int = 3
-
-    def __init__(self, spin_model: BinaryModel) -> None:
-        self.spin_model = spin_model
-        self._color_group: dict[int, list[int]] = {}
-        self._pauli_encoding: dict[int, tuple[int, PauliType]] = {}
-        self._perform_encoding()
-
-    def _perform_encoding(self) -> None:
-        edges = list(self.spin_model.quad.keys())
-        _, self._color_group = greedy_graph_coloring(edges, self.max_color_group_size)
-        self._color_group = check_linear_term(
-            self._color_group,
-            list(self.spin_model.linear.keys()),
-            self.max_color_group_size,
-        )
-        paulis: list[PauliType] = ["Z", "X", "Y"]
-        for qubit, var_list in self._color_group.items():
-            for pauli_idx, var_idx in enumerate(var_list):
-                self._pauli_encoding[var_idx] = (qubit, paulis[pauli_idx])
-
-    @property
     def num_qubits(self) -> int:
-        """Number of physical qubits (1 per k=1 group, 2 per k>=2 group)."""
-        _, total = build_physical_qubit_map(self._color_group)
-        return total
-
-    @property
-    def num_logical_qubits(self) -> int:
+        """Number of qubits after QRAC encoding."""
         return len(self._color_group)
-
-    @property
-    def color_group(self) -> dict[int, list[int]]:
-        return self._color_group
-
-    @property
-    def pauli_encoding(self) -> dict[int, tuple[int, PauliType]]:
-        return self._pauli_encoding
-
-    def get_pauli_for_variable(self, var_idx: int) -> tuple[int, PauliType]:
-        return self._pauli_encoding[var_idx]
-
-
-class QRACSpaceEfficientEncoder:
-    """Space Efficient QRAC Encoder.
-
-    No graph coloring. Uses sequential numbering:
-    variable i -> qubit i//2, Pauli X (even index) or Y (odd index).
-
-    Always maintains a 2:1 compression ratio.
-    """
-
-    def __init__(self, spin_model: BinaryModel) -> None:
-        self.spin_model = spin_model
-        self._pauli_encoding: dict[int, tuple[int, PauliType]] = {}
-        self._perform_encoding()
-
-    def _perform_encoding(self) -> None:
-        paulis: list[PauliType] = ["X", "Y"]
-        num_vars = self.spin_model.num_bits
-        for i in range(num_vars):
-            qubit_index = i // 2
-            self._pauli_encoding[i] = (qubit_index, paulis[i % 2])
-
-    @property
-    def num_qubits(self) -> int:
-        num_vars = self.spin_model.num_bits
-        return (num_vars + 1) // 2
-
-    @property
-    def pauli_encoding(self) -> dict[int, tuple[int, PauliType]]:
-        return self._pauli_encoding
-
-    def get_pauli_for_variable(self, var_idx: int) -> tuple[int, PauliType]:
-        return self._pauli_encoding[var_idx]

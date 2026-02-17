@@ -15,7 +15,28 @@ from qamomile.optimization.utils import is_close_zero
 from qamomile.optimization.binary_model import BinaryModel, VarType
 
 from .base import QRACConverterBase
-from .encoder import QRAC21Encoder, _build_var_occupancy, color_group_to_qrac_encode
+from .encoder import (
+    GraphColoringQRACEncoder,
+    PauliType,
+    _build_var_occupancy,
+    color_group_to_qrac_encode,
+)
+
+
+class QRAC21Encoder(GraphColoringQRACEncoder):
+    """(2,1,p)-QRAC Encoder.
+
+    Encodes Ising model variables into Pauli operators using 2-coloring.
+    Up to 2 variables per qubit, using Z and X Paulis.
+
+    The relaxed Hamiltonian is:
+        H̃ = Σ_{ij} √k_i·√k_j·J_{ij}·P_{f(i)}·P_{f(j)} + Σ_i √k_i·h_i·P_{f(i)}
+
+    where k_i is the number of variables encoded on the qubit containing variable i.
+    """
+
+    max_color_group_size: int = 2
+    paulis: list[PauliType] = ["Z", "X"]
 
 
 def qrac21_encode_ising(

@@ -19,11 +19,39 @@ from qamomile.optimization.binary_model import BinaryModel, VarType
 
 from .base import QRACConverterBase
 from .encoder import (
-    QRAC32Encoder,
+    GraphColoringQRACEncoder,
+    PauliType,
     _build_var_occupancy,
     build_physical_qubit_map,
     color_group_to_qrac_encode,
 )
+
+
+class QRAC32Encoder(GraphColoringQRACEncoder):
+    """(3,2,p)-QRAC Encoder.
+
+    Same graph coloring as (3,1,p) but uses 2-local prime operators for
+    color groups with k>=2 variables. Groups with k=1 use a single
+    physical qubit with a regular Pauli operator.
+
+    Physical qubit allocation per color group:
+        k=1: 1 physical qubit (regular Pauli, scale=1)
+        k=2: 2 physical qubits (prime operators, scale=√(2·2)=2)
+        k=3: 2 physical qubits (prime operators, scale=√(2·3)=√6)
+    """
+
+    max_color_group_size: int = 3
+    paulis: list[PauliType] = ["Z", "X", "Y"]
+
+    @property
+    def num_qubits(self) -> int:
+        """Number of physical qubits (1 per k=1 group, 2 per k>=2 group)."""
+        _, total = build_physical_qubit_map(self._color_group)
+        return total
+
+    @property
+    def num_logical_qubits(self) -> int:
+        return len(self._color_group)
 
 
 def create_x_prime(idx: int) -> qm_o.Hamiltonian:

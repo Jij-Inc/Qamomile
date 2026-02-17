@@ -18,7 +18,29 @@ from qamomile.optimization.utils import is_close_zero
 from qamomile.optimization.binary_model import BinaryModel, VarType
 
 from .base import QRACConverterBase
-from .encoder import QRACSpaceEfficientEncoder
+from .encoder import BaseQRACEncoder, PauliType
+
+
+class QRACSpaceEfficientEncoder(BaseQRACEncoder):
+    """Space Efficient QRAC Encoder.
+
+    No graph coloring. Uses sequential numbering:
+    variable i -> qubit i//2, Pauli X (even index) or Y (odd index).
+
+    Always maintains a 2:1 compression ratio.
+    """
+
+    def _perform_encoding(self) -> None:
+        paulis: list[PauliType] = ["X", "Y"]
+        num_vars = self.spin_model.num_bits
+        for i in range(num_vars):
+            qubit_index = i // 2
+            self._pauli_encoding[i] = (qubit_index, paulis[i % 2])
+
+    @property
+    def num_qubits(self) -> int:
+        num_vars = self.spin_model.num_bits
+        return (num_vars + 1) // 2
 
 
 def numbering_space_efficient_encode(
