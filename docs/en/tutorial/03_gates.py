@@ -17,7 +17,7 @@
 #
 # A reference for the basic quantum gates available in Qamomile.
 #
-# ## What You Will Learn
+# ## What We Will Learn
 # - All single-qubit gates available in Qamomile
 # - All multi-qubit gates available in Qamomile
 # - The gate return value pattern (linear types in action)
@@ -33,7 +33,7 @@ transpiler = QiskitTranspiler()
 # %% [markdown]
 # ## 1. Quick Recap
 #
-# In the previous tutorial (`02_type_system`), you learned how to create qubits
+# In the previous tutorial (`02_type_system`), we learned how to create qubits
 # with `qmc.qubit()` and `qmc.qubit_array()`. We use those here without
 # further explanation. Every qubit starts in $|0\rangle$.
 
@@ -415,7 +415,7 @@ for value, count in result_rzz.results:
 # %% [markdown]
 # RZZ introduces correlations between qubits — the dominant outcomes are
 # $(0, 0)$ and $(1, 1)$, i.e. `(q0, q1)` agree (in ket notation
-# $|00\rangle$ and $|11\rangle$). You will see this gate again when we
+# $|00\rangle$ and $|11\rangle$). We will see this gate again when we
 # cover QAOA.
 
 # %% [markdown]
@@ -527,7 +527,7 @@ for value, count in result_rv.results:
 #
 # Every gate returns the qubits it consumed. Always capture the return value.
 #
-# In the next tutorial, you will use these gates to build your first quantum
+# In the next tutorial, we will use these gates to build our first quantum
 # algorithm.
 
 # %% [markdown]

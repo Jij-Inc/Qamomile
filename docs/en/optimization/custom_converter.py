@@ -15,7 +15,7 @@
 # %% [markdown]
 # # Writing Custom Optimization Converters
 #
-# This tutorial explains how to write your own optimization converter by
+# This tutorial explains how to write our own optimization converter by
 # subclassing `MathematicalProblemConverter`.  A converter is the bridge between
 # a mathematical optimization problem and the quantum circuit that solves it:
 # it turns the problem into a cost Hamiltonian and decodes measurement results
@@ -30,7 +30,7 @@
 #
 # This tutorial focuses on `MathematicalProblemConverter` because it handles
 # the boilerplate of converting a `BinaryModel` (or `ommx.v1.Instance`) into
-# an internal spin model and provides a built-in `decode()` method.  You only
+# an internal spin model and provides a built-in `decode()` method.  We only
 # need to implement one abstract method: `get_cost_hamiltonian()`.
 
 # %% [markdown]
@@ -44,17 +44,17 @@
 #         -> converts to spin model internally (self.spin_model)
 #         -> calls __post_init__()
 #
-#     get_cost_hamiltonian() -> Hamiltonian    [abstract, you implement this]
+#     get_cost_hamiltonian() -> Hamiltonian    [abstract, we implement this]
 #     decode(samples: SampleResult) -> BinarySampleSet   [built-in]
 #     __post_init__()                          [optional override]
 # ```
 #
-# When you create a converter instance:
+# When we create a converter instance:
 #
 # 1. The constructor accepts an `ommx.v1.Instance` or a `BinaryModel`.
 # 2. It internally converts the problem to a spin (Ising) model stored in `self.spin_model`.
-# 3. It calls `__post_init__()`, which you can override for custom initialization.
-# 4. Your `get_cost_hamiltonian()` reads from `self.spin_model` and returns a `Hamiltonian`.
+# 3. It calls `__post_init__()`, which we can override for custom initialization.
+# 4. Our `get_cost_hamiltonian()` reads from `self.spin_model` and returns a `Hamiltonian`.
 # 5. After quantum execution, `decode()` converts measurement bitstrings back to a `BinarySampleSet` in the original variable type.
 #
 # Let's import the key classes.
@@ -79,7 +79,7 @@ import qamomile.observable as qm_o
 # - Shorthand factory functions: `X(i)`, `Y(i)`, `Z(i)` that each return a single-term `Hamiltonian`
 #
 # Hamiltonians support arithmetic (`+`, `-`, `*`, scalar multiplication), so
-# you can build them up naturally.
+# we can build them up naturally.
 
 # %%
 # Create single Pauli-Z operators on qubits 0 and 1
@@ -93,7 +93,7 @@ print("Number of qubits:", H_example.num_qubits)
 print("Constant term:", H_example.constant)
 
 # %% [markdown]
-# You can also build Hamiltonians term-by-term using `add_term()`:
+# We can also build Hamiltonians term-by-term using `add_term()`:
 
 # %%
 H_manual = qm_o.Hamiltonian()
@@ -400,7 +400,7 @@ print(f"\nMean energy: {decoded.energy_mean():.4f}")
 # %% [markdown]
 # ## Working with BINARY Variables
 #
-# The converter handles variable-type conversion automatically.  If you
+# The converter handles variable-type conversion automatically.  If we
 # provide a BINARY model, the base class converts it to SPIN internally,
 # and `decode()` converts the results back to BINARY (0/1).
 
@@ -445,7 +445,7 @@ for sample, energy in zip(decoded_binary.samples, decoded_binary.energy):
 # ## Advanced: Overriding `__post_init__`
 #
 # The `MathematicalProblemConverter` base class calls `__post_init__()` at the
-# end of `__init__()`, after `self.spin_model` is available.  You can override
+# end of `__init__()`, after `self.spin_model` is available.  We can override
 # this hook to perform custom initialization that depends on the spin model.
 #
 # For example, the built-in `QRAC31Converter` uses `__post_init__` to perform
@@ -514,7 +514,7 @@ for ops, coeff in scaled_converter.get_cost_hamiltonian():
 #    internally, and provides a built-in `decode()` method.
 #
 # 2. **Implementing `get_cost_hamiltonian()`** -- the one abstract method
-#    you must implement.  Read from `self.spin_model` (linear, quad, higher,
+#    we must implement.  Read from `self.spin_model` (linear, quad, higher,
 #    constant) and return a `qm_o.Hamiltonian`.
 #
 # 3. **End-to-end workflow** -- define a problem, create a converter, build
@@ -530,7 +530,7 @@ for ops, coeff in scaled_converter.get_cost_hamiltonian():
 # - **`MathematicalProblemConverter`** (this tutorial): Best for most use cases.
 #   Handles BINARY/SPIN conversion and result decoding automatically.
 #
-# - **`QuantumConverter`** (`qamomile.core.converters.converter`): Use when you
+# - **`QuantumConverter`** (`qamomile.core.converters.converter`): Use when we
 #   need full control over Ising encoding or need to work with the lower-level
 #   `IsingModel` / `HigherIsingModel` representations.
 #

@@ -15,12 +15,12 @@
 # %% [markdown]
 # # Parametric Circuits and Variational Quantum Algorithms
 #
-# In this tutorial, you will learn how to use **parametric circuits** in Qamomile
+# In this tutorial, we will learn how to use **parametric circuits** in Qamomile
 # and apply them to build a **variational quantum classifier** from scratch.
 # Parametric circuits are the foundation of all variational quantum algorithms (VQAs),
 # which combine quantum circuits with classical optimization.
 #
-# ## What You Will Learn
+# ## What We Will Learn
 # - Why parametric circuits matter for variational quantum algorithms
 # - The distinction between `bindings=` and `parameters=` in transpilation
 # - How to use `Observable` and `expval()` for expectation values
@@ -61,8 +61,8 @@ transpiler = QiskitTranspiler()
 # | `bindings=` | At **transpile time** | Values the circuit structure depends on (array sizes, loop counts, Hamiltonians) |
 # | `parameters=` | At **execution time** | Values that can change between runs (rotation angles for optimization) |
 #
-# When you list a parameter name in `parameters=`, Qamomile keeps it as a symbolic
-# variable in the transpiled circuit. You can supply different values at execution
+# When we list a parameter name in `parameters=`, Qamomile keeps it as a symbolic
+# variable in the transpiled circuit. We can supply different values at execution
 # time without re-transpiling.
 
 # %% [markdown]
@@ -494,13 +494,13 @@ plt.show()
 # %% [markdown]
 # ## 7. Summary
 #
-# In this tutorial, you learned the key concepts behind parametric quantum circuits
+# In this tutorial, we learned the key concepts behind parametric quantum circuits
 # and applied them to build a variational quantum classifier.
 #
 # ### Key Takeaways
 #
 # 1. **Parametric circuits** are the foundation of variational quantum algorithms.
-#    Qamomile lets you declare free parameters with `parameters=` so they can be
+#    Qamomile lets us declare free parameters with `parameters=` so they can be
 #    changed at execution time without retranspiling.
 #
 # 2. **`bindings=` vs. `parameters=`**:
@@ -526,7 +526,7 @@ plt.show()
 # - [QAOA](../optimization/qaoa.ipynb): See how Qamomile's built-in converters handle
 #   combinatorial optimization problems
 # - [Resource Estimation](08_resource_estimation.ipynb): Estimate circuit depth and
-#   gate counts for your circuits
+#   gate counts for our circuits
 # - [Custom Executor](10_custom_executor.ipynb): Run circuits on cloud quantum hardware
 
 # %% [markdown]

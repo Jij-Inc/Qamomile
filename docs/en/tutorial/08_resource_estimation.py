@@ -15,12 +15,12 @@
 # %% [markdown]
 # # Algebraic Resource Estimation
 #
-# How many qubits does your algorithm need? How many gates? How does
+# How many qubits does our algorithm need? How many gates? How does
 # the cost scale with problem size? These are the questions that
-# **resource estimation** answers -- and Qamomile lets you answer them
+# **resource estimation** answers -- and Qamomile lets us answer them
 # *symbolically*, before committing to any concrete parameter values.
 #
-# ## What You Will Learn
+# ## What We Will Learn
 # - Using `estimate_resources()` to obtain qubit counts, gate counts, and circuit depth as SymPy expressions
 # - Iterating over all available metrics with `.to_dict()`
 # - Working with symbolic (parametric) circuits and using `.substitute()` and `.simplify()`
@@ -40,22 +40,22 @@ from qamomile.circuit.estimator import estimate_resources
 # %% [markdown]
 # ## 1. What is Algebraic Resource Estimation?
 #
-# Traditional resource estimation works on a *fixed* circuit: you build
+# Traditional resource estimation works on a *fixed* circuit: we build
 # the circuit for a specific size, then count the gates. This is fine
-# for small experiments, but it does not tell you how your algorithm
+# for small experiments, but it does not tell us how our algorithm
 # *scales*.
 #
 # Qamomile's algebraic estimator takes a different approach:
 #
-# 1. You write a `@qkernel` whose parameters may include symbolic
+# 1. We write a `@qkernel` whose parameters may include symbolic
 #    sizes (e.g. `n: qmc.UInt`).
-# 2. You call `estimate_resources(kernel.block)`.
+# 2. We call `estimate_resources(kernel.block)`.
 # 3. The estimator walks the circuit IR -- including loops, function
 #    calls, and controlled operations -- and returns qubit counts,
 #    gate counts, and depth as **SymPy expressions** that may contain
 #    the symbolic parameters.
 #
-# This lets you explore the full design space without building a
+# This lets us explore the full design space without building a
 # separate circuit for every size.
 
 # %% [markdown]
@@ -145,7 +145,7 @@ for section, values in data.items():
 # forward-compatible -- if new fields are added in a future release,
 # they will appear automatically.
 #
-# You can also access fields directly:
+# We can also access fields directly:
 # ```python
 # est.qubits          # 2
 # est.gates.total      # 2
@@ -188,7 +188,7 @@ print(f"  Parameters:        {est_ghz.parameters}")
 
 # %% [markdown]
 # The results contain the symbol **n**. This is the key insight of
-# algebraic estimation: you get closed-form expressions that describe
+# algebraic estimation: we get closed-form expressions that describe
 # how resources grow with the problem size.
 #
 # ### 3.3 Substituting Concrete Values
@@ -206,7 +206,7 @@ for size in [10, 50, 100]:
     )
 
 # %% [markdown]
-# You can also serialise the estimate as JSON using `to_dict()`:
+# We can also serialise the estimate as JSON using `to_dict()`:
 
 # %%
 import json
@@ -525,7 +525,7 @@ for n in [4, 8, 16, 32, 64]:
 #
 # ### 5.3 Choosing a Strategy at Circuit Level
 #
-# You can also select a strategy when applying the composite gate
+# We can also select a strategy when applying the composite gate
 # inside a `@qkernel`. The estimator will then use the corresponding
 # resource metadata automatically:
 #
@@ -540,13 +540,13 @@ for n in [4, 8, 16, 32, 64]:
 #     return q
 # ```
 #
-# This gives you fine-grained control over the cost/accuracy
-# trade-off without changing the rest of your algorithm.
+# This gives us fine-grained control over the cost/accuracy
+# trade-off without changing the rest of our algorithm.
 
 # %% [markdown]
 # ## 6. Custom Composite Gates and Strategies
 #
-# Qamomile lets you define your own composite gates with multiple
+# Qamomile lets us define our own composite gates with multiple
 # decomposition strategies. This is useful for:
 #
 # - Comparing implementation trade-offs (precision vs. gate count)
@@ -714,7 +714,7 @@ for section, values in est_algo.to_dict().items():
 # %% [markdown]
 # ### 6.5 Stub Gates for Black-Box Estimation
 #
-# Sometimes you need to estimate resources for an algorithm that uses
+# Sometimes we need to estimate resources for an algorithm that uses
 # a subroutine whose internal structure is unknown or irrelevant.
 # Qamomile supports **stub gates** -- composite gates with resource
 # metadata but no gate-level implementation.
@@ -776,7 +776,7 @@ for section, values in est_grover.to_dict().items():
 
 # %% [markdown]
 # The estimator picks up the stub's T-gate count (10) and adds it to
-# the surrounding gates. This allows you to estimate total algorithm
+# the surrounding gates. This allows us to estimate total algorithm
 # cost even when the oracle internals are not available.
 #
 # Note that **query complexity** does not appear in the

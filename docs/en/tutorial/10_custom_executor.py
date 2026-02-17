@@ -15,11 +15,11 @@
 # %% [markdown]
 # # Implementing Custom Executors: Cloud Backend Integration
 #
-# This tutorial teaches you how to implement custom quantum Executors in Qamomile.
-# By customizing an Executor, you can run circuits on cloud quantum devices
+# This tutorial walks through how to implement custom quantum Executors in Qamomile.
+# By customizing an Executor, we can run circuits on cloud quantum devices
 # such as IBM Quantum and AWS Braket.
 #
-# ## What You Will Learn
+# ## What We Will Learn
 # - The role and structure of QuantumExecutor
 # - How to create a minimal custom Executor
 # - How to connect to IBM Quantum cloud
@@ -50,7 +50,7 @@ import qamomile.circuit as qmc
 # ```
 #
 # The standard `QiskitTranspiler` uses `AerSimulator`, but
-# you can use any backend by creating a custom Executor.
+# we can use any backend by creating a custom Executor.
 # %% [markdown]
 # ## 2. Basic Structure of QuantumExecutor
 #
@@ -165,7 +165,7 @@ for value, count in result.results:
     print(f"  {value}: {count} times")
 
 # %% [markdown]
-# You can confirm that a proper Bell state (roughly equal counts of |00⟩ and |11⟩) has been generated.
+# We can confirm that a proper Bell state (roughly equal counts of |00⟩ and |11⟩) has been generated.
 
 # %% [markdown]
 # ## 4. IBM Quantum Cloud Integration
@@ -248,8 +248,8 @@ class IBMQuantumExecutor(QuantumExecutor[QuantumCircuit]):
 # %% [markdown]
 # ### Running on IBM Quantum
 #
-# If you have IBM Quantum credentials configured, the executor will connect
-# to the cloud and run your circuit on real hardware. If credentials are not
+# If we have IBM Quantum credentials configured, the executor will connect
+# to the cloud and run our circuit on real hardware. If credentials are not
 # available, we fall back to the local simulator.
 
 # %%
@@ -277,7 +277,7 @@ except Exception as e:
 # %% [markdown]
 # ## 5. Implementing Parameter Binding
 #
-# For parametric circuits like QAOA, you need to implement the `bind_parameters()` method.
+# For parametric circuits like QAOA, we need to implement the `bind_parameters()` method.
 #
 # ### ParameterMetadata Structure
 #
@@ -392,7 +392,7 @@ for theta_val in [0.0, 1.57, 3.14]:  # 0, π/2, π
 # ## 6. Implementing Expectation Value Calculation (estimate)
 #
 # Variational algorithms like QAOA require calculating expectation values of Hamiltonians.
-# By implementing the `estimate()` method, you can use it in optimization loops.
+# By implementing the `estimate()` method, we can use it in optimization loops.
 #
 # ### The estimate() Method Specification
 #

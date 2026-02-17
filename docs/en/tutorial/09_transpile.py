@@ -15,12 +15,12 @@
 # %% [markdown]
 # # Inside the Transpiler: From @qkernel to Executable Program
 #
-# This tutorial takes you on a guided tour through Qamomile's transpiler pipeline.
-# In earlier tutorials, you called `transpiler.transpile()` as a single step.
-# Here, you will see what happens under the hood: each pass that transforms
-# your `@qkernel` Python function into a backend-specific executable program.
+# This tutorial is a guided tour through Qamomile's transpiler pipeline.
+# In earlier tutorials, we called `transpiler.transpile()` as a single step.
+# Here, we will see what happens under the hood: each pass that transforms
+# our `@qkernel` Python function into a backend-specific executable program.
 #
-# ## What You Will Learn
+# ## What We Will Learn
 # - The full transpiler pipeline and the role of each pass
 # - The difference between `kernel.block` and `transpiler.to_block()`
 # - How `draw()` visualizes circuits at different levels of detail
@@ -33,7 +33,7 @@
 # %% [markdown]
 # ## 1. Overview
 #
-# When you write a `@qkernel` and call `transpiler.transpile()`, Qamomile runs
+# When we write a `@qkernel` and call `transpiler.transpile()`, Qamomile runs
 # the following pipeline of passes:
 #
 # ```
@@ -67,7 +67,7 @@
 # simplifies, and finally separates them so the quantum portion can be sent
 # to a real device while classical post-processing runs on a CPU.
 #
-# We will use a **single circuit** throughout Sections 2–6, so you can
+# We will use a **single circuit** throughout Sections 2–6, so we can
 # follow every transformation from start to finish. Then in Section 7 we
 # show QPE as a complete end-to-end example.
 
@@ -115,7 +115,7 @@ def my_circuit(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
 # operation and play a key role in the constant folding and segment
 # separation passes later.
 #
-# The `draw()` method lets you visualize the circuit at different levels
+# The `draw()` method lets us visualize the circuit at different levels
 # of detail.
 
 # %%
@@ -234,7 +234,7 @@ print_block_operations(validated)
 
 # %% [markdown]
 # The operations are unchanged — validation passed because each qubit
-# in `my_circuit` is used exactly once per operation. If you tried to use
+# in `my_circuit` is used exactly once per operation. If we tried to use
 # the same qubit twice (e.g., `qmc.cx(q, q)`), the pass would raise a
 # `LinearTypeError` before the circuit ever reaches the quantum hardware.
 #
@@ -281,7 +281,7 @@ print_block_operations(analyzed)
 # - No quantum gate depends on a measurement result
 #
 # The block is now in the **ANALYZED** state, with a dependency graph
-# attached. If any validation fails, you get a clear error message pointing
+# attached. If any validation fails, we get a clear error message pointing
 # to the problematic operation.
 
 # %% [markdown]
@@ -403,12 +403,12 @@ for value, count in result.results:
 # (not the original `0.5`). The results are returned as `Bit` values — no
 # post-processing needed.
 #
-# Note that you can also run the full pipeline in a single call with
+# Note that we can also run the full pipeline in a single call with
 # `transpiler.transpile()`:
 # ```python
 # executable = transpiler.transpile(my_circuit, bindings={"n": 2, "theta": 0.5})
 # ```
-# The step-by-step approach above is equivalent but lets you inspect
+# The step-by-step approach above is equivalent but lets us inspect
 # each intermediate stage.
 
 # %% [markdown]
@@ -513,7 +513,7 @@ for name, segment in segments:
 # %% [markdown]
 # ## 8. TranspilerConfig and Strategies
 #
-# The transpiler pipeline is not fixed — you can influence how composite
+# The transpiler pipeline is not fixed — we can influence how composite
 # gates are decomposed by configuring **strategies**.
 #
 # `CompositeGate`s in the standard library (like QFT and IQFT) can have
@@ -521,7 +521,7 @@ for name, segment in segments:
 # supports both a standard (full precision, O(n²) gates) and an approximate
 # strategy (truncated rotations, O(n·k) gates).
 #
-# You control which strategy is used during the emit pass via
+# We control which strategy is used during the emit pass via
 # `TranspilerConfig`.
 
 # %%
@@ -592,7 +592,7 @@ print(f"Approximate QFT gates: {circuit_approx.size()}")
 # %% [markdown]
 # ## 9. Summary
 #
-# In this tutorial, you traced the complete path from a `@qkernel` function
+# In this tutorial, we traced the complete path from a `@qkernel` function
 # to an `ExecutableProgram`. Here is a recap of each pass:
 #
 # | Pass | Input | Output | Purpose |
@@ -608,9 +608,9 @@ print(f"Approximate QFT gates: {circuit_approx.size()}")
 # Key takeaways:
 #
 # - **`transpile()` is not magic** — it is a well-defined sequence of passes,
-#   each of which you can call individually for debugging.
+#   each of which we can call individually for debugging.
 # - **`to_block()` vs `kernel.block`** — Use `to_block(kernel, bindings=...)`
-#   when your kernel has parameterized array shapes. `kernel.block` is a
+#   when our kernel has parameterized array shapes. `kernel.block` is a
 #   shortcut that builds without bindings.
 # - **`draw()` with `inline` and `inline_depth`** — Visualize circuits at
 #   different levels of detail before entering the transpiler pipeline.

@@ -20,7 +20,7 @@
 # make quantum computing fundamentally different from classical computing:
 # **superposition**, **interference**, and **entanglement**.
 #
-# ## What You Will Learn
+# ## What We Will Learn
 # - Superposition: the quantum coin flip
 # - Phase and the $|+\rangle$ / $|-\rangle$ states
 # - Quantum interference: how phases control outcomes
@@ -547,7 +547,7 @@ for value, count in result_ghz5.results:
 #
 # These three phenomena -- superposition, interference, and entanglement --
 # are the ingredients that give quantum algorithms their power.
-# In the next tutorial, you will explore Qamomile's
+# In the next tutorial, we will explore Qamomile's
 # [standard library](05_stdlib.ipynb) -- ready-made building blocks like
 # QFT and QPE that rely on exactly these principles.
 

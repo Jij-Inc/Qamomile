@@ -13,16 +13,16 @@
 # ---
 
 # %% [markdown]
-# # Your First Quantum Algorithm: The Deutsch-Jozsa Algorithm
+# # Our First Quantum Algorithm: The Deutsch-Jozsa Algorithm
 #
-# In this tutorial, you will learn about the **Deutsch-Jozsa algorithm**,
-# your first real quantum algorithm.
+# In this tutorial, we will learn about the **Deutsch-Jozsa algorithm**,
+# our first real quantum algorithm.
 # The Deutsch-Jozsa algorithm is one of the earliest quantum algorithms,
 # generalizing Deutsch's original single-bit algorithm (1985) to $n$ bits.
 # It provided one of the first clear demonstrations that quantum computers
 # can solve certain problems exponentially faster than classical ones.
 #
-# ## What You Will Learn
+# ## What We Will Learn
 # - What quantum algorithms are
 # - The concept of oracles (black-box functions)
 # - The Deutsch-Jozsa problem and its quantum solution
@@ -336,7 +336,7 @@ for name, circuit in test_cases:
 # %% [markdown]
 # ## 9. Summary
 #
-# This tutorial covered the **Deutsch-Jozsa algorithm**, your first complete
+# This tutorial covered the **Deutsch-Jozsa algorithm**, our first complete
 # quantum algorithm built with Qamomile.
 #
 # ### Key Takeaways

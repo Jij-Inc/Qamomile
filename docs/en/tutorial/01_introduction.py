@@ -18,9 +18,9 @@
 # Welcome to Qamomile, a quantum computing SDK for building, analyzing,
 # and executing quantum circuits in Python.
 #
-# ## What You Will Learn
+# ## What We Will Learn
 # - What Qamomile is and where it fits in the quantum ecosystem
-# - Creating and running your first quantum circuit
+# - Creating and running our first quantum circuit
 # - The linear type system (no-cloning enforcement)
 # - Execution with QiskitTranspiler
 # - How Qamomile traces and compiles quantum programs
@@ -57,7 +57,7 @@
 # | **Optimization** | QAOA, FQAOA, QRAO converters with [ommx](https://jij-inc.github.io/ommx/en/introduction.html) integration (more planned) |
 
 # %% [markdown]
-# ## 2. Your First Quantum Circuit
+# ## 2. Our First Quantum Circuit
 #
 # ### Quantum Programs as `@qkernel` Functions
 #
@@ -127,12 +127,12 @@ x_gate_circuit.draw()
 # %% [markdown]
 # ## 3. The Linear Type System
 #
-# You may have noticed the pattern `q = qmc.x(q)` — why must we reassign?
+# We may have noticed the pattern `q = qmc.x(q)` — why must we reassign?
 #
 # In quantum mechanics, qubits cannot be copied (the **no-cloning theorem**).
 # Qamomile enforces this through its **linear type system**: once a qubit
 # enters a gate, the old handle is consumed and a new handle is returned.
-# You must always capture the return value.
+# We must always capture the return value.
 #
 # ```python
 # # Correct
@@ -178,13 +178,13 @@ except Exception as e:
 # %% [markdown]
 # ## 4. Execution with Qiskit
 #
-# Qamomile circuits are backend-agnostic. To execute them, you use a
+# Qamomile circuits are backend-agnostic. To execute them, we use a
 # **transpiler** that converts the circuit to a specific backend format.
 #
 # Currently, `QiskitTranspiler` is the supported backend.
 # Support for CUDA-Q and QURI Parts is under active development,
 # with more backends planned. Because circuits are defined as
-# backend-agnostic `@qkernel` functions, your code will work
+# backend-agnostic `@qkernel` functions, our code will work
 # unchanged as new backends become available.
 #
 # The execution pipeline has two modes depending on what the kernel returns:
@@ -203,7 +203,7 @@ except Exception as e:
 #   `qmc.expval()` in variational algorithms (see
 #   [07_parametric_circuits](07_parametric_circuits.ipynb)).
 #
-# In this tutorial we use `sample()` exclusively. You will encounter
+# In this tutorial we use `sample()` exclusively. We will encounter
 # `run()` when working with observables and variational circuits.
 
 # %%
@@ -225,7 +225,7 @@ for value, count in result.results:
 # The X gate flips $|0\rangle$ to $|1\rangle$, so all 1000 measurements
 # should yield `1`.
 #
-# You can also inspect the transpiled Qiskit circuit:
+# We can also inspect the transpiled Qiskit circuit:
 
 # %%
 qiskit_circuit = executable.get_first_circuit()
@@ -277,10 +277,10 @@ for value, count in result_ord.results:
 # %% [markdown]
 # ## 5. Tracing and Compilation
 #
-# When you define a `@qmc.qkernel` function, Qamomile does not execute
+# When we define a `@qmc.qkernel` function, Qamomile does not execute
 # the quantum operations immediately. Instead, it uses a two-phase approach:
 #
-# 1. **Tracing**: When you call `.draw()` or `transpile()`, Qamomile
+# 1. **Tracing**: When we call `.draw()` or `transpile()`, Qamomile
 #    **traces** the function body to build an intermediate representation
 #    (IR) — a directed graph of operations and data dependencies.
 # 2. **Transpilation**: The IR graph is processed through a multi-pass
@@ -297,7 +297,7 @@ for value, count in result_ord.results:
 #
 # This architecture provides two key benefits:
 #
-# - **Backend independence**: Define your circuit once as a `@qkernel`,
+# - **Backend independence**: Define a circuit once as a `@qkernel`,
 #   then transpile it to any supported backend without modification.
 # - **Optimization opportunities**: The multi-pass pipeline can inline
 #   subroutines, fold constants, and analyze dependencies before
@@ -309,7 +309,7 @@ for value, count in result_ord.results:
 # ## 6. Parametric Circuits
 #
 # Many quantum algorithms use circuits with tunable parameters.
-# In Qamomile, you use `qmc.Float` as the parameter type.
+# In Qamomile, we use `qmc.Float` as the parameter type.
 
 # %%
 import math
@@ -326,7 +326,7 @@ def rotation_circuit(theta: qmc.Float) -> qmc.Bit:
 rotation_circuit.draw()
 
 # %% [markdown]
-# You can also pass parameter values directly to `draw()` to see the
+# We can also pass parameter values directly to `draw()` to see the
 # circuit with concrete values filled in:
 
 # %%
@@ -335,7 +335,7 @@ rotation_circuit.draw(theta=math.pi / 4)
 # %% [markdown]
 # ### bindings vs parameters
 #
-# When transpiling, you can provide values in two ways:
+# When transpiling, we can provide values in two ways:
 #
 # - **`bindings`**: Values fixed at transpile time (circuit structure may depend on them)
 # - **`parameters`**: Values that remain free and can be changed between executions
@@ -371,8 +371,8 @@ for angle, name in [(0, "0"), (math.pi / 4, "pi/4"), (math.pi, "pi")]:
 # %% [markdown]
 # ## 7. Resource Estimation
 #
-# Before running on real hardware, you may want to estimate how many qubits
-# and gates your circuit requires. Qamomile provides **algebraic resource
+# Before running on real hardware, we may want to estimate how many qubits
+# and gates our circuit requires. Qamomile provides **algebraic resource
 # estimation** that works with symbolic parameters.
 #
 # When a circuit uses `qmc.range()` with a symbolic `UInt` bound, the
@@ -463,7 +463,7 @@ print(f"  Circuit depth: {est_ghz.depth.total_depth}")
 #
 # More converters are planned as new quantum optimization algorithms are developed.
 # We actively welcome community feedback on which algorithms and converters
-# to prioritize next. If you have a use case that would benefit from a new
+# to prioritize next. If we have a use case that would benefit from a new
 # converter, please open an issue on [GitHub](https://github.com/Jij-Inc/Qamomile).
 #
 # For more information about the mathematical modeling layer, see the
@@ -502,13 +502,13 @@ print(f"  Circuit depth: {est_ghz.depth.total_depth}")
 # | `optimization/qaoa.ipynb` | QAOA for combinatorial optimization |
 # | `optimization/fqaoa.ipynb` | Fermionic QAOA with constraint enforcement |
 # | `optimization/qrao31.ipynb` | Quantum Random Access Optimization |
-# | `optimization/custom_converter.ipynb` | Building your own converter |
+# | `optimization/custom_converter.ipynb` | Building our own converter |
 
 # %% [markdown]
 # ## What We Learned
 #
 # - **What Qamomile is and where it fits in the quantum ecosystem** — Qamomile bridges the path from NISQ to FTQC, providing a single framework for writing quantum programs across both paradigms.
-# - **Creating and running your first quantum circuit** — Used `@qmc.qkernel` with `qmc.qubit()`, gates like `qmc.x()`, and `qmc.measure()` to build and visualize circuits.
+# - **Creating and running our first quantum circuit** — Used `@qmc.qkernel` with `qmc.qubit()`, gates like `qmc.x()`, and `qmc.measure()` to build and visualize circuits.
 # - **The linear type system (no-cloning enforcement)** — Gates consume and return qubits; always reassign (`q = qmc.h(q)`) to enforce the quantum no-cloning theorem at compile time.
 # - **Execution with QiskitTranspiler** — `QiskitTranspiler` compiles kernels via `transpile()` and runs them via `sample()` to obtain measurement results.
 # - **How Qamomile traces and compiles quantum programs** — `@qkernel` functions are traced into an IR graph, then transpiled through a multi-pass pipeline (inline, constant fold, analyze, separate, emit) to produce backend-specific circuits.

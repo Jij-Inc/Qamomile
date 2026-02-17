@@ -24,7 +24,7 @@
 # in `algorithm` may be promoted to `stdlib`, and the boundary between the
 # two may shift between versions.
 #
-# ## What You Will Learn
+# ## What We Will Learn
 # - Using `qmc.qft()`, `qmc.iqft()`, and `qmc.qpe()` from the standard library
 # - Decomposition strategies for controlling precision vs. gate count
 # - IR-level vs. backend-level circuits (and why they can differ)
@@ -67,7 +67,7 @@ transpiler = QiskitTranspiler()
 #
 # Qamomile provides `qmc.qft()` and `qmc.iqft()` as frontend functions
 # that operate on `Vector[Qubit]` and return `Vector[Qubit]`. This follows
-# the same factory function pattern you have seen with other gates:
+# the same factory function pattern we have seen with other gates:
 #
 # ```python
 # qubits = qmc.qft(qubits)
@@ -408,14 +408,14 @@ for value, count in result_qpe2.results:
 # %% [markdown]
 # Both results match the expected phases exactly. The `QFixed` type and
 # `qmc.measure()` handle all the binary-fraction decoding automatically,
-# so you get the phase value directly without manual bit manipulation.
+# so we get the phase value directly without manual bit manipulation.
 
 # %% [markdown]
 # ## 4. CompositeGate: Writing Custom Gates
 #
 # QFT and IQFT are `CompositeGate` subclasses with pluggable
 # decomposition strategies. QPE is a standalone function that uses IQFT
-# internally. You can use the `CompositeGate` framework to define your
+# internally. We can use the `CompositeGate` framework to define our
 # own reusable multi-qubit gates.
 #
 # ### Why CompositeGate?
@@ -491,7 +491,7 @@ def use_custom_gate() -> tuple[qmc.Bit, qmc.Bit]:
 use_custom_gate.draw()
 
 # %% [markdown]
-# With `expand_composite=True`, you can see the gates inside the box:
+# With `expand_composite=True`, we can see the gates inside the box:
 
 # %%
 use_custom_gate.draw(expand_composite=True)
@@ -552,7 +552,7 @@ use_bell_gate.draw()
 # %% [markdown]
 # ### Stub Gates for Resource Estimation
 #
-# Sometimes you need to estimate resources for a component whose gate-level
+# Sometimes we need to estimate resources for a component whose gate-level
 # implementation is not yet available — for example, an oracle in Grover's
 # algorithm. `@composite_gate(stub=True, ...)` creates a placeholder gate
 # with resource annotations but **no decomposition**.
@@ -598,7 +598,7 @@ print(f"  T-gate count:     {stub_resources.t_gate_count}")
 # %% [markdown]
 # The stub gate appears as a labelled box in the circuit diagram and
 # carries resource metadata for estimation, but has no gate-level
-# decomposition. This is useful for top-down circuit design where you
+# decomposition. This is useful for top-down circuit design where we
 # define the algorithm structure first and fill in implementations later.
 
 # %% [markdown]
@@ -606,7 +606,7 @@ print(f"  T-gate count:     {stub_resources.t_gate_count}")
 #
 # The `qamomile.circuit.algorithm` module provides `@qkernel` building blocks
 # for common circuit patterns. These are regular kernels
-# and can be composed inside your own kernels **or executed standalone**.
+# and can be composed inside our own kernels **or executed standalone**.
 #
 # | Module | Examples |
 # |--------|---------|
@@ -650,8 +650,8 @@ for value, count in sorted_results:
 
 # %% [markdown]
 # All algorithm building blocks follow the same pattern: they are ordinary
-# `@qkernel` functions that you can compose into your own circuits.
-# You will see them in action in the
+# `@qkernel` functions that we can compose into our own circuits.
+# We will see them in action in the
 # [QAOA optimization tutorial](../optimization/qaoa.ipynb).
 
 # %% [markdown]
@@ -715,7 +715,7 @@ for value, count in sorted_results:
 #
 # ### Next Tutorials
 #
-# - [Your First Quantum Algorithm](06_first_algorithm.ipynb): The Deutsch-Jozsa algorithm
+# - [Our First Quantum Algorithm](06_first_algorithm.ipynb): The Deutsch-Jozsa algorithm
 # - [Resource Estimation](08_resource_estimation.ipynb): Estimate gate counts and circuit depth
 # - [QAOA](../optimization/qaoa.ipynb): Solve combinatorial optimization problems with QAOA
 
@@ -723,7 +723,7 @@ for value, count in sorted_results:
 # ## What We Learned
 #
 # - **Using `qmc.qft()`, `qmc.iqft()`, and `qmc.qpe()` from the standard library** — These ready-made building blocks handle Quantum Fourier Transform and Phase Estimation with a single function call.
-# - **Decomposition strategies for controlling precision vs. gate count** — `QFT.list_strategies()` and `get_resources_for_strategy()` let you compare and select trade-offs like `"standard"` vs. `"approximate"`.
+# - **Decomposition strategies for controlling precision vs. gate count** — `QFT.list_strategies()` and `get_resources_for_strategy()` let us compare and select trade-offs like `"standard"` vs. `"approximate"`.
 # - **IR-level vs. backend-level circuits** — `expand_composite=True` shows Qamomile's IR decomposition, which may differ from the actual transpiled circuit. Use `transpiler.to_circuit()` to inspect the backend-level result.
 # - **Building Quantum Phase Estimation with `qmc.qpe()`** — `qmc.qpe()` takes a unitary kernel, target qubits, and counting qubits, returning a `QFixed` value decoded automatically.
 # - **Writing custom composite gates with `CompositeGate` and `@composite_gate`** — Subclass `CompositeGate` or use the decorator to define reusable multi-qubit operations with pluggable decomposition strategies.

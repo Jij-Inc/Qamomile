@@ -17,10 +17,10 @@
 #
 # Qamomile uses a rich type system to distinguish quantum and classical data,
 # enforce correctness before execution, and make circuits self-documenting.
-# In this tutorial you will learn every type that Qamomile provides and
+# In this tutorial we will learn every type that Qamomile provides and
 # when to reach for each one.
 #
-# ## What You Will Learn
+# ## What We Will Learn
 # - The full catalogue of Qamomile types
 # - Quantum types vs classical types
 # - How to create qubits and qubit arrays
@@ -47,7 +47,7 @@ transpiler = QiskitTranspiler()
 #
 # ### Qubit Types
 #
-# Only qubit types have constructors that you call directly inside
+# Only qubit types have constructors that we call directly inside
 # `@qkernel` functions:
 #
 # | Type | Constructor | Description |
@@ -80,7 +80,7 @@ transpiler = QiskitTranspiler()
 # The most important distinction is between **quantum** and **classical** types:
 #
 # - **Quantum types** (`Qubit`, `QFixed`, `Vector[Qubit]`) obey the
-#   **linear type rule**: each handle can only be used once, and you must
+#   **linear type rule**: each handle can only be used once, and we must
 #   reassign after every gate (`q = qmc.h(q)`).
 # - **Classical types** (`Float`, `UInt`, `Bit`) can be freely reused and
 #   copied -- they behave like ordinary Python values.
@@ -115,7 +115,7 @@ single_qubit_demo.draw()
 # ### Qubit Array: `qmc.qubit_array()`
 #
 # Creates a `Vector[Qubit]` -- a 1-D register of qubits.
-# You access individual qubits by index and query the size via `.shape[0]`.
+# We access individual qubits by index and query the size via `.shape[0]`.
 
 
 # %%
@@ -141,12 +141,12 @@ qubit_array_demo.draw(n=3, fold_loops=False)
 # The `draw()` method accepts keyword arguments to control visualization:
 #
 # - **`n=3`**: Binds the symbolic parameter `n` to a concrete value.
-#   For circuits using `qmc.qubit_array(n, ...)`, you **must** provide the
+#   For circuits using `qmc.qubit_array(n, ...)`, we **must** provide the
 #   qubit count -- otherwise `draw()` cannot determine the circuit layout
 #   and will raise an error.
 # - **`fold_loops=False`**: By default (`fold_loops=True`), loops created
 #   by `qmc.range()` are displayed as compact blocks. Setting it to `False`
-#   unrolls the loop so you can see each iteration as individual gates.
+#   unrolls the loop so we can see each iteration as individual gates.
 
 # %%
 # What happens when you don't specify n?
@@ -159,7 +159,7 @@ except Exception as e:
 # ### Linear Type Errors
 #
 # Because qubits obey the linear type rule, Qamomile catches common
-# mistakes at trace time -- before your circuit ever reaches a backend.
+# mistakes at trace time -- before our circuit ever reaches a backend.
 # There are three error types:
 #
 # | Error | Cause |
@@ -224,7 +224,7 @@ except Exception as e:
 # %% [markdown]
 # These errors are caught immediately when the `@qkernel` is traced
 # (during `draw()` or `transpile()`), not at execution time. This means
-# you get clear, actionable error messages before any quantum hardware
+# we get clear, actionable error messages before any quantum hardware
 # is involved.
 
 # %% [markdown]
@@ -234,7 +234,7 @@ except Exception as e:
 # transpilation time. They are used as gate parameters, loop bounds, and
 # array indices.
 #
-# You do not construct classical types directly. Instead, you declare
+# We do not construct classical types directly. Instead, we declare
 # them as **type annotations** in `@qkernel` signatures and provide
 # values via `bindings` or `parameters` at transpile time.
 #
@@ -357,11 +357,11 @@ reuse_classical.draw()
 # %% [markdown]
 # ## 4. Symbolic Values and Iteration
 #
-# When you write `n: qmc.UInt` or `theta: qmc.Float` in a `@qkernel` signature,
+# When we write `n: qmc.UInt` or `theta: qmc.Float` in a `@qkernel` signature,
 # the values are **symbolic** at trace time. The actual values are supplied
 # later via `bindings` during transpilation.
 #
-# This design lets you define circuits once and reuse them with different
+# This design lets us define circuits once and reuse them with different
 # sizes and parameters.
 #
 # ### `qmc.range()` -- Looping with Symbolic Bounds
@@ -440,7 +440,7 @@ exec_items = transpiler.transpile(
 )
 
 # %% [markdown]
-# You can inspect the transpiled circuit to verify that the loop was
+# We can inspect the transpiled circuit to verify that the loop was
 # unrolled into two concrete RZZ gates.
 
 # %%
@@ -517,7 +517,7 @@ print(qiskit_circuit.draw(output="text"))
 # automatically decode the estimated phase from the measurement results.
 #
 # `QFixed` is a quantum type (subject to linear type rules). It is
-# returned by `qmc.qpe()` -- you do not construct it directly.
+# returned by `qmc.qpe()` -- we do not construct it directly.
 #
 # ```python
 # # QFixed is returned by qmc.qpe()
@@ -530,8 +530,8 @@ print(qiskit_circuit.draw(output="text"))
 # ### `Observable` -- Hamiltonian Reference
 #
 # `Observable` is a handle that refers to a Hamiltonian operator.
-# It is a **type annotation-only** type -- you cannot construct it inside
-# a `@qkernel`. Instead, you build the Hamiltonian in Python using
+# It is a **type annotation-only** type -- it cannot be constructed inside
+# a `@qkernel`. Instead, we build the Hamiltonian in Python using
 # `qamomile.observable` and pass it into the kernel via `bindings`.
 #
 # `Observable` is used with `qmc.expval()` to compute expectation values
@@ -561,7 +561,7 @@ print(qiskit_circuit.draw(output="text"))
 # )
 # ```
 #
-# You will encounter `Observable` in the optimisation tutorials.
+# We will encounter `Observable` in the optimisation tutorials.
 
 # %% [markdown]
 # ## 7. Summary: When to Use Each Type
@@ -598,7 +598,7 @@ print(qiskit_circuit.draw(output="text"))
 # ```python
 # import qamomile.circuit as qmc
 #
-# # The only two constructors you need:
+# # The only two constructors we need:
 # q = qmc.qubit(name="q")               # Qubit
 # qubits = qmc.qubit_array(n, name="q")  # Vector[Qubit]
 #
@@ -614,7 +614,7 @@ print(qiskit_circuit.draw(output="text"))
 # for (i, j), v in qmc.items(dict_handle):    # dict iteration
 # ```
 #
-# In the next tutorials you will see these types in action:
+# In the next tutorials we will see these types in action:
 # - **`03_gates.ipynb`**: Complete gate reference (all 11 gates)
 # - **`04_superposition_entanglement.ipynb`**: Superposition, interference, Bell/GHZ states
 # - **`05_stdlib.ipynb`**: QFT, QPE with `QFixed`
