@@ -212,6 +212,16 @@ class TestEndToEnd:
         assert len(result.samples) == 1
 
 
+class TestHUBORejection:
+    """Tests for HUBO rejection in QRAC converters."""
+
+    def test_hubo_rejection(self):
+        """QRAC converters reject higher-order (HUBO) problems."""
+        model = BinaryModel.from_hubo({(0, 1, 2): 1.0})
+        with pytest.raises(ValueError, match="higher-order"):
+            QRAC31Converter(model)
+
+
 class TestQRAC31EncodeIsingCoefficients:
     """Tests for exact Hamiltonian coefficient verification using qrac31_encode_ising."""
 
