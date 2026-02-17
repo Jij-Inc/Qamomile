@@ -10,11 +10,40 @@ This module implements the encoding logic for various QRAC variants:
 from __future__ import annotations
 from typing import Literal
 
+import qamomile.observable as qm_o
 from qamomile.optimization.binary_model import BinaryModel
 from .graph_coloring import greedy_graph_coloring, check_linear_term
 
 
 PauliType = Literal["X", "Y", "Z"]
+
+
+def color_group_to_qrac_encode(
+    color_group: dict[int, list[int]],
+) -> dict[int, qm_o.PauliOperator]:
+    """Encode a color group mapping into Pauli operator assignments.
+
+    Assigns Z, X, Y Pauli operators (in order) to variables within each
+    qubit's color group.
+
+    Args:
+        color_group: Mapping from qubit index to list of variable indices.
+
+    Returns:
+        Mapping from variable index to PauliOperator.
+
+    Examples:
+        >>> color_group = {0: [0, 1, 2], 1: [3, 4], 2: [6,]}
+        >>> color_group_to_qrac_encode(color_group)
+        {0: Z0, 1: X0, 2: Y0, 3: Z1, 4: X1, 6: Z2}
+
+    """
+    encoded = {}
+    paulis = [qm_o.Pauli.Z, qm_o.Pauli.X, qm_o.Pauli.Y]
+    for color, group in color_group.items():
+        for ope_idx, bit_index in enumerate(group):
+            encoded[bit_index] = qm_o.PauliOperator(paulis[ope_idx], color)
+    return encoded
 
 
 def _build_var_occupancy(color_group: dict[int, list[int]]) -> dict[int, int]:

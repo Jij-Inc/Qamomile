@@ -15,8 +15,7 @@ from qamomile.optimization.utils import is_close_zero
 from qamomile.optimization.binary_model import BinaryModel, VarType
 
 from .base import QRACConverterBase
-from .encoder import QRAC21Encoder, _build_var_occupancy
-from .qrao31 import color_group_to_qrac_encode
+from .encoder import QRAC21Encoder, _build_var_occupancy, color_group_to_qrac_encode
 
 
 def qrac21_encode_ising(

@@ -14,32 +14,7 @@ from qamomile.optimization.utils import is_close_zero
 from qamomile.optimization.binary_model import BinaryModel, VarType
 
 from .base import QRACConverterBase
-from .encoder import QRAC31Encoder, _build_var_occupancy
-
-
-def color_group_to_qrac_encode(
-    color_group: dict[int, list[int]],
-) -> dict[int, qm_o.PauliOperator]:
-    """qrac encode
-
-    Args:
-        color_group (dict[int, list[int]]): key is color (qubit's index). value is list of bit's index.
-
-    Returns:
-        dict[int, tuple[int, Pauli]]: key is bit's index. value is tuple of qubit's index and Pauli operator kind.
-
-    Examples:
-        >>> color_group = {0: [0, 1, 2], 1: [3, 4], 2: [6,]}
-        >>> color_group_to_qrac_encode(color_group)
-        {0: Z0, 1: X0, 2: Y0, 3: Z1, 4: X1, 6: Z2}
-
-    """
-    qrac31 = {}
-    paulis = [qm_o.Pauli.Z, qm_o.Pauli.X, qm_o.Pauli.Y]
-    for color, group in color_group.items():
-        for ope_idx, bit_index in enumerate(group):
-            qrac31[bit_index] = qm_o.PauliOperator(paulis[ope_idx], color)
-    return qrac31
+from .encoder import QRAC31Encoder, _build_var_occupancy, color_group_to_qrac_encode
 
 
 def qrac31_encode_ising(
