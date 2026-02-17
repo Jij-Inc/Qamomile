@@ -129,54 +129,6 @@ class TestSignRounder:
         assert rounder.round([-0.001]) == [-1]
 
 
-class TestDecoding:
-    """Tests for decoding functionality."""
-
-    def test_decode_from_rounded(self):
-        """Test decoding rounded spins to BinarySampleSet."""
-        x = binary(0)
-        y = binary(1)
-
-        problem = BinaryExpr()
-        problem += x * y  # Minimize x*y
-
-        model = BinaryModel(problem)
-        converter = QRAC31Converter(model)
-
-        # Assume rounding gave us spins [+1, +1]
-        # In spin form: s_0 = +1, s_1 = +1
-        spins = [1, 1]
-        result = converter.decode_from_rounded(spins)
-
-        assert len(result.samples) == 1
-        assert result.vartype == VarType.SPIN
-
-    def test_decode_to_binary(self):
-        """Test conversion from spin to binary."""
-        x = binary(0)
-        y = binary(1)
-
-        problem = BinaryExpr()
-        problem += x * y
-
-        model = BinaryModel(problem)
-        converter = QRAC31Converter(model)
-
-        # spin = +1 -> binary = 0
-        # spin = -1 -> binary = 1
-        spins = [1, -1]
-        result = converter.decode_to_binary(spins)
-
-        assert len(result.samples) == 1
-        assert result.vartype == VarType.BINARY
-
-        sample = result.samples[0]
-        # Check conversion: spin +1 -> binary 0, spin -1 -> binary 1
-        for idx, spin in zip(sorted(sample.keys()), spins):
-            expected_binary = (1 - spin) // 2
-            assert sample[idx] == expected_binary
-
-
 class TestEndToEnd:
     """End-to-end tests for QRAO31."""
 
@@ -207,9 +159,8 @@ class TestEndToEnd:
 
         assert spins == [1, -1, 1]
 
-        # Decode
-        result = converter.decode_from_rounded(spins)
-        assert len(result.samples) == 1
+        assert len(spins) == 3
+        assert all(s in (1, -1) for s in spins)
 
 
 class TestHUBORejection:

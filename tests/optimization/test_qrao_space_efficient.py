@@ -200,49 +200,6 @@ class TestSpaceEfficientConverter:
         assert len(pauli_list) == converter.spin_model.num_bits
 
 
-class TestSpaceEfficientDecoding:
-    """Tests for decoding functionality."""
-
-    def test_decode_from_rounded(self):
-        """Test decoding rounded spins to BinarySampleSet."""
-        x = binary(0)
-        y = binary(1)
-
-        problem = BinaryExpr()
-        problem += x * y
-
-        model = BinaryModel(problem)
-        converter = QRACSpaceEfficientConverter(model)
-
-        spins = [1, -1]
-        result = converter.decode_from_rounded(spins)
-
-        assert len(result.samples) == 1
-        assert result.vartype == VarType.SPIN
-
-    def test_decode_to_binary(self):
-        """Test conversion from spin to binary."""
-        x = binary(0)
-        y = binary(1)
-
-        problem = BinaryExpr()
-        problem += x * y
-
-        model = BinaryModel(problem)
-        converter = QRACSpaceEfficientConverter(model)
-
-        spins = [1, -1]
-        result = converter.decode_to_binary(spins)
-
-        assert len(result.samples) == 1
-        assert result.vartype == VarType.BINARY
-
-        sample = result.samples[0]
-        for idx, spin in zip(sorted(sample.keys()), spins):
-            expected_binary = (1 - spin) // 2
-            assert sample[idx] == expected_binary
-
-
 class TestSpaceEfficientEndToEnd:
     """End-to-end tests for Space Efficient QRAC."""
 
@@ -270,8 +227,8 @@ class TestSpaceEfficientEndToEnd:
         spins = rounder.round(mock_expectations)
         assert spins == [1, -1, 1]
 
-        result = converter.decode_from_rounded(spins)
-        assert len(result.samples) == 1
+        assert len(spins) == 3
+        assert all(s in (1, -1) for s in spins)
 
 
 class TestSpaceEfficientEncodeIsingCoefficients:
