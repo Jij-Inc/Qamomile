@@ -8,14 +8,12 @@ from __future__ import annotations
 import abc
 
 import qamomile.observable as qm_o
-from qamomile.optimization.binary_model import BinarySampleSet, VarType
 from qamomile.optimization.converter import MathematicalProblemConverter
 
 
 class QRACConverterBase(MathematicalProblemConverter, abc.ABC):
     """Abstract base for all QRAC-based converters.
 
-    Provides shared methods for result decoding and energy calculation.
     Subclasses must implement:
 
     - ``num_qubits`` (property)
@@ -74,43 +72,3 @@ class QRACConverterBase(MathematicalProblemConverter, abc.ABC):
 
     @abc.abstractmethod
     def get_encoded_pauli_list(self) -> list[qm_o.Hamiltonian]: ...
-
-    def decode_from_rounded(self, spins: list[int]) -> BinarySampleSet:
-        """Decode rounded spin values into a BinarySampleSet.
-
-        Args:
-            spins: List of spin values (+1 or -1) for each variable.
-
-        Returns:
-            BinarySampleSet in SPIN vartype.
-        """
-        sample = {i: s for i, s in enumerate(spins)}
-        energy = self.spin_model.calc_energy(spins)
-        return BinarySampleSet(
-            samples=[sample],
-            num_occurrences=[1],
-            energy=[energy],
-            vartype=VarType.SPIN,
-        )
-
-    def decode_to_binary(self, spins: list[int]) -> BinarySampleSet:
-        """Decode rounded spins directly to binary values.
-
-        Conversion: binary = (1 - spin) // 2
-            spin +1 -> binary 0
-            spin -1 -> binary 1
-
-        Args:
-            spins: List of spin values (+1 or -1).
-
-        Returns:
-            BinarySampleSet in BINARY vartype.
-        """
-        sample = {i: (1 - s) // 2 for i, s in enumerate(spins)}
-        energy = self.spin_model.calc_energy(spins)
-        return BinarySampleSet(
-            samples=[sample],
-            num_occurrences=[1],
-            energy=[energy],
-            vartype=VarType.BINARY,
-        )
