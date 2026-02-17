@@ -1,10 +1,15 @@
 """Tests for QRAO21 (Quantum Random Access Optimization with (2,1,p)-QRAC)."""
 
+import pytest
 import numpy as np
+import networkx as nx
 
 from qamomile.optimization.qrao import QRAC21Converter, QRAC21Encoder, SignRounder
 from qamomile.optimization.qrao.qrao21 import qrac21_encode_ising
-from qamomile.optimization.qrao.graph_coloring import greedy_graph_coloring, check_linear_term
+from qamomile.optimization.qrao.graph_coloring import (
+    greedy_graph_coloring,
+    check_linear_term,
+)
 from qamomile.optimization.binary_model import binary, BinaryExpr, BinaryModel, VarType
 import qamomile.observable as qm_o
 
@@ -58,7 +63,7 @@ class TestQRAC21Encoder:
         encoder = QRAC21Encoder(spin_model)
 
         for _, pauli_type in encoder.pauli_encoding.values():
-            assert pauli_type in ('Z', 'X')
+            assert pauli_type in ("Z", "X")
 
 
 class TestQRAC21Converter:
@@ -76,8 +81,11 @@ class TestQRAC21Converter:
         model = BinaryModel(problem)
         converter = QRAC21Converter(model)
 
-        assert converter.num_qubits > 0
-        assert converter.spin_model is not None
+        # x*y + x → spin: 2 bits, 1 quad, 2 linear, constant=0.75
+        assert converter.num_qubits == 2
+        assert converter.spin_model.num_bits == 2
+        assert len(converter.spin_model.quad) == 1
+        assert len(converter.spin_model.linear) == 2
 
     def test_cost_hamiltonian(self):
         """Test cost Hamiltonian generation."""
@@ -91,7 +99,10 @@ class TestQRAC21Converter:
         converter = QRAC21Converter(model)
 
         hamiltonian = converter.get_cost_hamiltonian()
-        assert hamiltonian is not None
+        # x*y → spin: 1 quad + 2 linear = 3 terms, constant=0.25
+        assert len(hamiltonian.terms) == 3
+        assert hamiltonian.constant == pytest.approx(0.25)
+        assert hamiltonian.num_qubits == 2
 
     def test_encoded_pauli_list(self):
         """Test encoded Pauli list generation."""
@@ -107,6 +118,9 @@ class TestQRAC21Converter:
 
         pauli_list = converter.get_encoded_pauli_list()
         assert len(pauli_list) == converter.spin_model.num_bits
+        # Each entry should be a non-trivial Hamiltonian with terms
+        for obs in pauli_list:
+            assert len(obs.terms) > 0
 
 
 class TestQRAC21EndToEnd:
@@ -125,16 +139,17 @@ class TestQRAC21EndToEnd:
         model = BinaryModel(problem)
         converter = QRAC21Converter(model)
 
-        assert converter.num_qubits >= 2
+        # Path graph (0-1-2): 3 vars, 2 interactions → 2 qubits for QRAC21
+        assert converter.num_qubits == 2
         assert len(converter.encoder.pauli_encoding) == 3
+
+        hamiltonian = converter.get_cost_hamiltonian()
+        assert hamiltonian.constant == pytest.approx(-0.5)
 
         rounder = SignRounder()
         mock_expectations = [0.9, -0.8, 0.7]
         spins = rounder.round(mock_expectations)
         assert spins == [1, -1, 1]
-
-        assert len(spins) == 3
-        assert all(s in (1, -1) for s in spins)
 
 
 class TestQRAC21EncodeIsingCoefficients:
@@ -217,3 +232,34 @@ class TestQRAC21EncodeIsingCoefficients:
         assert qrac_hamiltonian.num_qubits < ising.num_bits
         assert len(encoding) == ising.num_bits
         assert qrac_hamiltonian.terms == expected_hamiltonian
+
+
+class TestQRAC21RandomGraphs:
+    """Property-based tests with random Erdős–Rényi graphs."""
+
+    @pytest.mark.parametrize("seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999])
+    def test_random_graph(self, seed):
+        rng = np.random.default_rng(seed)
+        n = int(rng.integers(4, 15))
+        G = nx.erdos_renyi_graph(n, 0.4, seed=seed)
+
+        linear = {i: float(rng.uniform(-2, 2)) for i in range(n)}
+        quad = {(u, v): float(rng.uniform(-2, 2)) for u, v in G.edges()}
+        ising = BinaryModel.from_ising(linear=linear, quad=quad, constant=0.0)
+
+        converter = QRAC21Converter(ising)
+        hamiltonian = converter.get_cost_hamiltonian()
+
+        # Structural invariants
+        assert hamiltonian.num_qubits == converter.num_qubits
+        assert converter.num_qubits <= n
+        assert len(converter.encoder.pauli_encoding) == n
+        assert len(hamiltonian.terms) <= len(linear) + len(quad)
+        assert len(hamiltonian.terms) > 0
+
+        # Pauli types must be Z or X only for (2,1,p)-QRAC
+        for _, pauli_type in converter.encoder.pauli_encoding.values():
+            assert pauli_type in ("Z", "X")
+
+        pauli_list = converter.get_encoded_pauli_list()
+        assert len(pauli_list) == n

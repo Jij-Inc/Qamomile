@@ -2,10 +2,14 @@
 
 import pytest
 import numpy as np
+import networkx as nx
 
 from qamomile.optimization.qrao import QRAC31Converter, QRAC31Encoder, SignRounder
 from qamomile.optimization.qrao.qrao31 import qrac31_encode_ising
-from qamomile.optimization.qrao.graph_coloring import greedy_graph_coloring, check_linear_term
+from qamomile.optimization.qrao.graph_coloring import (
+    greedy_graph_coloring,
+    check_linear_term,
+)
 from qamomile.optimization.binary_model import binary, BinaryExpr, BinaryModel, VarType
 import qamomile.observable as qm_o
 
@@ -76,8 +80,12 @@ class TestQRAC31Converter:
         model = BinaryModel(problem)
         converter = QRAC31Converter(model)
 
-        assert converter.num_qubits > 0
-        assert converter.spin_model is not None
+        # x*y + x → spin: 2 bits, 1 quad, 2 linear
+        assert converter.num_qubits == 2
+        assert converter.spin_model.num_bits == 2
+        assert len(converter.spin_model.quad) == 1
+        assert len(converter.spin_model.linear) == 2
+
 
 class TestSignRounder:
     """Tests for SignRounder."""
@@ -123,9 +131,12 @@ class TestEndToEnd:
         model = BinaryModel(problem)
         converter = QRAC31Converter(model)
 
-        # Check encoding
-        assert converter.num_qubits >= 2
+        # Check encoding: path graph (0-1-2) needs 2 qubits for (3,1,p)-QRAC
+        assert converter.num_qubits == 2
         assert len(converter.encoder.pauli_encoding) == 3
+
+        hamiltonian = converter.get_cost_hamiltonian()
+        assert hamiltonian.constant == pytest.approx(-0.5)
 
         # Simulate rounding results (as if from VQE)
         # For MaxCut, optimal is alternating: [+1, -1, +1] or [-1, +1, -1]
@@ -270,3 +281,34 @@ class TestQRAC31EncodeIsingCoefficients:
         assert qrac_hamiltonian.num_qubits < ising.num_bits
         assert len(encoding) == ising.num_bits
         assert qrac_hamiltonian.terms == expected_hamiltonian
+
+
+class TestQRAC31RandomGraphs:
+    """Property-based tests with random Erdős–Rényi graphs."""
+
+    @pytest.mark.parametrize("seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999])
+    def test_random_graph(self, seed):
+        rng = np.random.default_rng(seed)
+        n = int(rng.integers(4, 15))
+        G = nx.erdos_renyi_graph(n, 0.4, seed=seed)
+
+        linear = {i: float(rng.uniform(-2, 2)) for i in range(n)}
+        quad = {(u, v): float(rng.uniform(-2, 2)) for u, v in G.edges()}
+        ising = BinaryModel.from_ising(linear=linear, quad=quad, constant=0.0)
+
+        converter = QRAC31Converter(ising)
+        hamiltonian = converter.get_cost_hamiltonian()
+
+        # Structural invariants
+        assert hamiltonian.num_qubits == converter.num_qubits
+        assert converter.num_qubits <= n
+        assert len(converter.encoder.pauli_encoding) == n
+        assert len(hamiltonian.terms) <= len(linear) + len(quad)
+        assert len(hamiltonian.terms) > 0
+
+        # Pauli types must be Z, X, or Y for (3,1,p)-QRAC
+        for _, pauli_type in converter.encoder.pauli_encoding.values():
+            assert pauli_type in ("Z", "X", "Y")
+
+        pauli_list = converter.get_encoded_pauli_list()
+        assert len(pauli_list) == n

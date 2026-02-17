@@ -1,7 +1,10 @@
 """Tests for Space Efficient QRAC (Quantum Random Access Optimization)."""
 
+import math
+
 import pytest
 import numpy as np
+import networkx as nx
 
 from qamomile.optimization.qrao import (
     QRACSpaceEfficientConverter,
@@ -34,10 +37,10 @@ class TestSpaceEfficientEncoder:
         # Variable 1 -> qubit 0, Y
         # Variable 2 -> qubit 1, X
         # Variable 3 -> qubit 1, Y
-        assert encoder.pauli_encoding[0] == (0, 'X')
-        assert encoder.pauli_encoding[1] == (0, 'Y')
-        assert encoder.pauli_encoding[2] == (1, 'X')
-        assert encoder.pauli_encoding[3] == (1, 'Y')
+        assert encoder.pauli_encoding[0] == (0, "X")
+        assert encoder.pauli_encoding[1] == (0, "Y")
+        assert encoder.pauli_encoding[2] == (1, "X")
+        assert encoder.pauli_encoding[3] == (1, "Y")
 
     def test_num_qubits(self):
         """Test qubit count calculation."""
@@ -77,7 +80,7 @@ class TestSpaceEfficientEncoder:
         encoder = QRACSpaceEfficientEncoder(spin_model)
 
         for _, pauli_type in encoder.pauli_encoding.values():
-            assert pauli_type in ('X', 'Y')
+            assert pauli_type in ("X", "Y")
 
 
 class TestSpaceEfficientEncoding:
@@ -117,22 +120,32 @@ class TestSpaceEfficientEncoding:
         spin_model = model.change_vartype(VarType.SPIN)
 
         hamiltonian, encoded_ope = qrac_space_efficient_encode_ising(spin_model)
-        assert hamiltonian is not None
+        # x*y → spin: 1 quad (same qubit → Z) + 2 linear = 3 terms, constant=0.25
+        assert len(hamiltonian.terms) == 3
+        assert hamiltonian.constant == pytest.approx(0.25)
+        # Same-qubit interaction should produce a Z term
+        has_z = any(
+            any(op.pauli == qm_o.Pauli.Z for op in key) for key in hamiltonian.terms
+        )
+        assert has_z
 
     def test_different_qubit_interaction(self):
         """Test that different-qubit interactions produce P_i * P_j terms."""
-        # Variables 0 and 2 are on different qubits (0 and 1)
-        x = binary(0)
-        z = binary(2)
+        # Use Ising model directly: 3 vars, interaction between 0 and 2
+        # var 0 → X on qubit 0, var 2 → X on qubit 1 (different qubits)
+        ising = BinaryModel.from_ising(
+            linear={0: 1.0, 1: 1.0, 2: 1.0},
+            quad={(0, 2): 1.0},
+            constant=0.0,
+        )
 
-        problem = BinaryExpr()
-        problem += x * z
-
-        model = BinaryModel(problem)
-        spin_model = model.change_vartype(VarType.SPIN)
-
-        hamiltonian, encoded_ope = qrac_space_efficient_encode_ising(spin_model)
-        assert hamiltonian is not None
+        hamiltonian, encoded_ope = qrac_space_efficient_encode_ising(ising)
+        # 3 linear + 1 quad = 4 terms
+        assert len(hamiltonian.terms) == 4
+        assert hamiltonian.constant == pytest.approx(0.0)
+        # Vars 0 and 2 are on different qubits → product term X0·X1
+        has_2body = any(len(key) == 2 for key in hamiltonian.terms)
+        assert has_2body
 
 
 class TestSpaceEfficientConverter:
@@ -150,7 +163,10 @@ class TestSpaceEfficientConverter:
         model = BinaryModel(problem)
         converter = QRACSpaceEfficientConverter(model)
 
-        assert converter.spin_model is not None
+        # x*y + x → spin: 2 bits, 1 quad, 2 linear
+        assert converter.spin_model.num_bits == 2
+        assert len(converter.spin_model.quad) == 1
+        assert len(converter.spin_model.linear) == 2
 
     def test_cost_hamiltonian(self):
         """Test cost Hamiltonian generation."""
@@ -166,8 +182,10 @@ class TestSpaceEfficientConverter:
         converter = QRACSpaceEfficientConverter(model)
 
         hamiltonian = converter.get_cost_hamiltonian()
-        assert hamiltonian is not None
-        assert converter.num_qubits > 0
+        # x*y + y*z → spin: 2 quad + 3 linear = 5 terms, constant=0.5
+        assert converter.num_qubits == 2
+        assert len(hamiltonian.terms) == 5
+        assert hamiltonian.constant == pytest.approx(0.5)
 
     def test_num_qubits_after_encoding(self):
         """Test num_qubits is set after get_cost_hamiltonian."""
@@ -181,8 +199,8 @@ class TestSpaceEfficientConverter:
         converter = QRACSpaceEfficientConverter(model)
         converter.get_cost_hamiltonian()
 
-        # 4 variables -> 2 qubits with 2:1 compression
-        assert converter.num_qubits >= 2
+        # 4 variables -> 2 qubits with 2:1 compression (always ceil(n/2))
+        assert converter.num_qubits == 2
 
     def test_encoded_pauli_list(self):
         """Test encoded Pauli list generation."""
@@ -217,8 +235,10 @@ class TestSpaceEfficientEndToEnd:
         converter = QRACSpaceEfficientConverter(model)
 
         hamiltonian = converter.get_cost_hamiltonian()
-        assert hamiltonian is not None
-        assert converter.num_qubits >= 1
+        # -x*y - y*z → spin: 2 quad + 3 linear = 5 terms, constant=-0.5
+        assert converter.num_qubits == 2
+        assert len(hamiltonian.terms) == 5
+        assert hamiltonian.constant == pytest.approx(-0.5)
 
         assert len(converter.encoder.pauli_encoding) == 3
 
@@ -289,3 +309,36 @@ class TestSpaceEfficientEncodeIsingCoefficients:
 
         assert hamiltonian == expected_hamiltonian
         assert encoding == expected_encoding
+
+
+class TestSpaceEfficientRandomGraphs:
+    """Property-based tests with random Erdős–Rényi graphs."""
+
+    @pytest.mark.parametrize("seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999])
+    def test_random_graph(self, seed):
+        rng = np.random.default_rng(seed)
+        n = int(rng.integers(4, 15))
+        G = nx.erdos_renyi_graph(n, 0.4, seed=seed)
+
+        linear = {i: float(rng.uniform(-2, 2)) for i in range(n)}
+        quad = {(u, v): float(rng.uniform(-2, 2)) for u, v in G.edges()}
+        ising = BinaryModel.from_ising(linear=linear, quad=quad, constant=0.0)
+
+        converter = QRACSpaceEfficientConverter(ising)
+        hamiltonian = converter.get_cost_hamiltonian()
+
+        # Space-efficient always uses ceil(n/2) qubits
+        expected_qubits = math.ceil(n / 2)
+        assert converter.num_qubits == expected_qubits
+        assert hamiltonian.num_qubits == expected_qubits
+
+        assert len(converter.encoder.pauli_encoding) == n
+        assert len(hamiltonian.terms) <= len(linear) + len(quad)
+        assert len(hamiltonian.terms) > 0
+
+        # Pauli types must be X or Y only for space-efficient encoding
+        for _, pauli_type in converter.encoder.pauli_encoding.values():
+            assert pauli_type in ("X", "Y")
+
+        pauli_list = converter.get_encoded_pauli_list()
+        assert len(pauli_list) == n
