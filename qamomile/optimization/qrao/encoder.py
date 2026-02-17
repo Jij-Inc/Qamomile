@@ -63,6 +63,29 @@ def _build_var_occupancy(color_group: dict[int, list[int]]) -> dict[int, int]:
     return var_occupancy
 
 
+def build_physical_qubit_map(
+    color_group: dict[int, list[int]],
+) -> tuple[dict[int, int], int]:
+    """Map color (logical) index to physical qubit start index.
+
+    For (3,2,p)-QRAC, color groups with k=1 variable use 1 physical qubit
+    (regular Pauli), while groups with k>=2 variables use 2 physical qubits
+    (prime operators).
+
+    Args:
+        color_group: Mapping from color index to list of variable indices.
+
+    Returns:
+        Tuple of (color_to_phys_start mapping, total_physical_qubits).
+    """
+    color_to_phys: dict[int, int] = {}
+    current = 0
+    for color in sorted(color_group.keys()):
+        color_to_phys[color] = current
+        current += 1 if len(color_group[color]) == 1 else 2
+    return color_to_phys, current
+
+
 class QRAC31Encoder:
     """(3,1,p)-QRAC Encoder.
 
@@ -194,13 +217,14 @@ class QRAC21Encoder:
 class QRAC32Encoder:
     """(3,2,p)-QRAC Encoder.
 
-    Same graph coloring as (3,1,p) but uses 2-local prime operators.
-    Each logical qubit maps to 2 physical qubits.
+    Same graph coloring as (3,1,p) but uses 2-local prime operators for
+    color groups with k>=2 variables. Groups with k=1 use a single
+    physical qubit with a regular Pauli operator.
 
-    The relaxed Hamiltonian is:
-        H̃ = Σ_{ij} 6·J_{ij}·P'_{f(i)}·P'_{f(j)} + Σ_i √6·h_i·P'_{f(i)}
-
-    where P' are 2-local prime operators (X', Y', Z').
+    Physical qubit allocation per color group:
+        k=1: 1 physical qubit (regular Pauli, scale=1)
+        k=2: 2 physical qubits (prime operators, scale=√(2·2)=2)
+        k=3: 2 physical qubits (prime operators, scale=√(2·3)=√6)
     """
 
     max_color_group_size: int = 3
@@ -226,8 +250,9 @@ class QRAC32Encoder:
 
     @property
     def num_qubits(self) -> int:
-        """Number of physical qubits (2x logical qubits)."""
-        return len(self._color_group) * 2
+        """Number of physical qubits (1 per k=1 group, 2 per k>=2 group)."""
+        _, total = build_physical_qubit_map(self._color_group)
+        return total
 
     @property
     def num_logical_qubits(self) -> int:

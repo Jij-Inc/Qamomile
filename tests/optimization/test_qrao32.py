@@ -11,6 +11,7 @@ from qamomile.optimization.qrao.qrao32 import (
     create_prime_operator,
     qrac32_encode_ising,
 )
+from qamomile.optimization.qrao.encoder import build_physical_qubit_map
 from qamomile.optimization.qrao.graph_coloring import greedy_graph_coloring, check_linear_term
 from qamomile.optimization.binary_model import binary, BinaryExpr, BinaryModel, VarType
 import qamomile.observable as qm_o
@@ -64,27 +65,59 @@ class TestPrimeOperators:
     def test_create_prime_operator_x(self):
         """Test prime operator dispatch for X."""
         pauli_op = qm_o.PauliOperator(qm_o.Pauli.X, 0)
-        prime = create_prime_operator(pauli_op)
+        prime = create_prime_operator(pauli_op, 0)
         assert isinstance(prime, qm_o.Hamiltonian)
 
     def test_create_prime_operator_y(self):
         """Test prime operator dispatch for Y."""
         pauli_op = qm_o.PauliOperator(qm_o.Pauli.Y, 0)
-        prime = create_prime_operator(pauli_op)
+        prime = create_prime_operator(pauli_op, 0)
         assert isinstance(prime, qm_o.Hamiltonian)
 
     def test_create_prime_operator_z(self):
         """Test prime operator dispatch for Z."""
         pauli_op = qm_o.PauliOperator(qm_o.Pauli.Z, 0)
-        prime = create_prime_operator(pauli_op)
+        prime = create_prime_operator(pauli_op, 0)
         assert isinstance(prime, qm_o.Hamiltonian)
 
     def test_prime_operator_qubit_indexing(self):
-        """Test that prime operators use 2*index for physical qubits."""
-        # Logical qubit 1 should map to physical qubits 2 and 3
+        """Test that prime operators use the given phys_start for physical qubits."""
         pauli_op = qm_o.PauliOperator(qm_o.Pauli.Z, 1)
-        prime = create_prime_operator(pauli_op)
+        # Physical qubits should start at 2
+        prime = create_prime_operator(pauli_op, 2)
         assert isinstance(prime, qm_o.Hamiltonian)
+
+
+class TestBuildPhysicalQubitMap:
+    """Tests for build_physical_qubit_map utility."""
+
+    def test_all_k1_groups(self):
+        """All color groups have 1 variable -> 1 physical qubit each."""
+        color_group = {0: [0], 1: [1], 2: [2]}
+        mapping, total = build_physical_qubit_map(color_group)
+        assert mapping == {0: 0, 1: 1, 2: 2}
+        assert total == 3
+
+    def test_all_k3_groups(self):
+        """All color groups have 3 variables -> 2 physical qubits each."""
+        color_group = {0: [0, 1, 2], 1: [3, 4, 5]}
+        mapping, total = build_physical_qubit_map(color_group)
+        assert mapping == {0: 0, 1: 2}
+        assert total == 4
+
+    def test_mixed_k1_and_k3(self):
+        """Mixed k=1 and k=3 groups."""
+        color_group = {0: [0], 1: [1, 2, 3], 2: [4]}
+        mapping, total = build_physical_qubit_map(color_group)
+        assert mapping == {0: 0, 1: 1, 2: 3}
+        assert total == 4
+
+    def test_k2_group(self):
+        """k=2 group uses 2 physical qubits."""
+        color_group = {0: [0, 1], 1: [2]}
+        mapping, total = build_physical_qubit_map(color_group)
+        assert mapping == {0: 0, 1: 2}
+        assert total == 3
 
 
 class TestQRAC32Encoder:
@@ -108,8 +141,8 @@ class TestQRAC32Encoder:
         q1, _ = encoder.pauli_encoding[1]
         assert q0 != q1  # Interacting variables on different logical qubits
 
-    def test_num_qubits_is_2x_logical(self):
-        """Test that physical qubit count is 2x logical."""
+    def test_num_qubits_full_groups(self):
+        """Test physical qubit count when all groups are fully populated."""
         problem = BinaryExpr()
         for i in range(6):
             problem += binary(i)
@@ -119,9 +152,29 @@ class TestQRAC32Encoder:
 
         encoder = QRAC32Encoder(spin_model)
 
-        # 6 vars, 3 per logical qubit -> 2 logical -> 4 physical
+        # 6 vars, 3 per logical qubit -> 2 logical -> each k=3 -> 4 physical
         assert encoder.num_logical_qubits == 2
         assert encoder.num_qubits == 4
+
+    def test_num_qubits_partial_groups(self):
+        """Test physical qubit count with k=1 groups using fewer physical qubits."""
+        x = binary(0)
+        y = binary(1)
+        z = binary(2)
+
+        problem = BinaryExpr()
+        problem += x * y
+        problem += z
+
+        model = BinaryModel(problem)
+        spin_model = model.change_vartype(VarType.SPIN)
+
+        encoder = QRAC32Encoder(spin_model)
+
+        # x0 and x1 interact -> different groups, each k=1 -> 1 phys each
+        # x2 standalone -> packed into existing group or new k=1 group
+        # All groups have k<=2 at most, so physical qubits < 2 * logical
+        assert encoder.num_qubits <= encoder.num_logical_qubits * 2
 
     def test_pauli_types(self):
         """Test that Z, X, Y Paulis are used."""
@@ -157,8 +210,8 @@ class TestQRAC32Converter:
         assert converter.num_qubits > 0
         assert converter.spin_model is not None
 
-    def test_num_qubits_is_2x_logical(self):
-        """Test that converter's num_qubits is 2x logical."""
+    def test_num_qubits_matches_physical_map(self):
+        """Test that converter's num_qubits matches build_physical_qubit_map."""
         x = binary(0)
         y = binary(1)
 
@@ -168,8 +221,8 @@ class TestQRAC32Converter:
         model = BinaryModel(problem)
         converter = QRAC32Converter(model)
 
-        # 2 interacting vars -> 2 logical qubits -> 4 physical
-        assert converter.num_qubits == len(converter.color_group) * 2
+        _, expected_total = build_physical_qubit_map(converter.color_group)
+        assert converter.num_qubits == expected_total
 
     def test_cost_hamiltonian(self):
         """Test cost Hamiltonian generation."""
@@ -217,7 +270,7 @@ class TestQRAC32EndToEnd:
         model = BinaryModel(problem)
         converter = QRAC32Converter(model)
 
-        assert converter.num_qubits >= 4  # At least 2 logical -> 4 physical
+        assert converter.num_qubits >= 3  # At least 2 logical groups
         assert len(converter.encoder.pauli_encoding) == 3
 
         rounder = SignRounder()
@@ -233,12 +286,17 @@ class TestQRAC32EncodeIsingCoefficients:
     """Tests for exact Hamiltonian coefficient verification using qrac32_encode_ising."""
 
     def test_encode_ising_exact_coefficients(self):
-        """Test exact coefficients for QRAC32 Ising encoding with prime operators."""
-        Z0 = qm_o.PauliOperator(qm_o.Pauli.Z, 0)
-        Z1 = qm_o.PauliOperator(qm_o.Pauli.Z, 1)
-        X1 = qm_o.PauliOperator(qm_o.Pauli.X, 1)
-        Z2 = qm_o.PauliOperator(qm_o.Pauli.Z, 2)
+        """Test exact coefficients for QRAC32 Ising encoding with mixed operators.
 
+        color_group: {0:[0], 1:[1,2], 2:[3]}
+        Physical mapping: color 0 -> phys 0 (k=1, 1 qubit),
+                          color 1 -> phys 1,2 (k=2, 2 qubits),
+                          color 2 -> phys 3 (k=1, 1 qubit)
+        var 0 (k=1): regular Z on phys 0, scale=1
+        var 1 (k=2): Z' prime on phys 1, scale=√(2·2)=2
+        var 2 (k=2): X' prime on phys 1, scale=√(2·2)=2
+        var 3 (k=1): regular Z on phys 3, scale=1
+        """
         ising = BinaryModel.from_ising(
             linear={2: 5.0, 3: 2.0},
             quad={(0, 1): 2.0, (0, 2): 1.0},
@@ -255,21 +313,31 @@ class TestQRAC32EncodeIsingCoefficients:
 
         qrac_hamiltonian, encoding = qrac32_encode_ising(ising, color_group)
 
-        # Build expected Hamiltonian using prime operators
+        # Build expected Hamiltonian
         expected_hamiltonian = qm_o.Hamiltonian()
         expected_hamiltonian.constant = 6.0
-        Z0_prime = create_prime_operator(Z0)
-        Z1_prime = create_prime_operator(Z1)
-        Z2_prime = create_prime_operator(Z2)
-        X1_prime = create_prime_operator(X1)
 
-        # color_group: {0:[0], 1:[1,2], 2:[3]}
-        # Occupancies: var 0→k=1, var 1→k=2, var 2→k=2, var 3→k=1
-        # (3,2,p) formula: linear √(2k), quad √(2k_i)·√(2k_j)
-        expected_hamiltonian += np.sqrt(2 * 1) * np.sqrt(2 * 2) * 2.0 * Z0_prime * Z1_prime
-        expected_hamiltonian += np.sqrt(2 * 1) * np.sqrt(2 * 2) * 1.0 * Z0_prime * X1_prime
-        expected_hamiltonian += np.sqrt(2 * 2) * 5.0 * X1_prime
-        expected_hamiltonian += np.sqrt(2 * 1) * 2.0 * Z2_prime
+        # var 0 (k=1): simple Z on physical qubit 0
+        Z_phys0 = qm_o.Hamiltonian()
+        Z_phys0.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, 0),), 1.0)
+
+        # var 1 (k=2): Z' prime starting at physical qubit 1
+        Z_prime_1 = create_z_prime(1)
+        # var 2 (k=2): X' prime starting at physical qubit 1
+        X_prime_1 = create_x_prime(1)
+
+        # var 3 (k=1): simple Z on physical qubit 3
+        Z_phys3 = qm_o.Hamiltonian()
+        Z_phys3.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, 3),), 1.0)
+
+        # quad (0,1): scale_0=1, scale_1=2, coeff=2.0
+        expected_hamiltonian += 1.0 * 2.0 * 2.0 * Z_phys0 * Z_prime_1
+        # quad (0,2): scale_0=1, scale_2=2, coeff=1.0
+        expected_hamiltonian += 1.0 * 2.0 * 1.0 * Z_phys0 * X_prime_1
+        # linear(2): scale=2, coeff=5.0
+        expected_hamiltonian += 2.0 * 5.0 * X_prime_1
+        # linear(3): scale=1, coeff=2.0
+        expected_hamiltonian += 1.0 * 2.0 * Z_phys3
 
         assert len(encoding) == ising.num_bits
         assert qrac_hamiltonian == expected_hamiltonian
