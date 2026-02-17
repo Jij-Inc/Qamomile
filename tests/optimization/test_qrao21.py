@@ -1,12 +1,9 @@
 """Tests for QRAO21 (Quantum Random Access Optimization with (2,1,p)-QRAC)."""
 
-import pytest
 import numpy as np
-from math import sqrt
 
 from qamomile.optimization.qrao import QRAC21Converter, QRAC21Encoder, SignRounder
 from qamomile.optimization.qrao.qrao21 import qrac21_encode_ising
-from qamomile.optimization.qrao.qrao31 import qrac31_encode_ising
 from qamomile.optimization.qrao.graph_coloring import greedy_graph_coloring, check_linear_term
 from qamomile.optimization.binary_model import binary, BinaryExpr, BinaryModel, VarType
 import qamomile.observable as qm_o
@@ -48,28 +45,6 @@ class TestQRAC21Encoder:
 
         encoder = QRAC21Encoder(spin_model)
         assert encoder.num_qubits == 2
-
-    def test_hamiltonian_scaling(self):
-        """Test that Hamiltonian coefficients are correctly scaled."""
-        x = binary(0)
-        y = binary(1)
-
-        problem = BinaryExpr()
-        problem += 2.0 * x
-        problem += 3.0 * x * y
-
-        model = BinaryModel(problem)
-        spin_model = model.change_vartype(VarType.SPIN)
-
-        encoder = QRAC21Encoder(spin_model)
-
-        # Check scaling factors
-        assert encoder.linear_coeff_scale == pytest.approx(sqrt(2))
-        assert encoder.quad_coeff_scale == pytest.approx(2.0)
-
-        linear_coeffs = list(encoder.linear_hamiltonian.values())
-        quad_coeffs = list(encoder.quad_hamiltonian.values())
-        assert len(linear_coeffs) > 0 or len(quad_coeffs) > 0
 
     def test_pauli_types(self):
         """Test that only Z and X Paulis are used (not Y)."""

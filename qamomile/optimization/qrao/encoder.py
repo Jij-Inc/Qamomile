@@ -8,13 +8,9 @@ This module implements the encoding logic for various QRAC variants:
 """
 
 from __future__ import annotations
-from math import sqrt
 from typing import Literal
 
-import numpy as np
-
 from qamomile.optimization.binary_model import BinaryModel
-from qamomile.optimization.utils import is_close_zero
 from .graph_coloring import greedy_graph_coloring, check_linear_term
 
 
@@ -58,8 +54,6 @@ class QRAC31Encoder:
     """
 
     max_color_group_size: int = 3
-    linear_coeff_scale: float = sqrt(3)
-    quad_coeff_scale: float = 3.0
 
     def __init__(self, spin_model: BinaryModel) -> None:
         """Initialize encoder with a spin model.
@@ -70,13 +64,6 @@ class QRAC31Encoder:
         self.spin_model = spin_model
         self._color_group: dict[int, list[int]] = {}
         self._pauli_encoding: dict[int, tuple[int, PauliType]] = {}
-
-        # Relaxed Hamiltonian coefficients
-        self._linear_hamiltonian: dict[tuple[int, PauliType], float] = {}
-        self._quad_hamiltonian: dict[
-            tuple[tuple[int, PauliType], tuple[int, PauliType]], float
-        ] = {}
-        self._constant: float = 0.0
 
         self._perform_encoding()
 
@@ -99,41 +86,6 @@ class QRAC31Encoder:
             for pauli_idx, var_idx in enumerate(var_list):
                 self._pauli_encoding[var_idx] = (qubit, paulis[pauli_idx])
 
-        # 4. Build relaxed Hamiltonian
-        self._build_relaxed_hamiltonian()
-
-    def _build_relaxed_hamiltonian(self) -> None:
-        """Compute relaxed Hamiltonian coefficients with per-occupancy scaling."""
-        var_occupancy = _build_var_occupancy(self._color_group)
-
-        # Linear terms: √k_i * h_i * P_{f(i)}
-        for var_idx, coeff in self.spin_model.linear.items():
-            if is_close_zero(coeff):
-                continue
-            qubit, pauli = self._pauli_encoding[var_idx]
-            key = (qubit, pauli)
-            k = var_occupancy[var_idx]
-            self._linear_hamiltonian[key] = (
-                self._linear_hamiltonian.get(key, 0.0) + np.sqrt(k) * coeff
-            )
-
-        # Quadratic terms: √k_i * √k_j * J_{ij} * P_{f(i)} * P_{f(j)}
-        for (i, j), coeff in self.spin_model.quad.items():
-            if is_close_zero(coeff):
-                continue
-            qi, pi = self._pauli_encoding[i]
-            qj, pj = self._pauli_encoding[j]
-            # Canonical ordering for consistent keys
-            term_i = (qi, pi)
-            term_j = (qj, pj)
-            key = (term_i, term_j) if term_i <= term_j else (term_j, term_i)
-            ki, kj = var_occupancy[i], var_occupancy[j]
-            self._quad_hamiltonian[key] = (
-                self._quad_hamiltonian.get(key, 0.0) + np.sqrt(ki) * np.sqrt(kj) * coeff
-            )
-
-        self._constant = self.spin_model.constant
-
     @property
     def num_qubits(self) -> int:
         """Number of qubits after QRAC encoding."""
@@ -148,23 +100,6 @@ class QRAC31Encoder:
     def pauli_encoding(self) -> dict[int, tuple[int, PauliType]]:
         """Mapping from variable index to (qubit, pauli_type)."""
         return self._pauli_encoding
-
-    @property
-    def linear_hamiltonian(self) -> dict[tuple[int, PauliType], float]:
-        """Linear terms of relaxed Hamiltonian: {(qubit, pauli): coeff}."""
-        return self._linear_hamiltonian
-
-    @property
-    def quad_hamiltonian(
-        self,
-    ) -> dict[tuple[tuple[int, PauliType], tuple[int, PauliType]], float]:
-        """Quadratic terms of relaxed Hamiltonian: {((q1, p1), (q2, p2)): coeff}."""
-        return self._quad_hamiltonian
-
-    @property
-    def constant(self) -> float:
-        """Constant term of relaxed Hamiltonian."""
-        return self._constant
 
     def get_pauli_for_variable(self, var_idx: int) -> tuple[int, PauliType]:
         """Get Pauli operator for a variable.
@@ -191,18 +126,11 @@ class QRAC21Encoder:
     """
 
     max_color_group_size: int = 2
-    linear_coeff_scale: float = sqrt(2)
-    quad_coeff_scale: float = 2.0
 
     def __init__(self, spin_model: BinaryModel) -> None:
         self.spin_model = spin_model
         self._color_group: dict[int, list[int]] = {}
         self._pauli_encoding: dict[int, tuple[int, PauliType]] = {}
-        self._linear_hamiltonian: dict[tuple[int, PauliType], float] = {}
-        self._quad_hamiltonian: dict[
-            tuple[tuple[int, PauliType], tuple[int, PauliType]], float
-        ] = {}
-        self._constant: float = 0.0
         self._perform_encoding()
 
     def _perform_encoding(self) -> None:
@@ -217,33 +145,6 @@ class QRAC21Encoder:
         for qubit, var_list in self._color_group.items():
             for pauli_idx, var_idx in enumerate(var_list):
                 self._pauli_encoding[var_idx] = (qubit, paulis[pauli_idx])
-        self._build_relaxed_hamiltonian()
-
-    def _build_relaxed_hamiltonian(self) -> None:
-        var_occupancy = _build_var_occupancy(self._color_group)
-
-        for var_idx, coeff in self.spin_model.linear.items():
-            if is_close_zero(coeff):
-                continue
-            qubit, pauli = self._pauli_encoding[var_idx]
-            key = (qubit, pauli)
-            k = var_occupancy[var_idx]
-            self._linear_hamiltonian[key] = (
-                self._linear_hamiltonian.get(key, 0.0) + np.sqrt(k) * coeff
-            )
-        for (i, j), coeff in self.spin_model.quad.items():
-            if is_close_zero(coeff):
-                continue
-            qi, pi = self._pauli_encoding[i]
-            qj, pj = self._pauli_encoding[j]
-            term_i = (qi, pi)
-            term_j = (qj, pj)
-            key = (term_i, term_j) if term_i <= term_j else (term_j, term_i)
-            ki, kj = var_occupancy[i], var_occupancy[j]
-            self._quad_hamiltonian[key] = (
-                self._quad_hamiltonian.get(key, 0.0) + np.sqrt(ki) * np.sqrt(kj) * coeff
-            )
-        self._constant = self.spin_model.constant
 
     @property
     def num_qubits(self) -> int:
@@ -256,20 +157,6 @@ class QRAC21Encoder:
     @property
     def pauli_encoding(self) -> dict[int, tuple[int, PauliType]]:
         return self._pauli_encoding
-
-    @property
-    def linear_hamiltonian(self) -> dict[tuple[int, PauliType], float]:
-        return self._linear_hamiltonian
-
-    @property
-    def quad_hamiltonian(
-        self,
-    ) -> dict[tuple[tuple[int, PauliType], tuple[int, PauliType]], float]:
-        return self._quad_hamiltonian
-
-    @property
-    def constant(self) -> float:
-        return self._constant
 
     def get_pauli_for_variable(self, var_idx: int) -> tuple[int, PauliType]:
         return self._pauli_encoding[var_idx]
@@ -288,8 +175,6 @@ class QRAC32Encoder:
     """
 
     max_color_group_size: int = 3
-    linear_coeff_scale: float = sqrt(6)
-    quad_coeff_scale: float = 6.0
 
     def __init__(self, spin_model: BinaryModel) -> None:
         self.spin_model = spin_model
@@ -339,8 +224,6 @@ class QRACSpaceEfficientEncoder:
 
     Always maintains a 2:1 compression ratio.
     """
-
-    linear_coeff_scale: float = sqrt(3)
 
     def __init__(self, spin_model: BinaryModel) -> None:
         self.spin_model = spin_model

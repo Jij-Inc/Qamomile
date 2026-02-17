@@ -2,10 +2,9 @@
 
 import pytest
 import numpy as np
-from math import sqrt
 
 from qamomile.optimization.qrao import QRAC31Converter, QRAC31Encoder, SignRounder
-from qamomile.optimization.qrao.qrao31 import qrac31_encode_ising, color_group_to_qrac_encode
+from qamomile.optimization.qrao.qrao31 import qrac31_encode_ising
 from qamomile.optimization.qrao.graph_coloring import greedy_graph_coloring, check_linear_term
 from qamomile.optimization.binary_model import binary, BinaryExpr, BinaryModel, VarType
 import qamomile.observable as qm_o
@@ -60,29 +59,6 @@ class TestQRAC31Encoder:
 
         # 6 variables with no interactions -> 2 qubits (3 per qubit)
         assert encoder.num_qubits == 2
-
-    def test_hamiltonian_scaling(self):
-        """Test that Hamiltonian coefficients are correctly scaled."""
-        # Create: h_0 * s_0 + J_{01} * s_0 * s_1
-        x = binary(0)
-        y = binary(1)
-
-        problem = BinaryExpr()
-        problem += 2.0 * x  # Linear term
-        problem += 3.0 * x * y  # Quadratic term
-
-        model = BinaryModel(problem)
-        spin_model = model.change_vartype(VarType.SPIN)
-
-        encoder = QRAC31Encoder(spin_model)
-
-        # Linear terms should be scaled by sqrt(3)
-        # Quadratic terms should be scaled by 3
-        linear_coeffs = list(encoder.linear_hamiltonian.values())
-        quad_coeffs = list(encoder.quad_hamiltonian.values())
-
-        # Check that some scaling occurred (exact values depend on binary->spin conversion)
-        assert len(linear_coeffs) > 0 or len(quad_coeffs) > 0
 
 
 class TestQRAC31Converter:
