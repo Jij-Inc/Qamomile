@@ -32,6 +32,7 @@ dev = [
     "jupyter-book>=2.1.0",
     "jupytext>=1.18.1",
     "matplotlib>=3.10.8",
+    "networkx>=3.0",
     "pytest>=9.0.2",
     "ruff>=0.14.11",
     "zuban>=0.4.1",
