@@ -12,14 +12,13 @@ from qamomile.optimization.binary_model import BinarySampleSet, VarType
 from qamomile.optimization.converter import MathematicalProblemConverter
 
 
-class QRACConverterBase(MathematicalProblemConverter):
+class QRACConverterBase(MathematicalProblemConverter, abc.ABC):
     """Abstract base for all QRAC-based converters.
 
     Provides shared methods for result decoding and energy calculation.
     Subclasses must implement:
 
     - ``num_qubits`` (property)
-    - ``get_cost_hamiltonian()``
     - ``get_encoded_pauli_list()``
 
     Ansatz Construction:
@@ -60,14 +59,18 @@ class QRACConverterBase(MathematicalProblemConverter):
         design. For the example above it is ``2 * num_qubits * depth``.
     """
 
+    def __post_init__(self) -> None:
+        if self.spin_model.higher:
+            raise ValueError(
+                "QRAC converters do not support higher-order (HUBO) terms. "
+                "All interaction terms must be at most quadratic."
+            )
+
     @property
     @abc.abstractmethod
     def num_qubits(self) -> int:
         """Number of qubits after QRAC encoding."""
         ...
-
-    @abc.abstractmethod
-    def get_cost_hamiltonian(self) -> qm_o.Hamiltonian: ...
 
     @abc.abstractmethod
     def get_encoded_pauli_list(self) -> list[qm_o.Hamiltonian]: ...
@@ -82,7 +85,7 @@ class QRACConverterBase(MathematicalProblemConverter):
             BinarySampleSet in SPIN vartype.
         """
         sample = {i: s for i, s in enumerate(spins)}
-        energy = self._calculate_energy(spins)
+        energy = self.spin_model.calc_energy(spins)
         return BinarySampleSet(
             samples=[sample],
             num_occurrences=[1],
@@ -104,31 +107,10 @@ class QRACConverterBase(MathematicalProblemConverter):
             BinarySampleSet in BINARY vartype.
         """
         sample = {i: (1 - s) // 2 for i, s in enumerate(spins)}
-        energy = self._calculate_energy(spins)
+        energy = self.spin_model.calc_energy(spins)
         return BinarySampleSet(
             samples=[sample],
             num_occurrences=[1],
             energy=[energy],
             vartype=VarType.BINARY,
         )
-
-    def _calculate_energy(self, spins: list[int]) -> float:
-        """Calculate energy for a given spin assignment.
-
-        Args:
-            spins: List of spin values (+1 or -1).
-
-        Returns:
-            Energy value for the spin configuration.
-        """
-        energy = self.spin_model.constant
-        for idx, coeff in self.spin_model.linear.items():
-            energy += coeff * spins[idx]
-        for (i, j), coeff in self.spin_model.quad.items():
-            energy += coeff * spins[i] * spins[j]
-        for inds, coeff in self.spin_model.higher.items():
-            prod = 1
-            for i in inds:
-                prod *= spins[i]
-            energy += coeff * prod
-        return energy
