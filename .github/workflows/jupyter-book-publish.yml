@@ -35,6 +35,11 @@ jobs:
       - name: Build documentation
         working-directory: docs
         run: |
+          # Generate API reference
+          uv run python generate_api.py
+          cp -r api/ en/api/
+          cp -r api/ ja/api/
+
           # Convert .py to .ipynb
           uv run jupytext --to ipynb en/tutorial/*.py || true
           uv run jupytext --to ipynb en/transpile/*.py || true

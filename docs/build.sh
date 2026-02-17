@@ -46,11 +46,26 @@ show_help() {
     echo ""
 }
 
+# Function to generate API reference
+generate_api() {
+    echo "Generating API reference..."
+    uv run python generate_api.py
+    info "API reference generated"
+}
+
+# Function to copy API reference to language directories
+copy_api() {
+    echo "Copying API reference to language directories..."
+    cp -r api/ en/api/
+    cp -r api/ ja/api/
+    info "API reference copied"
+}
+
 # Function to sync English notebooks
 sync_en() {
     echo "Converting English .py files to .ipynb..."
     uv run jupytext --to ipynb en/tutorial/*.py 2>/dev/null || true
-    uv run jupytext --to ipynb en/transpile/*.py 2>/dev/null || true
+    uv run jupytext --to ipynb en/optimization/*.py 2>/dev/null || true
     info "English notebooks synced"
 }
 
@@ -58,7 +73,7 @@ sync_en() {
 sync_ja() {
     echo "Converting Japanese .py files to .ipynb..."
     uv run jupytext --to ipynb ja/tutorial/*.py 2>/dev/null || true
-    uv run jupytext --to ipynb ja/transpile/*.py 2>/dev/null || true
+    uv run jupytext --to ipynb ja/optimization/*.py 2>/dev/null || true
     info "Japanese notebooks synced"
 }
 
@@ -91,6 +106,8 @@ build_ja() {
 
 # Function to build all documentation
 build_all() {
+    generate_api
+    copy_api
     sync_all
     build_en
     build_ja
@@ -101,11 +118,13 @@ build_all() {
 clean() {
     echo "Cleaning generated files..."
     rm -f en/tutorial/*.ipynb
-    rm -f en/transpile/*.ipynb
+    rm -f en/optimization/*.ipynb
     rm -f ja/tutorial/*.ipynb
-    rm -f ja/transpile/*.ipynb
+    rm -f ja/optimization/*.ipynb
     rm -rf en/_build
     rm -rf ja/_build
+    rm -rf en/api
+    rm -rf ja/api
     info "Cleaned generated .ipynb files and build outputs"
 }
 

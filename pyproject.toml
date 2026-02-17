@@ -36,6 +36,7 @@ dev = [
     "pytest-mpl>=0.17.0",
     "ruff>=0.14.11",
     "zuban>=0.4.1",
+    "griffe>=1.0.0",
     "quri-parts-core>=0.21.1",
     "quri-parts-circuit>=0.21.1",
     "quri-parts-qulacs>=0.21.1",

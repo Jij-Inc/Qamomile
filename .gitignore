@@ -164,3 +164,8 @@ cython_debug/
 #.idea/
 # MyST build outputs
 _build
+
+# Generated API docs (build-time copies)
+docs/en/api/
+docs/ja/api/
+docs/api/

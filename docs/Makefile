@@ -1,7 +1,7 @@
 # Makefile for Qamomile Documentation (docs2)
 # Uses jupytext to convert .py -> .ipynb and Jupyter Book to build
 
-.PHONY: help build build-en build-ja sync sync-en sync-ja clean clean-all serve-en serve-ja build-site serve-site
+.PHONY: help build build-en build-ja sync sync-en sync-ja generate-api copy-api clean clean-all serve-en serve-ja build-site serve-site
 
 # Default target
 help:
@@ -23,18 +23,30 @@ help:
 	@echo "  make serve-site  - Serve unified site locally (port 8000)"
 	@echo ""
 
+# Generate API reference from docstrings
+generate-api:
+	@echo "Generating API reference..."
+	@uv run python generate_api.py
+	@echo "✓ API reference generated"
+
+# Copy API reference to language directories
+copy-api: generate-api
+	@cp -r api/ en/api/
+	@cp -r api/ ja/api/
+	@echo "✓ API reference copied to language directories"
+
 # Build both languages
-build: sync build-en build-ja
+build: copy-api sync build-en build-ja
 	@echo "✓ Both English and Japanese documentation built successfully"
 
 # Build English documentation
-build-en: sync-en
+build-en: copy-api sync-en
 	@echo "Building English documentation..."
 	cd en && uv run jupyter-book build --html
 	@echo "✓ English documentation built: en/_build/html/index.html"
 
 # Build Japanese documentation
-build-ja: sync-ja
+build-ja: copy-api sync-ja
 	@echo "Building Japanese documentation..."
 	cd ja && uv run jupyter-book build --html
 	@echo "✓ Japanese documentation built: ja/_build/html/index.html"
@@ -66,6 +78,8 @@ clean:
 	@rm -f ja/transpile/*.ipynb
 	@rm -rf en/_build
 	@rm -rf ja/_build
+	@rm -rf en/api
+	@rm -rf ja/api
 	@rm -rf _site
 	@echo "✓ Cleaned generated .ipynb files and build outputs"
 
