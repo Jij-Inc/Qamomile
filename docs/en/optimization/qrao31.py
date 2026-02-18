@@ -13,11 +13,27 @@
 # ---
 
 # %% [markdown]
-# # QRAO31 for the Max-Cut
+# # QRAO for the Max-Cut
 #
-# In this section, we will solve the Maxcut Problem using QRAO31 (Quantum Random Access Optimization) with the help of the JijModeling and Qamomile libraries.
+# **Quantum Random Access Optimization (QRAO)** is an approach that encodes multiple classical variables into a single qubit using Quantum Random Access Coding (QRAC). This dramatically reduces the number of qubits required compared to standard QAOA, where each variable occupies one qubit.
 #
-# First, let's install and import the main libraries we will be using.
+# For example, with QRAC(3,1,p) encoding, up to 3 variables are packed into 1 qubit — so a 12-variable problem that would need 12 qubits with QAOA may require only around 4 qubits with QRAO.
+#
+# In this tutorial, we solve the Max-Cut problem using QRAO31 (the QRAC(3,1,p) variant) with Qamomile.
+
+# %% [markdown]
+# ## QRAO Variants in Qamomile
+#
+# Qamomile provides several QRAO variants, each trading off encoding density and approximation quality. All converters are available from `qamomile.optimization.qrao`.
+#
+# | Variant | Converter Class | Variables / Qubit | Description |
+# |---------|----------------|-------------------|-------------|
+# | QRAC(2,1,p) | `QRAC21Converter` | up to 2 | Encodes 2 variables per qubit using Z and X operators |
+# | QRAC(3,1,p) | `QRAC31Converter` | up to 3 | Encodes 3 variables per qubit using Z, X, and Y operators |
+# | QRAC(3,2,p) | `QRAC32Converter` | up to 3 | Uses 2-qubit prime operators for higher fidelity |
+# | Space-efficient | `QRACSpaceEfficientConverter` | 2 (fixed) | No graph coloring needed; constant 2:1 compression |
+#
+# In this tutorial, we use **QRAC(3,1,p)** for the highest single-qubit compression ratio.
 
 # %%
 import jijmodeling as jm
@@ -36,11 +52,26 @@ num_nodes = 12
 # Generalized Petersen graph GP(6,2): 12 nodes, 18 edges, 3-regular
 edges = [
     # Outer hexagon
-    (0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0),
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 4),
+    (4, 5),
+    (5, 0),
     # Spokes
-    (0, 6), (1, 7), (2, 8), (3, 9), (4, 10), (5, 11),
+    (0, 6),
+    (1, 7),
+    (2, 8),
+    (3, 9),
+    (4, 10),
+    (5, 11),
     # Inner connections (step 2)
-    (6, 8), (8, 10), (10, 6), (7, 9), (9, 11), (11, 7),
+    (6, 8),
+    (8, 10),
+    (10, 6),
+    (7, 9),
+    (9, 11),
+    (11, 7),
 ]
 G.add_nodes_from(range(num_nodes))
 G.add_edges_from(edges)
@@ -120,11 +151,13 @@ instance = problem.eval(data)
 #
 # We generate the QRAO31-encoded Hamiltonian from the compiled Instance. The converter used for this is `QRAC31Converter` from `qamomile.optimization.qrao.qrao31`.
 #
-# QRAO31 uses Quantum Random Access Coding (QRAC) to encode up to 3 classical variables into a single qubit using different Pauli operators (X, Y, Z). This significantly reduces the number of qubits required compared to standard QAOA.
+# QRAO31 uses Quantum Random Access Coding (QRAC) to encode up to 3 classical variables into a single qubit using different Pauli operators (X, Y, Z). The converter internally performs:
 #
-# By creating an instance of this class, the QRAC-encoded Hamiltonian is internally generated from the compiled Instance. We can then:
-# - Use `get_cost_hamiltonian()` to obtain the cost Hamiltonian
-# - Build a VQE ansatz to search for the ground state of this Hamiltonian
+# 1. **Graph coloring** on the variable interaction graph to group non-adjacent variables
+# 2. **Pauli assignment** — each variable in a group is mapped to a distinct Pauli operator (Z, X, or Y) on the same qubit
+# 3. **Hamiltonian relaxation** — the original Ising Hamiltonian is rewritten in terms of the encoded Pauli operators
+#
+# We can then use `get_cost_hamiltonian()` to obtain the encoded Hamiltonian and build a VQE ansatz to find its ground state.
 
 # %%
 import qamomile.circuit as qmc
@@ -137,7 +170,32 @@ transpiler = QiskitTranspiler()
 converter = QRAC31Converter(instance)
 
 # %% [markdown]
-# Let's inspect the cost Hamiltonian. Unlike QAOA which uses only Pauli-Z operators, the QRAC-encoded Hamiltonian uses mixed Pauli operators (X, Y, Z) due to the encoding of multiple variables per qubit.
+# ### Qubit Reduction
+#
+# The key advantage of QRAO is the reduction in qubit count. Let's see how many qubits are needed compared to QAOA (which requires one qubit per variable).
+
+# %%
+print(f"Number of classical variables: {num_nodes}")
+print(f"Number of qubits (QAOA):      {num_nodes}")
+print(f"Number of qubits (QRAO31):    {converter.num_qubits}")
+print(
+    f"Compression ratio:            {converter.num_qubits}/{num_nodes} = {converter.num_qubits / num_nodes:.0%}"
+)
+
+# %% [markdown]
+# The converter also exposes the variable-to-qubit mapping via `color_group` (which qubit each variable is assigned to) and `pauli_encoding` (which Pauli operator represents each variable).
+
+# %%
+print("Color groups (qubit -> variables):")
+for qubit_idx, var_indices in converter.color_group.items():
+    print(f"  Qubit {qubit_idx}: variables {var_indices}")
+
+print("\nPauli encoding (variable -> (qubit, Pauli)):")
+for var_idx, pauli_op in converter.pauli_encoding.items():
+    print(f"  Variable {var_idx} -> {pauli_op}")
+
+# %% [markdown]
+# Let's inspect the cost Hamiltonian. Unlike QAOA which uses only Pauli-Z operators on $n$ qubits (one per variable), the QRAC-encoded Hamiltonian acts on a much smaller number of qubits and uses mixed Pauli operators (X, Y, Z) because each qubit hosts multiple variables.
 
 # %%
 hamiltonian = converter.get_cost_hamiltonian()
@@ -147,7 +205,7 @@ hamiltonian
 # Now we build a hardware-efficient VQE ansatz to search for the ground state of this Hamiltonian.
 
 # %%
-from qamomile.circuit.algorithm.basic import ry_layer, rz_layer, cz_entangling_layer
+from qamomile.circuit.algorithm.basic import cz_entangling_layer, ry_layer, rz_layer
 
 depth = 2
 
@@ -157,10 +215,13 @@ def vqe(
     n: qmc.UInt, h: qmc.Observable, depth: qmc.UInt, theta: qmc.Vector[qmc.Float]
 ) -> qmc.Float:
     q = qmc.qubit_array(n, "q")
-    for layer in qmc.range(depth):
+    for layer in qmc.range(depth - 1):
         q = ry_layer(q, theta, 2 * n * layer)
         q = rz_layer(q, theta, 2 * n * layer + n)
         q = cz_entangling_layer(q)
+
+    q = ry_layer(q, theta, 2 * n * (depth - 1))
+    q = rz_layer(q, theta, 2 * n * (depth - 1) + n)
     return qmc.expval(q, h)
 
 
@@ -229,7 +290,7 @@ init_params = np.random.uniform(0, 2 * np.pi, size=n_params)
 # Clear history
 energy_history = []
 
-print(f"Starting VQE optimization...")
+print("Starting VQE optimization...")
 print(f"Initial parameter count: {len(init_params)}")
 
 # Optimize with COBYLA
@@ -241,7 +302,7 @@ result_opt = minimize(
     options={"maxiter": 100, "disp": True},
 )
 
-print(f"\nOptimization complete")
+print("\nOptimization complete")
 print(f"Final energy: {result_opt.fun:.4f}")
 
 # %% [markdown]
@@ -264,18 +325,21 @@ plt.show()
 # %% [markdown]
 # ## QRAO31 Decoding Process
 #
-# In QRAO31, each variable is encoded into a specific Pauli operator (X, Y, Z).
-# From the optimized state, we measure the expectation value of each Pauli operator
-# to recover the original variable values.
+# In standard QAOA, each variable corresponds to one qubit, so we can directly read out solutions by sampling bitstrings. In QRAO, however, multiple variables share a single qubit — we cannot simply measure the qubit in the computational basis to recover all variable values simultaneously.
 #
-# If the expectation value is positive, we infer +1 (spin representation), and if negative, -1.
+# Instead, QRAO uses a two-stage decoding process:
+#
+# 1. **Expectation value measurement**: For each variable $x_i$, measure the expectation value $\langle P_i \rangle$ of its assigned Pauli operator $P_i \in \{X, Y, Z\}$ on the optimized quantum state.
+# 2. **Rounding**: Convert continuous expectation values into discrete spin values using a rounding scheme.
+#
+# Since the Pauli operators on a single qubit do not commute (e.g., $[X, Y] \neq 0$), the expectation values must be estimated from separate measurement circuits — one for each Pauli basis.
 
 # %%
 # Create circuits to measure expectation values of Pauli operators for each variable
 pauli_observables = converter.get_encoded_pauli_list()
 
 print(f"Number of Pauli operators to measure: {len(pauli_observables)}")
-print(f"Variable index to Pauli operator mapping:")
+print("Variable index to Pauli operator mapping:")
 for idx, pauli_op in converter.pauli_encoding.items():
     print(f"  Variable {idx} -> {pauli_op}")
 
@@ -287,10 +351,13 @@ def measure_pauli(
     n: qmc.UInt, h: qmc.Observable, depth: qmc.UInt, theta: qmc.Vector[qmc.Float]
 ) -> qmc.Float:
     q = qmc.qubit_array(n, "q")
-    for layer in qmc.range(depth):
+    for layer in qmc.range(depth - 1):
         q = ry_layer(q, theta, 2 * n * layer)
         q = rz_layer(q, theta, 2 * n * layer + n)
         q = cz_entangling_layer(q)
+
+    q = ry_layer(q, theta, 2 * n * (depth - 1))
+    q = rz_layer(q, theta, 2 * n * (depth - 1) + n)
     return qmc.expval(q, h)
 
 
@@ -322,9 +389,17 @@ for i, exp in enumerate(expectations):
     print(f"  Variable {i}: {exp:.4f}")
 
 # %% [markdown]
-# ## Recovering the Solution
+# ## Recovering the Solution: Rounding
 #
-# We use SignRounder to recover the original variable values (spins) from expectation values.
+# The expectation values $\langle P_i \rangle$ are continuous numbers in $[-1, 1]$, but we need discrete spin values $s_i \in \{+1, -1\}$. This is where **rounding** comes in.
+#
+# `SignRounder` applies the simplest rounding rule:
+#
+# $$
+# s_i = \begin{cases} +1 & \text{if } \langle P_i \rangle \geq 0 \\ -1 & \text{if } \langle P_i \rangle < 0 \end{cases}
+# $$
+#
+# Because the QRAC-encoded Hamiltonian is a **relaxation** of the original problem (the encoding is not exact), rounding can introduce a gap between the relaxed optimum and the recovered solution. This is inherent to the QRAO approach — we trade exactness for a dramatic reduction in qubit count.
 
 # %%
 from qamomile.optimization.qrao import SignRounder
@@ -334,7 +409,7 @@ spins = rounder.round(expectations)
 
 print("Recovered spin values (+1 or -1):")
 for i, spin in enumerate(spins):
-    print(f"  Variable {i}: {spin}")
+    print(f"  Variable {i}: ⟨P⟩ = {expectations[i]:+.4f}  →  spin = {spin:+d}")
 
 # Convert spins to binary (spin=+1 -> binary=0, spin=-1 -> binary=1)
 binary_solution = [(1 - s) // 2 for s in spins]
@@ -383,7 +458,7 @@ def calculate_maxcut_value(graph, binary_solution):
 
 cut_value = calculate_maxcut_value(G, binary_solution)
 
-print(f"Solution found:")
+print("Solution found:")
 print(f"  Binary string: {''.join(map(str, binary_solution))}")
 print(f"  Number of cut edges: {cut_value}")
 
@@ -405,12 +480,29 @@ plt.tight_layout()
 plt.show()
 
 # %% [markdown]
+# ## Comparison with the Exact Solution
+#
+# Since Qamomile's converters accept `ommx.v1.Instance`, we can easily compare
+# our quantum result with a classical solver. Let's solve the same instance
+# exactly with SCIP and see how the QRAO solution compares.
+
+# %%
+from ommx_pyscipopt_adapter import OMMXPySCIPOptAdapter
+
+solution = OMMXPySCIPOptAdapter.solve(instance)
+
+print(f"Exact optimal value (Max-Cut): {int(solution.objective)}")
+print(f"QRAO solution value:           {cut_value}")
+
+# %% [markdown]
 # ## Summary
 #
 # In this tutorial, we demonstrated how to solve the Max-Cut problem using QRAO31 with Qamomile:
 #
 # 1. **Problem Formulation**: We formulated Max-Cut as an Ising problem using JijModeling
-# 2. **QRAO31 Encoding**: `QRAC31Converter` encoded 3 variables into 1 qubit, reducing qubit count
-# 3. **VQE Optimization**: We found optimal parameters using a hardware-efficient ansatz
-# 4. **Decoding**: We measured expectation values of Pauli operators and recovered original variable values with SignRounder
-# 5. **Solution Analysis**: We analyzed the measurement results and visualized the solution
+# 2. **QRAO31 Encoding**: `QRAC31Converter` encoded up to 3 variables per qubit via graph coloring and Pauli assignment, reducing the qubit count from 12 (QAOA) to just a few
+# 3. **VQE Optimization**: We found optimal parameters using a hardware-efficient ansatz on the reduced-size Hamiltonian
+# 4. **Decoding**: Since multiple variables share a qubit, we measured Pauli expectation values and applied `SignRounder` to recover discrete spin values
+# 5. **Solution Analysis**: We visualized the recovered Max-Cut solution on the original graph
+#
+# The key takeaway is that QRAO enables solving larger combinatorial optimization problems on near-term quantum hardware by significantly reducing the number of qubits required. And since Qamomile uses `ommx.v1.Instance`, it is straightforward to benchmark against classical solvers.

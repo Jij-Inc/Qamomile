@@ -345,6 +345,21 @@ plt.tight_layout()
 plt.show()
 
 # %% [markdown]
+# ## Comparison with the Exact Solution
+#
+# Since Qamomile's converters accept `ommx.v1.Instance`, we can easily compare
+# our quantum result with a classical solver. Let's solve the same instance
+# exactly with SCIP and see how the QAOA solution compares.
+
+# %%
+from ommx_pyscipopt_adapter import OMMXPySCIPOptAdapter
+
+solution = OMMXPySCIPOptAdapter.solve(instance)
+
+print(f"Exact optimal value (Max-Cut): {int(solution.objective)}")
+print(f"QAOA solution value:           {cut_edges}")
+
+# %% [markdown]
 # ## Summary
 #
 # In this tutorial, we demonstrated how to solve the Max-Cut problem using QAOA with Qamomile:

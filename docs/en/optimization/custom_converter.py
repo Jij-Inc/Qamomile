@@ -21,14 +21,8 @@
 # it turns the problem into a cost Hamiltonian and decodes measurement results
 # back into classical solutions.
 #
-# Qamomile provides two levels of converter base classes:
-#
-# | Base class | Module | Use case |
-# |---|---|---|
-# | `QuantumConverter` | `qamomile.core.converters.converter` | Low-level, full control over Ising encoding |
-# | `MathematicalProblemConverter` | `qamomile.optimization.converter` | Higher-level, automatic spin-model conversion |
-#
-# This tutorial focuses on `MathematicalProblemConverter` because it handles
+# This tutorial focuses on `MathematicalProblemConverter`
+# (`qamomile.optimization.converter`) because it handles
 # the boilerplate of converting a `BinaryModel` (or `ommx.v1.Instance`) into
 # an internal spin model and provides a built-in `decode()` method.  We only
 # need to implement one abstract method: `get_cost_hamiltonian()`.
@@ -57,18 +51,22 @@
 # 4. Our `get_cost_hamiltonian()` reads from `self.spin_model` and returns a `Hamiltonian`.
 # 5. After quantum execution, `decode()` converts measurement bitstrings back to a `BinarySampleSet` in the original variable type.
 #
+# The behavior in step 2 differs depending on the input type:
+#
+# | Input type | Conversion to spin model | Sense handling |
+# |---|---|---|
+# | `ommx.v1.Instance` | Calls `instance.to_qubo()` internally, then converts QUBO → SPIN | Maximization problems are automatically negated to minimization form. Decoded energies will be negative for maximization problems. |
+# | `BinaryModel` | Calls `change_vartype(SPIN)` directly | No sense concept. Coefficients are used as-is -- the user is responsible for the sign convention. |
+#
 # Let's import the key classes.
 
 # %%
-from qamomile.optimization.converter import MathematicalProblemConverter
+import qamomile.observable as qm_o
+from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.optimization.binary_model import (
     BinaryModel,
-    BinaryExpr,
-    VarType,
-    BinarySampleSet,
 )
-from qamomile.circuit.transpiler.job import SampleResult
-import qamomile.observable as qm_o
+from qamomile.optimization.converter import MathematicalProblemConverter
 
 # %% [markdown]
 # ## The Observable Module
@@ -253,8 +251,9 @@ def variational_circuit(
 # the results.
 
 # %%
-from qamomile.qiskit import QiskitTranspiler
 import numpy as np
+
+from qamomile.qiskit import QiskitTranspiler
 
 # Step 1: Define the problem (reuse the model from above)
 print("Step 1: Problem defined")
@@ -282,7 +281,7 @@ executable = transpiler.transpile(
     },
     parameters=["theta"],
 )
-print(f"\nStep 4: Circuit transpiled")
+print("\nStep 4: Circuit transpiled")
 
 # Step 5: Execute with some initial parameters
 theta_init = np.random.uniform(0, np.pi, size=n_qubits)
@@ -398,7 +397,7 @@ print(f"Number of samples: {len(decoded.samples)}")
 
 # Show the lowest-energy solution
 best_sample, best_energy, best_count = decoded.lowest()
-print(f"\nBest solution:")
+print("\nBest solution:")
 print(f"  Sample: {best_sample}")
 print(f"  Energy: {best_energy:.4f}")
 print(f"  Occurrences: {best_count}")
@@ -450,6 +449,80 @@ for sample, energy in zip(decoded_binary.samples, decoded_binary.energy):
     print(f"  {sample} -> energy = {energy:.4f}")
 
 # %% [markdown]
+# ## Using JijModeling and `ommx.v1.Instance`
+#
+# In practice, optimization problems are usually defined symbolically using
+# JijModeling and compiled into an `ommx.v1.Instance`.  The base class
+# `MathematicalProblemConverter` accepts either a `BinaryModel` or an
+# `ommx.v1.Instance`, so our `SimpleIsingConverter` works with both
+# -- no code changes needed.
+#
+# Let's demonstrate this with a small Max-Cut problem on a 4-node graph.
+
+# %%
+import jijmodeling as jm
+import networkx as nx
+
+# Define the Max-Cut problem symbolically
+problem = jm.Problem("Maxcut", sense=jm.ProblemSense.MAXIMIZE)
+
+
+@problem.update
+def _(problem: jm.DecoratedProblem):
+    V = problem.Dim()
+    E = problem.Graph()
+    x = problem.BinaryVar(shape=(V,))
+    obj = (
+        E.rows()
+        .map(lambda e: 1 / 2 * (1 - (2 * x[e[0]] - 1) * (2 * x[e[1]] - 1)))
+        .sum()
+    )
+    problem += obj
+
+
+# Create a small graph instance
+G = nx.Graph()
+G.add_edges_from([(0, 1), (1, 2), (2, 3), (0, 3)])
+
+data = {"V": G.number_of_nodes(), "E": list(G.edges())}
+instance = problem.eval(data)
+
+# %% [markdown]
+# Now pass the `ommx.v1.Instance` directly to our custom converter:
+
+# %%
+ommx_converter = SimpleIsingConverter(instance)
+H_ommx = ommx_converter.get_cost_hamiltonian()
+
+print("Cost Hamiltonian from OMMX instance:")
+print(H_ommx)
+print(f"Number of qubits: {H_ommx.num_qubits}")
+
+# %% [markdown]
+# The converter works identically -- the base class internally converts
+# the `ommx.v1.Instance` to a QUBO, then to a spin model.  We can
+# sample and decode results exactly as before:
+
+# %%
+ommx_sample_exec = transpiler.transpile(
+    sampling_circuit,
+    bindings={"n_qubits": H_ommx.num_qubits},
+    parameters=["theta"],
+)
+
+ommx_sample_job = ommx_sample_exec.sample(
+    transpiler.executor(),
+    bindings={"theta": np.random.uniform(0, np.pi, size=H_ommx.num_qubits)},
+    shots=512,
+)
+ommx_decoded = ommx_converter.decode(ommx_sample_job.result())
+
+print(f"Decoded vartype: {ommx_decoded.vartype}")
+best_sample, best_energy, best_count = ommx_decoded.lowest()
+print(f"Best solution: {best_sample}")
+print(f"Best energy: {best_energy:.4f}")
+
+# %% [markdown]
 # ## Advanced: Overriding `__post_init__`
 #
 # The `MathematicalProblemConverter` base class calls `__post_init__()` at the
@@ -472,19 +545,34 @@ for sample, energy in zip(decoded_binary.samples, decoded_binary.energy):
 #         # ...
 # ```
 #
-# Similarly, `FQAOAConverter` uses `__post_init__` to set up cyclic variable
-# mappings and to apply Hamiltonian normalization.
-#
-# Here is a minimal example of using `__post_init__` in a custom converter:
+# Here is a practical example: precomputing the **interaction graph** from
+# the spin model.  This is useful when the converter needs structural
+# information about variable interactions (e.g., for circuit layout
+# optimization or variable ordering heuristics).
 
 
 # %%
-class ScaledIsingConverter(MathematicalProblemConverter):
-    """Ising converter that normalizes coefficients by their maximum absolute value."""
+class GraphAwareIsingConverter(MathematicalProblemConverter):
+    """Ising converter that precomputes the interaction graph structure."""
 
     def __post_init__(self) -> None:
-        # Normalize the spin model so that the largest coefficient is 1.0
-        self.spin_model.normalize_by_abs_max(replace=True)
+        # Build adjacency list and degree information from the spin model
+        self.adjacency: dict[int, list[int]] = {
+            i: [] for i in range(self.spin_model.num_bits)
+        }
+        for i, j in self.spin_model.quad:
+            self.adjacency[i].append(j)
+            self.adjacency[j].append(i)
+
+        self.degree = {
+            node: len(neighbors) for node, neighbors in self.adjacency.items()
+        }
+
+        # Identify isolated variables (no interactions) and hub variables
+        self.isolated = [i for i, d in self.degree.items() if d == 0]
+        self.max_degree_node = (
+            max(self.degree, key=self.degree.get) if self.degree else None
+        )
 
     def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
         hamiltonian = qm_o.Hamiltonian()
@@ -496,22 +584,30 @@ class ScaledIsingConverter(MathematicalProblemConverter):
         return hamiltonian
 
 
-# Compare with the unnormalized version
-model_large = BinaryModel.from_ising(
-    linear={0: 3.0, 1: -6.0},
-    quad={(0, 1): 12.0},
-)
+# Demonstrate the precomputed structure
+graph_converter = GraphAwareIsingConverter(model)
 
-normal_converter = SimpleIsingConverter(model_large)
-scaled_converter = ScaledIsingConverter(model_large)
+print("Adjacency list:", graph_converter.adjacency)
+print("Degree:", graph_converter.degree)
+print("Isolated nodes:", graph_converter.isolated)
+print("Highest-degree node:", graph_converter.max_degree_node)
 
-print("Unnormalized Hamiltonian:")
-for ops, coeff in normal_converter.get_cost_hamiltonian():
-    print(f"  {ops} : {coeff}")
+# The Hamiltonian itself is the same as SimpleIsingConverter
+H_graph = graph_converter.get_cost_hamiltonian()
+print("\nCost Hamiltonian:", H_graph)
 
-print("\nNormalized Hamiltonian:")
-for ops, coeff in scaled_converter.get_cost_hamiltonian():
-    print(f"  {ops} : {coeff}")
+# %% [markdown]
+# The `__post_init__` hook lets us analyze the problem structure once at
+# construction time.  This information could then be used for:
+#
+# - **Circuit layout**: mapping high-degree variables to well-connected qubits
+# - **Variable ordering**: processing hub nodes first in custom ansatz designs
+# - **Problem diagnostics**: detecting disconnected subproblems
+#
+# The built-in converters use this pattern extensively:
+#
+# - `QRAC31Converter`: graph coloring to determine QRAC encoding
+# - `FQAOAConverter`: cyclic variable mapping for fermionic encoding
 
 # %% [markdown]
 # ## Summary
@@ -530,18 +626,13 @@ for ops, coeff in scaled_converter.get_cost_hamiltonian():
 #    a variational circuit with `qmc.expval()`, optimize parameters, sample,
 #    and decode results.
 #
-# 4. **Overriding `__post_init__()`** -- for custom initialization logic
-#    that runs after the spin model is available (e.g., normalization,
-#    graph coloring).
+# 4. **Using `ommx.v1.Instance`** -- define problems symbolically with
+#    JijModeling, compile to an instance, and pass it directly to the
+#    converter.  No converter changes needed.
 #
-# ### When to use which base class
-#
-# - **`MathematicalProblemConverter`** (this tutorial): Best for most use cases.
-#   Handles BINARY/SPIN conversion and result decoding automatically.
-#
-# - **`QuantumConverter`** (`qamomile.core.converters.converter`): Use when we
-#   need full control over Ising encoding or need to work with the lower-level
-#   `IsingModel` / `HigherIsingModel` representations.
+# 5. **Overriding `__post_init__()`** -- for custom initialization logic
+#    that runs after the spin model is available (e.g., precomputing
+#    interaction graph structure, graph coloring).
 #
 # ### Built-in converters for reference
 #
