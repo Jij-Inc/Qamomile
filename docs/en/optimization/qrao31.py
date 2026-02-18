@@ -13,89 +13,71 @@
 # ---
 
 # %% [markdown]
-# # Solving the MaxCut Problem with QRAO
+# # QRAO31 for the Max-Cut
 #
-# In this section, we use JijModeling and Qamomile to solve the MaxCut problem with QRAO.
+# In this section, we will solve the Maxcut Problem using QRAO31 (Quantum Random Access Optimization) with the help of the JijModeling and Qamomile libraries.
 #
-# First, we import the main libraries we'll be using.
+# First, let's install and import the main libraries we will be using.
 
 # %%
 import jijmodeling as jm
-import ommx.v1
 import matplotlib.pyplot as plt
-import numpy as np
 
 # %% [markdown]
-# ## What is the MaxCut Problem?
+# ## What is the Max-Cut Problem
 #
-# The MaxCut problem involves partitioning the nodes of a graph into two groups to maximize
-# the number of edges that are cut (or the total weight of cut edges if edges are weighted).
-# Applications include network partitioning and image processing (segmentation).
-
+# The Max-Cut problem is the problem of dividing the nodes of a graph into two groups such that the number of edges cut (or the total weight of the edges cut, if the edges have weights) is maximized. Applications include network partitioning and image processing (segmentation), among others.
 # %%
 import networkx as nx
-import matplotlib.pyplot as plt
+import numpy as np
 
 G = nx.Graph()
-num_nodes = 5
-edges = [(0, 1), (0, 4), (1, 2), (1, 3), (2, 3), (3, 4)]
+num_nodes = 12
+# Generalized Petersen graph GP(6,2): 12 nodes, 18 edges, 3-regular
+edges = [
+    # Outer hexagon
+    (0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0),
+    # Spokes
+    (0, 6), (1, 7), (2, 8), (3, 9), (4, 10), (5, 11),
+    # Inner connections (step 2)
+    (6, 8), (8, 10), (10, 6), (7, 9), (9, 11), (11, 7),
+]
 G.add_nodes_from(range(num_nodes))
 G.add_edges_from(edges)
-pos = {0: (1, 1), 1: (0, 1), 2: (-1, 0.5), 3: (0, 0), 4: (1, 0)}
+pos = {
+    # Outer hexagon (radius 2)
+    0: (0.00, 2.00),
+    1: (1.73, 1.00),
+    2: (1.73, -1.00),
+    3: (0.00, -2.00),
+    4: (-1.73, -1.00),
+    5: (-1.73, 1.00),
+    # Inner hexagon (radius 0.8)
+    6: (0.00, 0.80),
+    7: (0.69, 0.40),
+    8: (0.69, -0.40),
+    9: (0.00, -0.80),
+    10: (-0.69, -0.40),
+    11: (-0.69, 0.40),
+}
 
-cut_solution = {(1,): 1.0, (2,): 1.0, (4,): 1.0}
-edge_colors = []
-
-
-def get_edge_colors(
-    graph, cut_solution, in_cut_color="r", not_in_cut_color="b"
-) -> tuple[list[str], list[str]]:
-    cut_set_1 = [node[0] for node, value in cut_solution.items() if value == 1.0]
-    cut_set_2 = [node for node in graph.nodes() if node not in cut_set_1]
-
-    edge_colors = []
-    for u, v, _ in graph.edges(data=True):
-        if (u in cut_set_1 and v in cut_set_2) or (u in cut_set_2 and v in cut_set_1):
-            edge_colors.append(in_cut_color)
-        else:
-            edge_colors.append(not_in_cut_color)
-    node_colors = ["#2696EB" if node in cut_set_1 else "#EA9b26" for node in G.nodes()]
-    return edge_colors, node_colors
-
-
-edge_colors, node_colors = get_edge_colors(G, cut_solution)
-fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-
-axes[0].set_title("Original Graph G=(V,E)")
-nx.draw_networkx(G, pos, ax=axes[0], node_size=500, width=3, with_labels=True)
-axes[1].set_title("MaxCut Solution Visualization")
-nx.draw_networkx(
-    G,
-    pos,
-    ax=axes[1],
-    node_size=500,
-    width=3,
-    with_labels=True,
-    edge_color=edge_colors,
-    node_color=node_colors,
-)
-
+fig, ax = plt.subplots(figsize=(5, 4))
+ax.set_title("Original Graph G=(V,E)")
+nx.draw_networkx(G, pos, ax=ax, node_size=500, width=3, with_labels=True)
 plt.tight_layout()
 plt.show()
 
 
 # %% [markdown]
-# ## Building the Mathematical Model
+# ## Constructing the Mathematical Model
 #
-# The MaxCut problem can be formulated as follows:
+# The Max-Cut problem can be formulated with the following equation:
 #
 # $$
 #   \max \quad \frac{1}{2} \sum_{(i,j) \in E} (1 - s_i s_j)
 # $$
 #
-# This expression uses Ising variables $ s \in \{ +1, -1 \} $. Since we want to formulate
-# with JijModeling's binary variables $ x \in \{ 0, 1 \} $, we use the following
-# conversion between Ising and binary variables:
+# Note that this equation is expressed using Ising variables $ s \in \{ +1, -1 \} $. In this case, we want to formulate it using the binary variables $ x \in \{ 0, 1 \} $ from JijModeling. Therefore, we perform the conversion between Ising variables and binary variables using the following equations:
 #
 # $$
 #     x_i = \frac{1 + s_i}{2} \quad \Rightarrow \quad s_i = 2x_i - 1
@@ -124,59 +106,25 @@ def _(problem: jm.DecoratedProblem):
 problem
 
 # %% [markdown]
-# ## Preparing Instance Data
-#
-# Next, we solve the MaxCut problem for the following graph. The data for the specific
-# problem to be solved is called instance data.
-
-# %%
-import networkx as nx
-import numpy as np
-from IPython.display import display, Latex
-
-G = nx.Graph()
-num_nodes = 5
-edges = [(0, 1), (0, 4), (1, 2), (1, 3), (2, 3), (3, 4)]
-G.add_nodes_from(range(num_nodes))
-G.add_edges_from(edges)
-
-weight_matrix = nx.to_numpy_array(G, nodelist=list(range(num_nodes)))
-
-plt.title("G=(V,E)")
-plt.plot(figsize=(5, 4))
-
-nx.draw_networkx(G, pos, node_size=500)
+# ## Creating a Compiled Instance
+# We compile the mathematical model together with the instance data using `problem.eval()`. This process yields an intermediate representation of the problem with the instance data substituted.
 
 # %%
 V = num_nodes
 E = edges
-
 data = {"V": V, "E": E}
-
-data
-
-# %% [markdown]
-# ## Creating a Compiled Instance
-# Using the formulation and instance data prepared above, we compile using
-# `problem.eval()`. This process yields an intermediate
-# representation of the problem with instance data substituted.
-
-# %%
 instance = problem.eval(data)
 
 # %% [markdown]
-# ## Converting Compiled Instance to QAOA Circuit and Hamiltonian
+# ## Converting Compiled Instance to QRAO31 Hamiltonian and VQE Circuit
 #
-# We generate the QAOA circuit and Hamiltonian from the compiled instance. The converter
-# used for this is `qm.optimization.qaoa.QAOAConverter`.
+# We generate the QRAO31-encoded Hamiltonian from the compiled Instance. The converter used for this is `QRAC31Converter` from `qamomile.optimization.qrao.qrao31`.
 #
-# Creating an instance of this class and using `ising_encode`, we can internally generate
-# an Ising Hamiltonian from the compiled instance. Parameters that occur during conversion
-# to QUBO can also be set here. If not set, default values are used.
+# QRAO31 uses Quantum Random Access Coding (QRAC) to encode up to 3 classical variables into a single qubit using different Pauli operators (X, Y, Z). This significantly reduces the number of qubits required compared to standard QAOA.
 #
-# Once the Ising Hamiltonian is generated, we can generate the QAOA quantum circuit and
-# Hamiltonian respectively. These can be created using the `get_qaoa_ansatz` and
-# `get_cost_hamiltonian` methods. Here we fix the QAOA depth $p$ to 3.
+# By creating an instance of this class, the QRAC-encoded Hamiltonian is internally generated from the compiled Instance. We can then:
+# - Use `get_cost_hamiltonian()` to obtain the cost Hamiltonian
+# - Build a VQE ansatz to search for the ground state of this Hamiltonian
 
 # %%
 import qamomile.circuit as qmc
@@ -185,14 +133,23 @@ from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
 
-# Create the QRAO31 Hamiltonian
+# Create the QRAO31 converter
 converter = QRAC31Converter(instance)
-hamiltonin = converter.get_cost_hamiltonian()
-
 
 # %% [markdown]
-# We will use VQE to search for the ground state of this Hamiltonian.
+# Let's inspect the cost Hamiltonian. Unlike QAOA which uses only Pauli-Z operators, the QRAC-encoded Hamiltonian uses mixed Pauli operators (X, Y, Z) due to the encoding of multiple variables per qubit.
+
+# %%
+hamiltonian = converter.get_cost_hamiltonian()
+hamiltonian
+
+# %% [markdown]
+# Now we build a hardware-efficient VQE ansatz to search for the ground state of this Hamiltonian.
+
+# %%
 from qamomile.circuit.algorithm.basic import ry_layer, rz_layer, cz_entangling_layer
+
+depth = 2
 
 
 @qmc.qkernel
@@ -207,29 +164,34 @@ def vqe(
     return qmc.expval(q, h)
 
 
-transpiler = QiskitTranspiler()
 executable = transpiler.transpile(
     vqe,
     bindings={
-        "n": hamiltonin.num_qubits,
-        "h": hamiltonin,
-        "depth": 2,
+        "n": hamiltonian.num_qubits,
+        "h": hamiltonian,
+        "depth": depth,
     },
     parameters=["theta"],
 )
 
 # %% [markdown]
+# Let's look at the generated quantum circuit.
+
+# %%
+qiskit_circuit = executable.get_first_circuit()
+qiskit_circuit.draw()
+
+# %% [markdown]
 # ## VQE Optimization
 #
-# We set up a variational optimization loop. Using scipy's COBYLA optimizer,
-# we find the optimal VQE parameters.
+# Now we set up the variational optimization loop. We use scipy's COBYLA optimizer
+# to find the optimal VQE parameters.
 
 # %%
 from scipy.optimize import minimize
 
 # Calculate parameter count
-depth = 2
-n_qubits = hamiltonin.num_qubits
+n_qubits = hamiltonian.num_qubits
 n_params = (
     2 * n_qubits * depth
 )  # ry_layer + rz_layer each consume n_qubits params per layer
@@ -286,6 +248,8 @@ print(f"Final energy: {result_opt.fun:.4f}")
 # ## Visualizing Optimization Results
 #
 # Let's visualize the convergence of the optimization process.
+#
+# > **Note:** The energy values are negative because Qamomile internally converts the maximization problem into a minimization problem.
 
 # %%
 plt.figure(figsize=(10, 5))
@@ -382,15 +346,32 @@ for i, bit in enumerate(binary_solution):
 # %% [markdown]
 # ## Visualizing the Solution
 #
-# Let's visualize the solution found by QRAO31 on the original graph.
+# Let's visualize the best solution found by QRAO31 on the original graph.
 
 # %%
 # Convert solution to dictionary format
 solution_dict = {(i,): float(bit) for i, bit in enumerate(binary_solution)}
 
 
-# Calculate energy
-# Energy calculation in spin representation
+def get_edge_colors(
+    graph, cut_solution, in_cut_color="r", not_in_cut_color="b"
+) -> tuple[list[str], list[str]]:
+    cut_set_1 = [node[0] for node, value in cut_solution.items() if value == 1.0]
+    cut_set_2 = [node for node in graph.nodes() if node not in cut_set_1]
+
+    edge_colors = []
+    for u, v, _ in graph.edges(data=True):
+        if (u in cut_set_1 and v in cut_set_2) or (u in cut_set_2 and v in cut_set_1):
+            edge_colors.append(in_cut_color)
+        else:
+            edge_colors.append(not_in_cut_color)
+    node_colors = [
+        "#2696EB" if node in cut_set_1 else "#EA9b26" for node in graph.nodes()
+    ]
+    return edge_colors, node_colors
+
+
+# Calculate number of cut edges
 def calculate_maxcut_value(graph, binary_solution):
     """Calculate the objective function value for the MaxCut problem"""
     cut_count = 0
@@ -402,11 +383,10 @@ def calculate_maxcut_value(graph, binary_solution):
 
 cut_value = calculate_maxcut_value(G, binary_solution)
 
-print(f"\nSolution found:")
+print(f"Solution found:")
 print(f"  Binary string: {''.join(map(str, binary_solution))}")
 print(f"  Number of cut edges: {cut_value}")
 
-# Visualize solution
 edge_colors, node_colors = get_edge_colors(G, solution_dict)
 
 fig, ax = plt.subplots(figsize=(6, 5))
@@ -427,20 +407,10 @@ plt.show()
 # %% [markdown]
 # ## Summary
 #
-# In this tutorial, we demonstrated how to solve the MaxCut problem with QRAO31 using Qamomile:
+# In this tutorial, we demonstrated how to solve the Max-Cut problem using QRAO31 with Qamomile:
 #
-# 1. **Problem formulation**: We formulated MaxCut as a QUBO/Ising problem using JijModeling
-# 2. **QRAO31 encoding**: `QRAC31Converter` encoded 3 variables into 1 qubit, reducing qubit count
-# 3. **VQE optimization**: We found optimal parameters using a hardware-efficient ansatz
+# 1. **Problem Formulation**: We formulated Max-Cut as an Ising problem using JijModeling
+# 2. **QRAO31 Encoding**: `QRAC31Converter` encoded 3 variables into 1 qubit, reducing qubit count
+# 3. **VQE Optimization**: We found optimal parameters using a hardware-efficient ansatz
 # 4. **Decoding**: We measured expectation values of Pauli operators and recovered original variable values with SignRounder
-# 5. **Solution analysis**: We analyzed the measurement results and visualized the solution
-#
-# Key advantages of using Qamomile for QRAO31:
-# - **Qubit reduction**: Can represent up to 3x more variables with fewer qubits
-# - **Automatic conversion from mathematical formulations**: Automatically generates QRAC-encoded Hamiltonian from JijModeling
-# - **Backend-agnostic**: Currently Qiskit; CUDA-Q and QURI Parts coming soon
-# - **Integration with classical optimization**: Easy integration with classical optimization libraries like scipy
-#
-# QRAO31 is a powerful technique for efficiently using the limited qubits available on NISQ devices.
-
-# %%
+# 5. **Solution Analysis**: We analyzed the measurement results and visualized the solution
