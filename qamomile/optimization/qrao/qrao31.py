@@ -5,20 +5,15 @@ problems into QRAC-encoded quantum circuits and handles result decoding.
 """
 
 from __future__ import annotations
-import typing
 
 import numpy as np
 
 import qamomile.observable as qm_o
-from qamomile.optimization.utils import is_close_zero
-from qamomile.optimization.binary_model import BinaryModel, VarType
 
 from .base import QRACConverterBase
 from .encoder import (
     GraphColoringQRACEncoder,
     PauliType,
-    _build_var_occupancy,
-    color_group_to_qrac_encode,
 )
 
 
@@ -46,39 +41,14 @@ class QRAC31Encoder(GraphColoringQRACEncoder):
     def num_qubits(self) -> int:
         return self.num_logical_qubits
 
-
-def qrac31_encode_ising(
-    ising: BinaryModel[typing.Literal[VarType.SPIN]], color_group: dict[int, list[int]]
-) -> tuple[qm_o.Hamiltonian, dict[int, qm_o.PauliOperator]]:
-    encoded_ope = color_group_to_qrac_encode(color_group)
-    var_occupancy = _build_var_occupancy(color_group)
-
-    hamiltonian = qm_o.Hamiltonian()
-    hamiltonian.constant = ising.constant
-
-    # Linear terms: √k_i * h_i * P_{f(i)}
-    for idx, coeff in ising.linear.items():
-        if is_close_zero(coeff):
-            continue
-        pauli = encoded_ope[idx]
-        k = var_occupancy[idx]
-        hamiltonian.add_term((pauli,), np.sqrt(k) * coeff)
-
-    # Quadratic terms: √k_i * √k_j * J_{ij} * P_{f(i)} * P_{f(j)}
-    for (i, j), coeff in ising.quad.items():
-        if is_close_zero(coeff):
-            continue
-
-        if i == j:
-            hamiltonian.constant += coeff
-            continue
-
-        pauli_i = encoded_ope[i]
-        pauli_j = encoded_ope[j]
-        ki, kj = var_occupancy[i], var_occupancy[j]
-        hamiltonian.add_term((pauli_i, pauli_j), np.sqrt(ki) * np.sqrt(kj) * coeff)
-
-    return hamiltonian, encoded_ope
+    def _get_operator_and_scale(
+        self,
+        pauli: qm_o.PauliOperator,
+        k: int,
+    ) -> tuple[qm_o.Hamiltonian, float]:
+        h = qm_o.Hamiltonian()
+        h.add_term((pauli,), 1.0)
+        return h, np.sqrt(k)
 
 
 class QRAC31Converter(QRACConverterBase[QRAC31Encoder]):
@@ -108,23 +78,18 @@ class QRAC31Converter(QRACConverterBase[QRAC31Encoder]):
         Returns:
             Hamiltonian representing the cost function in QRAC form.
         """
-        hamiltonian, pauli_encoding = qrac31_encode_ising(
-            self.spin_model, self.color_group
-        )
+        hamiltonian, pauli_encoding = self._encoder.encode_ising(self.spin_model)
         self.pauli_encoding = pauli_encoding
         return hamiltonian
 
     def get_encoded_pauli_list(self) -> list[qm_o.Hamiltonian]:
         """Get the encoded Pauli operators as a list of Hamiltonians.
 
-        This method returns the Pauli Operators which correspond to the each variable in the Ising model.
-
         Returns:
             list[Hamiltonian]: List of Hamiltonians for each variable's Pauli operator.
         """
-        # return the encoded Pauli operators as list
         ising = self.spin_model
-        num_qubits = len(self.color_group)
+        num_qubits = self._encoder.num_qubits
         zero_pauli = qm_o.Hamiltonian(num_qubits=num_qubits)
         pauli_operators = [zero_pauli] * ising.num_bits
         for idx, pauli in self.pauli_encoding.items():

@@ -5,11 +5,6 @@ import numpy as np
 import networkx as nx
 
 from qamomile.optimization.qrao import QRAC31Converter, QRAC31Encoder, SignRounder
-from qamomile.optimization.qrao.qrao31 import qrac31_encode_ising
-from qamomile.optimization.qrao.graph_coloring import (
-    greedy_graph_coloring,
-    check_linear_term,
-)
 from qamomile.optimization.binary_model import binary, BinaryExpr, BinaryModel, VarType
 import qamomile.observable as qm_o
 
@@ -161,7 +156,7 @@ class TestHUBORejection:
 
 
 class TestQRAC31EncodeIsingCoefficients:
-    """Tests for exact Hamiltonian coefficient verification using qrac31_encode_ising."""
+    """Tests for exact Hamiltonian coefficient verification using encoder.encode_ising."""
 
     def test_linear_term_with_graph_coloring(self):
         """Test exact coefficients for Ising model with linear terms added via graph coloring."""
@@ -177,15 +172,8 @@ class TestQRAC31EncodeIsingCoefficients:
             constant=6.0,
         )
 
-        max_color_group_size = 3
-        _, color_group = greedy_graph_coloring(
-            ising.quad.keys(), max_color_group_size=max_color_group_size
-        )
-        color_group = check_linear_term(
-            color_group, list(ising.linear.keys()), max_color_group_size
-        )
-
-        qrac_hamiltonian, encoding = qrac31_encode_ising(ising, color_group)
+        encoder = QRAC31Encoder(ising)
+        qrac_hamiltonian, encoding = encoder.encode_ising(ising)
         num_terms = len(ising.linear) + len(ising.quad)
 
         # color_group: {0:[0], 1:[1,2], 2:[3]}
@@ -217,15 +205,8 @@ class TestQRAC31EncodeIsingCoefficients:
             constant=6.0,
         )
 
-        max_color_group_size = 3
-        _, color_group = greedy_graph_coloring(
-            ising.quad.keys(), max_color_group_size=max_color_group_size
-        )
-        color_group = check_linear_term(
-            color_group, list(ising.linear.keys()), max_color_group_size
-        )
-
-        qrac_hamiltonian, encoding = qrac31_encode_ising(ising, color_group)
+        encoder = QRAC31Encoder(ising)
+        qrac_hamiltonian, encoding = encoder.encode_ising(ising)
         num_terms = len(ising.linear) + len(ising.quad)
 
         # color_group: {0:[0], 1:[1,2], 2:[3,4,5], 3:[6]}
@@ -258,15 +239,8 @@ class TestQRAC31EncodeIsingCoefficients:
             constant=6.0,
         )
 
-        max_color_group_size = 3
-        _, color_group = greedy_graph_coloring(
-            ising.quad.keys(), max_color_group_size=max_color_group_size
-        )
-        color_group = check_linear_term(
-            color_group, list(ising.linear.keys()), max_color_group_size
-        )
-
-        qrac_hamiltonian, encoding = qrac31_encode_ising(ising, color_group)
+        encoder = QRAC31Encoder(ising)
+        qrac_hamiltonian, encoding = encoder.encode_ising(ising)
         num_terms = len(ising.linear) + len(ising.quad)
 
         # color_group: {0:[0,1,2], 1:[3]}
@@ -286,7 +260,9 @@ class TestQRAC31EncodeIsingCoefficients:
 class TestQRAC31RandomGraphs:
     """Property-based tests with random Erdős–Rényi graphs."""
 
-    @pytest.mark.parametrize("seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999])
+    @pytest.mark.parametrize(
+        "seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+    )
     def test_random_graph(self, seed):
         rng = np.random.default_rng(seed)
         n = int(rng.integers(4, 15))

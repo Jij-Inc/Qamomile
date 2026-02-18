@@ -19,6 +19,7 @@ from typing import Literal
 
 import qamomile.observable as qm_o
 from qamomile.optimization.binary_model import BinaryModel, VarType
+from qamomile.optimization.utils import is_close_zero
 from .graph_coloring import greedy_graph_coloring, check_linear_term
 
 
@@ -179,3 +180,65 @@ class GraphColoringQRACEncoder(BaseQRACEncoder, abc.ABC):
     def num_logical_qubits(self) -> int:
         """Number of logical qubits (color groups) after QRAC encoding."""
         return len(self._color_group)
+
+    def encode_ising(
+        self,
+        ising: BinaryModel,
+    ) -> tuple[qm_o.Hamiltonian, dict[int, qm_o.PauliOperator]]:
+        """Encode a spin model into a relaxed QRAC Hamiltonian.
+
+        Uses the encoding determined by ``_perform_encoding`` and delegates
+        operator/scale computation to ``_get_operator_and_scale``.
+
+        Args:
+            ising: BinaryModel in SPIN vartype.
+
+        Returns:
+            Tuple of (relaxed Hamiltonian, encoding map).
+        """
+        encoded_ope = color_group_to_qrac_encode(self._color_group)
+        var_occupancy = _build_var_occupancy(self._color_group)
+
+        hamiltonian = qm_o.Hamiltonian()
+        hamiltonian.constant = ising.constant
+
+        for idx, coeff in ising.linear.items():
+            if is_close_zero(coeff):
+                continue
+            op, scale = self._get_operator_and_scale(
+                encoded_ope[idx], var_occupancy[idx]
+            )
+            hamiltonian += (coeff * scale) * op
+
+        for (i, j), coeff in ising.quad.items():
+            if is_close_zero(coeff):
+                continue
+            if i == j:
+                hamiltonian.constant += coeff
+                continue
+            op_i, scale_i = self._get_operator_and_scale(
+                encoded_ope[i], var_occupancy[i]
+            )
+            op_j, scale_j = self._get_operator_and_scale(
+                encoded_ope[j], var_occupancy[j]
+            )
+            hamiltonian += (coeff * scale_i * scale_j) * (op_i * op_j)
+
+        return hamiltonian, encoded_ope
+
+    @abc.abstractmethod
+    def _get_operator_and_scale(
+        self,
+        pauli: qm_o.PauliOperator,
+        k: int,
+    ) -> tuple[qm_o.Hamiltonian, float]:
+        """Return the operator and scaling factor for a variable.
+
+        Args:
+            pauli: PauliOperator assigned to this variable.
+            k: Number of variables sharing this qubit (occupancy).
+
+        Returns:
+            Tuple of (operator Hamiltonian, scale factor).
+        """
+        ...

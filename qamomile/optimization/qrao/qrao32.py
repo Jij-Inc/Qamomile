@@ -9,20 +9,16 @@ on 2 physical qubits. Groups with k=1 variable fall back to a regular
 """
 
 from __future__ import annotations
-import typing
 
 import numpy as np
 
 import qamomile.observable as qm_o
-from qamomile.optimization.utils import is_close_zero
-from qamomile.optimization.binary_model import BinaryModel, VarType
 
 from .base import QRACConverterBase
 from .encoder import (
     GraphColoringQRACEncoder,
     PauliType,
     _build_var_occupancy,
-    color_group_to_qrac_encode,
 )
 
 
@@ -65,11 +61,22 @@ class QRAC32Encoder(GraphColoringQRACEncoder):
     max_color_group_size: int = 3
     paulis: list[PauliType] = ["Z", "X", "Y"]
 
+    def _perform_encoding(self) -> None:
+        super()._perform_encoding()
+        self._color_to_phys, _ = build_physical_qubit_map(self._color_group)
+
     @property
     def num_qubits(self) -> int:
         """Number of physical qubits (1 per k=1 group, 2 per k>=2 group)."""
         _, total = build_physical_qubit_map(self._color_group)
         return total
+
+    def _get_operator_and_scale(
+        self,
+        pauli: qm_o.PauliOperator,
+        k: int,
+    ) -> tuple[qm_o.Hamiltonian, float]:
+        return _make_operator(pauli, k, self._color_to_phys)
 
 
 def create_x_prime(idx: int) -> qm_o.Hamiltonian:
@@ -175,51 +182,6 @@ def _make_operator(
         return create_prime_operator(pauli, phys_start), np.sqrt(2 * k)
 
 
-def qrac32_encode_ising(
-    ising: BinaryModel[typing.Literal[VarType.SPIN]],
-    color_group: dict[int, list[int]],
-) -> tuple[qm_o.Hamiltonian, dict[int, qm_o.PauliOperator]]:
-    """Encode a spin model using (3,2,p)-QRAC.
-
-    Color groups with k=1 variable use a single physical qubit with a
-    regular Pauli operator (scale=1). Groups with k>=2 variables use
-    2 physical qubits with prime operators (scale=√(2k)).
-
-    Args:
-        ising: BinaryModel in SPIN vartype.
-        color_group: Mapping from qubit index to list of variable indices.
-
-    Returns:
-        Tuple of (relaxed Hamiltonian, encoding map).
-    """
-    encoded_ope = color_group_to_qrac_encode(color_group)
-    var_occupancy = _build_var_occupancy(color_group)
-    color_to_phys, _ = build_physical_qubit_map(color_group)
-
-    hamiltonian = qm_o.Hamiltonian()
-    hamiltonian.constant = ising.constant
-
-    for idx, coeff in ising.linear.items():
-        if is_close_zero(coeff):
-            continue
-        pauli = encoded_ope[idx]
-        k = var_occupancy[idx]
-        op, scale = _make_operator(pauli, k, color_to_phys)
-        hamiltonian += scale * coeff * op
-
-    for (i, j), coeff in ising.quad.items():
-        if is_close_zero(coeff):
-            continue
-        if i == j:
-            hamiltonian.constant += coeff
-            continue
-        op_i, scale_i = _make_operator(encoded_ope[i], var_occupancy[i], color_to_phys)
-        op_j, scale_j = _make_operator(encoded_ope[j], var_occupancy[j], color_to_phys)
-        hamiltonian += scale_i * scale_j * coeff * op_i * op_j
-
-    return hamiltonian, encoded_ope
-
-
 class QRAC32Converter(QRACConverterBase[QRAC32Encoder]):
     """QRAC(3,2,p) Converter for Quantum Random Access Optimization.
 
@@ -250,9 +212,7 @@ class QRAC32Converter(QRACConverterBase[QRAC32Encoder]):
         Returns:
             Hamiltonian representing the cost function in QRAC form.
         """
-        hamiltonian, pauli_encoding = qrac32_encode_ising(
-            self.spin_model, self.color_group
-        )
+        hamiltonian, pauli_encoding = self._encoder.encode_ising(self.spin_model)
         self.pauli_encoding = pauli_encoding
         return hamiltonian
 
