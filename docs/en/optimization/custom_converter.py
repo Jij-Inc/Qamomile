@@ -284,6 +284,7 @@ executable = transpiler.transpile(
 print("\nStep 4: Circuit transpiled")
 
 # Step 5: Execute with some initial parameters
+np.random.seed(901)
 theta_init = np.random.uniform(0, np.pi, size=n_qubits)
 job = executable.run(
     transpiler.executor(),
@@ -314,7 +315,6 @@ def objective(params, transpiler, executable):
     return energy
 
 
-np.random.seed(42)
 init_params = np.random.uniform(0, np.pi, size=n_qubits)
 
 energy_history = []

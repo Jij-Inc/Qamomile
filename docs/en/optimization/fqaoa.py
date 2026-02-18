@@ -168,7 +168,7 @@ def objective_function(params, transpiler, executable, converter, shots=1024):
 
 
 # %%
-np.random.seed(42)
+np.random.seed(901)
 
 init_params = np.concatenate(
     [

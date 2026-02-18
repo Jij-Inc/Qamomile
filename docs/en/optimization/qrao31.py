@@ -282,7 +282,7 @@ def objective_function(params, executable):
 
 # %%
 # Run optimization
-np.random.seed(42)
+np.random.seed(901)
 
 # Initial parameters
 init_params = np.random.uniform(0, 2 * np.pi, size=n_params)

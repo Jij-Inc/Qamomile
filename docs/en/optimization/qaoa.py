@@ -184,7 +184,7 @@ def objective_function(params, transpiler, executable, converter, shots=1024):
 
 # %%
 # Run optimization
-np.random.seed(42)
+np.random.seed(901)
 
 # Initial parameters: gamma in [0, 2π], beta in [0, π]
 init_params = np.concatenate(

@@ -228,7 +228,7 @@ plt.show()
 # We generate a simple 2D binary classification problem: two clusters of points.
 
 # %%
-np.random.seed(42)
+np.random.seed(901)
 n_samples = 15
 
 # Class 0: cluster centered at (-0.5, 0)
@@ -393,7 +393,6 @@ def classification_loss(params_flat, executable, transpiler, X_train, y_train):
 from scipy.optimize import minimize
 
 # Initial random parameters (4 values for 2 layers × 2 qubits)
-np.random.seed(42)
 n_params = 4
 init_params = np.random.uniform(-np.pi, np.pi, size=n_params)
 
