@@ -48,6 +48,10 @@ project:
 
 
 
+
+
+
+
     - title: API Reference
       file: api/index.md
       children:
@@ -88,6 +92,7 @@ site:
   title: Qamomile Documentation
   options:
     logo: ../assets/qamomile_logo.png
+    style: ../assets/custom-theme.css
   nav:
     - title: GitHub
       url: https://github.com/Jij-Inc/Qamomile

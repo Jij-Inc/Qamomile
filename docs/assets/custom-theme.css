@@ -1,0 +1,85 @@
+/* Qamomile Chamomile Theme — Override Tailwind blue with warm amber
+ *
+ * Color palette derived from circuit visualization style (style.py):
+ *   Gate face color: #E8B878 (Warm honey amber / chamomile tea)
+ *
+ * Blue → Chamomile mapping:
+ *   50:  #FDF8F0    100: #F9EDD8    200: #F0DCC0    300: #E8C898
+ *   400: #D4A05C    500: #C08A40    600: #A87430    700: #8B5E25
+ *   800: #6E4A1C    900: #5A3A15
+ */
+
+/* === Text colors === */
+.text-blue-50  { color: #FDF8F0 !important; }
+.text-blue-200 { color: #F0DCC0 !important; }
+.text-blue-400 { color: #D4A05C !important; }
+.text-blue-500 { color: #C08A40 !important; }
+.text-blue-600 { color: #A87430 !important; }
+.text-blue-700 { color: #8B5E25 !important; }
+.text-blue-800 { color: #6E4A1C !important; }
+.text-blue-900 { color: #5A3A15 !important; }
+
+/* === Background colors === */
+.bg-blue-50 { background-color: #FDF8F0 !important; }
+.bg-blue-50\/80 { background-color: rgba(253, 248, 240, 0.8) !important; }
+.bg-blue-100 { background-color: #F9EDD8 !important; }
+.bg-blue-300\/30 { background-color: rgba(232, 200, 152, 0.19) !important; }
+.bg-blue-500 { background-color: #C08A40 !important; }
+.bg-blue-600 { background-color: #A87430 !important; }
+.bg-blue-800 { background-color: #6E4A1C !important; }
+.bg-blue-900 { background-color: #5A3A15 !important; }
+
+/* === Border colors === */
+.border-blue-200 { border-color: #F0DCC0 !important; }
+.border-blue-400 { border-color: #D4A05C !important; }
+.border-blue-500 { border-color: #C08A40 !important; }
+.border-blue-500\/60 { border-color: rgba(192, 138, 64, 0.6) !important; }
+.border-blue-600 { border-color: #A87430 !important; }
+.border-blue-800 { border-color: #6E4A1C !important; }
+.border-b-blue-600 { border-bottom-color: #A87430 !important; }
+.border-l-blue-400 { border-left-color: #D4A05C !important; }
+.border-l-blue-500 { border-left-color: #C08A40 !important; }
+
+/* === Ring, outline, fill === */
+.ring-blue-500 { --tw-ring-color: #C08A40 !important; }
+.outline-blue-200 { outline-color: #F0DCC0 !important; }
+.fill-blue-900 { fill: #5A3A15 !important; }
+
+/* === Hover states === */
+.hover\:border-blue-500:hover { border-color: #C08A40 !important; }
+.hover\:border-blue-600:hover { border-color: #A87430 !important; }
+.hover\:border-l-blue-500:hover { border-left-color: #C08A40 !important; }
+.hover\:bg-blue-100:hover { background-color: #F9EDD8 !important; }
+.hover\:bg-blue-800:hover { background-color: #6E4A1C !important; }
+.hover\:text-blue-400:hover { color: #D4A05C !important; }
+.hover\:text-blue-500:hover { color: #C08A40 !important; }
+.hover\:text-blue-600:hover { color: #A87430 !important; }
+.hover\:text-blue-700:hover { color: #8B5E25 !important; }
+.hover\:ring-blue-500:hover { --tw-ring-color: #C08A40 !important; }
+
+/* === Focus states === */
+.focus\:border-blue-500:focus { border-color: #C08A40 !important; }
+.focus\:ring-blue-500:focus { --tw-ring-color: #C08A40 !important; }
+.focus-visible\:ring-blue-500:focus-visible { --tw-ring-color: #C08A40 !important; }
+
+/* === Group selected state === */
+.group[aria-selected=true] .group-aria-selected\:bg-blue-600 {
+  background-color: #A87430 !important;
+}
+
+/* === Dark mode === */
+.dark\:border-blue-500\/60:is(.dark *) { border-color: rgba(192, 138, 64, 0.6) !important; }
+.dark\:border-blue-800:is(.dark *) { border-color: #6E4A1C !important; }
+.dark\:border-l-blue-400:is(.dark *) { border-left-color: #D4A05C !important; }
+.dark\:bg-blue-900\/30:is(.dark *) { background-color: rgba(90, 58, 21, 0.19) !important; }
+.dark\:text-blue-50:is(.dark *) { color: #FDF8F0 !important; }
+.dark\:text-blue-200:is(.dark *) { color: #F0DCC0 !important; }
+.dark\:text-blue-400:is(.dark *) { color: #D4A05C !important; }
+.dark\:text-blue-500:is(.dark *) { color: #C08A40 !important; }
+.dark\:hover\:border-blue-400:hover:is(.dark *) { border-color: #D4A05C !important; }
+.dark\:hover\:border-blue-500:hover:is(.dark *) { border-color: #C08A40 !important; }
+.dark\:hover\:bg-blue-800:hover:is(.dark *) { background-color: #6E4A1C !important; }
+.dark\:hover\:text-blue-400:hover:is(.dark *) { color: #D4A05C !important; }
+.dark\:hover\:ring-blue-500:hover:is(.dark *) { --tw-ring-color: #C08A40 !important; }
+.dark\:focus\:border-blue-500:focus:is(.dark *) { border-color: #C08A40 !important; }
+.dark\:focus\:ring-blue-500:focus:is(.dark *) { --tw-ring-color: #C08A40 !important; }
