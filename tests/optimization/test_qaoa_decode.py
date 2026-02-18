@@ -73,18 +73,20 @@ def test_simple_qaoa_decode():
 
 
 def test_qaoa_decode():
-    x = jm.BinaryVar("x")
-    y = jm.BinaryVar("y")
-    z = jm.BinaryVar("z")
-
     problem = jm.Problem("sample")
-    problem += x * y
-    problem += -1 * y * z
-    problem += x
-    problem += -0.1*z
 
-    interpreter = jm.Interpreter({})
-    instance = interpreter.eval_problem(problem)
+    @problem.update
+    def _(problem: jm.DecoratedProblem):
+        x = problem.BinaryVar()
+        y = problem.BinaryVar()
+        z = problem.BinaryVar()
+
+        problem += x * y
+        problem += -1 * y * z
+        problem += x
+        problem += -0.1 * z
+
+    instance = problem.eval({})
 
     converter = QAOAConverter(instance)
 
