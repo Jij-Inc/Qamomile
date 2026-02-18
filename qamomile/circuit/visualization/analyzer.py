@@ -2752,11 +2752,13 @@ class CircuitAnalyzer:
                 return f"$\\{base}{rest}$"
             return name  # plain text, e.g., "phis[i]"
 
-        # Handle underscore notation (e.g., "theta_2", "x_2")
+        # Handle underscore notation (e.g., "theta_2", "beta_a_b_c")
         if "_" in name:
             parts = name.split("_", 1)
             if parts[0] in _TEX_SYMBOLS:
-                return f"$\\{parts[0]}_{{{parts[1]}}}$"
+                # Escape underscores in subscript to avoid double-subscript error
+                safe_subscript = parts[1].replace("_", r"\_")
+                return f"$\\{parts[0]}_{{{safe_subscript}}}$"
             return name  # plain text, e.g., "x_2"
 
         # Simple name

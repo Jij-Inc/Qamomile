@@ -1,5 +1,7 @@
 import io
 
+import pytest
+
 import qamomile.circuit as qm
 
 
@@ -9,6 +11,7 @@ class TestDoubleSubscriptRegression:
     See: .claude/workspace/reviewed/double_subscript_error_in_greek_parameter_names.md
     """
 
+    @pytest.mark.mpl_image_compare(style="default")
     def test_greek_param_with_multiple_underscores(self):
         """Greek letter parameter with multiple underscores should not raise."""
 
@@ -18,10 +21,11 @@ class TestDoubleSubscriptRegression:
             return q
 
         fig = circuit.draw()
-        assert fig is not None
-        # Force matplotlib to actually parse the TeX labels
+        # Force TeX parsing even without --mpl (e.g. in CI)
         fig.savefig(io.BytesIO(), format="png")
+        return fig
 
+    @pytest.mark.mpl_image_compare(style="default")
     def test_greek_param_with_three_underscores(self):
         """gamma_x_y_z should also render without error."""
 
@@ -31,6 +35,6 @@ class TestDoubleSubscriptRegression:
             return q
 
         fig = circuit.draw()
-        assert fig is not None
-        # Force matplotlib to actually parse the TeX labels
+        # Force TeX parsing even without --mpl (e.g. in CI)
         fig.savefig(io.BytesIO(), format="png")
+        return fig

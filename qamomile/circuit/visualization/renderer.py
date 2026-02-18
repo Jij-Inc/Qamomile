@@ -7,6 +7,7 @@ drawing operations for circuit visualization.
 from __future__ import annotations
 
 import io
+import math
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
@@ -1289,9 +1290,11 @@ class MatplotlibRenderer:
         )
         ax.add_patch(arc)
 
-        # Draw needle (simple line pointing up-right from arc center)
-        needle_end_x = x_pos + arc_radius * 0.55
-        needle_end_y = y + arc_radius * 0.35
+        # Draw needle (line pointing up-right from arc center, extending beyond arc)
+        needle_angle = math.radians(50)
+        needle_length = arc_radius * 1.3
+        needle_end_x = x_pos + needle_length * math.cos(needle_angle)
+        needle_end_y = arc_center_y + needle_length * math.sin(needle_angle)
         ax.plot(
             [x_pos, needle_end_x],
             [arc_center_y, needle_end_y],
