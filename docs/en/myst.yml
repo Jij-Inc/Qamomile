@@ -19,23 +19,29 @@ project:
     - file: index.md
     - title: Tutorials
       children:
-        - file: tutorial/01_introduction.ipynb
-        - file: tutorial/02_type_system.ipynb
-        - file: tutorial/03_gates.ipynb
-        - file: tutorial/04_superposition_entanglement.ipynb
-        - file: tutorial/05_stdlib.ipynb
-        - file: tutorial/06_composite_gate.ipynb
-        - file: tutorial/07_first_algorithm.ipynb
-        - file: tutorial/08_parametric_circuits.ipynb
-        - file: tutorial/09_resource_estimation.ipynb
-        - file: tutorial/10_transpile.ipynb
-        - file: tutorial/11_custom_executor.ipynb
-        - title: Optimization
+        - title: Foundations
           children:
-            - file: optimization/qaoa.ipynb
-            - file: optimization/fqaoa.ipynb
-            - file: optimization/qrao31.ipynb
-            - file: optimization/custom_converter.ipynb
+            - file: tutorial/01_introduction.ipynb
+            - file: tutorial/02_type_system.ipynb
+            - file: tutorial/03_gates.ipynb
+            - file: tutorial/04_superposition_entanglement.ipynb
+        - title: Standard Library & Algorithms
+          children:
+            - file: tutorial/05_stdlib.ipynb
+            - file: tutorial/06_composite_gate.ipynb
+            - file: tutorial/07_first_algorithm.ipynb
+            - file: tutorial/08_parametric_circuits.ipynb
+        - title: Advanced Topics
+          children:
+            - file: tutorial/09_resource_estimation.ipynb
+            - file: tutorial/10_transpile.ipynb
+            - file: tutorial/11_custom_executor.ipynb
+    - title: Optimization
+      children:
+        - file: optimization/qaoa.ipynb
+        - file: optimization/fqaoa.ipynb
+        - file: optimization/qrao31.ipynb
+        - file: optimization/custom_converter.ipynb
 
 # --- API Reference (auto-generated) ---
     - title: API Reference
