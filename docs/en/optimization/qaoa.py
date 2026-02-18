@@ -137,19 +137,14 @@ plt.plot(figsize=(5, 4))
 
 nx.draw_networkx(G, pos, node_size=500)
 
-# %%
-V = num_nodes
-E = edges
-
-data = {"V": V, "E": E}
-
-data
-
 # %% [markdown]
 # ## Creating a Compiled Instance
 # We compile the mathematical model together with the instance data using `problem.eval()`. This process yields an intermediate representation of the problem with the instance data substituted.
 
 # %%
+V = num_nodes
+E = edges
+data = {"V": V, "E": E}
 instance = problem.eval(data)
 
 # %% [markdown]
@@ -185,41 +180,6 @@ if qiskit_circuit is not None:
     print(f"Circuit depth: {qiskit_circuit.depth()}")
 
 # %% [markdown]
-# ## Energy Calculation
-#
-# To optimize QAOA, we need to calculate the expected energy from measurement results.
-# The converter provides access to the Ising model, which we use to calculate energy.
-
-
-# %%
-def calculate_ising_energy(bitstring: list[int], ising_model) -> float:
-    """
-    Calculate the Ising model energy from a bitstring.
-
-    Converts bitstring z_i ∈ {0, 1} to spin s_i ∈ {-1, +1}.
-    Convention: s_i = 1 - 2*z_i (z_i=0 → s_i=+1, z_i=1 → s_i=-1)
-    """
-    # Convert bits to spins
-    spins = [1 - 2 * b for b in bitstring]
-    return ising_model.calc_energy(spins)
-
-
-def calculate_expectation_value(sample_result, ising_model) -> float:
-    """
-    Calculate the expected energy value from measurement results.
-    """
-    total_energy = 0.0
-    total_counts = 0
-
-    for bitstring, count in sample_result.results:
-        energy = calculate_ising_energy(bitstring, ising_model)
-        total_energy += energy * count
-        total_counts += count
-
-    return total_energy / total_counts
-
-
-# %% [markdown]
 # ## VQE Optimization
 #
 # Now we set up the variational optimization loop. We use scipy's COBYLA optimizer
@@ -232,7 +192,7 @@ from scipy.optimize import minimize
 energy_history = []
 
 
-def objective_function(params, transpiler, executable, ising_model, shots=1024):
+def objective_function(params, transpiler, executable, converter, shots=1024):
     """
     Objective function for VQE optimization.
 
@@ -240,7 +200,7 @@ def objective_function(params, transpiler, executable, ising_model, shots=1024):
         params: Concatenated [gammas, betas] parameters
         transpiler: Quantum transpiler
         executable: Compiled QAOA circuit
-        ising_model: Ising model for energy calculation
+        converter: QAOAConverter for decoding results
         shots: Number of measurement shots
 
     Returns:
@@ -260,7 +220,8 @@ def objective_function(params, transpiler, executable, ising_model, shots=1024):
     )
     result = job.result()
 
-    energy = calculate_expectation_value(result, ising_model)
+    sampleset = converter.decode(result)
+    energy = sampleset.energy_mean()
     energy_history.append(energy)
 
     return energy
@@ -288,7 +249,7 @@ print(f"Initial parameters: gammas={init_params[:p]}, betas={init_params[p:]}")
 result_opt = minimize(
     objective_function,
     init_params,
-    args=(transpiler, executable, converter.spin_model),
+    args=(transpiler, executable, converter),
     method="COBYLA",
     options={"maxiter": 100, "disp": True},
 )
@@ -333,18 +294,19 @@ job_final = executable.sample(
 )
 result_final = job_final.result()
 
-# Sort results by energy
-results_with_energy = []
-for bitstring, count in result_final.results:
-    energy = calculate_ising_energy(bitstring, converter.spin_model)
-    results_with_energy.append((bitstring, count, energy))
+# Decode results using the converter
+sampleset = converter.decode(result_final)
 
-results_with_energy.sort(key=lambda x: x[2])
+# Sort by energy
+sorted_indices = np.argsort(sampleset.energy)
 
 print("Measurement results (sorted by energy):")
 print("-" * 60)
-for bitstring, count, energy in results_with_energy[:10]:
-    bitstring_str = "".join(map(str, bitstring))
+for idx in sorted_indices[:10]:
+    sample = sampleset.samples[idx]
+    count = sampleset.num_occurrences[idx]
+    energy = sampleset.energy[idx]
+    bitstring_str = "".join(str(sample[i]) for i in range(num_nodes))
     probability = count / 4096
     print(
         f"  {bitstring_str}: count={count:4d}, probability={probability:.3f}, energy={energy:.4f}"
@@ -357,11 +319,11 @@ for bitstring, count, energy in results_with_energy[:10]:
 
 # %%
 # Get the best solution (lowest energy)
-best_bitstring, best_count, best_energy = results_with_energy[0]
-best_solution = {(i,): float(bit) for i, bit in enumerate(best_bitstring)}
+best_sample, best_energy, best_count = sampleset.lowest()
+best_solution = {(i,): float(best_sample[i]) for i in range(num_nodes)}
 
 print("\nBest solution found:")
-print(f"  Bitstring: {''.join(map(str, best_bitstring))}")
+print(f"  Bitstring: {''.join(str(best_sample[i]) for i in range(num_nodes))}")
 print(f"  Energy: {best_energy:.4f}")
 
 # Visualize the solution
