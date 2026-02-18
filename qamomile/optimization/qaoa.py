@@ -13,6 +13,7 @@ from qamomile.circuit.transpiler.executable import ExecutableProgram
 from .converter import MathematicalProblemConverter
 from .utils import is_close_zero
 
+
 class QAOAConverter(MathematicalProblemConverter):
     """Converter for Quantum Approximate Optimization Algorithm (QAOA).
 
@@ -61,12 +62,7 @@ class QAOAConverter(MathematicalProblemConverter):
         hamiltonian.constant = self.spin_model.constant
         return hamiltonian
 
-    def transpile(
-        self,
-        transpiler: Transpiler,
-        *,
-        p: int
-    ) -> ExecutableProgram:
+    def transpile(self, transpiler: Transpiler, *, p: int) -> ExecutableProgram:
         """Transpile the model into an executable QAOA circuit.
 
         Dispatches to the quadratic-only fast path when no higher-order terms
@@ -99,6 +95,9 @@ class QAOAConverter(MathematicalProblemConverter):
         Returns:
             ExecutableProgram: The compiled circuit program.
         """
+
+        # NOTE: @qkernel is defined inline (not at module level) because
+        # transpile() binds instance-specific data at call time.
         @qmc.qkernel
         def qaoa_sampling(
             p: qmc.UInt,
@@ -141,9 +140,13 @@ class QAOAConverter(MathematicalProblemConverter):
         Returns:
             ExecutableProgram: The compiled circuit program.
         """
-        higher_terms = sorted(self.spin_model.higher.items(), key=lambda t: t[0])
+        # NOTE: @qkernel functions below are defined inline (not at module level)
+        # because they capture `higher_terms` via the `_apply_higher` closure.
+        higher_terms = sorted(self.spin_model.higher.items())
 
-        def _apply_higher(q, gamma):
+        def _apply_higher(
+            q: qmc.Vector[qmc.Qubit], gamma: qmc.Float
+        ) -> qmc.Vector[qmc.Qubit]:
             for indices, coeff in higher_terms:
                 q = apply_phase_gadget(q, list(indices), coeff * gamma)
             return q

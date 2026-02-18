@@ -183,7 +183,7 @@ def test_hubo_duplicate_indices_accumulated():
     model = BinaryModel.from_hubo(hubo)
 
     # Both should be accumulated into (0,1,2) with coefficient 1.5
-    assert model.higher[(0, 1, 2)] == 1.5
+    assert np.isclose(model.higher[(0, 1, 2)], 1.5)
 
 
 @qmc.qkernel
@@ -214,6 +214,13 @@ def _gadget_k3(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     return qmc.measure(q)
 
 
+@qmc.qkernel
+def _gadget_k5(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(n, name="q")
+    q = apply_phase_gadget(q, [0, 1, 2, 3, 4], 0.5)
+    return qmc.measure(q)
+
+
 @pytest.mark.parametrize(
     "kernel,n_qubits",
     [
@@ -221,8 +228,9 @@ def _gadget_k3(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
         (_gadget_k1, 1),
         (_gadget_k2, 2),
         (_gadget_k3, 3),
+        (_gadget_k5, 5),
     ],
-    ids=["k=0", "k=1", "k=2", "k=3"],
+    ids=["k=0", "k=1", "k=2", "k=3", "k=5"],
 )
 def test_apply_phase_gadget_branches(kernel, n_qubits):
     """Verify apply_phase_gadget transpiles for all k-body branch cases."""
@@ -264,6 +272,8 @@ def test_hubo_energy_optimization():
         best_occurrence = sampleset.num_occurrences[argmin_index]
         return best_energy * best_occurrence
 
+    # Starting point chosen empirically to converge to the global minimum
+    # on a statevector simulator within the COBYLA iteration budget.
     x0 = [2.6, 0.11, 0.52, 0.45]
     bounds = [(0, np.pi), (0, np.pi), (0, np.pi / 2), (0, np.pi / 2)]
     res = scipy.optimize.minimize(
@@ -281,4 +291,51 @@ def test_hubo_energy_optimization():
 
     best_sample, best_energy, _ = binary_result.lowest()
     assert best_sample == {0: 1, 1: 1, 2: 1}
-    assert abs(best_energy - (-5.0)) < 1e-6
+    assert np.isclose(best_energy, -5.0, atol=1e-6)
+
+
+# --- Edge-case and negative tests (P2-1) ---
+
+
+def test_empty_hubo_produces_trivial_hamiltonian():
+    """Verify that an empty HUBO dict produces a Hamiltonian with no terms."""
+    model = BinaryModel.from_hubo({})
+    converter = QAOAConverter(model)
+    hamiltonian = converter.get_cost_hamiltonian()
+
+    assert len(hamiltonian.terms) == 0
+
+
+def test_empty_hubo_transpiles_via_quadratic_path():
+    """Verify that an empty HUBO model transpiles through the quadratic path."""
+    model = BinaryModel.from_hubo({(0,): 1.0})
+    converter = QAOAConverter(model)
+
+    # No higher-order terms — should use quadratic path
+    assert not converter.spin_model.higher
+
+    transpiler = QiskitTranspiler()
+    executable = converter.transpile(transpiler, p=1)
+
+    bindings = {"gammas": [0.5], "betas": [0.3]}
+    job = executable.sample(transpiler.executor(), shots=10, bindings=bindings)
+    result = job.result()
+    assert len(result.results) > 0
+
+
+def test_single_higher_order_term():
+    """Verify a HUBO model with only one higher-order term and nothing else."""
+    hubo = {(0, 1, 2): 2.0}
+    model = BinaryModel.from_hubo(hubo)
+    converter = QAOAConverter(model)
+    hamiltonian = converter.get_cost_hamiltonian()
+
+    higher_terms = [t for t in hamiltonian.terms if len(t) == 3]
+    assert len(higher_terms) >= 1
+
+    transpiler = QiskitTranspiler()
+    executable = converter.transpile(transpiler, p=1)
+    bindings = {"gammas": [0.5], "betas": [0.3]}
+    job = executable.sample(transpiler.executor(), shots=10, bindings=bindings)
+    result = job.result()
+    assert len(result.results) > 0
