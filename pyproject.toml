@@ -41,6 +41,7 @@ dev = [
     "quri-parts-core>=0.21.1",
     "quri-parts-circuit>=0.21.1",
     "quri-parts-qulacs>=0.21.1",
+    "ommx-pyscipopt-adapter>=2.3.0",
 ]
 
 [tool.pytest.ini_options]
