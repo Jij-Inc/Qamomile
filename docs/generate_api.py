@@ -9,6 +9,7 @@ Usage:
 
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 
@@ -42,33 +43,45 @@ def format_annotation(annotation: str | griffe.Expression | None) -> str:
     return str(annotation)
 
 
-def format_signature(func: griffe.Function) -> str:
-    """Format a function signature."""
-    parts = []
+def _format_param(param: griffe.Parameter) -> str:
+    """Format a single parameter for signature display."""
+    if param.name in ("self", "cls"):
+        return param.name
+    p = param.name
+    ann = format_annotation(param.annotation)
+    if ann:
+        p += f": {ann}"
+    if param.default is not None:
+        p += f" = {param.default}"
+    if param.kind == griffe.ParameterKind.var_positional:
+        p = f"*{p}"
+    elif param.kind == griffe.ParameterKind.var_keyword:
+        p = f"**{p}"
+    return p
+
+
+def format_signature(func: griffe.Function, multiline: bool = True) -> str:
+    """Format a function signature, using multiple lines for many parameters."""
+    parts: list[str] = []
     for param in func.parameters:
-        if param.name == "self" or param.name == "cls":
-            parts.append(param.name)
-            continue
-        p = param.name
-        ann = format_annotation(param.annotation)
-        if ann:
-            p += f": {ann}"
-        if param.default is not None:
-            default_str = str(param.default)
-            p += f" = {default_str}"
-        if param.kind == griffe.ParameterKind.var_positional:
-            p = f"*{p}"
-        elif param.kind == griffe.ParameterKind.var_keyword:
-            p = f"**{p}"
-        elif param.kind == griffe.ParameterKind.keyword_only:
+        if param.kind == griffe.ParameterKind.keyword_only:
             if parts and not any(pp.startswith("*") for pp in parts):
                 parts.append("*")
-        parts.append(p)
+        parts.append(_format_param(param))
 
-    params_str = ", ".join(parts)
     ret = format_annotation(func.returns)
     ret_str = f" -> {ret}" if ret else ""
-    return f"({params_str}){ret_str}"
+
+    # Count real params (exclude self/cls)
+    real_params = [p for p in parts if p not in ("self", "cls")]
+    one_line = f"({', '.join(parts)}){ret_str}"
+
+    if multiline and len(real_params) >= 4 and len(one_line) > 80:
+        indent = "    "
+        param_lines = [f"{indent}{p}," for p in parts]
+        return "(\n" + "\n".join(param_lines) + f"\n){ret_str}"
+
+    return one_line
 
 
 def format_class_signature(cls: griffe.Class) -> str:
@@ -79,13 +92,122 @@ def format_class_signature(cls: griffe.Class) -> str:
     return f"class {cls.name}"
 
 
+def _escape_table_cell(text: str) -> str:
+    """Escape pipe characters and newlines for markdown table cells."""
+    return text.replace("|", "\\|").replace("\n", " ")
+
+
 def write_docstring(lines: list[str], docstring: griffe.Docstring | None) -> None:
-    """Write docstring content to lines."""
+    """Write docstring content as structured markdown using griffe's parser."""
     if not docstring or not docstring.value:
         return
-    for line in docstring.value.strip().splitlines():
-        lines.append(line)
-    lines.append("")
+
+    try:
+        sections = docstring.parse("google")
+    except Exception:
+        # Fallback to raw text if parsing fails
+        for line in docstring.value.strip().splitlines():
+            lines.append(line)
+        lines.append("")
+        return
+
+    for section in sections:
+        kind = section.kind
+
+        if kind == griffe.DocstringSectionKind.text:
+            for line in section.value.strip().splitlines():
+                lines.append(line)
+            lines.append("")
+
+        elif kind == griffe.DocstringSectionKind.parameters:
+            lines.append("**Parameters:**")
+            lines.append("")
+            lines.append("| Name | Type | Description |")
+            lines.append("|------|------|-------------|")
+            for param in section.value:
+                ann = str(param.annotation) if param.annotation else ""
+                desc = _escape_table_cell(param.description) if param.description else ""
+                lines.append(f"| `{param.name}` | `{ann}` | {desc} |")
+            lines.append("")
+
+        elif kind == griffe.DocstringSectionKind.returns:
+            lines.append("**Returns:**")
+            lines.append("")
+            for ret in section.value:
+                ann = str(ret.annotation) if ret.annotation else ""
+                desc = ret.description or ""
+                if ann:
+                    lines.append(f"`{ann}` — {desc}")
+                else:
+                    lines.append(desc)
+            lines.append("")
+
+        elif kind == griffe.DocstringSectionKind.raises:
+            lines.append("**Raises:**")
+            lines.append("")
+            for exc in section.value:
+                ann = str(exc.annotation) if exc.annotation else ""
+                desc = exc.description or ""
+                lines.append(f"- `{ann}` — {desc}")
+            lines.append("")
+
+        elif kind == griffe.DocstringSectionKind.admonition:
+            title = getattr(section, "title", "Note")
+            adm = section.value
+            desc = adm.description if hasattr(adm, "description") else str(adm)
+            # Wrap example content in code fence if it looks like code
+            if title and title.lower() == "example":
+                lines.append("**Example:**")
+                lines.append("")
+                # Check if already fenced
+                if "```" in desc:
+                    lines.append(desc)
+                else:
+                    lines.append("```python")
+                    lines.append(desc.strip())
+                    lines.append("```")
+                lines.append("")
+            elif title and title.lower() == "note":
+                lines.append(f"> **Note:** {desc}")
+                lines.append("")
+            else:
+                lines.append(f"**{title}:**")
+                lines.append("")
+                for line in desc.strip().splitlines():
+                    lines.append(line)
+                lines.append("")
+
+        elif kind == griffe.DocstringSectionKind.examples:
+            lines.append("**Examples:**")
+            lines.append("")
+            for kind_str, text in section.value:
+                if kind_str == "text":
+                    lines.append(text)
+                else:
+                    lines.append("```python")
+                    lines.append(text.strip())
+                    lines.append("```")
+            lines.append("")
+
+        elif kind == griffe.DocstringSectionKind.yields:
+            lines.append("**Yields:**")
+            lines.append("")
+            for y in section.value:
+                ann = str(y.annotation) if y.annotation else ""
+                desc = y.description or ""
+                if ann:
+                    lines.append(f"`{ann}` — {desc}")
+                else:
+                    lines.append(desc)
+            lines.append("")
+
+        else:
+            # Fallback for other section types
+            val = section.value
+            if isinstance(val, str):
+                for line in val.strip().splitlines():
+                    lines.append(line)
+                lines.append("")
 
 
 def resolve_member(member: griffe.Alias | griffe.Object) -> griffe.Object | None:
@@ -182,6 +304,13 @@ def collect_submodules_recursive(
                     )
                 )
     return result
+
+
+def _get_first_line(docstring: griffe.Docstring | None) -> str:
+    """Extract the first line of a docstring for summary tables."""
+    if not docstring or not docstring.value:
+        return ""
+    return docstring.value.strip().splitlines()[0]
 
 
 def generate_function_doc(func: griffe.Function) -> list[str]:
@@ -295,6 +424,26 @@ def generate_module_content(
     if module.docstring and module.docstring.value:
         write_docstring(lines, module.docstring)
 
+    # Summary table
+    has_summary = bool(functions) or bool(classes)
+    if has_summary:
+        lines.append(f"{h} Overview")
+        lines.append("")
+        if functions:
+            lines.append("| Function | Description |")
+            lines.append("|----------|-------------|")
+            for func_name, func in sorted(functions):
+                desc = _escape_table_cell(_get_first_line(func.docstring))
+                lines.append(f"| [`{func_name}`](#{func_name}) | {desc} |")
+            lines.append("")
+        if classes:
+            lines.append("| Class | Description |")
+            lines.append("|-------|-------------|")
+            for cls_name, cls in sorted(classes):
+                desc = _escape_table_cell(_get_first_line(cls.docstring))
+                lines.append(f"| [`{cls_name}`](#{cls_name}) | {desc} |")
+            lines.append("")
+
     if attributes:
         lines.append(f"{h} Constants")
         lines.append("")
@@ -310,16 +459,22 @@ def generate_module_content(
     if functions:
         lines.append(f"{h} Functions")
         lines.append("")
-        for func_name, func in sorted(functions):
+        for i, (func_name, func) in enumerate(sorted(functions)):
             lines.append(f"{h}# `{func_name}`")
             lines.append("")
             lines.extend(generate_function_doc(func))
+            if i < len(functions) - 1:
+                lines.append("---")
+                lines.append("")
 
     if classes:
         lines.append(f"{h} Classes")
         lines.append("")
-        for _, cls in sorted(classes):
+        for i, (_, cls) in enumerate(sorted(classes)):
             lines.extend(generate_class_doc(cls, heading_level=heading_level + 1))
+            if i < len(classes) - 1:
+                lines.append("---")
+                lines.append("")
 
     return lines
 
@@ -430,7 +585,11 @@ def build_toc_entries(
     split_data: dict[str, list[str]],
 ) -> list[str]:
     """Build myst.yml TOC YAML snippet lines."""
-    lines = ["    - title: API Reference", "      children:"]
+    lines = [
+        "    - title: API Reference",
+        "      file: api/index.md",
+        "      children:",
+    ]
     for name in subpackages:
         if name in split_packages:
             lines.append(f"        - file: api/{name}/index.md")
@@ -439,6 +598,31 @@ def build_toc_entries(
         else:
             lines.append(f"        - file: api/{name}.md")
     return lines
+
+
+def inject_toc(myst_yml_path: Path, toc_lines: list[str]) -> None:
+    """Inject API Reference TOC entries into a myst.yml file.
+
+    Performs text-based insertion/replacement to preserve existing formatting.
+    """
+    content = myst_yml_path.read_text()
+    toc_block = "\n".join(toc_lines) + "\n"
+
+    # Remove existing API Reference section if present
+    content = re.sub(
+        r"    - title: API Reference\n"
+        r"(?:      file: [^\n]+\n)?"
+        r"      children:\n"
+        r"(?:        - file: [^\n]+\n)*",
+        "",
+        content,
+    )
+
+    # Insert before the "site:" line
+    content = content.replace("\nsite:\n", f"\n{toc_block}\nsite:\n")
+
+    myst_yml_path.write_text(content)
+    print(f"  Injected API TOC into {myst_yml_path}")
 
 
 def main() -> None:
@@ -451,7 +635,6 @@ def main() -> None:
 
     split_packages: set[str] = set()
     split_data: dict[str, list[str]] = {}
-    all_files: list[str] = ["api/index.md"]
 
     for name in subpackages:
         full_name = f"{PACKAGE_NAME}.{name}"
@@ -478,7 +661,6 @@ def main() -> None:
                 out_file.write_text(content)
                 line_count = content.count("\n")
                 print(f"  Generated api/{rel_path} ({line_count} lines)")
-                all_files.append(f"api/{rel_path}")
                 # Track sub-file names (excluding index)
                 stem = Path(rel_path).stem
                 if stem != "index":
@@ -491,19 +673,21 @@ def main() -> None:
             out_file.write_text(content)
             line_count = content.count("\n")
             print(f"  Generated api/{name}.md ({line_count} lines)")
-            all_files.append(f"api/{name}.md")
 
     # Generate index page
     index_content = generate_index_page(subpackages, split_packages)
     (OUTPUT_DIR / "index.md").write_text(index_content)
     print("  Generated api/index.md")
 
-    # Print TOC entries
+    # Inject TOC into myst.yml files
     toc_lines = build_toc_entries(subpackages, split_packages, split_data)
+    docs_dir = Path(__file__).resolve().parent
+    for lang in ("en", "ja"):
+        myst_yml = docs_dir / lang / "myst.yml"
+        if myst_yml.exists():
+            inject_toc(myst_yml, toc_lines)
+
     print(f"\nAPI docs generated in {OUTPUT_DIR}")
-    print(f"\nmyst.yml TOC entries needed:")
-    for line in toc_lines:
-        print(line)
 
 
 if __name__ == "__main__":
