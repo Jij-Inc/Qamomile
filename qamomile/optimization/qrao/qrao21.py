@@ -102,7 +102,7 @@ class QRAC21Converter(QRACConverterBase[QRAC21Encoder]):
 
     @property
     def num_qubits(self) -> int:
-        return len(self.color_group)
+        return self._encoder.num_qubits
 
     def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
         """Generate the cost Hamiltonian for the QRAC-encoded problem.
