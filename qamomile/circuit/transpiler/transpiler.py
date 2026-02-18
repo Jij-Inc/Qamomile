@@ -112,8 +112,10 @@ class Transpiler(ABC, Generic[T]):
 
         # Option 2: Step-by-step
         block = transpiler.to_block(kernel)
-        linear = transpiler.inline(block)
-        folded = transpiler.constant_fold(linear, bindings={"theta": 0.5})
+        substituted = transpiler.substitute(block)
+        linear = transpiler.inline(substituted)
+        validated = transpiler.linear_validate(linear)
+        folded = transpiler.constant_fold(validated, bindings={"theta": 0.5})
         analyzed = transpiler.analyze(folded)
         separated = transpiler.separate(analyzed)
         executable = transpiler.emit(separated, bindings={"theta": 0.5})
