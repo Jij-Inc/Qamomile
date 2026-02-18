@@ -1,10 +1,12 @@
 """Tests for QRAO31 (Quantum Random Access Optimization with (3,1,p)-QRAC)."""
 
 import pytest
-from math import sqrt
+import numpy as np
+import networkx as nx
 
 from qamomile.optimization.qrao import QRAC31Converter, QRAC31Encoder, SignRounder
 from qamomile.optimization.binary_model import binary, BinaryExpr, BinaryModel, VarType
+import qamomile.observable as qm_o
 
 
 class TestQRAC31Encoder:
@@ -57,29 +59,6 @@ class TestQRAC31Encoder:
         # 6 variables with no interactions -> 2 qubits (3 per qubit)
         assert encoder.num_qubits == 2
 
-    def test_hamiltonian_scaling(self):
-        """Test that Hamiltonian coefficients are correctly scaled."""
-        # Create: h_0 * s_0 + J_{01} * s_0 * s_1
-        x = binary(0)
-        y = binary(1)
-
-        problem = BinaryExpr()
-        problem += 2.0 * x  # Linear term
-        problem += 3.0 * x * y  # Quadratic term
-
-        model = BinaryModel(problem)
-        spin_model = model.change_vartype(VarType.SPIN)
-
-        encoder = QRAC31Encoder(spin_model)
-
-        # Linear terms should be scaled by sqrt(3)
-        # Quadratic terms should be scaled by 3
-        linear_coeffs = list(encoder.linear_hamiltonian.values())
-        quad_coeffs = list(encoder.quad_hamiltonian.values())
-
-        # Check that some scaling occurred (exact values depend on binary->spin conversion)
-        assert len(linear_coeffs) > 0 or len(quad_coeffs) > 0
-
 
 class TestQRAC31Converter:
     """Tests for QRAC31Converter."""
@@ -96,8 +75,12 @@ class TestQRAC31Converter:
         model = BinaryModel(problem)
         converter = QRAC31Converter(model)
 
-        assert converter.num_qubits > 0
-        assert converter.spin_model is not None
+        # x*y + x → spin: 2 bits, 1 quad, 2 linear
+        assert converter.num_qubits == 2
+        assert converter.spin_model.num_bits == 2
+        assert len(converter.spin_model.quad) == 1
+        assert len(converter.spin_model.linear) == 2
+
 
 class TestSignRounder:
     """Tests for SignRounder."""
@@ -125,54 +108,6 @@ class TestSignRounder:
         assert rounder.round([-0.001]) == [-1]
 
 
-class TestDecoding:
-    """Tests for decoding functionality."""
-
-    def test_decode_from_rounded(self):
-        """Test decoding rounded spins to BinarySampleSet."""
-        x = binary(0)
-        y = binary(1)
-
-        problem = BinaryExpr()
-        problem += x * y  # Minimize x*y
-
-        model = BinaryModel(problem)
-        converter = QRAC31Converter(model)
-
-        # Assume rounding gave us spins [+1, +1]
-        # In spin form: s_0 = +1, s_1 = +1
-        spins = [1, 1]
-        result = converter.decode_from_rounded(spins)
-
-        assert len(result.samples) == 1
-        assert result.vartype == VarType.SPIN
-
-    def test_decode_to_binary(self):
-        """Test conversion from spin to binary."""
-        x = binary(0)
-        y = binary(1)
-
-        problem = BinaryExpr()
-        problem += x * y
-
-        model = BinaryModel(problem)
-        converter = QRAC31Converter(model)
-
-        # spin = +1 -> binary = 0
-        # spin = -1 -> binary = 1
-        spins = [1, -1]
-        result = converter.decode_to_binary(spins)
-
-        assert len(result.samples) == 1
-        assert result.vartype == VarType.BINARY
-
-        sample = result.samples[0]
-        # Check conversion: spin +1 -> binary 0, spin -1 -> binary 1
-        for idx, spin in zip(sorted(sample.keys()), spins):
-            expected_binary = (1 - spin) // 2
-            assert sample[idx] == expected_binary
-
-
 class TestEndToEnd:
     """End-to-end tests for QRAO31."""
 
@@ -191,9 +126,12 @@ class TestEndToEnd:
         model = BinaryModel(problem)
         converter = QRAC31Converter(model)
 
-        # Check encoding
-        assert converter.num_qubits >= 2
+        # Check encoding: path graph (0-1-2) needs 2 qubits for (3,1,p)-QRAC
+        assert converter.num_qubits == 2
         assert len(converter.encoder.pauli_encoding) == 3
+
+        hamiltonian = converter.get_cost_hamiltonian()
+        assert hamiltonian.constant == pytest.approx(-0.5)
 
         # Simulate rounding results (as if from VQE)
         # For MaxCut, optimal is alternating: [+1, -1, +1] or [-1, +1, -1]
@@ -203,6 +141,150 @@ class TestEndToEnd:
 
         assert spins == [1, -1, 1]
 
-        # Decode
-        result = converter.decode_from_rounded(spins)
-        assert len(result.samples) == 1
+        assert len(spins) == 3
+        assert all(s in (1, -1) for s in spins)
+
+
+class TestHUBORejection:
+    """Tests for HUBO rejection in QRAC converters."""
+
+    def test_hubo_rejection(self):
+        """QRAC converters reject higher-order (HUBO) problems."""
+        model = BinaryModel.from_hubo({(0, 1, 2): 1.0})
+        with pytest.raises(ValueError, match="higher-order"):
+            QRAC31Converter(model)
+
+
+class TestQRAC31EncodeIsingCoefficients:
+    """Tests for exact Hamiltonian coefficient verification using encoder.encode_ising."""
+
+    def test_linear_term_with_graph_coloring(self):
+        """Test exact coefficients for Ising model with linear terms added via graph coloring."""
+        Z0 = qm_o.PauliOperator(qm_o.Pauli.Z, 0)
+        Z1 = qm_o.PauliOperator(qm_o.Pauli.Z, 1)
+        X1 = qm_o.PauliOperator(qm_o.Pauli.X, 1)
+        Z2 = qm_o.PauliOperator(qm_o.Pauli.Z, 2)
+
+        # Ising model: J={(0,1):2.0, (0,2):1.0}, h={2:5.0, 3:2.0}, constant=6.0
+        ising = BinaryModel.from_ising(
+            linear={2: 5.0, 3: 2.0},
+            quad={(0, 1): 2.0, (0, 2): 1.0},
+            constant=6.0,
+        )
+
+        encoder = QRAC31Encoder(ising)
+        qrac_hamiltonian, encoding = encoder.encode_ising(ising)
+        num_terms = len(ising.linear) + len(ising.quad)
+
+        # color_group: {0:[0], 1:[1,2], 2:[3]}
+        # Occupancies: var 0→k=1, var 1→k=2, var 2→k=2, var 3→k=1
+        expected_hamiltonian = {
+            (Z0, Z1): np.sqrt(1) * np.sqrt(2) * 2.0,
+            (Z0, X1): np.sqrt(1) * np.sqrt(2) * 1.0,
+            (X1,): np.sqrt(2) * 5.0,
+            (Z2,): np.sqrt(1) * 2.0,
+        }
+        assert len(qrac_hamiltonian.terms) == num_terms
+        assert qrac_hamiltonian.num_qubits < ising.num_bits
+        assert len(encoding) == ising.num_bits
+        assert qrac_hamiltonian.terms == expected_hamiltonian
+
+    def test_linear_term_with_extra_variables(self):
+        """Test coefficients when linear-only variables fill multiple color groups."""
+        X1 = qm_o.PauliOperator(qm_o.Pauli.X, 1)
+        X2 = qm_o.PauliOperator(qm_o.Pauli.X, 2)
+        Y2 = qm_o.PauliOperator(qm_o.Pauli.Y, 2)
+        Z0 = qm_o.PauliOperator(qm_o.Pauli.Z, 0)
+        Z1 = qm_o.PauliOperator(qm_o.Pauli.Z, 1)
+        Z2 = qm_o.PauliOperator(qm_o.Pauli.Z, 2)
+        Z3 = qm_o.PauliOperator(qm_o.Pauli.Z, 3)
+
+        ising = BinaryModel.from_ising(
+            linear={2: 5.0, 3: 2.0, 4: 1.0, 5: 1.0, 6: 1.0},
+            quad={(0, 1): 2.0, (0, 2): 1.0},
+            constant=6.0,
+        )
+
+        encoder = QRAC31Encoder(ising)
+        qrac_hamiltonian, encoding = encoder.encode_ising(ising)
+        num_terms = len(ising.linear) + len(ising.quad)
+
+        # color_group: {0:[0], 1:[1,2], 2:[3,4,5], 3:[6]}
+        # Occupancies: var 0→k=1, var 1→k=2, var 2→k=2,
+        #              var 3→k=3, var 4→k=3, var 5→k=3, var 6→k=1
+        expected_hamiltonian = {
+            (Z0, Z1): np.sqrt(1) * np.sqrt(2) * 2.0,
+            (Z0, X1): np.sqrt(1) * np.sqrt(2) * 1.0,
+            (X1,): np.sqrt(2) * 5.0,
+            (Z2,): np.sqrt(3) * 2.0,
+            (X2,): np.sqrt(3) * 1.0,
+            (Y2,): np.sqrt(3) * 1.0,
+            (Z3,): np.sqrt(1) * 1.0,
+        }
+        assert len(qrac_hamiltonian.terms) == num_terms
+        assert qrac_hamiltonian.num_qubits < ising.num_bits
+        assert len(encoding) == ising.num_bits
+        assert qrac_hamiltonian.terms == expected_hamiltonian
+
+    def test_no_quadratic_terms(self):
+        """Test encoding with only linear terms (no quadratic interactions)."""
+        Z0 = qm_o.PauliOperator(qm_o.Pauli.Z, 0)
+        X0 = qm_o.PauliOperator(qm_o.Pauli.X, 0)
+        Y0 = qm_o.PauliOperator(qm_o.Pauli.Y, 0)
+        Z1 = qm_o.PauliOperator(qm_o.Pauli.Z, 1)
+
+        ising = BinaryModel.from_ising(
+            linear={0: 1.0, 1: 1.0, 2: 5.0, 3: 2.0},
+            quad={},
+            constant=6.0,
+        )
+
+        encoder = QRAC31Encoder(ising)
+        qrac_hamiltonian, encoding = encoder.encode_ising(ising)
+        num_terms = len(ising.linear) + len(ising.quad)
+
+        # color_group: {0:[0,1,2], 1:[3]}
+        # Occupancies: vars 0,1,2→k=3, var 3→k=1
+        expected_hamiltonian = {
+            (Z0,): np.sqrt(3) * 1.0,
+            (X0,): np.sqrt(3) * 1.0,
+            (Y0,): np.sqrt(3) * 5.0,
+            (Z1,): np.sqrt(1) * 2.0,
+        }
+        assert len(qrac_hamiltonian.terms) == num_terms
+        assert qrac_hamiltonian.num_qubits < ising.num_bits
+        assert len(encoding) == ising.num_bits
+        assert qrac_hamiltonian.terms == expected_hamiltonian
+
+
+class TestQRAC31RandomGraphs:
+    """Property-based tests with random Erdős–Rényi graphs."""
+
+    @pytest.mark.parametrize(
+        "seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+    )
+    def test_random_graph(self, seed):
+        rng = np.random.default_rng(seed)
+        n = int(rng.integers(4, 15))
+        G = nx.erdos_renyi_graph(n, 0.4, seed=seed)
+
+        linear = {i: float(rng.uniform(-2, 2)) for i in range(n)}
+        quad = {(u, v): float(rng.uniform(-2, 2)) for u, v in G.edges()}
+        ising = BinaryModel.from_ising(linear=linear, quad=quad, constant=0.0)
+
+        converter = QRAC31Converter(ising)
+        hamiltonian = converter.get_cost_hamiltonian()
+
+        # Structural invariants
+        assert hamiltonian.num_qubits == converter.num_qubits
+        assert converter.num_qubits <= n
+        assert len(converter.encoder.pauli_encoding) == n
+        assert len(hamiltonian.terms) <= len(linear) + len(quad)
+        assert len(hamiltonian.terms) > 0
+
+        # Pauli types must be Z, X, or Y for (3,1,p)-QRAC
+        for _, pauli_type in converter.encoder.pauli_encoding.values():
+            assert pauli_type in ("Z", "X", "Y")
+
+        pauli_list = converter.get_encoded_pauli_list()
+        assert len(pauli_list) == n

@@ -1,0 +1,167 @@
+"""Space Efficient QRAC Converter for Quantum Random Access Optimization.
+
+This module implements Space Efficient QRAO which maintains a constant
+2:1 compression ratio by using sequential numbering instead of graph coloring.
+
+Variables are alternately assigned X and Y Pauli operators on consecutive qubits.
+When interacting variables share the same qubit, a Z operator is used instead
+of the product of their Paulis.
+"""
+
+from __future__ import annotations
+import typing
+
+import numpy as np
+
+import qamomile.observable as qm_o
+from qamomile.optimization.utils import is_close_zero
+from qamomile.optimization.binary_model import BinaryModel, VarType
+
+from .base_converter import QRACConverterBase
+from .base_encoder import BaseQRACEncoder, PauliType
+
+
+class QRACSpaceEfficientEncoder(BaseQRACEncoder):
+    """Space Efficient QRAC Encoder.
+
+    No graph coloring. Uses sequential numbering:
+    variable i -> qubit i//2, Pauli X (even index) or Y (odd index).
+
+    Always maintains a 2:1 compression ratio.
+    """
+
+    def _perform_encoding(self) -> None:
+        paulis: list[PauliType] = ["X", "Y"]
+        num_vars = self.spin_model.num_bits
+        for i in range(num_vars):
+            qubit_index = i // 2
+            self._pauli_encoding[i] = (qubit_index, paulis[i % 2])
+
+    @property
+    def num_qubits(self) -> int:
+        num_vars = self.spin_model.num_bits
+        return (num_vars + 1) // 2
+
+
+def numbering_space_efficient_encode(
+    ising: BinaryModel[typing.Literal[VarType.SPIN]],
+) -> dict[int, qm_o.PauliOperator]:
+    """Encode using sequential numbering.
+
+    Variable i is assigned to qubit i//2 with Pauli X (even) or Y (odd).
+
+    Args:
+        ising: BinaryModel in SPIN vartype.
+
+    Returns:
+        Mapping from variable index to PauliOperator.
+    """
+    num_vars = ising.num_bits
+    encode = {}
+    pauli_ope = [qm_o.Pauli.X, qm_o.Pauli.Y]
+    for i in range(num_vars):
+        qubit_index = i // 2
+        color = i % 2
+        encode[i] = qm_o.PauliOperator(pauli_ope[color], qubit_index)
+    return encode
+
+
+def qrac_space_efficient_encode_ising(
+    ising: BinaryModel[typing.Literal[VarType.SPIN]],
+) -> tuple[qm_o.Hamiltonian, dict[int, qm_o.PauliOperator]]:
+    """Encode a spin model using space-efficient QRAC.
+
+    For quadratic terms:
+    - Same qubit: √3 * J_{ij} * Z_k
+    - Different qubit: 3 * J_{ij} * P_{f(i)} * P_{f(j)}
+
+    Args:
+        ising: BinaryModel in SPIN vartype.
+
+    Returns:
+        Tuple of (relaxed Hamiltonian, encoding map).
+    """
+    encoded_ope = numbering_space_efficient_encode(ising)
+
+    # Build per-variable occupancy (2 for most qubits, 1 for last if num_vars is odd)
+    num_vars = ising.num_bits
+    var_occupancy: dict[int, int] = {}
+    for i in range(num_vars):
+        qubit = i // 2
+        var_occupancy[i] = min(2, num_vars - qubit * 2)
+
+    hamiltonian = qm_o.Hamiltonian()
+    hamiltonian.constant = ising.constant
+
+    for idx, coeff in ising.linear.items():
+        if is_close_zero(coeff):
+            continue
+        pauli = encoded_ope[idx]
+        k = var_occupancy[idx]
+        hamiltonian.add_term((pauli,), np.sqrt(k) * coeff)
+
+    for (i, j), coeff in ising.quad.items():
+        if is_close_zero(coeff):
+            continue
+        if i == j:
+            hamiltonian.constant += coeff
+            continue
+        pauli_i = encoded_ope[i]
+        pauli_j = encoded_ope[j]
+        ki, kj = var_occupancy[i], var_occupancy[j]
+        if pauli_i.index == pauli_j.index:
+            hamiltonian.add_term(
+                (qm_o.PauliOperator(qm_o.Pauli.Z, pauli_i.index),),
+                np.sqrt(ki) * np.sqrt(kj) * coeff,
+            )
+        else:
+            hamiltonian.add_term((pauli_i, pauli_j), np.sqrt(ki) * np.sqrt(kj) * coeff)
+
+    return hamiltonian, encoded_ope
+
+
+class QRACSpaceEfficientConverter(QRACConverterBase[QRACSpaceEfficientEncoder]):
+    """Space Efficient QRAC Converter for Quantum Random Access Optimization.
+
+    Uses sequential numbering with constant 2:1 compression ratio.
+    No graph coloring is performed.
+
+    Example:
+        >>> converter = QRACSpaceEfficientConverter(instance)
+        >>> hamiltonian = converter.get_cost_hamiltonian()
+    """
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self._encoder = QRACSpaceEfficientEncoder(self.spin_model)
+        self.pauli_encoding: dict[int, qm_o.PauliOperator] = {}
+
+    @property
+    def num_qubits(self) -> int:
+        return self._encoder.num_qubits
+
+    def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
+        """Generate the cost Hamiltonian for the space-efficient QRAC-encoded problem.
+
+        Returns:
+            Hamiltonian representing the cost function in QRAC form.
+        """
+        hamiltonian, pauli_encoding = qrac_space_efficient_encode_ising(self.spin_model)
+        self.pauli_encoding = pauli_encoding
+        return hamiltonian
+
+    def get_encoded_pauli_list(self) -> list[qm_o.Hamiltonian]:
+        """Get the encoded Pauli operators as a list of Hamiltonians.
+
+        Returns:
+            list[Hamiltonian]: List of Hamiltonians for each variable's Pauli operator.
+        """
+        ising = self.spin_model
+        num_qubits = self._encoder.num_qubits
+        zero_pauli = qm_o.Hamiltonian(num_qubits=num_qubits)
+        pauli_operators = [zero_pauli] * ising.num_bits
+        for idx, pauli in self.pauli_encoding.items():
+            observable = qm_o.Hamiltonian(num_qubits=num_qubits)
+            observable.add_term((pauli,), 1.0)
+            pauli_operators[idx] = observable
+        return pauli_operators
