@@ -15,24 +15,21 @@
 # %% [markdown]
 # # QAOAによるMax-Cut問題の解法
 #
-# このセクションでは、JijModelingとQamomileライブラリを使ってQAOAでMaxcut問題を解きます。
+# このセクションでは、JijModelingとQamomileライブラリを使って、QAOAでMax-Cut問題を解きます。
 #
-# まず、使用するメインライブラリをインストールしてインポートしましょう。
+# まず、使用する主要なライブラリをインストールしてインポートしましょう。
 
 # %%
 import jijmodeling as jm
-import ommx.v1
 import matplotlib.pyplot as plt
-import numpy as np
 
 # %% [markdown]
 # ## Max-Cut問題とは
 #
-# Max-Cut問題は、グラフの頂点を2つのグループに分割し、カットされるエッジの数（またはエッジに重みがある場合はカットされるエッジの総重み）が最大になるようにする問題です。ネットワーク分割や画像処理（セグメンテーション）などに応用されています。
-
+# Max-Cut問題は、グラフの頂点を2つのグループに分割し、カットされるエッジの数（エッジに重みがある場合はカットされるエッジの総重み）が最大になるようにする問題です。ネットワーク分割や画像処理（セグメンテーション）などに応用されています。
 # %%
 import networkx as nx
-import matplotlib.pyplot as plt
+import numpy as np
 
 G = nx.Graph()
 num_nodes = 5
@@ -41,45 +38,11 @@ G.add_nodes_from(range(num_nodes))
 G.add_edges_from(edges)
 pos = {0: (1, 1), 1: (0, 1), 2: (-1, 0.5), 3: (0, 0), 4: (1, 0)}
 
-cut_solution = {(1,): 1.0, (2,): 1.0, (4,): 1.0}
-edge_colors = []
-
-
-def get_edge_colors(
-    graph, cut_solution, in_cut_color="r", not_in_cut_color="b"
-) -> tuple[list[str], list[str]]:
-    cut_set_1 = [node[0] for node, value in cut_solution.items() if value == 1.0]
-    cut_set_2 = [node for node in graph.nodes() if node not in cut_set_1]
-
-    edge_colors = []
-    for u, v, _ in graph.edges(data=True):
-        if (u in cut_set_1 and v in cut_set_2) or (u in cut_set_2 and v in cut_set_1):
-            edge_colors.append(in_cut_color)
-        else:
-            edge_colors.append(not_in_cut_color)
-    node_colors = ["#2696EB" if node in cut_set_1 else "#EA9b26" for node in G.nodes()]
-    return edge_colors, node_colors
-
-
-edge_colors, node_colors = get_edge_colors(G, cut_solution)
-fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-
-axes[0].set_title("Original Graph G=(V,E)")
-nx.draw_networkx(G, pos, ax=axes[0], node_size=500, width=3, with_labels=True)
-axes[1].set_title("MaxCut Solution Visualization")
-nx.draw_networkx(
-    G,
-    pos,
-    ax=axes[1],
-    node_size=500,
-    width=3,
-    with_labels=True,
-    edge_color=edge_colors,
-    node_color=node_colors,
-)
-
+fig, ax = plt.subplots(figsize=(5, 4))
+ax.set_title("Original Graph G=(V,E)")
+nx.draw_networkx(G, pos, ax=ax, node_size=500, width=3, with_labels=True)
 plt.tight_layout()
-# plt.show()
+plt.show()
 
 
 # %% [markdown]
@@ -98,85 +61,56 @@ plt.tight_layout()
 # $$
 #
 
+
 # %%
-def Maxcut_problem() -> jm.Problem:
-    V = jm.Placeholder("V")
-    E = jm.Placeholder("E", ndim=2)
-    x = jm.BinaryVar("x", shape=(V,))
-    e = jm.Element("e", belong_to=E)
-    i = jm.Element("i", belong_to=V)
-    j = jm.Element("j", belong_to=V)
+problem = jm.Problem("Maxcut", sense=jm.ProblemSense.MAXIMIZE)
 
-    problem = jm.Problem("Maxcut", sense=jm.ProblemSense.MAXIMIZE)
-    si = 2 * x[e[0]] - 1
-    sj = 2 * x[e[1]] - 1
-    si.set_latex("s_{e[0]}")
-    sj.set_latex("s_{e[1]}")
-    obj = 1 / 2 * jm.sum(e, (1 - si * sj))
+
+@problem.update
+def _(problem: jm.DecoratedProblem):
+    V = problem.Dim()
+    E = problem.Graph()
+    x = problem.BinaryVar(shape=(V,))
+
+    obj = (
+        E.rows()
+        .map(lambda e: 1 / 2 * (1 - (2 * x[e[0]] - 1) * (2 * x[e[1]] - 1)))
+        .sum()
+    )
     problem += obj
-    return problem
 
 
-problem = Maxcut_problem()
 problem
 
 # %% [markdown]
-# ## インスタンスデータの準備
-#
-# 次に、以下のグラフに対するMax-Cut問題を解きます。解く具体的な問題のデータをインスタンスデータと呼びます。
-
-# %%
-import networkx as nx
-import numpy as np
-from IPython.display import display, Latex
-
-G = nx.Graph()
-num_nodes = 5
-edges = [(0, 1), (0, 4), (1, 2), (1, 3), (2, 3), (3, 4)]
-G.add_nodes_from(range(num_nodes))
-G.add_edges_from(edges)
-
-weight_matrix = nx.to_numpy_array(G, nodelist=list(range(num_nodes)))
-
-plt.title("G=(V,E)")
-plt.plot(figsize=(5, 4))
-
-nx.draw_networkx(G, pos, node_size=500)
+# ## コンパイル済みインスタンスの作成
+# 数学モデルとインスタンスデータを `problem.eval()` を使ってコンパイルします。この処理により、インスタンスデータが代入された問題の中間表現が得られます。
 
 # %%
 V = num_nodes
 E = edges
-
 data = {"V": V, "E": E}
-
-data
-
-# %% [markdown]
-# ## コンパイル済みインスタンスの作成
-# `JijModeling.Interpreter` と `ommx.Instance` を使用して、先に準備した定式化とインスタンスデータからコンパイルを行います。この処理により、インスタンスデータが代入された問題の中間表現が得られます。
-
-# %%
-interpreter = jm.Interpreter(data)
-instance = interpreter.eval_problem(problem)
+instance = problem.eval(data)
 
 # %% [markdown]
 # ## コンパイル済みインスタンスからQAOA回路とハミルトニアンへの変換
 #
-# コンパイル済みInstanceからQAOA回路とハミルトニアンを生成します。これらを生成するためのコンバータが `qm.optimization.qaoa.QAOAConverter` です。
+# コンパイル済みInstanceからQAOA回路とハミルトニアンを生成します。このために使用するコンバータは `qamomile.optimization.qaoa` の `QAOAConverter` です。
 #
-# このクラスのインスタンスを作成し、`ising_encode` を使用すると、内部的にコンパイル済みInstanceからイジングハミルトニアンを生成できます。QUBOへの変換時に生じるパラメータもここで設定できます。設定しない場合はデフォルト値が使用されます。
+# このクラスのインスタンスを作成すると、内部的にコンパイル済みInstanceからイジングハミルトニアンが生成されます。その後、以下のメソッドが利用できます:
+# - `transpile()` でQAOA量子回路を生成
+# - `get_cost_hamiltonian()` でコストハミルトニアンを確認
 #
-# イジングハミルトニアンが生成されたら、QAOA量子回路とハミルトニアンをそれぞれ生成できます。`get_qaoa_ansatz` メソッドと `get_cost_hamiltonian` メソッドで取得できます。QAOAの層数 $p$ は $7$ に固定しています。
+# QAOAの層数 $p$ はここでは $3$ に設定しています。
 
 # %%
-import qamomile.circuit as qmc
 from qamomile.optimization.qaoa import QAOAConverter
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
 
-# QAOAコンバータを作成してトランスパイル
-p = 3  # QAOAの層数
+# Create the QAOA converter and transpile
+p = 3  # Number of QAOA layers
 converter = QAOAConverter(instance)
 executable = converter.transpile(
     transpiler=transpiler,
@@ -184,74 +118,48 @@ executable = converter.transpile(
 )
 
 # %% [markdown]
+# コストハミルトニアンを確認してみましょう。Max-Cutの目的関数はイジング変数 $s_i \in \{+1, -1\}$ で表現されるため、コストハミルトニアンはパウリZ演算子で構成されます。
+
+# %%
+cost_hamiltonian = converter.get_cost_hamiltonian()
+cost_hamiltonian
+
+# %% [markdown]
+# グラフのエッジは $E = \{(0,1),(0,4),(1,2),(1,3),(2,3),(3,4)\}$ です。イジング形式でのMax-Cutの目的関数は $\frac{1}{2}\sum_{(i,j) \in E}(1 - Z_i Z_j)$ であるため、コストハミルトニアンには各エッジに対応する $Z_i Z_j$ 項が含まれるはずです。実際に、上記のハミルトニアンが期待されるイジング定式化と一致していることが確認できます。
+
+# %% [markdown]
 # 生成された量子回路を見てみましょう。この回路は、コスト層とミキサー層を交互に適用するQAOAアンサッツを実装しています。
 
 # %%
 qiskit_circuit = executable.get_first_circuit()
-if qiskit_circuit is not None:
-    print(f"量子ビット数: {qiskit_circuit.num_qubits}")
-    print(f"回路の深さ: {qiskit_circuit.depth()}")
-
-# %% [markdown]
-# ## エネルギー計算
-#
-# QAOAを最適化するには、測定結果から期待エネルギーを計算する必要があります。
-# コンバータはイジングモデルへのアクセスを提供しており、これを使ってエネルギーを計算します。
-
-# %%
-def calculate_ising_energy(bitstring: list[int], ising_model) -> float:
-    """
-    ビット列からイジングモデルのエネルギーを計算する。
-
-    ビット列 z_i ∈ {0, 1} をスピン s_i ∈ {-1, +1} に変換。
-    変換規則: s_i = 1 - 2*z_i (z_i=0 → s_i=+1, z_i=1 → s_i=-1)
-    """
-    # ビットをスピンに変換
-    spins = [1 - 2 * b for b in bitstring]
-    return ising_model.calc_energy(spins)
-
-
-def calculate_expectation_value(sample_result, ising_model) -> float:
-    """
-    測定結果から期待エネルギー値を計算する。
-    """
-    total_energy = 0.0
-    total_counts = 0
-
-    for bitstring, count in sample_result.results:
-        energy = calculate_ising_energy(bitstring, ising_model)
-        total_energy += energy * count
-        total_counts += count
-
-    return total_energy / total_counts
-
+qiskit_circuit.draw()
 
 # %% [markdown]
 # ## VQE最適化
 #
-# 変分最適化ループを設定します。scipyのCOBYLA最適化器を使用して、
-# 最適なQAOAパラメータ（各層のgammaとbeta）を見つけます。
+# 次に、変分最適化ループを設定します。scipyのCOBYLA最適化器を使用して、
+# 最適なQAOAパラメータ（各層のgammaとbeta）を探索します。
 
 # %%
 from scipy.optimize import minimize
 
-# 最適化履歴を保存するリスト
+# List to save optimization history
 energy_history = []
 
 
-def objective_function(params, transpiler, executable, ising_model, shots=1024):
+def objective_function(params, transpiler, executable, converter, shots=1024):
     """
-    VQE最適化の目的関数。
+    Objective function for VQE optimization.
 
     Args:
-        params: 連結された [gammas, betas] パラメータ
-        transpiler: 量子トランスパイラ
-        executable: コンパイル済みQAOA回路
-        ising_model: エネルギー計算用イジングモデル
-        shots: 測定ショット数
+        params: Concatenated [gammas, betas] parameters
+        transpiler: Quantum transpiler
+        executable: Compiled QAOA circuit
+        converter: QAOAConverter for decoding results
+        shots: Number of measurement shots
 
     Returns:
-        期待エネルギー値
+        Expected energy value
     """
     p = len(params) // 2
     gammas = params[:p]
@@ -267,64 +175,69 @@ def objective_function(params, transpiler, executable, ising_model, shots=1024):
     )
     result = job.result()
 
-    energy = calculate_expectation_value(result, ising_model)
+    sampleset = converter.decode(result)
+    energy = sampleset.energy_mean()
     energy_history.append(energy)
 
     return energy
 
 
 # %%
-# 最適化の実行
-np.random.seed(42)
+# Run optimization
+np.random.seed(901)
 
-# 初期パラメータ: gamma ∈ [0, 2π], beta ∈ [0, π]
-init_params = np.concatenate([
-    np.random.uniform(0, 2 * np.pi, size=p),  # gammas
-    np.random.uniform(0, np.pi, size=p),       # betas
-])
+# Initial parameters: gamma in [0, 2π], beta in [0, π]
+init_params = np.concatenate(
+    [
+        np.random.uniform(0, 2 * np.pi, size=p),  # gammas
+        np.random.uniform(0, np.pi, size=p),  # betas
+    ]
+)
 
-# 履歴をクリア
+# Clear history
 energy_history = []
 
-print(f"QAOA最適化を開始します (p={p}層)...")
-print(f"初期パラメータ: gammas={init_params[:p]}, betas={init_params[p:]}")
+print(f"Starting QAOA optimization with p={p} layers...")
+print(f"Initial parameters: gammas={init_params[:p]}, betas={init_params[p:]}")
 
-# COBYLAメソッドで最適化
+# Optimize with COBYLA method
 result_opt = minimize(
     objective_function,
     init_params,
-    args=(transpiler, executable, converter.ising),
+    args=(transpiler, executable, converter),
     method="COBYLA",
     options={"maxiter": 100, "disp": True},
 )
 
-print(f"\n最適化されたパラメータ:")
+print("\nOptimized parameters:")
 print(f"  gammas: {result_opt.x[:p]}")
 print(f"  betas: {result_opt.x[p:]}")
-print(f"最終エネルギー: {result_opt.fun:.4f}")
+print(f"Final energy: {result_opt.fun:.4f}")
 
 # %% [markdown]
 # ## 最適化結果の可視化
 #
 # 最適化プロセスの収束を可視化してみましょう。
+#
+# > **注:** Qamomileは内部的に最大化問題を最小化問題に変換するため、エネルギー値は負の値になります。エネルギーが $-5$ の場合、Max-Cutの目的関数値は $5$ に対応します。
 
 # %%
 plt.figure(figsize=(10, 5))
-plt.plot(energy_history, marker='o', markersize=3)
+plt.plot(energy_history, marker="o", markersize=3)
 plt.xlabel("Iteration")
 plt.ylabel("Energy")
 plt.title("QAOA Optimization Convergence")
 plt.grid(True)
 plt.tight_layout()
-# plt.show()
+plt.show()
 
 # %% [markdown]
 # ## 最終解の分析
 #
-# 最適化された回路からサンプリングし、結果を分析します。
+# 最適化された回路からサンプリングし、結果を分析しましょう。
 
 # %%
-# 最適化されたパラメータでサンプリング
+# Sample with optimized parameters
 optimal_gammas = result_opt.x[:p]
 optimal_betas = result_opt.x[p:]
 
@@ -338,20 +251,46 @@ job_final = executable.sample(
 )
 result_final = job_final.result()
 
-# エネルギーでソート
-results_with_energy = []
-for bitstring, count in result_final.results:
-    energy = calculate_ising_energy(bitstring, converter.ising)
-    results_with_energy.append((bitstring, count, energy))
+# Decode results using the converter
+sampleset = converter.decode(result_final)
 
-results_with_energy.sort(key=lambda x: x[2])
+# Build frequency distribution over all sampled bitstrings
+bitstrings = []
+counts = []
+energies = []
+for i in range(len(sampleset.samples)):
+    sample = sampleset.samples[i]
+    bitstring_str = "".join(str(sample[j]) for j in range(num_nodes))
+    bitstrings.append(bitstring_str)
+    counts.append(sampleset.num_occurrences[i])
+    energies.append(sampleset.energy[i])
 
-print("測定結果（エネルギー順）:")
-print("-" * 60)
-for bitstring, count, energy in results_with_energy[:10]:
-    bitstring_str = "".join(map(str, bitstring))
-    probability = count / 4096
-    print(f"  {bitstring_str}: count={count:4d}, probability={probability:.3f}, energy={energy:.4f}")
+# Sort by bitstring for consistent display
+sorted_order = np.argsort(bitstrings)
+bitstrings = [bitstrings[i] for i in sorted_order]
+counts = [counts[i] for i in sorted_order]
+energies = [energies[i] for i in sorted_order]
+
+# Plot frequency distribution
+fig, ax = plt.subplots(figsize=(12, 5))
+x_pos = np.arange(len(bitstrings))
+bars = ax.bar(x_pos, counts)
+
+# Highlight optimal solutions (energy = -5) with red bars
+for i, e in enumerate(energies):
+    if np.isclose(e, -5.0):
+        bars[i].set_color("red")
+
+ax.set_xticks(x_pos)
+ax.set_xticklabels(bitstrings, rotation=90)
+ax.set_xlabel("Bitstring")
+ax.set_ylabel("Counts")
+ax.set_title("QAOA Measurement Frequency Distribution (red = optimal, energy = -5)")
+plt.tight_layout()
+plt.show()
+
+# %% [markdown]
+# 赤いバーはエネルギーが $= -5$ のビット列を示しており、これはMax-Cutの最適解（6本中5本のエッジをカット）に対応しています。頻度分布から、QAOAがこれらの最適解に測定確率を集中させることに成功していることがわかります。
 
 # %% [markdown]
 # ## 解の可視化
@@ -359,15 +298,34 @@ for bitstring, count, energy in results_with_energy[:10]:
 # QAOAで見つけた最良解を元のグラフ上に可視化してみましょう。
 
 # %%
-# 最良解（最低エネルギー）を取得
-best_bitstring, best_count, best_energy = results_with_energy[0]
-best_solution = {(i,): float(bit) for i, bit in enumerate(best_bitstring)}
+# Get the best solution (lowest energy)
+best_sample, best_energy, best_count = sampleset.lowest()
+best_solution = {(i,): float(best_sample[i]) for i in range(num_nodes)}
 
-print(f"\n見つかった最良解:")
-print(f"  ビット列: {''.join(map(str, best_bitstring))}")
-print(f"  エネルギー: {best_energy:.4f}")
+print("Best solution found:")
+print(f"  Bitstring: {''.join(str(best_sample[i]) for i in range(num_nodes))}")
+print(f"  Energy: {best_energy:.4f}")
 
-# 解を可視化
+
+# Visualize the solution
+def get_edge_colors(
+    graph, cut_solution, in_cut_color="r", not_in_cut_color="b"
+) -> tuple[list[str], list[str]]:
+    cut_set_1 = [node[0] for node, value in cut_solution.items() if value == 1.0]
+    cut_set_2 = [node for node in graph.nodes() if node not in cut_set_1]
+
+    edge_colors = []
+    for u, v, _ in graph.edges(data=True):
+        if (u in cut_set_1 and v in cut_set_2) or (u in cut_set_2 and v in cut_set_1):
+            edge_colors.append(in_cut_color)
+        else:
+            edge_colors.append(not_in_cut_color)
+    node_colors = [
+        "#2696EB" if node in cut_set_1 else "#EA9b26" for node in graph.nodes()
+    ]
+    return edge_colors, node_colors
+
+
 edge_colors, node_colors = get_edge_colors(G, best_solution)
 cut_edges = sum(1 for c in edge_colors if c == "r")
 
@@ -384,19 +342,27 @@ nx.draw_networkx(
     node_color=node_colors,
 )
 plt.tight_layout()
-# plt.show()
+plt.show()
+
+# %% [markdown]
+# ## 厳密解との比較
+#
+# Qamomileのコンバータは `ommx.v1.Instance` を受け取るため、量子計算の結果と古典ソルバーの結果を簡単に比較できます。同じインスタンスをSCIPで厳密に解き、QAOAの解と比較してみましょう。
+
+# %%
+from ommx_pyscipopt_adapter import OMMXPySCIPOptAdapter
+
+solution = OMMXPySCIPOptAdapter.solve(instance)
+
+print(f"Exact optimal value (Max-Cut): {int(solution.objective)}")
+print(f"QAOA solution value:           {cut_edges}")
 
 # %% [markdown]
 # ## まとめ
 #
 # このチュートリアルでは、QamomileでQAOAを使ってMax-Cut問題を解く方法を実演しました:
 #
-# 1. **問題の定式化**: JijModelingを使ってMax-CutをQUBO/イジング問題として定式化
-# 2. **回路の生成**: Qamomileの`QAOAConverter`がQAOA回路を自動生成
-# 3. **VQE最適化**: scipyのCOBYLA最適化器で最適なQAOAパラメータを探索
-# 4. **解の分析**: 測定結果を分析し、解を可視化
-#
-# QamomileをQAOAに使う主な利点:
-# - 数学的定式化からイジングモデルを自動生成
-# - バックエンド非依存の回路定義（Qiskit、Quri-Parts、PennyLane等で動作）
-# - 古典最適化ライブラリとの容易な連携
+# 1. **問題の定式化**: JijModelingを使ってMax-Cutをイジング問題として定式化しました
+# 2. **ハミルトニアンと回路の生成**: `QAOAConverter` がコストハミルトニアンとQAOA回路を自動生成しました
+# 3. **VQE最適化**: scipyのCOBYLA最適化器を使い、Qamomileで最適なQAOAパラメータを探索しました
+# 4. **解の分析**: 頻度分布から、QAOAがMax-Cutの最適解に測定確率を集中させることを確認しました

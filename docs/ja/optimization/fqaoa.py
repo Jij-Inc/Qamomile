@@ -15,12 +15,12 @@
 # %% [markdown]
 # # 制約付き最適化のためのFQAOA
 #
-# このチュートリアルでは、JijModelingとQamomileを使って
+# このチュートリアルでは、JijModelingとQamomileを使い、
 # **Fermionic QAOA (FQAOA)** で制約付きバイナリ最適化問題を解きます。
 #
-# FQAOAはバイナリ変数をフェルミオン占有数にエンコードします。
-# $\sum_i x_i = M$ の形式の等式制約は、フェルミオン数 $M$ を
-# 保存することで*厳密に*強制されるため、標準QAOAで必要な
+# FQAOAはバイナリ変数をフェルミオンの占有数にエンコードします。
+# $\sum_i x_i = M$ の形式の等式制約は、フェルミオン数 $M$ の
+# 保存によって*厳密に*満たされるため、標準QAOAで必要となる
 # ペナルティ項が不要になります。
 #
 # **参考文献**: Yoshioka et al., *Fermionic Quantum Approximate Optimization Algorithm* (2023).
@@ -41,41 +41,41 @@ import matplotlib.pyplot as plt
 #   \qquad \text{s.t.} \quad \sum_{i,d} x_{i,d} = M
 # $$
 #
-# ここで $x_{i,d} \in \{0, 1\}$ であり、$M$ はフェルミオン数です。
+# ここで $x_{i,d} \in \{0, 1\}$、$M$ はフェルミオン数です。
 #
 # 標準QAOAでは制約をペナルティ項
 # $\lambda \bigl(\sum_{i,d} x_{i,d} - M\bigr)^2$ として追加する必要があり、
-# $\lambda$ の調整は簡単ではありません。FQAOAはこれを完全に回避します。
+# $\lambda$ の調整は容易ではありません。FQAOAはこれを完全に回避します。
+
 
 # %%
-def constrained_qubo_problem() -> jm.Problem:
-    J = jm.Placeholder("J", ndim=2)
+problem = jm.Problem("qubo")
+
+
+@problem.update
+def _(problem: jm.DecoratedProblem):
+    J = problem.Float(ndim=2)
     n = J.len_at(0, latex="n")
-    D = jm.Placeholder("D")
-    x = jm.BinaryVar("x", shape=(n, D))
+    D = problem.Dim()
+    x = problem.BinaryVar(shape=(n, D))
 
-    problem = jm.Problem("qubo")
-    i, j = jm.Element("i", n), jm.Element("j", n)
-    d, d_dash = jm.Element("d", D), jm.Element("d'", D)
+    # Quadratic objective
+    problem += J.ndenumerate().map(
+        lambda ij_v: ij_v[1] * x[ij_v[0][0]].sum() * x[ij_v[0][1]].sum()
+    ).sum()
 
-    # 二次目的関数
-    problem += jm.sum([i, j], J[i, j] * jm.sum([d, d_dash], x[i, d] * x[j, d_dash]))
-
-    # 等式制約: 選択されたビットの合計がMに等しい
-    problem += jm.Constraint("constraint", jm.sum([i, d], x[i, d]) == 4)
-
-    return problem
+    # Equality constraint: total number of selected bits equals M
+    problem += problem.Constraint("constraint", x.sum() == 4)
 
 
-problem = constrained_qubo_problem()
 problem
 
 # %% [markdown]
 # ## インスタンスデータの準備
 #
-# $4 \times 4$ の係数行列 $J$ と $D = 2$ ビット/整数の
-# 小規模なインスタンスを準備します。等式制約は
-# ちょうど $M = 4$ ビットが1になることを要求しています。
+# $4 \times 4$ の係数行列 $J$ と $D = 2$ ビット/整数の小規模な
+# インスタンスを用意します。等式制約により、ちょうど $M = 4$ 個の
+# ビットが1になることが要求されます。
 
 # %%
 instance_data = {
@@ -88,28 +88,29 @@ instance_data = {
     "D": 2,
 }
 
-num_fermions = 4  # 制約の合計値と一致する必要がある
+num_fermions = 4  # must match the constraint sum
 
 # %% [markdown]
 # ## コンパイル済みインスタンスの作成
 #
-# `jm.Interpreter` を使用して数学モデルとインスタンスデータを
-# コンパイルします。
+# `problem.eval()` を使って、数学モデルとインスタンスデータを
+# まとめてコンパイルします。
 
 # %%
-interpreter = jm.Interpreter(instance_data)
-instance = interpreter.eval_problem(problem)
+instance = problem.eval(instance_data)
 
 # %% [markdown]
-# ## FQAOA回路への変換
+# ## FQAOA回路とハミルトニアンへの変換
 #
 # `FQAOAConverter` はコンパイル済みインスタンス**と**フェルミオン数
-# $M$ を受け取ります。内部的には、制約がフェルミオンエンコーディング
-# 自体で強制されるため、`uniform_penalty_weight=0.0` でQUBOが
-# 生成されます。
+# $M$ を受け取ります。等式制約はフェルミオンエンコーディング自体に
+# よって強制されるため、ペナルティ項は不要です。
 #
-# `transpile` メソッドは、変分角度 `gammas` と `betas` のみが
-# 自由パラメータの実行可能プログラムを生成します。
+# 以下の操作が可能です:
+# - `transpile()` でFQAOA量子回路を生成
+# - `get_cost_hamiltonian()` でコストハミルトニアンを確認
+#
+# FQAOAの層数 $p$ はここでは $2$ に設定しています。
 
 # %%
 from qamomile.optimization.fqaoa import FQAOAConverter
@@ -117,58 +118,37 @@ from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
 
-p = 2  # FQAOAの層数
+p = 2  # Number of FQAOA layers
 converter = FQAOAConverter(instance, num_fermions=num_fermions)
 executable = converter.transpile(transpiler, p=p)
 
+# %% [markdown]
+# コストハミルトニアンを確認しましょう。ハミルトニアンはQUBO目的関数のイジング表現から構築されます。
+
 # %%
-qiskit_circuit = executable.get_first_circuit()
-if qiskit_circuit is not None:
-    print(f"量子ビット数: {qiskit_circuit.num_qubits}")
-    print(f"変分パラメータ数: {len(qiskit_circuit.parameters)}")
-    print(f"回路の深さ: {qiskit_circuit.depth()}")
+cost_hamiltonian = converter.get_cost_hamiltonian()
+cost_hamiltonian
 
 # %% [markdown]
-# ## エネルギー計算
-#
-# VQEループを実行するには、測定結果をイジングエネルギーに
-# 変換する関数が必要です。コンバータは `converter.spin_model` に
-# スピンモデルを格納しています。
+# 生成された量子回路を見てみましょう。標準QAOAとは異なり、FQAOA回路にはGivens回転による初期状態準備とフェルミオンホッピングミキサーが含まれています。
 
 # %%
-def calculate_ising_energy(bitstring: list[int], spin_model) -> float:
-    """測定ビット列をイジングエネルギーに変換する。
-
-    変換規則: z_i ∈ {0, 1} -> s_i = 1 - 2*z_i ∈ {+1, -1}。
-    """
-    spins = [1 - 2 * b for b in bitstring]
-    return spin_model.calc_energy(spins)
-
-
-def calculate_expectation_value(sample_result, spin_model) -> float:
-    """全測定結果の加重平均エネルギー。"""
-    total_energy = 0.0
-    total_counts = 0
-    for bitstring, count in sample_result.results:
-        total_energy += calculate_ising_energy(bitstring, spin_model) * count
-        total_counts += count
-    return total_energy / total_counts
-
+qiskit_circuit = executable.get_first_circuit()
+qiskit_circuit.draw()
 
 # %% [markdown]
 # ## VQE最適化
 #
-# scipyのCOBYLA最適化器を使用して、変分パラメータ `gammas` と `betas` に
+# scipyのCOBYLA最適化器を使って、変分パラメータ `gammas` と `betas` に
 # 対するエネルギー期待値を最小化します。
 
 # %%
 from scipy.optimize import minimize
 
-energy_history: list[float] = []
+energy_history = []
 
 
-def objective_function(params, spin_model, shots=1024):
-    """VQEループの目的関数。"""
+def objective_function(params, transpiler, executable, converter, shots=1024):
     p = len(params) // 2
     gammas = params[:p]
     betas = params[p:]
@@ -180,40 +160,43 @@ def objective_function(params, spin_model, shots=1024):
     )
     result = job.result()
 
-    energy = calculate_expectation_value(result, spin_model)
+    sampleset = converter.decode(result)
+    energy = sampleset.energy_mean()
     energy_history.append(energy)
     return energy
 
 
 # %%
-np.random.seed(42)
+np.random.seed(901)
 
-init_params = np.concatenate([
-    np.random.uniform(0, 2 * np.pi, size=p),  # gammas
-    np.random.uniform(0, np.pi, size=p),       # betas
-])
+init_params = np.concatenate(
+    [
+        np.random.uniform(0, 2 * np.pi, size=p),  # gammas
+        np.random.uniform(0, np.pi, size=p),  # betas
+    ]
+)
 
 energy_history = []
 
-print(f"FQAOA最適化を開始します (p={p}層)...")
-print(f"量子ビット数: {converter.num_qubits}")
-print(f"フェルミオン数: {converter.num_fermions}")
+print(f"Starting FQAOA optimization with p={p} layers...")
 
 result_opt = minimize(
     objective_function,
     init_params,
-    args=(converter.spin_model,),
+    args=(transpiler, executable, converter),
     method="COBYLA",
     options={"maxiter": 100, "disp": True},
 )
 
-print("\n最適化されたパラメータ:")
+print("\nOptimized parameters:")
 print(f"  gammas: {result_opt.x[:p]}")
 print(f"  betas:  {result_opt.x[p:]}")
-print(f"最終エネルギー: {result_opt.fun:.4f}")
+print(f"Final energy: {result_opt.fun:.4f}")
 
 # %% [markdown]
-# ## 最適化の収束可視化
+# ## 最適化結果の可視化
+#
+# 最適化プロセスの収束の様子を可視化しましょう。
 
 # %%
 plt.figure(figsize=(10, 5))
@@ -223,13 +206,12 @@ plt.ylabel("Energy")
 plt.title("FQAOA Optimization Convergence")
 plt.grid(True)
 plt.tight_layout()
-# plt.show()
+plt.show()
 
 # %% [markdown]
 # ## 最終解の分析
 #
-# 最適化された回路からより多くのショットでサンプリングし、
-# 測定結果を元のバイナリ変数の領域にデコードします。
+# 最適化された回路からサンプリングし、結果を分析しましょう。
 
 # %%
 optimal_gammas = result_opt.x[:p]
@@ -242,59 +224,85 @@ job_final = executable.sample(
 )
 result_final = job_final.result()
 
-# 測定結果をバイナリ変数の割り当てにデコード
+# Decode results using the converter
 sampleset = converter.decode(result_final)
 
-# 最良解を表示
+num_vars = converter.num_qubits
+
+# Build frequency distribution over all sampled bitstrings
+bitstrings = []
+counts = []
+energies = []
+for i in range(len(sampleset.samples)):
+    sample = sampleset.samples[i]
+    bitstring_str = "".join(str(sample[j]) for j in range(num_vars))
+    bitstrings.append(bitstring_str)
+    counts.append(sampleset.num_occurrences[i])
+    energies.append(sampleset.energy[i])
+
+# Sort by bitstring for consistent display
+sorted_order = np.argsort(bitstrings)
+bitstrings = [bitstrings[i] for i in sorted_order]
+counts = [counts[i] for i in sorted_order]
+energies = [energies[i] for i in sorted_order]
+
+# Determine optimal energy
 best_sample, best_energy, best_count = sampleset.lowest()
-print("見つかった最良解:")
-print(f"  変数の割り当て: {best_sample}")
-print(f"  エネルギー: {best_energy:.4f}")
-print(f"  出現回数: {best_count}")
+
+# Plot frequency distribution
+fig, ax = plt.subplots(figsize=(12, 5))
+x_pos = np.arange(len(bitstrings))
+bars = ax.bar(x_pos, counts)
+
+# Highlight optimal solutions with red bars
+for i, e in enumerate(energies):
+    if np.isclose(e, best_energy):
+        bars[i].set_color("red")
+
+ax.set_xticks(x_pos)
+ax.set_xticklabels(bitstrings, rotation=90)
+ax.set_xlabel("Bitstring")
+ax.set_ylabel("Counts")
+ax.set_title(f"FQAOA Measurement Frequency Distribution (red = optimal, energy = {best_energy:.2f})")
+plt.tight_layout()
+plt.show()
 
 # %% [markdown]
-# エネルギー順にソートした上位の測定結果も確認できます。
+# **すべてのビット列がちょうど $M = 4$ 個のビットが1になっている**ことに注目してください。これは、フェルミオン数保存がペナルティ項なしで等式制約を強制していることを示しています。赤いバーは最適解を示しており、FQAOAが測定確率を最適解に集中させることに成功していることがわかります。
 
 # %%
-results_with_energy = []
-for bitstring, count in result_final.results:
-    energy = calculate_ising_energy(bitstring, converter.spin_model)
-    results_with_energy.append((bitstring, count, energy))
-
-results_with_energy.sort(key=lambda x: x[2])
-
-print("上位の測定結果（エネルギー順）:")
-print("-" * 60)
-for bitstring, count, energy in results_with_energy[:10]:
-    bitstring_str = "".join(map(str, bitstring))
-    probability = count / 4096
-    # フェルミオン数保存の検証: すべてのビット列は
-    # ちょうど num_fermions 個のビットが1になるはず
-    num_ones = sum(bitstring)
-    print(
-        f"  {bitstring_str}: count={count:4d}, "
-        f"prob={probability:.3f}, energy={energy:.4f}, "
-        f"ones={num_ones}"
-    )
+print("Best solution found:")
+print(f"  Variable assignment: {best_sample}")
+print(f"  Energy: {best_energy:.4f}")
+print(f"  Occurrences: {best_count}")
 
 # %% [markdown]
-# **すべてのビット列がちょうど $M = 4$ 個のビットが1** であることに
-# 注目してください。これは、フェルミオン数保存が等式制約を
-# ペナルティ項なしで強制していることを確認するものです。
+# ## 厳密解との比較
+#
+# Qamomileのコンバータは `ommx.v1.Instance` を受け付けるため、
+# 古典ソルバーとの比較が容易です。同じインスタンスをSCIPで厳密に解いて、
+# FQAOAの解と比較してみましょう。
+
+# %%
+from ommx_pyscipopt_adapter import OMMXPySCIPOptAdapter
+
+solution = OMMXPySCIPOptAdapter.solve(instance)
+
+print(f"Exact optimal value: {solution.objective:.4f}")
+print(f"FQAOA best energy:   {best_energy:.4f}")
 
 # %% [markdown]
 # ## まとめ
 #
-# このチュートリアルでは、QamomileでFQAOAを使って制約付き
-# 最適化問題を解く方法を実演しました:
+# このチュートリアルでは、QamomileのFQAOAを使って制約付き最適化問題を
+# 解く方法を実演しました:
 #
 # 1. **問題の定式化**: JijModelingを使って等式制約付きQUBOを定義
-# 2. **制約の処理**: `FQAOAConverter`がフェルミオン数保存で制約をエンコード ── ペナルティ重みの調整が不要
-# 3. **回路の生成**: `converter.transpile()`がGivens回転初期状態とフェルミオンミキサーを含む完全なFQAOAアンサッツを生成
-# 4. **VQE最適化**: scipyのCOBYLA最適化器で最適な変分パラメータを探索
-# 5. **解のデコード**: `converter.decode()`が測定結果を変数の割り当てにマッピング
+# 2. **ハミルトニアンと回路の生成**: `FQAOAConverter` がコストハミルトニアンと、Givens回転初期状態・フェルミオンミキサーを含むFQAOA回路を自動生成
+# 3. **VQE最適化**: scipyのCOBYLA最適化器で最適なFQAOAパラメータを探索
+# 4. **解の分析**: 測定頻度分布により、FQAOAが測定確率を最適解に集中させ、すべてのビット列が制約を厳密に満たしていることを確認
 #
 # FQAOAの標準QAOAに対する主な利点:
-# - 等式制約が構造的に**厳密に**充足される
+# - 等式制約が構造的に**厳密に**満たされる
 # - ペナルティ重み $\lambda$ の調整が不要
 # - 探索空間が実行可能解に制限されるため、収束が改善される

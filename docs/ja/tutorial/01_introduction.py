@@ -1,7 +1,6 @@
 # ---
 # jupyter:
 #   jupytext:
-#     cell_metadata_filter: -all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -14,311 +13,500 @@
 # ---
 
 # %% [markdown]
-# # Qamomile入門：量子コンピューティングの第一歩
+# # Qamomile入門
 #
-# このチュートリアルでは、Qamomileを使って量子コンピューティングの基礎を学びます。
-# プログラミング経験があれば、量子コンピューティングの予備知識は必要ありません。
+# Qamomileへようこそ。Qamomileは、Pythonで量子回路を構築・解析・実行するための
+# 量子コンピューティングSDKです。
 #
 # ## このチュートリアルで学ぶこと
-# - Qamomileとは何か、その特徴
-# - 量子ビット（qubit）の基本概念
+# - Qamomileとは何か、量子エコシステムにおける位置づけ
 # - 最初の量子回路の作成と実行
-# - Qamomileの重要な設計思想：線形型システム
+# - 線形型システム（量子複製不可能定理の適用）
+# - QiskitTranspilerを用いた実行
+# - Qamomileのトレースとトランスパイルの仕組み
+# - パラメトリック回路の基礎
+# - リソース見積もりの基礎
+# - 標準ライブラリとアルゴリズムライブラリの基礎
+# - 最適化機能の概要
 
 # %% [markdown]
 # ## 1. Qamomileとは
 #
-# **Qamomile**は、Pythonで量子回路を記述するためのライブラリです。
-# 以下のような特徴があります：
+# **Qamomile**は、量子コンピューティング向けのPython SDKです。
+# ノイズのある中規模量子コンピューティング（NISQ）から
+# 誤り耐性量子コンピューティング（FTQC）への橋渡しとなるように設計されており、
+# 両方のパラダイムに対応した量子プログラムを単一のフレームワークで記述できます。
 #
-# 1. **Pythonライクな記法**: `@qkernel`デコレータを使って、普通のPython関数のように量子回路を書けます
-# 2. **型安全**: 型アノテーションにより、コンパイル時にエラーを検出できます
-# 3. **マルチバックエンド**: 同じコードをQiskit、QuriParts、PennyLaneなど様々なSDKで実行できます
-# 4. **線形型システム**: 量子ビットの状態を安全に追跡し、よくあるバグを防ぎます
+# ### 位置づけ
+#
+# Qamomileは量子コンピューティングの両方のパラダイムをサポートしています：
+#
+# - **NISQアルゴリズム**: QAOAやVQEなどの変分アルゴリズム
+# - **誤り耐性アルゴリズム**: 標準ライブラリを通じたQPEなどの厳密アルゴリズム、
+#   および計画のための代数的リソース見積もり
+#
+# ### 主な特徴
+#
+# | 特徴 | 説明 |
+# |------|------|
+# | **Pythonライクな構文** | `@qkernel`デコレータで量子プログラムを定義 |
+# | **型安全性** | すべてのパラメータと戻り値に型アノテーションが必要 |
+# | **線形型** | 実行前に量子複製不可能定理を適用 |
+# | **マルチバックエンド** | 現在Qiskitに対応、CUDA-QおよびQURI Partsは近日対応予定、さらに拡大予定 |
+# | **標準ライブラリ** | QFT、IQFT、QPEを組み込みで提供（分解戦略あり、さらに追加予定） |
+# | **リソース見積もり** | シンボリックなゲート数と深さの解析 |
+# | **最適化** | [ommx](https://jij-inc.github.io/ommx/en/introduction.html)統合によるQAOA、FQAOA、QRAOコンバータ（さらに追加予定） |
 
 # %% [markdown]
-# ## 2. 量子ビット（Qubit）とは
+# ## 2. 最初の量子回路
 #
-# ### 古典ビットと量子ビット
+# ### `@qkernel`関数としての量子プログラム
 #
-# 普通のコンピュータでは、**ビット**（bit）が情報の最小単位です。
-# ビットは **0** か **1** のどちらか一方の値しか持てません。
+# Qamomileでは、**すべての量子プログラム（量子回路）は
+# `@qmc.qkernel`デコレータを付けたPython関数として記述します**。
+# これが量子計算を定義する唯一の方法であり、回路を作成する他の方法はありません。
 #
-# **古典ビット**: 0 または 1
+# `@qkernel`関数には最低限以下の要件があります：
 #
-# 一方、量子コンピュータでは**量子ビット**（qubit）を使います。
-# 量子ビットは、0と1の**重ね合わせ状態**を取ることができます。
+# 1. **`@qmc.qkernel`デコレータ** — 関数を量子カーネルとしてマークし、
+#    Qamomileがトレース、可視化、トランスパイルできるようにします。
+# 2. **すべてのパラメータと戻り値の型アノテーション** — Qamomileはこれらを使って
+#    量子ビットの割り当て、パラメータの処理、測定結果のデコードを行います。
+#    省略するとトレース時にエラーが発生します。
+# 3. **戻り値** — 関数は何かを返す必要があります（測定結果、量子ビット、
+#    または期待値）。戻り値の型アノテーションにより、
+#    Qamomileが出力の解釈方法を決定します。
 #
-# **量子ビット**: $|0\rangle$ と $|1\rangle$ の重ね合わせ（測定するまでどちらか決まらない）
+# ```python
+# @qmc.qkernel
+# def my_circuit(param: qmc.Float) -> qmc.Bit:   # annotations required
+#     q = qmc.qubit(name="q")      # allocate qubits inside the function
+#     q = qmc.ry(q, param)         # apply gates (reassign to respect linear types)
+#     return qmc.measure(q)        # return measurement result
+# ```
 #
-# 記号の説明：
-# - $|0\rangle$（ケット0）: 量子ビットの「0」状態
-# - $|1\rangle$（ケット1）: 量子ビットの「1」状態
+# 利用可能な型の全カタログについては[02_type_system](02_type_system.ipynb)を参照してください。
 #
-# ### 測定
+# ### 量子ビットとゲート
 #
-# 量子ビットを**測定**すると、重ね合わせ状態が崩れ、0か1のどちらかの値が得られます。
-# どちらが出るかは確率的に決まります。
-
-# %% [markdown]
-# ## 3. 最初の量子回路
+# **量子ビット**（qubit）は量子情報の基本単位です。古典ビット（常に0か1）とは異なり、
+# 量子ビットは測定されるまで$|0\rangle$と$|1\rangle$の**重ね合わせ状態**に
+# 存在することができます。
 #
-# それでは、Qamomileを使って最初の量子回路を作りましょう。
-# まずは必要なモジュールをインポートします。
+# 量子**ゲート**は量子ビットの状態を変換します。最も単純なゲートは
+# **Xゲート**（NOTゲート）で、$|0\rangle \to |1\rangle$を反転し、その逆も同様です。
+#
+# 最初の回路を作成してみましょう。
 
 # %%
-import qamomile.circuit as qm
+import qamomile.circuit as qmc
 from qamomile.qiskit import QiskitTranspiler
 
-# %% [markdown]
-# ### X ゲート（NOTゲート）
-#
-# 最も基本的な量子ゲートの1つが **Xゲート** です。
-# Xゲートは、量子ビットの状態を反転させます：
-# - $|0\rangle \rightarrow |1\rangle$
-# - $|1\rangle \rightarrow |0\rangle$
-#
-# 古典コンピュータの「NOTゲート」と同じ働きです。
 
-# %%
-@qm.qkernel
-def x_gate_circuit() -> qm.Bit:
-    """Xゲートを適用する最初の量子回路"""
-    # 量子ビットを作成（初期状態は |0⟩）
-    q = qm.qubit(name="q")
-
-    # Xゲートを適用して |0⟩ → |1⟩ に変換
-    q = qm.x(q)
-
-    # 測定して結果を返す
-    return qm.measure(q)
+@qmc.qkernel
+def x_gate_circuit() -> qmc.Bit:
+    """Apply X gate to flip |0> to |1>."""
+    q = qmc.qubit(name="q")
+    q = qmc.x(q)
+    return qmc.measure(q)
 
 
 x_gate_circuit.draw()
 
-
 # %% [markdown]
 # ### コードの解説
 #
-# 1. **`@qm.qkernel`**: この関数が量子カーネル（量子回路を定義する関数）であることを示すデコレータ
-# 2. **`-> qm.Bit`**: 戻り値の型。測定結果は古典ビット（`Bit`）になります
-# 3. **`qm.qubit(name="q")`**: 量子ビットを1つ作成。初期状態は $|0\rangle$
-# 4. **`q = qm.x(q)`**: Xゲートを適用。**重要：結果を必ず再代入します**
-# 5. **`qm.measure(q)`**: 量子ビットを測定し、古典ビットとして結果を取得
+# 1. **`@qmc.qkernel`**: この関数を量子カーネルとしてマーク
+# 2. **`-> qmc.Bit`**: 戻り値の型アノテーション（測定結果）
+# 3. **`qmc.qubit(name="q")`**: 量子ビットを1つ作成、初期状態は$|0\rangle$
+# 4. **`q = qmc.x(q)`**: Xゲートを適用。再代入に注目してください！
+# 5. **`qmc.measure(q)`**: 量子ビットを測定し、古典`Bit`を返す
+# 6. **`x_gate_circuit.draw()`**: 回路図を可視化。すべての`@qkernel`には`.draw()`メソッドがあり、Matplotlibを使って回路を描画します。
 
 # %% [markdown]
-# ## 4. 線形型システム：Qamomileの重要な設計思想
+# ## 3. 線形型システム
 #
-# 上のコードで、なぜ `q = qm.x(q)` と書くのか疑問に思ったかもしれません。
-# これはQamomileの**線形型システム**によるものです。
+# `q = qmc.x(q)`というパターンに気づいたかもしれません。なぜ再代入が必要なのでしょうか？
 #
-# ### なぜ再代入が必要か
-#
-# 量子ビットは「コピー」できない性質があります（量子力学の「複製不可能定理」）。
-# Qamomileでは、この性質を型システムで表現しています。
+# 量子力学では、量子ビットはコピーできません（**複製不可能定理**）。
+# Qamomileはこれを**線形型システム**で強制します。量子ビットがゲートに入ると、
+# 古いハンドルは消費され、新しいハンドルが返されます。
+# 常に戻り値を受け取る必要があります。
 #
 # ```python
-# # 正しい書き方
-# q = qm.x(q)  # ゲート適用後、新しい状態を q に再代入
+# # Correct
+# q = qmc.h(q)      # captures the new handle
+# q = qmc.x(q)      # uses the updated handle
 #
-# # 間違った書き方（エラーになります）
-# qm.x(q)      # 再代入せずに q を使い続けると、古い状態を参照してしまう
+# # Wrong — will cause an error
+# qmc.h(q)           # ignores return value
+# qmc.x(q)           # tries to use consumed handle
+# ```
+
+
+# %%
+# Error example: using a qubit twice
+@qmc.qkernel
+def bad_example() -> tuple[qmc.Bit, qmc.Bit]:
+    q = qmc.qubit(name="q")
+    q1 = qmc.h(q)  # consumes q
+    q2 = qmc.x(q)  # ERROR: q was already consumed
+    return qmc.measure(q1), qmc.measure(q2)
+
+
+try:
+    bad_example.draw()
+except Exception as e:
+    print(f"Error (expected): {type(e).__name__}: {e}")
+
+# %% [markdown]
+# ### 線形型のルール
+#
+# | コード | 有効？ | 理由 |
+# |--------|--------|------|
+# | `q = qmc.h(q)` | OK | 戻り値を再代入 |
+# | `qmc.h(q)` | NG | 戻り値を無視 |
+# | `q1 = qmc.h(q); q2 = qmc.x(q)` | NG | qを2回使用 |
+# | `q = qmc.h(q); q = qmc.x(q)` | OK | 順番に更新 |
+#
+# 多量子ビットゲートの場合、両方の量子ビットが返されます：
+# ```python
+# q0, q1 = qmc.cx(q0, q1)   # CNOT returns both qubits
+# ```
+
+# %% [markdown]
+# ## 4. Qiskitでの実行
+#
+# Qamomileの回路はバックエンドに依存しません。実行するには、
+# 回路を特定のバックエンド形式に変換する**トランスパイラ**を使用します。
+#
+# 現在、`QiskitTranspiler`がサポートされているバックエンドです。
+# CUDA-QおよびQURI Partsのサポートは現在開発中で、
+# さらに多くのバックエンドが計画されています。回路はバックエンドに依存しない
+# `@qkernel`関数として定義されるため、新しいバックエンドが利用可能になっても
+# コードを変更する必要はありません。
+#
+# 実行パイプラインには、カーネルの戻り値に応じて2つのモードがあります：
+# ```
+# @qkernel (returns Bit/Vector[Bit]/Float via measure)
+#   → transpile() → ExecutableProgram → sample(executor, shots=N) → SampleResult
+#
+# @qkernel (returns Float via expval)
+#   → transpile() → ExecutableProgram → run(executor) → Float
 # ```
 #
-# この設計により、「同じ量子ビットを2回使ってしまう」といったバグを防げます。
-
-# %% [markdown]
-# ### 線形型のエラー例：実際に試してみよう
+# - **`sample()`**: ショットベースの測定。`(value, count)`ペアを持つ`SampleResult`を
+#   返します。個別の結果ごとに1つのエントリが含まれます。
+# - **`run()`**: 期待値計算。`Float`値を直接返します
+#   （期待値$\langle\psi|H|\psi\rangle$）。変分アルゴリズムで`qmc.expval()`と
+#   一緒に使用します（[08_parametric_circuits](08_parametric_circuits.ipynb)を参照）。
 #
-# 実際に間違った書き方をするとどうなるか見てみましょう。
+# このチュートリアルでは`sample()`のみ使用します。
+# オブザーバブルや変分回路を扱う際に`run()`を紹介します。
 
 # %%
-# ダメな例1: 同じ量子ビットを2回使う
-@qm.qkernel
-def bad_example_reuse() -> tuple[qm.Bit, qm.Bit]:
-    q = qm.qubit(name="q")
-    q1 = qm.h(q)   # q を消費して q1 に
-    q2 = qm.x(q)   # ダメ！q は既に q1 で使われている
-    return qm.measure(q1), qm.measure(q2)
-
-
-# %%
-# この回路をトランスパイルしようとするとエラーになります
-try:
-    transpiler_test = QiskitTranspiler()
-    transpiler_test.transpile(bad_example_reuse)
-    print("エラーが発生しませんでした（予期しない動作）")
-except Exception as e:
-    print(f"エラーが発生しました（これが正しい動作です）:")
-    print(f"  {type(e).__name__}: {e}")
-
-# %% [markdown]
-# ### ダメな例2: 戻り値を無視する
-#
-# ゲートの戻り値を無視して、古い変数を使い続けるのもダメです。
-
-# %%
-@qm.qkernel
-def bad_example_ignore_return() -> qm.Bit:
-    q = qm.qubit(name="q")
-    qm.h(q)        # ダメ！戻り値を無視している
-    qm.x(q)        # ダメ！古い q を使っている
-    return qm.measure(q)  # これも古い q
-
-
-# %%
-try:
-    transpiler_test = QiskitTranspiler()
-    transpiler_test.transpile(bad_example_ignore_return)
-    print("エラーが発生しませんでした（予期しない動作）")
-except Exception as e:
-    print(f"エラーが発生しました（これが正しい動作です）:")
-    print(f"  {type(e).__name__}: {e}")
-
-# %% [markdown]
-# ### 正しい書き方
-#
-# 常にゲートの戻り値を同じ変数に再代入しましょう。
-
-# %%
-@qm.qkernel
-def good_example() -> qm.Bit:
-    q = qm.qubit(name="q")
-    q = qm.h(q)    # 正しい！結果を q に再代入
-    q = qm.x(q)    # 正しい！更新された q を使う
-    return qm.measure(q)
-
-
-good_example.draw()
-
-# %%
-# 正しい回路は問題なくトランスパイルできます
-transpiler_test = QiskitTranspiler()
-executable_good = transpiler_test.transpile(good_example)
-result_good = executable_good.sample(transpiler_test.executor(), shots=100).result()
-print("正しい回路は問題なく実行できます:")
-for value, count in result_good.results:
-    print(f"  測定結果: {value}, 回数: {count}")
-
-# %% [markdown]
-# ### まとめ：線形型のルール
-#
-# | 書き方 | 正しい？ | 理由 |
-# |--------|---------|------|
-# | `q = qm.h(q)` | OK | 戻り値を再代入 |
-# | `qm.h(q)` | NG | 戻り値を無視 |
-# | `q1 = qm.h(q); q2 = qm.x(q)` | NG | 同じ q を2回使用 |
-# | `q = qm.h(q); q = qm.x(q)` | OK | 順番に更新 |
-
-# %% [markdown]
-# ## 5. 量子回路の実行
-#
-# 作成した量子回路を実行してみましょう。
-# Qamomileでは、**トランスパイラ**を使って回路をバックエンド（今回はQiskit）に変換し、実行します。
-
-# %%
-# トランスパイラを作成
+# Create transpiler
 transpiler = QiskitTranspiler()
 
-# 量子回路をコンパイル
+# Compile the circuit
 executable = transpiler.transpile(x_gate_circuit)
 
-# シミュレータで実行（1000回測定）
+# Execute on simulator (1000 shots)
 job = executable.sample(transpiler.executor(), shots=1000)
 result = job.result()
 
-# 結果を表示
-print("=== Xゲート回路の実行結果 ===")
+print("=== X Gate Circuit Results ===")
 for value, count in result.results:
-    print(f"  測定結果: {value}, 回数: {count}")
+    print(f"  {value}: {count}")
 
 # %% [markdown]
-# ### 結果の解説
+# Xゲートは$|0\rangle$を$|1\rangle$に反転させるため、1000回の測定すべてで
+# `1`が得られるはずです。
 #
-# Xゲートを $|0\rangle$ に適用すると $|1\rangle$ になります。
-# したがって、測定結果は常に **1** になるはずです。
-#
-# 上の結果で、1000回の測定全てで `1` が得られていることを確認してください。
-
-# %% [markdown]
-# ## 6. 量子回路の可視化
-#
-# 作成した回路がどのような構造になっているか、図で確認できます。
+# トランスパイル後のQiskit回路も確認できます：
 
 # %%
-# Qiskit形式の回路を取得
-qiskit_circuit = transpiler.to_circuit(x_gate_circuit)
-
-# 回路を表示
-print("=== 量子回路の構造 ===")
+qiskit_circuit = executable.get_first_circuit()
 print(qiskit_circuit.draw(output="text"))
 
 # %% [markdown]
-# ### 回路図の読み方
+# ### 量子ビットの順序規則
 #
-# ```
-#      ┌───┐┌─┐
-#   q: ┤ X ├┤M├
-#      └───┘└╥┘
-# c: 1/══════╩═
-#            0
-# ```
+# 複数の量子ビットを扱う場合、Qamomileは以下の規則を使用します：
 #
-# - `q`: 量子ビットのライン
-# - `X`: Xゲート
-# - `M`: 測定
-# - `c`: 古典ビット（測定結果が格納される）
+# - **ケット表記**はビッグエンディアンです：最も左のビットが
+#   **最も大きいインデックス**の量子ビットです。例えば、3量子ビットの$|110\rangle$は
+#   `q[2]=1, q[1]=1, q[0]=0`を意味します。
+# - **タプル結果**は配列順に従います：`(q[0], q[1], ..., q[n-1])`。
+#   したがって、状態$|110\rangle$は測定結果では`(0, 1, 1)`として現れます。
+#
+# 3量子ビットの回路で実際に確認してみましょう。
 
-# %% [markdown]
-# ## 7. もう一つの例：何もしない回路
-#
-# 比較のため、何もゲートを適用しない回路も作ってみましょう。
 
 # %%
-@qm.qkernel
-def identity_circuit() -> qm.Bit:
-    """何もしない回路（初期状態をそのまま測定）"""
-    q = qm.qubit(name="q")
-    # 何もゲートを適用しない
-    return qm.measure(q)
+@qmc.qkernel
+def ordering_demo() -> tuple[qmc.Bit, qmc.Bit, qmc.Bit]:
+    """Demonstrate qubit ordering: q0=0, q1=1, q2=1 → ket |110>."""
+    q0 = qmc.qubit(name="q0")
+    q1 = qmc.qubit(name="q1")
+    q2 = qmc.qubit(name="q2")
+    # q0 stays |0>
+    q1 = qmc.x(q1)  # q1 → |1>
+    q2 = qmc.x(q2)  # q2 → |1>
+    return qmc.measure(q0), qmc.measure(q1), qmc.measure(q2)
 
 
-identity_circuit.draw()
+ordering_demo.draw()
 
 # %%
-# 実行
-executable_id = transpiler.transpile(identity_circuit)
-job_id = executable_id.sample(transpiler.executor(), shots=1000)
-result_id = job_id.result()
+exec_ord = transpiler.transpile(ordering_demo)
+result_ord = exec_ord.sample(transpiler.executor(), shots=100).result()
 
-print("=== 何もしない回路の実行結果 ===")
-for value, count in result_id.results:
-    print(f"  測定結果: {value}, 回数: {count}")
+print("=== Qubit Ordering Demo ===")
+for value, count in result_ord.results:
+    print(f"  {value}: {count}")
 
 # %% [markdown]
-# 量子ビットの初期状態は $|0\rangle$ なので、何もしなければ測定結果は常に **0** になります。
+# 状態は`q0=0, q1=1, q2=1`です。ケット表記（ビッグエンディアン：q2 q1 q0）では
+# $|110\rangle$ですが、タプル結果は配列順`(q0, q1, q2)`に従い`(0, 1, 1)`となります。
 
 # %% [markdown]
-# ## 8. まとめ
+# ## 5. トレースとコンパイル
 #
-# このチュートリアルでは、以下のことを学びました：
+# `@qmc.qkernel`関数を定義しても、Qamomileは量子操作を即座に実行しません。
+# 代わりに、2段階のアプローチを使用します：
 #
-# 1. **Qamomileの基本**: `@qm.qkernel` デコレータで量子回路を定義
-# 2. **量子ビット**: `qm.qubit()` で作成、初期状態は $|0\rangle$
-# 3. **量子ゲート**: `qm.x()` などのゲートで状態を操作
-# 4. **線形型システム**: ゲート適用後は **必ず再代入** (`q = qm.x(q)`)
-# 5. **測定**: `qm.measure()` で量子状態を古典ビットに変換
-# 6. **実行**: `QiskitTranspiler` でコンパイルし、`sample()` で実行
+# 1. **トレース**: `.draw()`や`transpile()`を呼び出すと、Qamomileは
+#    関数本体を**トレース**して中間表現（IR）を構築します。
+#    これは操作とデータ依存関係の有向グラフです。
+# 2. **トランスパイル**: IRグラフはマルチパスのパイプラインを通じて処理され、
+#    最適化されてバックエンド固有の回路に変換されます。
 #
-# ### 重要なポイント
-#
-# ```python
-# @qm.qkernel
-# def my_circuit() -> qm.Bit:
-#     q = qm.qubit(name="q")  # 量子ビット作成
-#     q = qm.x(q)              # ゲート適用（再代入必須！）
-#     return qm.measure(q)     # 測定
+# ```
+# @qkernel function
+#     ↓  trace
+# IR Graph (operations + dependencies)
+#     ↓  inline → constant_fold → analyze → separate → emit
+# Backend Circuit (e.g., Qiskit QuantumCircuit)
 # ```
 #
-# 次のチュートリアル（`02_single_qubit.py`）では、重ね合わせ状態を作る**アダマールゲート**や、
-# 回転角度を指定できる**回転ゲート**について学びます。
+# このアーキテクチャには2つの重要な利点があります：
+#
+# - **バックエンド非依存性**: 回路を`@qkernel`として一度定義すれば、
+#   コードを変更せずに任意のサポートバックエンドにトランスパイルできます。
+# - **最適化の機会**: マルチパスパイプラインにより、最終的な回路を生成する前に
+#   サブルーチンのインライン化、定数畳み込み、依存関係解析が可能です。
+#
+# トランスパイラパイプラインの詳細は[10_transpile](10_transpile.ipynb)を参照してください。
+
+# %% [markdown]
+# ## 6. パラメトリック回路
+#
+# 多くの量子アルゴリズムは、調整可能なパラメータを持つ回路を使用します。
+# Qamomileでは、パラメータの型として`qmc.Float`を使用します。
+
+# %%
+import math
+
+
+@qmc.qkernel
+def rotation_circuit(theta: qmc.Float) -> qmc.Bit:
+    """Parameterized rotation around the Y-axis."""
+    q = qmc.qubit(name="q")
+    q = qmc.ry(q, theta)
+    return qmc.measure(q)
+
+
+rotation_circuit.draw()
+
+# %% [markdown]
+# `draw()`にパラメータ値を直接渡して、具体的な値が埋め込まれた
+# 回路を確認することもできます：
+
+# %%
+rotation_circuit.draw(theta=math.pi / 4)
+
+# %% [markdown]
+# ### bindingsとparameters
+#
+# トランスパイル時に、2つの方法で値を提供できます：
+#
+# - **`bindings`**: トランスパイル時に固定される値（回路構造がこれに依存する場合があります）
+# - **`parameters`**: 自由なまま保持され、再トランスパイルなしに実行間で変更できる値
+
+# %%
+# Fix theta at transpile time
+exec_fixed = transpiler.transpile(rotation_circuit, bindings={"theta": math.pi / 2})
+result_fixed = exec_fixed.sample(transpiler.executor(), shots=1000).result()
+
+print("=== RY(pi/2) — fixed at transpile time ===")
+for value, count in result_fixed.results:
+    percentage = count / 1000 * 100
+    print(f"  {value}: {count} ({percentage:.1f}%)")
+
+# %%
+# Keep theta as a free parameter
+exec_param = transpiler.transpile(rotation_circuit, parameters=["theta"])
+
+# Execute multiple times with different values without retranspiling
+for angle, name in [(0, "0"), (math.pi / 4, "pi/4"), (math.pi, "pi")]:
+    res = exec_param.sample(
+        transpiler.executor(), bindings={"theta": angle}, shots=1000
+    ).result()
+    counts = {str(v): c for v, c in res.results}
+    print(f"RY({name}): {counts}")
+
+# %% [markdown]
+# これはVQEやQAOAなどの変分量子アルゴリズムの基盤であり、
+# 古典-量子ループの中でパラメータが最適化されます。
+
+# %% [markdown]
+# ## 7. リソース見積もり
+#
+# 実機で実行する前に、回路に必要な量子ビット数やゲート数を見積もりたい場合が
+# あります。Qamomileはシンボリックパラメータに対応した
+# **代数的リソース見積もり**を提供します。
+#
+# 回路がシンボリックな`UInt`の上限を持つ`qmc.range()`を使用する場合、
+# 見積もり結果はリソースが問題サイズに対してどのようにスケールするかを
+# 記述するSymPy式になります。
+
+
+# %%
+from qamomile.circuit.estimator import estimate_resources
+
+
+@qmc.qkernel
+def ghz_circuit(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+    """GHZ state with symbolic size n."""
+    q = qmc.qubit_array(n, name="q")
+    q[0] = qmc.h(q[0])
+    for i in qmc.range(n - 1):
+        q[i], q[i + 1] = qmc.cx(q[i], q[i + 1])
+    return q
+
+
+est_ghz = estimate_resources(ghz_circuit.block)
+
+print("=== GHZ State Resources (symbolic) ===")
+print(f"  Qubits:        {est_ghz.qubits}")
+print(f"  Total gates:   {est_ghz.gates.total}")
+print(f"  Two-qubit:     {est_ghz.gates.two_qubit}")
+print(f"  Circuit depth: {est_ghz.depth.total_depth}")
+
+# %% [markdown]
+# 結果にはシンボル**n**が含まれており、リソースが問題サイズに対してどのように
+# 増加するかを表す閉形式の式です。リソース見積もりの完全なチュートリアルは
+# [09_resource_estimation](09_resource_estimation.ipynb)を参照してください。
+
+# %% [markdown]
+# ## 8. 標準ライブラリとアルゴリズムライブラリ
+#
+# Qamomileは、ビルド済みの回路コンポーネントとして2つのライブラリを提供しています。
+#
+# **標準ライブラリ**（`qamomile.circuit.stdlib`）：量子アルゴリズムで
+# よく使われる基本的なビルディングブロックです。
+#
+# | コンポーネント | 説明 |
+# |----------------|------|
+# | `qft` / `iqft` | 量子フーリエ変換（複数の分解戦略あり） |
+# | `qpe` | 量子位相推定 |
+#
+# **アルゴリズムライブラリ**（`qamomile.circuit.algorithm`）：変分アルゴリズムや
+# 最適化アルゴリズム向けのより具体的な回路パターンです。
+#
+# | コンポーネント | 説明 |
+# |----------------|------|
+# | `qaoa_circuit`, `qaoa_state` | QAOA回路の構築 |
+# | `fqaoa_layers`, `fqaoa_state` | フェルミオンQAOAのコンポーネント（Givens回転、ホッピングゲート） |
+# | `rx_layer`, `ry_layer`, `rz_layer` | パラメータ付き回転レイヤー |
+# | `cz_entangling_layer` | CZエンタングリングレイヤー |
+#
+# どちらのライブラリも活発に開発中です。次にどの回路パターンやアルゴリズムを
+# 追加すべきかについてのフィードバックを歓迎します。
+# [GitHub](https://github.com/Jij-Inc/Qamomile)でissueを作成してください。
+#
+# 標準ライブラリの詳細なチュートリアルは[05_stdlib](05_stdlib.ipynb)を参照してください。
+
+# %% [markdown]
+# ## 9. 最適化機能
+#
+# Qamomileには、量子コンピュータで組合せ最適化問題を解くための
+# コンバータが含まれています。
+#
+# 最適化パイプライン：
+# ```
+# Mathematical Model (JijModeling)
+#      ↓  Interpreter + ommx.v1.Instance
+# Converter (QAOAConverter, FQAOAConverter, QRAO31Converter)
+#      ↓  get_cost_hamiltonian() / transpile()
+# Quantum Circuit + Classical Optimization Loop
+#      ↓  decode()
+# Solution
+# ```
+#
+# 利用可能なコンバータ：
+#
+# | コンバータ | アルゴリズム | 用途 |
+# |------------|--------------|------|
+# | `QAOAConverter` | QAOA | 汎用的な組合せ最適化 |
+# | `FQAOAConverter` | Fermionic QAOA | 制約付き最適化（制約の厳密な適用） |
+# | `QRAO31Converter` | QRAO 3-to-1 | 量子ビット効率の良いエンコーディング（1量子ビットに3変数） |
+#
+# 新しい量子最適化アルゴリズムの開発に伴い、さらに多くのコンバータが計画されています。
+# 次にどのアルゴリズムやコンバータを優先すべきかについて、
+# コミュニティからのフィードバックを積極的に歓迎しています。
+# 新しいコンバータが有用なユースケースがある場合は、
+# [GitHub](https://github.com/Jij-Inc/Qamomile)でissueを作成してください。
+#
+# 数理モデリング層の詳細については、
+# [ommxドキュメント](https://jij-inc.github.io/ommx/en/introduction.html)
+# および[JijModelingチュートリアル](https://jij-inc-jijmodeling-tutorials-en.readthedocs-hosted.com/en/latest/introduction.html)を参照してください。
+#
+# 最適化チュートリアル（[QAOA](../optimization/qaoa.ipynb)、[FQAOA](../optimization/fqaoa.ipynb)、[QRAO](../optimization/qrao31.ipynb)、[カスタムコンバータ](../optimization/custom_converter.ipynb)）で詳細を確認できます。
+
+# %% [markdown]
+# ## 10. まとめ
+#
+# このチュートリアルでは、Qamomileの基本的な概念を扱いました：
+#
+# 1. **`@qmc.qkernel`**: 量子回路をPython関数として定義
+# 2. **線形型**: ゲート適用後は常に再代入（`q = qmc.h(q)`）
+# 3. **実行**: `QiskitTranspiler` → `transpile()` → `sample()`
+# 4. **トレースとトランスパイル**: `@qkernel`はIRグラフにトレースされ、マルチパスパイプラインを通じてトランスパイルされる
+# 5. **パラメトリック回路**: `bindings` / `parameters`を使った`qmc.Float`パラメータ
+# 6. **リソース見積もり**: `estimate_resources(kernel.block)`によるシンボリックなゲート数
+# 7. **標準ライブラリとアルゴリズムライブラリ**: ビルド済みのQFT、QPE、QAOA、FQAOAコンポーネント
+# 8. **最適化**: QAOA、FQAOA、QRAO用コンバータ（さらに追加予定）
+#
+# ### 次のステップ
+#
+# | チュートリアル | トピック |
+# |----------------|---------|
+# | `02_type_system.ipynb` | 完全な型システム：Qubit、Float、UInt、Bit、Vector、Dict |
+# | `03_gates.ipynb` | 完全なゲートリファレンス（全11ゲート） |
+# | `04_superposition_entanglement.ipynb` | 重ね合わせ、干渉、Bell/GHZ状態 |
+# | `05_stdlib.ipynb` | QFT、QPE、アルゴリズムモジュール |
+# | `06_composite_gate.ipynb` | CompositeGate、`@composite_gate`、スタブゲート |
+# | `07_first_algorithm.ipynb` | Deutsch-Jozsaアルゴリズム |
+# | `08_parametric_circuits.ipynb` | パラメトリック回路とQAOAのスクラッチ実装 |
+# | `09_resource_estimation.ipynb` | 代数的リソース見積もり |
+# | `10_transpile.ipynb` | トランスパイラパイプラインの内部構造 |
+# | `11_custom_executor.ipynb` | カスタムバックエンドの統合 |
+# | `optimization/qaoa.ipynb` | 組合せ最適化のためのQAOA |
+# | `optimization/fqaoa.ipynb` | 制約適用付きフェルミオンQAOA |
+# | `optimization/qrao31.ipynb` | 量子ランダムアクセス最適化 |
+# | `optimization/custom_converter.ipynb` | 独自コンバータの構築 |
+
+# %% [markdown]
+# ## このチュートリアルで学んだこと
+#
+# - **Qamomileとは何か、量子エコシステムにおける位置づけ** — QamomileはNISQからFTQCへの橋渡しとなり、両方のパラダイムに対応した量子プログラムを単一のフレームワークで記述できます。
+# - **最初の量子回路の作成と実行** — `@qmc.qkernel`と`qmc.qubit()`、`qmc.x()`などのゲート、`qmc.measure()`を使って回路を構築・可視化しました。
+# - **線形型システム（量子複製不可能定理の適用）** — ゲートは量子ビットを消費して返します。量子複製不可能定理をトランスパイル時に適用するために、常に再代入（`q = qmc.h(q)`）してください。
+# - **QiskitTranspilerを用いた実行** — `QiskitTranspiler`は`transpile()`でカーネルをトランスパイルし、`sample()`で実行して測定結果を得ます。
+# - **Qamomileのトレースとトランスパイルの仕組み** — `@qkernel`関数はIRグラフにトレースされ、マルチパスパイプライン（inline、constant fold、analyze、separate、emit）を通じてバックエンド固有の回路が生成されます。
+# - **パラメトリック回路の基礎** — `qmc.Float`パラメータは`bindings=`でトランスパイル時に固定するか、`parameters=`で自由なまま保持して変分アルゴリズムに使用できます。
+# - **リソース見積もりの基礎** — `estimate_resources(kernel.block)`はシンボリックなゲート数と回路深さを生成し、SymPy式を通じて問題サイズに応じたスケーリングを表現します。
+# - **標準ライブラリとアルゴリズムライブラリの基礎** — QFT、QPEなどのビルド済みコンポーネント（さらに追加予定）。
+# - **最適化機能の概要** — QAOA、FQAOA、QRAOコンバータがJijModelingの問題をモデル→コンバータ→回路のパイプラインで実行可能な量子回路に変換します。

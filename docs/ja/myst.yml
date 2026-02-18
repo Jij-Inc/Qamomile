@@ -16,28 +16,74 @@ project:
   execute:
     cache: true
   toc:
-    - file: index
+    - file: index.md
     - title: チュートリアル
       children:
-        - file: tutorial/01_introduction
-        - file: tutorial/02_single_qubit
-        - file: tutorial/03_entanglement
-        - file: tutorial/04_algorithms
-        - file: tutorial/qpe
-        - file: tutorial/qaoa
+        - file: tutorial/01_introduction.ipynb
+        - file: tutorial/02_type_system.ipynb
+        - file: tutorial/03_gates.ipynb
+        - file: tutorial/04_superposition_entanglement.ipynb
+        - file: tutorial/05_stdlib.ipynb
+        - file: tutorial/06_composite_gate.ipynb
+        - file: tutorial/07_first_algorithm.ipynb
+        - file: tutorial/08_parametric_circuits.ipynb
+        - file: tutorial/09_resource_estimation.ipynb
+        - file: tutorial/10_transpile.ipynb
+        - file: tutorial/11_custom_executor.ipynb
     - title: 最適化
       children:
-        - file: optimization/qaoa
-        - file: optimization/fqaoa
-    - title: トランスパイル
+        - file: optimization/qaoa.ipynb
+        - file: optimization/fqaoa.ipynb
+        - file: optimization/qrao31.ipynb
+        - file: optimization/custom_converter.ipynb
+
+# --- API Reference (auto-generated) ---
+    - title: API リファレンス
+      file: api/index
       children:
-        - file: transpile/transpile_flow
+        - file: api/circuit/index
+          children:
+            - file: api/circuit/algorithm
+            - file: api/circuit/estimator
+            - file: api/circuit/frontend
+            - file: api/circuit/ir
+            - file: api/circuit/qft
+            - file: api/circuit/qpe
+            - file: api/circuit/resource_estimation
+            - file: api/circuit/stdlib
+            - file: api/circuit/transpiler
+            - file: api/circuit/visualization
+        - file: api/core
+        - file: api/observable
+        - file: api/optimization/index
+          children:
+            - file: api/optimization/binary_model
+            - file: api/optimization/converter
+            - file: api/optimization/fqaoa
+            - file: api/optimization/qaoa
+            - file: api/optimization/qrao
+            - file: api/optimization/utils
+        - file: api/qiskit/index
+          children:
+            - file: api/qiskit/emitter
+            - file: api/qiskit/emitters
+            - file: api/qiskit/observable
+            - file: api/qiskit/transpiler
+        - file: api/quri_parts/index
+          children:
+            - file: api/quri_parts/emitter
+            - file: api/quri_parts/exceptions
+            - file: api/quri_parts/observable
+            - file: api/quri_parts/parameter_converter
+            - file: api/quri_parts/transpiler
+# --- End API Reference ---
 
 site:
   template: book-theme
   title: Qamomile ドキュメント
   options:
     logo: ../assets/qamomile_logo.png
+    style: ../assets/custom-theme.css
   nav:
     - title: GitHub
       url: https://github.com/Jij-Inc/Qamomile

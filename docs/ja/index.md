@@ -6,7 +6,7 @@ Qamomileは、量子最適化アルゴリズムのための強力なSDKです。
 
 チュートリアルでQamomileの使い方を学びましょう：
 
-- [トランスパイルと実行](transpile/transpile_flow) - 量子カーネルの書き方とシミュレータ/実機での実行方法
+- [トランスパイルと実行](tutorial/01_introduction) - 量子カーネルの書き方とシミュレータ/実機での実行方法
 
 ## インストール
 
@@ -37,4 +37,4 @@ print(f"Counts: {result.counts}")
 ## リンク
 
 - [GitHub リポジトリ](https://github.com/Jij-Inc/Qamomile)
-- [API リファレンス](https://jij-inc.github.io/Qamomile/ja/)
+- [API リファレンス](api/index.md)
