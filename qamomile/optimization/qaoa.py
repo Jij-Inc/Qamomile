@@ -2,6 +2,7 @@ import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.qaoa import (
     apply_phase_gadget,
+    ising_cost_circuit,
     qaoa_state,
     superposition_vector,
     x_mixier_circuit,
@@ -13,6 +14,17 @@ from .converter import MathematicalProblemConverter
 from .utils import is_close_zero
 
 class QAOAConverter(MathematicalProblemConverter):
+    """Converter for Quantum Approximate Optimization Algorithm (QAOA).
+
+    Supports both standard quadratic (QUBO/Ising) models and higher-order
+    binary optimization (HUBO) models. When higher-order terms are present,
+    automatically uses phase-gadget decomposition for k-body Z-rotations.
+
+    Example:
+        >>> model = BinaryModel.from_hubo({(0, 1, 2): 1.0, (0,): -2.0})
+        >>> converter = QAOAConverter(model)
+        >>> executable = converter.transpile(QiskitTranspiler(), p=2)
+    """
 
     def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
         """Construct the Ising cost Hamiltonian from the spin model.
@@ -55,6 +67,19 @@ class QAOAConverter(MathematicalProblemConverter):
         *,
         p: int
     ) -> ExecutableProgram:
+        """Transpile the model into an executable QAOA circuit.
+
+        Dispatches to the quadratic-only fast path when no higher-order terms
+        are present, otherwise uses the HUBO path with phase-gadget
+        decomposition.
+
+        Args:
+            transpiler (Transpiler): Backend transpiler to use.
+            p (int): Number of QAOA layers.
+
+        Returns:
+            ExecutableProgram: The compiled circuit program.
+        """
         if not self.spin_model.higher:
             return self._transpile_quadratic(transpiler, p=p)
         return self._transpile_hubo(transpiler, p=p)
@@ -65,6 +90,15 @@ class QAOAConverter(MathematicalProblemConverter):
         *,
         p: int,
     ) -> ExecutableProgram:
+        """Transpile a quadratic-only model using the standard QAOA circuit.
+
+        Args:
+            transpiler (Transpiler): Backend transpiler to use.
+            p (int): Number of QAOA layers.
+
+        Returns:
+            ExecutableProgram: The compiled circuit program.
+        """
         @qmc.qkernel
         def qaoa_sampling(
             p: qmc.UInt,
@@ -94,7 +128,20 @@ class QAOAConverter(MathematicalProblemConverter):
         *,
         p: int,
     ) -> ExecutableProgram:
-        higher_terms = sorted(self.spin_model.higher.items())
+        """Transpile a model with higher-order terms using phase-gadget decomposition.
+
+        Decomposes k-body Z-rotation terms into CX ladder + RZ primitives
+        via ``apply_phase_gadget``, while reusing the standard
+        ``ising_cost_circuit`` for quadratic and linear terms.
+
+        Args:
+            transpiler (Transpiler): Backend transpiler to use.
+            p (int): Number of QAOA layers.
+
+        Returns:
+            ExecutableProgram: The compiled circuit program.
+        """
+        higher_terms = sorted(self.spin_model.higher.items(), key=lambda t: t[0])
 
         def _apply_higher(q, gamma):
             for indices, coeff in higher_terms:
@@ -108,10 +155,7 @@ class QAOAConverter(MathematicalProblemConverter):
             q: qmc.Vector[qmc.Qubit],
             gamma: qmc.Float,
         ) -> qmc.Vector[qmc.Qubit]:
-            for (i, j), Jij in quad.items():
-                q[i], q[j] = qmc.rzz(q[i], q[j], angle=Jij * gamma)
-            for i, hi in linear.items():
-                q[i] = qmc.rz(q[i], angle=hi * gamma)
+            q = ising_cost_circuit(quad, linear, q, gamma)
             q = _apply_higher(q, gamma)
             return q
 
