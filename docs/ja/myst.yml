@@ -30,12 +30,12 @@ project:
         - file: tutorial/09_resource_estimation.ipynb
         - file: tutorial/10_transpile.ipynb
         - file: tutorial/11_custom_executor.ipynb
-    - title: 最適化
-      children:
-        - file: optimization/qaoa.ipynb
-        - file: optimization/fqaoa.ipynb
-        - file: optimization/qrao31.ipynb
-        - file: optimization/custom_converter.ipynb
+        - title: 最適化
+          children:
+            - file: optimization/qaoa.ipynb
+            - file: optimization/fqaoa.ipynb
+            - file: optimization/qrao31.ipynb
+            - file: optimization/custom_converter.ipynb
 
 # --- API Reference (auto-generated) ---
     - title: API Reference
