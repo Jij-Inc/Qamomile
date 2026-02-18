@@ -1,7 +1,8 @@
-"""QRAC(3,1,p) Converter for Quantum Random Access Optimization.
+"""QRAC(2,1,p) Converter for Quantum Random Access Optimization.
 
-This module provides the QRAC31Converter class that converts optimization
-problems into QRAC-encoded quantum circuits and handles result decoding.
+This module provides the QRAC21Converter class that converts optimization
+problems into QRAC-encoded quantum circuits using (2,1,p)-QRAC.
+Up to 2 variables are encoded into a single qubit using X and Z Pauli operators.
 """
 
 from __future__ import annotations
@@ -17,25 +18,20 @@ from .base_encoder import (
 )
 
 
-class QRAC31Encoder(GraphColoringQRACEncoder):
-    """(3,1,p)-QRAC Encoder.
+class QRAC21Encoder(GraphColoringQRACEncoder):
+    """(2,1,p)-QRAC Encoder.
 
-    Encodes Ising model variables into Pauli operators on qubits using
-    graph coloring to ensure that interacting variables are assigned to
-    different qubits.
+    Encodes Ising model variables into Pauli operators using 2-coloring.
+    Up to 2 variables per qubit, using Z and X Paulis.
 
     The relaxed Hamiltonian is:
         H̃ = Σ_{ij} √k_i·√k_j·J_{ij}·P_{f(i)}·P_{f(j)} + Σ_i √k_i·h_i·P_{f(i)}
 
-    where f(i) = (qubit_index, pauli_type) maps variable i to a Pauli operator,
-    and k_i is the number of variables encoded on the qubit containing variable i.
-
-    Attributes:
-        max_color_group_size: Maximum variables per qubit (3 for QRAC31)
+    where k_i is the number of variables encoded on the qubit containing variable i.
     """
 
-    max_color_group_size: int = 3
-    paulis: list[PauliType] = ["Z", "X", "Y"]
+    max_color_group_size: int = 2
+    paulis: list[PauliType] = ["Z", "X"]
 
     @property
     def num_qubits(self) -> int:
@@ -51,20 +47,20 @@ class QRAC31Encoder(GraphColoringQRACEncoder):
         return h, np.sqrt(k)
 
 
-class QRAC31Converter(QRACConverterBase[QRAC31Encoder]):
-    """QRAC(3,1,p) Converter for Quantum Random Access Optimization.
+class QRAC21Converter(QRACConverterBase[QRAC21Encoder]):
+    """QRAC(2,1,p) Converter for Quantum Random Access Optimization.
 
     Converts optimization problems into QRAC-encoded form with reduced qubit count.
-    Up to 3 variables are encoded into a single qubit using Pauli operators.
+    Up to 2 variables are encoded into a single qubit using X and Z Pauli operators.
 
     Example:
-        >>> converter = QRAC31Converter(instance)
+        >>> converter = QRAC21Converter(instance)
         >>> hamiltonian = converter.get_cost_hamiltonian()
     """
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        self._encoder = QRAC31Encoder(self.spin_model)
+        self._encoder = QRAC21Encoder(self.spin_model)
         self.color_group = self._encoder.color_group
         self.pauli_encoding: dict[int, qm_o.PauliOperator] = {}
 
