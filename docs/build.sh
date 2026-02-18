@@ -40,8 +40,10 @@ show_help() {
     echo "  sync-ja     - Convert Japanese .py files to .ipynb"
     echo "  clean       - Remove generated .ipynb files and build outputs"
     echo "  clean-all   - Remove everything including execution cache"
-    echo "  serve-en    - Serve English docs locally (port 8000)"
-    echo "  serve-ja    - Serve Japanese docs locally (port 8000)"
+    echo "  serve-en    - Build (if needed) and serve English docs (port 8000)"
+    echo "  serve-ja    - Build (if needed) and serve Japanese docs (port 8000)"
+    echo "  fresh-en    - Clean, rebuild with execution, and serve English docs"
+    echo "  fresh-ja    - Clean, rebuild with execution, and serve Japanese docs"
     echo "  help        - Show this help message"
     echo ""
 }
@@ -66,6 +68,7 @@ sync_en() {
     echo "Converting English .py files to .ipynb..."
     uv run jupytext --to ipynb en/tutorial/*.py 2>/dev/null || true
     uv run jupytext --to ipynb en/optimization/*.py 2>/dev/null || true
+    uv run jupytext --to ipynb en/transpile/*.py 2>/dev/null || true
     info "English notebooks synced"
 }
 
@@ -74,6 +77,7 @@ sync_ja() {
     echo "Converting Japanese .py files to .ipynb..."
     uv run jupytext --to ipynb ja/tutorial/*.py 2>/dev/null || true
     uv run jupytext --to ipynb ja/optimization/*.py 2>/dev/null || true
+    uv run jupytext --to ipynb ja/transpile/*.py 2>/dev/null || true
     info "Japanese notebooks synced"
 }
 
@@ -89,7 +93,7 @@ build_en() {
     sync_en
     echo "Building English documentation..."
     cd en
-    uv run jupyter-book build --html
+    MPLBACKEND=agg uv run jupyter-book build --html
     cd ..
     info "English documentation built: en/_build/html/index.html"
 }
@@ -99,7 +103,7 @@ build_ja() {
     sync_ja
     echo "Building Japanese documentation..."
     cd ja
-    uv run jupyter-book build --html
+    MPLBACKEND=agg uv run jupyter-book build --html
     cd ..
     info "Japanese documentation built: ja/_build/html/index.html"
 }
@@ -120,7 +124,9 @@ clean() {
     rm -f en/tutorial/*.ipynb
     rm -f en/optimization/*.ipynb
     rm -f ja/tutorial/*.ipynb
+    rm -f en/transpile/*.ipynb
     rm -f ja/optimization/*.ipynb
+    rm -f ja/transpile/*.ipynb
     rm -rf en/_build
     rm -rf ja/_build
     rm -rf en/api
@@ -137,10 +143,13 @@ clean_all() {
     info "All generated files and cache removed"
 }
 
-# Function to serve English documentation
+# Function to serve English documentation (builds if needed)
 serve_en() {
     if [ ! -d "en/_build/html" ]; then
-        error "English documentation not built. Run './build.sh build-en' first."
+        warn "English documentation not built. Building now..."
+        generate_api
+        copy_api
+        build_en
     fi
     echo "Serving English documentation at http://localhost:8000"
     echo "Press Ctrl+C to stop the server"
@@ -148,11 +157,38 @@ serve_en() {
     python -m http.server 8000
 }
 
-# Function to serve Japanese documentation
+# Function to serve Japanese documentation (builds if needed)
 serve_ja() {
     if [ ! -d "ja/_build/html" ]; then
-        error "Japanese documentation not built. Run './build.sh build-ja' first."
+        warn "Japanese documentation not built. Building now..."
+        generate_api
+        copy_api
+        build_ja
     fi
+    echo "Serving Japanese documentation at http://localhost:8000"
+    echo "Press Ctrl+C to stop the server"
+    cd ja/_build/html
+    python -m http.server 8000
+}
+
+# Function to clean, rebuild, and serve English documentation
+fresh_en() {
+    clean
+    generate_api
+    copy_api
+    build_en
+    echo "Serving English documentation at http://localhost:8000"
+    echo "Press Ctrl+C to stop the server"
+    cd en/_build/html
+    python -m http.server 8000
+}
+
+# Function to clean, rebuild, and serve Japanese documentation
+fresh_ja() {
+    clean
+    generate_api
+    copy_api
+    build_ja
     echo "Serving Japanese documentation at http://localhost:8000"
     echo "Press Ctrl+C to stop the server"
     cd ja/_build/html
@@ -190,6 +226,12 @@ case "${1:-help}" in
         ;;
     serve-ja)
         serve_ja
+        ;;
+    fresh-en)
+        fresh_en
+        ;;
+    fresh-ja)
+        fresh_ja
         ;;
     help|--help|-h)
         show_help
