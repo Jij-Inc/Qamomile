@@ -22,9 +22,31 @@ from .encoder import (
     GraphColoringQRACEncoder,
     PauliType,
     _build_var_occupancy,
-    build_physical_qubit_map,
     color_group_to_qrac_encode,
 )
+
+
+def build_physical_qubit_map(
+    color_group: dict[int, list[int]],
+) -> tuple[dict[int, int], int]:
+    """Map color (logical) index to physical qubit start index.
+
+    For (3,2,p)-QRAC, color groups with k=1 variable use 1 physical qubit
+    (regular Pauli), while groups with k>=2 variables use 2 physical qubits
+    (prime operators).
+
+    Args:
+        color_group: Mapping from color index to list of variable indices.
+
+    Returns:
+        Tuple of (color_to_phys_start mapping, total_physical_qubits).
+    """
+    color_to_phys: dict[int, int] = {}
+    current = 0
+    for color in sorted(color_group.keys()):
+        color_to_phys[color] = current
+        current += 1 if len(color_group[color]) == 1 else 2
+    return color_to_phys, current
 
 
 class QRAC32Encoder(GraphColoringQRACEncoder):

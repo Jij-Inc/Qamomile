@@ -6,13 +6,13 @@ import networkx as nx
 
 from qamomile.optimization.qrao import QRAC32Converter, QRAC32Encoder, SignRounder
 from qamomile.optimization.qrao.qrao32 import (
+    build_physical_qubit_map,
     create_x_prime,
     create_y_prime,
     create_z_prime,
     create_prime_operator,
     qrac32_encode_ising,
 )
-from qamomile.optimization.qrao.encoder import build_physical_qubit_map
 from qamomile.optimization.qrao.graph_coloring import (
     greedy_graph_coloring,
     check_linear_term,
