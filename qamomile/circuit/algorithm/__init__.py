@@ -1,6 +1,7 @@
 """Algorithm building blocks for quantum circuits."""
 
 from .qaoa import (
+    apply_phase_gadget,
     ising_cost_circuit,
     x_mixier_circuit,
     qaoa_circuit,
@@ -26,6 +27,7 @@ from .fqaoa import (
 
 __all__ = [
     # QAOA
+    "apply_phase_gadget",
     "ising_cost_circuit",
     "x_mixier_circuit",
     "qaoa_circuit",
