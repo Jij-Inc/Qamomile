@@ -21,18 +21,15 @@
 
 # %%
 import jijmodeling as jm
-import ommx.v1
 import matplotlib.pyplot as plt
-import numpy as np
 
 # %% [markdown]
 # ## What is the Max-Cut Problem
 #
 # The Max-Cut problem is the problem of dividing the nodes of a graph into two groups such that the number of edges cut (or the total weight of the edges cut, if the edges have weights) is maximized. Applications include network partitioning and image processing (segmentation), among others.
-
 # %%
 import networkx as nx
-import matplotlib.pyplot as plt
+import numpy as np
 
 G = nx.Graph()
 num_nodes = 5
@@ -79,7 +76,7 @@ nx.draw_networkx(
 )
 
 plt.tight_layout()
-# plt.show()
+plt.show()
 
 
 # %% [markdown]
@@ -100,25 +97,23 @@ plt.tight_layout()
 
 
 # %%
-def Maxcut_problem() -> jm.Problem:
-    V = jm.Placeholder("V")
-    E = jm.Placeholder("E", ndim=2)
-    x = jm.BinaryVar("x", shape=(V,))
-    e = jm.Element("e", belong_to=E)
-    i = jm.Element("i", belong_to=V)
-    j = jm.Element("j", belong_to=V)
+problem = jm.Problem("Maxcut", sense=jm.ProblemSense.MAXIMIZE)
 
-    problem = jm.Problem("Maxcut", sense=jm.ProblemSense.MAXIMIZE)
-    si = 2 * x[e[0]] - 1
-    sj = 2 * x[e[1]] - 1
-    si.set_latex("s_{e[0]}")
-    sj.set_latex("s_{e[1]}")
-    obj = 1 / 2 * jm.sum(e, (1 - si * sj))
+
+@problem.update
+def _(problem: jm.DecoratedProblem):
+    V = problem.Dim()
+    E = problem.Graph()
+    x = problem.BinaryVar(shape=(V,))
+
+    obj = (
+        E.rows()
+        .map(lambda e: 1 / 2 * (1 - (2 * x[e[0]] - 1) * (2 * x[e[1]] - 1)))
+        .sum()
+    )
     problem += obj
-    return problem
 
 
-problem = Maxcut_problem()
 problem
 
 # %% [markdown]
@@ -128,8 +123,6 @@ problem
 
 # %%
 import networkx as nx
-import numpy as np
-from IPython.display import display, Latex
 
 G = nx.Graph()
 num_nodes = 5
@@ -154,11 +147,10 @@ data
 
 # %% [markdown]
 # ## Creating a Compiled Instance
-# We perform compilation using `JijModeling.Interpreter` and `ommx.Instance` by providing the formulation and the instance data prepared earlier. This process yields an intermediate representation of the problem with the instance data substituted.
+# We compile the mathematical model together with the instance data using `problem.eval()`. This process yields an intermediate representation of the problem with the instance data substituted.
 
 # %%
-interpreter = jm.Interpreter(data)
-instance = interpreter.eval_problem(problem)
+instance = problem.eval(data)
 
 # %% [markdown]
 # ## Converting Compiled Instance to QAOA Circuit and Hamiltonian
@@ -170,7 +162,6 @@ instance = interpreter.eval_problem(problem)
 # Once the Ising Hamiltonian is generated, we can generate the QAOA quantum circuit and the Hamiltonian respectively. These can be executed using the `get_qaoa_ansatz` and `get_cost_hamiltonian` methods. The number of QAOA layers, $p$, is fixed to be $7$ here.
 
 # %%
-import qamomile.circuit as qmc
 from qamomile.optimization.qaoa import QAOAConverter
 from qamomile.qiskit import QiskitTranspiler
 
@@ -302,7 +293,7 @@ result_opt = minimize(
     options={"maxiter": 100, "disp": True},
 )
 
-print(f"\nOptimized parameters:")
+print("\nOptimized parameters:")
 print(f"  gammas: {result_opt.x[:p]}")
 print(f"  betas: {result_opt.x[p:]}")
 print(f"Final energy: {result_opt.fun:.4f}")
@@ -320,7 +311,7 @@ plt.ylabel("Energy")
 plt.title("QAOA Optimization Convergence")
 plt.grid(True)
 plt.tight_layout()
-# plt.show()
+plt.show()
 
 # %% [markdown]
 # ## Final Solution Analysis
@@ -369,7 +360,7 @@ for bitstring, count, energy in results_with_energy[:10]:
 best_bitstring, best_count, best_energy = results_with_energy[0]
 best_solution = {(i,): float(bit) for i, bit in enumerate(best_bitstring)}
 
-print(f"\nBest solution found:")
+print("\nBest solution found:")
 print(f"  Bitstring: {''.join(map(str, best_bitstring))}")
 print(f"  Energy: {best_energy:.4f}")
 
@@ -390,7 +381,7 @@ nx.draw_networkx(
     node_color=node_colors,
 )
 plt.tight_layout()
-# plt.show()
+plt.show()
 
 # %% [markdown]
 # ## Summary

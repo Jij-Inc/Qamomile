@@ -468,7 +468,7 @@ print(f"  Circuit depth: {est_ghz.depth.total_depth}")
 #
 # For more information about the mathematical modeling layer, see the
 # [ommx documentation](https://jij-inc.github.io/ommx/en/introduction.html)
-# and the [JijModeling tutorials](https://jij-inc.github.io/JijModeling-Tutorials/en/introduction.html).
+# and the [JijModeling tutorials](https://jij-inc-jijmodeling-tutorials-en.readthedocs-hosted.com/en/latest/introduction.html).
 #
 # See the optimization tutorials ([QAOA](../optimization/qaoa.ipynb), [FQAOA](../optimization/fqaoa.ipynb), [QRAO](../optimization/qrao31.ipynb), [Custom Converter](../optimization/custom_converter.ipynb)) for details.
 

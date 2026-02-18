@@ -55,7 +55,7 @@ Mathematical Model (JijModeling)
          ↓
     Circuit Layer (Frontend @qkernel → IR Graph)
          ↓
-    Transpiler Pipeline (inline → constant_fold → analyze → separate → emit)
+    Transpiler Pipeline (to_block → substitute → inline → linear_validate → constant_fold → analyze → separate → emit)
          ↓
     Backend Execution (Qiskit, QuriParts, etc.)
 ```
@@ -65,7 +65,7 @@ Mathematical Model (JijModeling)
 **qamomile/circuit/** - Circuit abstraction layer:
 - `frontend/`: Python decorator-based API (`@qm.qkernel`) with handle types (Qubit, Float, UInt, Bit)
 - `ir/`: Intermediate representation with Value nodes, Operations, and Graph/Block structures
-- `transpiler/`: Multi-pass compilation (inline, constant fold, analyze, separate, emit)
+- `transpiler/`: Multi-pass compilation (to_block, substitute, inline, linear_validate, constant fold, analyze, separate, emit)
 - `stdlib/`: Built-in algorithms (QFT, IQFT, QPE)
 
 **qamomile/core/** - Mathematical modeling layer:
@@ -104,11 +104,13 @@ executable = transpiler.transpile(my_circuit, bindings={"theta": 0.5})
 ### Transpiler Pipeline Stages
 
 1. **to_block()**: QKernel → Block (HIERARCHICAL)
-2. **inline()**: Inlines CallBlockOperation → Block (LINEAR)
-3. **constant_fold()**: Evaluates constant expressions
-4. **analyze()**: Validates dependencies → Block (ANALYZED)
-5. **separate()**: Splits into quantum/classical segments → SeparatedProgram
-6. **emit()**: Backend-specific circuit generation → ExecutableProgram
+2. **substitute()**: Applies TranspilerConfig strategy rules (optional)
+3. **inline()**: Inlines CallBlockOperation → Block (LINEAR)
+4. **linear_validate()**: Safety net for linear type violations
+5. **constant_fold()**: Evaluates constant expressions
+6. **analyze()**: Validates dependencies → Block (ANALYZED)
+7. **separate()**: Splits into quantum/classical segments → SeparatedProgram
+8. **emit()**: Backend-specific circuit generation → ExecutableProgram
 
 ## Test
 

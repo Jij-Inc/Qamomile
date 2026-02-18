@@ -50,26 +50,25 @@ import matplotlib.pyplot as plt
 
 
 # %%
-def constrained_qubo_problem() -> jm.Problem:
-    J = jm.Placeholder("J", ndim=2)
-    n = J.len_at(0, latex="n")
-    D = jm.Placeholder("D")
-    x = jm.BinaryVar("x", shape=(n, D))
+problem = jm.Problem("qubo")
 
-    problem = jm.Problem("qubo")
-    i, j = jm.Element("i", n), jm.Element("j", n)
-    d, d_dash = jm.Element("d", D), jm.Element("d'", D)
+
+@problem.update
+def _(problem: jm.DecoratedProblem):
+    J = problem.Float(ndim=2)
+    n = J.len_at(0, latex="n")
+    D = problem.Dim()
+    x = problem.BinaryVar(shape=(n, D))
 
     # Quadratic objective
-    problem += jm.sum([i, j], J[i, j] * jm.sum([d, d_dash], x[i, d] * x[j, d_dash]))
+    problem += J.ndenumerate().map(
+        lambda ij_v: ij_v[1] * x[ij_v[0][0]].sum() * x[ij_v[0][1]].sum()
+    ).sum()
 
     # Equality constraint: total number of selected bits equals M
-    problem += jm.Constraint("constraint", jm.sum([i, d], x[i, d]) == 4)
-
-    return problem
+    problem += problem.Constraint("constraint", x.sum() == 4)
 
 
-problem = constrained_qubo_problem()
 problem
 
 # %% [markdown]
@@ -96,11 +95,10 @@ num_fermions = 4  # must match the constraint sum
 # ## Creating a Compiled Instance
 #
 # We compile the mathematical model together with the instance data using
-# `jm.Interpreter`.
+# `problem.eval()`.
 
 # %%
-interpreter = jm.Interpreter(instance_data)
-instance = interpreter.eval_problem(problem)
+instance = problem.eval(instance_data)
 
 # %% [markdown]
 # ## Converting to an FQAOA Circuit
@@ -228,7 +226,7 @@ plt.ylabel("Energy")
 plt.title("FQAOA Optimization Convergence")
 plt.grid(True)
 plt.tight_layout()
-# plt.show()
+plt.show()
 
 # %% [markdown]
 # ## Final Solution Analysis

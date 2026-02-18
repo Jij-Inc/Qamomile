@@ -44,13 +44,13 @@ build: copy-api sync build-en build-ja
 # Build English documentation
 build-en: copy-api sync-en
 	@echo "Building English documentation..."
-	cd en && MPLBACKEND=agg uv run jupyter-book build --html
+	cd en && MPLBACKEND=agg uv run jupyter-book build --execute --html
 	@echo "✓ English documentation built: en/_build/html/index.html"
 
 # Build Japanese documentation
 build-ja: copy-api sync-ja
 	@echo "Building Japanese documentation..."
-	cd ja && MPLBACKEND=agg uv run jupyter-book build --html
+	cd ja && MPLBACKEND=agg uv run jupyter-book build --execute --html
 	@echo "✓ Japanese documentation built: ja/_build/html/index.html"
 
 # Sync all .py files to .ipynb (both languages)

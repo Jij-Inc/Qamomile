@@ -199,7 +199,7 @@ plt.title(r"Expectation value $\langle \psi(\theta) | Z | \psi(\theta) \rangle$"
 plt.axhline(y=-1, color="r", linestyle="--", alpha=0.5, label="Ground state energy")
 plt.legend()
 plt.grid(True)
-# plt.show()
+plt.show()
 
 # %% [markdown]
 # The expectation value $\langle Z \rangle = \cos(\theta)$ for $RY(\theta)|0\rangle$.
@@ -251,7 +251,7 @@ plt.ylabel("Feature 2")
 plt.title("Training Data")
 plt.legend()
 plt.grid(True)
-# plt.show()
+plt.show()
 
 # %% [markdown]
 # ### Data Encoding
@@ -424,7 +424,7 @@ plt.xlabel("Iteration")
 plt.ylabel("MSE Loss")
 plt.title("Classifier Training Convergence")
 plt.grid(True)
-# plt.show()
+plt.show()
 
 # %% [markdown]
 # ## 6. Evaluating the Classifier
@@ -498,7 +498,7 @@ plt.xlabel("Feature 1")
 plt.ylabel("Feature 2")
 plt.title("Quantum Classifier Decision Boundary")
 plt.legend()
-# plt.show()
+plt.show()
 
 # %% [markdown]
 # The black line shows the decision boundary ($\langle Z \rangle = 0$).

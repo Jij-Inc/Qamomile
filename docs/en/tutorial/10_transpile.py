@@ -40,6 +40,9 @@
 #     |  to_block
 #     v
 #   Block (HIERARCHICAL)
+#     |  substitute (optional — applies TranspilerConfig strategy rules)
+#     v
+#   Block (HIERARCHICAL, strategies applied)
 #     |  inline
 #     v
 #   Block (LINEAR)
@@ -61,10 +64,12 @@
 # ```
 #
 # Each pass transforms an intermediate representation (IR) into a more refined
-# form. The key insight is that quantum and classical operations start out
-# interleaved in a single block, and the pipeline progressively validates,
-# simplifies, and finally separates them so the quantum portion can be sent
-# to a real device while classical post-processing runs on a CPU.
+# form. The `substitute` pass is optional — it runs when a `TranspilerConfig`
+# specifies decomposition strategy rules for composite gates. The key insight
+# is that quantum and classical operations start out interleaved in a single
+# block, and the pipeline progressively validates, simplifies, and finally
+# separates them so the quantum portion can be sent to a real device while
+# classical post-processing runs on a CPU.
 #
 # We will use a **single circuit** throughout Sections 2–6, so we can
 # follow every transformation from start to finish. Then in Section 7 we
@@ -203,11 +208,14 @@ print_block_operations(inlined)
 # After inlining, the transpiler runs three passes that validate correctness
 # and prepare the block for segment separation. Let's look at each one.
 #
-# ### 4a. `linear_validate` — Enforcing No-Cloning
+# ### 4a. `linear_validate` — Safety Net for No-Cloning
 #
-# The `linear_validate` pass enforces **linear type semantics**: each quantum
-# value (qubit) must be consumed exactly once. This enforces the no-cloning
-# principle at transpile time rather than at execution time.
+# The `linear_validate` pass is a **safety net** that catches any linear type
+# violations that may have bypassed frontend checks. In practice, most
+# violations (such as reusing a consumed qubit or aliasing) are caught at
+# **trace time** by the frontend's handle system — see the linear type errors
+# in [Tutorial 02](02_type_system.ipynb). This pass provides an additional
+# layer of verification at the IR level.
 
 # %%
 validated = transpiler.linear_validate(inlined)
@@ -217,8 +225,9 @@ print_block_operations(validated)
 # %% [markdown]
 # The operations are unchanged — validation passed because each qubit
 # in `my_circuit` is used exactly once per operation. If we tried to use
-# the same qubit twice (e.g., `qmc.cx(q, q)`), the pass would raise a
-# `LinearTypeError` before the circuit ever reaches the quantum hardware.
+# the same qubit twice (e.g., `qmc.cx(q, q)`), the frontend would raise a
+# `QubitAliasError` at trace time (during `draw()` or `to_block()`), before
+# the circuit ever reaches this pass.
 #
 # ### 4b. `constant_fold` — Evaluating Known Constants
 #
@@ -580,8 +589,9 @@ print(f"Approximate QFT gates: {circuit_approx.size()}")
 # | Pass | Input | Output | Purpose |
 # |------|-------|--------|---------|
 # | `to_block()` | `QKernel` | Block (HIERARCHICAL) | Convert Python function to IR |
+# | `substitute()` | Block | Block | Apply strategy rules from `TranspilerConfig` (optional) |
 # | `inline()` | Block | Block (LINEAR) | Expand all kernel calls |
-# | `linear_validate()` | Block | Block (validated) | Enforce no-cloning principle |
+# | `linear_validate()` | Block | Block (validated) | Safety net for no-cloning violations |
 # | `constant_fold()` | Block | Block (folded) | Evaluate known constants |
 # | `analyze()` | Block | Block (ANALYZED) | Build dependency graph, validate I/O |
 # | `separate()` | Block | SeparatedProgram | Split into classical/quantum segments |
@@ -612,10 +622,10 @@ print(f"Approximate QFT gates: {circuit_approx.size()}")
 # %% [markdown]
 # ## What We Learned
 #
-# - **The full transpiler pipeline and the role of each pass** — Seven passes (`to_block` → `inline` → `validate` → `constant_fold` → `analyze` → `separate` → `emit`) transform a `@qkernel` into backend-specific code.
+# - **The full transpiler pipeline and the role of each pass** — Eight passes (`to_block` → `substitute` → `inline` → `linear_validate` → `constant_fold` → `analyze` → `separate` → `emit`) transform a `@qkernel` into backend-specific code. The `substitute` pass is optional and applies strategy rules from `TranspilerConfig`.
 # - **How `draw()` visualizes circuits** — `inline=True` expands sub-kernel calls; `inline_depth` controls how many nesting levels are expanded.
 # - **How kernel calls are inlined into a flat instruction sequence** — The `inline()` pass recursively expands all `CallBlockOperation`s, producing a single linear block.
-# - **How validation, constant folding, and dependency analysis work** — `linear_validate` enforces no-cloning, `constant_fold` evaluates `BinOp` expressions like `theta * 2` into concrete values, and `analyze` builds a dependency graph for I/O validation.
+# - **How validation, constant folding, and dependency analysis work** — `linear_validate` is a safety net for no-cloning violations (most are caught at trace time by the frontend), `constant_fold` evaluates `BinOp` expressions like `theta * 2` into concrete values, and `analyze` builds a dependency graph for I/O validation.
 # - **How the program is separated into quantum and classical segments** — `separate()` splits the block into `classical_prep` (runtime parameter computation when values are unbound), `quantum`, and `classical_post` segments. QPE demonstrates `classical_post` with `DecodeQFixedOperation` for QFixed → Float conversion.
 # - **How the emit pass generates backend-specific code** — `emit()` walks quantum segments and produces native circuit objects (e.g. Qiskit `QuantumCircuit`) for the target backend.
 # - **How `TranspilerConfig` controls composite gate decomposition strategies** — `TranspilerConfig.with_strategies()` maps gate names to strategy names, selecting decompositions during the emit pass.

@@ -46,20 +46,20 @@ transpiler = QiskitTranspiler()
 #
 # ### Qubit Types
 #
-# Only qubit types have constructors that we call directly inside
-# `@qkernel` functions:
+# The most commonly used constructors are the qubit constructors:
 #
 # | Type | Constructor | Description |
 # |------|-------------|-------------|
 # | `Qubit` | `qmc.qubit(name=)` | Single qubit, initialised to $\|0\rangle$ |
 # | `Vector[Qubit]` | `qmc.qubit_array(n, name=)` | 1-D qubit register |
 #
-# ### Type annotation-only types
+# ### Classical Types
 #
-# All other types are used as **type annotations** in `@qkernel`
-# signatures. Their values are provided via function arguments,
-# `bindings` at transpile time, or as return values from operations.
-# They do not have user-facing constructors.
+# Classical types also have constructors (`qmc.uint()`, `qmc.float_()`,
+# `qmc.bit()`), but they are **typically provided as function parameters
+# or bindings** rather than constructed directly. Their values come from:
+# function arguments with type annotations (`theta: qmc.Float`),
+# the `bindings` dict at transpile time, or return values from operations.
 #
 # | Type | Category | Description |
 # |------|----------|-------------|
@@ -87,8 +87,9 @@ transpiler = QiskitTranspiler()
 # %% [markdown]
 # ## 2. Qubit Types
 #
-# `Qubit` and `Vector[Qubit]` are the **only types with user-facing
-# constructors**. All other types receive their values through:
+# `Qubit` and `Vector[Qubit]` are the **most commonly constructed types**.
+# Classical types can also be constructed with `qmc.uint()`, `qmc.float_()`,
+# and `qmc.bit()`, but in practice their values are typically provided through:
 #
 # - Function arguments with type annotations (`theta: qmc.Float`)
 # - The `bindings` dict at transpile time
@@ -235,9 +236,10 @@ except Exception as e:
 # transpilation time. They are used as gate parameters, loop bounds, and
 # array indices.
 #
-# We do not construct classical types directly. Instead, we declare
-# them as **type annotations** in `@qkernel` signatures and provide
-# values via `bindings` or `parameters` at transpile time.
+# Although classical types have constructors (`qmc.uint()`, `qmc.float_()`,
+# `qmc.bit()`), the typical pattern is to declare them as **type annotations**
+# in `@qkernel` signatures and provide values via `bindings` or `parameters`
+# at transpile time.
 #
 # ### `Float` -- Floating-Point Values
 #
@@ -584,8 +586,9 @@ print(qiskit_circuit.draw(output="text"))
 #
 # ### Key Rules to Remember
 #
-# 1. Only **qubit types** have user-facing constructors: `qmc.qubit()` and
-#    `qmc.qubit_array()`. All other types are type annotations.
+# 1. The most commonly used constructors are `qmc.qubit()` and
+#    `qmc.qubit_array()`. Classical constructors (`qmc.uint()`,
+#    `qmc.float_()`, `qmc.bit()`) exist but are rarely needed directly.
 # 2. **Quantum types** (`Qubit`, `QFixed`) enforce the linear type rule:
 #    always reassign after gates.
 # 3. **Classical types** (`Float`, `UInt`, `Bit`) can be freely reused.
@@ -599,14 +602,19 @@ print(qiskit_circuit.draw(output="text"))
 # ```python
 # import qamomile.circuit as qmc
 #
-# # The only two constructors we need:
+# # Qubit constructors (the most commonly used):
 # q = qmc.qubit(name="q")               # Qubit
 # qubits = qmc.qubit_array(n, name="q")  # Vector[Qubit]
 #
-# # Everything else is a type annotation:
-# # theta: qmc.Float           — rotation angle
-# # n: qmc.UInt                — integer parameter
-# # b: qmc.Bit                 — measurement result
+# # Classical constructors (available but rarely needed directly):
+# # qmc.uint(3)                — UInt from int or str
+# # qmc.float_(1.5)            — Float from float or str
+# # qmc.bit(True)              — Bit from bool, str, or int
+#
+# # Typical pattern — declare as type annotations:
+# # theta: qmc.Float           — rotation angle (via bindings)
+# # n: qmc.UInt                — integer parameter (via bindings)
+# # b: qmc.Bit                 — measurement result (from qmc.measure())
 # # ising: qmc.Dict[K, V]      — problem data (via bindings)
 # # H: qmc.Observable           — Hamiltonian (via bindings)
 #
@@ -626,9 +634,9 @@ print(qiskit_circuit.draw(output="text"))
 #
 # - **The full catalogue of Qamomile types** — Qamomile provides quantum types (`Qubit`, `QFixed`), classical scalars (`Float`, `UInt`, `Bit`), containers (`Vector`, `Dict`, `Tuple`, `Matrix`, `Tensor`), and special types (`Observable`).
 # - **Quantum types vs classical types** — Quantum types enforce linear ownership (consume-and-return), while classical types can be freely reused.
-# - **How to create qubits and qubit arrays** — `qmc.qubit(name=...)` and `qmc.qubit_array(n, name=...)` are the only constructors; all other types are type annotations.
+# - **How to create qubits and qubit arrays** — `qmc.qubit(name=...)` and `qmc.qubit_array(n, name=...)` are the primary constructors; classical constructors (`qmc.uint()`, `qmc.float_()`, `qmc.bit()`) exist but are typically provided via type annotations and bindings.
 # - **Linear type errors: what they look like and how to fix them** — `QubitConsumedError`, `QubitAliasError`, and `UnreturnedBorrowError` are caught at trace time with clear messages; the fix is always to capture gate return values and avoid reusing consumed handles.
-# - **Classical scalar types: `Float`, `UInt`, `Bit` (type annotations only)** — These appear as function parameters or measurement results but have no standalone constructors.
+# - **Classical scalar types: `Float`, `UInt`, `Bit`** — These are typically declared as function parameters or returned by operations. Standalone constructors (`qmc.uint()`, `qmc.float_()`, `qmc.bit()`) are available but rarely needed directly.
 # - **Symbolic values and iteration with `qmc.range()` and `qmc.items()`** — `qmc.range(n)` creates symbolic loops over `UInt` bounds, and `qmc.items(d)` iterates over `Dict` handles inside `@qkernel`.
 # - **Container types: `Vector`, `Dict`, `Tuple`, `Matrix`, `Tensor`** — `Vector` holds qubit registers and measurement arrays; `Dict` and `Tuple` pass structured problem data via `bindings`.
 # - **Special types: `QFixed`, `Observable`** — `QFixed` represents fixed-point quantum values from QPE; `Observable` is used for expectation value computation in variational algorithms.

@@ -81,7 +81,7 @@ nx.draw_networkx(
 )
 
 plt.tight_layout()
-# plt.show()
+plt.show()
 
 
 # %% [markdown]
@@ -104,25 +104,23 @@ plt.tight_layout()
 
 
 # %%
-def Maxcut_problem() -> jm.Problem:
-    V = jm.Placeholder("V")
-    E = jm.Placeholder("E", ndim=2)
-    x = jm.BinaryVar("x", shape=(V,))
-    e = jm.Element("e", belong_to=E)
-    i = jm.Element("i", belong_to=V)
-    j = jm.Element("j", belong_to=V)
+problem = jm.Problem("Maxcut", sense=jm.ProblemSense.MAXIMIZE)
 
-    problem = jm.Problem("Maxcut", sense=jm.ProblemSense.MAXIMIZE)
-    si = 2 * x[e[0]] - 1
-    sj = 2 * x[e[1]] - 1
-    si.set_latex("s_{e[0]}")
-    sj.set_latex("s_{e[1]}")
-    obj = 1 / 2 * jm.sum(e, (1 - si * sj))
+
+@problem.update
+def _(problem: jm.DecoratedProblem):
+    V = problem.Dim()
+    E = problem.Graph()
+    x = problem.BinaryVar(shape=(V,))
+
+    obj = (
+        E.rows()
+        .map(lambda e: 1 / 2 * (1 - (2 * x[e[0]] - 1) * (2 * x[e[1]] - 1)))
+        .sum()
+    )
     problem += obj
-    return problem
 
 
-problem = Maxcut_problem()
 problem
 
 # %% [markdown]
@@ -160,12 +158,11 @@ data
 # %% [markdown]
 # ## Creating a Compiled Instance
 # Using the formulation and instance data prepared above, we compile using
-# `JijModeling.Interpreter` and `ommx.Instance`. This process yields an intermediate
+# `problem.eval()`. This process yields an intermediate
 # representation of the problem with instance data substituted.
 
 # %%
-interpreter = jm.Interpreter(data)
-instance = interpreter.eval_problem(problem)
+instance = problem.eval(data)
 
 # %% [markdown]
 # ## Converting Compiled Instance to QAOA Circuit and Hamiltonian
@@ -298,7 +295,7 @@ plt.ylabel("Energy")
 plt.title("VQE Optimization Convergence")
 plt.grid(True)
 plt.tight_layout()
-# plt.show()
+plt.show()
 
 # %% [markdown]
 # ## QRAO31 Decoding Process
@@ -425,7 +422,7 @@ nx.draw_networkx(
     node_color=node_colors,
 )
 plt.tight_layout()
-# plt.show()
+plt.show()
 
 # %% [markdown]
 # ## Summary
