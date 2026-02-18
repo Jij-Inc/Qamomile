@@ -3,7 +3,7 @@
 This module provides QRAC-based encoders and converters for quantum optimization.
 """
 
-from .encoder import BaseQRACEncoder, GraphColoringQRACEncoder
+from .base_encoder import BaseQRACEncoder, GraphColoringQRACEncoder
 from .qrao21 import QRAC21Encoder, QRAC21Converter
 from .qrao31 import QRAC31Encoder, QRAC31Converter
 from .qrao32 import QRAC32Encoder, QRAC32Converter

@@ -14,8 +14,8 @@ import numpy as np
 
 import qamomile.observable as qm_o
 
-from .base import QRACConverterBase
-from .encoder import (
+from .base_converter import QRACConverterBase
+from .base_encoder import (
     GraphColoringQRACEncoder,
     PauliType,
     _build_var_occupancy,

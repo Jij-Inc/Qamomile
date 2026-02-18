@@ -17,8 +17,8 @@ import qamomile.observable as qm_o
 from qamomile.optimization.utils import is_close_zero
 from qamomile.optimization.binary_model import BinaryModel, VarType
 
-from .base import QRACConverterBase
-from .encoder import BaseQRACEncoder, PauliType
+from .base_converter import QRACConverterBase
+from .base_encoder import BaseQRACEncoder, PauliType
 
 
 class QRACSpaceEfficientEncoder(BaseQRACEncoder):
