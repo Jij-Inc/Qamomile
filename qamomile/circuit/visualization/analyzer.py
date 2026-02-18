@@ -2754,11 +2754,13 @@ class CircuitAnalyzer:
 
         # Handle underscore notation (e.g., "theta_2", "beta_a_b_c")
         if "_" in name:
-            parts = name.split("_", 1)
+            parts = name.split("_")
             if parts[0] in _TEX_SYMBOLS:
-                # Escape underscores in subscript to avoid double-subscript error
-                safe_subscript = parts[1].replace("_", r"\_")
-                return f"$\\{parts[0]}_{{{safe_subscript}}}$"
+                # Build nested subscripts: beta_a_b_c → \beta_{a_{b_{c}}}
+                subscript = parts[-1]
+                for i in range(len(parts) - 2, 0, -1):
+                    subscript = f"{parts[i]}_{{{subscript}}}"
+                return f"$\\{parts[0]}_{{{subscript}}}$"
             return name  # plain text, e.g., "x_2"
 
         # Simple name
