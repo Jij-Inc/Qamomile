@@ -38,6 +38,10 @@ class QRAC21Encoder(GraphColoringQRACEncoder):
     max_color_group_size: int = 2
     paulis: list[PauliType] = ["Z", "X"]
 
+    @property
+    def num_qubits(self) -> int:
+        return self.num_logical_qubits
+
 
 def qrac21_encode_ising(
     ising: BinaryModel[typing.Literal[VarType.SPIN]],

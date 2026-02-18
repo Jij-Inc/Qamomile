@@ -71,10 +71,6 @@ class QRAC32Encoder(GraphColoringQRACEncoder):
         _, total = build_physical_qubit_map(self._color_group)
         return total
 
-    @property
-    def num_logical_qubits(self) -> int:
-        return len(self._color_group)
-
 
 def create_x_prime(idx: int) -> qm_o.Hamiltonian:
     """Create X' operator for the given 2-qubit starting index.

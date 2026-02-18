@@ -176,6 +176,6 @@ class GraphColoringQRACEncoder(BaseQRACEncoder, abc.ABC):
         return self._color_group
 
     @property
-    def num_qubits(self) -> int:
-        """Number of qubits after QRAC encoding."""
+    def num_logical_qubits(self) -> int:
+        """Number of logical qubits (color groups) after QRAC encoding."""
         return len(self._color_group)
