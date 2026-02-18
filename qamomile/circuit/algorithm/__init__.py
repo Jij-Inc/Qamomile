@@ -7,6 +7,9 @@ from .qaoa import (
     qaoa_circuit,
     superposition_vector,
     qaoa_state,
+    hubo_cost_circuit,
+    hubo_qaoa_circuit,
+    hubo_qaoa_state,
 )
 from .basic import (
     rx_layer,
@@ -33,6 +36,9 @@ __all__ = [
     "qaoa_circuit",
     "superposition_vector",
     "qaoa_state",
+    "hubo_cost_circuit",
+    "hubo_qaoa_circuit",
+    "hubo_qaoa_state",
     # Basic layers
     "rx_layer",
     "ry_layer",

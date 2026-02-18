@@ -1,11 +1,8 @@
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.qaoa import (
-    apply_phase_gadget,
-    ising_cost_circuit,
+    hubo_qaoa_state,
     qaoa_state,
-    superposition_vector,
-    x_mixier_circuit,
 )
 from qamomile.circuit.transpiler.transpiler import Transpiler
 from qamomile.circuit.transpiler.executable import ExecutableProgram
@@ -140,42 +137,10 @@ class QAOAConverter(MathematicalProblemConverter):
         Returns:
             ExecutableProgram: The compiled circuit program.
         """
-        # NOTE: @qkernel functions below are defined inline (not at module level)
-        # because they capture `higher_terms` via the `_apply_higher` closure.
         higher_terms = sorted(self.spin_model.higher.items())
 
-        def _apply_higher(
-            q: qmc.Vector[qmc.Qubit], gamma: qmc.Float
-        ) -> qmc.Vector[qmc.Qubit]:
-            for indices, coeff in higher_terms:
-                q = apply_phase_gadget(q, list(indices), coeff * gamma)
-            return q
-
-        @qmc.qkernel
-        def ising_cost_circuit_hubo(
-            quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-            linear: qmc.Dict[qmc.UInt, qmc.Float],
-            q: qmc.Vector[qmc.Qubit],
-            gamma: qmc.Float,
-        ) -> qmc.Vector[qmc.Qubit]:
-            q = ising_cost_circuit(quad, linear, q, gamma)
-            q = _apply_higher(q, gamma)
-            return q
-
-        @qmc.qkernel
-        def qaoa_circuit_hubo(
-            p_val: qmc.UInt,
-            quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-            linear: qmc.Dict[qmc.UInt, qmc.Float],
-            q: qmc.Vector[qmc.Qubit],
-            gammas: qmc.Vector[qmc.Float],
-            betas: qmc.Vector[qmc.Float],
-        ) -> qmc.Vector[qmc.Qubit]:
-            for layer in qmc.range(p_val):
-                q = ising_cost_circuit_hubo(quad, linear, q, gammas[layer])
-                q = x_mixier_circuit(q, betas[layer])
-            return q
-
+        # NOTE: @qkernel is defined inline (not at module level) because it
+        # captures `higher_terms` via `hubo_qaoa_state` at trace time.
         @qmc.qkernel
         def qaoa_sampling_hubo(
             p_val: qmc.UInt,
@@ -185,8 +150,7 @@ class QAOAConverter(MathematicalProblemConverter):
             betas: qmc.Vector[qmc.Float],
             n: qmc.UInt,
         ) -> qmc.Vector[qmc.Bit]:
-            q = superposition_vector(n)
-            q = qaoa_circuit_hubo(p_val, quad, linear, q, gammas, betas)
+            q = hubo_qaoa_state(p_val, quad, linear, n, gammas, betas, higher_terms)
             return qmc.measure(q)
 
         return transpiler.transpile(
