@@ -26,8 +26,11 @@ def build_toc_entries(
     for name in subpackages:
         if name in split_packages:
             lines.append(f"        - file: api/{name}/index")
-            for sub_file in split_data.get(name, []):
-                lines.append(f"        - file: api/{name}/{sub_file}")
+            sub_files = split_data.get(name, [])
+            if sub_files:
+                lines.append("          children:")
+                for sub_file in sub_files:
+                    lines.append(f"            - file: api/{name}/{sub_file}")
         else:
             lines.append(f"        - file: api/{name}")
     lines.append(END_MARKER)

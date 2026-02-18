@@ -37,55 +37,46 @@ project:
         - file: optimization/qrao31.ipynb
         - file: optimization/custom_converter.ipynb
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+# --- API Reference (auto-generated) ---
     - title: API Reference
-      file: api/index.md
+      file: api/index
       children:
-        - file: api/circuit/index.md
-        - file: api/circuit/algorithm.md
-        - file: api/circuit/estimator.md
-        - file: api/circuit/frontend.md
-        - file: api/circuit/ir.md
-        - file: api/circuit/qft.md
-        - file: api/circuit/qpe.md
-        - file: api/circuit/resource_estimation.md
-        - file: api/circuit/stdlib.md
-        - file: api/circuit/transpiler.md
-        - file: api/circuit/visualization.md
-        - file: api/core.md
-        - file: api/observable.md
-        - file: api/optimization/index.md
-        - file: api/optimization/binary_model.md
-        - file: api/optimization/converter.md
-        - file: api/optimization/fqaoa.md
-        - file: api/optimization/qaoa.md
-        - file: api/optimization/qrao.md
-        - file: api/optimization/utils.md
-        - file: api/qiskit/index.md
-        - file: api/qiskit/emitter.md
-        - file: api/qiskit/emitters.md
-        - file: api/qiskit/observable.md
-        - file: api/qiskit/transpiler.md
-        - file: api/quri_parts/index.md
-        - file: api/quri_parts/emitter.md
-        - file: api/quri_parts/exceptions.md
-        - file: api/quri_parts/observable.md
-        - file: api/quri_parts/parameter_converter.md
-        - file: api/quri_parts/transpiler.md
+        - file: api/circuit/index
+          children:
+            - file: api/circuit/algorithm
+            - file: api/circuit/estimator
+            - file: api/circuit/frontend
+            - file: api/circuit/ir
+            - file: api/circuit/qft
+            - file: api/circuit/qpe
+            - file: api/circuit/resource_estimation
+            - file: api/circuit/stdlib
+            - file: api/circuit/transpiler
+            - file: api/circuit/visualization
+        - file: api/core
+        - file: api/observable
+        - file: api/optimization/index
+          children:
+            - file: api/optimization/binary_model
+            - file: api/optimization/converter
+            - file: api/optimization/fqaoa
+            - file: api/optimization/qaoa
+            - file: api/optimization/qrao
+            - file: api/optimization/utils
+        - file: api/qiskit/index
+          children:
+            - file: api/qiskit/emitter
+            - file: api/qiskit/emitters
+            - file: api/qiskit/observable
+            - file: api/qiskit/transpiler
+        - file: api/quri_parts/index
+          children:
+            - file: api/quri_parts/emitter
+            - file: api/quri_parts/exceptions
+            - file: api/quri_parts/observable
+            - file: api/quri_parts/parameter_converter
+            - file: api/quri_parts/transpiler
+# --- End API Reference ---
 
 site:
   template: book-theme
