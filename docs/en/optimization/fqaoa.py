@@ -101,15 +101,17 @@ num_fermions = 4  # must match the constraint sum
 instance = problem.eval(instance_data)
 
 # %% [markdown]
-# ## Converting to an FQAOA Circuit
+# ## Converting to an FQAOA Circuit and Hamiltonian
 #
 # `FQAOAConverter` takes the compiled instance **and** the number of
-# fermions $M$.  Internally, the QUBO is generated with
-# `uniform_penalty_weight=0.0` because the constraint is enforced by the
-# fermionic encoding itself.
+# fermions $M$. The equality constraint is enforced by the fermionic
+# encoding itself, so no penalty terms are needed.
 #
-# The `transpile` method produces an executable program whose only free
-# parameters are the variational angles `gammas` and `betas`.
+# We can then:
+# - Use `transpile()` to generate the FQAOA quantum circuit
+# - Use `get_cost_hamiltonian()` to inspect the cost Hamiltonian
+#
+# The number of FQAOA layers, $p$, is set to $2$ here.
 
 # %%
 from qamomile.optimization.fqaoa import FQAOAConverter
@@ -121,40 +123,19 @@ p = 2  # Number of FQAOA layers
 converter = FQAOAConverter(instance, num_fermions=num_fermions)
 executable = converter.transpile(transpiler, p=p)
 
+# %% [markdown]
+# Let's inspect the cost Hamiltonian. The Hamiltonian is constructed from the Ising representation of the QUBO objective.
+
 # %%
-qiskit_circuit = executable.get_first_circuit()
-if qiskit_circuit is not None:
-    print(f"Number of qubits: {qiskit_circuit.num_qubits}")
-    print(f"Number of variational parameters: {len(qiskit_circuit.parameters)}")
-    print(f"Circuit depth: {qiskit_circuit.depth()}")
+cost_hamiltonian = converter.get_cost_hamiltonian()
+cost_hamiltonian
 
 # %% [markdown]
-# ## Energy Calculation
-#
-# To run the VQE loop we need a function that maps measurement results to
-# the Ising energy.  The converter stores the spin model in
-# `converter.spin_model`.
-
+# Let's look at the generated quantum circuit. Unlike standard QAOA, the FQAOA circuit includes a Givens-rotation initial state preparation and a fermionic hopping mixer.
 
 # %%
-def calculate_ising_energy(bitstring: list[int], spin_model) -> float:
-    """Convert a measurement bitstring to an Ising energy.
-
-    Convention: z_i in {0, 1} -> s_i = 1 - 2*z_i in {+1, -1}.
-    """
-    spins = [1 - 2 * b for b in bitstring]
-    return spin_model.calc_energy(spins)
-
-
-def calculate_expectation_value(sample_result, spin_model) -> float:
-    """Weighted average energy over all measurement outcomes."""
-    total_energy = 0.0
-    total_counts = 0
-    for bitstring, count in sample_result.results:
-        total_energy += calculate_ising_energy(bitstring, spin_model) * count
-        total_counts += count
-    return total_energy / total_counts
-
+qiskit_circuit = executable.get_first_circuit()
+qiskit_circuit.draw()
 
 # %% [markdown]
 # ## VQE Optimization
@@ -165,11 +146,10 @@ def calculate_expectation_value(sample_result, spin_model) -> float:
 # %%
 from scipy.optimize import minimize
 
-energy_history: list[float] = []
+energy_history = []
 
 
-def objective_function(params, spin_model, shots=1024):
-    """Objective function for the VQE loop."""
+def objective_function(params, transpiler, executable, converter, shots=1024):
     p = len(params) // 2
     gammas = params[:p]
     betas = params[p:]
@@ -181,7 +161,8 @@ def objective_function(params, spin_model, shots=1024):
     )
     result = job.result()
 
-    energy = calculate_expectation_value(result, spin_model)
+    sampleset = converter.decode(result)
+    energy = sampleset.energy_mean()
     energy_history.append(energy)
     return energy
 
@@ -199,13 +180,11 @@ init_params = np.concatenate(
 energy_history = []
 
 print(f"Starting FQAOA optimization with p={p} layers...")
-print(f"Number of qubits: {converter.num_qubits}")
-print(f"Number of fermions: {converter.num_fermions}")
 
 result_opt = minimize(
     objective_function,
     init_params,
-    args=(converter.spin_model,),
+    args=(transpiler, executable, converter),
     method="COBYLA",
     options={"maxiter": 100, "disp": True},
 )
@@ -216,7 +195,9 @@ print(f"  betas:  {result_opt.x[p:]}")
 print(f"Final energy: {result_opt.fun:.4f}")
 
 # %% [markdown]
-# ## Visualizing Optimization Convergence
+# ## Visualizing Optimization Results
+#
+# Let's visualize the convergence of the optimization process.
 
 # %%
 plt.figure(figsize=(10, 5))
@@ -231,8 +212,7 @@ plt.show()
 # %% [markdown]
 # ## Final Solution Analysis
 #
-# We sample from the optimized circuit with more shots and decode the
-# measurement results back into the original binary variable domain.
+# Now let's sample from the optimized circuit and analyze the results.
 
 # %%
 optimal_gammas = result_opt.x[:p]
@@ -245,45 +225,57 @@ job_final = executable.sample(
 )
 result_final = job_final.result()
 
-# Decode measurement results into binary variable assignments
+# Decode results using the converter
 sampleset = converter.decode(result_final)
 
-# Show the best solution
+num_vars = converter.num_qubits
+
+# Build frequency distribution over all sampled bitstrings
+bitstrings = []
+counts = []
+energies = []
+for i in range(len(sampleset.samples)):
+    sample = sampleset.samples[i]
+    bitstring_str = "".join(str(sample[j]) for j in range(num_vars))
+    bitstrings.append(bitstring_str)
+    counts.append(sampleset.num_occurrences[i])
+    energies.append(sampleset.energy[i])
+
+# Sort by bitstring for consistent display
+sorted_order = np.argsort(bitstrings)
+bitstrings = [bitstrings[i] for i in sorted_order]
+counts = [counts[i] for i in sorted_order]
+energies = [energies[i] for i in sorted_order]
+
+# Determine optimal energy
 best_sample, best_energy, best_count = sampleset.lowest()
+
+# Plot frequency distribution
+fig, ax = plt.subplots(figsize=(12, 5))
+x_pos = np.arange(len(bitstrings))
+bars = ax.bar(x_pos, counts)
+
+# Highlight optimal solutions with red bars
+for i, e in enumerate(energies):
+    if np.isclose(e, best_energy):
+        bars[i].set_color("red")
+
+ax.set_xticks(x_pos)
+ax.set_xticklabels(bitstrings, rotation=90)
+ax.set_xlabel("Bitstring")
+ax.set_ylabel("Counts")
+ax.set_title(f"FQAOA Measurement Frequency Distribution (red = optimal, energy = {best_energy:.2f})")
+plt.tight_layout()
+plt.show()
+
+# %% [markdown]
+# Notice that **every bitstring has exactly $M = 4$ bits set to 1**. This confirms that the fermion number conservation enforces the equality constraint without any penalty terms. The red bars indicate the optimal solutions, showing that FQAOA successfully concentrates measurement probability on them.
+
+# %%
 print("Best solution found:")
 print(f"  Variable assignment: {best_sample}")
 print(f"  Energy: {best_energy:.4f}")
 print(f"  Occurrences: {best_count}")
-
-# %% [markdown]
-# We can also inspect the top measurement outcomes sorted by energy.
-
-# %%
-results_with_energy = []
-for bitstring, count in result_final.results:
-    energy = calculate_ising_energy(bitstring, converter.spin_model)
-    results_with_energy.append((bitstring, count, energy))
-
-results_with_energy.sort(key=lambda x: x[2])
-
-print("Top measurement results (sorted by energy):")
-print("-" * 60)
-for bitstring, count, energy in results_with_energy[:10]:
-    bitstring_str = "".join(map(str, bitstring))
-    probability = count / 4096
-    # Verify fermion number conservation: all bitstrings should have
-    # exactly num_fermions bits set to 1.
-    num_ones = sum(bitstring)
-    print(
-        f"  {bitstring_str}: count={count:4d}, "
-        f"prob={probability:.3f}, energy={energy:.4f}, "
-        f"ones={num_ones}"
-    )
-
-# %% [markdown]
-# Notice that **every bitstring has exactly $M = 4$ bits set to 1**.
-# This confirms that the fermion number conservation enforces the
-# equality constraint without any penalty terms.
 
 # %% [markdown]
 # ## Summary
@@ -291,11 +283,10 @@ for bitstring, count, energy in results_with_energy[:10]:
 # In this tutorial we demonstrated how to solve a constrained optimization
 # problem using FQAOA with Qamomile:
 #
-# 1. **Problem formulation**: We defined a QUBO with an equality constraint using JijModeling.
-# 2. **Constraint handling**: `FQAOAConverter` encodes the constraint via fermion number conservation — no penalty weight tuning needed.
-# 3. **Circuit generation**: `converter.transpile()` produces the full FQAOA ansatz with Givens-rotation initial state and fermionic mixer.
-# 4. **VQE optimization**: We found optimal variational parameters using scipy's COBYLA optimizer.
-# 5. **Solution decoding**: `converter.decode()` maps measurement results back to variable assignments.
+# 1. **Problem Formulation**: We defined a QUBO with an equality constraint using JijModeling
+# 2. **Hamiltonian & Circuit Generation**: `FQAOAConverter` automatically generated the cost Hamiltonian and FQAOA circuit with Givens-rotation initial state and fermionic mixer
+# 3. **VQE Optimization**: We used scipy's COBYLA optimizer to find optimal FQAOA parameters
+# 4. **Solution Analysis**: The frequency distribution confirmed that FQAOA concentrates measurement probability on the optimal solutions, with all bitstrings satisfying the constraint exactly
 #
 # Key advantages of FQAOA over standard QAOA:
 # - Equality constraints are satisfied **exactly** by construction
