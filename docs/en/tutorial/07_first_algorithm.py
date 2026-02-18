@@ -331,7 +331,6 @@ for name, circuit in test_cases:
 #
 # - **Grover's algorithm**: $\sqrt{N}$ speedup for database search
 # - **Shor's algorithm**: Exponential speedup for integer factorization
-# - **QAOA**: Approximate solutions for combinatorial optimization problems
 
 # %% [markdown]
 # ## 9. Summary
@@ -367,7 +366,7 @@ for name, circuit in test_cases:
 # ### Next Tutorials
 #
 # - [Standard Library](05_stdlib.ipynb): QFT, IQFT, and QPE with `qmc.controlled()` and `QFixed`
-# - [Parametric Circuits](07_parametric_circuits.ipynb): Variational quantum algorithms and hybrid optimization
+# - [Parametric Circuits](08_parametric_circuits.ipynb): Variational quantum algorithms and hybrid optimization
 
 # %% [markdown]
 # ## What We Learned

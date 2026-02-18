@@ -22,7 +22,6 @@
 #
 # ## What We Will Learn
 # - The full transpiler pipeline and the role of each pass
-# - The difference between `kernel.block` and `transpiler.to_block()`
 # - How `draw()` visualizes circuits at different levels of detail
 # - How kernel calls are inlined into a flat instruction sequence
 # - How validation, constant folding, and dependency analysis work
@@ -139,18 +138,12 @@ my_circuit.draw(n=2, inline=True)
 # - `1` — expand only the top-level calls
 
 # %% [markdown]
-# ### kernel.block vs transpiler.to_block()
+# ### Converting to a Block
 #
-# There are two ways to get the IR block:
-#
-# - **`kernel.block`** — A cached property that builds the block without
-#   any parameter bindings.
-# - **`transpiler.to_block(kernel, bindings=...)`** — Builds the block with
-#   concrete parameter bindings. This is important when the kernel uses
-#   parameters to determine array sizes (e.g., `qmc.qubit_array(n, ...)`).
-#
-# Since `my_circuit` uses `n` for the qubit array size, these two
-# approaches produce **different** results.
+# The first pipeline pass is `to_block()`, which traces the `@qkernel`
+# function and produces a `Block` — the IR that all subsequent passes
+# operate on. We pass `bindings` to give concrete values to parameters
+# like `n` (qubit array size).
 
 # %%
 from qamomile.circuit.ir.block import Block
@@ -172,25 +165,14 @@ def print_block_operations(block: Block):
 
 # %%
 transpiler = QiskitTranspiler()
-
-# Without bindings — n is symbolic, array size unresolved
-print("=== kernel.block (no bindings) ===")
-print_block_operations(my_circuit.block)
-
-# %%
-# With bindings — n=2 resolves the qubit array to 2 elements
-print("=== transpiler.to_block(bindings={'n': 2}) ===")
 block = transpiler.to_block(my_circuit, bindings={"n": 2})
 print_block_operations(block)
 
 # %% [markdown]
-# Notice that `QInitOperation` appears in the output. This is the qubit
-# allocation and initialization step — it tells the compiler how many
-# physical qubits to create. The emit pass uses this information to set up
-# the backend circuit.
-#
-# The `CallBlockOperation` for `prepare` has not yet been expanded — the
-# block is still in its **hierarchical** form (it may contain nested calls).
+# The block is in its **hierarchical** form — the `CallBlockOperation` for
+# `prepare` has not yet been expanded (it may contain nested calls).
+# The `QInitOperation` is the qubit allocation step that tells the
+# transpiler how many physical qubits to create.
 
 # %% [markdown]
 # ## 3. The Inline Pass
@@ -225,7 +207,7 @@ print_block_operations(inlined)
 #
 # The `linear_validate` pass enforces **linear type semantics**: each quantum
 # value (qubit) must be consumed exactly once. This enforces the no-cloning
-# principle at compile time rather than at execution time.
+# principle at transpile time rather than at execution time.
 
 # %%
 validated = transpiler.linear_validate(inlined)
@@ -291,7 +273,7 @@ print_block_operations(analyzed)
 #
 # - **`classical_prep`**: Classical operations that run *before* the quantum
 #   circuit (e.g., pre-computation of parameters that could not be folded
-#   at compile time). When all parameters are bound, `constant_fold` resolves
+#   at transpile time). When all parameters are bound, `constant_fold` resolves
 #   them, so this segment is typically `None`.
 #
 # - **`quantum`**: The quantum operations (gates, measurements).
@@ -330,7 +312,7 @@ for op in separated.quantum.operations:
 #
 # ### 5b. Runtime parameter — `classical_prep` in action
 #
-# What happens when `theta` is *not* bound at compile time? The `BinOp`
+# What happens when `theta` is *not* bound at transpile time? The `BinOp`
 # for `theta * 2` cannot be resolved by `constant_fold` and must be
 # computed at runtime *before* the quantum circuit is sent to the QPU.
 # The `separate` pass detects this and places the `BinOp` into a
@@ -609,9 +591,6 @@ print(f"Approximate QFT gates: {circuit_approx.size()}")
 #
 # - **`transpile()` is not magic** — it is a well-defined sequence of passes,
 #   each of which we can call individually for debugging.
-# - **`to_block()` vs `kernel.block`** — Use `to_block(kernel, bindings=...)`
-#   when our kernel has parameterized array shapes. `kernel.block` is a
-#   shortcut that builds without bindings.
 # - **`draw()` with `inline` and `inline_depth`** — Visualize circuits at
 #   different levels of detail before entering the transpiler pipeline.
 # - **Segment separation** splits the program into `classical_prep`
@@ -626,15 +605,14 @@ print(f"Approximate QFT gates: {circuit_approx.size()}")
 #
 # ### Next Steps
 #
-# - [Custom Executor](10_custom_executor.ipynb): Run circuits on cloud quantum hardware
-# - [Resource Estimation](08_resource_estimation.ipynb): Analyze gate counts and circuit depth
+# - [Custom Executor](11_custom_executor.ipynb): Run circuits on cloud quantum hardware
+# - [Resource Estimation](09_resource_estimation.ipynb): Analyze gate counts and circuit depth
 # - [QAOA](../optimization/qaoa.ipynb): Optimization with variational circuits
 
 # %% [markdown]
 # ## What We Learned
 #
 # - **The full transpiler pipeline and the role of each pass** — Seven passes (`to_block` → `inline` → `validate` → `constant_fold` → `analyze` → `separate` → `emit`) transform a `@qkernel` into backend-specific code.
-# - **The difference between `kernel.block` and `transpiler.to_block()`** — `kernel.block` builds without bindings; `to_block(kernel, bindings=...)` is needed when array shapes depend on parameters.
 # - **How `draw()` visualizes circuits** — `inline=True` expands sub-kernel calls; `inline_depth` controls how many nesting levels are expanded.
 # - **How kernel calls are inlined into a flat instruction sequence** — The `inline()` pass recursively expands all `CallBlockOperation`s, producing a single linear block.
 # - **How validation, constant folding, and dependency analysis work** — `linear_validate` enforces no-cloning, `constant_fold` evaluates `BinOp` expressions like `theta * 2` into concrete values, and `analyze` builds a dependency graph for I/O validation.

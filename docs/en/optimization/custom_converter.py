@@ -61,7 +61,12 @@
 
 # %%
 from qamomile.optimization.converter import MathematicalProblemConverter
-from qamomile.optimization.binary_model import BinaryModel, BinaryExpr, VarType, BinarySampleSet
+from qamomile.optimization.binary_model import (
+    BinaryModel,
+    BinaryExpr,
+    VarType,
+    BinarySampleSet,
+)
 from qamomile.circuit.transpiler.job import SampleResult
 import qamomile.observable as qm_o
 
@@ -125,6 +130,7 @@ print("Are they equal?", H_example == H_manual)
 # - `constant` -- `float` constant offset
 # - `num_bits` -- `int` number of spin variables
 
+
 # %%
 class SimpleIsingConverter(MathematicalProblemConverter):
     """A simple converter that creates a Z-only Hamiltonian from the spin model.
@@ -150,6 +156,7 @@ class SimpleIsingConverter(MathematicalProblemConverter):
         hamiltonian += self.spin_model.constant
 
         return hamiltonian
+
 
 # %% [markdown]
 # That is the entire converter.  The `decode()` method is inherited from
@@ -344,6 +351,7 @@ plt.tight_layout()
 # a measurement circuit, sample bitstrings, and decode them using the
 # converter's `decode()` method.
 
+
 # %%
 @qmc.qkernel
 def sampling_circuit(
@@ -409,7 +417,7 @@ binary_model = BinaryModel.from_qubo(
     qubo={
         (0, 1): -2.0,
         (1, 2): -1.0,
-        (0, 0): 1.0,   # diagonal = linear term in QUBO
+        (0, 0): 1.0,  # diagonal = linear term in QUBO
         (1, 1): -0.5,
     },
     constant=0.0,
@@ -468,6 +476,7 @@ for sample, energy in zip(decoded_binary.samples, decoded_binary.energy):
 # mappings and to apply Hamiltonian normalization.
 #
 # Here is a minimal example of using `__post_init__` in a custom converter:
+
 
 # %%
 class ScaledIsingConverter(MathematicalProblemConverter):

@@ -31,7 +31,6 @@
 # - Special types: `QFixed`, `Observable`
 
 # %%
-
 import qamomile.circuit as qmc
 from qamomile.qiskit import QiskitTranspiler
 
@@ -133,20 +132,22 @@ def qubit_array_demo(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     return qmc.measure(qubits)
 
 
+qubit_array_demo.draw(n=3)
+
+# %% [markdown]
+# By default, loops created by `qmc.range()` are displayed as compact blocks.
+# Setting `fold_loops=False` unrolls the loop so we can see each iteration
+# as individual gates.
+
+# %%
 qubit_array_demo.draw(n=3, fold_loops=False)
 
 # %% [markdown]
-# #### `draw()` options for parametric circuits
+# #### `draw()` with parametric circuits
 #
-# The `draw()` method accepts keyword arguments to control visualization:
-#
-# - **`n=3`**: Binds the symbolic parameter `n` to a concrete value.
-#   For circuits using `qmc.qubit_array(n, ...)`, we **must** provide the
-#   qubit count -- otherwise `draw()` cannot determine the circuit layout
-#   and will raise an error.
-# - **`fold_loops=False`**: By default (`fold_loops=True`), loops created
-#   by `qmc.range()` are displayed as compact blocks. Setting it to `False`
-#   unrolls the loop so we can see each iteration as individual gates.
+# For circuits using `qmc.qubit_array(n, ...)`, we **must** provide the
+# qubit count -- otherwise `draw()` cannot determine the circuit layout
+# and will raise an error.
 
 # %%
 # What happens when you don't specify n?
@@ -525,7 +526,7 @@ print(qiskit_circuit.draw(output="text"))
 # result: qmc.Float = qmc.measure(phase)
 # ```
 #
-# See the QPE tutorial (`05_stdlib.ipynb`) for a working example.
+# See the [QPE tutorial](05_stdlib.ipynb) for a working example.
 #
 # ### `Observable` -- Hamiltonian Reference
 #
@@ -578,8 +579,8 @@ print(qiskit_circuit.draw(output="text"))
 # | Represent a multi-index key | `Tuple[K, V]` | `qmc.Tuple[qmc.UInt, qmc.UInt]` |
 # | Iterate over problem data | `qmc.items(d)` | `for (i, j), Jij in qmc.items(ising):` |
 # | Loop with symbolic bounds | `qmc.range(n)` | `for i in qmc.range(n):` |
-# | Decode a QPE phase | `QFixed` | (see QPE tutorial) |
-# | Compute expectation values | `Observable` | (see optimisation tutorials) |
+# | Decode a QPE phase | `QFixed` | (see [QPE tutorial](05_stdlib.ipynb)) |
+# | Compute expectation values | `Observable` | (see [optimisation tutorials](../optimization/qaoa.ipynb)) |
 #
 # ### Key Rules to Remember
 #
@@ -615,10 +616,10 @@ print(qiskit_circuit.draw(output="text"))
 # ```
 #
 # In the next tutorials we will see these types in action:
-# - **`03_gates.ipynb`**: Complete gate reference (all 11 gates)
-# - **`04_superposition_entanglement.ipynb`**: Superposition, interference, Bell/GHZ states
-# - **`05_stdlib.ipynb`**: QFT, QPE with `QFixed`
-# - **`optimization/qaoa.ipynb`**: QAOA with `Dict`, `Tuple`, and `qmc.items()`
+# - **[03_gates](03_gates.ipynb)**: Complete gate reference (all 11 gates)
+# - **[04_superposition_entanglement](04_superposition_entanglement.ipynb)**: Superposition, interference, Bell/GHZ states
+# - **[05_stdlib](05_stdlib.ipynb)**: QFT, QPE with `QFixed`
+# - **[optimization/qaoa](../optimization/qaoa.ipynb)**: QAOA with `Dict`, `Tuple`, and `qmc.items()`
 
 # %% [markdown]
 # ## What We Learned

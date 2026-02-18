@@ -157,6 +157,10 @@ def reveal_plus() -> qmc.Bit:
     return qmc.measure(q)
 
 
+reveal_plus.draw()
+
+
+# %%
 @qmc.qkernel
 def reveal_minus() -> qmc.Bit:
     """H|-> = |1>: always measures 1."""
@@ -167,9 +171,6 @@ def reveal_minus() -> qmc.Bit:
     return qmc.measure(q)
 
 
-reveal_plus.draw()
-
-# %%
 reveal_minus.draw()
 
 # %%

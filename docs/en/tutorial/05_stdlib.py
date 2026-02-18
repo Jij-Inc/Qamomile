@@ -29,8 +29,6 @@
 # - Decomposition strategies for controlling precision vs. gate count
 # - IR-level vs. backend-level circuits (and why they can differ)
 # - Building Quantum Phase Estimation with `qmc.qpe()`
-# - Writing custom composite gates with `CompositeGate` and `@composite_gate`
-# - Stub gates for resource estimation without gate-level implementation
 # - Overview of the `qamomile.circuit.algorithm` module
 #
 # ## Current Standard Library
@@ -209,7 +207,7 @@ for strategy_name in QFT.list_strategies():
 # | Strategy | Truncation depth (k) | CP Gates (n=8) | Error |
 # |----------|---------------------|---------------|-------|
 # | standard | -- (full) | n(n-1)/2 = 28 | 0 |
-# | approximate_k2 | 2 | ~11 | O(n/2^2) |
+# | approximate_k2 | 2 | 13 | O(n/2^2) |
 # | approximate (k=3) | 3 | ~18 | O(n/2^3) |
 # | approximate_k4 | 4 | ~22 | O(n/2^4) |
 
@@ -302,8 +300,8 @@ print(qiskit_approx.draw(output="text"))
 #   reports the gate count each strategy would use.
 # - **Other backends** that do not provide a native QFT emitter will fall
 #   back to Qamomile's decomposition and respect the strategy.
-# - As the Qiskit emitter evolves, it may gain support for passing the
-#   approximation degree through to Qiskit's native QFT gate.
+# - Qiskit's `QFTGate` already supports an `approximation_degree` parameter;
+#   the Qamomile Qiskit emitter does not yet forward the strategy to it.
 #
 # **Key takeaway**: Approximation strategies control the trade-off between
 # gate count and precision. The `get_resources_for_strategy()` API (shown
@@ -411,198 +409,7 @@ for value, count in result_qpe2.results:
 # so we get the phase value directly without manual bit manipulation.
 
 # %% [markdown]
-# ## 4. CompositeGate: Writing Custom Gates
-#
-# QFT and IQFT are `CompositeGate` subclasses with pluggable
-# decomposition strategies. QPE is a standalone function that uses IQFT
-# internally. We can use the `CompositeGate` framework to define our
-# own reusable multi-qubit gates.
-#
-# ### Why CompositeGate?
-#
-# - **Encapsulation**: Bundle multiple gates into a single named operation
-# - **Reusability**: Use the gate in multiple kernels
-# - **Backend optimization**: Backends can provide native implementations
-# - **Resource estimation**: Attach resource metadata for analysis
-# - **Decomposition strategies**: Support multiple implementations
-#
-# ### Subclassing CompositeGate
-#
-# To create a custom gate, subclass `CompositeGate` and implement:
-#
-# 1. `num_target_qubits` (property): How many qubits the gate acts on
-# 2. `_decompose(qubits)`: The gate logic using frontend operations
-# 3. `_resources()` (optional): Resource metadata
-
-# %%
-from qamomile.circuit import CompositeGate
-from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
-
-
-class MyTwoQubitGate(CompositeGate):
-    """A custom 2-qubit gate: H on first qubit, then CNOT."""
-
-    custom_name = "my_gate"
-
-    def __init__(self):
-        pass
-
-    @property
-    def num_target_qubits(self) -> int:
-        return 2
-
-    def _decompose(self, qubits):
-        q0, q1 = qubits
-        q0 = qmc.h(q0)
-        q0, q1 = qmc.cx(q0, q1)
-        return q0, q1
-
-    def _resources(self):
-        return ResourceMetadata(
-            t_gate_count=0,
-            custom_metadata={
-                "num_h_gates": 1,
-                "num_cx_gates": 1,
-                "total_gates": 2,
-            },
-        )
-
-
-# %% [markdown]
-# ### Using the Custom Gate in a QKernel
-#
-# Instantiate the gate and call it like a function inside a `@qkernel`.
-# It accepts individual qubits as arguments and returns a tuple of qubits.
-
-
-# %%
-@qmc.qkernel
-def use_custom_gate() -> tuple[qmc.Bit, qmc.Bit]:
-    """Use MyTwoQubitGate inside a circuit."""
-    q0 = qmc.qubit(name="q0")
-    q1 = qmc.qubit(name="q1")
-
-    gate = MyTwoQubitGate()
-    q0, q1 = gate(q0, q1)
-
-    return qmc.measure(q0), qmc.measure(q1)
-
-
-use_custom_gate.draw()
-
-# %% [markdown]
-# With `expand_composite=True`, we can see the gates inside the box:
-
-# %%
-use_custom_gate.draw(expand_composite=True)
-
-# %% [markdown]
-# ### Checking Resources
-
-# %%
-gate = MyTwoQubitGate()
-resources = gate.get_resource_metadata()
-
-print("=== MyTwoQubitGate Resources ===")
-print(f"  Custom metadata: {resources.custom_metadata}")
-
-# %% [markdown]
-# ### The `@composite_gate` Decorator
-#
-# For simpler cases, Qamomile provides a `@composite_gate` decorator
-# that wraps a `@qkernel` function as a `CompositeGate`. This avoids
-# the need to write a full class.
-
-
-# %%
-@qmc.composite_gate
-@qmc.qkernel
-def bell_gate(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
-    """Create a Bell state: H on q0, then CNOT."""
-    q0 = qmc.h(q0)
-    q0, q1 = qmc.cx(q0, q1)
-    return q0, q1
-
-
-# %%
-@qmc.qkernel
-def use_bell_gate() -> tuple[qmc.Bit, qmc.Bit]:
-    """Use the decorator-based bell_gate."""
-    q0 = qmc.qubit(name="q0")
-    q1 = qmc.qubit(name="q1")
-
-    q0, q1 = bell_gate(q0, q1)
-
-    return qmc.measure(q0), qmc.measure(q1)
-
-
-use_bell_gate.draw()
-
-# %% [markdown]
-# ### Choosing Between Class and Decorator
-#
-# | Feature | `CompositeGate` subclass | `@composite_gate` decorator |
-# |---------|--------------------------|----------------------------|
-# | Resource metadata | Full control via `_resources()` | Not supported |
-# | Decomposition strategies | Via `_strategies` registry | Not supported |
-# | Parameterized construction | Via `__init__` arguments | Via closure/constants |
-# | Simplicity | More boilerplate | Minimal code |
-# | Best for | Library gates, configurable gates | Quick one-off gates |
-
-# %% [markdown]
-# ### Stub Gates for Resource Estimation
-#
-# Sometimes we need to estimate resources for a component whose gate-level
-# implementation is not yet available — for example, an oracle in Grover's
-# algorithm. `@composite_gate(stub=True, ...)` creates a placeholder gate
-# with resource annotations but **no decomposition**.
-
-
-# %%
-@qmc.composite_gate(
-    stub=True,
-    name="oracle",
-    num_qubits=5,
-    query_complexity=1,
-    t_gate_count=100,
-)
-def oracle():
-    pass
-
-
-# %%
-@qmc.qkernel
-def grover_iteration() -> qmc.Vector[qmc.Bit]:
-    """A single Grover iteration using a stub oracle."""
-    q = qmc.qubit_array(5, name="q")
-
-    # Superposition
-    for i in qmc.range(5):
-        q[i] = qmc.h(q[i])
-
-    # Oracle (stub — no gate-level implementation)
-    q[0], q[1], q[2], q[3], q[4] = oracle(q[0], q[1], q[2], q[3], q[4])
-
-    return qmc.measure(q)
-
-
-grover_iteration.draw()
-
-# %%
-stub_resources = oracle.get_resource_metadata()
-
-print("=== Stub Oracle Resources ===")
-print(f"  Query complexity: {stub_resources.query_complexity}")
-print(f"  T-gate count:     {stub_resources.t_gate_count}")
-
-# %% [markdown]
-# The stub gate appears as a labelled box in the circuit diagram and
-# carries resource metadata for estimation, but has no gate-level
-# decomposition. This is useful for top-down circuit design where we
-# define the algorithm structure first and fill in implementations later.
-
-# %% [markdown]
-# ## 5. Algorithm Building Blocks
+# ## 4. Algorithm Building Blocks
 #
 # The `qamomile.circuit.algorithm` module provides `@qkernel` building blocks
 # for common circuit patterns. These are regular kernels
@@ -655,7 +462,7 @@ for value, count in sorted_results:
 # [QAOA optimization tutorial](../optimization/qaoa.ipynb).
 
 # %% [markdown]
-# ## 6. Summary
+# ## 5. Summary
 #
 # ### Standard Library Functions
 #
@@ -671,8 +478,6 @@ for value, count in sorted_results:
 # |-------|--------|---------|
 # | `QFT` | `qamomile.circuit.stdlib.qft` | QFT with strategy support |
 # | `IQFT` | `qamomile.circuit.stdlib.qft` | IQFT with strategy support |
-# | `CompositeGate` | `qamomile.circuit` | Base class for custom gates |
-# | `ResourceMetadata` | `qamomile.circuit.ir.operation.composite_gate` | Resource estimation data |
 #
 # ### Decomposition Strategies
 #
@@ -691,32 +496,11 @@ for value, count in sorted_results:
 # results = qft_gate(q0, q1, ..., strategy="approximate")
 # ```
 #
-# ### Custom CompositeGate Pattern
-#
-# ```python
-# class MyGate(CompositeGate):
-#     custom_name = "my_gate"
-#
-#     def __init__(self, ...):
-#         ...
-#
-#     @property
-#     def num_target_qubits(self) -> int:
-#         return N
-#
-#     def _decompose(self, qubits):
-#         q0, q1 = qubits
-#         # ... gate operations ...
-#         return q0, q1
-#
-#     def _resources(self):
-#         return ResourceMetadata(t_gate_count=0)
-# ```
-#
 # ### Next Tutorials
 #
-# - [Our First Quantum Algorithm](06_first_algorithm.ipynb): The Deutsch-Jozsa algorithm
-# - [Resource Estimation](08_resource_estimation.ipynb): Estimate gate counts and circuit depth
+# - [Composite Gates](06_composite_gate.ipynb): Writing custom `CompositeGate`s and `@composite_gate`
+# - [Our First Quantum Algorithm](07_first_algorithm.ipynb): The Deutsch-Jozsa algorithm
+# - [Resource Estimation](09_resource_estimation.ipynb): Estimate gate counts and circuit depth
 # - [QAOA](../optimization/qaoa.ipynb): Solve combinatorial optimization problems with QAOA
 
 # %% [markdown]
@@ -726,6 +510,4 @@ for value, count in sorted_results:
 # - **Decomposition strategies for controlling precision vs. gate count** — `QFT.list_strategies()` and `get_resources_for_strategy()` let us compare and select trade-offs like `"standard"` vs. `"approximate"`.
 # - **IR-level vs. backend-level circuits** — `expand_composite=True` shows Qamomile's IR decomposition, which may differ from the actual transpiled circuit. Use `transpiler.to_circuit()` to inspect the backend-level result.
 # - **Building Quantum Phase Estimation with `qmc.qpe()`** — `qmc.qpe()` takes a unitary kernel, target qubits, and counting qubits, returning a `QFixed` value decoded automatically.
-# - **Writing custom composite gates with `CompositeGate` and `@composite_gate`** — Subclass `CompositeGate` or use the decorator to define reusable multi-qubit operations with pluggable decomposition strategies.
-# - **Stub gates for resource estimation without gate-level implementation** — Override `_resources()` to return `ResourceMetadata` without implementing `_decompose()`, enabling cost analysis before full implementation.
 # - **Overview of the `qamomile.circuit.algorithm` module** — Pre-built variational building blocks (QAOA layers, rotation layers, entangling layers) that compose into larger algorithms.

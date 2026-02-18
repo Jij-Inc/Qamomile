@@ -88,7 +88,7 @@ plt.tight_layout()
 # The Max-Cut problem can be formulated with the following equation:
 #
 # $$
-#   \max \quad \frac{1}{2} \sum_{(i,j) \in E} (1 - s_i s_j)  
+#   \max \quad \frac{1}{2} \sum_{(i,j) \in E} (1 - s_i s_j)
 # $$
 #
 # Note that this equation is expressed using Ising variables $ s \in \{ +1, -1 \} $. In this case, we want to formulate it using the binary variables $ x \in \{ 0, 1 \} $ from JijModeling. Therefore, we perform the conversion between Ising variables and binary variables using the following equations:
@@ -97,6 +97,7 @@ plt.tight_layout()
 #     x_i = \frac{1 + s_i}{2} \quad \Rightarrow \quad s_i = 2x_i - 1
 # $$
 #
+
 
 # %%
 def Maxcut_problem() -> jm.Problem:
@@ -198,6 +199,7 @@ if qiskit_circuit is not None:
 # To optimize QAOA, we need to calculate the expected energy from measurement results.
 # The converter provides access to the Ising model, which we use to calculate energy.
 
+
 # %%
 def calculate_ising_energy(bitstring: list[int], ising_model) -> float:
     """
@@ -278,10 +280,12 @@ def objective_function(params, transpiler, executable, ising_model, shots=1024):
 np.random.seed(42)
 
 # Initial parameters: gamma in [0, 2π], beta in [0, π]
-init_params = np.concatenate([
-    np.random.uniform(0, 2 * np.pi, size=p),  # gammas
-    np.random.uniform(0, np.pi, size=p),       # betas
-])
+init_params = np.concatenate(
+    [
+        np.random.uniform(0, 2 * np.pi, size=p),  # gammas
+        np.random.uniform(0, np.pi, size=p),  # betas
+    ]
+)
 
 # Clear history
 energy_history = []
@@ -310,7 +314,7 @@ print(f"Final energy: {result_opt.fun:.4f}")
 
 # %%
 plt.figure(figsize=(10, 5))
-plt.plot(energy_history, marker='o', markersize=3)
+plt.plot(energy_history, marker="o", markersize=3)
 plt.xlabel("Iteration")
 plt.ylabel("Energy")
 plt.title("QAOA Optimization Convergence")
@@ -351,7 +355,9 @@ print("-" * 60)
 for bitstring, count, energy in results_with_energy[:10]:
     bitstring_str = "".join(map(str, bitstring))
     probability = count / 4096
-    print(f"  {bitstring_str}: count={count:4d}, probability={probability:.3f}, energy={energy:.4f}")
+    print(
+        f"  {bitstring_str}: count={count:4d}, probability={probability:.3f}, energy={energy:.4f}"
+    )
 
 # %% [markdown]
 # ## Visualizing the Solution

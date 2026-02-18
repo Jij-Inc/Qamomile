@@ -265,7 +265,9 @@ except Exception as e:
     print()
     print("To use IBM Quantum, configure your credentials:")
     print("  from qiskit_ibm_runtime import QiskitRuntimeService")
-    print('  QiskitRuntimeService.save_account(channel="ibm_quantum", token="YOUR_TOKEN")')
+    print(
+        '  QiskitRuntimeService.save_account(channel="ibm_quantum", token="YOUR_TOKEN")'
+    )
     print()
     print("Running on local simulator instead:")
     local_executor = MySimpleExecutor()
@@ -571,8 +573,8 @@ print("  So <H> = 0 + 0.5 * 1 = 0.5")
 #
 # ### Next Steps
 #
-# - See the optimization section for QAOA with production converters
-# - See 05_stdlib.py for QPE and standard library functions
+# - See [the optimization section](../optimization/qaoa.ipynb) for QAOA with production converters
+# - See [05_stdlib](05_stdlib.ipynb) for QPE and standard library functions
 
 # %% [markdown]
 # ## What We Learned

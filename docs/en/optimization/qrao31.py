@@ -102,6 +102,7 @@ plt.tight_layout()
 # $$
 #
 
+
 # %%
 def Maxcut_problem() -> jm.Problem:
     V = jm.Placeholder("V")
@@ -198,7 +199,9 @@ from qamomile.circuit.algorithm.basic import ry_layer, rz_layer, cz_entangling_l
 
 
 @qmc.qkernel
-def vqe(n: qmc.UInt, h: qmc.Observable, depth: qmc.UInt, theta: qmc.Vector[qmc.Float]) -> qmc.Float:
+def vqe(
+    n: qmc.UInt, h: qmc.Observable, depth: qmc.UInt, theta: qmc.Vector[qmc.Float]
+) -> qmc.Float:
     q = qmc.qubit_array(n, "q")
     for layer in qmc.range(depth):
         q = ry_layer(q, theta, 2 * n * layer)
@@ -215,7 +218,7 @@ executable = transpiler.transpile(
         "h": hamiltonin,
         "depth": 2,
     },
-    parameters=["theta"]
+    parameters=["theta"],
 )
 
 # %% [markdown]
@@ -230,7 +233,9 @@ from scipy.optimize import minimize
 # Calculate parameter count
 depth = 2
 n_qubits = hamiltonin.num_qubits
-n_params = 2 * n_qubits * depth  # ry_layer + rz_layer each consume n_qubits params per layer
+n_params = (
+    2 * n_qubits * depth
+)  # ry_layer + rz_layer each consume n_qubits params per layer
 
 print(f"Number of qubits: {n_qubits}")
 print(f"Depth: {depth}")
@@ -287,7 +292,7 @@ print(f"Final energy: {result_opt.fun:.4f}")
 
 # %%
 plt.figure(figsize=(10, 5))
-plt.plot(energy_history, marker='o', markersize=3)
+plt.plot(energy_history, marker="o", markersize=3)
 plt.xlabel("Iteration")
 plt.ylabel("Energy")
 plt.title("VQE Optimization Convergence")
@@ -317,7 +322,9 @@ for idx, pauli_op in converter.pauli_encoding.items():
 # %%
 # Measure expectation values of each Pauli operator
 @qmc.qkernel
-def measure_pauli(n: qmc.UInt, h: qmc.Observable, depth: qmc.UInt, theta: qmc.Vector[qmc.Float]) -> qmc.Float:
+def measure_pauli(
+    n: qmc.UInt, h: qmc.Observable, depth: qmc.UInt, theta: qmc.Vector[qmc.Float]
+) -> qmc.Float:
     q = qmc.qubit_array(n, "q")
     for layer in qmc.range(depth):
         q = ry_layer(q, theta, 2 * n * layer)
@@ -337,7 +344,7 @@ for i, pauli_obs in enumerate(pauli_observables):
             "h": pauli_obs,
             "depth": depth,
         },
-        parameters=["theta"]
+        parameters=["theta"],
     )
 
     job = executable_pauli.run(
@@ -384,6 +391,7 @@ for i, bit in enumerate(binary_solution):
 # Convert solution to dictionary format
 solution_dict = {(i,): float(bit) for i, bit in enumerate(binary_solution)}
 
+
 # Calculate energy
 # Energy calculation in spin representation
 def calculate_maxcut_value(graph, binary_solution):
@@ -393,6 +401,7 @@ def calculate_maxcut_value(graph, binary_solution):
         if binary_solution[u] != binary_solution[v]:
             cut_count += 1
     return cut_count
+
 
 cut_value = calculate_maxcut_value(G, binary_solution)
 

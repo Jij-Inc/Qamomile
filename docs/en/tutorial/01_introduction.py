@@ -23,9 +23,10 @@
 # - Creating and running our first quantum circuit
 # - The linear type system (no-cloning enforcement)
 # - Execution with QiskitTranspiler
-# - How Qamomile traces and compiles quantum programs
+# - How Qamomile traces and transpiles quantum programs
 # - Brief introduction to parametric circuits
 # - Brief introduction to resource estimation
+# - Brief introduction to the standard library and algorithm library
 # - Overview of optimization features
 
 # %% [markdown]
@@ -201,7 +202,7 @@ except Exception as e:
 # - **`run()`**: Expectation value computation. Returns a `Float` value
 #   directly (the expectation $\langle\psi|H|\psi\rangle$). Used with
 #   `qmc.expval()` in variational algorithms (see
-#   [07_parametric_circuits](07_parametric_circuits.ipynb)).
+#   [08_parametric_circuits](08_parametric_circuits.ipynb)).
 #
 # In this tutorial we use `sample()` exclusively. We will encounter
 # `run()` when working with observables and variational circuits.
@@ -303,7 +304,7 @@ for value, count in result_ord.results:
 #   subroutines, fold constants, and analyze dependencies before
 #   generating the final circuit.
 #
-# See `09_transpile.ipynb` for a deep dive into the transpiler pipeline.
+# See [10_transpile](10_transpile.ipynb) for a deep dive into the transpiler pipeline.
 
 # %% [markdown]
 # ## 6. Parametric Circuits
@@ -364,9 +365,8 @@ for angle, name in [(0, "0"), (math.pi / 4, "pi/4"), (math.pi, "pi")]:
     print(f"RY({name}): {counts}")
 
 # %% [markdown]
-# This is the foundation of variational quantum algorithms (VQE, QAOA),
+# This is the foundation of variational quantum algorithms (such as VQE and QAOA),
 # where parameters are optimized in a classical-quantum loop.
-# See `07_parametric_circuits.ipynb` for a complete QAOA implementation.
 
 # %% [markdown]
 # ## 7. Resource Estimation
@@ -404,7 +404,7 @@ print(f"  Circuit depth: {est_ghz.depth.total_depth}")
 
 # %% [markdown]
 # The results contain the symbol **n** — closed-form expressions that
-# describe how resources grow with problem size. See `08_resource_estimation.ipynb`
+# describe how resources grow with problem size. See [09_resource_estimation](09_resource_estimation.ipynb)
 # for the full resource estimation tutorial.
 
 # %% [markdown]
@@ -434,7 +434,7 @@ print(f"  Circuit depth: {est_ghz.depth.total_depth}")
 # circuit patterns and algorithms to add next — please open an issue on
 # [GitHub](https://github.com/Jij-Inc/Qamomile).
 #
-# See `05_stdlib.ipynb` for a detailed standard library tutorial.
+# See [05_stdlib](05_stdlib.ipynb) for a detailed standard library tutorial.
 
 # %% [markdown]
 # ## 9. Optimization Features
@@ -470,7 +470,7 @@ print(f"  Circuit depth: {est_ghz.depth.total_depth}")
 # [ommx documentation](https://jij-inc.github.io/ommx/en/introduction.html)
 # and the [JijModeling tutorials](https://jij-inc.github.io/JijModeling-Tutorials/en/introduction.html).
 #
-# See the **Optimization** section of the documentation for detailed tutorials.
+# See the optimization tutorials ([QAOA](../optimization/qaoa.ipynb), [FQAOA](../optimization/fqaoa.ipynb), [QRAO](../optimization/qrao31.ipynb), [Custom Converter](../optimization/custom_converter.ipynb)) for details.
 
 # %% [markdown]
 # ## 10. Summary
@@ -480,7 +480,7 @@ print(f"  Circuit depth: {est_ghz.depth.total_depth}")
 # 1. **`@qmc.qkernel`**: Define quantum circuits as Python functions
 # 2. **Linear types**: Always reassign after gates (`q = qmc.h(q)`)
 # 3. **Execution**: `QiskitTranspiler` → `transpile()` → `sample()`
-# 4. **Tracing and compilation**: `@qkernel` is traced into an IR graph, then transpiled through a multi-pass pipeline
+# 4. **Tracing and transpilation**: `@qkernel` is traced into an IR graph, then transpiled through a multi-pass pipeline
 # 5. **Parametric circuits**: `qmc.Float` parameters with `bindings` / `parameters`
 # 6. **Resource estimation**: `estimate_resources(kernel.block)` for symbolic gate counts
 # 7. **Standard library & algorithm library**: Pre-built QFT, QPE, QAOA, FQAOA components
@@ -493,12 +493,13 @@ print(f"  Circuit depth: {est_ghz.depth.total_depth}")
 # | `02_type_system.ipynb` | Full type system: Qubit, Float, UInt, Bit, Vector, Dict |
 # | `03_gates.ipynb` | Complete gate reference (all 11 gates) |
 # | `04_superposition_entanglement.ipynb` | Superposition, interference, Bell/GHZ states |
-# | `05_stdlib.ipynb` | QFT, QPE, CompositeGate, algorithm module |
-# | `06_first_algorithm.ipynb` | Deutsch-Jozsa algorithm |
-# | `07_parametric_circuits.ipynb` | Parametric circuits and QAOA from scratch |
-# | `08_resource_estimation.ipynb` | Algebraic resource estimation |
-# | `09_transpile.ipynb` | Transpiler pipeline internals |
-# | `10_custom_executor.ipynb` | Custom backend integration |
+# | `05_stdlib.ipynb` | QFT, QPE, algorithm module |
+# | `06_composite_gate.ipynb` | CompositeGate, `@composite_gate`, stub gates |
+# | `07_first_algorithm.ipynb` | Deutsch-Jozsa algorithm |
+# | `08_parametric_circuits.ipynb` | Parametric circuits and QAOA from scratch |
+# | `09_resource_estimation.ipynb` | Algebraic resource estimation |
+# | `10_transpile.ipynb` | Transpiler pipeline internals |
+# | `11_custom_executor.ipynb` | Custom backend integration |
 # | `optimization/qaoa.ipynb` | QAOA for combinatorial optimization |
 # | `optimization/fqaoa.ipynb` | Fermionic QAOA with constraint enforcement |
 # | `optimization/qrao31.ipynb` | Quantum Random Access Optimization |
@@ -509,9 +510,10 @@ print(f"  Circuit depth: {est_ghz.depth.total_depth}")
 #
 # - **What Qamomile is and where it fits in the quantum ecosystem** — Qamomile bridges the path from NISQ to FTQC, providing a single framework for writing quantum programs across both paradigms.
 # - **Creating and running our first quantum circuit** — Used `@qmc.qkernel` with `qmc.qubit()`, gates like `qmc.x()`, and `qmc.measure()` to build and visualize circuits.
-# - **The linear type system (no-cloning enforcement)** — Gates consume and return qubits; always reassign (`q = qmc.h(q)`) to enforce the quantum no-cloning theorem at compile time.
-# - **Execution with QiskitTranspiler** — `QiskitTranspiler` compiles kernels via `transpile()` and runs them via `sample()` to obtain measurement results.
-# - **How Qamomile traces and compiles quantum programs** — `@qkernel` functions are traced into an IR graph, then transpiled through a multi-pass pipeline (inline, constant fold, analyze, separate, emit) to produce backend-specific circuits.
+# - **The linear type system (no-cloning enforcement)** — Gates consume and return qubits; always reassign (`q = qmc.h(q)`) to enforce the quantum no-cloning theorem at transpile time.
+# - **Execution with QiskitTranspiler** — `QiskitTranspiler` transpiles kernels via `transpile()` and runs them via `sample()` to obtain measurement results.
+# - **How Qamomile traces and transpiles quantum programs** — `@qkernel` functions are traced into an IR graph, then transpiled through a multi-pass pipeline (inline, constant fold, analyze, separate, emit) to produce backend-specific circuits.
 # - **Brief introduction to parametric circuits** — `qmc.Float` parameters can be fixed at transpile time with `bindings=` or kept free with `parameters=` for variational algorithms.
 # - **Brief introduction to resource estimation** — `estimate_resources(kernel.block)` produces symbolic gate counts and circuit depth, scaling with problem size via SymPy expressions.
+# - **Brief introduction to the standard library and algorithm library** - Pre-built components for QFT, QPE and more (even more planned).
 # - **Overview of optimization features** — QAOA, FQAOA, and QRAO converters turn JijModeling problems into executable quantum circuits through a model → converter → circuit pipeline.

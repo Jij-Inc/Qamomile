@@ -48,6 +48,7 @@ import matplotlib.pyplot as plt
 # $\lambda \bigl(\sum_{i,d} x_{i,d} - M\bigr)^2$, and tuning $\lambda$ is
 # non-trivial.  FQAOA avoids this entirely.
 
+
 # %%
 def constrained_qubo_problem() -> jm.Problem:
     J = jm.Placeholder("J", ndim=2)
@@ -136,6 +137,7 @@ if qiskit_circuit is not None:
 # the Ising energy.  The converter stores the spin model in
 # `converter.spin_model`.
 
+
 # %%
 def calculate_ising_energy(bitstring: list[int], spin_model) -> float:
     """Convert a measurement bitstring to an Ising energy.
@@ -189,10 +191,12 @@ def objective_function(params, spin_model, shots=1024):
 # %%
 np.random.seed(42)
 
-init_params = np.concatenate([
-    np.random.uniform(0, 2 * np.pi, size=p),  # gammas
-    np.random.uniform(0, np.pi, size=p),       # betas
-])
+init_params = np.concatenate(
+    [
+        np.random.uniform(0, 2 * np.pi, size=p),  # gammas
+        np.random.uniform(0, np.pi, size=p),  # betas
+    ]
+)
 
 energy_history = []
 

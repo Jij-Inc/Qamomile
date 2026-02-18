@@ -70,7 +70,9 @@ def h_gate_demo() -> qmc.Bit:
 h_gate_demo.draw()
 
 # %%
-result_h = transpiler.transpile(h_gate_demo).sample(transpiler.executor(), shots=1000).result()
+result_h = (
+    transpiler.transpile(h_gate_demo).sample(transpiler.executor(), shots=1000).result()
+)
 print("=== H Gate ===")
 for value, count in result_h.results:
     print(f"  {value}: {count} ({count / 10:.1f}%)")
@@ -96,7 +98,9 @@ def x_gate_demo() -> qmc.Bit:
 x_gate_demo.draw()
 
 # %%
-result_x = transpiler.transpile(x_gate_demo).sample(transpiler.executor(), shots=1000).result()
+result_x = (
+    transpiler.transpile(x_gate_demo).sample(transpiler.executor(), shots=1000).result()
+)
 print("=== X Gate ===")
 for value, count in result_x.results:
     print(f"  {value}: {count}")
@@ -126,7 +130,9 @@ def p_gate_demo() -> qmc.Bit:
 p_gate_demo.draw()
 
 # %%
-result_p = transpiler.transpile(p_gate_demo).sample(transpiler.executor(), shots=1000).result()
+result_p = (
+    transpiler.transpile(p_gate_demo).sample(transpiler.executor(), shots=1000).result()
+)
 print("=== P Gate: H-P(pi)-H = X ===")
 for value, count in result_p.results:
     print(f"  {value}: {count}")
@@ -154,10 +160,14 @@ rx_demo.draw()
 
 # %%
 print("=== RX Gate at Different Angles ===\n")
-for angle, name in zip([0, math.pi / 4, math.pi / 2, math.pi], ["0", "pi/4", "pi/2", "pi"]):
-    result = transpiler.transpile(rx_demo, bindings={"theta": angle}).sample(
-        transpiler.executor(), shots=1000
-    ).result()
+for angle, name in zip(
+    [0, math.pi / 4, math.pi / 2, math.pi], ["0", "pi/4", "pi/2", "pi"]
+):
+    result = (
+        transpiler.transpile(rx_demo, bindings={"theta": angle})
+        .sample(transpiler.executor(), shots=1000)
+        .result()
+    )
     print(f"RX({name}):")
     for value, count in result.results:
         print(f"  {value}: {count} ({count / 10:.1f}%)")
@@ -190,9 +200,11 @@ def ry_demo(theta: qmc.Float) -> qmc.Bit:
 ry_demo.draw()
 
 # %%
-result_ry = transpiler.transpile(ry_demo, bindings={"theta": math.pi / 2}).sample(
-    transpiler.executor(), shots=1000
-).result()
+result_ry = (
+    transpiler.transpile(ry_demo, bindings={"theta": math.pi / 2})
+    .sample(transpiler.executor(), shots=1000)
+    .result()
+)
 print("=== RY(pi/2) ===")
 for value, count in result_ry.results:
     print(f"  {value}: {count} ({count / 10:.1f}%)")
@@ -223,7 +235,9 @@ def rz_demo() -> qmc.Bit:
 rz_demo.draw()
 
 # %%
-result_rz = transpiler.transpile(rz_demo).sample(transpiler.executor(), shots=1000).result()
+result_rz = (
+    transpiler.transpile(rz_demo).sample(transpiler.executor(), shots=1000).result()
+)
 print("=== RZ(pi) sandwiched between H gates ===")
 for value, count in result_rz.results:
     print(f"  {value}: {count}")
@@ -275,7 +289,9 @@ def cx_demo() -> tuple[qmc.Bit, qmc.Bit]:
 cx_demo.draw()
 
 # %%
-result_cx = transpiler.transpile(cx_demo).sample(transpiler.executor(), shots=1000).result()
+result_cx = (
+    transpiler.transpile(cx_demo).sample(transpiler.executor(), shots=1000).result()
+)
 print("=== CX Gate (control=1) ===")
 for value, count in result_cx.results:
     print(f"  {value}: {count}")
@@ -311,7 +327,9 @@ def cz_demo() -> tuple[qmc.Bit, qmc.Bit]:
 cz_demo.draw()
 
 # %%
-result_cz = transpiler.transpile(cz_demo).sample(transpiler.executor(), shots=1000).result()
+result_cz = (
+    transpiler.transpile(cz_demo).sample(transpiler.executor(), shots=1000).result()
+)
 print("=== CZ Gate: (I⊗H)·CZ·(I⊗H) = CX ===")
 for value, count in result_cz.results:
     print(f"  {value}: {count}")
@@ -340,7 +358,9 @@ def swap_demo() -> tuple[qmc.Bit, qmc.Bit]:
 swap_demo.draw()
 
 # %%
-result_swap = transpiler.transpile(swap_demo).sample(transpiler.executor(), shots=1000).result()
+result_swap = (
+    transpiler.transpile(swap_demo).sample(transpiler.executor(), shots=1000).result()
+)
 print("=== SWAP Gate (q0=|1>, q1=|0> before) ===")
 for value, count in result_swap.results:
     print(f"  {value}: {count}")
@@ -371,7 +391,9 @@ def cp_demo() -> tuple[qmc.Bit, qmc.Bit]:
 cp_demo.draw()
 
 # %%
-result_cp = transpiler.transpile(cp_demo).sample(transpiler.executor(), shots=1000).result()
+result_cp = (
+    transpiler.transpile(cp_demo).sample(transpiler.executor(), shots=1000).result()
+)
 print("=== CP(pi): same pattern as CZ ===")
 for value, count in result_cp.results:
     print(f"  {value}: {count}")
@@ -405,9 +427,11 @@ def rzz_demo(theta: qmc.Float) -> tuple[qmc.Bit, qmc.Bit]:
 rzz_demo.draw()
 
 # %%
-result_rzz = transpiler.transpile(rzz_demo, bindings={"theta": math.pi / 2}).sample(
-    transpiler.executor(), shots=1000
-).result()
+result_rzz = (
+    transpiler.transpile(rzz_demo, bindings={"theta": math.pi / 2})
+    .sample(transpiler.executor(), shots=1000)
+    .result()
+)
 print("=== RZZ(pi/2) with H-RZZ-H ===")
 for value, count in result_rzz.results:
     print(f"  {value}: {count} ({count / 10:.1f}%)")
@@ -476,9 +500,11 @@ def return_value_demo() -> qmc.Vector[qmc.Bit]:
 return_value_demo.draw()
 
 # %%
-result_rv = transpiler.transpile(return_value_demo).sample(
-    transpiler.executor(), shots=1000
-).result()
+result_rv = (
+    transpiler.transpile(return_value_demo)
+    .sample(transpiler.executor(), shots=1000)
+    .result()
+)
 print("=== Return Value Pattern Demo ===")
 for value, count in result_rv.results:
     print(f"  {value}: {count}")

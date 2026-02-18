@@ -14,6 +14,9 @@
 
 # %% [markdown]
 # # Algebraic Resource Estimation
+# **IMPORTANT NOTE**:
+# Resource estimation function is still under bug-fixing and may produce incorrect results for some circuits.
+# This tutorial may change significantly soon.
 #
 # How many qubits does our algorithm need? How many gates? How does
 # the cost scale with problem size? These are the questions that
@@ -264,9 +267,8 @@ iqft.draw(qubits=4, fold_loops=False)
 # so that the estimator can track the qubit count and express
 # everything in terms of the symbolic size `n`.
 
+
 # %%
-
-
 @qmc.qkernel
 def iqft_n(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
     """IQFT on n freshly-allocated qubits."""
@@ -791,8 +793,8 @@ print(f"Oracle query complexity: {meta.query_complexity}")
 # %% [markdown]
 # **Next steps:**
 #
-# - [Transpile](09_transpile.ipynb) -- learn about the transpilation pipeline
-# - [Custom Executor](10_custom_executor.ipynb) -- run circuits on cloud quantum hardware
+# - [Transpile](10_transpile.ipynb) -- learn about the transpilation pipeline
+# - [Custom Executor](11_custom_executor.ipynb) -- run circuits on cloud quantum hardware
 # - [QAOA](../optimization/qaoa.ipynb) -- optimization with variational circuits
 
 # %% [markdown]
@@ -804,5 +806,3 @@ print(f"Oracle query complexity: {meta.query_complexity}")
 # - **Analyzing the resource profile of Quantum Phase Estimation (QPE)** -- Both a manual implementation (IQFT + controlled unitaries) and the built-in `qmc.qpe()` primitive give the same asymptotic scaling.
 # - **Comparing decomposition strategies for composite gates** -- QFT's standard vs approximate strategies demonstrate how truncating small-angle rotations trades accuracy for gate count savings.
 # - **Defining custom composite gates with strategies, and using stub gates for black-box resource estimation** -- Custom `CompositeGate` classes support multiple strategies; stub gates provide resource metadata without gate-level implementation, enabling algorithm-level cost analysis.
-
-# %%

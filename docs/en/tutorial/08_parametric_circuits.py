@@ -199,7 +199,7 @@ plt.title(r"Expectation value $\langle \psi(\theta) | Z | \psi(\theta) \rangle$"
 plt.axhline(y=-1, color="r", linestyle="--", alpha=0.5, label="Ground state energy")
 plt.legend()
 plt.grid(True)
-plt.show()
+# plt.show()
 
 # %% [markdown]
 # The expectation value $\langle Z \rangle = \cos(\theta)$ for $RY(\theta)|0\rangle$.
@@ -240,14 +240,18 @@ X_data = np.vstack([X0, X1]) * np.pi  # Scale for angle encoding
 y_data = np.array([0] * n_samples + [1] * n_samples)
 
 plt.figure(figsize=(6, 4))
-plt.scatter(X_data[:n_samples, 0], X_data[:n_samples, 1], c="blue", label="Class 0", marker="o")
-plt.scatter(X_data[n_samples:, 0], X_data[n_samples:, 1], c="red", label="Class 1", marker="x")
+plt.scatter(
+    X_data[:n_samples, 0], X_data[:n_samples, 1], c="blue", label="Class 0", marker="o"
+)
+plt.scatter(
+    X_data[n_samples:, 0], X_data[n_samples:, 1], c="red", label="Class 1", marker="x"
+)
 plt.xlabel("Feature 1")
 plt.ylabel("Feature 2")
 plt.title("Training Data")
 plt.legend()
 plt.grid(True)
-plt.show()
+# plt.show()
 
 # %% [markdown]
 # ### Data Encoding
@@ -305,7 +309,7 @@ def classifier(
 
     for layer in qmc.range(2):
         # Data encoding (re-uploaded each layer)
-        qubits = ry_layer(qubits, x, qmc.uint(0))
+        qubits = ry_layer(qubits, x, 0)
         # Variational rotations + entanglement
         qubits = ry_layer(qubits, params, layer * n)
         qubits = cz_entangling_layer(qubits)
@@ -420,7 +424,7 @@ plt.xlabel("Iteration")
 plt.ylabel("MSE Loss")
 plt.title("Classifier Training Convergence")
 plt.grid(True)
-plt.show()
+# plt.show()
 
 # %% [markdown]
 # ## 6. Evaluating the Classifier
@@ -479,13 +483,22 @@ plt.figure(figsize=(7, 5))
 plt.contourf(xx, yy, grid_predictions, levels=20, cmap="RdBu", alpha=0.7)
 plt.colorbar(label=r"$\langle Z \rangle$")
 plt.contour(xx, yy, grid_predictions, levels=[0.0], colors="black", linewidths=2)
-plt.scatter(X_data[:n_samples, 0], X_data[:n_samples, 1], c="blue", edgecolors="k", label="Class 0", marker="o")
-plt.scatter(X_data[n_samples:, 0], X_data[n_samples:, 1], c="red", label="Class 1", marker="x")
+plt.scatter(
+    X_data[:n_samples, 0],
+    X_data[:n_samples, 1],
+    c="blue",
+    edgecolors="k",
+    label="Class 0",
+    marker="o",
+)
+plt.scatter(
+    X_data[n_samples:, 0], X_data[n_samples:, 1], c="red", label="Class 1", marker="x"
+)
 plt.xlabel("Feature 1")
 plt.ylabel("Feature 2")
 plt.title("Quantum Classifier Decision Boundary")
 plt.legend()
-plt.show()
+# plt.show()
 
 # %% [markdown]
 # The black line shows the decision boundary ($\langle Z \rangle = 0$).
@@ -525,9 +538,9 @@ plt.show()
 #
 # - [QAOA](../optimization/qaoa.ipynb): See how Qamomile's built-in converters handle
 #   combinatorial optimization problems
-# - [Resource Estimation](08_resource_estimation.ipynb): Estimate circuit depth and
+# - [Resource Estimation](09_resource_estimation.ipynb): Estimate circuit depth and
 #   gate counts for our circuits
-# - [Custom Executor](10_custom_executor.ipynb): Run circuits on cloud quantum hardware
+# - [Custom Executor](11_custom_executor.ipynb): Run circuits on cloud quantum hardware
 
 # %% [markdown]
 # ## What We Learned
