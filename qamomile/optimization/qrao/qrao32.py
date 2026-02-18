@@ -202,9 +202,7 @@ class QRAC32Converter(QRACConverterBase[QRAC32Encoder]):
 
     @property
     def num_qubits(self) -> int:
-        """Physical qubit count (1 per k=1 group, 2 per k>=2 group)."""
-        _, total = build_physical_qubit_map(self.color_group)
-        return total
+        return self._encoder.num_qubits
 
     def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
         """Generate the cost Hamiltonian for the QRAC-encoded problem.
