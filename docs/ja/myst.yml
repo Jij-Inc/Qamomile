@@ -38,7 +38,7 @@ project:
         - file: optimization/custom_converter.ipynb
 
 # --- API Reference (auto-generated) ---
-    - title: API リファレンス
+    - title: API Reference
       file: api/index
       children:
         - file: api/circuit/index
@@ -53,7 +53,6 @@ project:
             - file: api/circuit/stdlib
             - file: api/circuit/transpiler
             - file: api/circuit/visualization
-        - file: api/core
         - file: api/observable
         - file: api/optimization/index
           children:
