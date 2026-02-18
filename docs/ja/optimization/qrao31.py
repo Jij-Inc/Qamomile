@@ -240,7 +240,7 @@ executable = transpiler.transpile(
 
 # %%
 qiskit_circuit = executable.get_first_circuit()
-qiskit_circuit.draw()
+qiskit_circuit.draw(output="mpl")
 
 # %% [markdown]
 # ## VQE最適化

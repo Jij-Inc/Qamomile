@@ -447,7 +447,7 @@ exec_items = transpiler.transpile(
 # %%
 qiskit_circuit = exec_items.get_first_circuit()
 print("=== Transpiled Circuit ===")
-print(qiskit_circuit.draw(output="text"))
+qiskit_circuit.draw(output="mpl")
 
 # %% [markdown]
 # ## 5. コンテナ型

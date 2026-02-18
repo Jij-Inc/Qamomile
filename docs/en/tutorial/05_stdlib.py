@@ -276,12 +276,12 @@ qft_approx_k2_4.draw(expand_composite=True)
 # %%
 qiskit_standard = transpiler.to_circuit(qft_standard_4)
 print("Qiskit — Standard QFT:")
-print(qiskit_standard.draw(output="text"))
+qiskit_standard.draw(output="mpl")
 
 # %%
 qiskit_approx = transpiler.to_circuit(qft_approx_k2_4)
 print("Qiskit — Approximate QFT k=2:")
-print(qiskit_approx.draw(output="text"))
+qiskit_approx.draw(output="mpl")
 
 # %% [markdown]
 # Both transpiled circuits show an identical `QFT` box. This is because the

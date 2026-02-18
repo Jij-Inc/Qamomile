@@ -227,7 +227,7 @@ for value, count in result.results:
 
 # %%
 qiskit_circuit = executable.get_first_circuit()
-print(qiskit_circuit.draw(output="text"))
+qiskit_circuit.draw(output="mpl")
 
 # %% [markdown]
 # ### 量子ビットの順序規則

@@ -230,7 +230,7 @@ for value, count in result.results:
 
 # %%
 qiskit_circuit = executable.get_first_circuit()
-print(qiskit_circuit.draw(output="text"))
+qiskit_circuit.draw(output="mpl")
 
 # %% [markdown]
 # ### Qubit Ordering Convention

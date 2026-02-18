@@ -366,7 +366,7 @@ executable = transpiler.emit(separated, bindings={"n": 2, "theta": 0.5})
 
 circuit = executable.get_first_circuit()
 print("=== Qiskit circuit ===")
-print(circuit.draw(output="text"))
+circuit.draw(output="mpl")
 
 # %%
 # Execute and see measurement results
@@ -434,7 +434,7 @@ executable_qpe = transpiler.transpile(qpe_3bit, bindings={"phase": test_phase})
 # Show the Qiskit circuit
 circuit_qpe = executable_qpe.get_first_circuit()
 print("=== QPE circuit ===")
-print(circuit_qpe.draw(output="text"))
+circuit_qpe.draw(output="mpl")
 
 # %%
 # Execute and see decoded Float results
@@ -531,7 +531,7 @@ transpiler_standard = QiskitTranspiler(use_native_composite=False)
 circuit_standard = transpiler_standard.to_circuit(qft_and_measure)
 
 print("=== Standard QFT (full precision) ===")
-print(circuit_standard.draw(output="text"))
+circuit_standard.draw(output="mpl")
 
 # %%
 # Transpile with the approximate strategy (truncation_depth=2).
@@ -547,7 +547,7 @@ transpiler_approx.set_config(config)
 circuit_approx = transpiler_approx.to_circuit(qft_and_measure)
 
 print("=== Approximate QFT (truncation_depth=2) ===")
-print(circuit_approx.draw(output="text"))
+circuit_approx.draw(output="mpl")
 
 # %%
 # Compare gate counts
