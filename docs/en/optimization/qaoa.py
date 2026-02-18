@@ -38,43 +38,9 @@ G.add_nodes_from(range(num_nodes))
 G.add_edges_from(edges)
 pos = {0: (1, 1), 1: (0, 1), 2: (-1, 0.5), 3: (0, 0), 4: (1, 0)}
 
-cut_solution = {(1,): 1.0, (2,): 1.0, (4,): 1.0}
-edge_colors = []
-
-
-def get_edge_colors(
-    graph, cut_solution, in_cut_color="r", not_in_cut_color="b"
-) -> tuple[list[str], list[str]]:
-    cut_set_1 = [node[0] for node, value in cut_solution.items() if value == 1.0]
-    cut_set_2 = [node for node in graph.nodes() if node not in cut_set_1]
-
-    edge_colors = []
-    for u, v, _ in graph.edges(data=True):
-        if (u in cut_set_1 and v in cut_set_2) or (u in cut_set_2 and v in cut_set_1):
-            edge_colors.append(in_cut_color)
-        else:
-            edge_colors.append(not_in_cut_color)
-    node_colors = ["#2696EB" if node in cut_set_1 else "#EA9b26" for node in G.nodes()]
-    return edge_colors, node_colors
-
-
-edge_colors, node_colors = get_edge_colors(G, cut_solution)
-fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-
-axes[0].set_title("Original Graph G=(V,E)")
-nx.draw_networkx(G, pos, ax=axes[0], node_size=500, width=3, with_labels=True)
-axes[1].set_title("MaxCut Solution Visualization")
-nx.draw_networkx(
-    G,
-    pos,
-    ax=axes[1],
-    node_size=500,
-    width=3,
-    with_labels=True,
-    edge_color=edge_colors,
-    node_color=node_colors,
-)
-
+fig, ax = plt.subplots(figsize=(5, 4))
+ax.set_title("Original Graph G=(V,E)")
+nx.draw_networkx(G, pos, ax=ax, node_size=500, width=3, with_labels=True)
 plt.tight_layout()
 plt.show()
 
@@ -117,27 +83,6 @@ def _(problem: jm.DecoratedProblem):
 problem
 
 # %% [markdown]
-# ## Preparing Instance Data
-#
-# Next, we will solve the Max-Cut Problem for the following graph. The data for the specific problem being solved is referred to as instance data.
-
-# %%
-import networkx as nx
-
-G = nx.Graph()
-num_nodes = 5
-edges = [(0, 1), (0, 4), (1, 2), (1, 3), (2, 3), (3, 4)]
-G.add_nodes_from(range(num_nodes))
-G.add_edges_from(edges)
-
-weight_matrix = nx.to_numpy_array(G, nodelist=list(range(num_nodes)))
-
-plt.title("G=(V,E)")
-plt.plot(figsize=(5, 4))
-
-nx.draw_networkx(G, pos, node_size=500)
-
-# %% [markdown]
 # ## Creating a Compiled Instance
 # We compile the mathematical model together with the instance data using `problem.eval()`. This process yields an intermediate representation of the problem with the instance data substituted.
 
@@ -150,11 +95,13 @@ instance = problem.eval(data)
 # %% [markdown]
 # ## Converting Compiled Instance to QAOA Circuit and Hamiltonian
 #
-# We generate the QAOA circuit and Hamiltonian from the compiled Instance. The converter used to generate these is `qm.optimization.qaoa.QAOAConverter`.
+# We generate the QAOA circuit and Hamiltonian from the compiled Instance. The converter used for this is `QAOAConverter` from `qamomile.optimization.qaoa`.
 #
-# By creating an instance of this class and using `ising_encode`, we can internally generate the Ising Hamiltonian from the compiled Instance. Parameters that arise during the conversion to QUBO can also be set here. If not set, default values are used.
+# By creating an instance of this class, the Ising Hamiltonian is internally generated from the compiled Instance. We can then:
+# - Use `transpile()` to generate the QAOA quantum circuit
+# - Use `get_cost_hamiltonian()` to inspect the cost Hamiltonian
 #
-# Once the Ising Hamiltonian is generated, we can generate the QAOA quantum circuit and the Hamiltonian respectively. These can be executed using the `get_qaoa_ansatz` and `get_cost_hamiltonian` methods. The number of QAOA layers, $p$, is fixed to be $7$ here.
+# The number of QAOA layers, $p$, is set to $3$ here.
 
 # %%
 from qamomile.optimization.qaoa import QAOAConverter
@@ -171,13 +118,21 @@ executable = converter.transpile(
 )
 
 # %% [markdown]
+# Let's inspect the cost Hamiltonian. Since the Max-Cut objective is expressed with Ising variables $s_i \in \{+1, -1\}$, the cost Hamiltonian consists of Pauli-Z operators.
+
+# %%
+cost_hamiltonian = converter.get_cost_hamiltonian()
+cost_hamiltonian
+
+# %% [markdown]
+# Our graph has edges $E = \{(0,1),(0,4),(1,2),(1,3),(2,3),(3,4)\}$. Since the Max-Cut objective in Ising form is $\frac{1}{2}\sum_{(i,j) \in E}(1 - Z_i Z_j)$, the cost Hamiltonian should contain $Z_i Z_j$ terms for each edge. Indeed, we can confirm that the Hamiltonian above matches the expected Ising formulation.
+
+# %% [markdown]
 # Let's look at the generated quantum circuit. The circuit implements the QAOA ansatz with alternating cost and mixer layers.
 
 # %%
 qiskit_circuit = executable.get_first_circuit()
-if qiskit_circuit is not None:
-    print(f"Number of qubits: {qiskit_circuit.num_qubits}")
-    print(f"Circuit depth: {qiskit_circuit.depth()}")
+qiskit_circuit.draw()
 
 # %% [markdown]
 # ## VQE Optimization
@@ -263,6 +218,8 @@ print(f"Final energy: {result_opt.fun:.4f}")
 # ## Visualizing Optimization Results
 #
 # Let's visualize the convergence of the optimization process.
+#
+# > **Note:** The energy values are negative because Qamomile internally converts the maximization problem into a minimization problem. An energy of $-5$ corresponds to a Max-Cut objective value of $5$.
 
 # %%
 plt.figure(figsize=(10, 5))
@@ -297,20 +254,43 @@ result_final = job_final.result()
 # Decode results using the converter
 sampleset = converter.decode(result_final)
 
-# Sort by energy
-sorted_indices = np.argsort(sampleset.energy)
+# Build frequency distribution over all sampled bitstrings
+bitstrings = []
+counts = []
+energies = []
+for i in range(len(sampleset.samples)):
+    sample = sampleset.samples[i]
+    bitstring_str = "".join(str(sample[j]) for j in range(num_nodes))
+    bitstrings.append(bitstring_str)
+    counts.append(sampleset.num_occurrences[i])
+    energies.append(sampleset.energy[i])
 
-print("Measurement results (sorted by energy):")
-print("-" * 60)
-for idx in sorted_indices[:10]:
-    sample = sampleset.samples[idx]
-    count = sampleset.num_occurrences[idx]
-    energy = sampleset.energy[idx]
-    bitstring_str = "".join(str(sample[i]) for i in range(num_nodes))
-    probability = count / 4096
-    print(
-        f"  {bitstring_str}: count={count:4d}, probability={probability:.3f}, energy={energy:.4f}"
-    )
+# Sort by bitstring for consistent display
+sorted_order = np.argsort(bitstrings)
+bitstrings = [bitstrings[i] for i in sorted_order]
+counts = [counts[i] for i in sorted_order]
+energies = [energies[i] for i in sorted_order]
+
+# Plot frequency distribution
+fig, ax = plt.subplots(figsize=(12, 5))
+x_pos = np.arange(len(bitstrings))
+bars = ax.bar(x_pos, counts)
+
+# Highlight optimal solutions (energy = -5) with red bars
+for i, e in enumerate(energies):
+    if np.isclose(e, -5.0):
+        bars[i].set_color("red")
+
+ax.set_xticks(x_pos)
+ax.set_xticklabels(bitstrings, rotation=90)
+ax.set_xlabel("Bitstring")
+ax.set_ylabel("Counts")
+ax.set_title("QAOA Measurement Frequency Distribution (red = optimal, energy = -5)")
+plt.tight_layout()
+plt.show()
+
+# %% [markdown]
+# The red bars indicate bitstrings with energy $= -5$, which correspond to the optimal Max-Cut solutions (cutting 5 out of 6 edges). The frequency distribution shows that QAOA successfully concentrates measurement probability on these optimal solutions.
 
 # %% [markdown]
 # ## Visualizing the Solution
@@ -322,11 +302,30 @@ for idx in sorted_indices[:10]:
 best_sample, best_energy, best_count = sampleset.lowest()
 best_solution = {(i,): float(best_sample[i]) for i in range(num_nodes)}
 
-print("\nBest solution found:")
+print("Best solution found:")
 print(f"  Bitstring: {''.join(str(best_sample[i]) for i in range(num_nodes))}")
 print(f"  Energy: {best_energy:.4f}")
 
+
 # Visualize the solution
+def get_edge_colors(
+    graph, cut_solution, in_cut_color="r", not_in_cut_color="b"
+) -> tuple[list[str], list[str]]:
+    cut_set_1 = [node[0] for node, value in cut_solution.items() if value == 1.0]
+    cut_set_2 = [node for node in graph.nodes() if node not in cut_set_1]
+
+    edge_colors = []
+    for u, v, _ in graph.edges(data=True):
+        if (u in cut_set_1 and v in cut_set_2) or (u in cut_set_2 and v in cut_set_1):
+            edge_colors.append(in_cut_color)
+        else:
+            edge_colors.append(not_in_cut_color)
+    node_colors = [
+        "#2696EB" if node in cut_set_1 else "#EA9b26" for node in graph.nodes()
+    ]
+    return edge_colors, node_colors
+
+
 edge_colors, node_colors = get_edge_colors(G, best_solution)
 cut_edges = sum(1 for c in edge_colors if c == "r")
 
@@ -350,12 +349,7 @@ plt.show()
 #
 # In this tutorial, we demonstrated how to solve the Max-Cut problem using QAOA with Qamomile:
 #
-# 1. **Problem Formulation**: We formulated Max-Cut as a QUBO/Ising problem using JijModeling
-# 2. **Circuit Generation**: Qamomile's `QAOAConverter` automatically generated the QAOA circuit
-# 3. **VQE Optimization**: We used scipy's COBYLA optimizer to find optimal QAOA parameters
-# 4. **Solution Analysis**: We analyzed the measurement results and visualized the solution
-#
-# Key advantages of using Qamomile for QAOA:
-# - Automatic Ising model generation from mathematical formulations
-# - Backend-agnostic circuit definition (currently Qiskit; CUDA-Q and QURI Parts coming soon)
-# - Easy integration with classical optimization libraries
+# 1. **Problem Formulation**: We formulated Max-Cut as an Ising problem using JijModeling
+# 2. **Hamiltonian & Circuit Generation**: `QAOAConverter` automatically generated the cost Hamiltonian and QAOA circuit
+# 3. **VQE Optimization**: We used scipy's COBYLA optimizer to find optimal QAOA parameters with Qamomile
+# 4. **Solution Analysis**: The frequency distribution confirmed that QAOA concentrates measurement probability on the optimal Max-Cut solutions
