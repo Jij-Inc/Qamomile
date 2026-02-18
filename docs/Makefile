@@ -62,7 +62,6 @@ sync-en:
 	@echo "Converting English .py files to .ipynb..."
 	@uv run jupytext --to ipynb en/tutorial/*.py 2>/dev/null || true
 	@uv run jupytext --to ipynb en/optimization/*.py 2>/dev/null || true
-	@uv run jupytext --to ipynb en/transpile/*.py 2>/dev/null || true
 	@echo "✓ English notebooks synced"
 
 # Sync Japanese .py files to .ipynb
@@ -70,7 +69,6 @@ sync-ja:
 	@echo "Converting Japanese .py files to .ipynb..."
 	@uv run jupytext --to ipynb ja/tutorial/*.py 2>/dev/null || true
 	@uv run jupytext --to ipynb ja/optimization/*.py 2>/dev/null || true
-	@uv run jupytext --to ipynb ja/transpile/*.py 2>/dev/null || true
 	@echo "✓ Japanese notebooks synced"
 
 # Clean generated files
@@ -78,10 +76,8 @@ clean:
 	@echo "Cleaning generated files..."
 	@rm -f en/tutorial/*.ipynb
 	@rm -f en/optimization/*.ipynb
-	@rm -f en/transpile/*.ipynb
 	@rm -f ja/tutorial/*.ipynb
 	@rm -f ja/optimization/*.ipynb
-	@rm -f ja/transpile/*.ipynb
 	@rm -rf en/_build
 	@rm -rf ja/_build
 	@rm -rf en/api
