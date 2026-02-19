@@ -1741,7 +1741,11 @@ class CircuitAnalyzer:
         ):
             return None
 
-        parent_name = value.parent_array.name or "params"
+        parent_lid = value.parent_array.logical_id
+        if parent_lid in param_values and isinstance(param_values[parent_lid], str):
+            parent_name = param_values[parent_lid]
+        else:
+            parent_name = value.parent_array.name or "params"
         resolved_indices = []
         for idx_val in value.element_indices:
             resolved = self._evaluate_value(idx_val, param_values)
@@ -1826,15 +1830,38 @@ class CircuitAnalyzer:
             name = value.parameter_name() or value.name
             if name:
                 return name
+        # Array element (e.g., weights[e])
+        if hasattr(value, "parent_array") and value.parent_array is not None:
+            array_name = value.parent_array.name or "arr"
+            if hasattr(value, "element_indices") and value.element_indices:
+                idx_parts = []
+                for idx_val in value.element_indices:
+                    idx = self._format_binop_operand(idx_val, param_values) or "?"
+                    idx_parts.append(idx)
+                return f"{array_name}[{','.join(idx_parts)}]"
+
         # Fallback: name
         if hasattr(value, "name") and value.name:
             return value.name
         return None
 
     def _resolve_binop_as_symbolic(
-        self, value: Value, param_values: dict
+        self,
+        value: Value,
+        param_values: dict,
+        operations: list[Operation] | None = None,
     ) -> str | None:
         """Find the defining BinOp for a value and build a symbolic expression string."""
+        # Search provided operations first (e.g., loop body)
+        if operations is not None:
+            for op in operations:
+                if (
+                    isinstance(op, BinOp)
+                    and op.results
+                    and id(op.results[0]) == id(value)
+                ):
+                    return self._build_symbolic_binop(op, param_values)
+        # Fallback: search top-level graph
         graph = getattr(self, "graph", None)
         if graph is None:
             return None
@@ -2424,31 +2451,16 @@ class CircuitAnalyzer:
                 elif theta.is_parameter():
                     param_name = theta.parameter_name() or "θ"
                     return self._format_symbolic_param(param_name)
-
-        # Find parameter values (non-qubit operands)
-        params = []
-        for operand in op.operands:
-            if hasattr(operand, "get_const"):
-                const = operand.get_const()
-                if const is not None and isinstance(const, (int, float)):
-                    params.append(self._format_parameter(const))
-                elif (
-                    hasattr(operand, "parent_array")
-                    and operand.parent_array is not None
-                ):
-                    array_name = operand.parent_array.name or "params"
-                    idx_str = self._resolve_index_expression(
-                        operand, loop_vars or set(), body_operations
+                else:
+                    # BinOp result (e.g., gamma * wij)
+                    symbolic = self._resolve_binop_as_symbolic(
+                        theta, {}, body_operations
                     )
-                    params.append(
-                        self._format_symbolic_param(f"{array_name}[{idx_str}]")
-                    )
-                elif hasattr(operand, "is_parameter") and operand.is_parameter():
-                    param_name = operand.parameter_name() or "θ"
-                    params.append(self._format_symbolic_param(param_name))
+                    if symbolic is not None:
+                        return self._format_symbolic_expression(symbolic)
+                    if hasattr(theta, "name") and theta.name:
+                        return self._format_symbolic_param(theta.name)
 
-        if params:
-            return ", ".join(params)
         return None
 
     def _format_operation_as_expression(
