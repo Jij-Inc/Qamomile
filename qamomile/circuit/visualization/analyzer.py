@@ -1831,6 +1831,22 @@ class CircuitAnalyzer:
             return value.name
         return None
 
+    def _resolve_binop_as_symbolic(
+        self, value: Value, param_values: dict
+    ) -> str | None:
+        """Find the defining BinOp for a value and build a symbolic expression string."""
+        graph = getattr(self, "graph", None)
+        if graph is None:
+            return None
+        for op in graph.operations:
+            if (
+                isinstance(op, BinOp)
+                and op.results
+                and id(op.results[0]) == id(value)
+            ):
+                return self._build_symbolic_binop(op, param_values)
+        return None
+
     def _build_symbolic_binop(self, binop: BinOp, param_values: dict) -> str | None:
         """Build a symbolic string for a BinOp expression.
 
@@ -2801,6 +2817,25 @@ class CircuitAnalyzer:
 
         return name  # plain text, e.g., "params"
 
+    def _format_symbolic_expression(self, expr: str) -> str:
+        """Format a symbolic expression (e.g., 'theta/2') as a TeX math string.
+
+        Splits on arithmetic operators and converts each operand individually,
+        applying Greek letter TeX conversion where appropriate.
+        """
+        parts = re.split(r"([+\-*/])", expr)
+        tex_parts: list[str] = []
+        for part in parts:
+            stripped = part.strip()
+            if stripped in "+-*/":
+                tex_parts.append(stripped)
+            elif stripped:
+                if stripped in _TEX_SYMBOLS:
+                    tex_parts.append(f"\\{stripped}")
+                else:
+                    tex_parts.append(stripped)
+        return "$" + "".join(tex_parts) + "$"
+
     def _get_block_label(
         self, op: CallBlockOperation, qubit_map: dict[str, int]
     ) -> str:
@@ -2946,9 +2981,17 @@ class CircuitAnalyzer:
                         if resolved_name is not None:
                             param_str = self._format_symbolic_param(resolved_name)
                         else:
-                            param_str = self._format_symbolic_param(
-                                op.theta.name or "?"
+                            symbolic = self._resolve_binop_as_symbolic(
+                                op.theta, param_values or {}
                             )
+                            if symbolic is not None:
+                                param_str = (
+                                    self._format_symbolic_expression(symbolic)
+                                )
+                            else:
+                                param_str = self._format_symbolic_param(
+                                    op.theta.name or "?"
+                                )
             else:
                 # Unknown type, convert to string
                 param_str = str(op.theta)
