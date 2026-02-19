@@ -156,7 +156,7 @@ class TestSingleQubitGatesFrontend:
         )
         assert statevectors_equal(sv, expected)
 
-    @pytest.mark.parametrize("seed", [42, 123, 999])
+    @pytest.mark.parametrize("seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999])
     def test_rx_random(self, seed):
         rng = np.random.default_rng(seed)
         angle = rng.uniform(0, 2 * np.pi)
@@ -202,7 +202,7 @@ class TestSingleQubitGatesFrontend:
         )
         assert statevectors_equal(sv, expected)
 
-    @pytest.mark.parametrize("seed", [42, 123, 999])
+    @pytest.mark.parametrize("seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999])
     def test_ry_random(self, seed):
         rng = np.random.default_rng(seed)
         angle = rng.uniform(0, 2 * np.pi)
@@ -246,7 +246,7 @@ class TestSingleQubitGatesFrontend:
         )
         assert statevectors_equal(sv, expected)
 
-    @pytest.mark.parametrize("seed", [42, 123, 999])
+    @pytest.mark.parametrize("seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999])
     def test_rz_random(self, seed):
         rng = np.random.default_rng(seed)
         angle = rng.uniform(0, 2 * np.pi)
@@ -296,7 +296,7 @@ class TestSingleQubitGatesFrontend:
         )
         assert statevectors_equal(sv, expected)
 
-    @pytest.mark.parametrize("seed", [42, 123])
+    @pytest.mark.parametrize("seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999])
     def test_p_random(self, seed):
         rng = np.random.default_rng(seed)
         angle = rng.uniform(0, 2 * np.pi)
@@ -512,7 +512,7 @@ class TestTwoQubitGatesFrontend:
         )
         assert statevectors_equal(sv, expected)
 
-    @pytest.mark.parametrize("seed", [42, 123])
+    @pytest.mark.parametrize("seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999])
     def test_cp_random(self, seed):
         rng = np.random.default_rng(seed)
         angle = rng.uniform(0, 2 * np.pi)
@@ -560,7 +560,7 @@ class TestTwoQubitGatesFrontend:
         )
         assert statevectors_equal(sv, expected)
 
-    @pytest.mark.parametrize("seed", [42, 123])
+    @pytest.mark.parametrize("seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999])
     def test_rzz_random(self, seed):
         rng = np.random.default_rng(seed)
         angle = rng.uniform(0, 2 * np.pi)
@@ -651,7 +651,7 @@ class TestGateCombinations:
         expected[7] = 1 / np.sqrt(2)
         assert statevectors_equal(sv, expected)
 
-    @pytest.mark.parametrize("seed", [42, 77])
+    @pytest.mark.parametrize("seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999])
     def test_rotation_sequence_random(self, seed):
         """RX -> RY -> RZ on single qubit with random angles."""
         rng = np.random.default_rng(seed)
@@ -694,7 +694,7 @@ class TestGateCombinations:
         expected = np.array([0, 0, 1, 0], dtype=complex)
         assert statevectors_equal(sv, expected)
 
-    @pytest.mark.parametrize("seed", [42])
+    @pytest.mark.parametrize("seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999])
     def test_entangling_plus_rotation(self, seed):
         """H + CX + RZ on target qubit."""
         rng = np.random.default_rng(seed)
@@ -1251,6 +1251,291 @@ class TestTranspilerPassesPipeline:
 
         qc = transpiler.to_circuit(circuit)
         assert isinstance(qc, QuantumCircuit)
+
+
+class TestTranspilerConfigAndSubstitution:
+    """Test TranspilerConfig, substitute(), strategy selection, and segment structure."""
+
+    def test_transpiler_config_with_strategies(self):
+        """TranspilerConfig.with_strategies creates config with strategy overrides."""
+        from qamomile.circuit.transpiler.transpiler import TranspilerConfig
+
+        config = TranspilerConfig.with_strategies({"qft": "approximate_k2"})
+        assert config.decomposition.strategy_overrides["qft"] == "approximate_k2"
+        assert len(config.substitutions.rules) == 1
+        assert config.substitutions.rules[0].source_name == "qft"
+        assert config.substitutions.rules[0].strategy == "approximate_k2"
+
+    def test_set_config_on_transpiler(self):
+        """set_config() applies TranspilerConfig to transpiler."""
+        from qamomile.circuit.transpiler.transpiler import TranspilerConfig
+
+        transpiler = QiskitTranspiler(use_native_composite=False)
+        config = TranspilerConfig.with_strategies({"qft": "approximate_k2"})
+        transpiler.set_config(config)
+        assert transpiler.config is config
+
+    def test_substitute_pass_sets_strategy(self):
+        """substitute() pass sets strategy_name on CompositeGateOperation."""
+        from qamomile.circuit.transpiler.transpiler import TranspilerConfig
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            q = qmc.qft(q)
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler(use_native_composite=False)
+        config = TranspilerConfig.with_strategies({"qft": "approximate_k2"})
+        transpiler.set_config(config)
+
+        block = transpiler.to_block(circuit)
+        substituted = transpiler.substitute(block)
+        # The substitution pass should have been applied (block changed)
+        assert substituted is not None
+
+    def test_approximate_qft_fewer_gates(self):
+        """Approximate QFT strategy produces fewer gates than standard."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(5, "q")
+            q = qmc.qft(q)
+            return qmc.measure(q)
+
+        # Standard QFT (default)
+        transpiler_std = QiskitTranspiler(use_native_composite=False)
+        exe_std = transpiler_std.transpile(circuit)
+        qc_std = exe_std.compiled_quantum[0].circuit
+        gates_std = [i for i in qc_std.data if i.operation.name not in ("measure", "barrier")]
+
+        # Approximate QFT (k=2)
+        from qamomile.circuit.transpiler.transpiler import TranspilerConfig
+
+        transpiler_approx = QiskitTranspiler(use_native_composite=False)
+        config = TranspilerConfig.with_strategies({"qft": "approximate_k2"})
+        transpiler_approx.set_config(config)
+        exe_approx = transpiler_approx.transpile(circuit)
+        qc_approx = exe_approx.compiled_quantum[0].circuit
+        gates_approx = [i for i in qc_approx.data if i.operation.name not in ("measure", "barrier")]
+
+        # Approximate should have strictly fewer gates for 5 qubits
+        assert len(gates_approx) < len(gates_std)
+
+    def test_approximate_qft_cp_count(self):
+        """Approximate QFT (k=2) on 5 qubits has fewer CP gates than standard."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(5, "q")
+            q = qmc.qft(q)
+            return qmc.measure(q)
+
+        # Standard QFT
+        transpiler_std = QiskitTranspiler(use_native_composite=False)
+        exe_std = transpiler_std.transpile(circuit)
+        qc_std = exe_std.compiled_quantum[0].circuit
+        cp_std = sum(1 for i in qc_std.data if i.operation.name == "cp")
+
+        # Approximate k=2
+        from qamomile.circuit.transpiler.transpiler import TranspilerConfig
+
+        transpiler_approx = QiskitTranspiler(use_native_composite=False)
+        config = TranspilerConfig.with_strategies({"qft": "approximate_k2"})
+        transpiler_approx.set_config(config)
+        exe_approx = transpiler_approx.transpile(circuit)
+        qc_approx = exe_approx.compiled_quantum[0].circuit
+        cp_approx = sum(1 for i in qc_approx.data if i.operation.name == "cp")
+
+        # Standard: n*(n-1)/2 = 10 CP gates; Approximate k=2: fewer
+        assert cp_std == 10  # 5*4/2
+        assert cp_approx < cp_std
+
+    def test_qft_strategy_resources(self):
+        """QFT strategy resource metadata is consistent."""
+        from qamomile.circuit.stdlib.qft import QFT
+
+        qft_gate = QFT(5)
+        standard_resources = qft_gate.get_resources_for_strategy("standard")
+        approx_resources = qft_gate.get_resources_for_strategy("approximate_k2")
+
+        assert standard_resources.custom_metadata["num_cp_gates"] == 10
+        assert approx_resources.custom_metadata["num_cp_gates"] < 10
+        assert standard_resources.custom_metadata["num_h_gates"] == 5
+        assert approx_resources.custom_metadata["num_h_gates"] == 5
+
+    def test_substitute_no_rules_is_noop(self):
+        """substitute() with no config rules returns block unchanged."""
+        transpiler = QiskitTranspiler()
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            return qmc.measure(q)
+
+        block = transpiler.to_block(circuit)
+        substituted = transpiler.substitute(block)
+        # Should return exact same block (no rules)
+        assert substituted is block
+
+    def test_separate_segments_simple_circuit(self):
+        """separate() produces SimplifiedProgram with quantum segment, no classical prep/post."""
+        from qamomile.circuit.transpiler.segments import SimplifiedProgram
+
+        transpiler = QiskitTranspiler()
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            return qmc.measure(q)
+
+        block = transpiler.to_block(circuit)
+        inlined = transpiler.inline(block)
+        validated = transpiler.linear_validate(inlined)
+        folded = transpiler.constant_fold(validated)
+        analyzed = transpiler.analyze(folded)
+        separated = transpiler.separate(analyzed)
+
+        assert isinstance(separated, SimplifiedProgram)
+        assert separated.quantum is not None
+        assert len(separated.quantum.operations) > 0
+        # Simple H+measure circuit should have no classical prep
+        assert separated.classical_prep is None
+
+    def test_separate_segments_with_classical_post(self):
+        """QPE produces classical_post segment for QFixed decoding."""
+        from qamomile.circuit.transpiler.segments import SimplifiedProgram
+
+        @qmc.qkernel
+        def phase_gate(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+            return qmc.p(q, theta)
+
+        @qmc.qkernel
+        def qpe_circuit(phase: qmc.Float) -> qmc.Float:
+            phase_register = qmc.qubit_array(3, name="phase_reg")
+            target = qmc.qubit(name="target")
+            target = qmc.x(target)
+            phase_q = qmc.qpe(target, phase_register, phase_gate, theta=phase)
+            return qmc.measure(phase_q)
+
+        transpiler = QiskitTranspiler(use_native_composite=False)
+        block = transpiler.to_block(qpe_circuit, bindings={"phase": np.pi / 2})
+        substituted = transpiler.substitute(block)
+        inlined = transpiler.inline(substituted)
+        validated = transpiler.linear_validate(inlined)
+        folded = transpiler.constant_fold(validated, bindings={"phase": np.pi / 2})
+        analyzed = transpiler.analyze(folded)
+        separated = transpiler.separate(analyzed)
+
+        assert isinstance(separated, SimplifiedProgram)
+        assert separated.quantum is not None
+        # QPE returns QFixed → Float, so classical_post should handle the decode
+        assert separated.classical_post is not None
+
+    def test_get_first_circuit(self):
+        """ExecutableProgram.get_first_circuit() returns the quantum circuit."""
+        from qiskit import QuantumCircuit
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        qc = exe.get_first_circuit()
+        assert isinstance(qc, QuantumCircuit)
+        assert qc.num_qubits > 0
+
+    def test_get_first_circuit_matches_quantum_circuit_property(self):
+        """get_first_circuit() should match quantum_circuit property."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        assert exe.get_first_circuit() is exe.quantum_circuit
+
+    def test_to_circuit_convenience_method(self):
+        """to_circuit() convenience method returns backend circuit directly."""
+        from qiskit import QuantumCircuit
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        qc = transpiler.to_circuit(circuit)
+        assert isinstance(qc, QuantumCircuit)
+
+    def test_to_circuit_with_bindings(self):
+        """to_circuit() with parameter bindings."""
+        from qiskit import QuantumCircuit
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        qc = transpiler.to_circuit(circuit, bindings={"theta": np.pi / 4})
+        assert isinstance(qc, QuantumCircuit)
+        rx_gates = [i for i in qc.data if i.operation.name == "rx"]
+        assert len(rx_gates) == 1
+        assert abs(float(rx_gates[0].operation.params[0]) - np.pi / 4) < 1e-10
+
+    def test_step_by_step_matches_transpile(self):
+        """Step-by-step pipeline produces same circuit as transpile()."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+
+        # Full pipeline
+        exe_full = transpiler.transpile(circuit)
+        qc_full = exe_full.compiled_quantum[0].circuit
+
+        # Step-by-step
+        block = transpiler.to_block(circuit)
+        substituted = transpiler.substitute(block)
+        inlined = transpiler.inline(substituted)
+        validated = transpiler.linear_validate(inlined)
+        folded = transpiler.constant_fold(validated)
+        analyzed = transpiler.analyze(folded)
+        separated = transpiler.separate(analyzed)
+        exe_step = transpiler.emit(separated)
+        qc_step = exe_step.compiled_quantum[0].circuit
+
+        # Both should produce functionally equivalent circuits
+        sv_full = _run_statevector(qc_full)
+        sv_step = _run_statevector(qc_step)
+        assert statevectors_equal(sv_full, sv_step)
+
+    def test_multiple_strategy_overrides(self):
+        """TranspilerConfig supports overriding multiple gates at once."""
+        from qamomile.circuit.transpiler.transpiler import TranspilerConfig
+
+        config = TranspilerConfig.with_strategies({
+            "qft": "approximate_k2",
+            "iqft": "approximate_k2",
+        })
+        assert len(config.substitutions.rules) == 2
+        rule_names = {r.source_name for r in config.substitutions.rules}
+        assert rule_names == {"qft", "iqft"}
 
 
 class TestParameterizedCircuits:
