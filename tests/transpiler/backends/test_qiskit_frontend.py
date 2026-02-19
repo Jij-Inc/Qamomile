@@ -2366,7 +2366,6 @@ class TestCustomCompositeGate:
     def test_custom_gate_transpiles(self):
         """Custom CompositeGate decomposes and transpiles."""
         from qamomile.circuit.frontend.composite_gate import CompositeGate
-        from qamomile.circuit.frontend.handle import Qubit
 
         class BellPair(CompositeGate):
             custom_name = "bell_pair"
