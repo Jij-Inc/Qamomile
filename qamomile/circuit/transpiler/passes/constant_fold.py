@@ -8,6 +8,7 @@ from typing import Any
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
+from qamomile.circuit.ir.operation.gate import GateOperation
 from qamomile.circuit.ir.value import Value, ValueBase
 
 from . import Pass
@@ -188,6 +189,16 @@ class ConstantFoldingPass(Pass[Block, Block]):
             else:
                 new_operands.append(operand)
 
+        result_op = dataclasses.replace(op, operands=new_operands) if changed else op
+
+        # Substitute folded values in GateOperation.theta field
+        if isinstance(result_op, GateOperation) and isinstance(result_op.theta, Value):
+            if result_op.theta.uuid in folded_values:
+                result_op = dataclasses.replace(
+                    result_op, theta=folded_values[result_op.theta.uuid]
+                )
+                changed = True
+
         if changed:
-            return dataclasses.replace(op, operands=new_operands)
+            return result_op
         return op

@@ -2727,17 +2727,33 @@ class CircuitAnalyzer:
             return f"{value:.1f}"  # e.g., "12.3"
         return f"{value:.2f}"  # e.g., "0.79"
 
+    @staticmethod
+    def _extract_greek_prefix(name: str) -> tuple[str, str] | None:
+        """Find the longest Greek letter prefix in *name*.
+
+        Returns ``(tex_symbol, remainder)`` or ``None``.
+        Only matches when there IS a remaining suffix (not exact match).
+        """
+        best: tuple[str, str] | None = None
+        for symbol in _TEX_SYMBOLS:
+            if name.startswith(symbol) and len(symbol) < len(name):
+                if best is None or len(symbol) > len(best[0]):
+                    best = (symbol, name[len(symbol) :])
+        return best
+
     def _format_symbolic_param(self, name: str) -> str:
         """Format symbolic parameter name for display.
 
         Greek-letter names get TeX rendering ($\\theta$).
-        Non-Greek names are returned as plain text (no italic).
+        Names with a Greek prefix get the prefix converted (phis → ${\\phi}s$).
+        Non-Greek names with underscores/brackets get subscript notation.
+        Other names are returned as plain text.
 
         Args:
             name: Parameter name.
 
         Returns:
-            TeX-formatted string for Greek names, plain text otherwise.
+            Formatted string suitable for matplotlib text rendering.
         """
         if "\\" in name:
             # Already a TeX command like \theta, \phi
@@ -2750,19 +2766,40 @@ class CircuitAnalyzer:
             rest = name[bracket_pos:]  # e.g., "[i]" or "[0]"
             if base in _TEX_SYMBOLS:
                 return f"$\\{base}{rest}$"
-            return name  # plain text, e.g., "phis[i]"
+            prefix = self._extract_greek_prefix(base)
+            if prefix:
+                symbol, suffix = prefix
+                return f"${{\\{symbol}}}{suffix}{rest}$"
+            return f"$\\mathrm{{{base}}}{rest}$"
 
-        # Handle underscore notation (e.g., "theta_2", "x_2")
+        # Handle underscore notation (e.g., "theta_2", "x_2", "phis_0")
         if "_" in name:
-            parts = name.split("_", 1)
-            if parts[0] in _TEX_SYMBOLS:
-                return f"$\\{parts[0]}_{{{parts[1]}}}$"
-            return name  # plain text, e.g., "x_2"
+            parts = name.split("_")
+            # Build nested subscripts: beta_a_b_c → \beta_{a_{b_{c}}}
+            subscript = parts[-1]
+            for i in range(len(parts) - 2, 0, -1):
+                subscript = f"{parts[i]}_{{{subscript}}}"
+
+            base = parts[0]
+            if base in _TEX_SYMBOLS:
+                return f"$\\{base}_{{{subscript}}}$"
+            prefix = self._extract_greek_prefix(base)
+            if prefix:
+                symbol, suffix = prefix
+                return f"${{\\{symbol}}}{suffix}_{{{subscript}}}$"
+            return f"$\\mathrm{{{base}}}_{{{subscript}}}$"
 
         # Simple name
         if name in _TEX_SYMBOLS:
             return f"$\\{name}$"
-        return name  # plain text, e.g., "phis"
+
+        # Simple name with Greek prefix (e.g., "phis" → ${\phi}s$)
+        prefix = self._extract_greek_prefix(name)
+        if prefix:
+            symbol, suffix = prefix
+            return f"${{\\{symbol}}}{suffix}$"
+
+        return name  # plain text, e.g., "params"
 
     def _get_block_label(
         self, op: CallBlockOperation, qubit_map: dict[str, int]
