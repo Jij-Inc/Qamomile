@@ -2393,9 +2393,13 @@ class TestCustomCompositeGate:
         sv = _run_statevector(qc)
         # CompositeGate may allocate extra qubits internally
         num_q = qc.num_qubits
+        # This test assumes the Bell pair occupies the only two qubits.
+        # If CompositeGate ever allocates ancillas, update the expected-state
+        # construction instead of relaxing this assertion.
+        assert num_q == 2
         expected = np.zeros(2**num_q, dtype=complex)
-        expected[0] = 1.0 / np.sqrt(2)  # |00...0>
-        expected[3] = 1.0 / np.sqrt(2)  # |...011> (q0=1, q1=1)
+        expected[0] = 1.0 / np.sqrt(2)  # |00>
+        expected[3] = 1.0 / np.sqrt(2)  # |11> (q0=1, q1=1)
         assert statevectors_equal(sv, expected)
 
 
