@@ -4,6 +4,7 @@ import pytest
 
 import qamomile.circuit as qm
 from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
+from qamomile.circuit.visualization.style import DEFAULT_STYLE
 
 
 class TestFormatSymbolicParam:
@@ -101,3 +102,38 @@ class TestDoubleSubscriptRegression:
         # Force TeX parsing even without --mpl (e.g. in CI)
         fig.savefig(io.BytesIO(), format="png")
         return fig
+
+
+class TestFloatArithmeticLabel:
+    """Regression test: Float arithmetic should display symbolic expression, not 'float_tmp'."""
+
+    @staticmethod
+    def _get_labels(kernel):
+        """Build visual IR and extract labels from a kernel."""
+        graph = kernel._build_graph_for_visualization()
+        analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE)
+        qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+        vc = analyzer.build_visual_ir(graph, qubit_map, qubit_names, num_qubits)
+        return [n.label for n in vc.children if hasattr(n, "label")]
+
+    def test_float_div_label(self):
+        @qm.qkernel
+        def circuit(theta: qm.Float) -> qm.Bit:
+            q = qm.qubit(name="q")
+            q = qm.rx(q, theta / 2)
+            return qm.measure(q)
+
+        labels = self._get_labels(circuit)
+        for label in labels:
+            assert "float_tmp" not in label
+
+    def test_float_mul_label(self):
+        @qm.qkernel
+        def circuit(theta: qm.Float) -> qm.Bit:
+            q = qm.qubit(name="q")
+            q = qm.ry(q, theta * 2)
+            return qm.measure(q)
+
+        labels = self._get_labels(circuit)
+        for label in labels:
+            assert "float_tmp" not in label
