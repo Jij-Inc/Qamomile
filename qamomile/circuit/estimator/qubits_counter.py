@@ -7,7 +7,9 @@ from typing import TYPE_CHECKING, overload
 import sympy as sp
 
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
 from qamomile.circuit.ir.operation.control_flow import (
+    ForItemsOperation,
     ForOperation,
     IfOperation,
     WhileOperation,
@@ -106,6 +108,23 @@ def _count_from_operations(operations: list[Operation]) -> sp.Expr:
                 block = op.block
                 if isinstance(block, BlockValue):
                     count += qubits_counter(block)  # type: ignore
+
+            case ForItemsOperation():
+                # Same as for loop - assume uncomputation
+                inner_count = _count_from_operations(op.operations)
+                count += inner_count  # type: ignore
+
+            case CompositeGateOperation():
+                from qamomile.circuit.ir.block_value import BlockValue
+
+                # Count qubits from implementation block if available
+                impl = op.implementation
+                if isinstance(impl, BlockValue):
+                    count += qubits_counter(impl)  # type: ignore
+
+                # Add ancilla qubits from resource metadata
+                if op.resource_metadata is not None:
+                    count += sp.Integer(op.resource_metadata.ancilla_qubits)
 
             case _:
                 continue
