@@ -6,7 +6,7 @@ into QURI Parts quantum circuits.
 
 from __future__ import annotations
 
-from typing import Any, Sequence, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from qamomile.circuit.transpiler.transpiler import Transpiler
 from qamomile.circuit.transpiler.passes.emit import EmitPass
@@ -18,8 +18,11 @@ from qamomile.circuit.transpiler.executable import (
 )
 
 from .emitter import QuriPartsGateEmitter
+from .exceptions import QamomileQuriPartsTranspileError
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     import quri_parts.circuit as qp_c
     import quri_parts.core.operator as qp_o
     from quri_parts.circuit import ImmutableBoundParametricQuantumCircuit
@@ -144,13 +147,22 @@ class QuriPartsExecutor(
 
         Returns:
             Bound parametric circuit
+
+        Raises:
+            QamomileQuriPartsTranspileError: If a required parameter binding
+                is missing from ``bindings``.
         """
         param_values = []
         for param_info in parameter_metadata.parameters:
             if param_info.name in bindings:
                 param_values.append(float(bindings[param_info.name]))
             else:
-                raise ValueError(f"Missing binding for parameter: {param_info.name}")
+                raise QamomileQuriPartsTranspileError(
+                    f"Missing binding for parameter '{param_info.name}'. "
+                    f"Provided bindings: {list(bindings.keys())}. "
+                    f"Required parameters: "
+                    f"{[p.name for p in parameter_metadata.parameters]}"
+                )
 
         return circuit.bind_parameters(param_values)
 

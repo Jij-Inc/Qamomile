@@ -1,7 +1,6 @@
 """Tests for QuriPartsCircuitTranspiler (new qamomile.circuit API)."""
 
 import math
-import pytest
 
 from qamomile.quri_parts import (
     QuriPartsGateEmitter,

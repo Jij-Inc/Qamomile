@@ -10,6 +10,7 @@ circuits. Angles are specified as dictionaries: {param: coeff, CONST: offset}.
 from __future__ import annotations
 
 import math
+import warnings
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -420,11 +421,15 @@ class QuriPartsGateEmitter:
         QURI Parts native gates which can be extended into the circuit.
         """
         if gate is not None:
-            # If we ever have a gate, try to extend
             try:
                 circuit.extend(gate)
-            except Exception:
-                pass
+            except Exception as e:
+                warnings.warn(
+                    f"Failed to append gate to QURI Parts circuit: {e}. "
+                    f"Falling back to manual decomposition.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
     def gate_power(self, gate: Any, power: int) -> Any:
         """Create gate raised to a power.

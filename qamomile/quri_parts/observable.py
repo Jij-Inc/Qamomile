@@ -6,22 +6,26 @@ to QURI Parts Operator for use with QURI Parts estimator primitives.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import qamomile.observable as qm_o
 
 if TYPE_CHECKING:
     from quri_parts.core.operator import Operator
 
+# Threshold for treating a coefficient as zero.
+# Matches the tolerance used in qamomile.qiskit.observable for consistency.
+_ZERO_THRESHOLD = 1e-15
+
 
 def hamiltonian_to_quri_operator(hamiltonian: qm_o.Hamiltonian) -> "Operator":
     """Convert qamomile.observable.Hamiltonian to QURI Parts Operator.
 
     Args:
-        hamiltonian: The qamomile.observable.Hamiltonian to convert
+        hamiltonian (qm_o.Hamiltonian): The qamomile Hamiltonian to convert.
 
     Returns:
-        QURI Parts Operator representation
+        Operator: QURI Parts Operator representation.
 
     Example:
         ```python
@@ -40,7 +44,7 @@ def hamiltonian_to_quri_operator(hamiltonian: qm_o.Hamiltonian) -> "Operator":
         qm_o.Pauli.Z: 3,
     }
 
-    terms: dict = {}
+    terms: dict[Any, complex] = {}
 
     for operators, coeff in hamiltonian.terms.items():
         pauli_indices = []
@@ -55,11 +59,21 @@ def hamiltonian_to_quri_operator(hamiltonian: qm_o.Hamiltonian) -> "Operator":
         else:
             terms[PAULI_IDENTITY] = terms.get(PAULI_IDENTITY, 0) + coeff
 
-    if abs(hamiltonian.constant) > 1e-15:
+    if abs(hamiltonian.constant) > _ZERO_THRESHOLD:
         terms[PAULI_IDENTITY] = terms.get(PAULI_IDENTITY, 0) + hamiltonian.constant
 
     return Operator(terms)
 
 
-# Convenience alias
-to_quri_operator = hamiltonian_to_quri_operator
+def to_quri_operator(hamiltonian: qm_o.Hamiltonian) -> "Operator":
+    """Convert Hamiltonian to QURI Parts Operator.
+
+    Convenience alias for :func:`hamiltonian_to_quri_operator`.
+
+    Args:
+        hamiltonian (qm_o.Hamiltonian): The qamomile Hamiltonian to convert.
+
+    Returns:
+        Operator: QURI Parts Operator representation.
+    """
+    return hamiltonian_to_quri_operator(hamiltonian)

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 import numpy as np
 
 from tests.transpiler.base_test import TranspilerTestSuite
