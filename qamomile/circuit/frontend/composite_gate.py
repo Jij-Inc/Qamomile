@@ -513,7 +513,7 @@ class _WrappedCompositeGate(CompositeGate):
             return None
         return self._qkernel.block
 
-    def get_resource_metadata(self) -> ResourceMetadata | None:
+    def _resources(self) -> ResourceMetadata | None:
         return self._resource_metadata
 
 
@@ -546,7 +546,7 @@ class _StubCompositeGate(CompositeGate):
     def get_implementation(self) -> None:
         return None
 
-    def get_resource_metadata(self) -> ResourceMetadata | None:
+    def _resources(self) -> ResourceMetadata | None:
         return self._resource_metadata
 
 
