@@ -2,18 +2,18 @@ import contextlib
 import copy
 import typing
 
-from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
+from qamomile.circuit.frontend.handle.containers import Dict, DictItemsIterator
+from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, Qubit, UInt
+from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
 from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
 from qamomile.circuit.ir.operation.control_flow import (
-    ForOperation,
     ForItemsOperation,
+    ForOperation,
     IfOperation,
     WhileOperation,
 )
+from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
 from qamomile.circuit.ir.value import Value
-from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, Qubit, UInt
-from qamomile.circuit.frontend.handle.containers import Dict, DictItemsIterator
-from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
 
 
 class WhileLoop:
@@ -152,6 +152,12 @@ def _fresh_handle_copy_for_tracing(h: typing.Any) -> typing.Any:
     c = copy.copy(h)
     c._consumed = False
     c._consumed_by = None
+    # Reset borrowed-element tracking for ArrayBase instances so that
+    # each branch starts with an empty borrow set.  Without this,
+    # shallow copy shares the same _borrowed_indices dict and borrowing
+    # an element in one branch would cause QubitConsumedError in the other.
+    if hasattr(c, "_borrowed_indices"):
+        c._borrowed_indices = {}
     return c
 
 
@@ -298,7 +304,10 @@ def emit_if(
     """
     parent_tracer = get_current_tracer()
 
-    # 1. Evaluate condition to get Bit/condition Handle
+    # 1. Evaluate condition using the ORIGINAL variables (before copying).
+    #    The AST transformer guarantees that the condition function only
+    #    produces comparison operations and never applies quantum gates,
+    #    so it is safe to pass the original (unconsumed) handles here.
     condition_result = cond_func(*variables)
     condition_value = (
         condition_result.value
@@ -323,11 +332,12 @@ def emit_if(
     # Note: The AST transformer guarantees both branches return the same
     # variable list in the same order, so true_val and false_val always
     # have the same type. We only need to check one side.
-    assert len(true_result) == len(false_result), (
-        f"Branch result length mismatch: true={len(true_result)}, false={len(false_result)}"
-    )
+    if len(true_result) != len(false_result):
+        raise ValueError(
+            f"Branch result length mismatch: true={len(true_result)}, false={len(false_result)}"
+        )
     merged_results = []
-    for true_val, false_val in zip(true_result, false_result):
+    for true_val, false_val in zip(true_result, false_result, strict=True):
         if isinstance(true_val, (Handle, Value)):
             phi_output, merged_handle = _create_phi_for_values(
                 condition_value, true_val, false_val, if_op
