@@ -195,7 +195,10 @@ class QKernel(Generic[P, R]):
             if param_type is Qubit:
                 continue
             if is_array_type(param_type):
-                element_type = getattr(param_type, "element_type", None)
+                if hasattr(param_type, "__args__") and param_type.__args__:
+                    element_type = param_type.__args__[0]
+                else:
+                    element_type = getattr(param_type, "element_type", None)
                 if element_type is Qubit:
                     continue
 
