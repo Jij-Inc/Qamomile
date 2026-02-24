@@ -6,7 +6,7 @@ allowing resource estimates to depend on problem size parameters.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import sympy as sp
@@ -67,9 +67,16 @@ class GateCount:
     t_gates: sp.Expr
     clifford_gates: sp.Expr
     rotation_gates: sp.Expr
+    oracle_calls: dict[str, sp.Expr] = field(default_factory=dict)
 
     def __add__(self, other: GateCount) -> GateCount:
         """Add two gate counts together."""
+        merged_oracle = dict(self.oracle_calls)
+        for name, count in other.oracle_calls.items():
+            if name in merged_oracle:
+                merged_oracle[name] = merged_oracle[name] + count
+            else:
+                merged_oracle[name] = count
         return GateCount(
             total=self.total + other.total,
             single_qubit=self.single_qubit + other.single_qubit,
@@ -78,6 +85,7 @@ class GateCount:
             t_gates=self.t_gates + other.t_gates,
             clifford_gates=self.clifford_gates + other.clifford_gates,
             rotation_gates=self.rotation_gates + other.rotation_gates,
+            oracle_calls=merged_oracle,
         )
 
     def __mul__(self, factor: sp.Expr | int) -> GateCount:
@@ -91,12 +99,27 @@ class GateCount:
             t_gates=self.t_gates * factor_expr,
             clifford_gates=self.clifford_gates * factor_expr,
             rotation_gates=self.rotation_gates * factor_expr,
+            oracle_calls={
+                name: count * factor_expr
+                for name, count in self.oracle_calls.items()
+            },
         )
 
     __rmul__ = __mul__
 
     def max(self, other: GateCount) -> GateCount:
         """Element-wise maximum of two gate counts."""
+        all_keys = set(self.oracle_calls.keys()) | set(other.oracle_calls.keys())
+        merged_oracle = {}
+        for key in all_keys:
+            if key in self.oracle_calls and key in other.oracle_calls:
+                merged_oracle[key] = sp.Max(
+                    self.oracle_calls[key], other.oracle_calls[key]
+                )
+            elif key in self.oracle_calls:
+                merged_oracle[key] = self.oracle_calls[key]
+            else:
+                merged_oracle[key] = other.oracle_calls[key]
         return GateCount(
             total=sp.Max(self.total, other.total),
             single_qubit=sp.Max(self.single_qubit, other.single_qubit),
@@ -105,6 +128,7 @@ class GateCount:
             t_gates=sp.Max(self.t_gates, other.t_gates),
             clifford_gates=sp.Max(self.clifford_gates, other.clifford_gates),
             rotation_gates=sp.Max(self.rotation_gates, other.rotation_gates),
+            oracle_calls=merged_oracle,
         )
 
     def simplify(self) -> GateCount:
@@ -117,6 +141,10 @@ class GateCount:
             t_gates=sp.simplify(self.t_gates),
             clifford_gates=sp.simplify(self.clifford_gates),
             rotation_gates=sp.simplify(self.rotation_gates),
+            oracle_calls={
+                name: sp.simplify(count)
+                for name, count in self.oracle_calls.items()
+            },
         )
 
     @staticmethod
@@ -336,7 +364,12 @@ def _count_composite_gate(
 
     # Priority 1: Use resource_metadata
     if op.resource_metadata is not None:
-        return _extract_gate_count_from_metadata(op.resource_metadata)
+        gate_count = _extract_gate_count_from_metadata(op.resource_metadata)
+        # Record oracle call for stub gates (gates without implementation)
+        if not op.has_implementation:
+            gate_name = op.custom_name or op.gate_type.value
+            gate_count.oracle_calls[gate_name] = sp.Integer(1)
+        return gate_count
 
     # Priority 2: Use implementation (decomposition)
     if op.has_implementation and op.implementation is not None:
@@ -654,6 +687,10 @@ def _apply_sum_to_count(
         t_gates=Sum(count.t_gates, (loop_var, start, stop - 1)).doit(),
         clifford_gates=Sum(count.clifford_gates, (loop_var, start, stop - 1)).doit(),
         rotation_gates=Sum(count.rotation_gates, (loop_var, start, stop - 1)).doit(),
+        oracle_calls={
+            name: Sum(val, (loop_var, start, stop - 1)).doit()
+            for name, val in count.oracle_calls.items()
+        },
     )
 
 

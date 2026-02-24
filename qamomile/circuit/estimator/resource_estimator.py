@@ -74,6 +74,10 @@ class ResourceEstimate:
                 t_gates=self.gates.t_gates.subs(subs_dict),
                 clifford_gates=self.gates.clifford_gates.subs(subs_dict),
                 rotation_gates=self.gates.rotation_gates.subs(subs_dict),
+                oracle_calls={
+                    name: val.subs(subs_dict)
+                    for name, val in self.gates.oracle_calls.items()
+                },
             ),
             depth=CircuitDepth(
                 total_depth=self.depth.total_depth.subs(subs_dict),
@@ -120,6 +124,10 @@ class ResourceEstimate:
                 "t_gates": str(self.gates.t_gates),
                 "clifford_gates": str(self.gates.clifford_gates),
                 "rotation_gates": str(self.gates.rotation_gates),
+                "oracle_calls": {
+                    name: str(val)
+                    for name, val in self.gates.oracle_calls.items()
+                },
             },
             "depth": {
                 "total_depth": str(self.depth.total_depth),
@@ -144,13 +152,19 @@ class ResourceEstimate:
             f"    T gates: {self.gates.t_gates}",
             f"    Clifford gates: {self.gates.clifford_gates}",
             f"    Rotation gates: {self.gates.rotation_gates}",
+        ]
+        if self.gates.oracle_calls:
+            lines.append("  Oracle Calls:")
+            for name, count in self.gates.oracle_calls.items():
+                lines.append(f"    {name}: {count}")
+        lines.extend([
             "  Depth:",
             f"    Total: {self.depth.total_depth}",
             f"    T-depth: {self.depth.t_depth}",
             f"    Two-qubit depth: {self.depth.two_qubit_depth}",
             f"    Multi-qubit depth: {self.depth.multi_qubit_depth}",
             f"    Rotation depth: {self.depth.rotation_depth}",
-        ]
+        ])
         if self.parameters:
             lines.append("  Parameters:")
             for name, symbol in self.parameters.items():
@@ -235,6 +249,8 @@ def estimate_resources(
         circuit_depth.rotation_depth,
     ]:
         all_symbols.update(expr.free_symbols)
+    for oracle_expr in gate_count.oracle_calls.values():
+        all_symbols.update(oracle_expr.free_symbols)
 
     parameters = {str(sym): sym for sym in sorted(all_symbols, key=str)}
 

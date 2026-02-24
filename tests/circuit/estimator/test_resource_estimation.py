@@ -621,6 +621,72 @@ class TestStubGateEstimation:
 
         est = estimate_resources(circuit_with_stub.block)
         assert est.gates.t_gates == 10
+        # Verify oracle call is tracked
+        assert "black_box_oracle" in est.gates.oracle_calls
+        assert est.gates.oracle_calls["black_box_oracle"] == 1
+
+    def test_stub_gate_multiple_calls(self):
+        """Test oracle_calls counts multiple invocations of the same stub gate."""
+        from qamomile.circuit.frontend.composite_gate import composite_gate
+
+        @composite_gate(
+            stub=True,
+            name="repeated_oracle",
+            num_qubits=2,
+            t_gate_count=5,
+        )
+        def repeated_oracle():
+            pass
+
+        @qm.qkernel
+        def circuit_multi() -> qm.Vector[qm.Qubit]:
+            q = qm.qubit_array(2, name="q")
+            q[0], q[1] = repeated_oracle(q[0], q[1])
+            q[0], q[1] = repeated_oracle(q[0], q[1])
+            q[0], q[1] = repeated_oracle(q[0], q[1])
+            return q
+
+        est = estimate_resources(circuit_multi.block)
+        assert est.gates.oracle_calls["repeated_oracle"] == 3
+        assert est.gates.t_gates == 15
+
+    def test_multiple_different_oracle_calls(self):
+        """Test tracking multiple different stub gates in one circuit."""
+        from qamomile.circuit.frontend.composite_gate import composite_gate
+
+        @composite_gate(stub=True, name="oracle_A", num_qubits=2, t_gate_count=3)
+        def oracle_a():
+            pass
+
+        @composite_gate(stub=True, name="oracle_B", num_qubits=2, t_gate_count=7)
+        def oracle_b():
+            pass
+
+        @qm.qkernel
+        def circuit_two_oracles() -> qm.Vector[qm.Qubit]:
+            q = qm.qubit_array(2, name="q")
+            q[0], q[1] = oracle_a(q[0], q[1])
+            q[0], q[1] = oracle_b(q[0], q[1])
+            q[0], q[1] = oracle_a(q[0], q[1])
+            return q
+
+        est = estimate_resources(circuit_two_oracles.block)
+        assert est.gates.oracle_calls["oracle_A"] == 2
+        assert est.gates.oracle_calls["oracle_B"] == 1
+        assert est.gates.t_gates == 3 + 7 + 3
+
+    def test_no_oracle_calls_for_non_stub(self):
+        """Test that non-stub circuits have empty oracle_calls."""
+
+        @qm.qkernel
+        def bell_state() -> qm.Vector[qm.Qubit]:
+            q = qm.qubit_array(2, name="q")
+            q[0] = qm.h(q[0])
+            q[0], q[1] = qm.cx(q[0], q[1])
+            return q
+
+        est = estimate_resources(bell_state.block)
+        assert est.gates.oracle_calls == {}
 
 
 class TestQPEResourceEstimation:
