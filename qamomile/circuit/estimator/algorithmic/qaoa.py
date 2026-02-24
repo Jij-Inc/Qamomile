@@ -108,6 +108,7 @@ def estimate_qaoa(
             total=sp.simplify(total_gates),
             single_qubit=sp.simplify(single_qubit),
             two_qubit=sp.simplify(two_qubit),
+            multi_qubit=sp.Integer(0),
             t_gates=t_gates,
             clifford_gates=clifford,
         ),
@@ -115,6 +116,7 @@ def estimate_qaoa(
             total_depth=sp.simplify(total_depth),
             t_depth=sp.Integer(0),  # No T gates
             two_qubit_depth=sp.simplify(two_qubit_depth),
+            multi_qubit_depth=sp.Integer(0),
         ),
         parameters={
             str(s): s
@@ -175,6 +177,7 @@ def estimate_qaoa_ising(
             total=base_est.gates.total + extra_single_qubit,
             single_qubit=base_est.gates.single_qubit + extra_single_qubit,
             two_qubit=base_est.gates.two_qubit,
+            multi_qubit=sp.Integer(0),
             t_gates=base_est.gates.t_gates,
             clifford_gates=base_est.gates.clifford_gates,
         ),
@@ -183,6 +186,7 @@ def estimate_qaoa_ising(
             total_depth=base_est.depth.total_depth,
             t_depth=base_est.depth.t_depth,
             two_qubit_depth=base_est.depth.two_qubit_depth,
+            multi_qubit_depth=sp.Integer(0),
         ),
         parameters=base_est.parameters,
     )

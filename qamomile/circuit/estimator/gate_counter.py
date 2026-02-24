@@ -63,6 +63,7 @@ class GateCount:
     total: sp.Expr
     single_qubit: sp.Expr
     two_qubit: sp.Expr
+    multi_qubit: sp.Expr
     t_gates: sp.Expr
     clifford_gates: sp.Expr
 
@@ -72,6 +73,7 @@ class GateCount:
             total=self.total + other.total,
             single_qubit=self.single_qubit + other.single_qubit,
             two_qubit=self.two_qubit + other.two_qubit,
+            multi_qubit=self.multi_qubit + other.multi_qubit,
             t_gates=self.t_gates + other.t_gates,
             clifford_gates=self.clifford_gates + other.clifford_gates,
         )
@@ -83,6 +85,7 @@ class GateCount:
             total=self.total * factor_expr,
             single_qubit=self.single_qubit * factor_expr,
             two_qubit=self.two_qubit * factor_expr,
+            multi_qubit=self.multi_qubit * factor_expr,
             t_gates=self.t_gates * factor_expr,
             clifford_gates=self.clifford_gates * factor_expr,
         )
@@ -95,6 +98,7 @@ class GateCount:
             total=sp.Max(self.total, other.total),
             single_qubit=sp.Max(self.single_qubit, other.single_qubit),
             two_qubit=sp.Max(self.two_qubit, other.two_qubit),
+            multi_qubit=sp.Max(self.multi_qubit, other.multi_qubit),
             t_gates=sp.Max(self.t_gates, other.t_gates),
             clifford_gates=sp.Max(self.clifford_gates, other.clifford_gates),
         )
@@ -105,6 +109,7 @@ class GateCount:
             total=sp.simplify(self.total),
             single_qubit=sp.simplify(self.single_qubit),
             two_qubit=sp.simplify(self.two_qubit),
+            multi_qubit=sp.simplify(self.multi_qubit),
             t_gates=sp.simplify(self.t_gates),
             clifford_gates=sp.simplify(self.clifford_gates),
         )
@@ -116,6 +121,7 @@ class GateCount:
             total=sp.Integer(0),
             single_qubit=sp.Integer(0),
             two_qubit=sp.Integer(0),
+            multi_qubit=sp.Integer(0),
             t_gates=sp.Integer(0),
             clifford_gates=sp.Integer(0),
         )
@@ -145,11 +151,17 @@ SINGLE_QUBIT_GATES = {
 TWO_QUBIT_GATES = {"cx", "cy", "cz", "swap", "cp", "crx", "cry", "crz", "rzz"}
 
 
-def _count_gate_operation(op: GateOperation) -> GateCount:
+_CONTROLLED_CLIFFORD_GATES = {"x", "y", "z"}
+
+
+def _count_gate_operation(
+    op: GateOperation, is_controlled: bool = False
+) -> GateCount:
     """Count gates for a single gate operation.
 
     Args:
         op: The gate operation to count
+        is_controlled: Whether this gate is inside a ControlledUOperation
 
     Returns:
         Gate counts for this operation
@@ -157,22 +169,40 @@ def _count_gate_operation(op: GateOperation) -> GateCount:
     # Get gate name from enum
     gate_name = op.gate_type.name.lower() if op.gate_type else "unknown"
 
-    # Determine gate type
-    is_clifford = gate_name in CLIFFORD_GATES
-    is_t_gate = gate_name in T_GATES
-    is_single_qubit = gate_name in SINGLE_QUBIT_GATES
-    is_two_qubit = gate_name in TWO_QUBIT_GATES
+    if is_controlled:
+        # Promote classification: control qubit increases qubit width by 1
+        is_single_qubit_base = gate_name in SINGLE_QUBIT_GATES
+        is_two_qubit_base = gate_name in TWO_QUBIT_GATES
 
-    # Count based on gate type
-    single = sp.Integer(1) if is_single_qubit else sp.Integer(0)
-    two = sp.Integer(1) if is_two_qubit else sp.Integer(0)
-    t_count = sp.Integer(1) if is_t_gate else sp.Integer(0)
-    clifford = sp.Integer(1) if is_clifford else sp.Integer(0)
+        single = sp.Integer(0)
+        two = sp.Integer(1) if is_single_qubit_base else sp.Integer(0)
+        multi = sp.Integer(1) if is_two_qubit_base else sp.Integer(0)
+
+        # Controlled T/Tdg are 2q non-Clifford gates, not simple T gates
+        t_count = sp.Integer(0)
+        # Only CX, CY, CZ are standard Clifford gates
+        clifford = (
+            sp.Integer(1)
+            if gate_name in _CONTROLLED_CLIFFORD_GATES
+            else sp.Integer(0)
+        )
+    else:
+        is_clifford = gate_name in CLIFFORD_GATES
+        is_t_gate = gate_name in T_GATES
+        is_single_qubit = gate_name in SINGLE_QUBIT_GATES
+        is_two_qubit = gate_name in TWO_QUBIT_GATES
+
+        single = sp.Integer(1) if is_single_qubit else sp.Integer(0)
+        two = sp.Integer(1) if is_two_qubit else sp.Integer(0)
+        multi = sp.Integer(0)
+        t_count = sp.Integer(1) if is_t_gate else sp.Integer(0)
+        clifford = sp.Integer(1) if is_clifford else sp.Integer(0)
 
     return GateCount(
         total=sp.Integer(1),
         single_qubit=single,
         two_qubit=two,
+        multi_qubit=multi,
         t_gates=t_count,
         clifford_gates=clifford,
     )
@@ -242,6 +272,7 @@ def _extract_gate_count_from_metadata(meta: ResourceMetadata) -> GateCount:
         total=sp.Integer(total) if total > 0 else sp.Integer(single_qubit + two_qubit),
         single_qubit=sp.Integer(single_qubit),
         two_qubit=sp.Integer(two_qubit),
+        multi_qubit=sp.Integer(0),
         t_gates=sp.Integer(t_gates) if t_gates else sp.Integer(0),
         clifford_gates=sp.Integer(clifford),
     )
@@ -253,6 +284,7 @@ def _count_composite_gate(
     loop_context: LoopContext,
     call_context: dict[str, Any],
     loop_var_symbols: dict[str, sp.Symbol],
+    is_controlled: bool = False,
 ) -> GateCount:
     """Count gates in a CompositeGateOperation.
 
@@ -306,6 +338,7 @@ def _count_composite_gate(
                 loop_context=loop_context,
                 call_context=new_call_context,
                 loop_var_symbols=loop_var_symbols,
+                is_controlled=is_controlled,
             )
 
     # Priority 3: Compute from known gate types
@@ -384,6 +417,7 @@ def _count_composite_gate(
             total=total,
             single_qubit=h_gates,
             two_qubit=cp_gates + swap_gates,
+            multi_qubit=sp.Integer(0),
             t_gates=sp.Integer(0),
             clifford_gates=h_gates + swap_gates,  # H and SWAP are Clifford
         )
@@ -591,6 +625,7 @@ def _apply_sum_to_count(
         total=Sum(count.total, (loop_var, start, stop - 1)).doit(),
         single_qubit=Sum(count.single_qubit, (loop_var, start, stop - 1)).doit(),
         two_qubit=Sum(count.two_qubit, (loop_var, start, stop - 1)).doit(),
+        multi_qubit=Sum(count.multi_qubit, (loop_var, start, stop - 1)).doit(),
         t_gates=Sum(count.t_gates, (loop_var, start, stop - 1)).doit(),
         clifford_gates=Sum(count.clifford_gates, (loop_var, start, stop - 1)).doit(),
     )
@@ -633,6 +668,7 @@ def _count_from_operations(
     loop_context: LoopContext | None = None,
     call_context: dict[str, Any] | None = None,
     loop_var_symbols: dict[str, sp.Symbol] | None = None,
+    is_controlled: bool = False,
 ) -> GateCount:
     """Count gates from a list of operations.
 
@@ -658,7 +694,7 @@ def _count_from_operations(
     for op in operations:
         match op:
             case GateOperation():
-                count = count + _count_gate_operation(op)
+                count = count + _count_gate_operation(op, is_controlled=is_controlled)
 
             case ForOperation():
                 # Get loop bounds: for i in range(start, stop, step)
@@ -733,6 +769,7 @@ def _count_from_operations(
                         loop_context=new_context,
                         call_context=call_context,
                         loop_var_symbols=new_loop_var_symbols,
+                        is_controlled=is_controlled,
                     )
 
                     # Check if inner count contains the current loop variable
@@ -760,6 +797,7 @@ def _count_from_operations(
                         loop_context=loop_context,
                         call_context=call_context,
                         loop_var_symbols=loop_var_symbols,
+                        is_controlled=is_controlled,
                     )
                     count = count + (inner_count * iterations)
 
@@ -772,6 +810,7 @@ def _count_from_operations(
                     loop_context=loop_context,
                     call_context=call_context,
                     loop_var_symbols=loop_var_symbols,
+                    is_controlled=is_controlled,
                 )
                 iterations = sp.Symbol("while_iter")
                 count = count + (inner_count * iterations)
@@ -784,6 +823,7 @@ def _count_from_operations(
                     loop_context=loop_context,
                     call_context=call_context,
                     loop_var_symbols=loop_var_symbols,
+                    is_controlled=is_controlled,
                 )
                 false_count = _count_from_operations(
                     op.false_operations,
@@ -791,6 +831,7 @@ def _count_from_operations(
                     loop_context=loop_context,
                     call_context=call_context,
                     loop_var_symbols=loop_var_symbols,
+                    is_controlled=is_controlled,
                 )
                 count = count + true_count.max(false_count)
 
@@ -839,6 +880,7 @@ def _count_from_operations(
                         loop_context=loop_context,
                         call_context=new_call_context,
                         loop_var_symbols=loop_var_symbols,
+                        is_controlled=is_controlled,
                     )
                     count = count + inner_count
 
@@ -885,12 +927,14 @@ def _count_from_operations(
                                     new_call_context[dim_formal.uuid] = resolved_dim
 
                     # Recursively count with preserved context
+                    # is_controlled=True promotes gate classifications
                     inner_count = _count_from_operations(
                         controlled_block.operations,
                         block=controlled_block,
                         loop_context=loop_context,
                         call_context=new_call_context,
                         loop_var_symbols=loop_var_symbols,
+                        is_controlled=True,
                     )
 
                     # Multiply by power if U^k is applied
@@ -904,7 +948,8 @@ def _count_from_operations(
 
             case CompositeGateOperation():
                 composite_count = _count_composite_gate(
-                    op, block, loop_context, call_context, loop_var_symbols
+                    op, block, loop_context, call_context, loop_var_symbols,
+                    is_controlled=is_controlled,
                 )
                 count = count + composite_count
 

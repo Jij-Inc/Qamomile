@@ -103,6 +103,7 @@ def estimate_qpe(
                 total=sp.simplify(total_gates),
                 single_qubit=sp.simplify(total_gates / 2),  # Rough estimate
                 two_qubit=sp.simplify(total_gates / 2),
+                multi_qubit=sp.Integer(0),
                 t_gates=sp.Integer(0),  # Depends on gate decomposition
                 clifford_gates=sp.Integer(0),
             ),
@@ -110,6 +111,7 @@ def estimate_qpe(
                 total_depth=sp.simplify(total_depth),
                 t_depth=sp.Integer(0),
                 two_qubit_depth=sp.simplify(total_depth / 2),
+                multi_qubit_depth=sp.Integer(0),
             ),
             parameters={
                 str(s): s
@@ -137,6 +139,7 @@ def estimate_qpe(
                 total=sp.simplify(total_gates),
                 single_qubit=sp.simplify(total_gates / 2),
                 two_qubit=sp.simplify(total_gates / 2),
+                multi_qubit=sp.Integer(0),
                 t_gates=sp.Integer(0),
                 clifford_gates=sp.Integer(0),
             ),
@@ -144,6 +147,7 @@ def estimate_qpe(
                 total_depth=sp.simplify(num_operations * n_expr),
                 t_depth=sp.Integer(0),
                 two_qubit_depth=sp.simplify(num_operations * n_expr / 2),
+                multi_qubit_depth=sp.Integer(0),
             ),
             parameters={
                 str(s): s for s in [n_expr, prec_expr] if isinstance(s, sp.Symbol)
@@ -214,6 +218,7 @@ def estimate_eigenvalue_filtering(
             total=sp.simplify(total_gates),
             single_qubit=sp.simplify(total_gates / 2),
             two_qubit=sp.simplify(total_gates / 2),
+            multi_qubit=sp.Integer(0),
             t_gates=sp.Integer(0),
             clifford_gates=sp.Integer(0),
         ),
@@ -221,6 +226,7 @@ def estimate_eigenvalue_filtering(
             total_depth=sp.simplify(total_gates),
             t_depth=sp.Integer(0),
             two_qubit_depth=sp.simplify(total_gates / 2),
+            multi_qubit_depth=sp.Integer(0),
         ),
         parameters={str(s): s for s in [n_expr, gamma] if isinstance(s, sp.Symbol)},
     )

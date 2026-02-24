@@ -70,6 +70,7 @@ class ResourceEstimate:
                 total=self.gates.total.subs(subs_dict),
                 single_qubit=self.gates.single_qubit.subs(subs_dict),
                 two_qubit=self.gates.two_qubit.subs(subs_dict),
+                multi_qubit=self.gates.multi_qubit.subs(subs_dict),
                 t_gates=self.gates.t_gates.subs(subs_dict),
                 clifford_gates=self.gates.clifford_gates.subs(subs_dict),
             ),
@@ -77,6 +78,7 @@ class ResourceEstimate:
                 total_depth=self.depth.total_depth.subs(subs_dict),
                 t_depth=self.depth.t_depth.subs(subs_dict),
                 two_qubit_depth=self.depth.two_qubit_depth.subs(subs_dict),
+                multi_qubit_depth=self.depth.multi_qubit_depth.subs(subs_dict),
             ),
             parameters=self.parameters,
         )
@@ -112,6 +114,7 @@ class ResourceEstimate:
                 "total": str(self.gates.total),
                 "single_qubit": str(self.gates.single_qubit),
                 "two_qubit": str(self.gates.two_qubit),
+                "multi_qubit": str(self.gates.multi_qubit),
                 "t_gates": str(self.gates.t_gates),
                 "clifford_gates": str(self.gates.clifford_gates),
             },
@@ -119,6 +122,7 @@ class ResourceEstimate:
                 "total_depth": str(self.depth.total_depth),
                 "t_depth": str(self.depth.t_depth),
                 "two_qubit_depth": str(self.depth.two_qubit_depth),
+                "multi_qubit_depth": str(self.depth.multi_qubit_depth),
             },
             "parameters": {k: str(v) for k, v in self.parameters.items()},
         }
@@ -132,12 +136,14 @@ class ResourceEstimate:
             f"    Total: {self.gates.total}",
             f"    Single-qubit: {self.gates.single_qubit}",
             f"    Two-qubit: {self.gates.two_qubit}",
+            f"    Multi-qubit: {self.gates.multi_qubit}",
             f"    T gates: {self.gates.t_gates}",
             f"    Clifford gates: {self.gates.clifford_gates}",
             "  Depth:",
             f"    Total: {self.depth.total_depth}",
             f"    T-depth: {self.depth.t_depth}",
             f"    Two-qubit depth: {self.depth.two_qubit_depth}",
+            f"    Multi-qubit depth: {self.depth.multi_qubit_depth}",
         ]
         if self.parameters:
             lines.append("  Parameters:")
@@ -212,11 +218,13 @@ def estimate_resources(
         gate_count.total,
         gate_count.single_qubit,
         gate_count.two_qubit,
+        gate_count.multi_qubit,
         gate_count.t_gates,
         gate_count.clifford_gates,
         circuit_depth.total_depth,
         circuit_depth.t_depth,
         circuit_depth.two_qubit_depth,
+        circuit_depth.multi_qubit_depth,
     ]:
         all_symbols.update(expr.free_symbols)
 

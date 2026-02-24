@@ -105,6 +105,7 @@ def estimate_trotter(
             total=sp.simplify(total_gates),
             single_qubit=sp.simplify(total_gates / 2),  # Rough split
             two_qubit=sp.simplify(total_gates / 2),
+            multi_qubit=sp.Integer(0),
             t_gates=sp.Integer(0),  # Depends on decomposition
             clifford_gates=sp.Integer(0),
         ),
@@ -112,6 +113,7 @@ def estimate_trotter(
             total_depth=sp.simplify(total_depth),
             t_depth=sp.Integer(0),
             two_qubit_depth=sp.simplify(total_depth / 2),
+            multi_qubit_depth=sp.Integer(0),
         ),
         parameters={
             str(s): s
@@ -195,6 +197,7 @@ def estimate_qsvt(
             total=sp.simplify(total_gates),
             single_qubit=sp.simplify(total_gates / 2),
             two_qubit=sp.simplify(total_gates / 2),
+            multi_qubit=sp.Integer(0),
             t_gates=sp.Integer(0),
             clifford_gates=sp.Integer(0),
         ),
@@ -202,6 +205,7 @@ def estimate_qsvt(
             total_depth=sp.simplify(num_calls * n_expr),
             t_depth=sp.Integer(0),
             two_qubit_depth=sp.simplify(num_calls * n_expr / 2),
+            multi_qubit_depth=sp.Integer(0),
         ),
         parameters={
             str(s): s
@@ -277,6 +281,7 @@ def estimate_qdrift(
             total=sp.simplify(total_operations),
             single_qubit=sp.Integer(0),  # Unknown without knowing term structure
             two_qubit=sp.Integer(0),
+            multi_qubit=sp.Integer(0),
             t_gates=sp.Integer(0),
             clifford_gates=sp.Integer(0),
         ),
@@ -285,6 +290,7 @@ def estimate_qdrift(
             total_depth=sp.simplify(total_operations),
             t_depth=sp.Integer(0),
             two_qubit_depth=sp.Integer(0),
+            multi_qubit_depth=sp.Integer(0),
         ),
         parameters={
             str(s): s

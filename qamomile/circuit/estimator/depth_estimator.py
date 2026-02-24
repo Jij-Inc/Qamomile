@@ -61,6 +61,7 @@ class CircuitDepth:
     total_depth: sp.Expr
     t_depth: sp.Expr
     two_qubit_depth: sp.Expr
+    multi_qubit_depth: sp.Expr
 
     def __add__(self, other: CircuitDepth) -> CircuitDepth:
         """Add two circuit depths (sequential composition)."""
@@ -68,6 +69,7 @@ class CircuitDepth:
             total_depth=self.total_depth + other.total_depth,
             t_depth=self.t_depth + other.t_depth,
             two_qubit_depth=self.two_qubit_depth + other.two_qubit_depth,
+            multi_qubit_depth=self.multi_qubit_depth + other.multi_qubit_depth,
         )
 
     def __mul__(self, factor: sp.Expr | int) -> CircuitDepth:
@@ -77,6 +79,7 @@ class CircuitDepth:
             total_depth=self.total_depth * factor_expr,
             t_depth=self.t_depth * factor_expr,
             two_qubit_depth=self.two_qubit_depth * factor_expr,
+            multi_qubit_depth=self.multi_qubit_depth * factor_expr,
         )
 
     __rmul__ = __mul__
@@ -87,6 +90,7 @@ class CircuitDepth:
             total_depth=sp.Max(self.total_depth, other.total_depth),
             t_depth=sp.Max(self.t_depth, other.t_depth),
             two_qubit_depth=sp.Max(self.two_qubit_depth, other.two_qubit_depth),
+            multi_qubit_depth=sp.Max(self.multi_qubit_depth, other.multi_qubit_depth),
         )
 
     def simplify(self) -> CircuitDepth:
@@ -95,6 +99,7 @@ class CircuitDepth:
             total_depth=sp.simplify(self.total_depth),
             t_depth=sp.simplify(self.t_depth),
             two_qubit_depth=sp.simplify(self.two_qubit_depth),
+            multi_qubit_depth=sp.simplify(self.multi_qubit_depth),
         )
 
     @staticmethod
@@ -104,6 +109,7 @@ class CircuitDepth:
             total_depth=sp.Integer(0),
             t_depth=sp.Integer(0),
             two_qubit_depth=sp.Integer(0),
+            multi_qubit_depth=sp.Integer(0),
         )
 
 
@@ -112,11 +118,20 @@ T_GATES = {"t", "tdg"}
 TWO_QUBIT_GATES = {"cx", "cy", "cz", "swap", "cp", "crx", "cry", "crz", "rzz"}
 
 
-def _estimate_gate_depth(op: GateOperation) -> CircuitDepth:
+SINGLE_QUBIT_GATES = {
+    "h", "x", "y", "z", "s", "sdg", "t", "tdg",
+    "rx", "ry", "rz", "p", "u", "u1", "u2", "u3",
+}
+
+
+def _estimate_gate_depth(
+    op: GateOperation, is_controlled: bool = False
+) -> CircuitDepth:
     """Estimate depth for a single gate operation.
 
     Args:
         op: The gate operation
+        is_controlled: Whether this gate is inside a ControlledUOperation
 
     Returns:
         Circuit depths for this operation
@@ -124,16 +139,27 @@ def _estimate_gate_depth(op: GateOperation) -> CircuitDepth:
     # Get gate name from enum
     gate_name = op.gate_type.name.lower() if op.gate_type else "unknown"
 
-    is_t_gate = gate_name in T_GATES
-    is_two_qubit = gate_name in TWO_QUBIT_GATES
+    if is_controlled:
+        is_single_qubit_base = gate_name in SINGLE_QUBIT_GATES
+        is_two_qubit_base = gate_name in TWO_QUBIT_GATES
 
-    t_depth = sp.Integer(1) if is_t_gate else sp.Integer(0)
-    two_qubit_depth = sp.Integer(1) if is_two_qubit else sp.Integer(0)
+        # Controlled T/Tdg are 2q gates, not simple T gates
+        t_depth = sp.Integer(0)
+        two_qubit_depth = sp.Integer(1) if is_single_qubit_base else sp.Integer(0)
+        multi_qubit_depth = sp.Integer(1) if is_two_qubit_base else sp.Integer(0)
+    else:
+        is_t_gate = gate_name in T_GATES
+        is_two_qubit = gate_name in TWO_QUBIT_GATES
+
+        t_depth = sp.Integer(1) if is_t_gate else sp.Integer(0)
+        two_qubit_depth = sp.Integer(1) if is_two_qubit else sp.Integer(0)
+        multi_qubit_depth = sp.Integer(0)
 
     return CircuitDepth(
         total_depth=sp.Integer(1),
         t_depth=t_depth,
         two_qubit_depth=two_qubit_depth,
+        multi_qubit_depth=multi_qubit_depth,
     )
 
 
@@ -161,6 +187,7 @@ def _extract_depth_from_metadata(meta: ResourceMetadata) -> CircuitDepth:
         total_depth=sp.Integer(total_depth),
         t_depth=sp.Integer(t_depth),
         two_qubit_depth=sp.Integer(two_qubit_depth),
+        multi_qubit_depth=sp.Integer(0),
     )
 
 
@@ -170,6 +197,7 @@ def _estimate_composite_gate_depth(
     loop_context: LoopContext,
     call_context: dict[str, Any],
     loop_var_symbols: dict[str, sp.Symbol],
+    is_controlled: bool = False,
 ) -> CircuitDepth:
     """Estimate depth of a CompositeGateOperation.
 
@@ -222,6 +250,7 @@ def _estimate_composite_gate_depth(
                 loop_context=loop_context,
                 call_context=new_call_context,
                 loop_var_symbols=loop_var_symbols,
+                is_controlled=is_controlled,
             )
 
     # Priority 3: Compute from known gate types
@@ -276,6 +305,7 @@ def _estimate_composite_gate_depth(
             total_depth=n,
             t_depth=sp.Integer(0),
             two_qubit_depth=n * (n - 1) / 2,  # Sequential estimate
+            multi_qubit_depth=sp.Integer(0),
         )
 
     # Priority 4: Error if no resource info or implementation
@@ -480,6 +510,7 @@ def _apply_sum_to_depth(
         total_depth=Sum(depth.total_depth, (loop_var, start, stop - 1)).doit(),
         t_depth=Sum(depth.t_depth, (loop_var, start, stop - 1)).doit(),
         two_qubit_depth=Sum(depth.two_qubit_depth, (loop_var, start, stop - 1)).doit(),
+        multi_qubit_depth=Sum(depth.multi_qubit_depth, (loop_var, start, stop - 1)).doit(),
     )
 
 
@@ -520,6 +551,7 @@ def _estimate_sequential_depth(
     loop_context: LoopContext | None = None,
     call_context: dict[str, Any] | None = None,
     loop_var_symbols: dict[str, sp.Symbol] | None = None,
+    is_controlled: bool = False,
 ) -> CircuitDepth:
     """Estimate depth assuming sequential execution.
 
@@ -548,7 +580,7 @@ def _estimate_sequential_depth(
     for op in operations:
         match op:
             case GateOperation():
-                depth = depth + _estimate_gate_depth(op)
+                depth = depth + _estimate_gate_depth(op, is_controlled=is_controlled)
 
             case ForOperation():
                 # Get loop bounds: for i in range(start, stop, step)
@@ -623,6 +655,7 @@ def _estimate_sequential_depth(
                         loop_context=new_context,
                         call_context=call_context,
                         loop_var_symbols=new_loop_var_symbols,
+                        is_controlled=is_controlled,
                     )
 
                     # Check if inner depth contains the current loop variable
@@ -650,6 +683,7 @@ def _estimate_sequential_depth(
                         loop_context=loop_context,
                         call_context=call_context,
                         loop_var_symbols=loop_var_symbols,
+                        is_controlled=is_controlled,
                     )
                     depth = depth + (inner_depth * iterations)
 
@@ -661,6 +695,7 @@ def _estimate_sequential_depth(
                     loop_context=loop_context,
                     call_context=call_context,
                     loop_var_symbols=loop_var_symbols,
+                    is_controlled=is_controlled,
                 )
                 iterations = sp.Symbol("while_iter")
                 depth = depth + (inner_depth * iterations)
@@ -673,6 +708,7 @@ def _estimate_sequential_depth(
                     loop_context=loop_context,
                     call_context=call_context,
                     loop_var_symbols=loop_var_symbols,
+                    is_controlled=is_controlled,
                 )
                 false_depth = _estimate_sequential_depth(
                     op.false_operations,
@@ -680,6 +716,7 @@ def _estimate_sequential_depth(
                     loop_context=loop_context,
                     call_context=call_context,
                     loop_var_symbols=loop_var_symbols,
+                    is_controlled=is_controlled,
                 )
                 depth = depth + true_depth.max(false_depth)
 
@@ -728,6 +765,7 @@ def _estimate_sequential_depth(
                         loop_context=loop_context,
                         call_context=new_call_context,
                         loop_var_symbols=loop_var_symbols,
+                        is_controlled=is_controlled,
                     )
                     depth = depth + inner_depth
 
@@ -774,12 +812,14 @@ def _estimate_sequential_depth(
                                     new_call_context[dim_formal.uuid] = resolved_dim
 
                     # Recursively estimate with preserved context
+                    # is_controlled=True promotes depth classifications
                     inner_depth = _estimate_sequential_depth(
                         controlled_block.operations,
                         block=controlled_block,
                         loop_context=loop_context,
                         call_context=new_call_context,
                         loop_var_symbols=loop_var_symbols,
+                        is_controlled=True,
                     )
 
                     # Multiply by power if U^k is applied
@@ -793,7 +833,8 @@ def _estimate_sequential_depth(
 
             case CompositeGateOperation():
                 composite_depth = _estimate_composite_gate_depth(
-                    op, block, loop_context, call_context, loop_var_symbols
+                    op, block, loop_context, call_context, loop_var_symbols,
+                    is_controlled=is_controlled,
                 )
                 depth = depth + composite_depth
 
