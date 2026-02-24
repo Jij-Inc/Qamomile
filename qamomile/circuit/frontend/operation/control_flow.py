@@ -13,7 +13,8 @@ from qamomile.circuit.ir.operation.control_flow import (
     WhileOperation,
 )
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.frontend.handle.array import ArrayBase
+from qamomile.circuit.ir.value import ArrayValue, Value
 
 
 class WhileLoop:
@@ -131,6 +132,9 @@ def _create_handle_from_value(value: Value, template_handle: Handle) -> Handle:
         return Float(value=value)
     elif isinstance(template_handle, Bit):
         return Bit(value=value)
+    elif isinstance(template_handle, ArrayBase):
+        cls = type(template_handle)
+        return cls._create_from_value(value=value, shape=template_handle._shape)
     else:
         # Fallback: return a generic Handle
         return Handle(value=value)
@@ -225,7 +229,14 @@ def _create_phi_for_values(
 
     # Create Phi output value (indexed to avoid name collisions)
     phi_index = len(if_operation.results)
-    phi_output = Value(type=true_v.type, name=f"{true_v.name}_phi_{phi_index}")
+    if isinstance(true_v, ArrayValue):
+        phi_output = ArrayValue(
+            type=true_v.type,
+            name=f"{true_v.name}_phi_{phi_index}",
+            shape=true_v.shape,
+        )
+    else:
+        phi_output = Value(type=true_v.type, name=f"{true_v.name}_phi_{phi_index}")
 
     # Create PhiOp and store in IfOperation
     _phi_op = PhiOp(operands=[condition_value, true_v, false_v], results=[phi_output])
