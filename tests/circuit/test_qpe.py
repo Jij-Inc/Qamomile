@@ -8,6 +8,11 @@ import pytest
 import qamomile.circuit as qmc
 
 
+def _decode_phase(bits: list) -> float:
+    """Decode measurement bits into a phase estimate."""
+    return sum(bit * (1 / (2 ** (i + 1))) for i, bit in enumerate(reversed(bits)))
+
+
 @pytest.fixture
 def qiskit_transpiler():
     pytest.importorskip("qiskit")
@@ -89,9 +94,7 @@ class TestQPENaive:
         result = job.result()
 
         for bits, count in result.results:
-            phase_estimate = sum(
-                bit * (1 / (2 ** (i + 1))) for i, bit in enumerate(reversed(bits))
-            )
+            phase_estimate = _decode_phase(bits)
             assert phase_estimate == pytest.approx(0.25), (
                 f"Naive QPE: expected 0.25, got {phase_estimate} "
                 f"(bits={bits}, count={count})"
@@ -106,9 +109,7 @@ class TestQPENaive:
         result = job.result()
 
         for bits, count in result.results:
-            phase_estimate = sum(
-                bit * (1 / (2 ** (i + 1))) for i, bit in enumerate(reversed(bits))
-            )
+            phase_estimate = _decode_phase(bits)
             assert phase_estimate == pytest.approx(0.125), (
                 f"Naive QPE: expected 0.125, got {phase_estimate}"
             )
@@ -167,9 +168,7 @@ class TestQPEConsistency:
         naive_result = naive_job.result()
         naive_phases = set()
         for bits, count in naive_result.results:
-            phase_est = sum(
-                bit * (1 / (2 ** (i + 1))) for i, bit in enumerate(reversed(bits))
-            )
+            phase_est = _decode_phase(bits)
             naive_phases.add(round(phase_est, 6))
 
         # Built-in QPE
@@ -270,9 +269,7 @@ class TestQPEConsistency:
         naive_result = naive_job.result()
         naive_phase_counts = {}
         for bits, count in naive_result.results:
-            phase_est = sum(
-                bit * (1 / (2 ** (i + 1))) for i, bit in enumerate(reversed(bits))
-            )
+            phase_est = _decode_phase(bits)
             naive_phase_counts[round(phase_est, 6)] = count
         naive_top = max(naive_phase_counts, key=naive_phase_counts.get)
 
