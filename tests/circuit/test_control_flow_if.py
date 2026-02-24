@@ -18,8 +18,8 @@ from qamomile.circuit.ir.types.primitives import BitType, FloatType, QubitType
 from qamomile.circuit.ir.value import Value
 
 
-class TestIfElseBothBranches:
-    """Both true and false branches contain quantum operations."""
+class TestIfElseScalarQubit:
+    """If-else control flow with scalar Qubit parameters only."""
 
     def test_if_else_both_branches_same_qubit(self):
         """Applying different gates to the same qubit in both branches.
@@ -95,9 +95,8 @@ class TestIfElseBothBranches:
             assert len(phi.operands) == 3
             assert len(phi.results) == 1
 
-    def test_if_else_diff(self):
-        """If without else should work. The false branch is empty (returns vars as-is),
-        so no qubit is consumed there."""
+    def test_if_else_asymmetric_branch_ops(self):
+        """If-else with different number of operations in each branch."""
 
         @qkernel
         def circuit(q0: Qubit, q1: Qubit) -> Qubit:
@@ -126,10 +125,6 @@ class TestIfElseBothBranches:
             assert isinstance(phi, PhiOp)
             assert len(phi.operands) == 3
             assert len(phi.results) == 1
-
-
-class TestIfWithoutElse:
-    """If-only or if with an empty else branch (no quantum operations in false branch)."""
 
     def test_if_only_no_else(self):
         """If without else should work. The false branch is empty (returns vars as-is),
@@ -190,17 +185,8 @@ class TestIfWithoutElse:
             assert len(phi.operands) == 3
             assert len(phi.results) == 1
 
-
-class TestIfElseNested:
-    """Nested if-else control flow."""
-
     def test_nested_if_else(self):
-        """Nested if-else inside a branch should build successfully.
-
-        Currently fails due to AST transformer limitation with nested
-        control flow.  This test documents the limitation and should be
-        updated when nested if-else is supported.
-        """
+        """Nested if-else inside a branch should build successfully."""
 
         @qkernel
         def circuit(q0: Qubit, q1: Qubit, q2: Qubit) -> Qubit:
@@ -427,8 +413,10 @@ class TestIfElseWithSymbolicVector:
             assert len(phi.results) == 1
 
 
-class TestIfElseWithDynamicQubitArray:
-    """n: UInt parameter + internal qm.qubit_array(n, ...) in if-else branches."""
+class TestIfElseWithQubitArray:
+    """If-else with qm.qubit_array() — both dynamic (UInt parameter) and fixed-size."""
+
+    # --- Dynamic qubit_array (UInt parameter) ---
 
     @pytest.mark.parametrize("n", [1, 3, 100])
     def test_if_else_dynamic_qubit_array_both_branches(self, n):
@@ -556,9 +544,7 @@ class TestIfElseWithDynamicQubitArray:
             assert len(phi.operands) == 3
             assert len(phi.results) == 1
 
-
-class TestIfElseWithVector:
-    """Vector[Qubit] and mixed Vector/Qubit in if-else branches."""
+    # --- Fixed-size qubit_array (element operations) ---
 
     def test_if_else_vector_element_ops_both_branches(self):
         """Different gates on same Vector element in each branch."""
@@ -714,9 +700,7 @@ class TestIfElseWithVector:
             assert len(phi.operands) == 3
             assert len(phi.results) == 1
 
-
-class TestIfElseWithVectorMeasurement:
-    """Measure Vector[Qubit] → Vector[Bit], use indexed bit as if condition."""
+    # --- Vector measurement as condition ---
 
     def test_measure_vector_condition_single_qubit_op(self):
         """Measure entire Vector, use bits[0] as condition, operate on separate Qubit."""
@@ -779,9 +763,7 @@ class TestIfElseWithVectorMeasurement:
             assert len(phi.operands) == 3
             assert len(phi.results) == 1
 
-
-class TestIfElseWholeVectorOps:
-    """Measure single qubit, operate on multiple/all Vector elements in branches."""
+    # --- Whole vector operations ---
 
     def test_qubit_condition_all_vector_elements(self):
         """Operate on all elements of a Vector in both branches."""
