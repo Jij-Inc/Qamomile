@@ -1,9 +1,15 @@
+from __future__ import annotations
+
 import dataclasses
+import typing
 
 from qamomile.circuit.ir.types.primitives import BitType, BlockType, UIntType
 from qamomile.circuit.ir.value import Value
 
 from .operation import Operation, OperationKind, ParamHint, Signature
+
+if typing.TYPE_CHECKING:
+    from .arithmetic_operations import PhiOp
 
 
 @dataclasses.dataclass
@@ -103,12 +109,14 @@ class IfOperation(Operation):
     Attributes:
         true_operations: List of operations in the true branch
         false_operations: List of operations in the false branch (may be empty)
+        phi_ops: List of PhiOp instances merging values from both branches
         operands[0]: condition (Bit type from measurement or comparison)
         results: Phi-merged output values from both branches
     """
 
     true_operations: list[Operation] = dataclasses.field(default_factory=list)
     false_operations: list[Operation] = dataclasses.field(default_factory=list)
+    phi_ops: list[PhiOp] = dataclasses.field(default_factory=list)
 
     @property
     def condition(self) -> Value:
