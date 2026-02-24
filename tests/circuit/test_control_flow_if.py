@@ -3,15 +3,18 @@
 import pytest
 
 import qamomile.circuit as qm
-from qamomile.circuit.frontend.qkernel import qkernel
 from qamomile.circuit.frontend.handle import Qubit
-from qamomile.circuit.ir.operation.control_flow import IfOperation
+from qamomile.circuit.frontend.handle.primitives import Float
+from qamomile.circuit.frontend.operation.control_flow import _create_phi_for_values
+from qamomile.circuit.frontend.qkernel import qkernel
 from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
-from qamomile.circuit.transpiler.errors import QubitConsumedError
+from qamomile.circuit.ir.operation.control_flow import IfOperation
+from qamomile.circuit.ir.types.primitives import BitType, FloatType, QubitType
+from qamomile.circuit.ir.value import Value
 
 
-class TestIfElseQubitConsumed:
-    """Both branches operating on the same Qubit should not raise QubitConsumedError."""
+class TestIfElseBothBranches:
+    """Both true and false branches contain quantum operations."""
 
     def test_if_else_both_branches_same_qubit(self):
         """Applying different gates to the same qubit in both branches.
@@ -36,13 +39,20 @@ class TestIfElseQubitConsumed:
                 q1 = qm.h(q1)
             return q1
 
-        try:
-            graph = circuit.build()
-        except QubitConsumedError:
-            pytest.fail(
-                "QubitConsumedError should not be raised for exclusive if-else branches"
-            )
-        assert graph is not None
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        assert len(if_ops[0].true_operations) == 1
+        assert len(if_ops[0].false_operations) == 1
+        assert len(if_ops[0].results) == 2
+        results = if_ops[0].results
+        assert results[0].type == BitType()
+        assert results[1].type == QubitType()
+        assert len(if_ops[0].phi_ops) == 2
+        for phi in if_ops[0].phi_ops:
+            assert isinstance(phi, PhiOp)
+            assert len(phi.operands) == 3
+            assert len(phi.results) == 1
 
     def test_if_else_multiple_qubits_in_branches(self):
         """Multiple qubits operated on in both branches should work."""
@@ -59,7 +69,53 @@ class TestIfElseQubitConsumed:
             return q1, q2
 
         graph = circuit.build()
-        assert graph is not None
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        assert len(if_ops[0].true_operations) == 2
+        assert len(if_ops[0].false_operations) == 2
+        assert len(if_ops[0].results) == 3
+        results = if_ops[0].results
+        assert results[0].type == BitType()
+        assert results[1].type == QubitType()
+        assert results[2].type == QubitType()
+        assert len(if_ops[0].phi_ops) == 3
+        for phi in if_ops[0].phi_ops:
+            assert isinstance(phi, PhiOp)
+            assert len(phi.operands) == 3
+            assert len(phi.results) == 1
+
+    def test_if_else_diff(self):
+        """If without else should work. The false branch is empty (returns vars as-is),
+        so no qubit is consumed there."""
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit) -> Qubit:
+            cond = qm.measure(q0)
+            if cond:
+                q1 = qm.x(q1)
+            else:
+                q1 = qm.h(q1)
+                q1 = qm.x(q1)
+            return q1
+
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        assert len(if_ops[0].true_operations) == 1
+        assert len(if_ops[0].false_operations) == 2
+        assert len(if_ops[0].results) == 2
+        results = if_ops[0].results
+        assert results[0].type == BitType()
+        assert results[1].type == QubitType()
+        assert len(if_ops[0].phi_ops) == 2
+        for phi in if_ops[0].phi_ops:
+            assert isinstance(phi, PhiOp)
+            assert len(phi.operands) == 3
+            assert len(phi.results) == 1
+
+
+class TestIfWithoutElse:
+    """If-only or if with an empty else branch (no quantum operations in false branch)."""
 
     def test_if_only_no_else(self):
         """If without else should work. The false branch is empty (returns vars as-is),
@@ -73,33 +129,25 @@ class TestIfElseQubitConsumed:
             return q1
 
         graph = circuit.build()
-        assert graph is not None
-
-
-class TestIfElseIRStructure:
-    """PhiOp should be recorded in IfOperation and the IR should be well-formed."""
-
-    def test_if_operation_in_graph(self):
-        """The built graph should contain an IfOperation."""
-
-        @qkernel
-        def circuit(q0: Qubit, q1: Qubit) -> Qubit:
-            cond = qm.measure(q0)
-            if cond:
-                q1 = qm.x(q1)
-            else:
-                q1 = qm.h(q1)
-            return q1
-
-        graph = circuit.build()
         if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
-        assert len(if_ops) == 1, f"Expected 1 IfOperation, got {len(if_ops)}"
+        assert len(if_ops) == 1
+        assert len(if_ops[0].true_operations) == 1
+        assert len(if_ops[0].false_operations) == 0
+        assert len(if_ops[0].results) == 2
+        results = if_ops[0].results
+        assert results[0].type == BitType()
+        assert results[1].type == QubitType()
+        assert len(if_ops[0].phi_ops) == 2
+        for phi in if_ops[0].phi_ops:
+            assert isinstance(phi, PhiOp)
+            assert len(phi.operands) == 3
+            assert len(phi.results) == 1
 
-    def test_phi_ops_recorded_in_if_operation(self):
-        """PhiOp instances should be stored in IfOperation.phi_ops.
+    def test_if_else_classical_only_in_one_branch(self):
+        """One branch with no qubit operations should work.
 
-        Previously, PhiOp was created but discarded (_phi_op was never stored).
-        Now it is appended to if_operation.phi_ops.
+        The false branch only returns the qubit unchanged, producing
+        a PhiOp that merges the gate-applied and identity paths.
         """
 
         @qkernel
@@ -108,38 +156,96 @@ class TestIfElseIRStructure:
             if cond:
                 q1 = qm.x(q1)
             else:
-                q1 = qm.h(q1)
+                pass  # no qubit operations
             return q1
 
         graph = circuit.build()
         if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
         assert len(if_ops) == 1
-
-        if_op = if_ops[0]
-        assert hasattr(if_op, "phi_ops"), "IfOperation should have phi_ops field"
-        assert len(if_op.phi_ops) > 0, "PhiOps should be recorded in IfOperation"
-
-        # Verify each PhiOp structure
-        for phi in if_op.phi_ops:
+        assert len(if_ops[0].true_operations) == 1
+        assert len(if_ops[0].false_operations) == 0
+        assert len(if_ops[0].results) == 2
+        results = if_ops[0].results
+        assert results[0].type == BitType()
+        assert results[1].type == QubitType()
+        assert len(if_ops[0].phi_ops) == 2
+        for phi in if_ops[0].phi_ops:
             assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3  # condition, true_value, false_value
-            assert len(phi.results) == 1  # phi_output
+            assert len(phi.operands) == 3
+            assert len(phi.results) == 1
 
-    def test_if_operation_has_true_and_false_operations(self):
-        """IfOperation should have operations recorded in both branches."""
+
+class TestIfElseNested:
+    """Nested if-else control flow."""
+
+    def test_nested_if_else(self):
+        """Nested if-else inside a branch should build successfully.
+
+        Currently fails due to AST transformer limitation with nested
+        control flow.  This test documents the limitation and should be
+        updated when nested if-else is supported.
+        """
 
         @qkernel
-        def circuit(q0: Qubit, q1: Qubit) -> Qubit:
-            cond = qm.measure(q0)
-            if cond:
-                q1 = qm.x(q1)
+        def circuit(q0: Qubit, q1: Qubit, q2: Qubit) -> Qubit:
+            cond1 = qm.measure(q0)
+            if cond1:
+                cond2 = qm.measure(q2)
+                if cond2:
+                    q1 = qm.x(q1)
+                else:
+                    q1 = qm.h(q1)
             else:
                 q1 = qm.h(q1)
             return q1
 
         graph = circuit.build()
-        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
-        if_op = if_ops[0]
 
-        assert len(if_op.true_operations) > 0, "True branch should have operations"
-        assert len(if_op.false_operations) > 0, "False branch should have operations"
+        # Outer IfOperation should exist at the top level
+        outer_if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(outer_if_ops) == 1, "Expected 1 outer IfOperation"
+        outer_if = outer_if_ops[0]
+        assert len(outer_if.true_operations) == 2
+        assert len(outer_if.false_operations) == 1
+        assert len(outer_if.results) == 3
+        results = outer_if.results
+        assert results[0].type == BitType()
+        assert results[1].type == QubitType()
+        assert results[2].type == QubitType()
+        assert len(outer_if.phi_ops) == 3
+        for phi in outer_if.phi_ops:
+            assert isinstance(phi, PhiOp)
+            assert len(phi.operands) == 3
+            assert len(phi.results) == 1
+
+        # Outer true branch should contain an inner IfOperation
+        inner_if_ops = [
+            op for op in outer_if.true_operations if isinstance(op, IfOperation)
+        ]
+        assert len(inner_if_ops) == 1, "Expected 1 inner IfOperation in true branch"
+        inner_if = inner_if_ops[0]
+        assert len(inner_if.true_operations) == 1
+        assert len(inner_if.false_operations) == 1
+        assert len(inner_if.results) == 2
+        results = inner_if.results
+        assert results[0].type == BitType()
+        assert results[1].type == QubitType()
+        assert len(inner_if.phi_ops) == 2
+        for phi in inner_if.phi_ops:
+            assert isinstance(phi, PhiOp)
+            assert len(phi.operands) == 3
+            assert len(phi.results) == 1
+
+
+class TestIfElseErrorHandling:
+    """Error cases for if-else control flow."""
+
+    def test_phi_type_mismatch_raises_type_error(self):
+        """_create_phi_for_values should raise TypeError when branch types differ."""
+        if_op = IfOperation()
+        condition = Value(type=BitType(), name="cond")
+        true_val = Qubit(value=Value(type=QubitType(), name="q_true"))
+        false_val = Float(value=Value(type=FloatType(), name="f_false"))
+
+        with pytest.raises(TypeError, match="Type mismatch in if-else branches"):
+            _create_phi_for_values(condition, true_val, false_val, if_op)
