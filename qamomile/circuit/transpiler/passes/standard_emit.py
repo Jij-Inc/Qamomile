@@ -41,7 +41,9 @@ from qamomile.circuit.transpiler.passes.emit_base import (
     LoopAnalyzer,
     CompositeDecomposer,
 )
+from qamomile.circuit.frontend.handle.handle import Handle
 from qamomile.circuit.transpiler.errors import (
+    EmitError,
     QubitIndexResolutionError,
     OperandResolutionInfo,
     ResolutionFailureReason,
@@ -1088,16 +1090,32 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             block_value, num_targets, local_bindings
         )
 
-        # Resolve power value from bindings if it's a Value
+        # Resolve power value from bindings
         power_value = op.power
         if isinstance(power_value, Value):
-            power_value = self._value_resolver.resolve_value(power_value, bindings)
-
-        # Handle UInt or other non-int types by getting numeric value
-        if hasattr(power_value, "value") and hasattr(power_value.value, "get_const"):
-            const_val = power_value.value.get_const()
-            if const_val is not None:
-                power_value = int(const_val)
+            power_value = self._resolver.resolve_classical_value(
+                power_value, bindings
+            )
+        elif isinstance(power_value, Handle):
+            # Handle type (e.g., UInt) - resolve inner Value via bindings
+            inner_value = power_value.value
+            resolved = self._resolver.resolve_classical_value(
+                inner_value, bindings
+            )
+            if resolved is not None:
+                power_value = int(resolved)
+            else:
+                # Currently unreachable: resolve_classical_value resolves
+                # all Handle-wrapped expressions (including BinOp with loop
+                # variables) via UUID-based binding lookup.  This guard
+                # exists to surface future IR changes that break resolution
+                # instead of silently emitting U^1.
+                raise EmitError(
+                    f"Failed to resolve ControlledU power from Handle: "
+                    f"inner value {inner_value} could not be resolved. "
+                    f"This likely indicates an unbound loop variable in the IR.",
+                    operation="ControlledUOperation",
+                )
 
         if unitary_gate is not None:
             # Only apply power if it's a concrete int value > 1
