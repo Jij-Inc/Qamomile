@@ -554,6 +554,11 @@ class ValueResolver:
                     if isinstance(bound_val, (int, float)):
                         return int(bound_val)
                     return None
+            elif val.uuid in bindings:
+                bound_val = bindings[val.uuid]
+                if isinstance(bound_val, (int, float)):
+                    return int(bound_val)
+                return None
             elif val.name in bindings:
                 bound_val = bindings[val.name]
                 if isinstance(bound_val, (int, float)):
