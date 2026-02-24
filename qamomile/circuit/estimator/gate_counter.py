@@ -66,6 +66,7 @@ class GateCount:
     multi_qubit: sp.Expr
     t_gates: sp.Expr
     clifford_gates: sp.Expr
+    rotation_gates: sp.Expr
 
     def __add__(self, other: GateCount) -> GateCount:
         """Add two gate counts together."""
@@ -76,6 +77,7 @@ class GateCount:
             multi_qubit=self.multi_qubit + other.multi_qubit,
             t_gates=self.t_gates + other.t_gates,
             clifford_gates=self.clifford_gates + other.clifford_gates,
+            rotation_gates=self.rotation_gates + other.rotation_gates,
         )
 
     def __mul__(self, factor: sp.Expr | int) -> GateCount:
@@ -88,6 +90,7 @@ class GateCount:
             multi_qubit=self.multi_qubit * factor_expr,
             t_gates=self.t_gates * factor_expr,
             clifford_gates=self.clifford_gates * factor_expr,
+            rotation_gates=self.rotation_gates * factor_expr,
         )
 
     __rmul__ = __mul__
@@ -101,6 +104,7 @@ class GateCount:
             multi_qubit=sp.Max(self.multi_qubit, other.multi_qubit),
             t_gates=sp.Max(self.t_gates, other.t_gates),
             clifford_gates=sp.Max(self.clifford_gates, other.clifford_gates),
+            rotation_gates=sp.Max(self.rotation_gates, other.rotation_gates),
         )
 
     def simplify(self) -> GateCount:
@@ -112,6 +116,7 @@ class GateCount:
             multi_qubit=sp.simplify(self.multi_qubit),
             t_gates=sp.simplify(self.t_gates),
             clifford_gates=sp.simplify(self.clifford_gates),
+            rotation_gates=sp.simplify(self.rotation_gates),
         )
 
     @staticmethod
@@ -124,6 +129,7 @@ class GateCount:
             multi_qubit=sp.Integer(0),
             t_gates=sp.Integer(0),
             clifford_gates=sp.Integer(0),
+            rotation_gates=sp.Integer(0),
         )
 
 
@@ -149,14 +155,13 @@ SINGLE_QUBIT_GATES = {
     "u3",
 }
 TWO_QUBIT_GATES = {"cx", "cy", "cz", "swap", "cp", "crx", "cry", "crz", "rzz"}
+ROTATION_GATES = {"rx", "ry", "rz", "p", "cp", "crx", "cry", "crz", "rzz"}
 
 
 _CONTROLLED_CLIFFORD_GATES = {"x", "y", "z"}
 
 
-def _count_gate_operation(
-    op: GateOperation, is_controlled: bool = False
-) -> GateCount:
+def _count_gate_operation(op: GateOperation, is_controlled: bool = False) -> GateCount:
     """Count gates for a single gate operation.
 
     Args:
@@ -182,21 +187,22 @@ def _count_gate_operation(
         t_count = sp.Integer(0)
         # Only CX, CY, CZ are standard Clifford gates
         clifford = (
-            sp.Integer(1)
-            if gate_name in _CONTROLLED_CLIFFORD_GATES
-            else sp.Integer(0)
+            sp.Integer(1) if gate_name in _CONTROLLED_CLIFFORD_GATES else sp.Integer(0)
         )
+        rotation = sp.Integer(1) if gate_name in ROTATION_GATES else sp.Integer(0)
     else:
         is_clifford = gate_name in CLIFFORD_GATES
         is_t_gate = gate_name in T_GATES
         is_single_qubit = gate_name in SINGLE_QUBIT_GATES
         is_two_qubit = gate_name in TWO_QUBIT_GATES
+        is_rotation = gate_name in ROTATION_GATES
 
         single = sp.Integer(1) if is_single_qubit else sp.Integer(0)
         two = sp.Integer(1) if is_two_qubit else sp.Integer(0)
         multi = sp.Integer(0)
         t_count = sp.Integer(1) if is_t_gate else sp.Integer(0)
         clifford = sp.Integer(1) if is_clifford else sp.Integer(0)
+        rotation = sp.Integer(1) if is_rotation else sp.Integer(0)
 
     return GateCount(
         total=sp.Integer(1),
@@ -205,6 +211,7 @@ def _count_gate_operation(
         multi_qubit=multi,
         t_gates=t_count,
         clifford_gates=clifford,
+        rotation_gates=rotation,
     )
 
 
@@ -268,6 +275,22 @@ def _extract_gate_count_from_metadata(meta: ResourceMetadata) -> GateCount:
         clifford += custom.get("num_cz_gates", 0)
         clifford += custom.get("num_swap_gates", 0)
 
+    # Extract rotation gates
+    rotation = custom.get("num_rotation_gates", 0)
+    if rotation == 0:
+        for key in [
+            "num_rx_gates",
+            "num_ry_gates",
+            "num_rz_gates",
+            "num_p_gates",
+            "num_cp_gates",
+            "num_crx_gates",
+            "num_cry_gates",
+            "num_crz_gates",
+            "num_rzz_gates",
+        ]:
+            rotation += custom.get(key, 0)
+
     return GateCount(
         total=sp.Integer(total) if total > 0 else sp.Integer(single_qubit + two_qubit),
         single_qubit=sp.Integer(single_qubit),
@@ -275,6 +298,7 @@ def _extract_gate_count_from_metadata(meta: ResourceMetadata) -> GateCount:
         multi_qubit=sp.Integer(0),
         t_gates=sp.Integer(t_gates) if t_gates else sp.Integer(0),
         clifford_gates=sp.Integer(clifford),
+        rotation_gates=sp.Integer(rotation),
     )
 
 
@@ -420,6 +444,7 @@ def _count_composite_gate(
             multi_qubit=sp.Integer(0),
             t_gates=sp.Integer(0),
             clifford_gates=h_gates + swap_gates,  # H and SWAP are Clifford
+            rotation_gates=cp_gates,  # CP gates are rotation gates
         )
 
     # Priority 4: Error if no resource info or implementation
@@ -628,6 +653,7 @@ def _apply_sum_to_count(
         multi_qubit=Sum(count.multi_qubit, (loop_var, start, stop - 1)).doit(),
         t_gates=Sum(count.t_gates, (loop_var, start, stop - 1)).doit(),
         clifford_gates=Sum(count.clifford_gates, (loop_var, start, stop - 1)).doit(),
+        rotation_gates=Sum(count.rotation_gates, (loop_var, start, stop - 1)).doit(),
     )
 
 
@@ -948,7 +974,11 @@ def _count_from_operations(
 
             case CompositeGateOperation():
                 composite_count = _count_composite_gate(
-                    op, block, loop_context, call_context, loop_var_symbols,
+                    op,
+                    block,
+                    loop_context,
+                    call_context,
+                    loop_var_symbols,
                     is_controlled=is_controlled,
                 )
                 count = count + composite_count

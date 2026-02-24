@@ -87,7 +87,9 @@ def estimate_trotter(
     exponent_time = sp.Rational(1 + 1 / p)
     exponent_error = sp.Rational(1 / p)
 
-    num_steps = sp.Pow(h1norm * t_expr, exponent_time) / sp.Pow(eps_expr, exponent_error)
+    num_steps = sp.Pow(h1norm * t_expr, exponent_time) / sp.Pow(
+        eps_expr, exponent_error
+    )
 
     # Each step applies all L Hamiltonian terms
     # Each term typically requires O(1) to O(n) gates
@@ -108,12 +110,14 @@ def estimate_trotter(
             multi_qubit=sp.Integer(0),
             t_gates=sp.Integer(0),  # Depends on decomposition
             clifford_gates=sp.Integer(0),
+            rotation_gates=sp.Integer(0),
         ),
         depth=CircuitDepth(
             total_depth=sp.simplify(total_depth),
             t_depth=sp.Integer(0),
             two_qubit_depth=sp.simplify(total_depth / 2),
             multi_qubit_depth=sp.Integer(0),
+            rotation_depth=sp.Integer(0),
         ),
         parameters={
             str(s): s
@@ -200,12 +204,14 @@ def estimate_qsvt(
             multi_qubit=sp.Integer(0),
             t_gates=sp.Integer(0),
             clifford_gates=sp.Integer(0),
+            rotation_gates=sp.Integer(0),
         ),
         depth=CircuitDepth(
             total_depth=sp.simplify(num_calls * n_expr),
             t_depth=sp.Integer(0),
             two_qubit_depth=sp.simplify(num_calls * n_expr / 2),
             multi_qubit_depth=sp.Integer(0),
+            rotation_depth=sp.Integer(0),
         ),
         parameters={
             str(s): s
@@ -284,6 +290,7 @@ def estimate_qdrift(
             multi_qubit=sp.Integer(0),
             t_gates=sp.Integer(0),
             clifford_gates=sp.Integer(0),
+            rotation_gates=sp.Integer(0),
         ),
         depth=CircuitDepth(
             # Sequential application
@@ -291,6 +298,7 @@ def estimate_qdrift(
             t_depth=sp.Integer(0),
             two_qubit_depth=sp.Integer(0),
             multi_qubit_depth=sp.Integer(0),
+            rotation_depth=sp.Integer(0),
         ),
         parameters={
             str(s): s

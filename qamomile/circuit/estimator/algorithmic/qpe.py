@@ -106,12 +106,14 @@ def estimate_qpe(
                 multi_qubit=sp.Integer(0),
                 t_gates=sp.Integer(0),  # Depends on gate decomposition
                 clifford_gates=sp.Integer(0),
+                rotation_gates=sp.Integer(0),
             ),
             depth=CircuitDepth(
                 total_depth=sp.simplify(total_depth),
                 t_depth=sp.Integer(0),
                 two_qubit_depth=sp.simplify(total_depth / 2),
                 multi_qubit_depth=sp.Integer(0),
+                rotation_depth=sp.Integer(0),
             ),
             parameters={
                 str(s): s
@@ -142,12 +144,14 @@ def estimate_qpe(
                 multi_qubit=sp.Integer(0),
                 t_gates=sp.Integer(0),
                 clifford_gates=sp.Integer(0),
+                rotation_gates=sp.Integer(0),
             ),
             depth=CircuitDepth(
                 total_depth=sp.simplify(num_operations * n_expr),
                 t_depth=sp.Integer(0),
                 two_qubit_depth=sp.simplify(num_operations * n_expr / 2),
                 multi_qubit_depth=sp.Integer(0),
+                rotation_depth=sp.Integer(0),
             ),
             parameters={
                 str(s): s for s in [n_expr, prec_expr] if isinstance(s, sp.Symbol)
@@ -221,12 +225,14 @@ def estimate_eigenvalue_filtering(
             multi_qubit=sp.Integer(0),
             t_gates=sp.Integer(0),
             clifford_gates=sp.Integer(0),
+            rotation_gates=sp.Integer(0),
         ),
         depth=CircuitDepth(
             total_depth=sp.simplify(total_gates),
             t_depth=sp.Integer(0),
             two_qubit_depth=sp.simplify(total_gates / 2),
             multi_qubit_depth=sp.Integer(0),
+            rotation_depth=sp.Integer(0),
         ),
         parameters={str(s): s for s in [n_expr, gamma] if isinstance(s, sp.Symbol)},
     )

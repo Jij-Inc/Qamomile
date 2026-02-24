@@ -73,12 +73,14 @@ class ResourceEstimate:
                 multi_qubit=self.gates.multi_qubit.subs(subs_dict),
                 t_gates=self.gates.t_gates.subs(subs_dict),
                 clifford_gates=self.gates.clifford_gates.subs(subs_dict),
+                rotation_gates=self.gates.rotation_gates.subs(subs_dict),
             ),
             depth=CircuitDepth(
                 total_depth=self.depth.total_depth.subs(subs_dict),
                 t_depth=self.depth.t_depth.subs(subs_dict),
                 two_qubit_depth=self.depth.two_qubit_depth.subs(subs_dict),
                 multi_qubit_depth=self.depth.multi_qubit_depth.subs(subs_dict),
+                rotation_depth=self.depth.rotation_depth.subs(subs_dict),
             ),
             parameters=self.parameters,
         )
@@ -117,12 +119,14 @@ class ResourceEstimate:
                 "multi_qubit": str(self.gates.multi_qubit),
                 "t_gates": str(self.gates.t_gates),
                 "clifford_gates": str(self.gates.clifford_gates),
+                "rotation_gates": str(self.gates.rotation_gates),
             },
             "depth": {
                 "total_depth": str(self.depth.total_depth),
                 "t_depth": str(self.depth.t_depth),
                 "two_qubit_depth": str(self.depth.two_qubit_depth),
                 "multi_qubit_depth": str(self.depth.multi_qubit_depth),
+                "rotation_depth": str(self.depth.rotation_depth),
             },
             "parameters": {k: str(v) for k, v in self.parameters.items()},
         }
@@ -139,11 +143,13 @@ class ResourceEstimate:
             f"    Multi-qubit: {self.gates.multi_qubit}",
             f"    T gates: {self.gates.t_gates}",
             f"    Clifford gates: {self.gates.clifford_gates}",
+            f"    Rotation gates: {self.gates.rotation_gates}",
             "  Depth:",
             f"    Total: {self.depth.total_depth}",
             f"    T-depth: {self.depth.t_depth}",
             f"    Two-qubit depth: {self.depth.two_qubit_depth}",
             f"    Multi-qubit depth: {self.depth.multi_qubit_depth}",
+            f"    Rotation depth: {self.depth.rotation_depth}",
         ]
         if self.parameters:
             lines.append("  Parameters:")
@@ -221,10 +227,12 @@ def estimate_resources(
         gate_count.multi_qubit,
         gate_count.t_gates,
         gate_count.clifford_gates,
+        gate_count.rotation_gates,
         circuit_depth.total_depth,
         circuit_depth.t_depth,
         circuit_depth.two_qubit_depth,
         circuit_depth.multi_qubit_depth,
+        circuit_depth.rotation_depth,
     ]:
         all_symbols.update(expr.free_symbols)
 

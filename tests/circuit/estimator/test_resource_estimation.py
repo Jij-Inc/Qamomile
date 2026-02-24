@@ -42,6 +42,7 @@ class TestBasicCircuitEstimation:
         assert est.gates.single_qubit == 1  # H gate
         assert est.gates.two_qubit == 1  # CX gate
         assert est.gates.clifford_gates == 2  # Both H and CX are Clifford
+        assert est.gates.rotation_gates == 0  # No rotation gates
 
     def test_parametric_ghz_estimation(self):
         """Test resource estimation with symbolic parameter."""
@@ -122,6 +123,7 @@ class TestBasicCircuitEstimation:
         assert est.gates.total == 9
         assert est.gates.single_qubit == 5  # RX gates
         assert est.gates.two_qubit == 4  # RZZ gates
+        assert est.gates.rotation_gates == 9  # All are rotation gates
 
     def test_nested_loop_dependent_bounds(self):
         """Test nested loops where inner bound depends on outer variable."""
@@ -545,6 +547,7 @@ class TestCompositeGateEstimation:
 
         # QFT(4) = 4 H + 6 CP (0+1+2+3=6 pairs) + 2 SWAP = 12 gates
         assert est.gates.total == 12
+        assert est.gates.rotation_gates == 6  # 6 CP gates are rotation
 
     def test_iqft_builtin_estimation(self):
         """Test built-in qmc.iqft() resource estimation."""
@@ -563,6 +566,7 @@ class TestCompositeGateEstimation:
 
         # IQFT(8) = 4 SWAP + 28 CP + 8 H = 40 gates
         assert est.gates.total == 40
+        assert est.gates.rotation_gates == 28  # 28 CP gates are rotation
 
     def test_nested_composite_gates(self):
         """Test nested composite gates (QPE contains IQFT)."""
@@ -589,6 +593,35 @@ class TestCompositeGateEstimation:
         # IQFT(4): 2 SWAP + 6 CP + 4 H = 12 gates
         # Total: 1 + 4 + 15 + 12 = 32 gates
         assert est.gates.total == 32
+
+
+class TestStubGateEstimation:
+    """Test resource estimation for stub composite gates."""
+
+    def test_stub_gate_resource_estimation(self):
+        """Test that stub gate metadata is correctly propagated to estimate_resources."""
+        from qamomile.circuit.frontend.composite_gate import composite_gate
+
+        @composite_gate(
+            stub=True,
+            name="black_box_oracle",
+            num_qubits=3,
+            t_gate_count=10,
+            query_complexity=1,
+        )
+        def black_box_oracle():
+            pass
+
+        @qm.qkernel
+        def circuit_with_stub() -> qm.Vector[qm.Qubit]:
+            q = qm.qubit_array(3, name="q")
+            for i in qm.range(3):
+                q[i] = qm.h(q[i])
+            q[0], q[1], q[2] = black_box_oracle(q[0], q[1], q[2])
+            return q
+
+        est = estimate_resources(circuit_with_stub.block)
+        assert est.gates.t_gates == 10
 
 
 class TestQPEResourceEstimation:
@@ -768,6 +801,60 @@ class TestQPEResourceEstimation:
             f"Manual QPE total gates should be >= 256, got {est_manual_8.gates.total}"
         assert est_builtin_8.gates.total >= 256, \
             f"Built-in QPE total gates should be >= 256, got {est_builtin_8.gates.total}"
+
+
+class TestRotationGateCounting:
+    """Test rotation gate counting."""
+
+    def test_single_qubit_rotation_rx(self):
+        @qm.qkernel
+        def rx_circuit() -> qm.Vector[qm.Qubit]:
+            q = qm.qubit_array(1, name="q")
+            q[0] = qm.rx(q[0], angle=1.0)
+            return q
+
+        est = estimate_resources(rx_circuit.block)
+        assert est.gates.rotation_gates == 1
+        assert est.depth.rotation_depth == 1
+
+    def test_clifford_not_counted_as_rotation(self):
+        @qm.qkernel
+        def clifford_circuit() -> qm.Vector[qm.Qubit]:
+            q = qm.qubit_array(2, name="q")
+            q[0] = qm.h(q[0])
+            q[0], q[1] = qm.cx(q[0], q[1])
+            return q
+
+        est = estimate_resources(clifford_circuit.block)
+        assert est.gates.rotation_gates == 0
+        assert est.depth.rotation_depth == 0
+
+    def test_mixed_rotation_and_clifford(self):
+        @qm.qkernel
+        def mixed() -> qm.Vector[qm.Qubit]:
+            q = qm.qubit_array(2, name="q")
+            q[0] = qm.h(q[0])
+            q[0] = qm.rx(q[0], 1.0)
+            q[0], q[1] = qm.cx(q[0], q[1])
+            q[0], q[1] = qm.rzz(q[0], q[1], 1.0)
+            return q
+
+        est = estimate_resources(mixed.block)
+        assert est.gates.rotation_gates == 2  # rx + rzz
+        assert est.gates.clifford_gates == 2  # h + cx
+        assert est.gates.total == 4
+
+    def test_parametric_rotation_count(self):
+        @qm.qkernel
+        def rotation_loop(n: qm.UInt) -> qm.Vector[qm.Qubit]:
+            q = qm.qubit_array(n, name="q")
+            for i in qm.range(n):
+                q[i] = qm.rx(q[i], angle=1.0)
+            return q
+
+        est = estimate_resources(rotation_loop.block)
+        n = sp.Symbol("n")
+        assert sp.simplify(est.gates.rotation_gates - n) == 0
 
 
 if __name__ == "__main__":

@@ -111,17 +111,17 @@ def estimate_qaoa(
             multi_qubit=sp.Integer(0),
             t_gates=t_gates,
             clifford_gates=clifford,
+            rotation_gates=sp.simplify(p_expr * (edges_expr + n_expr)),
         ),
         depth=CircuitDepth(
             total_depth=sp.simplify(total_depth),
             t_depth=sp.Integer(0),  # No T gates
             two_qubit_depth=sp.simplify(two_qubit_depth),
             multi_qubit_depth=sp.Integer(0),
+            rotation_depth=sp.simplify(p_expr * (edges_expr + n_expr)),
         ),
         parameters={
-            str(s): s
-            for s in [n_expr, p_expr, edges_expr]
-            if isinstance(s, sp.Symbol)
+            str(s): s for s in [n_expr, p_expr, edges_expr] if isinstance(s, sp.Symbol)
         },
     )
 
@@ -180,6 +180,7 @@ def estimate_qaoa_ising(
             multi_qubit=sp.Integer(0),
             t_gates=base_est.gates.t_gates,
             clifford_gates=base_est.gates.clifford_gates,
+            rotation_gates=base_est.gates.rotation_gates + extra_single_qubit,
         ),
         depth=CircuitDepth(
             # Linear terms can be done in parallel with mixer, so doesn't add depth
@@ -187,6 +188,7 @@ def estimate_qaoa_ising(
             t_depth=base_est.depth.t_depth,
             two_qubit_depth=base_est.depth.two_qubit_depth,
             multi_qubit_depth=sp.Integer(0),
+            rotation_depth=base_est.depth.rotation_depth,
         ),
         parameters=base_est.parameters,
     )

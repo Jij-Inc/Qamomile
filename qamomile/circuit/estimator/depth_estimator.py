@@ -62,6 +62,7 @@ class CircuitDepth:
     t_depth: sp.Expr
     two_qubit_depth: sp.Expr
     multi_qubit_depth: sp.Expr
+    rotation_depth: sp.Expr
 
     def __add__(self, other: CircuitDepth) -> CircuitDepth:
         """Add two circuit depths (sequential composition)."""
@@ -70,6 +71,7 @@ class CircuitDepth:
             t_depth=self.t_depth + other.t_depth,
             two_qubit_depth=self.two_qubit_depth + other.two_qubit_depth,
             multi_qubit_depth=self.multi_qubit_depth + other.multi_qubit_depth,
+            rotation_depth=self.rotation_depth + other.rotation_depth,
         )
 
     def __mul__(self, factor: sp.Expr | int) -> CircuitDepth:
@@ -80,6 +82,7 @@ class CircuitDepth:
             t_depth=self.t_depth * factor_expr,
             two_qubit_depth=self.two_qubit_depth * factor_expr,
             multi_qubit_depth=self.multi_qubit_depth * factor_expr,
+            rotation_depth=self.rotation_depth * factor_expr,
         )
 
     __rmul__ = __mul__
@@ -91,6 +94,7 @@ class CircuitDepth:
             t_depth=sp.Max(self.t_depth, other.t_depth),
             two_qubit_depth=sp.Max(self.two_qubit_depth, other.two_qubit_depth),
             multi_qubit_depth=sp.Max(self.multi_qubit_depth, other.multi_qubit_depth),
+            rotation_depth=sp.Max(self.rotation_depth, other.rotation_depth),
         )
 
     def simplify(self) -> CircuitDepth:
@@ -100,6 +104,7 @@ class CircuitDepth:
             t_depth=sp.simplify(self.t_depth),
             two_qubit_depth=sp.simplify(self.two_qubit_depth),
             multi_qubit_depth=sp.simplify(self.multi_qubit_depth),
+            rotation_depth=sp.simplify(self.rotation_depth),
         )
 
     @staticmethod
@@ -110,17 +115,33 @@ class CircuitDepth:
             t_depth=sp.Integer(0),
             two_qubit_depth=sp.Integer(0),
             multi_qubit_depth=sp.Integer(0),
+            rotation_depth=sp.Integer(0),
         )
 
 
 # Gate categorization
 T_GATES = {"t", "tdg"}
 TWO_QUBIT_GATES = {"cx", "cy", "cz", "swap", "cp", "crx", "cry", "crz", "rzz"}
+ROTATION_GATES = {"rx", "ry", "rz", "p", "cp", "crx", "cry", "crz", "rzz"}
 
 
 SINGLE_QUBIT_GATES = {
-    "h", "x", "y", "z", "s", "sdg", "t", "tdg",
-    "rx", "ry", "rz", "p", "u", "u1", "u2", "u3",
+    "h",
+    "x",
+    "y",
+    "z",
+    "s",
+    "sdg",
+    "t",
+    "tdg",
+    "rx",
+    "ry",
+    "rz",
+    "p",
+    "u",
+    "u1",
+    "u2",
+    "u3",
 }
 
 
@@ -147,19 +168,23 @@ def _estimate_gate_depth(
         t_depth = sp.Integer(0)
         two_qubit_depth = sp.Integer(1) if is_single_qubit_base else sp.Integer(0)
         multi_qubit_depth = sp.Integer(1) if is_two_qubit_base else sp.Integer(0)
+        rotation_depth = sp.Integer(1) if gate_name in ROTATION_GATES else sp.Integer(0)
     else:
         is_t_gate = gate_name in T_GATES
         is_two_qubit = gate_name in TWO_QUBIT_GATES
+        is_rotation = gate_name in ROTATION_GATES
 
         t_depth = sp.Integer(1) if is_t_gate else sp.Integer(0)
         two_qubit_depth = sp.Integer(1) if is_two_qubit else sp.Integer(0)
         multi_qubit_depth = sp.Integer(0)
+        rotation_depth = sp.Integer(1) if is_rotation else sp.Integer(0)
 
     return CircuitDepth(
         total_depth=sp.Integer(1),
         t_depth=t_depth,
         two_qubit_depth=two_qubit_depth,
         multi_qubit_depth=multi_qubit_depth,
+        rotation_depth=rotation_depth,
     )
 
 
@@ -183,11 +208,15 @@ def _extract_depth_from_metadata(meta: ResourceMetadata) -> CircuitDepth:
     # Extract two-qubit depth
     two_qubit_depth = custom.get("two_qubit_depth", 0)
 
+    # Extract rotation depth
+    rotation_depth = custom.get("rotation_depth", 0)
+
     return CircuitDepth(
         total_depth=sp.Integer(total_depth),
         t_depth=sp.Integer(t_depth),
         two_qubit_depth=sp.Integer(two_qubit_depth),
         multi_qubit_depth=sp.Integer(0),
+        rotation_depth=sp.Integer(rotation_depth),
     )
 
 
@@ -306,6 +335,7 @@ def _estimate_composite_gate_depth(
             t_depth=sp.Integer(0),
             two_qubit_depth=n * (n - 1) / 2,  # Sequential estimate
             multi_qubit_depth=sp.Integer(0),
+            rotation_depth=n * (n - 1) / 2,  # CP gates are rotation gates
         )
 
     # Priority 4: Error if no resource info or implementation
@@ -510,7 +540,10 @@ def _apply_sum_to_depth(
         total_depth=Sum(depth.total_depth, (loop_var, start, stop - 1)).doit(),
         t_depth=Sum(depth.t_depth, (loop_var, start, stop - 1)).doit(),
         two_qubit_depth=Sum(depth.two_qubit_depth, (loop_var, start, stop - 1)).doit(),
-        multi_qubit_depth=Sum(depth.multi_qubit_depth, (loop_var, start, stop - 1)).doit(),
+        multi_qubit_depth=Sum(
+            depth.multi_qubit_depth, (loop_var, start, stop - 1)
+        ).doit(),
+        rotation_depth=Sum(depth.rotation_depth, (loop_var, start, stop - 1)).doit(),
     )
 
 
@@ -833,7 +866,11 @@ def _estimate_sequential_depth(
 
             case CompositeGateOperation():
                 composite_depth = _estimate_composite_gate_depth(
-                    op, block, loop_context, call_context, loop_var_symbols,
+                    op,
+                    block,
+                    loop_context,
+                    call_context,
+                    loop_var_symbols,
                     is_controlled=is_controlled,
                 )
                 depth = depth + composite_depth
