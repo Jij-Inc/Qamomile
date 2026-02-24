@@ -1103,12 +1103,6 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             if resolved is not None:
                 power_value = int(resolved)
 
-        # Handle UInt or other non-int types by getting numeric value
-        if hasattr(power_value, "value") and hasattr(power_value.value, "get_const"):
-            const_val = power_value.value.get_const()
-            if const_val is not None:
-                power_value = int(const_val)
-
         if unitary_gate is not None:
             # Only apply power if it's a concrete int value > 1
             if isinstance(power_value, int) and power_value > 1:
