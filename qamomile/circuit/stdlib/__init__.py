@@ -39,25 +39,25 @@ Example:
 """
 
 # Class-based API (new)
-from .qft import QFT, IQFT
+from .adder import TTKInplaceAdder, ttk_adder
 
 # Function-based API (kept for compatibility, using new class-based impl)
-from .qft import qft, iqft
+from .qft import IQFT, QFT, iqft, qft
 
 # Strategies
 from .qft_strategies import (
-    StandardQFTStrategy,
+    ApproximateIQFTStrategy,
     ApproximateQFTStrategy,
     StandardIQFTStrategy,
-    ApproximateIQFTStrategy,
+    StandardQFTStrategy,
 )
-
 from .qpe import qpe
 
 __all__ = [
     # Classes
     "QFT",
     "IQFT",
+    "TTKInplaceAdder",
     # Strategies
     "StandardQFTStrategy",
     "ApproximateQFTStrategy",
@@ -67,4 +67,5 @@ __all__ = [
     "qft",
     "iqft",
     "qpe",
+    "ttk_adder",
 ]

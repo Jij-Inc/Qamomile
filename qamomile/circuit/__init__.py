@@ -20,11 +20,24 @@ from .frontend.operation.control_flow import for_items, items, range
 from .frontend.operation.controlled import controlled
 from .frontend.operation.expval import expval
 from .frontend.operation.measurement import measure
-from .frontend.operation.qubit_gates import cp, cx, cz, h, p, rx, ry, rz, rzz, swap, x
+from .frontend.operation.qubit_gates import (
+    ccx,
+    cp,
+    cx,
+    cz,
+    h,
+    p,
+    rx,
+    ry,
+    rz,
+    rzz,
+    swap,
+    x,
+)
 from .frontend.qkernel import QKernel, qkernel
 
 # Standard library circuits
-from .stdlib import iqft, qft, qpe
+from .stdlib import iqft, qft, qpe, ttk_adder
 
 __all__ = [
     "qkernel",
@@ -39,6 +52,7 @@ __all__ = [
     "qubit_array",
     "h",
     "x",
+    "ccx",
     "cx",
     "cz",
     "p",
@@ -69,5 +83,6 @@ __all__ = [
     "qpe",
     "iqft",
     "qft",
+    "ttk_adder",
     "QKernel",
 ]
