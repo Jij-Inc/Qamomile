@@ -3,7 +3,7 @@
 import pytest
 
 import qamomile.circuit as qm
-from qamomile.circuit.frontend.handle import Qubit
+from qamomile.circuit.frontend.handle import Qubit, Vector
 from qamomile.circuit.frontend.handle.primitives import Float
 from qamomile.circuit.frontend.operation.control_flow import _create_phi_for_values
 from qamomile.circuit.frontend.qkernel import qkernel
@@ -249,3 +249,228 @@ class TestIfElseErrorHandling:
 
         with pytest.raises(TypeError, match="Type mismatch in if-else branches"):
             _create_phi_for_values(condition, true_val, false_val, if_op)
+
+
+class TestIfElseWithSymbolicVector:
+    """Symbolic-sized Vector[Qubit] (parameter) in if-else branches."""
+
+    def test_if_else_symbolic_vector_same_element(self):
+        """Different gates on same element of a parameter Vector in each branch."""
+
+        @qkernel
+        def circuit(q0: Qubit, qs: Vector[Qubit]) -> Vector[Qubit]:
+            cond = qm.measure(q0)
+            if cond:
+                q = qs[0]
+                q = qm.x(q)
+                qs[0] = q
+            else:
+                q = qs[0]
+                q = qm.h(q)
+                qs[0] = q
+            return qs
+
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        assert len(if_ops[0].true_operations) > 0
+        assert len(if_ops[0].false_operations) > 0
+        assert len(if_ops[0].phi_ops) >= 2  # cond + qs
+
+    def test_if_else_symbolic_vector_different_elements(self):
+        """Different elements of a parameter Vector in each branch."""
+
+        @qkernel
+        def circuit(q0: Qubit, qs: Vector[Qubit]) -> Vector[Qubit]:
+            cond = qm.measure(q0)
+            if cond:
+                q = qs[0]
+                q = qm.x(q)
+                qs[0] = q
+            else:
+                q = qs[1]
+                q = qm.h(q)
+                qs[1] = q
+            return qs
+
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        assert len(if_ops[0].true_operations) > 0
+        assert len(if_ops[0].false_operations) > 0
+
+    def test_if_only_symbolic_vector_passthrough(self):
+        """Parameter Vector with ops only in true branch, pass-through in else."""
+
+        @qkernel
+        def circuit(q0: Qubit, qs: Vector[Qubit]) -> Vector[Qubit]:
+            cond = qm.measure(q0)
+            if cond:
+                q = qs[0]
+                q = qm.x(q)
+                qs[0] = q
+            return qs
+
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        assert len(if_ops[0].true_operations) > 0
+        assert len(if_ops[0].false_operations) == 0
+
+    def test_if_else_symbolic_vector_and_qubit_mixed(self):
+        """Mixed parameter Vector and individual Qubit in if-else."""
+
+        @qkernel
+        def circuit(
+            q0: Qubit, q1: Qubit, qs: Vector[Qubit]
+        ) -> tuple[Vector[Qubit], Qubit]:
+            cond = qm.measure(q0)
+            if cond:
+                q = qs[0]
+                q = qm.x(q)
+                qs[0] = q
+                q1 = qm.h(q1)
+            else:
+                q = qs[1]
+                q = qm.h(q)
+                qs[1] = q
+                q1 = qm.x(q1)
+            return qs, q1
+
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        assert len(if_ops[0].phi_ops) >= 3  # cond, qs, q1
+
+    def test_if_else_symbolic_vector_index_after_merge(self):
+        """Indexing a parameter Vector after if-else merge must work."""
+
+        @qkernel
+        def circuit(q0: Qubit, qs: Vector[Qubit]) -> Qubit:
+            cond = qm.measure(q0)
+            if cond:
+                q = qs[0]
+                q = qm.x(q)
+                qs[0] = q
+            else:
+                q = qs[0]
+                q = qm.h(q)
+                qs[0] = q
+            result = qs[1]
+            result = qm.h(result)
+            return result
+
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+
+class TestIfElseWithVector:
+    """Vector[Qubit] and mixed Vector/Qubit in if-else branches."""
+
+    def test_if_else_vector_element_ops_both_branches(self):
+        """Different gates on same Vector element in each branch."""
+
+        @qkernel
+        def circuit(q0: Qubit) -> Vector[Qubit]:
+            qs = qm.qubit_array(3, "qs")
+            cond = qm.measure(q0)
+            if cond:
+                q = qs[0]
+                q = qm.x(q)
+                qs[0] = q
+            else:
+                q = qs[0]
+                q = qm.h(q)
+                qs[0] = q
+            return qs
+
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        assert len(if_ops[0].true_operations) > 0
+        assert len(if_ops[0].false_operations) > 0
+        assert len(if_ops[0].phi_ops) >= 2  # cond + qs
+
+    def test_if_else_vector_different_elements_per_branch(self):
+        """Different elements operated on in each branch (tests _borrowed_indices reset)."""
+
+        @qkernel
+        def circuit(q0: Qubit) -> Vector[Qubit]:
+            qs = qm.qubit_array(3, "qs")
+            cond = qm.measure(q0)
+            if cond:
+                q = qs[0]
+                q = qm.x(q)
+                qs[0] = q
+            else:
+                q = qs[1]
+                q = qm.h(q)
+                qs[1] = q
+            return qs
+
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+
+    def test_if_else_mixed_vector_and_qubit(self):
+        """Mixed Vector[Qubit] and individual Qubit in if-else."""
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit) -> tuple[Vector[Qubit], Qubit]:
+            qs = qm.qubit_array(2, "qs")
+            cond = qm.measure(q0)
+            if cond:
+                q = qs[0]
+                q = qm.x(q)
+                qs[0] = q
+                q1 = qm.h(q1)
+            else:
+                q = qs[1]
+                q = qm.h(q)
+                qs[1] = q
+                q1 = qm.x(q1)
+            return qs, q1
+
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        assert len(if_ops[0].phi_ops) >= 3  # cond, qs, q1
+
+    def test_if_else_vector_index_after_merge(self):
+        """Indexing Vector after if-else merge must work (directly tests phi merge type)."""
+
+        @qkernel
+        def circuit(q0: Qubit) -> Qubit:
+            qs = qm.qubit_array(3, "qs")
+            cond = qm.measure(q0)
+            if cond:
+                q = qs[0]
+                q = qm.x(q)
+                qs[0] = q
+            else:
+                q = qs[0]
+                q = qm.h(q)
+                qs[0] = q
+            result = qs[1]
+            result = qm.h(result)
+            return result
+
+        graph = circuit.build()
+        # If qs became generic Handle after phi merge, qs[1] would raise AttributeError
+
+    def test_if_only_vector_passthrough(self):
+        """Vector with ops in true branch only, pass-through in else."""
+
+        @qkernel
+        def circuit(q0: Qubit) -> Vector[Qubit]:
+            qs = qm.qubit_array(2, "qs")
+            cond = qm.measure(q0)
+            if cond:
+                q = qs[0]
+                q = qm.x(q)
+                qs[0] = q
+            return qs
+
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
