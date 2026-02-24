@@ -225,6 +225,59 @@ def rzz(qubit_0: Qubit, qubit_1: Qubit, angle: float | Float) -> tuple[Qubit, Qu
     return q0_out, q1_out
 
 
+def _apply_three_qubit_gate(
+    qubit_0: Qubit, qubit_1: Qubit, qubit_2: Qubit, gate_type: GateOperationType
+) -> tuple[Qubit, Qubit, Qubit]:
+    """Apply a three-qubit gate and return the output qubits."""
+    # Check for aliasing (all three must be distinct physical qubits)
+    ids = [qubit_0.value.logical_id, qubit_1.value.logical_id, qubit_2.value.logical_id]
+    if ids[0] == ids[1] or ids[0] == ids[2] or ids[1] == ids[2]:
+        q0_name = qubit_0.name or "unnamed"
+        raise QubitAliasError(
+            f"Cannot use the same qubit in multiple positions of {gate_type.name}.\n"
+            f"All three qubits must be distinct.\n\n"
+            f"Fix: Use distinct qubits for all operands.",
+            handle_name=q0_name,
+            operation_name=gate_type.name,
+        )
+
+    # Consume all three input handles (enforces linear type)
+    qubit_0 = qubit_0.consume(operation_name=f"{gate_type.name}[0]")
+    qubit_1 = qubit_1.consume(operation_name=f"{gate_type.name}[1]")
+    qubit_2 = qubit_2.consume(operation_name=f"{gate_type.name}[2]")
+
+    q0_out_value = qubit_0.value.next_version()
+    q1_out_value = qubit_1.value.next_version()
+    q2_out_value = qubit_2.value.next_version()
+
+    q0_out = Qubit(value=q0_out_value, parent=qubit_0.parent, indices=qubit_0.indices)
+    q1_out = Qubit(value=q1_out_value, parent=qubit_1.parent, indices=qubit_1.indices)
+    q2_out = Qubit(value=q2_out_value, parent=qubit_2.parent, indices=qubit_2.indices)
+
+    gate_op = IRGateOperation(
+        gate_type=gate_type,
+        operands=[qubit_0.value, qubit_1.value, qubit_2.value],
+        results=[q0_out_value, q1_out_value, q2_out_value],
+    )
+    tracer = get_current_tracer()
+    tracer.add_operation(gate_op)
+    return q0_out, q1_out, q2_out
+
+
+def ccx(control1: Qubit, control2: Qubit, target: Qubit) -> tuple[Qubit, Qubit, Qubit]:
+    """Toffoli (CCX) gate: controlled-controlled-X.
+
+    Args:
+        control1: First control qubit.
+        control2: Second control qubit.
+        target: Target qubit.
+
+    Returns:
+        Tuple of (control1_out, control2_out, target_out) after CCX.
+    """
+    return _apply_three_qubit_gate(control1, control2, target, GateOperationType.TOFFOLI)
+
+
 def swap(qubit_0: Qubit, qubit_1: Qubit) -> tuple[Qubit, Qubit]:
     """SWAP gate: exchanges two qubits.
 
