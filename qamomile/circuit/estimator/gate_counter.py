@@ -134,7 +134,7 @@ class GateCount:
 
 
 # Gate categorization
-CLIFFORD_GATES = {"h", "s", "sdg", "cx", "cy", "cz", "swap"}
+CLIFFORD_GATES = {"h", "x", "y", "z", "s", "sdg", "cx", "cy", "cz", "swap"}
 T_GATES = {"t", "tdg"}
 SINGLE_QUBIT_GATES = {
     "h",
