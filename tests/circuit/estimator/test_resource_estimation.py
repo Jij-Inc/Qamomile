@@ -6,16 +6,13 @@ import sympy as sp
 import qamomile.circuit as qm
 from qamomile.circuit.estimator import (
     estimate_resources,
-    count_gates,
-    estimate_depth,
-    qubits_counter,
 )
 from qamomile.circuit.estimator.algorithmic import (
     estimate_qaoa,
-    estimate_qpe,
-    estimate_trotter,
-    estimate_qsvt,
     estimate_qdrift,
+    estimate_qpe,
+    estimate_qsvt,
+    estimate_trotter,
 )
 
 
@@ -58,7 +55,7 @@ class TestBasicCircuitEstimation:
         est = estimate_resources(ghz_state.block)
 
         # Verify symbolic expressions are resolved correctly
-        n = sp.Symbol("n")
+        n = sp.Symbol("n", integer=True, positive=True)
         assert est.qubits == n
 
         # Total gates: 1 H + (n-1) CX = n gates
@@ -92,7 +89,7 @@ class TestBasicCircuitEstimation:
             return q
 
         est = estimate_resources(circuit_with_arithmetic.block)
-        n = sp.Symbol("n")
+        n = sp.Symbol("n", integer=True, positive=True)
 
         # Should be n-1 H gates
         assert sp.simplify(est.gates.single_qubit - (n - 1)) == 0
@@ -127,6 +124,7 @@ class TestBasicCircuitEstimation:
 
     def test_nested_loop_dependent_bounds(self):
         """Test nested loops where inner bound depends on outer variable."""
+
         @qm.qkernel
         def nested_circuit(n: qm.UInt) -> qm.Vector[qm.Qubit]:
             q = qm.qubit_array(n, name="q")
@@ -137,7 +135,7 @@ class TestBasicCircuitEstimation:
             return q
 
         est = estimate_resources(nested_circuit.block)
-        n = sp.Symbol("n")
+        n = sp.Symbol("n", integer=True, positive=True)
 
         # Inner loop executes 0 + 1 + 2 + ... + (n-1) = n(n-1)/2 times
         # Expected: n(n-1)/2 H gates
@@ -154,6 +152,7 @@ class TestBasicCircuitEstimation:
 
     def test_iqft_pattern(self):
         """Test IQFT-like pattern with nested dependent loops."""
+
         @qm.qkernel
         def iqft_pattern(n: qm.UInt) -> qm.Vector[qm.Qubit]:
             q = qm.qubit_array(n, name="q")
@@ -168,7 +167,7 @@ class TestBasicCircuitEstimation:
             return q
 
         est = estimate_resources(iqft_pattern.block)
-        n = sp.Symbol("n")
+        n = sp.Symbol("n", integer=True, positive=True)
 
         # SWAP gates: floor(n/2)
         # CP gates: sum(j for j in range(n)) = n(n-1)/2
@@ -203,7 +202,7 @@ class TestBasicCircuitEstimation:
             return qubits
 
         est = estimate_resources(outer_kernel.block)
-        n = sp.Symbol("n")
+        n = sp.Symbol("n", integer=True, positive=True)
 
         # Should use 'n', not 'qubits_dim0'
         assert "qubits_dim0" not in str(est.gates.total)
@@ -239,7 +238,7 @@ class TestBasicCircuitEstimation:
         assert "qubits_dim0" not in str(est.gates.total)
 
         # Should contain 'n'
-        n = sp.Symbol("n")
+        n = sp.Symbol("n", integer=True, positive=True)
         assert n in est.gates.total.free_symbols
 
         # Test concrete value
@@ -253,7 +252,7 @@ class TestBasicCircuitEstimation:
         def power_loop(m: qm.UInt) -> qm.Vector[qm.Qubit]:
             q = qm.qubit_array(m, name="q")
             for i in qm.range(m):
-                iterations = 2 ** i
+                iterations = 2**i
                 for _ in qm.range(iterations):
                     q[i] = qm.h(q[i])
             return q
@@ -264,7 +263,7 @@ class TestBasicCircuitEstimation:
         assert "uint_tmp" not in str(est.gates.total)
 
         # Should contain m and possibly i (in Sum)
-        m_sym = sp.Symbol("m")
+        m_sym = sp.Symbol("m", integer=True, positive=True)
         assert m_sym in est.gates.total.free_symbols
 
         # Verify concrete substitution
@@ -293,7 +292,7 @@ class TestBasicCircuitEstimation:
             # Controlled-U operations
             cp = qm.controlled(controlled_phase)
             for i in qm.range(m):
-                iterations = 2 ** i
+                iterations = 2**i
                 for _ in qm.range(iterations):
                     counting[i], target = cp(counting[i], target, theta=1.0)
 
@@ -305,7 +304,7 @@ class TestBasicCircuitEstimation:
         assert "uint_tmp" not in str(est.gates.total)
 
         # Should contain m
-        m_sym = sp.Symbol("m")
+        m_sym = sp.Symbol("m", integer=True, positive=True)
         assert m_sym in est.gates.total.free_symbols
 
     def test_controlled_gate_with_varying_parameter(self):
@@ -326,7 +325,7 @@ class TestBasicCircuitEstimation:
 
             controlled_gate = qm.controlled(repeated_gate)
             for i in qm.range(m):
-                iterations = 2 ** i
+                iterations = 2**i
                 counting[i], target = controlled_gate(
                     counting[i], target, theta=1.0, iter=iterations
                 )
@@ -338,7 +337,7 @@ class TestBasicCircuitEstimation:
         assert "iter" not in str(est.gates.total)
 
         # Should contain m (and ideally 2**m pattern)
-        m_sym = sp.Symbol("m")
+        m_sym = sp.Symbol("m", integer=True, positive=True)
         assert m_sym in est.gates.total.free_symbols
 
         # Verify concrete substitution
@@ -379,7 +378,7 @@ class TestAlgorithmicEstimators:
         """Test QPE resource estimation with qubitization."""
         n = sp.Symbol("n", positive=True, integer=True)
         m = sp.Symbol("m", positive=True, integer=True)  # precision
-        alpha = sp.Symbol("alpha", positive=True)  # ||H||
+        alpha = sp.Symbol("alpha", integer=True, positive=True)  # ||H||
 
         est = estimate_qpe(n, m, hamiltonian_norm=alpha, method="qubitization")
 
@@ -394,7 +393,7 @@ class TestAlgorithmicEstimators:
 
     def test_hamiltonian_simulation_methods(self):
         """Test different Hamiltonian simulation methods."""
-        n, L, t, eps = sp.symbols("n L t eps", positive=True)
+        n, L, t, eps = sp.symbols("n L t eps", integer=True, positive=True)
 
         # Trotter (second-order)
         trotter2 = estimate_trotter(n, L, t, eps, order=2)
@@ -641,6 +640,7 @@ class TestQPEResourceEstimation:
         def iqft(qubits: qm.Vector[qm.Qubit]) -> qm.Vector[qm.Qubit]:
             """Inverse QFT."""
             import math
+
             n = qubits.shape[0]
             for j in qm.range(n // 2):
                 qubits[j], qubits[n - j - 1] = qm.swap(qubits[j], qubits[n - j - 1])
@@ -665,7 +665,7 @@ class TestQPEResourceEstimation:
             # Controlled-U^(2^k) operations
             controlled_phase = qm.controlled(phase_gate)
             for i in qm.range(m):
-                iterations = 2 ** i
+                iterations = 2**i
                 counting[i], target = controlled_phase(
                     counting[i], target, theta=theta, iter=iterations
                 )
@@ -680,13 +680,16 @@ class TestQPEResourceEstimation:
         est = estimate_resources(qpe_manual.block)
 
         # Check that the total gates expression contains 2^m term
-        m = sp.Symbol("m")
+        m = sp.Symbol("m", integer=True, positive=True)
         total_gates_expr = est.gates.total
 
         # Should have exponential term 2^m
-        assert sp.exp in [type(arg) for arg in sp.preorder_traversal(total_gates_expr)] or \
-               any(isinstance(arg, sp.Pow) and arg.base == 2 for arg in sp.preorder_traversal(total_gates_expr)), \
-               f"Expected 2^m term in total gates, got: {total_gates_expr}"
+        assert sp.exp in [
+            type(arg) for arg in sp.preorder_traversal(total_gates_expr)
+        ] or any(
+            isinstance(arg, sp.Pow) and arg.base == 2
+            for arg in sp.preorder_traversal(total_gates_expr)
+        ), f"Expected 2^m term in total gates, got: {total_gates_expr}"
 
         # Verify qubit count: m + 1
         assert est.qubits == m + 1
@@ -713,13 +716,16 @@ class TestQPEResourceEstimation:
         est = est.simplify()
 
         # Check that the total gates expression contains 2^n term
-        n = sp.Symbol("n")
+        n = sp.Symbol("n", integer=True, positive=True)
         total_gates_expr = est.gates.total
 
         # Should have exponential term 2^n
-        assert sp.exp in [type(arg) for arg in sp.preorder_traversal(total_gates_expr)] or \
-               any(isinstance(arg, sp.Pow) and arg.base == 2 for arg in sp.preorder_traversal(total_gates_expr)), \
-               f"Expected 2^n term in total gates, got: {total_gates_expr}"
+        assert sp.exp in [
+            type(arg) for arg in sp.preorder_traversal(total_gates_expr)
+        ] or any(
+            isinstance(arg, sp.Pow) and arg.base == 2
+            for arg in sp.preorder_traversal(total_gates_expr)
+        ), f"Expected 2^n term in total gates, got: {total_gates_expr}"
 
         # Verify qubit count: n + 1
         assert est.qubits == n + 1
@@ -737,6 +743,7 @@ class TestQPEResourceEstimation:
         @qm.qkernel
         def iqft(qubits: qm.Vector[qm.Qubit]) -> qm.Vector[qm.Qubit]:
             import math
+
             n = qubits.shape[0]
             for j in qm.range(n // 2):
                 qubits[j], qubits[n - j - 1] = qm.swap(qubits[j], qubits[n - j - 1])
@@ -758,7 +765,7 @@ class TestQPEResourceEstimation:
 
             controlled_phase = qm.controlled(phase_gate)
             for i in qm.range(m):
-                iterations = 2 ** i
+                iterations = 2**i
                 counting[i], target = controlled_phase(
                     counting[i], target, theta=theta, iter=iterations
                 )
@@ -784,8 +791,8 @@ class TestQPEResourceEstimation:
         est_builtin = estimate_resources(qpe_builtin.block).simplify()
 
         # Both should have similar qubit counts
-        m = sp.Symbol("m")
-        n = sp.Symbol("n")
+        m = sp.Symbol("m", integer=True, positive=True)
+        n = sp.Symbol("n", integer=True, positive=True)
 
         assert est_manual.qubits == m + 1
         assert est_builtin.qubits == n + 1
@@ -797,10 +804,12 @@ class TestQPEResourceEstimation:
         # Both should include the exponential term 2^8 = 256
         # Manual: 2^8 + 8^2/2 + 3*8/2 + floor(8/2) = 256 + 32 + 12 + 4 = 304
         # Built-in: similar structure
-        assert est_manual_8.gates.total >= 256, \
+        assert est_manual_8.gates.total >= 256, (
             f"Manual QPE total gates should be >= 256, got {est_manual_8.gates.total}"
-        assert est_builtin_8.gates.total >= 256, \
+        )
+        assert est_builtin_8.gates.total >= 256, (
             f"Built-in QPE total gates should be >= 256, got {est_builtin_8.gates.total}"
+        )
 
 
 class TestRotationGateCounting:
@@ -853,7 +862,7 @@ class TestRotationGateCounting:
             return q
 
         est = estimate_resources(rotation_loop.block)
-        n = sp.Symbol("n")
+        n = sp.Symbol("n", integer=True, positive=True)
         assert sp.simplify(est.gates.rotation_gates - n) == 0
 
 
