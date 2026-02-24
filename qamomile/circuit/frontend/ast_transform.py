@@ -25,6 +25,7 @@ class VariableCollector(ast.NodeVisitor):
         self.vars = set()
         self._exclude = set()  # 除外する名前
         self._global_names = global_names or set()
+        self._first_context: dict[str, str] = {}  # name -> "Store" | "Load"
 
     def visit_Call(self, node: ast.Call):
         """関数呼び出しの関数名を除外"""
@@ -49,11 +50,40 @@ class VariableCollector(ast.NodeVisitor):
             # ネストした属性アクセス (a.b.c) の場合は再帰
             self.visit(node.value)
 
+    def visit_Assign(self, node: ast.Assign):
+        """右辺を先に走査し、Python の評価順序に合わせる。
+
+        `q1 = qm.h(q1)` → 右辺 q1 (Load) が先 → first_context は "Load"
+        `cond2 = qm.measure(q2)` → 右辺 q2 (Load) が先、左辺 cond2 (Store) が後
+        """
+        self.visit(node.value)
+        for target in node.targets:
+            self.visit(target)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        """内部関数定義の走査をスキップする。"""
+        pass
+
     def visit_Name(self, node: ast.Name):
         """変数名を収集（除外リストにないもののみ）"""
         if isinstance(node.id, str):
             if node.id not in self._exclude and node.id not in self._global_names:
                 self.vars.add(node.id)
+                if node.id not in self._first_context:
+                    if isinstance(node.ctx, ast.Store):
+                        self._first_context[node.id] = "Store"
+                    else:
+                        self._first_context[node.id] = "Load"
+
+    @property
+    def locally_defined_vars(self) -> set[str]:
+        """このスコープ内で初めて定義（Store）される変数。"""
+        return {name for name, ctx in self._first_context.items() if ctx == "Store"}
+
+    @property
+    def incoming_vars(self) -> set[str]:
+        """外部スコープから渡される必要がある変数（初回が Load）。"""
+        return self.vars - self.locally_defined_vars
 
 
 class ControlFlowTransformer(ast.NodeTransformer):
@@ -481,12 +511,28 @@ class ControlFlowTransformer(ast.NodeTransformer):
         return with_stmt
 
     def visit_If(self, node: ast.If) -> Any:
-        self.generic_visit(node)
+        # 変換前のASTから変数を収集（generic_visit 後だと生成名が混入する）
+        collector_test = VariableCollector(global_names=self._global_names)
+        collector_test.visit(node.test)
 
-        vars_test = self._collect_variables(node.test)
-        vars_body = self._collect_variables(node.body)  # type: ignore
-        vars_orelse = self._collect_variables(node.orelse) if node.orelse else []  # type: ignore
-        target_vars = sorted(list(set(vars_test) | set(vars_body) | set(vars_orelse)))
+        collector_body = VariableCollector(global_names=self._global_names)
+        for stmt in node.body:
+            collector_body.visit(stmt)
+
+        collector_orelse = VariableCollector(global_names=self._global_names)
+        if node.orelse:
+            for stmt in node.orelse:
+                collector_orelse.visit(stmt)
+
+        # incoming_vars のみ使用（ブランチ内で初定義される変数を除外）
+        target_vars = sorted(
+            collector_test.vars
+            | collector_body.incoming_vars
+            | collector_orelse.incoming_vars
+        )
+
+        # ネストされた制御フローを変換
+        self.generic_visit(node)
 
         # Cond: returns bool
         cond_name = self._get_unique_name("cond")
