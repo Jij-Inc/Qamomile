@@ -148,16 +148,22 @@ class QFT(CompositeGate):
         QFT uses O(n^2) gates but no T gates in the standard decomposition.
         """
         n = self._num_qubits
-        # QFT uses n H gates and n(n-1)/2 controlled phase gates
-        num_gates = n + n * (n - 1) // 2
+        num_h = n
+        num_cp = n * (n - 1) // 2
+        num_swap = n // 2
         return ResourceMetadata(
-            t_gate_count=0,  # Standard QFT uses no T gates
+            t_gates=0,
+            total_gates=num_h + num_cp + num_swap,
+            single_qubit_gates=num_h,
+            two_qubit_gates=num_cp + num_swap,
+            clifford_gates=num_h + num_swap,
+            rotation_gates=num_cp,
             custom_metadata={
-                "num_h_gates": n,
-                "num_cp_gates": n * (n - 1) // 2,
-                "num_swap_gates": n // 2,
-                "total_gates": num_gates + n // 2,
-                "depth": n,  # Approximate depth
+                "num_h_gates": num_h,
+                "num_cp_gates": num_cp,
+                "num_swap_gates": num_swap,
+                "total_gates": num_h + num_cp + num_swap,
+                "depth": n,
             },
         )
 
@@ -254,15 +260,22 @@ class IQFT(CompositeGate):
         IQFT uses the same resources as QFT.
         """
         n = self._num_qubits
-        num_gates = n + n * (n - 1) // 2
+        num_h = n
+        num_cp = n * (n - 1) // 2
+        num_swap = n // 2
         return ResourceMetadata(
-            t_gate_count=0,  # Standard IQFT uses no T gates
+            t_gates=0,
+            total_gates=num_h + num_cp + num_swap,
+            single_qubit_gates=num_h,
+            two_qubit_gates=num_cp + num_swap,
+            clifford_gates=num_h + num_swap,
+            rotation_gates=num_cp,
             custom_metadata={
-                "num_h_gates": n,
-                "num_cp_gates": n * (n - 1) // 2,
-                "num_swap_gates": n // 2,
-                "total_gates": num_gates + n // 2,
-                "depth": n,  # Approximate depth
+                "num_h_gates": num_h,
+                "num_cp_gates": num_cp,
+                "num_swap_gates": num_swap,
+                "total_gates": num_h + num_cp + num_swap,
+                "depth": n,
             },
         )
 

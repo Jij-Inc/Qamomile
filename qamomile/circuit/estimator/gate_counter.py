@@ -244,12 +244,11 @@ def _count_gate_operation(op: GateOperation, is_controlled: bool = False) -> Gat
 
 
 def _extract_gate_count_from_metadata(meta: ResourceMetadata) -> GateCount:
-    """Extract GateCount from ResourceMetadata.
+    """Extract GateCount from ResourceMetadata typed fields.
 
-    Extracts gate counts from custom_metadata dictionary:
-    - total_gates: Total gate count
-    - num_h_gates, num_x_gates, etc.: Single-qubit gates
-    - num_cp_gates, num_swap_gates, num_cx_gates, etc.: Two-qubit gates
+    Reads the typed gate-count fields directly. Falls back to zero for any
+    field that is None. If total_gates is not set, computes it as
+    the sum of single_qubit + two_qubit + multi_qubit.
 
     Args:
         meta: ResourceMetadata containing gate information
@@ -257,74 +256,23 @@ def _extract_gate_count_from_metadata(meta: ResourceMetadata) -> GateCount:
     Returns:
         GateCount extracted from metadata
     """
-    custom = meta.custom_metadata
+    single_qubit = meta.single_qubit_gates or 0
+    two_qubit = meta.two_qubit_gates or 0
+    multi_qubit = meta.multi_qubit_gates or 0
+    t_gates = meta.t_gates or 0
+    clifford = meta.clifford_gates or 0
+    rotation = meta.rotation_gates or 0
 
-    # Extract total gates
-    total = custom.get("total_gates", 0)
-
-    # Extract single-qubit gates
-    single_qubit = 0
-    for key in [
-        "num_h_gates",
-        "num_x_gates",
-        "num_y_gates",
-        "num_z_gates",
-        "num_rx_gates",
-        "num_ry_gates",
-        "num_rz_gates",
-        "num_p_gates",
-    ]:
-        single_qubit += custom.get(key, 0)
-
-    # Extract two-qubit gates
-    two_qubit = 0
-    for key in [
-        "num_cx_gates",
-        "num_cy_gates",
-        "num_cz_gates",
-        "num_cp_gates",
-        "num_swap_gates",
-        "num_rzz_gates",
-    ]:
-        two_qubit += custom.get(key, 0)
-
-    # Extract T gates
-    t_gates = meta.t_gate_count or custom.get("num_t_gates", 0)
-
-    # Extract Clifford gates (H, X, Y, Z, CX, CZ, SWAP are Clifford)
-    clifford = custom.get("num_clifford_gates", 0)
-    if clifford == 0:
-        # Estimate from known Clifford gates
-        clifford += custom.get("num_h_gates", 0)
-        clifford += custom.get("num_x_gates", 0)
-        clifford += custom.get("num_y_gates", 0)
-        clifford += custom.get("num_z_gates", 0)
-        clifford += custom.get("num_cx_gates", 0)
-        clifford += custom.get("num_cz_gates", 0)
-        clifford += custom.get("num_swap_gates", 0)
-
-    # Extract rotation gates
-    rotation = custom.get("num_rotation_gates", 0)
-    if rotation == 0:
-        for key in [
-            "num_rx_gates",
-            "num_ry_gates",
-            "num_rz_gates",
-            "num_p_gates",
-            "num_cp_gates",
-            "num_crx_gates",
-            "num_cry_gates",
-            "num_crz_gates",
-            "num_rzz_gates",
-        ]:
-            rotation += custom.get(key, 0)
+    total = meta.total_gates
+    if not total:
+        total = single_qubit + two_qubit + multi_qubit
 
     return GateCount(
-        total=sp.Integer(total) if total > 0 else sp.Integer(single_qubit + two_qubit),
+        total=sp.Integer(total),
         single_qubit=sp.Integer(single_qubit),
         two_qubit=sp.Integer(two_qubit),
-        multi_qubit=sp.Integer(0),
-        t_gates=sp.Integer(t_gates) if t_gates else sp.Integer(0),
+        multi_qubit=sp.Integer(multi_qubit),
+        t_gates=sp.Integer(t_gates),
         clifford_gates=sp.Integer(clifford),
         rotation_gates=sp.Integer(rotation),
     )

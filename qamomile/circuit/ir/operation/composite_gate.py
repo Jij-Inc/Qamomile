@@ -28,16 +28,31 @@ class CompositeGateType(enum.Enum):
 class ResourceMetadata:
     """Resource estimation metadata for composite gates.
 
+    Gate count fields mirror GateCount categories. Fields left as None
+    are treated as zero during extraction.
+
     Attributes:
         query_complexity: Number of oracle/unitary queries
-        t_gate_count: Estimated T-gate count
+        t_gates: Estimated T-gate count
         ancilla_qubits: Number of ancilla qubits required
-        custom_metadata: Additional user-defined metadata
+        total_gates: Total number of gates
+        single_qubit_gates: Number of single-qubit gates
+        two_qubit_gates: Number of two-qubit gates
+        multi_qubit_gates: Number of multi-qubit gates (3+ qubits)
+        clifford_gates: Number of Clifford gates
+        rotation_gates: Number of rotation gates
+        custom_metadata: Additional metadata (depth, strategy, precision, etc.)
     """
 
     query_complexity: int | None = None
-    t_gate_count: int | None = None
+    t_gates: int | None = None
     ancilla_qubits: int = 0
+    total_gates: int | None = None
+    single_qubit_gates: int | None = None
+    two_qubit_gates: int | None = None
+    multi_qubit_gates: int | None = None
+    clifford_gates: int | None = None
+    rotation_gates: int | None = None
     custom_metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 

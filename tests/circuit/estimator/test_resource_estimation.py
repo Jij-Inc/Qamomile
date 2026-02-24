@@ -600,13 +600,13 @@ class TestStubGateEstimation:
     def test_stub_gate_resource_estimation(self):
         """Test that stub gate metadata is correctly propagated to estimate_resources."""
         from qamomile.circuit.frontend.composite_gate import composite_gate
+        from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 
         @composite_gate(
             stub=True,
             name="black_box_oracle",
             num_qubits=3,
-            t_gate_count=10,
-            query_complexity=1,
+            resource_metadata=ResourceMetadata(t_gates=10, query_complexity=1),
         )
         def black_box_oracle():
             pass
@@ -628,12 +628,13 @@ class TestStubGateEstimation:
     def test_stub_gate_multiple_calls(self):
         """Test oracle_calls counts multiple invocations of the same stub gate."""
         from qamomile.circuit.frontend.composite_gate import composite_gate
+        from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 
         @composite_gate(
             stub=True,
             name="repeated_oracle",
             num_qubits=2,
-            t_gate_count=5,
+            resource_metadata=ResourceMetadata(t_gates=5),
         )
         def repeated_oracle():
             pass
@@ -653,12 +654,23 @@ class TestStubGateEstimation:
     def test_multiple_different_oracle_calls(self):
         """Test tracking multiple different stub gates in one circuit."""
         from qamomile.circuit.frontend.composite_gate import composite_gate
+        from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 
-        @composite_gate(stub=True, name="oracle_A", num_qubits=2, t_gate_count=3)
+        @composite_gate(
+            stub=True,
+            name="oracle_A",
+            num_qubits=2,
+            resource_metadata=ResourceMetadata(t_gates=3),
+        )
         def oracle_a():
             pass
 
-        @composite_gate(stub=True, name="oracle_B", num_qubits=2, t_gate_count=7)
+        @composite_gate(
+            stub=True,
+            name="oracle_B",
+            num_qubits=2,
+            resource_metadata=ResourceMetadata(t_gates=7),
+        )
         def oracle_b():
             pass
 

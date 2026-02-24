@@ -64,7 +64,7 @@ class TestCompositeGateDefinition:
 
             def _resources(self) -> ResourceMetadata:
                 return ResourceMetadata(
-                    t_gate_count=10,
+                    t_gates=10,
                     query_complexity=5,
                     custom_metadata={"num_qubits": self._n},
                 )
@@ -73,7 +73,7 @@ class TestCompositeGateDefinition:
         metadata = gate.get_resource_metadata()
 
         assert metadata is not None
-        assert metadata.t_gate_count == 10
+        assert metadata.t_gates == 10
         assert metadata.query_complexity == 5
         assert metadata.custom_metadata["num_qubits"] == 4
 
@@ -171,7 +171,7 @@ class TestQFTAndIQFTClasses:
         metadata = qft.get_resource_metadata()
 
         assert metadata is not None
-        assert metadata.t_gate_count == 0  # Standard QFT uses no T gates
+        assert metadata.t_gates == 0  # Standard QFT uses no T gates
         assert "num_h_gates" in metadata.custom_metadata
         assert metadata.custom_metadata["num_h_gates"] == 4
 

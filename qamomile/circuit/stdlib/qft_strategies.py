@@ -100,13 +100,18 @@ class StandardQFTStrategy:
         num_swap_gates = n // 2
 
         return ResourceMetadata(
-            t_gate_count=0,  # Standard QFT uses no T gates
+            t_gates=0,
+            total_gates=num_h_gates + num_cp_gates + num_swap_gates,
+            single_qubit_gates=num_h_gates,
+            two_qubit_gates=num_cp_gates + num_swap_gates,
+            clifford_gates=num_h_gates + num_swap_gates,
+            rotation_gates=num_cp_gates,
             custom_metadata={
                 "num_h_gates": num_h_gates,
                 "num_cp_gates": num_cp_gates,
                 "num_swap_gates": num_swap_gates,
                 "total_gates": num_h_gates + num_cp_gates + num_swap_gates,
-                "depth": n,  # Approximate depth
+                "depth": n,
                 "precision": "full",
                 "strategy": "standard",
             },
@@ -198,13 +203,18 @@ class ApproximateQFTStrategy:
             num_cp_gates = n * (n - 1) // 2
 
         return ResourceMetadata(
-            t_gate_count=0,  # Approximate QFT uses no T gates
+            t_gates=0,
+            total_gates=num_h_gates + num_cp_gates + num_swap_gates,
+            single_qubit_gates=num_h_gates,
+            two_qubit_gates=num_cp_gates + num_swap_gates,
+            clifford_gates=num_h_gates + num_swap_gates,
+            rotation_gates=num_cp_gates,
             custom_metadata={
                 "num_h_gates": num_h_gates,
                 "num_cp_gates": num_cp_gates,
                 "num_swap_gates": num_swap_gates,
                 "total_gates": num_h_gates + num_cp_gates + num_swap_gates,
-                "depth": min(n, k + 1),  # Approximate depth
+                "depth": min(n, k + 1),
                 "precision": f"truncated_k{k}",
                 "truncation_depth": k,
                 "strategy": "approximate",
@@ -272,7 +282,12 @@ class StandardIQFTStrategy:
         num_swap_gates = n // 2
 
         return ResourceMetadata(
-            t_gate_count=0,
+            t_gates=0,
+            total_gates=num_h_gates + num_cp_gates + num_swap_gates,
+            single_qubit_gates=num_h_gates,
+            two_qubit_gates=num_cp_gates + num_swap_gates,
+            clifford_gates=num_h_gates + num_swap_gates,
+            rotation_gates=num_cp_gates,
             custom_metadata={
                 "num_h_gates": num_h_gates,
                 "num_cp_gates": num_cp_gates,
@@ -357,7 +372,12 @@ class ApproximateIQFTStrategy:
             num_cp_gates = n * (n - 1) // 2
 
         return ResourceMetadata(
-            t_gate_count=0,
+            t_gates=0,
+            total_gates=num_h_gates + num_cp_gates + num_swap_gates,
+            single_qubit_gates=num_h_gates,
+            two_qubit_gates=num_cp_gates + num_swap_gates,
+            clifford_gates=num_h_gates + num_swap_gates,
+            rotation_gates=num_cp_gates,
             custom_metadata={
                 "num_h_gates": num_h_gates,
                 "num_cp_gates": num_cp_gates,
