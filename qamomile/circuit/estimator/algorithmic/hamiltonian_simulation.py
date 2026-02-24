@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import sympy as sp
 
-from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
-from qamomile.circuit.estimator.gate_counter import GateCount
 from qamomile.circuit.estimator.depth_estimator import CircuitDepth
+from qamomile.circuit.estimator.gate_counter import GateCount
+from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
 
 
 def estimate_trotter(
@@ -282,7 +282,9 @@ def estimate_qdrift(
     total_operations = num_samples
 
     return ResourceEstimate(
-        qubits=sp.Symbol("n"),  # Not determined by this formula
+        qubits=sp.Symbol(
+            "n", integer=True, positive=True
+        ),  # Not determined by this formula
         gates=GateCount(
             total=sp.simplify(total_operations),
             single_qubit=sp.Integer(0),  # Unknown without knowing term structure

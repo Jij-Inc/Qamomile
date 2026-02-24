@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 import sympy as sp
 from sympy import Sum
 
+from qamomile.circuit.frontend.handle import Handle
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     BinOpKind,
@@ -19,21 +20,20 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOpKind,
 )
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+from qamomile.circuit.ir.operation.composite_gate import (
+    CompositeGateOperation,
+    ResourceMetadata,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
     IfOperation,
     WhileOperation,
-)
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
-    ResourceMetadata,
 )
 from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     GateOperation,
 )
 from qamomile.circuit.ir.operation.operation import Operation
-from qamomile.circuit.frontend.handle import Handle
 from qamomile.circuit.ir.value import Value
 
 if TYPE_CHECKING:
@@ -328,7 +328,7 @@ def _estimate_composite_gate_depth(
 
             # Last resort: symbolic n
             if n is None:
-                n = sp.Symbol("n")
+                n = sp.Symbol("n", integer=True, positive=True)
 
         return CircuitDepth(
             total_depth=n,
@@ -377,7 +377,7 @@ def value_to_expr(
         elif isinstance(v, bool):
             return sp.Integer(1 if v else 0)
         else:
-            return sp.Symbol(str(v))
+            return sp.Symbol(str(v), integer=True, positive=True)
 
     # Check if this value is mapped in call_context
     if call_context and v.uuid in call_context:
@@ -394,7 +394,7 @@ def value_to_expr(
         else:
             return sp.Integer(int(const_val))
     elif v.is_parameter():
-        return sp.Symbol(v.parameter_name())
+        return sp.Symbol(v.parameter_name(), integer=True, positive=True)
     else:
         # Check if this is a loop variable
         if loop_var_symbols and v.name in loop_var_symbols:
@@ -411,7 +411,7 @@ def value_to_expr(
             )
             if traced is not None:
                 return traced
-        return sp.Symbol(v.name)  # Fallback
+        return sp.Symbol(v.name, integer=True, positive=True)  # Fallback
 
 
 def _trace_value_operation(
@@ -624,7 +624,9 @@ def _estimate_sequential_depth(
 
                     # Build loop variable symbols mapping FIRST (needed for tracing loop bounds)
                     new_loop_var_symbols = loop_var_symbols.copy()
-                    loop_var_symbol = sp.Symbol(op.loop_var)
+                    loop_var_symbol = sp.Symbol(
+                        op.loop_var, integer=True, positive=True
+                    )
 
                     # Find all Values that represent this loop variable
                     loop_var_values = _find_loop_variable_values(
@@ -661,7 +663,9 @@ def _estimate_sequential_depth(
                                     v, local_block, call_context, new_loop_var_symbols
                                 )
                                 # Use local result if it's not just the symbol name
-                                if local_result != sp.Symbol(v.name):
+                                if local_result != sp.Symbol(
+                                    v.name, integer=True, positive=True
+                                ):
                                     return local_result
                             return result
                         else:
@@ -709,7 +713,7 @@ def _estimate_sequential_depth(
                     depth = depth + depth_expr
                 else:
                     # Fallback
-                    iterations = sp.Symbol("iter")
+                    iterations = sp.Symbol("iter", integer=True, positive=True)
                     inner_depth = _estimate_sequential_depth(
                         op.operations,
                         block=None,
@@ -730,7 +734,7 @@ def _estimate_sequential_depth(
                     loop_var_symbols=loop_var_symbols,
                     is_controlled=is_controlled,
                 )
-                iterations = sp.Symbol("while_iter")
+                iterations = sp.Symbol("while_iter", integer=True, positive=True)
                 depth = depth + (inner_depth * iterations)
 
             case IfOperation():

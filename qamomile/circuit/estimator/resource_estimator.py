@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING, Any
 
 import sympy as sp
 
-from qamomile.circuit.estimator.gate_counter import GateCount, count_gates
 from qamomile.circuit.estimator.depth_estimator import CircuitDepth, estimate_depth
+from qamomile.circuit.estimator.gate_counter import GateCount, count_gates
 from qamomile.circuit.estimator.qubits_counter import qubits_counter
 
 if TYPE_CHECKING:
@@ -62,7 +62,7 @@ class ResourceEstimate:
                 subs_dict[self.parameters[key]] = val
             else:
                 # Try creating a symbol (for cases where parameters weren't tracked)
-                subs_dict[sp.Symbol(key)] = val
+                subs_dict[sp.Symbol(key, integer=True, positive=True)] = val
 
         return ResourceEstimate(
             qubits=self.qubits.subs(subs_dict),

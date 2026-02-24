@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, overload
 
 import sympy as sp
 
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
 from qamomile.circuit.ir.operation.control_flow import (
@@ -17,17 +18,57 @@ from qamomile.circuit.ir.operation.control_flow import (
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.operation import Operation, QInitOperation
 from qamomile.circuit.ir.types.primitives import QubitType
-from qamomile.circuit.ir.value import ArrayValue
+from qamomile.circuit.ir.value import ArrayValue, Value
 
 if TYPE_CHECKING:
     from qamomile.circuit.ir.block_value import BlockValue
 
+BINOP_TO_SYMPY = {
+    BinOpKind.ADD: lambda l, r: l + r,
+    BinOpKind.SUB: lambda l, r: l - r,
+    BinOpKind.MUL: lambda l, r: l * r,
+    BinOpKind.DIV: lambda l, r: l / r,
+    BinOpKind.FLOORDIV: lambda l, r: sp.floor(l / r),
+    BinOpKind.POW: lambda l, r: l**r,
+}
 
-def _count_qinit(op: QInitOperation) -> sp.Expr:
+WHILE_SYMBOL = sp.Symbol("|while|")
+
+
+def _resolve_value_to_sympy(
+    value: Value,
+    symbol_map: dict[str, sp.Expr],
+) -> sp.Expr:
+    """Resolve a Value to a sympy expression.
+
+    Resolution priority:
+      1. Constant -> sp.Integer
+      2. Parameter -> sp.Symbol (integer=True, positive=True)
+      3. Registered in symbol_map (BinOp result etc.) -> cached expression
+      4. Fallback -> sp.Symbol(name, integer=True, positive=True)
+    """
+    if value.is_constant():
+        const_val = value.get_const()
+        if const_val is not None:
+            return sp.Integer(int(const_val))
+
+    if value.is_parameter():
+        param_name = value.parameter_name()
+        if param_name is not None:
+            return sp.Symbol(param_name, integer=True, positive=True)
+
+    if value.uuid in symbol_map:
+        return symbol_map[value.uuid]
+
+    return sp.Symbol(value.name, integer=True, positive=True)
+
+
+def _count_qinit(op: QInitOperation, symbol_map: dict[str, sp.Expr]) -> sp.Expr:
     """Count qubits from a QInitOperation.
 
     Args:
         op: The QInitOperation to count qubits from.
+        symbol_map: Mapping from Value UUIDs to resolved sympy expressions.
 
     Returns:
         Number of qubits as a sympy expression (may contain symbols for
@@ -41,17 +82,7 @@ def _count_qinit(op: QInitOperation) -> sp.Expr:
     if isinstance(result, ArrayValue) and isinstance(result.type, QubitType):
         el_count: sp.Expr = sp.Integer(1)
         for dim in result.shape:
-            if dim.is_constant():
-                const_val = dim.get_const()
-                if const_val is not None:
-                    el_count *= sp.Integer(int(const_val))
-            elif dim.is_parameter():
-                param_name = dim.parameter_name()
-                if param_name is not None:
-                    el_count *= sp.Symbol(param_name, integer=True, positive=True)  # type: ignore
-            else:
-                # Use name as symbol
-                el_count *= sp.Symbol(dim.name, integer=True, positive=True)  # type: ignore
+            el_count *= _resolve_value_to_sympy(dim, symbol_map)
         return el_count
 
     # Single qubit
@@ -61,7 +92,7 @@ def _count_qinit(op: QInitOperation) -> sp.Expr:
     return sp.Integer(0)
 
 
-def _count_input_qubits(input_values: list) -> sp.Expr:
+def _count_input_qubits(input_values: list, symbol_map: dict[str, sp.Expr]) -> sp.Expr:
     """Count qubit-typed values in BlockValue.input_values.
 
     Only used at the top level to count qubits passed as function arguments.
@@ -69,6 +100,7 @@ def _count_input_qubits(input_values: list) -> sp.Expr:
 
     Args:
         input_values: List of Value objects from BlockValue.input_values.
+        symbol_map: Mapping from Value UUIDs to resolved sympy expressions.
 
     Returns:
         Number of input qubits as a sympy expression.
@@ -78,54 +110,60 @@ def _count_input_qubits(input_values: list) -> sp.Expr:
         if isinstance(v, ArrayValue) and isinstance(v.type, QubitType):
             el_count: sp.Expr = sp.Integer(1)
             for dim in v.shape:
-                if dim.is_constant():
-                    const_val = dim.get_const()
-                    if const_val is not None:
-                        el_count *= sp.Integer(int(const_val))
-                elif dim.is_parameter():
-                    param_name = dim.parameter_name()
-                    if param_name is not None:
-                        el_count *= sp.Symbol(param_name, integer=True, positive=True)  # type: ignore
-                    else:
-                        el_count *= sp.Symbol(dim.name, integer=True, positive=True)  # type: ignore
-                else:
-                    el_count *= sp.Symbol(dim.name, integer=True, positive=True)  # type: ignore
+                el_count *= _resolve_value_to_sympy(dim, symbol_map)
             count += el_count
         elif isinstance(v.type, QubitType):
             count += sp.Integer(1)
     return count
 
 
-def _count_from_operations(operations: list[Operation]) -> sp.Expr:
+def _count_from_operations(
+    operations: list[Operation],
+    symbol_map: dict[str, sp.Expr] | None = None,
+) -> sp.Expr:
     """Count qubits from a list of operations.
 
     Args:
         operations: List of operations to analyze.
+        symbol_map: Mapping from Value UUIDs to resolved sympy expressions.
 
     Returns:
         Total qubit count as a sympy expression.
     """
+    if symbol_map is None:
+        symbol_map = {}
+
     count: sp.Expr = sp.Integer(0)
 
     for op in operations:
         match op:
+            case BinOp():
+                lhs_expr = _resolve_value_to_sympy(op.lhs, symbol_map)
+                rhs_expr = _resolve_value_to_sympy(op.rhs, symbol_map)
+                if op.kind in BINOP_TO_SYMPY:
+                    symbol_map[op.output.uuid] = BINOP_TO_SYMPY[op.kind](
+                        lhs_expr, rhs_expr
+                    )
+
             case QInitOperation():
-                count += _count_qinit(op)  # type: ignore
+                count += _count_qinit(op, symbol_map)  # type: ignore
 
             case ForOperation():
-                # Assume qubits are uncomputed after loop, don't multiply by iterations
-                inner_count = _count_from_operations(op.operations)
-                count += inner_count  # type: ignore
+                inner_count = _count_from_operations(op.operations, symbol_map)
+                start_expr = _resolve_value_to_sympy(op.operands[0], symbol_map)
+                stop_expr = _resolve_value_to_sympy(op.operands[1], symbol_map)
+                step_expr = _resolve_value_to_sympy(op.operands[2], symbol_map)
+                iterations = (stop_expr - start_expr) / step_expr
+                count += inner_count * iterations  # type: ignore
 
             case WhileOperation():
-                # Same as for loop - assume uncomputation
-                inner_count = _count_from_operations(op.operations)
-                count += inner_count  # type: ignore
+                inner_count = _count_from_operations(op.operations, symbol_map)
+                count += inner_count * WHILE_SYMBOL  # type: ignore
 
             case IfOperation():
                 # Take maximum of both branches
-                true_count = _count_from_operations(op.true_operations)
-                false_count = _count_from_operations(op.false_operations)
+                true_count = _count_from_operations(op.true_operations, symbol_map)
+                false_count = _count_from_operations(op.false_operations, symbol_map)
                 count += sp.Max(true_count, false_count)  # type: ignore
 
             case CallBlockOperation():
@@ -135,7 +173,7 @@ def _count_from_operations(operations: list[Operation]) -> sp.Expr:
 
                 block = op.operands[0]
                 if isinstance(block, BlockValue):
-                    count += _count_from_operations(block.operations)  # type: ignore
+                    count += _count_from_operations(block.operations, symbol_map)  # type: ignore
 
             case ControlledUOperation():
                 # Recursively count only internally-allocated qubits
@@ -143,12 +181,20 @@ def _count_from_operations(operations: list[Operation]) -> sp.Expr:
 
                 block = op.block
                 if isinstance(block, BlockValue):
-                    count += _count_from_operations(block.operations)  # type: ignore
+                    count += _count_from_operations(block.operations, symbol_map)  # type: ignore
 
             case ForItemsOperation():
-                # Same as for loop - assume uncomputation
-                inner_count = _count_from_operations(op.operations)
-                count += inner_count  # type: ignore
+                inner_count = _count_from_operations(op.operations, symbol_map)
+                dict_operand = op.operands[0]
+                if (
+                    hasattr(dict_operand, "is_parameter")
+                    and dict_operand.is_parameter()
+                ):
+                    dict_name = dict_operand.parameter_name() or dict_operand.name
+                else:
+                    dict_name = dict_operand.name
+                cardinality = sp.Symbol(f"|{dict_name}|", integer=True, positive=True)
+                count += inner_count * cardinality  # type: ignore
 
             case CompositeGateOperation():
                 from qamomile.circuit.ir.block_value import BlockValue
@@ -156,7 +202,7 @@ def _count_from_operations(operations: list[Operation]) -> sp.Expr:
                 # Count only internally-allocated qubits (not input_values)
                 impl = op.implementation
                 if isinstance(impl, BlockValue):
-                    count += _count_from_operations(impl.operations)  # type: ignore
+                    count += _count_from_operations(impl.operations, symbol_map)  # type: ignore
 
                 # Add ancilla qubits from resource metadata
                 if op.resource_metadata is not None:
@@ -204,7 +250,8 @@ def qubits_counter(block: BlockValue | list[Operation]) -> sp.Expr:
     from qamomile.circuit.ir.block_value import BlockValue
 
     if isinstance(block, BlockValue):
-        input_qubits = _count_input_qubits(block.input_values)
-        ops_qubits = _count_from_operations(block.operations)
+        symbol_map: dict[str, sp.Expr] = {}
+        input_qubits = _count_input_qubits(block.input_values, symbol_map)
+        ops_qubits = _count_from_operations(block.operations, symbol_map)
         return sp.simplify(input_qubits + ops_qubits)
     return _count_from_operations(block)
