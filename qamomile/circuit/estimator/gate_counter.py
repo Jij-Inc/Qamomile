@@ -842,7 +842,7 @@ def _count_from_operations(
                     loop_var_symbols=loop_var_symbols,
                     is_controlled=is_controlled,
                 )
-                iterations = sp.Symbol("while_iter", integer=True, positive=True)
+                iterations = sp.Symbol("|while|", integer=True, positive=True)
                 count = count + (inner_count * iterations)
 
             case IfOperation():

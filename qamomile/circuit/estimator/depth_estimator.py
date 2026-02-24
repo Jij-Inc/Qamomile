@@ -734,7 +734,7 @@ def _estimate_sequential_depth(
                     loop_var_symbols=loop_var_symbols,
                     is_controlled=is_controlled,
                 )
-                iterations = sp.Symbol("while_iter", integer=True, positive=True)
+                iterations = sp.Symbol("|while|", integer=True, positive=True)
                 depth = depth + (inner_depth * iterations)
 
             case IfOperation():
