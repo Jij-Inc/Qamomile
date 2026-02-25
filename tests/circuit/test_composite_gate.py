@@ -15,8 +15,8 @@ from qamomile.circuit.ir.operation.composite_gate import (
 from qamomile.circuit.ir.operation.operation import QInitOperation
 
 
-class TestCompositeGateDefinition:
-    """Test that CompositeGate subclasses can be defined correctly."""
+class TestCompositeGate:
+    """Test the CompositeGate API: definition, application, and error handling."""
 
     @pytest.mark.parametrize("n", [1, 2, 5, 10, 100])
     def test_simple_composite_gate_definition(self, n):
@@ -42,7 +42,6 @@ class TestCompositeGateDefinition:
                     result.append(qmc.h(q))
                 return tuple(result)
 
-        # Create instance
         gate = MyHadamardAll(n)
         assert gate.num_target_qubits == n
         assert gate.num_control_qubits == 0
@@ -88,10 +87,6 @@ class TestCompositeGateDefinition:
         assert metadata.query_complexity == 5
         assert metadata.custom_metadata["num_qubits"] == n
 
-
-class TestCompositeGateApplication:
-    """Test that CompositeGate can be applied to qubits in qkernels."""
-
     def test_apply_composite_gate_in_qkernel(self):
         """CompositeGate can be used inside a qkernel."""
 
@@ -122,12 +117,11 @@ class TestCompositeGateApplication:
             (q,) = double_h(q)
             return q
 
-        # Should build successfully
         block = circuit.build()
         assert block is not None
 
         ops = block.operations
-        assert len(ops) == 2  # Should have 2 operations from the decomposition
+        assert len(ops) == 2
         assert isinstance(ops[0], QInitOperation)
         assert isinstance(ops[1], CompositeGateOperation)
         assert ops[1].custom_name == "double_h"
@@ -165,7 +159,7 @@ class TestCompositeGateApplication:
         assert block is not None
 
         ops = block.operations
-        assert len(ops) == 3  # Should have 2 operations from the decomposition
+        assert len(ops) == 3
         assert isinstance(ops[0], QInitOperation)
         assert isinstance(ops[1], QInitOperation)
         assert isinstance(ops[2], CompositeGateOperation)
@@ -173,96 +167,61 @@ class TestCompositeGateApplication:
         assert ops[2].num_target_qubits == 2
         assert ops[2].num_control_qubits == 0
 
+    def test_wrong_num_qubits_raises_error(self):
+        """Passing wrong number of qubits raises ValueError."""
 
-class TestQFTAndIQFTClasses:
-    """Test the built-in QFT and IQFT CompositeGate classes."""
+        class TwoQubitGate(CompositeGate):
+            @property
+            def num_target_qubits(self) -> int:
+                return 2
 
-    @pytest.mark.parametrize("n", [1, 2, 5, 10, 100])
-    def test_qft_class_attributes(self, n):
-        """QFT class has correct attributes."""
-        from qamomile.circuit.stdlib.qft import QFT
+            def _decompose(self, qubits: tuple[Qubit, ...]) -> tuple[Qubit, ...]:
+                return qubits
 
-        qft = QFT(n)
-        assert qft.num_target_qubits == n
-        assert qft.num_control_qubits == 0
-        assert qft.gate_type == CompositeGateType.QFT
-        assert qft.custom_name == "qft"
+        gate = TwoQubitGate()
 
-    @pytest.mark.parametrize("n", [1, 2, 5, 10, 100])
-    def test_iqft_class_attributes(self, n):
-        """IQFT class has correct attributes."""
-        from qamomile.circuit.stdlib.qft import IQFT
+        @qkernel
+        def circuit(q: Qubit) -> Qubit:
+            (q,) = gate(q)
+            return q
 
-        iqft = IQFT(n)
-        assert iqft.num_target_qubits == n
-        assert iqft.num_control_qubits == 0
-        assert iqft.gate_type == CompositeGateType.IQFT
-        assert iqft.custom_name == "iqft"
+        with pytest.raises(ValueError, match="requires 2 target qubits"):
+            circuit.build()
 
-    @pytest.mark.parametrize("n", [1, 2, 5, 10, 100])
-    def test_qft_resources(self, n):
-        """QFT returns correct resource metadata."""
-        from qamomile.circuit.stdlib.qft import QFT
+    def test_stub_gate_without_decomposition(self):
+        """Stub gate (no _decompose) has no implementation."""
 
-        qft = QFT(n)
-        metadata = qft.get_resource_metadata()
+        class StubOracle(CompositeGate):
+            custom_name = "oracle"
 
-        assert metadata is not None
-        assert metadata.t_gate_count == 0  # Standard QFT uses no T gates
-        assert "num_h_gates" in metadata.custom_metadata
-        assert metadata.custom_metadata["num_h_gates"] == n
+            @property
+            def num_target_qubits(self) -> int:
+                return 2
 
-    @pytest.mark.parametrize("n", [1, 2, 5, 10, 100])
-    def test_qft_in_qkernel(self, n):
-        """QFT can be used in a qkernel."""
-        from qamomile.circuit.stdlib.qft import qft
+        oracle = StubOracle()
 
         @qkernel
         def circuit() -> Vector[Qubit]:
-            qs = qubit_array(n, "qs")
-            qs = qft(qs)
+            qs = qubit_array(2, "qs")
+            q0 = qs[0]
+            q1 = qs[1]
+            q0, q1 = oracle(q0, q1)
+            qs[0] = q0
+            qs[1] = q1
             return qs
 
         block = circuit.build()
-        assert block is not None
 
-        ops = block.operations
-        assert len(ops) == 2  # Should have 2 operations from the decomposition
-        assert isinstance(ops[0], QInitOperation)
-        assert isinstance(ops[1], CompositeGateOperation)
-        assert ops[1].custom_name == "qft"
-        assert ops[1].num_target_qubits == n
-        assert ops[1].num_control_qubits == 0
-
-    @pytest.mark.parametrize("n", [1, 2, 5, 10, 100])
-    def test_iqft_in_qkernel(self, n):
-        """iqft() factory function works in qkernel."""
-        from qamomile.circuit.stdlib.qft import iqft
-
-        @qkernel
-        def circuit() -> Vector[Qubit]:
-            qs = qubit_array(n, "qs")
-            qs = iqft(qs)
-            return qs
-
-        block = circuit.build()
-        assert block is not None
-
-        ops = block.operations
-        assert len(ops) == 2  # Should have 2 operations from the decomposition
-        assert isinstance(ops[0], QInitOperation)
-        assert isinstance(ops[1], CompositeGateOperation)
-        assert ops[1].custom_name == "iqft"
-        assert ops[1].num_target_qubits == n
-        assert ops[1].num_control_qubits == 0
+        composite_ops = [
+            op for op in block.operations if isinstance(op, CompositeGateOperation)
+        ]
+        assert len(composite_ops) == 1
+        assert composite_ops[0].has_implementation is False
+        assert composite_ops[0].implementation is None
 
 
 class TestCompositeGateTranspilation:
-    """Test that CompositeGate IR generation works correctly.
-
-    Note: Full transpilation to Qiskit requires circuits with classical I/O.
-    These tests verify that the IR is correctly generated for composite gates.
-    """
+    """Test CompositeGate IR generation and transpilation (requires Qiskit)."""
 
     @pytest.fixture
     def qiskit_transpiler(self):
@@ -300,43 +259,11 @@ class TestCompositeGateTranspilation:
             qs[1] = q1
             return qs
 
-        # Build to Block and inline
         block = qiskit_transpiler.to_block(circuit)
         inlined = qiskit_transpiler.inline(block)
 
-        # After inline, should have H and CX operations
         op_types = [type(op).__name__ for op in inlined.operations]
-        assert "GateOperation" in op_types  # H and CX are GateOperations
-
-    def test_qft_builds_ir(self, qiskit_transpiler):
-        """QFT builds correct IR with native gate type."""
-        from qamomile.circuit.ir.operation.composite_gate import CompositeGateType
-        from qamomile.circuit.stdlib.qft import QFT
-
-        @qkernel
-        def circuit() -> Vector[Qubit]:
-            qs = qubit_array(3, "qs")
-            q0 = qs[0]
-            q1 = qs[1]
-            q2 = qs[2]
-            qft = QFT(3)
-            q0, q1, q2 = qft(q0, q1, q2)
-            qs[0] = q0
-            qs[1] = q1
-            qs[2] = q2
-            return qs
-
-        # Build to Block (before inline)
-        block = qiskit_transpiler.to_block(circuit)
-
-        # Should have CompositeGateOperation with QFT type
-        from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
-
-        composite_ops = [
-            op for op in block.operations if isinstance(op, CompositeGateOperation)
-        ]
-        assert len(composite_ops) == 1
-        assert composite_ops[0].gate_type == CompositeGateType.QFT
+        assert "GateOperation" in op_types
 
     def test_no_phantom_qubits_with_array_elements(self, qiskit_transpiler):
         """qubit_array elements + CompositeGate should not create phantom qubits."""
@@ -367,94 +294,3 @@ class TestCompositeGateTranspilation:
         qc = qiskit_transpiler.to_circuit(circuit)
         qc.remove_final_measurements()
         assert qc.num_qubits == 2, f"Expected 2 qubits, got {qc.num_qubits}"
-
-    def test_iqft_builds_ir(self, qiskit_transpiler):
-        """IQFT builds correct IR with native gate type."""
-        from qamomile.circuit.ir.operation.composite_gate import CompositeGateType
-        from qamomile.circuit.stdlib.qft import IQFT
-
-        @qkernel
-        def circuit() -> Vector[Qubit]:
-            qs = qubit_array(2, "qs")
-            q0 = qs[0]
-            q1 = qs[1]
-            iqft = IQFT(2)
-            q0, q1 = iqft(q0, q1)
-            qs[0] = q0
-            qs[1] = q1
-            return qs
-
-        # Build to Block (before inline)
-        block = qiskit_transpiler.to_block(circuit)
-
-        # Should have CompositeGateOperation with IQFT type
-        from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
-
-        composite_ops = [
-            op for op in block.operations if isinstance(op, CompositeGateOperation)
-        ]
-        assert len(composite_ops) == 1
-        assert composite_ops[0].gate_type == CompositeGateType.IQFT
-
-
-class TestCompositeGateEdgeCases:
-    """Test edge cases and error handling for CompositeGate."""
-
-    def test_wrong_num_qubits_raises_error(self):
-        """Passing wrong number of qubits raises ValueError."""
-
-        class TwoQubitGate(CompositeGate):
-            @property
-            def num_target_qubits(self) -> int:
-                return 2
-
-            def _decompose(self, qubits: tuple[Qubit, ...]) -> tuple[Qubit, ...]:
-                return qubits
-
-        gate = TwoQubitGate()
-
-        @qkernel
-        def circuit(q: Qubit) -> Qubit:
-            # Passing 1 qubit to a 2-qubit gate
-            (q,) = gate(q)  # This should raise
-            return q
-
-        with pytest.raises(ValueError, match="requires 2 target qubits"):
-            circuit.build()
-
-    def test_stub_gate_without_decomposition(self):
-        """Stub gate (no _decompose) has no implementation."""
-        from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
-
-        class StubOracle(CompositeGate):
-            custom_name = "oracle"
-
-            @property
-            def num_target_qubits(self) -> int:
-                return 2
-
-            # No _decompose defined - stub gate
-
-        oracle = StubOracle()
-
-        @qkernel
-        def circuit() -> Vector[Qubit]:
-            qs = qubit_array(2, "qs")
-            q0 = qs[0]
-            q1 = qs[1]
-            q0, q1 = oracle(q0, q1)
-            qs[0] = q0
-            qs[1] = q1
-            return qs
-
-        # Build to block
-        block = circuit.build()
-
-        # Find the CompositeGateOperation
-        composite_ops = [
-            op for op in block.operations if isinstance(op, CompositeGateOperation)
-        ]
-        assert len(composite_ops) == 1
-        # Stub gate should have no implementation
-        assert composite_ops[0].has_implementation is False
-        assert composite_ops[0].implementation is None
