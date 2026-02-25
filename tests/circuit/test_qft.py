@@ -14,19 +14,7 @@ from qamomile.circuit.ir.operation.composite_gate import (
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.stdlib.qft import IQFT, QFT, iqft, qft
-
-
-def run_statevector(qc):
-    """Run circuit and return statevector (measurements removed)."""
-    from qiskit import transpile
-    from qiskit_aer import AerSimulator
-
-    qc.remove_final_measurements()
-    simulator = AerSimulator(method="statevector")
-    qc = transpile(qc, simulator)
-    qc.save_statevector()
-    result = simulator.run(qc).result()
-    return np.array(result.get_statevector())
+from tests.circuit.conftest import run_statevector
 
 
 @pytest.fixture

@@ -16,6 +16,7 @@ from qamomile.circuit.ir.operation.composite_gate import (
 )
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.value import ArrayValue, Value
+from tests.circuit.conftest import run_statevector
 
 # =============================================================================
 # Reusable CompositeGate definitions
@@ -74,19 +75,6 @@ class DoubleH(CompositeGate):
         q = qmc.h(q)
         q = qmc.h(q)
         return (q,)
-
-
-def run_statevector(qc):
-    """Run circuit and return statevector (measurements removed)."""
-    from qiskit import transpile
-    from qiskit_aer import AerSimulator
-
-    qc.remove_final_measurements()
-    simulator = AerSimulator(method="statevector")
-    qc = transpile(qc, simulator)
-    qc.save_statevector()
-    result = simulator.run(qc).result()
-    return np.array(result.get_statevector())
 
 
 def apply_gate_to_array(qs: Vector[Qubit], gate: CompositeGate) -> Vector[Qubit]:

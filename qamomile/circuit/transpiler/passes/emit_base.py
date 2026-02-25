@@ -236,6 +236,8 @@ class ResourceAllocator:
                             f"before this GateOperation."
                         )
                         qubit_map[operand.uuid] = qubit_map[key]
+                    # Non-constant indices (symbolic loop vars) are resolved
+                    # at emit time via ValueResolver.resolve_qubit_index_detailed.
                 else:
                     # Scalar qubit: allocate new index
                     qubit_map[operand.uuid] = len(qubit_map)
@@ -247,6 +249,44 @@ class ResourceAllocator:
                 if operand.uuid in qubit_map:
                     qubit_map[result.uuid] = qubit_map[operand.uuid]
 
+    @staticmethod
+    def _resolve_qubit_key(qubit: "Value") -> tuple[str | None, bool]:
+        """Resolve a qubit Value to its allocation key.
+
+        Returns:
+            (key, is_array_element) where key is the qubit_map key
+            or None if the index is non-constant.
+        """
+        if qubit.parent_array is not None and qubit.element_indices:
+            parent_uuid = qubit.parent_array.uuid
+            idx_value = qubit.element_indices[0]
+            if idx_value.is_constant():
+                idx = int(idx_value.get_const())
+                return f"{parent_uuid}_{idx}", True
+            return None, True
+        return qubit.uuid, False
+
+    def _allocate_qubit_list(
+        self,
+        all_qubits: list["Value"],
+        results: list["Value"],
+        qubit_map: dict[str, int],
+    ) -> None:
+        """Allocate qubits for a list of qubit Values and their results."""
+        for qubit in all_qubits:
+            qubit_key, is_array = self._resolve_qubit_key(qubit)
+            if qubit_key is not None:
+                if qubit_key not in qubit_map:
+                    qubit_map[qubit_key] = len(qubit_map)
+                if qubit.uuid not in qubit_map:
+                    qubit_map[qubit.uuid] = qubit_map[qubit_key]
+
+        for i, result in enumerate(results):
+            if result.uuid not in qubit_map and i < len(all_qubits):
+                qubit_key, is_array = self._resolve_qubit_key(all_qubits[i])
+                if qubit_key is not None:
+                    qubit_map[result.uuid] = qubit_map.get(qubit_key, len(qubit_map))
+
     def _allocate_composite(
         self,
         op: CompositeGateOperation,
@@ -254,30 +294,7 @@ class ResourceAllocator:
     ) -> None:
         """Allocate resources for a CompositeGateOperation."""
         all_qubits = op.control_qubits + op.target_qubits
-
-        def resolve_qubit_key(qubit: Value) -> tuple[str | None, bool]:
-            if qubit.parent_array is not None and qubit.element_indices:
-                parent_uuid = qubit.parent_array.uuid
-                idx_value = qubit.element_indices[0]
-                if idx_value.is_constant():
-                    idx = int(idx_value.get_const())
-                    return f"{parent_uuid}_{idx}", True
-                return None, True
-            return qubit.uuid, False
-
-        for qubit in all_qubits:
-            qubit_key, is_array = resolve_qubit_key(qubit)
-            if qubit_key is not None:
-                if qubit_key not in qubit_map:
-                    qubit_map[qubit_key] = len(qubit_map)
-                if qubit.uuid not in qubit_map:
-                    qubit_map[qubit.uuid] = qubit_map[qubit_key]
-
-        for i, result in enumerate(op.results):
-            if result.uuid not in qubit_map and i < len(all_qubits):
-                qubit_key, is_array = resolve_qubit_key(all_qubits[i])
-                if qubit_key is not None:
-                    qubit_map[result.uuid] = qubit_map.get(qubit_key, len(qubit_map))
+        self._allocate_qubit_list(all_qubits, list(op.results), qubit_map)
 
     def _allocate_controlled_u(
         self,
@@ -290,30 +307,7 @@ class ResourceAllocator:
             v for v in op.target_operands if hasattr(v, "type") and v.type.is_quantum()
         ]
         all_qubits = control_qubits + target_qubits
-
-        def resolve_qubit_key(qubit: Value) -> tuple[str | None, bool]:
-            if qubit.parent_array is not None and qubit.element_indices:
-                parent_uuid = qubit.parent_array.uuid
-                idx_value = qubit.element_indices[0]
-                if idx_value.is_constant():
-                    idx = int(idx_value.get_const())
-                    return f"{parent_uuid}_{idx}", True
-                return None, True
-            return qubit.uuid, False
-
-        for qubit in all_qubits:
-            qubit_key, is_array = resolve_qubit_key(qubit)
-            if qubit_key is not None:
-                if qubit_key not in qubit_map:
-                    qubit_map[qubit_key] = len(qubit_map)
-                if qubit.uuid not in qubit_map:
-                    qubit_map[qubit.uuid] = qubit_map[qubit_key]
-
-        for i, result in enumerate(op.results):
-            if result.uuid not in qubit_map and i < len(all_qubits):
-                qubit_key, is_array = resolve_qubit_key(all_qubits[i])
-                if qubit_key is not None:
-                    qubit_map[result.uuid] = qubit_map.get(qubit_key, len(qubit_map))
+        self._allocate_qubit_list(all_qubits, list(op.results), qubit_map)
 
     def _allocate_cast(
         self,
