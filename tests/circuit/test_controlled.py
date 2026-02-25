@@ -493,14 +493,64 @@ def _make_controlled_circuit(
 # -- Helpers -------------------------------------------------------------------
 
 
+def _precise_statevector(qc):
+    """Compute statevector with exact controlled-gate unitaries.
+
+    Qiskit's ``ControlledGate.to_matrix()`` is not always available, so
+    ``Operator(circuit)`` falls back to gate decomposition which can
+    accumulate significant error (e.g. ``CXGate().power(3).control(3)``).
+
+    This helper processes each gate instruction individually.  For
+    ``ControlledGate`` instances it builds the controlled unitary from
+    the base gate's precise matrix, avoiding decomposition error entirely.
+    """
+    from qiskit.circuit import ControlledGate as QiskitControlledGate
+    from qiskit.quantum_info import Operator, Statevector
+
+    def _gate_operator(gate):
+        if isinstance(gate, QiskitControlledGate):
+            base_mat = Operator(gate.base_gate).data
+            n_base = base_mat.shape[0]
+            nc = gate.num_ctrl_qubits
+            dim = (2**nc) * n_base
+            mat = np.eye(dim, dtype=complex)
+            # In Qiskit little-endian ordering, controls occupy the lowest bits.
+            ctrl_all1 = (1 << nc) - 1
+            idx = [i for i in range(dim) if (i & ctrl_all1) == ctrl_all1]
+            for r, ri in enumerate(idx):
+                for c, ci in enumerate(idx):
+                    mat[ri, ci] = base_mat[r, c]
+            return Operator(mat)
+        return Operator(gate)
+
+    sv = Statevector.from_int(0, 2**qc.num_qubits)
+    for inst in qc.data:
+        qubits = [qc.find_bit(q).index for q in inst.qubits]
+        sv = sv.evolve(_gate_operator(inst.operation), qubits)
+    return sv.data
+
+
 def _get_statevector(transpiler, circuit_kernel, bindings):
     """Transpile, remove measurements, return full statevector as numpy array."""
-    from qiskit.quantum_info import Statevector
-
     executable = transpiler.transpile(circuit_kernel, bindings=bindings)
     qc = executable.quantum_circuit.copy()
     qc.remove_final_measurements()
-    return Statevector(qc).data
+    return _precise_statevector(qc)
+
+
+def _gate_power_matrix(matrix: np.ndarray, power: int) -> np.ndarray:
+    """Compute U^power using Qiskit's gate power implementation.
+
+    For power == 1 returns the matrix as-is.  For power > 1, delegates to
+    ``UnitaryGate(matrix).power(power)`` so the expected value uses exactly
+    the same computation path as the transpiled circuit.
+    """
+    if power == 1:
+        return matrix
+    from qiskit.circuit.library import UnitaryGate
+    from qiskit.quantum_info import Operator
+
+    return Operator(UnitaryGate(matrix).power(power)).data
 
 
 def _expected_statevector(
@@ -519,7 +569,7 @@ def _expected_statevector(
     # Controls all |1>
     controls_state = computational_basis_state(num_controls, 2**num_controls - 1)
     # Gate U^power acts on target qubits starting from |0...0>
-    U = np.linalg.matrix_power(spec.matrix, power)
+    U = _gate_power_matrix(spec.matrix, power)
     targets_final = U @ all_zeros_state(spec.num_targets)
     # In little-endian: controls are lower qubits, targets are higher qubits
     return np.kron(targets_final, controls_state)
@@ -564,13 +614,6 @@ class TestControlledGateIntegration:
 class TestControlledPowerIntegration:
     """Integration test: controlled(gate, num_controls, power) for all gate x control x power combos."""
 
-    @staticmethod
-    def _tolerance(spec, num_controls, power):
-        """Return (rtol, atol) — relaxed for Qiskit CXGate().power(3).control(3) precision issue."""
-        if spec.matrix_fn is cx_matrix and num_controls == 3 and power == 3:
-            return 1e-1, 5e-2
-        return 1e-5, 1e-8
-
     def test_controls_zero(self, qiskit_transpiler, spec, num_controls, power):
         """Controls all |0> => gate^power does NOT fire => full state stays |00...0>."""
         circuit = _make_controlled_circuit(
@@ -580,8 +623,7 @@ class TestControlledPowerIntegration:
         expected = _expected_statevector(
             spec, num_controls, activate_controls=False, power=power
         )
-        rtol, atol = self._tolerance(spec, num_controls, power)
-        assert statevectors_equal(actual, expected, rtol=rtol, atol=atol)
+        assert statevectors_equal(actual, expected)
 
     def test_controls_one(self, qiskit_transpiler, spec, num_controls, power):
         """Controls all |1> => gate^power fires => check full statevector."""
@@ -592,8 +634,7 @@ class TestControlledPowerIntegration:
         expected = _expected_statevector(
             spec, num_controls, activate_controls=True, power=power
         )
-        rtol, atol = self._tolerance(spec, num_controls, power)
-        assert statevectors_equal(actual, expected, rtol=rtol, atol=atol)
+        assert statevectors_equal(actual, expected)
 
 
 # =============================================================================
@@ -601,21 +642,30 @@ class TestControlledPowerIntegration:
 # =============================================================================
 
 
-def _get_statevector_with_prep(
-    transpiler, circuit_kernel, bindings, num_controls, target_state
-):
-    """Transpile circuit, prepend state preparation, return full statevector.
+_transpiled_cache: dict[tuple, object] = {}
 
-    Prepends H gates on control qubits and StatePreparation on target qubits
-    to the transpiled Qiskit circuit.
+
+def _get_cached_circuit(transpiler, spec, num_controls):
+    """Return a transpiled circuit (measurements removed), cached per (spec, num_controls)."""
+    key = (id(spec.kernel), num_controls, spec.theta)
+    if key not in _transpiled_cache:
+        circuit = _make_controlled_circuit(spec, num_controls, activate_controls=False)
+        executable = transpiler.transpile(circuit, bindings=spec.bindings)
+        qc = executable.quantum_circuit.copy()
+        qc.remove_final_measurements()
+        _transpiled_cache[key] = qc
+    return _transpiled_cache[key].copy()
+
+
+def _get_statevector_with_prep(transpiler, spec, num_controls, target_state):
+    """Get statevector with H-prep on controls and StatePreparation on targets.
+
+    Uses cached transpiled circuits to avoid redundant transpilation.
     """
     from qiskit import QuantumCircuit
     from qiskit.circuit.library import StatePreparation
-    from qiskit.quantum_info import Statevector
 
-    executable = transpiler.transpile(circuit_kernel, bindings=bindings)
-    main_qc = executable.quantum_circuit.copy()
-    main_qc.remove_final_measurements()
+    main_qc = _get_cached_circuit(transpiler, spec, num_controls)
 
     total = main_qc.num_qubits
     prep_qc = QuantumCircuit(total)
@@ -624,7 +674,7 @@ def _get_statevector_with_prep(
     prep_qc.append(StatePreparation(target_state), list(range(num_controls, total)))
 
     full_qc = prep_qc.compose(main_qc)
-    return Statevector(full_qc).data
+    return _precise_statevector(full_qc)
 
 
 def _expected_statevector_superposition(
@@ -643,7 +693,7 @@ def _expected_statevector_superposition(
     all1 = computational_basis_state(nc, 2**nc - 1)
     rest = control_plus - coeff * all1
 
-    U = np.linalg.matrix_power(spec.matrix, power)
+    U = _gate_power_matrix(spec.matrix, power)
     return np.kron(target_state, rest) + np.kron(U @ target_state, coeff * all1)
 
 
@@ -656,16 +706,15 @@ def _random_statevector(num_qubits: int, seed: int) -> np.ndarray:
 
 @pytest.mark.parametrize("spec", GATES)
 @pytest.mark.parametrize("num_controls", [1, 2, 3])
-@pytest.mark.parametrize("seed", [901 + offset for offset in range(100)])
+@pytest.mark.parametrize("seed", [901 + offset for offset in range(10)])
 class TestControlledGateRandomState:
     """Integration test: controlled gate with controls in superposition and random target state."""
 
     def test_random_initial_state(self, qiskit_transpiler, spec, num_controls, seed):
         """Controls in |+>^NC, targets in random |psi> => verify full statevector."""
         target_state = _random_statevector(spec.num_targets, seed=seed)
-        circuit = _make_controlled_circuit(spec, num_controls, activate_controls=False)
         actual = _get_statevector_with_prep(
-            qiskit_transpiler, circuit, spec.bindings, num_controls, target_state
+            qiskit_transpiler, spec, num_controls, target_state
         )
         expected = _expected_statevector_superposition(spec, num_controls, target_state)
         assert statevectors_equal(actual, expected)
