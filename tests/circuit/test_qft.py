@@ -38,6 +38,14 @@ def qiskit_transpiler():
     return QiskitTranspiler()
 
 
+@pytest.fixture
+def seeded_executor(qiskit_transpiler):
+    """Executor with fixed seed for reproducible sampling."""
+    from qiskit_aer import AerSimulator
+
+    return qiskit_transpiler.executor(backend=AerSimulator(seed_simulator=901))
+
+
 class TestQFT:
     """Test the QFT CompositeGate class."""
 
@@ -114,9 +122,7 @@ class TestQFT:
 
         ops = block.operations
         assert isinstance(ops[0], QInitOperation)
-        composite_ops = [
-            op for op in ops if isinstance(op, CompositeGateOperation)
-        ]
+        composite_ops = [op for op in ops if isinstance(op, CompositeGateOperation)]
         assert len(composite_ops) == 1
         assert composite_ops[0].custom_name == "qft"
         assert composite_ops[0].num_target_qubits == n
@@ -163,9 +169,12 @@ class TestQFT:
         assert qc.num_qubits == n
         assert len(qc.data) == n + 1  # |measurement| + QFT
 
-        assert qc.data[0].operation.name.lower() == "qft"
+        from qiskit.circuit.library import QFTGate
+        from qiskit.circuit.measure import Measure
+
+        assert isinstance(qc.data[0].operation, QFTGate)
         for datum in qc.data[1:]:
-            assert datum.operation.name == "measure"
+            assert isinstance(datum.operation, Measure)
 
     @pytest.mark.parametrize("n", [2, 3, 4])
     def test_uniform_statevector(self, qiskit_transpiler, n):
@@ -187,7 +196,7 @@ class TestQFT:
         )
 
     @pytest.mark.parametrize("n", [2, 3, 4])
-    def test_uniform_sampling(self, qiskit_transpiler, n):
+    def test_uniform_sampling(self, qiskit_transpiler, seeded_executor, n):
         """QFT on |0...0> produces approximately uniform distribution."""
 
         @qkernel
@@ -198,7 +207,7 @@ class TestQFT:
 
         executable = qiskit_transpiler.transpile(circuit)
         shots = 4096
-        job = executable.sample(qiskit_transpiler.executor(), shots=shots)
+        job = executable.sample(seeded_executor, shots=shots)
         result = job.result()
 
         num_outcomes = 2**n
@@ -236,9 +245,12 @@ class TestQFT:
         assert qc.num_qubits == n
         assert len(qc.data) == n + 1  # |measurement| + QFT
 
-        assert qc.data[0].operation.name.lower() == "qft"
+        from qiskit.circuit.library import QFTGate
+        from qiskit.circuit.measure import Measure
+
+        assert isinstance(qc.data[0].operation, QFTGate)
         for datum in qc.data[1:]:
-            assert datum.operation.name == "measure"
+            assert isinstance(datum.operation, Measure)
 
     @pytest.mark.parametrize("n", [2, 3, 4])
     def test_uniform_statevector_symbolic(self, qiskit_transpiler, n):
@@ -259,7 +271,7 @@ class TestQFT:
         )
 
     @pytest.mark.parametrize("n", [2, 3, 4])
-    def test_uniform_sampling_symbolic(self, qiskit_transpiler, n):
+    def test_uniform_sampling_symbolic(self, qiskit_transpiler, seeded_executor, n):
         """QFT on |0...0> produces uniform distribution (symbolic n)."""
 
         @qkernel
@@ -270,7 +282,7 @@ class TestQFT:
 
         executable = qiskit_transpiler.transpile(circuit, bindings={"num": n})
         shots = 4096
-        job = executable.sample(qiskit_transpiler.executor(), shots=shots)
+        job = executable.sample(seeded_executor, shots=shots)
         result = job.result()
 
         num_outcomes = 2**n
@@ -369,9 +381,7 @@ class TestIQFT:
 
         ops = block.operations
         assert isinstance(ops[0], QInitOperation)
-        composite_ops = [
-            op for op in ops if isinstance(op, CompositeGateOperation)
-        ]
+        composite_ops = [op for op in ops if isinstance(op, CompositeGateOperation)]
         assert len(composite_ops) == 1
         assert composite_ops[0].custom_name == "iqft"
         assert composite_ops[0].num_target_qubits == n
@@ -418,9 +428,16 @@ class TestIQFT:
         assert qc.num_qubits == n
         assert len(qc.data) == n + 1  # |measurement| + IQFT
 
-        assert qc.data[0].operation.name.lower() == "iqft"
+        from qiskit.circuit import AnnotatedOperation, InverseModifier
+        from qiskit.circuit.library import QFTGate
+        from qiskit.circuit.measure import Measure
+
+        iqft_op = qc.data[0].operation
+        assert isinstance(iqft_op, AnnotatedOperation)
+        assert isinstance(iqft_op.base_op, QFTGate)
+        assert any(isinstance(m, InverseModifier) for m in iqft_op.modifiers)
         for datum in qc.data[1:]:
-            assert datum.operation.name == "measure"
+            assert isinstance(datum.operation, Measure)
 
     @pytest.mark.parametrize("n", [2, 3, 4])
     def test_zero_statevector(self, qiskit_transpiler, n):
@@ -445,7 +462,7 @@ class TestIQFT:
         )
 
     @pytest.mark.parametrize("n", [2, 3, 4])
-    def test_zero_sampling(self, qiskit_transpiler, n):
+    def test_zero_sampling(self, qiskit_transpiler, seeded_executor, n):
         """IQFT on the uniform distribution produces |0...0>."""
 
         @qkernel
@@ -458,7 +475,7 @@ class TestIQFT:
 
         executable = qiskit_transpiler.transpile(circuit)
         shots = 1024
-        job = executable.sample(qiskit_transpiler.executor(), shots=shots)
+        job = executable.sample(seeded_executor, shots=shots)
         result = job.result()
 
         num_outcomes = 2**n
@@ -497,9 +514,16 @@ class TestIQFT:
         assert qc.num_qubits == n
         assert len(qc.data) == n + 1  # |measurement| + IQFT
 
-        assert qc.data[0].operation.name.lower() == "iqft"
+        from qiskit.circuit import AnnotatedOperation, InverseModifier
+        from qiskit.circuit.library import QFTGate
+        from qiskit.circuit.measure import Measure
+
+        iqft_op = qc.data[0].operation
+        assert isinstance(iqft_op, AnnotatedOperation)
+        assert isinstance(iqft_op.base_op, QFTGate)
+        assert any(isinstance(m, InverseModifier) for m in iqft_op.modifiers)
         for datum in qc.data[1:]:
-            assert datum.operation.name == "measure"
+            assert isinstance(datum.operation, Measure)
 
     @pytest.mark.parametrize("n", [2, 3, 4])
     def test_zero_statevector_symbolic(self, qiskit_transpiler, n):
@@ -523,7 +547,7 @@ class TestIQFT:
         )
 
     @pytest.mark.parametrize("n", [2, 3, 4])
-    def test_zero_sampling_symbolic(self, qiskit_transpiler, n):
+    def test_zero_sampling_symbolic(self, qiskit_transpiler, seeded_executor, n):
         """IQFT on uniform distribution produces |0...0> (symbolic n)."""
 
         @qkernel
@@ -536,7 +560,7 @@ class TestIQFT:
 
         executable = qiskit_transpiler.transpile(circuit, bindings={"num": n})
         shots = 1024
-        job = executable.sample(qiskit_transpiler.executor(), shots=shots)
+        job = executable.sample(seeded_executor, shots=shots)
         result = job.result()
 
         num_outcomes = 2**n
@@ -584,7 +608,7 @@ class TestQFTIQFT:
         )
 
     @pytest.mark.parametrize("n", [2, 3, 4])
-    def test_qft_iqft_identity(self, qiskit_transpiler, n):
+    def test_qft_iqft_identity(self, qiskit_transpiler, seeded_executor, n):
         """QFT followed by IQFT on |0...0> returns all zeros."""
 
         @qkernel
@@ -595,7 +619,7 @@ class TestQFTIQFT:
             return qmc.measure(qs)
 
         executable = qiskit_transpiler.transpile(circuit)
-        job = executable.sample(qiskit_transpiler.executor(), shots=1024)
+        job = executable.sample(seeded_executor, shots=1024)
         result = job.result()
 
         for bits, count in result.results:
@@ -624,7 +648,7 @@ class TestQFTIQFT:
         )
 
     @pytest.mark.parametrize("n", [2, 3, 4])
-    def test_qft_iqft_identity_symbolic(self, qiskit_transpiler, n):
+    def test_qft_iqft_identity_symbolic(self, qiskit_transpiler, seeded_executor, n):
         """QFT then IQFT returns all zeros (symbolic n, sampling)."""
 
         @qkernel
@@ -635,7 +659,7 @@ class TestQFTIQFT:
             return qmc.measure(qs)
 
         executable = qiskit_transpiler.transpile(circuit, bindings={"num": n})
-        job = executable.sample(qiskit_transpiler.executor(), shots=1024)
+        job = executable.sample(seeded_executor, shots=1024)
         result = job.result()
 
         for bits, count in result.results:
