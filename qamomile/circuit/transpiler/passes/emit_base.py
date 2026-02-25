@@ -229,8 +229,13 @@ class ResourceAllocator:
                     if idx_value.is_constant():
                         idx = int(idx_value.get_const())
                         key = f"{parent_uuid}_{idx}"
-                        if key in qubit_map:
-                            qubit_map[operand.uuid] = qubit_map[key]
+                        assert key in qubit_map, (
+                            f"Array element key {key!r} not found in qubit_map. "
+                            f"This indicates a bug in the transpiler pipeline: "
+                            f"QInitOperation for the parent array was not processed "
+                            f"before this GateOperation."
+                        )
+                        qubit_map[operand.uuid] = qubit_map[key]
                 else:
                     # Scalar qubit: allocate new index
                     qubit_map[operand.uuid] = len(qubit_map)
