@@ -124,7 +124,7 @@ class TestQFT:
             return qmc.measure(qs)
 
         executable = qiskit_transpiler.transpile(circuit)
-        shots = 2048
+        shots = 4096
         job = executable.sample(qiskit_transpiler.executor(), shots=shots)
         result = job.result()
 
@@ -144,9 +144,9 @@ class TestQFT:
         expected = shots / num_outcomes
         sigma = (expected * (1 - 1 / num_outcomes)) ** 0.5
         for outcome, count in counts.items():
-            assert abs(count - expected) < 4 * sigma, (
+            assert abs(count - expected) < 3 * sigma, (
                 f"n={n}, outcome={outcome}: count={count}, "
-                f"expected={expected:.0f} +/- {4 * sigma:.0f}"
+                f"expected={expected:.0f} +/- {3 * sigma:.0f}"
             )
 
 
@@ -239,6 +239,8 @@ class TestIQFT:
         for datum in qc.data[1:]:
             assert datum.operation.name == "measure"
 
+
+class TestQFTIQFT:
     @pytest.mark.parametrize("n", [2, 3, 4])
     def test_qft_iqft_identity(self, qiskit_transpiler, n):
         """QFT followed by IQFT on |0...0> returns all zeros."""
