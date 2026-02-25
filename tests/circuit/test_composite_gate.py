@@ -975,3 +975,151 @@ class TestNestedQKernelNoPhantomQubits:
 
         qc = qiskit_transpiler.to_circuit(main_circuit)
         assert qc.num_qubits == 4, f"Expected 4 qubits, got {qc.num_qubits}"
+
+    def test_same_qkernel_called_twice(self, qiskit_transpiler):
+        """No phantom qubits when same qkernel is called twice on same array."""
+
+        @qkernel
+        def apply_h_first(qs: Vector[Qubit]) -> Vector[Qubit]:
+            qs[0] = qmc.h(qs[0])
+            return qs
+
+        @qkernel
+        def call_twice() -> qmc.Vector[qmc.Bit]:
+            qs = qubit_array(3, "qs")
+            qs = apply_h_first(qs)
+            qs = apply_h_first(qs)
+            return qmc.measure(qs)
+
+        qc = qiskit_transpiler.to_circuit(call_twice)
+        assert qc.num_qubits == 3, f"Expected 3 qubits, got {qc.num_qubits}"
+
+    def test_multiple_array_parameters(self, qiskit_transpiler):
+        """No phantom qubits with qkernel taking two array parameters."""
+
+        @qkernel
+        def entangle_arrays(
+            qs1: Vector[Qubit], qs2: Vector[Qubit]
+        ) -> tuple[Vector[Qubit], Vector[Qubit]]:
+            qs1[0] = qmc.h(qs1[0])
+            qs1[0], qs2[0] = qmc.cx(qs1[0], qs2[0])
+            return qs1, qs2
+
+        @qkernel
+        def two_arrays() -> qmc.Vector[qmc.Bit]:
+            a = qubit_array(2, "a")
+            b = qubit_array(2, "b")
+            a, b = entangle_arrays(a, b)
+            return qmc.measure(a)
+
+        qc = qiskit_transpiler.to_circuit(two_arrays)
+        assert qc.num_qubits == 4, f"Expected 4 qubits, got {qc.num_qubits}"
+
+    def test_scalar_qubit_and_vector_mixed(self, qiskit_transpiler):
+        """No phantom qubits with mixed scalar Qubit and Vector parameters."""
+
+        @qkernel
+        def mixed_params(
+            q: Qubit, qs: Vector[Qubit]
+        ) -> tuple[Qubit, Vector[Qubit]]:
+            q, qs[0] = qmc.cx(q, qs[0])
+            return q, qs
+
+        @qkernel
+        def scalar_and_vector() -> qmc.Vector[qmc.Bit]:
+            qs = qubit_array(3, "qs")
+            q = qs[0]
+            q = qmc.h(q)
+            qs[0] = q
+            q2 = qs[1]
+            q2, qs = mixed_params(q2, qs)
+            qs[1] = q2
+            return qmc.measure(qs)
+
+        qc = qiskit_transpiler.to_circuit(scalar_and_vector)
+        assert qc.num_qubits == 3, f"Expected 3 qubits, got {qc.num_qubits}"
+
+    def test_operations_before_and_after_nested_call(self, qiskit_transpiler):
+        """No phantom qubits with array ops before and after nested call."""
+
+        @qkernel
+        def inner_op(qs: Vector[Qubit]) -> Vector[Qubit]:
+            qs[1] = qmc.x(qs[1])
+            return qs
+
+        @qkernel
+        def before_and_after() -> qmc.Vector[qmc.Bit]:
+            qs = qubit_array(3, "qs")
+            qs[0] = qmc.h(qs[0])
+            qs = inner_op(qs)
+            qs[2] = qmc.h(qs[2])
+            return qmc.measure(qs)
+
+        qc = qiskit_transpiler.to_circuit(before_and_after)
+        assert qc.num_qubits == 3, f"Expected 3 qubits, got {qc.num_qubits}"
+
+    def test_two_different_nested_calls(self, qiskit_transpiler):
+        """No phantom qubits with two different nested qkernel calls."""
+
+        @qkernel
+        def apply_h(qs: Vector[Qubit]) -> Vector[Qubit]:
+            qs[0] = qmc.h(qs[0])
+            return qs
+
+        @qkernel
+        def apply_x(qs: Vector[Qubit]) -> Vector[Qubit]:
+            qs[1] = qmc.x(qs[1])
+            return qs
+
+        @qkernel
+        def two_nested() -> qmc.Vector[qmc.Bit]:
+            qs = qubit_array(3, "qs")
+            qs = apply_h(qs)
+            qs = apply_x(qs)
+            return qmc.measure(qs)
+
+        qc = qiskit_transpiler.to_circuit(two_nested)
+        assert qc.num_qubits == 3, f"Expected 3 qubits, got {qc.num_qubits}"
+
+    def test_nested_call_then_composite_gate(self, qiskit_transpiler):
+        """No phantom qubits with nested call followed by CompositeGate."""
+        from qamomile.circuit.stdlib.qft import qft
+
+        @qkernel
+        def apply_h(qs: Vector[Qubit]) -> Vector[Qubit]:
+            qs[0] = qmc.h(qs[0])
+            return qs
+
+        @qkernel
+        def nested_then_qft() -> qmc.Vector[qmc.Bit]:
+            qs = qubit_array(3, "qs")
+            qs = apply_h(qs)
+            qs = qft(qs)
+            return qmc.measure(qs)
+
+        qc = qiskit_transpiler.to_circuit(nested_then_qft)
+        assert qc.num_qubits == 3, f"Expected 3 qubits, got {qc.num_qubits}"
+
+    def test_two_independent_arrays_with_nested_calls(self, qiskit_transpiler):
+        """No phantom qubits with two independent arrays and separate nested calls."""
+
+        @qkernel
+        def apply_h(qs: Vector[Qubit]) -> Vector[Qubit]:
+            qs[0] = qmc.h(qs[0])
+            return qs
+
+        @qkernel
+        def apply_x(qs: Vector[Qubit]) -> Vector[Qubit]:
+            qs[1] = qmc.x(qs[1])
+            return qs
+
+        @qkernel
+        def two_independent() -> qmc.Vector[qmc.Bit]:
+            a = qubit_array(2, "a")
+            b = qubit_array(3, "b")
+            a = apply_h(a)
+            b = apply_x(b)
+            return qmc.measure(b)
+
+        qc = qiskit_transpiler.to_circuit(two_independent)
+        assert qc.num_qubits == 5, f"Expected 5 qubits, got {qc.num_qubits}"
