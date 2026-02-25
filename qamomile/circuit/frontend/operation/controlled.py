@@ -39,6 +39,10 @@ class ControlledGate:
     """
 
     def __init__(self, qkernel: "QKernel", num_controls: int = 1) -> None:
+        if num_controls < 1:
+            raise ValueError(
+                f"num_controls must be >= 1, got {num_controls}."
+            )
         self._qkernel = qkernel
         self._num_controls = num_controls
 
@@ -63,6 +67,11 @@ class ControlledGate:
         num_controls = self._num_controls
 
         # Split args into controls and targets
+        if len(args) <= num_controls:
+            raise ValueError(
+                f"ControlledU requires at least {num_controls + 1} qubits "
+                f"({num_controls} controls + at least 1 target), got {len(args)}."
+            )
         controls = args[:num_controls]
         target_args = args[num_controls:]
 
