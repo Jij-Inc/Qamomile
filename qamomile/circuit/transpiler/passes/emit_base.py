@@ -219,19 +219,28 @@ class ResourceAllocator:
         qubit_map: dict[str, int],
     ) -> None:
         """Allocate resources for a GateOperation."""
+        # Phase 1: Register all operands in qubit_map
         for operand in op.operands:
             if operand.uuid not in qubit_map:
-                if operand.parent_array is None:
+                if operand.parent_array is not None and operand.element_indices:
+                    # Array element: resolve via parent_array key
+                    parent_uuid = operand.parent_array.uuid
+                    idx_value = operand.element_indices[0]
+                    if idx_value.is_constant():
+                        idx = int(idx_value.get_const())
+                        key = f"{parent_uuid}_{idx}"
+                        if key in qubit_map:
+                            qubit_map[operand.uuid] = qubit_map[key]
+                else:
+                    # Scalar qubit: allocate new index
                     qubit_map[operand.uuid] = len(qubit_map)
 
-        for result in op.results:
-            if result.uuid not in qubit_map:
-                if result.parent_array is None and op.operands:
-                    first_operand = op.operands[0]
-                    if first_operand.parent_array is None:
-                        qubit_map[result.uuid] = qubit_map.get(
-                            first_operand.uuid, len(qubit_map)
-                        )
+        # Phase 2: Map each result to its corresponding operand (1:1)
+        for i, result in enumerate(op.results):
+            if result.uuid not in qubit_map and i < len(op.operands):
+                operand = op.operands[i]
+                if operand.uuid in qubit_map:
+                    qubit_map[result.uuid] = qubit_map[operand.uuid]
 
     def _allocate_composite(
         self,
