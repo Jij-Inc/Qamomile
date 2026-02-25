@@ -843,3 +843,135 @@ class TestCompositeGateTranspilation:
         qc = qiskit_transpiler.to_circuit(circuit, bindings={"num": 2})
         qc.remove_final_measurements()
         assert qc.num_qubits == 2, f"Expected 2 qubits, got {qc.num_qubits}"
+
+
+class TestNestedQKernelNoPhantomQubits:
+    """Verify no phantom qubits when nesting qkernels with array arguments."""
+
+    def test_2_level_nest(self, qiskit_transpiler):
+        """No phantom qubits with 2-level nested qkernel passing array."""
+
+        @qkernel
+        def inner(qs: Vector[Qubit]) -> Vector[Qubit]:
+            qs[0] = qmc.h(qs[0])
+            return qs
+
+        @qkernel
+        def outer() -> qmc.Vector[qmc.Bit]:
+            qs = qubit_array(3, "qs")
+            qs = inner(qs)
+            return qmc.measure(qs)
+
+        qc = qiskit_transpiler.to_circuit(outer)
+        assert qc.num_qubits == 3, f"Expected 3 qubits, got {qc.num_qubits}"
+
+    def test_3_level_nest(self, qiskit_transpiler):
+        """No phantom qubits with 3-level nested qkernel passing array."""
+
+        @qkernel
+        def level_c(qs: Vector[Qubit]) -> Vector[Qubit]:
+            qs[0] = qmc.h(qs[0])
+            return qs
+
+        @qkernel
+        def level_b(qs: Vector[Qubit]) -> Vector[Qubit]:
+            qs = level_c(qs)
+            return qs
+
+        @qkernel
+        def level_a() -> qmc.Vector[qmc.Bit]:
+            qs = qubit_array(3, "qs")
+            qs = level_b(qs)
+            return qmc.measure(qs)
+
+        qc = qiskit_transpiler.to_circuit(level_a)
+        assert qc.num_qubits == 3, f"Expected 3 qubits, got {qc.num_qubits}"
+
+    def test_4_level_nest(self, qiskit_transpiler):
+        """No phantom qubits with 4-level nested qkernel passing array."""
+
+        @qkernel
+        def d(qs: Vector[Qubit]) -> Vector[Qubit]:
+            qs[0] = qmc.h(qs[0])
+            return qs
+
+        @qkernel
+        def c(qs: Vector[Qubit]) -> Vector[Qubit]:
+            return d(qs)
+
+        @qkernel
+        def b(qs: Vector[Qubit]) -> Vector[Qubit]:
+            return c(qs)
+
+        @qkernel
+        def a() -> qmc.Vector[qmc.Bit]:
+            qs = qubit_array(3, "qs")
+            qs = b(qs)
+            return qmc.measure(qs)
+
+        qc = qiskit_transpiler.to_circuit(a)
+        assert qc.num_qubits == 3, f"Expected 3 qubits, got {qc.num_qubits}"
+
+    def test_inner_creates_array(self, qiskit_transpiler):
+        """No phantom qubits when inner qkernel creates its own array."""
+
+        @qkernel
+        def inner_create() -> Vector[Qubit]:
+            qs = qubit_array(3, "inner_qs")
+            qs[0] = qmc.h(qs[0])
+            return qs
+
+        @qkernel
+        def outer_create() -> qmc.Vector[qmc.Bit]:
+            qs = inner_create()
+            return qmc.measure(qs)
+
+        qc = qiskit_transpiler.to_circuit(outer_create)
+        assert qc.num_qubits == 3, f"Expected 3 qubits, got {qc.num_qubits}"
+
+    def test_3_level_nest_with_composite_gate(self, qiskit_transpiler):
+        """No phantom qubits with 3-level nest and CompositeGate (QFT)."""
+        from qamomile.circuit.stdlib.qft import qft
+
+        @qkernel
+        def apply_qft(qs: Vector[Qubit]) -> Vector[Qubit]:
+            qs = qft(qs)
+            return qs
+
+        @qkernel
+        def middle(qs: Vector[Qubit]) -> Vector[Qubit]:
+            qs = apply_qft(qs)
+            return qs
+
+        @qkernel
+        def top() -> qmc.Vector[qmc.Bit]:
+            qs = qubit_array(3, "qs")
+            qs = middle(qs)
+            return qmc.measure(qs)
+
+        qc = qiskit_transpiler.to_circuit(top)
+        assert qc.num_qubits == 3, f"Expected 3 qubits, got {qc.num_qubits}"
+
+    def test_multi_element_access_nested(self, qiskit_transpiler):
+        """No phantom qubits when multiple array elements are accessed in nested call."""
+
+        @qkernel
+        def process(qs: Vector[Qubit]) -> Vector[Qubit]:
+            qs[0] = qmc.h(qs[0])
+            qs[1] = qmc.x(qs[1])
+            qs[2] = qmc.h(qs[2])
+            return qs
+
+        @qkernel
+        def wrapper(qs: Vector[Qubit]) -> Vector[Qubit]:
+            qs = process(qs)
+            return qs
+
+        @qkernel
+        def main_circuit() -> qmc.Vector[qmc.Bit]:
+            qs = qubit_array(4, "qs")
+            qs = wrapper(qs)
+            return qmc.measure(qs)
+
+        qc = qiskit_transpiler.to_circuit(main_circuit)
+        assert qc.num_qubits == 4, f"Expected 4 qubits, got {qc.num_qubits}"
