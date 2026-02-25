@@ -10,6 +10,7 @@ from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.types.primitives import FloatType
 from qamomile.circuit.ir.value import Value
+from qamomile.circuit.transpiler.errors import QubitAliasError
 
 if TYPE_CHECKING:
     from qamomile.circuit.frontend.qkernel import QKernel
@@ -64,6 +65,21 @@ class ControlledGate:
         # Split args into controls and targets
         controls = args[:num_controls]
         target_args = args[num_controls:]
+
+        # Check for aliasing (same physical qubit used in multiple positions)
+        seen_ids: set[str] = set()
+        for q in args:
+            lid = q.value.logical_id
+            if lid in seen_ids:
+                q_name = q.name or "unnamed"
+                raise QubitAliasError(
+                    f"Cannot use the same qubit in multiple positions of ControlledU.\n"
+                    f"Qubit '{q_name}' appears more than once.\n\n"
+                    f"Fix: Use distinct qubits for each control and target.",
+                    handle_name=q_name,
+                    operation_name="ControlledU",
+                )
+            seen_ids.add(lid)
 
         # Consume all qubit handles (enforces linear type)
         controls = tuple(c.consume(operation_name="ControlledU[control]") for c in controls)
