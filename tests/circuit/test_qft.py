@@ -17,23 +17,6 @@ from qamomile.circuit.stdlib.qft import IQFT, QFT, iqft, qft
 from tests.circuit.conftest import run_statevector
 
 
-@pytest.fixture
-def qiskit_transpiler():
-    """Get Qiskit transpiler."""
-    pytest.importorskip("qiskit")
-    from qamomile.qiskit import QiskitTranspiler
-
-    return QiskitTranspiler()
-
-
-@pytest.fixture
-def seeded_executor(qiskit_transpiler):
-    """Executor with fixed seed for reproducible sampling."""
-    from qiskit_aer import AerSimulator
-
-    return qiskit_transpiler.executor(backend=AerSimulator(seed_simulator=901))
-
-
 class TestQFT:
     """Test the QFT CompositeGate class."""
 

@@ -1,6 +1,24 @@
-"""Shared test utilities for circuit tests."""
+"""Shared test utilities and fixtures for circuit tests."""
 
 import numpy as np
+import pytest
+
+
+@pytest.fixture
+def qiskit_transpiler():
+    """Get Qiskit transpiler."""
+    pytest.importorskip("qiskit")
+    from qamomile.qiskit import QiskitTranspiler
+
+    return QiskitTranspiler()
+
+
+@pytest.fixture
+def seeded_executor(qiskit_transpiler):
+    """Executor with fixed seed for reproducible sampling."""
+    from qiskit_aer import AerSimulator
+
+    return qiskit_transpiler.executor(backend=AerSimulator(seed_simulator=901))
 
 
 def run_statevector(qc):
