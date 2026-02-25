@@ -86,7 +86,12 @@ class ResourceAllocator:
             if isinstance(op, QInitOperation):
                 result = op.results[0]
                 if isinstance(result, ArrayValue):
-                    # Allocate qubits for array elements using {array_uuid}_{i} format
+                    # Allocate physical qubits for array elements using
+                    # {array_uuid}_{i} keys.  At this stage only these
+                    # composite keys are registered; the individual element
+                    # Values (which carry their own UUIDs) are created
+                    # dynamically during frontend tracing and their UUID
+                    # mapping is deferred to _allocate_gate / _allocate_qubit_list.
                     if result.shape:
                         size_val = result.shape[0]
                         size = self._resolve_size(size_val, bindings)
@@ -219,7 +224,11 @@ class ResourceAllocator:
         qubit_map: dict[str, int],
     ) -> None:
         """Allocate resources for a GateOperation."""
-        # Phase 1: Register all operands in qubit_map
+        # Phase 1: Register all operands in qubit_map.
+        # Element Values are created dynamically during frontend tracing
+        # (handle/array.py _get_element), so their UUIDs are unknown at
+        # QInitOperation time.  Here we lazily map each element UUID to
+        # the physical qubit already allocated under the {parent_uuid}_{idx} key.
         for operand in op.operands:
             if operand.uuid not in qubit_map:
                 if operand.parent_array is not None and operand.element_indices:
