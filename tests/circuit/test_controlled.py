@@ -656,12 +656,13 @@ def _random_statevector(num_qubits: int, seed: int) -> np.ndarray:
 
 @pytest.mark.parametrize("spec", GATES)
 @pytest.mark.parametrize("num_controls", [1, 2, 3])
+@pytest.mark.parametrize("seed", [901 + offset for offset in range(100)])
 class TestControlledGateRandomState:
     """Integration test: controlled gate with controls in superposition and random target state."""
 
-    def test_random_initial_state(self, qiskit_transpiler, spec, num_controls):
+    def test_random_initial_state(self, qiskit_transpiler, spec, num_controls, seed):
         """Controls in |+>^NC, targets in random |psi> => verify full statevector."""
-        target_state = _random_statevector(spec.num_targets, seed=42)
+        target_state = _random_statevector(spec.num_targets, seed=seed)
         circuit = _make_controlled_circuit(spec, num_controls, activate_controls=False)
         actual = _get_statevector_with_prep(
             qiskit_transpiler, circuit, spec.bindings, num_controls, target_state
