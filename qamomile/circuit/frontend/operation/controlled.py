@@ -65,6 +65,10 @@ class ControlledGate:
         controls = args[:num_controls]
         target_args = args[num_controls:]
 
+        # Consume all qubit handles (enforces linear type)
+        controls = tuple(c.consume(operation_name="ControlledU[control]") for c in controls)
+        target_args = tuple(t.consume(operation_name="ControlledU[target]") for t in target_args)
+
         # Get BlockValue from qkernel
         block = self._qkernel.block
 
