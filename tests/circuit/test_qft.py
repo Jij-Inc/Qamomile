@@ -36,7 +36,7 @@ class TestQFT:
         metadata = gate.get_resource_metadata()
 
         assert metadata is not None
-        assert metadata.t_gate_count == 0
+        assert metadata.t_gates == 0
         assert "num_h_gates" in metadata.custom_metadata
         assert metadata.custom_metadata["num_h_gates"] == n
         assert "num_cp_gates" in metadata.custom_metadata
@@ -232,7 +232,7 @@ class TestIQFT:
         metadata = gate.get_resource_metadata()
 
         assert metadata is not None
-        assert metadata.t_gate_count == 0
+        assert metadata.t_gates == 0
         assert "num_h_gates" in metadata.custom_metadata
         assert metadata.custom_metadata["num_h_gates"] == n
         assert "num_cp_gates" in metadata.custom_metadata
