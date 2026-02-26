@@ -8,74 +8,32 @@ import pytest
 import qamomile.circuit as qm
 from qamomile.circuit.ir.operation.composite_gate import CompositeGateType
 from qamomile.circuit.stdlib.ttk_adder import TTKInplaceAdder
+from tests.circuit.conftest import run_statevector
 
 # ---------------------------------------------------------------------------
-# Unit tests for class attributes and resources
+# Helpers
 # ---------------------------------------------------------------------------
 
 
-class TestTTKInplaceAdderAttributes:
-    def test_custom_name(self) -> None:
-        adder = TTKInplaceAdder(3)
-        assert adder.custom_name == "ttk_adder"
-
-    def test_gate_type(self) -> None:
-        adder = TTKInplaceAdder(3)
-        assert adder.gate_type == CompositeGateType.CUSTOM
-
-    @pytest.mark.parametrize("n", [1, 2, 3, 5, 8])
-    def test_num_target_qubits(self, n: int) -> None:
-        adder = TTKInplaceAdder(n)
-        assert adder.num_target_qubits == 2 * n + 1
-
-    def test_invalid_n(self) -> None:
-        with pytest.raises(ValueError, match="n must be >= 1"):
-            TTKInplaceAdder(0)
-        with pytest.raises(ValueError, match="n must be >= 1"):
-            TTKInplaceAdder(-1)
-
-
-def test_ttk_adder_mismatched_registers() -> None:
-    """Mismatched register sizes raise ValueError."""
-    from qamomile.circuit.stdlib.ttk_adder import ttk_adder
-
-    @qm.qkernel
-    def circuit() -> qm.Bit:
-        a = qm.qubit_array(2, "a")
-        b = qm.qubit_array(3, "b")
-        z = qm.qubit("z")
-        b, a, z = ttk_adder(b, a, z)
-        return qm.measure(z)
-
-    with pytest.raises(ValueError, match="same size"):
-        circuit.build()
-
-
-class TestTTKInplaceAdderResources:
-    def test_resources_n1(self) -> None:
-        r = TTKInplaceAdder(1)._resources()
-        m = r.custom_metadata
-        assert m["num_cnot_gates"] == 1
-        assert m["num_toffoli_gates"] == 1
-        assert m["total_gates"] == 2
-
-    @pytest.mark.parametrize("n", [2, 3, 4, 5])
-    def test_resources(self, n: int) -> None:
-        r = TTKInplaceAdder(n)._resources()
-        m = r.custom_metadata
-        assert m["num_cnot_gates"] == 5 * n - 5
-        assert m["num_toffoli_gates"] == 2 * n - 1
-        assert m["total_gates"] == 7 * n - 6
-        assert m["depth"] == 5 * n - 3
-
-
-# ---------------------------------------------------------------------------
-# Statevector correctness tests via Qamomile pipeline + Qiskit simulation
-# ---------------------------------------------------------------------------
+def _expected_resources(n: int) -> dict[str, int]:
+    """Expected TTK adder resource counts for n-bit operands."""
+    if n == 1:
+        return {
+            "num_cnot_gates": 1,
+            "num_toffoli_gates": 1,
+            "total_gates": 2,
+            "depth": 2,
+        }
+    return {
+        "num_cnot_gates": 5 * n - 5,
+        "num_toffoli_gates": 2 * n - 1,
+        "total_gates": 7 * n - 6,
+        "depth": 5 * n - 3,
+    }
 
 
 def _make_adder_kernel(n: int):
-    """Create an adder qkernel for n-bit operands using qubit_array + ttk_adder."""
+    """Create an adder qkernel for n-bit operands."""
 
     @qm.qkernel
     def _kernel() -> qm.Bit:
@@ -101,9 +59,6 @@ def _build_adder_circuit(n: int, a_val: int, b_val: int):
     transpiler = QiskitTranspiler()
     adder_qc = transpiler.to_circuit(kernel)
 
-    # Remove final measurements so we can do statevector simulation
-    adder_qc.remove_final_measurements()
-
     # Prepend X gates to encode a_val and b_val
     prep = QuantumCircuit(adder_qc.num_qubits)
     for i in range(n):
@@ -113,16 +68,6 @@ def _build_adder_circuit(n: int, a_val: int, b_val: int):
             prep.x(n + i)  # b register: qubits n..2n-1
 
     return prep.compose(adder_qc)
-
-
-def _simulate_statevector(qc):
-    """Simulate circuit and return statevector as numpy array."""
-    from qiskit_aer import AerSimulator
-
-    qc.save_statevector()
-    simulator = AerSimulator(method="statevector")
-    result = simulator.run(qc).result()
-    return np.array(result.get_statevector())
 
 
 def _expected_basis_index(n: int, a_val: int, b_val: int) -> int:
@@ -135,34 +80,6 @@ def _expected_basis_index(n: int, a_val: int, b_val: int) -> int:
     sum_low = total % (1 << n)
     carry = total >> n
     return a_val | (sum_low << n) | (carry << (2 * n))
-
-
-@pytest.mark.parametrize("n", [1, 2, 3])
-def test_ttk_adder_correctness(n: int) -> None:
-    """Exhaustive test for n-bit addition."""
-    pytest.importorskip("qiskit")
-    pytest.importorskip("qiskit_aer")
-
-    for a_val in range(2**n):
-        for b_val in range(2**n):
-            qc = _build_adder_circuit(n, a_val, b_val)
-            sv = _simulate_statevector(qc)
-
-            expected_idx = _expected_basis_index(n, a_val, b_val)
-            num_qubits = qc.num_qubits
-            expected_sv = np.zeros(2**num_qubits, dtype=complex)
-            expected_sv[expected_idx] = 1.0
-
-            assert np.allclose(np.abs(sv), np.abs(expected_sv), atol=1e-8), (
-                f"n={n}, a={a_val}, b={b_val}: "
-                f"expected index {expected_idx}, "
-                f"got nonzero at {np.nonzero(np.abs(sv) > 0.5)}"
-            )
-
-
-# ---------------------------------------------------------------------------
-# Random cross-validation: Qamomile pipeline vs Qiskit reference (n=5, 8)
-# ---------------------------------------------------------------------------
 
 
 def _build_reference_circuit(n: int, a_val: int, b_val: int):
@@ -221,26 +138,107 @@ def _build_reference_circuit(n: int, a_val: int, b_val: int):
     return qc
 
 
-@pytest.mark.parametrize("n", [5, 8])
-def test_ttk_adder_random_vs_qiskit(n: int) -> None:
-    """Random cross-validation: Qamomile pipeline vs Qiskit reference."""
-    pytest.importorskip("qiskit")
-    pytest.importorskip("qiskit_aer")
+# ---------------------------------------------------------------------------
+# Unit tests: attributes, resources, validation
+# ---------------------------------------------------------------------------
 
-    rng = np.random.default_rng(42)
-    num_samples = 10
 
-    for _ in range(num_samples):
-        a_val = int(rng.integers(0, 2**n))
-        b_val = int(rng.integers(0, 2**n))
+class TestTTKInplaceAdder:
+    """Unit tests for TTKInplaceAdder construction, attributes, and resources."""
 
-        qamomile_qc = _build_adder_circuit(n, a_val, b_val)
-        reference_qc = _build_reference_circuit(n, a_val, b_val)
+    @pytest.mark.parametrize("n", [1, 2, 3, 5, 8])
+    def test_class_attributes(self, n: int) -> None:
+        adder = TTKInplaceAdder(n)
+        assert adder.custom_name == "ttk_adder"
+        assert adder.gate_type == CompositeGateType.CUSTOM
+        assert adder.num_target_qubits == 2 * n + 1
 
-        qamomile_sv = _simulate_statevector(qamomile_qc)
-        reference_sv = _simulate_statevector(reference_qc)
+    def test_invalid_n(self) -> None:
+        with pytest.raises(ValueError, match="n must be >= 1"):
+            TTKInplaceAdder(0)
+        with pytest.raises(ValueError, match="n must be >= 1"):
+            TTKInplaceAdder(-1)
 
-        assert np.allclose(np.abs(qamomile_sv), np.abs(reference_sv), atol=1e-8), (
-            f"n={n}, a={a_val}, b={b_val}: "
-            f"Qamomile and Qiskit reference statevectors differ"
-        )
+    def test_mismatched_registers(self) -> None:
+        """Mismatched register sizes raise ValueError."""
+        from qamomile.circuit.stdlib.ttk_adder import ttk_adder
+
+        @qm.qkernel
+        def circuit() -> qm.Bit:
+            a = qm.qubit_array(2, "a")
+            b = qm.qubit_array(3, "b")
+            z = qm.qubit("z")
+            b, a, z = ttk_adder(b, a, z)
+            return qm.measure(z)
+
+        with pytest.raises(ValueError, match="same size"):
+            circuit.build()
+
+    @pytest.mark.parametrize("n", [1, 2, 3, 4, 5])
+    def test_resources(self, n: int) -> None:
+        r = TTKInplaceAdder(n)._resources()
+        expected = _expected_resources(n)
+        for key, value in expected.items():
+            assert r.custom_metadata[key] == value
+
+
+# ---------------------------------------------------------------------------
+# Statevector correctness (exhaustive, small n)
+# ---------------------------------------------------------------------------
+
+
+class TestTTKAdderCorrectness:
+    """Exhaustive statevector verification for small n."""
+
+    @pytest.mark.parametrize("n", [1, 2, 3])
+    def test_exhaustive_addition(self, n: int) -> None:
+        pytest.importorskip("qiskit")
+        pytest.importorskip("qiskit_aer")
+
+        for a_val in range(2**n):
+            for b_val in range(2**n):
+                qc = _build_adder_circuit(n, a_val, b_val)
+                sv = run_statevector(qc)
+
+                expected_idx = _expected_basis_index(n, a_val, b_val)
+                num_qubits = qc.num_qubits
+                expected_sv = np.zeros(2**num_qubits, dtype=complex)
+                expected_sv[expected_idx] = 1.0
+
+                assert np.allclose(np.abs(sv), np.abs(expected_sv), atol=1e-8), (
+                    f"n={n}, a={a_val}, b={b_val}: "
+                    f"expected index {expected_idx}, "
+                    f"got nonzero at {np.nonzero(np.abs(sv) > 0.5)}"
+                )
+
+
+# ---------------------------------------------------------------------------
+# Cross-validation: Qamomile pipeline vs Qiskit reference (large n)
+# ---------------------------------------------------------------------------
+
+
+class TestTTKAdderCrossValidation:
+    """Random cross-validation against independent Qiskit reference."""
+
+    @pytest.mark.parametrize("n", [5, 8])
+    def test_random_vs_qiskit_reference(self, n: int) -> None:
+        pytest.importorskip("qiskit")
+        pytest.importorskip("qiskit_aer")
+
+        rng = np.random.default_rng(42)
+        num_samples = 10
+
+        for _ in range(num_samples):
+            a_val = int(rng.integers(0, 2**n))
+            b_val = int(rng.integers(0, 2**n))
+
+            qamomile_qc = _build_adder_circuit(n, a_val, b_val)
+            reference_qc = _build_reference_circuit(n, a_val, b_val)
+
+            qamomile_sv = run_statevector(qamomile_qc)
+            reference_sv = run_statevector(reference_qc)
+
+            assert np.allclose(np.abs(qamomile_sv), np.abs(reference_sv), atol=1e-8), (
+                f"n={n}, a={a_val}, b={b_val}: "
+                f"Qamomile and Qiskit reference statevectors differ"
+            )
