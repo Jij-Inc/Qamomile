@@ -1,7 +1,14 @@
 """Shared test utilities and fixtures for circuit tests."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import numpy as np
 import pytest
+
+if TYPE_CHECKING:
+    from qiskit.circuit import QuantumCircuit
 
 
 @pytest.fixture
@@ -21,8 +28,15 @@ def seeded_executor(qiskit_transpiler):
     return qiskit_transpiler.executor(backend=AerSimulator(seed_simulator=901))
 
 
-def run_statevector(qc):
-    """Run circuit and return statevector (measurements removed)."""
+def run_statevector(qc: "QuantumCircuit") -> np.ndarray:
+    """Run circuit and return statevector (measurements removed).
+
+    Args:
+        qc: Qiskit QuantumCircuit to simulate.
+
+    Returns:
+        numpy array of complex amplitudes.
+    """
     from qiskit import transpile
     from qiskit_aer import AerSimulator
 
