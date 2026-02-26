@@ -10,14 +10,14 @@ from qamomile.quri_parts import (
 class TestQuriPartsGateEmitter:
     """Test the gate emitter directly."""
 
-    def test_create_circuit(self):
+    def test_create_circuit(self) -> None:
         """Test circuit creation."""
         emitter = QuriPartsGateEmitter()
         circuit = emitter.create_circuit(3, 2)
         assert circuit.qubit_count == 3
         # Note: QURI Parts doesn't track classical bits in the circuit
 
-    def test_single_qubit_gates(self):
+    def test_single_qubit_gates(self) -> None:
         """Test single qubit gate emission."""
         emitter = QuriPartsGateEmitter()
         circuit = emitter.create_circuit(2, 0)
@@ -32,7 +32,7 @@ class TestQuriPartsGateEmitter:
         gates = list(circuit.gates)
         assert len(gates) == 6
 
-    def test_rotation_gates_with_float(self):
+    def test_rotation_gates_with_float(self) -> None:
         """Test rotation gates with float angles."""
         emitter = QuriPartsGateEmitter()
         circuit = emitter.create_circuit(1, 0)
@@ -44,7 +44,7 @@ class TestQuriPartsGateEmitter:
         gates = list(circuit.gates)
         assert len(gates) == 3
 
-    def test_rotation_gates_with_parameter(self):
+    def test_rotation_gates_with_parameter(self) -> None:
         """Test rotation gates with parametric angles."""
         emitter = QuriPartsGateEmitter()
         circuit = emitter.create_circuit(1, 0)
@@ -56,7 +56,7 @@ class TestQuriPartsGateEmitter:
         # Circuit should have parametric gates
         assert circuit.parameter_count == 1
 
-    def test_two_qubit_gates(self):
+    def test_two_qubit_gates(self) -> None:
         """Test two qubit gate emission."""
         emitter = QuriPartsGateEmitter()
         circuit = emitter.create_circuit(2, 0)
@@ -68,7 +68,7 @@ class TestQuriPartsGateEmitter:
         gates = list(circuit.gates)
         assert len(gates) == 3
 
-    def test_controlled_phase_decomposition(self):
+    def test_controlled_phase_decomposition(self) -> None:
         """Test CP gate decomposition."""
         emitter = QuriPartsGateEmitter()
         circuit = emitter.create_circuit(2, 0)
@@ -79,7 +79,7 @@ class TestQuriPartsGateEmitter:
         gates = list(circuit.gates)
         assert len(gates) == 5
 
-    def test_rzz_gate(self):
+    def test_rzz_gate(self) -> None:
         """Test RZZ gate emission."""
         emitter = QuriPartsGateEmitter()
         circuit = emitter.create_circuit(2, 0)
@@ -89,7 +89,7 @@ class TestQuriPartsGateEmitter:
         gates = list(circuit.gates)
         assert len(gates) == 1
 
-    def test_toffoli_gate(self):
+    def test_toffoli_gate(self) -> None:
         """Test Toffoli gate emission."""
         emitter = QuriPartsGateEmitter()
         circuit = emitter.create_circuit(3, 0)
@@ -99,7 +99,7 @@ class TestQuriPartsGateEmitter:
         gates = list(circuit.gates)
         assert len(gates) == 1
 
-    def test_controlled_single_qubit_decomposition(self):
+    def test_controlled_single_qubit_decomposition(self) -> None:
         """Test controlled single-qubit gate decompositions."""
         emitter = QuriPartsGateEmitter()
         circuit = emitter.create_circuit(2, 0)
@@ -114,7 +114,7 @@ class TestQuriPartsGateEmitter:
         gates = list(circuit.gates)
         assert len(gates) > 5  # Each gate decomposes to multiple gates
 
-    def test_measure_is_noop(self):
+    def test_measure_is_noop(self) -> None:
         """Test that measure is a no-op (doesn't add gates)."""
         emitter = QuriPartsGateEmitter()
         circuit = emitter.create_circuit(1, 1)
@@ -126,7 +126,7 @@ class TestQuriPartsGateEmitter:
         # Only H gate, measure is no-op
         assert len(gates) == 1
 
-    def test_barrier_is_noop(self):
+    def test_barrier_is_noop(self) -> None:
         """Test that barrier is a no-op (doesn't add gates)."""
         emitter = QuriPartsGateEmitter()
         circuit = emitter.create_circuit(2, 0)
@@ -139,14 +139,14 @@ class TestQuriPartsGateEmitter:
         # Only 2 H gates, barrier is no-op
         assert len(gates) == 2
 
-    def test_supports_no_native_control_flow(self):
+    def test_supports_no_native_control_flow(self) -> None:
         """Test that emitter reports no native control flow support."""
         emitter = QuriPartsGateEmitter()
         assert not emitter.supports_for_loop()
         assert not emitter.supports_if_else()
         assert not emitter.supports_while_loop()
 
-    def test_circuit_to_gate_returns_none(self):
+    def test_circuit_to_gate_returns_none(self) -> None:
         """Test that circuit_to_gate returns None (not supported)."""
         emitter = QuriPartsGateEmitter()
         circuit = emitter.create_circuit(1, 0)
@@ -155,13 +155,13 @@ class TestQuriPartsGateEmitter:
         gate = emitter.circuit_to_gate(circuit, "test")
         assert gate is None
 
-    def test_gate_power_returns_none(self):
+    def test_gate_power_returns_none(self) -> None:
         """Test that gate_power returns None (not supported)."""
         emitter = QuriPartsGateEmitter()
         result = emitter.gate_power(None, 2)
         assert result is None
 
-    def test_gate_controlled_returns_none(self):
+    def test_gate_controlled_returns_none(self) -> None:
         """Test that gate_controlled returns None (not supported)."""
         emitter = QuriPartsGateEmitter()
         result = emitter.gate_controlled(None, 1)
@@ -171,14 +171,14 @@ class TestQuriPartsGateEmitter:
 class TestQuriPartsCircuitTranspiler:
     """Test the transpiler configuration."""
 
-    def test_transpiler_creation(self):
+    def test_transpiler_creation(self) -> None:
         """Test transpiler can be created."""
         from qamomile.quri_parts import QuriPartsCircuitTranspiler
 
         transpiler = QuriPartsCircuitTranspiler()
         assert transpiler is not None
 
-    def test_executor_creation(self):
+    def test_executor_creation(self) -> None:
         """Test executor can be created from transpiler."""
         from qamomile.quri_parts import QuriPartsCircuitTranspiler
 
@@ -186,7 +186,7 @@ class TestQuriPartsCircuitTranspiler:
         executor = transpiler.executor()
         assert executor is not None
 
-    def test_executor_with_custom_sampler(self):
+    def test_executor_with_custom_sampler(self) -> None:
         """Test executor with custom sampler."""
         from qamomile.quri_parts import QuriPartsCircuitTranspiler
 

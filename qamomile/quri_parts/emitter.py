@@ -176,6 +176,7 @@ class QuriPartsGateEmitter:
         control: int,
         target: int,
     ) -> None:
+        """Emit CNOT (controlled-X) gate."""
         circuit.add_CNOT_gate(control, target)
 
     def emit_cz(
@@ -184,6 +185,7 @@ class QuriPartsGateEmitter:
         control: int,
         target: int,
     ) -> None:
+        """Emit controlled-Z gate."""
         circuit.add_CZ_gate(control, target)
 
     def emit_swap(
@@ -192,6 +194,7 @@ class QuriPartsGateEmitter:
         qubit1: int,
         qubit2: int,
     ) -> None:
+        """Emit SWAP gate."""
         circuit.add_SWAP_gate(qubit1, qubit2)
 
     # Two-qubit rotation gates
@@ -254,6 +257,7 @@ class QuriPartsGateEmitter:
         control2: int,
         target: int,
     ) -> None:
+        """Emit Toffoli (CCX) gate."""
         circuit.add_TOFFOLI_gate(control1, control2, target)
 
     # Controlled single-qubit gates (decomposition required)

@@ -246,6 +246,7 @@ class QuriPartsCircuitTranspiler(
     """
 
     def _create_separate_pass(self) -> SeparatePass:
+        """Create default separation pass (no backend-specific overrides)."""
         return SeparatePass()
 
     def _create_emit_pass(
@@ -253,6 +254,7 @@ class QuriPartsCircuitTranspiler(
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
     ) -> EmitPass["qp_c.LinearMappedUnboundParametricQuantumCircuit"]:
+        """Create QURI Parts emission pass with gate emitter."""
         return QuriPartsEmitPass(bindings, parameters)
 
     def executor(
