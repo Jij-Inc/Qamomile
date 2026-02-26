@@ -1128,6 +1128,14 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 circuit, controlled_gate, control_indices + target_indices
             )
         else:
+            if op.num_controls > 1:
+                raise EmitError(
+                    f"Cannot decompose multi-controlled operation "
+                    f"(num_controls={op.num_controls}): "
+                    f"block-to-gate conversion failed and the "
+                    f"fallback decomposition only supports single control.",
+                    operation="ControlledUOperation",
+                )
             # Only unroll if power_value is a concrete int
             if isinstance(power_value, int):
                 for _ in range(power_value):
