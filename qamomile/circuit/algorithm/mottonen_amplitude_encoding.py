@@ -2,7 +2,7 @@
 
 Available:
     Classes:
-        - MottonenAmplitudeEncode: Möttönen amplitude encoding (CompositeGate)
+        - MottonenAmplitudeEncoding: Möttönen amplitude encoding (CompositeGate)
 
     Functions:
         - amplitude_encoding: Apply Möttönen amplitude encoding to qubits
@@ -14,6 +14,7 @@ Reference:
 
 from __future__ import annotations
 
+import typing
 from collections.abc import Sequence
 
 import numpy as np
@@ -45,7 +46,8 @@ def _get_cnot_controls(k: int) -> list[int]:
         if i == 2**k:
             controls.append(k - 1)
         else:
-            controls.append((i & -i).bit_length() - 1)
+            trailing_zeros = (i & -i).bit_length() - 1
+            controls.append(trailing_zeros)
     return controls
 
 
@@ -61,12 +63,12 @@ def _compute_angle_transform_matrix(k: int) -> np.ndarray:
     permutation beyond bit-reversal of the alpha indices.
     """
     size = 2**k
-    M = np.zeros((size, size))
+    matrix = np.zeros((size, size))
     for i in range(size):
         for j in range(size):
             bit_count = bin(j & _gray_code(i)).count("1")
-            M[i, j] = (2**-k) * ((-1) ** bit_count)
-    return M
+            matrix[i, j] = (2**-k) * ((-1) ** bit_count)
+    return matrix
 
 
 def _compute_all_thetas(amplitudes: np.ndarray, num_qubits: int) -> list[np.ndarray]:
@@ -105,14 +107,14 @@ def _compute_all_thetas(amplitudes: np.ndarray, num_qubits: int) -> list[np.ndar
             for j in range(2**k):
                 rev_j = int(format(j, f"0{k}b")[::-1], 2)
                 alphas_br[j] = alphas_arr[rev_j]
-            M = _compute_angle_transform_matrix(k)
-            thetas = M @ alphas_br
+            matrix = _compute_angle_transform_matrix(k)
+            thetas = matrix @ alphas_br
 
         all_thetas.append(thetas)
     return all_thetas
 
 
-class MottonenAmplitudeEncode(CompositeGate):
+class MottonenAmplitudeEncoding(CompositeGate):
     """Möttönen amplitude encoding (arXiv:quant-ph/0407010).
 
     Prepares an arbitrary quantum state from the |0...0> state using
@@ -122,12 +124,12 @@ class MottonenAmplitudeEncode(CompositeGate):
 
     Example::
 
-        gate = MottonenAmplitudeEncode([1.0, 0.0, 0.0, 1.0])
+        gate = MottonenAmplitudeEncoding([1.0, 0.0, 0.0, 1.0])
         q0, q1 = gate(q0, q1)
     """
 
     gate_type = CompositeGateType.CUSTOM
-    custom_name = "mottonen_state_prep"
+    custom_name = "mottonen_amplitude_encoding"
 
     _strategies: dict = {}  # type: ignore[type-arg]
     _default_strategy = "standard"
@@ -192,7 +194,7 @@ def compute_mottonen_thetas(amplitudes: Sequence[float] | np.ndarray) -> np.ndar
     """Pre-compute flat rotation angles for Möttönen amplitude encoding.
 
     Converts a classical amplitude vector into the rotation angles
-    needed by :func:`parametric_amplitude_encoding`.
+    needed by :func:`amplitude_encoding` in parametric mode.
 
     Args:
         amplitudes: Classical vector of length 2^n. Will be normalized.
@@ -213,24 +215,13 @@ def compute_mottonen_thetas(amplitudes: Sequence[float] | np.ndarray) -> np.ndar
     return np.concatenate(all_thetas)
 
 
-def amplitude_encoding(
+def _concrete_amplitude_encoding(
     qubits: Vector[Qubit],
     amplitudes: Sequence[float] | np.ndarray,
 ) -> Vector[Qubit]:
-    """Apply Möttönen amplitude encoding to a qubit register.
-
-    Prepares the quantum state whose amplitudes match the given
-    classical vector (automatically normalized).
-
-    Args:
-        qubits: Vector of n qubits, all in |0> state.
-        amplitudes: Classical vector of length 2^n. Will be normalized.
-
-    Returns:
-        Qubit vector encoding the normalized amplitudes.
-    """
+    """Apply Möttönen amplitude encoding with concrete amplitudes."""
     n = _get_size(qubits)
-    gate = MottonenAmplitudeEncode(amplitudes)
+    gate = MottonenAmplitudeEncoding(amplitudes)
     if gate.num_target_qubits != n:
         raise ValueError(
             f"Need {gate.num_target_qubits} qubits for {len(amplitudes)} "
@@ -244,23 +235,11 @@ def amplitude_encoding(
     return qubits
 
 
-def parametric_amplitude_encoding(
+def _parametric_amplitude_encoding(
     qubits: Vector[Qubit],
     thetas: Vector[Float],
 ) -> Vector[Qubit]:
-    """Parametric Möttönen amplitude encoding.
-
-    Uses pre-computed rotation angles (from :func:`compute_mottonen_thetas`)
-    as ``Vector[Float]`` parameters, enabling parametric quantum circuits.
-
-    Args:
-        qubits: Vector of n qubits, all in |0> state.
-        thetas: Rotation angles of length 2^n - 1, computed by
-            :func:`compute_mottonen_thetas`.
-
-    Returns:
-        Qubit vector encoding the state corresponding to *thetas*.
-    """
+    """Apply Möttönen amplitude encoding with parametric rotation angles."""
     n = _get_size(qubits)
     q: list[Qubit] = [qubits[i] for i in range(n)]
 
@@ -281,3 +260,43 @@ def parametric_amplitude_encoding(
     for i in range(n):
         qubits[i] = q[i]
     return qubits
+
+
+@typing.overload
+def amplitude_encoding(
+    qubits: Vector[Qubit],
+    data: Sequence[float] | np.ndarray,
+) -> Vector[Qubit]: ...
+
+
+@typing.overload
+def amplitude_encoding(
+    qubits: Vector[Qubit],
+    data: Vector[Float],
+) -> Vector[Qubit]: ...
+
+
+def amplitude_encoding(
+    qubits: Vector[Qubit],
+    data: Sequence[float] | np.ndarray | Vector[Float],
+) -> Vector[Qubit]:
+    """Apply Möttönen amplitude encoding to a qubit register.
+
+    If *data* is a classical sequence of floats, it is treated as
+    amplitudes and converted into rotation angles internally.
+    If *data* is a ``Vector[Float]``, it is treated as pre-computed
+    rotation angles (from :func:`compute_mottonen_thetas`) for
+    parametric circuits.
+
+    Args:
+        qubits: Vector of n qubits, all in |0> state.
+        data: Either a classical amplitude vector of length 2^n
+            (will be normalized), or a ``Vector[Float]`` of
+            pre-computed rotation angles of length 2^n - 1.
+
+    Returns:
+        Qubit vector encoding the target state.
+    """
+    if isinstance(data, Vector):
+        return _parametric_amplitude_encoding(qubits, data)
+    return _concrete_amplitude_encoding(qubits, data)

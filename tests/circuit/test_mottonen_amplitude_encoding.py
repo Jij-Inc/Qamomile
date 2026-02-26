@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 
 import qamomile.circuit as qm
-from qamomile.circuit.algorithm.mottonen_amplitude_encode import (
-    MottonenAmplitudeEncode,
+from qamomile.circuit.algorithm.mottonen_amplitude_encoding import (
+    MottonenAmplitudeEncoding,
     compute_mottonen_thetas,
 )
 from qamomile.circuit.ir.operation.composite_gate import CompositeGateType
@@ -17,37 +17,37 @@ from qamomile.circuit.ir.operation.composite_gate import CompositeGateType
 # ---------------------------------------------------------------------------
 
 
-class TestMottonenAmplitudeEncodeAttributes:
+class TestMottonenAmplitudeEncodingAttributes:
     def test_custom_name(self) -> None:
-        gate = MottonenAmplitudeEncode([1.0, 0.0])
-        assert gate.custom_name == "mottonen_state_prep"
+        gate = MottonenAmplitudeEncoding([1.0, 0.0])
+        assert gate.custom_name == "mottonen_amplitude_encoding"
 
     def test_gate_type(self) -> None:
-        gate = MottonenAmplitudeEncode([1.0, 0.0])
+        gate = MottonenAmplitudeEncoding([1.0, 0.0])
         assert gate.gate_type == CompositeGateType.CUSTOM
 
     @pytest.mark.parametrize("n_qubits", [1, 2, 3, 4])
     def test_num_target_qubits(self, n_qubits: int) -> None:
         amplitudes = np.ones(2**n_qubits)
-        gate = MottonenAmplitudeEncode(amplitudes)
+        gate = MottonenAmplitudeEncoding(amplitudes)
         assert gate.num_target_qubits == n_qubits
 
     def test_invalid_length(self) -> None:
         with pytest.raises(ValueError, match="power of 2"):
-            MottonenAmplitudeEncode([1.0, 0.0, 0.0])
+            MottonenAmplitudeEncoding([1.0, 0.0, 0.0])
 
     def test_empty_amplitudes(self) -> None:
         with pytest.raises(ValueError, match="power of 2"):
-            MottonenAmplitudeEncode([])
+            MottonenAmplitudeEncoding([])
 
     def test_zero_amplitudes(self) -> None:
         with pytest.raises(ValueError, match="all zeros"):
-            MottonenAmplitudeEncode([0.0, 0.0])
+            MottonenAmplitudeEncoding([0.0, 0.0])
 
 
 def test_amplitude_encoding_qubit_mismatch() -> None:
     """Qubit count / amplitude count mismatch raises ValueError."""
-    from qamomile.circuit.algorithm.mottonen_amplitude_encode import amplitude_encoding
+    from qamomile.circuit.algorithm.mottonen_amplitude_encoding import amplitude_encoding
 
     @qm.qkernel
     def circuit() -> qm.Vector[qm.Bit]:
@@ -60,11 +60,11 @@ def test_amplitude_encoding_qubit_mismatch() -> None:
         circuit.build()
 
 
-class TestMottonenAmplitudeEncodeResources:
+class TestMottonenAmplitudeEncodingResources:
     @pytest.mark.parametrize("n_qubits", [1, 2, 3, 4])
     def test_resources(self, n_qubits: int) -> None:
         amplitudes = np.ones(2**n_qubits)
-        r = MottonenAmplitudeEncode(amplitudes)._resources()
+        r = MottonenAmplitudeEncoding(amplitudes)._resources()
         m = r.custom_metadata
         assert m["num_ry_gates"] == 2**n_qubits - 1
         assert m["num_cnot_gates"] == 2**n_qubits - 2
@@ -78,7 +78,7 @@ class TestMottonenAmplitudeEncodeResources:
 
 def _make_encoding_kernel(n_qubits: int, amplitudes: list[float]):
     """Create an amplitude encoding qkernel using the factory function."""
-    from qamomile.circuit.algorithm.mottonen_amplitude_encode import amplitude_encoding
+    from qamomile.circuit.algorithm.mottonen_amplitude_encoding import amplitude_encoding
 
     @qm.qkernel
     def _kernel() -> qm.Vector[qm.Bit]:
@@ -271,7 +271,7 @@ def _build_parametric_circuit(n_qubits: int, thetas_val: list[float]):
     @qm.qkernel
     def _kernel(t: qm.Vector[qm.Float]) -> qm.Vector[qm.Bit]:
         q = qm.qubit_array(n_qubits, "q")
-        q = qm.parametric_amplitude_encoding(q, t)
+        q = qm.amplitude_encoding(q, t)
         return qm.measure(q)
 
     transpiler = QiskitTranspiler()
