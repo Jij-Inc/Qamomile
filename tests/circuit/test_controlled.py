@@ -333,13 +333,6 @@ class TestControlledValidation:
                 cg(*qs)
 
 
-@pytest.fixture
-def qiskit_transpiler():
-    pytest.importorskip("qiskit")
-    from qamomile.qiskit import QiskitTranspiler
-
-    return QiskitTranspiler()
-
 
 # -- Gate qkernels (1-qubit, no param) ----------------------------------------
 
