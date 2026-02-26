@@ -189,12 +189,15 @@ ROTATION_GATES = {"rx", "ry", "rz", "p", "cp", "crx", "cry", "crz", "rzz"}
 _CONTROLLED_CLIFFORD_GATES = {"x", "y", "z"}
 
 
-def _count_gate_operation(op: GateOperation, is_controlled: bool = False) -> GateCount:
+def _count_gate_operation(
+    op: GateOperation, num_controls: int | sp.Expr = 0
+) -> GateCount:
     """Count gates for a single gate operation.
 
     Args:
         op: The gate operation to count
-        is_controlled: Whether this gate is inside a ControlledUOperation
+        num_controls: Number of control qubits wrapping this gate (0 = not controlled).
+            Can be int (concrete) or sp.Expr (symbolic).
 
     Returns:
         Gate counts for this operation
@@ -202,14 +205,34 @@ def _count_gate_operation(op: GateOperation, is_controlled: bool = False) -> Gat
     # Get gate name from enum
     gate_name = op.gate_type.name.lower() if op.gate_type else "unknown"
 
-    if is_controlled:
-        # Promote classification: control qubit increases qubit width by 1
+    # Safe symbolic check: "has controls?"
+    _has_controls = not (isinstance(num_controls, int) and num_controls == 0)
+
+    if _has_controls:
         is_single_qubit_base = gate_name in SINGLE_QUBIT_GATES
         is_two_qubit_base = gate_name in TWO_QUBIT_GATES
 
         single = sp.Integer(0)
-        two = sp.Integer(1) if is_single_qubit_base else sp.Integer(0)
-        multi = sp.Integer(1) if is_two_qubit_base else sp.Integer(0)
+
+        if isinstance(num_controls, int):
+            # Concrete num_controls: classify based on total qubit count
+            if is_single_qubit_base:
+                total_qubits = num_controls + 1
+            elif is_two_qubit_base:
+                total_qubits = num_controls + 2
+            else:
+                total_qubits = num_controls + 1  # unknown treated as 1q
+            two = sp.Integer(1) if total_qubits == 2 else sp.Integer(0)
+            multi = sp.Integer(1) if total_qubits > 2 else sp.Integer(0)
+        else:
+            # Symbolic num_controls: conservatively classify as multi_qubit
+            # (num_controls >= 1 so total_qubits >= 2, typically > 2)
+            two = sp.Integer(0)
+            multi = (
+                sp.Integer(1)
+                if (is_single_qubit_base or is_two_qubit_base)
+                else sp.Integer(0)
+            )
 
         # Controlled T/Tdg are 2q non-Clifford gates, not simple T gates
         t_count = sp.Integer(0)
@@ -284,7 +307,7 @@ def _count_composite_gate(
     loop_context: LoopContext,
     call_context: dict[str, Any],
     loop_var_symbols: dict[str, sp.Symbol],
-    is_controlled: bool = False,
+    num_controls: int | sp.Expr = 0,
 ) -> GateCount:
     """Count gates in a CompositeGateOperation.
 
@@ -343,7 +366,7 @@ def _count_composite_gate(
                 loop_context=loop_context,
                 call_context=new_call_context,
                 loop_var_symbols=loop_var_symbols,
-                is_controlled=is_controlled,
+                num_controls=num_controls,
             )
 
     # Priority 3: Compute from known gate types
@@ -701,7 +724,7 @@ def _count_from_operations(
     loop_context: LoopContext | None = None,
     call_context: dict[str, Any] | None = None,
     loop_var_symbols: dict[str, sp.Symbol] | None = None,
-    is_controlled: bool = False,
+    num_controls: int | sp.Expr = 0,
 ) -> GateCount:
     """Count gates from a list of operations.
 
@@ -727,7 +750,7 @@ def _count_from_operations(
     for op in operations:
         match op:
             case GateOperation():
-                count = count + _count_gate_operation(op, is_controlled=is_controlled)
+                count = count + _count_gate_operation(op, num_controls=num_controls)
 
             case ForOperation():
                 # Get loop bounds: for i in range(start, stop, step)
@@ -806,7 +829,7 @@ def _count_from_operations(
                         loop_context=new_context,
                         call_context=call_context,
                         loop_var_symbols=new_loop_var_symbols,
-                        is_controlled=is_controlled,
+                        num_controls=num_controls,
                     )
 
                     # Check if inner count contains the current loop variable
@@ -843,7 +866,7 @@ def _count_from_operations(
                         loop_context=loop_context,
                         call_context=call_context,
                         loop_var_symbols=loop_var_symbols,
-                        is_controlled=is_controlled,
+                        num_controls=num_controls,
                     )
                     count = count + (inner_count * iterations)
 
@@ -856,7 +879,7 @@ def _count_from_operations(
                     loop_context=loop_context,
                     call_context=call_context,
                     loop_var_symbols=loop_var_symbols,
-                    is_controlled=is_controlled,
+                    num_controls=num_controls,
                 )
                 iterations = sp.Symbol("|while|", integer=True, positive=True)
                 count = count + (inner_count * iterations)
@@ -869,7 +892,7 @@ def _count_from_operations(
                     loop_context=loop_context,
                     call_context=call_context,
                     loop_var_symbols=loop_var_symbols,
-                    is_controlled=is_controlled,
+                    num_controls=num_controls,
                 )
                 false_count = _count_from_operations(
                     op.false_operations,
@@ -877,7 +900,7 @@ def _count_from_operations(
                     loop_context=loop_context,
                     call_context=call_context,
                     loop_var_symbols=loop_var_symbols,
-                    is_controlled=is_controlled,
+                    num_controls=num_controls,
                 )
                 count = count + true_count.max(false_count)
 
@@ -926,7 +949,7 @@ def _count_from_operations(
                         loop_context=loop_context,
                         call_context=new_call_context,
                         loop_var_symbols=loop_var_symbols,
-                        is_controlled=is_controlled,
+                        num_controls=num_controls,
                     )
                     count = count + inner_count
 
@@ -972,15 +995,23 @@ def _count_from_operations(
                                     )
                                     new_call_context[dim_formal.uuid] = resolved_dim
 
+                    # Resolve num_controls for classification
+                    if op.is_symbolic_num_controls:
+                        nc = value_to_expr(
+                            op.num_controls, block, call_context, loop_var_symbols
+                        )
+                    else:
+                        nc = op.num_controls
+
                     # Recursively count with preserved context
-                    # is_controlled=True promotes gate classifications
+                    # num_controls promotes gate classifications
                     inner_count = _count_from_operations(
                         controlled_block.operations,
                         block=controlled_block,
                         loop_context=loop_context,
                         call_context=new_call_context,
                         loop_var_symbols=loop_var_symbols,
-                        is_controlled=True,
+                        num_controls=nc,
                     )
 
                     # Multiply by power if U^k is applied
@@ -999,7 +1030,7 @@ def _count_from_operations(
                     loop_context,
                     call_context,
                     loop_var_symbols,
-                    is_controlled=is_controlled,
+                    num_controls=num_controls,
                 )
                 count = count + composite_count
 

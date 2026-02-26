@@ -1029,6 +1029,12 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         bindings: dict[str, Any],
     ) -> None:
         """Emit a ControlledUOperation."""
+        if op.is_symbolic_num_controls:
+            raise EmitError(
+                "Cannot emit ControlledUOperation with symbolic num_controls. "
+                "Bind parameters to concrete values before transpilation.",
+                operation="ControlledUOperation",
+            )
         block_value = op.block
         control_operands = op.control_operands
         remaining_operands = op.operands[1 + op.num_controls :]

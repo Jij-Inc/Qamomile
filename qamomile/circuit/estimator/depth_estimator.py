@@ -159,13 +159,13 @@ SINGLE_QUBIT_GATES = {
 
 
 def _estimate_gate_depth(
-    op: GateOperation, is_controlled: bool = False
+    op: GateOperation, num_controls: int | sp.Expr = 0
 ) -> CircuitDepth:
     """Estimate depth for a single gate operation.
 
     Args:
         op: The gate operation
-        is_controlled: Whether this gate is inside a ControlledUOperation
+        num_controls: Number of control qubits (0 means no control)
 
     Returns:
         Circuit depths for this operation
@@ -173,14 +173,35 @@ def _estimate_gate_depth(
     # Get gate name from enum
     gate_name = op.gate_type.name.lower() if op.gate_type else "unknown"
 
-    if is_controlled:
+    # Safe symbolic check: "has controls?"
+    _has_controls = not (isinstance(num_controls, int) and num_controls == 0)
+
+    if _has_controls:
         is_single_qubit_base = gate_name in SINGLE_QUBIT_GATES
         is_two_qubit_base = gate_name in TWO_QUBIT_GATES
 
         # Controlled T/Tdg are 2q gates, not simple T gates
         t_depth = sp.Integer(0)
-        two_qubit_depth = sp.Integer(1) if is_single_qubit_base else sp.Integer(0)
-        multi_qubit_depth = sp.Integer(1) if is_two_qubit_base else sp.Integer(0)
+
+        if isinstance(num_controls, int):
+            # Concrete num_controls: classify based on total qubit count
+            if is_single_qubit_base:
+                total_qubits = num_controls + 1
+            elif is_two_qubit_base:
+                total_qubits = num_controls + 2
+            else:
+                total_qubits = num_controls + 1  # unknown treated as 1q
+            two_qubit_depth = sp.Integer(1) if total_qubits == 2 else sp.Integer(0)
+            multi_qubit_depth = sp.Integer(1) if total_qubits > 2 else sp.Integer(0)
+        else:
+            # Symbolic num_controls: conservatively classify as multi_qubit
+            two_qubit_depth = sp.Integer(0)
+            multi_qubit_depth = (
+                sp.Integer(1)
+                if (is_single_qubit_base or is_two_qubit_base)
+                else sp.Integer(0)
+            )
+
         rotation_depth = sp.Integer(1) if gate_name in ROTATION_GATES else sp.Integer(0)
     else:
         is_t_gate = gate_name in T_GATES
@@ -239,7 +260,7 @@ def _estimate_composite_gate_depth(
     loop_context: LoopContext,
     call_context: dict[str, Any],
     loop_var_symbols: dict[str, sp.Symbol],
-    is_controlled: bool = False,
+    num_controls: int | sp.Expr = 0,
 ) -> CircuitDepth:
     """Estimate depth of a CompositeGateOperation.
 
@@ -306,7 +327,7 @@ def _estimate_composite_gate_depth(
                 loop_context=loop_context,
                 call_context=new_call_context,
                 loop_var_symbols=loop_var_symbols,
-                is_controlled=is_controlled,
+                num_controls=num_controls,
             )
 
     # Priority 3: Compute from known gate types
@@ -778,7 +799,7 @@ def _simulate_parallel_depth_concrete(
     block: Any,
     call_context: dict[str, Any],
     var_env: dict[str, int],
-    is_controlled: bool = False,
+    num_controls: int | sp.Expr = 0,
 ) -> None:
     """Simulate parallel depth with fully concrete variable values.
 
@@ -791,14 +812,14 @@ def _simulate_parallel_depth_concrete(
         block: Block for value tracing
         call_context: Call context for parameter resolution
         var_env: Mapping from all variable names to concrete integer values
-        is_controlled: Whether inside a ControlledUOperation
+        num_controls: Number of control qubits (0 means no control)
     """
     from qamomile.circuit.ir.block_value import BlockValue
     from qamomile.circuit.ir.value import ArrayValue
 
     for op in operations:
         if isinstance(op, GateOperation):
-            gate_depth = _estimate_gate_depth(op, is_controlled=is_controlled)
+            gate_depth = _estimate_gate_depth(op, num_controls=num_controls)
             qubit_ids = [
                 _concretize_qubit_name(v.name, var_env) for v in op.operands
             ]
@@ -867,7 +888,7 @@ def _simulate_parallel_depth_concrete(
                     block=block,
                     call_context=call_context,
                     var_env=inner_env,
-                    is_controlled=is_controlled,
+                    num_controls=num_controls,
                 )
 
         elif isinstance(op, CallBlockOperation):
@@ -920,10 +941,30 @@ def _simulate_parallel_depth_concrete(
                 block=called_block,
                 call_context=new_call_context,
                 var_env=var_env,
-                is_controlled=is_controlled,
+                num_controls=num_controls,
             )
 
         elif isinstance(op, ControlledUOperation):
+            if op.is_symbolic_num_controls:
+                # Symbolic num_controls: treat as depth-1 multi-qubit gate
+                all_qubit_names = [v.name for v in op.operands[1:]]
+                max_current = CircuitDepth.zero()
+                for qid in all_qubit_names:
+                    max_current = max_current.max(
+                        qubit_depths.get(qid, CircuitDepth.zero())
+                    )
+                gate_depth = CircuitDepth(
+                    total_depth=sp.Integer(1),
+                    t_depth=sp.Integer(0),
+                    two_qubit_depth=sp.Integer(0),
+                    multi_qubit_depth=sp.Integer(1),
+                    rotation_depth=sp.Integer(0),
+                )
+                new_depth = max_current + gate_depth
+                for qid in all_qubit_names:
+                    qubit_depths[qid] = new_depth
+                continue
+
             controlled_block = op.block
             if not isinstance(controlled_block, BlockValue):
                 continue
@@ -979,7 +1020,7 @@ def _simulate_parallel_depth_concrete(
                 block=controlled_block,
                 call_context=new_call_context,
                 var_env=var_env,
-                is_controlled=True,
+                num_controls=op.num_controls,
             )
             inner_depth = _get_max_depth(inner_depths)
 
@@ -995,7 +1036,7 @@ def _simulate_parallel_depth_concrete(
 
         elif isinstance(op, CompositeGateOperation):
             composite_depth = _estimate_composite_gate_depth(
-                op, block, [], call_context, {}, is_controlled=is_controlled
+                op, block, [], call_context, {}, num_controls=num_controls
             )
             # Substitute var_env values into composite depth
             subs_dict = {sp.Symbol(k): v for k, v in var_env.items()}
@@ -1098,7 +1139,7 @@ def _estimate_parallel_depth(
     loop_context: LoopContext | None = None,
     call_context: dict[str, Any] | None = None,
     loop_var_symbols: dict[str, sp.Symbol] | None = None,
-    is_controlled: bool = False,
+    num_controls: int | sp.Expr = 0,
 ) -> None:
     """Estimate parallel depth by tracking per-qubit depths.
 
@@ -1112,7 +1153,7 @@ def _estimate_parallel_depth(
         loop_context: Stack of outer loop variables for nested loop analysis
         call_context: Optional mapping from Value UUIDs to actual argument Values
         loop_var_symbols: Optional mapping from Value names to SymPy loop variable symbols
-        is_controlled: Whether inside a ControlledUOperation
+        num_controls: Number of control qubits (0 means no control)
     """
     if loop_context is None:
         loop_context = []
@@ -1124,7 +1165,7 @@ def _estimate_parallel_depth(
     for op in operations:
         match op:
             case GateOperation():
-                gate_depth = _estimate_gate_depth(op, is_controlled=is_controlled)
+                gate_depth = _estimate_gate_depth(op, num_controls=num_controls)
                 qubit_ids = [v.name for v in op.operands]
                 if qubit_ids:
                     # Max depth among all involved qubits
@@ -1145,7 +1186,7 @@ def _estimate_parallel_depth(
                     loop_context,
                     call_context,
                     loop_var_symbols,
-                    is_controlled,
+                    num_controls,
                 )
 
             case WhileOperation():
@@ -1156,7 +1197,7 @@ def _estimate_parallel_depth(
                     loop_context=loop_context,
                     call_context=call_context,
                     loop_var_symbols=loop_var_symbols,
-                    is_controlled=is_controlled,
+                    num_controls=num_controls,
                 )
                 iterations = sp.Symbol("|while|", integer=True, positive=True)
                 increase = inner_depth * iterations
@@ -1177,7 +1218,7 @@ def _estimate_parallel_depth(
                     loop_context=loop_context,
                     call_context=call_context,
                     loop_var_symbols=loop_var_symbols,
-                    is_controlled=is_controlled,
+                    num_controls=num_controls,
                 )
                 _estimate_parallel_depth(
                     op.false_operations,
@@ -1186,7 +1227,7 @@ def _estimate_parallel_depth(
                     loop_context=loop_context,
                     call_context=call_context,
                     loop_var_symbols=loop_var_symbols,
-                    is_controlled=is_controlled,
+                    num_controls=num_controls,
                 )
                 all_qids = set(true_depths) | set(false_depths)
                 for qid in all_qids:
@@ -1202,7 +1243,7 @@ def _estimate_parallel_depth(
                     loop_context,
                     call_context,
                     loop_var_symbols,
-                    is_controlled,
+                    num_controls,
                 )
 
             case ControlledUOperation():
@@ -1222,7 +1263,7 @@ def _estimate_parallel_depth(
                     loop_context,
                     call_context,
                     loop_var_symbols,
-                    is_controlled=is_controlled,
+                    num_controls=num_controls,
                 )
                 # Composite gate touches all its qubits
                 qubit_ids = [v.name for v in op.operands if hasattr(v, "name")]
@@ -1303,7 +1344,7 @@ def _handle_for_parallel(
     loop_context: LoopContext,
     call_context: dict[str, Any],
     loop_var_symbols: dict[str, sp.Symbol],
-    is_controlled: bool,
+    num_controls: int | sp.Expr,
 ) -> None:
     """Handle ForOperation for parallel depth estimation.
 
@@ -1318,7 +1359,7 @@ def _handle_for_parallel(
             loop_context=loop_context,
             call_context=call_context,
             loop_var_symbols=loop_var_symbols,
-            is_controlled=is_controlled,
+            num_controls=num_controls,
         )
         iterations = sp.Symbol("iter", integer=True, positive=True)
         current_max = _get_max_depth(qubit_depths)
@@ -1364,7 +1405,7 @@ def _handle_for_parallel(
                 loop_context=new_context,
                 call_context=call_context,
                 loop_var_symbols=new_loop_var_symbols,
-                is_controlled=is_controlled,
+                num_controls=num_controls,
             )
             iterations = (stop_expr - start_expr) / step_expr
             current_max = _get_max_depth(qubit_depths)
@@ -1383,7 +1424,7 @@ def _handle_for_parallel(
                 block=sim_block,
                 call_context=call_context,
                 var_env=inner_env,
-                is_controlled=is_controlled,
+                num_controls=num_controls,
             )
         return
 
@@ -1425,7 +1466,7 @@ def _handle_for_parallel(
                 block=sim_block,
                 call_context=concrete_call_ctx,
                 var_env=inner_env,
-                is_controlled=is_controlled,
+                num_controls=num_controls,
             )
 
         samples[n_val] = _get_max_depth(inner_depths)
@@ -1438,7 +1479,7 @@ def _handle_for_parallel(
             loop_context=new_context,
             call_context=call_context,
             loop_var_symbols=new_loop_var_symbols,
-            is_controlled=is_controlled,
+            num_controls=num_controls,
         )
         iterations = (stop_expr - start_expr) / step_expr
         current_max = _get_max_depth(qubit_depths)
@@ -1474,7 +1515,7 @@ def _handle_call_block_parallel(
     loop_context: LoopContext,
     call_context: dict[str, Any],
     loop_var_symbols: dict[str, sp.Symbol],
-    is_controlled: bool,
+    num_controls: int | sp.Expr,
 ) -> None:
     """Handle CallBlockOperation for parallel depth estimation."""
     from qamomile.circuit.ir.block_value import BlockValue
@@ -1512,7 +1553,7 @@ def _handle_call_block_parallel(
         loop_context=loop_context,
         call_context=new_call_context,
         loop_var_symbols=loop_var_symbols,
-        is_controlled=is_controlled,
+        num_controls=num_controls,
     )
 
 
@@ -1527,6 +1568,26 @@ def _handle_controlled_u_parallel(
     """Handle ControlledUOperation for parallel depth estimation."""
     from qamomile.circuit.ir.block_value import BlockValue
     from qamomile.circuit.ir.value import ArrayValue
+
+    if op.is_symbolic_num_controls:
+        # Symbolic num_controls: treat as depth-1 multi-qubit gate
+        all_qubit_names = [v.name for v in op.operands[1:]]
+        max_current = CircuitDepth.zero()
+        for qid in all_qubit_names:
+            max_current = max_current.max(
+                qubit_depths.get(qid, CircuitDepth.zero())
+            )
+        gate_depth = CircuitDepth(
+            total_depth=sp.Integer(1),
+            t_depth=sp.Integer(0),
+            two_qubit_depth=sp.Integer(0),
+            multi_qubit_depth=sp.Integer(1),
+            rotation_depth=sp.Integer(0),
+        )
+        new_depth = max_current + gate_depth
+        for qid in all_qubit_names:
+            qubit_depths[qid] = new_depth
+        return
 
     controlled_block = op.block
     if not isinstance(controlled_block, BlockValue):
@@ -1557,7 +1618,7 @@ def _handle_controlled_u_parallel(
     # Get all qubits involved (control + target)
     all_qubit_names = [v.name for v in op.operands if hasattr(v, "name")]
 
-    # Compute inner depth with is_controlled=True
+    # Compute inner depth with num_controls=op.num_controls
     inner_depths: QubitDepthMap = {}
     _estimate_parallel_depth(
         controlled_block.operations,
@@ -1566,7 +1627,7 @@ def _handle_controlled_u_parallel(
         loop_context=loop_context,
         call_context=new_call_context,
         loop_var_symbols=loop_var_symbols,
-        is_controlled=True,
+        num_controls=op.num_controls,
     )
 
     inner_depth = _get_max_depth(inner_depths)
@@ -1588,7 +1649,7 @@ def _compute_sequential_depth(
     loop_context: LoopContext | None = None,
     call_context: dict[str, Any] | None = None,
     loop_var_symbols: dict[str, sp.Symbol] | None = None,
-    is_controlled: bool = False,
+    num_controls: int | sp.Expr = 0,
 ) -> CircuitDepth:
     """Compute sequential (sum-of-all-gates) depth. Used as fallback for loops."""
     if loop_context is None:
@@ -1603,7 +1664,7 @@ def _compute_sequential_depth(
     for op in operations:
         match op:
             case GateOperation():
-                depth = depth + _estimate_gate_depth(op, is_controlled=is_controlled)
+                depth = depth + _estimate_gate_depth(op, num_controls=num_controls)
 
             case ForOperation():
                 if len(op.operands) >= 2:
@@ -1625,7 +1686,7 @@ def _compute_sequential_depth(
                         loop_context=new_context,
                         call_context=call_context,
                         loop_var_symbols=new_loop_var_symbols,
-                        is_controlled=is_controlled,
+                        num_controls=num_controls,
                     )
 
                     if loop_var_symbol in inner_depth.total_depth.free_symbols:
@@ -1646,7 +1707,7 @@ def _compute_sequential_depth(
                     loop_context=loop_context,
                     call_context=call_context,
                     loop_var_symbols=loop_var_symbols,
-                    is_controlled=is_controlled,
+                    num_controls=num_controls,
                 )
                 false_depth = _compute_sequential_depth(
                     op.false_operations,
@@ -1654,7 +1715,7 @@ def _compute_sequential_depth(
                     loop_context=loop_context,
                     call_context=call_context,
                     loop_var_symbols=loop_var_symbols,
-                    is_controlled=is_controlled,
+                    num_controls=num_controls,
                 )
                 depth = depth + true_depth.max(false_depth)
 
@@ -1694,13 +1755,24 @@ def _compute_sequential_depth(
                         loop_context=loop_context,
                         call_context=new_call_context,
                         loop_var_symbols=loop_var_symbols,
-                        is_controlled=is_controlled,
+                        num_controls=num_controls,
                     )
                     depth = depth + inner_depth
 
             case ControlledUOperation():
                 from qamomile.circuit.ir.block_value import BlockValue
                 from qamomile.circuit.ir.value import ArrayValue
+
+                if op.is_symbolic_num_controls:
+                    # Symbolic num_controls: treat as depth-1 multi-qubit gate
+                    depth = depth + CircuitDepth(
+                        total_depth=sp.Integer(1),
+                        t_depth=sp.Integer(0),
+                        two_qubit_depth=sp.Integer(0),
+                        multi_qubit_depth=sp.Integer(1),
+                        rotation_depth=sp.Integer(0),
+                    )
+                    continue
 
                 controlled_block = op.block
                 if isinstance(controlled_block, BlockValue):
@@ -1735,7 +1807,7 @@ def _compute_sequential_depth(
                         loop_context=loop_context,
                         call_context=new_call_context,
                         loop_var_symbols=loop_var_symbols,
-                        is_controlled=True,
+                        num_controls=op.num_controls,
                     )
                     depth = depth + inner_depth
 
@@ -1746,7 +1818,7 @@ def _compute_sequential_depth(
                     loop_context,
                     call_context,
                     loop_var_symbols,
-                    is_controlled=is_controlled,
+                    num_controls=num_controls,
                 )
                 depth = depth + composite_depth
 

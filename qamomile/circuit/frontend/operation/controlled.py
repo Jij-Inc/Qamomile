@@ -38,33 +38,42 @@ class ControlledGate:
         c0, c1, tgt = cc_phase(ctrl0, ctrl1, target, theta=0.5)
     """
 
-    def __init__(self, qkernel: "QKernel", num_controls: int = 1) -> None:
-        if num_controls < 1:
+    def __init__(self, qkernel: "QKernel", num_controls: int | UInt = 1) -> None:
+        if isinstance(num_controls, int) and num_controls < 1:
             raise ValueError(
                 f"num_controls must be >= 1, got {num_controls}."
             )
+        # For UInt (symbolic), validation is deferred to emit time
         self._qkernel = qkernel
         self._num_controls = num_controls
 
     def __call__(
         self,
-        *args: Qubit,
+        *args: Any,
         power: int = 1,
         **params: ParamValue,
-    ) -> tuple[Qubit, ...]:
+    ) -> tuple[Any, ...]:
         """Apply controlled gate.
 
-        Args:
+        For concrete num_controls (int):
             *args: First num_controls qubits are controls, rest are targets.
+        For symbolic num_controls (UInt):
+            args[0]: Vector[Qubit] (controls), args[1:]: individual Qubit targets.
+
+        Args:
+            *args: Control and target qubits.
             power: Number of times to apply U. Default is 1.
-                   For QPE, this is 2^k. The emitter creates Controlled(U^power),
-                   NOT Controlled(U)^power.
             **params: Parameters for the underlying gate (e.g., theta=0.5)
 
         Returns:
-            Tuple of (control_0, ..., control_N, target_0, ..., target_M)
+            Tuple of output handles.
         """
         num_controls = self._num_controls
+
+        if isinstance(num_controls, UInt):
+            return self._call_symbolic(args, power, params)
+
+        # --- Concrete path (existing logic, unchanged) ---
 
         # Split args into controls and targets
         if len(args) <= num_controls:
@@ -164,13 +173,108 @@ class ControlledGate:
 
         return tuple(output_qubits)
 
+    def _call_symbolic(
+        self,
+        args: tuple[Any, ...],
+        power: int,
+        params: dict[str, ParamValue],
+    ) -> tuple[Any, ...]:
+        """Handle symbolic num_controls (UInt).
 
-def controlled(qkernel: "QKernel", num_controls: int = 1) -> ControlledGate:
+        Convention: args[0] is Vector[Qubit] (controls), args[1:] are targets.
+        """
+        from qamomile.circuit.frontend.handle.array import ArrayBase, Vector
+
+        num_controls = self._num_controls
+        assert isinstance(num_controls, UInt)
+
+        if not args or not isinstance(args[0], ArrayBase):
+            raise ValueError(
+                "When num_controls is symbolic (UInt), the first argument "
+                "must be a Vector[Qubit] for control qubits."
+            )
+
+        control_vector = args[0]
+        target_args = args[1:]
+
+        if not target_args:
+            raise ValueError("ControlledU requires at least 1 target qubit.")
+
+        # Consume control vector (linear type enforcement)
+        control_vector = control_vector.consume(operation_name="ControlledU[controls]")
+
+        # Consume target qubits
+        consumed_targets = []
+        for tgt in target_args:
+            consumed_targets.append(tgt.consume(operation_name="ControlledU[target]"))
+
+        # Get BlockValue from qkernel
+        block = self._qkernel.block
+
+        # Build operands: [BlockValue, control_vector, target(s), param(s)]
+        operands: list[Any] = [block, control_vector.value]
+        for tgt in consumed_targets:
+            operands.append(tgt.value)
+
+        # Add parameter values
+        for param_name, param_value in params.items():
+            if isinstance(param_value, Handle):
+                operands.append(param_value.value)
+            else:
+                param_val = Value(
+                    type=FloatType(),
+                    name=f"ctrl_param_{param_name}",
+                    params={"const": float(param_value)},
+                )
+                operands.append(param_val)
+
+        # Build results: [control_vector_out, target_out(s)]
+        results: list[Value] = []
+        results.append(control_vector.value.next_version())
+        for tgt in consumed_targets:
+            results.append(tgt.value.next_version())
+
+        # Create ControlledUOperation with symbolic num_controls
+        op = ControlledUOperation(
+            operands=operands,
+            results=results,
+            num_controls=num_controls.value,  # IR Value, not UInt handle
+            power=power,
+        )
+
+        # Add to tracer
+        tracer = get_current_tracer()
+        tracer.add_operation(op)
+
+        # Return output handles
+        output_handles: list[Any] = []
+
+        # Control vector output
+        control_out = Vector._create_from_value(
+            results[0], control_vector.shape, control_vector.value.name
+        )
+        output_handles.append(control_out)
+
+        # Target outputs
+        for i, tgt in enumerate(consumed_targets):
+            output_handles.append(
+                Qubit(
+                    value=results[1 + i],
+                    parent=tgt.parent,
+                    indices=tgt.indices,
+                )
+            )
+
+        return tuple(output_handles)
+
+
+def controlled(qkernel: "QKernel", num_controls: int | UInt = 1) -> ControlledGate:
     """Create a controlled version of a quantum gate (QKernel).
 
     Args:
         qkernel: A QKernel defining the gate to control.
         num_controls: Number of control qubits (default: 1).
+            Can be int (concrete) or UInt (symbolic).
 
     Returns:
         ControlledGate that can be called with (*controls, *targets, **params)

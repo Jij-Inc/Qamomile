@@ -95,8 +95,13 @@ class ControlledUOperation(Operation):
                The emitter will create Controlled(U^power), not Controlled(U)^power.
     """
 
-    num_controls: int = 1
+    num_controls: int | Value = 1  # int = concrete, Value = symbolic
     power: int = 1
+
+    @property
+    def is_symbolic_num_controls(self) -> bool:
+        """Whether num_controls is symbolic (Value) rather than concrete (int)."""
+        return isinstance(self.num_controls, Value)
 
     @property
     def block(self):
@@ -106,15 +111,26 @@ class ControlledUOperation(Operation):
     @property
     def control_operands(self):
         """Get the control qubit values."""
+        if self.is_symbolic_num_controls:
+            # Symbolic: operands[1] is the control array Value
+            return [self.operands[1]]
         return self.operands[1 : 1 + self.num_controls]
 
     @property
     def target_operands(self):
         """Get the target qubit values (arguments to U)."""
+        if self.is_symbolic_num_controls:
+            # Symbolic: operands[2:] are targets (after BlockValue and control array)
+            return self.operands[2:]
         return self.operands[1 + self.num_controls :]
 
     @property
     def signature(self) -> Signature:
+        if self.is_symbolic_num_controls:
+            raise NotImplementedError(
+                "Cannot compute signature for ControlledUOperation with "
+                "symbolic num_controls."
+            )
         num_targets = len(self.operands) - 1 - self.num_controls
         return Signature(
             operands=[

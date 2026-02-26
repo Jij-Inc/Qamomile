@@ -325,6 +325,14 @@ class ResourceAllocator:
         qubit_map: dict[str, int],
     ) -> None:
         """Allocate resources for a ControlledUOperation."""
+        if op.is_symbolic_num_controls:
+            from qamomile.circuit.transpiler.errors import EmitError
+
+            raise EmitError(
+                "Cannot transpile ControlledUOperation with symbolic num_controls. "
+                "Bind parameters to concrete values before transpilation.",
+                operation="ControlledUOperation",
+            )
         control_qubits = list(op.control_operands)
         target_qubits = [
             v for v in op.target_operands if hasattr(v, "type") and v.type.is_quantum()
