@@ -226,8 +226,8 @@ def _get_size(arr: Vector[Qubit]) -> int:
 
 
 def amplitude_encoding(
-    amplitudes: Sequence[float] | np.ndarray,
     qubits: Vector[Qubit],
+    amplitudes: Sequence[float] | np.ndarray,
 ) -> Vector[Qubit]:
     """Apply Möttönen amplitude encoding to a qubit register.
 
@@ -235,8 +235,8 @@ def amplitude_encoding(
     classical vector (automatically normalized).
 
     Args:
-        amplitudes: Classical vector of length 2^n. Will be normalized.
         qubits: Vector of n qubits, all in |0> state.
+        amplitudes: Classical vector of length 2^n. Will be normalized.
 
     Returns:
         Qubit vector encoding the normalized amplitudes.
@@ -257,8 +257,8 @@ def amplitude_encoding(
 
 
 def parametric_amplitude_encoding(
-    thetas: Vector[Float],
     qubits: Vector[Qubit],
+    thetas: Vector[Float],
 ) -> Vector[Qubit]:
     """Parametric Möttönen amplitude encoding.
 
@@ -266,9 +266,9 @@ def parametric_amplitude_encoding(
     as ``Vector[Float]`` parameters, enabling parametric quantum circuits.
 
     Args:
+        qubits: Vector of n qubits, all in |0> state.
         thetas: Rotation angles of length 2^n - 1, computed by
             :func:`compute_mottonen_thetas`.
-        qubits: Vector of n qubits, all in |0> state.
 
     Returns:
         Qubit vector encoding the state corresponding to *thetas*.

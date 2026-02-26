@@ -68,7 +68,7 @@ def _make_encoding_kernel(n_qubits: int, amplitudes: list[float]):
     @qm.qkernel
     def _kernel() -> qm.Vector[qm.Bit]:
         q = qm.qubit_array(n_qubits, "q")
-        q = amplitude_encoding(amplitudes, q)
+        q = amplitude_encoding(q, amplitudes)
         return qm.measure(q)
 
     return _kernel
@@ -206,7 +206,7 @@ def test_amplitude_encoding_factory() -> None:
     @qm.qkernel
     def _kernel() -> qm.Vector[qm.Bit]:
         q = qm.qubit_array(2, "q")
-        q = qm.amplitude_encoding(amplitudes, q)
+        q = qm.amplitude_encoding(q, amplitudes)
         return qm.measure(q)
 
     from qamomile.qiskit import QiskitTranspiler
@@ -256,7 +256,7 @@ def _build_parametric_circuit(n_qubits: int, thetas_val: list[float]):
     @qm.qkernel
     def _kernel(t: qm.Vector[qm.Float]) -> qm.Vector[qm.Bit]:
         q = qm.qubit_array(n_qubits, "q")
-        q = qm.parametric_amplitude_encoding(t, q)
+        q = qm.parametric_amplitude_encoding(q, t)
         return qm.measure(q)
 
     transpiler = QiskitTranspiler()
