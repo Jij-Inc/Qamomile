@@ -76,7 +76,7 @@ Dependencies flow only downstream (left to right). Upstream (reverse) dependenci
 - Extensive type annotations on all parameters, return types, and generics.
 - **All functions and classes MUST have Google-style docstrings** with `Args`, `Returns`, `Raises`, and `Example` sections as appropriate. Type hints should be included in the docstring. Missing docstrings are a P2+ issue.
 - No stale imports or dead code.
-- Consistent import style (`import qamomile.circuit as qmc`).Expand commentComment on line R79Resolved
+- Consistent import style (`import qamomile.circuit as qmc`).
 
 ### H. Testing Philosophy
 
