@@ -46,6 +46,18 @@ class TestHamiltonianToQuriOperator:
         for _, c in op.items():
             assert np.isclose(c, coeff)
 
+    def test_identity_operator_in_term(self) -> None:
+        """Verify Pauli.I operators within a term are skipped correctly."""
+        h = qm_o.Hamiltonian()
+        # Manually construct a term with I(0)*Z(1)
+        h.add_term(
+            (qm_o.PauliOperator(qm_o.Pauli.I, 0), qm_o.PauliOperator(qm_o.Pauli.Z, 1)),
+            1.0,
+        )
+        op = hamiltonian_to_quri_operator(h)
+        # I(0)*Z(1) should produce just Z(1), not a two-qubit term
+        assert len(op) == 1
+
     def test_multi_qubit_product(self) -> None:
         """Verify X(0)*Z(1) produces one two-qubit term."""
         h = qm_o.X(0) * qm_o.Z(1)

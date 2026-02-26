@@ -77,31 +77,37 @@ class QuriPartsGateEmitter:
     def emit_h(
         self, circuit: "LinearMappedUnboundParametricQuantumCircuit", qubit: int
     ) -> None:
+        """Emit Hadamard gate."""
         circuit.add_H_gate(qubit)
 
     def emit_x(
         self, circuit: "LinearMappedUnboundParametricQuantumCircuit", qubit: int
     ) -> None:
+        """Emit Pauli-X gate."""
         circuit.add_X_gate(qubit)
 
     def emit_y(
         self, circuit: "LinearMappedUnboundParametricQuantumCircuit", qubit: int
     ) -> None:
+        """Emit Pauli-Y gate."""
         circuit.add_Y_gate(qubit)
 
     def emit_z(
         self, circuit: "LinearMappedUnboundParametricQuantumCircuit", qubit: int
     ) -> None:
+        """Emit Pauli-Z gate."""
         circuit.add_Z_gate(qubit)
 
     def emit_s(
         self, circuit: "LinearMappedUnboundParametricQuantumCircuit", qubit: int
     ) -> None:
+        """Emit S (phase) gate."""
         circuit.add_S_gate(qubit)
 
     def emit_t(
         self, circuit: "LinearMappedUnboundParametricQuantumCircuit", qubit: int
     ) -> None:
+        """Emit T gate."""
         circuit.add_T_gate(qubit)
 
     # Single-qubit rotation gates
@@ -150,8 +156,9 @@ class QuriPartsGateEmitter:
         """Emit Phase gate.
 
         QURI Parts doesn't have a native Phase gate. We use RZ which differs
-        by a global phase (which is physically irrelevant).
-        P(θ) = e^(iθ/2) * RZ(θ)
+        by a global phase: P(θ) = e^(iθ/2) * RZ(θ).
+        For single-qubit usage the global phase is physically irrelevant.
+        For controlled gates, the CP decomposition compensates accordingly.
         """
         angle_dict = self._make_angle_dict(angle)
         if isinstance(angle_dict, float):

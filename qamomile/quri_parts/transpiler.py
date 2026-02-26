@@ -6,7 +6,7 @@ into QURI Parts quantum circuits.
 
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import Any, Sequence, TYPE_CHECKING
 
 from qamomile.circuit.transpiler.transpiler import Transpiler
 from qamomile.circuit.transpiler.passes.emit import EmitPass
@@ -21,8 +21,6 @@ from .emitter import QuriPartsGateEmitter
 from .exceptions import QamomileQuriPartsTranspileError
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     import quri_parts.circuit as qp_c
     import quri_parts.core.operator as qp_o
     from quri_parts.circuit import ImmutableBoundParametricQuantumCircuit
@@ -90,11 +88,11 @@ class QuriPartsExecutor(
                 from quri_parts.qulacs.sampler import create_qulacs_vector_sampler
 
                 self._sampler = create_qulacs_vector_sampler()
-            except ImportError:
+            except ImportError as e:
                 raise ImportError(
                     "quri-parts-qulacs is required for QuriPartsExecutor. "
                     "Install with: pip install quri-parts-qulacs"
-                )
+                ) from e
         return self._sampler
 
     @property
@@ -107,11 +105,11 @@ class QuriPartsExecutor(
                 )
 
                 self._estimator = create_qulacs_vector_parametric_estimator()
-            except ImportError:
+            except ImportError as e:
                 raise ImportError(
                     "quri-parts-qulacs is required for QuriPartsExecutor. "
                     "Install with: pip install quri-parts-qulacs"
-                )
+                ) from e
         return self._estimator
 
     def execute(self, circuit: Any, shots: int) -> dict[str, int]:
@@ -165,6 +163,35 @@ class QuriPartsExecutor(
                 )
 
         return circuit.bind_parameters(param_values)
+
+    def estimate(
+        self,
+        circuit: "qp_c.LinearMappedUnboundParametricQuantumCircuit",
+        hamiltonian: Any,
+        params: Sequence[float] | None = None,
+    ) -> float:
+        """Estimate expectation value <psi|H|psi>.
+
+        Accepts either a ``qamomile.observable.Hamiltonian`` (the standard
+        interface) or a native ``quri_parts.core.operator.Operator``.
+
+        Args:
+            circuit: The unbound parametric circuit (state preparation ansatz)
+            hamiltonian: Hamiltonian to measure — ``qamomile.observable.Hamiltonian``
+                or ``quri_parts.core.operator.Operator``
+            params: Parameter values for the parametric circuit
+
+        Returns:
+            Real part of the expectation value
+        """
+        import qamomile.observable as qm_o
+
+        if isinstance(hamiltonian, qm_o.Hamiltonian):
+            from qamomile.quri_parts.observable import hamiltonian_to_quri_operator
+
+            hamiltonian = hamiltonian_to_quri_operator(hamiltonian)
+
+        return self.estimate_expectation(circuit, hamiltonian, params or [])
 
     def estimate_expectation(
         self,

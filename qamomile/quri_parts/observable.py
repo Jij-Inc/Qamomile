@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any, TYPE_CHECKING
 
+# qamomile.observable is a core module, always available (not optional).
 import qamomile.observable as qm_o
 
 if TYPE_CHECKING:
