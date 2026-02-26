@@ -224,6 +224,12 @@ class ResourceAllocator:
         qubit_map: dict[str, int],
     ) -> None:
         """Allocate resources for a GateOperation."""
+        # GateOperation represents a unitary gate: qubit count is preserved.
+        assert len(op.results) == len(op.operands), (
+            f"GateOperation must have equal operands and results, "
+            f"got {len(op.operands)} operands and {len(op.results)} results."
+        )
+
         # Phase 1: Register all operands in qubit_map.
         # Element Values are created dynamically during frontend tracing
         # (handle/array.py _get_element), so their UUIDs are unknown at
@@ -248,12 +254,16 @@ class ResourceAllocator:
                     # Non-constant indices (symbolic loop vars) are resolved
                     # at emit time via ValueResolver.resolve_qubit_index_detailed.
                 else:
-                    # Scalar qubit: allocate new index
+                    # Scalar qubit: allocate new index.
+                    # This path is used for @qkernel input parameters created with
+                    # emit_init=False (func_to_block.py), which have no QInitOperation.
+                    # ResourceAllocator.allocate() receives only operations, not the
+                    # block's input_values, so these qubits are first registered here.
                     qubit_map[operand.uuid] = len(qubit_map)
 
         # Phase 2: Map each result to its corresponding operand (1:1)
         for i, result in enumerate(op.results):
-            if result.uuid not in qubit_map and i < len(op.operands):
+            if result.uuid not in qubit_map:
                 operand = op.operands[i]
                 if operand.uuid in qubit_map:
                     qubit_map[result.uuid] = qubit_map[operand.uuid]
@@ -286,6 +296,10 @@ class ResourceAllocator:
             qubit_key, is_array = self._resolve_qubit_key(qubit)
             if qubit_key is not None:
                 if qubit_key not in qubit_map:
+                    # New allocation for qubits not yet registered.
+                    # For scalar qubits, this handles @qkernel input parameters
+                    # (emit_init=False) that have no preceding QInitOperation.
+                    # For array elements, this handles first-seen element keys.
                     qubit_map[qubit_key] = len(qubit_map)
                 if qubit.uuid not in qubit_map:
                     qubit_map[qubit.uuid] = qubit_map[qubit_key]
