@@ -24,7 +24,11 @@ from tests.circuit.conftest import run_statevector
 
 
 class HadamardAll(CompositeGate):
-    """Apply H to all n qubits."""
+    """Apply H to all n qubits.
+
+    Args:
+        n: Number of target qubits.
+    """
 
     custom_name = "hadamard_all"
 
@@ -42,7 +46,7 @@ class HadamardAll(CompositeGate):
 
 
 class BellPair(CompositeGate):
-    """H + CX on 2 qubits -> Bell state."""
+    """Apply H + CX on 2 qubits to create a Bell state."""
 
     custom_name = "bell_pair"
 
@@ -60,7 +64,7 @@ class BellPair(CompositeGate):
 
 
 class DoubleH(CompositeGate):
-    """Apply H twice -> identity."""
+    """Apply H twice (identity operation) on a single qubit."""
 
     custom_name = "double_h"
 
@@ -1094,3 +1098,47 @@ class TestNestedQKernelNoPhantomQubits:
 
         qc = qiskit_transpiler.to_circuit(two_independent)
         assert qc.num_qubits == 5, f"Expected 5 qubits, got {qc.num_qubits}"
+
+
+class TestAllocateGateInvariant:
+    """Test that _allocate_gate enforces invariants on malformed operations."""
+
+    def test_missing_qinit_for_array_element(self):
+        """GateOperation on array element without QInitOperation raises AssertionError."""
+        from qamomile.circuit.ir.operation.gate import (
+            GateOperation,
+            GateOperationType,
+        )
+        from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+        from qamomile.circuit.transpiler.passes.emit_base import ResourceAllocator
+
+        parent_array = ArrayValue(
+            type=QubitType(),
+            name="q_array",
+            shape=(Value(type=UIntType(), name="dim0", params={"const": 3}),),
+        )
+
+        idx_value = Value(
+            type=UIntType(),
+            name="idx",
+            params={"const": 0},
+        )
+
+        element_qubit = Value(
+            type=QubitType(),
+            name="q_element",
+            parent_array=parent_array,
+            element_indices=(idx_value,),
+        )
+
+        result_qubit = element_qubit.next_version()
+
+        gate_op = GateOperation(
+            gate_type=GateOperationType.H,
+            operands=[element_qubit],
+            results=[result_qubit],
+        )
+
+        allocator = ResourceAllocator()
+        with pytest.raises(AssertionError, match="Array element key"):
+            allocator.allocate([gate_op])

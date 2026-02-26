@@ -133,7 +133,7 @@ class TestQFT:
         assert ops[1].custom_name == "qft"
         assert isinstance(ops[2], ReturnOperation)
 
-    @pytest.mark.parametrize("n", [2, 3, 4])
+    @pytest.mark.parametrize("n", [1, 2, 3, 4])
     def test_transpile_circuit(self, qiskit_transpiler, n):
         """QFT transpiles to a valid Qiskit circuit with correct qubit count."""
 
@@ -154,7 +154,7 @@ class TestQFT:
         for datum in qc.data[1:]:
             assert isinstance(datum.operation, Measure)
 
-    @pytest.mark.parametrize("n", [2, 3, 4])
+    @pytest.mark.parametrize("n", [1, 2, 3, 4])
     def test_uniform_statevector(self, qiskit_transpiler, n):
         """QFT on |0...0> produces uniform superposition (statevector check)."""
 
@@ -173,7 +173,7 @@ class TestQFT:
             f"n={n}: expected uniform amplitudes {expected_amp}, got {np.abs(sv)}"
         )
 
-    @pytest.mark.parametrize("n", [2, 3, 4])
+    @pytest.mark.parametrize("n", [1, 2, 3, 4])
     def test_transpile_circuit_symbolic(self, qiskit_transpiler, n):
         """QFT transpiles correctly when n is bound at transpile time."""
 
@@ -194,7 +194,7 @@ class TestQFT:
         for datum in qc.data[1:]:
             assert isinstance(datum.operation, Measure)
 
-    @pytest.mark.parametrize("n", [2, 3, 4])
+    @pytest.mark.parametrize("n", [1, 2, 3, 4])
     def test_uniform_statevector_symbolic(self, qiskit_transpiler, n):
         """QFT on |0...0> produces uniform superposition (symbolic n)."""
 
@@ -329,7 +329,7 @@ class TestIQFT:
         assert ops[1].custom_name == "iqft"
         assert isinstance(ops[2], ReturnOperation)
 
-    @pytest.mark.parametrize("n", [2, 3, 4])
+    @pytest.mark.parametrize("n", [1, 2, 3, 4])
     def test_transpile_circuit(self, qiskit_transpiler, n):
         """IQFT transpiles to a valid Qiskit circuit with correct qubit count."""
 
@@ -354,7 +354,7 @@ class TestIQFT:
         for datum in qc.data[1:]:
             assert isinstance(datum.operation, Measure)
 
-    @pytest.mark.parametrize("n", [2, 3, 4])
+    @pytest.mark.parametrize("n", [1, 2, 3, 4])
     def test_zero_statevector(self, qiskit_transpiler, n):
         """IQFT on uniform superposition produces |0...0> (statevector check)."""
 
@@ -376,7 +376,7 @@ class TestIQFT:
             f"n={n}: expected |0...0>, got {sv}"
         )
 
-    @pytest.mark.parametrize("n", [2, 3, 4])
+    @pytest.mark.parametrize("n", [1, 2, 3, 4])
     def test_transpile_circuit_symbolic(self, qiskit_transpiler, n):
         """IQFT transpiles correctly when n is bound at transpile time."""
 
@@ -401,7 +401,7 @@ class TestIQFT:
         for datum in qc.data[1:]:
             assert isinstance(datum.operation, Measure)
 
-    @pytest.mark.parametrize("n", [2, 3, 4])
+    @pytest.mark.parametrize("n", [1, 2, 3, 4])
     def test_zero_statevector_symbolic(self, qiskit_transpiler, n):
         """IQFT on uniform superposition produces |0...0> (symbolic n)."""
 
@@ -425,7 +425,9 @@ class TestIQFT:
 
 
 class TestQFTIQFT:
-    @pytest.mark.parametrize("n", [2, 3, 4])
+    """Test QFT followed by IQFT produces identity."""
+
+    @pytest.mark.parametrize("n", [1, 2, 3, 4])
     def test_qft_iqft_identity_statevector(self, qiskit_transpiler, n):
         """QFT followed by IQFT on |0...0> returns |0...0> (statevector check)."""
 
@@ -446,7 +448,7 @@ class TestQFTIQFT:
             f"n={n}: expected |0...0>, got {sv}"
         )
 
-    @pytest.mark.parametrize("n", [2, 3, 4])
+    @pytest.mark.parametrize("n", [1, 2, 3, 4])
     def test_qft_iqft_identity(self, qiskit_transpiler, seeded_executor, n):
         """QFT followed by IQFT on |0...0> returns all zeros."""
 
@@ -466,7 +468,7 @@ class TestQFTIQFT:
                 f"n={n}: expected all zeros, got {bits} (count={count})"
             )
 
-    @pytest.mark.parametrize("n", [2, 3, 4])
+    @pytest.mark.parametrize("n", [1, 2, 3, 4])
     def test_qft_iqft_identity_statevector_symbolic(self, qiskit_transpiler, n):
         """QFT then IQFT is identity (symbolic n, statevector check)."""
 
@@ -486,7 +488,7 @@ class TestQFTIQFT:
             f"n={n}: expected |0...0>, got {sv}"
         )
 
-    @pytest.mark.parametrize("n", [2, 3, 4])
+    @pytest.mark.parametrize("n", [1, 2, 3, 4])
     def test_qft_iqft_identity_symbolic(self, qiskit_transpiler, seeded_executor, n):
         """QFT then IQFT returns all zeros (symbolic n, sampling)."""
 
