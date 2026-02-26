@@ -16,11 +16,10 @@ from .fqaoa import (
     initial_occupations,
     mixer_layer,
 )
-from .mottonen_amplitude_encode import (
-    MottonenAmplitudeEncode,
+from .mottonen_amplitude_encoding import (
+    MottonenAmplitudeEncoding,
     amplitude_encoding,
     compute_mottonen_thetas,
-    parametric_amplitude_encoding,
 )
 from .qaoa import (
     ising_cost_circuit,
@@ -52,8 +51,7 @@ __all__ = [
     "fqaoa_layers",
     "fqaoa_state",
     # State preparation
-    "MottonenAmplitudeEncode",
+    "MottonenAmplitudeEncoding",
     "amplitude_encoding",
     "compute_mottonen_thetas",
-    "parametric_amplitude_encoding",
 ]

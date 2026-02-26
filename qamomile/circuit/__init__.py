@@ -40,7 +40,7 @@ from .frontend.qkernel import QKernel, qkernel
 from .stdlib import iqft, qft, qpe, ttk_adder
 
 # Algorithm building blocks
-from .algorithm import amplitude_encoding, compute_mottonen_thetas, parametric_amplitude_encoding
+from .algorithm import amplitude_encoding, compute_mottonen_thetas
 
 __all__ = [
     "qkernel",
@@ -89,6 +89,5 @@ __all__ = [
     "ttk_adder",
     "amplitude_encoding",
     "compute_mottonen_thetas",
-    "parametric_amplitude_encoding",
     "QKernel",
 ]
