@@ -165,3 +165,30 @@ class TestEstimateExpectation:
 
         result = executor.estimate_expectation(circuit, hamiltonian, [])
         assert np.isclose(result, 1.0, atol=1e-10)
+
+    def test_estimate_with_qamomile_hamiltonian(self) -> None:
+        """Verify estimate() auto-converts qamomile Hamiltonian to Operator."""
+        import qamomile.observable as qm_o
+
+        emitter = QuriPartsGateEmitter()
+        circuit = emitter.create_circuit(1, 0)
+        # No gates -> |0> state; <0|Z|0> = 1.0
+
+        hamiltonian = qm_o.Z(0)
+        executor = QuriPartsExecutor()
+
+        result = executor.estimate(circuit, hamiltonian, params=[])
+        assert np.isclose(result, 1.0, atol=1e-10)
+
+    def test_estimate_zero_hamiltonian(self) -> None:
+        """Verify estimate() with empty Hamiltonian returns 0.0."""
+        import qamomile.observable as qm_o
+
+        emitter = QuriPartsGateEmitter()
+        circuit = emitter.create_circuit(1, 0)
+
+        hamiltonian = qm_o.Hamiltonian()  # empty — no terms, zero constant
+        executor = QuriPartsExecutor()
+
+        result = executor.estimate(circuit, hamiltonian, params=[])
+        assert np.isclose(result, 0.0, atol=1e-10)

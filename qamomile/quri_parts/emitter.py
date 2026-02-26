@@ -117,6 +117,7 @@ class QuriPartsGateEmitter:
         qubit: int,
         angle: float | Any,
     ) -> None:
+        """Emit RX rotation gate."""
         angle_dict = self._make_angle_dict(angle)
         if isinstance(angle_dict, float):
             circuit.add_RX_gate(qubit, angle_dict)
@@ -129,6 +130,7 @@ class QuriPartsGateEmitter:
         qubit: int,
         angle: float | Any,
     ) -> None:
+        """Emit RY rotation gate."""
         angle_dict = self._make_angle_dict(angle)
         if isinstance(angle_dict, float):
             circuit.add_RY_gate(qubit, angle_dict)
@@ -141,6 +143,7 @@ class QuriPartsGateEmitter:
         qubit: int,
         angle: float | Any,
     ) -> None:
+        """Emit RZ rotation gate."""
         angle_dict = self._make_angle_dict(angle)
         if isinstance(angle_dict, float):
             circuit.add_RZ_gate(qubit, angle_dict)

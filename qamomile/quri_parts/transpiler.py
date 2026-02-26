@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     import quri_parts.core.operator as qp_o
     from quri_parts.circuit import ImmutableBoundParametricQuantumCircuit
 
+    import qamomile.observable as qm_o
+
 
 class QuriPartsEmitPass(
     StandardEmitPass["qp_c.LinearMappedUnboundParametricQuantumCircuit"]
@@ -167,18 +169,18 @@ class QuriPartsExecutor(
     def estimate(
         self,
         circuit: "qp_c.LinearMappedUnboundParametricQuantumCircuit",
-        hamiltonian: Any,
+        hamiltonian: "qm_o.Hamiltonian",
         params: Sequence[float] | None = None,
     ) -> float:
         """Estimate expectation value <psi|H|psi>.
 
-        Accepts either a ``qamomile.observable.Hamiltonian`` (the standard
-        interface) or a native ``quri_parts.core.operator.Operator``.
+        Also accepts a native ``quri_parts.core.operator.Operator`` at
+        runtime for convenience (auto-conversion is skipped in that case).
 
         Args:
             circuit: The unbound parametric circuit (state preparation ansatz)
-            hamiltonian: Hamiltonian to measure — ``qamomile.observable.Hamiltonian``
-                or ``quri_parts.core.operator.Operator``
+            hamiltonian: Hamiltonian to measure (qamomile Hamiltonian or
+                native QURI Parts Operator at runtime)
             params: Parameter values for the parametric circuit
 
         Returns:

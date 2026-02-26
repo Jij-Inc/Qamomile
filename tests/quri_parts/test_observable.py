@@ -11,7 +11,6 @@ import qamomile.observable as qm_o
 from qamomile.quri_parts.observable import (
     hamiltonian_to_quri_operator,
     to_quri_operator,
-    _ZERO_THRESHOLD,
 )
 
 
@@ -92,7 +91,7 @@ class TestHamiltonianToQuriOperator:
     def test_near_zero_constant_is_excluded(self) -> None:
         """Verify near-zero constant (below threshold) is excluded."""
         h = qm_o.Z(0)
-        h.constant = _ZERO_THRESHOLD / 10
+        h.constant = 1e-16
         op = hamiltonian_to_quri_operator(h)
         assert len(op) == 1
 
