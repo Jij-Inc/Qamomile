@@ -64,24 +64,17 @@ def _assert_amplitudes_match(qc, n_qubits: int, amplitudes: list[float]) -> None
 
 
 class TestMottonenAmplitudeEncoding:
-    def test_custom_name(self) -> None:
+    def test_gate_metadata(self) -> None:
         gate = MottonenAmplitudeEncoding([1.0, 0.0])
         assert gate.custom_name == "mottonen_amplitude_encoding"
-
-    def test_gate_type(self) -> None:
-        gate = MottonenAmplitudeEncoding([1.0, 0.0])
         assert gate.gate_type == CompositeGateType.CUSTOM
-
-    @pytest.mark.parametrize("n_qubits", [1, 2, 3, 4])
-    def test_num_target_qubits(self, n_qubits: int) -> None:
-        amplitudes = np.ones(2**n_qubits)
-        gate = MottonenAmplitudeEncoding(amplitudes)
-        assert gate.num_target_qubits == n_qubits
 
     @pytest.mark.parametrize("n_qubits", [1, 2, 3, 4])
     def test_resources(self, n_qubits: int) -> None:
         amplitudes = np.ones(2**n_qubits)
-        r = MottonenAmplitudeEncoding(amplitudes)._resources()
+        gate = MottonenAmplitudeEncoding(amplitudes)
+        assert gate.num_target_qubits == n_qubits
+        r = gate._resources()
         m = r.custom_metadata
         assert m["num_ry_gates"] == 2**n_qubits - 1
         assert m["num_cnot_gates"] == 2**n_qubits - 2
@@ -140,6 +133,7 @@ class TestConcreteEncoding:
             pytest.param([0.0, 0.0, 0.0, 1.0], id="2q-11"),
             pytest.param([1.0, 1.0, 1.0, 1.0], id="2q-uniform"),
             pytest.param([1.0, 0.0, 0.0, 1.0], id="2q-bell-like"),
+            pytest.param([3.0, 4.0], id="1q-normalization"),
         ],
     )
     def test_fixed_amplitudes(self, qiskit_transpiler, amplitudes: list[float]) -> None:
@@ -154,12 +148,6 @@ class TestConcreteEncoding:
             amplitudes = rng.standard_normal(2**n_qubits).tolist()
             qc = _build_encoding_circuit(amplitudes, qiskit_transpiler)
             _assert_amplitudes_match(qc, n_qubits, amplitudes)
-
-    def test_normalization(self, qiskit_transpiler) -> None:
-        """Non-normalized input should be automatically normalized."""
-        amplitudes = [3.0, 4.0]  # norm = 5
-        qc = _build_encoding_circuit(amplitudes, qiskit_transpiler)
-        _assert_amplitudes_match(qc, 1, amplitudes)
 
     def test_qubit_mismatch_raises(self) -> None:
         """Qubit count / amplitude count mismatch raises ValueError."""
