@@ -113,6 +113,12 @@ Dependencies flow only downstream (left to right). Upstream (reverse) dependenci
 - **Mutable default arguments**: NEVER use mutable defaults (`def f(x=[])`). Use `def f(x: list[int] | None = None): x = x if x is not None else []`.
 - **Generators vs lists**: For large iterations, prefer generators or iterators over materialized lists when the result is consumed only once.
 
+### L. Defensive Programming
+
+- **Exhaustive branching**: `if-else` and `match` statements MUST always include an `else` (or default) branch, even when it seems unnecessary. If the else branch has no action, add an explicit comment explaining why (e.g., `# No action needed: ...`) or a defensive `assert` (e.g., `assert False, "unreachable"`).
+- **Defensive assertions**: When guarding against cases that should never occur according to Qamomile's specification but are added "just in case", prefer `assert` over `raise`. This clearly communicates the intent: "this is a specification invariant, not an expected error path."
+- **`assert` vs `raise`**: Use `assert` for internal invariants that indicate programmer error if violated. Use `raise` (with proper exception types from `QamomileCompileError` hierarchy) for conditions that could be triggered by user input or external data.
+
 ---
 
 ## Review Process
@@ -163,6 +169,7 @@ For each changed file, systematically check:
 9. **Documentation** (Section I) — `.py` and `.ipynb` in sync? Proper Jupytext format?
 10. **Numerical correctness** (Section J) — Float comparisons use `isclose`/`is_close_zero`? Tests use `np.allclose`? Tolerance assumptions documented?
 11. **Performance & memory** (Section K) — Unnecessary copies? Mutable default arguments? Large iterations use generators?
+12. **Defensive programming** (Section L) — Do `if-else`/`match` statements include `else`/default branches? Are defensive checks using `assert` for internal invariants? Are unreachable branches clearly marked?
 
 ### Step 5: Impact Analysis and Potential Bug Detection
 
@@ -178,6 +185,8 @@ For each significant change, describe:
 #### 5b. Modification Completeness Check
 
 Verify that all necessary changes were made — not just the primary change but all dependent updates:
+- **Feature addition completeness**: If a new feature was added, are there sufficient tests covering the new functionality (including edge cases and negative tests)? Is documentation (docstrings, tutorials) provided?
+- **Feature modification completeness**: If existing behavior was modified, were related tests updated to reflect the new behavior? Were related documentation and tutorials updated accordingly?
 - **Call site updates**: If a function signature changed, were ALL callers updated?
 - **`__init__.py` / `__all__` updates**: If a public symbol was added, removed, or renamed, were exports updated?
 - **Test coverage**: Were tests added or updated to cover the new/changed behavior? Are there missing test cases? Do tests cover edge cases (empty inputs, boundary values) and negative cases (invalid inputs raise correct exceptions)?
@@ -199,7 +208,7 @@ Display a structured review report directly in the conversation.
 
 Use the following severity levels:
 - **P0 (Bug)**: Incorrect behavior, runtime error, linear type violation, silent data corruption, **breaking changes in related (unchanged) files** caused by the modifications, mutable default arguments, bare `except` swallowing errors, floating-point `==` in production code, missing exception chaining causing lost diagnostics
-- **P1 (Significant Design Issue)**: Violates core Qamomile philosophy (layer boundaries, @qkernel pattern, backend abstraction), .py/.ipynb desync, **incomplete modifications** (e.g., changed interface but callers not updated, missing `__all__` update), missing tolerance in numerical test assertions
+- **P1 (Significant Design Issue)**: Violates core Qamomile philosophy (layer boundaries, @qkernel pattern, backend abstraction), .py/.ipynb desync, **incomplete modifications** (e.g., changed interface but callers not updated, missing `__all__` update), missing tolerance in numerical test assertions, **missing tests or documentation for new/modified features**
 - **P2 (Moderate)**: Missing docstrings, un-parametrized tests, missing random tests, inconsistencies, missing test coverage for new behavior, missing edge case or negative tests, unnecessary copies in hot paths
 - **P3 (Minor/Nit)**: Style, naming, import ordering, unfixed random seed, suboptimal generator vs list choice
 
