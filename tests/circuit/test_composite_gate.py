@@ -145,6 +145,13 @@ class TestCompositeGate:
         assert metadata.t_gates == 10
         assert metadata.query_complexity == 5
         assert metadata.custom_metadata["num_qubits"] == n
+        # Unspecified typed fields default to None
+        assert metadata.total_gates is None
+        assert metadata.single_qubit_gates is None
+        assert metadata.two_qubit_gates is None
+        assert metadata.multi_qubit_gates is None
+        assert metadata.clifford_gates is None
+        assert metadata.rotation_gates is None
 
     def test_apply_composite_gate_in_qkernel(self):
         """CompositeGate can be used inside a qkernel."""
@@ -409,6 +416,13 @@ class TestCompositeGate:
         assert op.resource_metadata.t_gates == 42
         assert op.resource_metadata.query_complexity == 7
         assert op.resource_metadata.custom_metadata["key"] == "value"
+        # Unspecified typed fields default to None
+        assert op.resource_metadata.total_gates is None
+        assert op.resource_metadata.single_qubit_gates is None
+        assert op.resource_metadata.two_qubit_gates is None
+        assert op.resource_metadata.multi_qubit_gates is None
+        assert op.resource_metadata.clifford_gates is None
+        assert op.resource_metadata.rotation_gates is None
 
     def test_strategy_resource_metadata(self, mocker):
         """Strategy's resources() is used instead of _resources() when strategy is active."""
@@ -561,8 +575,13 @@ class TestQFTAndIQFTClasses:
         metadata = qft.get_resource_metadata()
 
         assert metadata is not None
-        assert metadata.t_gates == 0  # Standard QFT uses no T gates
-        assert "num_h_gates" in metadata.custom_metadata
+        assert metadata.t_gates == 0
+        # n=4: num_h=4, num_cp=6, num_swap=2
+        assert metadata.total_gates == 12
+        assert metadata.single_qubit_gates == 4
+        assert metadata.two_qubit_gates == 8
+        assert metadata.clifford_gates == 6
+        assert metadata.rotation_gates == 6
         assert metadata.custom_metadata["num_h_gates"] == 4
 
     def test_qft_in_qkernel(self):

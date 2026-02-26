@@ -36,17 +36,25 @@ class TestQFT:
         metadata = gate.get_resource_metadata()
 
         assert metadata is not None
+
+        num_h = n
+        num_cp = n * (n - 1) // 2
+        num_swap = n // 2
+
+        # Typed fields
         assert metadata.t_gates == 0
-        assert "num_h_gates" in metadata.custom_metadata
-        assert metadata.custom_metadata["num_h_gates"] == n
-        assert "num_cp_gates" in metadata.custom_metadata
-        assert metadata.custom_metadata["num_cp_gates"] == n * (n - 1) // 2
-        assert "num_swap_gates" in metadata.custom_metadata
-        assert metadata.custom_metadata["num_swap_gates"] == n // 2
-        assert "total_gates" in metadata.custom_metadata
-        assert metadata.custom_metadata["total_gates"] == n + n * (n - 1) // 2 + n // 2
-        assert "depth" in metadata.custom_metadata
-        assert metadata.custom_metadata["depth"] == n
+        assert metadata.total_gates == num_h + num_cp + num_swap
+        assert metadata.single_qubit_gates == num_h
+        assert metadata.two_qubit_gates == num_cp + num_swap
+        assert metadata.clifford_gates == num_h + num_swap
+        assert metadata.rotation_gates == num_cp
+
+        # custom_metadata
+        assert metadata.custom_metadata["num_h_gates"] == num_h
+        assert metadata.custom_metadata["num_cp_gates"] == num_cp
+        assert metadata.custom_metadata["num_swap_gates"] == num_swap
+        assert metadata.custom_metadata["total_gates"] == num_h + num_cp + num_swap
+        assert metadata.custom_metadata["depth"] == 2 * n
 
     @pytest.mark.parametrize("n", [1, 2, 5, 10, 100])
     def test_resources_symbolic(self, n):
@@ -232,17 +240,25 @@ class TestIQFT:
         metadata = gate.get_resource_metadata()
 
         assert metadata is not None
+
+        num_h = n
+        num_cp = n * (n - 1) // 2
+        num_swap = n // 2
+
+        # Typed fields
         assert metadata.t_gates == 0
-        assert "num_h_gates" in metadata.custom_metadata
-        assert metadata.custom_metadata["num_h_gates"] == n
-        assert "num_cp_gates" in metadata.custom_metadata
-        assert metadata.custom_metadata["num_cp_gates"] == n * (n - 1) // 2
-        assert "num_swap_gates" in metadata.custom_metadata
-        assert metadata.custom_metadata["num_swap_gates"] == n // 2
-        assert "total_gates" in metadata.custom_metadata
-        assert metadata.custom_metadata["total_gates"] == n + n * (n - 1) // 2 + n // 2
-        assert "depth" in metadata.custom_metadata
-        assert metadata.custom_metadata["depth"] == n
+        assert metadata.total_gates == num_h + num_cp + num_swap
+        assert metadata.single_qubit_gates == num_h
+        assert metadata.two_qubit_gates == num_cp + num_swap
+        assert metadata.clifford_gates == num_h + num_swap
+        assert metadata.rotation_gates == num_cp
+
+        # custom_metadata
+        assert metadata.custom_metadata["num_h_gates"] == num_h
+        assert metadata.custom_metadata["num_cp_gates"] == num_cp
+        assert metadata.custom_metadata["num_swap_gates"] == num_swap
+        assert metadata.custom_metadata["total_gates"] == num_h + num_cp + num_swap
+        assert metadata.custom_metadata["depth"] == 2 * n
 
     @pytest.mark.parametrize("n", [1, 2, 5, 10, 100])
     def test_resources_symbolic(self, n):

@@ -163,7 +163,7 @@ class QFT(CompositeGate):
                 "num_cp_gates": num_cp,
                 "num_swap_gates": num_swap,
                 "total_gates": num_h + num_cp + num_swap,
-                "depth": n,
+                "depth": 2 * n,
             },
         )
 
@@ -275,7 +275,7 @@ class IQFT(CompositeGate):
                 "num_cp_gates": num_cp,
                 "num_swap_gates": num_swap,
                 "total_gates": num_h + num_cp + num_swap,
-                "depth": n,
+                "depth": 2 * n,
             },
         )
 

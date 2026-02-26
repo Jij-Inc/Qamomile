@@ -621,6 +621,11 @@ class TestStubGateEstimation:
 
         est = estimate_resources(circuit_with_stub.block)
         assert est.gates.t_gates == 10
+        # 3 H gates from circuit, stub contributes 0 for unspecified fields
+        assert est.gates.single_qubit == 3
+        assert est.gates.clifford_gates == 3
+        assert est.gates.two_qubit == 0
+        assert est.gates.rotation_gates == 0
         # Verify oracle call is tracked
         assert "black_box_oracle" in est.gates.oracle_calls
         assert est.gates.oracle_calls["black_box_oracle"] == 1
