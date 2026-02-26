@@ -5,19 +5,13 @@ from __future__ import annotations
 from abc import abstractmethod
 from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
+import qamomile.observable as qm_o
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
 )
 from qamomile.circuit.ir.value import Value
-from qamomile.circuit.transpiler.passes import Pass
-from qamomile.circuit.transpiler.segments import (
-    ClassicalSegment,
-    ExpvalSegment,
-    QuantumSegment,
-    SimplifiedProgram,
-)
 from qamomile.circuit.transpiler.executable import (
     CompiledClassicalSegment,
     CompiledExpvalSegment,
@@ -25,7 +19,13 @@ from qamomile.circuit.transpiler.executable import (
     ExecutableProgram,
     ParameterMetadata,
 )
-import qamomile.observable as qm_o
+from qamomile.circuit.transpiler.passes import Pass
+from qamomile.circuit.transpiler.segments import (
+    ClassicalSegment,
+    ExpvalSegment,
+    QuantumSegment,
+    SimplifiedProgram,
+)
 
 T = TypeVar("T")  # Backend circuit type
 C = TypeVar("C", covariant=True)  # Circuit type for emitter
@@ -49,9 +49,9 @@ class CompositeGateEmitter(Protocol[C]):
                 return gate_type in (CompositeGateType.QFT, CompositeGateType.IQFT)
 
             def emit(self, circuit, op, qubit_indices, bindings) -> bool:
-                from qiskit.circuit.library import QFT
-                qft = QFT(len(qubit_indices))
-                circuit.compose(qft, qubit_indices, inplace=True)
+                from qiskit.circuit.library import QFTGate
+                qft_gate = QFTGate(len(qubit_indices))
+                circuit.append(qft_gate, qubit_indices)
                 return True
     """
 
@@ -226,8 +226,7 @@ class EmitPass(Pass[SimplifiedProgram, ExecutableProgram[T]], Generic[T]):
         # Validate type
         if not isinstance(hamiltonian, qm_o.Hamiltonian):
             raise TypeError(
-                f"Expected qamomile.observable.Hamiltonian, "
-                f"got {type(hamiltonian)}"
+                f"Expected qamomile.observable.Hamiltonian, got {type(hamiltonian)}"
             )
 
         # Build qubit mapping from Pauli index to physical qubit index

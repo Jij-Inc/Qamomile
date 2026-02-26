@@ -1,4 +1,4 @@
-"""Qiskit QFT/IQFT emitter using native qiskit.circuit.library.QFT."""
+"""Qiskit QFT/IQFT emitter using native qiskit.circuit.library.QFTGate."""
 
 from __future__ import annotations
 
@@ -16,9 +16,9 @@ from qamomile.circuit.ir.operation.composite_gate import (
 class QiskitQFTEmitter:
     """Emitter for QFT and IQFT using Qiskit's native library.
 
-    Uses qiskit.circuit.library.QFT which is a stable, non-deprecated API.
-    This provides optimized implementations that benefit from Qiskit's
-    circuit optimization passes.
+    Uses qiskit.circuit.library.QFTGate which is the recommended API
+    since Qiskit 2.1. This provides optimized implementations that
+    benefit from Qiskit's circuit optimization passes.
 
     Supports:
     - CompositeGateType.QFT: Quantum Fourier Transform
@@ -58,7 +58,7 @@ class QiskitQFTEmitter:
             return False
 
         try:
-            from qiskit.circuit.library import QFT as QiskitQFT
+            from qiskit.circuit.library import QFTGate
         except ImportError:
             return False  # Qiskit not available, fall back to manual
 
@@ -66,13 +66,13 @@ class QiskitQFTEmitter:
 
         try:
             if op.gate_type == CompositeGateType.QFT:
-                qft = QiskitQFT(num_qubits)
-                circuit.compose(qft, qubit_indices, inplace=True)
+                qft_gate = QFTGate(num_qubits)
+                circuit.append(qft_gate, qubit_indices)
                 return True
 
             elif op.gate_type == CompositeGateType.IQFT:
-                iqft = QiskitQFT(num_qubits).inverse()
-                circuit.compose(iqft, qubit_indices, inplace=True)
+                iqft_gate = QFTGate(num_qubits).inverse(annotated=True)
+                circuit.append(iqft_gate, qubit_indices)
                 return True
 
         except Exception:
@@ -100,10 +100,10 @@ class QiskitQFTEmitter:
             return False
 
         try:
-            from qiskit.circuit.library import QFT as QiskitQFT
+            from qiskit.circuit.library import QFTGate
 
-            iqft = QiskitQFT(len(qubit_indices)).inverse()
-            circuit.compose(iqft, qubit_indices, inplace=True)
+            iqft_gate = QFTGate(len(qubit_indices)).inverse(annotated=True)
+            circuit.append(iqft_gate, qubit_indices)
             return True
         except Exception:
             return False
@@ -128,10 +128,10 @@ class QiskitQFTEmitter:
             return False
 
         try:
-            from qiskit.circuit.library import QFT as QiskitQFT
+            from qiskit.circuit.library import QFTGate
 
-            qft = QiskitQFT(len(qubit_indices))
-            circuit.compose(qft, qubit_indices, inplace=True)
+            qft_gate = QFTGate(len(qubit_indices))
+            circuit.append(qft_gate, qubit_indices)
             return True
         except Exception:
             return False
