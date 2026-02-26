@@ -53,8 +53,9 @@ def _assert_amplitudes_match(qc, n_qubits: int, amplitudes: list[float]) -> None
     encoded = sv[: 2**n_qubits]
     expected = np.array(amplitudes, dtype=float)
     expected /= np.linalg.norm(expected)
-    assert np.allclose(np.abs(encoded), np.abs(expected), atol=1e-8), (
-        f"amplitudes={amplitudes}: got {encoded}, expected {expected}"
+    fidelity = np.abs(np.vdot(expected, encoded)) ** 2
+    assert np.isclose(fidelity, 1.0, atol=1e-8), (
+        f"amplitudes={amplitudes}: fidelity={fidelity}, got {encoded}, expected {expected}"
     )
 
 

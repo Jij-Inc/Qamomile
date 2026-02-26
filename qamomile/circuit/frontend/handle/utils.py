@@ -6,14 +6,14 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .array import Vector
-    from .primitives import Qubit
+    from .handle import Handle
 
 
-def _get_size(arr: Vector[Qubit]) -> int:
+def _get_size(arr: Vector[Handle]) -> int:
     """Get array size as Python int.
 
     Args:
-        arr: A Vector of Qubits
+        arr: A Vector of handle elements
 
     Returns:
         The size of the array as an integer

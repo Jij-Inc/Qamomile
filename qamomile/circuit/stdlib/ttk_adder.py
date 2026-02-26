@@ -21,8 +21,6 @@ Resources (n >= 2):
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.handle import Qubit, Vector
@@ -32,8 +30,6 @@ from qamomile.circuit.ir.operation.composite_gate import (
     ResourceMetadata,
 )
 
-if TYPE_CHECKING:
-    pass
 
 
 class TTKInplaceAdder(CompositeGate):

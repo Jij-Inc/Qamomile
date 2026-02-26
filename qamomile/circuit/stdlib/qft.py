@@ -31,7 +31,6 @@ Example:
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
 
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.composite_gate import CompositeGate
@@ -49,9 +48,6 @@ from qamomile.circuit.stdlib.qft_strategies import (
     StandardIQFTStrategy,
     StandardQFTStrategy,
 )
-
-if TYPE_CHECKING:
-    pass
 
 
 class QFT(CompositeGate):
