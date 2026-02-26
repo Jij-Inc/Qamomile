@@ -3,6 +3,13 @@
 Adds two n-bit binary numbers a[n-1]...a[0] and b[n-1]...b[0],
 storing the (n+1)-bit sum in-place: B_i <- s_i, z <- z XOR s_n.
 
+Available:
+    Classes:
+        - TTKInplaceAdder: CompositeGate implementing the TTK adder
+
+    Functions:
+        - ttk_adder: Apply TTK inplace adder to qubit registers
+
 Qubit layout (2n+1 qubits, grouped by register):
     (a_0, a_1, ..., a_{n-1}, b_0, b_1, ..., b_{n-1}, z)
 
@@ -19,6 +26,7 @@ from typing import TYPE_CHECKING
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.handle import Qubit, Vector
+from qamomile.circuit.frontend.handle.utils import _get_size
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateType,
     ResourceMetadata,
@@ -149,20 +157,6 @@ class TTKInplaceAdder(CompositeGate):
                     "operand_bits": n,
                 },
             )
-
-
-def _get_size(arr: Vector[Qubit]) -> int:
-    """Get array size as Python int."""
-    size = arr.shape[0]
-    if isinstance(size, int):
-        return size
-    if hasattr(size, "value") and size.value.is_constant():
-        val = size.value.get_const()
-        if val is not None:
-            return int(val)
-    if hasattr(size, "init_value"):
-        return int(size.init_value)
-    raise ValueError("Array must have fixed size")
 
 
 def ttk_adder(

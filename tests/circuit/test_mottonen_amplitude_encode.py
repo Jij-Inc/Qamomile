@@ -45,6 +45,21 @@ class TestMottonenAmplitudeEncodeAttributes:
             MottonenAmplitudeEncode([0.0, 0.0])
 
 
+def test_amplitude_encoding_qubit_mismatch() -> None:
+    """Qubit count / amplitude count mismatch raises ValueError."""
+    from qamomile.circuit.algorithm.mottonen_amplitude_encode import amplitude_encoding
+
+    @qm.qkernel
+    def circuit() -> qm.Vector[qm.Bit]:
+        q = qm.qubit_array(2, "q")
+        # 8 amplitudes need 3 qubits, but only 2 provided
+        q = amplitude_encoding(q, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        return qm.measure(q)
+
+    with pytest.raises(ValueError, match="qubits"):
+        circuit.build()
+
+
 class TestMottonenAmplitudeEncodeResources:
     @pytest.mark.parametrize("n_qubits", [1, 2, 3, 4])
     def test_resources(self, n_qubits: int) -> None:
@@ -260,9 +275,7 @@ def _build_parametric_circuit(n_qubits: int, thetas_val: list[float]):
         return qm.measure(q)
 
     transpiler = QiskitTranspiler()
-    executor = transpiler.transpile(
-        _kernel, bindings={"t": thetas_val}
-    )
+    executor = transpiler.transpile(_kernel, bindings={"t": thetas_val})
     qc = executor.compiled_quantum[0].circuit
     qc.remove_final_measurements()
     return qc

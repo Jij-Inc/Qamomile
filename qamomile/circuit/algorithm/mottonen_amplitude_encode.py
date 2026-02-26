@@ -21,10 +21,12 @@ import numpy as np
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.handle import Float, Qubit, Vector
+from qamomile.circuit.frontend.handle.utils import _get_size
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateType,
     ResourceMetadata,
 )
+from qamomile.optimization.utils import is_close_zero
 
 
 def _gray_code(n: int) -> int:
@@ -135,8 +137,8 @@ class MottonenAmplitudeEncode(CompositeGate):
         n = len(arr)
         if n == 0 or (n & (n - 1)) != 0:
             raise ValueError(f"Length of amplitudes must be a power of 2, got {n}")
-        norm = np.linalg.norm(arr)
-        if norm == 0:
+        norm = float(np.linalg.norm(arr))
+        if is_close_zero(norm):
             raise ValueError("Amplitudes must not be all zeros")
         self._amplitudes = arr / norm
         self._num_qubits = int(np.log2(n))
@@ -202,27 +204,13 @@ def compute_mottonen_thetas(amplitudes: Sequence[float] | np.ndarray) -> np.ndar
     n = len(arr)
     if n == 0 or (n & (n - 1)) != 0:
         raise ValueError(f"Length of amplitudes must be a power of 2, got {n}")
-    norm = np.linalg.norm(arr)
-    if norm == 0:
+    norm = float(np.linalg.norm(arr))
+    if is_close_zero(norm):
         raise ValueError("Amplitudes must not be all zeros")
     arr = arr / norm
     num_qubits = int(np.log2(n))
     all_thetas = _compute_all_thetas(arr, num_qubits)
     return np.concatenate(all_thetas)
-
-
-def _get_size(arr: Vector[Qubit]) -> int:
-    """Get array size as Python int."""
-    size = arr.shape[0]
-    if isinstance(size, int):
-        return size
-    if hasattr(size, "value") and size.value.is_constant():
-        val = size.value.get_const()
-        if val is not None:
-            return int(val)
-    if hasattr(size, "init_value"):
-        return int(size.init_value)
-    raise ValueError("Array must have fixed size")
 
 
 def amplitude_encoding(

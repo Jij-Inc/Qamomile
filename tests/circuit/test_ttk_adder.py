@@ -35,6 +35,22 @@ class TestTTKInplaceAdderAttributes:
             TTKInplaceAdder(-1)
 
 
+def test_ttk_adder_mismatched_registers() -> None:
+    """Mismatched register sizes raise ValueError."""
+    from qamomile.circuit.stdlib.ttk_adder import ttk_adder
+
+    @qm.qkernel
+    def circuit() -> qm.Bit:
+        a = qm.qubit_array(2, "a")
+        b = qm.qubit_array(3, "b")
+        z = qm.qubit("z")
+        b, a, z = ttk_adder(b, a, z)
+        return qm.measure(z)
+
+    with pytest.raises(ValueError, match="same size"):
+        circuit.build()
+
+
 class TestTTKInplaceAdderResources:
     def test_resources_n1(self) -> None:
         r = TTKInplaceAdder(1)._resources()
@@ -121,76 +137,27 @@ def _expected_basis_index(n: int, a_val: int, b_val: int) -> int:
     return a_val | (sum_low << n) | (carry << (2 * n))
 
 
-@pytest.mark.parametrize(
-    "a_val, b_val",
-    [(a, b) for a in range(2) for b in range(2)],
-)
-def test_ttk_adder_correctness_1bit(a_val: int, b_val: int) -> None:
-    """Exhaustive test for n=1 (4 cases)."""
+@pytest.mark.parametrize("n", [1, 2, 3])
+def test_ttk_adder_correctness(n: int) -> None:
+    """Exhaustive test for n-bit addition."""
     pytest.importorskip("qiskit")
     pytest.importorskip("qiskit_aer")
 
-    n = 1
-    qc = _build_adder_circuit(n, a_val, b_val)
-    sv = _simulate_statevector(qc)
+    for a_val in range(2**n):
+        for b_val in range(2**n):
+            qc = _build_adder_circuit(n, a_val, b_val)
+            sv = _simulate_statevector(qc)
 
-    expected_idx = _expected_basis_index(n, a_val, b_val)
-    num_qubits = qc.num_qubits
-    expected_sv = np.zeros(2**num_qubits, dtype=complex)
-    expected_sv[expected_idx] = 1.0
+            expected_idx = _expected_basis_index(n, a_val, b_val)
+            num_qubits = qc.num_qubits
+            expected_sv = np.zeros(2**num_qubits, dtype=complex)
+            expected_sv[expected_idx] = 1.0
 
-    assert np.allclose(np.abs(sv), np.abs(expected_sv), atol=1e-8), (
-        f"n={n}, a={a_val}, b={b_val}: "
-        f"expected index {expected_idx}, got nonzero at {np.nonzero(np.abs(sv) > 0.5)}"
-    )
-
-
-@pytest.mark.parametrize(
-    "a_val, b_val",
-    [(a, b) for a in range(4) for b in range(4)],
-)
-def test_ttk_adder_correctness_2bit(a_val: int, b_val: int) -> None:
-    """Exhaustive test for n=2 (16 cases)."""
-    pytest.importorskip("qiskit")
-    pytest.importorskip("qiskit_aer")
-
-    n = 2
-    qc = _build_adder_circuit(n, a_val, b_val)
-    sv = _simulate_statevector(qc)
-
-    expected_idx = _expected_basis_index(n, a_val, b_val)
-    num_qubits = qc.num_qubits
-    expected_sv = np.zeros(2**num_qubits, dtype=complex)
-    expected_sv[expected_idx] = 1.0
-
-    assert np.allclose(np.abs(sv), np.abs(expected_sv), atol=1e-8), (
-        f"n={n}, a={a_val}, b={b_val}: "
-        f"expected index {expected_idx}, got nonzero at {np.nonzero(np.abs(sv) > 0.5)}"
-    )
-
-
-@pytest.mark.parametrize(
-    "a_val, b_val",
-    [(a, b) for a in range(8) for b in range(8)],
-)
-def test_ttk_adder_correctness_3bit(a_val: int, b_val: int) -> None:
-    """Exhaustive test for n=3 (64 cases)."""
-    pytest.importorskip("qiskit")
-    pytest.importorskip("qiskit_aer")
-
-    n = 3
-    qc = _build_adder_circuit(n, a_val, b_val)
-    sv = _simulate_statevector(qc)
-
-    expected_idx = _expected_basis_index(n, a_val, b_val)
-    num_qubits = qc.num_qubits
-    expected_sv = np.zeros(2**num_qubits, dtype=complex)
-    expected_sv[expected_idx] = 1.0
-
-    assert np.allclose(np.abs(sv), np.abs(expected_sv), atol=1e-8), (
-        f"n={n}, a={a_val}, b={b_val}: "
-        f"expected index {expected_idx}, got nonzero at {np.nonzero(np.abs(sv) > 0.5)}"
-    )
+            assert np.allclose(np.abs(sv), np.abs(expected_sv), atol=1e-8), (
+                f"n={n}, a={a_val}, b={b_val}: "
+                f"expected index {expected_idx}, "
+                f"got nonzero at {np.nonzero(np.abs(sv) > 0.5)}"
+            )
 
 
 # ---------------------------------------------------------------------------

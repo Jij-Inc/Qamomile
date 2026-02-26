@@ -24,7 +24,19 @@ def _apply_single_qubit_gate(qubit: Qubit, gate_type: GateOperationType) -> Qubi
 def _apply_two_qubit_gate(
     control: Qubit, target: Qubit, gate_type: GateOperationType
 ) -> tuple[Qubit, Qubit]:
-    """Apply a two-qubit gate and return the output qubits."""
+    """Apply a two-qubit gate and return the output qubits.
+
+    Args:
+        control: Control qubit handle.
+        target: Target qubit handle.
+        gate_type: The gate operation type to apply.
+
+    Returns:
+        Tuple of (control_out, target_out) with new SSA versions.
+
+    Raises:
+        QubitAliasError: If control and target refer to the same physical qubit.
+    """
     # Check for aliasing (same physical qubit used twice)
     # Use logical_id to track physical qubit identity across SSA versions
     if control.value.logical_id == target.value.logical_id:
@@ -228,7 +240,20 @@ def rzz(qubit_0: Qubit, qubit_1: Qubit, angle: float | Float) -> tuple[Qubit, Qu
 def _apply_three_qubit_gate(
     qubit_0: Qubit, qubit_1: Qubit, qubit_2: Qubit, gate_type: GateOperationType
 ) -> tuple[Qubit, Qubit, Qubit]:
-    """Apply a three-qubit gate and return the output qubits."""
+    """Apply a three-qubit gate and return the output qubits.
+
+    Args:
+        qubit_0: First qubit handle.
+        qubit_1: Second qubit handle.
+        qubit_2: Third qubit handle.
+        gate_type: The gate operation type to apply.
+
+    Returns:
+        Tuple of (q0_out, q1_out, q2_out) with new SSA versions.
+
+    Raises:
+        QubitAliasError: If any two qubits refer to the same physical qubit.
+    """
     # Check for aliasing (all three must be distinct physical qubits)
     ids = [qubit_0.value.logical_id, qubit_1.value.logical_id, qubit_2.value.logical_id]
     if ids[0] == ids[1] or ids[0] == ids[2] or ids[1] == ids[2]:
@@ -275,7 +300,9 @@ def ccx(control1: Qubit, control2: Qubit, target: Qubit) -> tuple[Qubit, Qubit, 
     Returns:
         Tuple of (control1_out, control2_out, target_out) after CCX.
     """
-    return _apply_three_qubit_gate(control1, control2, target, GateOperationType.TOFFOLI)
+    return _apply_three_qubit_gate(
+        control1, control2, target, GateOperationType.TOFFOLI
+    )
 
 
 def swap(qubit_0: Qubit, qubit_1: Qubit) -> tuple[Qubit, Qubit]:
