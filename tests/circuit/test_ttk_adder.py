@@ -7,8 +7,7 @@ import pytest
 
 import qamomile.circuit as qm
 from qamomile.circuit.ir.operation.composite_gate import CompositeGateType
-from qamomile.circuit.stdlib.adder import TTKInplaceAdder
-
+from qamomile.circuit.stdlib.ttk_adder import TTKInplaceAdder
 
 # ---------------------------------------------------------------------------
 # Unit tests for class attributes and resources
@@ -57,7 +56,6 @@ class TestTTKInplaceAdderResources:
 # ---------------------------------------------------------------------------
 # Statevector correctness tests via Qamomile pipeline + Qiskit simulation
 # ---------------------------------------------------------------------------
-
 
 
 def _make_adder_kernel(n: int):

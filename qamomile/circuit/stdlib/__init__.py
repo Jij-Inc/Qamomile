@@ -39,8 +39,6 @@ Example:
 """
 
 # Class-based API (new)
-from .adder import TTKInplaceAdder, ttk_adder
-
 # Function-based API (kept for compatibility, using new class-based impl)
 from .qft import IQFT, QFT, iqft, qft
 
@@ -52,6 +50,7 @@ from .qft_strategies import (
     StandardQFTStrategy,
 )
 from .qpe import qpe
+from .ttk_adder import TTKInplaceAdder, ttk_adder
 
 __all__ = [
     # Classes
