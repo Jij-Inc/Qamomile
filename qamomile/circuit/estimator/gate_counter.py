@@ -624,19 +624,41 @@ def _find_loop_variable_values(operations: list[Operation], loop_var_name: str) 
 
 
 def _apply_sum_to_count(
-    count: GateCount, loop_var: sp.Symbol, start: sp.Expr, stop: sp.Expr
+    count: GateCount,
+    loop_var: sp.Symbol,
+    start: sp.Expr,
+    stop: sp.Expr,
+    step: sp.Expr = sp.Integer(1),
 ) -> GateCount:
-    """Apply SymPy Sum to all fields of a GateCount."""
+    """Apply SymPy Sum to all fields of a GateCount.
+
+    For forward loops (step > 0): Sum over (loop_var, start, stop-1)
+    For reverse loops (step < 0): Sum over (loop_var, stop+1, start)
+    """
+    # Determine correct bounds based on step direction
+    is_negative_step = False
+    try:
+        is_negative_step = bool(step < 0)
+    except TypeError:
+        pass  # symbolic step, assume positive
+
+    if is_negative_step:
+        lower = stop + 1
+        upper = start
+    else:
+        lower = start
+        upper = stop - 1
+
     return GateCount(
-        total=Sum(count.total, (loop_var, start, stop - 1)).doit(),
-        single_qubit=Sum(count.single_qubit, (loop_var, start, stop - 1)).doit(),
-        two_qubit=Sum(count.two_qubit, (loop_var, start, stop - 1)).doit(),
-        multi_qubit=Sum(count.multi_qubit, (loop_var, start, stop - 1)).doit(),
-        t_gates=Sum(count.t_gates, (loop_var, start, stop - 1)).doit(),
-        clifford_gates=Sum(count.clifford_gates, (loop_var, start, stop - 1)).doit(),
-        rotation_gates=Sum(count.rotation_gates, (loop_var, start, stop - 1)).doit(),
+        total=Sum(count.total, (loop_var, lower, upper)).doit(),
+        single_qubit=Sum(count.single_qubit, (loop_var, lower, upper)).doit(),
+        two_qubit=Sum(count.two_qubit, (loop_var, lower, upper)).doit(),
+        multi_qubit=Sum(count.multi_qubit, (loop_var, lower, upper)).doit(),
+        t_gates=Sum(count.t_gates, (loop_var, lower, upper)).doit(),
+        clifford_gates=Sum(count.clifford_gates, (loop_var, lower, upper)).doit(),
+        rotation_gates=Sum(count.rotation_gates, (loop_var, lower, upper)).doit(),
         oracle_calls={
-            name: Sum(val, (loop_var, start, stop - 1)).doit()
+            name: Sum(val, (loop_var, lower, upper)).doit()
             for name, val in count.oracle_calls.items()
         },
     )
@@ -789,12 +811,21 @@ def _count_from_operations(
 
                     # Check if inner count contains the current loop variable
                     # This happens when inner loops have bounds that depend on this variable
-                    if loop_var_symbol in inner_count.total.free_symbols:
+                    # Also check oracle_calls (stubs have total=0 but oracle_calls
+                    # may depend on the loop variable)
+                    all_free = inner_count.total.free_symbols
+                    for val in inner_count.oracle_calls.values():
+                        all_free = all_free | val.free_symbols
+                    if loop_var_symbol in all_free:
                         # The inner count varies with our loop variable
                         # We need to sum it over all loop iterations
                         # Sum(inner_count, (loop_var, start, stop-1))
                         count_expr = _apply_sum_to_count(
-                            inner_count, loop_var_symbol, start_expr, stop_expr
+                            inner_count,
+                            loop_var_symbol,
+                            start_expr,
+                            stop_expr,
+                            step_expr,
                         )
                     else:
                         # Normal case: inner count is constant per iteration
