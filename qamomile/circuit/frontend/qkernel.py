@@ -407,7 +407,7 @@ class QKernel(Generic[P, R]):
             dummy_inputs: dict[str, Handle] = {}
 
             for name, param in self.signature.parameters.items():
-                param_type = param.annotation
+                param_type = self.input_types.get(name, param.annotation)
 
                 # Observable types are always treated as parameters (resolved during emit)
                 if param_type is Observable:

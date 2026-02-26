@@ -39,6 +39,9 @@ from .frontend.qkernel import QKernel, qkernel
 # Standard library circuits
 from .stdlib import iqft, qft, qpe, ttk_adder
 
+# Algorithm building blocks
+from .algorithm import amplitude_encoding, compute_mottonen_thetas, parametric_amplitude_encoding
+
 __all__ = [
     "qkernel",
     "composite_gate",
@@ -84,5 +87,8 @@ __all__ = [
     "iqft",
     "qft",
     "ttk_adder",
+    "amplitude_encoding",
+    "compute_mottonen_thetas",
+    "parametric_amplitude_encoding",
     "QKernel",
 ]
