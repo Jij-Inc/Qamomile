@@ -21,7 +21,6 @@ from .frontend.operation.controlled import controlled
 from .frontend.operation.expval import expval
 from .frontend.operation.measurement import measure
 from .frontend.operation.qubit_gates import (
-    ccx,
     cp,
     cx,
     cz,
@@ -55,7 +54,6 @@ __all__ = [
     "qubit_array",
     "h",
     "x",
-    "ccx",
     "cx",
     "cz",
     "p",
