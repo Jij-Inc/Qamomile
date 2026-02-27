@@ -64,27 +64,30 @@ class ResourceEstimate:
                 # Try creating a symbol (for cases where parameters weren't tracked)
                 subs_dict[sp.Symbol(key, integer=True, positive=True)] = val
 
+        def _subs_eval(expr: sp.Expr) -> sp.Expr:
+            return expr.subs(subs_dict).doit()
+
         return ResourceEstimate(
-            qubits=self.qubits.subs(subs_dict),
+            qubits=_subs_eval(self.qubits),
             gates=GateCount(
-                total=self.gates.total.subs(subs_dict),
-                single_qubit=self.gates.single_qubit.subs(subs_dict),
-                two_qubit=self.gates.two_qubit.subs(subs_dict),
-                multi_qubit=self.gates.multi_qubit.subs(subs_dict),
-                t_gates=self.gates.t_gates.subs(subs_dict),
-                clifford_gates=self.gates.clifford_gates.subs(subs_dict),
-                rotation_gates=self.gates.rotation_gates.subs(subs_dict),
+                total=_subs_eval(self.gates.total),
+                single_qubit=_subs_eval(self.gates.single_qubit),
+                two_qubit=_subs_eval(self.gates.two_qubit),
+                multi_qubit=_subs_eval(self.gates.multi_qubit),
+                t_gates=_subs_eval(self.gates.t_gates),
+                clifford_gates=_subs_eval(self.gates.clifford_gates),
+                rotation_gates=_subs_eval(self.gates.rotation_gates),
                 oracle_calls={
-                    name: val.subs(subs_dict)
+                    name: _subs_eval(val)
                     for name, val in self.gates.oracle_calls.items()
                 },
             ),
             depth=CircuitDepth(
-                total_depth=self.depth.total_depth.subs(subs_dict),
-                t_depth=self.depth.t_depth.subs(subs_dict),
-                two_qubit_depth=self.depth.two_qubit_depth.subs(subs_dict),
-                multi_qubit_depth=self.depth.multi_qubit_depth.subs(subs_dict),
-                rotation_depth=self.depth.rotation_depth.subs(subs_dict),
+                total_depth=_subs_eval(self.depth.total_depth),
+                t_depth=_subs_eval(self.depth.t_depth),
+                two_qubit_depth=_subs_eval(self.depth.two_qubit_depth),
+                multi_qubit_depth=_subs_eval(self.depth.multi_qubit_depth),
+                rotation_depth=_subs_eval(self.depth.rotation_depth),
             ),
             parameters=self.parameters,
         )

@@ -184,6 +184,8 @@ SINGLE_QUBIT_GATES = {
 }
 TWO_QUBIT_GATES = {"cx", "cy", "cz", "swap", "cp", "crx", "cry", "crz", "rzz"}
 ROTATION_GATES = {"rx", "ry", "rz", "p", "cp", "crx", "cry", "crz", "rzz"}
+MULTI_QUBIT_GATES = {"toffoli"}
+_GATE_BASE_QUBITS: dict[str, int] = {"toffoli": 3}
 
 
 _CONTROLLED_CLIFFORD_GATES = {"x", "y", "z"}
@@ -221,18 +223,30 @@ def _count_gate_operation(
             elif is_two_qubit_base:
                 total_qubits = num_controls + 2
             else:
-                total_qubits = num_controls + 1  # unknown treated as 1q
+                total_qubits = num_controls + _GATE_BASE_QUBITS.get(gate_name, 1)
             two = sp.Integer(1) if total_qubits == 2 else sp.Integer(0)
             multi = sp.Integer(1) if total_qubits > 2 else sp.Integer(0)
         else:
-            # Symbolic num_controls: conservatively classify as multi_qubit
-            # (num_controls >= 1 so total_qubits >= 2, typically > 2)
-            two = sp.Integer(0)
-            multi = (
-                sp.Integer(1)
-                if (is_single_qubit_base or is_two_qubit_base)
-                else sp.Integer(0)
-            )
+            # Symbolic num_controls: use Piecewise so subs() resolves correctly
+            if is_single_qubit_base:
+                total_qubits = num_controls + 1
+            elif is_two_qubit_base:
+                total_qubits = num_controls + 2
+            else:
+                total_qubits = num_controls + _GATE_BASE_QUBITS.get(gate_name, 1)
+            is_multi_qubit_base = gate_name in MULTI_QUBIT_GATES
+            if is_single_qubit_base or is_two_qubit_base or is_multi_qubit_base:
+                two = sp.Piecewise(
+                    (sp.Integer(1), sp.Eq(total_qubits, 2)),
+                    (sp.Integer(0), True),
+                )
+                multi = sp.Piecewise(
+                    (sp.Integer(1), total_qubits > 2),
+                    (sp.Integer(0), True),
+                )
+            else:
+                two = sp.Integer(0)
+                multi = sp.Integer(0)
 
         # Controlled T/Tdg are 2q non-Clifford gates, not simple T gates
         t_count = sp.Integer(0)
@@ -246,11 +260,12 @@ def _count_gate_operation(
         is_t_gate = gate_name in T_GATES
         is_single_qubit = gate_name in SINGLE_QUBIT_GATES
         is_two_qubit = gate_name in TWO_QUBIT_GATES
+        is_multi_qubit = gate_name in MULTI_QUBIT_GATES
         is_rotation = gate_name in ROTATION_GATES
 
         single = sp.Integer(1) if is_single_qubit else sp.Integer(0)
         two = sp.Integer(1) if is_two_qubit else sp.Integer(0)
-        multi = sp.Integer(0)
+        multi = sp.Integer(1) if is_multi_qubit else sp.Integer(0)
         t_count = sp.Integer(1) if is_t_gate else sp.Integer(0)
         clifford = sp.Integer(1) if is_clifford else sp.Integer(0)
         rotation = sp.Integer(1) if is_rotation else sp.Integer(0)
@@ -837,6 +852,8 @@ def _count_from_operations(
                     # Also check oracle_calls (stubs have total=0 but oracle_calls
                     # may depend on the loop variable)
                     all_free = inner_count.total.free_symbols
+                    all_free = all_free | inner_count.two_qubit.free_symbols
+                    all_free = all_free | inner_count.multi_qubit.free_symbols
                     for val in inner_count.oracle_calls.values():
                         all_free = all_free | val.free_symbols
                     if loop_var_symbol in all_free:
