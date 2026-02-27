@@ -27,9 +27,7 @@ def _build_qkernel(func_source: str, filename: str):
     return qkernel(local_ns["_circuit"])
 
 
-def _build_random_gate_circuit(
-    gates, template, n_qubits, seed, *, theta=None
-):
+def _build_random_gate_circuit(gates, template, n_qubits, seed, *, theta=None):
     """Pick random gates, build a qkernel, return (graph, expected_types, num_gates).
 
     Args:
@@ -143,6 +141,42 @@ class TestSingleQubitGates:
             assert len(op.operands) == self.N_QUBITS
             assert len(op.results) == self.N_QUBITS
 
+    @pytest.mark.parametrize("gate_fn, expected_type", ALL_GATES, ids=IDS)
+    @pytest.mark.parametrize("actual_n", [1, 2, 5, 10])
+    def test_gate_ir_given_n(self, gate_fn, expected_type, actual_n):
+        @qkernel
+        def circuit(n: qm.UInt) -> qm.Vector[Qubit]:
+            qs = qm.qubit_array(n, "qs")
+            qs[0] = gate_fn(qs[0])
+            return qs
+
+        graph = circuit.build(n=actual_n)
+        assert len(graph.operations) == 2
+        assert isinstance(graph.operations[0], QInitOperation)
+        assert isinstance(graph.operations[1], GateOperation)
+        gate_op = graph.operations[1]
+        assert gate_op.gate_type == expected_type
+        assert gate_op.theta is None
+        assert len(gate_op.operands) == 1
+        assert len(gate_op.results) == 1
+
+    @pytest.mark.parametrize("gate_fn, expected_type", ALL_GATES, ids=IDS)
+    def test_gate_ir_qubits(self, gate_fn, expected_type):
+        @qkernel
+        def circuit(qs: qm.Vector[Qubit]) -> qm.Vector[Qubit]:
+            qs[0] = gate_fn(qs[0])
+            return qs
+
+        graph = circuit.build()
+        assert len(graph.operations) == 2
+        assert isinstance(graph.operations[0], QInitOperation)
+        assert isinstance(graph.operations[1], GateOperation)
+        gate_op = graph.operations[1]
+        assert gate_op.gate_type == expected_type
+        assert gate_op.theta is None
+        assert len(gate_op.operands) == 1
+        assert len(gate_op.results) == 1
+
 
 class TestRotationGates:
     """Parameterized single-qubit gates."""
@@ -238,6 +272,42 @@ class TestRotationGates:
             assert len(op.operands) == self.N_QUBITS
             assert len(op.results) == self.N_QUBITS
 
+    @pytest.mark.parametrize("gate_fn, expected_type", ALL_GATES, ids=IDS)
+    @pytest.mark.parametrize("actual_n", [1, 2, 5, 10])
+    def test_gate_ir_given_n(self, gate_fn, expected_type, actual_n):
+        @qkernel
+        def circuit(n: qm.UInt) -> qm.Vector[Qubit]:
+            qs = qm.qubit_array(n, "qs")
+            qs[0] = gate_fn(qs[0], 0.5)
+            return qs
+
+        graph = circuit.build(n=actual_n)
+        assert len(graph.operations) == 2
+        assert isinstance(graph.operations[0], QInitOperation)
+        assert isinstance(graph.operations[1], GateOperation)
+        gate_op = graph.operations[1]
+        assert gate_op.gate_type == expected_type
+        assert gate_op.theta == 0.5
+        assert len(gate_op.operands) == 1
+        assert len(gate_op.results) == 1
+
+    @pytest.mark.parametrize("gate_fn, expected_type", ALL_GATES, ids=IDS)
+    def test_gate_ir_qubits(self, gate_fn, expected_type):
+        @qkernel
+        def circuit(qs: qm.Vector[Qubit]) -> qm.Vector[Qubit]:
+            qs[0] = gate_fn(qs[0], 0.5)
+            return qs
+
+        graph = circuit.build()
+        assert len(graph.operations) == 2
+        assert isinstance(graph.operations[0], QInitOperation)
+        assert isinstance(graph.operations[1], GateOperation)
+        gate_op = graph.operations[1]
+        assert gate_op.gate_type == expected_type
+        assert gate_op.theta == 0.5
+        assert len(gate_op.operands) == 1
+        assert len(gate_op.results) == 1
+
 
 class TestTwoQubitGates:
     """Non-parameterized two-qubit gates."""
@@ -291,6 +361,42 @@ class TestTwoQubitGates:
             assert op.theta is None
             assert len(op.operands) == self.N_QUBITS
             assert len(op.results) == self.N_QUBITS
+
+    @pytest.mark.parametrize("gate_fn, expected_type", ALL_GATES, ids=IDS)
+    @pytest.mark.parametrize("actual_n", [2, 5, 10])
+    def test_gate_ir_given_n(self, gate_fn, expected_type, actual_n):
+        @qkernel
+        def circuit(n: qm.UInt) -> qm.Vector[Qubit]:
+            qs = qm.qubit_array(n, "qs")
+            qs[0], qs[1] = gate_fn(qs[0], qs[1])
+            return qs
+
+        graph = circuit.build(n=actual_n)
+        assert len(graph.operations) == 2
+        assert isinstance(graph.operations[0], QInitOperation)
+        assert isinstance(graph.operations[1], GateOperation)
+        gate_op = graph.operations[1]
+        assert gate_op.gate_type == expected_type
+        assert gate_op.theta is None
+        assert len(gate_op.operands) == 2
+        assert len(gate_op.results) == 2
+
+    @pytest.mark.parametrize("gate_fn, expected_type", ALL_GATES, ids=IDS)
+    def test_gate_ir_qubits(self, gate_fn, expected_type):
+        @qkernel
+        def circuit(qs: qm.Vector[Qubit]) -> qm.Vector[Qubit]:
+            qs[0], qs[1] = gate_fn(qs[0], qs[1])
+            return qs
+
+        graph = circuit.build()
+        assert len(graph.operations) == 2
+        assert isinstance(graph.operations[0], QInitOperation)
+        assert isinstance(graph.operations[1], GateOperation)
+        gate_op = graph.operations[1]
+        assert gate_op.gate_type == expected_type
+        assert gate_op.theta is None
+        assert len(gate_op.operands) == 2
+        assert len(gate_op.results) == 2
 
 
 class TestTwoQubitParamGates:
@@ -387,6 +493,42 @@ class TestTwoQubitParamGates:
             assert len(op.operands) == self.N_QUBITS
             assert len(op.results) == self.N_QUBITS
 
+    @pytest.mark.parametrize("gate_fn, expected_type", ALL_GATES, ids=IDS)
+    @pytest.mark.parametrize("actual_n", [2, 5, 10])
+    def test_gate_ir_given_n(self, gate_fn, expected_type, actual_n):
+        @qkernel
+        def circuit(n: qm.UInt) -> qm.Vector[Qubit]:
+            qs = qm.qubit_array(n, "qs")
+            qs[0], qs[1] = gate_fn(qs[0], qs[1], 0.5)
+            return qs
+
+        graph = circuit.build(n=actual_n)
+        assert len(graph.operations) == 2
+        assert isinstance(graph.operations[0], QInitOperation)
+        assert isinstance(graph.operations[1], GateOperation)
+        gate_op = graph.operations[1]
+        assert gate_op.gate_type == expected_type
+        assert gate_op.theta == 0.5
+        assert len(gate_op.operands) == 2
+        assert len(gate_op.results) == 2
+
+    @pytest.mark.parametrize("gate_fn, expected_type", ALL_GATES, ids=IDS)
+    def test_gate_ir_qubits(self, gate_fn, expected_type):
+        @qkernel
+        def circuit(qs: qm.Vector[Qubit]) -> qm.Vector[Qubit]:
+            qs[0], qs[1] = gate_fn(qs[0], qs[1], 0.5)
+            return qs
+
+        graph = circuit.build()
+        assert len(graph.operations) == 2
+        assert isinstance(graph.operations[0], QInitOperation)
+        assert isinstance(graph.operations[1], GateOperation)
+        gate_op = graph.operations[1]
+        assert gate_op.gate_type == expected_type
+        assert gate_op.theta == 0.5
+        assert len(gate_op.operands) == 2
+        assert len(gate_op.results) == 2
+
 
 class TestThreeQubitGates:
     """ccx — three-qubit gate."""
@@ -438,19 +580,69 @@ class TestThreeQubitGates:
             assert len(op.operands) == self.N_QUBITS
             assert len(op.results) == self.N_QUBITS
 
+    @pytest.mark.parametrize("gate_fn, expected_type", ALL_GATES, ids=IDS)
+    @pytest.mark.parametrize("actual_n", [3, 5, 10])
+    def test_gate_ir_given_n(self, gate_fn, expected_type, actual_n):
+        @qkernel
+        def circuit(n: qm.UInt) -> qm.Vector[Qubit]:
+            qs = qm.qubit_array(n, "qs")
+            qs[0], qs[1], qs[2] = gate_fn(qs[0], qs[1], qs[2])
+            return qs
+
+        graph = circuit.build(n=actual_n)
+        assert len(graph.operations) == 2
+        assert isinstance(graph.operations[0], QInitOperation)
+        assert isinstance(graph.operations[1], GateOperation)
+        gate_op = graph.operations[1]
+        assert gate_op.gate_type == expected_type
+        assert gate_op.theta is None
+        assert len(gate_op.operands) == 3
+        assert len(gate_op.results) == 3
+
+    @pytest.mark.parametrize("gate_fn, expected_type", ALL_GATES, ids=IDS)
+    def test_gate_ir_qubits(self, gate_fn, expected_type):
+        @qkernel
+        def circuit(qs: qm.Vector[Qubit]) -> qm.Vector[Qubit]:
+            qs[0], qs[1], qs[2] = gate_fn(qs[0], qs[1], qs[2])
+            return qs
+
+        graph = circuit.build()
+        assert len(graph.operations) == 2
+        assert isinstance(graph.operations[0], QInitOperation)
+        assert isinstance(graph.operations[1], GateOperation)
+        gate_op = graph.operations[1]
+        assert gate_op.gate_type == expected_type
+        assert gate_op.theta is None
+        assert len(gate_op.operands) == 3
+        assert len(gate_op.results) == 3
+
 
 class TestAllGates:
     """Test that all gates can be used together in a single circuit."""
 
     CATEGORIZED_GATES = [
-        (TestSingleQubitGates.ALL_GATES_WITH_IDS, TestSingleQubitGates.GATE_TEMPLATE, None),
+        (
+            TestSingleQubitGates.ALL_GATES_WITH_IDS,
+            TestSingleQubitGates.GATE_TEMPLATE,
+            None,
+        ),
         (TestRotationGates.ALL_GATES_WITH_IDS, TestRotationGates.GATE_TEMPLATE, 0.5),
         (TestTwoQubitGates.ALL_GATES_WITH_IDS, TestTwoQubitGates.GATE_TEMPLATE, None),
-        (TestTwoQubitParamGates.ALL_GATES_WITH_IDS, TestTwoQubitParamGates.GATE_TEMPLATE, 0.5),
-        (TestThreeQubitGates.ALL_GATES_WITH_IDS, TestThreeQubitGates.GATE_TEMPLATE, None),
+        (
+            TestTwoQubitParamGates.ALL_GATES_WITH_IDS,
+            TestTwoQubitParamGates.GATE_TEMPLATE,
+            0.5,
+        ),
+        (
+            TestThreeQubitGates.ALL_GATES_WITH_IDS,
+            TestThreeQubitGates.GATE_TEMPLATE,
+            None,
+        ),
     ]
 
-    ALL_GATES = [gate_info for gates, _, _ in CATEGORIZED_GATES for gate_info, _ in gates]
+    ALL_GATES = [
+        gate_info for gates, _, _ in CATEGORIZED_GATES for gate_info, _ in gates
+    ]
     ALL_GATES_WITH_TEMPLATES = [
         (gate_info, template, theta)
         for gates, template, theta in CATEGORIZED_GATES
