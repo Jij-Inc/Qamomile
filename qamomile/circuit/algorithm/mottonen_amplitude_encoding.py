@@ -19,9 +19,9 @@ from collections.abc import Sequence
 
 import numpy as np
 
-import qamomile.circuit as qmc
 from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.handle import Float, Qubit, Vector
+from qamomile.circuit.frontend.operation.qubit_gates import cx, ry
 from qamomile.circuit.frontend.handle.utils import _get_size
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateType,
@@ -183,15 +183,15 @@ def _emit_mottonen_gates(
     for k in range(num_qubits):
         tgt = num_qubits - 1 - k
         if k == 0:
-            q[tgt] = qmc.ry(q[tgt], angles[idx])
+            q[tgt] = ry(q[tgt], angles[idx])
             idx += 1
         else:
             cnot_seq = _get_cnot_controls(k)
             for i in range(2**k):
-                q[tgt] = qmc.ry(q[tgt], angles[idx])
+                q[tgt] = ry(q[tgt], angles[idx])
                 idx += 1
                 ctrl = num_qubits - 1 - cnot_seq[i]
-                q[ctrl], q[tgt] = qmc.cx(q[ctrl], q[tgt])
+                q[ctrl], q[tgt] = cx(q[ctrl], q[tgt])
 
 
 # ---------------------------------------------------------------------------

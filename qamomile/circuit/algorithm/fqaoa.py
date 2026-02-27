@@ -5,54 +5,67 @@ Approximate Optimization Algorithm (FQAOA), including Givens rotations for
 initial state preparation, hopping gates for the fermionic mixer, and cost
 layer construction.
 
-All functions are decorated with ``@qm_c.qkernel`` and use Handle-typed
+All functions are decorated with ``@qkernel`` and use Handle-typed
 parameters so they can be composed inside other ``@qkernel`` functions.
 """
 
 import numpy as np
 
-import qamomile.circuit as qmc
+from qamomile.circuit.frontend.constructors import qubit_array, uint
+from qamomile.circuit.frontend.handle import (
+    Dict,
+    Float,
+    Matrix,
+    Qubit,
+    Tuple,
+    UInt,
+    Vector,
+)
+from qamomile.circuit.frontend.operation.control_flow import items, range
+from qamomile.circuit.frontend.operation.controlled import controlled
+from qamomile.circuit.frontend.operation.qubit_gates import cx, rx, ry, rz, rzz, x
+from qamomile.circuit.frontend.qkernel import qkernel
 
 
-@qmc.qkernel
-def _ry_gate(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
-    return qmc.ry(q, theta)
+@qkernel
+def _ry_gate(q: Qubit, theta: Float) -> Qubit:
+    return ry(q, theta)
 
 
-_controlled_ry = qmc.controlled(_ry_gate)
+_controlled_ry = controlled(_ry_gate)
 
 
-@qmc.qkernel
+@qkernel
 def initial_occupations(
-    q: qmc.Vector[qmc.Qubit],
-    num_fermions: qmc.UInt,
-) -> qmc.Vector[qmc.Qubit]:
+    q: Vector[Qubit],
+    num_fermions: UInt,
+) -> Vector[Qubit]:
     """Apply X gates to the first ``num_fermions`` qubits."""
-    for i in qmc.range(num_fermions):
-        q[i] = qmc.x(q[i])
+    for i in range(num_fermions):
+        q[i] = x(q[i])
     return q
 
 
-@qmc.qkernel
+@qkernel
 def givens_rotation(
-    q: qmc.Vector[qmc.Qubit],
-    i: qmc.UInt,
-    j: qmc.UInt,
-    theta: qmc.Float,
-) -> qmc.Vector[qmc.Qubit]:
+    q: Vector[Qubit],
+    i: UInt,
+    j: UInt,
+    theta: Float,
+) -> Vector[Qubit]:
     """Apply a single Givens rotation between qubits *i* and *j*."""
-    q[j], q[i] = qmc.cx(q[j], q[i])
+    q[j], q[i] = cx(q[j], q[i])
     q[i], q[j] = _controlled_ry(q[i], q[j], theta=-2.0 * theta)
-    q[j], q[i] = qmc.cx(q[j], q[i])
+    q[j], q[i] = cx(q[j], q[i])
     return q
 
 
-@qmc.qkernel
+@qkernel
 def givens_rotations(
-    q: qmc.Vector[qmc.Qubit],
-    givens_ij: qmc.Matrix[qmc.UInt],
-    givens_theta: qmc.Vector[qmc.Float],
-) -> qmc.Vector[qmc.Qubit]:
+    q: Vector[Qubit],
+    givens_ij: Matrix[UInt],
+    givens_theta: Vector[Float],
+) -> Vector[Qubit]:
     """Apply a sequence of Givens rotations.
 
     Args:
@@ -62,96 +75,96 @@ def givens_rotations(
         givens_theta: Vector of length ``N`` with the rotation angles.
     """
     n_rotations = givens_ij.shape[0]
-    for k in qmc.range(n_rotations):
+    for k in range(n_rotations):
         q = givens_rotation(q, givens_ij[k, 0], givens_ij[k, 1], givens_theta[k])
     return q
 
 
-@qmc.qkernel
+@qkernel
 def hopping_gate(
-    q: qmc.Vector[qmc.Qubit],
-    i: qmc.UInt,
-    j: qmc.UInt,
-    beta: qmc.Float,
-    hopping: qmc.Float,
-) -> qmc.Vector[qmc.Qubit]:
+    q: Vector[Qubit],
+    i: UInt,
+    j: UInt,
+    beta: Float,
+    hopping: Float,
+) -> Vector[Qubit]:
     """Apply the fermionic hopping gate between qubits *i* and *j*."""
-    q[i] = qmc.rx(q[i], -0.5 * np.pi)
-    q[j] = qmc.rx(q[j], 0.5 * np.pi)
-    q[i], q[j] = qmc.cx(q[i], q[j])
-    q[i] = qmc.rx(q[i], -1.0 * beta * hopping)
-    q[j] = qmc.rz(q[j], beta * hopping)
-    q[i], q[j] = qmc.cx(q[i], q[j])
-    q[i] = qmc.rx(q[i], 0.5 * np.pi)
-    q[j] = qmc.rx(q[j], -0.5 * np.pi)
+    q[i] = rx(q[i], -0.5 * np.pi)
+    q[j] = rx(q[j], 0.5 * np.pi)
+    q[i], q[j] = cx(q[i], q[j])
+    q[i] = rx(q[i], -1.0 * beta * hopping)
+    q[j] = rz(q[j], beta * hopping)
+    q[i], q[j] = cx(q[i], q[j])
+    q[i] = rx(q[i], 0.5 * np.pi)
+    q[j] = rx(q[j], -0.5 * np.pi)
     return q
 
 
-@qmc.qkernel
+@qkernel
 def mixer_layer(
-    q: qmc.Vector[qmc.Qubit],
-    beta: qmc.Float,
-    hopping: qmc.Float,
-    num_qubits: qmc.UInt,
-) -> qmc.Vector[qmc.Qubit]:
+    q: Vector[Qubit],
+    beta: Float,
+    hopping: Float,
+    num_qubits: UInt,
+) -> Vector[Qubit]:
     """Apply the fermionic mixer layer (even-odd-boundary hopping)."""
     last_qubit = num_qubits - 1
-    for i in qmc.range(0, last_qubit, 2):
+    for i in range(0, last_qubit, 2):
         q = hopping_gate(q, i, i + 1, beta, hopping)
-    for i in qmc.range(1, last_qubit, 2):
+    for i in range(1, last_qubit, 2):
         q = hopping_gate(q, i, i + 1, beta, hopping)
-    q = hopping_gate(q, qmc.uint(0), last_qubit, beta, hopping)
+    q = hopping_gate(q, uint(0), last_qubit, beta, hopping)
     return q
 
 
-@qmc.qkernel
+@qkernel
 def cost_layer(
-    q: qmc.Vector[qmc.Qubit],
-    gamma: qmc.Float,
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-) -> qmc.Vector[qmc.Qubit]:
+    q: Vector[Qubit],
+    gamma: Float,
+    linear: Dict[UInt, Float],
+    quad: Dict[Tuple[UInt, UInt], Float],
+) -> Vector[Qubit]:
     """Apply the cost (phase separation) layer."""
-    for i, hi in qmc.items(linear):
-        q[i] = qmc.rz(q[i], 2 * hi * gamma)
+    for i, hi in items(linear):
+        q[i] = rz(q[i], 2 * hi * gamma)
 
-    for (i, j), Jij in qmc.items(quad):
-        q[i], q[j] = qmc.rzz(q[i], q[j], 2 * Jij * gamma)
+    for (i, j), Jij in items(quad):
+        q[i], q[j] = rzz(q[i], q[j], 2 * Jij * gamma)
 
     return q
 
 
-@qmc.qkernel
+@qkernel
 def fqaoa_layers(
-    q: qmc.Vector[qmc.Qubit],
-    betas: qmc.Vector[qmc.Float],
-    gammas: qmc.Vector[qmc.Float],
-    p: qmc.UInt,
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    hopping: qmc.Float,
-    num_qubits: qmc.UInt,
-) -> qmc.Vector[qmc.Qubit]:
+    q: Vector[Qubit],
+    betas: Vector[Float],
+    gammas: Vector[Float],
+    p: UInt,
+    linear: Dict[UInt, Float],
+    quad: Dict[Tuple[UInt, UInt], Float],
+    hopping: Float,
+    num_qubits: UInt,
+) -> Vector[Qubit]:
     """Apply *p* layers of cost + mixer."""
-    for layer in qmc.range(p):
+    for layer in range(p):
         q = cost_layer(q, gammas[layer], linear, quad)
         q = mixer_layer(q, betas[layer], hopping, num_qubits)
     return q
 
 
-@qmc.qkernel
+@qkernel
 def fqaoa_state(
-    p: qmc.UInt,
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    num_qubits: qmc.UInt,
-    num_fermions: qmc.UInt,
-    givens_ij: qmc.Matrix[qmc.UInt],
-    givens_theta: qmc.Vector[qmc.Float],
-    hopping: qmc.Float,
-    gammas: qmc.Vector[qmc.Float],
-    betas: qmc.Vector[qmc.Float],
-) -> qmc.Vector[qmc.Qubit]:
+    p: UInt,
+    linear: Dict[UInt, Float],
+    quad: Dict[Tuple[UInt, UInt], Float],
+    num_qubits: UInt,
+    num_fermions: UInt,
+    givens_ij: Matrix[UInt],
+    givens_theta: Vector[Float],
+    hopping: Float,
+    gammas: Vector[Float],
+    betas: Vector[Float],
+) -> Vector[Qubit]:
     """Generate complete FQAOA state.
 
     Args:
@@ -170,7 +183,7 @@ def fqaoa_state(
     Returns:
         FQAOA state vector.
     """
-    q = qmc.qubit_array(num_qubits, name="q")
+    q = qubit_array(num_qubits, name="q")
     q = initial_occupations(q, num_fermions)
     q = givens_rotations(q, givens_ij, givens_theta)
     q = fqaoa_layers(q, betas, gammas, p, linear, quad, hopping, num_qubits)
