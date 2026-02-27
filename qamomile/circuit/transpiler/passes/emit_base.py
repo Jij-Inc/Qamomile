@@ -685,6 +685,13 @@ class LoopAnalyzer:
         evaluated with native loop control flow (the variable is symbolic).
         The loop must be unrolled so the BinOp can be evaluated with
         concrete iteration values.
+
+        Args:
+            operations: List of IR operations to inspect.
+            loop_var: Name of the enclosing loop variable to detect.
+
+        Returns:
+            True if any BinOp operand directly references *loop_var*.
         """
         for op in operations:
             if isinstance(op, BinOp):
@@ -702,6 +709,8 @@ class LoopAnalyzer:
             elif isinstance(op, WhileOperation):
                 if self._has_loop_var_binop(op.operations, loop_var):
                     return True
+            # No action for other operation types (GateOperation, CastOperation, etc.)
+            # — only BinOps and control-flow containers can carry loop-var dependencies.
         return False
 
     def _has_dynamic_nested_loop(
