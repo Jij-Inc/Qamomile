@@ -1,19 +1,21 @@
 """Tests that each frontend gate correctly registers its GateOperation in the IR graph."""
 
 import linecache
+from collections.abc import Callable
 
 import numpy as np
 import pytest
 
 import qamomile.circuit as qm
 from qamomile.circuit.frontend.handle import Qubit
-from qamomile.circuit.frontend.qkernel import qkernel
+from qamomile.circuit.frontend.qkernel import QKernel, qkernel
+from qamomile.circuit.ir.graph.graph import Graph
 from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.value import Value
 
 
-def _build_qkernel(func_source: str, filename: str):
+def _build_qkernel(func_source: str, filename: str) -> QKernel:
     """Compile a function source string into a @qkernel."""
     compiled = compile(func_source, filename, "exec")
     linecache.cache[filename] = (
@@ -27,7 +29,14 @@ def _build_qkernel(func_source: str, filename: str):
     return qkernel(local_ns["_circuit"])
 
 
-def _build_random_gate_circuit(gates, template, n_qubits, seed, *, theta=None):
+def _build_random_gate_circuit(
+    gates: list[tuple[Callable, GateOperationType]],
+    template: str,
+    n_qubits: int,
+    seed: int,
+    *,
+    theta: str | float | list[float] | None = None,
+) -> tuple[Graph, list[GateOperationType], int, list[float] | None]:
     """Pick random gates, build a qkernel, return (graph, expected_types, num_gates).
 
     Args:
