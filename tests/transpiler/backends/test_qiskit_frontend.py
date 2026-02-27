@@ -4741,3 +4741,294 @@ class TestEntanglementAndParityPatterns:
         # With identical states: ancilla always measures 0.
         # Full state should be |000⟩ (all data qubits are |0⟩, ancilla is |0⟩).
         assert statevectors_equal(sv, all_zeros_state(3))
+
+
+# ===========================================================================
+# 15. Qubit Array Pattern Tests
+# ===========================================================================
+
+
+class TestQubitArrayPatterns:
+    """Test qubit_array-based circuit patterns that fill coverage gaps.
+
+    Group 1: Pure gate circuits on qubit_array (not covered by TestGateCombinations).
+    Group 2: If-else control flow with qubit_array (TestControlFlowIfElse uses only qubit()).
+    Group 3: Unified array parity (existing tests use qubit_array + separate qubit("anc")).
+    Group 4: Parametric vs hardcoded array size (UInt-bound vs literal).
+    """
+
+    # -- Group 1: Pure Gate Circuits on qubit_array ----------------------------
+
+    def test_cx_propagation_array(self):
+        """X(q[0]) + CX → |11⟩ on qubit_array(2)."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            q[0] = qmc.x(q[0])
+            q[0], q[1] = qmc.cx(q[0], q[1])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        expected = computational_basis_state(2, 3)
+        assert statevectors_equal(sv, expected)
+        assert qc.num_qubits == 2
+
+    def test_independent_rotations_array(self):
+        """RX(θ₁) on q[0], RY(θ₂) on q[1] via qubit_array(2)."""
+
+        @qmc.qkernel
+        def circuit(theta1: qmc.Float, theta2: qmc.Float) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            q[0] = qmc.rx(q[0], theta1)
+            q[1] = qmc.ry(q[1], theta2)
+            return qmc.measure(q)
+
+        bindings = {"theta1": np.pi / 3, "theta2": np.pi / 5}
+        _, qc = _transpile_and_get_circuit(circuit, bindings=bindings)
+        sv = _run_statevector(qc)
+        # Expected: RX(π/3)|0⟩ ⊗ RY(π/5)|0⟩ (Qiskit LE: MSB⊗LSB)
+        RX = GATE_SPECS["RX"].matrix_fn(np.pi / 3)
+        RY = GATE_SPECS["RY"].matrix_fn(np.pi / 5)
+        expected = tensor_product(RY, RX) @ all_zeros_state(2)
+        assert statevectors_equal(sv, expected)
+        assert qc.num_qubits == 2
+
+    def test_cz_entangling_layer_array(self):
+        """H⊗3 + CZ chain on qubit_array(3)."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0] = qmc.h(q[0])
+            q[1] = qmc.h(q[1])
+            q[2] = qmc.h(q[2])
+            q[0], q[1] = qmc.cz(q[0], q[1])
+            q[1], q[2] = qmc.cz(q[1], q[2])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        # Manual: H⊗3 · CZ(0,1) · CZ(1,2) |000⟩
+        H = GATE_SPECS["H"].matrix_fn()
+        CZ = GATE_SPECS["CZ"].matrix_fn()
+        h3 = tensor_product(H, tensor_product(H, H))
+        cz01 = tensor_product(identity(2), CZ)
+        cz12 = tensor_product(CZ, identity(2))
+        expected = cz12 @ cz01 @ h3 @ all_zeros_state(3)
+        assert statevectors_equal(sv, expected)
+        assert qc.num_qubits == 3
+
+    def test_three_qubit_rotation_layer_array(self):
+        """Different rotation gates per index: RX(θ₀), RY(θ₁), RZ(θ₂)."""
+
+        @qmc.qkernel
+        def circuit(t0: qmc.Float, t1: qmc.Float, t2: qmc.Float) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0] = qmc.rx(q[0], t0)
+            q[1] = qmc.ry(q[1], t1)
+            q[2] = qmc.rz(q[2], t2)
+            return qmc.measure(q)
+
+        angles = {"t0": np.pi / 4, "t1": np.pi / 3, "t2": np.pi / 6}
+        _, qc = _transpile_and_get_circuit(circuit, bindings=angles)
+        sv = _run_statevector(qc)
+        # Expected: RZ(π/6)|0⟩ ⊗ RY(π/3)|0⟩ ⊗ RX(π/4)|0⟩  (Qiskit LE)
+        RX = GATE_SPECS["RX"].matrix_fn(np.pi / 4)
+        RY = GATE_SPECS["RY"].matrix_fn(np.pi / 3)
+        RZ = GATE_SPECS["RZ"].matrix_fn(np.pi / 6)
+        expected = tensor_product(RZ, tensor_product(RY, RX)) @ all_zeros_state(3)
+        assert statevectors_equal(sv, expected)
+        assert qc.num_qubits == 3
+
+    # -- Group 2: If-Else with qubit_array ------------------------------------
+
+    def test_if_else_array_basic(self):
+        """X(q[0]) → measure → if: X(q[1]) on qubit_array(2)."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit_array(2, "q")
+            q[0] = qmc.x(q[0])
+            bit = qmc.measure(q[0])
+            if bit:
+                q[1] = qmc.x(q[1])
+            else:
+                q[1] = q[1]
+            return qmc.measure(q[1])
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        names = _gate_names(qc)
+        assert "if_else" in names
+        assert qc.num_qubits == 2
+
+    def test_if_else_array_zero_measurement(self):
+        """Measure |0⟩ (always false branch) on qubit_array(2)."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit_array(2, "q")
+            bit = qmc.measure(q[0])
+            if bit:
+                q[1] = qmc.x(q[1])
+            else:
+                q[1] = q[1]
+            return qmc.measure(q[1])
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        names = _gate_names(qc)
+        assert "if_else" in names
+        assert qc.num_qubits == 2
+
+    def test_if_else_array_parametric(self):
+        """if: RX(θ) on q[1] via qubit_array(2)."""
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Bit:
+            q = qmc.qubit_array(2, "q")
+            q[0] = qmc.x(q[0])
+            bit = qmc.measure(q[0])
+            if bit:
+                q[1] = qmc.rx(q[1], theta)
+            else:
+                q[1] = q[1]
+            return qmc.measure(q[1])
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 4})
+        names = _gate_names(qc)
+        assert "if_else" in names
+        assert qc.num_qubits == 2
+
+    @pytest.mark.xfail(
+        reason="Aer returns no counts for if_else circuits built from qubit_array",
+        raises=Exception,
+    )
+    def test_if_else_array_execution(self):
+        """Shot-based execution of if-else on qubit_array(2)."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit_array(2, "q")
+            q[0] = qmc.x(q[0])
+            bit = qmc.measure(q[0])
+            if bit:
+                q[1] = qmc.x(q[1])
+            else:
+                q[1] = q[1]
+            return qmc.measure(q[1])
+
+        transpiler = QiskitTranspiler()
+        executor = transpiler.executor()
+        exe = transpiler.transpile(circuit)
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        assert result is not None
+        assert len(result.results) > 0
+        for value, count in result.results:
+            assert value in (0, 1)
+            assert count > 0
+
+    # -- Group 3: Unified Array Parity ----------------------------------------
+
+    def test_parity_unified_array_even(self):
+        """Parity check |011⟩ (even) with single qubit_array(4): ancilla=|0⟩."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            # Data qubits q[0..2] = |011⟩, ancilla q[3]
+            q[0] = qmc.x(q[0])
+            q[1] = qmc.x(q[1])
+            # CX ladder: compute parity into q[3]
+            q[0], q[3] = qmc.cx(q[0], q[3])
+            q[1], q[3] = qmc.cx(q[1], q[3])
+            q[2], q[3] = qmc.cx(q[2], q[3])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        # |011⟩ has 2 ones → even parity → ancilla stays |0⟩
+        # State: |data⟩|anc⟩ = |011⟩|0⟩
+        # LE: q0=1,q1=1,q2=0,q3=0 → index 0b0011 = 3
+        assert np.isclose(abs(sv[3]), 1.0, atol=1e-10)
+        assert qc.num_qubits == 4
+
+    def test_parity_unified_array_odd(self):
+        """Parity check |010⟩ (odd) with single qubit_array(4): ancilla=|1⟩."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            # Data qubits q[0..2] = |010⟩, ancilla q[3]
+            q[1] = qmc.x(q[1])
+            # CX ladder: compute parity into q[3]
+            q[0], q[3] = qmc.cx(q[0], q[3])
+            q[1], q[3] = qmc.cx(q[1], q[3])
+            q[2], q[3] = qmc.cx(q[2], q[3])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        # |010⟩ has 1 one → odd parity → ancilla becomes |1⟩
+        # State: |010⟩|1⟩
+        # LE: q0=0,q1=1,q2=0,q3=1 → index 0b1010 = 10
+        assert np.isclose(abs(sv[10]), 1.0, atol=1e-10)
+        assert qc.num_qubits == 4
+
+    # -- Group 4: Parametric vs Hardcoded Array Size --------------------------
+
+    def test_h_layer_parametric_vs_hardcoded(self):
+        """H on all n qubits: parametric UInt-bound n vs hardcoded 3."""
+
+        @qmc.qkernel
+        def h_parametric(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            for i in qmc.range(n):
+                q[i] = qmc.h(q[i])
+            return qmc.measure(q)
+
+        @qmc.qkernel
+        def h_hardcoded() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0] = qmc.h(q[0])
+            q[1] = qmc.h(q[1])
+            q[2] = qmc.h(q[2])
+            return qmc.measure(q)
+
+        _, qc_par = _transpile_and_get_circuit(h_parametric, bindings={"n": 3})
+        _, qc_hc = _transpile_and_get_circuit(h_hardcoded)
+        sv_par = _run_statevector(qc_par)
+        sv_hc = _run_statevector(qc_hc)
+        assert statevectors_equal(sv_par, sv_hc)
+        # Both should be |+++⟩ = uniform superposition
+        expected = np.ones(8, dtype=complex) / np.sqrt(8)
+        assert statevectors_equal(sv_par, expected)
+
+    def test_cx_chain_parametric_vs_hardcoded(self):
+        """GHZ via CX chain: parametric UInt-bound n vs hardcoded 3."""
+
+        @qmc.qkernel
+        def ghz_parametric(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            q[0] = qmc.h(q[0])
+            for i in qmc.range(n - 1):
+                q[i], q[i + 1] = qmc.cx(q[i], q[i + 1])
+            return qmc.measure(q)
+
+        @qmc.qkernel
+        def ghz_hardcoded() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0] = qmc.h(q[0])
+            q[0], q[1] = qmc.cx(q[0], q[1])
+            q[1], q[2] = qmc.cx(q[1], q[2])
+            return qmc.measure(q)
+
+        _, qc_par = _transpile_and_get_circuit(ghz_parametric, bindings={"n": 3})
+        _, qc_hc = _transpile_and_get_circuit(ghz_hardcoded)
+        sv_par = _run_statevector(qc_par)
+        sv_hc = _run_statevector(qc_hc)
+        assert statevectors_equal(sv_par, sv_hc)
+        # Both should be 3-qubit GHZ
+        assert np.isclose(abs(sv_par[0]), 1.0 / np.sqrt(2), atol=1e-10)
+        assert np.isclose(abs(sv_par[7]), 1.0 / np.sqrt(2), atol=1e-10)
