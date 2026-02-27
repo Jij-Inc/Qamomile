@@ -2,6 +2,7 @@
 
 import linecache
 
+import numpy as np
 import pytest
 
 import qamomile.circuit as qm
@@ -12,8 +13,89 @@ from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.value import Value
 
 
+def _build_qkernel(func_source: str, filename: str):
+    """Compile a function source string into a @qkernel."""
+    compiled = compile(func_source, filename, "exec")
+    linecache.cache[filename] = (
+        len(func_source),
+        None,
+        func_source.splitlines(True),
+        filename,
+    )
+    local_ns: dict = {}
+    exec(compiled, {**globals()}, local_ns)  # noqa: S102
+    return qkernel(local_ns["_circuit"])
+
+
+def _build_random_gate_circuit(
+    gates, template, n_qubits, seed, *, theta=None
+):
+    """Pick random gates, build a qkernel, return (graph, expected_types, num_gates).
+
+    Args:
+        theta: None for non-parameterized gates, "literal" to auto-generate
+               random per-gate float values, a scalar (e.g. 0.5) to use the
+               same literal for every gate, a list of floats for per-gate
+               literal values, or "symbolic" for per-gate Float parameters.
+
+    Returns:
+        (graph, expected_types, num_gates, thetas) where thetas is None for
+        non-parameterized / symbolic gates, or a list of float values.
+    """
+    rng = np.random.default_rng(seed)
+    num_gates = rng.integers(2, 100)
+    random_gates = rng.choice(gates, size=num_gates)
+
+    # Resolve theta values.
+    thetas = None
+    if theta == "literal":
+        thetas = rng.uniform(0, 2 * np.pi, size=num_gates).tolist()
+    elif isinstance(theta, list):
+        thetas = theta
+    elif theta is not None and theta != "symbolic":
+        thetas = [theta] * num_gates
+
+    # Build the parameter section.
+    params = ", ".join(f"q{i}: Qubit" for i in range(n_qubits))
+    build_parameters = None
+    if theta == "symbolic":
+        params += ", " + ", ".join(f"theta{i}: qm.Float" for i in range(num_gates))
+        build_parameters = [f"theta{i}" for i in range(num_gates)]
+    # Build the body section.
+    body_lines = []
+    for idx, (fn, _) in enumerate(random_gates):
+        fmt = {"name": fn.__name__, "i": idx}
+        if theta == "symbolic":
+            fmt["theta"] = f"theta{idx}"
+        elif thetas is not None:
+            fmt["theta"] = str(thetas[idx])
+        body_lines.append(f"    {template.format(**fmt)}")
+    # Build the return section.
+    returns = ", ".join(f"q{i}" for i in range(n_qubits))
+    return_type = (
+        "Qubit" if n_qubits == 1 else f"tuple[{', '.join(['Qubit'] * n_qubits)}]"
+    )
+    # Build the full function source.
+    func_source = (
+        f"def _circuit({params}) -> {return_type}:\n"
+        + "\n".join(body_lines)
+        + f"\n    return {returns}\n"
+    )
+    # Build QKernel form of the function.
+    circuit = _build_qkernel(func_source, f"<randomized_gates_{seed}>")
+
+    # Build the graph and obtain expected types list.
+    graph = circuit.build(parameters=build_parameters)
+    expected_types = [gate_type for _, gate_type in random_gates]
+
+    return graph, expected_types, num_gates, thetas
+
+
 class TestSingleQubitGates:
     """Non-parameterized single-qubit gates."""
+
+    GATE_TEMPLATE = "q0 = qm.{name}(q0)"
+    N_QUBITS = 1
 
     ALL_GATES_WITH_IDS = [
         ((qm.h, GateOperationType.H), "H"),
@@ -40,9 +122,33 @@ class TestSingleQubitGates:
         assert len(gate_op.operands) == 1
         assert len(gate_op.results) == 1
 
+    @pytest.mark.parametrize("seed", [901 + offset for offset in range(50)])
+    def test_randomized_gates(self, seed):
+        """Test random sequences of non-parameterized single-qubit gates."""
+        graph, expected_types, num_gates, _ = _build_random_gate_circuit(
+            gates=self.ALL_GATES,
+            template=self.GATE_TEMPLATE,
+            n_qubits=self.N_QUBITS,
+            seed=seed,
+        )
+        assert len(graph.operations) == self.N_QUBITS + num_gates
+        for op in graph.operations[: self.N_QUBITS]:
+            assert isinstance(op, QInitOperation)
+        for op, expected_type in zip(
+            graph.operations[self.N_QUBITS :], expected_types, strict=True
+        ):
+            assert isinstance(op, GateOperation)
+            assert op.gate_type == expected_type
+            assert op.theta is None
+            assert len(op.operands) == self.N_QUBITS
+            assert len(op.results) == self.N_QUBITS
+
 
 class TestRotationGates:
     """Parameterized single-qubit gates."""
+
+    GATE_TEMPLATE = "q0 = qm.{name}(q0, {theta})"
+    N_QUBITS = 1
 
     ALL_GATES_WITH_IDS = [
         ((qm.rx, GateOperationType.RX), "RX"),
@@ -87,9 +193,57 @@ class TestRotationGates:
         assert len(gate_op.operands) == 1
         assert len(gate_op.results) == 1
 
+    @pytest.mark.parametrize("seed", [901 + offset for offset in range(50)])
+    def test_randomized_gates_literal(self, seed):
+        """Test random sequences of rotation gates with literal theta."""
+        graph, expected_types, num_gates, thetas = _build_random_gate_circuit(
+            self.ALL_GATES,
+            self.GATE_TEMPLATE,
+            self.N_QUBITS,
+            seed,
+            theta="literal",
+        )
+        assert thetas is not None
+        assert len(graph.operations) == self.N_QUBITS + num_gates
+        for op in graph.operations[: self.N_QUBITS]:
+            assert isinstance(op, QInitOperation)
+        for op, expected_type, expected_theta in zip(
+            graph.operations[self.N_QUBITS :], expected_types, thetas, strict=True
+        ):
+            assert isinstance(op, GateOperation)
+            assert op.gate_type == expected_type
+            assert op.theta == expected_theta
+            assert len(op.operands) == self.N_QUBITS
+            assert len(op.results) == self.N_QUBITS
+
+    @pytest.mark.parametrize("seed", [901 + offset for offset in range(50)])
+    def test_randomized_gates_symbolic(self, seed):
+        """Test random sequences of rotation gates with symbolic theta."""
+        graph, expected_types, num_gates, _ = _build_random_gate_circuit(
+            self.ALL_GATES,
+            self.GATE_TEMPLATE,
+            self.N_QUBITS,
+            seed,
+            theta="symbolic",
+        )
+        assert len(graph.operations) == self.N_QUBITS + num_gates
+        for op in graph.operations[: self.N_QUBITS]:
+            assert isinstance(op, QInitOperation)
+        for op, expected_type in zip(
+            graph.operations[self.N_QUBITS :], expected_types, strict=True
+        ):
+            assert isinstance(op, GateOperation)
+            assert op.gate_type == expected_type
+            assert isinstance(op.theta, Value)
+            assert len(op.operands) == self.N_QUBITS
+            assert len(op.results) == self.N_QUBITS
+
 
 class TestTwoQubitGates:
     """Non-parameterized two-qubit gates."""
+
+    GATE_TEMPLATE = "q0, q1 = qm.{name}(q0, q1)"
+    N_QUBITS = 2
 
     ALL_GATES_WITH_IDS = [
         ((qm.cx, GateOperationType.CX), "CX"),
@@ -117,9 +271,33 @@ class TestTwoQubitGates:
         assert len(gate_op.operands) == 2
         assert len(gate_op.results) == 2
 
+    @pytest.mark.parametrize("seed", [901 + offset for offset in range(50)])
+    def test_randomized_gates(self, seed):
+        """Test random sequences of non-parameterized two-qubit gates."""
+        graph, expected_types, num_gates, _ = _build_random_gate_circuit(
+            self.ALL_GATES,
+            self.GATE_TEMPLATE,
+            self.N_QUBITS,
+            seed,
+        )
+        assert len(graph.operations) == self.N_QUBITS + num_gates
+        for op in graph.operations[: self.N_QUBITS]:
+            assert isinstance(op, QInitOperation)
+        for op, expected_type in zip(
+            graph.operations[self.N_QUBITS :], expected_types, strict=True
+        ):
+            assert isinstance(op, GateOperation)
+            assert op.gate_type == expected_type
+            assert op.theta is None
+            assert len(op.operands) == self.N_QUBITS
+            assert len(op.results) == self.N_QUBITS
+
 
 class TestTwoQubitParamGates:
     """Parameterized two-qubit gates."""
+
+    GATE_TEMPLATE = "q0, q1 = qm.{name}(q0, q1, {theta})"
+    N_QUBITS = 2
 
     ALL_GATES_WITH_IDS = [
         ((qm.cp, GateOperationType.CP), "CP"),
@@ -164,9 +342,57 @@ class TestTwoQubitParamGates:
         assert len(gate_op.operands) == 2
         assert len(gate_op.results) == 2
 
+    @pytest.mark.parametrize("seed", [901 + offset for offset in range(50)])
+    def test_randomized_gates_literal(self, seed):
+        """Test random sequences of parameterized two-qubit gates with literal theta."""
+        graph, expected_types, num_gates, thetas = _build_random_gate_circuit(
+            self.ALL_GATES,
+            self.GATE_TEMPLATE,
+            self.N_QUBITS,
+            seed,
+            theta="literal",
+        )
+        assert thetas is not None
+        assert len(graph.operations) == self.N_QUBITS + num_gates
+        for op in graph.operations[: self.N_QUBITS]:
+            assert isinstance(op, QInitOperation)
+        for op, expected_type, expected_theta in zip(
+            graph.operations[self.N_QUBITS :], expected_types, thetas, strict=True
+        ):
+            assert isinstance(op, GateOperation)
+            assert op.gate_type == expected_type
+            assert op.theta == expected_theta
+            assert len(op.operands) == self.N_QUBITS
+            assert len(op.results) == self.N_QUBITS
+
+    @pytest.mark.parametrize("seed", [901 + offset for offset in range(50)])
+    def test_randomized_gates_symbolic(self, seed):
+        """Test random sequences of parameterized two-qubit gates with symbolic theta."""
+        graph, expected_types, num_gates, _ = _build_random_gate_circuit(
+            self.ALL_GATES,
+            self.GATE_TEMPLATE,
+            self.N_QUBITS,
+            seed,
+            theta="symbolic",
+        )
+        assert len(graph.operations) == self.N_QUBITS + num_gates
+        for op in graph.operations[: self.N_QUBITS]:
+            assert isinstance(op, QInitOperation)
+        for op, expected_type in zip(
+            graph.operations[self.N_QUBITS :], expected_types, strict=True
+        ):
+            assert isinstance(op, GateOperation)
+            assert op.gate_type == expected_type
+            assert isinstance(op.theta, Value)
+            assert len(op.operands) == self.N_QUBITS
+            assert len(op.results) == self.N_QUBITS
+
 
 class TestThreeQubitGates:
     """ccx — three-qubit gate."""
+
+    GATE_TEMPLATE = "q0, q1, q2 = qm.{name}(q0, q1, q2)"
+    N_QUBITS = 3
 
     ALL_GATES_WITH_IDS = [((qm.ccx, GateOperationType.TOFFOLI), "CCX")]
     ALL_GATES = [gate_info for gate_info, _ in ALL_GATES_WITH_IDS]
@@ -191,26 +417,50 @@ class TestThreeQubitGates:
         assert len(gate_op.operands) == 3
         assert len(gate_op.results) == 3
 
+    @pytest.mark.parametrize("seed", [901 + offset for offset in range(50)])
+    def test_randomized_gates(self, seed):
+        """Test random sequences of three-qubit gates."""
+        graph, expected_types, num_gates, _ = _build_random_gate_circuit(
+            self.ALL_GATES,
+            self.GATE_TEMPLATE,
+            self.N_QUBITS,
+            seed,
+        )
+        assert len(graph.operations) == self.N_QUBITS + num_gates
+        for op in graph.operations[: self.N_QUBITS]:
+            assert isinstance(op, QInitOperation)
+        for op, expected_type in zip(
+            graph.operations[self.N_QUBITS :], expected_types, strict=True
+        ):
+            assert isinstance(op, GateOperation)
+            assert op.gate_type == expected_type
+            assert op.theta is None
+            assert len(op.operands) == self.N_QUBITS
+            assert len(op.results) == self.N_QUBITS
+
 
 class TestAllGates:
     """Test that all gates can be used together in a single circuit."""
 
     CATEGORIZED_GATES = [
-        (TestSingleQubitGates.ALL_GATES_WITH_IDS, "q0 = qm.{name}(q0)"),
-        (TestRotationGates.ALL_GATES_WITH_IDS, "q0 = qm.{name}(q0, 0.5)"),
-        (TestTwoQubitGates.ALL_GATES_WITH_IDS, "q0, q1 = qm.{name}(q0, q1)"),
-        (TestTwoQubitParamGates.ALL_GATES_WITH_IDS, "q0, q1 = qm.{name}(q0, q1, 0.5)"),
-        (TestThreeQubitGates.ALL_GATES_WITH_IDS, "q0, q1, q2 = qm.{name}(q0, q1, q2)"),
+        (TestSingleQubitGates.ALL_GATES_WITH_IDS, TestSingleQubitGates.GATE_TEMPLATE, None),
+        (TestRotationGates.ALL_GATES_WITH_IDS, TestRotationGates.GATE_TEMPLATE, 0.5),
+        (TestTwoQubitGates.ALL_GATES_WITH_IDS, TestTwoQubitGates.GATE_TEMPLATE, None),
+        (TestTwoQubitParamGates.ALL_GATES_WITH_IDS, TestTwoQubitParamGates.GATE_TEMPLATE, 0.5),
+        (TestThreeQubitGates.ALL_GATES_WITH_IDS, TestThreeQubitGates.GATE_TEMPLATE, None),
     ]
 
-    ALL_GATES = [gate_info for gates, _ in CATEGORIZED_GATES for gate_info, _ in gates]
+    ALL_GATES = [gate_info for gates, _, _ in CATEGORIZED_GATES for gate_info, _ in gates]
 
     def test_all_gates_in_one_circuit(self):
         """Build a single @qkernel with every gate, verify flat GateOperations."""
         body_lines = []
-        for gates, template in self.CATEGORIZED_GATES:
+        for gates, template, theta in self.CATEGORIZED_GATES:
             for (gate_fn, _), _ in gates:
-                body_lines.append("    " + template.format(name=gate_fn.__name__))
+                fmt = {"name": gate_fn.__name__, "i": 0}
+                if theta is not None:
+                    fmt["theta"] = str(theta)
+                body_lines.append("    " + template.format(**fmt))
 
         func_source = (
             "def _circuit(q0: Qubit, q1: Qubit, q2: Qubit)"
@@ -219,17 +469,7 @@ class TestAllGates:
             + "\n    return q0, q1, q2\n"
         )
 
-        filename = "<all_gates_circuit>"
-        compiled = compile(func_source, filename, "exec")
-        linecache.cache[filename] = (
-            len(func_source),
-            None,
-            func_source.splitlines(True),
-            filename,
-        )
-        local_ns: dict = {}
-        exec(compiled, {**globals()}, local_ns)  # noqa: S102
-        circuit = qkernel(local_ns["_circuit"])
+        circuit = _build_qkernel(func_source, "<all_gates_circuit>")
 
         graph = circuit.build()
 
