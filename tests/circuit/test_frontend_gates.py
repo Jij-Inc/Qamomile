@@ -451,6 +451,11 @@ class TestAllGates:
     ]
 
     ALL_GATES = [gate_info for gates, _, _ in CATEGORIZED_GATES for gate_info, _ in gates]
+    ALL_GATES_WITH_TEMPLATES = [
+        (gate_info, template, theta)
+        for gates, template, theta in CATEGORIZED_GATES
+        for gate_info, _ in gates
+    ]
 
     def test_all_gates_in_one_circuit(self):
         """Build a single @qkernel with every gate, verify flat GateOperations."""
@@ -484,3 +489,44 @@ class TestAllGates:
         for op, expected_type in zip(ops[n_qinits:], expected_types, strict=True):
             assert isinstance(op, GateOperation)
             assert op.gate_type == expected_type
+
+    @pytest.mark.parametrize("seed", [901 + offset for offset in range(50)])
+    def test_randomized_all_gates(self, seed):
+        """Test random mix of gates from all categories in one circuit."""
+        rng = np.random.default_rng(seed)
+        num_gates = rng.integers(2, 100)
+        indices = rng.integers(0, len(self.ALL_GATES_WITH_TEMPLATES), size=num_gates)
+        chosen = [self.ALL_GATES_WITH_TEMPLATES[i] for i in indices]
+
+        body_lines = []
+        expected_thetas = []
+        for idx, ((fn, _), template, theta) in enumerate(chosen):
+            fmt = {"name": fn.__name__, "i": idx}
+            if theta is not None:
+                literal_theta = rng.uniform(0, 2 * np.pi)
+                fmt["theta"] = str(literal_theta)
+                expected_thetas.append(literal_theta)
+            else:
+                expected_thetas.append(None)
+            body_lines.append("    " + template.format(**fmt))
+
+        func_source = (
+            "def _circuit(q0: Qubit, q1: Qubit, q2: Qubit)"
+            " -> tuple[Qubit, Qubit, Qubit]:\n"
+            + "\n".join(body_lines)
+            + "\n    return q0, q1, q2\n"
+        )
+        circuit = _build_qkernel(func_source, f"<randomized_all_gates_{seed}>")
+        graph = circuit.build()
+
+        n_qinits = 3
+        assert len(graph.operations) == n_qinits + num_gates
+        expected_types = [gt for (_, gt), _, _ in chosen]
+        for op in graph.operations[:n_qinits]:
+            assert isinstance(op, QInitOperation)
+        for op, expected_type, expected_theta in zip(
+            graph.operations[n_qinits:], expected_types, expected_thetas, strict=True
+        ):
+            assert isinstance(op, GateOperation)
+            assert op.gate_type == expected_type
+            assert op.theta == expected_theta
