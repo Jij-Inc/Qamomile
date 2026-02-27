@@ -1,4 +1,6 @@
 # Frontend API
+# Algorithm building blocks
+from .algorithm import amplitude_encoding, compute_mottonen_thetas
 from .frontend.composite_gate import CompositeGate, composite_gate
 from .frontend.constructors import bit, float_, qubit, qubit_array, uint
 from .frontend.handle import (
@@ -21,6 +23,7 @@ from .frontend.operation.controlled import controlled
 from .frontend.operation.expval import expval
 from .frontend.operation.measurement import measure
 from .frontend.operation.qubit_gates import (
+    ccx,
     cp,
     cx,
     cz,
@@ -32,14 +35,12 @@ from .frontend.operation.qubit_gates import (
     rzz,
     swap,
     x,
+    z,
 )
 from .frontend.qkernel import QKernel, qkernel
 
 # Standard library circuits
 from .stdlib import iqft, qft, qpe, ttk_adder
-
-# Algorithm building blocks
-from .algorithm import amplitude_encoding, compute_mottonen_thetas
 
 __all__ = [
     "qkernel",
@@ -54,8 +55,10 @@ __all__ = [
     "qubit_array",
     "h",
     "x",
+    "z",
     "cx",
     "cz",
+    "ccx",
     "p",
     "rx",
     "ry",
