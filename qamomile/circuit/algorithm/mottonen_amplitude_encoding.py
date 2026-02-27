@@ -29,7 +29,6 @@ from qamomile.circuit.ir.operation.composite_gate import (
 )
 from qamomile.optimization.utils import is_close_zero
 
-
 # ---------------------------------------------------------------------------
 # Math utilities
 # ---------------------------------------------------------------------------
@@ -56,8 +55,9 @@ def _get_cnot_controls(k: int) -> list[int]:
         if i == 2**k:
             controls.append(k - 1)
         else:
-            trailing_zeros = (i & -i).bit_length() - 1
-            controls.append(trailing_zeros)
+            lowest_set_bit = i & -i
+            bit_position = lowest_set_bit.bit_length() - 1
+            controls.append(bit_position)
     return controls
 
 
@@ -119,14 +119,24 @@ def _compute_all_thetas(amplitudes: np.ndarray, num_qubits: int) -> list[np.ndar
         chunk_size = 2 ** (num_qubits - k)
         half_chunk = chunk_size // 2
 
+        # The original paper (Möttönen et al.) defines the angle as:
+        #   alpha = 2 * arcsin(norm_bottom / sqrt(norm_top^2 + norm_bottom^2))
+        # Here we use arctan2 instead, which is mathematically equivalent:
+        #   arctan2(y, x) = arcsin(y / sqrt(x^2 + y^2))  when x >= 0
+        # Since norms are always non-negative, the condition x >= 0 holds.
+        # arctan2 is preferred because:
+        #   - No need to pre-compute the total norm for division
+        #   - Avoids division by zero when both norms are zero
+        #     (arctan2(0, 0) = 0, whereas arcsin(0/0) = NaN)
+        #   - At the leaf level (half_chunk == 1), individual amplitudes
+        #     can be negative, and arctan2's range (-pi, pi] correctly
+        #     preserves sign information that arcsin [-pi/2, pi/2] cannot
         alphas = []
         for i in range(2**k):
             chunk = amplitudes[i * chunk_size : (i + 1) * chunk_size]
             if half_chunk == 1:
-                # Leaf level: preserve sign of individual amplitudes
                 alpha = 2 * np.arctan2(float(chunk[1]), float(chunk[0]))
             else:
-                # Intermediate level: compute weight distribution within chunk
                 norm_top = np.linalg.norm(chunk[:half_chunk])
                 norm_bottom = np.linalg.norm(chunk[half_chunk:])
                 alpha = 2 * np.arctan2(norm_bottom, norm_top)
