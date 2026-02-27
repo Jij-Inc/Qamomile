@@ -30,9 +30,19 @@ from qamomile.circuit.ir.operation.composite_gate import (
 from qamomile.optimization.utils import is_close_zero
 
 
+# ---------------------------------------------------------------------------
+# Math utilities
+# ---------------------------------------------------------------------------
+
+
 def _gray_code(n: int) -> int:
     """Return the Gray code of integer n."""
     return n ^ (n >> 1)
+
+
+def _bit_reverse(value: int, num_bits: int) -> int:
+    """Reverse the bit order of *value* within *num_bits* width."""
+    return int(format(value, f"0{num_bits}b")[::-1], 2)
 
 
 def _get_cnot_controls(k: int) -> list[int]:
@@ -71,6 +81,29 @@ def _compute_angle_transform_matrix(k: int) -> np.ndarray:
     return matrix
 
 
+# ---------------------------------------------------------------------------
+# Validation & angle computation
+# ---------------------------------------------------------------------------
+
+
+def _validate_and_normalize(
+    amplitudes: Sequence[float] | np.ndarray,
+) -> tuple[np.ndarray, int]:
+    """Validate amplitude vector and return (normalized_array, num_qubits).
+
+    Raises:
+        ValueError: If length is not a power of 2, or all amplitudes are zero.
+    """
+    arr = np.array(amplitudes, dtype=float)
+    n = len(arr)
+    if n == 0 or (n & (n - 1)) != 0:
+        raise ValueError(f"Length of amplitudes must be a power of 2, got {n}")
+    norm = float(np.linalg.norm(arr))
+    if is_close_zero(norm):
+        raise ValueError("Amplitudes must not be all zeros")
+    return arr / norm, int(np.log2(n))
+
+
 def _compute_all_thetas(amplitudes: np.ndarray, num_qubits: int) -> list[np.ndarray]:
     """Pre-compute all rotation angles for the Möttönen decomposition.
 
@@ -89,12 +122,14 @@ def _compute_all_thetas(amplitudes: np.ndarray, num_qubits: int) -> list[np.ndar
         alphas = []
         for i in range(2**k):
             chunk = amplitudes[i * chunk_size : (i + 1) * chunk_size]
-            norm_chunk = np.linalg.norm(chunk)
-            norm_bottom = np.linalg.norm(chunk[half_chunk:])
-            if norm_chunk > 0:
-                alpha = 2 * np.arcsin(norm_bottom / norm_chunk)
+            if half_chunk == 1:
+                # Leaf level: preserve sign of individual amplitudes
+                alpha = 2 * np.arctan2(float(chunk[1]), float(chunk[0]))
             else:
-                alpha = 0.0
+                # Intermediate level: compute weight distribution within chunk
+                norm_top = np.linalg.norm(chunk[:half_chunk])
+                norm_bottom = np.linalg.norm(chunk[half_chunk:])
+                alpha = 2 * np.arctan2(norm_bottom, norm_top)
             alphas.append(alpha)
         alphas_arr = np.array(alphas)
 
@@ -105,13 +140,53 @@ def _compute_all_thetas(amplitudes: np.ndarray, num_qubits: int) -> list[np.ndar
             # (MSB-first) with Gray code convention (LSB-first).
             alphas_br = np.zeros_like(alphas_arr)
             for j in range(2**k):
-                rev_j = int(format(j, f"0{k}b")[::-1], 2)
-                alphas_br[j] = alphas_arr[rev_j]
+                alphas_br[j] = alphas_arr[_bit_reverse(j, k)]
             matrix = _compute_angle_transform_matrix(k)
             thetas = matrix @ alphas_br
 
         all_thetas.append(thetas)
     return all_thetas
+
+
+# ---------------------------------------------------------------------------
+# Circuit emission
+# ---------------------------------------------------------------------------
+
+
+def _emit_mottonen_gates(
+    q: list[Qubit],
+    num_qubits: int,
+    angles: Sequence[float] | Vector[Float],
+) -> None:
+    """Emit the RY + CNOT gate sequence for Möttönen decomposition.
+
+    Reads *angles* sequentially by flat index (2^num_qubits - 1 total).
+    Mutates *q* in place.
+
+    Args:
+        q: Mutable list of qubit handles.
+        num_qubits: Number of qubits.
+        angles: Flat sequence of rotation angles, length 2^n - 1.
+            Can be concrete floats or parametric Float handles.
+    """
+    idx = 0
+    for k in range(num_qubits):
+        tgt = num_qubits - 1 - k
+        if k == 0:
+            q[tgt] = qmc.ry(q[tgt], angles[idx])
+            idx += 1
+        else:
+            cnot_seq = _get_cnot_controls(k)
+            for i in range(2**k):
+                q[tgt] = qmc.ry(q[tgt], angles[idx])
+                idx += 1
+                ctrl = num_qubits - 1 - cnot_seq[i]
+                q[ctrl], q[tgt] = qmc.cx(q[ctrl], q[tgt])
+
+
+# ---------------------------------------------------------------------------
+# CompositeGate class
+# ---------------------------------------------------------------------------
 
 
 class MottonenAmplitudeEncoding(CompositeGate):
@@ -135,15 +210,7 @@ class MottonenAmplitudeEncoding(CompositeGate):
     _default_strategy = "standard"
 
     def __init__(self, amplitudes: Sequence[float] | np.ndarray):
-        arr = np.array(amplitudes, dtype=float)
-        n = len(arr)
-        if n == 0 or (n & (n - 1)) != 0:
-            raise ValueError(f"Length of amplitudes must be a power of 2, got {n}")
-        norm = float(np.linalg.norm(arr))
-        if is_close_zero(norm):
-            raise ValueError("Amplitudes must not be all zeros")
-        self._amplitudes = arr / norm
-        self._num_qubits = int(np.log2(n))
+        self._amplitudes, self._num_qubits = _validate_and_normalize(amplitudes)
         self._all_thetas = _compute_all_thetas(self._amplitudes, self._num_qubits)
 
     @property
@@ -155,22 +222,9 @@ class MottonenAmplitudeEncoding(CompositeGate):
         qubits: tuple[Qubit, ...],
     ) -> tuple[Qubit, ...]:
         """Decompose into RY and CNOT gates following Gray code ordering."""
-        n = self._num_qubits
         q = list(qubits)
-
-        for k in range(n):
-            thetas = self._all_thetas[k]
-            tgt = n - 1 - k
-
-            if k == 0:
-                q[tgt] = qmc.ry(q[tgt], float(thetas[0]))
-            else:
-                cnot_seq = _get_cnot_controls(k)
-                for i in range(2**k):
-                    q[tgt] = qmc.ry(q[tgt], float(thetas[i]))
-                    ctrl = n - 1 - cnot_seq[i]
-                    q[ctrl], q[tgt] = qmc.cx(q[ctrl], q[tgt])
-
+        flat_angles = [float(a) for a in np.concatenate(self._all_thetas)]
+        _emit_mottonen_gates(q, self._num_qubits, flat_angles)
         return tuple(q)
 
     def _resources(self) -> ResourceMetadata:
@@ -190,6 +244,11 @@ class MottonenAmplitudeEncoding(CompositeGate):
         )
 
 
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
 def compute_mottonen_thetas(amplitudes: Sequence[float] | np.ndarray) -> np.ndarray:
     """Pre-compute flat rotation angles for Möttönen amplitude encoding.
 
@@ -202,15 +261,7 @@ def compute_mottonen_thetas(amplitudes: Sequence[float] | np.ndarray) -> np.ndar
     Returns:
         1-D numpy array of length 2^n - 1.
     """
-    arr = np.array(amplitudes, dtype=float)
-    n = len(arr)
-    if n == 0 or (n & (n - 1)) != 0:
-        raise ValueError(f"Length of amplitudes must be a power of 2, got {n}")
-    norm = float(np.linalg.norm(arr))
-    if is_close_zero(norm):
-        raise ValueError("Amplitudes must not be all zeros")
-    arr = arr / norm
-    num_qubits = int(np.log2(n))
+    arr, num_qubits = _validate_and_normalize(amplitudes)
     all_thetas = _compute_all_thetas(arr, num_qubits)
     return np.concatenate(all_thetas)
 
@@ -242,21 +293,7 @@ def _parametric_amplitude_encoding(
     """Apply Möttönen amplitude encoding with parametric rotation angles."""
     n = _get_size(qubits)
     q: list[Qubit] = [qubits[i] for i in range(n)]
-
-    theta_idx = 0
-    for k in range(n):
-        tgt = n - 1 - k
-        if k == 0:
-            q[tgt] = qmc.ry(q[tgt], thetas[theta_idx])
-            theta_idx += 1
-        else:
-            cnot_seq = _get_cnot_controls(k)
-            for i in range(2**k):
-                q[tgt] = qmc.ry(q[tgt], thetas[theta_idx])
-                theta_idx += 1
-                ctrl = n - 1 - cnot_seq[i]
-                q[ctrl], q[tgt] = qmc.cx(q[ctrl], q[tgt])
-
+    _emit_mottonen_gates(q, n, thetas)
     for i in range(n):
         qubits[i] = q[i]
     return qubits
