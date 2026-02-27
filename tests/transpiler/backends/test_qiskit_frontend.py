@@ -3070,10 +3070,6 @@ class TestAlgorithmQAOAModules:
         rx_count = sum(1 for name in _gate_names(qc) if name == "rx")
         assert rx_count == n_qubits
 
-    @pytest.mark.xfail(
-        reason="x_mixier_circuit 2.0*beta BinOp expression not folded to correct angle",
-        strict=False,
-    )
     def test_x_mixer_circuit_statevector(self):
         """x_mixier_circuit statevector matches RX(2β) ⊗ RX(2β)."""
 
@@ -3261,10 +3257,6 @@ class TestAdvancedParameterHandling:
         # Should have theta + params[0], params[1], params[2]
         assert len(param_names) >= 4
 
-    @pytest.mark.xfail(
-        reason="Vector[Float] parameters= with ry_layer sub-kernel (known bug)",
-        strict=False,
-    )
     def test_parametric_variational_classifier_pattern(self):
         """User's exact pattern: ry_layer + cz_entangling_layer with parametric Vector."""
 
@@ -3767,10 +3759,6 @@ class TestVariationalClassifierPattern:
         result = exe.run(transpiler.executor()).result()
         assert -1.0 <= result <= 1.0
 
-    @pytest.mark.xfail(
-        reason="layer*n BinOp in qmc.range loop not resolved during constant folding",
-        strict=False,
-    )
     def test_two_layer_variational_classifier(self):
         """Two-layer classifier: 6 RY + 4 CZ for 3 qubits."""
 
@@ -3835,10 +3823,6 @@ class TestVariationalClassifierPattern:
         assert ry_count == 6  # 3 x-encode + 3 params
         assert cz_count == 4  # 2 entangling layers * 2 CZ each
 
-    @pytest.mark.xfail(
-        reason="Vector[Float] parameters= returns empty parameters dict (known bug)",
-        strict=False,
-    )
     def test_variational_classifier_parametric(self):
         """Parametric classifier with parameters=['params']."""
 
@@ -4073,10 +4057,6 @@ class TestFQAOAIntegration:
         cx_count = sum(1 for name in _gate_names(qc) if name == "cx")
         assert cx_count == total_hopping * 2
 
-    @pytest.mark.xfail(
-        reason="fqaoa_state internal qubit_array allocation not tracked in emit qubit_map",
-        strict=False,
-    )
     def test_fqaoa_state_transpiles(self):
         """Full fqaoa_state transpiles successfully."""
 
@@ -4978,11 +4958,6 @@ class TestQubitArrayPatterns:
         assert "if_else" in names
         assert qc.num_qubits == 2
 
-    @pytest.mark.xfail(
-        reason="Aer returns no counts for if_else circuits built from qubit_array",
-        raises=Exception,
-        strict=False,
-    )
     def test_if_else_array_execution(self):
         """Shot-based execution of if-else on qubit_array(2)."""
 
