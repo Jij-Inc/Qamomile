@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import typing
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -23,11 +24,15 @@ from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.handle import Float, Qubit, Vector
 from qamomile.circuit.frontend.operation.qubit_gates import cx, ry
 from qamomile.circuit.frontend.handle.utils import _get_size
+from qamomile.circuit.frontend.tracer import Tracer, trace
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateType,
     ResourceMetadata,
 )
 from qamomile.optimization.utils import is_close_zero
+
+if TYPE_CHECKING:
+    from qamomile.circuit.ir.block_value import BlockValue
 
 # ---------------------------------------------------------------------------
 # Math utilities
@@ -219,9 +224,27 @@ class MottonenAmplitudeEncoding(CompositeGate):
     _strategies: dict = {}  # type: ignore[type-arg]
     _default_strategy = "standard"
 
-    def __init__(self, amplitudes: Sequence[float] | np.ndarray):
-        self._amplitudes, self._num_qubits = _validate_and_normalize(amplitudes)
-        self._all_thetas = _compute_all_thetas(self._amplitudes, self._num_qubits)
+    def __init__(
+        self,
+        amplitudes: Sequence[float] | np.ndarray | None = None,
+        *,
+        thetas: Vector[Float] | None = None,
+        num_qubits: int | None = None,
+    ):
+        if amplitudes is not None:
+            # concrete mode
+            self._amplitudes, self._num_qubits = _validate_and_normalize(amplitudes)
+            self._all_thetas = _compute_all_thetas(self._amplitudes, self._num_qubits)
+            self._parametric = False
+        elif thetas is not None and num_qubits is not None:
+            # parametric mode
+            self._thetas = thetas
+            self._num_qubits = num_qubits
+            self._parametric = True
+        else:
+            raise ValueError(
+                "Either amplitudes or (thetas, num_qubits) must be provided"
+            )
 
     @property
     def num_target_qubits(self) -> int:
@@ -232,10 +255,46 @@ class MottonenAmplitudeEncoding(CompositeGate):
         qubits: tuple[Qubit, ...],
     ) -> tuple[Qubit, ...]:
         """Decompose into RY and CNOT gates following Gray code ordering."""
+        if self._parametric:
+            raise NotImplementedError(
+                "Parametric mode uses _build_decomposition_block directly"
+            )
         q = list(qubits)
         flat_angles = [float(a) for a in np.concatenate(self._all_thetas)]
         _emit_mottonen_gates(q, self._num_qubits, flat_angles)
         return tuple(q)
+
+    def _build_decomposition_block(
+        self,
+        target_qubits: "tuple[Qubit, ...] | Vector[Qubit]",
+        strategy_name: str | None = None,
+    ) -> "BlockValue | None":
+        if not self._parametric:
+            return super()._build_decomposition_block(target_qubits, strategy_name)
+
+        from qamomile.circuit.ir.block_value import BlockValue
+        from qamomile.circuit.ir.value import Value
+        from qamomile.circuit.ir.types.primitives import QubitType
+
+        decomp_tracer = Tracer()
+        input_values: list[Value] = []
+        fresh_qubits: list[Qubit] = []
+        for i in range(self._num_qubits):
+            q_value = Value(type=QubitType(), name=f"_decomp_q{i}")
+            fresh_qubits.append(Qubit(value=q_value))
+            input_values.append(q_value)
+
+        with trace(decomp_tracer):
+            q = list(fresh_qubits)
+            _emit_mottonen_gates(q, self._num_qubits, self._thetas)
+
+        return_values = [qi.value for qi in q]
+        return BlockValue(
+            operations=decomp_tracer.operations,
+            input_values=input_values,
+            return_values=return_values,
+            name=self.custom_name,
+        )
 
     def _resources(self) -> ResourceMetadata:
         n = self._num_qubits
@@ -302,10 +361,11 @@ def _parametric_amplitude_encoding(
 ) -> Vector[Qubit]:
     """Apply Möttönen amplitude encoding with parametric rotation angles."""
     n = _get_size(qubits)
-    q: list[Qubit] = [qubits[i] for i in range(n)]
-    _emit_mottonen_gates(q, n, thetas)
+    gate = MottonenAmplitudeEncoding(thetas=thetas, num_qubits=n)
+    qubit_list: list[Qubit] = [qubits[i] for i in range(n)]
+    result = gate(*qubit_list)
     for i in range(n):
-        qubits[i] = q[i]
+        qubits[i] = result[i]
     return qubits
 
 
