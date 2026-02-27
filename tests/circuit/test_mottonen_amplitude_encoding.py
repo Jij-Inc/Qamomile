@@ -47,15 +47,14 @@ def _build_parametric_circuit(
     return executor.compiled_quantum[0].circuit
 
 
-def _assert_amplitudes_match(qc, n_qubits: int, amplitudes: list[float]) -> None:
+def _assert_amplitudes_match(qc, amplitudes: list[float]) -> None:
     """Simulate *qc* and verify the encoded amplitudes match *amplitudes*."""
     sv = run_statevector(qc)
-    encoded = sv[: 2**n_qubits]
     expected = np.array(amplitudes, dtype=float)
     expected /= np.linalg.norm(expected)
-    fidelity = np.abs(np.vdot(expected, encoded)) ** 2
+    fidelity = np.abs(np.vdot(expected, sv)) ** 2
     assert np.isclose(fidelity, 1.0, atol=1e-8), (
-        f"amplitudes={amplitudes}: fidelity={fidelity}, got {encoded}, expected {expected}"
+        f"amplitudes={amplitudes}: fidelity={fidelity}, got {sv}, expected {expected}"
     )
 
 
@@ -138,9 +137,8 @@ class TestConcreteEncoding:
         ],
     )
     def test_fixed_amplitudes(self, qiskit_transpiler, amplitudes: list[float]) -> None:
-        n_qubits = int(np.log2(len(amplitudes)))
         qc = _build_encoding_circuit(amplitudes, qiskit_transpiler)
-        _assert_amplitudes_match(qc, n_qubits, amplitudes)
+        _assert_amplitudes_match(qc, amplitudes)
 
     @pytest.mark.parametrize("n_qubits", [1, 2, 3])
     def test_random_amplitudes(self, qiskit_transpiler, n_qubits: int) -> None:
@@ -148,7 +146,7 @@ class TestConcreteEncoding:
         for _ in range(5):
             amplitudes = rng.standard_normal(2**n_qubits).tolist()
             qc = _build_encoding_circuit(amplitudes, qiskit_transpiler)
-            _assert_amplitudes_match(qc, n_qubits, amplitudes)
+            _assert_amplitudes_match(qc, amplitudes)
 
     def test_qubit_mismatch_raises(self) -> None:
         """Qubit count / amplitude count mismatch raises ValueError."""
@@ -174,7 +172,7 @@ class TestConcreteEncoding:
             return qm.measure(q)
 
         qc = qiskit_transpiler.to_circuit(_kernel)
-        _assert_amplitudes_match(qc, 2, amplitudes)
+        _assert_amplitudes_match(qc, amplitudes)
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +197,7 @@ class TestParametricEncoding:
         n_qubits = int(np.log2(len(amplitudes)))
         thetas = compute_mottonen_thetas(amplitudes)
         qc = _build_parametric_circuit(n_qubits, thetas.tolist(), qiskit_transpiler)
-        _assert_amplitudes_match(qc, n_qubits, amplitudes)
+        _assert_amplitudes_match(qc, amplitudes)
 
     @pytest.mark.parametrize("n_qubits", [1, 2, 3])
     def test_random_amplitudes(self, qiskit_transpiler, n_qubits: int) -> None:
@@ -208,4 +206,4 @@ class TestParametricEncoding:
             amplitudes = rng.standard_normal(2**n_qubits).tolist()
             thetas = compute_mottonen_thetas(amplitudes)
             qc = _build_parametric_circuit(n_qubits, thetas.tolist(), qiskit_transpiler)
-            _assert_amplitudes_match(qc, n_qubits, amplitudes)
+            _assert_amplitudes_match(qc, amplitudes)
