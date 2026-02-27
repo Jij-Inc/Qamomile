@@ -113,15 +113,11 @@ Dependencies flow only downstream (left to right). Upstream (reverse) dependenci
 - **Mutable default arguments**: NEVER use mutable defaults (`def f(x=[])`). Use `def f(x: list[int] | None = None): x = x if x is not None else []`.
 - **Generators vs lists**: For large iterations, prefer generators or iterators over materialized lists when the result is consumed only once.
 
-<<<<<<< HEAD
-=======
 ### L. Defensive Programming
 
 - **Exhaustive branching**: `if-else` and `match` statements MUST always include an `else` (or default) branch, even when it seems unnecessary. If the else branch has no action, add an explicit comment explaining why (e.g., `# No action needed: ...`) or a defensive `assert` (e.g., `assert False, "unreachable"`).
 - **Defensive assertions**: When guarding against cases that should never occur according to Qamomile's specification but are added "just in case", prefer `assert` over `raise`. This clearly communicates the intent: "this is a specification invariant, not an expected error path."
 - **`assert` vs `raise`**: Use `assert` for internal invariants that indicate programmer error if violated. Use `raise` (with proper exception types from `QamomileCompileError` hierarchy) for conditions that could be triggered by user input or external data.
-
->>>>>>> new_qamomile
 ---
 
 ## Review Process
