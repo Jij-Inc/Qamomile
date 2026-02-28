@@ -65,6 +65,8 @@ class ResourceEstimate:
                 subs_dict[sp.Symbol(key, integer=True, positive=True)] = val
 
         def _subs_eval(expr: sp.Expr) -> sp.Expr:
+            if isinstance(expr, (int, float)):
+                return sp.Integer(expr)
             return expr.subs(subs_dict).doit()
 
         return ResourceEstimate(

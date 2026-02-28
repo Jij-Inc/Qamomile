@@ -980,37 +980,77 @@ def _count_from_operations(
                     # Build call context: map formal parameters to actual arguments
                     new_call_context = call_context.copy()
 
-                    # Get target operands (skip BlockValue and control qubits)
-                    target_operands = op.target_operands
-
-                    # Map each formal input to corresponding target operand
-                    for formal_idx, formal_input in enumerate(
-                        controlled_block.input_values
-                    ):
-                        if formal_idx < len(target_operands):
-                            actual_arg = target_operands[formal_idx]
-
-                            # Resolve actual_arg to SymPy expression in the OUTER block
-                            # so that computed values (like 2**i) can be traced
-                            resolved_arg = value_to_expr(
-                                actual_arg, block, call_context, loop_var_symbols
-                            )
-                            new_call_context[formal_input.uuid] = resolved_arg
-
-                            # If both are arrays, also map dimensions
-                            if isinstance(actual_arg, ArrayValue) and isinstance(
-                                formal_input, ArrayValue
-                            ):
-                                for dim_formal, dim_actual in zip(
-                                    formal_input.shape, actual_arg.shape
-                                ):
-                                    resolved_dim = value_to_expr(
-                                        dim_actual,
+                    if op.has_index_spec:
+                        # index_spec mode: skip qubit formal inputs,
+                        # map only non-qubit parameters from operands[2:]
+                        param_operands = op.operands[2:]
+                        param_idx = 0
+                        for formal_input in controlled_block.input_values:
+                            if not formal_input.type.is_quantum():
+                                if param_idx < len(param_operands):
+                                    actual_arg = param_operands[param_idx]
+                                    resolved_arg = value_to_expr(
+                                        actual_arg,
                                         block,
                                         call_context,
                                         loop_var_symbols,
                                     )
-                                    new_call_context[dim_formal.uuid] = resolved_dim
+                                    new_call_context[
+                                        formal_input.uuid
+                                    ] = resolved_arg
+                                    if isinstance(
+                                        actual_arg, ArrayValue
+                                    ) and isinstance(formal_input, ArrayValue):
+                                        for dim_formal, dim_actual in zip(
+                                            formal_input.shape, actual_arg.shape
+                                        ):
+                                            resolved_dim = value_to_expr(
+                                                dim_actual,
+                                                block,
+                                                call_context,
+                                                loop_var_symbols,
+                                            )
+                                            new_call_context[
+                                                dim_formal.uuid
+                                            ] = resolved_dim
+                                    param_idx += 1
+                    else:
+                        # Get target operands (skip BlockValue and control qubits)
+                        target_operands = op.target_operands
+
+                        # Map each formal input to corresponding target operand
+                        for formal_idx, formal_input in enumerate(
+                            controlled_block.input_values
+                        ):
+                            if formal_idx < len(target_operands):
+                                actual_arg = target_operands[formal_idx]
+
+                                # Resolve actual_arg to SymPy expression in the OUTER block
+                                # so that computed values (like 2**i) can be traced
+                                resolved_arg = value_to_expr(
+                                    actual_arg,
+                                    block,
+                                    call_context,
+                                    loop_var_symbols,
+                                )
+                                new_call_context[formal_input.uuid] = resolved_arg
+
+                                # If both are arrays, also map dimensions
+                                if isinstance(
+                                    actual_arg, ArrayValue
+                                ) and isinstance(formal_input, ArrayValue):
+                                    for dim_formal, dim_actual in zip(
+                                        formal_input.shape, actual_arg.shape
+                                    ):
+                                        resolved_dim = value_to_expr(
+                                            dim_actual,
+                                            block,
+                                            call_context,
+                                            loop_var_symbols,
+                                        )
+                                        new_call_context[
+                                            dim_formal.uuid
+                                        ] = resolved_dim
 
                     # Resolve num_controls for classification
                     if op.is_symbolic_num_controls:

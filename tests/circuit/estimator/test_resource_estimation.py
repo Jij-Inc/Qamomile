@@ -798,7 +798,6 @@ class TestQPEResourceEstimation:
         est = estimate_resources(qpe_builtin.block)
         est = est.simplify()
 
-        # Check that the total gates expression contains 2^n term
         n = sp.Symbol("n", integer=True, positive=True)
         total_gates_expr = est.gates.total
 

@@ -199,25 +199,48 @@ def _count_from_operations(
 
                 controlled_block = op.block
                 if isinstance(controlled_block, BlockValue):
-                    # Map formal input array dimensions to actual target operand dimensions
                     inner_symbol_map = symbol_map.copy()
-                    target_operands = op.target_operands
-                    for formal_idx, formal_input in enumerate(
-                        controlled_block.input_values
-                    ):
-                        if formal_idx < len(target_operands):
-                            actual_arg = target_operands[formal_idx]
-                            if isinstance(actual_arg, ArrayValue) and isinstance(
-                                formal_input, ArrayValue
-                            ):
-                                for dim_formal, dim_actual in zip(
-                                    formal_input.shape, actual_arg.shape
-                                ):
-                                    inner_symbol_map[dim_formal.uuid] = (
-                                        _resolve_value_to_sympy(
-                                            dim_actual, symbol_map
+                    if op.has_index_spec:
+                        # index_spec mode: skip qubit formals,
+                        # map only non-qubit ArrayValue dimensions
+                        param_operands = op.operands[2:]
+                        param_idx = 0
+                        for formal_input in controlled_block.input_values:
+                            if not formal_input.type.is_quantum():
+                                if param_idx < len(param_operands):
+                                    actual_arg = param_operands[param_idx]
+                                    if isinstance(
+                                        actual_arg, ArrayValue
+                                    ) and isinstance(formal_input, ArrayValue):
+                                        for dim_formal, dim_actual in zip(
+                                            formal_input.shape,
+                                            actual_arg.shape,
+                                        ):
+                                            inner_symbol_map[
+                                                dim_formal.uuid
+                                            ] = _resolve_value_to_sympy(
+                                                dim_actual, symbol_map
+                                            )
+                                    param_idx += 1
+                    else:
+                        # Map formal input array dimensions to actual target operand dimensions
+                        target_operands = op.target_operands
+                        for formal_idx, formal_input in enumerate(
+                            controlled_block.input_values
+                        ):
+                            if formal_idx < len(target_operands):
+                                actual_arg = target_operands[formal_idx]
+                                if isinstance(
+                                    actual_arg, ArrayValue
+                                ) and isinstance(formal_input, ArrayValue):
+                                    for dim_formal, dim_actual in zip(
+                                        formal_input.shape, actual_arg.shape
+                                    ):
+                                        inner_symbol_map[dim_formal.uuid] = (
+                                            _resolve_value_to_sympy(
+                                                dim_actual, symbol_map
+                                            )
                                         )
-                                    )
                     count += _count_from_operations(controlled_block.operations, inner_symbol_map)  # type: ignore
 
             case ForItemsOperation():

@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any
 import sympy as sp
 from sympy import Sum
 
-from qamomile.circuit.frontend.handle import Handle
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     BinOpKind,
@@ -636,36 +635,6 @@ def _apply_sum_to_depth(
     )
 
 
-def _resolve_power_expr(
-    power: Any,
-    block: Block | None,
-    call_context: dict[str, Any] | None,
-    loop_var_symbols: dict[str, sp.Symbol] | None,
-) -> sp.Expr | int:
-    """Resolve power value to SymPy expression or int.
-
-    Args:
-        power: Power value (int, SymPy expression, Handle, or Value).
-        block: Current block for context.
-        call_context: Call context for parameter resolution.
-        loop_var_symbols: Loop variable symbols.
-
-    Returns:
-        SymPy expression or int representing the power.
-    """
-    if isinstance(power, (int, sp.Basic)):
-        return power
-
-    # Handle is a frontend handle - convert via its value
-    if isinstance(power, Handle):
-        return value_to_expr(power.value, block, call_context, loop_var_symbols)
-
-    # Value object - convert directly
-    if hasattr(power, "value"):
-        return value_to_expr(power, block, call_context, loop_var_symbols)
-
-    return power
-
 
 # Type alias for per-qubit depth tracking
 QubitDepthMap = dict[str, CircuitDepth]
@@ -866,6 +835,11 @@ def _eval_value_concrete(
         if c is not None:
             return int(c)
 
+    # Check var_env by UUID first (avoids name collisions when multiple
+    # BinOps share the same result name like 'uint_tmp')
+    if v.uuid in var_env:
+        return var_env[v.uuid]
+
     # Check var_env by name
     if v.name in var_env:
         return var_env[v.name]
@@ -887,28 +861,34 @@ def _eval_value_concrete(
     return None
 
 
-def _resolve_power_concrete(
-    power: Any,
+
+def _concretize_qubit_operand(
+    v: Any,
     block: Any,
     call_context: dict[str, Any],
     var_env: dict[str, int],
-) -> int:
-    """Resolve power value to a concrete integer."""
-    if isinstance(power, int):
-        return power
-    if isinstance(power, sp.Basic):
-        result = power.subs({sp.Symbol(k): v for k, v in var_env.items()})
-        return int(result) if result.is_number else 1
+) -> str:
+    """Resolve a qubit operand Value to a concrete qubit name.
 
-    if isinstance(power, Handle):
-        val = _eval_value_concrete(power.value, block, call_context, var_env)
-        return val if val is not None else 1
+    Uses the Value's element_indices to trace indices through the IR
+    by UUID, avoiding name collisions when multiple BinOps share the
+    same result name (e.g. 'uint_tmp').
+    """
+    if (
+        hasattr(v, "parent_array")
+        and v.parent_array is not None
+        and hasattr(v, "element_indices")
+        and v.element_indices
+    ):
+        array_name = v.parent_array.name
+        idx_val = _eval_value_concrete(
+            v.element_indices[0], block, call_context, var_env
+        )
+        if idx_val is not None:
+            return f"{array_name}[{idx_val}]"
 
-    if hasattr(power, "value"):
-        val = _eval_value_concrete(power, block, call_context, var_env)
-        return val if val is not None else 1
-
-    return 1
+    # Fallback to string-based resolution
+    return _concretize_qubit_name(v.name, var_env)
 
 
 def _simulate_parallel_depth_concrete(
@@ -941,7 +921,8 @@ def _simulate_parallel_depth_concrete(
         if isinstance(op, GateOperation):
             gate_depth = _estimate_gate_depth(op, num_controls=num_controls)
             qubit_ids = [
-                _concretize_qubit_name(v.name, var_env) for v in op.operands
+                _concretize_qubit_operand(v, block, call_context, var_env)
+                for v in op.operands
             ]
             if qubit_ids:
                 max_current = CircuitDepth.zero()
@@ -956,7 +937,9 @@ def _simulate_parallel_depth_concrete(
         elif isinstance(op, BinOp):
             # Track arithmetic results so qubit names like q[uint_tmp] resolve
             if op.results:
-                result_name = op.results[0].name
+                result_val = op.results[0]
+                result_name = result_val.name
+                result_uuid = result_val.uuid
                 left = _eval_value_concrete(
                     op.operands[0], block, call_context, var_env
                 )
@@ -964,25 +947,28 @@ def _simulate_parallel_depth_concrete(
                     op.operands[1], block, call_context, var_env
                 )
                 if left is not None and right is not None:
+                    computed: int = 0
                     if op.kind == BinOpKind.ADD:
-                        var_env[result_name] = left + right
+                        computed = left + right
                     elif op.kind == BinOpKind.SUB:
-                        var_env[result_name] = left - right
+                        computed = left - right
                     elif op.kind == BinOpKind.MUL:
-                        var_env[result_name] = left * right
+                        computed = left * right
                     elif op.kind == BinOpKind.FLOORDIV:
-                        var_env[result_name] = (
-                            left // right if right != 0 else 0
-                        )
+                        computed = left // right if right != 0 else 0
                     elif op.kind == BinOpKind.DIV:
-                        var_env[result_name] = (
-                            left // right if right != 0 else 0
-                        )
+                        computed = left // right if right != 0 else 0
                     elif op.kind == BinOpKind.POW:
-                        var_env[result_name] = left**right
+                        computed = left**right
+                    # Store by both name (backward compat) and UUID
+                    # (avoids collisions when multiple BinOps share a name)
+                    var_env[result_name] = computed
+                    var_env[result_uuid] = computed
 
         elif isinstance(op, MeasureOperation):
-            qubit_id = _concretize_qubit_name(op.operands[0].name, var_env)
+            qubit_id = _concretize_qubit_operand(
+                op.operands[0], block, call_context, var_env
+            )
             current = qubit_depths.get(qubit_id, CircuitDepth.zero())
             measure_unit = CircuitDepth(
                 total_depth=sp.Integer(1),
@@ -1004,24 +990,26 @@ def _simulate_parallel_depth_concrete(
                 for k in qubit_depths
                 if k.startswith(arr_name + "[") or k == arr_name
             ]
-            if matched_qids:
-                max_current = CircuitDepth.zero()
-                for qid in matched_qids:
-                    max_current = max_current.max(
-                        qubit_depths.get(qid, CircuitDepth.zero())
-                    )
-                measure_unit = CircuitDepth(
-                    total_depth=sp.Integer(1),
-                    t_depth=sp.Integer(0),
-                    two_qubit_depth=sp.Integer(0),
-                    multi_qubit_depth=sp.Integer(0),
-                    rotation_depth=sp.Integer(0),
+            if not matched_qids:
+                matched_qids = [arr_name]
+
+            max_current = CircuitDepth.zero()
+            for qid in matched_qids:
+                max_current = max_current.max(
+                    qubit_depths.get(qid, CircuitDepth.zero())
                 )
-                new_depth = max_current + measure_unit
-                for qid in matched_qids:
-                    qubit_depths[qid] = new_depth
-                if value_depths is not None and op.results:
-                    value_depths[op.results[0].uuid] = new_depth
+            measure_unit = CircuitDepth(
+                total_depth=sp.Integer(1),
+                t_depth=sp.Integer(0),
+                two_qubit_depth=sp.Integer(0),
+                multi_qubit_depth=sp.Integer(0),
+                rotation_depth=sp.Integer(0),
+            )
+            new_depth = max_current + measure_unit
+            for qid in matched_qids:
+                qubit_depths[qid] = new_depth
+            if value_depths is not None and op.results:
+                value_depths[op.results[0].uuid] = new_depth
 
         elif isinstance(op, NotOp):
             if value_depths is not None:
@@ -1178,10 +1166,22 @@ def _simulate_parallel_depth_concrete(
                                     )
                                 )
 
-            # Build qubit name mapping and use local depth map
-            qubit_name_map = _build_qubit_name_map(
-                called_block, op.operands, offset=1
-            )
+            # Build qubit name mapping with concretized names
+            qubit_name_map = {}
+            for formal_idx, formal_input in enumerate(
+                called_block.input_values
+            ):
+                if formal_idx + 1 < len(op.operands):
+                    actual_arg = op.operands[formal_idx + 1]
+                    if (
+                        hasattr(formal_input, "type")
+                        and hasattr(formal_input.type, "is_quantum")
+                        and formal_input.type.is_quantum()
+                    ):
+                        concrete_name = _concretize_qubit_operand(
+                            actual_arg, block, call_context, var_env
+                        )
+                        qubit_name_map[formal_input.name] = concrete_name
             local_depths = _map_depths_to_local(qubit_name_map, qubit_depths)
 
             _simulate_parallel_depth_concrete(
@@ -1228,47 +1228,90 @@ def _simulate_parallel_depth_concrete(
                 continue
 
             new_call_context = call_context.copy()
-            target_operands = op.target_operands
-            for formal_idx, formal_input in enumerate(
-                controlled_block.input_values
-            ):
-                if formal_idx < len(target_operands):
-                    actual_arg = target_operands[formal_idx]
-                    concrete_val = _eval_value_concrete(
-                        actual_arg, block, call_context, var_env
-                    )
-                    if concrete_val is not None:
-                        new_call_context[formal_input.uuid] = sp.Integer(
-                            concrete_val
-                        )
-                    else:
-                        new_call_context[formal_input.uuid] = value_to_expr(
-                            actual_arg, block, call_context, {}
-                        )
-                    if isinstance(actual_arg, ArrayValue) and isinstance(
-                        formal_input, ArrayValue
-                    ):
-                        for dim_formal, dim_actual in zip(
-                            formal_input.shape, actual_arg.shape
-                        ):
-                            dim_val = _eval_value_concrete(
-                                dim_actual, block, call_context, var_env
-                            )
-                            if dim_val is not None:
-                                new_call_context[dim_formal.uuid] = sp.Integer(
-                                    dim_val
-                                )
 
-            # Get control + target qubit names
-            ctrl_names = [
-                _concretize_qubit_name(v.name, var_env)
-                for v in op.control_operands
-            ]
-            tgt_names = [
-                _concretize_qubit_name(v.name, var_env)
-                for v in op.target_operands
-            ]
-            all_qubit_names = ctrl_names + tgt_names
+            if op.has_index_spec:
+                # index_spec mode: skip qubit formal inputs,
+                # map only non-qubit parameters from operands[2:]
+                param_operands = op.operands[2:]
+                param_idx = 0
+                for formal_input in controlled_block.input_values:
+                    if not formal_input.type.is_quantum():
+                        if param_idx < len(param_operands):
+                            actual_arg = param_operands[param_idx]
+                            concrete_val = _eval_value_concrete(
+                                actual_arg, block, call_context, var_env
+                            )
+                            if concrete_val is not None:
+                                new_call_context[
+                                    formal_input.uuid
+                                ] = sp.Integer(concrete_val)
+                            else:
+                                new_call_context[
+                                    formal_input.uuid
+                                ] = value_to_expr(
+                                    actual_arg, block, call_context, {}
+                                )
+                            param_idx += 1
+
+                # Get qubit names from Vector elements
+                vector = op.operands[1]
+                vector_name = vector.name
+                if vector.shape:
+                    vs = _eval_value_concrete(
+                        vector.shape[0], block, call_context, var_env
+                    )
+                    if vs is not None:
+                        all_qubit_names = [
+                            f"{vector_name}[{i}]" for i in range(vs)
+                        ]
+                    else:
+                        all_qubit_names = [vector_name]
+                else:
+                    all_qubit_names = [vector_name]
+            else:
+                target_operands = op.target_operands
+                for formal_idx, formal_input in enumerate(
+                    controlled_block.input_values
+                ):
+                    if formal_idx < len(target_operands):
+                        actual_arg = target_operands[formal_idx]
+                        concrete_val = _eval_value_concrete(
+                            actual_arg, block, call_context, var_env
+                        )
+                        if concrete_val is not None:
+                            new_call_context[
+                                formal_input.uuid
+                            ] = sp.Integer(concrete_val)
+                        else:
+                            new_call_context[
+                                formal_input.uuid
+                            ] = value_to_expr(
+                                actual_arg, block, call_context, {}
+                            )
+                        if isinstance(actual_arg, ArrayValue) and isinstance(
+                            formal_input, ArrayValue
+                        ):
+                            for dim_formal, dim_actual in zip(
+                                formal_input.shape, actual_arg.shape
+                            ):
+                                dim_val = _eval_value_concrete(
+                                    dim_actual, block, call_context, var_env
+                                )
+                                if dim_val is not None:
+                                    new_call_context[
+                                        dim_formal.uuid
+                                    ] = sp.Integer(dim_val)
+
+                # Get control + target qubit names
+                ctrl_names = [
+                    _concretize_qubit_operand(v, block, call_context, var_env)
+                    for v in op.control_operands
+                ]
+                tgt_names = [
+                    _concretize_qubit_operand(v, block, call_context, var_env)
+                    for v in op.target_operands
+                ]
+                all_qubit_names = ctrl_names + tgt_names
 
             # Compute inner depth
             inner_depths: dict[str, CircuitDepth] = {}
@@ -1300,11 +1343,23 @@ def _simulate_parallel_depth_concrete(
             subs_dict = {sp.Symbol(k): v for k, v in var_env.items()}
             composite_depth = composite_depth.substitute(subs_dict)
 
-            qubit_ids = [
+            # Expand array operand names to element-level qubit IDs
+            raw_names = [
                 _concretize_qubit_name(v.name, var_env)
                 for v in op.operands
                 if hasattr(v, "name")
             ]
+            qubit_ids: list[str] = []
+            for name in raw_names:
+                matched = [
+                    k for k in qubit_depths
+                    if k.startswith(name + "[")
+                ]
+                if matched:
+                    qubit_ids.extend(matched)
+                else:
+                    qubit_ids.append(name)
+
             max_current = CircuitDepth.zero()
             for qid in qubit_ids:
                 max_current = max_current.max(
@@ -1390,6 +1445,182 @@ def _interpolate_depth(
     )
 
 
+def _has_binop_name_collisions(operations: list[Operation]) -> bool:
+    """Check if the operations have multiple BinOps with the same result name.
+
+    When BinOps share result names (e.g. 'uint_tmp'), symbolic qubit names
+    like 'qs[uint_tmp]' become ambiguous and the symbolic depth tracker
+    can't distinguish which concrete qubit is meant. In this case, full-block
+    concrete sampling is needed.
+    """
+    seen: set[str] = set()
+    for op in operations:
+        if isinstance(op, BinOp) and op.results:
+            name = op.results[0].name
+            if name in seen:
+                return True
+            seen.add(name)
+    return False
+
+
+def _scan_parametric_for_loops(
+    operations: list[Operation],
+    block: Any,
+    call_context: dict[str, Any],
+    loop_var_symbols: dict[str, sp.Symbol],
+    loop_context: LoopContext,
+) -> tuple[sp.Symbol, list[tuple[sp.Expr, sp.Expr, sp.Expr]]] | None:
+    """Scan top-level operations for ForOperations with parametric bounds.
+
+    Returns (parametric_symbol, loop_bounds_list) or None if no parametric
+    for-loops found.
+    """
+    param_syms_found: set[sp.Symbol] = set()
+    loop_bounds: list[tuple[sp.Expr, sp.Expr, sp.Expr]] = []
+
+    for op in operations:
+        if not isinstance(op, ForOperation) or len(op.operands) < 2:
+            continue
+        try:
+            (
+                loop_var_symbol,
+                start_expr,
+                stop_expr,
+                step_expr,
+                _,
+                _,
+                _,
+            ) = _prepare_for_loop(
+                op, block, call_context, loop_var_symbols, loop_context
+            )
+        except Exception:
+            continue
+
+        all_bound_syms = (
+            start_expr.free_symbols | stop_expr.free_symbols | step_expr.free_symbols
+        )
+        parametric_syms = (
+            all_bound_syms - {loop_var_symbol} - set(loop_var_symbols.values())
+        )
+        if parametric_syms:
+            param_syms_found.update(parametric_syms)
+            loop_bounds.append((start_expr, stop_expr, step_expr))
+
+    if not param_syms_found:
+        return None
+
+    param_sym = sorted(param_syms_found, key=str)[0]
+    return param_sym, loop_bounds
+
+
+def _compute_valid_sample_points_for_block(
+    param_sym: sp.Symbol,
+    loop_bounds: list[tuple[sp.Expr, sp.Expr, sp.Expr]],
+    min_samples: int = 7,
+) -> list[int]:
+    """Compute sample points where all parametric loops have non-zero iterations."""
+    valid: list[int] = []
+    for n_val in range(2, 30):
+        subs = {param_sym: n_val}
+        all_ok = True
+        for start_expr, stop_expr, step_expr in loop_bounds:
+            try:
+                cs = int(start_expr.subs(subs))
+                ce = int(stop_expr.subs(subs))
+                ct = int(step_expr.subs(subs))
+            except (TypeError, ValueError):
+                all_ok = False
+                break
+            if len(range(cs, ce, ct)) == 0:
+                all_ok = False
+                break
+        if all_ok:
+            valid.append(n_val)
+            if len(valid) >= min_samples:
+                break
+    return valid
+
+
+def _estimate_by_full_block_sampling(
+    operations: list[Operation],
+    qubit_depths: QubitDepthMap,
+    block: Any,
+    call_context: dict[str, Any],
+    param_sym: sp.Symbol,
+    valid_points: list[int],
+    num_controls: int | sp.Expr,
+) -> None:
+    """Estimate depth by concretely simulating the entire operations block.
+
+    For each sample value of the parametric symbol, simulates all operations
+    concretely (resolving symbolic qubit names to concrete ones) and records
+    the max depth. Then interpolates to get a symbolic expression.
+
+    This avoids qubit name aliasing issues that arise when tracking symbolic
+    depths through parametric for-loops.
+    """
+    entry_depth = _get_max_depth(qubit_depths)
+    body_qubits = _collect_all_qubit_names(operations)
+    samples: dict[int, CircuitDepth] = {}
+
+    for n_val in valid_points:
+        subs = {param_sym: n_val}
+        var_env: dict[str, int] = {str(param_sym): n_val}
+
+        # Concretize call_context
+        concrete_call_ctx: dict[str, Any] = {}
+        for uuid, expr in call_context.items():
+            if isinstance(expr, sp.Basic) and expr.free_symbols:
+                concrete_call_ctx[uuid] = expr.subs(subs)
+            else:
+                concrete_call_ctx[uuid] = expr
+
+        inner_depths: dict[str, CircuitDepth] = {}
+        _simulate_parallel_depth_concrete(
+            operations,
+            inner_depths,
+            block=block,
+            call_context=concrete_call_ctx,
+            var_env=var_env,
+            num_controls=num_controls,
+        )
+
+        samples[n_val] = _get_max_depth(inner_depths)
+
+    if not samples:
+        return
+
+    # Use last point as verification
+    verify_n = valid_points[-1]
+    verify_sample = samples.pop(verify_n, None)
+
+    interpolated = _interpolate_depth(samples, param_sym)
+
+    if verify_sample is not None:
+        verify_check = interpolated.substitute({param_sym: verify_n})
+        mismatch = any(
+            sp.simplify(
+                getattr(verify_check, field) - getattr(verify_sample, field)
+            )
+            != 0
+            for field in [
+                "total_depth",
+                "t_depth",
+                "two_qubit_depth",
+                "multi_qubit_depth",
+                "rotation_depth",
+            ]
+        )
+        if mismatch:
+            samples[verify_n] = verify_sample
+            interpolated = _interpolate_depth(samples, param_sym)
+
+    # Update qubit_depths
+    new_depth = entry_depth + interpolated
+    for qid in set(qubit_depths) | body_qubits:
+        qubit_depths[qid] = new_depth
+
+
 def _estimate_parallel_depth(
     operations: list[Operation],
     qubit_depths: QubitDepthMap,
@@ -1421,6 +1652,30 @@ def _estimate_parallel_depth(
         call_context = {}
     if loop_var_symbols is None:
         loop_var_symbols = {}
+
+    # Use full-block concrete sampling only when BinOp name collisions
+    # cause qubit name aliasing (e.g. multiple BinOps produce 'uint_tmp',
+    # making 'qs[uint_tmp]' ambiguous in symbolic depth tracking).
+    if _has_binop_name_collisions(operations):
+        param_result = _scan_parametric_for_loops(
+            operations, block, call_context, loop_var_symbols, loop_context
+        )
+        if param_result is not None:
+            param_sym, loop_bounds = param_result
+            valid_points = _compute_valid_sample_points_for_block(
+                param_sym, loop_bounds
+            )
+            if valid_points:
+                _estimate_by_full_block_sampling(
+                    operations,
+                    qubit_depths,
+                    block,
+                    call_context,
+                    param_sym,
+                    valid_points,
+                    num_controls,
+                )
+                return
 
     _MEASURE_UNIT = CircuitDepth(
         total_depth=sp.Integer(1),
@@ -1462,17 +1717,19 @@ def _estimate_parallel_depth(
                     for k in qubit_depths
                     if k.startswith(arr_name + "[") or k == arr_name
                 ]
-                if matched_qids:
-                    max_current = CircuitDepth.zero()
-                    for qid in matched_qids:
-                        max_current = max_current.max(
-                            qubit_depths.get(qid, CircuitDepth.zero())
-                        )
-                    new_depth = max_current + _MEASURE_UNIT
-                    for qid in matched_qids:
-                        qubit_depths[qid] = new_depth
-                    if value_depths is not None and op.results:
-                        value_depths[op.results[0].uuid] = new_depth
+                if not matched_qids:
+                    matched_qids = [arr_name]
+
+                max_current = CircuitDepth.zero()
+                for qid in matched_qids:
+                    max_current = max_current.max(
+                        qubit_depths.get(qid, CircuitDepth.zero())
+                    )
+                new_depth = max_current + _MEASURE_UNIT
+                for qid in matched_qids:
+                    qubit_depths[qid] = new_depth
+                if value_depths is not None and op.results:
+                    value_depths[op.results[0].uuid] = new_depth
 
             case NotOp():
                 if value_depths is not None:
@@ -1619,16 +1876,28 @@ def _estimate_parallel_depth(
                     loop_var_symbols,
                     num_controls=num_controls,
                 )
-                # Composite gate touches all its qubits
-                qubit_ids = [v.name for v in op.operands if hasattr(v, "name")]
-                max_current = CircuitDepth.zero()
-                for qid in qubit_ids:
-                    max_current = max_current.max(
-                        qubit_depths.get(qid, CircuitDepth.zero())
-                    )
-                new_depth = max_current + composite_depth
-                for qid in qubit_ids:
-                    qubit_depths[qid] = new_depth
+                # Expand array operand names to element-level qubit IDs
+                raw_names = [v.name for v in op.operands if hasattr(v, "name")]
+                qubit_ids: list[str] = []
+                for name in raw_names:
+                    matched = [
+                        k for k in qubit_depths
+                        if k.startswith(name + "[")
+                    ]
+                    if matched:
+                        qubit_ids.extend(matched)
+                    else:
+                        qubit_ids.append(name)
+
+                if qubit_ids:
+                    max_current = CircuitDepth.zero()
+                    for qid in qubit_ids:
+                        max_current = max_current.max(
+                            qubit_depths.get(qid, CircuitDepth.zero())
+                        )
+                    new_depth = max_current + composite_depth
+                    for qid in qubit_ids:
+                        qubit_depths[qid] = new_depth
 
             case _:
                 continue
@@ -1787,13 +2056,49 @@ def _handle_for_parallel(
     # Bounds contain parametric symbols -> sample and interpolate
     param_sym = sorted(parametric_syms, key=str)[0]
 
-    _SAMPLE_POINTS = [2, 3, 4, 5, 6, 7]
-    _VERIFY_POINT = 8
+    _MIN_SAMPLES = 6  # Minimum training samples for interpolation
 
     entry_depth = _get_max_depth(qubit_depths)
     samples: dict[int, CircuitDepth] = {}
 
-    for n_val in _SAMPLE_POINTS + [_VERIFY_POINT]:
+    # Dynamically select sample points (skip zero-iteration points)
+    valid_points: list[int] = []
+    for n_val in range(2, 21):
+        subs = {param_sym: n_val}
+        try:
+            cs = int(start_expr.subs(subs))
+            ce = int(stop_expr.subs(subs))
+            ct = int(step_expr.subs(subs))
+        except (TypeError, ValueError):
+            continue
+        if len(range(cs, ce, ct)) == 0:
+            continue  # Skip zero-iteration points
+        valid_points.append(n_val)
+        if len(valid_points) >= _MIN_SAMPLES + 1:  # training + verification
+            break
+
+    if not valid_points:
+        # All sample points have zero iterations -> loop does not contribute depth
+        return
+
+    if len(valid_points) < 3:
+        # Too few valid samples -> conservative fallback
+        increase = _compute_sequential_depth(
+            op.operations,
+            block=sim_block,
+            loop_context=new_context,
+            call_context=call_context,
+            loop_var_symbols=new_loop_var_symbols,
+            num_controls=num_controls,
+        )
+        iterations = (stop_expr - start_expr) / step_expr
+        current_max = _get_max_depth(qubit_depths)
+        new_max = current_max + increase * iterations
+        for qid in set(qubit_depths) | body_qubits:
+            qubit_depths[qid] = new_max
+        return
+
+    for n_val in valid_points:
         subs = {param_sym: n_val}
         try:
             concrete_start = int(start_expr.subs(subs))
@@ -1844,18 +2149,32 @@ def _handle_for_parallel(
             qubit_depths[qid] = new_max
         return
 
-    # Separate verification point
-    verify_sample = samples.pop(_VERIFY_POINT, None)
+    # Separate verification point (last valid point)
+    verify_n = valid_points[-1]
+    verify_sample = samples.pop(verify_n, None)
 
     # Interpolate from sample points
     interpolated = _interpolate_depth(samples, param_sym)
 
     # Verify at verification point
     if verify_sample is not None:
-        verify_check = interpolated.substitute({param_sym: _VERIFY_POINT})
-        if sp.simplify(verify_check.total_depth - verify_sample.total_depth) != 0:
+        verify_check = interpolated.substitute({param_sym: verify_n})
+        mismatch = any(
+            sp.simplify(
+                getattr(verify_check, field) - getattr(verify_sample, field)
+            )
+            != 0
+            for field in [
+                "total_depth",
+                "t_depth",
+                "two_qubit_depth",
+                "multi_qubit_depth",
+                "rotation_depth",
+            ]
+        )
+        if mismatch:
             # Verification failed - include verify point in interpolation
-            samples[_VERIFY_POINT] = verify_sample
+            samples[verify_n] = verify_sample
             interpolated = _interpolate_depth(samples, param_sym)
 
     # Update qubit_depths
@@ -1943,29 +2262,59 @@ def _handle_controlled_u_parallel(
         return
 
     new_call_context = call_context.copy()
-    target_operands = op.target_operands
 
-    for formal_idx, formal_input in enumerate(controlled_block.input_values):
-        if formal_idx < len(target_operands):
-            actual_arg = target_operands[formal_idx]
-            resolved_arg = value_to_expr(
-                actual_arg, block, call_context, loop_var_symbols
-            )
-            new_call_context[formal_input.uuid] = resolved_arg
-
-            if isinstance(actual_arg, ArrayValue) and isinstance(
-                formal_input, ArrayValue
-            ):
-                for dim_formal, dim_actual in zip(
-                    formal_input.shape, actual_arg.shape
-                ):
-                    resolved_dim = value_to_expr(
-                        dim_actual, block, call_context, loop_var_symbols
+    if op.has_index_spec:
+        # index_spec mode: skip qubit formal inputs,
+        # map only non-qubit parameters from operands[2:]
+        param_operands = op.operands[2:]
+        param_idx = 0
+        for formal_input in controlled_block.input_values:
+            if not formal_input.type.is_quantum():
+                if param_idx < len(param_operands):
+                    actual_arg = param_operands[param_idx]
+                    resolved_arg = value_to_expr(
+                        actual_arg, block, call_context, loop_var_symbols
                     )
-                    new_call_context[dim_formal.uuid] = resolved_dim
+                    new_call_context[formal_input.uuid] = resolved_arg
+                    if isinstance(actual_arg, ArrayValue) and isinstance(
+                        formal_input, ArrayValue
+                    ):
+                        for dim_formal, dim_actual in zip(
+                            formal_input.shape, actual_arg.shape
+                        ):
+                            resolved_dim = value_to_expr(
+                                dim_actual, block, call_context, loop_var_symbols
+                            )
+                            new_call_context[dim_formal.uuid] = resolved_dim
+                    param_idx += 1
 
-    # Get all qubits involved (control + target)
-    all_qubit_names = [v.name for v in op.operands if hasattr(v, "name")]
+        # Use Vector name for symbolic qubit tracking
+        vector = op.operands[1]
+        all_qubit_names = [vector.name]
+    else:
+        target_operands = op.target_operands
+
+        for formal_idx, formal_input in enumerate(controlled_block.input_values):
+            if formal_idx < len(target_operands):
+                actual_arg = target_operands[formal_idx]
+                resolved_arg = value_to_expr(
+                    actual_arg, block, call_context, loop_var_symbols
+                )
+                new_call_context[formal_input.uuid] = resolved_arg
+
+                if isinstance(actual_arg, ArrayValue) and isinstance(
+                    formal_input, ArrayValue
+                ):
+                    for dim_formal, dim_actual in zip(
+                        formal_input.shape, actual_arg.shape
+                    ):
+                        resolved_dim = value_to_expr(
+                            dim_actual, block, call_context, loop_var_symbols
+                        )
+                        new_call_context[dim_formal.uuid] = resolved_dim
+
+        # Get all qubits involved (control + target)
+        all_qubit_names = [v.name for v in op.operands if hasattr(v, "name")]
 
     # Compute inner depth with resolved num_controls
     inner_depths: QubitDepthMap = {}
@@ -2138,29 +2487,76 @@ def _compute_sequential_depth(
                 controlled_block = op.block
                 if isinstance(controlled_block, BlockValue):
                     new_call_context = call_context.copy()
-                    target_operands = op.target_operands
-                    for formal_idx, formal_input in enumerate(
-                        controlled_block.input_values
-                    ):
-                        if formal_idx < len(target_operands):
-                            actual_arg = target_operands[formal_idx]
-                            resolved_arg = value_to_expr(
-                                actual_arg, block, call_context, loop_var_symbols
-                            )
-                            new_call_context[formal_input.uuid] = resolved_arg
-                            if isinstance(actual_arg, ArrayValue) and isinstance(
-                                formal_input, ArrayValue
-                            ):
-                                for dim_formal, dim_actual in zip(
-                                    formal_input.shape, actual_arg.shape
-                                ):
-                                    resolved_dim = value_to_expr(
-                                        dim_actual,
+
+                    if op.has_index_spec:
+                        # index_spec mode: skip qubit formal inputs,
+                        # map only non-qubit parameters
+                        param_operands = op.operands[2:]
+                        param_idx = 0
+                        for formal_input in controlled_block.input_values:
+                            if not formal_input.type.is_quantum():
+                                if param_idx < len(param_operands):
+                                    actual_arg = param_operands[param_idx]
+                                    resolved_arg = value_to_expr(
+                                        actual_arg,
                                         block,
                                         call_context,
                                         loop_var_symbols,
                                     )
-                                    new_call_context[dim_formal.uuid] = resolved_dim
+                                    new_call_context[
+                                        formal_input.uuid
+                                    ] = resolved_arg
+                                    if isinstance(
+                                        actual_arg, ArrayValue
+                                    ) and isinstance(
+                                        formal_input, ArrayValue
+                                    ):
+                                        for dim_formal, dim_actual in zip(
+                                            formal_input.shape,
+                                            actual_arg.shape,
+                                        ):
+                                            resolved_dim = value_to_expr(
+                                                dim_actual,
+                                                block,
+                                                call_context,
+                                                loop_var_symbols,
+                                            )
+                                            new_call_context[
+                                                dim_formal.uuid
+                                            ] = resolved_dim
+                                    param_idx += 1
+                    else:
+                        target_operands = op.target_operands
+                        for formal_idx, formal_input in enumerate(
+                            controlled_block.input_values
+                        ):
+                            if formal_idx < len(target_operands):
+                                actual_arg = target_operands[formal_idx]
+                                resolved_arg = value_to_expr(
+                                    actual_arg,
+                                    block,
+                                    call_context,
+                                    loop_var_symbols,
+                                )
+                                new_call_context[
+                                    formal_input.uuid
+                                ] = resolved_arg
+                                if isinstance(
+                                    actual_arg, ArrayValue
+                                ) and isinstance(formal_input, ArrayValue):
+                                    for dim_formal, dim_actual in zip(
+                                        formal_input.shape,
+                                        actual_arg.shape,
+                                    ):
+                                        resolved_dim = value_to_expr(
+                                            dim_actual,
+                                            block,
+                                            call_context,
+                                            loop_var_symbols,
+                                        )
+                                        new_call_context[
+                                            dim_formal.uuid
+                                        ] = resolved_dim
 
                     inner_depth = _compute_sequential_depth(
                         controlled_block.operations,

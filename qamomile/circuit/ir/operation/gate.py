@@ -97,6 +97,13 @@ class ControlledUOperation(Operation):
 
     num_controls: int | Value = 1  # int = concrete, Value = symbolic
     power: int = 1
+    target_indices: list[Value] | None = None
+    controlled_indices: list[Value] | None = None
+
+    @property
+    def has_index_spec(self) -> bool:
+        """Whether target/control positions are specified via index lists."""
+        return self.target_indices is not None or self.controlled_indices is not None
 
     @property
     def is_symbolic_num_controls(self) -> bool:
@@ -111,6 +118,8 @@ class ControlledUOperation(Operation):
     @property
     def control_operands(self):
         """Get the control qubit values."""
+        if self.has_index_spec:
+            return [self.operands[1]]  # Entire Vector
         if self.is_symbolic_num_controls:
             # Symbolic: operands[1] is the control array Value
             return [self.operands[1]]
@@ -119,13 +128,27 @@ class ControlledUOperation(Operation):
     @property
     def target_operands(self):
         """Get the target qubit values (arguments to U)."""
+        if self.has_index_spec:
+            return []  # Targets are implicit via index lists
         if self.is_symbolic_num_controls:
             # Symbolic: operands[2:] are targets (after BlockValue and control array)
             return self.operands[2:]
         return self.operands[1 + self.num_controls :]
 
     @property
+    def param_operands(self):
+        """Get parameter operands (non-qubit, non-block)."""
+        if self.has_index_spec:
+            return self.operands[2:]
+        return []
+
+    @property
     def signature(self) -> Signature:
+        if self.has_index_spec:
+            raise NotImplementedError(
+                "Cannot compute signature for ControlledUOperation with "
+                "index spec."
+            )
         if self.is_symbolic_num_controls:
             raise NotImplementedError(
                 "Cannot compute signature for ControlledUOperation with "

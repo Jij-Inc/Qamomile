@@ -8,7 +8,7 @@ from qamomile.circuit.frontend.handle import Handle
 from qamomile.circuit.frontend.handle.primitives import Float, Qubit, UInt
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
-from qamomile.circuit.ir.types.primitives import FloatType
+from qamomile.circuit.ir.types.primitives import FloatType, UIntType
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import QubitAliasError
 
@@ -51,23 +51,43 @@ class ControlledGate:
         self,
         *args: Any,
         power: int = 1,
+        target_indices: list[int | UInt] | None = None,
+        controlled_indices: list[int | UInt] | None = None,
         **params: ParamValue,
-    ) -> tuple[Any, ...]:
+    ) -> tuple[Any, ...] | Any:
         """Apply controlled gate.
 
         For concrete num_controls (int):
             *args: First num_controls qubits are controls, rest are targets.
         For symbolic num_controls (UInt):
             args[0]: Vector[Qubit] (controls), args[1:]: individual Qubit targets.
+        With target_indices or controlled_indices:
+            args[0]: Single Vector[Qubit], indices specify which elements are
+            targets (or controls). Returns a single Vector (not a tuple).
 
         Args:
             *args: Control and target qubits.
             power: Number of times to apply U. Default is 1.
+            target_indices: Indices within the Vector that are targets.
+                The remaining elements become controls.
+            controlled_indices: Indices within the Vector that are controls.
+                The remaining elements become targets.
             **params: Parameters for the underlying gate (e.g., theta=0.5)
 
         Returns:
-            Tuple of output handles.
+            Tuple of output handles, or single Vector when using index spec.
         """
+        if target_indices is not None and controlled_indices is not None:
+            raise ValueError(
+                "Cannot specify both target_indices and controlled_indices. "
+                "Use one or the other."
+            )
+
+        if target_indices is not None or controlled_indices is not None:
+            return self._call_with_index_spec(
+                args, power, target_indices, controlled_indices, params
+            )
+
         num_controls = self._num_controls
 
         if isinstance(num_controls, UInt):
@@ -172,6 +192,110 @@ class ControlledGate:
             )
 
         return tuple(output_qubits)
+
+    def _call_with_index_spec(
+        self,
+        args: tuple[Any, ...],
+        power: int,
+        target_indices: list[int | UInt] | None,
+        controlled_indices: list[int | UInt] | None,
+        params: dict[str, ParamValue],
+    ) -> Any:
+        """Handle index-spec mode: single Vector with explicit target/control indices."""
+        from qamomile.circuit.frontend.handle.array import ArrayBase, Vector
+
+        # Validate: exactly one Vector argument
+        if len(args) != 1 or not isinstance(args[0], ArrayBase):
+            raise ValueError(
+                "When target_indices or controlled_indices is specified, "
+                "exactly one Vector[Qubit] must be provided."
+            )
+
+        indices = target_indices if target_indices is not None else controlled_indices
+        assert indices is not None
+
+        # Validate: non-empty
+        if len(indices) == 0:
+            raise ValueError(
+                "At least one index must be specified in "
+                "target_indices or controlled_indices."
+            )
+
+        # Validate: no duplicate concrete indices
+        concrete = [i for i in indices if isinstance(i, int)]
+        if len(set(concrete)) != len(concrete):
+            raise ValueError(
+                "Duplicate indices are not allowed in "
+                "target_indices/controlled_indices."
+            )
+
+        # Convert indices to Value list
+        def _to_value_list(idx_list: list[int | UInt]) -> list[Value]:
+            result: list[Value] = []
+            for idx in idx_list:
+                if isinstance(idx, int):
+                    val = Value(
+                        type=UIntType(),
+                        name=f"idx_{idx}",
+                        params={"const": idx},
+                    )
+                    result.append(val)
+                elif isinstance(idx, UInt):
+                    result.append(idx.value)
+                else:
+                    raise TypeError(f"Index must be int or UInt, got {type(idx)}")
+            return result
+
+        ti_values = _to_value_list(target_indices) if target_indices is not None else None
+        ci_values = (
+            _to_value_list(controlled_indices)
+            if controlled_indices is not None
+            else None
+        )
+
+        vector = args[0]
+        # Consume the Vector (linear type)
+        vector = vector.consume(operation_name="ControlledU[index_spec]")
+
+        block = self._qkernel.block
+
+        # operands: [BlockValue, ArrayValue, params...]
+        operands: list[Any] = [block, vector.value]
+        for param_name, param_value in params.items():
+            if isinstance(param_value, Handle):
+                operands.append(param_value.value)
+            else:
+                param_val = Value(
+                    type=FloatType(),
+                    name=f"ctrl_param_{param_name}",
+                    params={"const": float(param_value)},
+                )
+                operands.append(param_val)
+
+        # results: [ArrayValue (updated Vector)]
+        results = [vector.value.next_version()]
+
+        # Get num_controls as IR Value
+        nc = self._num_controls
+        if isinstance(nc, UInt):
+            nc = nc.value
+
+        op = ControlledUOperation(
+            operands=operands,
+            results=results,
+            num_controls=nc,
+            power=power,
+            target_indices=ti_values,
+            controlled_indices=ci_values,
+        )
+
+        tracer = get_current_tracer()
+        tracer.add_operation(op)
+
+        # Return a single Vector (not tuple)
+        return Vector._create_from_value(
+            results[0], vector.shape, vector.value.name
+        )
 
     def _call_symbolic(
         self,
