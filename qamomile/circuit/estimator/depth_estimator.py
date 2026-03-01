@@ -43,6 +43,12 @@ from qamomile.circuit.ir.operation.operation import Operation
 from qamomile.circuit.ir.value import Value
 
 if TYPE_CHECKING:
+    pass
+
+
+class _UnresolvableForOpError(Exception):
+    """Raised when _simulate_parallel_depth_concrete encounters a ForOperation
+    whose bounds cannot be resolved to concrete integers."""
     from qamomile.circuit.ir.block import Block
     from qamomile.circuit.ir.block_value import BlockValue
 
@@ -912,7 +918,8 @@ def _simulate_parallel_depth_concrete(
     """Simulate parallel depth with fully concrete variable values.
 
     Like _estimate_parallel_depth but resolves all loop variables and
-    qubit indices to concrete integers. No symbolic manipulation.
+    qubit indices to concrete integers. For inner ForOperations with
+    unresolvable bounds, delegates to _estimate_parallel_depth (symbolic path).
 
     Args:
         operations: List of operations to simulate
@@ -1161,7 +1168,7 @@ def _simulate_parallel_depth_concrete(
                 else 1
             )
             if start_val is None or stop_val is None or step_val is None:
-                continue
+                raise _UnresolvableForOpError()
             for loop_val in range(start_val, stop_val, step_val):
                 inner_env = var_env.copy()
                 inner_env[op.loop_var] = loop_val
@@ -1173,7 +1180,7 @@ def _simulate_parallel_depth_concrete(
                     var_env=inner_env,
                     num_controls=num_controls,
                     value_depths=value_depths,
-                )
+                    )
 
         elif isinstance(op, CallBlockOperation):
             called_block = op.operands[0]
@@ -1378,9 +1385,9 @@ def _interpolate_depth(
     sorted_ns = sorted(samples.keys())
 
     def interpolate_field(field_getter: Any) -> sp.Expr:
-        vals = {n_val: int(field_getter(samples[n_val])) for n_val in sorted_ns}
+        vals = {n_val: field_getter(samples[n_val]) for n_val in sorted_ns}
 
-        if all(v == 0 for v in vals.values()):
+        if all(sp.simplify(v) == 0 for v in vals.values()):
             return sp.Integer(0)
 
         pts = [(n_val, vals[n_val]) for n_val in sorted_ns]
@@ -1405,8 +1412,8 @@ def _interpolate_depth(
                 a_s * 2**n3 + b_s * n3 + c_s - v3,
             ]
             sol = sp.solve(eqs, [a_s, b_s, c_s])
-            if sol and all(
-                isinstance(sol[s], sp.Rational) for s in [a_s, b_s, c_s]
+            if sol and isinstance(sol, dict) and all(
+                isinstance(sol.get(s), sp.Rational) for s in [a_s, b_s, c_s]
             ):
                 expr = sol[a_s] * 2**sym + sol[b_s] * sym + sol[c_s]
                 if all(
@@ -1545,6 +1552,7 @@ def _estimate_by_full_block_sampling(
     body_qubits = _collect_all_qubit_names(operations)
     samples: dict[int, CircuitDepth] = {}
 
+
     for n_val in valid_points:
         subs = {param_sym: n_val}
         var_env: dict[str, int] = {str(param_sym): n_val}
@@ -1558,14 +1566,18 @@ def _estimate_by_full_block_sampling(
                 concrete_call_ctx[uuid] = expr
 
         inner_depths: dict[str, CircuitDepth] = {}
-        _simulate_parallel_depth_concrete(
-            operations,
-            inner_depths,
-            block=block,
-            call_context=concrete_call_ctx,
-            var_env=var_env,
-            num_controls=num_controls,
-        )
+        try:
+            _simulate_parallel_depth_concrete(
+                operations,
+                inner_depths,
+                block=block,
+                call_context=concrete_call_ctx,
+                var_env=var_env,
+                num_controls=num_controls,
+            )
+        except _UnresolvableForOpError:
+            # Body has additional unresolvable symbols; skip this sample
+            continue
 
         samples[n_val] = _get_max_depth(inner_depths)
 
@@ -2070,18 +2082,39 @@ def _handle_for_parallel(
             return
 
         var_env: dict[str, int] = {}
-        for loop_val in range(start_val, stop_val, step_val):
-            inner_env = var_env.copy()
-            inner_env[op.loop_var] = loop_val
-            _simulate_parallel_depth_concrete(
+        try:
+            for loop_val in range(start_val, stop_val, step_val):
+                inner_env = var_env.copy()
+                inner_env[op.loop_var] = loop_val
+                _simulate_parallel_depth_concrete(
+                    op.operations,
+                    qubit_depths,
+                    block=sim_block,
+                    call_context=call_context,
+                    var_env=inner_env,
+                    num_controls=num_controls,
+                    value_depths=value_depths,
+                )
+        except _UnresolvableForOpError:
+            # Body contains ForOps with unresolvable bounds.
+            # Fall back to symbolic per-iteration depth estimation.
+            per_iter_depths: QubitDepthMap = {}
+            _estimate_parallel_depth(
                 op.operations,
-                qubit_depths,
+                per_iter_depths,
                 block=sim_block,
                 call_context=call_context,
-                var_env=inner_env,
+                loop_var_symbols=new_loop_var_symbols,
                 num_controls=num_controls,
-                value_depths=value_depths,
             )
+            increase = _get_max_depth(per_iter_depths)
+            iterations = stop_expr - start_expr
+            if step_expr != 1:
+                iterations = iterations / step_expr
+            current_max = _get_max_depth(qubit_depths)
+            new_max = current_max + increase * iterations
+            for qid in set(qubit_depths) | body_qubits:
+                qubit_depths[qid] = new_max
         return
 
     # Bounds contain parametric symbols -> sample and interpolate
@@ -2129,6 +2162,7 @@ def _handle_for_parallel(
             qubit_depths[qid] = new_max
         return
 
+
     for n_val in valid_points:
         subs = {param_sym: n_val}
         try:
@@ -2149,17 +2183,35 @@ def _handle_for_parallel(
                 concrete_call_ctx[uuid] = expr
 
         inner_depths: dict[str, CircuitDepth] = {}
-        for loop_val in range(concrete_start, concrete_stop, concrete_step):
-            inner_env = var_env.copy()
-            inner_env[op.loop_var] = loop_val
-            _simulate_parallel_depth_concrete(
+        try:
+            for loop_val in range(concrete_start, concrete_stop, concrete_step):
+                inner_env = var_env.copy()
+                inner_env[op.loop_var] = loop_val
+                _simulate_parallel_depth_concrete(
+                    op.operations,
+                    inner_depths,
+                    block=sim_block,
+                    call_context=concrete_call_ctx,
+                    var_env=inner_env,
+                    num_controls=num_controls,
+                )
+        except _UnresolvableForOpError:
+            # Body contains ForOps with additional unresolvable symbols.
+            # Fall back to symbolic per-iteration depth, then interpolate
+            # on the outer parametric symbol only.
+            per_iter_depths: QubitDepthMap = {}
+            _estimate_parallel_depth(
                 op.operations,
-                inner_depths,
+                per_iter_depths,
                 block=sim_block,
                 call_context=concrete_call_ctx,
-                var_env=inner_env,
+                loop_var_symbols=new_loop_var_symbols,
                 num_controls=num_controls,
             )
+            per_iter_increase = _get_max_depth(per_iter_depths)
+            n_iterations = len(range(concrete_start, concrete_stop, concrete_step))
+            samples[n_val] = per_iter_increase * n_iterations
+            continue
 
         samples[n_val] = _get_max_depth(inner_depths)
 
