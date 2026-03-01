@@ -27,6 +27,7 @@ from qamomile.circuit.ir.operation.composite_gate import (
     ResourceMetadata,
 )
 from qamomile.circuit.ir.operation.control_flow import (
+    ForItemsOperation,
     ForOperation,
     IfOperation,
     WhileOperation,
@@ -35,6 +36,7 @@ from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     GateOperation,
     MeasureOperation,
+    MeasureQFixedOperation,
     MeasureVectorOperation,
 )
 from qamomile.circuit.ir.operation.operation import Operation
@@ -651,6 +653,27 @@ def _get_max_depth(qubit_depths: QubitDepthMap) -> CircuitDepth:
     return result
 
 
+def _resolve_power_expr(
+    power: Any,
+    block: Block | None,
+    call_context: dict[str, Any] | None,
+    loop_var_symbols: dict[str, sp.Symbol] | None,
+) -> sp.Expr | int:
+    """Resolve power value to SymPy expression or int."""
+    if isinstance(power, (int, sp.Basic)):
+        return power
+
+    from qamomile.circuit.frontend.handle import Handle
+
+    if isinstance(power, Handle):
+        return value_to_expr(power.value, block, call_context, loop_var_symbols)
+
+    if hasattr(power, "value"):
+        return value_to_expr(power, block, call_context, loop_var_symbols)
+
+    return power
+
+
 def _collect_gate_qubit_names(operations: list[Operation]) -> set[str]:
     """Collect qubit names from GateOperation operands in operation list."""
     names: set[str] = set()
@@ -663,6 +686,8 @@ def _collect_gate_qubit_names(operations: list[Operation]) -> set[str]:
         elif isinstance(op, IfOperation):
             names.update(_collect_gate_qubit_names(op.true_operations))
             names.update(_collect_gate_qubit_names(op.false_operations))
+        elif isinstance(op, ForItemsOperation):
+            names.update(_collect_gate_qubit_names(op.operations))
     return names
 
 
@@ -697,6 +722,8 @@ def _collect_all_qubit_names(operations: list[Operation]) -> set[str]:
             names.add(op.operands[0].name)
         elif isinstance(op, MeasureVectorOperation):
             names.add(op.operands[0].name)
+        elif isinstance(op, MeasureQFixedOperation):
+            names.add(op.operands[0].name)
         elif isinstance(op, ForOperation):
             names.update(_collect_all_qubit_names(op.operations))
         elif isinstance(op, WhileOperation):
@@ -704,6 +731,8 @@ def _collect_all_qubit_names(operations: list[Operation]) -> set[str]:
         elif isinstance(op, IfOperation):
             names.update(_collect_all_qubit_names(op.true_operations))
             names.update(_collect_all_qubit_names(op.false_operations))
+        elif isinstance(op, ForItemsOperation):
+            names.update(_collect_all_qubit_names(op.operations))
     return names
 
 
@@ -1011,6 +1040,35 @@ def _simulate_parallel_depth_concrete(
             if value_depths is not None and op.results:
                 value_depths[op.results[0].uuid] = new_depth
 
+        elif isinstance(op, MeasureQFixedOperation):
+            qfixed = op.operands[0]
+            qfixed_name = _concretize_qubit_name(qfixed.name, var_env)
+            matched_qids = [
+                k
+                for k in qubit_depths
+                if k.startswith(qfixed_name + "[") or k == qfixed_name
+            ]
+            if not matched_qids:
+                matched_qids = [qfixed_name]
+
+            max_current = CircuitDepth.zero()
+            for qid in matched_qids:
+                max_current = max_current.max(
+                    qubit_depths.get(qid, CircuitDepth.zero())
+                )
+            measure_unit = CircuitDepth(
+                total_depth=sp.Integer(1),
+                t_depth=sp.Integer(0),
+                two_qubit_depth=sp.Integer(0),
+                multi_qubit_depth=sp.Integer(0),
+                rotation_depth=sp.Integer(0),
+            )
+            new_depth = max_current + measure_unit
+            for qid in matched_qids:
+                qubit_depths[qid] = new_depth
+            if value_depths is not None and op.results:
+                value_depths[op.results[0].uuid] = new_depth
+
         elif isinstance(op, NotOp):
             if value_depths is not None:
                 input_depth = value_depths.get(
@@ -1050,7 +1108,7 @@ def _simulate_parallel_depth_concrete(
 
             branch_qubits = _collect_all_qubit_names(
                 op.true_operations
-            ) | _collect_gate_qubit_names(op.false_operations)
+            ) | _collect_all_qubit_names(op.false_operations)
             for qid in branch_qubits:
                 current = qubit_depths.get(qid, CircuitDepth.zero())
                 true_depths[qid] = current.max(condition_depth)
@@ -1090,6 +1148,21 @@ def _simulate_parallel_depth_concrete(
                     phi_op.false_value.name, CircuitDepth.zero()
                 )
                 qubit_depths[phi_op.output.name] = tv_depth.max(fv_depth)
+
+        elif isinstance(op, ForItemsOperation):
+            # Concrete simulation: iterate body once (dict size unknown)
+            inner_depths_copy = qubit_depths.copy()
+            _simulate_parallel_depth_concrete(
+                op.operations,
+                inner_depths_copy,
+                block=block,
+                call_context=call_context,
+                var_env=var_env,
+                num_controls=num_controls,
+                value_depths=value_depths,
+            )
+            for qid, d in inner_depths_copy.items():
+                qubit_depths[qid] = d
 
         elif isinstance(op, ForOperation):
             if len(op.operands) < 2:
@@ -1324,6 +1397,23 @@ def _simulate_parallel_depth_concrete(
                 num_controls=nc,
             )
             inner_depth = _get_max_depth(inner_depths)
+
+            # Multiply by power if U^k is applied
+            if isinstance(op.power, int):
+                power_val = op.power
+            else:
+                from qamomile.circuit.frontend.handle import Handle
+
+                pv = op.power.value if isinstance(op.power, Handle) else op.power
+                if isinstance(pv, Value):
+                    concrete = _eval_value_concrete(
+                        pv, block, call_context, var_env
+                    )
+                    power_val = concrete if concrete is not None else 1
+                else:
+                    power_val = op.power
+            if power_val != 1:
+                inner_depth = inner_depth * power_val
 
             # Update all involved qubits
             max_current = CircuitDepth.zero()
@@ -1731,6 +1821,28 @@ def _estimate_parallel_depth(
                 if value_depths is not None and op.results:
                     value_depths[op.results[0].uuid] = new_depth
 
+            case MeasureQFixedOperation():
+                qfixed = op.operands[0]
+                qfixed_name = qfixed.name
+                matched_qids = [
+                    k
+                    for k in qubit_depths
+                    if k.startswith(qfixed_name + "[") or k == qfixed_name
+                ]
+                if not matched_qids:
+                    matched_qids = [qfixed_name]
+
+                max_current = CircuitDepth.zero()
+                for qid in matched_qids:
+                    max_current = max_current.max(
+                        qubit_depths.get(qid, CircuitDepth.zero())
+                    )
+                new_depth = max_current + _MEASURE_UNIT
+                for qid in matched_qids:
+                    qubit_depths[qid] = new_depth
+                if value_depths is not None and op.results:
+                    value_depths[op.results[0].uuid] = new_depth
+
             case NotOp():
                 if value_depths is not None:
                     input_depth = value_depths.get(
@@ -1788,6 +1900,33 @@ def _estimate_parallel_depth(
                 for qid in set(qubit_depths) | body_qubits:
                     qubit_depths[qid] = new_max
 
+            case ForItemsOperation():
+                inner_depth = _compute_sequential_depth(
+                    op.operations,
+                    block=block,
+                    loop_context=loop_context,
+                    call_context=call_context,
+                    loop_var_symbols=loop_var_symbols,
+                    num_controls=num_controls,
+                )
+                dict_operand = op.operands[0]
+                if (
+                    hasattr(dict_operand, "is_parameter")
+                    and dict_operand.is_parameter()
+                ):
+                    dict_name = dict_operand.parameter_name() or dict_operand.name
+                else:
+                    dict_name = dict_operand.name
+                cardinality_sym = sp.Symbol(
+                    f"|{dict_name}|", integer=True, positive=True
+                )
+                total_depth = inner_depth * cardinality_sym
+                body_qubits = _collect_all_qubit_names(op.operations)
+                current_max = _get_max_depth(qubit_depths)
+                new_max = current_max + total_depth
+                for qid in set(qubit_depths) | body_qubits:
+                    qubit_depths[qid] = new_max
+
             case IfOperation():
                 # Get condition depth from value_depths
                 condition_depth = CircuitDepth.zero()
@@ -1802,7 +1941,7 @@ def _estimate_parallel_depth(
                 # Bump branch qubit depths to condition_depth
                 branch_qubits = _collect_all_qubit_names(
                     op.true_operations
-                ) | _collect_gate_qubit_names(op.false_operations)
+                ) | _collect_all_qubit_names(op.false_operations)
                 for qid in branch_qubits:
                     current = qubit_depths.get(qid, CircuitDepth.zero())
                     bumped = current.max(condition_depth)
@@ -2331,6 +2470,13 @@ def _handle_controlled_u_parallel(
 
     inner_depth = _get_max_depth(inner_depths)
 
+    # Multiply by power if U^k is applied
+    power_expr = _resolve_power_expr(
+        op.power, block, call_context, loop_var_symbols
+    )
+    if power_expr != 1:
+        inner_depth = inner_depth * power_expr
+
     # All involved qubits get the max depth
     max_current = CircuitDepth.zero()
     for qid in all_qubit_names:
@@ -2378,6 +2524,31 @@ def _compute_sequential_depth(
 
             case MeasureVectorOperation():
                 depth = depth + _MEASURE_UNIT
+
+            case MeasureQFixedOperation():
+                depth = depth + _MEASURE_UNIT
+
+            case ForItemsOperation():
+                inner_depth = _compute_sequential_depth(
+                    op.operations,
+                    block=block,
+                    loop_context=loop_context,
+                    call_context=call_context,
+                    loop_var_symbols=loop_var_symbols,
+                    num_controls=num_controls,
+                )
+                dict_operand = op.operands[0]
+                if (
+                    hasattr(dict_operand, "is_parameter")
+                    and dict_operand.is_parameter()
+                ):
+                    dict_name = dict_operand.parameter_name() or dict_operand.name
+                else:
+                    dict_name = dict_operand.name
+                cardinality_sym = sp.Symbol(
+                    f"|{dict_name}|", integer=True, positive=True
+                )
+                depth = depth + inner_depth * cardinality_sym
 
             case ForOperation():
                 if len(op.operands) >= 2:
@@ -2566,6 +2737,14 @@ def _compute_sequential_depth(
                         loop_var_symbols=loop_var_symbols,
                         num_controls=nc_expr,
                     )
+
+                    # Multiply by power if U^k is applied
+                    power_expr = _resolve_power_expr(
+                        op.power, block, call_context, loop_var_symbols
+                    )
+                    if power_expr != 1:
+                        inner_depth = inner_depth * power_expr
+
                     depth = depth + inner_depth
 
             case CompositeGateOperation():

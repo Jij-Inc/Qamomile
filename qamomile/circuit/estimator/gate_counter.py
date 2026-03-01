@@ -25,6 +25,7 @@ from qamomile.circuit.ir.operation.composite_gate import (
     ResourceMetadata,
 )
 from qamomile.circuit.ir.operation.control_flow import (
+    ForItemsOperation,
     ForOperation,
     IfOperation,
     WhileOperation,
@@ -250,10 +251,18 @@ def _count_gate_operation(
 
         # Controlled T/Tdg are 2q non-Clifford gates, not simple T gates
         t_count = sp.Integer(0)
-        # Only CX, CY, CZ are standard Clifford gates
-        clifford = (
-            sp.Integer(1) if gate_name in _CONTROLLED_CLIFFORD_GATES else sp.Integer(0)
-        )
+        # Only CX, CY, CZ (num_controls=1) are standard Clifford gates
+        # CCX, CCZ (num_controls>=2) are NOT Clifford
+        if gate_name in _CONTROLLED_CLIFFORD_GATES:
+            if isinstance(num_controls, int):
+                clifford = sp.Integer(1) if num_controls == 1 else sp.Integer(0)
+            else:
+                clifford = sp.Piecewise(
+                    (sp.Integer(1), sp.Eq(num_controls, 1)),
+                    (sp.Integer(0), True),
+                )
+        else:
+            clifford = sp.Integer(0)
         rotation = sp.Integer(1) if gate_name in ROTATION_GATES else sp.Integer(0)
     else:
         is_clifford = gate_name in CLIFFORD_GATES
@@ -323,6 +332,7 @@ def _count_composite_gate(
     call_context: dict[str, Any],
     loop_var_symbols: dict[str, sp.Symbol],
     num_controls: int | sp.Expr = 0,
+    parent_blocks: list | None = None,
 ) -> GateCount:
     """Count gates in a CompositeGateOperation.
 
@@ -370,7 +380,8 @@ def _count_composite_gate(
                 if formal_idx + 1 < len(op.operands):
                     actual_arg = op.operands[formal_idx + 1]
                     resolved_arg = value_to_expr(
-                        actual_arg, block, call_context, loop_var_symbols
+                        actual_arg, block, call_context, loop_var_symbols,
+                        parent_blocks=parent_blocks,
                     )
                     new_call_context[formal_input.uuid] = resolved_arg
 
@@ -378,6 +389,7 @@ def _count_composite_gate(
             return _count_from_operations(
                 impl_block.operations,
                 block=impl_block,
+                parent_blocks=[],
                 loop_context=loop_context,
                 call_context=new_call_context,
                 loop_var_symbols=loop_var_symbols,
@@ -405,7 +417,8 @@ def _count_composite_gate(
                 if isinstance(parent, ArrayValue) and parent.shape:
                     # Get the symbolic dimension from the parent array
                     n = value_to_expr(
-                        parent.shape[0], block, call_context, loop_var_symbols
+                        parent.shape[0], block, call_context, loop_var_symbols,
+                        parent_blocks=parent_blocks,
                     )
 
             # If we couldn't trace to parent array, use the concrete count
@@ -436,6 +449,7 @@ def _count_composite_gate(
                                     block,
                                     call_context,
                                     loop_var_symbols,
+                                    parent_blocks=parent_blocks,
                                 )
                                 break
 
@@ -480,6 +494,7 @@ def value_to_expr(
     block: Block | None = None,
     call_context: dict[str, Any] | None = None,
     loop_var_symbols: dict[str, sp.Symbol] | None = None,
+    parent_blocks: list | None = None,
 ) -> sp.Expr:
     """Convert Value to SymPy expression, tracing operations if needed.
 
@@ -488,6 +503,7 @@ def value_to_expr(
         block: Optional Block for operation tracing
         call_context: Optional mapping from Value UUIDs to actual argument Values or SymPy expressions
         loop_var_symbols: Optional mapping from Value names to SymPy loop variable symbols
+        parent_blocks: Optional list of ancestor blocks for scope chain resolution
 
     Returns:
         SymPy expression representing the value
@@ -511,7 +527,8 @@ def value_to_expr(
     # Check if this value is mapped in call_context
     if call_context and v.uuid in call_context:
         resolved_val = call_context[v.uuid]
-        return value_to_expr(resolved_val, block, call_context, loop_var_symbols)
+        return value_to_expr(resolved_val, block, call_context, loop_var_symbols,
+                             parent_blocks=parent_blocks)
 
     # Use proper Value API
     if v.is_constant():
@@ -537,9 +554,25 @@ def value_to_expr(
                 visited=set(),
                 call_context=call_context,
                 loop_var_symbols=loop_var_symbols,
+                parent_blocks=parent_blocks,
             )
             if traced is not None:
                 return traced
+
+        # Search parent blocks for scope chain resolution
+        if parent_blocks:
+            for pb in reversed(parent_blocks):
+                traced = _trace_value_operation(
+                    v,
+                    pb,
+                    visited=set(),
+                    call_context=call_context,
+                    loop_var_symbols=loop_var_symbols,
+                    parent_blocks=parent_blocks,
+                )
+                if traced is not None:
+                    return traced
+
         return sp.Symbol(v.name, integer=True, positive=True)  # Fallback
 
 
@@ -549,6 +582,7 @@ def _trace_value_operation(
     visited: set,
     call_context: dict[str, Any] | None = None,
     loop_var_symbols: dict[str, sp.Symbol] | None = None,
+    parent_blocks: list | None = None,
 ) -> sp.Expr | None:
     """Trace backward through operations to find what produced this Value.
 
@@ -558,6 +592,7 @@ def _trace_value_operation(
         visited: Set of visited Value IDs to prevent infinite recursion
         call_context: Optional mapping from Value UUIDs to actual argument Values
         loop_var_symbols: Optional mapping from Value names to SymPy loop variable symbols
+        parent_blocks: Optional list of ancestor blocks for scope chain resolution
 
     Returns:
         SymPy expression if successfully traced, None otherwise
@@ -573,10 +608,12 @@ def _trace_value_operation(
         if op.results[0] == v:
             if isinstance(op, BinOp):
                 left = value_to_expr(
-                    op.operands[0], block, call_context, loop_var_symbols
+                    op.operands[0], block, call_context, loop_var_symbols,
+                    parent_blocks=parent_blocks,
                 )
                 right = value_to_expr(
-                    op.operands[1], block, call_context, loop_var_symbols
+                    op.operands[1], block, call_context, loop_var_symbols,
+                    parent_blocks=parent_blocks,
                 )
 
                 if op.kind == BinOpKind.ADD:
@@ -588,16 +625,25 @@ def _trace_value_operation(
                 elif op.kind == BinOpKind.DIV:
                     return left / right
                 elif op.kind == BinOpKind.FLOORDIV:
+                    quotient = sp.simplify(left / right)
+                    # For symbolic integer expressions (e.g., 2**m / 2**i = 2**(m-i)),
+                    # avoid wrapping in floor() to enable symbolic simplification.
+                    # This is safe because quantum circuit IR uses FLOORDIV between
+                    # integer types where the result is typically exact.
+                    if isinstance(quotient, (sp.Integer, sp.Symbol, sp.Pow)):
+                        return quotient
                     return sp.floor(left / right)
                 elif op.kind == BinOpKind.POW:
                     return left**right
 
             elif isinstance(op, CompOp):
                 left = value_to_expr(
-                    op.operands[0], block, call_context, loop_var_symbols
+                    op.operands[0], block, call_context, loop_var_symbols,
+                    parent_blocks=parent_blocks,
                 )
                 right = value_to_expr(
-                    op.operands[1], block, call_context, loop_var_symbols
+                    op.operands[1], block, call_context, loop_var_symbols,
+                    parent_blocks=parent_blocks,
                 )
 
                 if op.kind == CompOpKind.EQ:
@@ -707,6 +753,7 @@ def _resolve_power_expr(
     block: Block | None,
     call_context: dict[str, Any] | None,
     loop_var_symbols: dict[str, sp.Symbol] | None,
+    parent_blocks: list | None = None,
 ) -> sp.Expr | int:
     """Resolve power value to SymPy expression or int.
 
@@ -715,6 +762,7 @@ def _resolve_power_expr(
         block: Current block for context.
         call_context: Call context for parameter resolution.
         loop_var_symbols: Loop variable symbols.
+        parent_blocks: Optional list of ancestor blocks for scope chain resolution.
 
     Returns:
         SymPy expression or int representing the power.
@@ -724,11 +772,13 @@ def _resolve_power_expr(
 
     # Handle is a frontend handle - convert via its value
     if isinstance(power, Handle):
-        return value_to_expr(power.value, block, call_context, loop_var_symbols)
+        return value_to_expr(power.value, block, call_context, loop_var_symbols,
+                             parent_blocks=parent_blocks)
 
     # Value object - convert directly
     if hasattr(power, "value"):
-        return value_to_expr(power, block, call_context, loop_var_symbols)
+        return value_to_expr(power, block, call_context, loop_var_symbols,
+                             parent_blocks=parent_blocks)
 
     return power
 
@@ -736,6 +786,7 @@ def _resolve_power_expr(
 def _count_from_operations(
     operations: list[Operation],
     block: Block | None = None,
+    parent_blocks: list | None = None,
     loop_context: LoopContext | None = None,
     call_context: dict[str, Any] | None = None,
     loop_var_symbols: dict[str, sp.Symbol] | None = None,
@@ -746,6 +797,7 @@ def _count_from_operations(
     Args:
         operations: List of operations to analyze
         block: Optional Block for value tracing
+        parent_blocks: Optional list of ancestor blocks for scope chain resolution
         loop_context: Stack of outer loop variables for nested loop analysis
         call_context: Optional mapping from Value UUIDs to actual argument Values
         loop_var_symbols: Optional mapping from Value names to SymPy loop variable symbols
@@ -795,13 +847,19 @@ def _count_from_operations(
                         "LocalBlock", (), {"operations": op.operations}
                     )()
 
+                    # Build parent block chain for scope resolution
+                    new_parent_blocks = list(parent_blocks or [])
+                    if block is not None:
+                        new_parent_blocks.append(block)
+
                     # Convert values to SymPy expressions, tracing in local block if value not in outer block
                     # Try outer block first, then local block
                     def convert_with_local_trace(v):
                         # First try with outer block
                         if block is not None:
                             result = value_to_expr(
-                                v, block, call_context, new_loop_var_symbols
+                                v, block, call_context, new_loop_var_symbols,
+                                parent_blocks=parent_blocks,
                             )
                             # If we got a symbol, try local block too
                             from qamomile.circuit.ir.value import Value
@@ -812,7 +870,8 @@ def _count_from_operations(
                                 and not v.is_parameter()
                             ):
                                 local_result = value_to_expr(
-                                    v, local_block, call_context, new_loop_var_symbols
+                                    v, local_block, call_context, new_loop_var_symbols,
+                                    parent_blocks=new_parent_blocks,
                                 )
                                 # Use local result if it's not just the symbol name
                                 if local_result != sp.Symbol(
@@ -822,7 +881,8 @@ def _count_from_operations(
                             return result
                         else:
                             return value_to_expr(
-                                v, local_block, call_context, new_loop_var_symbols
+                                v, local_block, call_context, new_loop_var_symbols,
+                                parent_blocks=new_parent_blocks,
                             )
 
                     start_expr = convert_with_local_trace(start)
@@ -838,9 +898,11 @@ def _count_from_operations(
 
                     # Recursively count inner operations with enhanced context
                     # Pass local_block so inner operations can trace values defined in this scope
+                    # Pass parent_blocks so ancestor scope values remain accessible
                     inner_count = _count_from_operations(
                         op.operations,
-                        block=local_block,  # Use local block for tracing
+                        block=local_block,
+                        parent_blocks=new_parent_blocks,
                         loop_context=new_context,
                         call_context=call_context,
                         loop_var_symbols=new_loop_var_symbols,
@@ -876,10 +938,14 @@ def _count_from_operations(
                     count = count + count_expr
                 else:
                     # Fallback
+                    fallback_parent_blocks = list(parent_blocks or [])
+                    if block is not None:
+                        fallback_parent_blocks.append(block)
                     iterations = sp.Symbol("iter", integer=True, positive=True)
                     inner_count = _count_from_operations(
                         op.operations,
                         block=None,
+                        parent_blocks=fallback_parent_blocks,
                         loop_context=loop_context,
                         call_context=call_context,
                         loop_var_symbols=loop_var_symbols,
@@ -890,9 +956,13 @@ def _count_from_operations(
             case WhileOperation():
                 # Conservative: assume constant iterations
                 # In practice, would need bounds analysis
+                while_parent_blocks = list(parent_blocks or [])
+                if block is not None:
+                    while_parent_blocks.append(block)
                 inner_count = _count_from_operations(
                     op.operations,
                     block=None,
+                    parent_blocks=while_parent_blocks,
                     loop_context=loop_context,
                     call_context=call_context,
                     loop_var_symbols=loop_var_symbols,
@@ -903,9 +973,13 @@ def _count_from_operations(
 
             case IfOperation():
                 # Take maximum of both branches
+                if_parent_blocks = list(parent_blocks or [])
+                if block is not None:
+                    if_parent_blocks.append(block)
                 true_count = _count_from_operations(
                     op.true_operations,
                     block=None,
+                    parent_blocks=if_parent_blocks,
                     loop_context=loop_context,
                     call_context=call_context,
                     loop_var_symbols=loop_var_symbols,
@@ -914,12 +988,39 @@ def _count_from_operations(
                 false_count = _count_from_operations(
                     op.false_operations,
                     block=None,
+                    parent_blocks=if_parent_blocks,
                     loop_context=loop_context,
                     call_context=call_context,
                     loop_var_symbols=loop_var_symbols,
                     num_controls=num_controls,
                 )
                 count = count + true_count.max(false_count)
+
+            case ForItemsOperation():
+                items_parent_blocks = list(parent_blocks or [])
+                if block is not None:
+                    items_parent_blocks.append(block)
+                inner_count = _count_from_operations(
+                    op.operations,
+                    block=None,
+                    parent_blocks=items_parent_blocks,
+                    loop_context=loop_context,
+                    call_context=call_context,
+                    loop_var_symbols=loop_var_symbols,
+                    num_controls=num_controls,
+                )
+                dict_operand = op.operands[0]
+                if (
+                    hasattr(dict_operand, "is_parameter")
+                    and dict_operand.is_parameter()
+                ):
+                    dict_name = dict_operand.parameter_name() or dict_operand.name
+                else:
+                    dict_name = dict_operand.name
+                cardinality_sym = sp.Symbol(
+                    f"|{dict_name}|", integer=True, positive=True
+                )
+                count = count + inner_count * cardinality_sym
 
             case CallBlockOperation():
                 # Recursively count gates in called block
@@ -940,7 +1041,8 @@ def _count_from_operations(
                             # Resolve actual_arg to SymPy expression in the OUTER block
                             # so that computed values (like 2**i) can be traced
                             resolved_arg = value_to_expr(
-                                actual_arg, block, call_context, loop_var_symbols
+                                actual_arg, block, call_context, loop_var_symbols,
+                                parent_blocks=parent_blocks,
                             )
                             new_call_context[formal_input.uuid] = resolved_arg
 
@@ -956,6 +1058,7 @@ def _count_from_operations(
                                         block,
                                         call_context,
                                         loop_var_symbols,
+                                        parent_blocks=parent_blocks,
                                     )
                                     new_call_context[dim_formal.uuid] = resolved_dim
 
@@ -963,6 +1066,7 @@ def _count_from_operations(
                     inner_count = _count_from_operations(
                         called_block.operations,
                         block=called_block,
+                        parent_blocks=[],
                         loop_context=loop_context,
                         call_context=new_call_context,
                         loop_var_symbols=loop_var_symbols,
@@ -994,6 +1098,7 @@ def _count_from_operations(
                                         block,
                                         call_context,
                                         loop_var_symbols,
+                                        parent_blocks=parent_blocks,
                                     )
                                     new_call_context[
                                         formal_input.uuid
@@ -1009,6 +1114,7 @@ def _count_from_operations(
                                                 block,
                                                 call_context,
                                                 loop_var_symbols,
+                                                parent_blocks=parent_blocks,
                                             )
                                             new_call_context[
                                                 dim_formal.uuid
@@ -1032,6 +1138,7 @@ def _count_from_operations(
                                     block,
                                     call_context,
                                     loop_var_symbols,
+                                    parent_blocks=parent_blocks,
                                 )
                                 new_call_context[formal_input.uuid] = resolved_arg
 
@@ -1047,6 +1154,7 @@ def _count_from_operations(
                                             block,
                                             call_context,
                                             loop_var_symbols,
+                                            parent_blocks=parent_blocks,
                                         )
                                         new_call_context[
                                             dim_formal.uuid
@@ -1055,7 +1163,8 @@ def _count_from_operations(
                     # Resolve num_controls for classification
                     if op.is_symbolic_num_controls:
                         nc = value_to_expr(
-                            op.num_controls, block, call_context, loop_var_symbols
+                            op.num_controls, block, call_context, loop_var_symbols,
+                            parent_blocks=parent_blocks,
                         )
                     else:
                         nc = op.num_controls
@@ -1065,6 +1174,7 @@ def _count_from_operations(
                     inner_count = _count_from_operations(
                         controlled_block.operations,
                         block=controlled_block,
+                        parent_blocks=[],
                         loop_context=loop_context,
                         call_context=new_call_context,
                         loop_var_symbols=loop_var_symbols,
@@ -1073,7 +1183,8 @@ def _count_from_operations(
 
                     # Multiply by power if U^k is applied
                     power_expr = _resolve_power_expr(
-                        op.power, block, call_context, loop_var_symbols
+                        op.power, block, call_context, loop_var_symbols,
+                        parent_blocks=parent_blocks,
                     )
                     if power_expr != 1:
                         inner_count = inner_count * power_expr
@@ -1088,6 +1199,7 @@ def _count_from_operations(
                     call_context,
                     loop_var_symbols,
                     num_controls=num_controls,
+                    parent_blocks=parent_blocks,
                 )
                 count = count + composite_count
 
@@ -1137,5 +1249,6 @@ def count_gates(block: BlockValue | Block | list[Operation]) -> GateCount:
         ops = block
 
     return _count_from_operations(
-        ops, block_ref, loop_context=[], call_context={}, loop_var_symbols={}
+        ops, block_ref, parent_blocks=[], loop_context=[], call_context={},
+        loop_var_symbols={},
     )
