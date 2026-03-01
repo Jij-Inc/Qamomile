@@ -924,14 +924,14 @@ QKERNEL_CATALOG: list[QKernelEntry] = [
         min_params={"n": 3},
         tags=("oracle",),
     ),
-    # QKernelEntry(
-    #     id="naive_multi_controlled_z",
-    #     qkernel=naive_multi_controlled_z,
-    #     description="Naive multi-controlled Z",
-    #     param_names=("n",),
-    #     min_params={"n": 2},
-    #     tags=("oracle",),
-    # ),
+    QKernelEntry(
+        id="naive_multi_controlled_z",
+        qkernel=naive_multi_controlled_z,
+        description="Naive multi-controlled Z",
+        param_names=("n",),
+        min_params={"n": 2},
+        tags=("oracle",),
+    ),
     # QKernelEntry(
     #     id="grover_vchain",
     #     qkernel=grover_vchain,

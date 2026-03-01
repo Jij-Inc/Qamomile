@@ -514,30 +514,30 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
             rotation_depth=sp.Integer(0),
         ),
     ),
-    # "naive_multi_controlled_z": ResourceEstimate(
-    #     qubits=n,
-    #     gates=GateCount(
-    #         total=sp.Integer(1),
-    #         single_qubit=sp.Integer(0),
-    #         two_qubit=sp.Piecewise((sp.Integer(1), sp.Eq(n, 2)), (sp.Integer(0), True)),
-    #         multi_qubit=sp.Piecewise((sp.Integer(1), n > 2), (sp.Integer(0), True)),
-    #         t_gates=sp.Integer(0),
-    #         clifford_gates=sp.Integer(0),
-    #         rotation_gates=sp.Integer(0),
-    #         oracle_calls={},
-    #     ),
-    #     depth=CircuitDepth(
-    #         total_depth=sp.Integer(1),
-    #         t_depth=sp.Integer(0),
-    #         two_qubit_depth=sp.Piecewise(
-    #             (sp.Integer(1), sp.Eq(n, 2)), (sp.Integer(0), True)
-    #         ),
-    #         multi_qubit_depth=sp.Piecewise(
-    #             (sp.Integer(1), n > 2), (sp.Integer(0), True)
-    #         ),
-    #         rotation_depth=sp.Integer(0),
-    #     ),
-    # ),
+    "naive_multi_controlled_z": ResourceEstimate(
+        qubits=n,
+        gates=GateCount(
+            total=sp.Integer(1),
+            single_qubit=sp.Integer(0),
+            two_qubit=sp.Piecewise((sp.Integer(1), sp.Eq(n, 2)), (sp.Integer(0), True)),
+            multi_qubit=sp.Piecewise((sp.Integer(1), n > 2), (sp.Integer(0), True)),
+            t_gates=sp.Integer(0),
+            clifford_gates=sp.Integer(0),
+            rotation_gates=sp.Integer(0),
+            oracle_calls={},
+        ),
+        depth=CircuitDepth(
+            total_depth=sp.Integer(1),
+            t_depth=sp.Integer(0),
+            two_qubit_depth=sp.Piecewise(
+                (sp.Integer(1), sp.Eq(n, 2)), (sp.Integer(0), True)
+            ),
+            multi_qubit_depth=sp.Piecewise(
+                (sp.Integer(1), n > 2), (sp.Integer(0), True)
+            ),
+            rotation_depth=sp.Integer(0),
+        ),
+    ),
     # "grover_vchain": ResourceEstimate(
     #     qubits=n + n_iters * (n - 2) + 1,
     #     gates=GateCount(
