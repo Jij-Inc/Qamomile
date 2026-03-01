@@ -126,6 +126,7 @@ def _assert_depth(actual: CircuitDepth, expected: CircuitDepth) -> None:
 n = sp.Symbol("n", integer=True, positive=True)
 m = sp.Symbol("m", integer=True, positive=True)
 n_iters = sp.Symbol("n_iters", integer=True, positive=True)
+num_layers = sp.Symbol("num_layers", integer=True, positive=True)
 
 EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
     "no_operation": ResourceEstimate(
@@ -301,6 +302,46 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
             rotation_depth=sp.Integer(0),
         ),
     ),
+    "hadamard_test": ResourceEstimate(
+        qubits=2,
+        gates=GateCount(
+            total=3,
+            single_qubit=sp.Integer(2),
+            two_qubit=1,
+            multi_qubit=sp.Integer(0),
+            t_gates=sp.Integer(0),
+            clifford_gates=2,
+            rotation_gates=sp.Integer(0),
+            oracle_calls={"controlled_oracle": sp.Integer(1)},
+        ),
+        depth=CircuitDepth(
+            total_depth=4,
+            t_depth=sp.Integer(0),
+            two_qubit_depth=1,
+            multi_qubit_depth=sp.Integer(0),
+            rotation_depth=sp.Integer(0),
+        ),
+    ),
+    "swap_test": ResourceEstimate(
+        qubits=3,
+        gates=GateCount(
+            total=5,
+            single_qubit=sp.Integer(2),
+            two_qubit=2,
+            multi_qubit=sp.Integer(1),
+            t_gates=sp.Integer(0),
+            clifford_gates=4,
+            rotation_gates=sp.Integer(0),
+            oracle_calls={},
+        ),
+        depth=CircuitDepth(
+            total_depth=4,
+            t_depth=sp.Integer(0),
+            two_qubit_depth=2,
+            multi_qubit_depth=sp.Integer(1),
+            rotation_depth=sp.Integer(0),
+        ),
+    ),
     "qft": ResourceEstimate(
         # Ref: Nielsen & Chuang
         qubits=n,
@@ -377,6 +418,25 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
             two_qubit_depth=4 * n - 4,
             multi_qubit_depth=sp.Integer(0),
             rotation_depth=4 * n - 5,
+        ),
+    ),
+    "ttk_adder": ResourceEstimate(
+        qubits=2 * n + 1,
+        gates=GateCount(
+            total=7 * n - 6,
+            single_qubit=0,
+            two_qubit=5 * n - 5,
+            multi_qubit=2 * n - 1,
+            t_gates=sp.Integer(0),
+            clifford_gates=5 * n - 5,
+            rotation_gates=0,
+        ),
+        depth=CircuitDepth(
+            total_depth=5 * n - 3,
+            t_depth=sp.Integer(0),
+            two_qubit_depth=3 * n - 2,
+            multi_qubit_depth=2 * n - 1,
+            rotation_depth=0,
         ),
     ),
     "simplest_oracle": ResourceEstimate(
@@ -459,6 +519,26 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
             rotation_depth=sp.Integer(0),
         ),
     ),
+    "deutsch_jozsa": ResourceEstimate(
+        qubits=n + 1,
+        gates=GateCount(
+            total=2 * n + 2,
+            single_qubit=2 * n + 2,
+            two_qubit=0,
+            multi_qubit=0,
+            t_gates=sp.Integer(0),
+            clifford_gates=2 * n + 2,
+            rotation_gates=sp.Integer(0),
+            oracle_calls={"deutsch_jozsa_oracle": 1},  # type: ignore
+        ),
+        depth=CircuitDepth(
+            total_depth=sp.Integer(5),
+            t_depth=sp.Integer(0),
+            two_qubit_depth=0,
+            multi_qubit_depth=0,
+            rotation_depth=sp.Integer(0),
+        ),
+    ),
     "teleportation": ResourceEstimate(
         qubits=3,
         gates=GateCount(
@@ -494,6 +574,26 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
             rotation_depth=sp.Integer(0),
         ),
     ),
+    "hardware_efficient_ansatz": ResourceEstimate(
+        qubits=n,
+        gates=GateCount(
+            total=2 * n * num_layers + (num_layers - 1) * (n - 1),
+            single_qubit=2 * n * num_layers,
+            two_qubit=(num_layers - 1) * (n - 1),
+            multi_qubit=0,
+            t_gates=sp.Integer(0),
+            clifford_gates=(num_layers - 1) * (n - 1),
+            rotation_gates=2 * n * num_layers,
+            oracle_calls={},
+        ),
+        depth=CircuitDepth(
+            total_depth=2 * num_layers + (num_layers - 1) * (n - 1),
+            t_depth=sp.Integer(0),
+            two_qubit_depth=(num_layers - 1) * (n - 1),
+            multi_qubit_depth=0,
+            rotation_depth=2 * num_layers,
+        ),
+    ),
     "vchain_controlled_z": ResourceEstimate(
         qubits=2 * n - 2,
         gates=GateCount(
@@ -511,6 +611,26 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
             t_depth=sp.Integer(0),
             two_qubit_depth=sp.Integer(1),
             multi_qubit_depth=2 * n - 4,
+            rotation_depth=sp.Integer(0),
+        ),
+    ),
+    "grover_vchain": ResourceEstimate(
+        qubits=n + n_iters * (n - 2) + 1,
+        gates=GateCount(
+            total=(n + 2) + n_iters * (6 * n - 1),
+            single_qubit=(n + 2) + n_iters * (4 * n + 2),
+            two_qubit=n_iters,
+            multi_qubit=n_iters * (2 * n - 4),
+            t_gates=sp.Integer(0),
+            clifford_gates=(n + 2) + n_iters * (4 * n + 3),
+            rotation_gates=0,
+            oracle_calls={"grover_oracle": n_iters},
+        ),
+        depth=CircuitDepth(
+            total_depth=3 + n_iters * (2 * n + 2),
+            t_depth=sp.Integer(0),
+            two_qubit_depth=n_iters,
+            multi_qubit_depth=n_iters * sp.Max(0, 2 * n - 4),  # type: ignore
             rotation_depth=sp.Integer(0),
         ),
     ),
@@ -538,26 +658,36 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
             rotation_depth=sp.Integer(0),
         ),
     ),
-    # "grover_vchain": ResourceEstimate(
-    #     qubits=n + n_iters * (n - 2) + 1,
-    #     gates=GateCount(
-    #         total=n + n_iters * (4 * n + 1) + 2,
-    #         single_qubit=4 * n * n_iters + n + 2,
-    #         two_qubit=sp.Integer(0),
-    #         multi_qubit=sp.Integer(0),
-    #         t_gates=sp.Integer(0),
-    #         clifford_gates=4 * n * n_iters + n + 2,
-    #         rotation_gates=n_iters,
-    #         oracle_calls={"grover_oracle": sp.Integer(1)},
-    #     ),
-    #     depth=CircuitDepth(
-    #         total_depth=n_iters + 3,
-    #         t_depth=sp.Integer(0),
-    #         two_qubit_depth=sp.Integer(0),
-    #         multi_qubit_depth=n_iters,
-    #         rotation_depth=sp.Integer(0),
-    #     ),
-    # ),
+    "grover_naive_multi_controlled_z": ResourceEstimate(
+        qubits=n + 1,
+        gates=GateCount(
+            total=(n + 2) + n_iters * (4 * n + 1),
+            single_qubit=(n + 2) + n_iters * 4 * n,
+            two_qubit=(
+                n_iters
+                * sp.Piecewise((sp.Integer(1), sp.Eq(n, 2)), (sp.Integer(0), True))
+            ),  # type: ignore
+            multi_qubit=(
+                n_iters * sp.Piecewise((sp.Integer(1), n > 2), (sp.Integer(0), True))
+            ),  # type: ignore
+            t_gates=sp.Integer(0),
+            clifford_gates=(n + 2) + n_iters * 4 * n,
+            rotation_gates=0,
+            oracle_calls={"grover_oracle": n_iters},
+        ),
+        depth=CircuitDepth(
+            total_depth=3 + n_iters * 6,
+            t_depth=sp.Integer(0),
+            two_qubit_depth=(
+                n_iters
+                * sp.Piecewise((sp.Integer(1), sp.Eq(n, 2)), (sp.Integer(0), True))
+            ),  # type: ignore
+            multi_qubit_depth=(
+                n_iters * sp.Piecewise((sp.Integer(1), n > 2), (sp.Integer(0), True))
+            ),  # type: ignore
+            rotation_depth=sp.Integer(0),
+        ),
+    ),
     "maj": ResourceEstimate(
         qubits=3,
         gates=GateCount(

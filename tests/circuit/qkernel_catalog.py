@@ -184,6 +184,89 @@ def parallel_ghz_state(m: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
     return qs
 
 
+@qmc.composite_gate(
+    stub=True,
+    name="controlled_oracle",
+    num_qubits=1,
+    num_controls=1,
+    resource_metadata=ResourceMetadata(
+        query_complexity=1,
+        total_gates=1,
+        two_qubit_gates=1,
+        custom_metadata={"depth": 1, "two_qubit_depth": 1},
+    ),
+)
+def _controlled_oracle():
+    pass
+
+
+@qmc.qkernel
+def hadamard_test() -> qmc.Bit:
+    q = qmc.qubit(name="q")
+    psi = qmc.qubit(name="psi")
+
+    q = qmc.h(q)
+    q, psi = _controlled_oracle(psi, controls=(q,))
+    q = qmc.h(q)
+
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def swap_test() -> qmc.Bit:
+    q = qmc.qubit(name="q")
+    psi = qmc.qubit(name="psi")
+    phi = qmc.qubit(name="phi")
+
+    q = qmc.h(q)
+    psi, phi = qmc.cx(psi, phi)
+
+    q, phi, psi = qmc.ccx(q, phi, psi)
+
+    psi, phi = qmc.cx(psi, phi)
+    q = qmc.h(q)
+
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def deutsch_jozsa(n: qmc.UInt) -> qmc.Bit:
+    qs = qmc.qubit_array(n, name="qs")
+    target = qmc.qubit(name="target")
+
+    qs = _all_h(qs)
+    target = qmc.x(target)
+    target = qmc.h(target)
+
+    (qs, target) = _over_oracle(qs, target, name="deutsch_jozsa_oracle")
+
+    qs = _all_h(qs)  # type: ignore
+
+    return qmc.measure(qs)  # type: ignore
+
+
+@qmc.qkernel
+def hardware_efficient_ansatz(
+    n: qmc.UInt,
+    thetas: qmc.Matrix[qmc.Float],
+    phis: qmc.Matrix[qmc.Float],
+    num_layers: qmc.UInt,
+) -> qmc.Vector[qmc.Qubit]:
+    qs = qmc.qubit_array(n, name="qs")
+    for i in qmc.range(num_layers - 1):
+        for j in qmc.range(n):
+            qs[j] = qmc.ry(qs[j], thetas[i, j])
+            qs[j] = qmc.rz(qs[j], phis[i, j])
+
+        for j in qmc.range(n - 1):
+            qs[j], qs[j + 1] = qmc.cx(qs[j], qs[j + 1])
+
+    for j in qmc.range(n):
+        qs[j] = qmc.ry(qs[j], thetas[num_layers - 1, j])
+        qs[j] = qmc.rz(qs[j], phis[num_layers - 1, j])
+    return qs
+
+
 # --- QFT / IQFT ---
 
 
@@ -339,6 +422,47 @@ def draper_inplace_qc_adder(
     return qs
 
 
+@qmc.qkernel
+def _ttk_adder(
+    a: qmc.Vector[qmc.Qubit], b: qmc.Vector[qmc.Qubit], z: qmc.Qubit
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit], qmc.Qubit]:
+    n = a.shape[0]
+
+    for i in qmc.range(1, n):
+        a[i], b[i] = qmc.cx(a[i], b[i])
+
+    a[n - 1], z = qmc.cx(a[n - 1], z)
+    for i in qmc.range(n - 2, 0, -1):
+        a[i], a[i + 1] = qmc.cx(a[i], a[i + 1])
+
+    for i in qmc.range(n - 1):
+        b[i], a[i], a[i + 1] = qmc.ccx(b[i], a[i], a[i + 1])
+    b[n - 1], a[n - 1], z = qmc.ccx(b[n - 1], a[n - 1], z)
+
+    for i in qmc.range(n - 1, 0, -1):
+        a[i], b[i] = qmc.cx(a[i], b[i])
+        b[i - 1], a[i - 1], a[i] = qmc.ccx(b[i - 1], a[i - 1], a[i])
+
+    for i in qmc.range(1, n - 1):
+        a[i], a[i + 1] = qmc.cx(a[i], a[i + 1])
+
+    for i in qmc.range(n):
+        a[i], b[i] = qmc.cx(a[i], b[i])
+
+    return a, b, z
+
+
+@qmc.qkernel
+def ttk_adder(
+    n: qmc.UInt,
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit], qmc.Qubit]:
+    a = qmc.qubit_array(n, name="a")
+    b = qmc.qubit_array(n, name="b")
+    z = qmc.qubit(name="z")
+    a, b, z = _ttk_adder(a, b, z)
+    return a, b, z
+
+
 @qmc.composite_gate(
     stub=True,
     name="two_qubit_oracle",
@@ -446,6 +570,39 @@ def vchain_controlled_z(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
 
 
 @qmc.qkernel
+def _grover_vchain(
+    qs: qmc.Vector[qmc.Qubit], q: qmc.Qubit, n_iters: qmc.UInt
+) -> qmc.Vector[qmc.Qubit]:
+    # Initialise all the qubits.
+    qs = _all_h(qs)
+    q = qmc.x(q)
+    q = qmc.h(q)
+
+    # Apply the diffusion operator (inversion about the mean).
+    for _ in qmc.range(n_iters):
+        # Call the oracle.
+        (qs, q) = _over_oracle(qs, q, name="grover_oracle")
+        # Apply the diffusion operator,
+        # which can be implemented as H + X + multi-controlled Z + X + H.
+        qs = _all_h(qs)
+        qs = _all_x(qs)
+        qs = _vchain_controlled_z(qs)
+        qs = _all_x(qs)
+        qs = _all_h(qs)
+
+    return qs
+
+
+@qmc.qkernel
+def grover_vchain(n: qmc.UInt, n_iters: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    qs = qmc.qubit_array(n, name="qs")
+    q = qmc.qubit(name="q")
+    qs = _grover_vchain(qs, q, n_iters)
+    bits = qmc.measure(qs)
+    return bits
+
+
+@qmc.qkernel
 def __z(q: qmc.Qubit) -> qmc.Qubit:
     return qmc.z(q)
 
@@ -466,7 +623,7 @@ def naive_multi_controlled_z(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
 
 
 @qmc.qkernel
-def _grover_vchain(
+def _grover_naive_multi_controlled_z(
     qs: qmc.Vector[qmc.Qubit], q: qmc.Qubit, n_iters: qmc.UInt
 ) -> qmc.Vector[qmc.Qubit]:
     # Initialise all the qubits.
@@ -475,14 +632,14 @@ def _grover_vchain(
     q = qmc.h(q)
 
     # Apply the diffusion operator (inversion about the mean).
-    for _iter in qmc.range(n_iters):
+    for _ in qmc.range(n_iters):
         # Call the oracle.
         (qs, q) = _over_oracle(qs, q, name="grover_oracle")
         # Apply the diffusion operator,
         # which can be implemented as H + X + multi-controlled Z + X + H.
         qs = _all_h(qs)
         qs = _all_x(qs)
-        qs = _vchain_controlled_z(qs)
+        qs = _naive_multi_controlled_z(qs)
         qs = _all_x(qs)
         qs = _all_h(qs)
 
@@ -490,10 +647,12 @@ def _grover_vchain(
 
 
 @qmc.qkernel
-def grover_vchain(n: qmc.UInt, n_iters: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+def grover_naive_multi_controlled_z(
+    n: qmc.UInt, n_iters: qmc.UInt
+) -> qmc.Vector[qmc.Bit]:
     qs = qmc.qubit_array(n, name="qs")
     q = qmc.qubit(name="q")
-    qs = _grover_vchain(qs, q, n_iters)
+    qs = _grover_naive_multi_controlled_z(qs, q, n_iters)
     bits = qmc.measure(qs)
     return bits
 
@@ -779,6 +938,7 @@ def single_rzz() -> qmc.Vector[qmc.Qubit]:
 n = sp.Symbol("n", integer=True, positive=True)
 m = sp.Symbol("m", integer=True, positive=True)
 n_iters = sp.Symbol("n_iters", integer=True, positive=True)
+num_layers = sp.Symbol("num_layers", integer=True, positive=True)
 
 QKERNEL_CATALOG: list[QKernelEntry] = [
     QKernelEntry(
@@ -852,6 +1012,22 @@ QKERNEL_CATALOG: list[QKernelEntry] = [
         tags=("parametric", "clifford"),
     ),
     QKernelEntry(
+        id="hadamard_test",
+        qkernel=hadamard_test,
+        description="Hadamard test with a stub controlled oracle",
+        param_names=(),
+        min_params={},
+        tags=(),
+    ),
+    QKernelEntry(
+        id="swap_test",
+        qkernel=swap_test,
+        description="Swap test",
+        param_names=(),
+        min_params={},
+        tags=(),
+    ),
+    QKernelEntry(
         id="qft",
         qkernel=qft,
         description="QFT with parametric n qubits",
@@ -879,6 +1055,14 @@ QKERNEL_CATALOG: list[QKernelEntry] = [
         id="draper_inplace_qc_adder",
         qkernel=draper_inplace_qc_adder,
         description="Draper's in-place quantum carry-lookahead adder with parametric n qubits and factor",
+        param_names=("n",),
+        min_params={"n": 2},
+        tags=("parametric",),
+    ),
+    QKernelEntry(
+        id="ttk_adder",
+        qkernel=ttk_adder,
+        description="Takahashi-Tani-Kunihiro (TTK) adder with parametric n qubits",
         param_names=("n",),
         min_params={"n": 2},
         tags=("parametric",),
@@ -912,9 +1096,25 @@ QKERNEL_CATALOG: list[QKernelEntry] = [
         tags=("oracle",),
     ),
     QKernelEntry(
+        id="deutsch_jozsa",
+        qkernel=deutsch_jozsa,
+        description="Deutsch-Jozsa algorithm",
+        param_names=("n",),
+        min_params={"n": 1},
+        tags=("oracle",),
+    ),
+    QKernelEntry(
         id="teleportation",
         qkernel=teleportation,
         description="Quantum Teleportation with X",
+    ),
+    QKernelEntry(
+        id="hardware_efficient_ansatz",
+        qkernel=hardware_efficient_ansatz,
+        description="Hardware-efficient ansatz with layers of RX and CX gates.",
+        param_names=("n", "num_layers"),
+        min_params={"n": 2, "num_layers": 1},
+        tags=("parametric",),
     ),
     QKernelEntry(
         id="vchain_controlled_z",
@@ -925,6 +1125,14 @@ QKERNEL_CATALOG: list[QKernelEntry] = [
         tags=("oracle",),
     ),
     QKernelEntry(
+        id="grover_vchain",
+        qkernel=grover_vchain,
+        description="Grover's algorithm with V-chain multi-controlled Z",
+        param_names=("n", "n_iters"),
+        min_params={"n": 3, "n_iters": 1},
+        tags=("oracle",),
+    ),
+    QKernelEntry(
         id="naive_multi_controlled_z",
         qkernel=naive_multi_controlled_z,
         description="Naive multi-controlled Z",
@@ -932,14 +1140,14 @@ QKERNEL_CATALOG: list[QKernelEntry] = [
         min_params={"n": 2},
         tags=("oracle",),
     ),
-    # QKernelEntry(
-    #     id="grover_vchain",
-    #     qkernel=grover_vchain,
-    #     description="Grover's algorithm with V-chain multi-controlled Z",
-    #     param_names=("n", "n_iters"),
-    #     min_params={"n": 3},
-    #     tags=("oracle",),
-    # ),
+    QKernelEntry(
+        id="grover_naive_multi_controlled_z",
+        qkernel=grover_naive_multi_controlled_z,
+        description="Grover's algorithm with naive multi-controlled Z",
+        param_names=("n", "n_iters"),
+        min_params={"n": 2, "n_iters": 1},
+        tags=("oracle",),
+    ),
     QKernelEntry(
         id="maj",
         qkernel=maj,
