@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any
 import sympy as sp
 from sympy import Sum
 
-from qamomile.circuit.frontend.handle import Handle
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     BinOpKind,
@@ -748,40 +747,6 @@ def _apply_sum_to_count(
     )
 
 
-def _resolve_power_expr(
-    power: Any,
-    block: Block | None,
-    call_context: dict[str, Any] | None,
-    loop_var_symbols: dict[str, sp.Symbol] | None,
-    parent_blocks: list | None = None,
-) -> sp.Expr | int:
-    """Resolve power value to SymPy expression or int.
-
-    Args:
-        power: Power value (int, SymPy expression, Handle, or Value).
-        block: Current block for context.
-        call_context: Call context for parameter resolution.
-        loop_var_symbols: Loop variable symbols.
-        parent_blocks: Optional list of ancestor blocks for scope chain resolution.
-
-    Returns:
-        SymPy expression or int representing the power.
-    """
-    if isinstance(power, (int, sp.Basic)):
-        return power
-
-    # Handle is a frontend handle - convert via its value
-    if isinstance(power, Handle):
-        return value_to_expr(power.value, block, call_context, loop_var_symbols,
-                             parent_blocks=parent_blocks)
-
-    # Value object - convert directly
-    if hasattr(power, "value"):
-        return value_to_expr(power, block, call_context, loop_var_symbols,
-                             parent_blocks=parent_blocks)
-
-    return power
-
 
 def _count_from_operations(
     operations: list[Operation],
@@ -1180,14 +1145,6 @@ def _count_from_operations(
                         loop_var_symbols=loop_var_symbols,
                         num_controls=nc,
                     )
-
-                    # Multiply by power if U^k is applied
-                    power_expr = _resolve_power_expr(
-                        op.power, block, call_context, loop_var_symbols,
-                        parent_blocks=parent_blocks,
-                    )
-                    if power_expr != 1:
-                        inner_count = inner_count * power_expr
 
                     count = count + inner_count
 

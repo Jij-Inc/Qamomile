@@ -653,26 +653,6 @@ def _get_max_depth(qubit_depths: QubitDepthMap) -> CircuitDepth:
     return result
 
 
-def _resolve_power_expr(
-    power: Any,
-    block: Block | None,
-    call_context: dict[str, Any] | None,
-    loop_var_symbols: dict[str, sp.Symbol] | None,
-) -> sp.Expr | int:
-    """Resolve power value to SymPy expression or int."""
-    if isinstance(power, (int, sp.Basic)):
-        return power
-
-    from qamomile.circuit.frontend.handle import Handle
-
-    if isinstance(power, Handle):
-        return value_to_expr(power.value, block, call_context, loop_var_symbols)
-
-    if hasattr(power, "value"):
-        return value_to_expr(power, block, call_context, loop_var_symbols)
-
-    return power
-
 
 def _collect_gate_qubit_names(operations: list[Operation]) -> set[str]:
     """Collect qubit names from GateOperation operands in operation list."""
@@ -1397,23 +1377,6 @@ def _simulate_parallel_depth_concrete(
                 num_controls=nc,
             )
             inner_depth = _get_max_depth(inner_depths)
-
-            # Multiply by power if U^k is applied
-            if isinstance(op.power, int):
-                power_val = op.power
-            else:
-                from qamomile.circuit.frontend.handle import Handle
-
-                pv = op.power.value if isinstance(op.power, Handle) else op.power
-                if isinstance(pv, Value):
-                    concrete = _eval_value_concrete(
-                        pv, block, call_context, var_env
-                    )
-                    power_val = concrete if concrete is not None else 1
-                else:
-                    power_val = op.power
-            if power_val != 1:
-                inner_depth = inner_depth * power_val
 
             # Update all involved qubits
             max_current = CircuitDepth.zero()
@@ -2470,13 +2433,6 @@ def _handle_controlled_u_parallel(
 
     inner_depth = _get_max_depth(inner_depths)
 
-    # Multiply by power if U^k is applied
-    power_expr = _resolve_power_expr(
-        op.power, block, call_context, loop_var_symbols
-    )
-    if power_expr != 1:
-        inner_depth = inner_depth * power_expr
-
     # All involved qubits get the max depth
     max_current = CircuitDepth.zero()
     for qid in all_qubit_names:
@@ -2737,13 +2693,6 @@ def _compute_sequential_depth(
                         loop_var_symbols=loop_var_symbols,
                         num_controls=nc_expr,
                     )
-
-                    # Multiply by power if U^k is applied
-                    power_expr = _resolve_power_expr(
-                        op.power, block, call_context, loop_var_symbols
-                    )
-                    if power_expr != 1:
-                        inner_depth = inner_depth * power_expr
 
                     depth = depth + inner_depth
 
