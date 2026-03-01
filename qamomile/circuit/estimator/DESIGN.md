@@ -311,6 +311,147 @@ num_controls=1, num_targets=1 → total_qubits=2
 
 ---
 
+## 4.8 CompositeGateOperation と ResourceMetadata
+
+CompositeGateOperation は複合ゲート（QFT, IQFT, QPE, カスタムゲート）を IR 上の単一操作として表現する。
+リソース推定においては、3つの推定器がそれぞれ異なるフィールドを読み取る。
+
+### 4.8.1 ResourceMetadata 全フィールド
+
+`ResourceMetadata`（`composite_gate.py`）は CompositeGateOperation に付与するメタデータである。
+
+```python
+@dataclass
+class ResourceMetadata:
+    query_complexity: int | None = None
+    t_gates: int | None = None
+    ancilla_qubits: int = 0
+    total_gates: int | None = None
+    single_qubit_gates: int | None = None
+    two_qubit_gates: int | None = None
+    multi_qubit_gates: int | None = None
+    clifford_gates: int | None = None
+    rotation_gates: int | None = None
+    custom_metadata: dict[str, Any] = field(default_factory=dict)
+```
+
+| フィールド | 型 | デフォルト | 読み取る推定器 | 説明 |
+|---|---|---|---|---|
+| `query_complexity` | `int \| None` | `None` | なし（情報提供のみ） | オラクル/ユニタリクエリの回数。推定器は直接使用しないが、アルゴリズム解析で参照可能 |
+| `t_gates` | `int \| None` | `None` | gate_counter | T/Tdg ゲート数 |
+| `ancilla_qubits` | `int` | `0` | qubits_counter | 内部で確保する補助量子ビット数。implementation 内の QInitOperation とは別にカウントされる |
+| `total_gates` | `int \| None` | `None` | gate_counter | 全ゲート数。未設定（`None`）の場合は `single_qubit_gates + two_qubit_gates + multi_qubit_gates` で自動算出 |
+| `single_qubit_gates` | `int \| None` | `None` | gate_counter | 1量子ビットゲート数 |
+| `two_qubit_gates` | `int \| None` | `None` | gate_counter | 2量子ビットゲート数 |
+| `multi_qubit_gates` | `int \| None` | `None` | gate_counter | 3量子ビット以上のゲート数 |
+| `clifford_gates` | `int \| None` | `None` | gate_counter | Clifford ゲート数 |
+| `rotation_gates` | `int \| None` | `None` | gate_counter | 回転ゲート数 |
+| `custom_metadata` | `dict[str, Any]` | `{}` | depth_estimator | 深さ情報等を格納する自由形式辞書 |
+
+**`None` の扱い**: 型付きフィールド（`total_gates`, `single_qubit_gates` 等）が `None` の場合、`_extract_gate_count_from_metadata` は **0 として扱う**。ゲートとしてカウントしたい場合は明示的に値を設定する必要がある。
+
+### 4.8.2 型付きフィールドと custom_metadata の役割分担
+
+ResourceMetadata には2種類のデータ格納方式がある:
+
+1. **型付きフィールド** — ゲートカウント情報（`total_gates`, `single_qubit_gates`, `two_qubit_gates` 等）
+2. **`custom_metadata` 辞書** — 深さ情報やその他の自由形式データ
+
+各推定器が読み取るフィールドは以下の通り:
+
+```
+ResourceMetadata
+│
+├── 型付きフィールド ──→ gate_counter.py (_extract_gate_count_from_metadata)
+│   total_gates, single_qubit_gates, two_qubit_gates,
+│   multi_qubit_gates, t_gates, clifford_gates, rotation_gates
+│
+├── ancilla_qubits ──→ qubits_counter.py
+│
+├── custom_metadata ──→ depth_estimator.py (_extract_depth_from_metadata)
+│   認識するキー:
+│     "depth" or "total_depth" → total_depth
+│     "t_depth"                → t_depth
+│     "two_qubit_depth"        → two_qubit_depth
+│     "rotation_depth"         → rotation_depth
+│
+└── query_complexity ──→ 推定器は直接使用しない（情報提供用）
+```
+
+**設計上の非対称性**: gate_counter は型付きフィールドを読み、depth_estimator は `custom_metadata` 辞書を読む。これは歴史的な経緯による非対称設計であり、深さ情報は後から `custom_metadata` に追加された。
+
+**`custom_metadata` の深さキー**:
+
+| キー | 対応する CircuitDepth フィールド | 備考 |
+|---|---|---|
+| `"depth"` or `"total_depth"` | `total_depth` | 両方ある場合は `"depth"` を優先 |
+| `"t_depth"` | `t_depth` | |
+| `"two_qubit_depth"` | `two_qubit_depth` | |
+| `"rotation_depth"` | `rotation_depth` | |
+
+未設定のキーは 0 として扱う。`multi_qubit_depth` は常に 0（`custom_metadata` からの取得に未対応）。
+
+### 4.8.3 スタブゲートの設計原則
+
+`stub=True` で定義された CompositeGate（implementation なし）は、ブラックボックスとして扱われる。
+
+#### ゲートカウント
+
+- 型付きフィールドが `None` → **0 として扱う**。ゲートとしてカウントしたい場合は `total_gates`, `two_qubit_gates` 等を明示的に設定する
+- `oracle_calls` にゲート名と回数（= 1）を自動記録する
+- 例: `ResourceMetadata(query_complexity=1)` のみ → `GateCount(total=0, oracle_calls={"name": 1})`
+- 例: `ResourceMetadata(total_gates=1, two_qubit_gates=1)` → `GateCount(total=1, two_qubit=1, oracle_calls={"name": 1})`
+
+#### 深さ
+
+- `custom_metadata` から深さを取得（未設定なら 0）
+- **制御付きスタブの最小深さルール**: `num_control_qubits > 0` かつ `total_depth == 0` かつ `two_qubit_depth == 0` の場合、`total_depth=1, two_qubit_depth=1` に自動補正する。制御ゲートは最低1層の2量子ビットゲートが必要なため
+
+#### qubit 数
+
+- implementation がないため内部 qubit はカウントしない
+- `ancilla_qubits` のみ加算（デフォルト 0）
+
+#### 例：Hadamard テスト用 controlled_oracle
+
+```python
+@qmc.composite_gate(
+    stub=True,
+    name="controlled_oracle",
+    num_qubits=1,
+    num_controls=1,
+    resource_metadata=ResourceMetadata(
+        query_complexity=1,
+        total_gates=1,        # ← 1ゲートとしてカウント
+        two_qubit_gates=1,    # ← 2量子ビットゲートとして分類
+        custom_metadata={"depth": 1},
+    ),
+)
+def _controlled_oracle():
+    pass
+```
+
+推定結果:
+- ゲート: `GateCount(total=1, two_qubit=1, oracle_calls={"controlled_oracle": 1})`
+- 深さ: `CircuitDepth(total_depth=1, two_qubit_depth=1)` （`custom_metadata` の `"depth": 1` + 制御付き補正で `two_qubit_depth=1`）
+- qubit: 0（スタブ自身は qubit を確保しない。入力 qubit は呼び出し元でカウント）
+
+### 4.8.4 3推定器の CompositeGateOperation 処理優先順位
+
+| 優先順位 | gate_counter | depth_estimator | qubits_counter |
+|---|---|---|---|
+| **1. ResourceMetadata** | 型付きフィールドから GateCount 抽出。スタブは `oracle_calls` 記録 | `custom_metadata` から CircuitDepth 抽出。制御付きスタブは最低深さ補正 | `ancilla_qubits` を加算 |
+| **2. Implementation** | BlockValue を再帰カウント | `_compute_sequential_depth` で再帰推定 | implementation 内の operations を再帰カウント |
+| **3. 既知型** | QFT/IQFT 公式（§4.4） | QFT/IQFT 深さ公式（§5.7） | — |
+| **4. エラー** | ValueError | ValueError | — |
+
+注意:
+- qubits_counter は優先順位1と2を両方適用する（ancilla_qubits + implementation 内部 qubit）
+- gate_counter と depth_estimator は優先順位1が存在すれば2以降はスキップ
+- ResourceMetadata が設定されている場合、implementation があっても展開されない（metadata が優先）
+
+---
+
 ## 5. 回路深さ推定（depth_estimator.py）
 
 ### 5.1 基本原理：DAG クリティカルパス方式
