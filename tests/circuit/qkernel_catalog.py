@@ -622,6 +622,73 @@ def simple_ripple_carry_adder_3_cnot(
     return a, b, z
 
 
+@qmc.qkernel
+def _cdkm_adder(
+    a: qmc.Vector[qmc.Qubit], b: qmc.Vector[qmc.Qubit], z: qmc.Qubit
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit], qmc.Qubit]:
+    x = qmc.qubit(name="x")
+    n = a.shape[0]
+
+    for i in qmc.range(1, n, 1):
+        a[i], b[i] = qmc.cx(a[i], b[i])
+
+    a[1], x = qmc.cx(a[1], x)
+
+    a[0], b[0], x = qmc.ccx(a[0], b[0], x)
+    a[1], a[2] = qmc.cx(a[1], a[2])
+
+    x, b[1], a[1] = qmc.ccx(x, b[1], a[1])
+    a[3], a[2] = qmc.cx(a[3], a[2])
+
+    for i in qmc.range(2, n - 2, 1):
+        a[i - 1], b[i], a[i] = qmc.ccx(a[i - 1], b[i], a[i])
+        a[i + 2], a[i + 1] = qmc.cx(a[i + 2], a[i + 1])
+
+    a[n - 3], b[n - 2], a[n - 2] = qmc.ccx(a[n - 3], b[n - 2], a[n - 2])
+    a[n - 1], z = qmc.cx(a[n - 1], z)
+
+    a[n - 2], b[n - 1], z = qmc.ccx(a[n - 2], b[n - 1], z)
+    for i in qmc.range(1, n - 1, 1):
+        b[i] = qmc.x(b[i])
+
+    x, b[1] = qmc.cx(x, b[1])
+    for i in qmc.range(2, n, 1):
+        a[i - 1], b[i] = qmc.cx(a[i - 1], b[i])
+
+    a[n - 3], b[n - 2], a[n - 2] = qmc.ccx(a[n - 3], b[n - 2], a[n - 2])
+
+    for i in qmc.range(n - 3, 1, -1):
+        a[i - 1], b[i], a[i] = qmc.ccx(a[i - 1], b[i], a[i])
+        a[i + 2], a[i + 1] = qmc.cx(a[i + 2], a[i + 1])
+        b[i + 1] = qmc.x(b[i + 1])
+
+    x, b[1], a[1] = qmc.ccx(x, b[1], a[1])
+    a[3], a[2] = qmc.cx(a[3], a[2])
+    b[2] = qmc.x(b[2])
+
+    a[0], b[0], x = qmc.ccx(a[0], b[0], x)
+    a[2], a[1] = qmc.cx(a[2], a[1])
+    b[1] = qmc.x(b[1])
+
+    a[1], x = qmc.cx(a[1], x)
+
+    for i in qmc.range(0, n, 1):
+        a[i], b[i] = qmc.cx(a[i], b[i])
+
+    return a, b, z
+
+
+@qmc.qkernel
+def cdkm_adder(
+    n: qmc.UInt,
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit], qmc.Qubit]:
+    a = qmc.qubit_array(n, name="a")
+    b = qmc.qubit_array(n, name="b")
+    z = qmc.qubit(name="z")
+    a, b, z = _cdkm_adder(a, b, z)
+    return a, b, z
+
+
 # --- Single-qubit gate circuits ---
 
 
@@ -905,6 +972,14 @@ QKERNEL_CATALOG: list[QKernelEntry] = [
         description="Simple ripple-carry adder using MAJ and UMA with 3 CNOTs",
         param_names=("n",),
         min_params={"n": 2},
+        tags=("arithmetic",),
+    ),
+    QKernelEntry(
+        id="cdkm_adder",
+        qkernel=cdkm_adder,
+        description="Cuccaro-Draper-Kutin-Moulton (CDKM) ripple-carry adder",
+        param_names=("n",),
+        min_params={"n": 4},
         tags=("arithmetic",),
     ),
     # --- Single-qubit gate entries ---
