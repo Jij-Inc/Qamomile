@@ -497,10 +497,10 @@ class TestCompositeGateEstimation:
         est = estimate_resources(test_qpe_concrete.block)
 
         # Should get concrete gate counts
-        # For m=3: 1 X + 3 H + 7 controlled-P + IQFT(3)
+        # For m=3: 1 X + 3 H + 3 controlled-P (power= means 1 gate each) + IQFT(3)
         # IQFT(3): 1 SWAP + 3 CP + 3 H = 7 gates
-        # Total: 1 + 3 + 7 + 7 = 18 gates
-        assert est.gates.total > 15  # At least 15 gates
+        # Total: 1 + 3 + 3 + 7 = 14 gates
+        assert est.gates.total == 14
 
     def test_qpe_builtin_concrete_m8(self):
         """Test built-in QPE with m=8 matches expected gate count."""
@@ -519,15 +519,10 @@ class TestCompositeGateEstimation:
 
         est = estimate_resources(test_qpe_m8.block)
 
-        # For m=8: 2^0 + 2^1 + ... + 2^7 = 255 controlled-P gates
-        # Plus 1 X + 8 H + IQFT(8)
+        # For m=8: 1 X + 8 H + 8 controlled-P (power= means 1 gate each) + IQFT(8)
         # IQFT(8) = 4 SWAP + 28 CP + 8 H = 40 gates
-        # Total: 1 X + 8 H + 255 P + 40 IQFT = 304 gates
-
-        # Should not just be counting the composite gate itself
-        assert est.gates.total != 1
-        # Should have substantial number of gates
-        assert est.gates.total > 250
+        # Total: 1 X + 8 H + 8 CP + 40 IQFT = 57 gates
+        assert est.gates.total == 57
 
     def test_qft_builtin_estimation(self):
         """Test built-in qmc.qft() resource estimation."""
@@ -588,10 +583,10 @@ class TestCompositeGateEstimation:
         # Should handle nested composite gates
         assert est.gates.total != 1
 
-        # QPE(m=4): 1 X + 4 H + 15 controlled-P + IQFT(4)
+        # QPE(m=4): 1 X + 4 H + 4 controlled-P (power= means 1 gate each) + IQFT(4)
         # IQFT(4): 2 SWAP + 6 CP + 4 H = 12 gates
-        # Total: 1 + 4 + 15 + 12 = 32 gates
-        assert est.gates.total == 32
+        # Total: 1 + 4 + 4 + 12 = 21 gates
+        assert est.gates.total == 21
 
 
 class TestStubGateEstimation:
@@ -709,8 +704,8 @@ class TestStubGateEstimation:
 class TestQPEResourceEstimation:
     """Test QPE resource estimation comparing manual vs built-in implementations."""
 
-    def test_manual_qpe_has_exponential_term(self):
-        """Test that manual QPE implementation correctly shows 2^m term."""
+    def test_manual_qpe_has_polynomial_term(self):
+        """Test that manual QPE with opaque ControlledU has polynomial resource."""
 
         @qm.qkernel
         def phase_gate(q: qm.Qubit, theta: float, iter: int) -> qm.Qubit:
@@ -762,23 +757,29 @@ class TestQPEResourceEstimation:
 
         est = estimate_resources(qpe_manual.block)
 
-        # Check that the total gates expression contains 2^m term
+        # With opaque ControlledUOperation, manual QPE is polynomial (not exponential).
+        # Each controlled_phase call counts as 1 gate regardless of iter parameter.
         m = sp.Symbol("m", integer=True, positive=True)
         total_gates_expr = est.gates.total
 
-        # Should have exponential term 2^m
-        assert sp.exp in [
-            type(arg) for arg in sp.preorder_traversal(total_gates_expr)
-        ] or any(
+        # Should NOT have exponential term 2^m (ControlledU is opaque)
+        has_exponential = any(
             isinstance(arg, sp.Pow) and arg.base == 2
             for arg in sp.preorder_traversal(total_gates_expr)
-        ), f"Expected 2^m term in total gates, got: {total_gates_expr}"
+        )
+        assert not has_exponential, (
+            f"Expected no 2^m term in total gates (opaque ControlledU), got: {total_gates_expr}"
+        )
 
         # Verify qubit count: m + 1
         assert est.qubits == m + 1
 
-    def test_builtin_qpe_has_exponential_term(self):
-        """Test that built-in qpe() also shows 2^n term after fix."""
+    def test_builtin_qpe_has_polynomial_term(self):
+        """Test that built-in qpe() has polynomial (not exponential) resource estimate.
+
+        ControlledUOperation with power=2^k represents a single Controlled(U^(2^k))
+        gate, not 2^k repetitions. So QPE resource should be polynomial in n.
+        """
 
         @qm.qkernel
         def simple_phase_gate(q: qm.Qubit, theta: float) -> qm.Qubit:
@@ -801,13 +802,14 @@ class TestQPEResourceEstimation:
         n = sp.Symbol("n", integer=True, positive=True)
         total_gates_expr = est.gates.total
 
-        # Should have exponential term 2^n
-        assert sp.exp in [
-            type(arg) for arg in sp.preorder_traversal(total_gates_expr)
-        ] or any(
+        # Should NOT have exponential term 2^n (power= means single gate)
+        has_exponential = any(
             isinstance(arg, sp.Pow) and arg.base == 2
             for arg in sp.preorder_traversal(total_gates_expr)
-        ), f"Expected 2^n term in total gates, got: {total_gates_expr}"
+        )
+        assert not has_exponential, (
+            f"Expected no 2^n term in total gates, got: {total_gates_expr}"
+        )
 
         # Verify qubit count: n + 1
         assert est.qubits == n + 1
@@ -883,14 +885,13 @@ class TestQPEResourceEstimation:
         est_manual_8 = est_manual.substitute(m=8)
         est_builtin_8 = est_builtin.substitute(n=8)
 
-        # Both should include the exponential term 2^8 = 256
-        # Manual: 2^8 + 8^2/2 + 3*8/2 + floor(8/2) = 256 + 32 + 12 + 4 = 304
-        # Built-in: similar structure
-        assert est_manual_8.gates.total >= 256, (
-            f"Manual QPE total gates should be >= 256, got {est_manual_8.gates.total}"
-        )
-        assert est_builtin_8.gates.total >= 256, (
-            f"Built-in QPE total gates should be >= 256, got {est_builtin_8.gates.total}"
+        # With opaque ControlledU, both manual and builtin QPE are polynomial.
+        # Manual QPE: m H + m ControlledU + IQFT(m) = polynomial in m
+        # Built-in QPE: same polynomial structure
+        # For m=8: both should give the same total (57)
+        assert est_manual_8.gates.total == est_builtin_8.gates.total, (
+            f"Manual and built-in QPE should have same total gates, "
+            f"got manual={est_manual_8.gates.total}, builtin={est_builtin_8.gates.total}"
         )
 
 
