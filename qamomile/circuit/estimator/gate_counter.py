@@ -1040,113 +1040,57 @@ def _count_from_operations(
                     count = count + inner_count
 
             case ControlledUOperation():
-                # Recursively count gates in the unitary block
+                # Treat ControlledUOperation as an opaque gate:
+                # total=1, rotation=0, clifford=0
+                # Only classify by qubit width (two_qubit / multi_qubit)
                 from qamomile.circuit.ir.block_value import BlockValue
-                from qamomile.circuit.ir.value import ArrayValue
 
+                # Resolve num_controls
+                if op.is_symbolic_num_controls:
+                    nc = value_to_expr(
+                        op.num_controls, block, call_context, loop_var_symbols,
+                        parent_blocks=parent_blocks,
+                    )
+                else:
+                    nc = op.num_controls
+
+                # Determine number of target qubits
                 controlled_block = op.block
                 if isinstance(controlled_block, BlockValue):
-                    # Build call context: map formal parameters to actual arguments
-                    new_call_context = call_context.copy()
+                    num_targets = sum(
+                        1 for inp in controlled_block.input_values
+                        if inp.type.is_quantum()
+                    )
+                else:
+                    target_ops = op.target_operands if hasattr(op, 'target_operands') else []
+                    num_targets = len(target_ops) if target_ops else 1
 
-                    if op.has_index_spec:
-                        # index_spec mode: skip qubit formal inputs,
-                        # map only non-qubit parameters from operands[2:]
-                        param_operands = op.operands[2:]
-                        param_idx = 0
-                        for formal_input in controlled_block.input_values:
-                            if not formal_input.type.is_quantum():
-                                if param_idx < len(param_operands):
-                                    actual_arg = param_operands[param_idx]
-                                    resolved_arg = value_to_expr(
-                                        actual_arg,
-                                        block,
-                                        call_context,
-                                        loop_var_symbols,
-                                        parent_blocks=parent_blocks,
-                                    )
-                                    new_call_context[
-                                        formal_input.uuid
-                                    ] = resolved_arg
-                                    if isinstance(
-                                        actual_arg, ArrayValue
-                                    ) and isinstance(formal_input, ArrayValue):
-                                        for dim_formal, dim_actual in zip(
-                                            formal_input.shape, actual_arg.shape
-                                        ):
-                                            resolved_dim = value_to_expr(
-                                                dim_actual,
-                                                block,
-                                                call_context,
-                                                loop_var_symbols,
-                                                parent_blocks=parent_blocks,
-                                            )
-                                            new_call_context[
-                                                dim_formal.uuid
-                                            ] = resolved_dim
-                                    param_idx += 1
-                    else:
-                        # Get target operands (skip BlockValue and control qubits)
-                        target_operands = op.target_operands
-
-                        # Map each formal input to corresponding target operand
-                        for formal_idx, formal_input in enumerate(
-                            controlled_block.input_values
-                        ):
-                            if formal_idx < len(target_operands):
-                                actual_arg = target_operands[formal_idx]
-
-                                # Resolve actual_arg to SymPy expression in the OUTER block
-                                # so that computed values (like 2**i) can be traced
-                                resolved_arg = value_to_expr(
-                                    actual_arg,
-                                    block,
-                                    call_context,
-                                    loop_var_symbols,
-                                    parent_blocks=parent_blocks,
-                                )
-                                new_call_context[formal_input.uuid] = resolved_arg
-
-                                # If both are arrays, also map dimensions
-                                if isinstance(
-                                    actual_arg, ArrayValue
-                                ) and isinstance(formal_input, ArrayValue):
-                                    for dim_formal, dim_actual in zip(
-                                        formal_input.shape, actual_arg.shape
-                                    ):
-                                        resolved_dim = value_to_expr(
-                                            dim_actual,
-                                            block,
-                                            call_context,
-                                            loop_var_symbols,
-                                            parent_blocks=parent_blocks,
-                                        )
-                                        new_call_context[
-                                            dim_formal.uuid
-                                        ] = resolved_dim
-
-                    # Resolve num_controls for classification
-                    if op.is_symbolic_num_controls:
-                        nc = value_to_expr(
-                            op.num_controls, block, call_context, loop_var_symbols,
-                            parent_blocks=parent_blocks,
-                        )
-                    else:
-                        nc = op.num_controls
-
-                    # Recursively count with preserved context
-                    # num_controls promotes gate classifications
-                    inner_count = _count_from_operations(
-                        controlled_block.operations,
-                        block=controlled_block,
-                        parent_blocks=[],
-                        loop_context=loop_context,
-                        call_context=new_call_context,
-                        loop_var_symbols=loop_var_symbols,
-                        num_controls=nc,
+                # Classify by qubit width
+                if isinstance(nc, int):
+                    total_qubits = nc + num_targets
+                    two = sp.Integer(1) if total_qubits == 2 else sp.Integer(0)
+                    multi = sp.Integer(1) if total_qubits > 2 else sp.Integer(0)
+                else:
+                    total_qubits = nc + num_targets
+                    two = sp.Piecewise(
+                        (sp.Integer(1), sp.Eq(total_qubits, 2)),
+                        (sp.Integer(0), True),
+                    )
+                    multi = sp.Piecewise(
+                        (sp.Integer(1), total_qubits > 2),
+                        (sp.Integer(0), True),
                     )
 
-                    count = count + inner_count
+                gate_count = GateCount(
+                    total=sp.Integer(1),
+                    single_qubit=sp.Integer(0),
+                    two_qubit=two,
+                    multi_qubit=multi,
+                    t_gates=sp.Integer(0),
+                    clifford_gates=sp.Integer(0),
+                    rotation_gates=sp.Integer(0),
+                )
+                count = count + gate_count
 
             case CompositeGateOperation():
                 composite_count = _count_composite_gate(

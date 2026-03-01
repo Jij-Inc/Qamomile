@@ -1250,63 +1250,39 @@ def _simulate_parallel_depth_concrete(
             _write_back_depths(qubit_name_map, local_depths, qubit_depths)
 
         elif isinstance(op, ControlledUOperation):
+            # Treat as opaque gate with depth=1
             if op.is_symbolic_num_controls:
                 nc = _eval_value_concrete(
                     op.num_controls, block, call_context, var_env
                 )
                 if nc is None:
-                    # Cannot resolve to concrete int; conservative fallback
-                    all_qubit_names = [v.name for v in op.operands[1:]]
-                    max_current = CircuitDepth.zero()
-                    for qid in all_qubit_names:
-                        max_current = max_current.max(
-                            qubit_depths.get(qid, CircuitDepth.zero())
-                        )
-                    gate_depth = CircuitDepth(
-                        total_depth=sp.Integer(1),
-                        t_depth=sp.Integer(0),
-                        two_qubit_depth=sp.Integer(0),
-                        multi_qubit_depth=sp.Integer(1),
-                        rotation_depth=sp.Integer(0),
-                    )
-                    new_depth = max_current + gate_depth
-                    for qid in all_qubit_names:
-                        qubit_depths[qid] = new_depth
-                    continue
+                    nc = 1  # Conservative fallback
             else:
                 nc = op.num_controls
 
             controlled_block = op.block
-            if not isinstance(controlled_block, BlockValue):
-                continue
+            if isinstance(controlled_block, BlockValue):
+                num_targets = sum(
+                    1 for inp in controlled_block.input_values
+                    if inp.type.is_quantum()
+                )
+            else:
+                num_targets = 1
 
-            new_call_context = call_context.copy()
+            total_qubits = nc + num_targets
+            two_qubit_depth = sp.Integer(1) if total_qubits == 2 else sp.Integer(0)
+            multi_qubit_depth = sp.Integer(1) if total_qubits > 2 else sp.Integer(0)
 
+            gate_depth = CircuitDepth(
+                total_depth=sp.Integer(1),
+                t_depth=sp.Integer(0),
+                two_qubit_depth=two_qubit_depth,
+                multi_qubit_depth=multi_qubit_depth,
+                rotation_depth=sp.Integer(0),
+            )
+
+            # Get qubit names for depth tracking
             if op.has_index_spec:
-                # index_spec mode: skip qubit formal inputs,
-                # map only non-qubit parameters from operands[2:]
-                param_operands = op.operands[2:]
-                param_idx = 0
-                for formal_input in controlled_block.input_values:
-                    if not formal_input.type.is_quantum():
-                        if param_idx < len(param_operands):
-                            actual_arg = param_operands[param_idx]
-                            concrete_val = _eval_value_concrete(
-                                actual_arg, block, call_context, var_env
-                            )
-                            if concrete_val is not None:
-                                new_call_context[
-                                    formal_input.uuid
-                                ] = sp.Integer(concrete_val)
-                            else:
-                                new_call_context[
-                                    formal_input.uuid
-                                ] = value_to_expr(
-                                    actual_arg, block, call_context, {}
-                                )
-                            param_idx += 1
-
-                # Get qubit names from Vector elements
                 vector = op.operands[1]
                 vector_name = vector.name
                 if vector.shape:
@@ -1322,40 +1298,6 @@ def _simulate_parallel_depth_concrete(
                 else:
                     all_qubit_names = [vector_name]
             else:
-                target_operands = op.target_operands
-                for formal_idx, formal_input in enumerate(
-                    controlled_block.input_values
-                ):
-                    if formal_idx < len(target_operands):
-                        actual_arg = target_operands[formal_idx]
-                        concrete_val = _eval_value_concrete(
-                            actual_arg, block, call_context, var_env
-                        )
-                        if concrete_val is not None:
-                            new_call_context[
-                                formal_input.uuid
-                            ] = sp.Integer(concrete_val)
-                        else:
-                            new_call_context[
-                                formal_input.uuid
-                            ] = value_to_expr(
-                                actual_arg, block, call_context, {}
-                            )
-                        if isinstance(actual_arg, ArrayValue) and isinstance(
-                            formal_input, ArrayValue
-                        ):
-                            for dim_formal, dim_actual in zip(
-                                formal_input.shape, actual_arg.shape
-                            ):
-                                dim_val = _eval_value_concrete(
-                                    dim_actual, block, call_context, var_env
-                                )
-                                if dim_val is not None:
-                                    new_call_context[
-                                        dim_formal.uuid
-                                    ] = sp.Integer(dim_val)
-
-                # Get control + target qubit names
                 ctrl_names = [
                     _concretize_qubit_operand(v, block, call_context, var_env)
                     for v in op.control_operands
@@ -1366,25 +1308,12 @@ def _simulate_parallel_depth_concrete(
                 ]
                 all_qubit_names = ctrl_names + tgt_names
 
-            # Compute inner depth
-            inner_depths: dict[str, CircuitDepth] = {}
-            _simulate_parallel_depth_concrete(
-                controlled_block.operations,
-                inner_depths,
-                block=controlled_block,
-                call_context=new_call_context,
-                var_env=var_env,
-                num_controls=nc,
-            )
-            inner_depth = _get_max_depth(inner_depths)
-
-            # Update all involved qubits
             max_current = CircuitDepth.zero()
             for qid in all_qubit_names:
                 max_current = max_current.max(
                     qubit_depths.get(qid, CircuitDepth.zero())
                 )
-            new_depth = max_current + inner_depth
+            new_depth = max_current + gate_depth
             for qid in all_qubit_names:
                 qubit_depths[qid] = new_depth
 
@@ -2350,96 +2279,63 @@ def _handle_controlled_u_parallel(
     loop_var_symbols: dict[str, sp.Symbol],
     value_depths: dict[str, CircuitDepth] | None = None,
 ) -> None:
-    """Handle ControlledUOperation for parallel depth estimation."""
-    from qamomile.circuit.ir.block_value import BlockValue
-    from qamomile.circuit.ir.value import ArrayValue
+    """Handle ControlledUOperation for parallel depth estimation.
 
+    Treats ControlledUOperation as an opaque gate with depth=1.
+    Does not expand inner block.
+    """
+    from qamomile.circuit.ir.block_value import BlockValue
+
+    # Resolve num_controls
     if op.is_symbolic_num_controls:
         nc_expr = value_to_expr(op.num_controls, block, call_context, loop_var_symbols)
     else:
         nc_expr = op.num_controls
 
+    # Determine number of target qubits
     controlled_block = op.block
-    if not isinstance(controlled_block, BlockValue):
-        return
-
-    new_call_context = call_context.copy()
-
-    if op.has_index_spec:
-        # index_spec mode: skip qubit formal inputs,
-        # map only non-qubit parameters from operands[2:]
-        param_operands = op.operands[2:]
-        param_idx = 0
-        for formal_input in controlled_block.input_values:
-            if not formal_input.type.is_quantum():
-                if param_idx < len(param_operands):
-                    actual_arg = param_operands[param_idx]
-                    resolved_arg = value_to_expr(
-                        actual_arg, block, call_context, loop_var_symbols
-                    )
-                    new_call_context[formal_input.uuid] = resolved_arg
-                    if isinstance(actual_arg, ArrayValue) and isinstance(
-                        formal_input, ArrayValue
-                    ):
-                        for dim_formal, dim_actual in zip(
-                            formal_input.shape, actual_arg.shape
-                        ):
-                            resolved_dim = value_to_expr(
-                                dim_actual, block, call_context, loop_var_symbols
-                            )
-                            new_call_context[dim_formal.uuid] = resolved_dim
-                    param_idx += 1
-
-        # Use Vector name for symbolic qubit tracking
-        vector = op.operands[1]
-        all_qubit_names = [vector.name]
+    if isinstance(controlled_block, BlockValue):
+        num_targets = sum(
+            1 for inp in controlled_block.input_values
+            if inp.type.is_quantum()
+        )
     else:
-        target_operands = op.target_operands
+        num_targets = 1
 
-        for formal_idx, formal_input in enumerate(controlled_block.input_values):
-            if formal_idx < len(target_operands):
-                actual_arg = target_operands[formal_idx]
-                resolved_arg = value_to_expr(
-                    actual_arg, block, call_context, loop_var_symbols
-                )
-                new_call_context[formal_input.uuid] = resolved_arg
+    # Classify by qubit width
+    if isinstance(nc_expr, int):
+        total_qubits = nc_expr + num_targets
+        two_qubit_depth = sp.Integer(1) if total_qubits == 2 else sp.Integer(0)
+        multi_qubit_depth = sp.Integer(1) if total_qubits > 2 else sp.Integer(0)
+    else:
+        total_qubits = nc_expr + num_targets
+        two_qubit_depth = sp.Piecewise(
+            (sp.Integer(1), sp.Eq(total_qubits, 2)),
+            (sp.Integer(0), True),
+        )
+        multi_qubit_depth = sp.Piecewise(
+            (sp.Integer(1), total_qubits > 2),
+            (sp.Integer(0), True),
+        )
 
-                if isinstance(actual_arg, ArrayValue) and isinstance(
-                    formal_input, ArrayValue
-                ):
-                    for dim_formal, dim_actual in zip(
-                        formal_input.shape, actual_arg.shape
-                    ):
-                        resolved_dim = value_to_expr(
-                            dim_actual, block, call_context, loop_var_symbols
-                        )
-                        new_call_context[dim_formal.uuid] = resolved_dim
-
-        # Get all qubits involved (control + target)
-        all_qubit_names = [v.name for v in op.operands if hasattr(v, "name")]
-
-    # Compute inner depth with resolved num_controls
-    inner_depths: QubitDepthMap = {}
-    _estimate_parallel_depth(
-        controlled_block.operations,
-        inner_depths,
-        block=controlled_block,
-        loop_context=loop_context,
-        call_context=new_call_context,
-        loop_var_symbols=loop_var_symbols,
-        num_controls=nc_expr,
-        value_depths=value_depths,
+    gate_depth = CircuitDepth(
+        total_depth=sp.Integer(1),
+        t_depth=sp.Integer(0),
+        two_qubit_depth=two_qubit_depth,
+        multi_qubit_depth=multi_qubit_depth,
+        rotation_depth=sp.Integer(0),
     )
 
-    inner_depth = _get_max_depth(inner_depths)
+    # Get all qubit names involved (control + target)
+    all_qubit_names = [v.name for v in op.operands if hasattr(v, "name")]
 
-    # All involved qubits get the max depth
+    # All involved qubits get max(current) + gate_depth
     max_current = CircuitDepth.zero()
     for qid in all_qubit_names:
         max_current = max_current.max(
             qubit_depths.get(qid, CircuitDepth.zero())
         )
-    new_depth = max_current + inner_depth
+    new_depth = max_current + gate_depth
     for qid in all_qubit_names:
         qubit_depths[qid] = new_depth
 
@@ -2603,8 +2499,8 @@ def _compute_sequential_depth(
                     depth = depth + inner_depth
 
             case ControlledUOperation():
+                # Treat as opaque gate with depth=1
                 from qamomile.circuit.ir.block_value import BlockValue
-                from qamomile.circuit.ir.value import ArrayValue
 
                 if op.is_symbolic_num_controls:
                     nc_expr = value_to_expr(op.num_controls, block, call_context, loop_var_symbols)
@@ -2613,88 +2509,35 @@ def _compute_sequential_depth(
 
                 controlled_block = op.block
                 if isinstance(controlled_block, BlockValue):
-                    new_call_context = call_context.copy()
+                    num_targets = sum(
+                        1 for inp in controlled_block.input_values
+                        if inp.type.is_quantum()
+                    )
+                else:
+                    num_targets = 1
 
-                    if op.has_index_spec:
-                        # index_spec mode: skip qubit formal inputs,
-                        # map only non-qubit parameters
-                        param_operands = op.operands[2:]
-                        param_idx = 0
-                        for formal_input in controlled_block.input_values:
-                            if not formal_input.type.is_quantum():
-                                if param_idx < len(param_operands):
-                                    actual_arg = param_operands[param_idx]
-                                    resolved_arg = value_to_expr(
-                                        actual_arg,
-                                        block,
-                                        call_context,
-                                        loop_var_symbols,
-                                    )
-                                    new_call_context[
-                                        formal_input.uuid
-                                    ] = resolved_arg
-                                    if isinstance(
-                                        actual_arg, ArrayValue
-                                    ) and isinstance(
-                                        formal_input, ArrayValue
-                                    ):
-                                        for dim_formal, dim_actual in zip(
-                                            formal_input.shape,
-                                            actual_arg.shape,
-                                        ):
-                                            resolved_dim = value_to_expr(
-                                                dim_actual,
-                                                block,
-                                                call_context,
-                                                loop_var_symbols,
-                                            )
-                                            new_call_context[
-                                                dim_formal.uuid
-                                            ] = resolved_dim
-                                    param_idx += 1
-                    else:
-                        target_operands = op.target_operands
-                        for formal_idx, formal_input in enumerate(
-                            controlled_block.input_values
-                        ):
-                            if formal_idx < len(target_operands):
-                                actual_arg = target_operands[formal_idx]
-                                resolved_arg = value_to_expr(
-                                    actual_arg,
-                                    block,
-                                    call_context,
-                                    loop_var_symbols,
-                                )
-                                new_call_context[
-                                    formal_input.uuid
-                                ] = resolved_arg
-                                if isinstance(
-                                    actual_arg, ArrayValue
-                                ) and isinstance(formal_input, ArrayValue):
-                                    for dim_formal, dim_actual in zip(
-                                        formal_input.shape,
-                                        actual_arg.shape,
-                                    ):
-                                        resolved_dim = value_to_expr(
-                                            dim_actual,
-                                            block,
-                                            call_context,
-                                            loop_var_symbols,
-                                        )
-                                        new_call_context[
-                                            dim_formal.uuid
-                                        ] = resolved_dim
-
-                    inner_depth = _compute_sequential_depth(
-                        controlled_block.operations,
-                        block=controlled_block,
-                        loop_context=loop_context,
-                        call_context=new_call_context,
-                        loop_var_symbols=loop_var_symbols,
-                        num_controls=nc_expr,
+                if isinstance(nc_expr, int):
+                    total_qubits = nc_expr + num_targets
+                    two_qubit_depth = sp.Integer(1) if total_qubits == 2 else sp.Integer(0)
+                    multi_qubit_depth = sp.Integer(1) if total_qubits > 2 else sp.Integer(0)
+                else:
+                    total_qubits = nc_expr + num_targets
+                    two_qubit_depth = sp.Piecewise(
+                        (sp.Integer(1), sp.Eq(total_qubits, 2)),
+                        (sp.Integer(0), True),
+                    )
+                    multi_qubit_depth = sp.Piecewise(
+                        (sp.Integer(1), total_qubits > 2),
+                        (sp.Integer(0), True),
                     )
 
-                    depth = depth + inner_depth
+                depth = depth + CircuitDepth(
+                    total_depth=sp.Integer(1),
+                    t_depth=sp.Integer(0),
+                    two_qubit_depth=two_qubit_depth,
+                    multi_qubit_depth=multi_qubit_depth,
+                    rotation_depth=sp.Integer(0),
+                )
 
             case CompositeGateOperation():
                 composite_depth = _estimate_composite_gate_depth(
