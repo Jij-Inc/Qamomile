@@ -6,11 +6,14 @@ allowing resource estimates to depend on problem size parameters.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import sympy as sp
 from sympy import Sum
+
+from qamomile.circuit.estimator.depth_estimator import _strip_nonneg_max
 
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
@@ -134,15 +137,15 @@ class GateCount:
     def simplify(self) -> GateCount:
         """Simplify all SymPy expressions."""
         return GateCount(
-            total=sp.simplify(self.total),
-            single_qubit=sp.simplify(self.single_qubit),
-            two_qubit=sp.simplify(self.two_qubit),
-            multi_qubit=sp.simplify(self.multi_qubit),
-            t_gates=sp.simplify(self.t_gates),
-            clifford_gates=sp.simplify(self.clifford_gates),
-            rotation_gates=sp.simplify(self.rotation_gates),
+            total=_strip_nonneg_max(sp.simplify(self.total)),
+            single_qubit=_strip_nonneg_max(sp.simplify(self.single_qubit)),
+            two_qubit=_strip_nonneg_max(sp.simplify(self.two_qubit)),
+            multi_qubit=_strip_nonneg_max(sp.simplify(self.multi_qubit)),
+            t_gates=_strip_nonneg_max(sp.simplify(self.t_gates)),
+            clifford_gates=_strip_nonneg_max(sp.simplify(self.clifford_gates)),
+            rotation_gates=_strip_nonneg_max(sp.simplify(self.rotation_gates)),
             oracle_calls={
-                name: sp.simplify(count)
+                name: _strip_nonneg_max(sp.simplify(count))
                 for name, count in self.oracle_calls.items()
             },
         )
@@ -296,6 +299,9 @@ def _extract_gate_count_from_metadata(meta: ResourceMetadata) -> GateCount:
     field that is None. If total_gates is not set, computes it as
     the sum of single_qubit + two_qubit + multi_qubit.
 
+    Emits a UserWarning if total_gates is set but some gate category
+    fields are None and the known sub-total is less than total_gates.
+
     Args:
         meta: ResourceMetadata containing gate information
 
@@ -308,6 +314,33 @@ def _extract_gate_count_from_metadata(meta: ResourceMetadata) -> GateCount:
     t_gates = meta.t_gates or 0
     clifford = meta.clifford_gates or 0
     rotation = meta.rotation_gates or 0
+
+    # Warn if total_gates is set but sub-categories have None gaps
+    if meta.total_gates:
+        none_fields = [
+            name
+            for name, val in [
+                ("single_qubit_gates", meta.single_qubit_gates),
+                ("two_qubit_gates", meta.two_qubit_gates),
+                ("multi_qubit_gates", meta.multi_qubit_gates),
+            ]
+            if val is None
+        ]
+        if none_fields:
+            non_none_sum = single_qubit + two_qubit + multi_qubit
+            if non_none_sum < meta.total_gates:
+                warnings.warn(
+                    f"ResourceMetadata has total_gates={meta.total_gates} "
+                    f"but {', '.join(none_fields)} "
+                    f"{'is' if len(none_fields) == 1 else 'are'} "
+                    f"unspecified (None) and treated as 0. "
+                    f"The known sub-total ({non_none_sum}) is less than "
+                    f"total_gates ({meta.total_gates}). "
+                    f"Set gate category fields explicitly for accurate "
+                    f"sub-category counts.",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
     total = meta.total_gates
     if not total:

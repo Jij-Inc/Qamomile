@@ -7,6 +7,7 @@ Depth is expressed as SymPy expressions for parametric problem sizes.
 from __future__ import annotations
 
 import re
+import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -55,6 +56,30 @@ class _UnresolvableForOpError(Exception):
 
 # Loop context: [(var_name, start, stop, step), ...]
 LoopContext = list[tuple[str, sp.Expr, sp.Expr, sp.Expr]]
+
+
+def _strip_nonneg_max(expr: sp.Expr) -> sp.Expr:
+    """Canonicalize Max(0, x) -> x in resource estimation expressions.
+
+    Circuit depths and gate counts are non-negative by physical construction,
+    so Max(0, expr) is a redundant artifact introduced by the fallback
+    estimation path's qubit-wise sp.Max. This normalization aligns all paths
+    to the same canonical form.
+    """
+    if not isinstance(expr, sp.Expr):
+        return expr
+    # Bottom-up: first process sub-expressions, then this node
+    if expr.args:
+        new_args = [_strip_nonneg_max(a) for a in expr.args]
+        expr = expr.func(*new_args)
+    # Match Max(0, x) or Max(x, 0)
+    if isinstance(expr, sp.Max) and len(expr.args) == 2:
+        a, b = expr.args
+        if a == 0 or a == sp.Integer(0):
+            return b
+        if b == 0 or b == sp.Integer(0):
+            return a
+    return expr
 
 
 @dataclass
@@ -112,11 +137,11 @@ class CircuitDepth:
     def simplify(self) -> CircuitDepth:
         """Simplify all SymPy expressions."""
         return CircuitDepth(
-            total_depth=sp.simplify(self.total_depth),
-            t_depth=sp.simplify(self.t_depth),
-            two_qubit_depth=sp.simplify(self.two_qubit_depth),
-            multi_qubit_depth=sp.simplify(self.multi_qubit_depth),
-            rotation_depth=sp.simplify(self.rotation_depth),
+            total_depth=_strip_nonneg_max(sp.simplify(self.total_depth)),
+            t_depth=_strip_nonneg_max(sp.simplify(self.t_depth)),
+            two_qubit_depth=_strip_nonneg_max(sp.simplify(self.two_qubit_depth)),
+            multi_qubit_depth=_strip_nonneg_max(sp.simplify(self.multi_qubit_depth)),
+            rotation_depth=_strip_nonneg_max(sp.simplify(self.rotation_depth)),
         )
 
     def substitute(
@@ -258,25 +283,17 @@ def _extract_depth_from_metadata(meta: ResourceMetadata) -> CircuitDepth:
     Returns:
         CircuitDepth extracted from metadata
     """
-    custom = meta.custom_metadata
-
-    # Extract depth
-    total_depth = custom.get("depth", custom.get("total_depth", 0))
-
-    # Extract T-depth
-    t_depth = custom.get("t_depth", 0)
-
-    # Extract two-qubit depth
-    two_qubit_depth = custom.get("two_qubit_depth", 0)
-
-    # Extract rotation depth
-    rotation_depth = custom.get("rotation_depth", 0)
+    total_depth = meta.total_depth or 0
+    t_depth = meta.t_depth or 0
+    two_qubit_depth = meta.two_qubit_depth or 0
+    multi_qubit_depth = meta.multi_qubit_depth or 0
+    rotation_depth = meta.rotation_depth or 0
 
     return CircuitDepth(
         total_depth=sp.Integer(total_depth),
         t_depth=sp.Integer(t_depth),
         two_qubit_depth=sp.Integer(two_qubit_depth),
-        multi_qubit_depth=sp.Integer(0),
+        multi_qubit_depth=sp.Integer(multi_qubit_depth),
         rotation_depth=sp.Integer(rotation_depth),
     )
 
@@ -406,7 +423,7 @@ def _estimate_composite_gate_depth(
                 n = sp.Symbol("n", integer=True, positive=True)
 
         return CircuitDepth(
-            total_depth=n,
+            total_depth=2 * n,
             t_depth=sp.Integer(0),
             two_qubit_depth=n * (n - 1) / 2,  # Sequential estimate
             multi_qubit_depth=sp.Integer(0),
@@ -1137,19 +1154,61 @@ def _simulate_parallel_depth_concrete(
                 qubit_depths[phi_op.output.name] = tv_depth.max(fv_depth)
 
         elif isinstance(op, ForItemsOperation):
-            # Concrete simulation: iterate body once (dict size unknown)
-            inner_depths_copy = qubit_depths.copy()
-            _simulate_parallel_depth_concrete(
+            # Dict size unknown: sequential upper bound with cardinality symbol
+            inner_depth = _compute_sequential_depth(
                 op.operations,
-                inner_depths_copy,
                 block=block,
+                loop_context=[],
                 call_context=call_context,
-                var_env=var_env,
+                loop_var_symbols={},
                 num_controls=num_controls,
-                value_depths=value_depths,
             )
-            for qid, d in inner_depths_copy.items():
-                qubit_depths[qid] = d
+            dict_operand = op.operands[0]
+            if (
+                hasattr(dict_operand, "is_parameter")
+                and dict_operand.is_parameter()
+            ):
+                dict_name = dict_operand.parameter_name() or dict_operand.name
+            else:
+                dict_name = dict_operand.name
+            cardinality_sym = sp.Symbol(
+                f"|{dict_name}|", integer=True, positive=True
+            )
+            total_depth = inner_depth * cardinality_sym
+            body_qubits = _collect_all_qubit_names(op.operations)
+            current_max = _get_max_depth(qubit_depths)
+            new_max = current_max + total_depth
+            for qid in set(qubit_depths) | body_qubits:
+                qubit_depths[qid] = new_max
+            warnings.warn(
+                f"Depth for ForItemsOperation over '{dict_name}' is a sequential "
+                f"upper bound (multiplied by |{dict_name}|). "
+                f"True depth depends on runtime data.",
+                stacklevel=2,
+            )
+
+        elif isinstance(op, WhileOperation):
+            # While iteration count unknown: sequential upper bound
+            inner_depth = _compute_sequential_depth(
+                op.operations,
+                block=None,
+                loop_context=[],
+                call_context=call_context,
+                loop_var_symbols={},
+                num_controls=num_controls,
+            )
+            iterations = sp.Symbol("|while|", integer=True, positive=True)
+            increase = inner_depth * iterations
+            body_qubits = _collect_gate_qubit_names(op.operations)
+            current_max = _get_max_depth(qubit_depths)
+            new_max = current_max + increase
+            for qid in set(qubit_depths) | body_qubits:
+                qubit_depths[qid] = new_max
+            warnings.warn(
+                "Depth for WhileOperation is a sequential upper bound "
+                "(multiplied by |while|). True iteration count is unknown.",
+                stacklevel=2,
+            )
 
         elif isinstance(op, ForOperation):
             if len(op.operands) < 2:

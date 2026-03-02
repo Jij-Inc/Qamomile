@@ -54,7 +54,7 @@ class TestQFT:
         assert metadata.custom_metadata["num_cp_gates"] == num_cp
         assert metadata.custom_metadata["num_swap_gates"] == num_swap
         assert metadata.custom_metadata["total_gates"] == num_h + num_cp + num_swap
-        assert metadata.custom_metadata["depth"] == 2 * n
+        assert metadata.total_depth == 2 * n
 
     @pytest.mark.parametrize("n", [1, 2, 5, 10, 100])
     def test_resources_symbolic(self, n):
@@ -258,7 +258,7 @@ class TestIQFT:
         assert metadata.custom_metadata["num_cp_gates"] == num_cp
         assert metadata.custom_metadata["num_swap_gates"] == num_swap
         assert metadata.custom_metadata["total_gates"] == num_h + num_cp + num_swap
-        assert metadata.custom_metadata["depth"] == 2 * n
+        assert metadata.total_depth == 2 * n
 
     @pytest.mark.parametrize("n", [1, 2, 5, 10, 100])
     def test_resources_symbolic(self, n):
