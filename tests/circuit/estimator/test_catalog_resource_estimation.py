@@ -396,7 +396,7 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         ),  # type:ignore
         clifford_gates=(n + 2) + n_iters * 4 * n,
         oracle_calls={"grover_oracle": n_iters},
-        total_depth=2 + n_iters * 5,
+        total_depth=3 + n_iters * 5,
         two_qubit_depth=(
             n_iters * sp.Piecewise((sp.Integer(1), sp.Eq(n, 2)), (sp.Integer(0), True))
         ),  # type:ignore
@@ -468,7 +468,7 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         single_qubit=2 * n,
         two_qubit=3 * n,
         multi_qubit=n,
-        clifford_gates=2 * n,
+        clifford_gates=5 * n,
         total_depth=2 * n + 3,
         two_qubit_depth=2 * n + 3,
         multi_qubit_depth=n,
@@ -499,11 +499,11 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
     "draper_inplace_qc_adder": resource(
         # Addition on a Quantum Computer (https://arxiv.org/abs/quant-ph/0008033) (circuit)
         n,
-        total=n**2 + 2 * n + 2 * sp.floor(n / 2),
+        total=n + n * (n + 1) + 2 * sp.floor(n / 2),
         single_qubit=3 * n,
-        two_qubit=n**2 - n + 2 * sp.floor(n / 2),
+        two_qubit=n * (n - 1) + 2 * sp.floor(n / 2),
         clifford_gates=2 * n + 2 * sp.floor(n / 2),
-        rotation_gates=n**2,
+        rotation_gates=n + n * (n - 1),
         total_depth=4 * n + 1,
         two_qubit_depth=4 * n - 4,
         rotation_depth=4 * n - 5,
