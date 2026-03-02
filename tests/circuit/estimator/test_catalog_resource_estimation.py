@@ -429,17 +429,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
     ),
     "uma_2_cnot": resource(
         # A new quantum ripple-carry addition circuit (https://arxiv.org/abs/quant-ph/0410184) (circuit)
-        2 * n + 1,
-        total=3 * n,
-        two_qubit=2 * n,
-        multi_qubit=n,
-        clifford_gates=2 * n,
-        total_depth=3 * n,
-        two_qubit_depth=2 * n,
-        multi_qubit_depth=n,
-    ),
-    "uma_2_cnot_loop": resource(
-        # A new quantum ripple-carry addition circuit (https://arxiv.org/abs/quant-ph/0410184) (circuit)
         3,
         total=3,
         two_qubit=2,
@@ -449,16 +438,15 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit_depth=2,
         multi_qubit_depth=1,
     ),
-    "uma_3_cnot_loop": resource(
+    "uma_2_cnot_loop": resource(
         # A new quantum ripple-carry addition circuit (https://arxiv.org/abs/quant-ph/0410184) (circuit)
         2 * n + 1,
-        total=6 * n,
-        single_qubit=2 * n,
-        two_qubit=3 * n,
+        total=3 * n,
+        two_qubit=2 * n,
         multi_qubit=n,
-        clifford_gates=2,
-        total_depth=2 * n + 3,
-        two_qubit_depth=2 * n + 3,
+        clifford_gates=2 * n,
+        total_depth=3 * n,
+        two_qubit_depth=2 * n,
         multi_qubit_depth=n,
     ),
     "uma_3_cnot": resource(
@@ -472,6 +460,18 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         total_depth=5,
         two_qubit_depth=3,
         multi_qubit_depth=1,
+    ),
+    "uma_3_cnot_loop": resource(
+        # A new quantum ripple-carry addition circuit (https://arxiv.org/abs/quant-ph/0410184) (circuit)
+        2 * n + 1,
+        total=6 * n,
+        single_qubit=2 * n,
+        two_qubit=3 * n,
+        multi_qubit=n,
+        clifford_gates=2,
+        total_depth=2 * n + 3,
+        two_qubit_depth=2 * n + 3,
+        multi_qubit_depth=n,
     ),
     "simple_ripple_carry_adder_2_cnot": resource(
         # A new quantum ripple-carry addition circuit (https://arxiv.org/abs/quant-ph/0410184) (circuit)
