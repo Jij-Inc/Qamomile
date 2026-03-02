@@ -59,6 +59,54 @@ def _apply_two_qubit_gate(
     return ctrl_out, tgt_out
 
 
+def _apply_three_qubit_gate(
+    control1: Qubit, control2: Qubit, target: Qubit, gate_type: GateOperationType
+) -> tuple[Qubit, Qubit, Qubit]:
+    """Apply a three-qubit gate and return the output qubits."""
+    # Check for aliasing - all 3 pairs
+    pairs = [
+        (control1, control2, "control1", "control2"),
+        (control1, target, "control1", "target"),
+        (control2, target, "control2", "target"),
+    ]
+    for q_a, q_b, name_a, name_b in pairs:
+        if q_a.value.logical_id == q_b.value.logical_id:
+            q_name = q_a.name or "unnamed"
+            raise QubitAliasError(
+                f"Cannot use the same qubit as both {name_a} and {name_b} in {gate_type.name}.\n"
+                f"Qubit '{q_name}' appears in both positions.\n\n"
+                f"Fix: Use distinct qubits for {name_a} and {name_b}.",
+                handle_name=q_name,
+                operation_name=gate_type.name,
+            )
+
+    # Consume all three input handles (enforces linear type)
+    control1 = control1.consume(operation_name=f"{gate_type.name}[control1]")
+    control2 = control2.consume(operation_name=f"{gate_type.name}[control2]")
+    target = target.consume(operation_name=f"{gate_type.name}[target]")
+
+    ctrl1_out_value = control1.value.next_version()
+    ctrl2_out_value = control2.value.next_version()
+    tgt_out_value = target.value.next_version()
+
+    ctrl1_out = Qubit(
+        value=ctrl1_out_value, parent=control1.parent, indices=control1.indices
+    )
+    ctrl2_out = Qubit(
+        value=ctrl2_out_value, parent=control2.parent, indices=control2.indices
+    )
+    tgt_out = Qubit(value=tgt_out_value, parent=target.parent, indices=target.indices)
+
+    gate_op = IRGateOperation(
+        gate_type=gate_type,
+        operands=[control1.value, control2.value, target.value],
+        results=[ctrl1_out_value, ctrl2_out_value, tgt_out_value],
+    )
+    tracer = get_current_tracer()
+    tracer.add_operation(gate_op)
+    return ctrl1_out, ctrl2_out, tgt_out
+
+
 def h(qubit: Qubit) -> Qubit:
     """Hadamard gate."""
     return _apply_single_qubit_gate(qubit, GateOperationType.H)
@@ -67,6 +115,11 @@ def h(qubit: Qubit) -> Qubit:
 def x(qubit: Qubit) -> Qubit:
     """Pauli-X gate (NOT gate)."""
     return _apply_single_qubit_gate(qubit, GateOperationType.X)
+
+
+def z(qubit: Qubit) -> Qubit:
+    """Pauli-Z gate."""
+    return _apply_single_qubit_gate(qubit, GateOperationType.Z)
 
 
 def cx(control: Qubit, target: Qubit) -> tuple[Qubit, Qubit]:
@@ -238,3 +291,19 @@ def swap(qubit_0: Qubit, qubit_1: Qubit) -> tuple[Qubit, Qubit]:
         Tuple of (qubit_0_out, qubit_1_out) after SWAP.
     """
     return _apply_two_qubit_gate(qubit_0, qubit_1, GateOperationType.SWAP)
+
+
+def ccx(
+    control1: Qubit, control2: Qubit, target: Qubit
+) -> tuple[Qubit, Qubit, Qubit]:
+    """Toffoli (CCX) gate: flips target when both controls are |1>.
+
+    Args:
+        control1: First control qubit.
+        control2: Second control qubit.
+        target: Target qubit.
+
+    Returns:
+        Tuple of (control1_out, control2_out, target_out) after CCX.
+    """
+    return _apply_three_qubit_gate(control1, control2, target, GateOperationType.TOFFOLI)
