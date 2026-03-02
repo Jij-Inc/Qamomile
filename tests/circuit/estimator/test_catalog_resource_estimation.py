@@ -348,7 +348,8 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         rotation_depth=num_layers * (quad + linear + 1),  # type:ignore
     ),
     # --- Multi-controlled gates ---
-    "vchain_controlled_z": resource(
+    "network_decomposition_controlled_z": resource(
+        # Ref: Nielsen & Chuang P. 184 (circuit and ancillas)
         2 * n - 2,
         total=2 * n - 1,
         single_qubit=2,
@@ -371,15 +372,15 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         multi_qubit_depth=sp.Piecewise((sp.Integer(1), n > 2), (sp.Integer(0), True)),
     ),
     # --- Grover ---
-    "grover_vchain": resource(
-        n + n_iters * (n - 2) + 1,
+    "grover_network_decomposition": resource(
+        2 * n - 1,
         total=(n + 2) + n_iters * (6 * n - 1),
         single_qubit=(n + 2) + n_iters * (4 * n + 2),
         two_qubit=n_iters,
         multi_qubit=n_iters * (2 * n - 4),
         clifford_gates=(n + 2) + n_iters * (4 * n + 3),
         oracle_calls={"grover_oracle": n_iters},
-        total_depth=3 + n_iters * (2 * n + 2),
+        total_depth=3 + n_iters * (2 * n + 1),
         two_qubit_depth=n_iters,
         multi_qubit_depth=n_iters * (2 * n - 4),
     ),
@@ -389,19 +390,19 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         single_qubit=(n + 2) + n_iters * 4 * n,
         two_qubit=(
             n_iters * sp.Piecewise((sp.Integer(1), sp.Eq(n, 2)), (sp.Integer(0), True))
-        ),
+        ),  # type:ignore
         multi_qubit=(
             n_iters * sp.Piecewise((sp.Integer(1), n > 2), (sp.Integer(0), True))
-        ),
+        ),  # type:ignore
         clifford_gates=(n + 2) + n_iters * 4 * n,
         oracle_calls={"grover_oracle": n_iters},
-        total_depth=3 + n_iters * 6,
+        total_depth=2 + n_iters * 5,
         two_qubit_depth=(
             n_iters * sp.Piecewise((sp.Integer(1), sp.Eq(n, 2)), (sp.Integer(0), True))
-        ),
+        ),  # type:ignore
         multi_qubit_depth=(
             n_iters * sp.Piecewise((sp.Integer(1), n > 2), (sp.Integer(0), True))
-        ),
+        ),  # type:ignore
     ),
     # --- Arithmetic ---
     "maj": resource(
@@ -649,6 +650,50 @@ EXPECTED_BINDINGS_RESOURCES: list[BindingsCase] = [
             rotation_depth=1,  # RX:1
         ),
     ),
+    # --- qaoa_state_umbiguous: quad-only (linear empty) ---
+    BindingsCase(
+        id="qaoa_quad_only",
+        entry_id="qaoa_state_umbiguous",
+        bindings={
+            "n": 3,
+            "num_layers": 1,
+            "quad": {(0, 1): 0.5, (1, 2): 0.3},
+            "linear": {},
+        },
+        expected=resource(
+            3,
+            total=3 + 2 + 0 + 3,  # H(3) + RZZ(2) + RZ(0) + RX(3)
+            single_qubit=3 + 0 + 3,
+            two_qubit=2,
+            clifford_gates=3,
+            rotation_gates=2 + 0 + 3,
+            total_depth=4,  # H:1 + RZZ(sequential, share q1):2 + RX:1
+            two_qubit_depth=2,
+            rotation_depth=3,  # RZZ:2 + RX:1
+        ),
+    ),
+    # --- qaoa_state_umbiguous: single-element dicts ---
+    BindingsCase(
+        id="qaoa_single_element_dict",
+        entry_id="qaoa_state_umbiguous",
+        bindings={
+            "n": 2,
+            "num_layers": 1,
+            "quad": {(0, 1): 0.5},
+            "linear": {0: 0.1},
+        },
+        expected=resource(
+            2,
+            total=2 + 1 + 1 + 2,  # H(2) + RZZ(1) + RZ(1) + RX(2)
+            single_qubit=2 + 1 + 2,
+            two_qubit=1,
+            clifford_gates=2,
+            rotation_gates=1 + 1 + 2,
+            total_depth=4,  # H:1 + RZZ:1 + RZ:1 + RX:1
+            two_qubit_depth=1,
+            rotation_depth=3,  # RZZ:1 + RZ:1 + RX:1
+        ),
+    ),
 ]
 
 
@@ -675,6 +720,23 @@ def test_no_bindings_backward_compat():
     assert quad_sym in est.depth.total_depth.free_symbols
 
 
+def test_partial_bindings_dicts_only():
+    """Partial bindings (dicts only, no scalars) should not crash."""
+    entry = QKERNEL_BY_ID["qaoa_state_umbiguous"]
+    est = estimate_resources(
+        entry.qkernel.block,
+        bindings={"quad": {(0, 1): 0.5}, "linear": {0: 0.1}},
+    )
+    # Scalar parameters should remain symbolic
+    num_layers_sym = sp.Symbol("num_layers", integer=True, positive=True)
+    assert num_layers_sym in est.depth.total_depth.free_symbols
+    # Dict cardinalities should be substituted (not symbolic)
+    quad_sym = sp.Symbol("|quad|", integer=True, positive=True)
+    linear_sym = sp.Symbol("|linear|", integer=True, positive=True)
+    assert quad_sym not in est.depth.total_depth.free_symbols
+    assert linear_sym not in est.depth.total_depth.free_symbols
+
+
 def test_substitute_warns_worst_case():
     """substitute() should re-emit worst-case warning for dict depths."""
     from tests.circuit.qkernel_catalog import qaoa_state_umbiguous
@@ -690,3 +752,7 @@ def test_substitute_warns_worst_case():
         _ = est.substitute(n=4, num_layers=1)
     worst_case_msgs = [w for w in caught if "worst-case" in str(w.message)]
     assert len(worst_case_msgs) > 0
+    # Verify warning messages mention specific dict names
+    msg_texts = [str(w.message) for w in worst_case_msgs]
+    assert any("quad" in m for m in msg_texts)
+    assert any("linear" in m for m in msg_texts)

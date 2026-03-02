@@ -607,22 +607,28 @@ def qaoa_state_umbiguous(
 
 
 @qmc.qkernel
-def _vchain_controlled_z(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-    n = qs.shape[0]
-    ancillas = qmc.qubit_array(n - 2, name="ancillas")
-    target_position = n - 1
+def _network_decomposition_controlled_z(
+    qs: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    total_qubits = qs.shape[0]
+    n = total_qubits - 1  # number of control qubits
+    num_ancillas = n - 1
+    ancillas = qmc.qubit_array(num_ancillas, name="ancillas")
+    target_position = total_qubits - 1
 
     qs[0], qs[1], ancillas[0] = qmc.ccx(qs[0], qs[1], ancillas[0])
-    for i in qmc.range(0, n - 3, 1):
+    for i in qmc.range(0, num_ancillas - 1):
         qs[i + 2], ancillas[i], ancillas[i + 1] = qmc.ccx(
             qs[i + 2], ancillas[i], ancillas[i + 1]
         )
 
     qs[target_position] = qmc.h(qs[target_position])
-    ancillas[n - 3], qs[target_position] = qmc.cx(ancillas[n - 3], qs[target_position])
+    ancillas[num_ancillas - 1], qs[target_position] = qmc.cx(
+        ancillas[num_ancillas - 1], qs[target_position]
+    )
     qs[target_position] = qmc.h(qs[target_position])
 
-    for i in qmc.range(n - 4, -1, -1):
+    for i in qmc.range(num_ancillas - 2, -1, -1):
         qs[i + 2], ancillas[i], ancillas[i + 1] = qmc.ccx(
             qs[i + 2], ancillas[i], ancillas[i + 1]
         )
@@ -632,9 +638,9 @@ def _vchain_controlled_z(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
 
 
 @qmc.qkernel
-def vchain_controlled_z(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+def network_decomposition_controlled_z(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
     qs = qmc.qubit_array(n, name="qs")
-    qs = _vchain_controlled_z(qs)
+    qs = _network_decomposition_controlled_z(qs)
     return qs
 
 
@@ -647,7 +653,7 @@ def __z(q: qmc.Qubit) -> qmc.Qubit:
 def _naive_multi_controlled_z(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
     n = qs.shape[0]
     multi_controlled_z = qmc.controlled(__z, num_controls=n - 1)
-    qs = multi_controlled_z(qs, target_indices=[n - 1])
+    qs = multi_controlled_z(qs, target_indices=[n - 1])  # type: ignore
     return qs
 
 
@@ -664,7 +670,7 @@ def naive_multi_controlled_z(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
 
 
 @qmc.qkernel
-def _grover_vchain(
+def _grover_network_decomposition(
     qs: qmc.Vector[qmc.Qubit], q: qmc.Qubit, n_iters: qmc.UInt
 ) -> qmc.Vector[qmc.Qubit]:
     # Initialise all the qubits.
@@ -675,12 +681,17 @@ def _grover_vchain(
     # Apply the diffusion operator (inversion about the mean).
     for _ in qmc.range(n_iters):
         # Call the oracle.
-        (qs, q) = _over_oracle(qs, q, name="grover_oracle")
+        (qs, q) = _over_oracle(
+            qs,
+            q,
+            name="grover_oracle",
+            resource_metadata=ResourceMetadata(query_complexity=1),
+        )  # type: ignore
         # Apply the diffusion operator,
         # which can be implemented as H + X + multi-controlled Z + X + H.
         qs = _all_h(qs)
         qs = _all_x(qs)
-        qs = _vchain_controlled_z(qs)
+        qs = _network_decomposition_controlled_z(qs)
         qs = _all_x(qs)
         qs = _all_h(qs)
 
@@ -688,10 +699,10 @@ def _grover_vchain(
 
 
 @qmc.qkernel
-def grover_vchain(n: qmc.UInt, n_iters: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+def grover_network_decomposition(n: qmc.UInt, n_iters: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     qs = qmc.qubit_array(n, name="qs")
     q = qmc.qubit(name="q")
-    qs = _grover_vchain(qs, q, n_iters)
+    qs = _grover_network_decomposition(qs, q, n_iters)
     bits = qmc.measure(qs)
     return bits
 
@@ -708,7 +719,12 @@ def _grover_naive_multi_controlled_z(
     # Apply the diffusion operator (inversion about the mean).
     for _ in qmc.range(n_iters):
         # Call the oracle.
-        (qs, q) = _over_oracle(qs, q, name="grover_oracle")
+        (qs, q) = _over_oracle(
+            qs,
+            q,
+            name="grover_oracle",
+            resource_metadata=ResourceMetadata(query_complexity=1),
+        )  # type: ignore
         # Apply the diffusion operator,
         # which can be implemented as H + X + multi-controlled Z + X + H.
         qs = _all_h(qs)
@@ -1246,9 +1262,9 @@ QKERNEL_CATALOG: list[QKernelEntry] = [
     ),
     # --- Multi-controlled gates ---
     QKernelEntry(
-        id="vchain_controlled_z",
-        qkernel=vchain_controlled_z,
-        description="V-chain multi-controlled Z gate with parametric n qubits",
+        id="network_decomposition_controlled_z",
+        qkernel=network_decomposition_controlled_z,
+        description="Network decomposition of multi-controlled Z gate with parametric n qubits",
         param_names=("n",),
         min_params={"n": 3},
         tags=("oracle",),
@@ -1263,8 +1279,8 @@ QKERNEL_CATALOG: list[QKernelEntry] = [
     ),
     # --- Grover ---
     QKernelEntry(
-        id="grover_vchain",
-        qkernel=grover_vchain,
+        id="grover_network_decomposition",
+        qkernel=grover_network_decomposition,
         description="Grover's algorithm with V-chain multi-controlled Z",
         param_names=("n", "n_iters"),
         min_params={"n": 3, "n_iters": 1},
