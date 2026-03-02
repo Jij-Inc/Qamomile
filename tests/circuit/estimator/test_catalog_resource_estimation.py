@@ -509,17 +509,18 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         rotation_depth=4 * n - 5,
     ),
     "ttk_adder": resource(
+        # Quantum Addition Circuits and Unbounded Fan-Out (https://arxiv.org/abs/0910.2530) (circuit, total, two and toffoli (multi) counts, and total depth)
         2 * n + 1,
         total=7 * n - 6,
         two_qubit=5 * n - 5,
         multi_qubit=2 * n - 1,
         clifford_gates=5 * n - 5,
         total_depth=5 * n - 3,
-        two_qubit_depth=3 * n - 2,
+        two_qubit_depth=2 * n,
         multi_qubit_depth=2 * n - 1,
     ),
     "cdkm_adder": resource(
-        # A new quantum ripple-carry addition circuit (circuit)
+        # A new quantum ripple-carry addition circuit (https://arxiv.org/abs/quant-ph/0410184) (circuit, total, single, two and toffoli (multi), clifford counts, and total and toffoli (multi) depth)
         2 * n + 2,
         total=9 * n - 8,
         single_qubit=2 * n - 4,
@@ -527,7 +528,7 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         multi_qubit=2 * n - 1,
         clifford_gates=7 * n - 7,
         total_depth=2 * n + 4,
-        two_qubit_depth=2 * n + 2,
+        two_qubit_depth=2 * n + 1,
         multi_qubit_depth=2 * n - 1,
     ),
 }
