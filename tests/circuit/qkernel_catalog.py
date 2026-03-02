@@ -54,6 +54,7 @@ def _all_x(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
 def __emit_oracle(
     *qubits: qmc.Vector[qmc.Qubit] | qmc.Qubit,
     name: str,
+    resource_metadata: ResourceMetadata,
 ) -> None:
     """Emit a stub oracle CompositeGateOperation directly to the tracer.
 
@@ -72,7 +73,7 @@ def __emit_oracle(
         custom_name=name,
         num_target_qubits=0,
         has_implementation=False,
-        resource_metadata=ResourceMetadata(query_complexity=1, total_depth=1),
+        resource_metadata=resource_metadata,
     )
     tracer.add_operation(op)
 
@@ -80,8 +81,9 @@ def __emit_oracle(
 def _over_oracle(
     *qubits: qmc.Vector[qmc.Qubit] | qmc.Qubit,
     name: str,
+    resource_metadata: ResourceMetadata,
 ) -> tuple[qmc.Vector[qmc.Qubit] | qmc.Qubit, ...]:
-    __emit_oracle(*qubits, name=name)
+    __emit_oracle(*qubits, name=name, resource_metadata=resource_metadata)
     return qubits
 
 
@@ -359,7 +361,9 @@ def _one_qubit_oracle():
     stub=True,
     name="two_qubit_oracle",
     num_qubits=2,
-    resource_metadata=ResourceMetadata(query_complexity=1, total_depth=1),
+    resource_metadata=ResourceMetadata(
+        query_complexity=1, two_qubit_gates=1, total_depth=1, two_qubit_depth=1
+    ),
 )
 def _two_qubit_oracle():
     pass
@@ -424,7 +428,12 @@ def deutsch_jozsa(n: qmc.UInt) -> qmc.Bit:
     target = qmc.x(target)
     target = qmc.h(target)
 
-    (qs, target) = _over_oracle(qs, target, name="deutsch_jozsa_oracle")
+    (qs, target) = _over_oracle(
+        qs,
+        target,
+        name="deutsch_jozsa_oracle",
+        resource_metadata=ResourceMetadata(total_depth=1, query_complexity=1),
+    )  # type: ignore
 
     qs = _all_h(qs)  # type: ignore
 
@@ -436,7 +445,12 @@ def _simon(
     qs1: qmc.Vector[qmc.Qubit], qs2: qmc.Vector[qmc.Qubit]
 ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
     qs1 = _all_h(qs1)
-    qs1, qs2 = _over_oracle(qs1, qs2, name="simon_oracle")
+    qs1, qs2 = _over_oracle(
+        qs1,
+        qs2,
+        name="simon_oracle",
+        resource_metadata=ResourceMetadata(total_depth=1, query_complexity=1),
+    )  # type: ignore
     qs1 = _all_h(qs1)
     return qs1, qs2
 
@@ -495,7 +509,7 @@ def phase_gate_qpe(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Qubit]:
     qs = _all_h(qs)
 
     for k in qmc.range(n):
-        qs[k], target = controlled_u(qs[k], target, power=2**k, theta=theta)
+        qs[k], target = controlled_u(qs[k], target, power=2**k, theta=theta)  # type: ignore
 
     qs = _iqft(qs)
 
@@ -507,7 +521,13 @@ def phase_gate_qpe(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Qubit]:
     name="controlled_u",
     num_qubits=1,
     num_controls=1,
-    resource_metadata=ResourceMetadata(query_complexity=1),
+    resource_metadata=ResourceMetadata(
+        query_complexity=1,
+        total_gates=1,
+        two_qubit_gates=1,
+        total_depth=1,
+        two_qubit_depth=1,
+    ),
 )
 def _controlled_u():
     pass
@@ -547,8 +567,7 @@ def hardware_efficient_ansatz(
             qs[j] = qmc.ry(qs[j], thetas[i, j])
             qs[j] = qmc.rz(qs[j], phis[i, j])
 
-        for j in qmc.range(n - 1):
-            qs[j], qs[j + 1] = qmc.cx(qs[j], qs[j + 1])
+        qs = _linear_entanglement(qs)
 
     for j in qmc.range(n):
         qs[j] = qmc.ry(qs[j], thetas[num_layers - 1, j])
@@ -557,7 +576,7 @@ def hardware_efficient_ansatz(
 
 
 @qmc.qkernel
-def qaoa_state(
+def qaoa_state_umbiguous(
     n: qmc.UInt,
     num_layers: qmc.UInt,
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
@@ -1218,9 +1237,9 @@ QKERNEL_CATALOG: list[QKernelEntry] = [
         tags=("parametric",),
     ),
     QKernelEntry(
-        id="qaoa_state",
-        qkernel=qaoa_state,
-        description="QAOA state preparation with parametric n qubits and p layers",
+        id="qaoa_state_umbiguous",
+        qkernel=qaoa_state_umbiguous,
+        description="QAOA state preparation with parametric n qubits and p layers, and parametric Ising",
         param_names=("n",),
         min_params={"n": 3, "num_layers": 1},
         tags=("parametric",),

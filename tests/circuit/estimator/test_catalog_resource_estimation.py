@@ -155,9 +155,13 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
     ),
     "full_entanglement": resource(
         n,
-        total=n * (n - 1) / 2,
-        two_qubit=n * (n - 1) / 2,
-        clifford_gates=n * (n - 1) / 2,
+        total=n * (n - 1) / 2,  # type:ignore
+        two_qubit=n * (n - 1) / 2,  # type:ignore
+        clifford_gates=n * (n - 1) / 2,  # type:ignore
+        # Circuit depth calculation:
+        # - First CX layer: (n-1) gates (cannot be parallelised due to shared qubits)
+        # - Remaining layers: (n-2) depth (all CXs except the last can be parallelised in each layer)
+        # - Total depth: (n-1) + (n-2) = 2n-3
         total_depth=2 * n - 3,
         two_qubit_depth=2 * n - 3,
     ),
@@ -183,25 +187,25 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
     ),
     # --- QFT / IQFT ---
     "qft": resource(
-        # Ref: Nielsen & Chuang
+        # Ref: Nielsen & Chuang (gate counts)
         n,
         total=n * (n + 1) / 2 + sp.floor(n / 2),
         single_qubit=n,
         two_qubit=n * (n - 1) / 2 + sp.floor(n / 2),
         clifford_gates=n + sp.floor(n / 2),
-        rotation_gates=(n * (n - 1)) / 2,
+        rotation_gates=(n * (n - 1)) / 2,  # type:ignore
         total_depth=2 * n,
         two_qubit_depth=2 * n - 2,
         rotation_depth=2 * n - 3,
     ),
     "iqft": resource(
-        # Ref: Nielsen & Chuang
+        # Ref: Nielsen & Chuang (gate counts)
         n,
         total=n * (n + 1) / 2 + sp.floor(n / 2),
         single_qubit=n,
         two_qubit=n * (n - 1) / 2 + sp.floor(n / 2),
         clifford_gates=n + sp.floor(n / 2),
-        rotation_gates=(n * (n - 1)) / 2,
+        rotation_gates=(n * (n - 1)) / 2,  # type:ignore
         total_depth=2 * n,
         two_qubit_depth=2 * n - 2,
         rotation_depth=2 * n - 3,
@@ -234,14 +238,18 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         total_depth=1,
     ),
     "deutsch": resource(
+        # Ref: Quantum algorithms for optimizers (https://arxiv.org/abs/2408.07086) (circuit)
         2,
-        total=4,
+        total=5,
         single_qubit=4,
+        two_qubit=1,
         clifford_gates=4,
         oracle_calls={"two_qubit_oracle": 1},
         total_depth=5,
+        two_qubit_depth=1,
     ),
     "deutsch_jozsa": resource(
+        # Ref: Nielsen & Chuang (circuit)
         n + 1,
         total=2 * n + 2,
         single_qubit=2 * n + 2,
@@ -250,6 +258,7 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         total_depth=5,
     ),
     "simon": resource(
+        # Ref: Quantum algorithms for optimizers (https://arxiv.org/abs/2408.07086) (circuit)
         2 * n,
         total=2 * n,
         single_qubit=2 * n,
@@ -258,6 +267,7 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         total_depth=4,
     ),
     "teleportation": resource(
+        # Ref: Nielsen & Chuang (circuit)
         3,
         # X, H, CX, CX, H, [X, Z]
         # We don't count the measurement operations as gates.
@@ -281,30 +291,33 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
     ),
     # --- QPE ---
     "phase_gate_qpe": resource(
+        # Ref: Nielsen & Chuang (circuit)
         n + 1,
-        total=n**2 / 2 + 5 * n / 2 + sp.floor(n / 2),
+        total=2 * n + (n * (n + 1)) / 2 + sp.floor(n / 2),
         single_qubit=2 * n,
-        two_qubit=n**2 / 2 + n / 2 + sp.floor(n / 2),
+        two_qubit=n + (n * (n - 1)) / 2 + sp.floor(n / 2),
         clifford_gates=2 * n + sp.floor(n / 2),
-        rotation_gates=n * (n - 1) / 2,
+        rotation_gates=n * (n - 1) / 2,  # type:ignore
         total_depth=3 * n + 1,
         two_qubit_depth=3 * n - 2,
         rotation_depth=2 * n - 3,
     ),
     "stub_oracle_qpe": resource(
+        # Ref: Nielsen & Chuang (circuit)
         n + 1,
-        total=n**2 / 2 + 3 * n / 2 + sp.floor(n / 2),
+        total=n + (2**n - 1) + (n * (n + 1)) / 2 + sp.floor(n / 2),
         single_qubit=2 * n,
-        two_qubit=n**2 / 2 - n / 2 + sp.floor(n / 2),
+        two_qubit=(2**n - 1) + (n * (n - 1)) / 2 + sp.floor(n / 2),
         clifford_gates=2 * n + sp.floor(n / 2),
         rotation_gates=n * (n - 1) / 2,
         oracle_calls={"controlled_u": 2**n - 1},
         total_depth=2**n + 2 * n,
-        two_qubit_depth=2**n + 2 * n - 3,
+        two_qubit_depth=(2 * n - 2) + (2**n - 1),
         rotation_depth=2 * n - 3,
     ),
     # --- Variational / optimization ---
     "hardware_efficient_ansatz": resource(
+        # https://quantum.cloud.ibm.com/docs/en/api/qiskit/qiskit.circuit.library.EfficientSU2 (circuit)
         n,
         total=2 * n * num_layers + (num_layers - 1) * (n - 1),
         single_qubit=2 * n * num_layers,
@@ -315,16 +328,16 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit_depth=(num_layers - 1) * (n - 1),
         rotation_depth=2 * num_layers,
     ),
-    "qaoa_state": resource(
+    "qaoa_state_umbiguous": resource(
         n,
-        total=n + num_layers * (quad + linear + n),
-        single_qubit=n + num_layers * (linear + n),
-        two_qubit=num_layers * quad,
+        total=n + num_layers * (quad + linear + n),  # type:ignore
+        single_qubit=n + num_layers * (linear + n),  # type:ignore
+        two_qubit=num_layers * quad,  # type:ignore
         clifford_gates=n,
-        rotation_gates=num_layers * (quad + linear + n),
-        total_depth=1 + num_layers * (quad + linear + 1),
-        two_qubit_depth=num_layers * quad,
-        rotation_depth=num_layers * (quad + linear + 1),
+        rotation_gates=num_layers * (quad + linear + n),  # type:ignore
+        total_depth=1 + num_layers * (quad + linear + 1),  # type:ignore
+        two_qubit_depth=num_layers * quad,  # type:ignore
+        rotation_depth=num_layers * (quad + linear + 1),  # type:ignore
     ),
     # --- Multi-controlled gates ---
     "vchain_controlled_z": resource(
@@ -347,9 +360,7 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit_depth=sp.Piecewise(
             (sp.Integer(1), sp.Eq(n, 2)), (sp.Integer(0), True)
         ),
-        multi_qubit_depth=sp.Piecewise(
-            (sp.Integer(1), n > 2), (sp.Integer(0), True)
-        ),
+        multi_qubit_depth=sp.Piecewise((sp.Integer(1), n > 2), (sp.Integer(0), True)),
     ),
     # --- Grover ---
     "grover_vchain": resource(
@@ -369,8 +380,7 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         total=(n + 2) + n_iters * (4 * n + 1),
         single_qubit=(n + 2) + n_iters * 4 * n,
         two_qubit=(
-            n_iters
-            * sp.Piecewise((sp.Integer(1), sp.Eq(n, 2)), (sp.Integer(0), True))
+            n_iters * sp.Piecewise((sp.Integer(1), sp.Eq(n, 2)), (sp.Integer(0), True))
         ),
         multi_qubit=(
             n_iters * sp.Piecewise((sp.Integer(1), n > 2), (sp.Integer(0), True))
@@ -379,8 +389,7 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         oracle_calls={"grover_oracle": n_iters},
         total_depth=3 + n_iters * 6,
         two_qubit_depth=(
-            n_iters
-            * sp.Piecewise((sp.Integer(1), sp.Eq(n, 2)), (sp.Integer(0), True))
+            n_iters * sp.Piecewise((sp.Integer(1), sp.Eq(n, 2)), (sp.Integer(0), True))
         ),
         multi_qubit_depth=(
             n_iters * sp.Piecewise((sp.Integer(1), n > 2), (sp.Integer(0), True))
@@ -388,16 +397,35 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
     ),
     # --- Arithmetic ---
     "maj": resource(
-        3, total=3, two_qubit=2, multi_qubit=1, clifford_gates=2,
-        total_depth=3, two_qubit_depth=2, multi_qubit_depth=1,
+        3,
+        total=3,
+        two_qubit=2,
+        multi_qubit=1,
+        clifford_gates=2,
+        total_depth=3,
+        two_qubit_depth=2,
+        multi_qubit_depth=1,
     ),
     "uma_2_cnot": resource(
-        3, total=3, two_qubit=2, multi_qubit=1, clifford_gates=2,
-        total_depth=3, two_qubit_depth=2, multi_qubit_depth=1,
+        3,
+        total=3,
+        two_qubit=2,
+        multi_qubit=1,
+        clifford_gates=2,
+        total_depth=3,
+        two_qubit_depth=2,
+        multi_qubit_depth=1,
     ),
     "uma_3_cnot": resource(
-        3, total=6, single_qubit=2, two_qubit=3, multi_qubit=1, clifford_gates=5,
-        total_depth=5, two_qubit_depth=3, multi_qubit_depth=1,
+        3,
+        total=6,
+        single_qubit=2,
+        two_qubit=3,
+        multi_qubit=1,
+        clifford_gates=5,
+        total_depth=5,
+        two_qubit_depth=3,
+        multi_qubit_depth=1,
     ),
     "simple_ripple_carry_adder_2_cnot": resource(
         2 * n + 2,
