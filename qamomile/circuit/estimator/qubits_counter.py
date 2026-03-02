@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, overload
 
 import sympy as sp
 
+from qamomile.circuit.estimator.depth_estimator import _strip_nonneg_max
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
@@ -117,6 +118,216 @@ def _count_input_qubits(input_values: list, symbol_map: dict[str, sp.Expr]) -> s
     return count
 
 
+def _is_clean_call(block: "BlockValue") -> bool:
+    """Check if a BlockValue is a 'clean call'.
+
+    A clean call returns only the qubits it received as inputs.
+    Any internally allocated qubits (ancillas) are freed before return,
+    meaning ancilla qubits can be reused across loop iterations.
+
+    Detection: every quantum-typed return value must have a logical_id
+    that matches one of the input_values' logical_ids.
+
+    Conservative: if a cast/alias produces a new logical_id, this returns
+    False (safe fallback — will overcount, never undercount).
+    """
+    input_logical_ids = {v.logical_id for v in block.input_values}
+    for rv in block.return_values:
+        if rv.type.is_quantum():
+            if rv.logical_id not in input_logical_ids:
+                return False
+    return True
+
+
+def _count_loop_body_split(
+    operations: list[Operation],
+    symbol_map: dict[str, sp.Expr] | None = None,
+) -> tuple[sp.Expr, sp.Expr]:
+    """Split loop body qubit count into (persistent, reusable).
+
+    persistent: qubits that accumulate with each iteration
+        (QInitOperation, non-clean calls)
+    reusable: qubits from clean calls that can be reused across iterations
+        (max watermark, counted once)
+
+    Returns:
+        (persistent, reusable) tuple of sympy expressions.
+    """
+    from qamomile.circuit.ir.block_value import BlockValue
+
+    if symbol_map is None:
+        symbol_map = {}
+
+    persistent: sp.Expr = sp.Integer(0)
+    reusable: sp.Expr = sp.Integer(0)
+
+    for op in operations:
+        match op:
+            case BinOp():
+                lhs_expr = _resolve_value_to_sympy(op.lhs, symbol_map)
+                rhs_expr = _resolve_value_to_sympy(op.rhs, symbol_map)
+                if op.kind in BINOP_TO_SYMPY:
+                    symbol_map[op.output.uuid] = BINOP_TO_SYMPY[op.kind](
+                        lhs_expr, rhs_expr
+                    )
+
+            case QInitOperation():
+                persistent += _count_qinit(op, symbol_map)  # type: ignore
+
+            case CallBlockOperation():
+                called_block = op.operands[0]
+                if isinstance(called_block, BlockValue):
+                    inner_symbol_map = symbol_map.copy()
+                    for formal_idx, formal_input in enumerate(
+                        called_block.input_values
+                    ):
+                        if formal_idx + 1 < len(op.operands):
+                            actual_arg = op.operands[formal_idx + 1]
+                            if isinstance(actual_arg, ArrayValue) and isinstance(
+                                formal_input, ArrayValue
+                            ):
+                                for dim_formal, dim_actual in zip(
+                                    formal_input.shape, actual_arg.shape
+                                ):
+                                    inner_symbol_map[dim_formal.uuid] = (
+                                        _resolve_value_to_sympy(
+                                            dim_actual, symbol_map
+                                        )
+                                    )
+                    inner_alloc = _count_from_operations(
+                        called_block.operations, inner_symbol_map
+                    )
+                    if _is_clean_call(called_block):
+                        reusable = sp.Max(reusable, inner_alloc)
+                    else:
+                        persistent += inner_alloc  # type: ignore
+
+            case ControlledUOperation():
+                controlled_block = op.block
+                if isinstance(controlled_block, BlockValue):
+                    inner_symbol_map = symbol_map.copy()
+                    if op.has_index_spec:
+                        param_operands = op.operands[2:]
+                        param_idx = 0
+                        for formal_input in controlled_block.input_values:
+                            if not formal_input.type.is_quantum():
+                                if param_idx < len(param_operands):
+                                    actual_arg = param_operands[param_idx]
+                                    if isinstance(
+                                        actual_arg, ArrayValue
+                                    ) and isinstance(formal_input, ArrayValue):
+                                        for dim_formal, dim_actual in zip(
+                                            formal_input.shape,
+                                            actual_arg.shape,
+                                        ):
+                                            inner_symbol_map[
+                                                dim_formal.uuid
+                                            ] = _resolve_value_to_sympy(
+                                                dim_actual, symbol_map
+                                            )
+                                    param_idx += 1
+                    else:
+                        target_operands = op.target_operands
+                        for formal_idx, formal_input in enumerate(
+                            controlled_block.input_values
+                        ):
+                            if formal_idx < len(target_operands):
+                                actual_arg = target_operands[formal_idx]
+                                if isinstance(
+                                    actual_arg, ArrayValue
+                                ) and isinstance(formal_input, ArrayValue):
+                                    for dim_formal, dim_actual in zip(
+                                        formal_input.shape, actual_arg.shape
+                                    ):
+                                        inner_symbol_map[dim_formal.uuid] = (
+                                            _resolve_value_to_sympy(
+                                                dim_actual, symbol_map
+                                            )
+                                        )
+                    inner_alloc = _count_from_operations(
+                        controlled_block.operations, inner_symbol_map
+                    )
+                    if _is_clean_call(controlled_block):
+                        reusable = sp.Max(reusable, inner_alloc)
+                    else:
+                        persistent += inner_alloc  # type: ignore
+
+            case CompositeGateOperation():
+                impl = op.implementation
+                meta_ancilla: sp.Expr = sp.Integer(0)
+                impl_alloc: sp.Expr = sp.Integer(0)
+
+                if isinstance(impl, BlockValue):
+                    impl_alloc = _count_from_operations(impl.operations, symbol_map)
+
+                if op.resource_metadata is not None:
+                    meta_ancilla = sp.Integer(op.resource_metadata.ancilla_qubits)
+
+                total_alloc = impl_alloc + meta_ancilla
+
+                if isinstance(impl, BlockValue) and _is_clean_call(impl):
+                    reusable = sp.Max(reusable, total_alloc)
+                elif impl is None and op.resource_metadata is not None:
+                    # Stub with metadata only: ancilla are reusable by definition
+                    reusable = sp.Max(reusable, meta_ancilla)
+                else:
+                    persistent += total_alloc  # type: ignore
+
+            case ForOperation():
+                inner_p, inner_r = _count_loop_body_split(
+                    op.operations, symbol_map
+                )
+                start_expr = _resolve_value_to_sympy(op.operands[0], symbol_map)
+                stop_expr = _resolve_value_to_sympy(op.operands[1], symbol_map)
+                step_expr = _resolve_value_to_sympy(op.operands[2], symbol_map)
+                iterations = (stop_expr - start_expr) / step_expr
+                persistent += inner_p * iterations  # type: ignore
+                reusable = sp.Max(reusable, inner_r)
+
+            case WhileOperation():
+                inner_p, inner_r = _count_loop_body_split(
+                    op.operations, symbol_map
+                )
+                persistent += inner_p * WHILE_SYMBOL  # type: ignore
+                reusable = sp.Max(reusable, inner_r)
+
+            case IfOperation():
+                true_p, true_r = _count_loop_body_split(
+                    op.true_operations, symbol_map
+                )
+                false_p, false_r = _count_loop_body_split(
+                    op.false_operations, symbol_map
+                )
+                persistent += sp.Max(true_p, false_p)  # type: ignore
+                reusable = sp.Max(reusable, true_r, false_r)
+
+            case ForItemsOperation():
+                inner_p, inner_r = _count_loop_body_split(
+                    op.operations, symbol_map
+                )
+                dict_operand = op.operands[0]
+                if (
+                    hasattr(dict_operand, "is_parameter")
+                    and dict_operand.is_parameter()
+                ):
+                    dict_name = dict_operand.parameter_name() or dict_operand.name
+                else:
+                    dict_name = dict_operand.name
+                cardinality = sp.Symbol(
+                    f"|{dict_name}|", integer=True, positive=True
+                )
+                persistent += inner_p * cardinality  # type: ignore
+                reusable = sp.Max(reusable, inner_r)
+
+            case _:
+                continue
+
+    return (
+        _strip_nonneg_max(sp.simplify(persistent)),
+        _strip_nonneg_max(sp.simplify(reusable)),
+    )
+
+
 def _count_from_operations(
     operations: list[Operation],
     symbol_map: dict[str, sp.Expr] | None = None,
@@ -149,16 +360,25 @@ def _count_from_operations(
                 count += _count_qinit(op, symbol_map)  # type: ignore
 
             case ForOperation():
-                inner_count = _count_from_operations(op.operations, symbol_map)
+                persistent, reusable = _count_loop_body_split(
+                    op.operations, symbol_map
+                )
                 start_expr = _resolve_value_to_sympy(op.operands[0], symbol_map)
                 stop_expr = _resolve_value_to_sympy(op.operands[1], symbol_map)
                 step_expr = _resolve_value_to_sympy(op.operands[2], symbol_map)
                 iterations = (stop_expr - start_expr) / step_expr
-                count += inner_count * iterations  # type: ignore
+                reusable_factor = sp.Piecewise(
+                    (sp.Integer(1), sp.Gt(iterations, 0)),
+                    (sp.Integer(0), True),
+                )
+                count += persistent * iterations + reusable * reusable_factor  # type: ignore
 
             case WhileOperation():
-                inner_count = _count_from_operations(op.operations, symbol_map)
-                count += inner_count * WHILE_SYMBOL  # type: ignore
+                persistent, reusable = _count_loop_body_split(
+                    op.operations, symbol_map
+                )
+                # WHILE_SYMBOL is always positive, so reusable is counted once
+                count += persistent * WHILE_SYMBOL + reusable  # type: ignore
 
             case IfOperation():
                 # Take maximum of both branches
@@ -244,7 +464,9 @@ def _count_from_operations(
                     count += _count_from_operations(controlled_block.operations, inner_symbol_map)  # type: ignore
 
             case ForItemsOperation():
-                inner_count = _count_from_operations(op.operations, symbol_map)
+                persistent, reusable = _count_loop_body_split(
+                    op.operations, symbol_map
+                )
                 dict_operand = op.operands[0]
                 if (
                     hasattr(dict_operand, "is_parameter")
@@ -254,7 +476,8 @@ def _count_from_operations(
                 else:
                     dict_name = dict_operand.name
                 cardinality = sp.Symbol(f"|{dict_name}|", integer=True, positive=True)
-                count += inner_count * cardinality  # type: ignore
+                # cardinality is always positive, so reusable is counted once
+                count += persistent * cardinality + reusable  # type: ignore
 
             case CompositeGateOperation():
                 from qamomile.circuit.ir.block_value import BlockValue

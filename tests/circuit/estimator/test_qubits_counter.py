@@ -5039,3 +5039,168 @@ class TestInputQubits:
         resource = qubits_counter(circuit.block)
         n_sym = sp.Symbol("n", integer=True, positive=True)
         assert resource == 1 + n_sym
+
+
+class TestCallBlockInForOperation:
+    """Verify ancilla qubit reuse for clean CallBlockOperation inside loops."""
+
+    def test_clean_call_no_alloc_in_for(self):
+        """Clean call with no inner alloc inside for loop -> no extra qubits."""
+
+        @qmc.qkernel
+        def inner(q: qmc.Qubit) -> qmc.Qubit:
+            q = qmc.h(q)
+            return q
+
+        @qmc.qkernel
+        def circuit() -> qmc.Qubit:
+            q = qmc.qubit(name="q")
+            for _ in qmc.range(10):
+                q = inner(q)
+            return q
+
+        resource = qubits_counter(circuit.block)
+        assert resource == 1
+
+    def test_clean_call_with_ancilla_in_for(self):
+        """Clean call with internal ancilla inside for loop -> ancilla counted once."""
+
+        @qmc.qkernel
+        def inner(q: qmc.Qubit) -> qmc.Qubit:
+            ancilla = qmc.qubit_array(3, name="ancilla")
+            q = qmc.h(q)
+            return q
+
+        @qmc.qkernel
+        def circuit() -> qmc.Qubit:
+            q = qmc.qubit(name="q")
+            for _ in qmc.range(10):
+                q = inner(q)
+            return q
+
+        resource = qubits_counter(circuit.block)
+        assert resource == 1 + 3  # q + ancilla (reused)
+
+    def test_clean_call_with_symbolic_ancilla_in_for(self):
+        """Clean call with symbolic ancilla inside for loop -> ancilla counted once."""
+
+        @qmc.qkernel
+        def inner(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            n = qs.shape[0]
+            ancilla = qmc.qubit_array(n - 2, name="ancilla")
+            qs[0] = qmc.h(qs[0])
+            return qs
+
+        @qmc.qkernel
+        def circuit(n: qmc.UInt, m: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+            qs = qmc.qubit_array(n, name="qs")
+            for _ in qmc.range(m):
+                qs = inner(qs)
+            return qs
+
+        resource = qubits_counter(circuit.block)
+        n_sym = sp.Symbol("n", integer=True, positive=True)
+        assert resource == 2 * n_sym - 2
+
+    def test_non_clean_call_in_for_multiplicative(self):
+        """Non-clean call (returns new qubits) inside for loop -> multiplied."""
+
+        @qmc.qkernel
+        def inner() -> qmc.Qubit:
+            q = qmc.qubit(name="q")
+            return q
+
+        @qmc.qkernel
+        def circuit() -> qmc.Qubit:
+            for _ in qmc.range(5):
+                q = inner()
+            return q
+
+        resource = qubits_counter(circuit.block)
+        assert resource == 5
+
+    def test_mixed_clean_and_persistent_in_for(self):
+        """Mix of clean call (ancilla reusable) and QInit (persistent) in loop."""
+
+        @qmc.qkernel
+        def clean_inner(q: qmc.Qubit) -> qmc.Qubit:
+            ancilla = qmc.qubit_array(2, name="ancilla")
+            q = qmc.h(q)
+            return q
+
+        @qmc.qkernel
+        def circuit() -> qmc.Qubit:
+            q = qmc.qubit(name="q")
+            for _ in qmc.range(4):
+                q = clean_inner(q)
+                extra = qmc.qubit(name="extra")
+            return q
+
+        resource = qubits_counter(circuit.block)
+        # q(1) + 4 * extra(1) persistent + 2 reusable ancilla = 1 + 4 + 2 = 7
+        assert resource == 7
+
+    def test_clean_call_in_while_loop(self):
+        """Clean call with ancilla in while loop -> ancilla counted once."""
+
+        @qmc.qkernel
+        def inner(q: qmc.Qubit) -> qmc.Qubit:
+            ancilla = qmc.qubit_array(3, name="ancilla")
+            q = qmc.h(q)
+            return q
+
+        @qmc.qkernel
+        def circuit(cond: qmc.Bit) -> qmc.Qubit:
+            q = qmc.qubit(name="q")
+            while cond:
+                q = inner(q)
+            return q
+
+        resource = qubits_counter(circuit.block)
+        assert resource == 1 + 3  # q + ancilla (reused)
+
+    def test_multiple_clean_calls_max_watermark(self):
+        """Multiple clean calls in loop body -> reusable is max of all ancilla."""
+
+        @qmc.qkernel
+        def small_inner(q: qmc.Qubit) -> qmc.Qubit:
+            ancilla = qmc.qubit_array(2, name="small_anc")
+            q = qmc.h(q)
+            return q
+
+        @qmc.qkernel
+        def large_inner(q: qmc.Qubit) -> qmc.Qubit:
+            ancilla = qmc.qubit_array(5, name="large_anc")
+            q = qmc.h(q)
+            return q
+
+        @qmc.qkernel
+        def circuit() -> qmc.Qubit:
+            q = qmc.qubit(name="q")
+            for _ in qmc.range(10):
+                q = small_inner(q)
+                q = large_inner(q)
+            return q
+
+        resource = qubits_counter(circuit.block)
+        # q(1) + max(2, 5) reusable = 1 + 5 = 6
+        assert resource == 6
+
+    def test_zero_iteration_for_no_reusable(self):
+        """For loop with 0 iterations -> no qubits from body."""
+
+        @qmc.qkernel
+        def inner(q: qmc.Qubit) -> qmc.Qubit:
+            ancilla = qmc.qubit_array(3, name="ancilla")
+            q = qmc.h(q)
+            return q
+
+        @qmc.qkernel
+        def circuit() -> qmc.Qubit:
+            q = qmc.qubit(name="q")
+            for _ in qmc.range(0, 0):
+                q = inner(q)
+            return q
+
+        resource = qubits_counter(circuit.block)
+        assert resource == 1  # Just q, no ancilla since 0 iterations
