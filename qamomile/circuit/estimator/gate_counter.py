@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 import sympy as sp
 from sympy import Sum
 
-from qamomile.circuit.estimator.depth_estimator import _strip_nonneg_max
+from qamomile.circuit.estimator._utils import _strip_nonneg_max
 
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,

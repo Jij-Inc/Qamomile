@@ -58,28 +58,7 @@ class _UnresolvableForOpError(Exception):
 LoopContext = list[tuple[str, sp.Expr, sp.Expr, sp.Expr]]
 
 
-def _strip_nonneg_max(expr: sp.Expr) -> sp.Expr:
-    """Canonicalize Max(0, x) -> x in resource estimation expressions.
-
-    Circuit depths and gate counts are non-negative by physical construction,
-    so Max(0, expr) is a redundant artifact introduced by the fallback
-    estimation path's qubit-wise sp.Max. This normalization aligns all paths
-    to the same canonical form.
-    """
-    if not isinstance(expr, sp.Expr):
-        return expr
-    # Bottom-up: first process sub-expressions, then this node
-    if expr.args:
-        new_args = [_strip_nonneg_max(a) for a in expr.args]
-        expr = expr.func(*new_args)
-    # Match Max(0, x) or Max(x, 0)
-    if isinstance(expr, sp.Max) and len(expr.args) == 2:
-        a, b = expr.args
-        if a == 0 or a == sp.Integer(0):
-            return b
-        if b == 0 or b == sp.Integer(0):
-            return a
-    return expr
+from qamomile.circuit.estimator._utils import _strip_nonneg_max
 
 
 @dataclass
@@ -677,13 +656,32 @@ def _get_max_depth(qubit_depths: QubitDepthMap) -> CircuitDepth:
 
 
 
+def _resolve_qubit_base_name(v: Any) -> str:
+    """Resolve a Value to its base qubit name.
+
+    Uses parent_array when available to avoid unresolved symbolic
+    indices (e.g. "a[uint_tmp]" -> "a").
+    """
+    if hasattr(v, "parent_array") and v.parent_array is not None:
+        return v.parent_array.name
+    return v.name
+
+
 def _collect_gate_qubit_names(operations: list[Operation]) -> set[str]:
-    """Collect qubit names from GateOperation operands in operation list."""
+    """Collect qubit base names from GateOperation/CallBlockOperation operands."""
     names: set[str] = set()
     for op in operations:
         if isinstance(op, GateOperation):
             for v in op.operands:
                 names.add(v.name)
+        elif isinstance(op, CallBlockOperation):
+            for v in op.operands[1:]:
+                if (
+                    hasattr(v, "type")
+                    and hasattr(v.type, "is_quantum")
+                    and v.type.is_quantum()
+                ):
+                    names.add(_resolve_qubit_base_name(v))
         elif isinstance(op, ForOperation):
             names.update(_collect_gate_qubit_names(op.operations))
         elif isinstance(op, IfOperation):
@@ -767,6 +765,12 @@ def _map_depths_to_local(
     for formal_name, actual_name in qubit_name_map.items():
         if actual_name in qubit_depths:
             local_depths[formal_name] = qubit_depths[actual_name]
+        else:
+            # Base-name fallback: e.g. actual "a[0]" matches base key "a"
+            # when the for-loop write-back stored depth under base names.
+            base = actual_name.split("[")[0]
+            if base != actual_name and base in qubit_depths:
+                local_depths[formal_name] = qubit_depths[base]
         # ArrayValue prefix matching
         for key, val in qubit_depths.items():
             if key.startswith(actual_name + "["):
@@ -1659,6 +1663,102 @@ def _has_binop_name_collisions(operations: list[Operation]) -> bool:
     return False
 
 
+def _qubit_base_name(name: str) -> str:
+    """Normalize qubit name to base array/scalar name.
+
+    Examples: a[0] -> a, a[i] -> a, ancilla -> ancilla
+    """
+    return name.split("[", 1)[0]
+
+
+def _to_base_qubit_names(names: set[str]) -> set[str]:
+    return {_qubit_base_name(n) for n in names}
+
+
+def _body_has_for_items_or_while(operations: list[Operation]) -> bool:
+    """Check if operations contain ForItemsOperation or WhileOperation (recursively).
+
+    These operations produce symbolic qubit names in _simulate_parallel_depth_concrete's
+    fallback path, which don't match concrete names from For loops. This causes
+    incorrect depth stacking in _estimate_by_full_block_sampling.
+    """
+    for op in operations:
+        if isinstance(op, ForItemsOperation) or isinstance(op, WhileOperation):
+            return True
+        if isinstance(op, ForOperation):
+            if _body_has_for_items_or_while(op.operations):
+                return True
+        if isinstance(op, IfOperation):
+            if _body_has_for_items_or_while(
+                op.true_operations
+            ) or _body_has_for_items_or_while(op.false_operations):
+                return True
+    return False
+
+
+def _has_parametric_loop_with_pre_overlap(
+    operations: list[Operation],
+    block: Any,
+    call_context: dict[str, Any],
+    loop_var_symbols: dict[str, sp.Symbol],
+    loop_context: LoopContext,
+) -> bool:
+    """Detect parametric ForOp whose body touches qubits already touched before it.
+
+    Only triggers when neither the pre-loop operations nor the loop body
+    contain ForItemsOperation or WhileOperation, because
+    _estimate_by_full_block_sampling cannot correctly handle the
+    symbolic/concrete qubit name mismatch those produce.
+
+    The guard is scoped per candidate ForOperation (pre + body only),
+    not the entire operations list, to avoid over-conservatively disabling
+    the overlap correction when unrelated ForItems/While exist later.
+    """
+    for idx, op in enumerate(operations):
+        if not isinstance(op, ForOperation) or len(op.operands) < 2:
+            continue
+        try:
+            (
+                loop_var_symbol,
+                start_expr,
+                stop_expr,
+                step_expr,
+                _,
+                _,
+                _,
+            ) = _prepare_for_loop(
+                op, block, call_context, loop_var_symbols, loop_context
+            )
+        except Exception:
+            continue
+        all_bound_syms = (
+            start_expr.free_symbols
+            | stop_expr.free_symbols
+            | step_expr.free_symbols
+        )
+        parametric_syms = (
+            all_bound_syms - {loop_var_symbol} - set(loop_var_symbols.values())
+        )
+        if not parametric_syms:
+            continue  # not a parametric loop
+        # Guard: skip if pre-loop ops or loop body contain ForItems/While,
+        # as full-block sampling would mix symbolic and concrete qubit names.
+        if _body_has_for_items_or_while(
+            operations[:idx]
+        ) or _body_has_for_items_or_while(op.operations):
+            continue
+        # Reuse existing _collect_all_qubit_names (handles Gate/CallBlock/If/For etc.)
+        pre_qubits = _to_base_qubit_names(
+            _collect_all_qubit_names(operations[:idx])
+        )
+        body_qubits = _to_base_qubit_names(
+            _collect_all_qubit_names(op.operations)
+        )
+        if pre_qubits & body_qubits:
+            return True
+    return False
+
+
 def _scan_parametric_for_loops(
     operations: list[Operation],
     block: Any,
@@ -1745,7 +1845,7 @@ def _estimate_by_full_block_sampling(
     param_sym: sp.Symbol,
     valid_points: list[int],
     num_controls: int | sp.Expr,
-) -> None:
+) -> bool:
     """Estimate depth by concretely simulating the entire operations block.
 
     For each sample value of the parametric symbol, simulates all operations
@@ -1789,7 +1889,7 @@ def _estimate_by_full_block_sampling(
         samples[n_val] = _get_max_depth(inner_depths)
 
     if not samples:
-        return
+        return False
 
     # Use last point as verification
     verify_n = valid_points[-1]
@@ -1820,6 +1920,7 @@ def _estimate_by_full_block_sampling(
     new_depth = entry_depth + interpolated
     for qid in set(qubit_depths) | body_qubits:
         qubit_depths[qid] = new_depth
+    return True
 
 
 def _estimate_parallel_depth(
@@ -1854,10 +1955,16 @@ def _estimate_parallel_depth(
     if loop_var_symbols is None:
         loop_var_symbols = {}
 
-    # Use full-block concrete sampling only when BinOp name collisions
-    # cause qubit name aliasing (e.g. multiple BinOps produce 'uint_tmp',
-    # making 'qs[uint_tmp]' ambiguous in symbolic depth tracking).
-    if _has_binop_name_collisions(operations):
+    # Use full-block concrete sampling when BinOp name collisions cause
+    # qubit name aliasing, or when a parametric loop body shares qubits
+    # with pre-loop operations (which causes overcounting in isolated
+    # simulation).
+    use_full_block = _has_binop_name_collisions(
+        operations
+    ) or _has_parametric_loop_with_pre_overlap(
+        operations, block, call_context, loop_var_symbols, loop_context
+    )
+    if use_full_block:
         param_result = _scan_parametric_for_loops(
             operations, block, call_context, loop_var_symbols, loop_context
         )
@@ -1867,7 +1974,7 @@ def _estimate_parallel_depth(
                 param_sym, loop_bounds
             )
             if valid_points:
-                _estimate_by_full_block_sampling(
+                applied = _estimate_by_full_block_sampling(
                     operations,
                     qubit_depths,
                     block,
@@ -1876,7 +1983,8 @@ def _estimate_parallel_depth(
                     valid_points,
                     num_controls,
                 )
-                return
+                if applied:
+                    return
 
     _MEASURE_UNIT = CircuitDepth(
         total_depth=sp.Integer(1),

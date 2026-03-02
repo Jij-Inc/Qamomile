@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, overload
 
 import sympy as sp
 
-from qamomile.circuit.estimator.depth_estimator import _strip_nonneg_max
+from qamomile.circuit.estimator._utils import _strip_nonneg_max
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
@@ -139,6 +139,129 @@ def _is_clean_call(block: "BlockValue") -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Shared helpers: extracted from _count_loop_body_split / _count_from_operations
+# ---------------------------------------------------------------------------
+
+
+def _register_binop(op: BinOp, symbol_map: dict[str, sp.Expr]) -> None:
+    """Register a BinOp result in the symbol map."""
+    lhs_expr = _resolve_value_to_sympy(op.lhs, symbol_map)
+    rhs_expr = _resolve_value_to_sympy(op.rhs, symbol_map)
+    if op.kind in BINOP_TO_SYMPY:
+        symbol_map[op.output.uuid] = BINOP_TO_SYMPY[op.kind](lhs_expr, rhs_expr)
+
+
+def _build_call_block_inner_map(
+    op: CallBlockOperation, symbol_map: dict[str, sp.Expr]
+) -> tuple[BlockValue | None, dict[str, sp.Expr]]:
+    """Build inner symbol map for CallBlockOperation.
+
+    Maps formal input array dimensions to actual argument dimensions
+    so that parametric sizes are resolved correctly in the callee.
+
+    Returns:
+        (called_block, inner_symbol_map) if called_block is a BlockValue,
+        (None, {}) otherwise.
+    """
+    from qamomile.circuit.ir.block_value import BlockValue
+
+    called_block = op.operands[0]
+    if not isinstance(called_block, BlockValue):
+        return None, {}
+    inner_symbol_map = symbol_map.copy()
+    for formal_idx, formal_input in enumerate(called_block.input_values):
+        if formal_idx + 1 < len(op.operands):
+            actual_arg = op.operands[formal_idx + 1]
+            if isinstance(actual_arg, ArrayValue) and isinstance(
+                formal_input, ArrayValue
+            ):
+                for dim_formal, dim_actual in zip(
+                    formal_input.shape, actual_arg.shape
+                ):
+                    inner_symbol_map[dim_formal.uuid] = _resolve_value_to_sympy(
+                        dim_actual, symbol_map
+                    )
+    return called_block, inner_symbol_map
+
+
+def _build_controlled_u_inner_map(
+    op: ControlledUOperation, symbol_map: dict[str, sp.Expr]
+) -> tuple[BlockValue | None, dict[str, sp.Expr]]:
+    """Build inner symbol map for ControlledUOperation.
+
+    Handles both index_spec mode (qubit operands identified by index)
+    and the default mode (target_operands mapping).
+
+    Returns:
+        (controlled_block, inner_symbol_map) if controlled_block is a BlockValue,
+        (None, {}) otherwise.
+    """
+    from qamomile.circuit.ir.block_value import BlockValue
+
+    controlled_block = op.block
+    if not isinstance(controlled_block, BlockValue):
+        return None, {}
+    inner_symbol_map = symbol_map.copy()
+    if op.has_index_spec:
+        param_operands = op.operands[2:]
+        param_idx = 0
+        for formal_input in controlled_block.input_values:
+            if not formal_input.type.is_quantum():
+                if param_idx < len(param_operands):
+                    actual_arg = param_operands[param_idx]
+                    if isinstance(actual_arg, ArrayValue) and isinstance(
+                        formal_input, ArrayValue
+                    ):
+                        for dim_formal, dim_actual in zip(
+                            formal_input.shape, actual_arg.shape
+                        ):
+                            inner_symbol_map[dim_formal.uuid] = (
+                                _resolve_value_to_sympy(dim_actual, symbol_map)
+                            )
+                    param_idx += 1
+    else:
+        target_operands = op.target_operands
+        for formal_idx, formal_input in enumerate(controlled_block.input_values):
+            if formal_idx < len(target_operands):
+                actual_arg = target_operands[formal_idx]
+                if isinstance(actual_arg, ArrayValue) and isinstance(
+                    formal_input, ArrayValue
+                ):
+                    for dim_formal, dim_actual in zip(
+                        formal_input.shape, actual_arg.shape
+                    ):
+                        inner_symbol_map[dim_formal.uuid] = (
+                            _resolve_value_to_sympy(dim_actual, symbol_map)
+                        )
+    return controlled_block, inner_symbol_map
+
+
+def _compute_for_iterations(
+    op: ForOperation, symbol_map: dict[str, sp.Expr]
+) -> sp.Expr:
+    """Compute the number of iterations for a ForOperation."""
+    start_expr = _resolve_value_to_sympy(op.operands[0], symbol_map)
+    stop_expr = _resolve_value_to_sympy(op.operands[1], symbol_map)
+    step_expr = _resolve_value_to_sympy(op.operands[2], symbol_map)
+    return (stop_expr - start_expr) / step_expr
+
+
+def _resolve_for_items_cardinality(op: ForItemsOperation) -> sp.Symbol:
+    """Resolve the cardinality symbol for a ForItemsOperation."""
+    dict_operand = op.operands[0]
+    if hasattr(dict_operand, "is_parameter") and dict_operand.is_parameter():
+        dict_name = dict_operand.parameter_name() or dict_operand.name
+    else:
+        dict_name = dict_operand.name
+    return sp.Symbol(f"|{dict_name}|", integer=True, positive=True)
+
+
+# ---------------------------------------------------------------------------
+# Main counting functions
+# ---------------------------------------------------------------------------
+
+
 def _count_loop_body_split(
     operations: list[Operation],
     symbol_map: dict[str, sp.Expr] | None = None,
@@ -164,38 +287,18 @@ def _count_loop_body_split(
     for op in operations:
         match op:
             case BinOp():
-                lhs_expr = _resolve_value_to_sympy(op.lhs, symbol_map)
-                rhs_expr = _resolve_value_to_sympy(op.rhs, symbol_map)
-                if op.kind in BINOP_TO_SYMPY:
-                    symbol_map[op.output.uuid] = BINOP_TO_SYMPY[op.kind](
-                        lhs_expr, rhs_expr
-                    )
+                _register_binop(op, symbol_map)
 
             case QInitOperation():
                 persistent += _count_qinit(op, symbol_map)  # type: ignore
 
             case CallBlockOperation():
-                called_block = op.operands[0]
-                if isinstance(called_block, BlockValue):
-                    inner_symbol_map = symbol_map.copy()
-                    for formal_idx, formal_input in enumerate(
-                        called_block.input_values
-                    ):
-                        if formal_idx + 1 < len(op.operands):
-                            actual_arg = op.operands[formal_idx + 1]
-                            if isinstance(actual_arg, ArrayValue) and isinstance(
-                                formal_input, ArrayValue
-                            ):
-                                for dim_formal, dim_actual in zip(
-                                    formal_input.shape, actual_arg.shape
-                                ):
-                                    inner_symbol_map[dim_formal.uuid] = (
-                                        _resolve_value_to_sympy(
-                                            dim_actual, symbol_map
-                                        )
-                                    )
+                called_block, inner_map = _build_call_block_inner_map(
+                    op, symbol_map
+                )
+                if called_block is not None:
                     inner_alloc = _count_from_operations(
-                        called_block.operations, inner_symbol_map
+                        called_block.operations, inner_map
                     )
                     if _is_clean_call(called_block):
                         reusable = sp.Max(reusable, inner_alloc)
@@ -203,49 +306,12 @@ def _count_loop_body_split(
                         persistent += inner_alloc  # type: ignore
 
             case ControlledUOperation():
-                controlled_block = op.block
-                if isinstance(controlled_block, BlockValue):
-                    inner_symbol_map = symbol_map.copy()
-                    if op.has_index_spec:
-                        param_operands = op.operands[2:]
-                        param_idx = 0
-                        for formal_input in controlled_block.input_values:
-                            if not formal_input.type.is_quantum():
-                                if param_idx < len(param_operands):
-                                    actual_arg = param_operands[param_idx]
-                                    if isinstance(
-                                        actual_arg, ArrayValue
-                                    ) and isinstance(formal_input, ArrayValue):
-                                        for dim_formal, dim_actual in zip(
-                                            formal_input.shape,
-                                            actual_arg.shape,
-                                        ):
-                                            inner_symbol_map[
-                                                dim_formal.uuid
-                                            ] = _resolve_value_to_sympy(
-                                                dim_actual, symbol_map
-                                            )
-                                    param_idx += 1
-                    else:
-                        target_operands = op.target_operands
-                        for formal_idx, formal_input in enumerate(
-                            controlled_block.input_values
-                        ):
-                            if formal_idx < len(target_operands):
-                                actual_arg = target_operands[formal_idx]
-                                if isinstance(
-                                    actual_arg, ArrayValue
-                                ) and isinstance(formal_input, ArrayValue):
-                                    for dim_formal, dim_actual in zip(
-                                        formal_input.shape, actual_arg.shape
-                                    ):
-                                        inner_symbol_map[dim_formal.uuid] = (
-                                            _resolve_value_to_sympy(
-                                                dim_actual, symbol_map
-                                            )
-                                        )
+                controlled_block, inner_map = _build_controlled_u_inner_map(
+                    op, symbol_map
+                )
+                if controlled_block is not None:
                     inner_alloc = _count_from_operations(
-                        controlled_block.operations, inner_symbol_map
+                        controlled_block.operations, inner_map
                     )
                     if _is_clean_call(controlled_block):
                         reusable = sp.Max(reusable, inner_alloc)
@@ -277,12 +343,13 @@ def _count_loop_body_split(
                 inner_p, inner_r = _count_loop_body_split(
                     op.operations, symbol_map
                 )
-                start_expr = _resolve_value_to_sympy(op.operands[0], symbol_map)
-                stop_expr = _resolve_value_to_sympy(op.operands[1], symbol_map)
-                step_expr = _resolve_value_to_sympy(op.operands[2], symbol_map)
-                iterations = (stop_expr - start_expr) / step_expr
+                iterations = _compute_for_iterations(op, symbol_map)
+                reusable_factor = sp.Piecewise(
+                    (sp.Integer(1), sp.Gt(iterations, 0)),
+                    (sp.Integer(0), True),
+                )
                 persistent += inner_p * iterations  # type: ignore
-                reusable = sp.Max(reusable, inner_r)
+                reusable = sp.Max(reusable, inner_r * reusable_factor)
 
             case WhileOperation():
                 inner_p, inner_r = _count_loop_body_split(
@@ -305,17 +372,7 @@ def _count_loop_body_split(
                 inner_p, inner_r = _count_loop_body_split(
                     op.operations, symbol_map
                 )
-                dict_operand = op.operands[0]
-                if (
-                    hasattr(dict_operand, "is_parameter")
-                    and dict_operand.is_parameter()
-                ):
-                    dict_name = dict_operand.parameter_name() or dict_operand.name
-                else:
-                    dict_name = dict_operand.name
-                cardinality = sp.Symbol(
-                    f"|{dict_name}|", integer=True, positive=True
-                )
+                cardinality = _resolve_for_items_cardinality(op)
                 persistent += inner_p * cardinality  # type: ignore
                 reusable = sp.Max(reusable, inner_r)
 
@@ -341,6 +398,8 @@ def _count_from_operations(
     Returns:
         Total qubit count as a sympy expression.
     """
+    from qamomile.circuit.ir.block_value import BlockValue
+
     if symbol_map is None:
         symbol_map = {}
 
@@ -349,12 +408,7 @@ def _count_from_operations(
     for op in operations:
         match op:
             case BinOp():
-                lhs_expr = _resolve_value_to_sympy(op.lhs, symbol_map)
-                rhs_expr = _resolve_value_to_sympy(op.rhs, symbol_map)
-                if op.kind in BINOP_TO_SYMPY:
-                    symbol_map[op.output.uuid] = BINOP_TO_SYMPY[op.kind](
-                        lhs_expr, rhs_expr
-                    )
+                _register_binop(op, symbol_map)
 
             case QInitOperation():
                 count += _count_qinit(op, symbol_map)  # type: ignore
@@ -363,10 +417,7 @@ def _count_from_operations(
                 persistent, reusable = _count_loop_body_split(
                     op.operations, symbol_map
                 )
-                start_expr = _resolve_value_to_sympy(op.operands[0], symbol_map)
-                stop_expr = _resolve_value_to_sympy(op.operands[1], symbol_map)
-                step_expr = _resolve_value_to_sympy(op.operands[2], symbol_map)
-                iterations = (stop_expr - start_expr) / step_expr
+                iterations = _compute_for_iterations(op, symbol_map)
                 reusable_factor = sp.Piecewise(
                     (sp.Integer(1), sp.Gt(iterations, 0)),
                     (sp.Integer(0), True),
@@ -387,101 +438,28 @@ def _count_from_operations(
                 count += sp.Max(true_count, false_count)  # type: ignore
 
             case CallBlockOperation():
-                # Recursively count only internally-allocated qubits
-                # (not input_values, to avoid double-counting passed-in qubits)
-                from qamomile.circuit.ir.block_value import BlockValue
-
-                called_block = op.operands[0]
-                if isinstance(called_block, BlockValue):
-                    # Map formal input array dimensions to actual argument dimensions
-                    inner_symbol_map = symbol_map.copy()
-                    for formal_idx, formal_input in enumerate(
-                        called_block.input_values
-                    ):
-                        if formal_idx + 1 < len(op.operands):
-                            actual_arg = op.operands[formal_idx + 1]
-                            if isinstance(actual_arg, ArrayValue) and isinstance(
-                                formal_input, ArrayValue
-                            ):
-                                for dim_formal, dim_actual in zip(
-                                    formal_input.shape, actual_arg.shape
-                                ):
-                                    inner_symbol_map[dim_formal.uuid] = (
-                                        _resolve_value_to_sympy(
-                                            dim_actual, symbol_map
-                                        )
-                                    )
-                    count += _count_from_operations(called_block.operations, inner_symbol_map)  # type: ignore
+                called_block, inner_map = _build_call_block_inner_map(
+                    op, symbol_map
+                )
+                if called_block is not None:
+                    count += _count_from_operations(called_block.operations, inner_map)  # type: ignore
 
             case ControlledUOperation():
-                # Recursively count only internally-allocated qubits
-                from qamomile.circuit.ir.block_value import BlockValue
-
-                controlled_block = op.block
-                if isinstance(controlled_block, BlockValue):
-                    inner_symbol_map = symbol_map.copy()
-                    if op.has_index_spec:
-                        # index_spec mode: skip qubit formals,
-                        # map only non-qubit ArrayValue dimensions
-                        param_operands = op.operands[2:]
-                        param_idx = 0
-                        for formal_input in controlled_block.input_values:
-                            if not formal_input.type.is_quantum():
-                                if param_idx < len(param_operands):
-                                    actual_arg = param_operands[param_idx]
-                                    if isinstance(
-                                        actual_arg, ArrayValue
-                                    ) and isinstance(formal_input, ArrayValue):
-                                        for dim_formal, dim_actual in zip(
-                                            formal_input.shape,
-                                            actual_arg.shape,
-                                        ):
-                                            inner_symbol_map[
-                                                dim_formal.uuid
-                                            ] = _resolve_value_to_sympy(
-                                                dim_actual, symbol_map
-                                            )
-                                    param_idx += 1
-                    else:
-                        # Map formal input array dimensions to actual target operand dimensions
-                        target_operands = op.target_operands
-                        for formal_idx, formal_input in enumerate(
-                            controlled_block.input_values
-                        ):
-                            if formal_idx < len(target_operands):
-                                actual_arg = target_operands[formal_idx]
-                                if isinstance(
-                                    actual_arg, ArrayValue
-                                ) and isinstance(formal_input, ArrayValue):
-                                    for dim_formal, dim_actual in zip(
-                                        formal_input.shape, actual_arg.shape
-                                    ):
-                                        inner_symbol_map[dim_formal.uuid] = (
-                                            _resolve_value_to_sympy(
-                                                dim_actual, symbol_map
-                                            )
-                                        )
-                    count += _count_from_operations(controlled_block.operations, inner_symbol_map)  # type: ignore
+                controlled_block, inner_map = _build_controlled_u_inner_map(
+                    op, symbol_map
+                )
+                if controlled_block is not None:
+                    count += _count_from_operations(controlled_block.operations, inner_map)  # type: ignore
 
             case ForItemsOperation():
                 persistent, reusable = _count_loop_body_split(
                     op.operations, symbol_map
                 )
-                dict_operand = op.operands[0]
-                if (
-                    hasattr(dict_operand, "is_parameter")
-                    and dict_operand.is_parameter()
-                ):
-                    dict_name = dict_operand.parameter_name() or dict_operand.name
-                else:
-                    dict_name = dict_operand.name
-                cardinality = sp.Symbol(f"|{dict_name}|", integer=True, positive=True)
+                cardinality = _resolve_for_items_cardinality(op)
                 # cardinality is always positive, so reusable is counted once
                 count += persistent * cardinality + reusable  # type: ignore
 
             case CompositeGateOperation():
-                from qamomile.circuit.ir.block_value import BlockValue
-
                 # Count only internally-allocated qubits (not input_values)
                 impl = op.implementation
                 if isinstance(impl, BlockValue):
