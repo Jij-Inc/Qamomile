@@ -468,7 +468,7 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         single_qubit=2 * n,
         two_qubit=3 * n,
         multi_qubit=n,
-        clifford_gates=2,
+        clifford_gates=2 * n,
         total_depth=2 * n + 3,
         two_qubit_depth=2 * n + 3,
         multi_qubit_depth=n,
@@ -497,6 +497,7 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         multi_qubit_depth=2 * n,
     ),
     "draper_inplace_qc_adder": resource(
+        # Addition on a Quantum Computer (https://arxiv.org/abs/quant-ph/0008033) (circuit)
         n,
         total=n**2 + 2 * n + 2 * sp.floor(n / 2),
         single_qubit=3 * n,
