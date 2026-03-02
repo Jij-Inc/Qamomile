@@ -6,6 +6,7 @@ into a single interface for comprehensive circuit analysis.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -39,6 +40,9 @@ class ResourceEstimate:
     gates: GateCount
     depth: CircuitDepth
     parameters: dict[str, sp.Symbol] = field(default_factory=dict)
+    _worst_case_depth_dicts: frozenset[str] = field(
+        default_factory=frozenset, repr=False
+    )
 
     def substitute(self, **values: int | float) -> ResourceEstimate:
         """Substitute concrete values for parameters.
@@ -69,7 +73,7 @@ class ResourceEstimate:
                 return sp.Integer(expr)
             return expr.subs(subs_dict).doit()
 
-        return ResourceEstimate(
+        result = ResourceEstimate(
             qubits=_subs_eval(self.qubits),
             gates=GateCount(
                 total=_subs_eval(self.gates.total),
@@ -92,7 +96,19 @@ class ResourceEstimate:
                 rotation_depth=_subs_eval(self.depth.rotation_depth),
             ),
             parameters=self.parameters,
+            _worst_case_depth_dicts=self._worst_case_depth_dicts,
         )
+        # Re-emit warnings for worst-case depth dicts
+        for dict_name in sorted(self._worst_case_depth_dicts):
+            warnings.warn(
+                f"Depth for ForItemsOperation over '{dict_name}' uses "
+                f"worst-case sequential bound (multiplied by |{dict_name}|). "
+                f"For accurate parallel depth, use "
+                f"estimate_resources(block, bindings=...) with concrete "
+                f"dict values.",
+                stacklevel=2,
+            )
+        return result
 
     def simplify(self) -> ResourceEstimate:
         """Simplify all SymPy expressions.
@@ -105,6 +121,7 @@ class ResourceEstimate:
             gates=self.gates.simplify(),
             depth=self.depth.simplify(),
             parameters=self.parameters,
+            _worst_case_depth_dicts=self._worst_case_depth_dicts,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -179,14 +196,27 @@ class ResourceEstimate:
 
 def estimate_resources(
     block: BlockValue | Block | list[Operation],
+    *,
+    bindings: dict[str, Any] | None = None,
 ) -> ResourceEstimate:
     """Estimate all resources for a quantum circuit.
 
     This is the main entry point for comprehensive resource estimation.
     Combines qubit counting, gate counting, and depth estimation.
 
+    When ``bindings`` is provided with concrete dict values, ForItemsOperation
+    loops are unrolled with per-qubit depth tracking, yielding accurate
+    parallel depth instead of worst-case sequential estimates.
+
+    Note:
+        Calling ``substitute()`` on a symbolic result cannot recover
+        parallel depth information. For accurate depth with dict parameters,
+        pass concrete dicts via ``bindings`` at estimation time.
+
     Args:
         block: BlockValue, Block, or list of Operations to analyze
+        bindings: Optional concrete parameter bindings (scalars and dicts).
+            When provided, enables accurate depth for ForItemsOperation.
 
     Returns:
         ResourceEstimate with qubits, gates, depth, and parameters
@@ -233,8 +263,53 @@ def estimate_resources(
     # Count gates
     gate_count = count_gates(block)
 
-    # Estimate depth
-    circuit_depth = estimate_depth(block)
+    # Estimate depth (with bindings for concrete dict unrolling)
+    circuit_depth = estimate_depth(block, bindings=bindings)
+
+    # Detect worst-case dict depth symbols (|dict_name|)
+    worst_case_dicts: set[str] = set()
+    all_depth_exprs = [
+        circuit_depth.total_depth,
+        circuit_depth.t_depth,
+        circuit_depth.two_qubit_depth,
+        circuit_depth.multi_qubit_depth,
+        circuit_depth.rotation_depth,
+    ]
+    for expr in all_depth_exprs:
+        if isinstance(expr, sp.Basic):
+            for sym in expr.free_symbols:
+                name = str(sym)
+                if name.startswith("|") and name.endswith("|"):
+                    worst_case_dicts.add(name[1:-1])
+
+    # Substitute dict cardinality and scalar symbols if bindings provided
+    if bindings is not None:
+        all_subs: dict[sp.Symbol, int] = {}
+        for key, val in bindings.items():
+            if isinstance(val, dict):
+                all_subs[
+                    sp.Symbol(f"|{key}|", integer=True, positive=True)
+                ] = len(val)
+            elif isinstance(val, (int, float)):
+                all_subs[
+                    sp.Symbol(key, integer=True, positive=True)
+                ] = int(val)
+        if all_subs:
+            gate_count = GateCount(
+                total=gate_count.total.subs(all_subs),
+                single_qubit=gate_count.single_qubit.subs(all_subs),
+                two_qubit=gate_count.two_qubit.subs(all_subs),
+                multi_qubit=gate_count.multi_qubit.subs(all_subs),
+                t_gates=gate_count.t_gates.subs(all_subs),
+                clifford_gates=gate_count.clifford_gates.subs(all_subs),
+                rotation_gates=gate_count.rotation_gates.subs(all_subs),
+                oracle_calls={
+                    name: count.subs(all_subs)
+                    for name, count in gate_count.oracle_calls.items()
+                },
+            )
+            circuit_depth = circuit_depth.substitute(all_subs)
+            qubit_count = qubit_count.subs(all_subs)
 
     # Collect all symbols (parameters)
     all_symbols: set[sp.Symbol] = set()
@@ -264,4 +339,5 @@ def estimate_resources(
         gates=gate_count,
         depth=circuit_depth,
         parameters=parameters,
+        _worst_case_depth_dicts=frozenset(worst_case_dicts),
     )

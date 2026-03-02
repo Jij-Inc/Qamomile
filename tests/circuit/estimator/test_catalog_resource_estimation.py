@@ -5,6 +5,12 @@ from catalog entry ID to ResourceEstimate. Each catalog entry is tested
 against its expected resource estimate for qubits, gate counts, and depth.
 """
 
+from __future__ import annotations
+
+import warnings
+from dataclasses import dataclass
+from typing import Any
+
 import pytest
 import sympy as sp
 
@@ -20,6 +26,7 @@ from tests.circuit.estimator.assertions import (
     assert_gate_counts,
 )
 from tests.circuit.qkernel_catalog import (
+    QKERNEL_BY_ID,
     QKERNEL_CATALOG,
     QKernelEntry,
     concrete_values_for,
@@ -329,6 +336,7 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         rotation_depth=2 * num_layers,
     ),
     "qaoa_state_umbiguous": resource(
+        # Ref: Quantum algorithms for optimizers (https://arxiv.org/abs/2408.07086) (circuit)
         n,
         total=n + num_layers * (quad + linear + n),  # type:ignore
         single_qubit=n + num_layers * (linear + n),  # type:ignore
@@ -535,3 +543,150 @@ def test_parametric_substitution(entry, subs):
     assert_expr_equal(est.qubits, expected.qubits, "qubits")
     assert_gate_counts(est.gates, expected.gates)
     assert_depth(est.depth, expected.depth)
+
+
+# ============================================================
+# Concrete dict bindings tests
+# ============================================================
+
+
+@dataclass(frozen=True)
+class BindingsCase:
+    """A test case for concrete dict bindings with expected resources."""
+
+    id: str
+    entry_id: str
+    bindings: dict[str, Any]
+    expected: ResourceEstimate
+
+
+EXPECTED_BINDINGS_RESOURCES: list[BindingsCase] = [
+    # --- qaoa_state_umbiguous: non-overlapping qubits (parallel RZZ) ---
+    BindingsCase(
+        id="qaoa_non_overlapping",
+        entry_id="qaoa_state_umbiguous",
+        bindings={
+            "n": 4,
+            "num_layers": 1,
+            "quad": {(0, 1): 0.5, (2, 3): 0.3},
+            "linear": {0: 0.1, 1: 0.2, 2: 0.3, 3: 0.4},
+        },
+        expected=resource(
+            4,
+            total=4 + 2 + 4 + 4,  # H(4) + RZZ(2) + RZ(4) + RX(4)
+            single_qubit=4 + 4 + 4,  # H(4) + RZ(4) + RX(4)
+            two_qubit=2,  # RZZ(2)
+            clifford_gates=4,  # H(4)
+            rotation_gates=2 + 4 + 4,  # RZZ(2) + RZ(4) + RX(4)
+            total_depth=4,  # H:1 + RZZ(parallel):1 + RZ:1 + RX:1
+            two_qubit_depth=1,
+            rotation_depth=3,  # RZZ:1 + RZ:1 + RX:1
+        ),
+    ),
+    # --- qaoa_state_umbiguous: overlapping qubits (sequential RZZ) ---
+    BindingsCase(
+        id="qaoa_overlapping",
+        entry_id="qaoa_state_umbiguous",
+        bindings={
+            "n": 3,
+            "num_layers": 1,
+            "quad": {(0, 1): 0.5, (1, 2): 0.3},
+            "linear": {0: 0.1, 1: 0.2, 2: 0.3},
+        },
+        expected=resource(
+            3,
+            total=3 + 2 + 3 + 3,  # H(3) + RZZ(2) + RZ(3) + RX(3)
+            single_qubit=3 + 3 + 3,  # H(3) + RZ(3) + RX(3)
+            two_qubit=2,
+            clifford_gates=3,
+            rotation_gates=2 + 3 + 3,
+            total_depth=5,  # H:1 + RZZ(sequential):2 + RZ:1 + RX:1
+            two_qubit_depth=2,
+            rotation_depth=4,  # RZZ:2 + RZ:1 + RX:1
+        ),
+    ),
+    # --- qaoa_state_umbiguous: multi-layer ---
+    BindingsCase(
+        id="qaoa_multi_layer",
+        entry_id="qaoa_state_umbiguous",
+        bindings={
+            "n": 4,
+            "num_layers": 2,
+            "quad": {(0, 1): 0.5, (2, 3): 0.3},
+            "linear": {0: 0.1, 1: 0.2, 2: 0.3, 3: 0.4},
+        },
+        expected=resource(
+            4,
+            total=4 + 2 * (2 + 4 + 4),  # H(4) + 2*(RZZ(2)+RZ(4)+RX(4))
+            single_qubit=4 + 2 * (4 + 4),
+            two_qubit=2 * 2,
+            clifford_gates=4,
+            rotation_gates=2 * (2 + 4 + 4),
+            total_depth=7,  # H:1 + 2*(RZZ:1+RZ:1+RX:1)
+            two_qubit_depth=2,
+            rotation_depth=6,  # 2*(RZZ:1+RZ:1+RX:1)
+        ),
+    ),
+    # --- qaoa_state_umbiguous: empty dicts ---
+    BindingsCase(
+        id="qaoa_empty_dicts",
+        entry_id="qaoa_state_umbiguous",
+        bindings={
+            "n": 2,
+            "num_layers": 1,
+            "quad": {},
+            "linear": {},
+        },
+        expected=resource(
+            2,
+            total=2 + 0 + 0 + 2,  # H(2) + RX(2) only
+            single_qubit=2 + 0 + 2,
+            two_qubit=0,
+            clifford_gates=2,
+            rotation_gates=0 + 0 + 2,
+            total_depth=2,  # H:1 + RX:1
+            two_qubit_depth=0,
+            rotation_depth=1,  # RX:1
+        ),
+    ),
+]
+
+
+def _bindings_cases() -> list:
+    """Generate pytest params for concrete bindings test cases."""
+    return [pytest.param(case, id=case.id) for case in EXPECTED_BINDINGS_RESOURCES]
+
+
+@pytest.mark.parametrize("case", _bindings_cases())
+def test_concrete_bindings(case: BindingsCase):
+    """Test resource estimation with concrete dict bindings."""
+    entry = QKERNEL_BY_ID[case.entry_id]
+    est = estimate_resources(entry.qkernel.block, bindings=case.bindings)
+    assert_expr_equal(est.qubits, case.expected.qubits, "qubits")
+    assert_gate_counts(est.gates, case.expected.gates)
+    assert_depth(est.depth, case.expected.depth)
+
+
+def test_no_bindings_backward_compat():
+    """Without bindings, behavior should be unchanged (symbolic)."""
+    entry = QKERNEL_BY_ID["qaoa_state_umbiguous"]
+    est = estimate_resources(entry.qkernel.block)
+    quad_sym = sp.Symbol("|quad|", integer=True, positive=True)
+    assert quad_sym in est.depth.total_depth.free_symbols
+
+
+def test_substitute_warns_worst_case():
+    """substitute() should re-emit worst-case warning for dict depths."""
+    from tests.circuit.qkernel_catalog import qaoa_state_umbiguous
+
+    # First, get symbolic result (no bindings)
+    est = estimate_resources(qaoa_state_umbiguous.block)
+    # The result should have worst-case flag for quad and linear
+    assert len(est._worst_case_depth_dicts) > 0
+
+    # Calling substitute should re-emit warnings
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _ = est.substitute(n=4, num_layers=1)
+    worst_case_msgs = [w for w in caught if "worst-case" in str(w.message)]
+    assert len(worst_case_msgs) > 0

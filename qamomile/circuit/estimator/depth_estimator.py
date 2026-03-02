@@ -893,6 +893,102 @@ def _eval_value_concrete(
     return None
 
 
+def _resolve_dict_entries_for_depth(
+    dict_value: Any,
+    dict_bindings: dict[str, Any],
+) -> list[tuple[Any, Any]] | None:
+    """Resolve DictValue to concrete (key, value) pairs for depth estimation.
+
+    Resolution priority (mirrors standard_emit._resolve_dict_entries):
+    1. bound_data in params
+    2. parameter_name in dict_bindings
+    3. name in dict_bindings
+    """
+    # 1. bound_data
+    if hasattr(dict_value, "params") and "bound_data" in dict_value.params:
+        bound = dict_value.params["bound_data"]
+        if isinstance(bound, dict):
+            return list(bound.items())
+        elif hasattr(bound, "items"):
+            return list(bound.items())
+        return bound
+
+    # 2. parameter_name
+    if hasattr(dict_value, "is_parameter") and dict_value.is_parameter():
+        param_name = dict_value.parameter_name()
+        if param_name and param_name in dict_bindings:
+            bound = dict_bindings[param_name]
+            if isinstance(bound, dict):
+                return list(bound.items())
+
+    # 3. name
+    if hasattr(dict_value, "name") and dict_value.name in dict_bindings:
+        bound = dict_bindings[dict_value.name]
+        if isinstance(bound, dict):
+            return list(bound.items())
+
+    return None
+
+
+def _prepare_concrete_env(
+    block: Any,
+    bindings: dict[str, Any],
+) -> tuple[dict[str, int] | None, dict[str, Any], dict[str, Any]]:
+    """Build var_env, dict_bindings, and call_context from user bindings.
+
+    Args:
+        block: BlockValue with input_values for UUID mapping
+        bindings: User-provided parameter bindings (scalars and dicts)
+
+    Returns:
+        (var_env, dict_bindings, call_context) tuple.
+        var_env is None if block has no input_values to map.
+    """
+    from qamomile.circuit.ir.block_value import BlockValue
+    from qamomile.circuit.ir.value import ArrayValue, DictValue
+
+    var_env: dict[str, int] = {}
+    dict_bindings: dict[str, Any] = {}
+    call_context: dict[str, Any] = {}
+
+    for key, val in bindings.items():
+        if isinstance(val, dict):
+            dict_bindings[key] = val
+        elif isinstance(val, (int, float)):
+            var_env[key] = int(val)
+
+    # Block input UUID -> concrete value mapping
+    if isinstance(block, BlockValue):
+        for formal_input in block.input_values:
+            pname = None
+            if (
+                hasattr(formal_input, "is_parameter")
+                and formal_input.is_parameter()
+            ):
+                pname = formal_input.parameter_name()
+            if pname is None:
+                pname = formal_input.name
+
+            if isinstance(formal_input, DictValue):
+                continue  # handled via dict_bindings
+            elif pname in var_env:
+                call_context[formal_input.uuid] = sp.Integer(var_env[pname])
+                # Handle ArrayValue shape dimensions
+                if isinstance(formal_input, ArrayValue):
+                    for dim in formal_input.shape:
+                        dim_pname = None
+                        if (
+                            hasattr(dim, "is_parameter")
+                            and dim.is_parameter()
+                        ):
+                            dim_pname = dim.parameter_name()
+                        if dim_pname and dim_pname in var_env:
+                            call_context[dim.uuid] = sp.Integer(
+                                var_env[dim_pname]
+                            )
+
+    return var_env, dict_bindings, call_context
+
 
 def _concretize_qubit_operand(
     v: Any,
@@ -931,6 +1027,8 @@ def _simulate_parallel_depth_concrete(
     var_env: dict[str, int],
     num_controls: int | sp.Expr = 0,
     value_depths: dict[str, CircuitDepth] | None = None,
+    *,
+    dict_bindings: dict[str, Any] | None = None,
 ) -> None:
     """Simulate parallel depth with fully concrete variable values.
 
@@ -946,6 +1044,7 @@ def _simulate_parallel_depth_concrete(
         var_env: Mapping from all variable names to concrete integer values
         num_controls: Number of control qubits (0 means no control)
         value_depths: Mutable mapping from Value UUID to depth (for measurement tracking)
+        dict_bindings: Concrete dict bindings for ForItemsOperation unrolling
     """
     from qamomile.circuit.ir.block_value import BlockValue
     from qamomile.circuit.ir.value import ArrayValue
@@ -1126,6 +1225,7 @@ def _simulate_parallel_depth_concrete(
                 var_env=var_env,
                 num_controls=num_controls,
                 value_depths=value_depths,
+                dict_bindings=dict_bindings,
             )
             _simulate_parallel_depth_concrete(
                 op.false_operations,
@@ -1135,6 +1235,7 @@ def _simulate_parallel_depth_concrete(
                 var_env=var_env,
                 num_controls=num_controls,
                 value_depths=value_depths,
+                dict_bindings=dict_bindings,
             )
 
             all_qids = set(true_depths) | set(false_depths)
@@ -1154,38 +1255,74 @@ def _simulate_parallel_depth_concrete(
                 qubit_depths[phi_op.output.name] = tv_depth.max(fv_depth)
 
         elif isinstance(op, ForItemsOperation):
-            # Dict size unknown: sequential upper bound with cardinality symbol
-            inner_depth = _compute_sequential_depth(
-                op.operations,
-                block=block,
-                loop_context=[],
-                call_context=call_context,
-                loop_var_symbols={},
-                num_controls=num_controls,
-            )
+            if not op.operands:
+                continue
+
             dict_operand = op.operands[0]
-            if (
-                hasattr(dict_operand, "is_parameter")
-                and dict_operand.is_parameter()
-            ):
-                dict_name = dict_operand.parameter_name() or dict_operand.name
+            entries = _resolve_dict_entries_for_depth(
+                dict_operand, dict_bindings or {}
+            )
+
+            if entries is not None:
+                # Concrete unrolling: iterate entries with per-qubit tracking
+                for key, value in entries:
+                    # Copy var_env per entry to avoid BinOp mutation leakage
+                    inner_env = var_env.copy()
+                    # Bind key variables (tuple unpacking)
+                    if len(op.key_vars) > 1:
+                        for ki, kv_name in enumerate(op.key_vars):
+                            inner_env[kv_name] = (
+                                key[ki]
+                                if hasattr(key, "__getitem__")
+                                else key
+                            )
+                    elif len(op.key_vars) == 1:
+                        inner_env[op.key_vars[0]] = key
+
+                    _simulate_parallel_depth_concrete(
+                        op.operations,
+                        qubit_depths,
+                        block=block,
+                        call_context=call_context,
+                        var_env=inner_env,
+                        num_controls=num_controls,
+                        value_depths=value_depths,
+                        dict_bindings=dict_bindings,
+                    )
             else:
-                dict_name = dict_operand.name
-            cardinality_sym = sp.Symbol(
-                f"|{dict_name}|", integer=True, positive=True
-            )
-            total_depth = inner_depth * cardinality_sym
-            body_qubits = _collect_all_qubit_names(op.operations)
-            current_max = _get_max_depth(qubit_depths)
-            new_max = current_max + total_depth
-            for qid in set(qubit_depths) | body_qubits:
-                qubit_depths[qid] = new_max
-            warnings.warn(
-                f"Depth for ForItemsOperation over '{dict_name}' is a sequential "
-                f"upper bound (multiplied by |{dict_name}|). "
-                f"True depth depends on runtime data.",
-                stacklevel=2,
-            )
+                # Fallback: symbolic sequential upper bound
+                inner_depth = _compute_sequential_depth(
+                    op.operations,
+                    block=block,
+                    loop_context=[],
+                    call_context=call_context,
+                    loop_var_symbols={},
+                    num_controls=num_controls,
+                )
+                if (
+                    hasattr(dict_operand, "is_parameter")
+                    and dict_operand.is_parameter()
+                ):
+                    dict_name = (
+                        dict_operand.parameter_name() or dict_operand.name
+                    )
+                else:
+                    dict_name = dict_operand.name
+                cardinality_sym = sp.Symbol(
+                    f"|{dict_name}|", integer=True, positive=True
+                )
+                total_depth = inner_depth * cardinality_sym
+                body_qubits = _collect_all_qubit_names(op.operations)
+                current_max = _get_max_depth(qubit_depths)
+                new_max = current_max + total_depth
+                for qid in set(qubit_depths) | body_qubits:
+                    qubit_depths[qid] = new_max
+                warnings.warn(
+                    f"Depth for ForItemsOperation over '{dict_name}' is a "
+                    f"sequential upper bound (multiplied by |{dict_name}|). "
+                    f"True depth depends on runtime data.",
+                    stacklevel=2,
+                )
 
         elif isinstance(op, WhileOperation):
             # While iteration count unknown: sequential upper bound
@@ -1239,6 +1376,7 @@ def _simulate_parallel_depth_concrete(
                     var_env=inner_env,
                     num_controls=num_controls,
                     value_depths=value_depths,
+                    dict_bindings=dict_bindings,
                     )
 
         elif isinstance(op, CallBlockOperation):
@@ -1311,6 +1449,7 @@ def _simulate_parallel_depth_concrete(
                 var_env=var_env,
                 num_controls=num_controls,
                 value_depths=value_depths,
+                dict_bindings=dict_bindings,
             )
 
             _write_back_depths(qubit_name_map, local_depths, qubit_depths)
@@ -2667,7 +2806,11 @@ def _compute_sequential_depth(
     return depth.simplify()
 
 
-def estimate_depth(block: BlockValue | Block | list[Operation]) -> CircuitDepth:
+def estimate_depth(
+    block: BlockValue | Block | list[Operation],
+    *,
+    bindings: dict[str, Any] | None = None,
+) -> CircuitDepth:
     """Estimate circuit depth using parallel (DAG critical path) analysis.
 
     Computes the minimum circuit depth considering gate-level parallelism.
@@ -2678,11 +2821,18 @@ def estimate_depth(block: BlockValue | Block | list[Operation]) -> CircuitDepth:
     - If all iterations use distinct qubits: depth = single iteration depth
     - If iterations share qubits: falls back to sequential (conservative) depth
 
+    When ``bindings`` is provided with concrete dict values (e.g.,
+    ``{"quad": {(0,1): 0.5, (2,3): 0.3}}``), ForItemsOperation loops are
+    unrolled with per-qubit depth tracking, yielding accurate parallel depth
+    instead of worst-case sequential estimates.
+
     Depth is expressed using SymPy expressions and may contain symbols for
     parametric problem sizes (e.g., loop bounds).
 
     Args:
         block: BlockValue, Block, or list of Operations to analyze
+        bindings: Optional concrete parameter bindings (scalars and dicts).
+            When provided, enables concrete simulation for ForItemsOperation.
 
     Returns:
         CircuitDepth with total_depth, t_depth, two_qubit_depth, etc.
@@ -2702,8 +2852,29 @@ def estimate_depth(block: BlockValue | Block | list[Operation]) -> CircuitDepth:
     else:
         ops = block
 
-    qubit_depths: QubitDepthMap = {}
-    value_depths: dict[str, CircuitDepth] = {}
+    # If bindings provided, try concrete simulation path
+    if bindings is not None and block_ref is not None:
+        var_env, dict_bindings, call_context = _prepare_concrete_env(
+            block_ref, bindings
+        )
+        if var_env is not None:
+            qubit_depths: QubitDepthMap = {}
+            value_depths: dict[str, CircuitDepth] = {}
+            _simulate_parallel_depth_concrete(
+                ops,
+                qubit_depths,
+                block_ref,
+                call_context=call_context,
+                var_env=var_env,
+                num_controls=0,
+                value_depths=value_depths,
+                dict_bindings=dict_bindings,
+            )
+            return _get_max_depth(qubit_depths).simplify()
+
+    # Fallback: symbolic path
+    qubit_depths = {}
+    value_depths = {}
     _estimate_parallel_depth(
         ops, qubit_depths, block_ref,
         loop_context=[], call_context={}, loop_var_symbols={},
