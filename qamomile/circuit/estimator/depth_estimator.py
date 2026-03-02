@@ -920,12 +920,18 @@ def _resolve_dict_entries_for_depth(
             bound = dict_bindings[param_name]
             if isinstance(bound, dict):
                 return list(bound.items())
+            elif hasattr(bound, "items"):
+                return list(bound.items())
+            return bound
 
     # 3. name
     if hasattr(dict_value, "name") and dict_value.name in dict_bindings:
         bound = dict_bindings[dict_value.name]
         if isinstance(bound, dict):
             return list(bound.items())
+        elif hasattr(bound, "items"):
+            return list(bound.items())
+        return bound
 
     return None
 
@@ -1278,6 +1284,9 @@ def _simulate_parallel_depth_concrete(
                             )
                     elif len(op.key_vars) == 1:
                         inner_env[op.key_vars[0]] = key
+                    # Bind value variable
+                    if op.value_var:
+                        inner_env[op.value_var] = value
 
                     _simulate_parallel_depth_concrete(
                         op.operations,
@@ -2858,19 +2867,22 @@ def estimate_depth(
             block_ref, bindings
         )
         if var_env is not None:
-            qubit_depths: QubitDepthMap = {}
-            value_depths: dict[str, CircuitDepth] = {}
-            _simulate_parallel_depth_concrete(
-                ops,
-                qubit_depths,
-                block_ref,
-                call_context=call_context,
-                var_env=var_env,
-                num_controls=0,
-                value_depths=value_depths,
-                dict_bindings=dict_bindings,
-            )
-            return _get_max_depth(qubit_depths).simplify()
+            try:
+                qubit_depths: QubitDepthMap = {}
+                value_depths: dict[str, CircuitDepth] = {}
+                _simulate_parallel_depth_concrete(
+                    ops,
+                    qubit_depths,
+                    block_ref,
+                    call_context=call_context,
+                    var_env=var_env,
+                    num_controls=0,
+                    value_depths=value_depths,
+                    dict_bindings=dict_bindings,
+                )
+                return _get_max_depth(qubit_depths).simplify()
+            except _UnresolvableForOpError:
+                pass  # Fall through to symbolic path
 
     # Fallback: symbolic path
     qubit_depths = {}
