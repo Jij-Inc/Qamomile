@@ -773,6 +773,19 @@ def maj() -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
 
 
 @qmc.qkernel
+def maj_loop(n: qmc.UInt) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+    a = qmc.qubit_array(n, name="a")
+    b = qmc.qubit_array(n, name="b")
+    ancilla = qmc.qubit(name="ancilla")
+
+    a[0], b[0], ancilla = _maj(a[0], b[0], ancilla)
+    for i in qmc.range(1, n):
+        a[i], b[i], a[i - 1] = _maj(a[i], b[i], a[i - 1])
+
+    return a, b
+
+
+@qmc.qkernel
 def _uma_2_cnot(
     a: qmc.Qubit, b: qmc.Qubit, c: qmc.Qubit
 ) -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
@@ -790,6 +803,19 @@ def uma_2_cnot() -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
     c = qmc.qubit(name="c")
     a, b, c = _uma_2_cnot(a, b, c)
     return a, b, c
+
+
+@qmc.qkernel
+def uma_2_cnot_loop(n: qmc.UInt) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+    a = qmc.qubit_array(n, name="a")
+    b = qmc.qubit_array(n, name="b")
+    ancilla = qmc.qubit(name="ancilla")
+
+    for i in qmc.range(n - 1, 0, -1):
+        a[i], b[i], a[i - 1] = _uma_2_cnot(a[i], b[i], a[i - 1])
+    a[0], b[0], ancilla = _uma_2_cnot(a[0], b[0], ancilla)
+
+    return a, b
 
 
 @qmc.qkernel
@@ -812,6 +838,19 @@ def uma_3_cnot() -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
     c = qmc.qubit(name="c")
     a, b, c = _uma_3_cnot(a, b, c)
     return a, b, c
+
+
+@qmc.qkernel
+def uma_3_cnot_loop(n: qmc.UInt) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+    a = qmc.qubit_array(n, name="a")
+    b = qmc.qubit_array(n, name="b")
+    ancilla = qmc.qubit(name="ancilla")
+
+    for i in qmc.range(n - 1, 0, -1):
+        a[i], b[i], a[i - 1] = _uma_3_cnot(a[i], b[i], a[i - 1])
+    a[0], b[0], ancilla = _uma_3_cnot(a[0], b[0], ancilla)
+
+    return a, b
 
 
 @qmc.qkernel
@@ -1302,15 +1341,39 @@ QKERNEL_CATALOG: list[QKernelEntry] = [
         tags=("arithmetic",),
     ),
     QKernelEntry(
+        id="maj_loop",
+        qkernel=maj_loop,
+        description="MAJ gate with loops used in quantum ripple-carry adders",
+        param_names=("n",),
+        min_params={"n": 2},
+        tags=("arithmetic",),
+    ),
+    QKernelEntry(
         id="uma_2_cnot",
         qkernel=uma_2_cnot,
         description="UMA gate with 2 CNOTs used in quantum ripple-carry adders",
         tags=("arithmetic",),
     ),
     QKernelEntry(
+        id="uma_2_cnot_loop",
+        qkernel=uma_2_cnot_loop,
+        description="UMA gate with 2 CNOTs with loops used in quantum ripple-carry adders",
+        param_names=("n",),
+        min_params={"n": 2},
+        tags=("arithmetic",),
+    ),
+    QKernelEntry(
         id="uma_3_cnot",
         qkernel=uma_3_cnot,
         description="UMA gate with 3 CNOTs used in quantum ripple-carry adders",
+        tags=("arithmetic",),
+    ),
+    QKernelEntry(
+        id="uma_3_cnot_loop",
+        qkernel=uma_3_cnot_loop,
+        description="UMA gate with 3 CNOTs with loops used in quantum ripple-carry adders",
+        param_names=("n",),
+        min_params={"n": 2},
         tags=("arithmetic",),
     ),
     QKernelEntry(
