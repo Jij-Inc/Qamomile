@@ -209,3 +209,26 @@ class TestVariationalClassifier:
 
         assert ry_count == expected_ry
         assert cz_count == expected_cz
+
+        # Verify RY angles are non-zero (BinOp folding propagated correctly)
+        ry_angles = [
+            float(inst.operation.params[0])
+            for inst in qc.data
+            if inst.operation.name == "ry"
+        ]
+        for i, angle in enumerate(ry_angles):
+            assert np.isclose(angle, params[i]), (
+                f"RY[{i}] angle {angle} != expected {params[i]}"
+            )
+
+
+class TestConstantFoldEdgeCases:
+    """Edge-case and negative tests for constant folding."""
+
+    def test_x_mixer_zero_qubits_produces_empty_circuit(self) -> None:
+        """Zero qubits produces a circuit with no RX gates."""
+        _, qc = _transpile_and_get_circuit(
+            x_mixer_test_circuit, bindings={"n": 0, "beta": 0.5}
+        )
+        rx_count = sum(1 for name in _gate_names(qc) if name == "rx")
+        assert rx_count == 0
