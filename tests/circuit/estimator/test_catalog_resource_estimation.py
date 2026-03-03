@@ -93,6 +93,16 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
     # --- Single-qubit gate entries ---
     "single_h": resource(1, total=1, single_qubit=1, clifford_gates=1, total_depth=1),
     "single_x": resource(1, total=1, single_qubit=1, clifford_gates=1, total_depth=1),
+    "single_y": resource(1, total=1, single_qubit=1, clifford_gates=1, total_depth=1),
+    "single_z": resource(1, total=1, single_qubit=1, clifford_gates=1, total_depth=1),
+    "single_t": resource(
+        1, total=1, single_qubit=1, t_gates=1, total_depth=1, t_depth=1
+    ),
+    "single_tdg": resource(
+        1, total=1, single_qubit=1, t_gates=1, total_depth=1, t_depth=1
+    ),
+    "single_s": resource(1, total=1, single_qubit=1, clifford_gates=1, total_depth=1),
+    "single_sdg": resource(1, total=1, single_qubit=1, clifford_gates=1, total_depth=1),
     "single_p": resource(
         1, total=1, single_qubit=1, rotation_gates=1, total_depth=1, rotation_depth=1
     ),

@@ -107,6 +107,48 @@ def single_x() -> qmc.Qubit:
 
 
 @qmc.qkernel
+def single_y() -> qmc.Qubit:
+    q = qmc.qubit(name="q")
+    q = qmc.y(q)
+    return q
+
+
+@qmc.qkernel
+def single_z() -> qmc.Qubit:
+    q = qmc.qubit(name="q")
+    q = qmc.z(q)
+    return q
+
+
+@qmc.qkernel
+def single_t() -> qmc.Qubit:
+    q = qmc.qubit(name="q")
+    q = qmc.t(q)
+    return q
+
+
+@qmc.qkernel
+def single_tdg() -> qmc.Qubit:
+    q = qmc.qubit(name="q")
+    q = qmc.tdg(q)
+    return q
+
+
+@qmc.qkernel
+def single_s() -> qmc.Qubit:
+    q = qmc.qubit(name="q")
+    q = qmc.s(q)
+    return q
+
+
+@qmc.qkernel
+def single_sdg() -> qmc.Qubit:
+    q = qmc.qubit(name="q")
+    q = qmc.sdg(q)
+    return q
+
+
+@qmc.qkernel
 def single_p() -> qmc.Qubit:
     q = qmc.qubit(name="q")
     q = qmc.p(q, 0.1)
@@ -1110,6 +1152,42 @@ QKERNEL_CATALOG: list[QKernelEntry] = [
         id="single_x",
         qkernel=single_x,
         description="Single X gate",
+        tags=("concrete", "clifford", "single_gate"),
+    ),
+    QKernelEntry(
+        id="single_y",
+        qkernel=single_y,
+        description="Single Y gate",
+        tags=("concrete", "clifford", "single_gate"),
+    ),
+    QKernelEntry(
+        id="single_z",
+        qkernel=single_z,
+        description="Single Z gate",
+        tags=("concrete", "clifford", "single_gate"),
+    ),
+    QKernelEntry(
+        id="single_t",
+        qkernel=single_t,
+        description="Single T gate",
+        tags=("concrete", "single_gate"),
+    ),
+    QKernelEntry(
+        id="single_tdg",
+        qkernel=single_tdg,
+        description="Single T^dagger gate",
+        tags=("concrete", "single_gate"),
+    ),
+    QKernelEntry(
+        id="single_s",
+        qkernel=single_s,
+        description="Single S gate",
+        tags=("concrete", "clifford", "single_gate"),
+    ),
+    QKernelEntry(
+        id="single_sdg",
+        qkernel=single_sdg,
+        description="Single S^dagger gate",
         tags=("concrete", "clifford", "single_gate"),
     ),
     QKernelEntry(
