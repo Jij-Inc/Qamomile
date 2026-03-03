@@ -109,6 +109,33 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
     "only_measurements": resource(n),
     "simple_for_loop": resource(1, total=m, single_qubit=m, clifford_gates=m),
     "all_rx": resource(n, total=n, single_qubit=n, rotation_gates=n),
+    "naive_toffoli_decomposition": resource(
+        # https://arxiv.org/pdf/1210.0974
+        3,
+        total=16,
+        single_qubit=10,
+        two_qubit=6,
+        t_gates=7,
+        clifford_gates=9,
+    ),
+    "commutated_toffoli_decoposition": resource(
+        # https://arxiv.org/pdf/1210.0974
+        3,
+        total=16,
+        single_qubit=10,
+        two_qubit=6,
+        t_gates=7,
+        clifford_gates=9,
+    ),
+    "optimal_toffoli_decomposition": resource(
+        # https://arxiv.org/pdf/1210.0974
+        3,
+        total=17,
+        single_qubit=10,
+        two_qubit=7,
+        t_gates=7,
+        clifford_gates=10,
+    ),
     # --- Entanglement ---
     "bell_state": resource(
         2,

@@ -248,6 +248,79 @@ def all_rx(n: qmc.UInt, thetas: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Qubit]:
     return qs
 
 
+@qmc.qkernel
+def naive_toffoli_decomposition() -> qmc.Vector[qmc.Qubit]:
+    q = qmc.qubit_array(3, name="q")
+
+    q[2] = qmc.h(q[2])
+    q[1], q[2] = qmc.cx(q[1], q[2])
+    q[2] = qmc.tdg(q[2])
+    q[0], q[2] = qmc.cx(q[0], q[2])
+    q[2] = qmc.t(q[2])
+    q[1], q[2] = qmc.cx(q[1], q[2])
+    q[2] = qmc.tdg(q[2])
+    q[0], q[2] = qmc.cx(q[0], q[2])
+    q[1] = qmc.tdg(q[1])
+    q[2] = qmc.t(q[2])
+    q[0], q[1] = qmc.cx(q[0], q[1])
+    q[2] = qmc.h(q[2])
+    q[1] = qmc.tdg(q[1])
+    q[0], q[1] = qmc.cx(q[0], q[1])
+    q[0] = qmc.t(q[0])
+    q[1] = qmc.s(q[1])
+
+    return q
+
+
+@qmc.qkernel
+def commutated_toffoli_decoposition() -> qmc.Vector[qmc.Qubit]:
+    q = qmc.qubit_array(3, name="q")
+
+    q[2] = qmc.h(q[2])
+    q[1], q[2] = qmc.cx(q[1], q[2])
+    q[2] = qmc.tdg(q[2])
+    q[0], q[2] = qmc.cx(q[0], q[2])
+    q[2] = qmc.t(q[2])
+    q[1], q[2] = qmc.cx(q[1], q[2])
+    q[1] = qmc.tdg(q[1])
+    q[2] = qmc.tdg(q[2])
+    q[0], q[2] = qmc.cx(q[0], q[2])
+    q[0], q[1] = qmc.cx(q[0], q[1])
+    q[0] = qmc.t(q[0])
+    q[1] = qmc.tdg(q[1])
+    q[2] = qmc.t(q[2])
+    q[0], q[1] = qmc.cx(q[0], q[1])
+    q[1] = qmc.s(q[1])
+    q[2] = qmc.h(q[2])
+
+    return q
+
+
+@qmc.qkernel
+def optimal_toffoli_decomposition() -> qmc.Vector[qmc.Qubit]:
+    q = qmc.qubit_array(3, name="q")
+
+    q[2] = qmc.h(q[2])
+    q[0] = qmc.tdg(q[0])
+    q[1] = qmc.t(q[1])
+    q[2] = qmc.t(q[2])
+    q[0], q[1] = qmc.cx(q[0], q[1])
+    q[2], q[0] = qmc.cx(q[2], q[0])
+    q[0] = qmc.tdg(q[0])
+    q[1], q[2] = qmc.cx(q[1], q[2])
+    q[1], q[0] = qmc.cx(q[1], q[0])
+    q[0] = qmc.tdg(q[0])
+    q[1] = qmc.tdg(q[1])
+    q[2] = qmc.t(q[2])
+    q[2], q[0] = qmc.cx(q[2], q[0])
+    q[0] = qmc.s(q[0])
+    q[1], q[2] = qmc.cx(q[1], q[2])
+    q[0], q[1] = qmc.cx(q[0], q[1])
+    q[2] = qmc.h(q[2])
+
+    return q
+
+
 # ============================================================
 # Entanglement
 # ============================================================
@@ -1263,6 +1336,21 @@ QKERNEL_CATALOG: list[QKernelEntry] = [
         param_names=("n", "m"),
         min_params={"n": 1, "m": 2},
         tags=("clifford", "parametric"),
+    ),
+    QKernelEntry(
+        id="naive_toffoli_decomposition",
+        qkernel=naive_toffoli_decomposition,
+        description="Naive Toffoli decomposition",
+    ),
+    QKernelEntry(
+        id="commutated_toffoli_decoposition",
+        qkernel=commutated_toffoli_decoposition,
+        description="Commutated Toffoli decomposition",
+    ),
+    QKernelEntry(
+        id="optimal_toffoli_decomposition",
+        qkernel=optimal_toffoli_decomposition,
+        description="Optimal Toffoli decomposition",
     ),
     QKernelEntry(
         id="all_rx",
