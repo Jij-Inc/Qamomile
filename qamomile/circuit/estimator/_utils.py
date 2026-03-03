@@ -19,7 +19,7 @@ BINOP_TO_SYMPY = {
 def _strip_nonneg_max(expr: sp.Expr) -> sp.Expr:
     """Canonicalize Max(0, x) -> x in resource estimation expressions.
 
-    Resource estimates (qubits, gates, depths) are non-negative by physical
+    Resource estimates (qubits, gates) are non-negative by physical
     construction, so Max(0, expr) is a redundant artifact introduced by
     sp.Max operations. This normalization aligns all paths to the same
     canonical form.

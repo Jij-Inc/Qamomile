@@ -2,12 +2,11 @@
 
 Expected resource values are defined in EXPECTED_RESOURCES as a mapping
 from catalog entry ID to ResourceEstimate. Each catalog entry is tested
-against its expected resource estimate for qubits, gate counts, and depth.
+against its expected resource estimate for qubits and gate counts.
 """
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass
 from typing import Any
 
@@ -15,13 +14,11 @@ import pytest
 import sympy as sp
 
 from qamomile.circuit.estimator import (
-    CircuitDepth,
     GateCount,
     ResourceEstimate,
     estimate_resources,
 )
 from tests.circuit.estimator.assertions import (
-    assert_depth,
     assert_expr_equal,
     assert_gate_counts,
 )
@@ -49,11 +46,6 @@ def resource(
     clifford_gates=0,
     rotation_gates=0,
     oracle_calls=None,
-    total_depth=0,
-    t_depth=0,
-    two_qubit_depth=0,
-    multi_qubit_depth=0,
-    rotation_depth=0,
 ) -> ResourceEstimate:
     """Build a ResourceEstimate with zero defaults for unspecified fields."""
     return ResourceEstimate(
@@ -67,13 +59,6 @@ def resource(
             clifford_gates=clifford_gates,
             rotation_gates=rotation_gates,
             oracle_calls=oracle_calls or {},
-        ),
-        depth=CircuitDepth(
-            total_depth=total_depth,
-            t_depth=t_depth,
-            two_qubit_depth=two_qubit_depth,
-            multi_qubit_depth=multi_qubit_depth,
-            rotation_depth=rotation_depth,
         ),
     )
 
@@ -91,67 +76,39 @@ linear = sp.Symbol("|linear|", integer=True, positive=True)
 
 EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
     # --- Single-qubit gate entries ---
-    "single_h": resource(1, total=1, single_qubit=1, clifford_gates=1, total_depth=1),
-    "single_x": resource(1, total=1, single_qubit=1, clifford_gates=1, total_depth=1),
-    "single_y": resource(1, total=1, single_qubit=1, clifford_gates=1, total_depth=1),
-    "single_z": resource(1, total=1, single_qubit=1, clifford_gates=1, total_depth=1),
-    "single_t": resource(
-        1, total=1, single_qubit=1, t_gates=1, total_depth=1, t_depth=1
-    ),
-    "single_tdg": resource(
-        1, total=1, single_qubit=1, t_gates=1, total_depth=1, t_depth=1
-    ),
-    "single_s": resource(1, total=1, single_qubit=1, clifford_gates=1, total_depth=1),
-    "single_sdg": resource(1, total=1, single_qubit=1, clifford_gates=1, total_depth=1),
-    "single_p": resource(
-        1, total=1, single_qubit=1, rotation_gates=1, total_depth=1, rotation_depth=1
-    ),
-    "single_rx": resource(
-        1, total=1, single_qubit=1, rotation_gates=1, total_depth=1, rotation_depth=1
-    ),
-    "single_ry": resource(
-        1, total=1, single_qubit=1, rotation_gates=1, total_depth=1, rotation_depth=1
-    ),
-    "single_rz": resource(
-        1, total=1, single_qubit=1, rotation_gates=1, total_depth=1, rotation_depth=1
-    ),
+    "single_h": resource(1, total=1, single_qubit=1, clifford_gates=1),
+    "single_x": resource(1, total=1, single_qubit=1, clifford_gates=1),
+    "single_y": resource(1, total=1, single_qubit=1, clifford_gates=1),
+    "single_z": resource(1, total=1, single_qubit=1, clifford_gates=1),
+    "single_t": resource(1, total=1, single_qubit=1, t_gates=1),
+    "single_tdg": resource(1, total=1, single_qubit=1, t_gates=1),
+    "single_s": resource(1, total=1, single_qubit=1, clifford_gates=1),
+    "single_sdg": resource(1, total=1, single_qubit=1, clifford_gates=1),
+    "single_p": resource(1, total=1, single_qubit=1, rotation_gates=1),
+    "single_rx": resource(1, total=1, single_qubit=1, rotation_gates=1),
+    "single_ry": resource(1, total=1, single_qubit=1, rotation_gates=1),
+    "single_rz": resource(1, total=1, single_qubit=1, rotation_gates=1),
     # --- Two-qubit gate entries ---
-    "single_cx": resource(
-        2, total=1, two_qubit=1, clifford_gates=1, total_depth=1, two_qubit_depth=1
-    ),
-    "single_cz": resource(
-        2, total=1, two_qubit=1, clifford_gates=1, total_depth=1, two_qubit_depth=1
-    ),
+    "single_cx": resource(2, total=1, two_qubit=1, clifford_gates=1),
+    "single_cz": resource(2, total=1, two_qubit=1, clifford_gates=1),
     "single_cp": resource(
         2,
         total=1,
         two_qubit=1,
         rotation_gates=1,
-        total_depth=1,
-        two_qubit_depth=1,
-        rotation_depth=1,
     ),
-    "single_swap": resource(
-        2, total=1, two_qubit=1, clifford_gates=1, total_depth=1, two_qubit_depth=1
-    ),
+    "single_swap": resource(2, total=1, two_qubit=1, clifford_gates=1),
     "single_rzz": resource(
         2,
         total=1,
         two_qubit=1,
         rotation_gates=1,
-        total_depth=1,
-        two_qubit_depth=1,
-        rotation_depth=1,
     ),
     # --- Basic circuits ---
     "no_operation": resource(n),
-    "only_measurements": resource(n, total_depth=1),
-    "simple_for_loop": resource(
-        1, total=m, single_qubit=m, clifford_gates=m, total_depth=m
-    ),
-    "all_rx": resource(
-        n, total=n, single_qubit=n, rotation_gates=n, total_depth=1, rotation_depth=1
-    ),
+    "only_measurements": resource(n),
+    "simple_for_loop": resource(1, total=m, single_qubit=m, clifford_gates=m),
+    "all_rx": resource(n, total=n, single_qubit=n, rotation_gates=n),
     # --- Entanglement ---
     "bell_state": resource(
         2,
@@ -159,28 +116,18 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         single_qubit=1,
         two_qubit=1,
         clifford_gates=2,
-        total_depth=2,
-        two_qubit_depth=1,
     ),
     "linear_entanglement": resource(
         n,
         total=n - 1,
         two_qubit=n - 1,
         clifford_gates=n - 1,
-        total_depth=n - 1,
-        two_qubit_depth=n - 1,
     ),
     "full_entanglement": resource(
         n,
         total=n * (n - 1) / 2,  # type:ignore
         two_qubit=n * (n - 1) / 2,  # type:ignore
         clifford_gates=n * (n - 1) / 2,  # type:ignore
-        # Circuit depth calculation:
-        # - First CX layer: (n-1) gates (cannot be parallelised due to shared qubits)
-        # - Remaining layers: (n-2) depth (all CXs except the last can be parallelised in each layer)
-        # - Total depth: (n-1) + (n-2) = 2n-3
-        total_depth=2 * n - 3,
-        two_qubit_depth=2 * n - 3,
     ),
     "ghz_state": resource(
         # Ref: https://bloqade.quera.com/v0.22.3/digital/examples/ghz/
@@ -189,8 +136,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         single_qubit=1,
         two_qubit=n - 1,
         clifford_gates=n,
-        total_depth=n,
-        two_qubit_depth=n - 1,
     ),
     "parallel_ghz_state": resource(
         # Ref: https://bloqade.quera.com/v0.22.3/digital/examples/ghz/
@@ -199,8 +144,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         single_qubit=1,
         two_qubit=2**m - 1,
         clifford_gates=2**m,
-        total_depth=m + 1,
-        two_qubit_depth=m,
     ),
     # --- QFT / IQFT ---
     "qft": resource(
@@ -211,9 +154,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit=n * (n - 1) / 2 + sp.floor(n / 2),
         clifford_gates=n + sp.floor(n / 2),
         rotation_gates=(n * (n - 1)) / 2,  # type:ignore
-        total_depth=2 * n,
-        two_qubit_depth=2 * n - 2,
-        rotation_depth=2 * n - 3,
     ),
     "iqft": resource(
         # Ref: Nielsen & Chuang (gate counts)
@@ -223,9 +163,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit=n * (n - 1) / 2 + sp.floor(n / 2),
         clifford_gates=n + sp.floor(n / 2),
         rotation_gates=(n * (n - 1)) / 2,  # type:ignore
-        total_depth=2 * n,
-        two_qubit_depth=2 * n - 2,
-        rotation_depth=2 * n - 3,
     ),
     # --- Algorithms — quantum tests / oracle-based ---
     "hadamard_test": resource(
@@ -235,8 +172,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit=1,
         clifford_gates=2,
         oracle_calls={"controlled_oracle": 1},
-        total_depth=4,
-        two_qubit_depth=1,
     ),
     "swap_test": resource(
         3,
@@ -245,14 +180,10 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit=2,
         multi_qubit=1,
         clifford_gates=4,
-        total_depth=4,
-        two_qubit_depth=2,
-        multi_qubit_depth=1,
     ),
     "simplest_oracle": resource(
         1,
         oracle_calls={"one_qubit_oracle": 1},
-        total_depth=1,
     ),
     "deutsch": resource(
         # Ref: Quantum algorithms for optimizers (https://arxiv.org/abs/2408.07086) (circuit)
@@ -262,8 +193,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit=1,
         clifford_gates=4,
         oracle_calls={"two_qubit_oracle": 1},
-        total_depth=5,
-        two_qubit_depth=1,
     ),
     "deutsch_jozsa": resource(
         # Ref: Nielsen & Chuang (circuit)
@@ -272,7 +201,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         single_qubit=2 * n + 2,
         clifford_gates=2 * n + 2,
         oracle_calls={"deutsch_jozsa_oracle": 1},
-        total_depth=5,
     ),
     "simon": resource(
         # Ref: Quantum algorithms for optimizers (https://arxiv.org/abs/2408.07086) (circuit)
@@ -281,7 +209,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         single_qubit=2 * n,
         clifford_gates=2 * n,
         oracle_calls={"simon_oracle": 1},
-        total_depth=4,
     ),
     "teleportation": resource(
         # Ref: Nielsen & Chuang (circuit)
@@ -292,19 +219,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         single_qubit=5,  # X, H, H + (X, Z)
         two_qubit=2,
         clifford_gates=7,
-        # Algorithmic Resource Timeline (Depth: 6)
-        # =========================================================================
-        # | Layer | q0 (Send)    | q1 (Ancilla) | q2 (Recv)    | Description          |
-        # |-------|--------------|--------------|--------------|----------------------|
-        # | L1    | X (prepare)  | H            | -            | Init & Bell Prep     |
-        # | L2    | -            | CX (control) | CX (target)  | Entangle q1-q2       |
-        # | L3    | CX (control) | CX (target)  | -            | Interaction q0-q1    |
-        # | L4    | H            | Measure (M1) | -            | Parallel H & M1      |
-        # | L5    | Measure (M0) | -            | X-Correction | Parallel M0 & Corr X |
-        # | L6    | -            | -            | Z-Correction | Final Z-Correction   |
-        # =========================================================================
-        total_depth=6,
-        two_qubit_depth=2,
     ),
     # --- QPE ---
     "phase_gate_qpe": resource(
@@ -315,9 +229,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit=n + (n * (n - 1)) / 2 + sp.floor(n / 2),
         clifford_gates=2 * n + sp.floor(n / 2),
         rotation_gates=n * (n - 1) / 2,  # type:ignore
-        total_depth=3 * n + 1,
-        two_qubit_depth=3 * n - 2,
-        rotation_depth=2 * n - 3,
     ),
     "stub_oracle_qpe": resource(
         # Ref: Nielsen & Chuang (circuit)
@@ -328,9 +239,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         clifford_gates=2 * n + sp.floor(n / 2),
         rotation_gates=n * (n - 1) / 2,
         oracle_calls={"controlled_u": 2**n - 1},
-        total_depth=2**n + 2 * n,
-        two_qubit_depth=(2 * n - 2) + (2**n - 1),
-        rotation_depth=2 * n - 3,
     ),
     # --- Variational / optimization ---
     "hardware_efficient_ansatz": resource(
@@ -341,9 +249,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit=(num_layers - 1) * (n - 1),
         clifford_gates=(num_layers - 1) * (n - 1),
         rotation_gates=2 * n * num_layers,
-        total_depth=2 * num_layers + (num_layers - 1) * (n - 1),
-        two_qubit_depth=(num_layers - 1) * (n - 1),
-        rotation_depth=2 * num_layers,
     ),
     "qaoa_state_umbiguous": resource(
         # Ref: Quantum algorithms for optimizers (https://arxiv.org/abs/2408.07086) (circuit)
@@ -353,9 +258,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit=num_layers * quad,  # type:ignore
         clifford_gates=n,
         rotation_gates=num_layers * (quad + linear + n),  # type:ignore
-        total_depth=1 + num_layers * (quad + linear + 1),  # type:ignore
-        two_qubit_depth=num_layers * quad,  # type:ignore
-        rotation_depth=num_layers * (quad + linear + 1),  # type:ignore
     ),
     # --- Multi-controlled gates ---
     "network_decomposition_controlled_z": resource(
@@ -366,20 +268,12 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit=1,
         multi_qubit=2 * n - 4,
         clifford_gates=3,
-        total_depth=2 * n - 3,
-        two_qubit_depth=1,
-        multi_qubit_depth=2 * n - 4,
     ),
     "naive_multi_controlled_z": resource(
         n,
         total=1,
         two_qubit=sp.Piecewise((sp.Integer(1), sp.Eq(n, 2)), (sp.Integer(0), True)),
         multi_qubit=sp.Piecewise((sp.Integer(1), n > 2), (sp.Integer(0), True)),
-        total_depth=1,
-        two_qubit_depth=sp.Piecewise(
-            (sp.Integer(1), sp.Eq(n, 2)), (sp.Integer(0), True)
-        ),
-        multi_qubit_depth=sp.Piecewise((sp.Integer(1), n > 2), (sp.Integer(0), True)),
     ),
     # --- Grover ---
     "grover_network_decomposition": resource(
@@ -390,9 +284,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         multi_qubit=n_iters * (2 * n - 4),
         clifford_gates=(n + 2) + n_iters * (4 * n + 3),
         oracle_calls={"grover_oracle": n_iters},
-        total_depth=3 + n_iters * (2 * n + 1),
-        two_qubit_depth=n_iters,
-        multi_qubit_depth=n_iters * (2 * n - 4),
     ),
     "grover_naive_multi_controlled_z": resource(
         n + 1,
@@ -406,13 +297,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         ),  # type:ignore
         clifford_gates=(n + 2) + n_iters * 4 * n,
         oracle_calls={"grover_oracle": n_iters},
-        total_depth=3 + n_iters * 5,
-        two_qubit_depth=(
-            n_iters * sp.Piecewise((sp.Integer(1), sp.Eq(n, 2)), (sp.Integer(0), True))
-        ),  # type:ignore
-        multi_qubit_depth=(
-            n_iters * sp.Piecewise((sp.Integer(1), n > 2), (sp.Integer(0), True))
-        ),  # type:ignore
     ),
     "quantum_counting": resource(
         # Ref: Nielsen & Chuang (circuit)
@@ -423,10 +307,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         multi_qubit=n,
         clifford_gates=n + m + 1 + n + sp.floor(n / 2),  # type:ignore
         rotation_gates=(n * (n - 1)) / 2,  # type:ignore
-        total_depth=1 + n + 2 * n,
-        two_qubit_depth=2 * n - 2,
-        multi_qubit_depth=n,
-        rotation_depth=2 * n - 3,
     ),
     # --- Arithmetic ---
     "maj": resource(
@@ -436,9 +316,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit=2,
         multi_qubit=1,
         clifford_gates=2,
-        total_depth=3,
-        two_qubit_depth=2,
-        multi_qubit_depth=1,
     ),
     "maj_loop": resource(
         # A new quantum ripple-carry addition circuit (https://arxiv.org/abs/quant-ph/0410184) (circuit)
@@ -447,9 +324,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit=2 * n,
         multi_qubit=n,
         clifford_gates=2 * n,
-        total_depth=2 * n + 1,
-        two_qubit_depth=n + 1,
-        multi_qubit_depth=n,
     ),
     "uma_2_cnot": resource(
         # A new quantum ripple-carry addition circuit (https://arxiv.org/abs/quant-ph/0410184) (circuit)
@@ -458,9 +332,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit=2,
         multi_qubit=1,
         clifford_gates=2,
-        total_depth=3,
-        two_qubit_depth=2,
-        multi_qubit_depth=1,
     ),
     "uma_2_cnot_loop": resource(
         # A new quantum ripple-carry addition circuit (https://arxiv.org/abs/quant-ph/0410184) (circuit)
@@ -469,9 +340,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit=2 * n,
         multi_qubit=n,
         clifford_gates=2 * n,
-        total_depth=3 * n,
-        two_qubit_depth=2 * n,
-        multi_qubit_depth=n,
     ),
     "uma_3_cnot": resource(
         # A new quantum ripple-carry addition circuit (https://arxiv.org/abs/quant-ph/0410184) (circuit)
@@ -481,9 +349,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit=3,
         multi_qubit=1,
         clifford_gates=5,
-        total_depth=5,
-        two_qubit_depth=3,
-        multi_qubit_depth=1,
     ),
     "uma_3_cnot_loop": resource(
         # A new quantum ripple-carry addition circuit (https://arxiv.org/abs/quant-ph/0410184) (circuit)
@@ -493,9 +358,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit=3 * n,
         multi_qubit=n,
         clifford_gates=5 * n,
-        total_depth=2 * n + 3,
-        two_qubit_depth=n + 2,
-        multi_qubit_depth=n,
     ),
     "simple_ripple_carry_adder_2_cnot": resource(
         # A new quantum ripple-carry addition circuit (https://arxiv.org/abs/quant-ph/0410184) (circuit)
@@ -504,9 +366,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit=4 * n + 1,
         multi_qubit=2 * n,
         clifford_gates=4 * n + 1,
-        total_depth=5 * n + 2,
-        two_qubit_depth=3 * n + 2,
-        multi_qubit_depth=2 * n,
     ),
     "simple_ripple_carry_adder_3_cnot": resource(
         # A new quantum ripple-carry addition circuit (https://arxiv.org/abs/quant-ph/0410184) (circuit)
@@ -516,9 +375,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit=5 * n + 1,
         multi_qubit=2 * n,
         clifford_gates=7 * n + 1,
-        total_depth=4 * n + 4,
-        two_qubit_depth=2 * n + 3,
-        multi_qubit_depth=2 * n,
     ),
     "draper_inplace_qc_adder": resource(
         # Addition on a Quantum Computer (https://arxiv.org/abs/quant-ph/0008033) (circuit)
@@ -528,9 +384,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit=n * (n - 1) + 2 * sp.floor(n / 2),
         clifford_gates=2 * n + 2 * sp.floor(n / 2),
         rotation_gates=n + n * (n - 1),
-        total_depth=4 * n + 1,
-        two_qubit_depth=4 * n - 4,
-        rotation_depth=4 * n - 5,
     ),
     "ttk_adder": resource(
         # Quantum Addition Circuits and Unbounded Fan-Out (https://arxiv.org/abs/0910.2530) (circuit, total, two and toffoli (multi) counts, and total depth)
@@ -539,9 +392,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit=5 * n - 5,
         multi_qubit=2 * n - 1,
         clifford_gates=5 * n - 5,
-        total_depth=5 * n - 3,
-        two_qubit_depth=2 * n,
-        multi_qubit_depth=2 * n - 1,
     ),
     "cdkm_adder": resource(
         # A new quantum ripple-carry addition circuit (https://arxiv.org/abs/quant-ph/0410184) (circuit, total, single, two and toffoli (multi), clifford counts, and total and toffoli (multi) depth)
@@ -551,9 +401,6 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         two_qubit=5 * n - 3,
         multi_qubit=2 * n - 1,
         clifford_gates=7 * n - 7,
-        total_depth=2 * n + 4,
-        two_qubit_depth=2 * n + 1,
-        multi_qubit_depth=2 * n - 1,
     ),
 }
 
@@ -587,11 +434,6 @@ class TestCatalogResourceEstimation:
         expected = _get_expected(entry)
         assert_gate_counts(est.gates, expected.gates)
 
-    def test_depth(self, entry):
-        est = estimate_resources(entry.qkernel.block)
-        expected = _get_expected(entry)
-        assert_depth(est.depth, expected.depth)
-
 
 def _parametric_cases() -> list[tuple[str, dict[str, int]]]:
     """Generate (test_id, subs) pairs for all parametric entries."""
@@ -609,7 +451,6 @@ def test_parametric_substitution(entry, subs):
     expected = _get_expected(entry).substitute(**subs)
     assert_expr_equal(est.qubits, expected.qubits, "qubits")
     assert_gate_counts(est.gates, expected.gates)
-    assert_depth(est.depth, expected.depth)
 
 
 # ============================================================
@@ -645,9 +486,6 @@ EXPECTED_BINDINGS_RESOURCES: list[BindingsCase] = [
             two_qubit=2,  # RZZ(2)
             clifford_gates=4,  # H(4)
             rotation_gates=2 + 4 + 4,  # RZZ(2) + RZ(4) + RX(4)
-            total_depth=4,  # H:1 + RZZ(parallel):1 + RZ:1 + RX:1
-            two_qubit_depth=1,
-            rotation_depth=3,  # RZZ:1 + RZ:1 + RX:1
         ),
     ),
     # --- qaoa_state_umbiguous: overlapping qubits (sequential RZZ) ---
@@ -667,9 +505,6 @@ EXPECTED_BINDINGS_RESOURCES: list[BindingsCase] = [
             two_qubit=2,
             clifford_gates=3,
             rotation_gates=2 + 3 + 3,
-            total_depth=5,  # H:1 + RZZ(sequential):2 + RZ:1 + RX:1
-            two_qubit_depth=2,
-            rotation_depth=4,  # RZZ:2 + RZ:1 + RX:1
         ),
     ),
     # --- qaoa_state_umbiguous: multi-layer ---
@@ -689,9 +524,6 @@ EXPECTED_BINDINGS_RESOURCES: list[BindingsCase] = [
             two_qubit=2 * 2,
             clifford_gates=4,
             rotation_gates=2 * (2 + 4 + 4),
-            total_depth=7,  # H:1 + 2*(RZZ:1+RZ:1+RX:1)
-            two_qubit_depth=2,
-            rotation_depth=6,  # 2*(RZZ:1+RZ:1+RX:1)
         ),
     ),
     # --- qaoa_state_umbiguous: empty dicts ---
@@ -711,9 +543,6 @@ EXPECTED_BINDINGS_RESOURCES: list[BindingsCase] = [
             two_qubit=0,
             clifford_gates=2,
             rotation_gates=0 + 0 + 2,
-            total_depth=2,  # H:1 + RX:1
-            two_qubit_depth=0,
-            rotation_depth=1,  # RX:1
         ),
     ),
     # --- qaoa_state_umbiguous: quad-only (linear empty) ---
@@ -733,9 +562,6 @@ EXPECTED_BINDINGS_RESOURCES: list[BindingsCase] = [
             two_qubit=2,
             clifford_gates=3,
             rotation_gates=2 + 0 + 3,
-            total_depth=4,  # H:1 + RZZ(sequential, share q1):2 + RX:1
-            two_qubit_depth=2,
-            rotation_depth=3,  # RZZ:2 + RX:1
         ),
     ),
     # --- qaoa_state_umbiguous: linear-only (quad empty) ---
@@ -755,9 +581,6 @@ EXPECTED_BINDINGS_RESOURCES: list[BindingsCase] = [
             two_qubit=0,
             clifford_gates=4,
             rotation_gates=0 + 4 + 4,
-            total_depth=3,  # H:1 + RZ:1 + RX:1
-            two_qubit_depth=0,
-            rotation_depth=2,  # RZ:1 + RX:1
         ),
     ),
     # --- qaoa_state_umbiguous: single-element dicts ---
@@ -777,9 +600,6 @@ EXPECTED_BINDINGS_RESOURCES: list[BindingsCase] = [
             two_qubit=1,
             clifford_gates=2,
             rotation_gates=1 + 1 + 2,
-            total_depth=4,  # H:1 + RZZ:1 + RZ:1 + RX:1
-            two_qubit_depth=1,
-            rotation_depth=3,  # RZZ:1 + RZ:1 + RX:1
         ),
     ),
 ]
@@ -797,7 +617,6 @@ def test_concrete_bindings(case: BindingsCase):
     est = estimate_resources(entry.qkernel.block, bindings=case.bindings)
     assert_expr_equal(est.qubits, case.expected.qubits, "qubits")
     assert_gate_counts(est.gates, case.expected.gates)
-    assert_depth(est.depth, case.expected.depth)
 
 
 def test_no_bindings_backward_compat():
@@ -805,7 +624,7 @@ def test_no_bindings_backward_compat():
     entry = QKERNEL_BY_ID["qaoa_state_umbiguous"]
     est = estimate_resources(entry.qkernel.block)
     quad_sym = sp.Symbol("|quad|", integer=True, positive=True)
-    assert quad_sym in est.depth.total_depth.free_symbols
+    assert quad_sym in est.gates.total.free_symbols
 
 
 def test_partial_bindings_dicts_only():
@@ -817,30 +636,9 @@ def test_partial_bindings_dicts_only():
     )
     # Scalar parameters should remain symbolic
     num_layers_sym = sp.Symbol("num_layers", integer=True, positive=True)
-    assert num_layers_sym in est.depth.total_depth.free_symbols
+    assert num_layers_sym in est.gates.total.free_symbols
     # Dict cardinalities should be substituted (not symbolic)
     quad_sym = sp.Symbol("|quad|", integer=True, positive=True)
     linear_sym = sp.Symbol("|linear|", integer=True, positive=True)
-    assert quad_sym not in est.depth.total_depth.free_symbols
-    assert linear_sym not in est.depth.total_depth.free_symbols
-
-
-def test_substitute_warns_worst_case():
-    """substitute() should re-emit worst-case warning for dict depths."""
-    from tests.circuit.qkernel_catalog import qaoa_state_umbiguous
-
-    # First, get symbolic result (no bindings)
-    est = estimate_resources(qaoa_state_umbiguous.block)
-    # The result should have worst-case flag for quad and linear
-    assert len(est._worst_case_depth_dicts) > 0
-
-    # Calling substitute should re-emit warnings
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        _ = est.substitute(n=4, num_layers=1)
-    worst_case_msgs = [w for w in caught if "worst-case" in str(w.message)]
-    assert len(worst_case_msgs) > 0
-    # Verify warning messages mention specific dict names
-    msg_texts = [str(w.message) for w in worst_case_msgs]
-    assert any("quad" in m for m in msg_texts)
-    assert any("linear" in m for m in msg_texts)
+    assert quad_sym not in est.gates.total.free_symbols
+    assert linear_sym not in est.gates.total.free_symbols

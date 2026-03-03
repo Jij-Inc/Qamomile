@@ -1,22 +1,19 @@
 """Single source of truth for gate classification and resource formulas.
 
-Centralises gate sets, gate→GateCount/CircuitDepth classification,
+Centralises gate sets, gate→GateCount classification,
 metadata extraction, and QFT/IQFT formulas used by all estimators.
 """
 
 from __future__ import annotations
 
 import warnings
-from typing import TYPE_CHECKING
 
 import sympy as sp
 
 from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 from qamomile.circuit.ir.operation.gate import GateOperation
 
-if TYPE_CHECKING:
-    from .depth_estimator import CircuitDepth
-    from .gate_counter import GateCount
+from ._gate_count import GateCount
 
 # ------------------------------------------------------------------ #
 #  Gate set constants                                                 #
@@ -62,7 +59,7 @@ _ONE = sp.Integer(1)
 def classify_gate(
     op: GateOperation,
     num_controls: int | sp.Expr = 0,
-) -> "GateCount":
+) -> GateCount:
     """Classify a single GateOperation into a GateCount.
 
     Handles both concrete and symbolic *num_controls*.  The result always
@@ -80,9 +77,7 @@ def classify_gate(
     return _classify_uncontrolled(gate_name)
 
 
-def _classify_uncontrolled(gate_name: str) -> "GateCount":
-    from .gate_counter import GateCount
-
+def _classify_uncontrolled(gate_name: str) -> GateCount:
     return GateCount(
         total=_ONE,
         single_qubit=_ONE if gate_name in SINGLE_QUBIT_GATES else _ZERO,
@@ -97,7 +92,7 @@ def _classify_uncontrolled(gate_name: str) -> "GateCount":
 def _classify_controlled(
     gate_name: str,
     num_controls: int | sp.Expr,
-) -> "GateCount":
+) -> GateCount:
     from .gate_counter import GateCount
 
     is_single_base = gate_name in SINGLE_QUBIT_GATES
@@ -160,7 +155,7 @@ def _classify_controlled(
 def classify_controlled_u(
     nc: int | sp.Expr,
     num_targets: int,
-) -> "GateCount":
+) -> GateCount:
     """Classify a ControlledUOperation (opaque gate, total=1).
 
     ``power`` is NOT multiplied — each ControlledUOperation call counts
@@ -194,7 +189,7 @@ def classify_controlled_u(
 # ------------------------------------------------------------------ #
 
 
-def extract_gate_count_from_metadata(meta: ResourceMetadata) -> "GateCount":
+def extract_gate_count_from_metadata(meta: ResourceMetadata) -> GateCount:
     """Extract GateCount from ResourceMetadata.
 
     Emits ``UserWarning`` when *total_gates* is set but sub-categories
@@ -249,43 +244,12 @@ def extract_gate_count_from_metadata(meta: ResourceMetadata) -> "GateCount":
     )
 
 
-def extract_depth_from_metadata(
-    meta: ResourceMetadata,
-    num_control_qubits: int = 0,
-) -> "CircuitDepth":
-    """Extract CircuitDepth from ResourceMetadata.
-
-    Controlled stubs with ``total_depth=0`` and ``two_qubit_depth=0``
-    receive minimum ``depth=1`` (a controlled gate always has depth >= 1).
-    """
-    from .depth_estimator import CircuitDepth
-
-    td = sp.Integer(meta.total_depth or 0)
-    t_d = sp.Integer(meta.t_depth or 0)
-    tq = sp.Integer(meta.two_qubit_depth or 0)
-    mq = sp.Integer(meta.multi_qubit_depth or 0)
-    rot = sp.Integer(meta.rotation_depth or 0)
-
-    # Controlled stub fixup
-    if num_control_qubits > 0 and td == 0 and tq == 0:
-        td = _ONE
-        tq = _ONE
-
-    return CircuitDepth(
-        total_depth=td,
-        t_depth=t_d,
-        two_qubit_depth=tq,
-        multi_qubit_depth=mq,
-        rotation_depth=rot,
-    )
-
-
 # ------------------------------------------------------------------ #
 #  QFT / IQFT formulas                                                #
 # ------------------------------------------------------------------ #
 
 
-def qft_iqft_gate_count(n: sp.Expr) -> "GateCount":
+def qft_iqft_gate_count(n: sp.Expr) -> GateCount:
     """Gate count for QFT or IQFT on *n* qubits.
 
     QFT = n H + n(n-1)/2 CP + n//2 SWAP
@@ -303,42 +267,4 @@ def qft_iqft_gate_count(n: sp.Expr) -> "GateCount":
         t_gates=_ZERO,
         clifford_gates=h + swap,  # H and SWAP are Clifford
         rotation_gates=cp,  # CP gates are rotation
-    )
-
-
-def qft_iqft_depth(n: sp.Expr) -> "CircuitDepth":
-    """Depth estimate for QFT or IQFT on *n* qubits.
-
-    Sequential estimate: total=2n, two_qubit=n(n-1)/2, rotation=n(n-1)/2.
-    """
-    from .depth_estimator import CircuitDepth
-
-    return CircuitDepth(
-        total_depth=2 * n,
-        t_depth=_ZERO,
-        two_qubit_depth=n * (n - 1) / 2,
-        multi_qubit_depth=_ZERO,
-        rotation_depth=n * (n - 1) / 2,
-    )
-
-
-# ------------------------------------------------------------------ #
-#  Single-gate GateCount → CircuitDepth                               #
-# ------------------------------------------------------------------ #
-
-
-def gate_count_to_depth(gc: "GateCount") -> "CircuitDepth":
-    """Convert a single-gate GateCount to CircuitDepth.
-
-    For a single gate (total=1), each count category (0 or 1) maps
-    directly to the corresponding depth category.
-    """
-    from .depth_estimator import CircuitDepth
-
-    return CircuitDepth(
-        total_depth=gc.total,
-        t_depth=gc.t_gates,
-        two_qubit_depth=gc.two_qubit,
-        multi_qubit_depth=gc.multi_qubit,
-        rotation_depth=gc.rotation_gates,
     )

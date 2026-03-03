@@ -1,7 +1,7 @@
 """Unified value resolution for resource estimation.
 
 ExprResolver converts IR Values to SymPy expressions, providing a single
-source of truth for all estimators (gate counting, depth, qubits).
+source of truth for all estimators (gate counting, qubits).
 
 Two-mode API:
   resolve()          — symbolic; unbound parameters → sp.Symbol
@@ -14,6 +14,7 @@ from typing import Any
 
 import sympy as sp
 
+from qamomile.circuit.ir.block_value import BlockValue
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     BinOpKind,
@@ -128,8 +129,6 @@ class ExprResolver:
         Parent blocks are intentionally reset — the callee only sees
         its own scope plus values propagated through ``call_context``.
         """
-        from qamomile.circuit.ir.block_value import BlockValue
-
         called_block = call_op.operands[0]
         if not isinstance(called_block, BlockValue):
             # Not a BlockValue — use child_scope as fallback
@@ -201,7 +200,7 @@ class ExprResolver:
             if c is not None:
                 if isinstance(c, bool):
                     return sp.Integer(1 if c else 0)
-                if isinstance(c, float) and not isinstance(c, bool):
+                if isinstance(c, float):
                     return sp.Float(c)
                 return sp.Integer(int(c))
 

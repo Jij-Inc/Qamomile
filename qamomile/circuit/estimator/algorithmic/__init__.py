@@ -6,7 +6,7 @@ results from quantum algorithms literature, particularly from:
 arXiv:2310.03011v2 - "Quantum algorithms: A survey of applications
 and end-to-end complexities"
 
-Unlike the circuit-based estimators (gate_counter, depth_estimator),
+Unlike the circuit-based estimators (gate_counter, qubits_counter),
 these provide theoretical estimates based on algorithm parameters
 without needing the actual circuit implementation.
 """

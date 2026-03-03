@@ -4,9 +4,8 @@ import pytest
 import sympy as sp
 
 import qamomile.circuit as qm
-from qamomile.circuit.estimator import (
-    estimate_resources,
-)
+from qamomile.circuit.estimator import estimate_resources
+from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 from qamomile.circuit.estimator.algorithmic import (
     estimate_qaoa,
     estimate_qdrift,
@@ -167,7 +166,6 @@ class TestBasicCircuitEstimation:
             return q
 
         est = estimate_resources(iqft_pattern.block)
-        n = sp.Symbol("n", integer=True, positive=True)
 
         # SWAP gates: floor(n/2)
         # CP gates: sum(j for j in range(n)) = n(n-1)/2
@@ -413,6 +411,7 @@ class TestAlgorithmicEstimators:
         # All should have the right free symbols
         for est in [trotter2, trotter4, qsvt]:
             assert n in est.gates.total.free_symbols
+        assert L in qdrift.gates.total.free_symbols
 
     def test_concrete_hamiltonian_simulation(self):
         """Test Hamiltonian simulation with concrete parameters."""
@@ -467,7 +466,6 @@ class TestResourceEstimateOperations:
 
         assert "qubits" in data
         assert "gates" in data
-        assert "depth" in data
         assert data["qubits"] == "10"
 
 
@@ -594,10 +592,8 @@ class TestStubGateEstimation:
 
     def test_stub_gate_resource_estimation(self):
         """Test that stub gate metadata is correctly propagated to estimate_resources."""
-        from qamomile.circuit.frontend.composite_gate import composite_gate
-        from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 
-        @composite_gate(
+        @qm.composite_gate(
             stub=True,
             name="black_box_oracle",
             num_qubits=3,
@@ -627,10 +623,8 @@ class TestStubGateEstimation:
 
     def test_stub_gate_multiple_calls(self):
         """Test oracle_calls counts multiple invocations of the same stub gate."""
-        from qamomile.circuit.frontend.composite_gate import composite_gate
-        from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 
-        @composite_gate(
+        @qm.composite_gate(
             stub=True,
             name="repeated_oracle",
             num_qubits=2,
@@ -653,10 +647,8 @@ class TestStubGateEstimation:
 
     def test_multiple_different_oracle_calls(self):
         """Test tracking multiple different stub gates in one circuit."""
-        from qamomile.circuit.frontend.composite_gate import composite_gate
-        from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 
-        @composite_gate(
+        @qm.composite_gate(
             stub=True,
             name="oracle_A",
             num_qubits=2,
@@ -665,7 +657,7 @@ class TestStubGateEstimation:
         def oracle_a():
             pass
 
-        @composite_gate(
+        @qm.composite_gate(
             stub=True,
             name="oracle_B",
             num_qubits=2,
@@ -907,7 +899,6 @@ class TestRotationGateCounting:
 
         est = estimate_resources(rx_circuit.block)
         assert est.gates.rotation_gates == 1
-        assert est.depth.rotation_depth == 1
 
     def test_clifford_not_counted_as_rotation(self):
         @qm.qkernel
@@ -919,7 +910,6 @@ class TestRotationGateCounting:
 
         est = estimate_resources(clifford_circuit.block)
         assert est.gates.rotation_gates == 0
-        assert est.depth.rotation_depth == 0
 
     def test_mixed_rotation_and_clifford(self):
         @qm.qkernel

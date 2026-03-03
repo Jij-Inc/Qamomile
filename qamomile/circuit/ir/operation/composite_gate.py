@@ -28,13 +28,13 @@ class CompositeGateType(enum.Enum):
 class ResourceMetadata:
     """Resource estimation metadata for composite gates.
 
-    Gate count and depth fields mirror GateCount and CircuitDepth categories.
+    Gate count fields mirror GateCount categories.
 
     None semantics:
         Fields left as None mean "unknown/unspecified". During extraction,
-        gate_counter and depth_estimator treat None as 0, which may
-        undercount resources if the true value is nonzero. To ensure
-        accurate resource estimates, set all relevant fields explicitly.
+        gate_counter treats None as 0, which may undercount resources if
+        the true value is nonzero. To ensure accurate resource estimates,
+        set all relevant fields explicitly.
 
         When total_gates is set but some of single_qubit_gates,
         two_qubit_gates, or multi_qubit_gates are None, the extractor
@@ -53,13 +53,6 @@ class ResourceMetadata:
         multi_qubit_gates: Number of multi-qubit gates, 3+ qubits (None -> 0)
         clifford_gates: Number of Clifford gates (None -> 0)
         rotation_gates: Number of rotation gates (None -> 0)
-        total_depth: Total circuit depth (None -> 0)
-        t_depth: T-gate depth (None -> 0)
-        two_qubit_depth: Two-qubit gate depth (None -> 0)
-        multi_qubit_depth: Multi-qubit gate depth, 3+ qubits (None -> 0)
-        rotation_depth: Rotation gate depth (None -> 0).
-            Note: depth sub-categories are independent metrics under
-            different parallelism assumptions and do NOT sum to total_depth.
         custom_metadata: Additional metadata (strategy, precision, etc.)
     """
 
@@ -72,11 +65,6 @@ class ResourceMetadata:
     multi_qubit_gates: int | None = None
     clifford_gates: int | None = None
     rotation_gates: int | None = None
-    total_depth: int | None = None
-    t_depth: int | None = None
-    two_qubit_depth: int | None = None
-    multi_qubit_depth: int | None = None
-    rotation_depth: int | None = None
     custom_metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 

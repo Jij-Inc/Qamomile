@@ -158,7 +158,6 @@ class QFT(CompositeGate):
             two_qubit_gates=num_cp + num_swap,
             clifford_gates=num_h + num_swap,
             rotation_gates=num_cp,
-            total_depth=2 * n,
             custom_metadata={
                 "num_h_gates": num_h,
                 "num_cp_gates": num_cp,
@@ -270,7 +269,6 @@ class IQFT(CompositeGate):
             two_qubit_gates=num_cp + num_swap,
             clifford_gates=num_h + num_swap,
             rotation_gates=num_cp,
-            total_depth=2 * n,
             custom_metadata={
                 "num_h_gates": num_h,
                 "num_cp_gates": num_cp,

@@ -7,10 +7,11 @@ control flow scoping.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, overload
+from typing import overload
 
 import sympy as sp
 
+from qamomile.circuit.ir.block_value import BlockValue
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
 from qamomile.circuit.ir.operation.control_flow import (
@@ -34,9 +35,6 @@ from ._engine import (
 from ._loop_executor import symbolic_iterations
 from ._resolver import ExprResolver
 from ._utils import _strip_nonneg_max
-
-if TYPE_CHECKING:
-    from qamomile.circuit.ir.block_value import BlockValue
 
 WHILE_SYMBOL = sp.Symbol("|while|", integer=True, positive=True)
 
@@ -129,7 +127,6 @@ def _build_controlled_u_child_resolver(
     Returns:
         (controlled_block, child_resolver) or (None, None).
     """
-    from qamomile.circuit.ir.block_value import BlockValue
 
     controlled_block = op.block
     if not isinstance(controlled_block, BlockValue):
@@ -186,7 +183,6 @@ def _count_composite_split(
         alloc: Total qubit allocation (implementation + metadata ancilla)
         is_reusable: True if the allocation can be reused across loop iterations
     """
-    from qamomile.circuit.ir.block_value import BlockValue
 
     impl = op.implementation
     meta_ancilla: sp.Expr = sp.Integer(0)
@@ -213,7 +209,6 @@ def _count_composite_total(
     resolver: ExprResolver,
 ) -> sp.Expr:
     """Count qubits from a CompositeGateOperation (non-split)."""
-    from qamomile.circuit.ir.block_value import BlockValue
 
     count: sp.Expr = sp.Integer(0)
     impl = op.implementation
@@ -243,7 +238,6 @@ def _count_loop_body_split(
     Returns:
         (persistent, reusable) tuple of sympy expressions.
     """
-    from qamomile.circuit.ir.block_value import BlockValue
 
     persistent: sp.Expr = sp.Integer(0)
     reusable: sp.Expr = sp.Integer(0)
@@ -341,7 +335,6 @@ def _count_from_operations(
     Returns:
         Total qubit count as a sympy expression.
     """
-    from qamomile.circuit.ir.block_value import BlockValue
 
     count: sp.Expr = sp.Integer(0)
 
@@ -443,7 +436,6 @@ def qubits_counter(block: BlockValue | list[Operation]) -> sp.Expr:
         >>> count = qubits_counter(block)
         >>> print(count)  # e.g., "n + 3" for parametric n
     """
-    from qamomile.circuit.ir.block_value import BlockValue
 
     if isinstance(block, BlockValue):
         resolver = ExprResolver(block=block)

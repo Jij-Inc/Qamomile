@@ -110,9 +110,6 @@ def _emit_iqft_and_cast_to_qfixed(qubits: Vector[Qubit]) -> QFixed:
             two_qubit_gates=num_cp + num_swap,
             clifford_gates=num_h + num_swap,
             rotation_gates=num_cp,
-            total_depth=2 * concrete_n,
-            two_qubit_depth=num_cp + num_swap,
-            rotation_depth=num_cp,
         )
 
     # Create CompositeGateOperation for IQFT

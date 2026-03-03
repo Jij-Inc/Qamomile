@@ -191,7 +191,7 @@ class CompositeGate(abc.ABC):
                 n = self._num_qubits
                 return ResourceMetadata(
                     t_gates=0,
-                    total_depth=n,
+                    total_gates=n,
                 )
         """
         return None

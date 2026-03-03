@@ -1,7 +1,7 @@
 """Shared operation-processing helpers for resource estimation.
 
-Provides resolution and scoping utilities used by all three estimators
-(gate_counter, depth_estimator, qubits_counter).  Each estimator has
+Provides resolution and scoping utilities used by the estimators
+(gate_counter, qubits_counter).  Each estimator has
 its own dispatch loop but calls these shared helpers to avoid
 duplicating CompositeGate priority logic, QFT/IQFT n resolution,
 ControlledU resolution, loop scoping, etc.
@@ -13,23 +13,25 @@ interpolate) — that stays in each estimator / loop_executor.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 import sympy as sp
 
-from ._resolver import ExprResolver
+from qamomile.circuit.ir.block_value import BlockValue
+from qamomile.circuit.ir.operation.composite_gate import (
+    CompositeGateOperation,
+    CompositeGateType,
+    ResourceMetadata,
+)
+from qamomile.circuit.ir.operation.control_flow import (
+    ForItemsOperation,
+    ForOperation,
+)
+from qamomile.circuit.ir.operation.gate import ControlledUOperation
+from qamomile.circuit.ir.operation.operation import QInitOperation
+from qamomile.circuit.ir.value import ArrayValue
 
-if TYPE_CHECKING:
-    from qamomile.circuit.ir.block_value import BlockValue
-    from qamomile.circuit.ir.operation.composite_gate import (
-        CompositeGateOperation,
-        ResourceMetadata,
-    )
-    from qamomile.circuit.ir.operation.control_flow import (
-        ForItemsOperation,
-        ForOperation,
-    )
-    from qamomile.circuit.ir.operation.gate import ControlledUOperation
+from ._resolver import ExprResolver
 
 
 # ------------------------------------------------------------------ #
@@ -82,9 +84,6 @@ def resolve_composite_gate(
     3. Known formula (QFT / IQFT)
     4. Error — no resource info available
     """
-    from qamomile.circuit.ir.block_value import BlockValue
-    from qamomile.circuit.ir.operation.composite_gate import CompositeGateType
-
     # 1. metadata
     if op.resource_metadata is not None:
         oracle_name = None
@@ -154,9 +153,6 @@ def _resolve_qft_iqft_n(
       3. ``num_target_qubits`` field
       4. ``sp.Symbol("n")`` fallback
     """
-    from qamomile.circuit.ir.operation.operation import QInitOperation
-    from qamomile.circuit.ir.value import ArrayValue
-
     target_qubits = op.target_qubits
     n_qubits = len(target_qubits)
 
@@ -200,8 +196,6 @@ def resolve_controlled_u(
     ``num_controls`` may be ``int`` or ``sp.Expr`` (symbolic).
     ``num_targets`` is always a concrete ``int``.
     """
-    from qamomile.circuit.ir.block_value import BlockValue
-
     if op.is_symbolic_num_controls:
         nc: int | sp.Expr = resolver.resolve(op.num_controls)
     else:

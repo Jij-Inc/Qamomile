@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import sympy as sp
 
-from qamomile.circuit.estimator.depth_estimator import CircuitDepth
 from qamomile.circuit.estimator.gate_counter import GateCount
 from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
 
@@ -98,9 +97,6 @@ def estimate_trotter(
 
     total_gates = num_steps * gates_per_step
 
-    # Depth: sequential application of all terms, all steps
-    total_depth = num_steps * L_expr
-
     return ResourceEstimate(
         qubits=n_expr,
         gates=GateCount(
@@ -111,13 +107,6 @@ def estimate_trotter(
             t_gates=sp.Integer(0),  # Depends on decomposition
             clifford_gates=sp.Integer(0),
             rotation_gates=sp.Integer(0),
-        ),
-        depth=CircuitDepth(
-            total_depth=sp.simplify(total_depth),
-            t_depth=sp.Integer(0),
-            two_qubit_depth=sp.simplify(total_depth / 2),
-            multi_qubit_depth=sp.Integer(0),
-            rotation_depth=sp.Integer(0),
         ),
         parameters={
             str(s): s
@@ -206,13 +195,6 @@ def estimate_qsvt(
             clifford_gates=sp.Integer(0),
             rotation_gates=sp.Integer(0),
         ),
-        depth=CircuitDepth(
-            total_depth=sp.simplify(num_calls * n_expr),
-            t_depth=sp.Integer(0),
-            two_qubit_depth=sp.simplify(num_calls * n_expr / 2),
-            multi_qubit_depth=sp.Integer(0),
-            rotation_depth=sp.Integer(0),
-        ),
         parameters={
             str(s): s
             for s in [n_expr, alpha, t_expr, eps_expr]
@@ -293,14 +275,6 @@ def estimate_qdrift(
             t_gates=sp.Integer(0),
             clifford_gates=sp.Integer(0),
             rotation_gates=sp.Integer(0),
-        ),
-        depth=CircuitDepth(
-            # Sequential application
-            total_depth=sp.simplify(total_operations),
-            t_depth=sp.Integer(0),
-            two_qubit_depth=sp.Integer(0),
-            multi_qubit_depth=sp.Integer(0),
-            rotation_depth=sp.Integer(0),
         ),
         parameters={
             str(s): s

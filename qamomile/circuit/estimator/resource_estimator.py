@@ -1,18 +1,16 @@
 """Unified resource estimation interface.
 
-This module combines all resource metrics (qubits, gates, depth)
+This module combines all resource metrics (qubits, gates)
 into a single interface for comprehensive circuit analysis.
 """
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import sympy as sp
 
-from qamomile.circuit.estimator.depth_estimator import CircuitDepth, estimate_depth
 from qamomile.circuit.estimator.gate_counter import GateCount, count_gates
 from qamomile.circuit.estimator.qubits_counter import qubits_counter
 
@@ -32,17 +30,12 @@ class ResourceEstimate:
     Attributes:
         qubits: Logical qubit count
         gates: Gate count breakdown (total, single_qubit, two_qubit, t_gates, clifford)
-        depth: Circuit depth breakdown (total_depth, t_depth, two_qubit_depth)
         parameters: Dictionary mapping symbol names to their SymPy symbols
     """
 
     qubits: sp.Expr
     gates: GateCount
-    depth: CircuitDepth
     parameters: dict[str, sp.Symbol] = field(default_factory=dict)
-    _worst_case_depth_dicts: frozenset[str] = field(
-        default_factory=frozenset, repr=False
-    )
 
     def substitute(self, **values: int | float) -> ResourceEstimate:
         """Substitute concrete values for parameters.
@@ -73,7 +66,7 @@ class ResourceEstimate:
                 return sp.Integer(expr)
             return expr.subs(subs_dict).doit()
 
-        result = ResourceEstimate(
+        return ResourceEstimate(
             qubits=_subs_eval(self.qubits),
             gates=GateCount(
                 total=_subs_eval(self.gates.total),
@@ -92,27 +85,8 @@ class ResourceEstimate:
                     for name, val in self.gates.oracle_queries.items()
                 },
             ),
-            depth=CircuitDepth(
-                total_depth=_subs_eval(self.depth.total_depth),
-                t_depth=_subs_eval(self.depth.t_depth),
-                two_qubit_depth=_subs_eval(self.depth.two_qubit_depth),
-                multi_qubit_depth=_subs_eval(self.depth.multi_qubit_depth),
-                rotation_depth=_subs_eval(self.depth.rotation_depth),
-            ),
             parameters=self.parameters,
-            _worst_case_depth_dicts=self._worst_case_depth_dicts,
         )
-        # Re-emit warnings for worst-case depth dicts
-        for dict_name in sorted(self._worst_case_depth_dicts):
-            warnings.warn(
-                f"Depth for ForItemsOperation over '{dict_name}' uses "
-                f"worst-case sequential bound (multiplied by |{dict_name}|). "
-                f"For accurate parallel depth, use "
-                f"estimate_resources(block, bindings=...) with concrete "
-                f"dict values.",
-                stacklevel=2,
-            )
-        return result
 
     def simplify(self) -> ResourceEstimate:
         """Simplify all SymPy expressions.
@@ -123,9 +97,7 @@ class ResourceEstimate:
         return ResourceEstimate(
             qubits=sp.simplify(self.qubits),
             gates=self.gates.simplify(),
-            depth=self.depth.simplify(),
             parameters=self.parameters,
-            _worst_case_depth_dicts=self._worst_case_depth_dicts,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -157,13 +129,6 @@ class ResourceEstimate:
                     name: str(val) for name, val in self.gates.oracle_queries.items()
                 },
             },
-            "depth": {
-                "total_depth": str(self.depth.total_depth),
-                "t_depth": str(self.depth.t_depth),
-                "two_qubit_depth": str(self.depth.two_qubit_depth),
-                "multi_qubit_depth": str(self.depth.multi_qubit_depth),
-                "rotation_depth": str(self.depth.rotation_depth),
-            },
             "parameters": {k: str(v) for k, v in self.parameters.items()},
         }
 
@@ -189,16 +154,6 @@ class ResourceEstimate:
             lines.append("  Oracle Queries:")
             for name, count in self.gates.oracle_queries.items():
                 lines.append(f"    {name}: {count}")
-        lines.extend(
-            [
-                "  Depth:",
-                f"    Total: {self.depth.total_depth}",
-                f"    T-depth: {self.depth.t_depth}",
-                f"    Two-qubit depth: {self.depth.two_qubit_depth}",
-                f"    Multi-qubit depth: {self.depth.multi_qubit_depth}",
-                f"    Rotation depth: {self.depth.rotation_depth}",
-            ]
-        )
         if self.parameters:
             lines.append("  Parameters:")
             for name, symbol in self.parameters.items():
@@ -214,24 +169,14 @@ def estimate_resources(
     """Estimate all resources for a quantum circuit.
 
     This is the main entry point for comprehensive resource estimation.
-    Combines qubit counting, gate counting, and depth estimation.
-
-    When ``bindings`` is provided with concrete dict values, ForItemsOperation
-    loops are unrolled with per-qubit depth tracking, yielding accurate
-    parallel depth instead of worst-case sequential estimates.
-
-    Note:
-        Calling ``substitute()`` on a symbolic result cannot recover
-        parallel depth information. For accurate depth with dict parameters,
-        pass concrete dicts via ``bindings`` at estimation time.
+    Combines qubit counting and gate counting.
 
     Args:
         block: BlockValue, Block, or list of Operations to analyze
         bindings: Optional concrete parameter bindings (scalars and dicts).
-            When provided, enables accurate depth for ForItemsOperation.
 
     Returns:
-        ResourceEstimate with qubits, gates, depth, and parameters
+        ResourceEstimate with qubits, gates, and parameters
 
     Example:
         >>> import qamomile.circuit as qm
@@ -248,7 +193,6 @@ def estimate_resources(
         >>> print(est.qubits)  # 2
         >>> print(est.gates.total)  # 2
         >>> print(est.gates.two_qubit)  # 1
-        >>> print(est.depth.total_depth)  # 2
 
     Example with parametric size:
         >>> @qm.qkernel
@@ -274,25 +218,6 @@ def estimate_resources(
 
     # Count gates
     gate_count = count_gates(block)
-
-    # Estimate depth (with bindings for concrete dict unrolling)
-    circuit_depth = estimate_depth(block, bindings=bindings)
-
-    # Detect worst-case dict depth symbols (|dict_name|)
-    worst_case_dicts: set[str] = set()
-    all_depth_exprs = [
-        circuit_depth.total_depth,
-        circuit_depth.t_depth,
-        circuit_depth.two_qubit_depth,
-        circuit_depth.multi_qubit_depth,
-        circuit_depth.rotation_depth,
-    ]
-    for expr in all_depth_exprs:
-        if isinstance(expr, sp.Basic):
-            for sym in expr.free_symbols:
-                name = str(sym)
-                if name.startswith("|") and name.endswith("|"):
-                    worst_case_dicts.add(name[1:-1])
 
     # Substitute dict cardinality and scalar symbols if bindings provided
     if bindings is not None:
@@ -320,7 +245,6 @@ def estimate_resources(
                     for name, count in gate_count.oracle_queries.items()
                 },
             )
-            circuit_depth = circuit_depth.substitute(all_subs)
             qubit_count = qubit_count.subs(all_subs)
 
     # Collect all symbols (parameters)
@@ -334,11 +258,6 @@ def estimate_resources(
         gate_count.t_gates,
         gate_count.clifford_gates,
         gate_count.rotation_gates,
-        circuit_depth.total_depth,
-        circuit_depth.t_depth,
-        circuit_depth.two_qubit_depth,
-        circuit_depth.multi_qubit_depth,
-        circuit_depth.rotation_depth,
     ]:
         all_symbols.update(expr.free_symbols)
     for oracle_expr in gate_count.oracle_calls.values():
@@ -351,7 +270,5 @@ def estimate_resources(
     return ResourceEstimate(
         qubits=qubit_count,
         gates=gate_count,
-        depth=circuit_depth,
         parameters=parameters,
-        _worst_case_depth_dicts=frozenset(worst_case_dicts),
     )

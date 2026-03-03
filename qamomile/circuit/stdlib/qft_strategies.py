@@ -106,7 +106,6 @@ class StandardQFTStrategy:
             two_qubit_gates=num_cp_gates + num_swap_gates,
             clifford_gates=num_h_gates + num_swap_gates,
             rotation_gates=num_cp_gates,
-            total_depth=2 * n,
             custom_metadata={
                 "num_h_gates": num_h_gates,
                 "num_cp_gates": num_cp_gates,
@@ -209,7 +208,6 @@ class ApproximateQFTStrategy:
             two_qubit_gates=num_cp_gates + num_swap_gates,
             clifford_gates=num_h_gates + num_swap_gates,
             rotation_gates=num_cp_gates,
-            total_depth=min(n, k + 1),
             custom_metadata={
                 "num_h_gates": num_h_gates,
                 "num_cp_gates": num_cp_gates,
@@ -288,7 +286,6 @@ class StandardIQFTStrategy:
             two_qubit_gates=num_cp_gates + num_swap_gates,
             clifford_gates=num_h_gates + num_swap_gates,
             rotation_gates=num_cp_gates,
-            total_depth=2 * n,
             custom_metadata={
                 "num_h_gates": num_h_gates,
                 "num_cp_gates": num_cp_gates,
@@ -378,7 +375,6 @@ class ApproximateIQFTStrategy:
             two_qubit_gates=num_cp_gates + num_swap_gates,
             clifford_gates=num_h_gates + num_swap_gates,
             rotation_gates=num_cp_gates,
-            total_depth=min(n, k + 1),
             custom_metadata={
                 "num_h_gates": num_h_gates,
                 "num_cp_gates": num_cp_gates,

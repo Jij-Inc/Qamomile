@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sympy as sp
 
-from qamomile.circuit.estimator import CircuitDepth, GateCount
+from qamomile.circuit.estimator import GateCount
 
 
 def assert_expr_equal(actual: sp.Expr, expected: sp.Expr, msg: str = "") -> None:
@@ -51,16 +51,3 @@ def assert_gate_counts(actual: GateCount, expected: GateCount) -> None:
             f"actual={set(actual.oracle_queries.keys())}, "
             f"expected={set(expected.oracle_queries.keys())}"
         )
-
-
-def assert_depth(actual: CircuitDepth, expected: CircuitDepth) -> None:
-    """Assert all depth fields match."""
-    assert_expr_equal(actual.total_depth, expected.total_depth, "total_depth")
-    assert_expr_equal(actual.t_depth, expected.t_depth, "t_depth")
-    assert_expr_equal(
-        actual.two_qubit_depth, expected.two_qubit_depth, "two_qubit_depth"
-    )
-    assert_expr_equal(
-        actual.multi_qubit_depth, expected.multi_qubit_depth, "multi_qubit_depth"
-    )
-    assert_expr_equal(actual.rotation_depth, expected.rotation_depth, "rotation_depth")

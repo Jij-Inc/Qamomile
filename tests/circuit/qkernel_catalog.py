@@ -381,8 +381,6 @@ def iqft(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
         query_complexity=1,
         total_gates=1,
         two_qubit_gates=1,
-        total_depth=1,
-        two_qubit_depth=1,
     ),
 )
 def _controlled_oracle():
@@ -393,7 +391,7 @@ def _controlled_oracle():
     stub=True,
     name="one_qubit_oracle",
     num_qubits=1,
-    resource_metadata=ResourceMetadata(query_complexity=1, total_depth=1),
+    resource_metadata=ResourceMetadata(query_complexity=1),
 )
 def _one_qubit_oracle():
     pass
@@ -403,9 +401,7 @@ def _one_qubit_oracle():
     stub=True,
     name="two_qubit_oracle",
     num_qubits=2,
-    resource_metadata=ResourceMetadata(
-        query_complexity=1, two_qubit_gates=1, total_depth=1, two_qubit_depth=1
-    ),
+    resource_metadata=ResourceMetadata(query_complexity=1, two_qubit_gates=1),
 )
 def _two_qubit_oracle():
     pass
@@ -474,7 +470,7 @@ def deutsch_jozsa(n: qmc.UInt) -> qmc.Bit:
         qs,
         target,
         name="deutsch_jozsa_oracle",
-        resource_metadata=ResourceMetadata(total_depth=1, query_complexity=1),
+        resource_metadata=ResourceMetadata(query_complexity=1),
     )  # type: ignore
 
     qs = _all_h(qs)  # type: ignore
@@ -491,7 +487,7 @@ def _simon(
         qs1,
         qs2,
         name="simon_oracle",
-        resource_metadata=ResourceMetadata(total_depth=1, query_complexity=1),
+        resource_metadata=ResourceMetadata(query_complexity=1),
     )  # type: ignore
     qs1 = _all_h(qs1)
     return qs1, qs2
@@ -567,8 +563,6 @@ def phase_gate_qpe(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Qubit]:
         query_complexity=1,
         total_gates=1,
         two_qubit_gates=1,
-        total_depth=1,
-        two_qubit_depth=1,
     ),
 )
 def _controlled_u():
