@@ -107,7 +107,10 @@ class TestSingleQubitGates:
     ALL_GATES_WITH_IDS = [
         ((qm.h, GateOperationType.H), "H"),
         ((qm.x, GateOperationType.X), "X"),
+        ((qm.y, GateOperationType.Y), "Y"),
         ((qm.z, GateOperationType.Z), "Z"),
+        ((qm.t, GateOperationType.T), "T"),
+        ((qm.s, GateOperationType.S), "S"),
     ]
     ALL_GATES = [gate_info for gate_info, _ in ALL_GATES_WITH_IDS]
     IDS = [_id for _, _id in ALL_GATES_WITH_IDS]
