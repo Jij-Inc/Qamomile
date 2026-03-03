@@ -271,6 +271,10 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 self._emitter.emit_t(circuit, qubit_indices[0])
             case GateOperationType.S:
                 self._emitter.emit_s(circuit, qubit_indices[0])
+            case GateOperationType.SDG:
+                self._emitter.emit_sdg(circuit, qubit_indices[0])
+            case GateOperationType.TDG:
+                self._emitter.emit_tdg(circuit, qubit_indices[0])
             case GateOperationType.CX:
                 self._emitter.emit_cx(circuit, qubit_indices[0], qubit_indices[1])
             case GateOperationType.CZ:
@@ -1020,6 +1024,10 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 self._emitter.emit_cp(circuit, control_idx, target_idx, math.pi / 2)
             case GateOperationType.T:
                 self._emitter.emit_cp(circuit, control_idx, target_idx, math.pi / 4)
+            case GateOperationType.SDG:
+                self._emitter.emit_cp(circuit, control_idx, target_idx, -math.pi / 2)
+            case GateOperationType.TDG:
+                self._emitter.emit_cp(circuit, control_idx, target_idx, -math.pi / 4)
 
     def _emit_controlled_u_with_index_spec(
         self,

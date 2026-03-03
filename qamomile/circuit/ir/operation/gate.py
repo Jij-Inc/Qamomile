@@ -19,7 +19,9 @@ class GateOperationType(enum.Enum):
     Y = enum.auto()
     Z = enum.auto()
     T = enum.auto()
+    TDG = enum.auto()  # T† = P(-π/4)
     S = enum.auto()
+    SDG = enum.auto()  # S† = P(-π/2)
     P = enum.auto()  # Phase gate: P(θ)|1⟩ = e^{iθ}|1⟩
     RX = enum.auto()
     RY = enum.auto()
