@@ -24,7 +24,7 @@ from qamomile.circuit.ir.value import ArrayValue, Value
 if TYPE_CHECKING:
     from qamomile.circuit.ir.block_value import BlockValue
 
-WHILE_SYMBOL = sp.Symbol("|while|")
+WHILE_SYMBOL = sp.Symbol("|while|", integer=True, positive=True)
 
 
 def _resolve_value_to_sympy(
@@ -167,9 +167,7 @@ def _build_call_block_inner_map(
             if isinstance(actual_arg, ArrayValue) and isinstance(
                 formal_input, ArrayValue
             ):
-                for dim_formal, dim_actual in zip(
-                    formal_input.shape, actual_arg.shape
-                ):
+                for dim_formal, dim_actual in zip(formal_input.shape, actual_arg.shape):
                     inner_symbol_map[dim_formal.uuid] = _resolve_value_to_sympy(
                         dim_actual, symbol_map
                     )
@@ -207,8 +205,8 @@ def _build_controlled_u_inner_map(
                         for dim_formal, dim_actual in zip(
                             formal_input.shape, actual_arg.shape
                         ):
-                            inner_symbol_map[dim_formal.uuid] = (
-                                _resolve_value_to_sympy(dim_actual, symbol_map)
+                            inner_symbol_map[dim_formal.uuid] = _resolve_value_to_sympy(
+                                dim_actual, symbol_map
                             )
                     param_idx += 1
     else:
@@ -222,8 +220,8 @@ def _build_controlled_u_inner_map(
                     for dim_formal, dim_actual in zip(
                         formal_input.shape, actual_arg.shape
                     ):
-                        inner_symbol_map[dim_formal.uuid] = (
-                            _resolve_value_to_sympy(dim_actual, symbol_map)
+                        inner_symbol_map[dim_formal.uuid] = _resolve_value_to_sympy(
+                            dim_actual, symbol_map
                         )
     return controlled_block, inner_symbol_map
 
@@ -284,9 +282,7 @@ def _count_loop_body_split(
                 persistent += _count_qinit(op, symbol_map)  # type: ignore
 
             case CallBlockOperation():
-                called_block, inner_map = _build_call_block_inner_map(
-                    op, symbol_map
-                )
+                called_block, inner_map = _build_call_block_inner_map(op, symbol_map)
                 if called_block is not None:
                     inner_alloc = _count_from_operations(
                         called_block.operations, inner_map
@@ -331,9 +327,7 @@ def _count_loop_body_split(
                     persistent += total_alloc  # type: ignore
 
             case ForOperation():
-                inner_p, inner_r = _count_loop_body_split(
-                    op.operations, symbol_map
-                )
+                inner_p, inner_r = _count_loop_body_split(op.operations, symbol_map)
                 iterations = _compute_for_iterations(op, symbol_map)
                 reusable_factor = sp.Piecewise(
                     (sp.Integer(1), sp.Gt(iterations, 0)),
@@ -343,16 +337,12 @@ def _count_loop_body_split(
                 reusable = sp.Max(reusable, inner_r * reusable_factor)
 
             case WhileOperation():
-                inner_p, inner_r = _count_loop_body_split(
-                    op.operations, symbol_map
-                )
+                inner_p, inner_r = _count_loop_body_split(op.operations, symbol_map)
                 persistent += inner_p * WHILE_SYMBOL  # type: ignore
                 reusable = sp.Max(reusable, inner_r)
 
             case IfOperation():
-                true_p, true_r = _count_loop_body_split(
-                    op.true_operations, symbol_map
-                )
+                true_p, true_r = _count_loop_body_split(op.true_operations, symbol_map)
                 false_p, false_r = _count_loop_body_split(
                     op.false_operations, symbol_map
                 )
@@ -360,9 +350,7 @@ def _count_loop_body_split(
                 reusable = sp.Max(reusable, true_r, false_r)
 
             case ForItemsOperation():
-                inner_p, inner_r = _count_loop_body_split(
-                    op.operations, symbol_map
-                )
+                inner_p, inner_r = _count_loop_body_split(op.operations, symbol_map)
                 cardinality = _resolve_for_items_cardinality(op)
                 persistent += inner_p * cardinality  # type: ignore
                 reusable = sp.Max(reusable, inner_r)
@@ -405,9 +393,7 @@ def _count_from_operations(
                 count += _count_qinit(op, symbol_map)  # type: ignore
 
             case ForOperation():
-                persistent, reusable = _count_loop_body_split(
-                    op.operations, symbol_map
-                )
+                persistent, reusable = _count_loop_body_split(op.operations, symbol_map)
                 iterations = _compute_for_iterations(op, symbol_map)
                 reusable_factor = sp.Piecewise(
                     (sp.Integer(1), sp.Gt(iterations, 0)),
@@ -416,9 +402,7 @@ def _count_from_operations(
                 count += persistent * iterations + reusable * reusable_factor  # type: ignore
 
             case WhileOperation():
-                persistent, reusable = _count_loop_body_split(
-                    op.operations, symbol_map
-                )
+                persistent, reusable = _count_loop_body_split(op.operations, symbol_map)
                 # WHILE_SYMBOL is always positive, so reusable is counted once
                 count += persistent * WHILE_SYMBOL + reusable  # type: ignore
 
@@ -429,9 +413,7 @@ def _count_from_operations(
                 count += sp.Max(true_count, false_count)  # type: ignore
 
             case CallBlockOperation():
-                called_block, inner_map = _build_call_block_inner_map(
-                    op, symbol_map
-                )
+                called_block, inner_map = _build_call_block_inner_map(op, symbol_map)
                 if called_block is not None:
                     count += _count_from_operations(called_block.operations, inner_map)  # type: ignore
 
@@ -440,12 +422,12 @@ def _count_from_operations(
                     op, symbol_map
                 )
                 if controlled_block is not None:
-                    count += _count_from_operations(controlled_block.operations, inner_map)  # type: ignore
+                    count += _count_from_operations(
+                        controlled_block.operations, inner_map
+                    )  # type: ignore
 
             case ForItemsOperation():
-                persistent, reusable = _count_loop_body_split(
-                    op.operations, symbol_map
-                )
+                persistent, reusable = _count_loop_body_split(op.operations, symbol_map)
                 cardinality = _resolve_for_items_cardinality(op)
                 # cardinality is always positive, so reusable is counted once
                 count += persistent * cardinality + reusable  # type: ignore

@@ -1183,7 +1183,7 @@ def count_gates(block: BlockValue | Block | list[Operation]) -> GateCount:
     - ForOperation: Multiplies inner count by iterations
     - IfOperation: Takes maximum of branches
     - CallBlockOperation: Recursively counts called blocks
-    - ControlledUOperation: Recursively counts unitary block
+    - ControlledUOperation: Counts as a single opaque gate
 
     Args:
         block: BlockValue, Block, or list of Operations to analyze
