@@ -71,6 +71,7 @@ class GateCount:
     clifford_gates: sp.Expr
     rotation_gates: sp.Expr
     oracle_calls: dict[str, sp.Expr] = field(default_factory=dict)
+    oracle_queries: dict[str, sp.Expr] = field(default_factory=dict)
 
     def __add__(self, other: GateCount) -> GateCount:
         """Add two gate counts together."""
@@ -80,6 +81,12 @@ class GateCount:
                 merged_oracle[name] = merged_oracle[name] + count
             else:
                 merged_oracle[name] = count
+        merged_queries = dict(self.oracle_queries)
+        for name, count in other.oracle_queries.items():
+            if name in merged_queries:
+                merged_queries[name] = merged_queries[name] + count
+            else:
+                merged_queries[name] = count
         return GateCount(
             total=self.total + other.total,
             single_qubit=self.single_qubit + other.single_qubit,
@@ -89,6 +96,7 @@ class GateCount:
             clifford_gates=self.clifford_gates + other.clifford_gates,
             rotation_gates=self.rotation_gates + other.rotation_gates,
             oracle_calls=merged_oracle,
+            oracle_queries=merged_queries,
         )
 
     def __mul__(self, factor: sp.Expr | int) -> GateCount:
@@ -106,23 +114,29 @@ class GateCount:
                 name: count * factor_expr
                 for name, count in self.oracle_calls.items()
             },
+            oracle_queries={
+                name: count * factor_expr
+                for name, count in self.oracle_queries.items()
+            },
         )
 
     __rmul__ = __mul__
 
     def max(self, other: GateCount) -> GateCount:
         """Element-wise maximum of two gate counts."""
-        all_keys = set(self.oracle_calls.keys()) | set(other.oracle_calls.keys())
-        merged_oracle = {}
-        for key in all_keys:
-            if key in self.oracle_calls and key in other.oracle_calls:
-                merged_oracle[key] = sp.Max(
-                    self.oracle_calls[key], other.oracle_calls[key]
-                )
-            elif key in self.oracle_calls:
-                merged_oracle[key] = self.oracle_calls[key]
-            else:
-                merged_oracle[key] = other.oracle_calls[key]
+        def _merge_max(
+            a: dict[str, sp.Expr], b: dict[str, sp.Expr]
+        ) -> dict[str, sp.Expr]:
+            merged: dict[str, sp.Expr] = {}
+            for key in set(a.keys()) | set(b.keys()):
+                if key in a and key in b:
+                    merged[key] = sp.Max(a[key], b[key])
+                elif key in a:
+                    merged[key] = a[key]
+                else:
+                    merged[key] = b[key]
+            return merged
+
         return GateCount(
             total=sp.Max(self.total, other.total),
             single_qubit=sp.Max(self.single_qubit, other.single_qubit),
@@ -131,7 +145,8 @@ class GateCount:
             t_gates=sp.Max(self.t_gates, other.t_gates),
             clifford_gates=sp.Max(self.clifford_gates, other.clifford_gates),
             rotation_gates=sp.Max(self.rotation_gates, other.rotation_gates),
-            oracle_calls=merged_oracle,
+            oracle_calls=_merge_max(self.oracle_calls, other.oracle_calls),
+            oracle_queries=_merge_max(self.oracle_queries, other.oracle_queries),
         )
 
     def simplify(self) -> GateCount:
@@ -147,6 +162,10 @@ class GateCount:
             oracle_calls={
                 name: _strip_nonneg_max(sp.simplify(count))
                 for name, count in self.oracle_calls.items()
+            },
+            oracle_queries={
+                name: _strip_nonneg_max(sp.simplify(count))
+                for name, count in self.oracle_queries.items()
             },
         )
 
@@ -397,6 +416,9 @@ def _count_composite_gate(
         if not op.has_implementation:
             gate_name = op.custom_name or op.gate_type.value
             gate_count.oracle_calls[gate_name] = sp.Integer(1)
+            qc = op.resource_metadata.query_complexity
+            if qc is not None:
+                gate_count.oracle_queries[gate_name] = sp.Integer(qc)
         return gate_count
 
     # Priority 2: Use implementation (decomposition)
@@ -777,6 +799,10 @@ def _apply_sum_to_count(
             name: Sum(val, (loop_var, lower, upper)).doit()
             for name, val in count.oracle_calls.items()
         },
+        oracle_queries={
+            name: Sum(val, (loop_var, lower, upper)).doit()
+            for name, val in count.oracle_queries.items()
+        },
     )
 
 
@@ -915,6 +941,8 @@ def _count_from_operations(
                     all_free = all_free | inner_count.two_qubit.free_symbols
                     all_free = all_free | inner_count.multi_qubit.free_symbols
                     for val in inner_count.oracle_calls.values():
+                        all_free = all_free | val.free_symbols
+                    for val in inner_count.oracle_queries.values():
                         all_free = all_free | val.free_symbols
                     if loop_var_symbol in all_free:
                         # The inner count varies with our loop variable

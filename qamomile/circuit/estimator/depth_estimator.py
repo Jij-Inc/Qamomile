@@ -667,8 +667,8 @@ def _resolve_qubit_base_name(v: Any) -> str:
     return v.name
 
 
-def _collect_gate_qubit_names(operations: list[Operation]) -> set[str]:
-    """Collect qubit base names from GateOperation/CallBlockOperation operands."""
+def _collect_all_qubit_names(operations: list[Operation]) -> set[str]:
+    """Collect qubit names from all operation types."""
     names: set[str] = set()
     for op in operations:
         if isinstance(op, GateOperation):
@@ -682,31 +682,6 @@ def _collect_gate_qubit_names(operations: list[Operation]) -> set[str]:
                     and v.type.is_quantum()
                 ):
                     names.add(_resolve_qubit_base_name(v))
-        elif isinstance(op, ForOperation):
-            names.update(_collect_gate_qubit_names(op.operations))
-        elif isinstance(op, IfOperation):
-            names.update(_collect_gate_qubit_names(op.true_operations))
-            names.update(_collect_gate_qubit_names(op.false_operations))
-        elif isinstance(op, ForItemsOperation):
-            names.update(_collect_gate_qubit_names(op.operations))
-    return names
-
-
-def _collect_all_qubit_names(operations: list[Operation]) -> set[str]:
-    """Collect qubit names from all operation types (for IfOperation branches)."""
-    names: set[str] = set()
-    for op in operations:
-        if isinstance(op, GateOperation):
-            for v in op.operands:
-                names.add(v.name)
-        elif isinstance(op, CallBlockOperation):
-            for v in op.operands[1:]:
-                if (
-                    hasattr(v, "type")
-                    and hasattr(v.type, "is_quantum")
-                    and v.type.is_quantum()
-                ):
-                    names.add(v.name)
         elif isinstance(op, ControlledUOperation):
             for v in op.operands[1:]:
                 if hasattr(v, "name"):
@@ -1349,7 +1324,7 @@ def _simulate_parallel_depth_concrete(
             )
             iterations = sp.Symbol("|while|", integer=True, positive=True)
             increase = inner_depth * iterations
-            body_qubits = _collect_gate_qubit_names(op.operations)
+            body_qubits = _collect_all_qubit_names(op.operations)
             current_max = _get_max_depth(qubit_depths)
             new_max = current_max + increase
             for qid in set(qubit_depths) | body_qubits:
@@ -1545,9 +1520,9 @@ def _simulate_parallel_depth_concrete(
 
             # Expand array operand names to element-level qubit IDs
             raw_names = [
-                _concretize_qubit_name(v.name, var_env)
+                _concretize_qubit_operand(v, block, call_context, var_env)
                 for v in op.operands
-                if hasattr(v, "name")
+                if hasattr(v, "name") and hasattr(v, "type") and v.type.is_quantum()
             ]
             qubit_ids: list[str] = []
             for name in raw_names:
@@ -1696,23 +1671,20 @@ def _body_has_for_items_or_while(operations: list[Operation]) -> bool:
     return False
 
 
-def _has_parametric_loop_with_pre_overlap(
+def _has_parametric_loop_with_surrounding_overlap(
     operations: list[Operation],
     block: Any,
     call_context: dict[str, Any],
     loop_var_symbols: dict[str, sp.Symbol],
     loop_context: LoopContext,
 ) -> bool:
-    """Detect parametric ForOp whose body touches qubits already touched before it.
+    """Detect parametric ForOp whose body shares qubits with surrounding ops.
 
-    Only triggers when neither the pre-loop operations nor the loop body
-    contain ForItemsOperation or WhileOperation, because
+    Checks both pre-loop and post-loop operations for qubit overlap with
+    the loop body.  Only triggers when neither the surrounding operations
+    nor the loop body contain ForItemsOperation or WhileOperation, because
     _estimate_by_full_block_sampling cannot correctly handle the
     symbolic/concrete qubit name mismatch those produce.
-
-    The guard is scoped per candidate ForOperation (pre + body only),
-    not the entire operations list, to avoid over-conservatively disabling
-    the overlap correction when unrelated ForItems/While exist later.
     """
     for idx, op in enumerate(operations):
         if not isinstance(op, ForOperation) or len(op.operands) < 2:
@@ -1741,20 +1713,27 @@ def _has_parametric_loop_with_pre_overlap(
         )
         if not parametric_syms:
             continue  # not a parametric loop
-        # Guard: skip if pre-loop ops or loop body contain ForItems/While,
-        # as full-block sampling would mix symbolic and concrete qubit names.
-        if _body_has_for_items_or_while(
-            operations[:idx]
-        ) or _body_has_for_items_or_while(op.operations):
+        # Guard: skip if pre-loop ops, loop body, or post-loop ops
+        # contain ForItems/While, as full-block sampling would mix
+        # symbolic and concrete qubit names.
+        if (
+            _body_has_for_items_or_while(operations[:idx])
+            or _body_has_for_items_or_while(op.operations)
+            or _body_has_for_items_or_while(operations[idx + 1 :])
+        ):
             continue
         # Reuse existing _collect_all_qubit_names (handles Gate/CallBlock/If/For etc.)
         pre_qubits = _to_base_qubit_names(
             _collect_all_qubit_names(operations[:idx])
         )
+        post_qubits = _to_base_qubit_names(
+            _collect_all_qubit_names(operations[idx + 1 :])
+        )
         body_qubits = _to_base_qubit_names(
             _collect_all_qubit_names(op.operations)
         )
-        if pre_qubits & body_qubits:
+        surrounding_qubits = pre_qubits | post_qubits
+        if surrounding_qubits & body_qubits:
             return True
     return False
 
@@ -1961,7 +1940,7 @@ def _estimate_parallel_depth(
     # simulation).
     use_full_block = _has_binop_name_collisions(
         operations
-    ) or _has_parametric_loop_with_pre_overlap(
+    ) or _has_parametric_loop_with_surrounding_overlap(
         operations, block, call_context, loop_var_symbols, loop_context
     )
     if use_full_block:
@@ -2115,7 +2094,7 @@ def _estimate_parallel_depth(
                 increase = inner_depth * iterations
                 current_max = _get_max_depth(qubit_depths)
                 new_max = current_max + increase
-                body_qubits = _collect_gate_qubit_names(op.operations)
+                body_qubits = _collect_all_qubit_names(op.operations)
                 for qid in set(qubit_depths) | body_qubits:
                     qubit_depths[qid] = new_max
 
@@ -2346,7 +2325,7 @@ def _handle_for_parallel(
         iterations = sp.Symbol("iter", integer=True, positive=True)
         current_max = _get_max_depth(qubit_depths)
         new_max = current_max + increase * iterations
-        body_qubits = _collect_gate_qubit_names(op.operations)
+        body_qubits = _collect_all_qubit_names(op.operations)
         for qid in set(qubit_depths) | body_qubits:
             qubit_depths[qid] = new_max
         return
@@ -2361,7 +2340,7 @@ def _handle_for_parallel(
         local_block,
     ) = _prepare_for_loop(op, block, call_context, loop_var_symbols, loop_context)
 
-    body_qubits = _collect_gate_qubit_names(op.operations)
+    body_qubits = _collect_all_qubit_names(op.operations)
 
     # Collect free parametric symbols from loop bounds
     all_bound_syms = (
@@ -2694,7 +2673,25 @@ def _handle_controlled_u_parallel(
     )
 
     # Get all qubit names involved (control + target)
-    all_qubit_names = [v.name for v in op.operands if hasattr(v, "name")]
+    if op.has_index_spec:
+        vector = op.operands[1]
+        vector_name = vector.name
+        if vector.shape:
+            shape_expr = value_to_expr(
+                vector.shape[0], block, call_context, loop_var_symbols
+            )
+            if shape_expr.is_number:
+                all_qubit_names = [
+                    f"{vector_name}[{i}]" for i in range(int(shape_expr))
+                ]
+            else:
+                all_qubit_names = [vector_name]
+        else:
+            all_qubit_names = [vector_name]
+    else:
+        all_qubit_names = [v.name for v in op.control_operands] + [
+            v.name for v in op.target_operands
+        ]
 
     # All involved qubits get max(current) + gate_depth
     max_current = CircuitDepth.zero()

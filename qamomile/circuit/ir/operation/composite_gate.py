@@ -42,8 +42,8 @@ class ResourceMetadata:
         total_gates, indicating potentially missing gate category data.
 
     Attributes:
-        query_complexity: Number of oracle/unitary queries.
-            Informational only; not consumed by estimators.
+        query_complexity: Number of oracle/unitary queries per call.
+            Used by gate_counter to produce oracle_queries metric.
         t_gates: Estimated T-gate count (None -> 0)
         ancilla_qubits: Number of ancilla qubits required
         total_gates: Total number of gates. If None and sub-categories

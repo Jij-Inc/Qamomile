@@ -87,6 +87,10 @@ class ResourceEstimate:
                     name: _subs_eval(val)
                     for name, val in self.gates.oracle_calls.items()
                 },
+                oracle_queries={
+                    name: _subs_eval(val)
+                    for name, val in self.gates.oracle_queries.items()
+                },
             ),
             depth=CircuitDepth(
                 total_depth=_subs_eval(self.depth.total_depth),
@@ -150,6 +154,10 @@ class ResourceEstimate:
                     name: str(val)
                     for name, val in self.gates.oracle_calls.items()
                 },
+                "oracle_queries": {
+                    name: str(val)
+                    for name, val in self.gates.oracle_queries.items()
+                },
             },
             "depth": {
                 "total_depth": str(self.depth.total_depth),
@@ -178,6 +186,10 @@ class ResourceEstimate:
         if self.gates.oracle_calls:
             lines.append("  Oracle Calls:")
             for name, count in self.gates.oracle_calls.items():
+                lines.append(f"    {name}: {count}")
+        if self.gates.oracle_queries:
+            lines.append("  Oracle Queries:")
+            for name, count in self.gates.oracle_queries.items():
                 lines.append(f"    {name}: {count}")
         lines.extend([
             "  Depth:",
@@ -307,6 +319,10 @@ def estimate_resources(
                     name: count.subs(all_subs)
                     for name, count in gate_count.oracle_calls.items()
                 },
+                oracle_queries={
+                    name: count.subs(all_subs)
+                    for name, count in gate_count.oracle_queries.items()
+                },
             )
             circuit_depth = circuit_depth.substitute(all_subs)
             qubit_count = qubit_count.subs(all_subs)
@@ -330,6 +346,8 @@ def estimate_resources(
     ]:
         all_symbols.update(expr.free_symbols)
     for oracle_expr in gate_count.oracle_calls.values():
+        all_symbols.update(oracle_expr.free_symbols)
+    for oracle_expr in gate_count.oracle_queries.values():
         all_symbols.update(oracle_expr.free_symbols)
 
     parameters = {str(sym): sym for sym in sorted(all_symbols, key=str)}

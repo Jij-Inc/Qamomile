@@ -35,6 +35,22 @@ def assert_gate_counts(actual: GateCount, expected: GateCount) -> None:
         f"actual={set(actual.oracle_calls.keys())}, "
         f"expected={set(expected.oracle_calls.keys())}"
     )
+    # Only check oracle_queries when expected specifies them
+    if expected.oracle_queries:
+        for name, expected_count in expected.oracle_queries.items():
+            assert name in actual.oracle_queries, f"Missing oracle query: {name}"
+            assert_expr_equal(
+                actual.oracle_queries[name],
+                expected_count,
+                f"oracle_queries[{name}]",
+            )
+        assert set(actual.oracle_queries.keys()) == set(
+            expected.oracle_queries.keys()
+        ), (
+            f"oracle_queries keys mismatch: "
+            f"actual={set(actual.oracle_queries.keys())}, "
+            f"expected={set(expected.oracle_queries.keys())}"
+        )
 
 
 def assert_depth(actual: CircuitDepth, expected: CircuitDepth) -> None:
