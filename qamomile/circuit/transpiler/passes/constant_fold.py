@@ -190,17 +190,13 @@ class ConstantFoldingPass(Pass[Block, Block]):
                 new_operands.append(operand)
 
         # Also substitute GateOperation.theta if it references a folded value
-        new_theta = None
-        theta_changed = False
+        replacements: dict[str, object] = {}
+        if changed:
+            replacements["operands"] = new_operands
         if isinstance(op, GateOperation) and isinstance(op.theta, Value):
             if op.theta.uuid in folded_values:
-                new_theta = folded_values[op.theta.uuid]
-                theta_changed = True
+                replacements["theta"] = folded_values[op.theta.uuid]
 
-        if changed and theta_changed:
-            return dataclasses.replace(op, operands=new_operands, theta=new_theta)
-        elif changed:
-            return dataclasses.replace(op, operands=new_operands)
-        elif theta_changed:
-            return dataclasses.replace(op, theta=new_theta)
+        if replacements:
+            return dataclasses.replace(op, **replacements)
         return op
