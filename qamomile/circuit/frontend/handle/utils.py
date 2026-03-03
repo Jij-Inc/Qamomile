@@ -8,8 +8,10 @@ if TYPE_CHECKING:
     from .array import Vector
     from .handle import Handle
 
+__all__ = ["get_size"]
 
-def _get_size(arr: Vector[Handle]) -> int:
+
+def get_size(arr: Vector[Handle]) -> int:
     """Get array size as Python int.
 
     Args:

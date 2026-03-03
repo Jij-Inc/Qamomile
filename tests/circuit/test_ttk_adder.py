@@ -161,12 +161,14 @@ class TestTTKInplaceAdder:
 
     @pytest.mark.parametrize("n", [1, 3, 5, 10, 100])
     def test_class_attributes(self, n: int) -> None:
+        """TTKInplaceAdder has correct name, gate_type, and qubit count."""
         adder = TTKInplaceAdder(n)
         assert adder.custom_name == "ttk_adder"
         assert adder.gate_type == CompositeGateType.CUSTOM
         assert adder.num_target_qubits == 2 * n + 1
 
     def test_invalid_n(self) -> None:
+        """n < 1 raises ValueError."""
         with pytest.raises(ValueError, match="n must be >= 1"):
             TTKInplaceAdder(0)
         with pytest.raises(ValueError, match="n must be >= 1"):
@@ -189,6 +191,7 @@ class TestTTKInplaceAdder:
 
     @pytest.mark.parametrize("n", [1, 3, 5, 10, 100])
     def test_resources(self, n: int) -> None:
+        """Resource counts match theoretical gate decomposition."""
         r = TTKInplaceAdder(n)._resources()
         expected = _expected_resources(n)
         for key, value in expected.items():
@@ -225,6 +228,7 @@ class TestTTKAdderCorrectness:
 
     @pytest.mark.parametrize("n, a_val, b_val", _exhaustive_addition_params())
     def test_exhaustive_addition(self, n: int, a_val: int, b_val: int) -> None:
+        """Statevector matches expected basis state for all n-bit input pairs."""
         pytest.importorskip("qiskit")
         pytest.importorskip("qiskit_aer")
 
@@ -244,6 +248,7 @@ class TestTTKAdderCorrectness:
 
     @pytest.mark.parametrize("n, seed", _cross_validation_params())
     def test_random_vs_qiskit_reference(self, n: int, seed: int) -> None:
+        """Qamomile adder matches independent Qiskit reference implementation."""
         pytest.importorskip("qiskit")
         pytest.importorskip("qiskit_aer")
 

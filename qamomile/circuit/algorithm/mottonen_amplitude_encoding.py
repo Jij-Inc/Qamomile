@@ -22,8 +22,8 @@ import numpy as np
 
 from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.handle import Float, Qubit, Vector
+from qamomile.circuit.frontend.handle.utils import get_size
 from qamomile.circuit.frontend.operation.qubit_gates import cx, ry
-from qamomile.circuit.frontend.handle.utils import _get_size
 from qamomile.circuit.frontend.tracer import Tracer, trace
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateType,
@@ -273,8 +273,8 @@ class MottonenAmplitudeEncoding(CompositeGate):
             return super()._build_decomposition_block(target_qubits, strategy_name)
 
         from qamomile.circuit.ir.block_value import BlockValue
-        from qamomile.circuit.ir.value import Value
         from qamomile.circuit.ir.types.primitives import QubitType
+        from qamomile.circuit.ir.value import Value
 
         decomp_tracer = Tracer()
         input_values: list[Value] = []
@@ -340,7 +340,7 @@ def _concrete_amplitude_encoding(
     amplitudes: Sequence[float] | np.ndarray,
 ) -> Vector[Qubit]:
     """Apply Möttönen amplitude encoding with concrete amplitudes."""
-    n = _get_size(qubits)
+    n = get_size(qubits)
     gate = MottonenAmplitudeEncoding(amplitudes)
     if gate.num_target_qubits != n:
         raise ValueError(
@@ -360,7 +360,7 @@ def _parametric_amplitude_encoding(
     thetas: Vector[Float],
 ) -> Vector[Qubit]:
     """Apply Möttönen amplitude encoding with parametric rotation angles."""
-    n = _get_size(qubits)
+    n = get_size(qubits)
     gate = MottonenAmplitudeEncoding(thetas=thetas, num_qubits=n)
     qubit_list: list[Qubit] = [qubits[i] for i in range(n)]
     result = gate(*qubit_list)

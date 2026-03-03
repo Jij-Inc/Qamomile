@@ -24,7 +24,7 @@ from __future__ import annotations
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.handle import Qubit, Vector
-from qamomile.circuit.frontend.handle.utils import _get_size
+from qamomile.circuit.frontend.handle.utils import get_size
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateType,
     ResourceMetadata,
@@ -173,8 +173,8 @@ def ttk_adder(
     Returns:
         Tuple of (b, a, z) after addition.
     """
-    n_b = _get_size(b)
-    n_a = _get_size(a)
+    n_b = get_size(b)
+    n_a = get_size(a)
     if n_b != n_a:
         raise ValueError(
             f"Registers a and b must have the same size, got a={n_a}, b={n_b}"

@@ -65,12 +65,14 @@ def _assert_amplitudes_match(qc, amplitudes: list[float]) -> None:
 
 class TestMottonenAmplitudeEncoding:
     def test_gate_metadata(self) -> None:
+        """Gate has correct custom_name and gate_type."""
         gate = MottonenAmplitudeEncoding([1.0, 0.0])
         assert gate.custom_name == "mottonen_amplitude_encoding"
         assert gate.gate_type == CompositeGateType.CUSTOM
 
     @pytest.mark.parametrize("n_qubits", [1, 2, 3, 4])
     def test_resources(self, n_qubits: int) -> None:
+        """Resource counts match expected RY and CNOT gate counts."""
         amplitudes = np.ones(2**n_qubits)
         gate = MottonenAmplitudeEncoding(amplitudes)
         assert gate.num_target_qubits == n_qubits
@@ -89,6 +91,7 @@ class TestMottonenAmplitudeEncoding:
         ],
     )
     def test_invalid_amplitudes(self, amplitudes: list[float], match: str) -> None:
+        """Invalid amplitude vectors raise ValueError."""
         with pytest.raises(ValueError, match=match):
             MottonenAmplitudeEncoding(amplitudes)
 
@@ -99,11 +102,19 @@ class TestMottonenAmplitudeEncoding:
 
 
 class TestComputeMottonenThetas:
-    @pytest.mark.parametrize("n_qubits", [1, 2, 3])
-    def test_output_length(self, n_qubits: int) -> None:
+    @pytest.mark.parametrize(
+        "n_qubits, expected",
+        [
+            (1, np.array([np.pi / 2])),
+            (2, np.array([np.pi / 2, np.pi / 2, 0.0])),
+            (3, np.array([np.pi / 2, np.pi / 2, 0.0, np.pi / 2, 0.0, 0.0, 0.0])),
+        ],
+    )
+    def test_output_values(self, n_qubits: int, expected: np.ndarray) -> None:
+        """Output theta vector matches analytical values for uniform amplitudes."""
         amplitudes = np.ones(2**n_qubits)
         thetas = compute_mottonen_thetas(amplitudes)
-        assert len(thetas) == 2**n_qubits - 1
+        np.testing.assert_allclose(thetas, expected, atol=1e-12)
 
     @pytest.mark.parametrize(
         "amplitudes, match",
@@ -113,6 +124,7 @@ class TestComputeMottonenThetas:
         ],
     )
     def test_invalid_amplitudes(self, amplitudes: list[float], match: str) -> None:
+        """Invalid amplitude vectors raise ValueError."""
         with pytest.raises(ValueError, match=match):
             compute_mottonen_thetas(amplitudes)
 
@@ -137,16 +149,18 @@ class TestConcreteEncoding:
         ],
     )
     def test_fixed_amplitudes(self, qiskit_transpiler, amplitudes: list[float]) -> None:
+        """Concrete encoding produces correct statevector for known amplitudes."""
         qc = _build_encoding_circuit(amplitudes, qiskit_transpiler)
         _assert_amplitudes_match(qc, amplitudes)
 
     @pytest.mark.parametrize("n_qubits", [1, 2, 3])
-    def test_random_amplitudes(self, qiskit_transpiler, n_qubits: int) -> None:
-        rng = np.random.default_rng(42)
-        for _ in range(5):
-            amplitudes = rng.standard_normal(2**n_qubits).tolist()
-            qc = _build_encoding_circuit(amplitudes, qiskit_transpiler)
-            _assert_amplitudes_match(qc, amplitudes)
+    @pytest.mark.parametrize("seed", [901 + i for i in range(5)])
+    def test_random_amplitudes(self, qiskit_transpiler, n_qubits: int, seed: int) -> None:
+        """Concrete encoding produces correct statevector for random amplitudes."""
+        rng = np.random.default_rng(seed)
+        amplitudes = rng.standard_normal(2**n_qubits).tolist()
+        qc = _build_encoding_circuit(amplitudes, qiskit_transpiler)
+        _assert_amplitudes_match(qc, amplitudes)
 
     def test_qubit_mismatch_raises(self) -> None:
         """Qubit count / amplitude count mismatch raises ValueError."""
@@ -194,16 +208,102 @@ class TestParametricEncoding:
         ],
     )
     def test_fixed_amplitudes(self, qiskit_transpiler, amplitudes: list[float]) -> None:
+        """Parametric encoding produces correct statevector for known amplitudes."""
         n_qubits = int(np.log2(len(amplitudes)))
         thetas = compute_mottonen_thetas(amplitudes)
         qc = _build_parametric_circuit(n_qubits, thetas.tolist(), qiskit_transpiler)
         _assert_amplitudes_match(qc, amplitudes)
 
     @pytest.mark.parametrize("n_qubits", [1, 2, 3])
-    def test_random_amplitudes(self, qiskit_transpiler, n_qubits: int) -> None:
-        rng = np.random.default_rng(123)
-        for _ in range(3):
-            amplitudes = rng.standard_normal(2**n_qubits).tolist()
+    @pytest.mark.parametrize("seed", [901 + i for i in range(3)])
+    def test_random_amplitudes(self, qiskit_transpiler, n_qubits: int, seed: int) -> None:
+        """Parametric encoding produces correct statevector for random amplitudes."""
+        rng = np.random.default_rng(seed)
+        amplitudes = rng.standard_normal(2**n_qubits).tolist()
+        thetas = compute_mottonen_thetas(amplitudes)
+        qc = _build_parametric_circuit(n_qubits, thetas.tolist(), qiskit_transpiler)
+        _assert_amplitudes_match(qc, amplitudes)
+
+
+# ---------------------------------------------------------------------------
+# Parametric unbound encoding tests
+# ---------------------------------------------------------------------------
+
+
+class TestParametricUnboundEncoding:
+    """Tests for parametric amplitude encoding without bindings."""
+
+    def test_unbound_transpile_has_parameters(self, qiskit_transpiler) -> None:
+        """Transpile with parameters= produces a parameterized Qiskit circuit."""
+        n_qubits = 2
+
+        @qm.qkernel
+        def _kernel(t: qm.Vector[qm.Float]) -> qm.Vector[qm.Bit]:
+            q = qm.qubit_array(n_qubits, "q")
+            q = qm.amplitude_encoding(q, t)
+            return qm.measure(q)
+
+        executable = qiskit_transpiler.transpile(_kernel, parameters=["t"])
+        circuit = executable.compiled_quantum[0].circuit
+        assert len(circuit.parameters) > 0
+        assert len(circuit.parameters) == 2**n_qubits - 1
+
+    @pytest.mark.parametrize(
+        "amplitudes",
+        [
+            pytest.param([1.0, 0.0], id="1q-basis-0"),
+            pytest.param([0.0, 1.0], id="1q-basis-1"),
+            pytest.param([1.0, 0.0, 0.0, 0.0], id="2q-00"),
+            pytest.param([1.0, 0.0, 0.0, 1.0], id="2q-bell-like"),
+            pytest.param([1.0, 1.0, 1.0, 1.0], id="2q-uniform"),
+        ],
+    )
+    def test_late_binding_correctness(self, qiskit_transpiler, amplitudes) -> None:
+        """Unbound circuit + assign_parameters produces correct statevector."""
+        n_qubits = int(np.log2(len(amplitudes)))
+
+        @qm.qkernel
+        def _kernel(t: qm.Vector[qm.Float]) -> qm.Vector[qm.Bit]:
+            q = qm.qubit_array(n_qubits, "q")
+            q = qm.amplitude_encoding(q, t)
+            return qm.measure(q)
+
+        executable = qiskit_transpiler.transpile(_kernel, parameters=["t"])
+        circuit = executable.compiled_quantum[0].circuit
+
+        thetas = compute_mottonen_thetas(amplitudes)
+        param_dict = {
+            p: thetas[i]
+            for i, p in enumerate(sorted(circuit.parameters, key=lambda p: p.name))
+        }
+        bound_circuit = circuit.assign_parameters(param_dict)
+        _assert_amplitudes_match(bound_circuit, amplitudes)
+
+    def test_circuit_reuse_with_different_amplitudes(self, qiskit_transpiler) -> None:
+        """Same parameterized circuit can be reused with different amplitudes."""
+        n_qubits = 2
+
+        @qm.qkernel
+        def _kernel(t: qm.Vector[qm.Float]) -> qm.Vector[qm.Bit]:
+            q = qm.qubit_array(n_qubits, "q")
+            q = qm.amplitude_encoding(q, t)
+            return qm.measure(q)
+
+        executable = qiskit_transpiler.transpile(_kernel, parameters=["t"])
+        circuit = executable.compiled_quantum[0].circuit
+
+        amplitude_sets = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+        ]
+        for amplitudes in amplitude_sets:
             thetas = compute_mottonen_thetas(amplitudes)
-            qc = _build_parametric_circuit(n_qubits, thetas.tolist(), qiskit_transpiler)
-            _assert_amplitudes_match(qc, amplitudes)
+            param_dict = {
+                p: thetas[i]
+                for i, p in enumerate(
+                    sorted(circuit.parameters, key=lambda p: p.name)
+                )
+            }
+            bound_circuit = circuit.assign_parameters(param_dict)
+            _assert_amplitudes_match(bound_circuit, amplitudes)

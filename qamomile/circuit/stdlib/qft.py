@@ -35,7 +35,7 @@ import math
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.handle import Qubit, Vector
-from qamomile.circuit.frontend.handle.utils import _get_size
+from qamomile.circuit.frontend.handle.utils import get_size
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateType,
     ResourceMetadata,
@@ -282,7 +282,7 @@ def qft(qubits: Vector[Qubit]) -> Vector[Qubit]:
             qubits = qft(qubits)
             return qubits
     """
-    n = _get_size(qubits)
+    n = get_size(qubits)
     qft_gate = QFT(n)
 
     # Get individual qubits from vector
@@ -316,7 +316,7 @@ def iqft(qubits: Vector[Qubit]) -> Vector[Qubit]:
             qubits = iqft(qubits)
             return qubits
     """
-    n = _get_size(qubits)
+    n = get_size(qubits)
     iqft_gate = IQFT(n)
 
     # Get individual qubits from vector

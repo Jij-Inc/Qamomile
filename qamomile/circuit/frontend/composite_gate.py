@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import abc
 import dataclasses
-from typing import TYPE_CHECKING, Callable, ClassVar, Sequence, Any, overload
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, Sequence, overload
 
 from qamomile.circuit.frontend.handle.primitives import Qubit
-from qamomile.circuit.frontend.tracer import get_current_tracer, trace, Tracer
+from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
@@ -16,9 +16,9 @@ from qamomile.circuit.ir.operation.composite_gate import (
 from qamomile.circuit.ir.value import Value
 
 if TYPE_CHECKING:
-    from qamomile.circuit.ir.block_value import BlockValue
-    from qamomile.circuit.frontend.handle.array import Vector
     from qamomile.circuit.frontend.decomposition import DecompositionStrategy
+    from qamomile.circuit.frontend.handle.array import Vector
+    from qamomile.circuit.ir.block_value import BlockValue
 
 
 class CompositeGate(abc.ABC):
@@ -59,7 +59,7 @@ class CompositeGate(abc.ABC):
         ```python
         # Factory function pattern
         def qft(qubits: Vector[Qubit]) -> Vector[Qubit]:
-            n = _get_size(qubits)
+            n = get_size(qubits)
             return QFT(n)(qubits)
 
         # Direct class usage
@@ -299,10 +299,10 @@ class CompositeGate(abc.ABC):
         Returns:
             BlockValue containing the traced operations, or None
         """
-        from qamomile.circuit.ir.block_value import BlockValue
         from qamomile.circuit.frontend.handle.array import Vector
-        from qamomile.circuit.ir.value import ArrayValue, Value
-        from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+        from qamomile.circuit.ir.block_value import BlockValue
+        from qamomile.circuit.ir.types.primitives import QubitType
+        from qamomile.circuit.ir.value import Value
 
         # Determine which decomposition method to use
         strategy = self.get_strategy(strategy_name) if strategy_name else None
@@ -635,8 +635,8 @@ def composite_gate(
     Returns:
         A CompositeGate instance that can be called like a gate function.
     """
-    from qamomile.circuit.frontend.qkernel import QKernel
     from qamomile.circuit.frontend.handle import Qubit
+    from qamomile.circuit.frontend.qkernel import QKernel
 
     def decorator(
         kernel_or_func: Callable,
