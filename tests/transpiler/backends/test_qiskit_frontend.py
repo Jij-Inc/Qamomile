@@ -418,6 +418,71 @@ class TestSingleQubitGatesFrontend:
         )
         assert statevectors_equal(sv, expected)
 
+    # -- Z (Pauli-Z) --
+
+    def test_z_creation(self):
+        """Z gate transpiles to a Qiskit circuit containing 'z' instruction."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.z(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert "z" in _gate_names(qc)
+
+    def test_z_on_zero(self):
+        """Z|0⟩ = |0⟩ (no change on computational basis |0⟩)."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.z(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        expected = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["Z"].matrix_fn()
+        )
+        assert statevectors_equal(sv, expected)
+
+    def test_z_on_one(self):
+        """Z|1⟩ = −|1⟩ (phase flip on |1⟩)."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            q = qmc.z(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        state_after_x = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["X"].matrix_fn()
+        )
+        expected = compute_expected_statevector(
+            state_after_x, GATE_SPECS["Z"].matrix_fn()
+        )
+        assert statevectors_equal(sv, expected)
+
+    def test_z_on_plus(self):
+        """Z|+⟩ = |−⟩ (phase flip converts |+⟩ to |−⟩)."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            q = qmc.z(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        expected = minus_state()
+        assert statevectors_equal(sv, expected)
+
 
 class TestTwoQubitGatesFrontend:
     """Test each two-qubit gate through the full frontend pipeline."""
@@ -722,6 +787,119 @@ class TestTwoQubitGatesFrontend:
         sv = _run_statevector(qc)
         expected = compute_expected_statevector(
             computational_basis_state(2, 1), GATE_SPECS["SWAP"].matrix_fn()
+        )
+        assert statevectors_equal(sv, expected)
+
+
+class TestThreeQubitGatesFrontend:
+    """Test each three-qubit gate through the full frontend pipeline."""
+
+    # -- CCX (Toffoli) --
+
+    def test_ccx_creation(self):
+        """CCX gate transpiles to a Qiskit circuit containing 'ccx' instruction."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert "ccx" in _gate_names(qc)
+
+    @pytest.mark.parametrize(
+        "x_targets, basis_idx",
+        [
+            pytest.param([], 0, id="000"),
+            pytest.param([0], 1, id="001"),
+            pytest.param([1], 2, id="010"),
+            pytest.param([0, 1], 3, id="011_flips"),
+            pytest.param([2], 4, id="100"),
+            pytest.param([0, 2], 5, id="101"),
+            pytest.param([1, 2], 6, id="110"),
+            pytest.param([0, 1, 2], 7, id="111_flips"),
+        ],
+    )
+    def test_ccx_basis_state(self, x_targets, basis_idx):
+        """CCX on all 8 computational basis states; flips target only when both controls are |1⟩."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
+            return qmc.measure(q)
+
+        @qmc.qkernel
+        def circuit_x0() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0] = qmc.x(q[0])
+            q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
+            return qmc.measure(q)
+
+        @qmc.qkernel
+        def circuit_x1() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[1] = qmc.x(q[1])
+            q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
+            return qmc.measure(q)
+
+        @qmc.qkernel
+        def circuit_x01() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0] = qmc.x(q[0])
+            q[1] = qmc.x(q[1])
+            q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
+            return qmc.measure(q)
+
+        @qmc.qkernel
+        def circuit_x2() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[2] = qmc.x(q[2])
+            q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
+            return qmc.measure(q)
+
+        @qmc.qkernel
+        def circuit_x02() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0] = qmc.x(q[0])
+            q[2] = qmc.x(q[2])
+            q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
+            return qmc.measure(q)
+
+        @qmc.qkernel
+        def circuit_x12() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[1] = qmc.x(q[1])
+            q[2] = qmc.x(q[2])
+            q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
+            return qmc.measure(q)
+
+        @qmc.qkernel
+        def circuit_x012() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0] = qmc.x(q[0])
+            q[1] = qmc.x(q[1])
+            q[2] = qmc.x(q[2])
+            q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
+            return qmc.measure(q)
+
+        kernels = {
+            0: circuit,
+            1: circuit_x0,
+            2: circuit_x1,
+            3: circuit_x01,
+            4: circuit_x2,
+            5: circuit_x02,
+            6: circuit_x12,
+            7: circuit_x012,
+        }
+
+        _, qc = _transpile_and_get_circuit(kernels[basis_idx])
+        sv = _run_statevector(qc)
+        expected = compute_expected_statevector(
+            computational_basis_state(3, basis_idx),
+            GATE_SPECS["TOFFOLI"].matrix_fn(),
         )
         assert statevectors_equal(sv, expected)
 
