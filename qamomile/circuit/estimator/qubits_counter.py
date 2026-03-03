@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING, overload
 
 import sympy as sp
 
-from qamomile.circuit.estimator._utils import _strip_nonneg_max
-from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
+from qamomile.circuit.estimator._utils import BINOP_TO_SYMPY, _strip_nonneg_max
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
 from qamomile.circuit.ir.operation.control_flow import (
@@ -23,15 +23,6 @@ from qamomile.circuit.ir.value import ArrayValue, Value
 
 if TYPE_CHECKING:
     from qamomile.circuit.ir.block_value import BlockValue
-
-BINOP_TO_SYMPY = {
-    BinOpKind.ADD: lambda l, r: l + r,
-    BinOpKind.SUB: lambda l, r: l - r,
-    BinOpKind.MUL: lambda l, r: l * r,
-    BinOpKind.DIV: lambda l, r: l / r,
-    BinOpKind.FLOORDIV: lambda l, r: sp.floor(l / r),
-    BinOpKind.POW: lambda l, r: l**r,
-}
 
 WHILE_SYMBOL = sp.Symbol("|while|")
 

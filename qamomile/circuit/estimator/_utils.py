@@ -4,6 +4,17 @@ from __future__ import annotations
 
 import sympy as sp
 
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind
+
+BINOP_TO_SYMPY = {
+    BinOpKind.ADD: lambda l, r: l + r,
+    BinOpKind.SUB: lambda l, r: l - r,
+    BinOpKind.MUL: lambda l, r: l * r,
+    BinOpKind.DIV: lambda l, r: l / r,
+    BinOpKind.FLOORDIV: lambda l, r: sp.floor(l / r),
+    BinOpKind.POW: lambda l, r: l**r,
+}
+
 
 def _strip_nonneg_max(expr: sp.Expr) -> sp.Expr:
     """Canonicalize Max(0, x) -> x in resource estimation expressions.

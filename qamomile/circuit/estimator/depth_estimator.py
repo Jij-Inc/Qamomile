@@ -58,7 +58,7 @@ class _UnresolvableForOpError(Exception):
 LoopContext = list[tuple[str, sp.Expr, sp.Expr, sp.Expr]]
 
 
-from qamomile.circuit.estimator._utils import _strip_nonneg_max
+from qamomile.circuit.estimator._utils import BINOP_TO_SYMPY, _strip_nonneg_max
 
 
 @dataclass
@@ -700,6 +700,43 @@ def _get_max_depth(qubit_depths: QubitDepthMap) -> CircuitDepth:
 
 
 
+def _resolve_value_expr(
+    v: Any,
+    symbol_map: dict[str, sp.Expr],
+    block: Block | None = None,
+    call_context: dict[str, Any] | None = None,
+    loop_var_symbols: dict[str, sp.Symbol] | None = None,
+) -> sp.Expr:
+    """symbol_map-first Value -> SymPy resolution. Falls back to value_to_expr."""
+    if isinstance(v, Value) and v.uuid in symbol_map:
+        return symbol_map[v.uuid]
+    return value_to_expr(v, block, call_context, loop_var_symbols)
+
+
+def _qubit_key(
+    v: Any,
+    symbol_map: dict[str, sp.Expr],
+    block: Block | None = None,
+    call_context: dict[str, Any] | None = None,
+    loop_var_symbols: dict[str, sp.Symbol] | None = None,
+) -> str:
+    """Normalized qubit key. Array indices resolved via SymPy to avoid BinOp aliasing."""
+    if (
+        hasattr(v, "parent_array")
+        and v.parent_array is not None
+        and hasattr(v, "element_indices")
+        and v.element_indices
+    ):
+        idx_parts = []
+        for idx in v.element_indices:
+            expr = _resolve_value_expr(
+                idx, symbol_map, block, call_context, loop_var_symbols
+            )
+            idx_parts.append(str(expr))
+        return f"{v.parent_array.name}[{','.join(idx_parts)}]"
+    return v.name
+
+
 def _resolve_qubit_base_name(v: Any) -> str:
     """Resolve a Value to its base qubit name.
 
@@ -711,13 +748,22 @@ def _resolve_qubit_base_name(v: Any) -> str:
     return v.name
 
 
-def _collect_all_qubit_names(operations: list[Operation]) -> set[str]:
+def _collect_all_qubit_names(
+    operations: list[Operation],
+    symbol_map: dict[str, sp.Expr] | None = None,
+) -> set[str]:
     """Collect qubit names from all operation types."""
     names: set[str] = set()
+
+    def _name(v: Any) -> str:
+        if symbol_map is not None:
+            return _qubit_key(v, symbol_map)
+        return v.name
+
     for op in operations:
         if isinstance(op, GateOperation):
             for v in op.operands:
-                names.add(v.name)
+                names.add(_name(v))
         elif isinstance(op, CallBlockOperation):
             for v in op.operands[1:]:
                 if (
@@ -729,7 +775,7 @@ def _collect_all_qubit_names(operations: list[Operation]) -> set[str]:
         elif isinstance(op, ControlledUOperation):
             for v in op.operands[1:]:
                 if hasattr(v, "name"):
-                    names.add(v.name)
+                    names.add(_name(v))
         elif isinstance(op, CompositeGateOperation):
             for v in op.operands:
                 if (
@@ -737,22 +783,26 @@ def _collect_all_qubit_names(operations: list[Operation]) -> set[str]:
                     and hasattr(v, "type")
                     and v.type.is_quantum()
                 ):
-                    names.add(v.name)
+                    names.add(_name(v))
         elif isinstance(op, MeasureOperation):
-            names.add(op.operands[0].name)
+            names.add(_name(op.operands[0]))
         elif isinstance(op, MeasureVectorOperation):
             names.add(op.operands[0].name)
         elif isinstance(op, MeasureQFixedOperation):
             names.add(op.operands[0].name)
         elif isinstance(op, ForOperation):
-            names.update(_collect_all_qubit_names(op.operations))
+            names.update(_collect_all_qubit_names(op.operations, symbol_map))
         elif isinstance(op, WhileOperation):
-            names.update(_collect_all_qubit_names(op.operations))
+            names.update(_collect_all_qubit_names(op.operations, symbol_map))
         elif isinstance(op, IfOperation):
-            names.update(_collect_all_qubit_names(op.true_operations))
-            names.update(_collect_all_qubit_names(op.false_operations))
+            names.update(
+                _collect_all_qubit_names(op.true_operations, symbol_map)
+            )
+            names.update(
+                _collect_all_qubit_names(op.false_operations, symbol_map)
+            )
         elif isinstance(op, ForItemsOperation):
-            names.update(_collect_all_qubit_names(op.operations))
+            names.update(_collect_all_qubit_names(op.operations, symbol_map))
     return names
 
 
@@ -760,6 +810,7 @@ def _build_qubit_name_map(
     called_block: BlockValue,
     op_operands: list,
     offset: int = 1,
+    symbol_map: dict[str, sp.Expr] | None = None,
 ) -> dict[str, str]:
     """Build formal_name -> actual_name mapping for qubit arguments."""
     qubit_name_map: dict[str, str] = {}
@@ -771,7 +822,12 @@ def _build_qubit_name_map(
                 and hasattr(formal_input.type, "is_quantum")
                 and formal_input.type.is_quantum()
             ):
-                qubit_name_map[formal_input.name] = actual_arg.name
+                if symbol_map is not None:
+                    qubit_name_map[formal_input.name] = _qubit_key(
+                        actual_arg, symbol_map
+                    )
+                else:
+                    qubit_name_map[formal_input.name] = actual_arg.name
     return qubit_name_map
 
 
@@ -1935,6 +1991,7 @@ def _estimate_parallel_depth(
     loop_var_symbols: dict[str, sp.Symbol] | None = None,
     num_controls: int | sp.Expr = 0,
     value_depths: dict[str, CircuitDepth] | None = None,
+    symbol_map: dict[str, sp.Expr] | None = None,
 ) -> None:
     """Estimate parallel depth by tracking per-qubit depths.
 
@@ -1950,6 +2007,7 @@ def _estimate_parallel_depth(
         loop_var_symbols: Optional mapping from Value names to SymPy loop variable symbols
         num_controls: Number of control qubits (0 means no control)
         value_depths: Mutable mapping from Value UUID to depth (for measurement tracking)
+        symbol_map: Mutable mapping from Value UUID to SymPy expression (for BinOp resolution)
     """
     if loop_context is None:
         loop_context = []
@@ -1957,6 +2015,22 @@ def _estimate_parallel_depth(
         call_context = {}
     if loop_var_symbols is None:
         loop_var_symbols = {}
+    if symbol_map is None:
+        symbol_map = {}
+
+    # Pre-scan: register all BinOp results in symbol_map
+    for op in operations:
+        if isinstance(op, BinOp) and op.results:
+            lhs_expr = _resolve_value_expr(
+                op.lhs, symbol_map, block, call_context, loop_var_symbols
+            )
+            rhs_expr = _resolve_value_expr(
+                op.rhs, symbol_map, block, call_context, loop_var_symbols
+            )
+            if op.kind in BINOP_TO_SYMPY:
+                symbol_map[op.output.uuid] = BINOP_TO_SYMPY[op.kind](
+                    lhs_expr, rhs_expr
+                )
 
     # Use full-block concrete sampling when BinOp name collisions cause
     # qubit name aliasing, or when a parametric loop body shares qubits
@@ -2001,13 +2075,21 @@ def _estimate_parallel_depth(
         match op:
             case GateOperation():
                 gate_depth = _estimate_gate_depth(op, num_controls=num_controls)
-                qubit_ids = [v.name for v in op.operands]
+                qubit_ids = [
+                    _qubit_key(
+                        v, symbol_map, block, call_context, loop_var_symbols
+                    )
+                    for v in op.operands
+                ]
                 CircuitDepth.apply_gate_to_qubits(
                     qubit_depths, qubit_ids, gate_depth
                 )
 
             case MeasureOperation():
-                qubit_id = op.operands[0].name
+                qubit_id = _qubit_key(
+                    op.operands[0], symbol_map, block, call_context,
+                    loop_var_symbols,
+                )
                 current = qubit_depths.get(qubit_id, CircuitDepth.zero())
                 new_depth = current + _MEASURE_UNIT
                 qubit_depths[qubit_id] = new_depth
@@ -2091,6 +2173,7 @@ def _estimate_parallel_depth(
                     loop_var_symbols,
                     num_controls,
                     value_depths=value_depths,
+                    symbol_map=symbol_map,
                 )
 
             case WhileOperation():
@@ -2107,7 +2190,9 @@ def _estimate_parallel_depth(
                 increase = inner_depth * iterations
                 current_max = _get_max_depth(qubit_depths)
                 new_max = current_max + increase
-                body_qubits = _collect_all_qubit_names(op.operations)
+                body_qubits = _collect_all_qubit_names(
+                    op.operations, symbol_map
+                )
                 for qid in set(qubit_depths) | body_qubits:
                     qubit_depths[qid] = new_max
 
@@ -2132,7 +2217,9 @@ def _estimate_parallel_depth(
                     f"|{dict_name}|", integer=True, positive=True
                 )
                 total_depth = inner_depth * cardinality_sym
-                body_qubits = _collect_all_qubit_names(op.operations)
+                body_qubits = _collect_all_qubit_names(
+                    op.operations, symbol_map
+                )
                 current_max = _get_max_depth(qubit_depths)
                 new_max = current_max + total_depth
                 for qid in set(qubit_depths) | body_qubits:
@@ -2151,8 +2238,8 @@ def _estimate_parallel_depth(
 
                 # Bump branch qubit depths to condition_depth
                 branch_qubits = _collect_all_qubit_names(
-                    op.true_operations
-                ) | _collect_all_qubit_names(op.false_operations)
+                    op.true_operations, symbol_map
+                ) | _collect_all_qubit_names(op.false_operations, symbol_map)
                 for qid in branch_qubits:
                     current = qubit_depths.get(qid, CircuitDepth.zero())
                     bumped = current.max(condition_depth)
@@ -2168,6 +2255,7 @@ def _estimate_parallel_depth(
                     loop_var_symbols=loop_var_symbols,
                     num_controls=num_controls,
                     value_depths=value_depths,
+                    symbol_map=symbol_map,
                 )
                 _estimate_parallel_depth(
                     op.false_operations,
@@ -2178,6 +2266,7 @@ def _estimate_parallel_depth(
                     loop_var_symbols=loop_var_symbols,
                     num_controls=num_controls,
                     value_depths=value_depths,
+                    symbol_map=symbol_map,
                 )
                 all_qids = set(true_depths) | set(false_depths)
                 for qid in all_qids:
@@ -2187,9 +2276,18 @@ def _estimate_parallel_depth(
 
                 # PhiOp depth propagation
                 for phi_op in op.phi_ops:
-                    tv_name = phi_op.true_value.name
-                    fv_name = phi_op.false_value.name
-                    out_name = phi_op.output.name
+                    tv_name = _qubit_key(
+                        phi_op.true_value, symbol_map, block,
+                        call_context, loop_var_symbols,
+                    )
+                    fv_name = _qubit_key(
+                        phi_op.false_value, symbol_map, block,
+                        call_context, loop_var_symbols,
+                    )
+                    out_name = _qubit_key(
+                        phi_op.output, symbol_map, block,
+                        call_context, loop_var_symbols,
+                    )
                     tv_depth = qubit_depths.get(tv_name, CircuitDepth.zero())
                     fv_depth = qubit_depths.get(fv_name, CircuitDepth.zero())
                     qubit_depths[out_name] = tv_depth.max(fv_depth)
@@ -2204,6 +2302,7 @@ def _estimate_parallel_depth(
                     loop_var_symbols,
                     num_controls,
                     value_depths=value_depths,
+                    symbol_map=symbol_map,
                 )
 
             case ControlledUOperation():
@@ -2215,6 +2314,7 @@ def _estimate_parallel_depth(
                     call_context,
                     loop_var_symbols,
                     value_depths=value_depths,
+                    symbol_map=symbol_map,
                 )
 
             case CompositeGateOperation():
@@ -2227,7 +2327,13 @@ def _estimate_parallel_depth(
                     num_controls=num_controls,
                 )
                 # Expand array operand names to element-level qubit IDs
-                raw_names = [v.name for v in op.operands if hasattr(v, "name")]
+                raw_names = [
+                    _qubit_key(
+                        v, symbol_map, block, call_context, loop_var_symbols
+                    )
+                    for v in op.operands
+                    if hasattr(v, "name")
+                ]
                 qubit_ids: list[str] = []
                 for name in raw_names:
                     matched = [
@@ -2313,6 +2419,7 @@ def _handle_for_parallel(
     loop_var_symbols: dict[str, sp.Symbol],
     num_controls: int | sp.Expr,
     value_depths: dict[str, CircuitDepth] | None = None,
+    symbol_map: dict[str, sp.Expr] | None = None,
 ) -> None:
     """Handle ForOperation for parallel depth estimation.
 
@@ -2332,7 +2439,7 @@ def _handle_for_parallel(
         iterations = sp.Symbol("iter", integer=True, positive=True)
         current_max = _get_max_depth(qubit_depths)
         new_max = current_max + increase * iterations
-        body_qubits = _collect_all_qubit_names(op.operations)
+        body_qubits = _collect_all_qubit_names(op.operations, symbol_map)
         for qid in set(qubit_depths) | body_qubits:
             qubit_depths[qid] = new_max
         return
@@ -2347,7 +2454,7 @@ def _handle_for_parallel(
         local_block,
     ) = _prepare_for_loop(op, block, call_context, loop_var_symbols, loop_context)
 
-    body_qubits = _collect_all_qubit_names(op.operations)
+    body_qubits = _collect_all_qubit_names(op.operations, symbol_map)
 
     # Collect free parametric symbols from loop bounds
     all_bound_syms = (
@@ -2407,6 +2514,7 @@ def _handle_for_parallel(
                 call_context=call_context,
                 loop_var_symbols=new_loop_var_symbols,
                 num_controls=num_controls,
+                symbol_map=symbol_map,
             )
             increase = _get_max_depth(per_iter_depths)
             iterations = stop_expr - start_expr
@@ -2508,6 +2616,7 @@ def _handle_for_parallel(
                 call_context=concrete_call_ctx,
                 loop_var_symbols=new_loop_var_symbols,
                 num_controls=num_controls,
+                symbol_map=symbol_map,
             )
             per_iter_increase = _get_max_depth(per_iter_depths)
             n_iterations = len(range(concrete_start, concrete_stop, concrete_step))
@@ -2576,6 +2685,7 @@ def _handle_call_block_parallel(
     loop_var_symbols: dict[str, sp.Symbol],
     num_controls: int | sp.Expr,
     value_depths: dict[str, CircuitDepth] | None = None,
+    symbol_map: dict[str, sp.Expr] | None = None,
 ) -> None:
     """Handle CallBlockOperation for parallel depth estimation."""
     from qamomile.circuit.ir.block_value import BlockValue
@@ -2606,7 +2716,9 @@ def _handle_call_block_parallel(
                     new_call_context[dim_formal.uuid] = resolved_dim
 
     # Build qubit name mapping and use local depth map
-    qubit_name_map = _build_qubit_name_map(called_block, op.operands, offset=1)
+    qubit_name_map = _build_qubit_name_map(
+        called_block, op.operands, offset=1, symbol_map=symbol_map
+    )
     local_depths = _map_depths_to_local(qubit_name_map, qubit_depths)
 
     _estimate_parallel_depth(
@@ -2618,6 +2730,7 @@ def _handle_call_block_parallel(
         loop_var_symbols=loop_var_symbols,
         num_controls=num_controls,
         value_depths=value_depths,
+        symbol_map=symbol_map,
     )
 
     _write_back_depths(qubit_name_map, local_depths, qubit_depths)
@@ -2631,6 +2744,7 @@ def _handle_controlled_u_parallel(
     call_context: dict[str, Any],
     loop_var_symbols: dict[str, sp.Symbol],
     value_depths: dict[str, CircuitDepth] | None = None,
+    symbol_map: dict[str, sp.Expr] | None = None,
 ) -> None:
     """Handle ControlledUOperation for parallel depth estimation.
 
@@ -2696,8 +2810,16 @@ def _handle_controlled_u_parallel(
         else:
             all_qubit_names = [vector_name]
     else:
-        all_qubit_names = [v.name for v in op.control_operands] + [
-            v.name for v in op.target_operands
+        all_qubit_names = [
+            _qubit_key(
+                v, symbol_map, block, call_context, loop_var_symbols
+            )
+            for v in op.control_operands
+        ] + [
+            _qubit_key(
+                v, symbol_map, block, call_context, loop_var_symbols
+            )
+            for v in op.target_operands
         ]
 
     # All involved qubits get max(current) + gate_depth
@@ -2996,5 +3118,6 @@ def estimate_depth(
         ops, qubit_depths, block_ref,
         loop_context=[], call_context={}, loop_var_symbols={},
         value_depths=value_depths,
+        symbol_map={},
     )
     return _get_max_depth(qubit_depths).simplify()
