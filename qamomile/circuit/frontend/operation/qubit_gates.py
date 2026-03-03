@@ -117,9 +117,24 @@ def x(qubit: Qubit) -> Qubit:
     return _apply_single_qubit_gate(qubit, GateOperationType.X)
 
 
+def y(qubit: Qubit) -> Qubit:
+    """Pauli-Y gate."""
+    return _apply_single_qubit_gate(qubit, GateOperationType.Y)
+
+
 def z(qubit: Qubit) -> Qubit:
     """Pauli-Z gate."""
     return _apply_single_qubit_gate(qubit, GateOperationType.Z)
+
+
+def t(qubit: Qubit) -> Qubit:
+    """T gate (fourth root of Z)."""
+    return _apply_single_qubit_gate(qubit, GateOperationType.T)
+
+
+def s(qubit: Qubit) -> Qubit:
+    """S gate (square root of Z)."""
+    return _apply_single_qubit_gate(qubit, GateOperationType.S)
 
 
 def cx(control: Qubit, target: Qubit) -> tuple[Qubit, Qubit]:
