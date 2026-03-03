@@ -1,4 +1,9 @@
-"""Qubit resource counting for BlockValue."""
+"""Qubit resource counting for BlockValue.
+
+This module counts the number of qubits required by a quantum circuit,
+using ExprResolver for value resolution and shared engine helpers for
+control flow scoping.
+"""
 
 from __future__ import annotations
 
@@ -6,8 +11,6 @@ from typing import TYPE_CHECKING, overload
 
 import sympy as sp
 
-from qamomile.circuit.estimator._utils import BINOP_TO_SYMPY, _strip_nonneg_max
-from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
 from qamomile.circuit.ir.operation.control_flow import (
@@ -19,7 +22,18 @@ from qamomile.circuit.ir.operation.control_flow import (
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.operation import Operation, QInitOperation
 from qamomile.circuit.ir.types.primitives import QubitType
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.value import ArrayValue
+
+from ._engine import (
+    build_for_items_scope,
+    build_for_loop_scope,
+    build_if_scopes,
+    build_while_scope,
+    resolve_for_items_cardinality,
+)
+from ._loop_executor import symbolic_iterations
+from ._resolver import ExprResolver
+from ._utils import _strip_nonneg_max
 
 if TYPE_CHECKING:
     from qamomile.circuit.ir.block_value import BlockValue
@@ -27,40 +41,13 @@ if TYPE_CHECKING:
 WHILE_SYMBOL = sp.Symbol("|while|", integer=True, positive=True)
 
 
-def _resolve_value_to_sympy(
-    value: Value,
-    symbol_map: dict[str, sp.Expr],
-) -> sp.Expr:
-    """Resolve a Value to a sympy expression.
-
-    Resolution priority:
-      1. Constant -> sp.Integer
-      2. Parameter -> sp.Symbol (integer=True, positive=True)
-      3. Registered in symbol_map (BinOp result etc.) -> cached expression
-      4. Fallback -> sp.Symbol(name, integer=True, positive=True)
-    """
-    if value.is_constant():
-        const_val = value.get_const()
-        if const_val is not None:
-            return sp.Integer(int(const_val))
-
-    if value.is_parameter():
-        param_name = value.parameter_name()
-        if param_name is not None:
-            return sp.Symbol(param_name, integer=True, positive=True)
-
-    if value.uuid in symbol_map:
-        return symbol_map[value.uuid]
-
-    return sp.Symbol(value.name, integer=True, positive=True)
+# ------------------------------------------------------------------ #
+#  QInit / input qubit counting                                       #
+# ------------------------------------------------------------------ #
 
 
-def _count_qinit(op: QInitOperation, symbol_map: dict[str, sp.Expr]) -> sp.Expr:
+def _count_qinit(op: QInitOperation, resolver: ExprResolver) -> sp.Expr:
     """Count qubits from a QInitOperation.
-
-    Args:
-        op: The QInitOperation to count qubits from.
-        symbol_map: Mapping from Value UUIDs to resolved sympy expressions.
 
     Returns:
         Number of qubits as a sympy expression (may contain symbols for
@@ -68,13 +55,11 @@ def _count_qinit(op: QInitOperation, symbol_map: dict[str, sp.Expr]) -> sp.Expr:
     """
     result = op.results[0]
 
-    # Array of qubits (ArrayValue with quantum element type)
-    # Check ArrayValue first before checking single qubit type
-    # Note: Use isinstance instead of is_quantum() due to MRO issue
+    # Array of qubits
     if isinstance(result, ArrayValue) and isinstance(result.type, QubitType):
         el_count: sp.Expr = sp.Integer(1)
         for dim in result.shape:
-            el_count *= _resolve_value_to_sympy(dim, symbol_map)
+            el_count *= resolver.resolve(dim)
         return el_count
 
     # Single qubit
@@ -84,40 +69,37 @@ def _count_qinit(op: QInitOperation, symbol_map: dict[str, sp.Expr]) -> sp.Expr:
     return sp.Integer(0)
 
 
-def _count_input_qubits(input_values: list, symbol_map: dict[str, sp.Expr]) -> sp.Expr:
+def _count_input_qubits(
+    input_values: list,
+    resolver: ExprResolver,
+) -> sp.Expr:
     """Count qubit-typed values in BlockValue.input_values.
 
     Only used at the top level to count qubits passed as function arguments.
-    Not used in recursive calls to avoid double-counting.
-
-    Args:
-        input_values: List of Value objects from BlockValue.input_values.
-        symbol_map: Mapping from Value UUIDs to resolved sympy expressions.
-
-    Returns:
-        Number of input qubits as a sympy expression.
     """
     count: sp.Expr = sp.Integer(0)
     for v in input_values:
         if isinstance(v, ArrayValue) and isinstance(v.type, QubitType):
             el_count: sp.Expr = sp.Integer(1)
             for dim in v.shape:
-                el_count *= _resolve_value_to_sympy(dim, symbol_map)
+                el_count *= resolver.resolve(dim)
             count += el_count
         elif isinstance(v.type, QubitType):
             count += sp.Integer(1)
     return count
 
 
-def _is_clean_call(block: "BlockValue") -> bool:
+# ------------------------------------------------------------------ #
+#  Clean call detection                                               #
+# ------------------------------------------------------------------ #
+
+
+def _is_clean_call(block: BlockValue) -> bool:
     """Check if a BlockValue is a 'clean call'.
 
     A clean call returns only the qubits it received as inputs.
     Any internally allocated qubits (ancillas) are freed before return,
     meaning ancilla qubits can be reused across loop iterations.
-
-    Detection: every quantum-typed return value must have a logical_id
-    that matches one of the input_values' logical_ids.
 
     Conservative: if a cast/alias produces a new logical_id, this returns
     False (safe fallback — will overcount, never undercount).
@@ -130,68 +112,30 @@ def _is_clean_call(block: "BlockValue") -> bool:
     return True
 
 
-# ---------------------------------------------------------------------------
-# Shared helpers: extracted from _count_loop_body_split / _count_from_operations
-# ---------------------------------------------------------------------------
+# ------------------------------------------------------------------ #
+#  ControlledU child resolver                                         #
+# ------------------------------------------------------------------ #
 
 
-def _register_binop(op: BinOp, symbol_map: dict[str, sp.Expr]) -> None:
-    """Register a BinOp result in the symbol map."""
-    lhs_expr = _resolve_value_to_sympy(op.lhs, symbol_map)
-    rhs_expr = _resolve_value_to_sympy(op.rhs, symbol_map)
-    if op.kind in BINOP_TO_SYMPY:
-        symbol_map[op.output.uuid] = BINOP_TO_SYMPY[op.kind](lhs_expr, rhs_expr)
-
-
-def _build_call_block_inner_map(
-    op: CallBlockOperation, symbol_map: dict[str, sp.Expr]
-) -> tuple[BlockValue | None, dict[str, sp.Expr]]:
-    """Build inner symbol map for CallBlockOperation.
-
-    Maps formal input array dimensions to actual argument dimensions
-    so that parametric sizes are resolved correctly in the callee.
-
-    Returns:
-        (called_block, inner_symbol_map) if called_block is a BlockValue,
-        (None, {}) otherwise.
-    """
-    from qamomile.circuit.ir.block_value import BlockValue
-
-    called_block = op.operands[0]
-    if not isinstance(called_block, BlockValue):
-        return None, {}
-    inner_symbol_map = symbol_map.copy()
-    for formal_idx, formal_input in enumerate(called_block.input_values):
-        if formal_idx + 1 < len(op.operands):
-            actual_arg = op.operands[formal_idx + 1]
-            if isinstance(actual_arg, ArrayValue) and isinstance(
-                formal_input, ArrayValue
-            ):
-                for dim_formal, dim_actual in zip(formal_input.shape, actual_arg.shape):
-                    inner_symbol_map[dim_formal.uuid] = _resolve_value_to_sympy(
-                        dim_actual, symbol_map
-                    )
-    return called_block, inner_symbol_map
-
-
-def _build_controlled_u_inner_map(
-    op: ControlledUOperation, symbol_map: dict[str, sp.Expr]
-) -> tuple[BlockValue | None, dict[str, sp.Expr]]:
-    """Build inner symbol map for ControlledUOperation.
+def _build_controlled_u_child_resolver(
+    op: ControlledUOperation,
+    resolver: ExprResolver,
+) -> tuple[BlockValue | None, ExprResolver | None]:
+    """Build child resolver for ControlledUOperation's inner block.
 
     Handles both index_spec mode (qubit operands identified by index)
     and the default mode (target_operands mapping).
 
     Returns:
-        (controlled_block, inner_symbol_map) if controlled_block is a BlockValue,
-        (None, {}) otherwise.
+        (controlled_block, child_resolver) or (None, None).
     """
     from qamomile.circuit.ir.block_value import BlockValue
 
     controlled_block = op.block
     if not isinstance(controlled_block, BlockValue):
-        return None, {}
-    inner_symbol_map = symbol_map.copy()
+        return None, None
+
+    extra: dict[str, sp.Expr] = {}
     if op.has_index_spec:
         param_operands = op.operands[2:]
         param_idx = 0
@@ -202,12 +146,8 @@ def _build_controlled_u_inner_map(
                     if isinstance(actual_arg, ArrayValue) and isinstance(
                         formal_input, ArrayValue
                     ):
-                        for dim_formal, dim_actual in zip(
-                            formal_input.shape, actual_arg.shape
-                        ):
-                            inner_symbol_map[dim_formal.uuid] = _resolve_value_to_sympy(
-                                dim_actual, symbol_map
-                            )
+                        for df, da in zip(formal_input.shape, actual_arg.shape):
+                            extra[df.uuid] = resolver.resolve(da)
                     param_idx += 1
     else:
         target_operands = op.target_operands
@@ -217,43 +157,81 @@ def _build_controlled_u_inner_map(
                 if isinstance(actual_arg, ArrayValue) and isinstance(
                     formal_input, ArrayValue
                 ):
-                    for dim_formal, dim_actual in zip(
-                        formal_input.shape, actual_arg.shape
-                    ):
-                        inner_symbol_map[dim_formal.uuid] = _resolve_value_to_sympy(
-                            dim_actual, symbol_map
-                        )
-    return controlled_block, inner_symbol_map
+                    for df, da in zip(formal_input.shape, actual_arg.shape):
+                        extra[df.uuid] = resolver.resolve(da)
+
+    ctx = resolver.context
+    ctx.update(extra)
+    child = ExprResolver(
+        block=controlled_block,
+        context=ctx,
+        loop_var_names=resolver.loop_var_names,
+        parent_blocks=[],
+    )
+    return controlled_block, child
 
 
-def _compute_for_iterations(
-    op: ForOperation, symbol_map: dict[str, sp.Expr]
+# ------------------------------------------------------------------ #
+#  CompositeGate qubit counting                                       #
+# ------------------------------------------------------------------ #
+
+
+def _count_composite_split(
+    op: CompositeGateOperation,
+    resolver: ExprResolver,
+) -> tuple[sp.Expr, bool]:
+    """Count qubits from a CompositeGateOperation.
+
+    Returns (alloc, is_reusable):
+        alloc: Total qubit allocation (implementation + metadata ancilla)
+        is_reusable: True if the allocation can be reused across loop iterations
+    """
+    from qamomile.circuit.ir.block_value import BlockValue
+
+    impl = op.implementation
+    meta_ancilla: sp.Expr = sp.Integer(0)
+    impl_alloc: sp.Expr = sp.Integer(0)
+
+    if isinstance(impl, BlockValue):
+        impl_alloc = _count_from_operations(impl.operations, resolver)
+
+    if op.resource_metadata is not None:
+        meta_ancilla = sp.Integer(op.resource_metadata.ancilla_qubits)
+
+    total_alloc = impl_alloc + meta_ancilla
+
+    if isinstance(impl, BlockValue) and _is_clean_call(impl):
+        return total_alloc, True
+    if impl is None and op.resource_metadata is not None:
+        # Stub with metadata only: ancilla are reusable by definition
+        return meta_ancilla, True
+    return total_alloc, False
+
+
+def _count_composite_total(
+    op: CompositeGateOperation,
+    resolver: ExprResolver,
 ) -> sp.Expr:
-    """Compute the number of iterations for a ForOperation."""
-    start_expr = _resolve_value_to_sympy(op.operands[0], symbol_map)
-    stop_expr = _resolve_value_to_sympy(op.operands[1], symbol_map)
-    step_expr = _resolve_value_to_sympy(op.operands[2], symbol_map)
-    return (stop_expr - start_expr) / step_expr
+    """Count qubits from a CompositeGateOperation (non-split)."""
+    from qamomile.circuit.ir.block_value import BlockValue
+
+    count: sp.Expr = sp.Integer(0)
+    impl = op.implementation
+    if isinstance(impl, BlockValue):
+        count += _count_from_operations(impl.operations, resolver)
+    if op.resource_metadata is not None:
+        count += sp.Integer(op.resource_metadata.ancilla_qubits)
+    return count
 
 
-def _resolve_for_items_cardinality(op: ForItemsOperation) -> sp.Symbol:
-    """Resolve the cardinality symbol for a ForItemsOperation."""
-    dict_operand = op.operands[0]
-    if hasattr(dict_operand, "is_parameter") and dict_operand.is_parameter():
-        dict_name = dict_operand.parameter_name() or dict_operand.name
-    else:
-        dict_name = dict_operand.name
-    return sp.Symbol(f"|{dict_name}|", integer=True, positive=True)
-
-
-# ---------------------------------------------------------------------------
-# Main counting functions
-# ---------------------------------------------------------------------------
+# ------------------------------------------------------------------ #
+#  Loop body split counting                                           #
+# ------------------------------------------------------------------ #
 
 
 def _count_loop_body_split(
     operations: list[Operation],
-    symbol_map: dict[str, sp.Expr] | None = None,
+    resolver: ExprResolver,
 ) -> tuple[sp.Expr, sp.Expr]:
     """Split loop body qubit count into (persistent, reusable).
 
@@ -267,38 +245,31 @@ def _count_loop_body_split(
     """
     from qamomile.circuit.ir.block_value import BlockValue
 
-    if symbol_map is None:
-        symbol_map = {}
-
     persistent: sp.Expr = sp.Integer(0)
     reusable: sp.Expr = sp.Integer(0)
 
     for op in operations:
         match op:
-            case BinOp():
-                _register_binop(op, symbol_map)
-
             case QInitOperation():
-                persistent += _count_qinit(op, symbol_map)  # type: ignore
+                persistent += _count_qinit(op, resolver)  # type: ignore
 
             case CallBlockOperation():
-                called_block, inner_map = _build_call_block_inner_map(op, symbol_map)
-                if called_block is not None:
-                    inner_alloc = _count_from_operations(
-                        called_block.operations, inner_map
-                    )
+                called_block = op.operands[0]
+                if isinstance(called_block, BlockValue):
+                    child = resolver.call_child_scope(op)
+                    inner_alloc = _count_from_operations(called_block.operations, child)
                     if _is_clean_call(called_block):
                         reusable = sp.Max(reusable, inner_alloc)
                     else:
                         persistent += inner_alloc  # type: ignore
 
             case ControlledUOperation():
-                controlled_block, inner_map = _build_controlled_u_inner_map(
-                    op, symbol_map
+                controlled_block, child = _build_controlled_u_child_resolver(
+                    op, resolver
                 )
-                if controlled_block is not None:
+                if controlled_block is not None and child is not None:
                     inner_alloc = _count_from_operations(
-                        controlled_block.operations, inner_map
+                        controlled_block.operations, child
                     )
                     if _is_clean_call(controlled_block):
                         reusable = sp.Max(reusable, inner_alloc)
@@ -306,29 +277,18 @@ def _count_loop_body_split(
                         persistent += inner_alloc  # type: ignore
 
             case CompositeGateOperation():
-                impl = op.implementation
-                meta_ancilla: sp.Expr = sp.Integer(0)
-                impl_alloc: sp.Expr = sp.Integer(0)
-
-                if isinstance(impl, BlockValue):
-                    impl_alloc = _count_from_operations(impl.operations, symbol_map)
-
-                if op.resource_metadata is not None:
-                    meta_ancilla = sp.Integer(op.resource_metadata.ancilla_qubits)
-
-                total_alloc = impl_alloc + meta_ancilla
-
-                if isinstance(impl, BlockValue) and _is_clean_call(impl):
-                    reusable = sp.Max(reusable, total_alloc)
-                elif impl is None and op.resource_metadata is not None:
-                    # Stub with metadata only: ancilla are reusable by definition
-                    reusable = sp.Max(reusable, meta_ancilla)
+                alloc, is_reusable = _count_composite_split(op, resolver)
+                if is_reusable:
+                    reusable = sp.Max(reusable, alloc)
                 else:
-                    persistent += total_alloc  # type: ignore
+                    persistent += alloc  # type: ignore
 
             case ForOperation():
-                inner_p, inner_r = _count_loop_body_split(op.operations, symbol_map)
-                iterations = _compute_for_iterations(op, symbol_map)
+                if len(op.operands) < 2:
+                    continue
+                child, start, stop, step, _ = build_for_loop_scope(op, resolver)
+                inner_p, inner_r = _count_loop_body_split(op.operations, child)
+                iterations = symbolic_iterations(start, stop, step)
                 reusable_factor = sp.Piecewise(
                     (sp.Integer(1), sp.Gt(iterations, 0)),
                     (sp.Integer(0), True),
@@ -337,21 +297,24 @@ def _count_loop_body_split(
                 reusable = sp.Max(reusable, inner_r * reusable_factor)
 
             case WhileOperation():
-                inner_p, inner_r = _count_loop_body_split(op.operations, symbol_map)
+                child, _ = build_while_scope(op, resolver)
+                inner_p, inner_r = _count_loop_body_split(op.operations, child)
                 persistent += inner_p * WHILE_SYMBOL  # type: ignore
                 reusable = sp.Max(reusable, inner_r)
 
             case IfOperation():
-                true_p, true_r = _count_loop_body_split(op.true_operations, symbol_map)
+                true_child, false_child = build_if_scopes(op, resolver)
+                true_p, true_r = _count_loop_body_split(op.true_operations, true_child)
                 false_p, false_r = _count_loop_body_split(
-                    op.false_operations, symbol_map
+                    op.false_operations, false_child
                 )
                 persistent += sp.Max(true_p, false_p)  # type: ignore
                 reusable = sp.Max(reusable, true_r, false_r)
 
             case ForItemsOperation():
-                inner_p, inner_r = _count_loop_body_split(op.operations, symbol_map)
-                cardinality = _resolve_for_items_cardinality(op)
+                child = build_for_items_scope(op, resolver)
+                inner_p, inner_r = _count_loop_body_split(op.operations, child)
+                cardinality = resolve_for_items_cardinality(op)
                 persistent += inner_p * cardinality  # type: ignore
                 reusable = sp.Max(reusable, inner_r)
 
@@ -364,37 +327,35 @@ def _count_loop_body_split(
     )
 
 
+# ------------------------------------------------------------------ #
+#  Main counting function                                             #
+# ------------------------------------------------------------------ #
+
+
 def _count_from_operations(
     operations: list[Operation],
-    symbol_map: dict[str, sp.Expr] | None = None,
+    resolver: ExprResolver,
 ) -> sp.Expr:
     """Count qubits from a list of operations.
-
-    Args:
-        operations: List of operations to analyze.
-        symbol_map: Mapping from Value UUIDs to resolved sympy expressions.
 
     Returns:
         Total qubit count as a sympy expression.
     """
     from qamomile.circuit.ir.block_value import BlockValue
 
-    if symbol_map is None:
-        symbol_map = {}
-
     count: sp.Expr = sp.Integer(0)
 
     for op in operations:
         match op:
-            case BinOp():
-                _register_binop(op, symbol_map)
-
             case QInitOperation():
-                count += _count_qinit(op, symbol_map)  # type: ignore
+                count += _count_qinit(op, resolver)  # type: ignore
 
             case ForOperation():
-                persistent, reusable = _count_loop_body_split(op.operations, symbol_map)
-                iterations = _compute_for_iterations(op, symbol_map)
+                if len(op.operands) < 2:
+                    continue
+                child, start, stop, step, _ = build_for_loop_scope(op, resolver)
+                persistent, reusable = _count_loop_body_split(op.operations, child)
+                iterations = symbolic_iterations(start, stop, step)
                 reusable_factor = sp.Piecewise(
                     (sp.Integer(1), sp.Gt(iterations, 0)),
                     (sp.Integer(0), True),
@@ -402,50 +363,51 @@ def _count_from_operations(
                 count += persistent * iterations + reusable * reusable_factor  # type: ignore
 
             case WhileOperation():
-                persistent, reusable = _count_loop_body_split(op.operations, symbol_map)
-                # WHILE_SYMBOL is always positive, so reusable is counted once
+                child, _ = build_while_scope(op, resolver)
+                persistent, reusable = _count_loop_body_split(op.operations, child)
                 count += persistent * WHILE_SYMBOL + reusable  # type: ignore
 
             case IfOperation():
-                # Take maximum of both branches
-                true_count = _count_from_operations(op.true_operations, symbol_map)
-                false_count = _count_from_operations(op.false_operations, symbol_map)
+                true_child, false_child = build_if_scopes(op, resolver)
+                true_count = _count_from_operations(op.true_operations, true_child)
+                false_count = _count_from_operations(op.false_operations, false_child)
                 count += sp.Max(true_count, false_count)  # type: ignore
 
             case CallBlockOperation():
-                called_block, inner_map = _build_call_block_inner_map(op, symbol_map)
-                if called_block is not None:
-                    count += _count_from_operations(called_block.operations, inner_map)  # type: ignore
+                called_block = op.operands[0]
+                if isinstance(called_block, BlockValue):
+                    child = resolver.call_child_scope(op)
+                    count += _count_from_operations(  # type: ignore
+                        called_block.operations, child
+                    )
 
             case ControlledUOperation():
-                controlled_block, inner_map = _build_controlled_u_inner_map(
-                    op, symbol_map
+                controlled_block, child = _build_controlled_u_child_resolver(
+                    op, resolver
                 )
-                if controlled_block is not None:
-                    count += _count_from_operations(
-                        controlled_block.operations, inner_map
-                    )  # type: ignore
+                if controlled_block is not None and child is not None:
+                    count += _count_from_operations(  # type: ignore
+                        controlled_block.operations, child
+                    )
 
             case ForItemsOperation():
-                persistent, reusable = _count_loop_body_split(op.operations, symbol_map)
-                cardinality = _resolve_for_items_cardinality(op)
-                # cardinality is always positive, so reusable is counted once
+                child = build_for_items_scope(op, resolver)
+                persistent, reusable = _count_loop_body_split(op.operations, child)
+                cardinality = resolve_for_items_cardinality(op)
                 count += persistent * cardinality + reusable  # type: ignore
 
             case CompositeGateOperation():
-                # Count only internally-allocated qubits (not input_values)
-                impl = op.implementation
-                if isinstance(impl, BlockValue):
-                    count += _count_from_operations(impl.operations, symbol_map)  # type: ignore
-
-                # Add ancilla qubits from resource metadata
-                if op.resource_metadata is not None:
-                    count += sp.Integer(op.resource_metadata.ancilla_qubits)
+                count += _count_composite_total(op, resolver)  # type: ignore
 
             case _:
                 continue
 
     return sp.simplify(count)
+
+
+# ------------------------------------------------------------------ #
+#  Public entry point                                                 #
+# ------------------------------------------------------------------ #
 
 
 @overload
@@ -484,8 +446,9 @@ def qubits_counter(block: BlockValue | list[Operation]) -> sp.Expr:
     from qamomile.circuit.ir.block_value import BlockValue
 
     if isinstance(block, BlockValue):
-        symbol_map: dict[str, sp.Expr] = {}
-        input_qubits = _count_input_qubits(block.input_values, symbol_map)
-        ops_qubits = _count_from_operations(block.operations, symbol_map)
+        resolver = ExprResolver(block=block)
+        input_qubits = _count_input_qubits(block.input_values, resolver)
+        ops_qubits = _count_from_operations(block.operations, resolver)
         return sp.simplify(input_qubits + ops_qubits)
-    return _count_from_operations(block)
+    resolver = ExprResolver()
+    return _count_from_operations(block, resolver)

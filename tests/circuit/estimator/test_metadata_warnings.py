@@ -4,7 +4,7 @@ import warnings
 
 import pytest
 
-from qamomile.circuit.estimator.gate_counter import _extract_gate_count_from_metadata
+from qamomile.circuit.estimator._catalog import extract_gate_count_from_metadata as _extract_gate_count_from_metadata
 from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 
 

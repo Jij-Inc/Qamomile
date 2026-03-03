@@ -7,12 +7,12 @@ import sympy as sp
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind
 
 BINOP_TO_SYMPY = {
-    BinOpKind.ADD: lambda l, r: l + r,
-    BinOpKind.SUB: lambda l, r: l - r,
-    BinOpKind.MUL: lambda l, r: l * r,
-    BinOpKind.DIV: lambda l, r: l / r,
-    BinOpKind.FLOORDIV: lambda l, r: sp.floor(l / r),
-    BinOpKind.POW: lambda l, r: l**r,
+    BinOpKind.ADD: lambda lhs, r: lhs + r,
+    BinOpKind.SUB: lambda lhs, r: lhs - r,
+    BinOpKind.MUL: lambda lhs, r: lhs * r,
+    BinOpKind.DIV: lambda lhs, r: lhs / r,
+    BinOpKind.FLOORDIV: lambda lhs, r: sp.floor(lhs / r),
+    BinOpKind.POW: lambda lhs, r: lhs**r,
 }
 
 

@@ -151,12 +151,10 @@ class ResourceEstimate:
                 "clifford_gates": str(self.gates.clifford_gates),
                 "rotation_gates": str(self.gates.rotation_gates),
                 "oracle_calls": {
-                    name: str(val)
-                    for name, val in self.gates.oracle_calls.items()
+                    name: str(val) for name, val in self.gates.oracle_calls.items()
                 },
                 "oracle_queries": {
-                    name: str(val)
-                    for name, val in self.gates.oracle_queries.items()
+                    name: str(val) for name, val in self.gates.oracle_queries.items()
                 },
             },
             "depth": {
@@ -191,14 +189,16 @@ class ResourceEstimate:
             lines.append("  Oracle Queries:")
             for name, count in self.gates.oracle_queries.items():
                 lines.append(f"    {name}: {count}")
-        lines.extend([
-            "  Depth:",
-            f"    Total: {self.depth.total_depth}",
-            f"    T-depth: {self.depth.t_depth}",
-            f"    Two-qubit depth: {self.depth.two_qubit_depth}",
-            f"    Multi-qubit depth: {self.depth.multi_qubit_depth}",
-            f"    Rotation depth: {self.depth.rotation_depth}",
-        ])
+        lines.extend(
+            [
+                "  Depth:",
+                f"    Total: {self.depth.total_depth}",
+                f"    T-depth: {self.depth.t_depth}",
+                f"    Two-qubit depth: {self.depth.two_qubit_depth}",
+                f"    Multi-qubit depth: {self.depth.multi_qubit_depth}",
+                f"    Rotation depth: {self.depth.rotation_depth}",
+            ]
+        )
         if self.parameters:
             lines.append("  Parameters:")
             for name, symbol in self.parameters.items():
@@ -299,13 +299,9 @@ def estimate_resources(
         all_subs: dict[sp.Symbol, int] = {}
         for key, val in bindings.items():
             if isinstance(val, dict):
-                all_subs[
-                    sp.Symbol(f"|{key}|", integer=True, positive=True)
-                ] = len(val)
+                all_subs[sp.Symbol(f"|{key}|", integer=True, positive=True)] = len(val)
             elif isinstance(val, (int, float)):
-                all_subs[
-                    sp.Symbol(key, integer=True, positive=True)
-                ] = int(val)
+                all_subs[sp.Symbol(key, integer=True, positive=True)] = int(val)
         if all_subs:
             gate_count = GateCount(
                 total=gate_count.total.subs(all_subs),

@@ -710,9 +710,7 @@ class TestForItemsOp:
             return bit
 
         resource = qubits_counter(circuit.block)
-        expected = (
-            n * sp.Symbol("|angles|", integer=True, positive=True)
-        )
+        expected = n * sp.Symbol("|angles|", integer=True, positive=True)
         assert resource == expected
 
     @pytest.mark.parametrize("n", [1, 2, 5, 10, 100])
@@ -4460,7 +4458,7 @@ class TestCallBlockOperation:
 class TestWhileOperation:
     """Verify that resource estimation correctly counts qubits from while loops."""
 
-    W = sp.Symbol("|while|")
+    W = sp.Symbol("|while|", integer=True, positive=True)
 
     def test_int_qubits_outside_while(self):
         """Qubit allocation outside while → qubits == allocated qubits, not affected by loop."""
