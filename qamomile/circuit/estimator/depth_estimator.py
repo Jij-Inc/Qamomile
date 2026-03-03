@@ -146,6 +146,50 @@ class CircuitDepth:
             rotation_depth=sp.Integer(0),
         )
 
+    @staticmethod
+    def apply_gate_to_qubits(
+        qubit_depths: dict[str, CircuitDepth],
+        qubit_ids: list[str],
+        gate_depth: CircuitDepth,
+    ) -> None:
+        """Apply gate depth to qubits with per-field selective propagation.
+
+        For each depth field independently:
+        - If the gate contributes (not definitely zero): max across all
+          involved qubits + gate contribution, assigned to all qubits.
+        - If the gate does NOT contribute (definitely zero): each qubit
+          retains its own current value for that field.
+        """
+        from dataclasses import fields as dc_fields
+
+        if not qubit_ids:
+            return
+
+        field_names = [f.name for f in dc_fields(CircuitDepth)]
+        current = [qubit_depths.get(qid, CircuitDepth.zero()) for qid in qubit_ids]
+
+        propagated: dict[str, sp.Expr] = {}
+        no_prop: set[str] = set()
+
+        for fname in field_names:
+            gate_contrib = getattr(gate_depth, fname)
+            if gate_contrib.is_zero is True:
+                no_prop.add(fname)
+            else:
+                max_val = getattr(current[0], fname)
+                for cd in current[1:]:
+                    max_val = sp.Max(max_val, getattr(cd, fname))
+                propagated[fname] = max_val + gate_contrib
+
+        for i, qid in enumerate(qubit_ids):
+            new_fields = {}
+            for fname in field_names:
+                if fname in no_prop:
+                    new_fields[fname] = getattr(current[i], fname)
+                else:
+                    new_fields[fname] = propagated[fname]
+            qubit_depths[qid] = CircuitDepth(**new_fields)
+
 
 # Gate categorization
 T_GATES = {"t", "tdg"}
@@ -1041,15 +1085,9 @@ def _simulate_parallel_depth_concrete(
                 _concretize_qubit_operand(v, block, call_context, var_env)
                 for v in op.operands
             ]
-            if qubit_ids:
-                max_current = CircuitDepth.zero()
-                for qid in qubit_ids:
-                    max_current = max_current.max(
-                        qubit_depths.get(qid, CircuitDepth.zero())
-                    )
-                new_depth = max_current + gate_depth
-                for qid in qubit_ids:
-                    qubit_depths[qid] = new_depth
+            CircuitDepth.apply_gate_to_qubits(
+                qubit_depths, qubit_ids, gate_depth
+            )
 
         elif isinstance(op, BinOp):
             # Track arithmetic results so qubit names like q[uint_tmp] resolve
@@ -1110,11 +1148,6 @@ def _simulate_parallel_depth_concrete(
             if not matched_qids:
                 matched_qids = [arr_name]
 
-            max_current = CircuitDepth.zero()
-            for qid in matched_qids:
-                max_current = max_current.max(
-                    qubit_depths.get(qid, CircuitDepth.zero())
-                )
             measure_unit = CircuitDepth(
                 total_depth=sp.Integer(1),
                 t_depth=sp.Integer(0),
@@ -1122,11 +1155,14 @@ def _simulate_parallel_depth_concrete(
                 multi_qubit_depth=sp.Integer(0),
                 rotation_depth=sp.Integer(0),
             )
-            new_depth = max_current + measure_unit
-            for qid in matched_qids:
-                qubit_depths[qid] = new_depth
+            CircuitDepth.apply_gate_to_qubits(
+                qubit_depths, matched_qids, measure_unit
+            )
             if value_depths is not None and op.results:
-                value_depths[op.results[0].uuid] = new_depth
+                vd = CircuitDepth.zero()
+                for qid in matched_qids:
+                    vd = vd.max(qubit_depths[qid])
+                value_depths[op.results[0].uuid] = vd
 
         elif isinstance(op, MeasureQFixedOperation):
             qfixed = op.operands[0]
@@ -1139,11 +1175,6 @@ def _simulate_parallel_depth_concrete(
             if not matched_qids:
                 matched_qids = [qfixed_name]
 
-            max_current = CircuitDepth.zero()
-            for qid in matched_qids:
-                max_current = max_current.max(
-                    qubit_depths.get(qid, CircuitDepth.zero())
-                )
             measure_unit = CircuitDepth(
                 total_depth=sp.Integer(1),
                 t_depth=sp.Integer(0),
@@ -1151,11 +1182,14 @@ def _simulate_parallel_depth_concrete(
                 multi_qubit_depth=sp.Integer(0),
                 rotation_depth=sp.Integer(0),
             )
-            new_depth = max_current + measure_unit
-            for qid in matched_qids:
-                qubit_depths[qid] = new_depth
+            CircuitDepth.apply_gate_to_qubits(
+                qubit_depths, matched_qids, measure_unit
+            )
             if value_depths is not None and op.results:
-                value_depths[op.results[0].uuid] = new_depth
+                vd = CircuitDepth.zero()
+                for qid in matched_qids:
+                    vd = vd.max(qubit_depths[qid])
+                value_depths[op.results[0].uuid] = vd
 
         elif isinstance(op, NotOp):
             if value_depths is not None:
@@ -1501,14 +1535,9 @@ def _simulate_parallel_depth_concrete(
                 ]
                 all_qubit_names = ctrl_names + tgt_names
 
-            max_current = CircuitDepth.zero()
-            for qid in all_qubit_names:
-                max_current = max_current.max(
-                    qubit_depths.get(qid, CircuitDepth.zero())
-                )
-            new_depth = max_current + gate_depth
-            for qid in all_qubit_names:
-                qubit_depths[qid] = new_depth
+            CircuitDepth.apply_gate_to_qubits(
+                qubit_depths, all_qubit_names, gate_depth
+            )
 
         elif isinstance(op, CompositeGateOperation):
             composite_depth = _estimate_composite_gate_depth(
@@ -1535,14 +1564,9 @@ def _simulate_parallel_depth_concrete(
                 else:
                     qubit_ids.append(name)
 
-            max_current = CircuitDepth.zero()
-            for qid in qubit_ids:
-                max_current = max_current.max(
-                    qubit_depths.get(qid, CircuitDepth.zero())
-                )
-            new_depth = max_current + composite_depth
-            for qid in qubit_ids:
-                qubit_depths[qid] = new_depth
+            CircuitDepth.apply_gate_to_qubits(
+                qubit_depths, qubit_ids, composite_depth
+            )
 
 
 # ============================================================
@@ -1978,16 +2002,9 @@ def _estimate_parallel_depth(
             case GateOperation():
                 gate_depth = _estimate_gate_depth(op, num_controls=num_controls)
                 qubit_ids = [v.name for v in op.operands]
-                if qubit_ids:
-                    # Max depth among all involved qubits
-                    max_current = CircuitDepth.zero()
-                    for qid in qubit_ids:
-                        max_current = max_current.max(
-                            qubit_depths.get(qid, CircuitDepth.zero())
-                        )
-                    new_depth = max_current + gate_depth
-                    for qid in qubit_ids:
-                        qubit_depths[qid] = new_depth
+                CircuitDepth.apply_gate_to_qubits(
+                    qubit_depths, qubit_ids, gate_depth
+                )
 
             case MeasureOperation():
                 qubit_id = op.operands[0].name
@@ -2008,16 +2025,14 @@ def _estimate_parallel_depth(
                 if not matched_qids:
                     matched_qids = [arr_name]
 
-                max_current = CircuitDepth.zero()
-                for qid in matched_qids:
-                    max_current = max_current.max(
-                        qubit_depths.get(qid, CircuitDepth.zero())
-                    )
-                new_depth = max_current + _MEASURE_UNIT
-                for qid in matched_qids:
-                    qubit_depths[qid] = new_depth
+                CircuitDepth.apply_gate_to_qubits(
+                    qubit_depths, matched_qids, _MEASURE_UNIT
+                )
                 if value_depths is not None and op.results:
-                    value_depths[op.results[0].uuid] = new_depth
+                    vd = CircuitDepth.zero()
+                    for qid in matched_qids:
+                        vd = vd.max(qubit_depths[qid])
+                    value_depths[op.results[0].uuid] = vd
 
             case MeasureQFixedOperation():
                 qfixed = op.operands[0]
@@ -2030,16 +2045,14 @@ def _estimate_parallel_depth(
                 if not matched_qids:
                     matched_qids = [qfixed_name]
 
-                max_current = CircuitDepth.zero()
-                for qid in matched_qids:
-                    max_current = max_current.max(
-                        qubit_depths.get(qid, CircuitDepth.zero())
-                    )
-                new_depth = max_current + _MEASURE_UNIT
-                for qid in matched_qids:
-                    qubit_depths[qid] = new_depth
+                CircuitDepth.apply_gate_to_qubits(
+                    qubit_depths, matched_qids, _MEASURE_UNIT
+                )
                 if value_depths is not None and op.results:
-                    value_depths[op.results[0].uuid] = new_depth
+                    vd = CircuitDepth.zero()
+                    for qid in matched_qids:
+                        vd = vd.max(qubit_depths[qid])
+                    value_depths[op.results[0].uuid] = vd
 
             case NotOp():
                 if value_depths is not None:
@@ -2226,15 +2239,9 @@ def _estimate_parallel_depth(
                     else:
                         qubit_ids.append(name)
 
-                if qubit_ids:
-                    max_current = CircuitDepth.zero()
-                    for qid in qubit_ids:
-                        max_current = max_current.max(
-                            qubit_depths.get(qid, CircuitDepth.zero())
-                        )
-                    new_depth = max_current + composite_depth
-                    for qid in qubit_ids:
-                        qubit_depths[qid] = new_depth
+                CircuitDepth.apply_gate_to_qubits(
+                    qubit_depths, qubit_ids, composite_depth
+                )
 
             case _:
                 continue
@@ -2694,14 +2701,7 @@ def _handle_controlled_u_parallel(
         ]
 
     # All involved qubits get max(current) + gate_depth
-    max_current = CircuitDepth.zero()
-    for qid in all_qubit_names:
-        max_current = max_current.max(
-            qubit_depths.get(qid, CircuitDepth.zero())
-        )
-    new_depth = max_current + gate_depth
-    for qid in all_qubit_names:
-        qubit_depths[qid] = new_depth
+    CircuitDepth.apply_gate_to_qubits(qubit_depths, all_qubit_names, gate_depth)
 
 
 def _compute_sequential_depth(
