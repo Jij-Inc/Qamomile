@@ -404,6 +404,20 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
             n_iters * sp.Piecewise((sp.Integer(1), n > 2), (sp.Integer(0), True))
         ),  # type:ignore
     ),
+    "quantum_counting": resource(
+        # Ref: Nielsen & Chuang (circuit)
+        2 * m - 1 + n,
+        total=n + m + 1 + n + n * (n + 1) / 2 + sp.floor(n / 2),  # type:ignore
+        single_qubit=n + m + 1 + n,  # type:ignore
+        two_qubit=n * (n - 1) / 2 + sp.floor(n / 2),
+        multi_qubit=n,
+        clifford_gates=n + m + 1 + n + sp.floor(n / 2),  # type:ignore
+        rotation_gates=(n * (n - 1)) / 2,  # type:ignore
+        total_depth=1 + n + 2 * n,
+        two_qubit_depth=2 * n - 2,
+        multi_qubit_depth=n,
+        rotation_depth=2 * n - 3,
+    ),
     # --- Arithmetic ---
     "maj": resource(
         # A new quantum ripple-carry addition circuit (https://arxiv.org/abs/quant-ph/0410184) (circuit)
@@ -470,7 +484,7 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         multi_qubit=n,
         clifford_gates=5 * n,
         total_depth=2 * n + 3,
-        two_qubit_depth=2 * n + 3,
+        two_qubit_depth=n + 2,
         multi_qubit_depth=n,
     ),
     "simple_ripple_carry_adder_2_cnot": resource(
@@ -712,6 +726,28 @@ EXPECTED_BINDINGS_RESOURCES: list[BindingsCase] = [
             total_depth=4,  # H:1 + RZZ(sequential, share q1):2 + RX:1
             two_qubit_depth=2,
             rotation_depth=3,  # RZZ:2 + RX:1
+        ),
+    ),
+    # --- qaoa_state_umbiguous: linear-only (quad empty) ---
+    BindingsCase(
+        id="qaoa_linear_only",
+        entry_id="qaoa_state_umbiguous",
+        bindings={
+            "n": 4,
+            "num_layers": 1,
+            "quad": {},
+            "linear": {0: 0.1, 1: 0.2, 2: 0.3, 3: 0.4},
+        },
+        expected=resource(
+            4,
+            total=4 + 0 + 4 + 4,  # H(4) + RZZ(0) + RZ(4) + RX(4)
+            single_qubit=4 + 4 + 4,
+            two_qubit=0,
+            clifford_gates=4,
+            rotation_gates=0 + 4 + 4,
+            total_depth=3,  # H:1 + RZ:1 + RX:1
+            two_qubit_depth=0,
+            rotation_depth=2,  # RZ:1 + RX:1
         ),
     ),
     # --- qaoa_state_umbiguous: single-element dicts ---

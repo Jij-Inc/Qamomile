@@ -670,6 +670,28 @@ def naive_multi_controlled_z(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
 
 
 @qmc.qkernel
+def _grover_operator_network_decomposition(
+    qs: qmc.Vector[qmc.Qubit], q: qmc.Qubit
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
+    # Call the oracle.
+    (qs, q) = _over_oracle(
+        qs,
+        q,
+        name="grover_oracle",
+        resource_metadata=ResourceMetadata(query_complexity=1),
+    )  # type: ignore
+    # Apply the diffusion operator,
+    # which can be implemented as H + X + multi-controlled Z + X + H.
+    qs = _all_h(qs)
+    qs = _all_x(qs)
+    qs = _network_decomposition_controlled_z(qs)
+    qs = _all_x(qs)
+    qs = _all_h(qs)
+
+    return qs, q
+
+
+@qmc.qkernel
 def _grover_network_decomposition(
     qs: qmc.Vector[qmc.Qubit], q: qmc.Qubit, n_iters: qmc.UInt
 ) -> qmc.Vector[qmc.Qubit]:
@@ -680,20 +702,7 @@ def _grover_network_decomposition(
 
     # Apply the diffusion operator (inversion about the mean).
     for _ in qmc.range(n_iters):
-        # Call the oracle.
-        (qs, q) = _over_oracle(
-            qs,
-            q,
-            name="grover_oracle",
-            resource_metadata=ResourceMetadata(query_complexity=1),
-        )  # type: ignore
-        # Apply the diffusion operator,
-        # which can be implemented as H + X + multi-controlled Z + X + H.
-        qs = _all_h(qs)
-        qs = _all_x(qs)
-        qs = _network_decomposition_controlled_z(qs)
-        qs = _all_x(qs)
-        qs = _all_h(qs)
+        qs, q = _grover_operator_network_decomposition(qs, q)
 
     return qs
 
@@ -745,6 +754,34 @@ def grover_naive_multi_controlled_z(
     qs = _grover_naive_multi_controlled_z(qs, q, n_iters)
     bits = qmc.measure(qs)
     return bits
+
+
+@qmc.qkernel
+def quantum_counting(
+    n: qmc.UInt, m: qmc.UInt
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit], qmc.Qubit]:
+    qs1 = qmc.qubit_array(n, name="qs1")
+    qs2 = qmc.qubit_array(m, name="qs2")
+    q = qmc.qubit(name="q")
+    controlled_grover = qmc.controlled(
+        _grover_operator_network_decomposition, num_controls=1
+    )
+
+    qs1 = _all_h(qs1)
+    qs2 = _all_h(qs2)
+    q = qmc.h(q)
+
+    for t in qmc.range(n):
+        qs1[n - 1 - t], qs2, q = controlled_grover(
+            qs1[n - 1 - t],
+            qs2,
+            q,
+            power=2**t,  # type: ignore
+        )
+
+    qs1 = _iqft(qs1)
+
+    return qs1, qs2, q  # type: ignore
 
 
 # ============================================================
@@ -1331,6 +1368,16 @@ QKERNEL_CATALOG: list[QKernelEntry] = [
         description="Grover's algorithm with naive multi-controlled Z",
         param_names=("n", "n_iters"),
         min_params={"n": 2, "n_iters": 1},
+        tags=("oracle",),
+    ),
+    QKernelEntry(
+        id="quantum_counting",
+        qkernel=quantum_counting,
+        description="Quantum counting algorithm",
+        param_names=("n", "m"),
+        min_params={
+            "m": 3,
+        },
         tags=("oracle",),
     ),
     # --- Arithmetic ---
