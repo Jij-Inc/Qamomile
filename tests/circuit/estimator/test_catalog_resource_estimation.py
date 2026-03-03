@@ -136,6 +136,15 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         t_gates=7,
         clifford_gates=10,
     ),
+    "optimal_toffoli_decomposition_loop": resource(
+        # https://arxiv.org/pdf/1210.0974
+        3,
+        total=17 * (m + 1),
+        single_qubit=10 * (m + 1),
+        two_qubit=7 * (m + 1),
+        t_gates=7 * (m + 1),
+        clifford_gates=10 * (m + 1),
+    ),
     # --- Entanglement ---
     "bell_state": resource(
         2,

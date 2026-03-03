@@ -297,9 +297,7 @@ def commutated_toffoli_decoposition() -> qmc.Vector[qmc.Qubit]:
 
 
 @qmc.qkernel
-def optimal_toffoli_decomposition() -> qmc.Vector[qmc.Qubit]:
-    q = qmc.qubit_array(3, name="q")
-
+def _optimal_toffoli_decomposition(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
     q[2] = qmc.h(q[2])
     q[0] = qmc.tdg(q[0])
     q[1] = qmc.t(q[1])
@@ -318,6 +316,23 @@ def optimal_toffoli_decomposition() -> qmc.Vector[qmc.Qubit]:
     q[0], q[1] = qmc.cx(q[0], q[1])
     q[2] = qmc.h(q[2])
 
+    return q
+
+
+@qmc.qkernel
+def optimal_toffoli_decomposition() -> qmc.Vector[qmc.Qubit]:
+    q = qmc.qubit_array(3, name="q")
+    q = _optimal_toffoli_decomposition(q)
+    return q
+
+
+@qmc.qkernel
+def optimal_toffoli_decomposition_loop(m: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+    q = qmc.qubit_array(3, name="q")
+
+    q = _optimal_toffoli_decomposition(q)
+    for _ in qmc.range(m):
+        q = _optimal_toffoli_decomposition(q)
     return q
 
 
@@ -1351,6 +1366,13 @@ QKERNEL_CATALOG: list[QKernelEntry] = [
         id="optimal_toffoli_decomposition",
         qkernel=optimal_toffoli_decomposition,
         description="Optimal Toffoli decomposition",
+    ),
+    QKernelEntry(
+        id="optimal_toffoli_decomposition_loop",
+        qkernel=optimal_toffoli_decomposition_loop,
+        description="Optimal Toffoli decomposition with loop",
+        min_params={"m": 0},
+        tags=("parametric",),
     ),
     QKernelEntry(
         id="all_rx",
