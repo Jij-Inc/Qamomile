@@ -25,10 +25,10 @@ from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
+    ResourceMetadata,
 )
 from qamomile.circuit.ir.types import QFixedType
 from qamomile.circuit.ir.value import Value
-from qamomile.circuit.stdlib.qft import IQFT as IQFTGate
 
 if TYPE_CHECKING:
     from qamomile.circuit.frontend.qkernel import QKernel
@@ -97,19 +97,30 @@ def _emit_iqft_and_cast_to_qfixed(qubits: Vector[Qubit]) -> QFixed:
     for i, h in enumerate(qubit_handles):
         qubits[i] = h
 
-    # Build IQFT implementation BlockValue for visualization (expand_composite)
-    iqft_gate = IQFTGate(concrete_n)
-    impl_block = iqft_gate._build_decomposition_block(tuple(qubit_handles))
+    # Create ResourceMetadata for concrete IQFT (skip for symbolic QPE where concrete_n == 0)
+    resource_meta = None
+    if concrete_n > 0:
+        num_h = concrete_n
+        num_cp = concrete_n * (concrete_n - 1) // 2
+        num_swap = concrete_n // 2
+        resource_meta = ResourceMetadata(
+            t_gates=0,
+            total_gates=num_h + num_cp + num_swap,
+            single_qubit_gates=num_h,
+            two_qubit_gates=num_cp + num_swap,
+            clifford_gates=num_h + num_swap,
+            rotation_gates=num_cp,
+        )
 
     # Create CompositeGateOperation for IQFT
     iqft_op = CompositeGateOperation(
-        operands=([impl_block] if impl_block else []) + operands,
+        operands=operands,
         results=iqft_results,
         gate_type=CompositeGateType.IQFT,
         num_control_qubits=0,
         num_target_qubits=concrete_n,
-        has_implementation=impl_block is not None,
-        composite_gate_instance=iqft_gate,
+        has_implementation=False,  # Use native backend
+        resource_metadata=resource_meta,
     )
 
     tracer = get_current_tracer()

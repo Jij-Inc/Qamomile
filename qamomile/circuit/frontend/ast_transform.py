@@ -25,6 +25,7 @@ class VariableCollector(ast.NodeVisitor):
         self.vars = set()
         self._exclude = set()  # 除外する名前
         self._global_names = global_names or set()
+        self._first_context: dict[str, str] = {}  # name -> "Store" | "Load"
 
     def visit_Call(self, node: ast.Call):
         """関数呼び出しの関数名を除外"""
@@ -49,11 +50,40 @@ class VariableCollector(ast.NodeVisitor):
             # ネストした属性アクセス (a.b.c) の場合は再帰
             self.visit(node.value)
 
+    def visit_Assign(self, node: ast.Assign):
+        """右辺を先に走査し、Python の評価順序に合わせる。
+
+        `q1 = qm.h(q1)` → 右辺 q1 (Load) が先 → first_context は "Load"
+        `cond2 = qm.measure(q2)` → 右辺 q2 (Load) が先、左辺 cond2 (Store) が後
+        """
+        self.visit(node.value)
+        for target in node.targets:
+            self.visit(target)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        """内部関数定義の走査をスキップする。"""
+        pass
+
     def visit_Name(self, node: ast.Name):
         """変数名を収集（除外リストにないもののみ）"""
         if isinstance(node.id, str):
             if node.id not in self._exclude and node.id not in self._global_names:
                 self.vars.add(node.id)
+                if node.id not in self._first_context:
+                    if isinstance(node.ctx, ast.Store):
+                        self._first_context[node.id] = "Store"
+                    else:
+                        self._first_context[node.id] = "Load"
+
+    @property
+    def locally_defined_vars(self) -> set[str]:
+        """このスコープ内で初めて定義（Store）される変数。"""
+        return {name for name, ctx in self._first_context.items() if ctx == "Store"}
+
+    @property
+    def incoming_vars(self) -> set[str]:
+        """外部スコープから渡される必要がある変数（初回が Load）。"""
+        return self.vars - self.locally_defined_vars
 
 
 class ControlFlowTransformer(ast.NodeTransformer):
@@ -202,6 +232,44 @@ class ControlFlowTransformer(ast.NodeTransformer):
             col_offset=0,
         )  # type: ignore
         return func_def, func_name
+
+    @staticmethod
+    def _has_top_level_return(body_nodes: list[ast.stmt]) -> bool:
+        """Check if any top-level statement in body_nodes is a Return with a value."""
+        return any(
+            isinstance(stmt, ast.Return) and stmt.value is not None
+            for stmt in body_nodes
+        )
+
+    @staticmethod
+    def _has_return_under_loop(body_nodes: list[ast.stmt]) -> bool:
+        """Check if any return statement exists inside a for/while loop in body_nodes."""
+        for stmt in body_nodes:
+            if not isinstance(stmt, (ast.For, ast.While)):
+                continue
+            for node in ast.walk(stmt):
+                if isinstance(node, ast.Return) and node.value is not None:
+                    return True
+        return False
+
+    @staticmethod
+    def _transform_returns_to_assignments(
+        body_nodes: list[ast.stmt], ret_var_name: str
+    ) -> list[ast.stmt]:
+        """Replace top-level ``return expr`` with ``ret_var_name = expr``."""
+        new_body: list[ast.stmt] = []
+        for stmt in body_nodes:
+            if isinstance(stmt, ast.Return) and stmt.value is not None:
+                assign = ast.Assign(
+                    targets=[ast.Name(id=ret_var_name, ctx=ast.Store())],
+                    value=stmt.value,
+                    lineno=stmt.lineno,
+                    col_offset=getattr(stmt, "col_offset", 0),
+                )
+                new_body.append(assign)
+            else:
+                new_body.append(stmt)
+        return new_body
 
     def visit_While(self, node: ast.While) -> Any:
         # ネストされた制御フローを先に変換
@@ -395,7 +463,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             item_var = "item"
 
         # Try to get a readable representation of the iterable
-        iter_str = ast.unparse(node.iter) if hasattr(ast, 'unparse') else "vector"
+        iter_str = ast.unparse(node.iter) if hasattr(ast, "unparse") else "vector"
 
         raise SyntaxError(
             f"Direct iteration over sequences is not supported in @qkernel functions.\n"
@@ -481,12 +549,71 @@ class ControlFlowTransformer(ast.NodeTransformer):
         return with_stmt
 
     def visit_If(self, node: ast.If) -> Any:
+        # 変換前のASTから変数を収集（generic_visit 後だと生成名が混入する）
+        collector_test = VariableCollector(global_names=self._global_names)
+        collector_test.visit(node.test)
+
+        collector_body = VariableCollector(global_names=self._global_names)
+        for stmt in node.body:
+            collector_body.visit(stmt)
+
+        collector_orelse = VariableCollector(global_names=self._global_names)
+        if node.orelse:
+            for stmt in node.orelse:
+                collector_orelse.visit(stmt)
+
+        # incoming_vars のみ使用（ブランチ内で初定義される変数を除外）
+        target_vars = sorted(
+            collector_test.vars
+            | collector_body.incoming_vars
+            | collector_orelse.incoming_vars
+        )
+
+        # Detect return inside for/while in if-else branches (unsupported).
+        # Must run before generic_visit which transforms loops into with-stmts.
+        if self._has_return_under_loop(node.body) or self._has_return_under_loop(
+            node.orelse if node.orelse else []
+        ):
+            raise SyntaxError(
+                "'return' inside for/while in @qkernel if-else is not supported"
+            )
+
+        # ネストされた制御フローを変換
         self.generic_visit(node)
 
-        vars_test = self._collect_variables(node.test)
-        vars_body = self._collect_variables(node.body)  # type: ignore
-        vars_orelse = self._collect_variables(node.orelse) if node.orelse else []  # type: ignore
-        target_vars = sorted(list(set(vars_test) | set(vars_body) | set(vars_orelse)))
+        # 明示的 return の検出と変換
+        orelse_body = node.orelse if node.orelse else []
+        body_has_return = self._has_top_level_return(node.body)
+        orelse_has_return = self._has_top_level_return(orelse_body)
+
+        # One-sided return is not supported: when only one branch returns,
+        # the phi merge cannot pair the return value with a corresponding
+        # value from the other branch, causing TypeError or silent bugs.
+        if body_has_return != orelse_has_return:
+            returning_branch = "if" if body_has_return else "else"
+            raise SyntaxError(
+                f"One-sided 'return' in @qkernel if-else is not supported.\n"
+                f"Line {node.lineno}: only the '{returning_branch}' branch "
+                f"has a 'return' statement.\n\n"
+                f"In @qkernel functions, 'return' inside if-else must appear "
+                f"in ALL branches or in NONE.\n"
+                f"Either add 'return' to both branches, or move 'return' "
+                f"after the if-else block."
+            )
+
+        has_return = body_has_return  # both are equal at this point
+
+        ret_var_name: str | None = None
+        if has_return:
+            ret_var_name = self._get_unique_name("_if_ret")
+            true_body = self._transform_returns_to_assignments(node.body, ret_var_name)
+            false_body = self._transform_returns_to_assignments(
+                orelse_body, ret_var_name
+            )
+            target_vars.append(ret_var_name)
+        else:
+            true_body = node.body
+            false_body = orelse_body
 
         # Cond: returns bool
         cond_name = self._get_unique_name("cond")
@@ -501,13 +628,12 @@ class ControlFlowTransformer(ast.NodeTransformer):
 
         # True Body
         true_def, true_name = self._create_inner_func(
-            "body", node.body, target_vars, node.lineno
+            "body", true_body, target_vars, node.lineno
         )
 
         # False Body
-        orelse_body = node.orelse if node.orelse else []
         false_def, false_name = self._create_inner_func(
-            "body", orelse_body, target_vars, node.lineno
+            "body", false_body, target_vars, node.lineno
         )
 
         var_list = ast.List(
@@ -526,7 +652,29 @@ class ControlFlowTransformer(ast.NodeTransformer):
         )
 
         assign_node = self._create_assignment_node(target_vars, call_expr, node.lineno)
-        return [cond_def, true_def, false_def, assign_node]
+
+        result_stmts: list[ast.stmt] = [cond_def, true_def, false_def]
+
+        if has_return:
+            # _if_ret_N = None (初期化)
+            init_stmt = ast.Assign(
+                targets=[ast.Name(id=ret_var_name, ctx=ast.Store())],
+                value=ast.Constant(value=None),
+                lineno=node.lineno,
+            )
+            result_stmts.append(init_stmt)
+
+        result_stmts.append(assign_node)
+
+        if has_return:
+            # return _if_ret_N
+            outer_return = ast.Return(
+                value=ast.Name(id=ret_var_name, ctx=ast.Load()),
+                lineno=node.lineno,
+            )
+            result_stmts.append(outer_return)
+
+        return result_stmts
 
 
 def transform_control_flow(func: Callable):
@@ -536,6 +684,11 @@ def transform_control_flow(func: Callable):
 
     # グローバル変数名を取得（モジュール、組み込み関数など）
     global_names = set(func.__globals__.keys())
+
+    # クロージャ変数も除外する（VariableCollector が target_vars に含めないようにする）
+    # クロージャの値は後で name_space に注入されるため、内部関数からアクセス可能
+    if func.__closure__ is not None:
+        global_names.update(func.__code__.co_freevars)
 
     transformer = ControlFlowTransformer(global_names=global_names)
     tree = transformer.visit(tree)

@@ -74,7 +74,6 @@ print(f"  Total gates: {est.gates.total}")
 print(f"  Single-qubit gates: {est.gates.single_qubit}")
 print(f"  Two-qubit gates: {est.gates.two_qubit}")
 print(f"  Clifford gates: {est.gates.clifford_gates}")
-print(f"  Circuit depth: {est.depth.total_depth}")
 
 # %% [markdown]
 # As expected: 2 qubits, 2 gates (H + CX), both Clifford, depth 2.
@@ -105,7 +104,6 @@ print("\nGHZ State Resource Estimate (symbolic):")
 print(f"  Qubits: {est_ghz.qubits}")
 print(f"  Total gates: {est_ghz.gates.total}")
 print(f"  Two-qubit gates: {est_ghz.gates.two_qubit}")
-print(f"  Circuit depth: {est_ghz.depth.total_depth}")
 
 # %% [markdown]
 # Notice that the results contain the symbol `n`! This is the power of algebraic estimation.
@@ -190,7 +188,6 @@ print("IQFT Resource Estimate (symbolic n):")
 print(f"  Qubits: {est_iqft.qubits}")
 print(f"  Total gates: {est_iqft.gates.total}")
 print(f"  Two-qubit gates: {est_iqft.gates.two_qubit}")
-print(f"  Depth: {est_iqft.depth.total_depth}")
 
 # %% [markdown]
 # IQFT requires $O(n^2)$ gates due to the nested loops.
@@ -263,7 +260,6 @@ print("\nManual QPE Resource Estimate (symbolic m):")
 print(f"  Qubits: {est_qpe_manual.qubits}")
 print(f"  Total gates: {est_qpe_manual.gates.total}")
 print(f"  Two-qubit gates: {est_qpe_manual.gates.two_qubit}")
-print(f"  Depth: {est_qpe_manual.depth.total_depth}")
 
 
 # %% [markdown]
@@ -271,7 +267,7 @@ print(f"  Depth: {est_qpe_manual.depth.total_depth}")
 #
 # - **Qubits**: $m + 1$ (m counting qubits + 1 target qubit) - scales linearly
 # - **Gates**: Grows rapidly with precision due to $2^m$ controlled operations
-# - **Depth**: Also increases significantly with precision
+# - **Depth**: Not reported by `estimate_resources()` in the current API
 
 # %% [markdown]
 # ## Section 3: Using Qamomile's Built-in QPE
@@ -312,6 +308,5 @@ print("\nBuilt-in QPE (m=8) Resource Estimate:")
 print(f"  Qubits: {est_builtin.qubits}")
 print(f"  Total gates: {est_builtin.gates.total}")
 print(f"  Two-qubit gates: {est_builtin.gates.two_qubit}")
-print(f"  Depth: {est_builtin.depth.total_depth}")
 
 # %%

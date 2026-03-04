@@ -86,7 +86,12 @@ class ResourceAllocator:
             if isinstance(op, QInitOperation):
                 result = op.results[0]
                 if isinstance(result, ArrayValue):
-                    # Allocate qubits for array elements using {array_uuid}_{i} format
+                    # Allocate physical qubits for array elements using
+                    # {array_uuid}_{i} keys.  At this stage only these
+                    # composite keys are registered; the individual element
+                    # Values (which carry their own UUIDs) are created
+                    # dynamically during frontend tracing and their UUID
+                    # mapping is deferred to _allocate_gate / _allocate_qubit_list.
                     if result.shape:
                         size_val = result.shape[0]
                         size = self._resolve_size(size_val, bindings)
@@ -219,19 +224,91 @@ class ResourceAllocator:
         qubit_map: dict[str, int],
     ) -> None:
         """Allocate resources for a GateOperation."""
+        # GateOperation represents a unitary gate: qubit count is preserved.
+        assert len(op.results) == len(op.operands), (
+            f"GateOperation must have equal operands and results, "
+            f"got {len(op.operands)} operands and {len(op.results)} results."
+        )
+
+        # Phase 1: Register all operands in qubit_map.
+        # Element Values are created dynamically during frontend tracing
+        # (handle/array.py _get_element), so their UUIDs are unknown at
+        # QInitOperation time.  Here we lazily map each element UUID to
+        # the physical qubit already allocated under the {parent_uuid}_{idx} key.
         for operand in op.operands:
             if operand.uuid not in qubit_map:
-                if operand.parent_array is None:
+                if operand.parent_array is not None and operand.element_indices:
+                    # Array element: resolve via parent_array key
+                    parent_uuid = operand.parent_array.uuid
+                    idx_value = operand.element_indices[0]
+                    if idx_value.is_constant():
+                        idx = int(idx_value.get_const())
+                        key = f"{parent_uuid}_{idx}"
+                        assert key in qubit_map, (
+                            f"Array element key {key!r} not found in qubit_map. "
+                            f"This indicates a bug in the transpiler pipeline: "
+                            f"QInitOperation for the parent array was not processed "
+                            f"before this GateOperation."
+                        )
+                        qubit_map[operand.uuid] = qubit_map[key]
+                    # Non-constant indices (symbolic loop vars) are resolved
+                    # at emit time via ValueResolver.resolve_qubit_index_detailed.
+                else:
+                    # Scalar qubit: allocate new index.
+                    # This path is used for @qkernel input parameters created with
+                    # emit_init=False (func_to_block.py), which have no QInitOperation.
+                    # ResourceAllocator.allocate() receives only operations, not the
+                    # block's input_values, so these qubits are first registered here.
                     qubit_map[operand.uuid] = len(qubit_map)
 
-        for result in op.results:
+        # Phase 2: Map each result to its corresponding operand (1:1)
+        for i, result in enumerate(op.results):
             if result.uuid not in qubit_map:
-                if result.parent_array is None and op.operands:
-                    first_operand = op.operands[0]
-                    if first_operand.parent_array is None:
-                        qubit_map[result.uuid] = qubit_map.get(
-                            first_operand.uuid, len(qubit_map)
-                        )
+                operand = op.operands[i]
+                if operand.uuid in qubit_map:
+                    qubit_map[result.uuid] = qubit_map[operand.uuid]
+
+    @staticmethod
+    def _resolve_qubit_key(qubit: "Value") -> tuple[str | None, bool]:
+        """Resolve a qubit Value to its allocation key.
+
+        Returns:
+            (key, is_array_element) where key is the qubit_map key
+            or None if the index is non-constant.
+        """
+        if qubit.parent_array is not None and qubit.element_indices:
+            parent_uuid = qubit.parent_array.uuid
+            idx_value = qubit.element_indices[0]
+            if idx_value.is_constant():
+                idx = int(idx_value.get_const())
+                return f"{parent_uuid}_{idx}", True
+            return None, True
+        return qubit.uuid, False
+
+    def _allocate_qubit_list(
+        self,
+        all_qubits: list["Value"],
+        results: list["Value"],
+        qubit_map: dict[str, int],
+    ) -> None:
+        """Allocate qubits for a list of qubit Values and their results."""
+        for qubit in all_qubits:
+            qubit_key, is_array = self._resolve_qubit_key(qubit)
+            if qubit_key is not None:
+                if qubit_key not in qubit_map:
+                    # New allocation for qubits not yet registered.
+                    # For scalar qubits, this handles @qkernel input parameters
+                    # (emit_init=False) that have no preceding QInitOperation.
+                    # For array elements, this handles first-seen element keys.
+                    qubit_map[qubit_key] = len(qubit_map)
+                if qubit.uuid not in qubit_map:
+                    qubit_map[qubit.uuid] = qubit_map[qubit_key]
+
+        for i, result in enumerate(results):
+            if result.uuid not in qubit_map and i < len(all_qubits):
+                qubit_key, is_array = self._resolve_qubit_key(all_qubits[i])
+                if qubit_key is not None:
+                    qubit_map[result.uuid] = qubit_map.get(qubit_key, len(qubit_map))
 
     def _allocate_composite(
         self,
@@ -240,30 +317,7 @@ class ResourceAllocator:
     ) -> None:
         """Allocate resources for a CompositeGateOperation."""
         all_qubits = op.control_qubits + op.target_qubits
-
-        def resolve_qubit_key(qubit: Value) -> tuple[str | None, bool]:
-            if qubit.parent_array is not None and qubit.element_indices:
-                parent_uuid = qubit.parent_array.uuid
-                idx_value = qubit.element_indices[0]
-                if idx_value.is_constant():
-                    idx = int(idx_value.get_const())
-                    return f"{parent_uuid}_{idx}", True
-                return None, True
-            return qubit.uuid, False
-
-        for qubit in all_qubits:
-            qubit_key, is_array = resolve_qubit_key(qubit)
-            if qubit_key is not None:
-                if qubit_key not in qubit_map:
-                    qubit_map[qubit_key] = len(qubit_map)
-                if qubit.uuid not in qubit_map:
-                    qubit_map[qubit.uuid] = qubit_map[qubit_key]
-
-        for i, result in enumerate(op.results):
-            if result.uuid not in qubit_map and i < len(all_qubits):
-                qubit_key, is_array = resolve_qubit_key(all_qubits[i])
-                if qubit_key is not None:
-                    qubit_map[result.uuid] = qubit_map.get(qubit_key, len(qubit_map))
+        self._allocate_qubit_list(all_qubits, list(op.results), qubit_map)
 
     def _allocate_controlled_u(
         self,
@@ -271,35 +325,33 @@ class ResourceAllocator:
         qubit_map: dict[str, int],
     ) -> None:
         """Allocate resources for a ControlledUOperation."""
+        if op.has_index_spec:
+            # Vector already allocated by QInitOperation.
+            # Map result ArrayValue to same physical qubits.
+            vector_operand = op.operands[1]
+            vector_result = op.results[0]
+            for key, idx in list(qubit_map.items()):
+                if key.startswith(f"{vector_operand.uuid}_"):
+                    suffix = key[len(f"{vector_operand.uuid}_"):]
+                    result_key = f"{vector_result.uuid}_{suffix}"
+                    if result_key not in qubit_map:
+                        qubit_map[result_key] = idx
+            return
+
+        if op.is_symbolic_num_controls:
+            from qamomile.circuit.transpiler.errors import EmitError
+
+            raise EmitError(
+                "Cannot transpile ControlledUOperation with symbolic num_controls. "
+                "Bind parameters to concrete values before transpilation.",
+                operation="ControlledUOperation",
+            )
         control_qubits = list(op.control_operands)
         target_qubits = [
             v for v in op.target_operands if hasattr(v, "type") and v.type.is_quantum()
         ]
         all_qubits = control_qubits + target_qubits
-
-        def resolve_qubit_key(qubit: Value) -> tuple[str | None, bool]:
-            if qubit.parent_array is not None and qubit.element_indices:
-                parent_uuid = qubit.parent_array.uuid
-                idx_value = qubit.element_indices[0]
-                if idx_value.is_constant():
-                    idx = int(idx_value.get_const())
-                    return f"{parent_uuid}_{idx}", True
-                return None, True
-            return qubit.uuid, False
-
-        for qubit in all_qubits:
-            qubit_key, is_array = resolve_qubit_key(qubit)
-            if qubit_key is not None:
-                if qubit_key not in qubit_map:
-                    qubit_map[qubit_key] = len(qubit_map)
-                if qubit.uuid not in qubit_map:
-                    qubit_map[qubit.uuid] = qubit_map[qubit_key]
-
-        for i, result in enumerate(op.results):
-            if result.uuid not in qubit_map and i < len(all_qubits):
-                qubit_key, is_array = resolve_qubit_key(all_qubits[i])
-                if qubit_key is not None:
-                    qubit_map[result.uuid] = qubit_map.get(qubit_key, len(qubit_map))
+        self._allocate_qubit_list(all_qubits, list(op.results), qubit_map)
 
     def _allocate_cast(
         self,
@@ -554,6 +606,11 @@ class ValueResolver:
                     if isinstance(bound_val, (int, float)):
                         return int(bound_val)
                     return None
+            elif val.uuid in bindings:
+                bound_val = bindings[val.uuid]
+                if isinstance(bound_val, (int, float)):
+                    return int(bound_val)
+                return None
             elif val.name in bindings:
                 bound_val = bindings[val.name]
                 if isinstance(bound_val, (int, float)):

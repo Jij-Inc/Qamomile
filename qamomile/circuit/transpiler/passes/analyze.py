@@ -48,6 +48,9 @@ class AnalyzePass(Pass[Block, Block]):
             input.parameters,
         )
 
+        # Validate ControlledUOperation fields (power is outside operands)
+        self._validate_controlled_u_fields(input.operations)
+
         return dataclasses.replace(
             input,
             kind=BlockKind.ANALYZED,
@@ -152,6 +155,63 @@ class AnalyzePass(Pass[Block, Block]):
                         )
 
         validator = QuantumDependencyValidator()
+        validator.visit_operations(operations)
+
+    def _validate_controlled_u_fields(
+        self,
+        operations: list[Operation],
+    ) -> None:
+        """Validate ``ControlledUOperation``-specific dataclass fields.
+
+        ``power`` lives outside ``op.operands``, so the generic
+        dependency validation does not cover it.  This method rejects
+        statically-decidable invalid concrete values (``<= 0``,
+        ``bool``, non-integer) while allowing unresolved symbolic
+        ``Value`` instances that will be resolved at emit time.
+
+        Args:
+            operations: The linear operation list to validate.
+
+        Raises:
+            ValidationError: If a concrete ``power`` value is invalid.
+        """
+        from qamomile.circuit.ir.operation.gate import ControlledUOperation
+
+        def _validate_concrete_power(value: object, op: ControlledUOperation) -> None:
+            if isinstance(value, bool):
+                raise ValidationError(
+                    f"ControlledU power must be a positive integer, got bool ({value})."
+                )
+            if not isinstance(value, (int, float)):
+                raise ValidationError(
+                    f"ControlledU power must be a positive integer, "
+                    f"got {type(value).__name__}."
+                )
+            if isinstance(value, float) and value != int(value):
+                raise ValidationError(
+                    f"ControlledU power must be an integer, "
+                    f"got non-integer float {value}."
+                )
+            int_val = int(value)
+            if int_val <= 0:
+                raise ValidationError(
+                    f"ControlledU power must be strictly positive, got {int_val}."
+                )
+
+        class ControlledUValidator(ControlFlowVisitor):
+            def visit_operation(self, op: Operation) -> None:
+                if not isinstance(op, ControlledUOperation):
+                    return
+                power = op.power
+                if isinstance(power, Value):
+                    if power.is_constant():
+                        const = power.get_const()
+                        if const is not None:
+                            _validate_concrete_power(const, op)
+                    return
+                _validate_concrete_power(power, op)
+
+        validator = ControlledUValidator()
         validator.visit_operations(operations)
 
     def _find_measurement_results(

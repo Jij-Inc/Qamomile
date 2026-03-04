@@ -9,7 +9,6 @@ import sympy as sp
 
 from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
 from qamomile.circuit.estimator.gate_counter import GateCount
-from qamomile.circuit.estimator.depth_estimator import CircuitDepth
 
 
 def estimate_qaoa(
@@ -39,7 +38,6 @@ def estimate_qaoa(
             gates.total: 2*p*n + p*num_edges (RX + RZZ gates)
             gates.single_qubit: 2*p*n (RX gates)
             gates.two_qubit: p*num_edges (RZZ gates)
-            depth.total_depth: O(p * (num_edges + n))
 
     Example:
         >>> import sympy as sp
@@ -87,15 +85,6 @@ def estimate_qaoa(
     # Two-qubit: p * num_edges RZZ gates
     two_qubit = p_expr * edges_expr
 
-    # Depth estimation (conservative, assumes sequential)
-    # - Initial: n H gates (depth n or 1 if parallel)
-    # - Per layer: num_edges RZZ + n RX (sequential)
-    # Conservative: sum everything
-    total_depth = n_expr + p_expr * (edges_expr + n_expr)
-
-    # Two-qubit depth: only RZZ gates
-    two_qubit_depth = p_expr * edges_expr
-
     # T gates and Clifford gates:
     # Standard QAOA uses only rotations (Rx, RZZ), no T gates
     # Clifford gates: only the initial H gates
@@ -108,18 +97,13 @@ def estimate_qaoa(
             total=sp.simplify(total_gates),
             single_qubit=sp.simplify(single_qubit),
             two_qubit=sp.simplify(two_qubit),
+            multi_qubit=sp.Integer(0),
             t_gates=t_gates,
             clifford_gates=clifford,
-        ),
-        depth=CircuitDepth(
-            total_depth=sp.simplify(total_depth),
-            t_depth=sp.Integer(0),  # No T gates
-            two_qubit_depth=sp.simplify(two_qubit_depth),
+            rotation_gates=sp.simplify(p_expr * (edges_expr + n_expr)),
         ),
         parameters={
-            str(s): s
-            for s in [n_expr, p_expr, edges_expr]
-            if isinstance(s, sp.Symbol)
+            str(s): s for s in [n_expr, p_expr, edges_expr] if isinstance(s, sp.Symbol)
         },
     )
 
@@ -175,14 +159,10 @@ def estimate_qaoa_ising(
             total=base_est.gates.total + extra_single_qubit,
             single_qubit=base_est.gates.single_qubit + extra_single_qubit,
             two_qubit=base_est.gates.two_qubit,
+            multi_qubit=sp.Integer(0),
             t_gates=base_est.gates.t_gates,
             clifford_gates=base_est.gates.clifford_gates,
-        ),
-        depth=CircuitDepth(
-            # Linear terms can be done in parallel with mixer, so doesn't add depth
-            total_depth=base_est.depth.total_depth,
-            t_depth=base_est.depth.t_depth,
-            two_qubit_depth=base_est.depth.two_qubit_depth,
+            rotation_gates=base_est.gates.rotation_gates + extra_single_qubit,
         ),
         parameters=base_est.parameters,
     )
