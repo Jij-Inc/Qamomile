@@ -129,11 +129,17 @@ class ValueCollector(ControlFlowVisitor):
         self.result_uuids: set[str] = set()
 
     def visit_operation(self, op: Operation) -> None:
-        from qamomile.circuit.ir.value import ValueBase
+        from qamomile.circuit.ir.operation.gate import GateOperation
+        from qamomile.circuit.ir.value import Value, ValueBase
 
         for operand in op.operands:
             if isinstance(operand, ValueBase):
                 self.operand_uuids.add(operand.uuid)
+
+        # GateOperation.theta is a Value stored outside operands;
+        # include it so consumers see all referenced Values.
+        if isinstance(op, GateOperation) and isinstance(op.theta, Value):
+            self.operand_uuids.add(op.theta.uuid)
 
         for result in op.results:
             self.result_uuids.add(result.uuid)

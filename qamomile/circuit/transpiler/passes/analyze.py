@@ -7,7 +7,7 @@ import dataclasses
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.operation import OperationKind
-from qamomile.circuit.ir.operation.gate import MeasureOperation
+from qamomile.circuit.ir.operation.gate import GateOperation, MeasureOperation
 from qamomile.circuit.ir.value import Value, ValueBase
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowVisitor
@@ -87,6 +87,10 @@ class AnalyzePass(Pass[Block, Block]):
                 operand_uuids = {
                     v.uuid for v in op.operands if isinstance(v, ValueBase)
                 }
+                # GateOperation.theta is a Value stored outside operands;
+                # include it as a dependency so the graph is complete.
+                if isinstance(op, GateOperation) and isinstance(op.theta, Value):
+                    operand_uuids.add(op.theta.uuid)
                 for result in op.results:
                     if result.uuid not in self.graph:
                         self.graph[result.uuid] = set()
@@ -131,12 +135,18 @@ class AnalyzePass(Pass[Block, Block]):
                 if op.operation_kind != OperationKind.QUANTUM:
                     return
 
-                for operand in op.operands:
-                    if not isinstance(operand, ValueBase):
-                        continue
+                # Collect all Value dependencies including GateOperation.theta
+                deps_to_check: list[ValueBase] = [
+                    v for v in op.operands if isinstance(v, ValueBase)
+                ]
+                # GateOperation.theta is a Value stored outside operands;
+                # validate it against measurement dependencies as well.
+                if isinstance(op, GateOperation) and isinstance(op.theta, Value):
+                    deps_to_check.append(op.theta)
 
+                for dep in deps_to_check:
                     if outer_self._depends_on_measurement(
-                        operand.uuid,
+                        dep.uuid,
                         dependency_graph,
                         measurement_uuids,
                         parameter_uuids,
@@ -144,11 +154,11 @@ class AnalyzePass(Pass[Block, Block]):
                     ):
                         raise DependencyError(
                             f"Quantum operation '{type(op).__name__}' depends on "
-                            f"measurement result via value '{operand.name}'. "
+                            f"measurement result via value '{dep.name}'. "
                             f"JIT compilation not supported - classical values "
                             f"used in quantum ops must be parameters or constants.",
                             quantum_op=type(op).__name__,
-                            classical_value=operand.name,
+                            classical_value=dep.name,
                         )
 
         validator = QuantumDependencyValidator()

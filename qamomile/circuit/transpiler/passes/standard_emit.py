@@ -1351,7 +1351,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         bindings: dict[str, Any],
     ) -> float | Any:
         """Resolve angle parameter for rotation gates."""
-        if hasattr(op, "theta") and op.theta is not None:
+        if op.theta is not None:
             theta = op.theta
             if isinstance(theta, (int, float)):
                 return float(theta)

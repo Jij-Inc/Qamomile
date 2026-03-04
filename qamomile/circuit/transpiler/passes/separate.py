@@ -15,6 +15,7 @@ from qamomile.circuit.ir.operation.control_flow import (
 )
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.operation.gate import (
+    GateOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
 )
@@ -450,6 +451,15 @@ class SeparatePass(Pass[Block, SimplifiedProgram]):
                             or value_definitions[operand.uuid] != segment_index
                         ):
                             segment_inputs.add(operand.uuid)
+
+                # GateOperation.theta is a Value stored outside operands;
+                # include it as a segment input if defined elsewhere.
+                if isinstance(op, GateOperation) and isinstance(op.theta, Value):
+                    if (
+                        op.theta.uuid not in value_definitions
+                        or value_definitions[op.theta.uuid] != segment_index
+                    ):
+                        segment_inputs.add(op.theta.uuid)
 
                 # Results are defined by this segment
                 for result in op.results:

@@ -707,15 +707,17 @@ class LoopAnalyzer:
             if isinstance(op, BinOp):
                 depends = False
                 for operand in op.operands:
-                    if (
-                        isinstance(operand, _Value)
-                        and operand.name in {loop_var} | _derived_names
+                    if isinstance(operand, _Value) and (
+                        operand.name == loop_var or operand.name in _derived_names
                     ):
                         depends = True
                         break
                 if depends:
-                    # Track the result name so downstream BinOps are also
-                    # detected as transitive dependents.
+                    # Track the result name for future transitive detection
+                    # if the early-return logic is ever changed to collect all
+                    # dependent BinOps.  Currently the immediate ``return True``
+                    # means this entry is not read by subsequent iterations,
+                    # but keeping it maintains correctness if the design evolves.
                     result_name = op.results[0].name if op.results else None
                     if result_name is not None:
                         _derived_names.add(result_name)
@@ -742,6 +744,10 @@ class LoopAnalyzer:
                     op.operations, loop_var, _derived_names
                 ):
                     return True
+            else:
+                # Other operation types (gates, measures, etc.) cannot
+                # contain BinOps referencing the loop variable.
+                pass
         return False
 
     def _has_dynamic_nested_loop(
@@ -808,6 +814,19 @@ class LoopAnalyzer:
                                     return True
 
             elif isinstance(op, ForOperation):
+                if self._has_array_element_access(op.operations, loop_var):
+                    return True
+            elif isinstance(op, ForItemsOperation):
+                if self._has_array_element_access(op.operations, loop_var):
+                    return True
+            elif isinstance(op, IfOperation):
+                if self._has_array_element_access(
+                    op.true_operations, loop_var
+                ) or self._has_array_element_access(
+                    op.false_operations, loop_var
+                ):
+                    return True
+            elif isinstance(op, WhileOperation):
                 if self._has_array_element_access(op.operations, loop_var):
                     return True
 
