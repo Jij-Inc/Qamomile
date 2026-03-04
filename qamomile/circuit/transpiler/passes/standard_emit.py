@@ -1094,7 +1094,23 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                     operation="ControlledUOperation",
                 )
 
-        # 4. Partition into control and target physical indices
+        # 4. Validate resolved indices
+        resolved_indices = resolved_ti if resolved_ti is not None else resolved_ci
+        for idx in resolved_indices:
+            if not (0 <= idx < vector_size):
+                raise EmitError(
+                    f"Index {idx} out of bounds [0, {vector_size}) "
+                    f"for ControlledU vector.",
+                    operation="ControlledUOperation",
+                )
+        if len(set(resolved_indices)) != len(resolved_indices):
+            raise EmitError(
+                f"Duplicate indices in ControlledU index spec: "
+                f"{resolved_indices}.",
+                operation="ControlledUOperation",
+            )
+
+        # 5. Partition into control and target physical indices
         if resolved_ti is not None:
             target_set = set(resolved_ti)
             target_phys = [all_phys_indices[i] for i in resolved_ti]
@@ -1112,7 +1128,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 if i not in control_set
             ]
 
-        # 5. Validate num_controls consistency
+        # 6. Validate num_controls consistency
         if len(control_phys) != nc:
             raise EmitError(
                 f"num_controls ({nc}) does not match actual control count "
@@ -1120,7 +1136,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 operation="ControlledUOperation",
             )
 
-        # 6. Bind classical parameters
+        # 7. Bind classical parameters
         block_value = op.block
         param_operands = [
             v
@@ -1154,7 +1170,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 ):
                     local_bindings[param_name] = operand.params["const"]
 
-        # 7. Build and emit gate
+        # 8. Build and emit gate
         num_targets = len(target_phys)
         unitary_gate = self._blockvalue_to_gate(
             block_value, num_targets, local_bindings
@@ -1172,6 +1188,14 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             )
             if resolved is not None:
                 power_value = int(resolved)
+            else:
+                raise EmitError(
+                    f"Failed to resolve ControlledU power from Handle: "
+                    f"inner value {inner_value} could not be resolved. "
+                    f"This likely indicates an unbound loop variable "
+                    f"in the IR.",
+                    operation="ControlledUOperation",
+                )
 
         if unitary_gate is not None:
             if isinstance(power_value, int) and power_value > 1:
@@ -1198,7 +1222,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                             local_bindings,
                         )
 
-        # 8. Map result ArrayValue in qubit_map
+        # 9. Map result ArrayValue in qubit_map
         vector_result = op.results[0]
         for i in range(vector_size):
             result_key = f"{vector_result.uuid}_{i}"

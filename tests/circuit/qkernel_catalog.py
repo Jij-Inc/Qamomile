@@ -273,7 +273,7 @@ def naive_toffoli_decomposition() -> qmc.Vector[qmc.Qubit]:
 
 
 @qmc.qkernel
-def commutated_toffoli_decoposition() -> qmc.Vector[qmc.Qubit]:
+def commutated_toffoli_decomposition() -> qmc.Vector[qmc.Qubit]:
     q = qmc.qubit_array(3, name="q")
 
     q[2] = qmc.h(q[2])
@@ -1358,8 +1358,8 @@ QKERNEL_CATALOG: list[QKernelEntry] = [
         description="Naive Toffoli decomposition",
     ),
     QKernelEntry(
-        id="commutated_toffoli_decoposition",
-        qkernel=commutated_toffoli_decoposition,
+        id="commutated_toffoli_decomposition",
+        qkernel=commutated_toffoli_decomposition,
         description="Commutated Toffoli decomposition",
     ),
     QKernelEntry(

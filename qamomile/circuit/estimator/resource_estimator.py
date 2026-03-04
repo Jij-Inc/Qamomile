@@ -15,7 +15,6 @@ from qamomile.circuit.estimator.gate_counter import GateCount, count_gates
 from qamomile.circuit.estimator.qubits_counter import qubits_counter
 
 if TYPE_CHECKING:
-    from qamomile.circuit.ir.block import Block
     from qamomile.circuit.ir.block_value import BlockValue
     from qamomile.circuit.ir.operation.operation import Operation
 
@@ -162,7 +161,7 @@ class ResourceEstimate:
 
 
 def estimate_resources(
-    block: BlockValue | Block | list[Operation],
+    block: BlockValue | list[Operation],
     *,
     bindings: dict[str, Any] | None = None,
 ) -> ResourceEstimate:
@@ -172,7 +171,7 @@ def estimate_resources(
     Combines qubit counting and gate counting.
 
     Args:
-        block: BlockValue, Block, or list of Operations to analyze
+        block: BlockValue or list of Operations to analyze
         bindings: Optional concrete parameter bindings (scalars and dicts).
 
     Returns:

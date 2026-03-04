@@ -26,29 +26,6 @@ _MAX_INTERP_DEPTH = 3
 
 
 # ------------------------------------------------------------------ #
-#  Error types                                                        #
-# ------------------------------------------------------------------ #
-
-
-class NonPolynomialLoopBehaviorError(Exception):
-    """Neither polynomial nor exponential+linear model verified."""
-
-    def __init__(self, symbols: set[sp.Symbol], message: str = ""):
-        self.symbols = symbols
-        super().__init__(
-            message or f"Cannot interpolate loop behaviour for symbols {symbols}"
-        )
-
-
-class TooDeepInterpolationError(Exception):
-    """Recursive interpolation exceeded maximum depth."""
-
-    def __init__(self, depth: int):
-        self.depth = depth
-        super().__init__(f"Interpolation depth {depth} exceeds max {_MAX_INTERP_DEPTH}")
-
-
-# ------------------------------------------------------------------ #
 #  Concrete range resolution                                          #
 # ------------------------------------------------------------------ #
 
@@ -162,10 +139,6 @@ def interpolate_scalar(
          - Exactly one verifies → use it.
          - Both verify → use polynomial (Occam's razor).
          - Neither verifies → use polynomial on all points (best effort).
-
-    Raises:
-        NonPolynomialLoopBehaviorError: Only if holdout verification
-            fails AND full-point polynomial doesn't match either (very rare).
     """
     if not sample_points:
         return sp.Integer(0)

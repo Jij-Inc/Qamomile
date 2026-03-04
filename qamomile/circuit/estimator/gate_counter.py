@@ -9,7 +9,6 @@ from __future__ import annotations
 import sympy as sp
 from sympy import Sum
 
-from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.block_value import BlockValue
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
@@ -271,7 +270,7 @@ def _handle_composite(
 # ------------------------------------------------------------------ #
 
 
-def count_gates(block: BlockValue | Block | list[Operation]) -> GateCount:
+def count_gates(block: BlockValue | list[Operation]) -> GateCount:
     """Count gates in a quantum circuit.
 
     This function analyzes operations and returns algebraic gate counts
@@ -286,7 +285,7 @@ def count_gates(block: BlockValue | Block | list[Operation]) -> GateCount:
     - ControlledUOperation: Counts as a single opaque gate
 
     Args:
-        block: BlockValue, Block, or list of Operations to analyze
+        block: BlockValue or list of Operations to analyze
 
     Returns:
         GateCount with total, single_qubit, two_qubit, t_gates, clifford_gates
@@ -297,7 +296,7 @@ def count_gates(block: BlockValue | Block | list[Operation]) -> GateCount:
         >>> print(count.total)  # e.g., "2*n + 5"
         >>> print(count.t_gates)  # e.g., "n"
     """
-    if isinstance(block, (BlockValue, Block)):
+    if isinstance(block, BlockValue):
         block_ref = block
         ops = block.operations
     else:

@@ -54,3 +54,16 @@ class TestMetadataValidationWarnings:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             _extract_gate_count_from_metadata(meta)
+
+    def test_total_gates_zero_is_respected(self):
+        """total_gates=0 should be treated as explicit 0, not as None."""
+        meta = ResourceMetadata(
+            total_gates=0,
+            single_qubit_gates=0,
+            two_qubit_gates=0,
+            multi_qubit_gates=0,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            result = _extract_gate_count_from_metadata(meta)
+        assert result.total == 0

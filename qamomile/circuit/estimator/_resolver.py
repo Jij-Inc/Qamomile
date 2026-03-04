@@ -276,24 +276,7 @@ _COMPOP_MAP = {
 
 
 def _apply_binop(kind: BinOpKind, left: sp.Expr, right: sp.Expr) -> sp.Expr:
-    """Apply binary arithmetic with smart FLOORDIV.
-
-    For FLOORDIV: avoids ``sp.floor()`` when the quotient simplifies to
-    an obviously-integer form (Integer, Symbol, Pow with non-negative
-    exponent), enabling cleaner symbolic expressions like
-    ``2**m / 2**i = 2**(m-i)``.
-    """
-    if kind == BinOpKind.FLOORDIV:
-        quotient = sp.simplify(left / right)
-        if isinstance(quotient, (sp.Integer, sp.Symbol)):
-            return quotient
-        if isinstance(quotient, sp.Pow):
-            # Only skip floor for Pow with non-negative exponent
-            # e.g., 2**(m-i) is fine, but n**(-1) = 1/n is not integer
-            base, exp = quotient.as_base_exp()
-            if exp.is_nonnegative is not False:
-                return quotient
-        return sp.floor(left / right)
+    """Apply binary arithmetic."""
     fn = BINOP_TO_SYMPY.get(kind)
     if fn is None:
         raise ValueError(f"Unknown BinOpKind: {kind}")

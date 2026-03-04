@@ -6,12 +6,27 @@ import sympy as sp
 
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind
 
+def _smart_floordiv(lhs: sp.Expr, r: sp.Expr) -> sp.Expr:
+    """Smart FLOORDIV: avoids sp.floor() when quotient is obviously integer.
+
+    Enables cleaner symbolic expressions like ``2**m / 2**i = 2**(m-i)``.
+    """
+    quotient = sp.simplify(lhs / r)
+    if isinstance(quotient, (sp.Integer, sp.Symbol)):
+        return quotient
+    if isinstance(quotient, sp.Pow):
+        base, exp = quotient.as_base_exp()
+        if exp.is_nonnegative is not False:
+            return quotient
+    return sp.floor(lhs / r)
+
+
 BINOP_TO_SYMPY = {
     BinOpKind.ADD: lambda lhs, r: lhs + r,
     BinOpKind.SUB: lambda lhs, r: lhs - r,
     BinOpKind.MUL: lambda lhs, r: lhs * r,
     BinOpKind.DIV: lambda lhs, r: lhs / r,
-    BinOpKind.FLOORDIV: lambda lhs, r: sp.floor(lhs / r),
+    BinOpKind.FLOORDIV: _smart_floordiv,
     BinOpKind.POW: lambda lhs, r: lhs**r,
 }
 

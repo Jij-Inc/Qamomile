@@ -36,16 +36,16 @@ from tests.circuit.qkernel_catalog import (
 
 
 def resource(
-    qubits,
+    qubits: int | float | sp.Expr,
     *,
-    total=0,
-    single_qubit=0,
-    two_qubit=0,
-    multi_qubit=0,
-    t_gates=0,
-    clifford_gates=0,
-    rotation_gates=0,
-    oracle_calls=None,
+    total: int | float | sp.Expr = 0,
+    single_qubit: int | float | sp.Expr = 0,
+    two_qubit: int | float | sp.Expr = 0,
+    multi_qubit: int | float | sp.Expr = 0,
+    t_gates: int | float | sp.Expr = 0,
+    clifford_gates: int | float | sp.Expr = 0,
+    rotation_gates: int | float | sp.Expr = 0,
+    oracle_calls: dict[str, int | float | sp.Expr] | None = None,
 ) -> ResourceEstimate:
     """Build a ResourceEstimate with zero defaults for unspecified fields."""
     return ResourceEstimate(
@@ -118,7 +118,7 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         t_gates=7,
         clifford_gates=9,
     ),
-    "commutated_toffoli_decoposition": resource(
+    "commutated_toffoli_decomposition": resource(
         # https://arxiv.org/pdf/1210.0974
         3,
         total=16,

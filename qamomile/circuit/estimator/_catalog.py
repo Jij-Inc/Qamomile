@@ -19,7 +19,7 @@ from ._gate_count import GateCount
 #  Gate set constants                                                 #
 # ------------------------------------------------------------------ #
 
-CLIFFORD_GATES = {"h", "x", "y", "z", "s", "sdg", "cx", "cy", "cz", "swap"}
+CLIFFORD_GATES = {"h", "x", "y", "z", "s", "sdg", "cx", "cz", "swap"}
 T_GATES = {"t", "tdg"}
 SINGLE_QUBIT_GATES = {
     "h",
@@ -39,8 +39,8 @@ SINGLE_QUBIT_GATES = {
     "u2",
     "u3",
 }
-TWO_QUBIT_GATES = {"cx", "cy", "cz", "swap", "cp", "crx", "cry", "crz", "rzz"}
-ROTATION_GATES = {"rx", "ry", "rz", "p", "cp", "crx", "cry", "crz", "rzz"}
+TWO_QUBIT_GATES = {"cx", "cz", "swap", "cp", "rzz"}
+ROTATION_GATES = {"rx", "ry", "rz", "p", "cp", "rzz"}
 MULTI_QUBIT_GATES = {"toffoli", "ccx"}
 _GATE_BASE_QUBITS: dict[str, int] = {"toffoli": 3, "ccx": 3}
 
@@ -78,6 +78,14 @@ def classify_gate(
 
 
 def _classify_uncontrolled(gate_name: str) -> GateCount:
+    """Classify a single uncontrolled gate into a GateCount.
+
+    Args:
+        gate_name: Lowercase gate name (e.g. "h", "cx", "toffoli").
+
+    Returns:
+        GateCount with total=1 and appropriate category flags set.
+    """
     return GateCount(
         total=_ONE,
         single_qubit=_ONE if gate_name in SINGLE_QUBIT_GATES else _ZERO,
@@ -93,8 +101,18 @@ def _classify_controlled(
     gate_name: str,
     num_controls: int | sp.Expr,
 ) -> GateCount:
-    from .gate_counter import GateCount
+    """Classify a controlled gate into a GateCount.
 
+    Handles both concrete and symbolic num_controls.
+    A single-control X/Y/Z is Clifford; higher control counts are multi-qubit.
+
+    Args:
+        gate_name: Lowercase base gate name (e.g. "x", "rz").
+        num_controls: Number of control qubits (concrete or symbolic).
+
+    Returns:
+        GateCount with total=1 and category flags based on control count.
+    """
     is_single_base = gate_name in SINGLE_QUBIT_GATES
     is_two_base = gate_name in TWO_QUBIT_GATES
 
@@ -162,8 +180,6 @@ def classify_controlled_u(
     as exactly one gate regardless of power.  Exponential oracle counts
     arise from loop structure (e.g. ``for _rep in range(2**k)``).
     """
-    from .gate_counter import GateCount
-
     total_qubits = nc + num_targets
 
     if isinstance(nc, int):
@@ -196,16 +212,14 @@ def extract_gate_count_from_metadata(meta: ResourceMetadata) -> GateCount:
     have ``None`` gaps and the known sub-total is less than *total_gates*.
     This warning behaviour is required by ``test_metadata_warnings.py``.
     """
-    from .gate_counter import GateCount
+    single = meta.single_qubit_gates if meta.single_qubit_gates is not None else 0
+    two = meta.two_qubit_gates if meta.two_qubit_gates is not None else 0
+    multi = meta.multi_qubit_gates if meta.multi_qubit_gates is not None else 0
+    t = meta.t_gates if meta.t_gates is not None else 0
+    clifford = meta.clifford_gates if meta.clifford_gates is not None else 0
+    rotation = meta.rotation_gates if meta.rotation_gates is not None else 0
 
-    single = meta.single_qubit_gates or 0
-    two = meta.two_qubit_gates or 0
-    multi = meta.multi_qubit_gates or 0
-    t = meta.t_gates or 0
-    clifford = meta.clifford_gates or 0
-    rotation = meta.rotation_gates or 0
-
-    if meta.total_gates:
+    if meta.total_gates is not None:
         none_fields = [
             name
             for name, val in [
@@ -231,7 +245,7 @@ def extract_gate_count_from_metadata(meta: ResourceMetadata) -> GateCount:
                     stacklevel=2,
                 )
 
-    total = meta.total_gates if meta.total_gates else single + two + multi
+    total = meta.total_gates if meta.total_gates is not None else single + two + multi
 
     return GateCount(
         total=sp.Integer(total),
@@ -254,8 +268,6 @@ def qft_iqft_gate_count(n: sp.Expr) -> GateCount:
 
     QFT = n H + n(n-1)/2 CP + n//2 SWAP
     """
-    from .gate_counter import GateCount
-
     h = n
     cp = n * (n - 1) / 2
     swap = n // 2
