@@ -32,14 +32,20 @@ from typing import TYPE_CHECKING, Any
 from qamomile.circuit.frontend.decomposition import DecompositionConfig
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.operation import QInitOperation
+from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
 from qamomile.circuit.ir.operation.gate import (
+    ControlledUOperation,
     GateOperation,
     GateOperationType,
     MeasureOperation,
     MeasureVectorOperation,
     MeasureQFixedOperation,
 )
+from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.operation.cast import CastOperation
+from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
+from qamomile.circuit.ir.operation.arithmetic_operations import BinaryOperationBase
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
@@ -52,9 +58,31 @@ from qamomile.circuit.ir.operation.control_flow import (
     WhileOperation,
 )
 from qamomile.circuit.transpiler.passes.inline import InlinePass
+from qamomile.circuit.transpiler.passes.linear_validate import LinearValidationPass
 
 if TYPE_CHECKING:
     from qamomile.circuit.frontend.qkernel import QKernel
+
+
+def linear_preflight(block: Block, bindings: dict[str, Any] | None = None) -> Block:
+    """Run inline + linear validation as a preflight check.
+
+    This ensures that the block is free of linear type violations
+    before resource estimation proceeds.
+
+    Args:
+        block: The block to validate.
+        bindings: Optional parameter bindings.
+
+    Returns:
+        The inlined, validated block.
+
+    Raises:
+        LinearTypeError: If linear type violations are detected.
+    """
+    inlined = InlinePass().run(block)
+    LinearValidationPass().run(inlined)
+    return inlined
 
 
 @dataclass
@@ -159,15 +187,23 @@ class ResourceEstimator:
         self,
         kernel: "QKernel",
         bindings: dict[str, Any] | None = None,
+        validate_linear: bool = False,
     ) -> ResourceEstimate:
         """Estimate resources for a QKernel.
 
         Args:
-            kernel: The kernel to analyze
-            bindings: Optional parameter bindings for accurate loop counts
+            kernel: The kernel to analyze.
+            bindings: Optional parameter bindings for accurate loop counts.
+            validate_linear: If True, run linear type validation before
+                estimating. Default is False for backward compatibility.
+                Will become True in a future version.
 
         Returns:
-            ResourceEstimate with gate counts and other metrics
+            ResourceEstimate with gate counts and other metrics.
+
+        Raises:
+            LinearTypeError: If ``validate_linear`` is True and violations
+                are detected.
         """
         # Get the block from the kernel
         if bindings:
@@ -187,23 +223,36 @@ class ResourceEstimator:
             block_value = kernel.block
             block = Block.from_block_value(block_value, {})
 
-        return self.estimate_block(block, bindings or {})
+        return self.estimate_block(
+            block, bindings or {}, validate_linear=validate_linear
+        )
 
     def estimate_block(
         self,
         block: Block,
         bindings: dict[str, Any] | None = None,
+        validate_linear: bool = False,
     ) -> ResourceEstimate:
         """Estimate resources for a Block.
 
         Args:
-            block: The block to analyze
-            bindings: Optional parameter bindings
+            block: The block to analyze.
+            bindings: Optional parameter bindings.
+            validate_linear: If True, run linear type validation before
+                estimating. Default is False for backward compatibility.
+                Will become True in a future version.
 
         Returns:
-            ResourceEstimate with gate counts and other metrics
+            ResourceEstimate with gate counts and other metrics.
+
+        Raises:
+            LinearTypeError: If ``validate_linear`` is True and violations
+                are detected.
         """
         bindings = bindings or {}
+
+        if validate_linear:
+            linear_preflight(block, bindings)
 
         # Count qubits from QInitOperations
         qubit_count = 0
@@ -293,6 +342,64 @@ class ResourceEstimator:
                 # While loops are hard to estimate; count body once
                 body_estimate = self._estimate_operations(op.operations, bindings)
                 estimate = estimate + body_estimate
+
+            elif isinstance(op, CallBlockOperation):
+                from qamomile.circuit.ir.block_value import BlockValue
+
+                called_block = op.operands[0]
+                if isinstance(called_block, BlockValue):
+                    body_estimate = self._estimate_operations(
+                        called_block.operations, bindings
+                    )
+                    estimate = estimate + body_estimate
+
+            elif isinstance(op, ControlledUOperation):
+                from qamomile.circuit.ir.block_value import BlockValue
+
+                controlled_block = op.block
+                if isinstance(controlled_block, BlockValue):
+                    body_estimate = self._estimate_operations(
+                        controlled_block.operations, bindings
+                    )
+                    power = self._resolve_int(op.power, bindings, 1)
+                    if power is not None and power > 1:
+                        body_estimate = ResourceEstimate(
+                            total_gates=body_estimate.total_gates * power,
+                            t_gate_count=body_estimate.t_gate_count * power,
+                            cnot_count=body_estimate.cnot_count * power,
+                            qubit_count=body_estimate.qubit_count,
+                            depth=body_estimate.depth * power,
+                            gate_counts={
+                                k: v * power
+                                for k, v in body_estimate.gate_counts.items()
+                            },
+                            composite_resources=body_estimate.composite_resources,
+                            measurement_count=(
+                                body_estimate.measurement_count * power
+                            ),
+                        )
+                    estimate = estimate + body_estimate
+
+            elif isinstance(
+                op,
+                (
+                    CInitOperation,
+                    ReturnOperation,
+                    CastOperation,
+                    DecodeQFixedOperation,
+                ),
+            ):
+                pass  # No gate-count contribution
+
+            elif isinstance(op, BinaryOperationBase):
+                pass  # Classical arithmetic — no gates
+
+            else:
+                raise ValueError(
+                    f"ResourceEstimator encountered unhandled operation type "
+                    f"'{type(op).__name__}'. This may result in inaccurate "
+                    f"estimates. Please report this as a bug."
+                )
 
         return estimate
 
