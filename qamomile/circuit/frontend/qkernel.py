@@ -13,6 +13,7 @@ from qamomile.circuit.frontend.func_to_block import (
     func_to_block,
     is_array_type,
     is_dict_type,
+    is_tuple_type,
 )
 from qamomile.circuit.frontend.handle import Observable, Qubit
 from qamomile.circuit.frontend.handle.containers import Dict
@@ -242,6 +243,10 @@ class QKernel(Generic[P, R]):
 
             # Observable types are provided via bindings
             if param_type is Observable:
+                continue
+
+            # Dict/Tuple types are created as dummy inputs (symbolic for visualization)
+            if is_dict_type(param_type) or is_tuple_type(param_type):
                 continue
 
             # Non-qubit, non-parameter, non-observable types must be in kwargs or have a default value

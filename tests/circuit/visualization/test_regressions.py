@@ -137,3 +137,24 @@ class TestFloatArithmeticLabel:
         labels = self._get_labels(circuit)
         for label in labels:
             assert "float_tmp" not in label
+
+
+class TestDictParamSymbolicDraw:
+    """Regression test: Dict type params should not block draw() when not provided."""
+
+    def test_draw_dict_symbolic(self):
+        """Dict型パラメータなしでdraw()できることを確認."""
+
+        @qm.qkernel
+        def items_demo(
+            n_qubits: qm.UInt,
+            ising: qm.Dict[qm.Tuple[qm.UInt, qm.UInt], qm.Float],
+            gamma: qm.Float,
+        ) -> qm.Vector[qm.Bit]:
+            q = qm.qubit_array(n_qubits, name="q")
+            for (i, j), Jij in qm.items(ising):
+                q[i], q[j] = qm.rzz(q[i], q[j], gamma * Jij)
+            return qm.measure(q)
+
+        fig = items_demo.draw(n_qubits=3)
+        assert fig is not None
