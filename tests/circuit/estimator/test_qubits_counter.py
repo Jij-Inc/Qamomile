@@ -4953,6 +4953,124 @@ class TestControlledUOperation:
         assert resource == 2 + m_sym
 
 
+class TestControlledUIndexSpec:
+    """Verify qubit counting for ControlledUOperation with target_indices/controlled_indices."""
+
+    def test_target_indices_no_inner_alloc(self):
+        """controlled(z, num_controls=3) with target_indices=[3] on 4-qubit array → 4."""
+
+        @qmc.qkernel
+        def gate(q: qmc.Qubit) -> qmc.Qubit:
+            return qmc.z(q)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Qubit]:
+            qs = qmc.qubit_array(4, name="qs")
+            cg = qmc.controlled(gate, num_controls=3)
+            qs = cg(qs, target_indices=[3])
+            return qs
+
+        resource = qubits_counter(circuit.block)
+        assert resource == 4
+
+    def test_controlled_indices_no_inner_alloc(self):
+        """controlled(z, num_controls=3) with controlled_indices=[0,1,2] on 4-qubit array → 4."""
+
+        @qmc.qkernel
+        def gate(q: qmc.Qubit) -> qmc.Qubit:
+            return qmc.z(q)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Qubit]:
+            qs = qmc.qubit_array(4, name="qs")
+            cg = qmc.controlled(gate, num_controls=3)
+            qs = cg(qs, controlled_indices=[0, 1, 2])
+            return qs
+
+        resource = qubits_counter(circuit.block)
+        assert resource == 4
+
+    def test_controlled_indices_inner_alloc(self):
+        """Inner block allocates ancilla → total == array_size + ancilla."""
+
+        @qmc.qkernel
+        def gate_with_ancilla(q: qmc.Qubit) -> qmc.Qubit:
+            _anc = qmc.qubit_array(3, name="anc")
+            q = qmc.h(q)
+            return q
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Qubit]:
+            qs = qmc.qubit_array(4, name="qs")
+            cg = qmc.controlled(gate_with_ancilla, num_controls=3)
+            qs = cg(qs, controlled_indices=[0, 1, 2])
+            return qs
+
+        resource = qubits_counter(circuit.block)
+        assert resource == 4 + 3
+
+    def test_controlled_indices_with_params(self):
+        """Inner block with float param, controlled_indices → qubits == 4."""
+
+        @qmc.qkernel
+        def param_gate(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+            q = qmc.rx(q, theta)
+            return q
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Qubit]:
+            qs = qmc.qubit_array(4, name="qs")
+            cg = qmc.controlled(param_gate, num_controls=3)
+            qs = cg(qs, controlled_indices=[0, 1, 2], theta=0.5)
+            return qs
+
+        resource = qubits_counter(circuit.block)
+        assert resource == 4
+
+    def test_controlled_indices_in_loop(self):
+        """controlled_indices inside loop → no new qubits per iteration."""
+
+        @qmc.qkernel
+        def gate(q: qmc.Qubit) -> qmc.Qubit:
+            return qmc.z(q)
+
+        @qmc.qkernel
+        def circuit(m: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+            qs = qmc.qubit_array(4, name="qs")
+            cg = qmc.controlled(gate, num_controls=3)
+            for _ in qmc.range(m):
+                qs = cg(qs, controlled_indices=[0, 1, 2])
+            return qs
+
+        resource = qubits_counter(circuit.block)
+        assert resource == 4
+
+    def test_controlled_vs_target_indices_equivalence(self):
+        """Same partition: controlled_indices=[0,1,2] vs target_indices=[3] → same qubit count."""
+
+        @qmc.qkernel
+        def gate(q: qmc.Qubit) -> qmc.Qubit:
+            return qmc.z(q)
+
+        @qmc.qkernel
+        def circuit_ci() -> qmc.Vector[qmc.Qubit]:
+            qs = qmc.qubit_array(4, name="qs")
+            cg = qmc.controlled(gate, num_controls=3)
+            qs = cg(qs, controlled_indices=[0, 1, 2])
+            return qs
+
+        @qmc.qkernel
+        def circuit_ti() -> qmc.Vector[qmc.Qubit]:
+            qs = qmc.qubit_array(4, name="qs")
+            cg = qmc.controlled(gate, num_controls=3)
+            qs = cg(qs, target_indices=[3])
+            return qs
+
+        resource_ci = qubits_counter(circuit_ci.block)
+        resource_ti = qubits_counter(circuit_ti.block)
+        assert resource_ci == resource_ti
+
+
 class TestInputQubits:
     """Verify that resource estimation correctly counts qubits from input qubits."""
 
