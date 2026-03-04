@@ -1156,12 +1156,16 @@ class MatplotlibRenderer:
             y = self.qubit_y[i]
             # Use measurement position if available, otherwise default
             wire_end = self.qubit_end_positions.get(i, default_wire_end)
+            # Measurement-terminated wires use "butt" capstyle to prevent
+            # the half-linewidth overhang past the measurement box edge.
+            capstyle = "butt" if i in self.qubit_end_positions else "projecting"
             line = mlines.Line2D(
                 [wire_start, wire_end],
                 [y, y],
                 color=self.style.wire_color,
                 linewidth=1,
                 zorder=PORDER_WIRE,
+                solid_capstyle=capstyle,
             )
             ax.add_line(line)
 

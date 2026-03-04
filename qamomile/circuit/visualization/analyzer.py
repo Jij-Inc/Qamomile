@@ -710,8 +710,8 @@ class CircuitAnalyzer:
             )
 
         if isinstance(op, CallBlockOperation):
-            label = self._get_block_label(op, qubit_map)
-            box_width = self._estimate_label_box_width(label)
+            label = self._get_block_label(op, qubit_map, param_values=param_values)
+            box_width = self._estimate_block_label_box_width(label)
             qubit_indices = []
             for operand in op.operands[1:]:  # Skip BlockValue
                 qubit_indices.extend(
@@ -1041,12 +1041,15 @@ class CircuitAnalyzer:
             op, qubit_map, logical_id_remap, param_values
         )
         header = "while cond:"
+        local_param_values = dict(param_values)
+        self._evaluate_loop_body_intermediates(op.operations, local_param_values)
         body_lines: list[str] = []
         for body_op in op.operations:
             expr = self._format_operation_as_expression(
                 body_op,
                 set(),
                 body_operations=op.operations,
+                param_values=local_param_values,
             )
             if expr:
                 body_lines.extend(expr.split("\n"))
@@ -1085,12 +1088,17 @@ class CircuitAnalyzer:
         condition_label = f"if {cond_name}:"
 
         if self.fold_loops:
+            local_param_values = dict(param_values)
+            self._evaluate_loop_body_intermediates(
+                op.true_operations, local_param_values
+            )
             body_lines: list[str] = []
             for body_op in op.true_operations:
                 expr = self._format_operation_as_expression(
                     body_op,
                     set(),
                     body_operations=op.true_operations,
+                    param_values=local_param_values,
                 )
                 if expr:
                     body_lines.extend(expr.split("\n"))
@@ -1265,12 +1273,18 @@ class CircuitAnalyzer:
         range_str = self._format_range_str(op, set(), param_values)
         header = f"for {op.loop_var} in {range_str}"
 
+        # Evaluate intermediate BinOp results so that nested expressions
+        # (e.g., a = omega + 1; b = a / 2) resolve to symbolic names
+        # instead of exposing internal temporaries like "float_tmp".
+        local_param_values = dict(param_values)
+        self._evaluate_loop_body_intermediates(op.operations, local_param_values)
+
         body_lines: list[str] = []
         for body_op in op.operations:
             expr = self._format_operation_as_expression(
                 body_op,
                 {op.loop_var},
-                param_values=param_values,
+                param_values=local_param_values,
                 body_operations=op.operations,
             )
             if expr:
@@ -1866,11 +1880,7 @@ class CircuitAnalyzer:
         if graph is None:
             return None
         for op in graph.operations:
-            if (
-                isinstance(op, BinOp)
-                and op.results
-                and id(op.results[0]) == id(value)
-            ):
+            if isinstance(op, BinOp) and op.results and id(op.results[0]) == id(value):
                 return self._build_symbolic_binop(op, param_values)
         return None
 
@@ -2261,9 +2271,29 @@ class CircuitAnalyzer:
             if const is not None:
                 child_param_values[dummy_input.logical_id] = const
             elif actual_input.logical_id in param_values:
-                child_param_values[dummy_input.logical_id] = param_values[
-                    actual_input.logical_id
-                ]
+                pv = param_values[actual_input.logical_id]
+                if isinstance(pv, (int, float)):
+                    # Numeric value: store directly
+                    child_param_values[dummy_input.logical_id] = pv
+                elif (
+                    hasattr(actual_input, "parent_array")
+                    and actual_input.parent_array is not None
+                    and not isinstance(actual_input.type, QubitType)
+                ):
+                    # Non-qubit array element with non-numeric value:
+                    # try resolving the array index before storing the raw string
+                    evaluated = self._evaluate_value(actual_input, param_values)
+                    if evaluated is not None and isinstance(evaluated, (int, float)):
+                        child_param_values[dummy_input.logical_id] = evaluated
+                    else:
+                        resolved = self._resolve_symbolic_array_name(
+                            actual_input, param_values
+                        )
+                        child_param_values[dummy_input.logical_id] = (
+                            resolved if resolved is not None else pv
+                        )
+                else:
+                    child_param_values[dummy_input.logical_id] = pv
             elif actual_input.is_parameter():
                 child_param_values[dummy_input.logical_id] = (
                     actual_input.parameter_name() or actual_input.name
@@ -2341,6 +2371,24 @@ class CircuitAnalyzer:
         text_width = len(visual_label) * self.style.char_width_gate
         return max(text_width + 2 * self.style.text_padding, self.style.gate_width)
 
+    def _estimate_block_label_box_width(self, label: str) -> float:
+        """Estimate box width for a CallBlock label.
+
+        Uses ``char_width_block`` (wider than ``char_width_gate``) because
+        block labels often contain longer text with parenthesized parameters
+        (e.g., ``mixer(omegas[0])``).
+
+        Args:
+            label: Text label to estimate width for.
+
+        Returns:
+            Estimated box width in data coordinate units.
+        """
+        visual_label = label.replace("$", "")
+        visual_label = re.sub(r"\\[a-zA-Z]+", "X", visual_label)
+        text_width = len(visual_label) * self.style.char_width_block
+        return max(text_width + 2 * self.style.text_padding, self.style.gate_width)
+
     @staticmethod
     def _get_child_op_lists(op: Operation) -> list[list[Operation]]:
         """Return child operation lists for control-flow operations."""
@@ -2408,6 +2456,7 @@ class CircuitAnalyzer:
         op: GateOperation,
         loop_vars: set[str] | None = None,
         body_operations: list | None = None,
+        param_values: dict | None = None,
     ) -> str | None:
         """Get gate parameters as a string for expression format.
 
@@ -2415,6 +2464,7 @@ class CircuitAnalyzer:
             op: GateOperation.
             loop_vars: Set of loop variable names in scope (e.g., {"i", "j"}).
             body_operations: Operations list for resolving index expressions.
+            param_values: Parameter values for resolving symbolic expressions.
 
         Returns:
             Parameter string (e.g., "0.5") or None if no parameters.
@@ -2454,7 +2504,7 @@ class CircuitAnalyzer:
                 else:
                     # BinOp result (e.g., gamma * wij)
                     symbolic = self._resolve_binop_as_symbolic(
-                        theta, {}, body_operations
+                        theta, param_values or {}, body_operations
                     )
                     if symbolic is not None:
                         return self._format_symbolic_expression(symbolic)
@@ -2511,7 +2561,7 @@ class CircuitAnalyzer:
                 return None
 
             params = self._get_gate_params_for_expression(
-                op, loop_vars, body_operations
+                op, loop_vars, body_operations, param_values=param_values
             )
             result_str = ",".join(qubit_strs)
             args_str = ",".join(qubit_strs)
@@ -2543,18 +2593,33 @@ class CircuitAnalyzer:
             assert isinstance(block_value, BlockValue), assertion_message
             block_name = block_value.name or "block"
 
-            if len(op.operands) > 1:
-                operand = op.operands[1]
+            qubit_parts: list[str] = []
+            param_parts: list[str] = []
+            for operand in op.operands[1:]:
+                s = None
                 if (
                     hasattr(operand, "parent_array")
                     and operand.parent_array is not None
                 ):
-                    array_name = operand.parent_array.name or "qubits"
-                    idx_str = self._resolve_index_expression(
+                    arr = operand.parent_array.name or "qubits"
+                    idx = self._resolve_index_expression(
                         operand, loop_vars, body_operations
                     )
-                    return f"{prefix}{array_name}[{idx_str}] = {block_name}({array_name}[{idx_str}])"
-            return f"{prefix}{block_name}(...)"
+                    s = f"{arr}[{idx}]"
+                elif hasattr(operand, "name") and operand.name:
+                    s = operand.name
+                if s is None:
+                    continue
+                if isinstance(operand.type, QubitType):
+                    qubit_parts.append(s)
+                else:
+                    param_parts.append(s)
+
+            if not qubit_parts:
+                return f"{prefix}{block_name}(...)"
+            result_str = ",".join(qubit_parts)
+            args_str = ",".join(qubit_parts + param_parts)
+            return f"{prefix}{result_str} = {block_name}({args_str})"
 
         elif isinstance(op, ControlledUOperation):
             block_value = op.block
@@ -2849,14 +2914,26 @@ class CircuitAnalyzer:
         return "$" + "".join(tex_parts) + "$"
 
     def _get_block_label(
-        self, op: CallBlockOperation, qubit_map: dict[str, int]
+        self,
+        op: CallBlockOperation,
+        qubit_map: dict[str, int],
+        param_values: dict | None = None,
     ) -> str:
         """Get display label for a CallBlockOperation, including parameters.
+
+        Non-qubit arguments are resolved in order:
+        1. Constant value → numeric display
+        2. ``_evaluate_value`` → numeric via param_values / BinOp
+        3. ``_resolve_symbolic_array_name`` → e.g. ``omegas[0]``
+        4. ``is_parameter()`` → symbolic name
+        5. Raw ``arg_name`` fallback
 
         Args:
             op: CallBlockOperation to label.
             qubit_map: Mapping from logical_id to qubit wire index (used to
                 distinguish qubit args from parameter args).
+            param_values: Mapping from logical_ids to resolved parameter values,
+                used to resolve array indices and bound values.
 
         Returns:
             Display label string, e.g. "block(0.5)" or "my_kernel".
@@ -2891,11 +2968,23 @@ class CircuitAnalyzer:
                 const = actual_input.get_const()
                 if const is not None:
                     params.append(self._format_parameter(const))
-                elif actual_input.is_parameter():
-                    param_name = actual_input.parameter_name() or arg_name
-                    params.append(self._format_symbolic_param(param_name))
                 else:
-                    params.append(arg_name)
+                    # Try numeric evaluation through param_values
+                    evaluated = self._evaluate_value(actual_input, param_values or {})
+                    if evaluated is not None and isinstance(evaluated, (int, float)):
+                        params.append(self._format_parameter(evaluated))
+                    else:
+                        # Try resolved array name (e.g., omegas[0])
+                        resolved_name = self._resolve_symbolic_array_name(
+                            actual_input, param_values or {}
+                        )
+                        if resolved_name is not None:
+                            params.append(self._format_symbolic_param(resolved_name))
+                        elif actual_input.is_parameter():
+                            param_name = actual_input.parameter_name() or arg_name
+                            params.append(self._format_symbolic_param(param_name))
+                        else:
+                            params.append(self._format_symbolic_param(arg_name))
 
         if params:
             label = f"{label}({', '.join(params)})"
@@ -2997,9 +3086,7 @@ class CircuitAnalyzer:
                                 op.theta, param_values or {}
                             )
                             if symbolic is not None:
-                                param_str = (
-                                    self._format_symbolic_expression(symbolic)
-                                )
+                                param_str = self._format_symbolic_expression(symbolic)
                             else:
                                 param_str = self._format_symbolic_param(
                                     op.theta.name or "?"
