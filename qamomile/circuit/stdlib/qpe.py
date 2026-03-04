@@ -119,13 +119,16 @@ def _emit_iqft_and_cast_to_qfixed(qubits: Vector[Qubit]) -> QFixed:
         type=result_type,
         name=f"{qubits.value.name}_as_qfixed",
         params={
+            # Canonical packed-qubit key
+            "element_uuids": qubit_uuids,
+            "element_logical_ids": qubit_logical_ids,
             "cast_source_uuid": qubits.value.uuid,
             "cast_source_logical_id": qubits.value.logical_id,
             "cast_qubit_uuids": qubit_uuids,
             "cast_qubit_logical_ids": qubit_logical_ids,
             "num_bits": concrete_n,
             "int_bits": int_bits,
-            "qubit_values": qubit_uuids,  # This is what MeasureQFixedOperation uses
+            "qubit_values": qubit_uuids,
         },
     )
 

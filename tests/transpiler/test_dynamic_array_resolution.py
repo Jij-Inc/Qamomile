@@ -233,6 +233,18 @@ class TestAllocatorFailFastOnUnresolvedSize:
         with pytest.raises(EmitError, match="Unresolved array size"):
             transpiler.transpile(kernel_dynamic_size, bindings={})
 
+    def test_allocator_emiterror_carries_failure_reason(self):
+        """EmitError for unresolved size should carry UNRESOLVED_ARRAY_SIZE reason."""
+        from qamomile.circuit.transpiler.errors import EmitError, ResolutionFailureReason
+
+        transpiler = QiskitTranspiler()
+        with pytest.raises(EmitError, match="Unresolved array size") as exc_info:
+            transpiler.transpile(kernel_dynamic_size, bindings={})
+        err = exc_info.value
+        assert err.failure_reason == ResolutionFailureReason.UNRESOLVED_ARRAY_SIZE
+        assert err.failure_details is not None
+        assert "Suggested fixes" in str(err)
+
     def test_allocator_bound_symbolic_size_still_allocates(self):
         """Transpiling with correct bindings should allocate normally (no regression)."""
         transpiler = QiskitTranspiler()

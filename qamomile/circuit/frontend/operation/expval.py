@@ -68,11 +68,16 @@ def expval(
         # For now, we create a pseudo-ArrayValue to group them
         # The emitter will handle unpacking
         qubit_values = [q.value for q in qubits]
+        # Canonical key: element_uuids (list[str])
+        # Keep qubit_values for backward compatibility during migration
         qubits_value = ArrayValue(
             type=qubit_values[0].type,
             name="expval_qubits",
             shape=tuple(),
-            params={"qubit_values": qubit_values},
+            params={
+                "element_uuids": [qv.uuid for qv in qubit_values],
+                "qubit_values": qubit_values,
+            },
         )
     elif isinstance(qubits, Vector):
         qubits_value = qubits.value

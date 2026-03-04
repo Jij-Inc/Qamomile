@@ -49,10 +49,29 @@ class SeparationError(QamomileCompileError):
 
 
 class EmitError(QamomileCompileError):
-    """Error during backend code emission."""
+    """Error during backend code emission.
 
-    def __init__(self, message: str, operation: str | None = None):
+    Attributes:
+        operation: Name of the operation that caused the error.
+        failure_reason: Categorized reason for the failure, if applicable.
+        failure_details: Human-readable details about the failure context.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        operation: str | None = None,
+        failure_reason: "ResolutionFailureReason | None" = None,
+        failure_details: str | None = None,
+    ):
         self.operation = operation
+        self.failure_reason = failure_reason
+        self.failure_details = failure_details
+        if failure_reason is not None:
+            suggestions = _suggestions_for_reason(failure_reason)
+            if suggestions:
+                suffix = "\n".join(f"  - {s}" for s in suggestions)
+                message = f"{message}\n\nSuggested fixes:\n{suffix}"
         super().__init__(message)
 
 
@@ -66,6 +85,24 @@ class ResolutionFailureReason(Enum):
     DIRECT_UUID_NOT_FOUND = "direct_uuid_not_found"
     UNRESOLVED_ARRAY_SIZE = "unresolved_array_size"
     UNKNOWN = "unknown"
+
+
+def _suggestions_for_reason(reason: ResolutionFailureReason) -> list[str]:
+    """Return actionable suggestions for a given failure reason.
+
+    This helper is used by ``EmitError`` to append context-specific
+    remediation hints when a ``failure_reason`` is provided.
+    Reasons already handled by ``QubitIndexResolutionError._generate_suggestions``
+    return an empty list to avoid duplication.
+    """
+    if reason == ResolutionFailureReason.UNRESOLVED_ARRAY_SIZE:
+        return [
+            "Pass the source array in the `bindings` dict so its shape can be read "
+            "at compile time (e.g. bindings={'hi': np.array([...])}).",
+            "Alternatively, bind the dimension variable directly "
+            "(e.g. bindings={'n': 4}).",
+        ]
+    return []
 
 
 @dataclass

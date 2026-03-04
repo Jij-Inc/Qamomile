@@ -282,14 +282,21 @@ class EmitPass(Pass[SimplifiedProgram, ExecutableProgram[T]], Generic[T]):
         compiled_seg = compiled_quantum[quantum_segment_index]
         uuid_to_physical = compiled_seg.qubit_map
 
-        # Check if qubits_value is an ArrayValue with qubit_values
-        # (created when tuple of qubits is passed to expval)
+        # Check if qubits_value is an ArrayValue with packed qubit info
+        # (created when tuple of qubits is passed to expval, or by pack_qubits)
         if isinstance(qubits_value, ArrayValue):
-            qubit_values = qubits_value.params.get("qubit_values", [])
-            for i, qv in enumerate(qubit_values):
-                # qv is a Value object; look up its UUID in the qubit_map
-                if hasattr(qv, "uuid") and qv.uuid in uuid_to_physical:
-                    qubit_map[i] = uuid_to_physical[qv.uuid]
+            # Prefer canonical element_uuids (list[str]),
+            # fall back to qubit_values (list[Value]) for backward compat
+            element_uuids = qubits_value.params.get("element_uuids", None)
+            if element_uuids is not None:
+                for i, quuid in enumerate(element_uuids):
+                    if quuid in uuid_to_physical:
+                        qubit_map[i] = uuid_to_physical[quuid]
+            else:
+                qubit_values = qubits_value.params.get("qubit_values", [])
+                for i, qv in enumerate(qubit_values):
+                    if hasattr(qv, "uuid") and qv.uuid in uuid_to_physical:
+                        qubit_map[i] = uuid_to_physical[qv.uuid]
         else:
             # Single qubit or Vector case - map index 0 to the qubit
             if hasattr(qubits_value, "uuid") and qubits_value.uuid in uuid_to_physical:

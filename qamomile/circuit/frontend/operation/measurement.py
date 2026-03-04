@@ -111,8 +111,10 @@ def _measure_qfixed(qfixed: QFixed) -> Float:
     float_out_value = Value(type=FloatType(), name="qfixed_measured")
     float_out = Float(value=float_out_value)
 
-    # Extract QFixed parameters
-    qubit_values = qfixed.value.params.get("qubit_values", [])
+    # Extract QFixed parameters - prefer canonical element_uuids
+    qubit_values = qfixed.value.params.get(
+        "element_uuids", qfixed.value.params.get("qubit_values", [])
+    )
     num_bits = qfixed.value.params.get("num_bits", len(qubit_values))
     int_bits = qfixed.value.params.get("int_bits", 0)
 

@@ -129,6 +129,9 @@ def _cast_vector_qubit_to_qfixed(
         type=result_type,
         name=f"{source.value.name}_as_qfixed",
         params={
+            # Canonical packed-qubit key
+            "element_uuids": qubit_uuids,
+            "element_logical_ids": qubit_logical_ids,
             # Cast metadata - using logical_id for physical qubit tracking
             "cast_source_uuid": source.value.uuid,
             "cast_source_logical_id": source.value.logical_id,

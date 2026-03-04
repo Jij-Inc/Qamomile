@@ -370,7 +370,10 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
     ) -> None:
         """Emit QFixed measurement."""
         qfixed = op.operands[0]
-        qubit_uuids = qfixed.params.get("qubit_values", [])
+        # Prefer canonical element_uuids, fall back to qubit_values
+        qubit_uuids = qfixed.params.get(
+            "element_uuids", qfixed.params.get("qubit_values", [])
+        )
         result = op.results[0]
 
         for i, qubit_uuid in enumerate(qubit_uuids):
@@ -1093,15 +1096,11 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         # Resolve power value from bindings
         power_value = op.power
         if isinstance(power_value, Value):
-            power_value = self._resolver.resolve_classical_value(
-                power_value, bindings
-            )
+            power_value = self._resolver.resolve_classical_value(power_value, bindings)
         elif isinstance(power_value, Handle):
             # Handle type (e.g., UInt) - resolve inner Value via bindings
             inner_value = power_value.value
-            resolved = self._resolver.resolve_classical_value(
-                inner_value, bindings
-            )
+            resolved = self._resolver.resolve_classical_value(inner_value, bindings)
             if resolved is not None:
                 power_value = int(resolved)
             else:

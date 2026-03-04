@@ -10,6 +10,10 @@ import qamomile.circuit as qmc
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.ir.types.primitives import QubitType, FloatType, UIntType
 from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.frontend.type_check import (
+    validate_return_type,
+    _format_annotation,
+)
 
 
 class TestArgumentValidationRejects:
@@ -189,6 +193,69 @@ class TestReturnValueValidation:
         # (Qubit) doesn't trigger return validation until outer is called.
         graph = caller.build()
         assert graph is not None
+
+
+class TestFormatAnnotation:
+    """Tests for _format_annotation recursive formatting."""
+
+    def test_nested_tuple_formats_fully(self):
+        """Tuple[Vector[Qubit], UInt] should not truncate to Tuple[Vector, UInt]."""
+        result = _format_annotation(qmc.Tuple[qmc.Vector[qmc.Qubit], qmc.UInt])
+        assert result == "Tuple[Vector[Qubit], UInt]"
+
+    def test_plain_scalar(self):
+        assert _format_annotation(qmc.Qubit) == "Qubit"
+
+    def test_vector_with_element(self):
+        assert _format_annotation(qmc.Vector[qmc.Float]) == "Vector[Float]"
+
+
+class TestReturnTypeValidationDirect:
+    """Direct unit tests for validate_return_type error branches."""
+
+    def test_array_expected_scalar_got(self):
+        """Array annotation with scalar Value should raise."""
+        scalar = Value(type=QubitType(), name="q")
+        with pytest.raises(TypeError, match=r"expected Vector\[Qubit\].*scalar"):
+            validate_return_type(qmc.Vector[qmc.Qubit], scalar, 0)
+
+    def test_scalar_expected_array_got(self):
+        """Scalar annotation with ArrayValue should raise."""
+        shape = (Value(type=UIntType(), name="n", params={"const": 2}),)
+        arr = ArrayValue(type=QubitType(), name="qs", shape=shape)
+        with pytest.raises(TypeError, match=r"expected Qubit.*array"):
+            validate_return_type(qmc.Qubit, arr, 0)
+
+    def test_tuple_expected_scalar_got(self):
+        """Tuple annotation with scalar Value should raise."""
+        scalar = Value(type=UIntType(), name="x")
+        with pytest.raises(TypeError, match=r"expected.*Tuple.*non-tuple"):
+            validate_return_type(qmc.Tuple[qmc.UInt, qmc.UInt], scalar, 0)
+
+    def test_dict_expected_scalar_got(self):
+        """Dict annotation with scalar Value should raise."""
+        scalar = Value(type=FloatType(), name="f")
+        with pytest.raises(TypeError, match=r"expected.*Dict.*non-dict"):
+            validate_return_type(
+                qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float], scalar, 0
+            )
+
+    def test_ir_type_mismatch(self):
+        """Scalar annotation matching structure but wrong IR type should raise."""
+        float_val = Value(type=FloatType(), name="f")
+        with pytest.raises(TypeError, match=r"expected element type.*got"):
+            validate_return_type(qmc.Qubit, float_val, 0)
+
+    def test_matching_scalar_passes(self):
+        """Matching type should not raise."""
+        qubit_val = Value(type=QubitType(), name="q")
+        validate_return_type(qmc.Qubit, qubit_val, 0)
+
+    def test_matching_array_passes(self):
+        """Matching array should not raise."""
+        shape = (Value(type=UIntType(), name="n", params={"const": 3}),)
+        arr = ArrayValue(type=QubitType(), name="qs", shape=shape)
+        validate_return_type(qmc.Vector[qmc.Qubit], arr, 0)
 
 
 class TestInlinePassValidation:

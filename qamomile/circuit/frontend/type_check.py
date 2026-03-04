@@ -21,17 +21,22 @@ from qamomile.circuit.ir.value import ArrayValue, Value, TupleValue, DictValue
 
 
 def _format_annotation(annotation: typing.Any) -> str:
-    """Format a type annotation for error messages."""
+    """Format a type annotation for error messages.
+
+    Recursively formats nested types so that e.g.
+    ``Tuple[Vector[Qubit], UInt]`` is displayed in full rather than
+    ``Tuple[Vector, UInt]``.
+    """
     if is_array_type(annotation):
         cls = getattr(annotation, "__origin__", annotation).__name__
         if hasattr(annotation, "__args__") and annotation.__args__:
-            elem = annotation.__args__[0].__name__
+            elem = _format_annotation(annotation.__args__[0])
             return f"{cls}[{elem}]"
         return cls
 
     if is_tuple_type(annotation):
         if hasattr(annotation, "__args__") and annotation.__args__:
-            elems = ", ".join(a.__name__ for a in annotation.__args__)
+            elems = ", ".join(_format_annotation(a) for a in annotation.__args__)
             return f"Tuple[{elems}]"
         return "Tuple"
 
@@ -62,6 +67,34 @@ def _format_handle(handle: Handle) -> str:
     return type(handle).__name__
 
 
+def _annotation_kind(annotation: typing.Any) -> str:
+    """Return the structural kind of a type annotation.
+
+    Returns one of ``"array"``, ``"tuple"``, ``"dict"``, or ``"scalar"``.
+    """
+    if is_array_type(annotation):
+        return "array"
+    if is_tuple_type(annotation):
+        return "tuple"
+    if is_dict_type(annotation):
+        return "dict"
+    return "scalar"
+
+
+def _handle_kind(handle: Handle) -> str:
+    """Return the structural kind of a Handle instance.
+
+    Returns one of ``"array"``, ``"tuple"``, ``"dict"``, or ``"scalar"``.
+    """
+    if isinstance(handle, ArrayBase):
+        return "array"
+    if isinstance(handle, Tuple):
+        return "tuple"
+    if isinstance(handle, Dict):
+        return "dict"
+    return "scalar"
+
+
 def validate_argument_type(
     annotation: typing.Any, handle: Handle, arg_name: str
 ) -> None:
@@ -70,48 +103,18 @@ def validate_argument_type(
     Raises TypeError if the handle's structural type (scalar/array/tuple/dict)
     or element type doesn't match the expected annotation.
     """
-    ann_is_array = is_array_type(annotation)
-    ann_is_tuple = is_tuple_type(annotation)
-    ann_is_dict = is_dict_type(annotation)
+    ann_kind = _annotation_kind(annotation)
+    hdl_kind = _handle_kind(handle)
 
-    handle_is_array = isinstance(handle, ArrayBase)
-    handle_is_tuple = isinstance(handle, Tuple)
-    handle_is_dict = isinstance(handle, Dict)
-
-    # Kind mismatch checks
-    if ann_is_array and not handle_is_array:
-        raise TypeError(
-            f"Argument '{arg_name}': expected {_format_annotation(annotation)}, "
-            f"got {_format_handle(handle)}."
-        )
-    if not ann_is_array and handle_is_array:
-        raise TypeError(
-            f"Argument '{arg_name}': expected {_format_annotation(annotation)}, "
-            f"got {_format_handle(handle)}."
-        )
-    if ann_is_tuple and not handle_is_tuple:
-        raise TypeError(
-            f"Argument '{arg_name}': expected {_format_annotation(annotation)}, "
-            f"got {_format_handle(handle)}."
-        )
-    if not ann_is_tuple and handle_is_tuple:
-        raise TypeError(
-            f"Argument '{arg_name}': expected {_format_annotation(annotation)}, "
-            f"got {_format_handle(handle)}."
-        )
-    if ann_is_dict and not handle_is_dict:
-        raise TypeError(
-            f"Argument '{arg_name}': expected {_format_annotation(annotation)}, "
-            f"got {_format_handle(handle)}."
-        )
-    if not ann_is_dict and handle_is_dict:
+    # Kind mismatch check
+    if ann_kind != hdl_kind:
         raise TypeError(
             f"Argument '{arg_name}': expected {_format_annotation(annotation)}, "
             f"got {_format_handle(handle)}."
         )
 
     # Element type checks within the same kind
-    if ann_is_array:
+    if ann_kind == "array":
         # Array class mismatch (Vector vs Matrix vs Tensor)
         expected_class = getattr(annotation, "__origin__", annotation).__name__
         actual_class = type(handle).__name__
@@ -127,7 +130,7 @@ def validate_argument_type(
                     f"Argument '{arg_name}': expected {_format_annotation(annotation)}, "
                     f"got {_format_handle(handle)}."
                 )
-    elif not ann_is_tuple and not ann_is_dict:
+    elif ann_kind == "scalar":
         # Scalar: direct class comparison
         if type(handle) is not annotation:
             raise TypeError(

@@ -104,6 +104,8 @@ class ResourceAllocator:
                                 f"symbolic dimension '{dim_name}' is not bound. "
                                 f"Pass bindings to resolve this dimension.",
                                 operation="QInitOperation",
+                                failure_reason=ResolutionFailureReason.UNRESOLVED_ARRAY_SIZE,
+                                failure_details=f"dimension '{dim_name}' of array '{array_name}'",
                             )
                         for i in range(size):
                             qubit_id = f"{result.uuid}_{i}"
@@ -131,6 +133,8 @@ class ResourceAllocator:
                             f"symbolic dimension '{dim_name}' is not bound. "
                             f"Pass bindings to resolve this dimension.",
                             operation="MeasureVectorOperation",
+                            failure_reason=ResolutionFailureReason.UNRESOLVED_ARRAY_SIZE,
+                            failure_details=f"dimension '{dim_name}' of array '{array_name}'",
                         )
                     for i in range(size):
                         clbit_id = f"{result.uuid}_{i}"
@@ -139,7 +143,10 @@ class ResourceAllocator:
 
             elif isinstance(op, MeasureQFixedOperation):
                 qfixed = op.operands[0]
-                qubit_uuids = qfixed.params.get("qubit_values", [])
+                # Prefer canonical element_uuids, fall back to qubit_values
+                qubit_uuids = qfixed.params.get(
+                    "element_uuids", qfixed.params.get("qubit_values", [])
+                )
                 result = op.results[0]
                 for i, qubit_uuid in enumerate(qubit_uuids):
                     clbit_id = f"{result.uuid}_{i}"
