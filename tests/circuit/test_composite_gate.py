@@ -128,7 +128,7 @@ class TestCompositeGate:
 
             def _resources(self) -> ResourceMetadata:
                 return ResourceMetadata(
-                    t_gate_count=10,
+                    t_gates=10,
                     query_complexity=5,
                     custom_metadata={"num_qubits": self._n},
                 )
@@ -142,9 +142,16 @@ class TestCompositeGate:
         metadata = gate.get_resource_metadata()
 
         assert metadata is not None
-        assert metadata.t_gate_count == 10
+        assert metadata.t_gates == 10
         assert metadata.query_complexity == 5
         assert metadata.custom_metadata["num_qubits"] == n
+        # Unspecified typed fields default to None
+        assert metadata.total_gates is None
+        assert metadata.single_qubit_gates is None
+        assert metadata.two_qubit_gates is None
+        assert metadata.multi_qubit_gates is None
+        assert metadata.clifford_gates is None
+        assert metadata.rotation_gates is None
 
     def test_apply_composite_gate_in_qkernel(self):
         """CompositeGate can be used inside a qkernel."""
@@ -387,7 +394,7 @@ class TestCompositeGate:
 
             def _resources(self) -> ResourceMetadata:
                 return ResourceMetadata(
-                    t_gate_count=42,
+                    t_gates=42,
                     query_complexity=7,
                     custom_metadata={"key": "value"},
                 )
@@ -406,9 +413,16 @@ class TestCompositeGate:
         assert isinstance(ops[1], CompositeGateOperation)
         op = ops[1]
         assert op.resource_metadata is not None
-        assert op.resource_metadata.t_gate_count == 42
+        assert op.resource_metadata.t_gates == 42
         assert op.resource_metadata.query_complexity == 7
         assert op.resource_metadata.custom_metadata["key"] == "value"
+        # Unspecified typed fields default to None
+        assert op.resource_metadata.total_gates is None
+        assert op.resource_metadata.single_qubit_gates is None
+        assert op.resource_metadata.two_qubit_gates is None
+        assert op.resource_metadata.multi_qubit_gates is None
+        assert op.resource_metadata.clifford_gates is None
+        assert op.resource_metadata.rotation_gates is None
 
     def test_strategy_resource_metadata(self, mocker):
         """Strategy's resources() is used instead of _resources() when strategy is active."""
@@ -424,11 +438,11 @@ class TestCompositeGate:
                 return (qmc.h(qubits[0]),)
 
             def _resources(self) -> ResourceMetadata:
-                return ResourceMetadata(t_gate_count=100)
+                return ResourceMetadata(t_gates=100)
 
         gate = GateForStratRes()
 
-        strategy_meta = ResourceMetadata(t_gate_count=5, query_complexity=3)
+        strategy_meta = ResourceMetadata(t_gates=5, query_complexity=3)
         mock_strategy = mocker.MagicMock()
         mock_strategy.name = "efficient"
         mock_strategy.decompose.return_value = None
@@ -448,7 +462,7 @@ class TestCompositeGate:
         assert isinstance(ops[1], CompositeGateOperation)
         op = ops[1]
         assert op.resource_metadata is strategy_meta
-        assert op.resource_metadata.t_gate_count == 5
+        assert op.resource_metadata.t_gates == 5
 
         del GateForStratRes._strategies["efficient"]
 
@@ -532,6 +546,84 @@ class TestCompositeGate:
             assert r.element_indices[0].params["const"] == index
 
 
+class TestQFTAndIQFTClasses:
+    """Test the built-in QFT and IQFT CompositeGate classes."""
+
+    def test_qft_class_attributes(self):
+        """QFT class has correct attributes."""
+        from qamomile.circuit.stdlib.qft import QFT
+
+        qft = QFT(4)
+        assert qft.num_target_qubits == 4
+        assert qft.gate_type == CompositeGateType.QFT
+        assert qft.custom_name == "qft"
+
+    def test_iqft_class_attributes(self):
+        """IQFT class has correct attributes."""
+        from qamomile.circuit.stdlib.qft import IQFT
+
+        iqft = IQFT(3)
+        assert iqft.num_target_qubits == 3
+        assert iqft.gate_type == CompositeGateType.IQFT
+        assert iqft.custom_name == "iqft"
+
+    def test_qft_resources(self):
+        """QFT returns correct resource metadata."""
+        from qamomile.circuit.stdlib.qft import QFT
+
+        qft = QFT(4)
+        metadata = qft.get_resource_metadata()
+
+        assert metadata is not None
+        assert metadata.t_gates == 0
+        # n=4: num_h=4, num_cp=6, num_swap=2
+        assert metadata.total_gates == 12
+        assert metadata.single_qubit_gates == 4
+        assert metadata.two_qubit_gates == 8
+        assert metadata.clifford_gates == 6
+        assert metadata.rotation_gates == 6
+        assert metadata.custom_metadata["num_h_gates"] == 4
+
+    def test_qft_in_qkernel(self):
+        """QFT can be used in a qkernel."""
+        from qamomile.circuit.stdlib.qft import QFT
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit) -> tuple[Qubit, Qubit]:
+            qft = QFT(2)
+            q0, q1 = qft(q0, q1)
+            return q0, q1
+
+        block = circuit.build()
+        assert block is not None
+
+    def test_qft_factory_function(self):
+        """qft() factory function works in qkernel."""
+        from qamomile.circuit.stdlib.qft import qft
+
+        @qkernel
+        def circuit() -> Vector[Qubit]:
+            qubits = qubit_array(3, "q")
+            qubits = qft(qubits)
+            return qubits
+
+        block = circuit.build()
+        assert block is not None
+
+    def test_iqft_factory_function(self):
+        """iqft() factory function works in qkernel."""
+        from qamomile.circuit.stdlib.qft import iqft
+
+        @qkernel
+        def circuit() -> Vector[Qubit]:
+            qubits = qubit_array(3, "q")
+            qubits = iqft(qubits)
+            return qubits
+
+        block = circuit.build()
+        assert block is not None
+
+
 class TestCompositeGateTranspilation:
     """Test CompositeGate IR generation and transpilation (requires Qiskit)."""
 
@@ -554,6 +646,54 @@ class TestCompositeGateTranspilation:
 
         op_types = [type(op).__name__ for op in inlined.operations]
         assert "GateOperation" in op_types
+
+    def test_qft_builds_ir(self, qiskit_transpiler):
+        """QFT builds correct IR with native gate type."""
+        from qamomile.circuit.stdlib.qft import QFT
+
+        @qkernel
+        def circuit() -> Vector[Qubit]:
+            qs = qubit_array(3, "qs")
+            q0 = qs[0]
+            q1 = qs[1]
+            q2 = qs[2]
+            qft = QFT(3)
+            q0, q1, q2 = qft(q0, q1, q2)
+            qs[0] = q0
+            qs[1] = q1
+            qs[2] = q2
+            return qs
+
+        block = qiskit_transpiler.to_block(circuit)
+
+        composite_ops = [
+            op for op in block.operations if isinstance(op, CompositeGateOperation)
+        ]
+        assert len(composite_ops) == 1
+        assert composite_ops[0].gate_type == CompositeGateType.QFT
+
+    def test_iqft_builds_ir(self, qiskit_transpiler):
+        """IQFT builds correct IR with native gate type."""
+        from qamomile.circuit.stdlib.qft import IQFT
+
+        @qkernel
+        def circuit() -> Vector[Qubit]:
+            qs = qubit_array(2, "qs")
+            q0 = qs[0]
+            q1 = qs[1]
+            iqft = IQFT(2)
+            q0, q1 = iqft(q0, q1)
+            qs[0] = q0
+            qs[1] = q1
+            return qs
+
+        block = qiskit_transpiler.to_block(circuit)
+
+        composite_ops = [
+            op for op in block.operations if isinstance(op, CompositeGateOperation)
+        ]
+        assert len(composite_ops) == 1
+        assert composite_ops[0].gate_type == CompositeGateType.IQFT
 
     @pytest.mark.parametrize("n", [2, 3, 4])
     def test_hadamard_all_transpile_circuit(self, qiskit_transpiler, n):
@@ -1142,3 +1282,24 @@ class TestAllocateGateInvariant:
         allocator = ResourceAllocator()
         with pytest.raises(AssertionError, match="Array element key"):
             allocator.allocate([gate_op])
+
+
+class TestBackwardsCompatibility:
+    """Test that existing APIs still work."""
+
+    def test_old_iqft_import_still_works(self):
+        """Old import path for iqft/qft still works."""
+        from qamomile.circuit.stdlib import iqft, qft
+
+        assert callable(iqft)
+        assert callable(qft)
+
+    def test_stdlib_exports_classes(self):
+        """stdlib exports both class and function APIs."""
+        from qamomile.circuit.stdlib import QFT, IQFT, qft, iqft, qpe
+
+        assert QFT is not None
+        assert IQFT is not None
+        assert qft is not None
+        assert iqft is not None
+        assert qpe is not None

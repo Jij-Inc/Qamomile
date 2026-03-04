@@ -49,7 +49,7 @@ class CompositeGate(abc.ABC):
                return qubits
 
            def _resources(self) -> ResourceMetadata:
-               return ResourceMetadata(t_gate_count=0)
+               return ResourceMetadata(t_gates=0)
        ```
 
     2. **Using get_implementation() (advanced)**:
@@ -184,14 +184,14 @@ class CompositeGate(abc.ABC):
         This is an alternative to get_resource_metadata() with a simpler name.
 
         Returns:
-            ResourceMetadata with query_complexity, t_gate_count, etc.
+            ResourceMetadata with query_complexity, t_gates, etc.
 
         Example:
             def _resources(self) -> ResourceMetadata:
                 n = self._num_qubits
                 return ResourceMetadata(
-                    t_gate_count=0,  # QFT uses no T gates
-                    custom_metadata={"depth": n}
+                    t_gates=0,
+                    total_gates=n,
                 )
         """
         return None
@@ -513,7 +513,7 @@ class _WrappedCompositeGate(CompositeGate):
             return None
         return self._qkernel.block
 
-    def get_resource_metadata(self) -> ResourceMetadata | None:
+    def _resources(self) -> ResourceMetadata | None:
         return self._resource_metadata
 
 
@@ -546,7 +546,7 @@ class _StubCompositeGate(CompositeGate):
     def get_implementation(self) -> None:
         return None
 
-    def get_resource_metadata(self) -> ResourceMetadata | None:
+    def _resources(self) -> ResourceMetadata | None:
         return self._resource_metadata
 
 
@@ -576,8 +576,7 @@ def composite_gate(
     name: str,
     num_qubits: int,
     num_controls: int = 0,
-    query_complexity: int | None = None,
-    t_gate_count: int | None = None,
+    resource_metadata: ResourceMetadata | None = None,
     gate_type: CompositeGateType = CompositeGateType.CUSTOM,
 ) -> Callable[[Callable], _StubCompositeGate]:
     """Decorator form for stub: @composite_gate(stub=True, name="oracle", num_qubits=5)."""
@@ -591,8 +590,7 @@ def composite_gate(
     name: str = "",
     num_qubits: int | None = None,
     num_controls: int = 0,
-    query_complexity: int | None = None,
-    t_gate_count: int | None = None,
+    resource_metadata: ResourceMetadata | None = None,
     gate_type: CompositeGateType = CompositeGateType.CUSTOM,
 ) -> (
     _WrappedCompositeGate
@@ -614,7 +612,10 @@ def composite_gate(
         q0, q1 = my_qft(q0, q1)
 
     Usage as stub (no implementation, for resource estimation):
-        @composite_gate(stub=True, name="oracle", num_qubits=5, query_complexity=100)
+        @composite_gate(
+            stub=True, name="oracle", num_qubits=5,
+            resource_metadata=ResourceMetadata(query_complexity=100, t_gates=10),
+        )
         def oracle():
             pass
 
@@ -628,8 +629,7 @@ def composite_gate(
         name: Name for the composite gate
         num_qubits: Number of target qubits (required for stub)
         num_controls: Number of control qubits (default: 0)
-        query_complexity: Query complexity for resource estimation
-        t_gate_count: T-gate count estimate for resource estimation
+        resource_metadata: ResourceMetadata for resource estimation (stub mode)
         gate_type: The type of composite gate (default: CUSTOM)
 
     Returns:
@@ -646,12 +646,7 @@ def composite_gate(
             if num_qubits is None:
                 raise ValueError("num_qubits is required for stub composite gates")
 
-            resource_meta = None
-            if query_complexity is not None or t_gate_count is not None:
-                resource_meta = ResourceMetadata(
-                    query_complexity=query_complexity,
-                    t_gate_count=t_gate_count,
-                )
+            resource_meta = resource_metadata
 
             gate_name = name or getattr(kernel_or_func, "__name__", "stub")
 

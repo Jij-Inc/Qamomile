@@ -333,6 +333,52 @@ class TestControlledValidation:
                 cg(*qs)
 
 
+class TestControlledPowerValidation:
+    """Tests for power parameter validation in ControlledGate."""
+
+    def test_power_zero_raises(self):
+        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        with trace():
+            with pytest.raises(ValueError, match="strictly positive"):
+                cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=0)
+
+    def test_power_negative_raises(self):
+        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        with trace():
+            with pytest.raises(ValueError, match="strictly positive"):
+                cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=-3)
+
+    def test_power_bool_true_raises(self):
+        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        with trace():
+            with pytest.raises(TypeError, match="bool"):
+                cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=True)
+
+    def test_power_bool_false_raises(self):
+        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        with trace():
+            with pytest.raises(TypeError, match="bool"):
+                cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=False)
+
+    def test_power_float_raises(self):
+        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        with trace():
+            with pytest.raises(TypeError, match="int or UInt"):
+                cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=1.5)
+
+    def test_power_uint_normalizes_to_value(self):
+        from qamomile.circuit.frontend.handle.primitives import UInt as UIntHandle
+        from qamomile.circuit.ir.types.primitives import UIntType
+
+        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        uint_val = Value(type=UIntType(), name="power_k", params={"const": 4})
+        uint_power = UIntHandle(value=uint_val)
+        with trace() as tracer:
+            cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=uint_power)
+        op = tracer.operations[0]
+        assert isinstance(op.power, Value)
+        assert op.power is uint_val
+
 
 # -- Gate qkernels (1-qubit, no param) ----------------------------------------
 
@@ -741,7 +787,12 @@ class TestControlledGateRandomState:
         """Controls in |+>^NC, targets in random |psi> => verify full statevector."""
         target_state = _random_statevector(spec.num_targets, seed=seed)
         actual = _get_statevector_with_prep(
-            qiskit_transpiler, spec, num_controls, target_state, transpiled_cache, power=power
+            qiskit_transpiler,
+            spec,
+            num_controls,
+            target_state,
+            transpiled_cache,
+            power=power,
         )
         expected = _expected_statevector_superposition(
             spec, num_controls, target_state, power=power
