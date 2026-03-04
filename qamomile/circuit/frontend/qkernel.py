@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 import inspect
 import warnings
-from typing import Any, Callable, Generic, ParamSpec, TypeVar, cast, get_type_hints
+from typing import TYPE_CHECKING, Any, Callable, Generic, ParamSpec, TypeVar, cast, get_type_hints
 
 import numpy as np
 
@@ -19,6 +21,9 @@ from qamomile.circuit.ir.block_value import BlockValue
 from qamomile.circuit.ir.graph import Graph
 from qamomile.circuit.ir.types import FloatType, ObservableType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
+
+if TYPE_CHECKING:
+    from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -356,6 +361,40 @@ class QKernel(Generic[P, R]):
             return Dict(value=dict_value, _entries=[])
 
         raise TypeError(f"Cannot create bound value for type {param_type}")
+
+    def estimate_resources(
+        self,
+        *,
+        bindings: dict[str, Any] | None = None,
+    ) -> ResourceEstimate:
+        """Estimate all resources for this kernel's circuit.
+
+        Convenience method that delegates to the module-level
+        ``estimate_resources`` function, eliminating the need to
+        access ``.block`` directly.
+
+        Args:
+            bindings: Optional concrete parameter bindings (scalars and dicts).
+                      Dict values trigger ``|key|`` cardinality substitution.
+
+        Returns:
+            ResourceEstimate with qubits, gates, and parameters.
+
+        Example:
+            >>> @qm.qkernel
+            ... def bell() -> qm.Vector[qm.Qubit]:
+            ...     q = qm.qubit_array(2)
+            ...     q[0] = qm.h(q[0])
+            ...     q[0], q[1] = qm.cx(q[0], q[1])
+            ...     return q
+            >>> est = bell.estimate_resources()
+            >>> print(est.qubits)  # 2
+        """
+        from qamomile.circuit.estimator.resource_estimator import (
+            estimate_resources,
+        )
+
+        return estimate_resources(self.block, bindings=bindings)
 
     def build(
         self,

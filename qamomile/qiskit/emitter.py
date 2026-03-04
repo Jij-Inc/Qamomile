@@ -50,6 +50,12 @@ class QiskitGateEmitter:
     def emit_t(self, circuit: "QuantumCircuit", qubit: int) -> None:
         circuit.t(qubit)
 
+    def emit_sdg(self, circuit: "QuantumCircuit", qubit: int) -> None:
+        circuit.sdg(qubit)
+
+    def emit_tdg(self, circuit: "QuantumCircuit", qubit: int) -> None:
+        circuit.tdg(qubit)
+
     # Single-qubit rotation gates
     def emit_rx(
         self, circuit: "QuantumCircuit", qubit: int, angle: float | Any
