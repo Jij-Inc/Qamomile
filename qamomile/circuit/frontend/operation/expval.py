@@ -62,6 +62,8 @@ def expval(
     """
     # Convert qubits to Value
     if isinstance(qubits, tuple):
+        if len(qubits) == 0:
+            raise ValueError("expval requires at least one qubit")
         # Tuple of individual Qubits - collect their values
         # For now, we create a pseudo-ArrayValue to group them
         # The emitter will handle unpacking

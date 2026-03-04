@@ -19,12 +19,62 @@ from qamomile.circuit.ir.operation.control_flow import (
     WhileOperation,
 )
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.value import ArrayValue, DictValue, TupleValue, Value
+from qamomile.circuit.transpiler.errors import InliningError
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.value_mapping import (
     UUIDRemapper,
     ValueSubstitutor,
 )
+
+
+def _validate_inline_type_match(
+    block_input: Value, resolved_arg: Value, block_name: str
+) -> None:
+    """Validate IR value types match between block input and call argument."""
+    block_is_array = isinstance(block_input, ArrayValue)
+    arg_is_array = isinstance(resolved_arg, ArrayValue)
+    if block_is_array != arg_is_array:
+        raise InliningError(
+            f"Type mismatch in block '{block_name}': "
+            f"parameter '{block_input.name}' expects "
+            f"{'array' if block_is_array else 'scalar'}, "
+            f"got {'array' if arg_is_array else 'scalar'} "
+            f"'{resolved_arg.name}'."
+        )
+
+    block_is_tuple = isinstance(block_input, TupleValue)
+    arg_is_tuple = isinstance(resolved_arg, TupleValue)
+    if block_is_tuple != arg_is_tuple:
+        raise InliningError(
+            f"Type mismatch in block '{block_name}': "
+            f"parameter '{block_input.name}' expects "
+            f"{'tuple' if block_is_tuple else 'non-tuple'}, "
+            f"got {'tuple' if arg_is_tuple else 'non-tuple'} "
+            f"'{resolved_arg.name}'."
+        )
+
+    block_is_dict = isinstance(block_input, DictValue)
+    arg_is_dict = isinstance(resolved_arg, DictValue)
+    if block_is_dict != arg_is_dict:
+        raise InliningError(
+            f"Type mismatch in block '{block_name}': "
+            f"parameter '{block_input.name}' expects "
+            f"{'dict' if block_is_dict else 'non-dict'}, "
+            f"got {'dict' if arg_is_dict else 'non-dict'} "
+            f"'{resolved_arg.name}'."
+        )
+
+    # IR type comparison for Value/ArrayValue (TupleValue has no .type, DictValue is generic)
+    if not isinstance(block_input, (TupleValue, DictValue)) and not isinstance(
+        resolved_arg, (TupleValue, DictValue)
+    ):
+        if block_input.type != resolved_arg.type:
+            raise InliningError(
+                f"Element type mismatch in block '{block_name}': "
+                f"parameter '{block_input.name}' has type "
+                f"{block_input.type.label()}, got {resolved_arg.type.label()}."
+            )
 
 
 def find_return_operation(operations: list[Operation]) -> ReturnOperation | None:
@@ -176,6 +226,7 @@ class InlinePass(Pass[Block, Block]):
         for block_input, call_arg in zip(block.input_values, call_args):
             # Apply value_map to call_arg first
             resolved_arg = value_map.get(call_arg.uuid, call_arg)
+            _validate_inline_type_match(block_input, resolved_arg, block.name)
             local_map[block_input.uuid] = resolved_arg
 
             # If both are ArrayValues, also map shape dimensions

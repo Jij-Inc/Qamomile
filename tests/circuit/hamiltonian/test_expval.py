@@ -49,6 +49,35 @@ class TestExpvalFrontend:
         assert has_expval
 
 
+class TestExpvalInputValidation:
+    """Test expval input validation at the frontend layer."""
+
+    def test_expval_empty_tuple_rejected_with_clear_error(self):
+        """expval(()) should raise ValueError, not IndexError."""
+        with pytest.raises(ValueError, match="expval requires at least one qubit"):
+
+            @qm.qkernel
+            def bad_kernel(H: qm.Observable) -> qm.Float:
+                return qm.expval((), H)
+
+            bad_kernel.build()
+
+    def test_expval_tuple_non_empty_preserves_order(self):
+        """expval with non-empty tuple should still work correctly."""
+
+        @qm.qkernel
+        def ok_kernel(q0: qm.Qubit, q1: qm.Qubit, H: qm.Observable) -> qm.Float:
+            q0 = qm.h(q0)
+            return qm.expval((q0, q1), H)
+
+        block = ok_kernel.build()
+        from qamomile.circuit.ir.operation import ExpvalOp
+
+        expval_op = next(op for op in block.operations if isinstance(op, ExpvalOp))
+        assert expval_op.qubits is not None
+        assert expval_op.observable is not None
+
+
 class TestExpvalOp:
     """Test ExpvalOp IR operation."""
 
@@ -167,10 +196,7 @@ class TestExpvalTranspiler:
         transpiler = QiskitTranspiler()
 
         # Transpile with Hamiltonian in bindings
-        executable = transpiler.transpile(
-            vqe,
-            bindings={"H": H, "n": 2}
-        )
+        executable = transpiler.transpile(vqe, bindings={"H": H, "n": 2})
 
         # Should have compiled expval segment
         assert len(executable.compiled_expval) == 1

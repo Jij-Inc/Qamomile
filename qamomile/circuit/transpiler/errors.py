@@ -64,6 +64,7 @@ class ResolutionFailureReason(Enum):
     INDEX_NOT_NUMERIC = "index_not_numeric"
     NESTED_ARRAY_RESOLUTION_FAILED = "nested_array_resolution_failed"
     DIRECT_UUID_NOT_FOUND = "direct_uuid_not_found"
+    UNRESOLVED_ARRAY_SIZE = "unresolved_array_size"
     UNKNOWN = "unknown"
 
 
@@ -123,16 +124,12 @@ class QubitIndexResolutionError(EmitError):
         bindings_sample = self.available_bindings_keys[:10]
         lines.append(f"  Bindings keys (sample): {bindings_sample}")
         if len(self.available_bindings_keys) > 10:
-            lines.append(
-                f"    ... and {len(self.available_bindings_keys) - 10} more"
-            )
+            lines.append(f"    ... and {len(self.available_bindings_keys) - 10} more")
 
         qubit_map_sample = self.available_qubit_map_keys[:10]
         lines.append(f"  Qubit map keys (sample): {qubit_map_sample}")
         if len(self.available_qubit_map_keys) > 10:
-            lines.append(
-                f"    ... and {len(self.available_qubit_map_keys) - 10} more"
-            )
+            lines.append(f"    ... and {len(self.available_qubit_map_keys) - 10} more")
         lines.append("")
 
         lines.append("=== Suggested Fixes ===")

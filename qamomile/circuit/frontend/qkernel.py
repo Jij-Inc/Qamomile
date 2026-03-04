@@ -11,6 +11,10 @@ from qamomile.circuit.frontend.func_to_block import (
     is_array_type,
     is_dict_type,
 )
+from qamomile.circuit.frontend.type_check import (
+    validate_argument_type,
+    validate_return_type,
+)
 from qamomile.circuit.frontend.handle import Observable, Qubit
 from qamomile.circuit.frontend.handle.containers import Dict
 from qamomile.circuit.frontend.handle.primitives import Float, Handle, UInt
@@ -112,6 +116,7 @@ class QKernel(Generic[P, R]):
                 raise TypeError(
                     f"Argument '{name}' must be a Handle instance, got {type(handle)}"
                 )
+            validate_argument_type(self.input_types[name], handle, name)
             inputs_map[name] = handle.value
 
         # Ensure the block IR is compiled
@@ -130,6 +135,10 @@ class QKernel(Generic[P, R]):
             raise RuntimeError(
                 f"Mismatch in return values: expected {len(self.output_types)}, got {len(results)}"
             )
+
+        # Validate return value types before wrapping
+        for idx, (val, handle_type) in enumerate(zip(results, self.output_types)):
+            validate_return_type(handle_type, val, idx)
 
         wrapped_results = []
         for val, handle_type in zip(results, self.output_types):

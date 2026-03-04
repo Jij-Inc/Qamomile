@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
-from qamomile.circuit.transpiler.errors import ResolutionFailureReason
+from qamomile.circuit.transpiler.errors import EmitError, ResolutionFailureReason
 
 if TYPE_CHECKING:
     from qamomile.circuit.ir.value import Value
@@ -24,6 +24,7 @@ class QubitResolutionResult:
     index: int | None = None
     failure_reason: ResolutionFailureReason | None = None
     failure_details: str = ""
+
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.operation import QInitOperation
@@ -95,11 +96,19 @@ class ResourceAllocator:
                     if result.shape:
                         size_val = result.shape[0]
                         size = self._resolve_size(size_val, bindings)
-                        if size is not None:
-                            for i in range(size):
-                                qubit_id = f"{result.uuid}_{i}"
-                                if qubit_id not in qubit_map:
-                                    qubit_map[qubit_id] = len(qubit_map)
+                        if size is None:
+                            dim_name = getattr(size_val, "name", "<unknown>")
+                            array_name = result.name or "<anonymous>"
+                            raise EmitError(
+                                f"Unresolved array size for '{array_name}': "
+                                f"symbolic dimension '{dim_name}' is not bound. "
+                                f"Pass bindings to resolve this dimension.",
+                                operation="QInitOperation",
+                            )
+                        for i in range(size):
+                            qubit_id = f"{result.uuid}_{i}"
+                            if qubit_id not in qubit_map:
+                                qubit_map[qubit_id] = len(qubit_map)
                     continue
                 if result.uuid not in qubit_map:
                     qubit_map[result.uuid] = len(qubit_map)
@@ -114,11 +123,19 @@ class ResourceAllocator:
                 if isinstance(result, ArrayValue) and result.shape:
                     size_val = result.shape[0]
                     size = self._resolve_size(size_val, bindings)
-                    if size is not None:
-                        for i in range(size):
-                            clbit_id = f"{result.uuid}_{i}"
-                            if clbit_id not in clbit_map:
-                                clbit_map[clbit_id] = len(clbit_map)
+                    if size is None:
+                        dim_name = getattr(size_val, "name", "<unknown>")
+                        array_name = result.name or "<anonymous>"
+                        raise EmitError(
+                            f"Unresolved array size for '{array_name}': "
+                            f"symbolic dimension '{dim_name}' is not bound. "
+                            f"Pass bindings to resolve this dimension.",
+                            operation="MeasureVectorOperation",
+                        )
+                    for i in range(size):
+                        clbit_id = f"{result.uuid}_{i}"
+                        if clbit_id not in clbit_map:
+                            clbit_map[clbit_id] = len(clbit_map)
 
             elif isinstance(op, MeasureQFixedOperation):
                 qfixed = op.operands[0]
@@ -140,8 +157,12 @@ class ResourceAllocator:
                 self._allocate_recursive(op.operations, qubit_map, clbit_map, bindings)
 
             elif isinstance(op, IfOperation):
-                self._allocate_recursive(op.true_operations, qubit_map, clbit_map, bindings)
-                self._allocate_recursive(op.false_operations, qubit_map, clbit_map, bindings)
+                self._allocate_recursive(
+                    op.true_operations, qubit_map, clbit_map, bindings
+                )
+                self._allocate_recursive(
+                    op.false_operations, qubit_map, clbit_map, bindings
+                )
 
             elif isinstance(op, WhileOperation):
                 self._allocate_recursive(op.operations, qubit_map, clbit_map, bindings)

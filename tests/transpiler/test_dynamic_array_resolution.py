@@ -221,6 +221,31 @@ class TestDynamicMeasurement:
             assert len(bitstring) == 4
 
 
+class TestAllocatorFailFastOnUnresolvedSize:
+    """Tests that ResourceAllocator raises EmitError when symbolic sizes cannot be resolved."""
+
+    def test_allocator_fails_fast_on_unresolved_symbolic_size(self):
+        """Transpiling without bindings for dynamic array size should raise EmitError."""
+        from qamomile.circuit.transpiler.errors import EmitError
+
+        transpiler = QiskitTranspiler()
+        # kernel_dynamic_size has `n = hi.shape[0]` — omitting hi binding leaves size unresolved
+        with pytest.raises(EmitError, match="Unresolved array size"):
+            transpiler.transpile(kernel_dynamic_size, bindings={})
+
+    def test_allocator_bound_symbolic_size_still_allocates(self):
+        """Transpiling with correct bindings should allocate normally (no regression)."""
+        transpiler = QiskitTranspiler()
+        hi = np.array([0.1, 0.2, 0.3])
+
+        executor = transpiler.transpile(kernel_dynamic_size, bindings={"hi": hi})
+        job = executor.sample(transpiler.executor(), bindings={}, shots=100)
+        result = job.result()
+        assert result is not None
+        for bitstring, _count in result.results:
+            assert len(bitstring) == 3
+
+
 class TestQAOAPattern:
     """Integration tests for QAOA-like circuit patterns.
 
