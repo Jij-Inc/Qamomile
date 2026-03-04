@@ -256,3 +256,40 @@ class TestControlledUTranspileIntegration:
         transpiler = QiskitTranspiler()
         result = transpiler.transpile(kernel, bindings={"n": 4})
         assert result is not None
+
+
+# -- Power field strict-int-cast unit tests ----------------------------------
+
+
+import pytest
+from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
+
+
+class TestConstantFoldPowerStrictValidation:
+    """Verify that _strict_int_cast rejects invalid power types."""
+
+    def test_bool_rejected(self):
+        with pytest.raises(ValueError, match="bool"):
+            ConstantFoldingPass._strict_int_cast(True)
+
+    def test_bool_false_rejected(self):
+        with pytest.raises(ValueError, match="bool"):
+            ConstantFoldingPass._strict_int_cast(False)
+
+    def test_non_integer_float_rejected(self):
+        with pytest.raises(ValueError, match="non-integer float"):
+            ConstantFoldingPass._strict_int_cast(1.5)
+
+    def test_zero_rejected(self):
+        with pytest.raises(ValueError, match="strictly positive"):
+            ConstantFoldingPass._strict_int_cast(0)
+
+    def test_negative_rejected(self):
+        with pytest.raises(ValueError, match="strictly positive"):
+            ConstantFoldingPass._strict_int_cast(-1)
+
+    def test_valid_integer_accepted(self):
+        assert ConstantFoldingPass._strict_int_cast(4) == 4
+
+    def test_whole_float_accepted(self):
+        assert ConstantFoldingPass._strict_int_cast(4.0) == 4

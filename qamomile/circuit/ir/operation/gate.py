@@ -95,10 +95,12 @@ class ControlledUOperation(Operation):
         power: Number of times to apply U. Default is 1 (apply U once).
                For QPE, this is 2^k where k is the counting qubit index.
                The emitter will create Controlled(U^power), not Controlled(U)^power.
+               Must be a strictly positive integer. Symbolic values (Value) are
+               resolved during constant folding and validated at emit time.
     """
 
     num_controls: int | Value = 1  # int = concrete, Value = symbolic
-    power: int = 1
+    power: int | Value = 1  # int = concrete, Value = symbolic (e.g. 2**k in QPE)
     target_indices: list[Value] | None = None
     controlled_indices: list[Value] | None = None
 

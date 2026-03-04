@@ -635,7 +635,7 @@ def phase_gate_qpe(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Qubit]:
     qs = _all_h(qs)
 
     for k in qmc.range(n):
-        qs[k], target = controlled_u(qs[k], target, power=2**k, theta=theta)  # type: ignore
+        qs[k], target = controlled_u(qs[k], target, power=2**k, theta=theta)
 
     qs = _iqft(qs)
 
@@ -900,7 +900,7 @@ def quantum_counting(
             qs1[n - 1 - t],
             qs2,
             q,
-            power=2**t,  # type: ignore
+            power=2**t,
         )
 
     qs1 = _iqft(qs1)

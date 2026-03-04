@@ -40,17 +40,49 @@ class ControlledGate:
 
     def __init__(self, qkernel: "QKernel", num_controls: int | UInt = 1) -> None:
         if isinstance(num_controls, int) and num_controls < 1:
-            raise ValueError(
-                f"num_controls must be >= 1, got {num_controls}."
-            )
+            raise ValueError(f"num_controls must be >= 1, got {num_controls}.")
         # For UInt (symbolic), validation is deferred to emit time
         self._qkernel = qkernel
         self._num_controls = num_controls
 
+    @staticmethod
+    def _normalize_power(power: int | UInt) -> int | Value:
+        """Normalize power to an IR-compatible type (``int`` or ``Value``).
+
+        ``UInt`` handles are unwrapped to their underlying ``Value`` so
+        that the IR never stores frontend types.  Concrete ``int`` values
+        are validated for strict positivity.
+
+        Args:
+            power: The power value from the user API.
+
+        Returns:
+            ``int`` for concrete values, ``Value`` for symbolic expressions.
+
+        Raises:
+            TypeError: If *power* is ``bool``, ``float``, or another
+                unsupported type.
+            ValueError: If a concrete *power* is ``<= 0``.
+        """
+        if isinstance(power, bool):
+            raise TypeError(
+                f"power must be a positive integer, got bool ({power}). "
+                f"Use an integer value like power=1 or power=2."
+            )
+        if isinstance(power, UInt):
+            return power.value
+        if isinstance(power, int):
+            if power <= 0:
+                raise ValueError(
+                    f"power must be a strictly positive integer, got {power}."
+                )
+            return power
+        raise TypeError(f"power must be int or UInt, got {type(power).__name__}.")
+
     def __call__(
         self,
         *args: Any,
-        power: int = 1,
+        power: int | UInt = 1,
         target_indices: list[int | UInt] | None = None,
         controlled_indices: list[int | UInt] | None = None,
         **params: ParamValue,
@@ -67,7 +99,9 @@ class ControlledGate:
 
         Args:
             *args: Control and target qubits.
-            power: Number of times to apply U. Default is 1.
+            power: Number of times to apply U. Must be a strictly positive
+                integer. Accepts UInt handles for symbolic expressions
+                (e.g., 2**k in QPE).
             target_indices: Indices within the Vector that are targets.
                 The remaining elements become controls.
             controlled_indices: Indices within the Vector that are controls.
@@ -77,6 +111,8 @@ class ControlledGate:
         Returns:
             Tuple of output handles, or single Vector when using index spec.
         """
+        power = self._normalize_power(power)
+
         if target_indices is not None and controlled_indices is not None:
             raise ValueError(
                 "Cannot specify both target_indices and controlled_indices. "
@@ -120,8 +156,12 @@ class ControlledGate:
             seen_ids.add(lid)
 
         # Consume all qubit handles (enforces linear type)
-        controls = tuple(c.consume(operation_name="ControlledU[control]") for c in controls)
-        target_args = tuple(t.consume(operation_name="ControlledU[target]") for t in target_args)
+        controls = tuple(
+            c.consume(operation_name="ControlledU[control]") for c in controls
+        )
+        target_args = tuple(
+            t.consume(operation_name="ControlledU[target]") for t in target_args
+        )
 
         # Get BlockValue from qkernel
         block = self._qkernel.block
@@ -196,7 +236,7 @@ class ControlledGate:
     def _call_with_index_spec(
         self,
         args: tuple[Any, ...],
-        power: int,
+        power: int | Value,
         target_indices: list[int | UInt] | None,
         controlled_indices: list[int | UInt] | None,
         params: dict[str, ParamValue],
@@ -246,7 +286,9 @@ class ControlledGate:
                     raise TypeError(f"Index must be int or UInt, got {type(idx)}")
             return result
 
-        ti_values = _to_value_list(target_indices) if target_indices is not None else None
+        ti_values = (
+            _to_value_list(target_indices) if target_indices is not None else None
+        )
         ci_values = (
             _to_value_list(controlled_indices)
             if controlled_indices is not None
@@ -293,14 +335,12 @@ class ControlledGate:
         tracer.add_operation(op)
 
         # Return a single Vector (not tuple)
-        return Vector._create_from_value(
-            results[0], vector.shape, vector.value.name
-        )
+        return Vector._create_from_value(results[0], vector.shape, vector.value.name)
 
     def _call_symbolic(
         self,
         args: tuple[Any, ...],
-        power: int,
+        power: int | Value,
         params: dict[str, ParamValue],
     ) -> tuple[Any, ...]:
         """Handle symbolic num_controls (UInt).
