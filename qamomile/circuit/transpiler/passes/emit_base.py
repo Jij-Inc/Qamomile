@@ -353,6 +353,27 @@ class ResourceAllocator:
         qubit_map: dict[str, int],
     ) -> None:
         """Allocate resources for a ControlledUOperation."""
+        if op.has_index_spec:
+            # Vector already allocated by QInitOperation.
+            # Map result ArrayValue to same physical qubits.
+            vector_operand = op.operands[1]
+            vector_result = op.results[0]
+            for key, idx in list(qubit_map.items()):
+                if key.startswith(f"{vector_operand.uuid}_"):
+                    suffix = key[len(f"{vector_operand.uuid}_"):]
+                    result_key = f"{vector_result.uuid}_{suffix}"
+                    if result_key not in qubit_map:
+                        qubit_map[result_key] = idx
+            return
+
+        if op.is_symbolic_num_controls:
+            from qamomile.circuit.transpiler.errors import EmitError
+
+            raise EmitError(
+                "Cannot transpile ControlledUOperation with symbolic num_controls. "
+                "Bind parameters to concrete values before transpilation.",
+                operation="ControlledUOperation",
+            )
         control_qubits = list(op.control_operands)
         target_qubits = [
             v for v in op.target_operands if hasattr(v, "type") and v.type.is_quantum()
