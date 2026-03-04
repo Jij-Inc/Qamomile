@@ -13,6 +13,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     IfOperation,
     WhileOperation,
 )
+from qamomile.circuit.ir.operation.gate import GateOperation
 from qamomile.circuit.ir.value import (
     ArrayValue,
     DictValue,
@@ -104,11 +105,18 @@ class UUIDRemapper:
                 operations=cloned_body,
             )
         else:
-            return dataclasses.replace(
+            cloned = dataclasses.replace(
                 op,
                 operands=new_operands,
                 results=new_results,
             )
+            # GateOperation.theta is a Value stored outside operands;
+            # clone it so the inlined copy gets its own UUID.
+            if isinstance(cloned, GateOperation) and isinstance(cloned.theta, Value):
+                cloned = dataclasses.replace(
+                    cloned, theta=cast(Value, self.clone_value(cloned.theta))
+                )
+            return cloned
 
     def clone_value(self, value: ValueBase) -> ValueBase:
         """Clone any value type with a fresh UUID and logical_id.
@@ -218,11 +226,22 @@ class ValueSubstitutor:
             else:
                 new_results.append(v)
 
-        return dataclasses.replace(
+        substituted = dataclasses.replace(
             op,
             operands=new_operands,
             results=new_results,
         )
+
+        # GateOperation.theta is a Value stored outside operands;
+        # substitute it so the caller's argument replaces the callee's param.
+        if isinstance(substituted, GateOperation) and isinstance(
+            substituted.theta, Value
+        ):
+            new_theta = self.substitute_value(substituted.theta)
+            if isinstance(new_theta, Value) and new_theta is not substituted.theta:
+                substituted = dataclasses.replace(substituted, theta=new_theta)
+
+        return substituted
 
     def substitute_value(self, v: ValueBase) -> ValueBase:
         """Substitute a single value using the value map.
