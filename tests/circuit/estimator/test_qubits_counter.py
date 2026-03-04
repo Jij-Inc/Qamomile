@@ -476,7 +476,8 @@ class TestForOp:
             return bit
 
         resource = qubits_counter(circuit.block)
-        expected = sp.Symbol("n", integer=True, positive=True) - a
+        n = sp.Symbol("n", integer=True, positive=True)
+        expected = sp.Max(0, n - a)
         assert resource == expected
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])
@@ -492,7 +493,8 @@ class TestForOp:
             return bit
 
         resource = qubits_counter(circuit.block)
-        expected = a - sp.Symbol("n", integer=True, positive=True)
+        n = sp.Symbol("n", integer=True, positive=True)
+        expected = sp.Max(0, a - n)
         assert resource == expected
 
     def test_symbolic_sub_symbol_for_loop_qubits(self):
@@ -507,9 +509,9 @@ class TestForOp:
             return bit
 
         resource = qubits_counter(circuit.block)
-        expected = sp.Symbol("n", integer=True, positive=True) - sp.Symbol(
-            "m", integer=True, positive=True
-        )  # type: ignore
+        n = sp.Symbol("n", integer=True, positive=True)
+        m = sp.Symbol("m", integer=True, positive=True)
+        expected = sp.Max(0, n - m)
         assert resource == expected
 
     @pytest.mark.parametrize("a", [1, 2, 5, 10, 100])

@@ -939,5 +939,115 @@ class TestRotationGateCounting:
         assert sp.simplify(est.gates.rotation_gates - n) == 0
 
 
+class TestForLoopStepSemantics:
+    """Test correct range() semantics for step != 1 in resource estimation."""
+
+    def test_constant_body_step_2(self):
+        """range(0, 5, 2) with constant body -> 3 iterations (not 5/2)."""
+
+        @qm.qkernel
+        def circuit(q: qm.Qubit) -> qm.Qubit:
+            for i in qm.range(0, 5, 2):
+                q = qm.h(q)
+            return q
+
+        est = estimate_resources(circuit.block)
+        assert est.gates.total == 3
+
+    def test_constant_body_negative_step(self):
+        """range(5, 0, -2) with constant body -> 3 iterations."""
+
+        @qm.qkernel
+        def circuit(q: qm.Qubit) -> qm.Qubit:
+            for i in qm.range(5, 0, -2):
+                q = qm.h(q)
+            return q
+
+        est = estimate_resources(circuit.block)
+        assert est.gates.total == 3
+
+    def test_step_1_regression(self):
+        """Step=1 (default) still works exactly as before."""
+
+        @qm.qkernel
+        def circuit(n: qm.UInt) -> qm.Vector[qm.Qubit]:
+            q = qm.qubit_array(n, name="q")
+            for i in qm.range(n):
+                q[i] = qm.h(q[i])
+            return q
+
+        est = estimate_resources(circuit.block)
+        n = sp.Symbol("n", integer=True, positive=True)
+        assert sp.simplify(est.gates.total - n) == 0
+
+    def test_step_zero_raises(self):
+        """step=0 should raise ValueError."""
+        from qamomile.circuit.estimator._loop_executor import symbolic_iterations
+
+        with pytest.raises(ValueError, match="step cannot be zero"):
+            symbolic_iterations(sp.Integer(0), sp.Integer(5), sp.Integer(0))
+
+
+class TestSymbolicIterations:
+    """Direct unit tests for the symbolic_iterations function."""
+
+    def test_concrete_step_1(self):
+        from qamomile.circuit.estimator._loop_executor import symbolic_iterations
+
+        assert symbolic_iterations(
+            sp.Integer(0), sp.Integer(5), sp.Integer(1)
+        ) == 5
+
+    def test_concrete_step_2(self):
+        from qamomile.circuit.estimator._loop_executor import symbolic_iterations
+
+        assert symbolic_iterations(
+            sp.Integer(0), sp.Integer(5), sp.Integer(2)
+        ) == 3
+
+    def test_concrete_step_neg_1(self):
+        from qamomile.circuit.estimator._loop_executor import symbolic_iterations
+
+        assert symbolic_iterations(
+            sp.Integer(5), sp.Integer(0), sp.Integer(-1)
+        ) == 5
+
+    def test_concrete_step_neg_2(self):
+        from qamomile.circuit.estimator._loop_executor import symbolic_iterations
+
+        assert symbolic_iterations(
+            sp.Integer(5), sp.Integer(0), sp.Integer(-2)
+        ) == 3
+
+    def test_empty_range_forward(self):
+        from qamomile.circuit.estimator._loop_executor import symbolic_iterations
+
+        assert symbolic_iterations(
+            sp.Integer(5), sp.Integer(0), sp.Integer(1)
+        ) == 0
+
+    def test_empty_range_reverse(self):
+        from qamomile.circuit.estimator._loop_executor import symbolic_iterations
+
+        assert symbolic_iterations(
+            sp.Integer(0), sp.Integer(5), sp.Integer(-1)
+        ) == 0
+
+    def test_step_zero_raises(self):
+        from qamomile.circuit.estimator._loop_executor import symbolic_iterations
+
+        with pytest.raises(ValueError):
+            symbolic_iterations(
+                sp.Integer(0), sp.Integer(5), sp.Integer(0)
+            )
+
+    def test_symbolic_step_1_simplifies(self):
+        from qamomile.circuit.estimator._loop_executor import symbolic_iterations
+
+        n = sp.Symbol("n", integer=True, positive=True)
+        result = symbolic_iterations(sp.Integer(0), n, sp.Integer(1))
+        assert sp.simplify(result - n) == 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

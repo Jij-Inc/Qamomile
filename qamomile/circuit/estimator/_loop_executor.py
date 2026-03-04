@@ -210,14 +210,18 @@ def symbolic_iterations(
     stop: sp.Expr,
     step: sp.Expr,
 ) -> sp.Expr:
-    """Compute ``(stop − start) / step`` as symbolic iteration count.
+    """Compute the number of iterations of ``range(start, stop, step)``.
 
-    This is the number of iterations of ``range(start, stop, step)``.
-    Exact for step=1; approximate for step>1 (ceildiv semantics
-    are hard to express symbolically, but resource estimates use this
-    as a tight bound).
+    Uses the discrete formula ``Max(0, ceiling((stop - start) / step))``
+    which exactly matches Python ``range()`` semantics for any integer
+    step (positive, negative, or symbolic).
+
+    Raises:
+        ValueError: If *step* is a concrete zero.
     """
-    return (stop - start) / step
+    if hasattr(step, "is_zero") and step.is_zero:
+        raise ValueError("Loop step cannot be zero")
+    return sp.Max(0, sp.ceiling((stop - start) / step))
 
 
 # ------------------------------------------------------------------ #

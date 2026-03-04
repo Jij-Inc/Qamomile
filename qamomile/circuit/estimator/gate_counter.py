@@ -40,6 +40,7 @@ from ._engine import (
     resolve_for_items_cardinality,
 )
 from ._gate_count import GateCount
+from ._loop_executor import symbolic_iterations
 from ._resolver import ExprResolver
 
 
@@ -57,37 +58,30 @@ def _apply_sum_to_count(
 ) -> GateCount:
     """Apply SymPy Sum to all fields of a GateCount.
 
-    For forward loops (step > 0): Sum over ``(loop_var, start, stop-1)``
-    For reverse loops (step < 0): Sum over ``(loop_var, stop+1, start)``
+    Uses the variable transformation ``loop_var = start + step * k`` where
+    ``k`` ranges from ``0`` to ``iterations - 1``, matching Python ``range()``
+    semantics for any step value.
     """
-    is_negative_step = False
-    try:
-        is_negative_step = bool(step < 0)
-    except TypeError:
-        pass  # symbolic step, assume positive
+    iterations = symbolic_iterations(start, stop, step)
+    k = sp.Dummy("k", integer=True, nonneg=True)
 
-    if is_negative_step:
-        lower = stop + 1
-        upper = start
-    else:
-        lower = start
-        upper = stop - 1
+    def _sum_field(expr: sp.Expr) -> sp.Expr:
+        transformed = expr.subs(loop_var, start + step * k)
+        return Sum(transformed, (k, 0, iterations - 1)).doit()
 
     return GateCount(
-        total=Sum(count.total, (loop_var, lower, upper)).doit(),
-        single_qubit=Sum(count.single_qubit, (loop_var, lower, upper)).doit(),
-        two_qubit=Sum(count.two_qubit, (loop_var, lower, upper)).doit(),
-        multi_qubit=Sum(count.multi_qubit, (loop_var, lower, upper)).doit(),
-        t_gates=Sum(count.t_gates, (loop_var, lower, upper)).doit(),
-        clifford_gates=Sum(count.clifford_gates, (loop_var, lower, upper)).doit(),
-        rotation_gates=Sum(count.rotation_gates, (loop_var, lower, upper)).doit(),
+        total=_sum_field(count.total),
+        single_qubit=_sum_field(count.single_qubit),
+        two_qubit=_sum_field(count.two_qubit),
+        multi_qubit=_sum_field(count.multi_qubit),
+        t_gates=_sum_field(count.t_gates),
+        clifford_gates=_sum_field(count.clifford_gates),
+        rotation_gates=_sum_field(count.rotation_gates),
         oracle_calls={
-            name: Sum(val, (loop_var, lower, upper)).doit()
-            for name, val in count.oracle_calls.items()
+            name: _sum_field(val) for name, val in count.oracle_calls.items()
         },
         oracle_queries={
-            name: Sum(val, (loop_var, lower, upper)).doit()
-            for name, val in count.oracle_queries.items()
+            name: _sum_field(val) for name, val in count.oracle_queries.items()
         },
     )
 
@@ -201,7 +195,7 @@ def _handle_for(
     if loop_sym in all_free:
         return _apply_sum_to_count(inner, loop_sym, start, stop, step)
 
-    iterations = (stop - start) / step
+    iterations = symbolic_iterations(start, stop, step)
     return inner * iterations
 
 

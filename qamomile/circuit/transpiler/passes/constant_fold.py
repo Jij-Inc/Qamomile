@@ -161,6 +161,9 @@ class ConstantFoldingPass(Pass[Block, Block]):
         Also propagates folded values into ``element_indices`` of Value
         operands so that gate operations referencing a folded BinOp result
         as a qubit index are updated correctly.
+
+        For ``ControlledUOperation``, also folds ``num_controls``,
+        ``target_indices``, and ``controlled_indices`` fields.
         """
         new_operands: list[Any] = []
         changed = False
@@ -188,6 +191,90 @@ class ConstantFoldingPass(Pass[Block, Block]):
             else:
                 new_operands.append(operand)
 
+        # Fold ControlledUOperation-specific dataclass fields.
+        from qamomile.circuit.ir.operation.gate import ControlledUOperation
+
+        if isinstance(op, ControlledUOperation):
+            extra_kwargs: dict[str, Any] = {}
+
+            # Fold num_controls: Value -> int if resolvable.
+            if isinstance(op.num_controls, Value):
+                new_nc = self._resolve_field_value(op.num_controls, folded_values)
+                if new_nc is not op.num_controls:
+                    extra_kwargs["num_controls"] = new_nc
+                    changed = True
+
+            # Fold target_indices list.
+            if op.target_indices is not None:
+                new_ti = self._fold_value_list(op.target_indices, folded_values)
+                if new_ti is not None:
+                    extra_kwargs["target_indices"] = new_ti
+                    changed = True
+
+            # Fold controlled_indices list.
+            if op.controlled_indices is not None:
+                new_ci = self._fold_value_list(op.controlled_indices, folded_values)
+                if new_ci is not None:
+                    extra_kwargs["controlled_indices"] = new_ci
+                    changed = True
+
+            if extra_kwargs:
+                return dataclasses.replace(op, operands=new_operands, **extra_kwargs)
+
         if changed:
             return dataclasses.replace(op, operands=new_operands)
         return op
+
+    def _resolve_field_value(
+        self,
+        value: Value,
+        folded_values: dict[str, Value],
+    ) -> Value | int:
+        """Resolve a Value in a ControlledUOperation field.
+
+        Returns a concrete ``int`` if resolvable, or the original
+        ``Value`` unchanged.
+        """
+        if value.uuid in folded_values:
+            folded = folded_values[value.uuid]
+            const = folded.get_const()
+            if const is not None:
+                return int(const)
+            return folded
+
+        resolved = self._resolve_value(value, folded_values)
+        if resolved is not None:
+            return int(resolved)
+
+        return value
+
+    def _fold_value_list(
+        self,
+        values: list[Value],
+        folded_values: dict[str, Value],
+    ) -> list[Value] | None:
+        """Fold a list of Values (e.g. target_indices).
+
+        Returns a new list if any element changed, or ``None`` if unchanged.
+        """
+        new_values: list[Value] = []
+        list_changed = False
+        for v in values:
+            if v.uuid in folded_values:
+                new_values.append(folded_values[v.uuid])
+                list_changed = True
+            else:
+                resolved = self._resolve_value(v, folded_values)
+                if resolved is not None:
+                    new_values.append(
+                        Value(
+                            type=v.type,
+                            name=f"folded_{v.name}",
+                            params={"const": int(resolved)},
+                            uuid=v.uuid,
+                        )
+                    )
+                    list_changed = True
+                else:
+                    new_values.append(v)
+        return new_values if list_changed else None
