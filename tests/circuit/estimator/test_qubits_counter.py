@@ -311,7 +311,6 @@ class TestQInitOp:
         assert resource == n
 
     def test_argument_symbolical_qubits(self):
-
         @qmc.qkernel
         def circuit(n: qmc.UInt) -> qmc.Qubit:
             qs = qmc.qubit_array(n, name="qs")

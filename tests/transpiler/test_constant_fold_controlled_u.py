@@ -1,10 +1,7 @@
 """Tests for constant folding of ControlledUOperation fields."""
 
-import pytest
-
 import qamomile.circuit as qm
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
-from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
 
 
 # -- Helper kernels ----------------------------------------------------------

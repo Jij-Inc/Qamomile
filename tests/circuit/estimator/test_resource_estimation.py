@@ -994,52 +994,38 @@ class TestSymbolicIterations:
     def test_concrete_step_1(self):
         from qamomile.circuit.estimator._loop_executor import symbolic_iterations
 
-        assert symbolic_iterations(
-            sp.Integer(0), sp.Integer(5), sp.Integer(1)
-        ) == 5
+        assert symbolic_iterations(sp.Integer(0), sp.Integer(5), sp.Integer(1)) == 5
 
     def test_concrete_step_2(self):
         from qamomile.circuit.estimator._loop_executor import symbolic_iterations
 
-        assert symbolic_iterations(
-            sp.Integer(0), sp.Integer(5), sp.Integer(2)
-        ) == 3
+        assert symbolic_iterations(sp.Integer(0), sp.Integer(5), sp.Integer(2)) == 3
 
     def test_concrete_step_neg_1(self):
         from qamomile.circuit.estimator._loop_executor import symbolic_iterations
 
-        assert symbolic_iterations(
-            sp.Integer(5), sp.Integer(0), sp.Integer(-1)
-        ) == 5
+        assert symbolic_iterations(sp.Integer(5), sp.Integer(0), sp.Integer(-1)) == 5
 
     def test_concrete_step_neg_2(self):
         from qamomile.circuit.estimator._loop_executor import symbolic_iterations
 
-        assert symbolic_iterations(
-            sp.Integer(5), sp.Integer(0), sp.Integer(-2)
-        ) == 3
+        assert symbolic_iterations(sp.Integer(5), sp.Integer(0), sp.Integer(-2)) == 3
 
     def test_empty_range_forward(self):
         from qamomile.circuit.estimator._loop_executor import symbolic_iterations
 
-        assert symbolic_iterations(
-            sp.Integer(5), sp.Integer(0), sp.Integer(1)
-        ) == 0
+        assert symbolic_iterations(sp.Integer(5), sp.Integer(0), sp.Integer(1)) == 0
 
     def test_empty_range_reverse(self):
         from qamomile.circuit.estimator._loop_executor import symbolic_iterations
 
-        assert symbolic_iterations(
-            sp.Integer(0), sp.Integer(5), sp.Integer(-1)
-        ) == 0
+        assert symbolic_iterations(sp.Integer(0), sp.Integer(5), sp.Integer(-1)) == 0
 
     def test_step_zero_raises(self):
         from qamomile.circuit.estimator._loop_executor import symbolic_iterations
 
         with pytest.raises(ValueError):
-            symbolic_iterations(
-                sp.Integer(0), sp.Integer(5), sp.Integer(0)
-            )
+            symbolic_iterations(sp.Integer(0), sp.Integer(5), sp.Integer(0))
 
     def test_symbolic_step_1_simplifies(self):
         from qamomile.circuit.estimator._loop_executor import symbolic_iterations
