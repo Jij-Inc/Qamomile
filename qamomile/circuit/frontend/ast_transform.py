@@ -242,6 +242,17 @@ class ControlFlowTransformer(ast.NodeTransformer):
         )
 
     @staticmethod
+    def _has_return_under_loop(body_nodes: list[ast.stmt]) -> bool:
+        """Check if any return statement exists inside a for/while loop in body_nodes."""
+        for stmt in body_nodes:
+            if not isinstance(stmt, (ast.For, ast.While)):
+                continue
+            for node in ast.walk(stmt):
+                if isinstance(node, ast.Return) and node.value is not None:
+                    return True
+        return False
+
+    @staticmethod
     def _transform_returns_to_assignments(
         body_nodes: list[ast.stmt], ret_var_name: str
     ) -> list[ast.stmt]:
@@ -557,6 +568,15 @@ class ControlFlowTransformer(ast.NodeTransformer):
             | collector_body.incoming_vars
             | collector_orelse.incoming_vars
         )
+
+        # Detect return inside for/while in if-else branches (unsupported).
+        # Must run before generic_visit which transforms loops into with-stmts.
+        if self._has_return_under_loop(node.body) or self._has_return_under_loop(
+            node.orelse if node.orelse else []
+        ):
+            raise SyntaxError(
+                "'return' inside for/while in @qkernel if-else is not supported"
+            )
 
         # ネストされた制御フローを変換
         self.generic_visit(node)

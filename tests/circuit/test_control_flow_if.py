@@ -997,3 +997,59 @@ class TestIfElseOneSidedReturnErrors:
                 elif cond2:
                     return qm.h(q1)
                 return q1
+
+    def test_for_nested_return_in_if_only_raises_syntax_error(self):
+        """Return inside for-loop in only one branch should raise SyntaxError."""
+        with pytest.raises(SyntaxError, match="inside for/while"):
+
+            @qkernel
+            def circuit(q0: Qubit, q1: Qubit) -> Qubit:
+                cond = qm.measure(q0)
+                if cond:
+                    for _ in qm.range(1):
+                        return qm.x(q1)
+                else:
+                    q1 = qm.h(q1)
+                return q1
+
+    def test_while_nested_return_in_if_only_raises_syntax_error(self):
+        """Return inside while-loop in only one branch should raise SyntaxError."""
+        with pytest.raises(SyntaxError, match="inside for/while"):
+
+            @qkernel
+            def circuit(q0: Qubit, q1: Qubit) -> Qubit:
+                cond = qm.measure(q0)
+                if cond:
+                    while True:
+                        return qm.x(q1)
+                else:
+                    q1 = qm.h(q1)
+                return q1
+
+    def test_for_nested_return_in_both_branches_raises_syntax_error(self):
+        """Return inside for-loop in both branches should raise SyntaxError."""
+        with pytest.raises(SyntaxError, match="inside for/while"):
+
+            @qkernel
+            def circuit(q0: Qubit, q1: Qubit) -> Qubit:
+                cond = qm.measure(q0)
+                if cond:
+                    for _ in qm.range(1):
+                        return qm.x(q1)
+                else:
+                    for _ in qm.range(1):
+                        return qm.h(q1)
+
+    def test_while_nested_return_in_both_branches_raises_syntax_error(self):
+        """Return inside while-loop in both branches should raise SyntaxError."""
+        with pytest.raises(SyntaxError, match="inside for/while"):
+
+            @qkernel
+            def circuit(q0: Qubit, q1: Qubit) -> Qubit:
+                cond = qm.measure(q0)
+                if cond:
+                    while True:
+                        return qm.x(q1)
+                else:
+                    while True:
+                        return qm.h(q1)
