@@ -154,7 +154,7 @@ serve_en() {
     echo "Serving English documentation at http://localhost:8000"
     echo "Press Ctrl+C to stop the server"
     cd en/_build/html
-    python -m http.server 8000
+    uv run python -m http.server 8000
 }
 
 # Function to serve Japanese documentation (builds if needed)
@@ -168,7 +168,7 @@ serve_ja() {
     echo "Serving Japanese documentation at http://localhost:8000"
     echo "Press Ctrl+C to stop the server"
     cd ja/_build/html
-    python -m http.server 8000
+    uv run python -m http.server 8000
 }
 
 # Function to clean, rebuild, and serve English documentation
@@ -180,7 +180,7 @@ fresh_en() {
     echo "Serving English documentation at http://localhost:8000"
     echo "Press Ctrl+C to stop the server"
     cd en/_build/html
-    python -m http.server 8000
+    uv run python -m http.server 8000
 }
 
 # Function to clean, rebuild, and serve Japanese documentation
@@ -192,7 +192,7 @@ fresh_ja() {
     echo "Serving Japanese documentation at http://localhost:8000"
     echo "Press Ctrl+C to stop the server"
     cd ja/_build/html
-    python -m http.server 8000
+    uv run python -m http.server 8000
 }
 
 # Main command dispatcher
