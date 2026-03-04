@@ -323,7 +323,9 @@ class ResourceEstimator:
             elif isinstance(op, GateOperation):
                 self._count_gate(op, estimate)
 
-            elif isinstance(op, (MeasureOperation, MeasureVectorOperation, MeasureQFixedOperation)):
+            elif isinstance(
+                op, (MeasureOperation, MeasureVectorOperation, MeasureQFixedOperation)
+            ):
                 estimate.measurement_count += 1
 
             elif isinstance(op, CompositeGateOperation):
@@ -374,9 +376,7 @@ class ResourceEstimator:
                                 for k, v in body_estimate.gate_counts.items()
                             },
                             composite_resources=body_estimate.composite_resources,
-                            measurement_count=(
-                                body_estimate.measurement_count * power
-                            ),
+                            measurement_count=(body_estimate.measurement_count * power),
                         )
                     estimate = estimate + body_estimate
 
@@ -503,7 +503,9 @@ class ResourceEstimator:
             # Controlled-U powers (rough estimate)
             estimate.total_gates += num_counting * n
             # IQFT
-            estimate.total_gates += num_counting + num_counting * (num_counting - 1) // 2
+            estimate.total_gates += (
+                num_counting + num_counting * (num_counting - 1) // 2
+            )
 
         else:
             # Unknown composite gate - just count as 1 operation
@@ -517,9 +519,15 @@ class ResourceEstimator:
     ) -> None:
         """Count resources for a for loop."""
         # Try to resolve loop bounds
-        start = self._resolve_int(op.operands[0] if len(op.operands) > 0 else None, bindings, 0)
-        stop = self._resolve_int(op.operands[1] if len(op.operands) > 1 else None, bindings, 1)
-        step = self._resolve_int(op.operands[2] if len(op.operands) > 2 else None, bindings, 1)
+        start = self._resolve_int(
+            op.operands[0] if len(op.operands) > 0 else None, bindings, 0
+        )
+        stop = self._resolve_int(
+            op.operands[1] if len(op.operands) > 1 else None, bindings, 1
+        )
+        step = self._resolve_int(
+            op.operands[2] if len(op.operands) > 2 else None, bindings, 1
+        )
 
         if start is not None and stop is not None and step is not None and step != 0:
             iterations = max(0, (stop - start + step - 1) // step) if step > 0 else 0
@@ -532,7 +540,9 @@ class ResourceEstimator:
 
         # Multiply by iterations
         for gate, count in body_estimate.gate_counts.items():
-            estimate.gate_counts[gate] = estimate.gate_counts.get(gate, 0) + count * iterations
+            estimate.gate_counts[gate] = (
+                estimate.gate_counts.get(gate, 0) + count * iterations
+            )
 
         estimate.total_gates += body_estimate.total_gates * iterations
         estimate.t_gate_count += body_estimate.t_gate_count * iterations
@@ -559,7 +569,9 @@ class ResourceEstimator:
         body_estimate = self._estimate_operations(op.operations, bindings)
 
         for gate, count in body_estimate.gate_counts.items():
-            estimate.gate_counts[gate] = estimate.gate_counts.get(gate, 0) + count * iterations
+            estimate.gate_counts[gate] = (
+                estimate.gate_counts.get(gate, 0) + count * iterations
+            )
 
         estimate.total_gates += body_estimate.total_gates * iterations
         estimate.t_gate_count += body_estimate.t_gate_count * iterations
@@ -584,8 +596,12 @@ class ResourceEstimator:
                 true_count, false_count
             )
 
-        estimate.total_gates += max(true_estimate.total_gates, false_estimate.total_gates)
-        estimate.t_gate_count += max(true_estimate.t_gate_count, false_estimate.t_gate_count)
+        estimate.total_gates += max(
+            true_estimate.total_gates, false_estimate.total_gates
+        )
+        estimate.t_gate_count += max(
+            true_estimate.t_gate_count, false_estimate.t_gate_count
+        )
         estimate.cnot_count += max(true_estimate.cnot_count, false_estimate.cnot_count)
         estimate.depth += max(true_estimate.depth, false_estimate.depth)
 
