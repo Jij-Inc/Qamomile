@@ -2,6 +2,7 @@ import contextlib
 import copy
 import typing
 
+from qamomile.circuit.frontend.handle.array import ArrayBase
 from qamomile.circuit.frontend.handle.containers import Dict, DictItemsIterator
 from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, Qubit, UInt
 from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
@@ -13,7 +14,6 @@ from qamomile.circuit.ir.operation.control_flow import (
     WhileOperation,
 )
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
-from qamomile.circuit.frontend.handle.array import ArrayBase
 from qamomile.circuit.ir.value import ArrayValue, Value
 
 
@@ -342,7 +342,7 @@ def emit_if(
     # 4. Create Phi functions for each variable to merge branches
     # Note: The AST transformer guarantees both branches return the same
     # variable list in the same order, so true_val and false_val always
-    # have the same type. We only need to check one side.
+    # have the same type.
     if len(true_result) != len(false_result):
         raise ValueError(
             f"Branch result length mismatch: true={len(true_result)}, false={len(false_result)}"
@@ -350,10 +350,24 @@ def emit_if(
     merged_results = []
     for true_val, false_val in zip(true_result, false_result, strict=True):
         if isinstance(true_val, (Handle, Value)):
+            if not isinstance(false_val, (Handle, Value)):
+                raise TypeError(
+                    f"Branch value mismatch in phi merge: "
+                    f"true branch returned {type(true_val).__name__}, "
+                    f"but false branch returned {type(false_val).__name__}. "
+                    f"Both branches of an if-else must return the same variables."
+                )
             phi_output, merged_handle = _create_phi_for_values(
                 condition_value, true_val, false_val, if_op
             )
             merged_results.append(merged_handle)
+        elif isinstance(false_val, (Handle, Value)):
+            raise TypeError(
+                f"Branch value mismatch in phi merge: "
+                f"false branch returned {type(false_val).__name__}, "
+                f"but true branch returned {type(true_val).__name__}. "
+                f"Both branches of an if-else must return the same variables."
+            )
         else:
             # Non-Handle/Value values (int, float, etc.) don't need phi
             merged_results.append(true_val)

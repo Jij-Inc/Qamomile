@@ -36,6 +36,7 @@ dev = [
     "pytest>=9.0.2",
     "pylatexenc>=2.10",
     "pytest-mpl>=0.17.0",
+    "pytest-mock>=3.14.0",
     "ruff>=0.14.11",
     "zuban>=0.4.1",
     "griffe>=1.0.0",

@@ -264,6 +264,12 @@ def create_dummy_input(
             shape=shape_values,
         )
 
+        # Emit QInitOperation for qubit arrays (consistent with scalar Qubit handling)
+        if emit_init and isinstance(element_ir_type, ir_types.QubitType):
+            qinit_op = QInitOperation(operands=[], results=[array_value])
+            tracer = get_current_tracer()
+            tracer.add_operation(qinit_op)
+
         # Create symbolic UInt handles for _shape
         shape_handles = tuple(UInt(value=dim_value) for dim_value in shape_values)
 

@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import ast
 import inspect
 import textwrap
 import warnings
-from typing import Any, Callable, Generic, ParamSpec, TypeVar, cast, get_type_hints
+from typing import TYPE_CHECKING, Any, Callable, Generic, ParamSpec, TypeVar, cast, get_type_hints
 
 import numpy as np
 
@@ -13,6 +15,7 @@ from qamomile.circuit.frontend.func_to_block import (
     func_to_block,
     is_array_type,
     is_dict_type,
+    is_tuple_type,
 )
 from qamomile.circuit.frontend.handle import Observable, Qubit
 from qamomile.circuit.frontend.handle.containers import Dict
@@ -22,6 +25,9 @@ from qamomile.circuit.ir.block_value import BlockValue
 from qamomile.circuit.ir.graph import Graph
 from qamomile.circuit.ir.types import FloatType, ObservableType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
+
+if TYPE_CHECKING:
+    from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -247,6 +253,10 @@ class QKernel(Generic[P, R]):
             if param_type is Observable:
                 continue
 
+            # Dict/Tuple types are created as dummy inputs (symbolic for visualization)
+            if is_dict_type(param_type) or is_tuple_type(param_type):
+                continue
+
             # Non-qubit, non-parameter, non-observable types must be in kwargs or have a default value
             if name not in kwargs:
                 if param.default is inspect.Parameter.empty:
@@ -447,6 +457,40 @@ class QKernel(Generic[P, R]):
             return Dict(value=dict_value, _entries=[])
 
         raise TypeError(f"Cannot create bound value for type {param_type}")
+
+    def estimate_resources(
+        self,
+        *,
+        bindings: dict[str, Any] | None = None,
+    ) -> ResourceEstimate:
+        """Estimate all resources for this kernel's circuit.
+
+        Convenience method that delegates to the module-level
+        ``estimate_resources`` function, eliminating the need to
+        access ``.block`` directly.
+
+        Args:
+            bindings: Optional concrete parameter bindings (scalars and dicts).
+                      Dict values trigger ``|key|`` cardinality substitution.
+
+        Returns:
+            ResourceEstimate with qubits, gates, and parameters.
+
+        Example:
+            >>> @qm.qkernel
+            ... def bell() -> qm.Vector[qm.Qubit]:
+            ...     q = qm.qubit_array(2)
+            ...     q[0] = qm.h(q[0])
+            ...     q[0], q[1] = qm.cx(q[0], q[1])
+            ...     return q
+            >>> est = bell.estimate_resources()
+            >>> print(est.qubits)  # 2
+        """
+        from qamomile.circuit.estimator.resource_estimator import (
+            estimate_resources,
+        )
+
+        return estimate_resources(self.block, bindings=bindings)
 
     def build(
         self,
