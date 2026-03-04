@@ -83,6 +83,13 @@ def resolve_composite_gate(
     2. ``implementation`` (has_implementation + BlockValue)
     3. Known formula (QFT / IQFT)
     4. Error — no resource info available
+
+    Args:
+        op (CompositeGateOperation): The operation to resolve.
+        resolver (ExprResolver): Resolver for the current scope.
+
+    Returns:
+        CompositeGateResolution: Exactly one of its four branches is populated.
     """
     # 1. metadata
     if op.resource_metadata is not None:
@@ -152,6 +159,13 @@ def _resolve_qft_iqft_n(
       2. Search block for QInitOperation with ``"counting"`` array (QPE)
       3. ``num_target_qubits`` field
       4. ``sp.Symbol("n")`` fallback
+
+    Args:
+        op (CompositeGateOperation): A QFT or IQFT operation.
+        resolver (ExprResolver): Resolver for the current scope.
+
+    Returns:
+        sp.Expr: The qubit count (concrete ``sp.Integer`` or symbolic).
     """
     target_qubits = op.target_qubits
     n_qubits = len(target_qubits)
@@ -195,6 +209,13 @@ def resolve_controlled_u(
 
     ``num_controls`` may be ``int`` or ``sp.Expr`` (symbolic).
     ``num_targets`` is always a concrete ``int``.
+
+    Args:
+        op (ControlledUOperation): The operation to resolve.
+        resolver (ExprResolver): Resolver for the current scope.
+
+    Returns:
+        tuple[int | sp.Expr, int]: ``(num_controls, num_targets)``.
     """
     if op.is_symbolic_num_controls:
         nc: int | sp.Expr = resolver.resolve(op.num_controls)
@@ -221,7 +242,14 @@ def resolve_controlled_u(
 def resolve_for_items_cardinality(
     op: ForItemsOperation,
 ) -> sp.Expr:
-    """Return the symbolic cardinality ``|dict_name|`` for a ForItems loop."""
+    """Return the symbolic cardinality ``|dict_name|`` for a ForItems loop.
+
+    Args:
+        op (ForItemsOperation): The for-items loop operation.
+
+    Returns:
+        sp.Expr: A positive integer symbol ``|dict_name|``.
+    """
     dict_operand = op.operands[0]
     if hasattr(dict_operand, "is_parameter") and dict_operand.is_parameter():
         dict_name = dict_operand.parameter_name() or dict_operand.name
@@ -236,7 +264,11 @@ def resolve_for_items_cardinality(
 
 
 class _LocalBlock:
-    """Lightweight stand-in for Block, used for value tracing in loop bodies."""
+    """Lightweight stand-in for Block, used for value tracing in loop bodies.
+
+    Attributes:
+        operations (list[Any]): The list of operations in this block.
+    """
 
     __slots__ = ("operations",)
 
@@ -250,14 +282,16 @@ def build_for_loop_scope(
 ) -> tuple[ExprResolver, sp.Expr, sp.Expr, sp.Expr, sp.Symbol]:
     """Build child resolver and resolved bounds for a ForOperation.
 
+    Args:
+        op (ForOperation): The for-loop operation.
+        resolver (ExprResolver): Resolver for the enclosing scope.
+
     Returns:
-        ``(child_resolver, start, stop, step, loop_symbol)``
-
-    The child resolver has:
-
-    - ``block`` = local block over ``op.operations``
-    - All Values named after ``op.loop_var`` mapped to ``loop_symbol``
-    - Parent blocks propagated (outer scope remains traceable)
+        tuple[ExprResolver, sp.Expr, sp.Expr, sp.Expr, sp.Symbol]:
+            ``(child_resolver, start, stop, step, loop_symbol)``.
+            The child resolver has ``block`` = local block over
+            ``op.operations``, loop variable mapped to ``loop_symbol``,
+            and parent blocks propagated.
     """
     loop_sym = sp.Symbol(op.loop_var, integer=True, positive=True)
 
@@ -292,7 +326,21 @@ def _collect_loop_var_names(
     loop_var_name: str,
     loop_sym: sp.Symbol,
 ) -> dict[str, sp.Symbol]:
-    """Collect ``{value_name: loop_symbol}`` for Values matching the loop variable."""
+    """Collect ``{value_name: loop_symbol}`` for Values matching the loop variable.
+
+    Scans one level of nesting so that operands referencing the loop
+    variable inside common patterns (e.g. nested BinOps) are also
+    captured.
+
+    Args:
+        operations (list[Any]): Operations inside the loop body.
+        loop_var_name (str): Name of the loop variable (e.g. ``"i"``).
+        loop_sym (sp.Symbol): SymPy symbol representing the loop variable.
+
+    Returns:
+        dict[str, sp.Symbol]: Mapping from value name to *loop_sym* for
+            every Value whose ``name`` equals *loop_var_name*.
+    """
     result: dict[str, sp.Symbol] = {loop_var_name: loop_sym}
     seen: set[str] = set()
 
@@ -327,7 +375,13 @@ def build_while_scope(
 ) -> tuple[ExprResolver, sp.Symbol]:
     """Build child resolver and trip-count symbol for a WhileOperation.
 
-    Returns ``(child_resolver, trip_count_symbol)``.
+    Args:
+        op (Any): A WhileOperation with an ``operations`` attribute.
+        resolver (ExprResolver): Resolver for the enclosing scope.
+
+    Returns:
+        tuple[ExprResolver, sp.Symbol]: ``(child_resolver, trip_count_symbol)``
+            where *trip_count_symbol* is ``|while|``.
     """
     local_block = _LocalBlock(op.operations)
     child = resolver.child_scope(inner_block=local_block)
@@ -346,7 +400,13 @@ def build_if_scopes(
 ) -> tuple[ExprResolver, ExprResolver]:
     """Build child resolvers for both branches of an IfOperation.
 
-    Returns ``(true_resolver, false_resolver)``.
+    Args:
+        op (Any): An IfOperation with ``true_operations`` and
+            ``false_operations`` attributes.
+        resolver (ExprResolver): Resolver for the enclosing scope.
+
+    Returns:
+        tuple[ExprResolver, ExprResolver]: ``(true_resolver, false_resolver)``.
     """
     true_block = _LocalBlock(op.true_operations)
     false_block = _LocalBlock(op.false_operations)
@@ -364,6 +424,14 @@ def build_for_items_scope(
     op: ForItemsOperation,
     resolver: ExprResolver,
 ) -> ExprResolver:
-    """Build child resolver for a ForItemsOperation body."""
+    """Build child resolver for a ForItemsOperation body.
+
+    Args:
+        op (ForItemsOperation): The for-items loop operation.
+        resolver (ExprResolver): Resolver for the enclosing scope.
+
+    Returns:
+        ExprResolver: Child resolver scoped to the loop body.
+    """
     local_block = _LocalBlock(op.operations)
     return resolver.child_scope(inner_block=local_block)

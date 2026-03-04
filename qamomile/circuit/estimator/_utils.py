@@ -11,6 +11,16 @@ def _smart_floordiv(lhs: sp.Expr, r: sp.Expr) -> sp.Expr:
     """Smart FLOORDIV: avoids sp.floor() when quotient is obviously integer.
 
     Enables cleaner symbolic expressions like ``2**m / 2**i = 2**(m-i)``.
+
+    Args:
+        lhs (sp.Expr): Dividend.
+        r (sp.Expr): Divisor.
+
+    Returns:
+        sp.Expr: ``lhs // r`` as a simplified SymPy expression.
+            Uses exact division when the quotient is obviously integral
+            (Integer, Symbol, or Pow with non-negative exponent);
+            falls back to ``sp.floor(lhs / r)`` otherwise.
     """
     quotient = sp.simplify(lhs / r)
     if isinstance(quotient, (sp.Integer, sp.Symbol)):
@@ -39,6 +49,13 @@ def _strip_nonneg_max(expr: sp.Expr) -> sp.Expr:
     construction, so Max(0, expr) is a redundant artifact introduced by
     sp.Max operations. This normalization aligns all paths to the same
     canonical form.
+
+    Args:
+        expr (sp.Expr): Expression to canonicalize (processed bottom-up).
+
+    Returns:
+        sp.Expr: Expression with all ``Max(0, x)`` / ``Max(x, 0)``
+            replaced by ``x``.
     """
     if not isinstance(expr, sp.Expr):
         return expr

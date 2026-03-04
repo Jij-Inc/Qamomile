@@ -179,6 +179,14 @@ def classify_controlled_u(
     ``power`` is NOT multiplied — each ControlledUOperation call counts
     as exactly one gate regardless of power.  Exponential oracle counts
     arise from loop structure (e.g. ``for _rep in range(2**k)``).
+
+    Args:
+        nc (int | sp.Expr): Number of control qubits (concrete or symbolic).
+        num_targets (int): Number of target qubits.
+
+    Returns:
+        GateCount: Gate count with ``total=1`` and two_qubit / multi_qubit
+            flags set based on the total qubit count (``nc + num_targets``).
     """
     total_qubits = nc + num_targets
 
@@ -211,6 +219,13 @@ def extract_gate_count_from_metadata(meta: ResourceMetadata) -> GateCount:
     Emits ``UserWarning`` when *total_gates* is set but sub-categories
     have ``None`` gaps and the known sub-total is less than *total_gates*.
     This warning behaviour is required by ``test_metadata_warnings.py``.
+
+    Args:
+        meta (ResourceMetadata): Metadata to extract gate counts from.
+            Fields left as ``None`` are treated as 0.
+
+    Returns:
+        GateCount: Extracted gate counts as ``sp.Integer`` values.
     """
     single = meta.single_qubit_gates if meta.single_qubit_gates is not None else 0
     two = meta.two_qubit_gates if meta.two_qubit_gates is not None else 0
@@ -267,6 +282,12 @@ def qft_iqft_gate_count(n: sp.Expr) -> GateCount:
     """Gate count for QFT or IQFT on *n* qubits.
 
     QFT = n H + n(n-1)/2 CP + n//2 SWAP
+
+    Args:
+        n (sp.Expr): Number of qubits (may be symbolic).
+
+    Returns:
+        GateCount: Symbolic gate counts for the standard QFT decomposition.
     """
     h = n
     cp = n * (n - 1) / 2

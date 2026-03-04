@@ -38,8 +38,15 @@ def try_resolve_range(
 ) -> tuple[int, int, int] | None:
     """Try to resolve loop bounds to concrete integers.
 
-    Returns ``(start, stop, step)`` as ints, or ``None`` if any bound is
-    symbolic.
+    Args:
+        resolver (ExprResolver): Resolver for the current scope.
+        start (Any): Loop start bound (IR Value or primitive).
+        stop (Any): Loop stop bound (IR Value or primitive).
+        step (Any): Loop step bound (IR Value or primitive).
+
+    Returns:
+        tuple[int, int, int] | None: ``(start, stop, step)`` as ints,
+            or ``None`` if any bound is symbolic.
     """
     try:
         s = resolver.resolve_concrete(start)
@@ -51,7 +58,19 @@ def try_resolve_range(
 
 
 def concrete_range(start: int, stop: int, step: int) -> list[int]:
-    """Python ``range()`` semantics — handles positive and negative step."""
+    """Python ``range()`` semantics — handles positive and negative step.
+
+    Args:
+        start (int): Range start (inclusive).
+        stop (int): Range stop (exclusive).
+        step (int): Range step (must be non-zero).
+
+    Returns:
+        list[int]: List of integers in the range.
+
+    Raises:
+        ValueError: If *step* is zero.
+    """
     if step == 0:
         raise ValueError("Loop step cannot be zero")
     return list(range(start, stop, step))
@@ -67,7 +86,16 @@ def find_parametric_symbols(
     stop: sp.Expr,
     step: sp.Expr,
 ) -> set[sp.Symbol]:
-    """Return free symbols appearing in loop bounds."""
+    """Return free symbols appearing in loop bounds.
+
+    Args:
+        start (sp.Expr): Symbolic start bound.
+        stop (sp.Expr): Symbolic stop bound.
+        step (sp.Expr): Symbolic step bound.
+
+    Returns:
+        set[sp.Symbol]: Union of free symbols from all three bounds.
+    """
     syms: set[sp.Symbol] = set()
     for expr in (start, stop, step):
         if isinstance(expr, sp.Expr):
@@ -97,6 +125,21 @@ def collect_sample_points(
       3. Otherwise, call ``sample_fn(n)`` and record the result.
 
     Stops after collecting at least *min_samples* valid points.
+
+    Args:
+        start (sp.Expr): Symbolic loop start bound.
+        stop (sp.Expr): Symbolic loop stop bound.
+        step (sp.Expr): Symbolic loop step bound.
+        param_sym (sp.Symbol): The parametric symbol to substitute.
+        sample_fn (Callable[[int], sp.Expr | int | float]): Function that
+            computes the metric for a given concrete value of *param_sym*.
+        min_samples (int): Minimum number of valid points to collect before
+            stopping. Defaults to ``_MIN_SAMPLES``.
+        max_n (int): Maximum value of *param_sym* to try. Defaults to
+            ``_MAX_SAMPLE_N``.
+
+    Returns:
+        list[tuple[int, sp.Expr]]: Collected ``(n_value, metric_value)`` pairs.
     """
     points: list[tuple[int, sp.Expr]] = []
     for n_val in range(2, max_n + 1):
@@ -216,6 +259,14 @@ def symbolic_iterations(
     which exactly matches Python ``range()`` semantics for any integer
     step (positive, negative, or symbolic).
 
+    Args:
+        start (sp.Expr): Symbolic start bound.
+        stop (sp.Expr): Symbolic stop bound.
+        step (sp.Expr): Symbolic step bound.
+
+    Returns:
+        sp.Expr: Symbolic iteration count ``Max(0, ceiling((stop - start) / step))``.
+
     Raises:
         ValueError: If *step* is a concrete zero.
     """
@@ -230,7 +281,15 @@ def symbolic_iterations(
 
 
 def _holdout_size(n: int) -> int:
-    """Determine holdout set size given *n* total points."""
+    """Determine holdout set size given *n* total points.
+
+    Args:
+        n (int): Total number of sample points available.
+
+    Returns:
+        int: Number of points to reserve for holdout validation
+            (0 if too few points, up to 4).
+    """
     if n >= 8:
         return 4
     if n >= 5:
@@ -242,7 +301,15 @@ def _fit_polynomial(
     pts: list[tuple[int, sp.Expr]],
     symbol: sp.Symbol,
 ) -> sp.Expr:
-    """Lagrange interpolation through sample points."""
+    """Lagrange interpolation through sample points.
+
+    Args:
+        pts (list[tuple[int, sp.Expr]]): ``(n, value)`` sample points.
+        symbol (sp.Symbol): The parametric symbol for the resulting polynomial.
+
+    Returns:
+        sp.Expr: Polynomial passing through all sample points.
+    """
     data = [(sp.Integer(n), v) for n, v in pts]
     return sp.interpolate(data, symbol)
 
@@ -255,6 +322,17 @@ def _fit_exp_linear(
 
     Returns the expression if coefficients are rational and the model
     verifies on ALL training points.  Returns ``None`` otherwise.
+
+    Args:
+        pts (list[tuple[int, sp.Expr]]): ``(n, value)`` training points
+            (at least 3 required).
+        symbol (sp.Symbol): The parametric symbol for the resulting
+            expression.
+
+    Returns:
+        sp.Expr | None: The fitted expression, or ``None`` if fewer than
+            3 points, coefficients are irrational, or the model fails
+            verification on training data.
     """
     if len(pts) < 3:
         return None
@@ -301,7 +379,18 @@ def _verify_holdout(
     holdout: list[tuple[int, sp.Expr]],
     symbol: sp.Symbol,
 ) -> bool:
-    """Verify *expr* matches all holdout points exactly."""
+    """Verify *expr* matches all holdout points exactly.
+
+    Args:
+        expr (sp.Expr): Candidate symbolic expression.
+        holdout (list[tuple[int, sp.Expr]]): ``(n, expected_value)``
+            holdout points.
+        symbol (sp.Symbol): The parametric symbol to substitute.
+
+    Returns:
+        bool: ``True`` if *expr* matches every holdout point (or if
+            *holdout* is empty); ``False`` otherwise.
+    """
     if not holdout:
         return True
     for n_val, expected in holdout:

@@ -58,6 +58,19 @@ class ExprResolver:
         loop_var_names: dict[str, sp.Symbol] | None = None,
         parent_blocks: list[Any] | None = None,
     ):
+        """Initialise an ExprResolver.
+
+        Args:
+            block (Any): The current block (BlockValue or _LocalBlock)
+                whose operations are searched for BinOp/CompOp traces.
+            context (dict[str, sp.Expr] | None): UUID → resolved expression
+                mapping for values passed across scope boundaries (e.g.
+                call arguments, composite-gate operands).
+            loop_var_names (dict[str, sp.Symbol] | None): Value name →
+                SymPy symbol mapping for loop variables in scope.
+            parent_blocks (list[Any] | None): Ancestor blocks to search
+                when tracing fails in the current block.
+        """
         self._block = block
         self._context: dict[str, sp.Expr] = dict(context or {})
         self._loop_var_names: dict[str, sp.Symbol] = dict(loop_var_names or {})
@@ -71,11 +84,23 @@ class ExprResolver:
         """Convert IR Value to SymPy expression (symbolic mode).
 
         Unbound parameters become ``sp.Symbol``.  Never raises for valid IR.
+
+        Args:
+            v (Any): IR Value, primitive Python type, or ``sp.Basic``.
+
+        Returns:
+            sp.Expr: Resolved SymPy expression.
         """
         return self._resolve(v, concrete=False)
 
     def resolve_concrete(self, v: Any) -> int:
         """Convert IR Value to concrete ``int``.
+
+        Args:
+            v (Any): IR Value, primitive Python type, or ``sp.Basic``.
+
+        Returns:
+            int: The resolved concrete integer.
 
         Raises:
             UnresolvedValueError: If the value is symbolic.
@@ -101,6 +126,17 @@ class ExprResolver:
         Propagates parent_blocks so values from outer scopes remain
         traceable.  For *callee* scopes (CallBlockOperation), use
         :meth:`call_child_scope` instead — callees get a fresh scope.
+
+        Args:
+            inner_block (Any): The block for the child scope.
+            extra_context (dict[str, sp.Expr] | None): Additional UUID →
+                expression mappings to merge into the child context.
+            extra_loop_vars (dict[str, sp.Symbol] | None): Additional
+                loop variable name → symbol mappings.
+
+        Returns:
+            ExprResolver: A new resolver scoped to *inner_block* with
+                parent blocks propagated from the current resolver.
         """
         ctx = self._context.copy()
         if extra_context:
@@ -128,6 +164,14 @@ class ExprResolver:
 
         Parent blocks are intentionally reset — the callee only sees
         its own scope plus values propagated through ``call_context``.
+
+        Args:
+            call_op (Any): A CallBlockOperation whose ``operands[0]``
+                is the called BlockValue and ``operands[1:]`` are actuals.
+
+        Returns:
+            ExprResolver: A new resolver scoped to the callee block with
+                formal→actual bindings in context and empty parent blocks.
         """
         called_block = call_op.operands[0]
         if not isinstance(called_block, BlockValue):
@@ -159,14 +203,17 @@ class ExprResolver:
 
     @property
     def context(self) -> dict[str, sp.Expr]:
+        """Copy of the UUID → expression context mapping."""
         return self._context.copy()
 
     @property
     def loop_var_names(self) -> dict[str, sp.Symbol]:
+        """Copy of the loop variable name → symbol mapping."""
         return self._loop_var_names.copy()
 
     @property
     def block(self) -> Any:
+        """The current block being resolved against."""
         return self._block
 
     # ------------------------------------------------------------------ #
@@ -174,6 +221,20 @@ class ExprResolver:
     # ------------------------------------------------------------------ #
 
     def _resolve(self, v: Any, concrete: bool) -> sp.Expr:
+        """Core resolution dispatcher (9-step priority chain).
+
+        Args:
+            v (Any): The value to resolve.
+            concrete (bool): If ``True``, raise on symbolic results;
+                if ``False``, produce ``sp.Symbol`` fallbacks.
+
+        Returns:
+            sp.Expr: Resolved expression.
+
+        Raises:
+            UnresolvedValueError: If *concrete* is ``True`` and the value
+                cannot be resolved to a concrete integer.
+        """
         # 1. Already SymPy
         if isinstance(v, sp.Basic):
             return v
@@ -236,7 +297,19 @@ class ExprResolver:
     def _trace(
         self, v: Value, block: Any, visited: set[int], concrete: bool
     ) -> sp.Expr | None:
-        """Trace backward through *block* operations for the op producing *v*."""
+        """Trace backward through *block* operations for the op producing *v*.
+
+        Args:
+            v (Value): The value whose defining operation is sought.
+            block (Any): Block whose operations are scanned.
+            visited (set[int]): ``id()``-based visited set for cycle
+                prevention.
+            concrete (bool): Passed through to :meth:`_resolve`.
+
+        Returns:
+            sp.Expr | None: Resolved expression if a defining BinOp or
+                CompOp was found; ``None`` otherwise.
+        """
         vid = id(v)
         if vid in visited:
             return None
@@ -276,7 +349,19 @@ _COMPOP_MAP = {
 
 
 def _apply_binop(kind: BinOpKind, left: sp.Expr, right: sp.Expr) -> sp.Expr:
-    """Apply binary arithmetic."""
+    """Apply binary arithmetic.
+
+    Args:
+        kind (BinOpKind): The arithmetic operation kind.
+        left (sp.Expr): Left operand.
+        right (sp.Expr): Right operand.
+
+    Returns:
+        sp.Expr: Result of applying the operation.
+
+    Raises:
+        ValueError: If *kind* is not in ``BINOP_TO_SYMPY``.
+    """
     fn = BINOP_TO_SYMPY.get(kind)
     if fn is None:
         raise ValueError(f"Unknown BinOpKind: {kind}")
@@ -284,7 +369,19 @@ def _apply_binop(kind: BinOpKind, left: sp.Expr, right: sp.Expr) -> sp.Expr:
 
 
 def _apply_compop(kind: CompOpKind, left: sp.Expr, right: sp.Expr) -> sp.Expr:
-    """Apply comparison operation."""
+    """Apply comparison operation.
+
+    Args:
+        kind (CompOpKind): The comparison operation kind.
+        left (sp.Expr): Left operand.
+        right (sp.Expr): Right operand.
+
+    Returns:
+        sp.Expr: SymPy relational expression (e.g. ``sp.Eq``, ``sp.Lt``).
+
+    Raises:
+        ValueError: If *kind* is not in ``_COMPOP_MAP``.
+    """
     fn = _COMPOP_MAP.get(kind)
     if fn is None:
         raise ValueError(f"Unknown CompOpKind: {kind}")
