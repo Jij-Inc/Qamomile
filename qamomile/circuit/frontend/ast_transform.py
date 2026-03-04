@@ -91,12 +91,18 @@ class ControlFlowTransformer(ast.NodeTransformer):
     if_func_name = "emit_if"
     for_func_name = "emit_for"
 
-    def __init__(self, global_names: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        global_names: set[str] | None = None,
+        param_names: set[str] | None = None,
+    ) -> None:
         self.counter: int = 0
         # 変数名 -> 型注釈ノード(ast.AST) を保持する辞書
         self.type_registry: dict[str, ast.AST] = {}
         # グローバル変数名（モジュール、組み込み関数など）
         self._global_names = global_names or set()
+        # 関数パラメータ名（ループ変数シャドウイング検出用）
+        self._param_names = param_names or set()
 
     def _get_unique_name(self, prefix: str) -> str:
         name = f"_{prefix}_{self.counter}"
@@ -233,7 +239,53 @@ class ControlFlowTransformer(ast.NodeTransformer):
         )  # type: ignore
         return func_def, func_name
 
+    # Known quantum operation names for while condition check
+    _QUANTUM_OPS = frozenset(
+        {
+            "h",
+            "x",
+            "y",
+            "z",
+            "s",
+            "t",
+            "cx",
+            "cz",
+            "cy",
+            "rx",
+            "ry",
+            "rz",
+            "p",
+            "cp",
+            "swap",
+            "ccx",
+            "rxx",
+            "ryy",
+            "rzz",
+            "measure",
+        }
+    )
+
+    def _check_no_quantum_ops_in_condition(
+        self, test_node: ast.expr, lineno: int
+    ) -> None:
+        """Detect quantum operations in while condition and raise SyntaxError."""
+        for node in ast.walk(test_node):
+            if isinstance(node, ast.Call):
+                func_name = None
+                if isinstance(node.func, ast.Name):
+                    func_name = node.func.id
+                elif isinstance(node.func, ast.Attribute):
+                    func_name = node.func.attr
+                if func_name and func_name in self._QUANTUM_OPS:
+                    raise SyntaxError(
+                        f"Quantum operation '{func_name}' in while condition "
+                        f"is not supported. Move the operation before the loop "
+                        f"and use the result as condition."
+                    )
+
     def visit_While(self, node: ast.While) -> Any:
+        # Check for quantum operations in while condition
+        self._check_no_quantum_ops_in_condition(node.test, node.lineno)
         # ネストされた制御フローを先に変換
         new_body = [self.visit(stmt) for stmt in node.body]
         flattened_body = []
@@ -384,6 +436,13 @@ class ControlFlowTransformer(ast.NodeTransformer):
         else:
             loop_var_name = "_loop_idx"
 
+        # Check for parameter shadowing
+        if loop_var_name in self._param_names:
+            raise SyntaxError(
+                f"Loop variable '{loop_var_name}' shadows a function parameter. "
+                f"Use a different variable name to avoid silent value loss."
+            )
+
         # for_loop(start, stop, step, var_name) コールを作成
         for_loop_call = ast.Call(
             func=ast.Name(id="for_loop", ctx=ast.Load()),
@@ -425,7 +484,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             item_var = "item"
 
         # Try to get a readable representation of the iterable
-        iter_str = ast.unparse(node.iter) if hasattr(ast, 'unparse') else "vector"
+        iter_str = ast.unparse(node.iter) if hasattr(ast, "unparse") else "vector"
 
         raise SyntaxError(
             f"Direct iteration over sequences is not supported in @qkernel functions.\n"
@@ -576,14 +635,27 @@ class ControlFlowTransformer(ast.NodeTransformer):
 
 
 def transform_control_flow(func: Callable):
-    src = inspect.getsource(func)
+    try:
+        src = inspect.getsource(func)
+    except OSError as e:
+        func_name = getattr(func, "__name__", "<unknown>")
+        raise SyntaxError(
+            f"Cannot retrieve source code for '{func_name}'. "
+            f"@qkernel functions must be defined in .py files "
+            f"(not REPL/exec/eval)."
+        ) from e
     src = textwrap.dedent(src)
     tree = ast.parse(src)
 
     # グローバル変数名を取得（モジュール、組み込み関数など）
     global_names = set(func.__globals__.keys())
 
-    transformer = ControlFlowTransformer(global_names=global_names)
+    # Extract parameter names for loop variable shadowing detection
+    param_names = set(inspect.signature(func).parameters.keys())
+
+    transformer = ControlFlowTransformer(
+        global_names=global_names, param_names=param_names
+    )
     tree = transformer.visit(tree)
 
     # デコレータを削除（再帰を防ぐ）

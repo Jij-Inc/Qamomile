@@ -139,6 +139,9 @@ def _measure_vector_qubit(qubits: Vector[Qubit]) -> Vector[Bit]:
     Returns:
         Vector[Bit] containing the measurement results.
     """
+    # Ensure all borrowed elements have been returned before measuring
+    qubits.validate_all_returned()
+
     # Consume the input handle (enforces linear type - measurement is destructive)
     qubits = qubits.consume(operation_name="measure")
 

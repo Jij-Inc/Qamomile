@@ -112,6 +112,9 @@ class QKernel(Generic[P, R]):
                 raise TypeError(
                     f"Argument '{name}' must be a Handle instance, got {type(handle)}"
                 )
+            # Consume quantum handles to enforce linear type
+            if handle._should_enforce_linear():
+                handle = handle.consume(operation_name=f"QKernel[{self.name}]")
             inputs_map[name] = handle.value
 
         # Ensure the block IR is compiled

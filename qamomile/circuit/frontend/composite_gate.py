@@ -301,8 +301,8 @@ class CompositeGate(abc.ABC):
         """
         from qamomile.circuit.ir.block_value import BlockValue
         from qamomile.circuit.frontend.handle.array import Vector
-        from qamomile.circuit.ir.value import ArrayValue, Value
-        from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+        from qamomile.circuit.ir.value import Value
+        from qamomile.circuit.ir.types.primitives import QubitType
 
         # Determine which decomposition method to use
         strategy = self.get_strategy(strategy_name) if strategy_name else None
@@ -419,23 +419,32 @@ class CompositeGate(abc.ABC):
             impl = self.get_implementation()
         has_impl = impl is not None
 
+        # Consume all qubit handles (enforces linear type)
+        gate_name = self.custom_name or self.gate_type.value
+        consumed_controls = [
+            c.consume(operation_name=f"{gate_name}[control]") for c in controls
+        ]
+        consumed_targets = [
+            t.consume(operation_name=f"{gate_name}[target]") for t in target_qubits
+        ]
+
         # Build operands
         operands: list[Any] = []
         if has_impl:
             operands.append(impl)
 
-        for ctrl in controls:
-            operands.append(ctrl.value)
+        for c in consumed_controls:
+            operands.append(c.value)
 
-        for tgt in target_qubits:
-            operands.append(tgt.value)
+        for t in consumed_targets:
+            operands.append(t.value)
 
         # Build results (new versions of qubits)
         results: list[Value] = []
-        for ctrl in controls:
-            results.append(ctrl.value.next_version())
-        for tgt in target_qubits:
-            results.append(tgt.value.next_version())
+        for c in consumed_controls:
+            results.append(c.value.next_version())
+        for t in consumed_targets:
+            results.append(t.value.next_version())
 
         # Get resource metadata for the selected strategy
         resource_meta = self.get_resources_for_strategy(strategy)
@@ -460,21 +469,21 @@ class CompositeGate(abc.ABC):
 
         # Return output handles
         output_qubits: list[Qubit] = []
-        for i, ctrl in enumerate(controls):
+        for i, c in enumerate(consumed_controls):
             output_qubits.append(
                 Qubit(
                     value=results[i],
-                    parent=ctrl.parent,
-                    indices=ctrl.indices,
+                    parent=c.parent,
+                    indices=c.indices,
                 )
             )
 
-        for i, tgt in enumerate(target_qubits):
+        for i, t in enumerate(consumed_targets):
             output_qubits.append(
                 Qubit(
-                    value=results[len(controls) + i],
-                    parent=tgt.parent,
-                    indices=tgt.indices,
+                    value=results[len(consumed_controls) + i],
+                    parent=t.parent,
+                    indices=t.indices,
                 )
             )
 

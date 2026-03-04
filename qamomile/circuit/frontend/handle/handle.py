@@ -102,7 +102,12 @@ class Handle(abc.ABC):
         new_handle.id = self.id
         new_handle._consumed = False
         new_handle._consumed_by = None
+        self._copy_subclass_state_to(new_handle)
         return new_handle
+
+    def _copy_subclass_state_to(self, new_handle: "Handle") -> None:
+        """Hook for subclasses to copy additional state during consume()."""
+        pass
 
 
 class ArithmeticMixin:
