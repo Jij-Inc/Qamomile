@@ -200,12 +200,10 @@ class TestFailFastUnknownOp:
 
     def test_unknown_op_raises(self):
         """Unhandled operation type must raise ValueError."""
-        from dataclasses import dataclass, field
+        from dataclasses import dataclass
 
         from qamomile.circuit.ir.block import Block, BlockKind
-        from qamomile.circuit.ir.operation.operation import Operation, Signature
-        from qamomile.circuit.ir.operation.operation import OperationKind
-        from qamomile.circuit.ir.value import Value
+        from qamomile.circuit.ir.operation.operation import Operation, OperationKind, Signature
 
         @dataclass
         class FakeOperation(Operation):
