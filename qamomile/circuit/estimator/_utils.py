@@ -6,6 +6,7 @@ import sympy as sp
 
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind
 
+
 def _smart_floordiv(lhs: sp.Expr, r: sp.Expr) -> sp.Expr:
     """Smart FLOORDIV: avoids sp.floor() when quotient is obviously integer.
 
@@ -15,7 +16,7 @@ def _smart_floordiv(lhs: sp.Expr, r: sp.Expr) -> sp.Expr:
     if isinstance(quotient, (sp.Integer, sp.Symbol)):
         return quotient
     if isinstance(quotient, sp.Pow):
-        base, exp = quotient.as_base_exp()
+        _, exp = quotient.as_base_exp()
         if exp.is_nonnegative is not False:
             return quotient
     return sp.floor(lhs / r)

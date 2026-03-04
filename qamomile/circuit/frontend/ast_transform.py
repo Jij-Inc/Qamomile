@@ -452,7 +452,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             item_var = "item"
 
         # Try to get a readable representation of the iterable
-        iter_str = ast.unparse(node.iter) if hasattr(ast, 'unparse') else "vector"
+        iter_str = ast.unparse(node.iter) if hasattr(ast, "unparse") else "vector"
 
         raise SyntaxError(
             f"Direct iteration over sequences is not supported in @qkernel functions.\n"
@@ -565,14 +565,28 @@ class ControlFlowTransformer(ast.NodeTransformer):
         orelse_body = node.orelse if node.orelse else []
         body_has_return = self._has_top_level_return(node.body)
         orelse_has_return = self._has_top_level_return(orelse_body)
-        has_return = body_has_return or orelse_has_return
+
+        # One-sided return is not supported: when only one branch returns,
+        # the phi merge cannot pair the return value with a corresponding
+        # value from the other branch, causing TypeError or silent bugs.
+        if body_has_return != orelse_has_return:
+            returning_branch = "if" if body_has_return else "else"
+            raise SyntaxError(
+                f"One-sided 'return' in @qkernel if-else is not supported.\n"
+                f"Line {node.lineno}: only the '{returning_branch}' branch "
+                f"has a 'return' statement.\n\n"
+                f"In @qkernel functions, 'return' inside if-else must appear "
+                f"in ALL branches or in NONE.\n"
+                f"Either add 'return' to both branches, or move 'return' "
+                f"after the if-else block."
+            )
+
+        has_return = body_has_return  # both are equal at this point
 
         ret_var_name: str | None = None
         if has_return:
             ret_var_name = self._get_unique_name("_if_ret")
-            true_body = self._transform_returns_to_assignments(
-                node.body, ret_var_name
-            )
+            true_body = self._transform_returns_to_assignments(node.body, ret_var_name)
             false_body = self._transform_returns_to_assignments(
                 orelse_body, ret_var_name
             )

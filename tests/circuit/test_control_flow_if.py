@@ -871,3 +871,129 @@ class TestIfElseWithQubitArray:
             assert isinstance(phi, PhiOp)
             assert len(phi.operands) == 3
             assert len(phi.results) == 1
+
+
+class TestIfElseOneSidedReturnErrors:
+    """One-sided return in if-else should raise SyntaxError at AST transform time."""
+
+    def test_if_side_return_only_raises_syntax_error(self):
+        """Return only in if-branch (not in else) should raise SyntaxError."""
+        with pytest.raises(SyntaxError, match="One-sided 'return'"):
+
+            @qkernel
+            def circuit(q0: Qubit, q1: Qubit) -> Qubit:
+                cond = qm.measure(q0)
+                if cond:
+                    return qm.x(q1)
+                else:
+                    q1 = qm.h(q1)
+                return q1
+
+    def test_else_side_return_only_raises_syntax_error(self):
+        """Return only in else-branch (not in if) should raise SyntaxError."""
+        with pytest.raises(SyntaxError, match="One-sided 'return'"):
+
+            @qkernel
+            def circuit(q0: Qubit, q1: Qubit) -> Qubit:
+                cond = qm.measure(q0)
+                if cond:
+                    q1 = qm.x(q1)
+                else:
+                    return qm.h(q1)
+                return q1
+
+    def test_both_branches_return_still_works(self):
+        """Return in BOTH branches should still work (regression guard)."""
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit) -> Qubit:
+            cond = qm.measure(q0)
+            if cond:
+                return qm.x(q1)
+            else:
+                return qm.h(q1)
+
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+
+    def test_neither_branch_returns_still_works(self):
+        """No return in either branch should still work (regression guard)."""
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit) -> Qubit:
+            cond = qm.measure(q0)
+            if cond:
+                q1 = qm.x(q1)
+            else:
+                q1 = qm.h(q1)
+            return q1
+
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+
+    def test_nested_one_sided_return_raises_syntax_error(self):
+        """One-sided return in a nested if should also raise SyntaxError."""
+        with pytest.raises(SyntaxError, match="One-sided 'return'"):
+
+            @qkernel
+            def circuit(q0: Qubit, q1: Qubit, q2: Qubit) -> Qubit:
+                cond1 = qm.measure(q0)
+                if cond1:
+                    cond2 = qm.measure(q2)
+                    if cond2:
+                        return qm.x(q1)
+                    else:
+                        q1 = qm.h(q1)
+                else:
+                    q1 = qm.h(q1)
+                return q1
+
+    def test_if_only_return_no_else_raises_syntax_error(self):
+        """Return in if-branch with no else clause should raise SyntaxError."""
+        with pytest.raises(SyntaxError, match="One-sided 'return'"):
+
+            @qkernel
+            def circuit(q0: Qubit, q1: Qubit) -> Qubit:
+                cond = qm.measure(q0)
+                if cond:
+                    return qm.x(q1)
+                return q1
+
+    def test_if_elif_else_all_return_works(self):
+        """if-elif-else with return in ALL branches should work."""
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit, q2: Qubit) -> Qubit:
+            cond1 = qm.measure(q0)
+            cond2 = qm.measure(q2)
+            if cond1:
+                return qm.x(q1)
+            elif cond2:
+                return qm.h(q1)
+            else:
+                return qm.z(q1)
+
+        graph = circuit.build()
+        # Should build without error; nested IfOperations
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) >= 1
+
+    def test_if_elif_no_else_partial_return_raises_syntax_error(self):
+        """if-elif with return but no final else should raise SyntaxError.
+
+        AST: if -> orelse=[If(elif)] where the inner If has
+        body with return but no orelse. Inner visit_If detects this.
+        """
+        with pytest.raises(SyntaxError, match="One-sided 'return'"):
+
+            @qkernel
+            def circuit(q0: Qubit, q1: Qubit, q2: Qubit) -> Qubit:
+                cond1 = qm.measure(q0)
+                cond2 = qm.measure(q2)
+                if cond1:
+                    return qm.x(q1)
+                elif cond2:
+                    return qm.h(q1)
+                return q1
