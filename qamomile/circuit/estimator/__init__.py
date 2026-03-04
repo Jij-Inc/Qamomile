@@ -11,7 +11,12 @@ All estimates are expressed as SymPy symbolic expressions, allowing
 dependency on problem size parameters.
 
 Usage:
-    Basic circuit analysis:
+    Basic circuit analysis (method API — recommended):
+        >>> estimate = my_circuit.estimate_resources()
+        >>> print(estimate.qubits)  # e.g., "n + 3"
+        >>> print(estimate.gates.total)  # e.g., "2*n"
+
+    Function API (also supported):
         >>> from qamomile.circuit.estimator import estimate_resources
         >>> estimate = estimate_resources(my_circuit.block)
         >>> print(estimate.qubits)  # e.g., "n + 3"

@@ -461,12 +461,12 @@ class TestCatalogResourceEstimation:
     """Test resource estimation against expected values for each catalog entry."""
 
     def test_qubits(self, entry):
-        est = estimate_resources(entry.qkernel.block)
+        est = entry.qkernel.estimate_resources()
         expected = _get_expected(entry)
         assert_expr_equal(est.qubits, expected.qubits, "qubits")
 
     def test_gate_counts(self, entry):
-        est = estimate_resources(entry.qkernel.block)
+        est = entry.qkernel.estimate_resources()
         expected = _get_expected(entry)
         assert_gate_counts(est.gates, expected.gates)
 
@@ -483,7 +483,7 @@ def _parametric_cases() -> list[tuple[str, dict[str, int]]]:
 
 @pytest.mark.parametrize("entry,subs", _parametric_cases())
 def test_parametric_substitution(entry, subs):
-    est = estimate_resources(entry.qkernel.block).substitute(**subs)
+    est = entry.qkernel.estimate_resources().substitute(**subs)
     expected = _get_expected(entry).substitute(**subs)
     assert_expr_equal(est.qubits, expected.qubits, "qubits")
     assert_gate_counts(est.gates, expected.gates)
@@ -648,9 +648,9 @@ def _bindings_cases() -> list:
 
 @pytest.mark.parametrize("case", _bindings_cases())
 def test_concrete_bindings(case: BindingsCase):
-    """Test resource estimation with concrete dict bindings."""
+    """Test resource estimation with concrete dict bindings via QKernel method."""
     entry = QKERNEL_BY_ID[case.entry_id]
-    est = estimate_resources(entry.qkernel.block, bindings=case.bindings)
+    est = entry.qkernel.estimate_resources(bindings=case.bindings)
     assert_expr_equal(est.qubits, case.expected.qubits, "qubits")
     assert_gate_counts(est.gates, case.expected.gates)
 
@@ -678,3 +678,31 @@ def test_partial_bindings_dicts_only():
     linear_sym = sp.Symbol("|linear|", integer=True, positive=True)
     assert quad_sym not in est.gates.total.free_symbols
     assert linear_sym not in est.gates.total.free_symbols
+
+
+# ============================================================
+# Equivalence: QKernel method vs function API
+# ============================================================
+
+
+@pytest.mark.parametrize(
+    "entry",
+    QKERNEL_CATALOG[:3],
+    ids=[e.id for e in QKERNEL_CATALOG[:3]],
+)
+def test_method_function_equivalence(entry):
+    """QKernel.estimate_resources() must equal estimate_resources(block)."""
+    method_est = entry.qkernel.estimate_resources()
+    func_est = estimate_resources(entry.qkernel.block)
+    assert_expr_equal(method_est.qubits, func_est.qubits, "qubits")
+    assert_gate_counts(method_est.gates, func_est.gates)
+
+
+def test_method_function_equivalence_with_bindings():
+    """QKernel.estimate_resources(bindings=...) must equal function API with same bindings."""
+    entry = QKERNEL_BY_ID["qaoa_state_umbiguous"]
+    bindings = {"quad": {(0, 1): 0.5}, "linear": {0: 0.1}}
+    method_est = entry.qkernel.estimate_resources(bindings=bindings)
+    func_est = estimate_resources(entry.qkernel.block, bindings=bindings)
+    assert_expr_equal(method_est.qubits, func_est.qubits, "qubits")
+    assert_gate_counts(method_est.gates, func_est.gates)
