@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import inspect
 import warnings
-from typing import TYPE_CHECKING, Any, Callable, Generic, ParamSpec, TypeVar, cast, get_type_hints
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Generic,
+    ParamSpec,
+    TypeVar,
+    cast,
+    get_type_hints,
+)
 
 import numpy as np
 
@@ -14,6 +23,7 @@ from qamomile.circuit.frontend.func_to_block import (
     is_dict_type,
 )
 from qamomile.circuit.frontend.type_check import (
+    _normalize_primitive,
     validate_argument_type,
     validate_return_type,
 )
@@ -161,7 +171,9 @@ class QKernel(Generic[P, R]):
                 )
             else:
                 # Instantiate the specific Handle type (Qubit, UInt, etc.)
-                wrapped_results.append(handle_type(value=val))
+                # Normalize primitives (float->Float, int->UInt, bool->Bit)
+                actual_type = _normalize_primitive(handle_type)
+                wrapped_results.append(actual_type(value=val))
 
         # Return tuple or single value to match Python function signature
         if len(wrapped_results) == 1:

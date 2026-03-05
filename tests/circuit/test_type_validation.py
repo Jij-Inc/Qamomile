@@ -13,6 +13,7 @@ from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.frontend.type_check import (
     validate_return_type,
     _format_annotation,
+    _format_handle,
 )
 
 
@@ -167,6 +168,53 @@ class TestArgumentValidationPasses:
         graph = outer.build(parameters=["fs"])
         assert graph is not None
 
+    def test_float_annotation_nested_call_passes(self):
+        """Primitive ``float`` annotation should accept ``Float`` handle."""
+
+        @qmc.qkernel
+        def inner(theta: float) -> float:
+            return theta
+
+        @qmc.qkernel
+        def outer(theta: float) -> float:
+            return inner(theta)
+
+        graph = outer.build(parameters=["theta"])
+        assert graph is not None
+
+    def test_int_annotation_nested_call_passes(self):
+        """Primitive ``int`` annotation should accept ``UInt`` handle."""
+
+        @qmc.qkernel
+        def inner(n: int) -> int:
+            return n
+
+        @qmc.qkernel
+        def outer(n: int) -> int:
+            return inner(n)
+
+        graph = outer.build(n=3)
+        assert graph is not None
+
+
+class TestPrimitiveAnnotationRejects:
+    """Ensure primitive normalization doesn't weaken existing mismatch checks."""
+
+    def test_bool_annotation_rejects_float_handle(self):
+        """``bool`` annotation must not accept ``Float`` handle."""
+
+        @qmc.qkernel
+        def inner(b: bool) -> bool:
+            return b
+
+        @qmc.qkernel
+        def caller(f: qmc.Float) -> qmc.Float:
+            f = inner(f)
+            return f
+
+        with pytest.raises(TypeError, match=r"expected bool.*got Float"):
+            caller.build(parameters=["f"])
+
 
 class TestReturnValueValidation:
     """Tests for return value type validation."""
@@ -209,42 +257,129 @@ class TestFormatAnnotation:
     def test_vector_with_element(self):
         assert _format_annotation(qmc.Vector[qmc.Float]) == "Vector[Float]"
 
+    def test_dict_with_nested_key(self):
+        result = _format_annotation(qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float])
+        assert result == "Dict[Tuple[UInt, UInt], Float]"
+
+    def test_dict_simple(self):
+        result = _format_annotation(qmc.Dict[qmc.UInt, qmc.Float])
+        assert result == "Dict[UInt, Float]"
+
+
+class TestFormatHandle:
+    """Tests for _format_handle detailed formatting."""
+
+    def test_tuple_with_elements(self):
+        """Tuple handle with _elements should show element types."""
+        from qamomile.circuit.ir.value import TupleValue
+
+        val = TupleValue(name="t")
+        t = qmc.Tuple(
+            value=val,
+            _elements=(qmc.UInt.__new__(qmc.UInt), qmc.UInt.__new__(qmc.UInt)),
+        )
+        assert _format_handle(t) == "Tuple[UInt, UInt]"
+
+    def test_tuple_empty_elements_fallback(self):
+        """Tuple with no _elements should return 'Tuple'."""
+        from qamomile.circuit.ir.value import TupleValue
+
+        val = TupleValue(name="t")
+        t = qmc.Tuple(value=val, _elements=())
+        assert _format_handle(t) == "Tuple"
+
+    def test_dict_with_bound_data(self):
+        """Dict with bound_data should infer types."""
+        from qamomile.circuit.ir.value import DictValue
+
+        val = DictValue(
+            name="d",
+            params={"bound_data": {(0, 1): 1.0, (1, 2): -0.5}},
+        )
+        d = qmc.Dict(value=val)
+        result = _format_handle(d)
+        assert result == "Dict[Tuple[UInt, UInt], Float]"
+
+    def test_dict_empty_bound_data_fallback(self):
+        """Dict with empty bound_data should return 'Dict'."""
+        from qamomile.circuit.ir.value import DictValue
+
+        val = DictValue(name="d", params={"bound_data": {}})
+        d = qmc.Dict(value=val)
+        assert _format_handle(d) == "Dict"
+
+    def test_dict_heterogeneous_bound_data_fallback(self):
+        """Dict with mixed value types should return 'Dict'."""
+        from qamomile.circuit.ir.value import DictValue
+
+        val = DictValue(
+            name="d",
+            params={"bound_data": {(0, 1): 1.0, (2, 3): 42}},
+        )
+        d = qmc.Dict(value=val)
+        assert _format_handle(d) == "Dict"
+
+
+def _make_scalar_qubit():
+    return Value(type=QubitType(), name="q")
+
+
+def _make_qubit_array():
+    shape = (Value(type=UIntType(), name="n", params={"const": 2}),)
+    return ArrayValue(type=QubitType(), name="qs", shape=shape)
+
+
+def _make_scalar_uint():
+    return Value(type=UIntType(), name="x")
+
+
+def _make_scalar_float():
+    return Value(type=FloatType(), name="f")
+
 
 class TestReturnTypeValidationDirect:
     """Direct unit tests for validate_return_type error branches."""
 
-    def test_array_expected_scalar_got(self):
-        """Array annotation with scalar Value should raise."""
-        scalar = Value(type=QubitType(), name="q")
-        with pytest.raises(TypeError, match=r"expected Vector\[Qubit\].*scalar"):
-            validate_return_type(qmc.Vector[qmc.Qubit], scalar, 0)
-
-    def test_scalar_expected_array_got(self):
-        """Scalar annotation with ArrayValue should raise."""
-        shape = (Value(type=UIntType(), name="n", params={"const": 2}),)
-        arr = ArrayValue(type=QubitType(), name="qs", shape=shape)
-        with pytest.raises(TypeError, match=r"expected Qubit.*array"):
-            validate_return_type(qmc.Qubit, arr, 0)
-
-    def test_tuple_expected_scalar_got(self):
-        """Tuple annotation with scalar Value should raise."""
-        scalar = Value(type=UIntType(), name="x")
-        with pytest.raises(TypeError, match=r"expected.*Tuple.*non-tuple"):
-            validate_return_type(qmc.Tuple[qmc.UInt, qmc.UInt], scalar, 0)
-
-    def test_dict_expected_scalar_got(self):
-        """Dict annotation with scalar Value should raise."""
-        scalar = Value(type=FloatType(), name="f")
-        with pytest.raises(TypeError, match=r"expected.*Dict.*non-dict"):
-            validate_return_type(
-                qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float], scalar, 0
-            )
-
-    def test_ir_type_mismatch(self):
-        """Scalar annotation matching structure but wrong IR type should raise."""
-        float_val = Value(type=FloatType(), name="f")
-        with pytest.raises(TypeError, match=r"expected element type.*got"):
-            validate_return_type(qmc.Qubit, float_val, 0)
+    @pytest.mark.parametrize(
+        "annotation, make_val, pattern",
+        [
+            pytest.param(
+                qmc.Vector[qmc.Qubit],
+                _make_scalar_qubit,
+                r"expected Vector\[Qubit\].*scalar",
+                id="array-expected-scalar-got",
+            ),
+            pytest.param(
+                qmc.Qubit,
+                _make_qubit_array,
+                r"expected Qubit.*array",
+                id="scalar-expected-array-got",
+            ),
+            pytest.param(
+                qmc.Tuple[qmc.UInt, qmc.UInt],
+                _make_scalar_uint,
+                r"expected.*Tuple.*non-tuple",
+                id="tuple-expected-scalar-got",
+            ),
+            pytest.param(
+                qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+                _make_scalar_float,
+                r"expected.*Dict.*non-dict",
+                id="dict-expected-scalar-got",
+            ),
+            pytest.param(
+                qmc.Qubit,
+                _make_scalar_float,
+                r"expected element type.*got",
+                id="ir-type-mismatch",
+            ),
+        ],
+    )
+    def test_return_type_rejects(self, annotation, make_val, pattern):
+        """Parametrized reject cases for validate_return_type."""
+        val = make_val()
+        with pytest.raises(TypeError, match=pattern):
+            validate_return_type(annotation, val, 0)
 
     def test_matching_scalar_passes(self):
         """Matching type should not raise."""

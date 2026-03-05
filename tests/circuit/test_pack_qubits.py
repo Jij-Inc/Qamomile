@@ -80,12 +80,13 @@ class TestPackQubitsAccepts:
         graph = k.build()
         assert graph is not None
 
-    def test_accepts_fixed_vector(self):
+    @pytest.mark.parametrize("size", [1, 3])
+    def test_accepts_fixed_vector(self, size):
         """Vector created with qubit_array (concrete size) should be accepted."""
 
         @qmc.qkernel
         def k() -> qmc.Vector[qmc.Qubit]:
-            qs = qmc.qubit_array(3, name="qs")
+            qs = qmc.qubit_array(size, name="qs")
             packed = qmc.pack_qubits(qs)
             return packed
 
@@ -128,6 +129,22 @@ class TestPackQubitsLinearType:
         with pytest.raises(QubitConsumedError):
             k.build()
 
+    def test_consumed_vector_rejects_element_access(self):
+        """After pack, accessing elements of the consumed source should fail."""
+
+        @qmc.qkernel
+        def k() -> qmc.Vector[qmc.Qubit]:
+            qs = qmc.qubit_array(2, name="qs")
+            packed = qmc.pack_qubits(qs)
+            # qs is consumed; element access should fail
+            q = qs[0]
+            q = qmc.h(q)
+            qs[0] = q
+            return packed
+
+        with pytest.raises(QubitConsumedError, match=r"consumed"):
+            k.build()
+
 
 class TestPackQubitsCanonicalKey:
     """Verify element_uuids canonical key is present."""
@@ -149,3 +166,53 @@ class TestPackQubitsCanonicalKey:
             assert len(uuids) == 2
             assert uuids[0] == v0.uuid
             assert uuids[1] == v1.uuid
+
+
+class TestPackQubitsTranspile:
+    """Transpilation integration tests for pack_qubits.
+
+    Requires qiskit to verify that element_uuids are correctly resolved
+    through the emit pipeline.
+    """
+
+    def test_pack_measure_preserves_order(self):
+        """pack -> X(first only) -> measure should transpile correctly."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def k() -> qmc.Vector[qmc.UInt]:
+            qs = qmc.qubit_array(2, name="qs")
+            q0 = qs[0]
+            q0 = qmc.x(q0)
+            qs[0] = q0
+            packed = qmc.pack_qubits(qs)
+            result = qmc.measure(packed)
+            return result
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(k)
+        assert executable is not None
+        assert len(executable.compiled_quantum) > 0
+
+    def test_pack_expval_transpiles(self):
+        """pack -> expval should transpile with correct qubit mapping."""
+        pytest.importorskip("qiskit")
+        import qamomile.observable as qm_o
+        from qamomile.qiskit import QiskitTranspiler
+
+        H = qm_o.Z(0) + qm_o.Z(1)
+
+        @qmc.qkernel
+        def k(H: qmc.Observable) -> qmc.Float:
+            qs = qmc.qubit_array(2, name="qs")
+            q0 = qs[0]
+            q0 = qmc.h(q0)
+            qs[0] = q0
+            packed = qmc.pack_qubits(qs)
+            return qmc.expval(packed, H)
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(k, bindings={"H": H})
+        assert executable is not None
+        assert len(executable.compiled_expval) == 1

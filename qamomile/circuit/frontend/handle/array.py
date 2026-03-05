@@ -165,8 +165,18 @@ class ArrayBase(Handle, Generic[T]):
         """Get an element at the given indices.
 
         Raises:
-            QubitConsumedError: If this element is already borrowed (for quantum arrays).
+            QubitConsumedError: If this element is already borrowed or the
+                container has been consumed (for quantum arrays).
         """
+        # Reject element access on consumed containers (quantum only)
+        if self._consumed and self.value.type.is_quantum():
+            raise QubitConsumedError(
+                f"Cannot access elements of '{self.value.name}' because it was "
+                f"consumed by '{self._consumed_by}'.",
+                handle_name=self.value.name,
+                operation_name="array element access",
+            )
+
         indices_key = self._make_indices_key(indices)
         index_str = self._format_index(indices)
 

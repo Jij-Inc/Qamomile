@@ -20,7 +20,7 @@ from .frontend.operation.control_flow import for_items, items, range
 from .frontend.operation.controlled import controlled
 from .frontend.operation.expval import expval
 from .frontend.operation.measurement import measure
-from .frontend.operation.pack import pack_qubits
+from .frontend.operation.pack import pack_qubits, unpack_qubits
 from .frontend.operation.qubit_gates import (
     ccx,
     cp,
@@ -77,6 +77,7 @@ __all__ = [
     "swap",
     "measure",
     "pack_qubits",
+    "unpack_qubits",
     "expval",
     "for_items",
     "items",

@@ -1,15 +1,11 @@
-"""Pack individual qubits into a Vector[Qubit].
+"""Pack and unpack qubits into/from a Vector[Qubit].
 
-This module provides the ``pack_qubits`` function which collects one or more
-``Qubit`` handles (or fixed-size ``Vector[Qubit]`` handles) into a single
-``Vector[Qubit]``.  The resulting vector carries the canonical
-``element_uuids`` key that downstream passes (separate, emit) use to resolve
-the packed qubit ordering.
+This module provides ``pack_qubits`` and ``unpack_qubits`` for combining and
+splitting qubit handles.  Both functions enforce a linear-type contract:
+input handles are *consumed* and must not be reused after the call.
 
-Linear-type contract:
-    All input handles are *consumed* by ``pack_qubits``.  After the call the
-    original handles must not be reused; only the returned ``Vector[Qubit]``
-    is valid.
+The resulting vectors carry the canonical ``element_uuids`` key that
+downstream passes (separate, emit) use to resolve qubit ordering.
 """
 
 from __future__ import annotations
@@ -26,11 +22,13 @@ def _resolve_vector_size(vec: ArrayBase) -> int | None:
     Returns the integer size if it can be determined, or ``None`` for
     symbolic (dynamic) sizes.
     """
-    size = vec.shape[0]
-    if isinstance(size, int):
-        return size
-    if hasattr(size, "value") and size.value.is_constant():
-        return int(size.value.get_const())
+    # Check frontend-level shape first (if non-empty)
+    if vec.shape:
+        size = vec.shape[0]
+        if isinstance(size, int):
+            return size
+        if hasattr(size, "value") and size.value.is_constant():
+            return int(size.value.get_const())
     # Fall back to IR-level shape (ArrayValue.shape)
     if vec.value.shape:
         dim_val = vec.value.shape[0]
@@ -73,15 +71,15 @@ def pack_qubits(*items: Qubit | Vector[Qubit]) -> Vector[Qubit]:
             if n is None:
                 raise ValueError("pack_qubits requires fixed-size Vector[Qubit]")
 
-            # Consume the vector handle
-            item.consume("pack_qubits")
-
-            # Collect element UUIDs
+            # Collect element UUIDs FIRST (before consume, so _get_element works)
             for i in range(n):
                 elem = item[i]
                 element_uuids.append(elem.value.uuid)
                 element_logical_ids.append(elem.value.logical_id)
                 item[i] = elem  # return the borrow so validate_all_returned won't fire
+
+            # Consume the vector handle AFTER collection
+            item.consume("pack_qubits")
 
         else:
             raise TypeError("pack_qubits accepts only Qubit or Vector[Qubit]")
@@ -108,3 +106,141 @@ def pack_qubits(*items: Qubit | Vector[Qubit]) -> Vector[Qubit]:
         shape=(total,),
         name="packed_qubits",
     )
+
+
+def unpack_qubits(
+    packed: Vector[Qubit],
+    *,
+    num_unpacked: int,
+    num_elements: list[int] | None = None,
+    indices: list[list[int]] | None = None,
+) -> tuple[Vector[Qubit], ...]:
+    """Split a packed qubit vector into multiple sub-vectors.
+
+    Exactly one of ``num_elements`` or ``indices`` must be provided.
+
+    Args:
+        packed: A ``Vector[Qubit]`` to split (typically from ``pack_qubits``).
+        num_unpacked: Number of output groups.
+        num_elements: Sizes of consecutive groups (splits from the front).
+            ``len(num_elements)`` must equal ``num_unpacked`` and
+            ``sum(num_elements)`` must equal the total qubit count.
+        indices: Per-group index lists for arbitrary reordering.
+            Each element must be used exactly once across all groups.
+
+    Returns:
+        A tuple of ``Vector[Qubit]`` handles, one per group.
+        Even single-element groups return a length-1 ``Vector``.
+
+    Raises:
+        TypeError: If ``packed`` is not a ``Vector[Qubit]``.
+        ValueError: For invalid arguments (see detailed rules below).
+    """
+    # --- Input type validation ---
+    if not isinstance(packed, Vector) or packed.element_type is not Qubit:
+        raise TypeError("unpack_qubits requires a Vector[Qubit]")
+
+    # --- Resolve total size ---
+    total = _resolve_vector_size(packed)
+    if total is None:
+        raise ValueError("unpack_qubits requires a fixed-size Vector[Qubit]")
+
+    # --- num_unpacked validation ---
+    if num_unpacked < 1:
+        raise ValueError("num_unpacked must be >= 1")
+
+    # --- Mutual exclusion ---
+    if num_elements is not None and indices is not None:
+        raise ValueError(
+            "Cannot specify both num_elements and indices; use exactly one"
+        )
+    if num_elements is None and indices is None:
+        raise ValueError("Must specify either num_elements or indices")
+
+    # --- Build resolved index groups ---
+    if num_elements is not None:
+        if len(num_elements) != num_unpacked:
+            raise ValueError(
+                f"len(num_elements)={len(num_elements)} != num_unpacked={num_unpacked}"
+            )
+        if any(n < 1 for n in num_elements):
+            raise ValueError("All num_elements values must be >= 1")
+        if sum(num_elements) != total:
+            raise ValueError(
+                f"sum(num_elements)={sum(num_elements)} != total qubit count={total}"
+            )
+        # Build consecutive index groups
+        resolved_indices: list[list[int]] = []
+        offset = 0
+        for n in num_elements:
+            resolved_indices.append(list(range(offset, offset + n)))
+            offset += n
+    else:
+        assert indices is not None
+        if len(indices) != num_unpacked:
+            raise ValueError(
+                f"len(indices)={len(indices)} != num_unpacked={num_unpacked}"
+            )
+        # Validate partition: all indices in range, no duplicates, full coverage
+        seen: set[int] = set()
+        for group in indices:
+            if not group:
+                raise ValueError("Empty index group is not allowed")
+            for idx in group:
+                if idx < 0 or idx >= total:
+                    raise ValueError(f"Index {idx} out of range [0, {total})")
+                if idx in seen:
+                    raise ValueError(f"Duplicate index {idx}")
+                seen.add(idx)
+        if len(seen) != total:
+            raise ValueError(
+                f"Indices must cover all {total} qubits exactly once, "
+                f"but only {len(seen)} were specified"
+            )
+        resolved_indices = [list(g) for g in indices]
+
+    # --- Read canonical keys from packed vector ---
+    all_uuids: list[str] = packed.value.params.get("element_uuids", [])
+    all_logical_ids: list[str] = packed.value.params.get("element_logical_ids", [])
+
+    if len(all_uuids) != total:
+        raise ValueError(
+            f"element_uuids length ({len(all_uuids)}) does not match "
+            f"vector size ({total})"
+        )
+
+    # --- Consume the packed handle ---
+    packed.consume("unpack_qubits")
+
+    # --- Build output sub-vectors ---
+    results: list[Vector[Qubit]] = []
+    for group_idx, group in enumerate(resolved_indices):
+        group_uuids = [all_uuids[i] for i in group]
+        group_logical_ids = (
+            [all_logical_ids[i] for i in group] if all_logical_ids else []
+        )
+
+        group_size = len(group)
+        size_value = Value(
+            type=UIntType(),
+            name=f"unpack_size_{group_idx}",
+            params={"const": group_size},
+        )
+        group_value = ArrayValue(
+            type=QubitType(),
+            name=f"unpacked_{group_idx}",
+            shape=(size_value,),
+            params={
+                "element_uuids": group_uuids,
+                "element_logical_ids": group_logical_ids,
+            },
+        )
+        results.append(
+            Vector._create_from_value(
+                value=group_value,
+                shape=(group_size,),
+                name=f"unpacked_{group_idx}",
+            )
+        )
+
+    return tuple(results)
