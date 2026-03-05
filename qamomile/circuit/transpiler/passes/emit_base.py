@@ -795,6 +795,59 @@ class LoopAnalyzer:
         if self._has_array_element_access(op.operations, op.loop_var):
             return True
 
+        # Check for BinOps that depend on the loop variable.
+        # These produce values used as array indices or gate angles
+        # and require concrete loop variable values to evaluate.
+        if self._has_loop_var_binop(op.operations, op.loop_var):
+            return True
+
+        return False
+
+    def _has_loop_var_binop(
+        self,
+        operations: list[Operation],
+        loop_var: str,
+    ) -> bool:
+        """Check if operations contain BinOps that reference the loop variable.
+
+        When a BinOp depends on the loop variable, its result cannot be
+        evaluated with native loop control flow (the variable is symbolic).
+        The loop must be unrolled so the BinOp can be evaluated with
+        concrete iteration values.
+
+        Args:
+            operations: List of IR operations to inspect.
+            loop_var: Name of the enclosing loop variable to detect.
+
+        Returns:
+            True if any BinOp operand directly references *loop_var*.
+        """
+        from qamomile.circuit.ir.value import Value
+
+        for op in operations:
+            if isinstance(op, BinOp):
+                for operand in op.operands:
+                    if isinstance(operand, Value) and operand.name == loop_var:
+                        return True
+            elif isinstance(op, ForOperation):
+                if self._has_loop_var_binop(op.operations, loop_var):
+                    return True
+            elif isinstance(op, IfOperation):
+                if self._has_loop_var_binop(
+                    op.true_operations, loop_var
+                ) or self._has_loop_var_binop(op.false_operations, loop_var):
+                    return True
+            elif isinstance(op, WhileOperation):
+                if self._has_loop_var_binop(op.operations, loop_var):
+                    return True
+            elif isinstance(op, ForItemsOperation):
+                # ForItemsOperation is unrolled for its own iteration, but its
+                # body may contain BinOps referencing the *outer* loop variable.
+                # Those BinOps still need concrete values, so we must recurse.
+                if self._has_loop_var_binop(op.operations, loop_var):
+                    return True
+            # No action for other operation types (GateOperation, CastOperation, etc.)
+            # — only BinOps and control-flow containers can carry loop-var dependencies.
         return False
 
     def _has_dynamic_nested_loop(
@@ -826,6 +879,8 @@ class LoopAnalyzer:
         loop_var: str,
     ) -> bool:
         """Check if operations access array elements using loop variable."""
+        from qamomile.circuit.ir.value import Value as _Value
+
         for op in operations:
             if isinstance(op, GateOperation):
                 for v in op.operands:
@@ -834,16 +889,14 @@ class LoopAnalyzer:
                             if self._index_depends_on_loop_var(idx, loop_var):
                                 return True
 
-                if hasattr(op, "theta") and op.theta is not None:
-                    theta = op.theta
+                if isinstance(op.theta, _Value):
                     if (
-                        hasattr(theta, "parent_array")
-                        and theta.parent_array is not None
+                        op.theta.parent_array is not None
+                        and op.theta.element_indices
                     ):
-                        if hasattr(theta, "element_indices") and theta.element_indices:
-                            for idx in theta.element_indices:
-                                if self._index_depends_on_loop_var(idx, loop_var):
-                                    return True
+                        for idx in op.theta.element_indices:
+                            if self._index_depends_on_loop_var(idx, loop_var):
+                                return True
 
             elif isinstance(op, BinOp):
                 for operand in [op.lhs, op.rhs]:
@@ -854,8 +907,8 @@ class LoopAnalyzer:
 
             elif isinstance(op, ControlledUOperation):
                 for v in op.operands:
-                    if hasattr(v, "parent_array") and v.parent_array is not None:
-                        if hasattr(v, "element_indices") and v.element_indices:
+                    if isinstance(v, _Value):
+                        if v.parent_array is not None and v.element_indices:
                             for idx in v.element_indices:
                                 if self._index_depends_on_loop_var(idx, loop_var):
                                     return True
