@@ -239,17 +239,32 @@ class ArrayBase(Handle, Generic[T]):
                 was not borrowed from this array (``value.parent is not self``).
 
         Notes:
-            For symbolic computed indices (e.g. ``n - j - 1``), each
-            evaluation creates a new UInt with a different uuid, making
-            key matching unreliable. The borrow-return identity check is
-            skipped for these indices.
+            For computed symbolic indices (e.g. ``i + 1``, ``n - j - 1``),
+            each evaluation creates a new UInt with a different uuid, so a
+            key derived from the LHS indices may not match the borrow key.
+            To handle this, we also derive a *source key* from the value's
+            provenance (``value.indices``), which still holds the original
+            UInt handles from ``_get_element`` and thus matches the borrow
+            key reliably.
         """
-        indices_key = self._make_indices_key(indices)
+        target_key = self._make_indices_key(indices)
         index_str = self._format_index(indices)
 
+        # Determine the borrow key to release.
+        # If the value carries provenance from this array, use its original
+        # indices key (stable across re-evaluations of computed indices).
+        source_key: tuple[str, ...] | None = None
+        if isinstance(value, Handle) and value.parent is self and value.indices:
+            source_key = self._make_indices_key(value.indices)
+
+        release_key = (
+            source_key
+            if source_key is not None and source_key in self._borrowed_indices
+            else target_key
+        )
+
         if self.value.type.is_quantum():
-            # 1. Check index is currently borrowed
-            if indices_key in self._borrowed_indices:
+            if release_key in self._borrowed_indices:
                 # Borrow-return path: element was borrowed, validate identity
                 if not isinstance(value, Handle) or value.parent is not self:
                     raise LinearTypeError(
@@ -258,16 +273,13 @@ class ArrayBase(Handle, Generic[T]):
                         handle_name=self.value.name,
                         operation_name="array element return",
                     )
-            # For symbolic computed indices (e.g. n-j-1), each evaluation
-            # creates a new UInt with a different uuid, so key matching is
-            # unreliable. We skip the borrow check for symbolic indices.
 
-            # 2. Consume the handle (prevents reuse of old handle)
+            # Consume the handle (prevents reuse of old handle)
             value.consume(operation_name=f"return to {self.value.name}[{index_str}]")
 
         # Release the borrow
-        if indices_key in self._borrowed_indices:
-            del self._borrowed_indices[indices_key]
+        if release_key in self._borrowed_indices:
+            del self._borrowed_indices[release_key]
 
     def _copy_subclass_state_to(self, new_handle: "ArrayBase") -> None:
         """Copy ArrayBase-specific state to a new handle created by consume()."""

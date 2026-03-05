@@ -568,6 +568,59 @@ class TestCallOperationsConsume:
         graph = main.build(parameters=["theta"])
         assert graph is not None
 
+    def test_composite_gate_call_consumes_target_qubit(self):
+        """Reusing qubit after CompositeGate call should raise QubitConsumedError."""
+        from qamomile.circuit.frontend.composite_gate import CompositeGate
+
+        class SimpleH(CompositeGate):
+            custom_name = "simple_h"
+
+            @property
+            def num_target_qubits(self) -> int:
+                return 1
+
+            def _decompose(self, qubits):
+                (q,) = qubits
+                return (qm.h(q),)
+
+        gate = SimpleH()
+
+        @qkernel
+        def bad_circuit(q: Qubit) -> tuple[Qubit, Qubit]:
+            (q2,) = gate(q)
+            q3 = qm.x(q)  # ERROR: q consumed by gate call
+            return q2, q3
+
+        with pytest.raises(QubitConsumedError):
+            bad_circuit.build()
+
+    def test_composite_gate_call_consumes_control_qubit(self):
+        """Reusing control qubit after CompositeGate call should raise QubitConsumedError."""
+        from qamomile.circuit.frontend.composite_gate import CompositeGate
+
+        class ControlledH(CompositeGate):
+            custom_name = "controlled_h"
+            num_control_qubits = 1
+
+            @property
+            def num_target_qubits(self) -> int:
+                return 1
+
+            def _decompose(self, qubits):
+                (q,) = qubits
+                return (qm.h(q),)
+
+        gate = ControlledH()
+
+        @qkernel
+        def bad_circuit(ctrl: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit, Qubit]:
+            ctrl_out, tgt_out = gate(tgt, controls=(ctrl,))
+            ctrl_reuse = qm.x(ctrl)  # ERROR: ctrl consumed by gate call
+            return ctrl_out, tgt_out, ctrl_reuse
+
+        with pytest.raises(QubitConsumedError):
+            bad_circuit.build()
+
 
 class TestLoopVariableShadowing:
     """Issue 02: Loop variable must not shadow function parameters."""
@@ -807,3 +860,36 @@ class TestIterationProhibition:
 
         graph = good_circuit.build()
         assert graph is not None
+
+
+class TestComputedIndexBorrowReturn:
+    """Computed symbolic indices (e.g. i+1) must not cause false UnreturnedBorrowError."""
+
+    def test_computed_index_plus_one_borrow_return(self):
+        """GHZ pattern: q[i], q[i+1] = qm.cx(q[i], q[i+1]) should succeed."""
+
+        @qkernel
+        def ghz(n: int) -> qm.Vector[qm.Bit]:
+            qubits = qubit_array(n, "q")
+            qubits[0] = qm.h(qubits[0])
+            for i in qm.range(n - 1):
+                qubits[i], qubits[i + 1] = qm.cx(qubits[i], qubits[i + 1])
+            return qm.measure(qubits)
+
+        graph = ghz.build(n=3)
+        assert graph is not None
+
+    def test_genuine_unreturned_borrow_still_detected(self):
+        """Borrowing without return must still raise UnreturnedBorrowError."""
+
+        @qkernel
+        def bad_circuit(n: int) -> qm.Vector[qm.Bit]:
+            qubits = qubit_array(n, "q")
+            for i in qm.range(n - 1):
+                q = qubits[i]
+                q = qm.h(q)
+                # Missing: qubits[i] = q
+            return qm.measure(qubits)
+
+        with pytest.raises(UnreturnedBorrowError):
+            bad_circuit.build(n=3)
