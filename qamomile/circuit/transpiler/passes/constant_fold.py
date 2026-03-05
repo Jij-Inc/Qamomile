@@ -233,12 +233,22 @@ class ConstantFoldingPass(Pass[Block, Block]):
         replacements: dict[str, Any] = {}
         if changed:
             replacements["operands"] = new_operands
-        if (
-            isinstance(op, GateOperation)
-            and isinstance(op.theta, Value)
-            and op.theta.uuid in folded_values
-        ):
-            replacements["theta"] = folded_values[op.theta.uuid]
+        if isinstance(op, GateOperation) and isinstance(op.theta, Value):
+            if op.theta.uuid in folded_values:
+                replacements["theta"] = folded_values[op.theta.uuid]
+            elif op.theta.element_indices:
+                new_indices = []
+                indices_changed = False
+                for idx in op.theta.element_indices:
+                    if idx.uuid in folded_values:
+                        new_indices.append(folded_values[idx.uuid])
+                        indices_changed = True
+                    else:
+                        new_indices.append(idx)
+                if indices_changed:
+                    replacements["theta"] = dataclasses.replace(
+                        op.theta, element_indices=tuple(new_indices)
+                    )
 
         if replacements:
             return dataclasses.replace(op, **replacements)
