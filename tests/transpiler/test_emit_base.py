@@ -4,15 +4,21 @@ These tests verify that ``LoopAnalyzer.should_unroll`` correctly identifies
 ``ForOperation`` loops containing BinOps that depend on the loop variable
 (directly or inside nested control-flow), and that theta array-element
 access referencing the loop variable triggers unrolling.
+
+The second section contains integration tests that verify UInt BinOp
+operations (``//``, ``**``) are correctly folded by the constant folding
+pass so that the resulting constant can be used as a ``qmc.range`` argument
+for loop unrolling in the emit pass.
 """
 
-from __future__ import annotations
+from typing import Any, TYPE_CHECKING
 
+import numpy as np
 import pytest
 
+import qamomile.circuit as qmc
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.control_flow import (
-    ForItemsOperation,
     ForOperation,
     IfOperation,
     WhileOperation,
@@ -269,34 +275,6 @@ class TestLoopAnalyzerBinOp:
 
         assert self.analyzer.should_unroll(for_op, {}) is True
 
-    def test_binop_in_for_items_triggers_unroll(self) -> None:
-        """A BinOp inside ForItemsOperation referencing outer loop var."""
-        loop_var_val = _uint_val("i")
-        const_val = _float_val("c", const=0.5)
-        binop, _ = _make_binop(loop_var_val, const_val, BinOpKind.ADD)
-
-        dict_val = Value(type=FloatType(), name="d")
-        for_items_op = ForItemsOperation(
-            operands=[dict_val],
-            results=[],
-            key_vars=["k"],
-            value_var="v",
-            operations=[binop],
-        )
-
-        start = _uint_val("start", const=0)
-        stop = _uint_val("stop", const=3)
-        step = _uint_val("step", const=1)
-
-        for_op = ForOperation(
-            operands=[start, stop, step],
-            results=[],
-            loop_var="i",
-            operations=[for_items_op],
-        )
-
-        assert self.analyzer.should_unroll(for_op, {}) is True
-
 
 # ===========================================================================
 # LoopAnalyzer — theta array element access
@@ -362,3 +340,138 @@ class TestLoopAnalyzerThetaArrayAccess:
         )
 
         assert self.analyzer.should_unroll(for_op, {}) is False
+
+
+# ===========================================================================
+# Integration tests — UInt BinOp (floordiv, pow) folding into loop bounds
+# ===========================================================================
+
+pytest.importorskip("qiskit")
+pytest.importorskip("qiskit_aer")
+
+if TYPE_CHECKING:
+    from qiskit.circuit import QuantumCircuit
+
+from qamomile.qiskit.transpiler import QiskitTranspiler  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Module-level @qkernel definitions (required for inspect.getsource)
+# ---------------------------------------------------------------------------
+
+
+@qmc.qkernel
+def binop_floordiv_circuit(
+    n: qmc.UInt, theta: qmc.Float
+) -> qmc.Vector[qmc.Bit]:
+    """Apply RX(theta) to first n // 2 qubits of a 4-qubit register."""
+    q = qmc.qubit_array(4, "q")
+    count = n // 2
+    for i in qmc.range(count):
+        q[i] = qmc.rx(q[i], angle=theta)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def binop_pow_circuit(
+    n: qmc.UInt, theta: qmc.Float
+) -> qmc.Vector[qmc.Bit]:
+    """Apply RX(theta) to first n ** 2 qubits of a 4-qubit register."""
+    q = qmc.qubit_array(4, "q")
+    count = n ** 2
+    for i in qmc.range(count):
+        q[i] = qmc.rx(q[i], angle=theta)
+    return qmc.measure(q)
+
+
+# ---------------------------------------------------------------------------
+# Test helpers
+# ---------------------------------------------------------------------------
+
+
+def _transpile_and_get_circuit(
+    kernel: Any,
+    bindings: dict[str, Any] | None = None,
+) -> tuple[Any, "QuantumCircuit"]:
+    """Transpile a kernel and return ``(executable, circuit)``."""
+    transpiler = QiskitTranspiler()
+    exe = transpiler.transpile(kernel, bindings=bindings)
+    qc = exe.compiled_quantum[0].circuit
+    return exe, qc
+
+
+def _extract_rx_angles(qc: "QuantumCircuit") -> list[float]:
+    """Extract all RX gate angles from a Qiskit circuit."""
+    return [
+        float(inst.operation.params[0])
+        for inst in qc.data
+        if inst.operation.name == "rx"
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Tests — UInt BinOp (floordiv, pow) folding into loop bounds
+# ---------------------------------------------------------------------------
+
+
+class TestUIntBinOpFolding:
+    """Tests for UInt BinOp kinds (``//``, ``**``) that affect loop bounds.
+
+    At tracing time ``n`` is a symbolic ``UInt`` handle, so ``n // 2``
+    emits a ``BinOp(FLOORDIV)`` into the IR.  The constant folding pass
+    resolves the parameter binding and evaluates the BinOp, producing
+    a concrete loop bound that the emit pass can unroll.
+    """
+
+    @pytest.mark.parametrize(
+        "n, theta, expected_rx_count",
+        [
+            (4, 0.5, 2),   # 4 // 2 = 2
+            (6, 0.3, 3),   # 6 // 2 = 3
+            (2, 1.0, 1),   # 2 // 2 = 1
+        ],
+        ids=["4//2=2", "6//2=3", "2//2=1"],
+    )
+    def test_floordiv_loop_bound(
+        self, n: int, theta: float, expected_rx_count: int
+    ) -> None:
+        """``n // 2`` correctly folded as loop bound; angles verified."""
+        _, qc = _transpile_and_get_circuit(
+            binop_floordiv_circuit, bindings={"n": n, "theta": theta}
+        )
+        rx_angles = _extract_rx_angles(qc)
+
+        assert len(rx_angles) == expected_rx_count, (
+            f"Expected {expected_rx_count} RX gates (n={n}, n//2={n // 2}), "
+            f"got {len(rx_angles)}"
+        )
+        for i, angle in enumerate(rx_angles):
+            assert np.isclose(angle, theta), (
+                f"RX[{i}] angle {angle} != expected {theta}"
+            )
+
+    @pytest.mark.parametrize(
+        "n, theta, expected_rx_count",
+        [
+            (2, 0.3, 4),   # 2 ** 2 = 4
+            (1, 0.5, 1),   # 1 ** 2 = 1
+        ],
+        ids=["2**2=4", "1**2=1"],
+    )
+    def test_pow_loop_bound(
+        self, n: int, theta: float, expected_rx_count: int
+    ) -> None:
+        """``n ** 2`` correctly folded as loop bound; angles verified."""
+        _, qc = _transpile_and_get_circuit(
+            binop_pow_circuit, bindings={"n": n, "theta": theta}
+        )
+        rx_angles = _extract_rx_angles(qc)
+
+        assert len(rx_angles) == expected_rx_count, (
+            f"Expected {expected_rx_count} RX gates (n={n}, n**2={n ** 2}), "
+            f"got {len(rx_angles)}"
+        )
+        for i, angle in enumerate(rx_angles):
+            assert np.isclose(angle, theta), (
+                f"RX[{i}] angle {angle} != expected {theta}"
+            )

@@ -230,7 +230,7 @@ class ConstantFoldingPass(Pass[Block, Block]):
                 return dataclasses.replace(op, operands=new_operands, **extra_kwargs)
 
         # Also substitute GateOperation.theta if it references a folded value
-        replacements: dict[str, object] = {}
+        replacements: dict[str, Any] = {}
         if changed:
             replacements["operands"] = new_operands
         if isinstance(op, GateOperation) and isinstance(op.theta, Value):

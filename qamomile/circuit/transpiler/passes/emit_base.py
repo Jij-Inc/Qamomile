@@ -708,23 +708,20 @@ class LoopAnalyzer:
         concrete iteration values.
 
         Args:
-            operations: List of operations to check.
-            loop_var: Name of the loop variable to search for.
+            operations: List of IR operations to inspect.
+            loop_var: Name of the enclosing loop variable to detect.
 
         Returns:
             True if any BinOp operand directly references *loop_var*.
         """
-        from qamomile.circuit.ir.value import Value as _Value
+        from qamomile.circuit.ir.value import Value
 
         for op in operations:
             if isinstance(op, BinOp):
                 for operand in op.operands:
-                    if isinstance(operand, _Value) and operand.name == loop_var:
+                    if isinstance(operand, Value) and operand.name == loop_var:
                         return True
             elif isinstance(op, ForOperation):
-                if self._has_loop_var_binop(op.operations, loop_var):
-                    return True
-            elif isinstance(op, ForItemsOperation):
                 if self._has_loop_var_binop(op.operations, loop_var):
                     return True
             elif isinstance(op, IfOperation):
@@ -735,6 +732,9 @@ class LoopAnalyzer:
             elif isinstance(op, WhileOperation):
                 if self._has_loop_var_binop(op.operations, loop_var):
                     return True
+            # No action for other operation types (GateOperation, CastOperation, etc.)
+            # — only BinOps and control-flow containers can carry loop-var dependencies.
+            # ForItemsOperation is always unrolled separately, so it is not checked here.
         return False
 
     def _has_dynamic_nested_loop(
