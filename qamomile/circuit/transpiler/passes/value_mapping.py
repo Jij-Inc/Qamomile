@@ -239,7 +239,11 @@ class ValueSubstitutor:
         self._value_map = value_map
 
     def substitute_operation(self, op: Operation) -> Operation:
-        """Substitute values in an operation using the value map."""
+        """Substitute values in an operation using the value map.
+
+        Handles control-flow operations (IfOperation, ForOperation, etc.)
+        by recursing into their nested operation lists and phi_ops.
+        """
         new_operands = []
         for v in op.operands:
             if isinstance(v, ValueBase):
@@ -253,6 +257,16 @@ class ValueSubstitutor:
                 new_results.append(self.substitute_value(v))
             else:
                 new_results.append(v)
+
+        # Handle IfOperation: also substitute inside phi_ops
+        if isinstance(op, IfOperation):
+            new_phi_ops = [self.substitute_operation(p) for p in op.phi_ops]
+            return dataclasses.replace(
+                op,
+                operands=new_operands,
+                results=new_results,
+                phi_ops=new_phi_ops,
+            )
 
         return dataclasses.replace(
             op,
