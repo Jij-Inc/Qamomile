@@ -483,6 +483,275 @@ class TestSingleQubitGatesFrontend:
         expected = minus_state()
         assert statevectors_equal(sv, expected)
 
+    # -- S (sqrt(Z)) --
+
+    def test_s_creation(self):
+        """S gate transpiles to a Qiskit circuit containing 's' instruction."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.s(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert "s" in _gate_names(qc)
+
+    def test_s_on_zero(self):
+        """S|0⟩ = |0⟩ (no change on computational basis |0⟩)."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.s(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        expected = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["S"].matrix_fn()
+        )
+        assert statevectors_equal(sv, expected)
+
+    def test_s_on_one(self):
+        """S|1⟩ = i|1⟩ (phase +i on |1⟩)."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            q = qmc.s(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        state_after_x = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["X"].matrix_fn()
+        )
+        expected = compute_expected_statevector(
+            state_after_x, GATE_SPECS["S"].matrix_fn()
+        )
+        assert statevectors_equal(sv, expected)
+
+    def test_s_squared_equals_z(self):
+        """S·S = Z on |+⟩ (two S gates equal one Z gate)."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            q = qmc.s(q)
+            q = qmc.s(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        expected = minus_state()
+        assert statevectors_equal(sv, expected)
+
+    # -- SDG (S-dagger, inverse of S) --
+
+    def test_sdg_creation(self):
+        """SDG gate transpiles to a Qiskit circuit containing 'sdg' instruction."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.sdg(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert "sdg" in _gate_names(qc)
+
+    def test_sdg_on_zero(self):
+        """SDG|0⟩ = |0⟩ (no change on computational basis |0⟩)."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.sdg(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        expected = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["SDG"].matrix_fn()
+        )
+        assert statevectors_equal(sv, expected)
+
+    def test_sdg_on_one(self):
+        """SDG|1⟩ = −i|1⟩ (phase −i on |1⟩)."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            q = qmc.sdg(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        state_after_x = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["X"].matrix_fn()
+        )
+        expected = compute_expected_statevector(
+            state_after_x, GATE_SPECS["SDG"].matrix_fn()
+        )
+        assert statevectors_equal(sv, expected)
+
+    def test_sdg_inverse_of_s(self):
+        """S then SDG = Identity on |1⟩."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            q = qmc.s(q)
+            q = qmc.sdg(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        expected = np.array([0, 1], dtype=complex)
+        assert statevectors_equal(sv, expected)
+
+    # -- T (sqrt(S)) --
+
+    def test_t_creation(self):
+        """T gate transpiles to a Qiskit circuit containing 't' instruction."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.t(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert "t" in _gate_names(qc)
+
+    def test_t_on_zero(self):
+        """T|0⟩ = |0⟩ (no change on computational basis |0⟩)."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.t(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        expected = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["T"].matrix_fn()
+        )
+        assert statevectors_equal(sv, expected)
+
+    def test_t_on_one(self):
+        """T|1⟩ = e^(iπ/4)|1⟩ (phase e^(iπ/4) on |1⟩)."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            q = qmc.t(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        state_after_x = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["X"].matrix_fn()
+        )
+        expected = compute_expected_statevector(
+            state_after_x, GATE_SPECS["T"].matrix_fn()
+        )
+        assert statevectors_equal(sv, expected)
+
+    def test_t_squared_equals_s(self):
+        """T·T = S on |1⟩ (two T gates equal one S gate)."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            q = qmc.t(q)
+            q = qmc.t(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        state_after_x = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["X"].matrix_fn()
+        )
+        expected = compute_expected_statevector(
+            state_after_x, GATE_SPECS["S"].matrix_fn()
+        )
+        assert statevectors_equal(sv, expected)
+
+    # -- TDG (T-dagger, inverse of T) --
+
+    def test_tdg_creation(self):
+        """TDG gate transpiles to a Qiskit circuit containing 'tdg' instruction."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.tdg(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert "tdg" in _gate_names(qc)
+
+    def test_tdg_on_zero(self):
+        """TDG|0⟩ = |0⟩ (no change on computational basis |0⟩)."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.tdg(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        expected = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["TDG"].matrix_fn()
+        )
+        assert statevectors_equal(sv, expected)
+
+    def test_tdg_on_one(self):
+        """TDG|1⟩ = e^(−iπ/4)|1⟩ (phase e^(−iπ/4) on |1⟩)."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            q = qmc.tdg(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        state_after_x = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["X"].matrix_fn()
+        )
+        expected = compute_expected_statevector(
+            state_after_x, GATE_SPECS["TDG"].matrix_fn()
+        )
+        assert statevectors_equal(sv, expected)
+
+    def test_tdg_inverse_of_t(self):
+        """T then TDG = Identity on |1⟩."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            q = qmc.t(q)
+            q = qmc.tdg(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        expected = np.array([0, 1], dtype=complex)
+        assert statevectors_equal(sv, expected)
+
 
 class TestTwoQubitGatesFrontend:
     """Test each two-qubit gate through the full frontend pipeline."""
