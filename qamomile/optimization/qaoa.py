@@ -129,7 +129,7 @@ class QAOAConverter(MathematicalProblemConverter):
         """Transpile a model with higher-order terms using phase-gadget decomposition.
 
         Decomposes k-body Z-rotation terms into CX ladder + RZ primitives
-        via ``apply_phase_gadget``, while reusing the standard
+        via ``phase_gadget``, while reusing the standard
         ``ising_cost`` for quadratic and linear terms.
 
         Args:

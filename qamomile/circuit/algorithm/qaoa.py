@@ -105,6 +105,7 @@ def qaoa_layers(
     return q
 
 
+@qmc.qkernel
 def qaoa_state(
     p: qmc.UInt,
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
@@ -132,7 +133,7 @@ def qaoa_state(
 
 
 @qmc.qkernel
-def _apply_phase_gadget_kernel(
+def phase_gadget(
     q: qmc.Vector[qmc.Qubit],
     indices: qmc.Vector[qmc.UInt],
     angle: qmc.Float,
@@ -172,43 +173,6 @@ def _apply_phase_gadget_kernel(
     return q
 
 
-def apply_phase_gadget(
-    q: qmc.Vector[qmc.Qubit],
-    indices: list[int] | qmc.Vector[qmc.UInt],
-    angle: qmc.Float | float,
-) -> qmc.Vector[qmc.Qubit]:
-    """Apply exp(-i * angle/2 * Z_{i0} Z_{i1} ... Z_{ik-1}).
-
-    Supports both concrete Python index lists (backward-compatible) and
-    symbolic `Vector[UInt]` indices (qkernel path).
-    """
-    if isinstance(indices, list):
-        k = len(indices)
-        if k == 0:
-            return q
-        if k == 1:
-            q[indices[0]] = qmc.rz(q[indices[0]], angle=angle)
-            return q
-        if k == 2:
-            q[indices[0]], q[indices[1]] = qmc.rzz(
-                q[indices[0]], q[indices[1]], angle=angle
-            )
-            return q
-        for step in range(k - 1):
-            q[indices[step]], q[indices[step + 1]] = qmc.cx(
-                q[indices[step]], q[indices[step + 1]]
-            )
-        q[indices[-1]] = qmc.rz(q[indices[-1]], angle=angle)
-        for step in range(k - 2, -1, -1):
-            q[indices[step]], q[indices[step + 1]] = qmc.cx(
-                q[indices[step]], q[indices[step + 1]]
-            )
-        return q
-
-    theta = angle if isinstance(angle, qmc.Float) else qmc.float_(float(angle))
-    return _apply_phase_gadget_kernel(q, indices, theta)
-
-
 @qmc.qkernel
 def hubo_ising_cost(
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
@@ -237,7 +201,7 @@ def hubo_ising_cost(
     """
     q = ising_cost(quad, linear, q, gamma)
     for indices, coeff in qmc.items(higher):
-        q = apply_phase_gadget(q, indices, coeff * gamma)
+        q = phase_gadget(q, indices, coeff * gamma)
     return q
 
 
@@ -277,6 +241,7 @@ def hubo_qaoa_layers(
     return q
 
 
+@qmc.qkernel
 def hubo_qaoa_state(
     p_val: qmc.UInt,
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],

@@ -17,11 +17,11 @@ from .fqaoa import (
     mixer_layer,
 )
 from .qaoa import (
-    apply_phase_gadget,
     hubo_ising_cost,
     hubo_qaoa_layers,
     hubo_qaoa_state,
     ising_cost,
+    phase_gadget,
     qaoa_layers,
     qaoa_state,
     superposition_vector,
@@ -30,7 +30,7 @@ from .qaoa import (
 
 __all__ = [
     # QAOA
-    "apply_phase_gadget",
+    "phase_gadget",
     "ising_cost",
     "x_mixer",
     "qaoa_layers",

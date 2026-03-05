@@ -3,9 +3,10 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.optimization.qaoa import QAOAConverter
+from qamomile.circuit.algorithm import phase_gadget
+from qamomile.circuit.transpiler.errors import QubitIndexResolutionError
 from qamomile.optimization.binary_model import BinaryExpr, BinaryModel, binary
-from qamomile.circuit.algorithm.qaoa import apply_phase_gadget
+from qamomile.optimization.qaoa import QAOAConverter
 from qamomile.qiskit.transpiler import QiskitTranspiler
 
 
@@ -187,59 +188,43 @@ def test_hubo_duplicate_indices_accumulated():
 
 
 @qmc.qkernel
-def _gadget_k0(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+def _gadget_with_indices(
+    n: qmc.UInt,
+    indices: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(n, name="q")
-    q = apply_phase_gadget(q, [], 0.5)
-    return qmc.measure(q)
-
-
-@qmc.qkernel
-def _gadget_k1(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(n, name="q")
-    q = apply_phase_gadget(q, [0], 0.5)
-    return qmc.measure(q)
-
-
-@qmc.qkernel
-def _gadget_k2(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(n, name="q")
-    q = apply_phase_gadget(q, [0, 1], 0.5)
-    return qmc.measure(q)
-
-
-@qmc.qkernel
-def _gadget_k3(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(n, name="q")
-    q = apply_phase_gadget(q, [0, 1, 2], 0.5)
-    return qmc.measure(q)
-
-
-@qmc.qkernel
-def _gadget_k5(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(n, name="q")
-    q = apply_phase_gadget(q, [0, 1, 2, 3, 4], 0.5)
+    q = phase_gadget(q, indices, qmc.float_(0.5))
     return qmc.measure(q)
 
 
 @pytest.mark.parametrize(
-    "kernel,n_qubits",
+    "indices,n_qubits",
     [
-        (_gadget_k0, 1),
-        (_gadget_k1, 1),
-        (_gadget_k2, 2),
-        (_gadget_k3, 3),
-        (_gadget_k5, 5),
+        ([0], 1),
+        ([0, 1], 2),
+        ([0, 1, 2], 3),
+        ([0, 1, 2, 3, 4], 5),
     ],
-    ids=["k=0", "k=1", "k=2", "k=3", "k=5"],
+    ids=["k=1", "k=2", "k=3", "k=5"],
 )
-def test_apply_phase_gadget_branches(kernel, n_qubits):
-    """Verify apply_phase_gadget transpiles for all k-body branch cases."""
+def test_phase_gadget_branches(indices, n_qubits):
+    """Verify phase_gadget transpiles for all k-body branch cases."""
     transpiler = QiskitTranspiler()
     executable = transpiler.transpile(
-        kernel,
-        bindings={"n": n_qubits},
+        _gadget_with_indices,
+        bindings={"n": n_qubits, "indices": indices},
     )
     assert executable is not None
+
+
+def test_phase_gadget_empty_indices_raises():
+    """Verify phase_gadget rejects empty index vectors (k=0)."""
+    transpiler = QiskitTranspiler()
+    with pytest.raises(QubitIndexResolutionError):
+        transpiler.transpile(
+            _gadget_with_indices,
+            bindings={"n": 1, "indices": []},
+        )
 
 
 def test_hubo_energy_optimization():
