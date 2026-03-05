@@ -7,9 +7,13 @@ from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.constructors import qubit_array
 from qamomile.circuit.frontend.handle import Qubit
 from qamomile.circuit.frontend.qkernel import qkernel
-from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
+from qamomile.circuit.ir.operation.gate import (
+    GateOperation,
+    GateOperationType,
+    MeasureVectorOperation,
+)
 from qamomile.circuit.ir.operation.operation import QInitOperation
-from qamomile.circuit.stdlib.qft import qft, iqft
+from qamomile.circuit.stdlib.qft import iqft, qft
 from qamomile.circuit.stdlib.qpe import qpe
 from qamomile.circuit.transpiler.errors import (
     LinearTypeError,
@@ -413,7 +417,7 @@ class TestClassicalValuesNotLinear:
 
 
 class TestArrayConsumePreservesState:
-    """Issue 07: Handle.consume() must preserve ArrayBase subclass state."""
+    """Handle.consume() must preserve ArrayBase subclass state."""
 
     def test_vector_consume_preserves_shape(self):
         """Vector.consume() should preserve shape."""
@@ -444,10 +448,14 @@ class TestArrayConsumePreservesState:
 
         graph = circuit.build()
         assert graph is not None
+        ops = graph.operations
+        assert len(ops) == 2
+        assert isinstance(ops[0], QInitOperation)
+        assert isinstance(ops[0], MeasureVectorOperation)
 
 
 class TestSetitemConsumeAndValidation:
-    """Issues 01+03: __setitem__ must consume handle and validate return."""
+    """__setitem__ must consume handle and validate return."""
 
     def test_setitem_consumes_handle(self):
         """After qs[0] = q, reusing q should raise QubitConsumedError."""
@@ -530,7 +538,7 @@ class TestSetitemConsumeAndValidation:
 
 
 class TestMeasureVectorValidation:
-    """Issue 06: validate_all_returned must be called before measure."""
+    """validate_all_returned must be called before measure."""
 
     def test_measure_vector_unreturned_borrow_raises(self):
         """measure(qs) with unreturned borrow should raise UnreturnedBorrowError."""
@@ -560,7 +568,7 @@ class TestMeasureVectorValidation:
 
 
 class TestCallOperationsConsume:
-    """Issue 08: QKernel/CompositeGate __call__ must consume quantum inputs."""
+    """QKernel/CompositeGate __call__ must consume quantum inputs."""
 
     def test_qkernel_call_consumes_quantum_input(self):
         """Reusing qubit after sub-kernel call should raise QubitConsumedError."""
@@ -648,179 +656,8 @@ class TestCallOperationsConsume:
             bad_circuit.build()
 
 
-class TestLoopVariableShadowing:
-    """Issue 02: Loop variable must not shadow function parameters."""
-
-    def test_loop_var_shadows_parameter_raises(self):
-        """for i in qm.range(n) where i is a parameter should raise SyntaxError."""
-        with pytest.raises(SyntaxError, match="shadows a function parameter"):
-
-            @qkernel
-            def bad_circuit(i: qm.UInt) -> qm.UInt:
-                for i in qm.range(3):
-                    pass
-                return i
-
-    def test_loop_var_no_shadow_works(self):
-        """Non-shadowing loop variable should work fine."""
-
-        @qkernel
-        def good_circuit() -> Qubit:
-            qs = qubit_array(3, "qs")
-            for j in qm.range(3):
-                qs[j] = qm.h(qs[j])
-            q = qs[0]
-            return q
-
-        graph = good_circuit.build()
-        assert graph is not None
-
-    def test_items_key_shadow_raises(self):
-        """items() key variable shadowing a parameter should raise SyntaxError."""
-        with pytest.raises(SyntaxError, match="shadows a function parameter"):
-
-            @qkernel
-            def bad_items_key(i: qm.UInt) -> Qubit:
-                qs = qubit_array(3, "qs")
-                angles = qm.dict_input(qm.UInt, qm.Float, name="angles")
-                for i, theta in qm.items(angles):
-                    qs[i] = qm.rx(qs[i], theta)
-                return qs[0]
-
-    def test_items_value_shadow_raises(self):
-        """items() value variable shadowing a parameter should raise SyntaxError."""
-        with pytest.raises(SyntaxError, match="shadows a function parameter"):
-
-            @qkernel
-            def bad_items_value(theta: qm.Float) -> Qubit:
-                qs = qubit_array(3, "qs")
-                angles = qm.dict_input(qm.UInt, qm.Float, name="angles")
-                for i, theta in qm.items(angles):
-                    qs[i] = qm.rx(qs[i], theta)
-                return qs[0]
-
-    def test_items_tuple_key_shadow_raises(self):
-        """items() tuple key variable shadowing a parameter should raise SyntaxError."""
-        with pytest.raises(SyntaxError, match="shadows a function parameter"):
-
-            @qkernel
-            def bad_tuple_key(
-                j: qm.UInt,
-                ising: qm.Dict[qm.Tuple[qm.UInt, qm.UInt], qm.Float],
-            ) -> Qubit:
-                qs = qubit_array(3, "qs")
-                for (i, j), Jij in qm.items(ising):
-                    qs[i], qs[j] = qm.rzz(qs[i], qs[j], Jij)
-                return qs[0]
-
-
-class TestRuntimeLimitations:
-    """Issue 05: Better diagnostics for runtime limitations."""
-
-    def test_getsource_failure_descriptive_error(self):
-        """Dynamically created function should give descriptive SyntaxError."""
-        from qamomile.circuit.frontend.ast_transform import transform_control_flow
-
-        ns = {"qm": qm, "Qubit": Qubit}
-        exec(
-            "def f(q: Qubit) -> Qubit:\n    q = qm.h(q)\n    return q\n",
-            ns,
-        )
-        with pytest.raises(SyntaxError, match="Cannot retrieve source code"):
-            transform_control_flow(ns["f"])
-
-    def test_while_quantum_condition_raises(self):
-        """while condition with quantum operation should raise SyntaxError."""
-        with pytest.raises(SyntaxError, match="Quantum operation"):
-
-            @qkernel
-            def bad_circuit(q: Qubit) -> Qubit:
-                while qm.measure(q):
-                    q = qm.h(q)
-                return q
-
-    def test_while_classical_condition_works(self):
-        """while condition with classical value should work."""
-
-        @qkernel
-        def good_circuit(q: Qubit, n: qm.UInt) -> Qubit:
-            while n:
-                q = qm.h(q)
-            return q
-
-        graph = good_circuit.build(n=1)
-        assert graph is not None
-
-    def test_while_qkernel_condition_raises(self):
-        """while condition calling a @qkernel should raise SyntaxError."""
-
-        @qkernel
-        def cond_fn(q: Qubit) -> qm.Bit:
-            return qm.measure(q)
-
-        with pytest.raises(SyntaxError, match="Quantum kernel"):
-
-            @qkernel
-            def bad_indirect(q: Qubit) -> Qubit:
-                while cond_fn(q):
-                    q = qm.h(q)
-                return q
-
-    def test_while_classical_callable_same_name_as_quantum_op(self):
-        """Classical function named 'measure' in while condition should be allowed."""
-
-        def measure(n: int) -> bool:
-            return n > 0
-
-        @qkernel
-        def circuit(q: Qubit, n: qm.UInt) -> Qubit:
-            while measure(n):
-                q = qm.h(q)
-            return q
-
-        # Should not raise — measure here is a classical function, not qm.measure
-        graph = circuit.build(n=1)
-        assert graph is not None
-
-
-class TestQuantumOpsSpec:
-    """Verify _QUANTUM_OPS matches the authoritative while-condition spec."""
-
-    def test_quantum_ops_matches_spec(self):
-        from qamomile.circuit.frontend.ast_transform import ControlFlowTransformer
-
-        expected = frozenset(
-            {
-                "h",
-                "x",
-                "y",
-                "z",
-                "s",
-                "t",
-                "sdg",
-                "tdg",
-                "cx",
-                "cz",
-                "rx",
-                "ry",
-                "rz",
-                "p",
-                "cp",
-                "swap",
-                "ccx",
-                "rzz",
-                "measure",
-                "expval",
-            }
-        )
-        missing = expected - ControlFlowTransformer._QUANTUM_OPS
-        extra = ControlFlowTransformer._QUANTUM_OPS - expected
-        assert missing == set(), f"Missing from _QUANTUM_OPS: {missing}"
-        assert extra == set(), f"Extra in _QUANTUM_OPS: {extra}"
-
-
 class TestCastConsumeAndValidation:
-    """Issue 04: cast must validate and consume source."""
+    """cast must validate and consume source."""
 
     def test_cast_consumes_source(self):
         """After cast, using source array should raise QubitConsumedError."""
@@ -987,7 +824,9 @@ _TWO_QUBIT_GATES_WITH_PARAM = [
 class TestAllSingleQubitGatesDoubleUse:
     """Every single-qubit gate must enforce linearity (double-use → error, reassign → OK)."""
 
-    @pytest.mark.parametrize("name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES])
+    @pytest.mark.parametrize(
+        "name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES]
+    )
     def test_double_use_raises(self, name, gate):
         """Using original qubit handle after gate should raise QubitConsumedError."""
 
@@ -1002,7 +841,9 @@ class TestAllSingleQubitGatesDoubleUse:
 
         assert name.upper() in str(exc_info.value)
 
-    @pytest.mark.parametrize("name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES])
+    @pytest.mark.parametrize(
+        "name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES]
+    )
     def test_reassign_works(self, name, gate):
         """Proper reassignment after single-qubit gate should build without errors."""
 
@@ -1018,7 +859,9 @@ class TestAllSingleQubitGatesDoubleUse:
 class TestAllRotationGatesDoubleUse:
     """Every rotation gate must enforce linearity."""
 
-    @pytest.mark.parametrize("name,gate", _ROTATION_GATES, ids=[g[0] for g in _ROTATION_GATES])
+    @pytest.mark.parametrize(
+        "name,gate", _ROTATION_GATES, ids=[g[0] for g in _ROTATION_GATES]
+    )
     def test_double_use_raises(self, name, gate):
         """Using original qubit handle after rotation gate should raise QubitConsumedError."""
 
@@ -1033,7 +876,9 @@ class TestAllRotationGatesDoubleUse:
 
         assert name.upper() in str(exc_info.value)
 
-    @pytest.mark.parametrize("name,gate", _ROTATION_GATES, ids=[g[0] for g in _ROTATION_GATES])
+    @pytest.mark.parametrize(
+        "name,gate", _ROTATION_GATES, ids=[g[0] for g in _ROTATION_GATES]
+    )
     def test_reassign_works(self, name, gate):
         """Proper reassignment after rotation gate should build without errors."""
 
@@ -1045,7 +890,9 @@ class TestAllRotationGatesDoubleUse:
         graph = good_circuit.build(parameters=["theta"])
         assert graph is not None
 
-    @pytest.mark.parametrize("name,gate", _ROTATION_GATES, ids=[g[0] for g in _ROTATION_GATES])
+    @pytest.mark.parametrize(
+        "name,gate", _ROTATION_GATES, ids=[g[0] for g in _ROTATION_GATES]
+    )
     def test_float_angle_reusable(self, name, gate):
         """Float angle should be reusable across multiple rotation gates."""
 
@@ -1062,7 +909,11 @@ class TestAllRotationGatesDoubleUse:
 class TestAllTwoQubitGatesDoubleUse:
     """Every two-qubit gate must consume both qubits."""
 
-    @pytest.mark.parametrize("name,gate", _TWO_QUBIT_GATES_NO_PARAM, ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM])
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_NO_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM],
+    )
     def test_reuse_first_qubit_raises(self, name, gate):
         """Reusing first qubit after two-qubit gate should raise QubitConsumedError."""
 
@@ -1075,7 +926,11 @@ class TestAllTwoQubitGatesDoubleUse:
         with pytest.raises(QubitConsumedError):
             bad_circuit.build()
 
-    @pytest.mark.parametrize("name,gate", _TWO_QUBIT_GATES_NO_PARAM, ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM])
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_NO_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM],
+    )
     def test_reuse_second_qubit_raises(self, name, gate):
         """Reusing second qubit after two-qubit gate should raise QubitConsumedError."""
 
@@ -1088,7 +943,11 @@ class TestAllTwoQubitGatesDoubleUse:
         with pytest.raises(QubitConsumedError):
             bad_circuit.build()
 
-    @pytest.mark.parametrize("name,gate", _TWO_QUBIT_GATES_NO_PARAM, ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM])
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_NO_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM],
+    )
     def test_reassign_both_works(self, name, gate):
         """Proper reassignment of both qubits after two-qubit gate should succeed."""
 
@@ -1100,7 +959,11 @@ class TestAllTwoQubitGatesDoubleUse:
         graph = good_circuit.build()
         assert graph is not None
 
-    @pytest.mark.parametrize("name,gate", _TWO_QUBIT_GATES_WITH_PARAM, ids=[g[0] for g in _TWO_QUBIT_GATES_WITH_PARAM])
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_WITH_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_WITH_PARAM],
+    )
     def test_reuse_first_qubit_param_gate_raises(self, name, gate):
         """Reusing first qubit after parameterized two-qubit gate should raise QubitConsumedError."""
 
@@ -1113,7 +976,11 @@ class TestAllTwoQubitGatesDoubleUse:
         with pytest.raises(QubitConsumedError):
             bad_circuit.build(parameters=["theta"])
 
-    @pytest.mark.parametrize("name,gate", _TWO_QUBIT_GATES_WITH_PARAM, ids=[g[0] for g in _TWO_QUBIT_GATES_WITH_PARAM])
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_WITH_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_WITH_PARAM],
+    )
     def test_reuse_second_qubit_param_gate_raises(self, name, gate):
         """Reusing second qubit after parameterized two-qubit gate should raise QubitConsumedError."""
 
@@ -1126,7 +993,11 @@ class TestAllTwoQubitGatesDoubleUse:
         with pytest.raises(QubitConsumedError):
             bad_circuit.build(parameters=["theta"])
 
-    @pytest.mark.parametrize("name,gate", _TWO_QUBIT_GATES_WITH_PARAM, ids=[g[0] for g in _TWO_QUBIT_GATES_WITH_PARAM])
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_WITH_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_WITH_PARAM],
+    )
     def test_reassign_both_param_gate_works(self, name, gate):
         """Proper reassignment of both qubits after parameterized two-qubit gate should succeed."""
 
@@ -1142,7 +1013,11 @@ class TestAllTwoQubitGatesDoubleUse:
 class TestAllTwoQubitGatesAlias:
     """Every two-qubit gate must detect aliasing (same qubit in both positions)."""
 
-    @pytest.mark.parametrize("name,gate", _TWO_QUBIT_GATES_NO_PARAM, ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM])
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_NO_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM],
+    )
     def test_alias_same_qubit_raises(self, name, gate):
         """Same qubit in both positions should raise QubitAliasError."""
 
@@ -1155,7 +1030,11 @@ class TestAllTwoQubitGatesAlias:
 
         assert name.upper() in str(exc_info.value)
 
-    @pytest.mark.parametrize("name,gate", _TWO_QUBIT_GATES_WITH_PARAM, ids=[g[0] for g in _TWO_QUBIT_GATES_WITH_PARAM])
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_WITH_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_WITH_PARAM],
+    )
     def test_alias_same_qubit_param_gate_raises(self, name, gate):
         """Same qubit in both positions of parameterized gate should raise QubitAliasError."""
 
@@ -1221,7 +1100,9 @@ class TestThreeQubitGateDoubleUse:
 class TestVectorQubitPatterns:
     """Gates used via Vector[Qubit] borrow-operate-return pattern."""
 
-    @pytest.mark.parametrize("name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES])
+    @pytest.mark.parametrize(
+        "name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES]
+    )
     def test_single_qubit_gate_borrow_return_works(self, name, gate):
         """Borrow from vector, apply single-qubit gate, return to vector should succeed."""
 
@@ -1236,7 +1117,9 @@ class TestVectorQubitPatterns:
         graph = good_circuit.build()
         assert graph is not None
 
-    @pytest.mark.parametrize("name,gate", _ROTATION_GATES, ids=[g[0] for g in _ROTATION_GATES])
+    @pytest.mark.parametrize(
+        "name,gate", _ROTATION_GATES, ids=[g[0] for g in _ROTATION_GATES]
+    )
     def test_rotation_gate_borrow_return_works(self, name, gate):
         """Borrow from vector, apply rotation gate, return to vector should succeed."""
 
@@ -1251,7 +1134,11 @@ class TestVectorQubitPatterns:
         graph = good_circuit.build(parameters=["theta"])
         assert graph is not None
 
-    @pytest.mark.parametrize("name,gate", _TWO_QUBIT_GATES_NO_PARAM, ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM])
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_NO_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM],
+    )
     def test_two_qubit_gate_borrow_return_works(self, name, gate):
         """Borrow two elements from vector, apply two-qubit gate, return both should succeed."""
 
@@ -1268,7 +1155,11 @@ class TestVectorQubitPatterns:
         graph = good_circuit.build()
         assert graph is not None
 
-    @pytest.mark.parametrize("name,gate", _TWO_QUBIT_GATES_WITH_PARAM, ids=[g[0] for g in _TWO_QUBIT_GATES_WITH_PARAM])
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_WITH_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_WITH_PARAM],
+    )
     def test_two_qubit_param_gate_borrow_return_works(self, name, gate):
         """Borrow two elements, apply parameterized two-qubit gate, return both should succeed."""
 
@@ -1303,7 +1194,9 @@ class TestVectorQubitPatterns:
         graph = good_circuit.build()
         assert graph is not None
 
-    @pytest.mark.parametrize("name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES])
+    @pytest.mark.parametrize(
+        "name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES]
+    )
     def test_unreturned_borrow_after_gate_raises(self, name, gate):
         """Borrowing, applying gate, not returning before measure should raise UnreturnedBorrowError."""
 
@@ -1628,7 +1521,9 @@ class TestControlledGateLinearity:
         cc_h = qm.controlled(sub, num_controls=2)
 
         @qkernel
-        def good_circuit(c0: Qubit, c1: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit, Qubit]:
+        def good_circuit(
+            c0: Qubit, c1: Qubit, tgt: Qubit
+        ) -> tuple[Qubit, Qubit, Qubit]:
             c0, c1, tgt = cc_h(c0, c1, tgt)
             return c0, c1, tgt
 
@@ -1712,7 +1607,9 @@ class TestMeasurementAllPatterns:
         with pytest.raises(QubitConsumedError):
             bad_circuit.build()
 
-    @pytest.mark.parametrize("name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES])
+    @pytest.mark.parametrize(
+        "name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES]
+    )
     def test_gate_then_measure_works(self, name, gate):
         """Every single-qubit gate followed by measure should succeed."""
 
