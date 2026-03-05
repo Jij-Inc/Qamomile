@@ -28,16 +28,43 @@ class CompositeGateType(enum.Enum):
 class ResourceMetadata:
     """Resource estimation metadata for composite gates.
 
+    Gate count fields mirror GateCount categories.
+
+    None semantics:
+        Fields left as None mean "unknown/unspecified". During extraction,
+        gate_counter treats None as 0, which may undercount resources if
+        the true value is nonzero. To ensure accurate resource estimates,
+        set all relevant fields explicitly.
+
+        When total_gates is set but some of single_qubit_gates,
+        two_qubit_gates, or multi_qubit_gates are None, the extractor
+        emits a UserWarning if the known sub-total is less than
+        total_gates, indicating potentially missing gate category data.
+
     Attributes:
-        query_complexity: Number of oracle/unitary queries
-        t_gate_count: Estimated T-gate count
+        query_complexity: Number of oracle/unitary queries per call.
+            Used by gate_counter to produce oracle_queries metric.
+        t_gates: Estimated T-gate count (None -> 0)
         ancilla_qubits: Number of ancilla qubits required
-        custom_metadata: Additional user-defined metadata
+        total_gates: Total number of gates. If None and sub-categories
+            are set, computed as single_qubit + two_qubit + multi_qubit.
+        single_qubit_gates: Number of single-qubit gates (None -> 0)
+        two_qubit_gates: Number of two-qubit gates (None -> 0)
+        multi_qubit_gates: Number of multi-qubit gates, 3+ qubits (None -> 0)
+        clifford_gates: Number of Clifford gates (None -> 0)
+        rotation_gates: Number of rotation gates (None -> 0)
+        custom_metadata: Additional metadata (strategy, precision, etc.)
     """
 
     query_complexity: int | None = None
-    t_gate_count: int | None = None
+    t_gates: int | None = None
     ancilla_qubits: int = 0
+    total_gates: int | None = None
+    single_qubit_gates: int | None = None
+    two_qubit_gates: int | None = None
+    multi_qubit_gates: int | None = None
+    clifford_gates: int | None = None
+    rotation_gates: int | None = None
     custom_metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 

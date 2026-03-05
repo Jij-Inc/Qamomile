@@ -137,6 +137,16 @@ def s(qubit: Qubit) -> Qubit:
     return _apply_single_qubit_gate(qubit, GateOperationType.S)
 
 
+def sdg(qubit: Qubit) -> Qubit:
+    """S-dagger gate (inverse of S gate)."""
+    return _apply_single_qubit_gate(qubit, GateOperationType.SDG)
+
+
+def tdg(qubit: Qubit) -> Qubit:
+    """T-dagger gate (inverse of T gate)."""
+    return _apply_single_qubit_gate(qubit, GateOperationType.TDG)
+
+
 def cx(control: Qubit, target: Qubit) -> tuple[Qubit, Qubit]:
     """CNOT (Controlled-X) gate."""
     return _apply_two_qubit_gate(control, target, GateOperationType.CX)

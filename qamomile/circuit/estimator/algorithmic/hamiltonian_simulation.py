@@ -12,9 +12,8 @@ from __future__ import annotations
 
 import sympy as sp
 
-from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
 from qamomile.circuit.estimator.gate_counter import GateCount
-from qamomile.circuit.estimator.depth_estimator import CircuitDepth
+from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
 
 
 def estimate_trotter(
@@ -87,7 +86,9 @@ def estimate_trotter(
     exponent_time = sp.Rational(1 + 1 / p)
     exponent_error = sp.Rational(1 / p)
 
-    num_steps = sp.Pow(h1norm * t_expr, exponent_time) / sp.Pow(eps_expr, exponent_error)
+    num_steps = sp.Pow(h1norm * t_expr, exponent_time) / sp.Pow(
+        eps_expr, exponent_error
+    )
 
     # Each step applies all L Hamiltonian terms
     # Each term typically requires O(1) to O(n) gates
@@ -96,22 +97,16 @@ def estimate_trotter(
 
     total_gates = num_steps * gates_per_step
 
-    # Depth: sequential application of all terms, all steps
-    total_depth = num_steps * L_expr
-
     return ResourceEstimate(
         qubits=n_expr,
         gates=GateCount(
             total=sp.simplify(total_gates),
             single_qubit=sp.simplify(total_gates / 2),  # Rough split
             two_qubit=sp.simplify(total_gates / 2),
+            multi_qubit=sp.Integer(0),
             t_gates=sp.Integer(0),  # Depends on decomposition
             clifford_gates=sp.Integer(0),
-        ),
-        depth=CircuitDepth(
-            total_depth=sp.simplify(total_depth),
-            t_depth=sp.Integer(0),
-            two_qubit_depth=sp.simplify(total_depth / 2),
+            rotation_gates=sp.Integer(0),
         ),
         parameters={
             str(s): s
@@ -195,13 +190,10 @@ def estimate_qsvt(
             total=sp.simplify(total_gates),
             single_qubit=sp.simplify(total_gates / 2),
             two_qubit=sp.simplify(total_gates / 2),
+            multi_qubit=sp.Integer(0),
             t_gates=sp.Integer(0),
             clifford_gates=sp.Integer(0),
-        ),
-        depth=CircuitDepth(
-            total_depth=sp.simplify(num_calls * n_expr),
-            t_depth=sp.Integer(0),
-            two_qubit_depth=sp.simplify(num_calls * n_expr / 2),
+            rotation_gates=sp.Integer(0),
         ),
         parameters={
             str(s): s
@@ -272,19 +264,17 @@ def estimate_qdrift(
     total_operations = num_samples
 
     return ResourceEstimate(
-        qubits=sp.Symbol("n"),  # Not determined by this formula
+        qubits=sp.Symbol(
+            "n", integer=True, positive=True
+        ),  # Not determined by this formula
         gates=GateCount(
             total=sp.simplify(total_operations),
             single_qubit=sp.Integer(0),  # Unknown without knowing term structure
             two_qubit=sp.Integer(0),
+            multi_qubit=sp.Integer(0),
             t_gates=sp.Integer(0),
             clifford_gates=sp.Integer(0),
-        ),
-        depth=CircuitDepth(
-            # Sequential application
-            total_depth=sp.simplify(total_operations),
-            t_depth=sp.Integer(0),
-            two_qubit_depth=sp.Integer(0),
+            rotation_gates=sp.Integer(0),
         ),
         parameters={
             str(s): s
