@@ -28,6 +28,7 @@
 
 # %%
 import math
+
 import qamomile.circuit as qm
 from qamomile.qiskit import QiskitTranspiler
 
@@ -50,6 +51,7 @@ transpiler = QiskitTranspiler()
 #
 # In other words, applying the H gate to $|0\rangle$ creates a state where $|0\rangle$ and $|1\rangle$ have equal probability.
 
+
 # %%
 @qm.qkernel
 def hadamard_circuit() -> qm.Bit:
@@ -61,6 +63,8 @@ def hadamard_circuit() -> qm.Bit:
 
     return qm.measure(q)
 
+
+hadamard_circuit.draw()
 
 # %%
 # Let's run it
@@ -99,6 +103,7 @@ print(qiskit_circuit.draw(output="text"))
 # By combining quantum gates, you can create various states.
 # What happens if we apply the H gate twice?
 
+
 # %%
 @qm.qkernel
 def double_hadamard() -> qm.Bit:
@@ -110,6 +115,8 @@ def double_hadamard() -> qm.Bit:
 
     return qm.measure(q)
 
+
+double_hadamard.draw()
 
 # %%
 executable2 = transpiler.transpile(double_hadamard)
@@ -142,6 +149,7 @@ for value, count in result2.results:
 #
 # These have the same measurement probability distribution (50/50), but they are different quantum states.
 
+
 # %%
 @qm.qkernel
 def plus_state() -> qm.Bit:
@@ -151,6 +159,10 @@ def plus_state() -> qm.Bit:
     return qm.measure(q)
 
 
+plus_state.draw()
+
+
+# %%
 @qm.qkernel
 def minus_state() -> qm.Bit:
     """Create $|-\rangle$ state"""
@@ -159,6 +171,8 @@ def minus_state() -> qm.Bit:
     q = qm.h(q)  # $|1\rangle \rightarrow |-\rangle$
     return qm.measure(q)
 
+
+minus_state.draw()
 
 # %%
 # Execute both and compare
@@ -195,6 +209,7 @@ print("\nBoth are approximately 50/50, but they are different quantum states!")
 # A qubit state can be represented as a point on a sphere called the "Bloch sphere."
 # Rotation gates rotate the state on this sphere.
 
+
 # %%
 @qm.qkernel
 def rx_circuit(theta: qm.Float) -> qm.Bit:
@@ -203,6 +218,14 @@ def rx_circuit(theta: qm.Float) -> qm.Bit:
     q = qm.rx(q, theta)  # Rotate theta around X-axis
     return qm.measure(q)
 
+
+rx_circuit.draw()
+
+# %% [markdown]
+# You can draw the circuit with a bounded parameter.
+
+# %%
+rx_circuit.draw(theta=math.pi / 4)
 
 # %%
 # Let's run with different angles
@@ -235,6 +258,7 @@ for angle, name in zip(angles, angle_names):
 # In Qamomile, you can treat parameters as variables and specify values at execution time.
 # This is an important feature for Variational Quantum Algorithms (VQA).
 
+
 # %%
 @qm.qkernel
 def parameterized_circuit(theta: qm.Float, phi: qm.Float) -> qm.Bit:
@@ -242,9 +266,18 @@ def parameterized_circuit(theta: qm.Float, phi: qm.Float) -> qm.Bit:
     q = qm.qubit(name="q")
 
     q = qm.ry(q, theta)  # Y-axis rotation
-    q = qm.rz(q, phi)    # Z-axis rotation
+    q = qm.rz(q, phi)  # Z-axis rotation
 
     return qm.measure(q)
+
+
+parameterized_circuit.draw()
+
+# %% [markdown]
+# You can assing one parameter and let the other symbolic.
+
+# %%
+parameterized_circuit.draw(theta=math.pi / 4)
 
 
 # %%
@@ -252,7 +285,7 @@ def parameterized_circuit(theta: qm.Float, phi: qm.Float) -> qm.Bit:
 # parameters: list of parameter names that can be changed at runtime
 executable_param = transpiler.transpile(
     parameterized_circuit,
-    parameters=["theta", "phi"]  # These values will be specified later
+    parameters=["theta", "phi"],  # These values will be specified later
 )
 
 # Execute with different parameters
@@ -266,9 +299,7 @@ print("=== Parameterized Circuit Execution ===\n")
 
 for params in params_list:
     result = executable_param.sample(
-        transpiler.executor(),
-        bindings=params,
-        shots=1000
+        transpiler.executor(), bindings=params, shots=1000
     ).result()
 
     print(f"theta={params['theta']:.2f}, phi={params['phi']:.2f}:")
@@ -286,18 +317,21 @@ for params in params_list:
 #
 # Phase doesn't directly affect measurement results, but it plays an important role in quantum interference.
 
+
 # %%
 @qm.qkernel
 def phase_example() -> qm.Bit:
     """Phase gate example"""
     q = qm.qubit(name="q")
 
-    q = qm.h(q)           # Create superposition
+    q = qm.h(q)  # Create superposition
     q = qm.p(q, math.pi)  # Add phase π to $|1\rangle$ (sign flip)
-    q = qm.h(q)           # Interfere
+    q = qm.h(q)  # Interfere
 
     return qm.measure(q)
 
+
+phase_example.draw()
 
 # %%
 exec_phase = transpiler.transpile(phase_example)
@@ -322,8 +356,7 @@ for value, count in result_phase.results:
 
 # %%
 qiskit_param = transpiler.to_circuit(
-    parameterized_circuit,
-    bindings={"theta": math.pi / 4, "phi": math.pi / 2}
+    parameterized_circuit, bindings={"theta": math.pi / 4, "phi": math.pi / 2}
 )
 print("=== Parameterized Circuit Structure ===")
 print(qiskit_param.draw(output="text"))

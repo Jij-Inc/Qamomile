@@ -25,6 +25,10 @@ project:
         - file: tutorial/04_algorithms
         - file: tutorial/qpe
         - file: tutorial/qaoa
+    - title: 最適化
+      children:
+        - file: optimization/qaoa
+        - file: optimization/fqaoa
     - title: トランスパイル
       children:
         - file: transpile/transpile_flow
