@@ -175,11 +175,13 @@ class TestUnpackQubitsNumElements:
             a, b, c = qmc.unpack_qubits(packed, num_unpacked=3, num_elements=[3, 1, 3])
 
             assert a.value.params["element_uuids"] == ["q0", "q1", "q2"]
-            assert b.value.params["element_uuids"] == ["q3"]
+            assert isinstance(b, qmc.Qubit)
+            assert b.value.parent_array is not None
+            assert b.value.parent_array.params["element_uuids"] == ["q3"]
             assert c.value.params["element_uuids"] == ["q4", "q5", "q6"]
 
-    def test_singleton_segment_returns_vector(self):
-        """Even size-1 segments return Vector[Qubit], not Qubit."""
+    def test_singleton_segment_returns_qubit(self):
+        """Size-1 num_elements segments should return Qubit."""
         from qamomile.circuit.ir.value import Value, ArrayValue
         from qamomile.circuit.ir.types.primitives import QubitType, UIntType
         from qamomile.circuit.frontend.handle.array import Vector
@@ -198,10 +200,12 @@ class TestUnpackQubitsNumElements:
             packed = Vector._create_from_value(value=arr, shape=(2,), name="p")
             a, b = qmc.unpack_qubits(packed, num_unpacked=2, num_elements=[1, 1])
 
-            assert isinstance(a, Vector)
-            assert isinstance(b, Vector)
-            assert a.shape == (1,)
-            assert b.shape == (1,)
+            assert isinstance(a, qmc.Qubit)
+            assert isinstance(b, qmc.Qubit)
+            assert a.value.parent_array is not None
+            assert b.value.parent_array is not None
+            assert a.value.parent_array.params["element_uuids"] == ["a"]
+            assert b.value.parent_array.params["element_uuids"] == ["b"]
 
 
 class TestUnpackQubitsIndices:
@@ -280,10 +284,12 @@ class TestUnpackQubitsNoElementUuids:
 
             # Derived element_uuids should use {source_uuid}_{i}
             assert len(a.value.params["element_uuids"]) == 3
-            assert len(b.value.params["element_uuids"]) == 1
             assert a.value.params["element_uuids"][0] == f"{arr.uuid}_0"
             assert a.value.params["element_uuids"][2] == f"{arr.uuid}_2"
-            assert b.value.params["element_uuids"][0] == f"{arr.uuid}_3"
+            assert isinstance(b, qmc.Qubit)
+            assert b.value.parent_array is not None
+            assert len(b.value.parent_array.params["element_uuids"]) == 1
+            assert b.value.parent_array.params["element_uuids"][0] == f"{arr.uuid}_3"
 
     def test_derives_logical_ids_from_source(self):
         """Derived element_logical_ids should use source logical_id."""
@@ -331,8 +337,10 @@ class TestUnpackQubitsSymbolic:
             assert "split_spec" in a.value.params
             assert a.value.params["split_spec"]["mode"] == "num_elements"
             assert a.value.params["split_spec"]["group_index"] == 0
-            assert "split_spec" in b.value.params
-            assert b.value.params["split_spec"]["group_index"] == 1
+            assert isinstance(b, qmc.Qubit)
+            assert b.value.parent_array is not None
+            assert "split_spec" in b.value.parent_array.params
+            assert b.value.parent_array.params["split_spec"]["group_index"] == 1
 
     def test_mixed_symbolic_concrete_num_elements(self):
         """Mix of symbolic and concrete entries in num_elements."""
@@ -354,9 +362,9 @@ class TestUnpackQubitsSymbolic:
             a, b = qmc.unpack_qubits(vec, num_unpacked=2, num_elements=[n - 1, 1])
 
             # Concrete entry (1) still goes through symbolic path
-            assert "split_spec" in b.value.params
-            # b's shape should be concrete 1
-            assert b.shape == (1,)
+            assert isinstance(b, qmc.Qubit)
+            assert b.value.parent_array is not None
+            assert "split_spec" in b.value.parent_array.params
 
     def test_symbolic_does_not_call_range(self):
         """Symbolic path should not produce element_uuids (no range() call)."""
@@ -378,7 +386,9 @@ class TestUnpackQubitsSymbolic:
 
             # Should NOT have element_uuids in symbolic path
             assert "element_uuids" not in a.value.params
-            assert "element_uuids" not in b.value.params
+            assert isinstance(b, qmc.Qubit)
+            assert b.value.parent_array is not None
+            assert "element_uuids" not in b.value.parent_array.params
 
     def test_concrete_int_negative_rejected_in_symbolic_mode(self):
         """Concrete int < 1 in num_elements should be rejected even in symbolic mode."""
@@ -451,10 +461,8 @@ class TestPackUnpackE2E:
         def k(q0: qmc.Qubit, q1: qmc.Qubit, q2: qmc.Qubit) -> qmc.Vector[qmc.Qubit]:
             packed = qmc.pack_qubits(q0, q1, q2)
             a, b = qmc.unpack_qubits(packed, num_unpacked=2, num_elements=[2, 1])
-            # Apply gate to unpacked sub-vector element
-            q = b[0]
-            q = qmc.h(q)
-            b[0] = q
+            # Apply gate to singleton output
+            b = qmc.h(b)
             # Repack for return
             result = qmc.pack_qubits(a, b)
             return result

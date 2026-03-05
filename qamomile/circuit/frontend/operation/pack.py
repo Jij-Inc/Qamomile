@@ -70,6 +70,16 @@ def _get_root_source_logical_id(item: Qubit | ArrayBase) -> str | None:
     return None
 
 
+def _scalarize_singleton_group(
+    group: Vector[Qubit],
+    requested_size: int | UIntHandle | Value | None,
+) -> Qubit | Vector[Qubit]:
+    """Return Qubit when num_elements explicitly requests a singleton group."""
+    if isinstance(requested_size, int) and requested_size == 1:
+        return group[0]
+    return group
+
+
 def pack_qubits(*items: Qubit | Vector[Qubit]) -> Vector[Qubit]:
     """Pack individual qubits and/or qubit vectors into one vector.
 
@@ -217,7 +227,7 @@ def unpack_qubits(
     num_unpacked: int,
     num_elements: list[int | UIntHandle] | None = None,
     indices: list[list[int]] | None = None,
-) -> tuple[Vector[Qubit], ...]:
+) -> tuple[Qubit | Vector[Qubit], ...]:
     """Split a packed qubit vector into multiple sub-vectors.
 
     Exactly one of ``num_elements`` or ``indices`` must be provided.
@@ -240,7 +250,9 @@ def unpack_qubits(
             Requires a concrete-size vector.  All values must be ``int``.
 
     Returns:
-        A tuple of ``Vector[Qubit]`` handles, one per group.
+        A tuple of group handles. Each group is a ``Vector[Qubit]`` by default.
+        When ``num_elements`` explicitly specifies ``1`` for a group, that group
+        is returned as ``Qubit``.
 
     Raises:
         TypeError: If ``packed`` is not a ``Vector[Qubit]``, or if
@@ -369,7 +381,7 @@ def unpack_qubits(
     packed.consume("unpack_qubits")
 
     # --- Build output sub-vectors ---
-    results: list[Vector[Qubit]] = []
+    results: list[Qubit | Vector[Qubit]] = []
 
     if symbolic_mode:
         assert num_elements is not None
@@ -419,13 +431,12 @@ def unpack_qubits(
                     },
                 },
             )
-            results.append(
-                Vector._create_from_value(
-                    value=group_value,
-                    shape=(frontend_shape,),
-                    name=f"unpacked_{group_idx}",
-                )
+            group_vector = Vector._create_from_value(
+                value=group_value,
+                shape=(frontend_shape,),
+                name=f"unpacked_{group_idx}",
             )
+            results.append(_scalarize_singleton_group(group_vector, n_expr))
     else:
         # Concrete path
         assert resolved_indices is not None
@@ -450,12 +461,14 @@ def unpack_qubits(
                     "element_logical_ids": group_logical_ids,
                 },
             )
-            results.append(
-                Vector._create_from_value(
-                    value=group_value,
-                    shape=(group_size,),
-                    name=f"unpacked_{group_idx}",
-                )
+            group_vector = Vector._create_from_value(
+                value=group_value,
+                shape=(group_size,),
+                name=f"unpacked_{group_idx}",
             )
+            requested_size = (
+                num_elements[group_idx] if num_elements is not None else None
+            )
+            results.append(_scalarize_singleton_group(group_vector, requested_size))
 
     return tuple(results)
