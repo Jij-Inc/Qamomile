@@ -5,6 +5,11 @@ import pytest
 import qamomile.circuit as qm
 from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
 from qamomile.circuit.visualization.style import DEFAULT_STYLE
+from qamomile.circuit.visualization.visual_ir import (
+    VFoldedBlock,
+    VInlineBlock,
+    VUnfoldedSequence,
+)
 
 
 class TestFormatSymbolicParam:
@@ -158,3 +163,184 @@ class TestDictParamSymbolicDraw:
 
         fig = items_demo.draw(n_qubits=3)
         assert fig is not None
+
+
+class TestFreshQubitReturnCallBlock:
+    """Regression: CallBlock returning fresh qubits should not crash draw()."""
+
+    def test_draw_callblock_fresh_qubit_array_return(self):
+        """superposition_vector(n) returns fresh qubits - draw should not crash."""
+        from qamomile.circuit.algorithm.qaoa import superposition_vector
+
+        @qm.qkernel
+        def demo(n: int) -> qm.Vector[qm.Bit]:
+            q = superposition_vector(n)
+            return qm.measure(q)
+
+        graph = demo._build_graph_for_visualization(n=3)
+        analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE)
+        qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+        assert num_q == 3
+
+    def test_draw_callblock_pass_through_qubit_still_works(self):
+        """Existing pass-through CallBlock must not regress."""
+
+        @qm.qkernel
+        def identity(q: qm.Qubit) -> qm.Qubit:
+            return q
+
+        @qm.qkernel
+        def demo() -> qm.Bit:
+            q = qm.qubit(name="q")
+            q = identity(q)
+            return qm.measure(q)
+
+        graph = demo._build_graph_for_visualization()
+        analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE)
+        qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+        assert num_q == 1
+
+
+class TestQPEPowerResolution:
+    """Regression: ControlledU power=2**k should resolve per iteration."""
+
+    def test_inline_unfolded_qpe_power_values(self):
+        """QPE inline unfolded: oracle power should be 1, 2, 4 for 3 counting qubits."""
+
+        @qm.qkernel
+        def oracle(q: qm.Qubit, phi: float) -> qm.Qubit:
+            return qm.p(q, phi)
+
+        @qm.qkernel
+        def qpe_circuit(phase: float) -> qm.Float:
+            counting = qm.qubit_array(3, name="cnt")
+            target = qm.qubit(name="tgt")
+            target = qm.x(target)
+            result: qm.QFixed = qm.qpe(target, counting, oracle, phi=phase)
+            return qm.measure(result)
+
+        graph = qpe_circuit._build_graph_for_visualization(phase=0.25)
+        analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=True, fold_loops=False)
+        qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+        vc = analyzer.build_visual_ir(graph, qm_map, qm_names, num_q)
+
+        # Find unfolded sequence containing controlled-U blocks
+        powers = []
+        for node in vc.children:
+            if isinstance(node, VUnfoldedSequence):
+                for iteration in node.iterations:
+                    for child in iteration:
+                        if isinstance(child, VInlineBlock) and child.power >= 1:
+                            powers.append(child.power)
+        assert powers == [1, 2, 4], f"Expected [1, 2, 4], got {powers}"
+
+
+class TestFoldedForCompositeGate:
+    """Regression: Folded for with CompositeGateOperation should have body_lines."""
+
+    def test_folded_for_with_composite_gate_has_body(self):
+        """Folded for containing stub composite gate should show body expression."""
+
+        @qm.composite_gate(stub=True, name="oracle", num_qubits=2)
+        def oracle():
+            pass
+
+        @qm.qkernel
+        def circuit() -> qm.Vector[qm.Bit]:
+            q = qm.qubit_array(2, name="q")
+            for i in qm.range(2):
+                q[0], q[1] = oracle(q[0], q[1])
+            return qm.measure(q)
+
+        graph = circuit._build_graph_for_visualization()
+        analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=False, fold_loops=True)
+        qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+        vc = analyzer.build_visual_ir(graph, qm_map, qm_names, num_q)
+
+        folded_blocks = [n for n in vc.children if isinstance(n, VFoldedBlock)]
+        assert len(folded_blocks) >= 1
+        for block in folded_blocks:
+            if "oracle" in str(block.body_lines):
+                assert len(block.body_lines) > 0, "body_lines should not be empty"
+                assert any("oracle" in line for line in block.body_lines)
+                return
+        # If no oracle-containing block found, assert fails
+        assert False, "No folded block with oracle body found"
+
+
+class TestFoldedCallBlockSymbolicTex:
+    """Regression: Folded CallBlock params should use TeX formatting."""
+
+    def test_folded_callblock_param_has_tex(self):
+        """Folded for + nested CallBlock: symbolic param should be TeX-formatted."""
+
+        @qm.qkernel
+        def rotate(q: qm.Qubit, omega: qm.Float) -> qm.Qubit:
+            q = qm.rx(q, omega)
+            return q
+
+        @qm.qkernel
+        def circuit(n: int, omegas: qm.Vector[qm.Float]) -> qm.Vector[qm.Qubit]:
+            q = qm.qubit_array(n, name="q")
+            for i in qm.range(n):
+                q[i] = rotate(q[i], omegas[i])
+            return q
+
+        graph = circuit._build_graph_for_visualization(n=3)
+        analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=False, fold_loops=True)
+        qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+        vc = analyzer.build_visual_ir(graph, qm_map, qm_names, num_q)
+
+        folded_blocks = [n for n in vc.children if isinstance(n, VFoldedBlock)]
+        assert len(folded_blocks) >= 1
+        # Body lines should contain TeX omega, not raw "omegas[i]"
+        for block in folded_blocks:
+            for line in block.body_lines:
+                if "rotate" in line:
+                    assert "omegas[i]" not in line, (
+                        f"Raw string 'omegas[i]' found in body line: {line}"
+                    )
+                    return
+        assert False, "No folded block with rotate body found"
+
+
+class TestInlineUnfoldedCallBlockArrayIndex:
+    """Regression: Inlined CallBlock array params should resolve per iteration."""
+
+    def test_inline_unfolded_array_index_resolved_per_iteration(self):
+        """Inlined CallBlock: omegas[i] should resolve to omegas[0/1/2]."""
+
+        @qm.qkernel
+        def rotate(q: qm.Qubit, omega: qm.Float) -> qm.Qubit:
+            q = qm.rx(q, omega)
+            return q
+
+        @qm.qkernel
+        def circuit(n: int, omegas: qm.Vector[qm.Float]) -> qm.Vector[qm.Qubit]:
+            q = qm.qubit_array(n, name="q")
+            for i in qm.range(n):
+                q[i] = rotate(q[i], omegas[i])
+            return q
+
+        graph = circuit._build_graph_for_visualization(n=3)
+        analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=True, fold_loops=False)
+        qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+        vc = analyzer.build_visual_ir(graph, qm_map, qm_names, num_q)
+
+        # Collect gate labels from unfolded iterations
+        gate_labels: list[str] = []
+        for node in vc.children:
+            if isinstance(node, VUnfoldedSequence):
+                for iteration in node.iterations:
+                    for child in iteration:
+                        if isinstance(child, VInlineBlock):
+                            for grandchild in child.children:
+                                if hasattr(grandchild, "label"):
+                                    gate_labels.append(grandchild.label)
+
+        # Labels should NOT all be identical (index should vary per iteration)
+        if len(gate_labels) >= 2:
+            assert len(set(gate_labels)) > 1, (
+                f"All gate labels are identical: {gate_labels}. "
+                f"Array index should resolve per iteration."
+            )

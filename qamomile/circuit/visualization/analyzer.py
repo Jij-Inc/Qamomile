@@ -121,7 +121,7 @@ class CircuitAnalyzer:
                 param_values: Parameter values for resolving symbolic indices.
             """
             nonlocal next_idx
-            for operand, result in zip(operands, results, strict=True):
+            for operand, result in zip(operands, results):
                 if not isinstance(result.type, QubitType):
                     continue
                 lid = self._resolve_array_element_lid(
@@ -290,6 +290,58 @@ class CircuitAnalyzer:
                     map_block_results(
                         qubit_operands, qubit_results, logical_id_remap, param_values
                     )
+
+                    # Handle fresh-return qubits (results with no corresponding operand)
+                    for fresh_result in qubit_results[len(qubit_operands) :]:
+                        if fresh_result.logical_id in qubit_map:
+                            continue
+                        if isinstance(fresh_result, ArrayValue):
+                            # Resolve array shape using block param mapping
+                            block_value = op.operands[0]
+                            fresh_pv = dict(param_values) if param_values else {}
+                            for dummy, actual in zip(
+                                block_value.input_values, op.operands[1:]
+                            ):
+                                c = actual.get_const()
+                                if c is not None:
+                                    fresh_pv[dummy.logical_id] = c
+                                elif param_values and actual.logical_id in param_values:
+                                    fresh_pv[dummy.logical_id] = param_values[
+                                        actual.logical_id
+                                    ]
+                            if fresh_result.shape:
+                                dim_val = fresh_result.shape[0]
+                                size = None
+                                c = dim_val.get_const()
+                                if c is not None:
+                                    size = int(c)
+                                elif dim_val.logical_id in fresh_pv:
+                                    pv = fresh_pv[dim_val.logical_id]
+                                    if isinstance(pv, (int, float)):
+                                        size = int(pv)
+                                if size is not None:
+                                    for i in range(size):
+                                        ek = f"{fresh_result.logical_id}_[{i}]"
+                                        if ek not in qubit_map:
+                                            qubit_map[ek] = next_idx
+                                            name = fresh_result.name or "q"
+                                            qubit_names[next_idx] = f"{name}[{i}]"
+                                            next_idx += 1
+                                    qubit_map[fresh_result.logical_id] = qubit_map.get(
+                                        f"{fresh_result.logical_id}_[0]",
+                                        next_idx,
+                                    )
+                                else:
+                                    raise ValueError(
+                                        f"Cannot visualize circuit: fresh-return "
+                                        f"qubit array '{fresh_result.name}' has "
+                                        f"symbolic size. Please provide concrete "
+                                        f"values for all size parameters."
+                                    )
+                        else:
+                            qubit_map[fresh_result.logical_id] = next_idx
+                            qubit_names[next_idx] = fresh_result.name or f"q{next_idx}"
+                            next_idx += 1
 
                 elif isinstance(op, CastOperation):
                     assert op.operands and op.results, (
@@ -749,16 +801,8 @@ class CircuitAnalyzer:
 
         if isinstance(op, ControlledUOperation):
             u_name = getattr(op.block, "name", "U") or "U"
-            power_val = (
-                op.power
-                if isinstance(op.power, int)
-                else getattr(op.power, "init_value", op.power)
-            )
-            label = (
-                f"{u_name}^{power_val}"
-                if isinstance(power_val, int) and power_val > 1
-                else u_name
-            )
+            power_val = self._resolve_controlled_u_power(op, param_values)
+            label = f"{u_name}^{power_val}" if power_val > 1 else u_name
             box_width = self._estimate_label_box_width(label)
             # Control qubits first, then target qubits
             control_indices: list[int] = []
@@ -857,11 +901,6 @@ class CircuitAnalyzer:
                     affected_qubits.append(idx)
             actual_inputs = list(op.target_operands)
             u_name = getattr(block_value, "name", "U") or "U"
-            power_val = (
-                op.power
-                if isinstance(op.power, int)
-                else getattr(op.power, "init_value", op.power)
-            )
             block_name = u_name
         elif isinstance(op, CompositeGateOperation):
             block_value = op.implementation
@@ -922,10 +961,8 @@ class CircuitAnalyzer:
             children, max_gate_width, depth
         )
         power = (
-            power_val
+            self._resolve_controlled_u_power(op, param_values)
             if isinstance(op, ControlledUOperation)
-            and isinstance(power_val, int)
-            and power_val > 1
             else 1
         )
         # Inner box label width (block name only, no power text)
@@ -1626,6 +1663,34 @@ class CircuitAnalyzer:
         collect_qubits(op.false_operations)
         return list(affected)
 
+    def _resolve_controlled_u_power(
+        self,
+        op: ControlledUOperation,
+        param_values: dict,
+    ) -> int:
+        """Resolve ControlledUOperation.power to a concrete integer.
+
+        Handles int literals, Value expressions (e.g., 2**k from QPE),
+        and init_value fallback.
+
+        Args:
+            op: ControlledUOperation whose power to resolve.
+            param_values: Parameter values for evaluating Value expressions.
+
+        Returns:
+            Resolved power as int (minimum 1).
+        """
+        if isinstance(op.power, int):
+            return op.power
+        if isinstance(op.power, Value):
+            evaluated = self._evaluate_value(op.power, param_values)
+            if isinstance(evaluated, (int, float)):
+                return int(evaluated)
+            init = getattr(op.power, "init_value", None)
+            if isinstance(init, int):
+                return init
+        return 1
+
     def _evaluate_value(
         self,
         value: Value,
@@ -2294,6 +2359,26 @@ class CircuitAnalyzer:
                         )
                 else:
                     child_param_values[dummy_input.logical_id] = pv
+            elif (
+                hasattr(actual_input, "parent_array")
+                and actual_input.parent_array is not None
+                and not isinstance(actual_input.type, QubitType)
+            ):
+                # Non-qubit array element not in param_values:
+                # try evaluating or resolving symbolic name
+                evaluated = self._evaluate_value(actual_input, param_values)
+                if evaluated is not None and isinstance(evaluated, (int, float)):
+                    child_param_values[dummy_input.logical_id] = evaluated
+                else:
+                    resolved = self._resolve_symbolic_array_name(
+                        actual_input, param_values
+                    )
+                    if resolved is not None:
+                        child_param_values[dummy_input.logical_id] = resolved
+                    elif actual_input.is_parameter():
+                        child_param_values[dummy_input.logical_id] = (
+                            actual_input.parameter_name() or actual_input.name
+                        )
             elif actual_input.is_parameter():
                 child_param_values[dummy_input.logical_id] = (
                     actual_input.parameter_name() or actual_input.name
@@ -2513,6 +2598,46 @@ class CircuitAnalyzer:
 
         return None
 
+    def _format_param_for_expression(
+        self,
+        operand: Value,
+        loop_vars: set[str],
+        param_values: dict | None = None,
+        body_operations: list | None = None,
+    ) -> str | None:
+        """Format a non-qubit parameter operand for folded body expressions.
+
+        Applies numeric evaluation and TeX symbolic formatting consistently
+        for CallBlockOperation, ControlledUOperation, and CompositeGateOperation
+        expression branches.
+
+        Args:
+            operand: Non-qubit Value to format.
+            loop_vars: Loop variable names in scope.
+            param_values: Parameter values for evaluation.
+            body_operations: Operations list for BinOp resolution.
+
+        Returns:
+            Formatted string (possibly TeX), or None if unresolvable.
+        """
+        # Try numeric evaluation first
+        if param_values is not None:
+            evaluated = self._evaluate_value(operand, param_values, body_operations)
+            if evaluated is not None and isinstance(evaluated, (int, float)):
+                return self._format_parameter(evaluated)
+
+        # Array element: resolve index and apply TeX formatting
+        if hasattr(operand, "parent_array") and operand.parent_array is not None:
+            arr = operand.parent_array.name or "params"
+            idx = self._resolve_index_expression(operand, loop_vars, body_operations)
+            return self._format_symbolic_param(f"{arr}[{idx}]")
+
+        # Named parameter: apply TeX formatting
+        if hasattr(operand, "name") and operand.name:
+            return self._format_symbolic_param(operand.name)
+
+        return None
+
     def _format_operation_as_expression(
         self,
         op: Operation,
@@ -2596,24 +2721,27 @@ class CircuitAnalyzer:
             qubit_parts: list[str] = []
             param_parts: list[str] = []
             for operand in op.operands[1:]:
-                s = None
-                if (
-                    hasattr(operand, "parent_array")
-                    and operand.parent_array is not None
-                ):
-                    arr = operand.parent_array.name or "qubits"
-                    idx = self._resolve_index_expression(
-                        operand, loop_vars, body_operations
-                    )
-                    s = f"{arr}[{idx}]"
-                elif hasattr(operand, "name") and operand.name:
-                    s = operand.name
-                if s is None:
-                    continue
                 if isinstance(operand.type, QubitType):
-                    qubit_parts.append(s)
+                    s = None
+                    if (
+                        hasattr(operand, "parent_array")
+                        and operand.parent_array is not None
+                    ):
+                        arr = operand.parent_array.name or "qubits"
+                        idx = self._resolve_index_expression(
+                            operand, loop_vars, body_operations
+                        )
+                        s = f"{arr}[{idx}]"
+                    elif hasattr(operand, "name") and operand.name:
+                        s = operand.name
+                    if s is not None:
+                        qubit_parts.append(s)
                 else:
-                    param_parts.append(s)
+                    s = self._format_param_for_expression(
+                        operand, loop_vars, param_values, body_operations
+                    )
+                    if s is not None:
+                        param_parts.append(s)
 
             if not qubit_parts:
                 return f"{prefix}{block_name}(...)"
@@ -2627,7 +2755,7 @@ class CircuitAnalyzer:
                 block_value.name if isinstance(block_value, BlockValue) else "U"
             ) or "U"
 
-            def _operand_str(v: Value) -> str | None:
+            def _qubit_str(v: Value) -> str | None:
                 if hasattr(v, "parent_array") and v.parent_array is not None:
                     arr = v.parent_array.name or "qubits"
                     idx = self._resolve_index_expression(v, loop_vars, body_operations)
@@ -2640,14 +2768,47 @@ class CircuitAnalyzer:
             qubit_parts = [
                 s
                 for v in all_operands
-                if isinstance(v.type, QubitType) and (s := _operand_str(v)) is not None
+                if isinstance(v.type, QubitType) and (s := _qubit_str(v)) is not None
             ]
             param_parts = [
                 s
                 for v in all_operands
                 if not isinstance(v.type, QubitType)
-                and (s := _operand_str(v)) is not None
+                and (
+                    s := self._format_param_for_expression(
+                        v, loop_vars, param_values, body_operations
+                    )
+                )
+                is not None
             ]
+            if not qubit_parts:
+                return f"{prefix}{block_name}(...)"
+            result_str = ",".join(qubit_parts)
+            args_str = ",".join(qubit_parts + param_parts)
+            return f"{prefix}{result_str} = {block_name}({args_str})"
+
+        elif isinstance(op, CompositeGateOperation):
+            block_name = op.name or "composite"
+            qubit_parts: list[str] = []
+            param_parts: list[str] = []
+            for qval in list(op.control_qubits) + list(op.target_qubits):
+                s = None
+                if hasattr(qval, "parent_array") and qval.parent_array is not None:
+                    arr = qval.parent_array.name or "qubits"
+                    idx = self._resolve_index_expression(
+                        qval, loop_vars, body_operations
+                    )
+                    s = f"{arr}[{idx}]"
+                elif hasattr(qval, "name") and qval.name:
+                    s = qval.name
+                if s is not None:
+                    qubit_parts.append(s)
+            for pval in op.parameters:
+                s = self._format_param_for_expression(
+                    pval, loop_vars, param_values, body_operations
+                )
+                if s is not None:
+                    param_parts.append(s)
             if not qubit_parts:
                 return f"{prefix}{block_name}(...)"
             result_str = ",".join(qubit_parts)
