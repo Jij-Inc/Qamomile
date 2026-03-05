@@ -91,7 +91,7 @@ def qpe(phase: float) -> qmc.Vector[qmc.Bit]:
         phase_register[i], target = controlled_phase_gate(
             phase_register[i], target, theta=phase, iter=2**i
         )
-    iqft(phase_register)
+    phase_register = iqft(phase_register)
 
     bits = qmc.measure(phase_register)
 
