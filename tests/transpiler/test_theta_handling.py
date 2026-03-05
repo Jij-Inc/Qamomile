@@ -8,8 +8,6 @@ These tests verify that theta is correctly propagated through each pass.
 
 from __future__ import annotations
 
-import dataclasses
-
 import pytest
 
 from qamomile.circuit.ir.block import Block, BlockKind
