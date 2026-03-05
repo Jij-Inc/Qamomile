@@ -1,14 +1,23 @@
-"""Tests for emit_base pass — LoopAnalyzer BinOp dependency detection.
+"""Tests for emit_base pass — ResourceAllocator phi_ops & LoopAnalyzer.
 
-These tests verify that ``LoopAnalyzer.should_unroll`` correctly identifies
-``ForOperation`` loops containing BinOps that depend on the loop variable
-(directly or inside nested control-flow), and that theta array-element
-access referencing the loop variable triggers unrolling.
+Section 1: ResourceAllocator phi_ops allocation (Bug #6).
+    ResourceAllocator._allocate_recursive() calls _allocate_phi_ops()
+    after processing IfOperation branches.  _allocate_phi_ops() delegates
+    to the shared map_phi_outputs() utility which:
+    - Maps scalar QubitType phi outputs to the same physical qubit as
+      the branch source value.
+    - Copies composite element keys ``{source_uuid}_{i}`` →
+      ``{output_uuid}_{i}`` for ArrayValue phi outputs.
+    - Maps scalar BitType phi outputs to the same classical bit index.
 
-The second section contains integration tests that verify UInt BinOp
-operations (``//``, ``**``) are correctly folded by the constant folding
-pass so that the resulting constant can be used as a ``qmc.range`` argument
-for loop unrolling in the emit pass.
+Section 2: LoopAnalyzer BinOp dependency detection.
+    LoopAnalyzer.should_unroll correctly identifies ForOperation loops
+    containing BinOps that depend on the loop variable (directly or
+    inside nested control-flow), and theta array-element access
+    referencing the loop variable triggers unrolling.
+
+Section 3: Integration tests for UInt BinOp (``//``, ``**``) folding
+    into loop bounds via the constant folding pass.
 """
 
 from typing import Any, TYPE_CHECKING
@@ -17,7 +26,11 @@ import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
-from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOp,
+    BinOpKind,
+    PhiOp,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
@@ -27,14 +40,48 @@ from qamomile.circuit.ir.operation.control_flow import (
 from qamomile.circuit.ir.operation.gate import (
     GateOperation,
     GateOperationType,
+    MeasureOperation,
 )
-from qamomile.circuit.ir.types.primitives import FloatType, QubitType, UIntType
+from qamomile.circuit.ir.operation.operation import QInitOperation
+from qamomile.circuit.ir.types.primitives import (
+    BitType,
+    FloatType,
+    QubitType,
+    UIntType,
+)
 from qamomile.circuit.ir.value import ArrayValue, Value
-from qamomile.circuit.transpiler.passes.emit_base import LoopAnalyzer
+from qamomile.circuit.transpiler.passes.emit_base import (
+    LoopAnalyzer,
+    ResourceAllocator,
+)
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Helpers — phi_ops tests
+# ---------------------------------------------------------------------------
+
+
+def _make_value(name: str, type_cls: type = UIntType) -> Value:
+    """Create a simple Value with the given name and type."""
+    return Value(type=type_cls(), name=name)
+
+
+def _make_const_value(name: str, const: int | float, type_cls: type = UIntType) -> Value:
+    """Create a constant Value with a ``const`` param entry."""
+    return Value(type=type_cls(), name=name, params={"const": const})
+
+
+def _make_array_value(
+    name: str,
+    shape_vals: tuple[Value, ...] = (),
+    type_cls: type = QubitType,
+) -> ArrayValue:
+    """Create an ArrayValue with the given shape dimension Values."""
+    return ArrayValue(type=type_cls(), name=name, shape=shape_vals)
+
+
+# ---------------------------------------------------------------------------
+# Helpers — LoopAnalyzer tests
 # ---------------------------------------------------------------------------
 
 
@@ -91,6 +138,372 @@ def _make_gate(
         gate_type=gate_type,
         theta=theta,
     )
+
+
+# ===========================================================================
+# Bug #6: Phi output allocation
+# ===========================================================================
+
+
+class TestPhiOpsAllocation:
+    """Tests that ResourceAllocator processes phi_ops for IfOperation."""
+
+    def test_phi_output_qubit_is_allocated(self) -> None:
+        """Phi output for a qubit type should be registered in qubit_map."""
+        # QInit → q
+        q_init = _make_value("q", QubitType)
+        q_init_out = q_init.next_version()
+        qinit_op = QInitOperation(operands=[], results=[q_init_out])
+
+        # H → q_after_h
+        q_after_h = q_init_out.next_version()
+        h_gate = GateOperation(
+            operands=[q_init_out],
+            results=[q_after_h],
+            gate_type=GateOperationType.H,
+        )
+
+        # Measure → bit
+        bit = _make_value("bit", BitType)
+        measure_op = MeasureOperation(operands=[q_after_h], results=[bit])
+
+        # If-else with phi merge
+        q_true = q_after_h.next_version()
+        x_gate = GateOperation(
+            operands=[q_after_h],
+            results=[q_true],
+            gate_type=GateOperationType.X,
+        )
+        q_false = q_after_h  # identity in false branch
+
+        phi_output = _make_value("q_phi", QubitType)
+        phi = PhiOp(
+            operands=[bit, q_true, q_false],
+            results=[phi_output],
+        )
+
+        if_op = IfOperation(
+            operands=[bit],
+            results=[phi_output],
+            true_operations=[x_gate],
+            false_operations=[],
+            phi_ops=[phi],
+        )
+
+        # Measure phi output
+        bit2 = _make_value("bit2", BitType)
+        measure2 = MeasureOperation(operands=[phi_output], results=[bit2])
+
+        operations = [qinit_op, h_gate, measure_op, if_op, measure2]
+
+        allocator = ResourceAllocator()
+        qubit_map, clbit_map = allocator.allocate(operations, bindings={})
+
+        # phi_output should be in qubit_map, mapped to same physical qubit
+        assert phi_output.uuid in qubit_map
+        assert qubit_map[phi_output.uuid] == qubit_map[q_init_out.uuid]
+
+    def test_phi_output_bit_is_allocated(self) -> None:
+        """Phi output for a bit type should be registered in clbit_map."""
+        # Setup: condition bit
+        cond = _make_value("cond", BitType)
+
+        # Create a qubit so we have something to measure
+        q = _make_value("q", QubitType)
+        q_out = q.next_version()
+        qinit_op = QInitOperation(operands=[], results=[q_out])
+
+        # Measure to get condition
+        measure_op = MeasureOperation(operands=[q_out], results=[cond])
+
+        # Bit phi: both branches produce the same bit
+        true_bit = _make_value("true_bit", BitType)
+        false_bit = _make_value("false_bit", BitType)
+        true_measure = MeasureOperation(
+            operands=[q_out.next_version()], results=[true_bit]
+        )
+        false_measure = MeasureOperation(
+            operands=[q_out.next_version()], results=[false_bit]
+        )
+
+        phi_bit = _make_value("phi_bit", BitType)
+        phi = PhiOp(
+            operands=[cond, true_bit, false_bit],
+            results=[phi_bit],
+        )
+
+        if_op = IfOperation(
+            operands=[cond],
+            results=[phi_bit],
+            true_operations=[true_measure],
+            false_operations=[false_measure],
+            phi_ops=[phi],
+        )
+
+        operations = [qinit_op, measure_op, if_op]
+
+        allocator = ResourceAllocator()
+        _, clbit_map = allocator.allocate(operations, bindings={})
+
+        # phi_bit should be in clbit_map
+        assert phi_bit.uuid in clbit_map
+
+    @pytest.mark.parametrize("array_size", [1, 2, 4])
+    def test_phi_output_array_composite_keys_are_allocated(
+        self, array_size: int
+    ) -> None:
+        """Phi output for an ArrayValue should copy composite element keys."""
+        size_val = _make_const_value("size", array_size)
+        q_array = _make_array_value("q", shape_vals=(size_val,))
+        qinit_op = QInitOperation(operands=[], results=[q_array])
+
+        # Measure q[0] → bit (condition)
+        q0_idx = _make_const_value("idx_0", 0)
+        q0_elem = Value(
+            type=QubitType(),
+            name="q[0]",
+            parent_array=q_array,
+            element_indices=(q0_idx,),
+        )
+        bit = _make_value("bit", BitType)
+        measure_op = MeasureOperation(operands=[q0_elem], results=[bit])
+
+        # If-else with phi on the whole array
+        phi_array = _make_array_value("q_phi", shape_vals=(size_val,))
+        phi = PhiOp(
+            operands=[bit, q_array, q_array],
+            results=[phi_array],
+        )
+
+        if_op = IfOperation(
+            operands=[bit],
+            results=[phi_array],
+            true_operations=[],
+            false_operations=[],
+            phi_ops=[phi],
+        )
+
+        operations = [qinit_op, measure_op, if_op]
+
+        allocator = ResourceAllocator()
+        qubit_map, _ = allocator.allocate(operations, bindings={})
+
+        # All composite keys for the phi output array should exist
+        for i in range(array_size):
+            phi_key = f"{phi_array.uuid}_{i}"
+            src_key = f"{q_array.uuid}_{i}"
+            assert phi_key in qubit_map, f"phi array element {i} not allocated"
+            assert qubit_map[phi_key] == qubit_map[src_key]
+
+    def test_identity_phi_maps_to_same_qubit(self) -> None:
+        """Phi with true_val == false_val (identity) still maps correctly."""
+        q = _make_value("q", QubitType)
+        q_out = q.next_version()
+        qinit_op = QInitOperation(operands=[], results=[q_out])
+
+        bit = _make_value("bit", BitType)
+        measure_op = MeasureOperation(operands=[q_out], results=[bit])
+
+        # Identity phi: both branches refer to the same qubit
+        phi_output = _make_value("q_phi", QubitType)
+        phi = PhiOp(
+            operands=[bit, q_out, q_out],
+            results=[phi_output],
+        )
+
+        if_op = IfOperation(
+            operands=[bit],
+            results=[phi_output],
+            true_operations=[],
+            false_operations=[],
+            phi_ops=[phi],
+        )
+
+        operations = [qinit_op, measure_op, if_op]
+
+        allocator = ResourceAllocator()
+        qubit_map, _ = allocator.allocate(operations, bindings={})
+
+        assert phi_output.uuid in qubit_map
+        assert qubit_map[phi_output.uuid] == qubit_map[q_out.uuid]
+
+    def test_phi_output_already_registered_is_skipped(self) -> None:
+        """Phi output UUID already in qubit_map is not overwritten."""
+        q = _make_value("q", QubitType)
+        q_out = q.next_version()
+        qinit_op = QInitOperation(operands=[], results=[q_out])
+
+        bit = _make_value("bit", BitType)
+        measure_op = MeasureOperation(operands=[q_out], results=[bit])
+
+        phi_output = _make_value("q_phi", QubitType)
+        phi = PhiOp(
+            operands=[bit, q_out, q_out],
+            results=[phi_output],
+        )
+
+        if_op = IfOperation(
+            operands=[bit],
+            results=[phi_output],
+            true_operations=[],
+            false_operations=[],
+            phi_ops=[phi],
+        )
+
+        operations = [qinit_op, measure_op, if_op]
+
+        allocator = ResourceAllocator()
+        qubit_map, clbit_map = allocator.allocate(operations, bindings={})
+
+        # Pre-register the phi output with a sentinel value
+        sentinel_idx = 999
+        qubit_map[phi_output.uuid] = sentinel_idx
+
+        # Re-running allocation should not overwrite it
+        allocator._allocate_phi_ops(
+            if_op.phi_ops, qubit_map, clbit_map
+        )
+        assert qubit_map[phi_output.uuid] == sentinel_idx
+
+    def test_multiple_phi_ops_all_allocated(self) -> None:
+        """Multiple phi_ops in a single IfOperation are all allocated."""
+        q0 = _make_value("q0", QubitType)
+        q0_out = q0.next_version()
+        q1 = _make_value("q1", QubitType)
+        q1_out = q1.next_version()
+        qinit0 = QInitOperation(operands=[], results=[q0_out])
+        qinit1 = QInitOperation(operands=[], results=[q1_out])
+
+        bit = _make_value("bit", BitType)
+        measure_op = MeasureOperation(operands=[q0_out], results=[bit])
+
+        # Two phi merges
+        phi_out0 = _make_value("phi0", QubitType)
+        phi_out1 = _make_value("phi1", QubitType)
+        phi0 = PhiOp(operands=[bit, q0_out, q0_out], results=[phi_out0])
+        phi1 = PhiOp(operands=[bit, q1_out, q1_out], results=[phi_out1])
+
+        if_op = IfOperation(
+            operands=[bit],
+            results=[phi_out0, phi_out1],
+            true_operations=[],
+            false_operations=[],
+            phi_ops=[phi0, phi1],
+        )
+
+        operations = [qinit0, qinit1, measure_op, if_op]
+
+        allocator = ResourceAllocator()
+        qubit_map, _ = allocator.allocate(operations, bindings={})
+
+        assert phi_out0.uuid in qubit_map
+        assert phi_out1.uuid in qubit_map
+        assert qubit_map[phi_out0.uuid] == qubit_map[q0_out.uuid]
+        assert qubit_map[phi_out1.uuid] == qubit_map[q1_out.uuid]
+
+    def test_phi_bit_consolidates_both_branches(self) -> None:
+        """Both branches' clbits must be consolidated to the same physical clbit.
+
+        Under Qiskit's ``if_test``, only one branch executes, so both
+        branches must measure into the same physical clbit. Otherwise
+        the phi output always reads the true branch's result.
+        """
+        q = _make_value("q", QubitType)
+        q_out = q.next_version()
+        qinit_op = QInitOperation(operands=[], results=[q_out])
+
+        cond = _make_value("cond", BitType)
+        measure_cond = MeasureOperation(operands=[q_out], results=[cond])
+
+        true_bit = _make_value("true_bit", BitType)
+        false_bit = _make_value("false_bit", BitType)
+        true_measure = MeasureOperation(
+            operands=[q_out.next_version()], results=[true_bit]
+        )
+        false_measure = MeasureOperation(
+            operands=[q_out.next_version()], results=[false_bit]
+        )
+
+        phi_bit = _make_value("phi_bit", BitType)
+        phi = PhiOp(
+            operands=[cond, true_bit, false_bit],
+            results=[phi_bit],
+        )
+        if_op = IfOperation(
+            operands=[cond],
+            results=[phi_bit],
+            true_operations=[true_measure],
+            false_operations=[false_measure],
+            phi_ops=[phi],
+        )
+
+        operations = [qinit_op, measure_cond, if_op]
+        allocator = ResourceAllocator()
+        _, clbit_map = allocator.allocate(operations, bindings={})
+
+        # All three — true_bit, false_bit, phi_bit — must share the same physical clbit
+        assert clbit_map[true_bit.uuid] == clbit_map[false_bit.uuid]
+        assert clbit_map[phi_bit.uuid] == clbit_map[true_bit.uuid]
+
+    @pytest.mark.parametrize("array_size", [1, 2, 4])
+    def test_phi_bit_array_consolidates_both_branches(
+        self, array_size: int
+    ) -> None:
+        """BitType ArrayValue phi must consolidate per-element clbits across branches."""
+        size_val = _make_const_value("size", array_size)
+
+        q_array = _make_array_value("q", shape_vals=(size_val,))
+        qinit_op = QInitOperation(operands=[], results=[q_array])
+
+        # Measure q[0] → condition
+        q0_idx = _make_const_value("idx_0", 0)
+        q0_elem = Value(
+            type=QubitType(), name="q[0]",
+            parent_array=q_array, element_indices=(q0_idx,),
+        )
+        cond = _make_value("cond", BitType)
+        measure_cond = MeasureOperation(operands=[q0_elem], results=[cond])
+
+        # True branch: measure into true_bits array
+        true_bits = _make_array_value("true_bits", shape_vals=(size_val,), type_cls=BitType)
+        false_bits = _make_array_value("false_bits", shape_vals=(size_val,), type_cls=BitType)
+
+        # Simulate allocation of individual array element clbits
+        # (MeasureVectorOperation would do this, but for unit test we pre-fill)
+
+        phi_bits = _make_array_value("phi_bits", shape_vals=(size_val,), type_cls=BitType)
+        phi = PhiOp(
+            operands=[cond, true_bits, false_bits],
+            results=[phi_bits],
+        )
+        if_op = IfOperation(
+            operands=[cond],
+            results=[phi_bits],
+            true_operations=[],
+            false_operations=[],
+            phi_ops=[phi],
+        )
+
+        # Pre-fill clbit_map with element keys for both arrays
+        clbit_map: dict[str, int] = {cond.uuid: 0}
+        for i in range(array_size):
+            clbit_map[f"{true_bits.uuid}_{i}"] = i + 1
+            clbit_map[f"{false_bits.uuid}_{i}"] = array_size + i + 1
+
+        from qamomile.circuit.transpiler.passes.emit_base import map_phi_outputs
+
+        map_phi_outputs(if_op.phi_ops, {}, clbit_map)
+
+        # Phi output elements should exist AND both branches consolidated
+        for i in range(array_size):
+            phi_key = f"{phi_bits.uuid}_{i}"
+            true_key = f"{true_bits.uuid}_{i}"
+            false_key = f"{false_bits.uuid}_{i}"
+            assert phi_key in clbit_map, f"phi element {i} not allocated"
+            assert clbit_map[phi_key] == clbit_map[true_key]
+            assert clbit_map[false_key] == clbit_map[true_key], (
+                f"element {i}: false branch clbit not consolidated"
+            )
 
 
 # ===========================================================================

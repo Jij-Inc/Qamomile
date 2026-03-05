@@ -42,7 +42,123 @@ from qamomile.circuit.ir.operation.control_flow import (
     IfOperation,
     WhileOperation,
 )
-from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, PhiOp
+from qamomile.circuit.ir.types.primitives import BitType
+from qamomile.circuit.ir.value import ArrayValue
+
+
+def map_phi_outputs(
+    phi_ops: list[Operation],
+    qubit_map: dict[str, int],
+    clbit_map: dict[str, int],
+    resolve_scalar_qubit: Any = None,
+) -> None:
+    """Register phi output UUIDs to the same physical resources as their source operands.
+
+    After an if-else block, PhiOp merges values from both branches.
+    The phi output is a new Value with a new UUID that must map to the
+    same physical qubit (or classical bit) as the branch values.
+
+    For ArrayValue phi outputs (e.g., qubit arrays), this copies all
+    composite element keys ``{source_uuid}_{i}`` →
+    ``{output_uuid}_{i}`` so that subsequent element accesses on the
+    phi output resolve to the correct physical qubits.
+
+    Args:
+        phi_ops: List of phi operations from an IfOperation.
+        qubit_map: Mapping from UUID/composite key to physical qubit index.
+        clbit_map: Mapping from UUID to physical classical bit index.
+        resolve_scalar_qubit: Optional callback ``(source, qubit_map) -> int | None``
+            for resolving scalar qubit values that are not directly in
+            ``qubit_map`` (e.g., array element resolution).  When *None*,
+            ``ResourceAllocator._resolve_qubit_key`` is used as fallback.
+    """
+    for phi in phi_ops:
+        if not isinstance(phi, PhiOp):
+            continue
+        output = phi.results[0]
+        true_val = phi.operands[1]
+        false_val = phi.operands[2]
+
+        if output.uuid in qubit_map or output.uuid in clbit_map:
+            continue
+
+        # Quantum types: map phi output to same physical qubit
+        if output.type.is_quantum():
+            # Handle ArrayValue phi outputs: copy composite element keys
+            if isinstance(output, ArrayValue):
+                for source in (true_val, false_val):
+                    if not isinstance(source, ArrayValue):
+                        continue
+                    # Copy all {source_uuid}_{i} -> {output_uuid}_{i}
+                    keys_propagated = False
+                    for key, phys_idx in list(qubit_map.items()):
+                        prefix = f"{source.uuid}_"
+                        if key.startswith(prefix):
+                            suffix = key[len(prefix):]
+                            out_key = f"{output.uuid}_{suffix}"
+                            if out_key not in qubit_map:
+                                qubit_map[out_key] = phys_idx
+                                keys_propagated = True
+                    if keys_propagated:
+                        break
+            else:
+                # Scalar qubit phi output
+                for source in (true_val, false_val):
+                    if source.uuid in qubit_map:
+                        qubit_map[output.uuid] = qubit_map[source.uuid]
+                        break
+                    # Try resolver callback or static fallback
+                    if resolve_scalar_qubit is not None:
+                        resolved = resolve_scalar_qubit(source, qubit_map)
+                    else:
+                        key, _ = ResourceAllocator._resolve_qubit_key(source)
+                        resolved = qubit_map.get(key) if key is not None else None
+                    if resolved is not None:
+                        qubit_map[output.uuid] = resolved
+                        break
+
+        # Classical bit types: consolidate both branches to the same
+        # physical clbit.  Under Qiskit's ``if_test`` only one branch
+        # executes, so both branches' measurements must target the same
+        # physical clbit — otherwise the phi output always reads the
+        # first-found branch (which was always the true branch).
+        elif isinstance(output.type, BitType):
+            if isinstance(output, ArrayValue):
+                # ArrayValue BitType: consolidate per-element keys
+                true_src = true_val if isinstance(true_val, ArrayValue) else None
+                false_src = false_val if isinstance(false_val, ArrayValue) else None
+                primary = true_src or false_src
+                secondary = false_src if true_src is not None else true_src
+
+                if primary is not None:
+                    for key, phys_idx in list(clbit_map.items()):
+                        prefix = f"{primary.uuid}_"
+                        if key.startswith(prefix):
+                            suffix = key[len(prefix):]
+                            # Map phi output element to primary's clbit
+                            out_key = f"{output.uuid}_{suffix}"
+                            if out_key not in clbit_map:
+                                clbit_map[out_key] = phys_idx
+                            # Redirect secondary branch element to same clbit
+                            if secondary is not None:
+                                sec_key = f"{secondary.uuid}_{suffix}"
+                                if sec_key in clbit_map:
+                                    clbit_map[sec_key] = phys_idx
+            else:
+                # Scalar BitType: pick the first available clbit as
+                # canonical, redirect the other branch to it.
+                true_clbit = clbit_map.get(true_val.uuid)
+                false_clbit = clbit_map.get(false_val.uuid)
+
+                if true_clbit is not None:
+                    clbit_map[output.uuid] = true_clbit
+                    # Redirect false branch to write to same physical clbit
+                    if false_clbit is not None and false_clbit != true_clbit:
+                        clbit_map[false_val.uuid] = true_clbit
+                elif false_clbit is not None:
+                    clbit_map[output.uuid] = false_clbit
+
 
 
 class ResourceAllocator:
@@ -80,8 +196,6 @@ class ResourceAllocator:
         bindings: dict[str, Any],
     ) -> None:
         """Recursively allocate resources from operations."""
-        from qamomile.circuit.ir.value import ArrayValue
-
         for op in operations:
             if isinstance(op, QInitOperation):
                 result = op.results[0]
@@ -142,6 +256,7 @@ class ResourceAllocator:
             elif isinstance(op, IfOperation):
                 self._allocate_recursive(op.true_operations, qubit_map, clbit_map, bindings)
                 self._allocate_recursive(op.false_operations, qubit_map, clbit_map, bindings)
+                self._allocate_phi_ops(op.phi_ops, qubit_map, clbit_map)
 
             elif isinstance(op, WhileOperation):
                 self._allocate_recursive(op.operations, qubit_map, clbit_map, bindings)
@@ -154,6 +269,15 @@ class ResourceAllocator:
 
             elif isinstance(op, CastOperation):
                 self._allocate_cast(op, qubit_map)
+
+    def _allocate_phi_ops(
+        self,
+        phi_ops: list[Operation],
+        qubit_map: dict[str, int],
+        clbit_map: dict[str, int],
+    ) -> None:
+        """Register phi output UUIDs via the shared ``map_phi_outputs`` utility."""
+        map_phi_outputs(phi_ops, qubit_map, clbit_map)
 
     def _resolve_size(
         self,

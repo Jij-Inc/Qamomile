@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import dataclasses
 
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind, CompOpKind
+from qamomile.circuit.ir.types import QFixedType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
     FloatType,
-    UIntType,
     QubitType,
+    UIntType,
 )
-from qamomile.circuit.ir.types import QFixedType
 from qamomile.circuit.ir.value import Value
-from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind, CompOpKind
 
 from .handle import ArithmeticMixin, Handle, _emit_binop, _emit_compop
 
