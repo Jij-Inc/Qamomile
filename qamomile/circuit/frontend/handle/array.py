@@ -121,12 +121,8 @@ class ArrayBase(Handle, Generic[T]):
         return instance
 
     def consume(self, operation_name: str = "unknown") -> "ArrayBase[T]":
-        """Override to preserve array-specific fields."""
-        result = super().consume(operation_name)
-        result._shape = self._shape
-        result._borrowed_indices = dict(self._borrowed_indices)
-        result.element_type = self.element_type
-        return result
+        """Override to narrow return type to ArrayBase[T]."""
+        return super().consume(operation_name)  # type: ignore[return-value]
 
     @property
     def shape(self) -> tuple[int | UInt, ...]:
