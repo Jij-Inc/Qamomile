@@ -1620,3 +1620,110 @@ class TestMeasurementAllPatterns:
 
         graph = good_circuit.build()
         assert graph is not None
+
+
+class TestArrayConsumeUnreturnedBorrow:
+    """Test that ArrayBase.consume() rejects quantum arrays with unreturned borrows.
+
+    Validates the common borrow-return contract in consume() covers all sinks:
+    qkernel calls, controlled gates (index-spec and symbolic), measure, and cast.
+    """
+
+    def test_qkernel_call_with_unreturned_vector_borrow_raises(self):
+        """QKernel call consuming a Vector[Qubit] with unreturned borrow should raise."""
+
+        @qkernel
+        def id_arr(qs: qm.Vector[Qubit]) -> qm.Vector[Qubit]:
+            return qs
+
+        @qkernel
+        def bad_outer() -> qm.Vector[Qubit]:
+            qs = qubit_array(3, "qs")
+            _q = qs[0]  # borrow but don't return
+            return id_arr(qs)
+
+        with pytest.raises(UnreturnedBorrowError):
+            bad_outer.build()
+
+    def test_qkernel_call_with_returned_vector_borrow_works(self):
+        """QKernel call after all borrows are returned should succeed."""
+
+        @qkernel
+        def id_arr(qs: qm.Vector[Qubit]) -> qm.Vector[Qubit]:
+            return qs
+
+        @qkernel
+        def good_outer() -> qm.Vector[Qubit]:
+            qs = qubit_array(3, "qs")
+            q = qs[0]
+            q = qm.h(q)
+            qs[0] = q  # return the borrow
+            return id_arr(qs)
+
+        graph = good_outer.build()
+        assert graph is not None
+
+    def test_controlled_index_spec_with_unreturned_vector_borrow_raises(self):
+        """controlled() with target_indices on a Vector with unreturned borrow should raise."""
+
+        @qkernel
+        def x_gate(q: Qubit) -> Qubit:
+            return qm.x(q)
+
+        @qkernel
+        def bad_controlled() -> qm.Vector[Qubit]:
+            qs = qubit_array(3, "qs")
+            _q = qs[0]  # borrow but don't return
+            cx = qm.controlled(x_gate)
+            qs = cx(qs, target_indices=[2])
+            return qs
+
+        with pytest.raises(UnreturnedBorrowError):
+            bad_controlled.build()
+
+    def test_controlled_symbolic_controls_with_unreturned_borrow_raises(self):
+        """controlled() with symbolic num_controls on a Vector with unreturned borrow should raise."""
+        from qamomile.circuit.frontend.handle.primitives import UInt
+        from qamomile.circuit.ir.types.primitives import UIntType
+        from qamomile.circuit.ir.value import Value
+
+        @qkernel
+        def x_gate(q: Qubit) -> Qubit:
+            return qm.x(q)
+
+        n = UInt(value=Value(type=UIntType(), name="n"))
+
+        @qkernel
+        def bad_controlled_sym() -> tuple[qm.Vector[Qubit], Qubit]:
+            qs = qubit_array(3, "qs")
+            tgt = qubit_array(1, "tgt")
+            _q = qs[0]  # borrow but don't return
+            cx = qm.controlled(x_gate, num_controls=n)
+            qs, t = cx(qs, tgt[0])
+            return qs, t
+
+        with pytest.raises(UnreturnedBorrowError):
+            bad_controlled_sym.build()
+
+    def test_measure_cast_unreturned_borrow_behavior_unchanged(self):
+        """measure/cast with unreturned borrow should still raise (regression guard)."""
+
+        @qkernel
+        def bad_measure() -> qm.Vector[qm.Bit]:
+            qs = qubit_array(3, "qs")
+            _q = qs[0]  # borrow but don't return
+            return qm.measure(qs)
+
+        with pytest.raises(UnreturnedBorrowError):
+            bad_measure.build()
+
+    def test_non_quantum_array_consume_unchanged(self):
+        """Classical array consume should not raise even with 'borrows'."""
+
+        @qkernel
+        def classical_circuit() -> qm.Vector[qm.Bit]:
+            qs = qubit_array(2, "qs")
+            return qm.measure(qs)
+
+        graph = classical_circuit.build()
+        assert graph is not None

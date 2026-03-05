@@ -137,6 +137,10 @@ class QKernel(Generic[P, R]):
         # their parent/indices restored so that borrow-return validation
         # in ArrayBase._return_element succeeds.
         provenance_map: dict[str, tuple[Any, tuple]] = {}
+        # Collect scalar handles borrowed from arrays that are also arguments.
+        # Their borrows must be released before the parent array is consumed,
+        # since ArrayBase.consume() enforces that all borrows are returned.
+        borrowed_scalars: list[tuple[Any, tuple]] = []
         for name, handle in bound_args.arguments.items():
             if not isinstance(handle, Handle):
                 raise TypeError(
@@ -152,6 +156,22 @@ class QKernel(Generic[P, R]):
                     handle.parent,
                     handle.indices,
                 )
+                borrowed_scalars.append((handle.parent, handle.indices))
+
+        # Release borrows for scalar elements whose parent arrays are also
+        # being passed to this call.  This allows the parent's consume()
+        # (which validates all borrows returned) to succeed.
+        array_args = {
+            id(h) for h in bound_args.arguments.values() if is_array_type(type(h))
+        }
+        for parent, indices in borrowed_scalars:
+            if id(parent) in array_args:
+                key = parent._make_indices_key(indices)
+                parent._borrowed_indices.pop(key, None)
+
+        for name, handle in bound_args.arguments.items():
+            if not isinstance(handle, Handle):
+                continue
             # Consume quantum handles to enforce linear type
             if handle._should_enforce_linear():
                 handle = handle.consume(operation_name=f"QKernel[{self.name}]")

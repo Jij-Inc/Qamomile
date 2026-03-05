@@ -121,7 +121,13 @@ class ArrayBase(Handle, Generic[T]):
         return instance
 
     def consume(self, operation_name: str = "unknown") -> "ArrayBase[T]":
-        """Override to narrow return type to ArrayBase[T]."""
+        """Consume the array, enforcing borrow-return contract for quantum arrays.
+
+        For quantum arrays, all borrowed elements must be returned before the
+        array can be consumed. This ensures that no unreturned borrows are
+        silently discarded by operations like qkernel calls or controlled gates.
+        """
+        self.validate_all_returned()
         return super().consume(operation_name)  # type: ignore[return-value]
 
     @property
