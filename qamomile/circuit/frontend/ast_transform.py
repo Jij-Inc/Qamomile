@@ -275,11 +275,9 @@ class ControlFlowTransformer(ast.NodeTransformer):
     ) -> None:
         """Detect quantum operations in while condition and raise SyntaxError.
 
-        Checks two layers:
-        1. Name match against _QUANTUM_OPS (e.g. ``qmc.measure``).
-        2. Namespace resolution for resolvable callables that are QKernel
-           instances (e.g. ``cond_fn`` where ``cond_fn = qkernel(...)``).
-           Unresolvable callables are allowed (fail-open).
+        Uses resolved callable identity to distinguish Qamomile quantum
+        operations from classical functions that happen to share the same name.
+        Unresolvable callables are allowed (fail-open).
         """
         for node in ast.walk(test_node):
             if isinstance(node, ast.Call):
@@ -288,15 +286,12 @@ class ControlFlowTransformer(ast.NodeTransformer):
                     func_name = node.func.id
                 elif isinstance(node.func, ast.Attribute):
                     func_name = node.func.attr
-                if func_name and func_name in self._QUANTUM_OPS:
-                    raise SyntaxError(
-                        f"Quantum operation '{func_name}' in while condition "
-                        f"is not supported. Move the operation before the loop "
-                        f"and use the result as condition."
-                    )
-                # Resolve callable in namespace to detect QKernel instances
+                # Resolve callable in namespace to check identity
                 resolved = self._resolve_callable(node.func)
-                if resolved is not None and type(resolved).__name__ == "QKernel":
+                if resolved is None:
+                    # Unresolvable: fail-open (allow)
+                    continue
+                if type(resolved).__name__ == "QKernel":
                     display = func_name or "<callable>"
                     raise SyntaxError(
                         f"Quantum kernel '{display}' in while condition "
@@ -304,6 +299,25 @@ class ControlFlowTransformer(ast.NodeTransformer):
                         f"quantum arguments, which is not allowed in "
                         f"while conditions."
                     )
+                if self._is_qamomile_quantum_op(resolved):
+                    display = func_name or "<callable>"
+                    raise SyntaxError(
+                        f"Quantum operation '{display}' in while condition "
+                        f"is not supported. Move the operation before the loop "
+                        f"and use the result as condition."
+                    )
+
+    @staticmethod
+    def _is_qamomile_quantum_op(obj: Any) -> bool:
+        """Check if *obj* is a Qamomile quantum operation by module and name."""
+        module = getattr(obj, "__module__", None)
+        name = getattr(obj, "__name__", None)
+        if module is None or name is None:
+            return False
+        return (
+            module.startswith("qamomile.circuit.frontend.operation")
+            and name in ControlFlowTransformer._QUANTUM_OPS
+        )
 
     def _resolve_callable(self, func_node: ast.expr) -> Any | None:
         """Try to resolve a callable AST node in the namespace.

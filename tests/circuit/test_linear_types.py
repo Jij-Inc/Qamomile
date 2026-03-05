@@ -740,6 +740,22 @@ class TestRuntimeLimitations:
                     q = qm.h(q)
                 return q
 
+    def test_while_classical_callable_same_name_as_quantum_op(self):
+        """Classical function named 'measure' in while condition should be allowed."""
+
+        def measure(n: int) -> bool:
+            return n > 0
+
+        @qkernel
+        def circuit(q: Qubit, n: qm.UInt) -> Qubit:
+            while measure(n):
+                q = qm.h(q)
+            return q
+
+        # Should not raise — measure here is a classical function, not qm.measure
+        graph = circuit.build(n=1)
+        assert graph is not None
+
 
 class TestQuantumOpsSpec:
     """Verify _QUANTUM_OPS matches the authoritative while-condition spec."""
