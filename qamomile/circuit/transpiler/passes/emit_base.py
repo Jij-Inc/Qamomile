@@ -120,10 +120,28 @@ def map_phi_outputs(
 
         # Classical bit types: map phi output to same classical bit
         elif isinstance(output.type, BitType):
-            for source in (true_val, false_val):
-                if source.uuid in clbit_map:
-                    clbit_map[output.uuid] = clbit_map[source.uuid]
-                    break
+            # Handle ArrayValue phi outputs of BitType: copy composite element keys
+            if isinstance(output, ArrayValue):
+                for source in (true_val, false_val):
+                    if not isinstance(source, ArrayValue):
+                        continue
+                    keys_propagated = False
+                    for key, phys_idx in list(clbit_map.items()):
+                        prefix = f"{source.uuid}_"
+                        if key.startswith(prefix):
+                            suffix = key[len(prefix):]
+                            out_key = f"{output.uuid}_{suffix}"
+                            if out_key not in clbit_map:
+                                clbit_map[out_key] = phys_idx
+                                keys_propagated = True
+                    if keys_propagated:
+                        break
+            else:
+                # Scalar BitType phi output
+                for source in (true_val, false_val):
+                    if source.uuid in clbit_map:
+                        clbit_map[output.uuid] = clbit_map[source.uuid]
+                        break
 
 
 
