@@ -127,7 +127,7 @@ class TestQFTStrategies:
         strategy = StandardQFTStrategy()
         resources = strategy.resources(4)
 
-        assert resources.t_gate_count == 0
+        assert resources.t_gates == 0
         assert resources.custom_metadata["num_h_gates"] == 4
         assert resources.custom_metadata["num_cp_gates"] == 6  # 4*3/2
         assert resources.custom_metadata["precision"] == "full"
@@ -137,7 +137,7 @@ class TestQFTStrategies:
         strategy = ApproximateQFTStrategy(truncation_depth=2)
         resources = strategy.resources(4)
 
-        assert resources.t_gate_count == 0
+        assert resources.t_gates == 0
         # With k=2, should have fewer CP gates than full QFT
         assert resources.custom_metadata["num_cp_gates"] < 6
         assert resources.custom_metadata["truncation_depth"] == 2

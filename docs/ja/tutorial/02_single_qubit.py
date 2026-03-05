@@ -63,6 +63,8 @@ def hadamard_circuit() -> qm.Bit:
     return qm.measure(q)
 
 
+hadamard_circuit.draw()
+
 # %%
 # 実行してみましょう
 executable = transpiler.transpile(hadamard_circuit)
@@ -112,6 +114,8 @@ def double_hadamard() -> qm.Bit:
     return qm.measure(q)
 
 
+double_hadamard.draw()
+
 # %%
 executable2 = transpiler.transpile(double_hadamard)
 job2 = executable2.sample(transpiler.executor(), shots=1000)
@@ -152,6 +156,10 @@ def plus_state() -> qm.Bit:
     return qm.measure(q)
 
 
+plus_state.draw()
+
+
+# %%
 @qm.qkernel
 def minus_state() -> qm.Bit:
     """|−⟩ 状態を作成"""
@@ -160,6 +168,8 @@ def minus_state() -> qm.Bit:
     q = qm.h(q)  # |1⟩ → |−⟩
     return qm.measure(q)
 
+
+minus_state.draw()
 
 # %%
 # 両方実行して比較
@@ -205,6 +215,14 @@ def rx_circuit(theta: qm.Float) -> qm.Bit:
     return qm.measure(q)
 
 
+rx_circuit.draw()
+
+# %% [markdown]
+# パラメータをバインドした回路を描画することもできます。
+
+# %%
+rx_circuit.draw(theta=math.pi / 4)
+
 # %%
 # 角度を変えて実行してみましょう
 angles = [0, math.pi / 4, math.pi / 2, math.pi]
@@ -246,6 +264,15 @@ def parameterized_circuit(theta: qm.Float, phi: qm.Float) -> qm.Bit:
     q = qm.rz(q, phi)    # Z軸回転
 
     return qm.measure(q)
+
+
+parameterized_circuit.draw()
+
+# %% [markdown]
+# 1つのパラメータを指定し、もう1つはシンボリックのままにすることもできます。
+
+# %%
+parameterized_circuit.draw(theta=math.pi / 4)
 
 
 # %%
@@ -299,6 +326,8 @@ def phase_example() -> qm.Bit:
 
     return qm.measure(q)
 
+
+phase_example.draw()
 
 # %%
 exec_phase = transpiler.transpile(phase_example)
@@ -366,5 +395,4 @@ print(qiskit_param.draw(output="text"))
 # ```
 #
 # 次のチュートリアル（`03_entanglement.py`）では、複数の量子ビットを扱い、
-# 量子力学の最も不思議な現象である**エンタングルメント（量子もつれ）**について学びます。
 # 量子力学の最も不思議な現象である**エンタングルメント（量子もつれ）**について学びます。

@@ -3,12 +3,14 @@
 import pytest
 
 import qamomile.circuit as qm
+from qamomile.circuit.frontend.constructors import qubit_array
+from qamomile.circuit.frontend.handle import Qubit
 from qamomile.circuit.frontend.qkernel import qkernel
-from qamomile.circuit.frontend.handle import Qubit, Vector
-from qamomile.circuit.frontend.constructors import qubit, qubit_array
+from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
+from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.transpiler.errors import (
-    QubitConsumedError,
     QubitAliasError,
+    QubitConsumedError,
     UnreturnedBorrowError,
 )
 
@@ -96,6 +98,47 @@ class TestProperReassignment:
         graph = good_circuit.build()
         assert graph is not None
 
+    def test_z_gate_build(self):
+        """Z gate should build correctly."""
+
+        @qkernel
+        def circuit(q: Qubit) -> Qubit:
+            q = qm.z(q)
+            return q
+
+        graph = circuit.build()
+        assert graph is not None
+        # Operations: QInitOperation + Z = 2
+        assert len(graph.operations) == 2
+        ops = graph.operations
+        assert isinstance(ops[0], QInitOperation)
+        assert isinstance(ops[1], GateOperation)
+        gate_op = ops[1]
+        assert gate_op.gate_type == GateOperationType.Z
+
+    def test_reassignment_three_qubit_gate_works(self):
+        """Proper reassignment with three-qubit gate should work."""
+
+        @qkernel
+        def circuit(q1: Qubit, q2: Qubit, q3: Qubit) -> tuple[Qubit, Qubit, Qubit]:
+            q1, q2, q3 = qm.ccx(q1, q2, q3)
+            q1 = qm.h(q1)
+            return q1, q2, q3
+
+        graph = circuit.build()
+        assert graph is not None
+
+        assert len(graph.operations) == 5  # QInitOperation * 3 + CCX + H = 5
+        assert isinstance(graph.operations[0], QInitOperation)
+        assert isinstance(graph.operations[1], QInitOperation)
+        assert isinstance(graph.operations[2], QInitOperation)
+        assert isinstance(graph.operations[3], GateOperation)
+        ccx_op = graph.operations[3]
+        assert ccx_op.gate_type == GateOperationType.TOFFOLI
+        assert isinstance(graph.operations[4], GateOperation)
+        h_op = graph.operations[4]
+        assert h_op.gate_type == GateOperationType.H
+
     def test_rotation_gates_with_reassignment_works(self):
         """Proper use of rotation gates should work."""
 
@@ -146,6 +189,36 @@ class TestQubitAliasDetection:
         @qkernel
         def bad_circuit(q: Qubit) -> tuple[Qubit, Qubit]:
             return qm.swap(q, q)  # ERROR: same qubit in both positions
+
+        with pytest.raises(QubitAliasError):
+            bad_circuit.build()
+
+    def test_ccx_same_qubit_control1_control2_raises_alias_error(self):
+        """Using same qubit as control1 and control2 in ccx should raise error."""
+
+        @qkernel
+        def bad_circuit(q1: Qubit, q2: Qubit) -> tuple[Qubit, Qubit, Qubit]:
+            return qm.ccx(q1, q1, q2)
+
+        with pytest.raises(QubitAliasError):
+            bad_circuit.build()
+
+    def test_ccx_same_qubit_control1_target_raises_alias_error(self):
+        """Using same qubit as control1 and target in ccx should raise error."""
+
+        @qkernel
+        def bad_circuit(q1: Qubit, q2: Qubit) -> tuple[Qubit, Qubit, Qubit]:
+            return qm.ccx(q1, q2, q1)
+
+        with pytest.raises(QubitAliasError):
+            bad_circuit.build()
+
+    def test_ccx_same_qubit_control2_target_raises_alias_error(self):
+        """Using same qubit as control2 and target in ccx should raise error."""
+
+        @qkernel
+        def bad_circuit(q1: Qubit, q2: Qubit) -> tuple[Qubit, Qubit, Qubit]:
+            return qm.ccx(q2, q1, q1)
 
         with pytest.raises(QubitAliasError):
             bad_circuit.build()
@@ -215,7 +288,6 @@ class TestArrayBorrowChecking:
 
     def test_validate_all_returned_catches_unreturned(self):
         """validate_all_returned should detect unreturned borrows."""
-        from qamomile.circuit.frontend.handle.array import Vector
         from qamomile.circuit.frontend.tracer import trace
 
         # Create a vector and borrow an element

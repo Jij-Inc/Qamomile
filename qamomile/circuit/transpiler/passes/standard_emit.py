@@ -40,8 +40,10 @@ from qamomile.circuit.transpiler.passes.emit_base import (
     ValueResolver,
     LoopAnalyzer,
     CompositeDecomposer,
+    map_phi_outputs,
 )
 from qamomile.circuit.transpiler.errors import (
+    EmitError,
     QubitIndexResolutionError,
     OperandResolutionInfo,
     ResolutionFailureReason,
@@ -147,7 +149,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 self._emit_gate(circuit, op, qubit_map, bindings)
 
             elif isinstance(op, MeasureOperation):
-                self._emit_measure(circuit, op, qubit_map, clbit_map)
+                self._emit_measure(circuit, op, qubit_map, clbit_map, bindings)
 
             elif isinstance(op, MeasureVectorOperation):
                 self._emit_measure_vector(circuit, op, qubit_map, clbit_map, bindings)
@@ -269,6 +271,10 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 self._emitter.emit_t(circuit, qubit_indices[0])
             case GateOperationType.S:
                 self._emitter.emit_s(circuit, qubit_indices[0])
+            case GateOperationType.SDG:
+                self._emitter.emit_sdg(circuit, qubit_indices[0])
+            case GateOperationType.TDG:
+                self._emitter.emit_tdg(circuit, qubit_indices[0])
             case GateOperationType.CX:
                 self._emitter.emit_cx(circuit, qubit_indices[0], qubit_indices[1])
             case GateOperationType.CZ:
@@ -315,13 +321,51 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         op: MeasureOperation,
         qubit_map: dict[str, int],
         clbit_map: dict[str, int],
+        bindings: dict[str, Any] | None = None,
     ) -> None:
-        """Emit a single measurement."""
-        qubit_uuid = op.operands[0].uuid
+        """Emit a single measurement.
+
+        Resolves the qubit operand using the full resolver (handles both
+        scalar qubits and array element qubits with composite keys).
+
+        Raises:
+            warnings.warn: If the qubit or clbit cannot be resolved, a
+                warning is emitted instead of silently dropping the
+                measurement.
+        """
+        import warnings
+
+        qubit_val = op.operands[0]
         clbit_uuid = op.results[0].uuid
-        if qubit_uuid in qubit_map and clbit_uuid in clbit_map:
+
+        # Use the resolver for proper array element handling
+        result = self._resolver.resolve_qubit_index_detailed(
+            qubit_val, qubit_map, bindings or {}
+        )
+        qubit_idx = result.index if result.success else None
+
+        # Fallback to direct UUID lookup
+        if qubit_idx is None and qubit_val.uuid in qubit_map:
+            qubit_idx = qubit_map[qubit_val.uuid]
+
+        if qubit_idx is not None and clbit_uuid in clbit_map:
             self._emitter.emit_measure(
-                circuit, qubit_map[qubit_uuid], clbit_map[clbit_uuid]
+                circuit, qubit_idx, clbit_map[clbit_uuid]
+            )
+        else:
+            details: list[str] = []
+            if qubit_idx is None:
+                details.append(
+                    f"qubit '{qubit_val.name}' (uuid: {qubit_val.uuid[:8]}...) "
+                    f"could not be resolved to a physical qubit index"
+                )
+            if clbit_uuid not in clbit_map:
+                details.append(
+                    f"clbit (uuid: {clbit_uuid[:8]}...) not found in clbit_map"
+                )
+            warnings.warn(
+                f"Measurement dropped: {'; '.join(details)}.",
+                stacklevel=2,
             )
 
     def _emit_measure_vector(
@@ -509,6 +553,9 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             elif len(op.key_vars) == 1:
                 # Single key variable
                 loop_bindings[op.key_vars[0]] = key
+                if op.key_is_vector:
+                    # Provide key length for Vector[UInt] shape resolution
+                    loop_bindings[f"{op.key_vars[0]}_dim0"] = len(key)
 
             # Bind value variable
             loop_bindings[op.value_var] = value
@@ -600,6 +647,32 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 circuit, op.false_operations, qubit_map, clbit_map, bindings
             )
             self._emitter.emit_if_end(circuit, context)
+
+            # Register phi output UUIDs so subsequent operations
+            # (e.g., measure) can resolve the merged values.
+            self._register_phi_outputs(op, qubit_map, clbit_map, bindings)
+
+    def _register_phi_outputs(
+        self,
+        op: IfOperation,
+        qubit_map: dict[str, int],
+        clbit_map: dict[str, int],
+        bindings: dict[str, Any] | None = None,
+    ) -> None:
+        """Register phi output UUIDs via the shared ``map_phi_outputs`` utility.
+
+        Uses the full ``ValueResolver.resolve_qubit_index_detailed`` for
+        scalar qubit resolution (handles array element operands).
+        """
+        resolver_bindings = bindings or {}
+
+        def _resolve_scalar(source: Value, qmap: dict[str, int]) -> int | None:
+            result = self._resolver.resolve_qubit_index_detailed(
+                source, qmap, resolver_bindings
+            )
+            return result.index if result.success else None
+
+        map_phi_outputs(op.phi_ops, qubit_map, clbit_map, _resolve_scalar)
 
     def _emit_while(
         self,
@@ -1018,6 +1091,265 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 self._emitter.emit_cp(circuit, control_idx, target_idx, math.pi / 2)
             case GateOperationType.T:
                 self._emitter.emit_cp(circuit, control_idx, target_idx, math.pi / 4)
+            case GateOperationType.SDG:
+                self._emitter.emit_cp(circuit, control_idx, target_idx, -math.pi / 2)
+            case GateOperationType.TDG:
+                self._emitter.emit_cp(circuit, control_idx, target_idx, -math.pi / 4)
+
+    def _resolve_power(
+        self,
+        op: ControlledUOperation,
+        bindings: dict[str, Any],
+    ) -> int:
+        """Resolve ``ControlledUOperation.power`` to a concrete positive ``int``.
+
+        After frontend normalization and constant folding, the ``power``
+        field is either a concrete ``int`` or a symbolic ``Value``.
+        This method resolves the latter via *bindings* and validates
+        the result, ensuring both controlled-U emission paths receive
+        identical, deterministic semantics.
+
+        Args:
+            op: The ``ControlledUOperation`` whose ``power`` to resolve.
+            bindings: Current variable bindings for symbolic resolution.
+
+        Returns:
+            A validated strictly-positive ``int``.
+
+        Raises:
+            EmitError: If *power* is unresolved, non-positive, ``bool``,
+                non-integer, or of an unexpected type.
+        """
+        power = op.power
+
+        if isinstance(power, int):
+            if isinstance(power, bool):
+                raise EmitError(
+                    f"ControlledU power must be a positive integer, "
+                    f"got bool ({power}).",
+                    operation="ControlledUOperation",
+                )
+            if power <= 0:
+                raise EmitError(
+                    f"ControlledU power must be strictly positive, got {power}.",
+                    operation="ControlledUOperation",
+                )
+            return power
+
+        if isinstance(power, Value):
+            resolved = self._resolver.resolve_classical_value(power, bindings)
+            if resolved is None:
+                raise EmitError(
+                    f"Cannot resolve ControlledU power: symbolic value "
+                    f"'{power.name}' could not be resolved to a concrete "
+                    f"integer. Ensure all loop variables and parameters "
+                    f"are bound before transpilation.",
+                    operation="ControlledUOperation",
+                )
+            if isinstance(resolved, bool):
+                raise EmitError(
+                    f"ControlledU power resolved to bool ({resolved}), "
+                    f"expected a positive integer.",
+                    operation="ControlledUOperation",
+                )
+            if isinstance(resolved, float):
+                if resolved != int(resolved):
+                    raise EmitError(
+                        f"ControlledU power resolved to non-integer float {resolved}.",
+                        operation="ControlledUOperation",
+                    )
+                resolved = int(resolved)
+            if not isinstance(resolved, int):
+                raise EmitError(
+                    f"ControlledU power resolved to "
+                    f"{type(resolved).__name__}, expected int.",
+                    operation="ControlledUOperation",
+                )
+            if resolved <= 0:
+                raise EmitError(
+                    f"ControlledU power must be strictly positive, got {resolved}.",
+                    operation="ControlledUOperation",
+                )
+            return resolved
+
+        raise EmitError(
+            f"ControlledU power has unexpected type "
+            f"{type(power).__name__}. Expected int or Value.",
+            operation="ControlledUOperation",
+        )
+
+    def _emit_controlled_u_with_index_spec(
+        self,
+        circuit: T,
+        op: ControlledUOperation,
+        qubit_map: dict[str, int],
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit a ControlledUOperation with target_indices/controlled_indices."""
+        # 1. Resolve num_controls
+        if op.is_symbolic_num_controls:
+            nc = self._resolver.resolve_classical_value(op.num_controls, bindings)
+            if nc is None:
+                raise EmitError(
+                    "Cannot resolve symbolic num_controls for index_spec emit.",
+                    operation="ControlledUOperation",
+                )
+            nc = int(nc)
+        else:
+            nc = op.num_controls
+
+        # 2. Resolve index lists
+        if op.target_indices is not None:
+            resolved_ti = []
+            for v in op.target_indices:
+                val = self._resolver.resolve_classical_value(v, bindings)
+                if val is None:
+                    raise EmitError(
+                        "Cannot resolve target index.",
+                        operation="ControlledUOperation",
+                    )
+                resolved_ti.append(int(val))
+            resolved_ci = None
+        else:
+            resolved_ci = []
+            for v in op.controlled_indices:
+                val = self._resolver.resolve_classical_value(v, bindings)
+                if val is None:
+                    raise EmitError(
+                        "Cannot resolve controlled index.",
+                        operation="ControlledUOperation",
+                    )
+                resolved_ci.append(int(val))
+            resolved_ti = None
+
+        # 3. Get Vector's physical qubit indices
+        vector_value = op.operands[1]
+        size_val = vector_value.shape[0]
+        vector_size = self._resolver.resolve_int_value(size_val, bindings)
+        if vector_size is None:
+            raise EmitError(
+                "Cannot resolve Vector size for index_spec emit.",
+                operation="ControlledUOperation",
+            )
+
+        all_phys_indices = []
+        for i in range(vector_size):
+            qubit_id = f"{vector_value.uuid}_{i}"
+            if qubit_id in qubit_map:
+                all_phys_indices.append(qubit_map[qubit_id])
+            else:
+                raise EmitError(
+                    f"Qubit {qubit_id} not found in qubit_map.",
+                    operation="ControlledUOperation",
+                )
+
+        # 4. Validate resolved indices
+        resolved_indices = resolved_ti if resolved_ti is not None else resolved_ci
+        for idx in resolved_indices:
+            if not (0 <= idx < vector_size):
+                raise EmitError(
+                    f"Index {idx} out of bounds [0, {vector_size}) "
+                    f"for ControlledU vector.",
+                    operation="ControlledUOperation",
+                )
+        if len(set(resolved_indices)) != len(resolved_indices):
+            raise EmitError(
+                f"Duplicate indices in ControlledU index spec: {resolved_indices}.",
+                operation="ControlledUOperation",
+            )
+
+        # 5. Partition into control and target physical indices
+        if resolved_ti is not None:
+            target_set = set(resolved_ti)
+            target_phys = [all_phys_indices[i] for i in resolved_ti]
+            control_phys = [
+                all_phys_indices[i] for i in range(vector_size) if i not in target_set
+            ]
+        else:
+            control_set = set(resolved_ci)
+            control_phys = [all_phys_indices[i] for i in resolved_ci]
+            target_phys = [
+                all_phys_indices[i] for i in range(vector_size) if i not in control_set
+            ]
+
+        # 6. Validate num_controls consistency
+        if len(control_phys) != nc:
+            raise EmitError(
+                f"num_controls ({nc}) does not match actual control count "
+                f"({len(control_phys)}).",
+                operation="ControlledUOperation",
+            )
+
+        # 7. Bind classical parameters
+        block_value = op.block
+        param_operands = [
+            v for v in op.operands[2:] if hasattr(v, "type") and v.type.is_classical()
+        ]
+        local_bindings = bindings.copy()
+
+        if hasattr(block_value, "input_values"):
+            param_inputs = [
+                iv
+                for iv in block_value.input_values
+                if hasattr(iv, "type") and iv.type.is_classical()
+            ]
+            for i, operand in enumerate(param_operands):
+                if i >= len(param_inputs):
+                    break
+                param_name = param_inputs[i].name
+                if operand.is_constant():
+                    local_bindings[param_name] = operand.get_const()
+                elif operand.is_parameter():
+                    outer_name = operand.parameter_name()
+                    if outer_name and outer_name in bindings:
+                        local_bindings[param_name] = bindings[outer_name]
+                elif operand.name in bindings:
+                    local_bindings[param_name] = bindings[operand.name]
+                elif (
+                    hasattr(operand, "params")
+                    and operand.params
+                    and "const" in operand.params
+                ):
+                    local_bindings[param_name] = operand.params["const"]
+
+        # 8. Build and emit gate
+        num_targets = len(target_phys)
+        unitary_gate = self._blockvalue_to_gate(
+            block_value, num_targets, local_bindings
+        )
+
+        power_value = self._resolve_power(op, bindings)
+
+        if unitary_gate is not None:
+            if power_value > 1:
+                unitary_gate = self._emitter.gate_power(unitary_gate, power_value)
+            controlled_gate = self._emitter.gate_controlled(unitary_gate, nc)
+            self._emitter.append_gate(
+                circuit, controlled_gate, control_phys + target_phys
+            )
+        else:
+            if nc > 1:
+                raise EmitError(
+                    f"Cannot decompose multi-controlled operation (num_controls={nc}).",
+                    operation="ControlledUOperation",
+                )
+            for _ in range(power_value):
+                for ctrl_idx in control_phys:
+                    self._emit_controlled_block(
+                        circuit,
+                        block_value,
+                        ctrl_idx,
+                        target_phys,
+                        local_bindings,
+                    )
+
+        # 9. Map result ArrayValue in qubit_map
+        vector_result = op.results[0]
+        for i in range(vector_size):
+            result_key = f"{vector_result.uuid}_{i}"
+            input_key = f"{vector_value.uuid}_{i}"
+            if input_key in qubit_map and result_key not in qubit_map:
+                qubit_map[result_key] = qubit_map[input_key]
 
     def _emit_controlled_u(
         self,
@@ -1027,6 +1359,15 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         bindings: dict[str, Any],
     ) -> None:
         """Emit a ControlledUOperation."""
+        if op.has_index_spec:
+            self._emit_controlled_u_with_index_spec(circuit, op, qubit_map, bindings)
+            return
+        if op.is_symbolic_num_controls:
+            raise EmitError(
+                "Cannot emit ControlledUOperation with symbolic num_controls. "
+                "Bind parameters to concrete values before transpilation.",
+                operation="ControlledUOperation",
+            )
         block_value = op.block
         control_operands = op.control_operands
         remaining_operands = op.operands[1 + op.num_controls :]
@@ -1088,20 +1429,10 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             block_value, num_targets, local_bindings
         )
 
-        # Resolve power value from bindings if it's a Value
-        power_value = op.power
-        if isinstance(power_value, Value):
-            power_value = self._value_resolver.resolve_value(power_value, bindings)
-
-        # Handle UInt or other non-int types by getting numeric value
-        if hasattr(power_value, "value") and hasattr(power_value.value, "get_const"):
-            const_val = power_value.value.get_const()
-            if const_val is not None:
-                power_value = int(const_val)
+        power_value = self._resolve_power(op, bindings)
 
         if unitary_gate is not None:
-            # Only apply power if it's a concrete int value > 1
-            if isinstance(power_value, int) and power_value > 1:
+            if power_value > 1:
                 unitary_gate = self._emitter.gate_power(unitary_gate, power_value)
             controlled_gate = self._emitter.gate_controlled(
                 unitary_gate, op.num_controls
@@ -1110,22 +1441,22 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 circuit, controlled_gate, control_indices + target_indices
             )
         else:
-            # Only unroll if power_value is a concrete int
-            if isinstance(power_value, int):
-                for _ in range(power_value):
-                    for ctrl_idx in control_indices:
-                        self._emit_controlled_block(
-                            circuit,
-                            block_value,
-                            ctrl_idx,
-                            target_indices,
-                            local_bindings,
-                        )
-            else:
-                # If power is symbolic, emit once (power will be handled by other means)
+            if op.num_controls > 1:
+                raise EmitError(
+                    f"Cannot decompose multi-controlled operation "
+                    f"(num_controls={op.num_controls}): "
+                    f"block-to-gate conversion failed and the "
+                    f"fallback decomposition only supports single control.",
+                    operation="ControlledUOperation",
+                )
+            for _ in range(power_value):
                 for ctrl_idx in control_indices:
                     self._emit_controlled_block(
-                        circuit, block_value, ctrl_idx, target_indices, local_bindings
+                        circuit,
+                        block_value,
+                        ctrl_idx,
+                        target_indices,
+                        local_bindings,
                     )
 
         all_input_indices = control_indices + target_indices

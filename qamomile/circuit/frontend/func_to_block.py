@@ -232,6 +232,7 @@ def create_dummy_input(
             dict_handle.name = name
             dict_handle.id = str(id(dict_handle))
             dict_handle._consumed = False
+            dict_handle._key_type = param_type.__args__[0]
             return dict_handle
         raise TypeError(f"Dict type missing key/value types: {param_type}")
 
@@ -263,6 +264,12 @@ def create_dummy_input(
             name=name,
             shape=shape_values,
         )
+
+        # Emit QInitOperation for qubit arrays (consistent with scalar Qubit handling)
+        if emit_init and isinstance(element_ir_type, ir_types.QubitType):
+            qinit_op = QInitOperation(operands=[], results=[array_value])
+            tracer = get_current_tracer()
+            tracer.add_operation(qinit_op)
 
         # Create symbolic UInt handles for _shape
         shape_handles = tuple(UInt(value=dim_value) for dim_value in shape_values)

@@ -22,7 +22,6 @@
 #
 # We will use Quantum Phase Estimation (QPE) as an example to explain the transpilation and execution flow in Qamomile.
 # Let's start by confirming the basic usage.
-
 # %%
 # %% [markdown]
 # ### QPE Overview
@@ -73,6 +72,8 @@ def qpe_3bit(phase: float) -> qmc.Float:
     return qmc.measure(phase_q)
 
 
+qpe_3bit.draw(fold_loops=False, inline=True)
+
 # %%
 # Transpile and Execute
 from qamomile.qiskit import QiskitTranspiler
@@ -121,7 +122,9 @@ def add_three(q: qmc.Qubit) -> qmc.Qubit:
     return q
 
 
-# %# [markdown]
+add_three.draw(inline=True)
+
+# %% [markdown]
 # Let's try inlining these kernels.
 
 # %%
