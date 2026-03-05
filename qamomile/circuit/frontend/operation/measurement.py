@@ -7,12 +7,14 @@ from qamomile.circuit.frontend.handle.array import Vector as VectorClass
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.gate import (
     MeasureOperation as IRMeasureOperation,
-    MeasureVectorOperation,
+)
+from qamomile.circuit.ir.operation.gate import (
     MeasureQFixedOperation,
+    MeasureVectorOperation,
 )
 from qamomile.circuit.ir.types import BitType, FloatType
 from qamomile.circuit.ir.types.primitives import UIntType
-from qamomile.circuit.ir.value import Value, ArrayValue
+from qamomile.circuit.ir.value import ArrayValue, Value
 
 
 @overload
@@ -60,8 +62,13 @@ def measure(
         return _measure_qfixed(target)
     elif hasattr(target, "element_type") and target.element_type == Qubit:
         return _measure_vector_qubit(target)
-    else:
+    elif isinstance(target, Qubit):
         return _measure_qubit(target)
+    else:
+        raise TypeError(
+            f"Unsupported type for measurement: {type(target)}. "
+            "Expected Qubit, QFixed, or Vector[Qubit]."
+        )
 
 
 def _measure_qubit(qubit: Qubit) -> Bit:
