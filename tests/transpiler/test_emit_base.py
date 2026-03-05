@@ -401,6 +401,110 @@ class TestPhiOpsAllocation:
         assert qubit_map[phi_out0.uuid] == qubit_map[q0_out.uuid]
         assert qubit_map[phi_out1.uuid] == qubit_map[q1_out.uuid]
 
+    def test_phi_bit_consolidates_both_branches(self) -> None:
+        """Both branches' clbits must be consolidated to the same physical clbit.
+
+        Under Qiskit's ``if_test``, only one branch executes, so both
+        branches must measure into the same physical clbit. Otherwise
+        the phi output always reads the true branch's result.
+        """
+        q = _make_value("q", QubitType)
+        q_out = q.next_version()
+        qinit_op = QInitOperation(operands=[], results=[q_out])
+
+        cond = _make_value("cond", BitType)
+        measure_cond = MeasureOperation(operands=[q_out], results=[cond])
+
+        true_bit = _make_value("true_bit", BitType)
+        false_bit = _make_value("false_bit", BitType)
+        true_measure = MeasureOperation(
+            operands=[q_out.next_version()], results=[true_bit]
+        )
+        false_measure = MeasureOperation(
+            operands=[q_out.next_version()], results=[false_bit]
+        )
+
+        phi_bit = _make_value("phi_bit", BitType)
+        phi = PhiOp(
+            operands=[cond, true_bit, false_bit],
+            results=[phi_bit],
+        )
+        if_op = IfOperation(
+            operands=[cond],
+            results=[phi_bit],
+            true_operations=[true_measure],
+            false_operations=[false_measure],
+            phi_ops=[phi],
+        )
+
+        operations = [qinit_op, measure_cond, if_op]
+        allocator = ResourceAllocator()
+        _, clbit_map = allocator.allocate(operations, bindings={})
+
+        # All three — true_bit, false_bit, phi_bit — must share the same physical clbit
+        assert clbit_map[true_bit.uuid] == clbit_map[false_bit.uuid]
+        assert clbit_map[phi_bit.uuid] == clbit_map[true_bit.uuid]
+
+    @pytest.mark.parametrize("array_size", [1, 2, 4])
+    def test_phi_bit_array_consolidates_both_branches(
+        self, array_size: int
+    ) -> None:
+        """BitType ArrayValue phi must consolidate per-element clbits across branches."""
+        size_val = _make_const_value("size", array_size)
+
+        q_array = _make_array_value("q", shape_vals=(size_val,))
+        qinit_op = QInitOperation(operands=[], results=[q_array])
+
+        # Measure q[0] → condition
+        q0_idx = _make_const_value("idx_0", 0)
+        q0_elem = Value(
+            type=QubitType(), name="q[0]",
+            parent_array=q_array, element_indices=(q0_idx,),
+        )
+        cond = _make_value("cond", BitType)
+        measure_cond = MeasureOperation(operands=[q0_elem], results=[cond])
+
+        # True branch: measure into true_bits array
+        true_bits = _make_array_value("true_bits", shape_vals=(size_val,), type_cls=BitType)
+        false_bits = _make_array_value("false_bits", shape_vals=(size_val,), type_cls=BitType)
+
+        # Simulate allocation of individual array element clbits
+        # (MeasureVectorOperation would do this, but for unit test we pre-fill)
+
+        phi_bits = _make_array_value("phi_bits", shape_vals=(size_val,), type_cls=BitType)
+        phi = PhiOp(
+            operands=[cond, true_bits, false_bits],
+            results=[phi_bits],
+        )
+        if_op = IfOperation(
+            operands=[cond],
+            results=[phi_bits],
+            true_operations=[],
+            false_operations=[],
+            phi_ops=[phi],
+        )
+
+        # Pre-fill clbit_map with element keys for both arrays
+        clbit_map: dict[str, int] = {cond.uuid: 0}
+        for i in range(array_size):
+            clbit_map[f"{true_bits.uuid}_{i}"] = i + 1
+            clbit_map[f"{false_bits.uuid}_{i}"] = array_size + i + 1
+
+        from qamomile.circuit.transpiler.passes.emit_base import map_phi_outputs
+
+        map_phi_outputs(if_op.phi_ops, {}, clbit_map)
+
+        # Phi output elements should exist AND both branches consolidated
+        for i in range(array_size):
+            phi_key = f"{phi_bits.uuid}_{i}"
+            true_key = f"{true_bits.uuid}_{i}"
+            false_key = f"{false_bits.uuid}_{i}"
+            assert phi_key in clbit_map, f"phi element {i} not allocated"
+            assert clbit_map[phi_key] == clbit_map[true_key]
+            assert clbit_map[false_key] == clbit_map[true_key], (
+                f"element {i}: false branch clbit not consolidated"
+            )
+
 
 # ===========================================================================
 # LoopAnalyzer._has_loop_var_binop

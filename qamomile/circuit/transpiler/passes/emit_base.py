@@ -118,30 +118,46 @@ def map_phi_outputs(
                         qubit_map[output.uuid] = resolved
                         break
 
-        # Classical bit types: map phi output to same classical bit
+        # Classical bit types: consolidate both branches to the same
+        # physical clbit.  Under Qiskit's ``if_test`` only one branch
+        # executes, so both branches' measurements must target the same
+        # physical clbit — otherwise the phi output always reads the
+        # first-found branch (which was always the true branch).
         elif isinstance(output.type, BitType):
-            # Handle ArrayValue phi outputs of BitType: copy composite element keys
             if isinstance(output, ArrayValue):
-                for source in (true_val, false_val):
-                    if not isinstance(source, ArrayValue):
-                        continue
-                    keys_propagated = False
+                # ArrayValue BitType: consolidate per-element keys
+                true_src = true_val if isinstance(true_val, ArrayValue) else None
+                false_src = false_val if isinstance(false_val, ArrayValue) else None
+                primary = true_src or false_src
+                secondary = false_src if true_src is not None else true_src
+
+                if primary is not None:
                     for key, phys_idx in list(clbit_map.items()):
-                        prefix = f"{source.uuid}_"
+                        prefix = f"{primary.uuid}_"
                         if key.startswith(prefix):
                             suffix = key[len(prefix):]
+                            # Map phi output element to primary's clbit
                             out_key = f"{output.uuid}_{suffix}"
                             if out_key not in clbit_map:
                                 clbit_map[out_key] = phys_idx
-                                keys_propagated = True
-                    if keys_propagated:
-                        break
+                            # Redirect secondary branch element to same clbit
+                            if secondary is not None:
+                                sec_key = f"{secondary.uuid}_{suffix}"
+                                if sec_key in clbit_map:
+                                    clbit_map[sec_key] = phys_idx
             else:
-                # Scalar BitType phi output
-                for source in (true_val, false_val):
-                    if source.uuid in clbit_map:
-                        clbit_map[output.uuid] = clbit_map[source.uuid]
-                        break
+                # Scalar BitType: pick the first available clbit as
+                # canonical, redirect the other branch to it.
+                true_clbit = clbit_map.get(true_val.uuid)
+                false_clbit = clbit_map.get(false_val.uuid)
+
+                if true_clbit is not None:
+                    clbit_map[output.uuid] = true_clbit
+                    # Redirect false branch to write to same physical clbit
+                    if false_clbit is not None and false_clbit != true_clbit:
+                        clbit_map[false_val.uuid] = true_clbit
+                elif false_clbit is not None:
+                    clbit_map[output.uuid] = false_clbit
 
 
 
