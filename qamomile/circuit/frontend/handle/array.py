@@ -6,7 +6,7 @@ import uuid
 from typing import Generic, Iterator, TypeVar, overload
 
 from qamomile.circuit.frontend.tracer import get_current_tracer
-from qamomile.circuit.ir.operation.operation import QInitOperation, CInitOperation
+from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
 from qamomile.circuit.ir.types import ValueType
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
@@ -276,6 +276,9 @@ class ArrayBase(Handle, Generic[T]):
         # Release the borrow
         if release_key in self._borrowed_indices:
             del self._borrowed_indices[release_key]
+        else:
+            # Classical types are freely copyable — no linear enforcement needed
+            pass
 
     def _copy_subclass_state_to(self, new_handle: "ArrayBase") -> None:
         """Copy ArrayBase-specific state to a new handle created by consume()."""
