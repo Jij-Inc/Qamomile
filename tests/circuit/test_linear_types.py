@@ -596,6 +596,44 @@ class TestLoopVariableShadowing:
         graph = good_circuit.build()
         assert graph is not None
 
+    def test_items_key_shadow_raises(self):
+        """items() key variable shadowing a parameter should raise SyntaxError."""
+        with pytest.raises(SyntaxError, match="shadows a function parameter"):
+
+            @qkernel
+            def bad_items_key(i: qm.UInt) -> Qubit:
+                qs = qubit_array(3, "qs")
+                angles = qm.dict_input(qm.UInt, qm.Float, name="angles")
+                for i, theta in qm.items(angles):
+                    qs[i] = qm.rx(qs[i], theta)
+                return qs[0]
+
+    def test_items_value_shadow_raises(self):
+        """items() value variable shadowing a parameter should raise SyntaxError."""
+        with pytest.raises(SyntaxError, match="shadows a function parameter"):
+
+            @qkernel
+            def bad_items_value(theta: qm.Float) -> Qubit:
+                qs = qubit_array(3, "qs")
+                angles = qm.dict_input(qm.UInt, qm.Float, name="angles")
+                for i, theta in qm.items(angles):
+                    qs[i] = qm.rx(qs[i], theta)
+                return qs[0]
+
+    def test_items_tuple_key_shadow_raises(self):
+        """items() tuple key variable shadowing a parameter should raise SyntaxError."""
+        with pytest.raises(SyntaxError, match="shadows a function parameter"):
+
+            @qkernel
+            def bad_tuple_key(
+                j: qm.UInt,
+                ising: qm.Dict[qm.Tuple[qm.UInt, qm.UInt], qm.Float],
+            ) -> Qubit:
+                qs = qubit_array(3, "qs")
+                for (i, j), Jij in qm.items(ising):
+                    qs[i], qs[j] = qm.rzz(qs[i], qs[j], Jij)
+                return qs[0]
+
 
 class TestRuntimeLimitations:
     """Issue 05: Better diagnostics for runtime limitations."""
@@ -633,6 +671,57 @@ class TestRuntimeLimitations:
 
         graph = good_circuit.build(n=1)
         assert graph is not None
+
+    def test_while_qkernel_condition_raises(self):
+        """while condition calling a @qkernel should raise SyntaxError."""
+
+        @qkernel
+        def cond_fn(q: Qubit) -> qm.Bit:
+            return qm.measure(q)
+
+        with pytest.raises(SyntaxError, match="Quantum kernel"):
+
+            @qkernel
+            def bad_indirect(q: Qubit) -> Qubit:
+                while cond_fn(q):
+                    q = qm.h(q)
+                return q
+
+
+class TestQuantumOpsSpec:
+    """Verify _QUANTUM_OPS matches the authoritative while-condition spec."""
+
+    def test_quantum_ops_matches_spec(self):
+        from qamomile.circuit.frontend.ast_transform import ControlFlowTransformer
+
+        expected = frozenset(
+            {
+                "h",
+                "x",
+                "y",
+                "z",
+                "s",
+                "t",
+                "sdg",
+                "tdg",
+                "cx",
+                "cz",
+                "rx",
+                "ry",
+                "rz",
+                "p",
+                "cp",
+                "swap",
+                "ccx",
+                "rzz",
+                "measure",
+                "expval",
+            }
+        )
+        missing = expected - ControlFlowTransformer._QUANTUM_OPS
+        extra = ControlFlowTransformer._QUANTUM_OPS - expected
+        assert missing == set(), f"Missing from _QUANTUM_OPS: {missing}"
+        assert extra == set(), f"Extra in _QUANTUM_OPS: {extra}"
 
 
 class TestCastConsumeAndValidation:
@@ -672,6 +761,49 @@ class TestCastConsumeAndValidation:
             for i in qm.range(3):
                 qs[i] = qm.h(qs[i])
             return qm.cast(qs, qm.QFixed, int_bits=1)
+
+        graph = good_circuit.build()
+        assert graph is not None
+
+
+class TestIterationProhibition:
+    """Verify direct iteration over Vector is prohibited at both AST and runtime layers."""
+
+    def test_for_sequence_raises_syntax_error(self):
+        """'for q in qs:' in @qkernel should raise SyntaxError at AST stage."""
+        with pytest.raises(SyntaxError, match="Direct iteration over sequences"):
+
+            @qkernel
+            def bad_circuit() -> Qubit:
+                qs = qubit_array(3, "qs")
+                for q in qs:
+                    q = qm.h(q)
+                return qs[0]
+
+    def test_vector_iter_raises_type_error(self):
+        """iter(Vector) should raise TypeError at runtime."""
+        from qamomile.circuit.frontend.handle.array import Vector
+        from qamomile.circuit.frontend.tracer import trace
+        from qamomile.circuit.ir.types import QubitType
+        from qamomile.circuit.ir.value import Value
+
+        with trace():
+            v = Vector._create_from_value(
+                value=Value(type=QubitType(), name="qs"),
+                shape=(),
+            )
+            with pytest.raises(TypeError, match="Direct iteration over Vector"):
+                iter(v)
+
+    def test_range_iteration_allowed(self):
+        """'for i in qmc.range(n):' should be allowed."""
+
+        @qkernel
+        def good_circuit() -> Qubit:
+            qs = qubit_array(3, "qs")
+            for i in qm.range(3):
+                qs[i] = qm.h(qs[i])
+            return qs[0]
 
         graph = good_circuit.build()
         assert graph is not None

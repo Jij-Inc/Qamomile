@@ -1,7 +1,7 @@
 import ast
 import inspect
 import textwrap
-from typing import Any, Callable
+from typing import Any, Callable, NoReturn
 
 
 from qamomile.circuit.frontend.operation.control_flow import (
@@ -95,6 +95,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         self,
         global_names: set[str] | None = None,
         param_names: set[str] | None = None,
+        namespace: dict[str, Any] | None = None,
     ) -> None:
         self.counter: int = 0
         # 変数名 -> 型注釈ノード(ast.AST) を保持する辞書
@@ -103,6 +104,8 @@ class ControlFlowTransformer(ast.NodeTransformer):
         self._global_names = global_names or set()
         # 関数パラメータ名（ループ変数シャドウイング検出用）
         self._param_names = param_names or set()
+        # Namespace for resolving callables (used in while condition QKernel check)
+        self._namespace = namespace or {}
 
     def _get_unique_name(self, prefix: str) -> str:
         name = f"_{prefix}_{self.counter}"
@@ -239,7 +242,9 @@ class ControlFlowTransformer(ast.NodeTransformer):
         )  # type: ignore
         return func_def, func_name
 
-    # Known quantum operation names for while condition check
+    # Authoritative spec: callable names prohibited in while conditions.
+    # Must match implemented quantum operations in
+    # qamomile/circuit/frontend/operation/{qubit_gates,measurement,expval}.py.
     _QUANTUM_OPS = frozenset(
         {
             "h",
@@ -248,9 +253,10 @@ class ControlFlowTransformer(ast.NodeTransformer):
             "z",
             "s",
             "t",
+            "sdg",
+            "tdg",
             "cx",
             "cz",
-            "cy",
             "rx",
             "ry",
             "rz",
@@ -258,17 +264,23 @@ class ControlFlowTransformer(ast.NodeTransformer):
             "cp",
             "swap",
             "ccx",
-            "rxx",
-            "ryy",
             "rzz",
             "measure",
+            "expval",
         }
     )
 
     def _check_no_quantum_ops_in_condition(
         self, test_node: ast.expr, lineno: int
     ) -> None:
-        """Detect quantum operations in while condition and raise SyntaxError."""
+        """Detect quantum operations in while condition and raise SyntaxError.
+
+        Checks two layers:
+        1. Name match against _QUANTUM_OPS (e.g. ``qmc.measure``).
+        2. Namespace resolution for resolvable callables that are QKernel
+           instances (e.g. ``cond_fn`` where ``cond_fn = qkernel(...)``).
+           Unresolvable callables are allowed (fail-open).
+        """
         for node in ast.walk(test_node):
             if isinstance(node, ast.Call):
                 func_name = None
@@ -282,6 +294,33 @@ class ControlFlowTransformer(ast.NodeTransformer):
                         f"is not supported. Move the operation before the loop "
                         f"and use the result as condition."
                     )
+                # Resolve callable in namespace to detect QKernel instances
+                resolved = self._resolve_callable(node.func)
+                if resolved is not None and type(resolved).__name__ == "QKernel":
+                    display = func_name or "<callable>"
+                    raise SyntaxError(
+                        f"Quantum kernel '{display}' in while condition "
+                        f"is not supported. @qkernel functions consume "
+                        f"quantum arguments, which is not allowed in "
+                        f"while conditions."
+                    )
+
+    def _resolve_callable(self, func_node: ast.expr) -> Any | None:
+        """Try to resolve a callable AST node in the namespace.
+
+        Returns the resolved object, or None if unresolvable.
+        """
+        if not self._namespace:
+            return None
+        if isinstance(func_node, ast.Name):
+            return self._namespace.get(func_node.id)
+        if isinstance(func_node, ast.Attribute) and isinstance(
+            func_node.value, ast.Name
+        ):
+            base = self._namespace.get(func_node.value.id)
+            if base is not None:
+                return getattr(base, func_node.attr, None)
+        return None
 
     @staticmethod
     def _has_top_level_return(body_nodes: list[ast.stmt]) -> bool:
@@ -423,6 +462,15 @@ class ControlFlowTransformer(ast.NodeTransformer):
             else:
                 flattened_body.append(item)
 
+        # Check for parameter shadowing (common to all for-loop variants)
+        all_binding_names = self._extract_tuple_vars(node.target)
+        for var_name in all_binding_names:
+            if var_name in self._param_names:
+                raise SyntaxError(
+                    f"Loop variable '{var_name}' shadows a function parameter. "
+                    f"Use a different variable name to avoid silent value loss."
+                )
+
         # Check for items() iteration first
         if self._is_items_call(node.iter):
             return self._transform_for_items(node, flattened_body)
@@ -474,13 +522,6 @@ class ControlFlowTransformer(ast.NodeTransformer):
         else:
             loop_var_name = "_loop_idx"
 
-        # Check for parameter shadowing
-        if loop_var_name in self._param_names:
-            raise SyntaxError(
-                f"Loop variable '{loop_var_name}' shadows a function parameter. "
-                f"Use a different variable name to avoid silent value loss."
-            )
-
         # for_loop(start, stop, step, var_name) コールを作成
         for_loop_call = ast.Call(
             func=ast.Name(id="for_loop", ctx=ast.Load()),
@@ -504,8 +545,8 @@ class ControlFlowTransformer(ast.NodeTransformer):
         return with_stmt
 
     def _transform_for_sequence(
-        self, node: ast.For, flattened_body: list[ast.stmt]
-    ) -> ast.With:
+        self, node: ast.For, _flattened_body: list[ast.stmt]
+    ) -> NoReturn:
         """Prohibit direct sequence iteration to prevent common bugs.
 
         Direct iteration like 'for item in vector:' doesn't support in-place
@@ -760,8 +801,17 @@ def transform_control_flow(func: Callable):
     # Extract parameter names for loop variable shadowing detection
     param_names = set(inspect.signature(func).parameters.keys())
 
+    # Build resolver namespace for callable resolution (while condition QKernel check).
+    # Includes globals and closure values available at function definition time.
+    resolver_namespace: dict[str, Any] = dict(func.__globals__)
+    if func.__closure__ is not None:
+        for name, cell in zip(func.__code__.co_freevars, func.__closure__):
+            resolver_namespace[name] = cell.cell_contents
+
     transformer = ControlFlowTransformer(
-        global_names=global_names, param_names=param_names
+        global_names=global_names,
+        param_names=param_names,
+        namespace=resolver_namespace,
     )
     tree = transformer.visit(tree)
 

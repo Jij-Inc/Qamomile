@@ -221,13 +221,28 @@ class ArrayBase(Handle, Generic[T]):
 
         Order: validate -> consume -> borrow release (fixed sequence).
 
+        Three paths for quantum arrays:
+
+        1. **Borrowed index, correct parent**: validates identity, consumes
+           handle, releases borrow. Normal borrow-return path.
+        2. **Borrowed index, wrong parent**: raises ``LinearTypeError``.
+           Prevents returning a value from a different array.
+        3. **Unborrowed index**: consumes the handle without identity check.
+           Allows writing a fresh qubit to an index that was never borrowed.
+
         Args:
             indices: The indices where the element is being returned.
             value: The handle being written back.
 
         Raises:
-            LinearTypeError: If the index is not borrowed, or the value
-                was not borrowed from this array.
+            LinearTypeError: If the index was borrowed **and** the value
+                was not borrowed from this array (``value.parent is not self``).
+
+        Notes:
+            For symbolic computed indices (e.g. ``n - j - 1``), each
+            evaluation creates a new UInt with a different uuid, making
+            key matching unreliable. The borrow-return identity check is
+            skipped for these indices.
         """
         indices_key = self._make_indices_key(indices)
         index_str = self._format_index(indices)

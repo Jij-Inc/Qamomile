@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import inspect
 import warnings
-from typing import TYPE_CHECKING, Any, Callable, Generic, ParamSpec, TypeVar, cast, get_type_hints
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Generic,
+    ParamSpec,
+    TypeVar,
+    cast,
+    get_type_hints,
+)
 
 import numpy as np
 
@@ -112,10 +121,25 @@ class QKernel(Generic[P, R]):
 
         # Prepare inputs for the IR call (unwrap Handles to Values)
         inputs_map = {}
+        # Track borrow provenance for input-derived quantum scalar handles.
+        # After the call, return values with matching logical_id will have
+        # their parent/indices restored so that borrow-return validation
+        # in ArrayBase._return_element succeeds.
+        provenance_map: dict[str, tuple[Any, tuple]] = {}
         for name, handle in bound_args.arguments.items():
             if not isinstance(handle, Handle):
                 raise TypeError(
                     f"Argument '{name}' must be a Handle instance, got {type(handle)}"
+                )
+            # Record provenance before consume (which preserves parent)
+            if (
+                handle.parent is not None
+                and not is_array_type(type(handle))
+                and handle._should_enforce_linear()
+            ):
+                provenance_map[handle.value.logical_id] = (
+                    handle.parent,
+                    handle.indices,
                 )
             # Consume quantum handles to enforce linear type
             if handle._should_enforce_linear():
@@ -155,7 +179,14 @@ class QKernel(Generic[P, R]):
                 )
             else:
                 # Instantiate the specific Handle type (Qubit, UInt, etc.)
-                wrapped_results.append(handle_type(value=val))
+                # Restore borrow provenance for input-derived quantum scalars
+                if val.logical_id in provenance_map:
+                    parent, indices = provenance_map[val.logical_id]
+                    wrapped_results.append(
+                        handle_type(value=val, parent=parent, indices=indices)
+                    )
+                else:
+                    wrapped_results.append(handle_type(value=val))
 
         # Return tuple or single value to match Python function signature
         if len(wrapped_results) == 1:
