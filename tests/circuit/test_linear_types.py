@@ -3,11 +3,14 @@
 import pytest
 
 import qamomile.circuit as qm
+from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.constructors import qubit_array
 from qamomile.circuit.frontend.handle import Qubit
 from qamomile.circuit.frontend.qkernel import qkernel
 from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
 from qamomile.circuit.ir.operation.operation import QInitOperation
+from qamomile.circuit.stdlib.qft import qft, iqft
+from qamomile.circuit.stdlib.qpe import qpe
 from qamomile.circuit.transpiler.errors import (
     LinearTypeError,
     QubitAliasError,
@@ -486,6 +489,29 @@ class TestSetitemConsumeAndValidation:
             with pytest.raises(QubitConsumedError):
                 qm.h(rogue)
 
+    def test_setitem_after_measure_raises_consumed_error(self):
+        """Writing to measured array should raise QubitConsumedError."""
+
+        @qkernel
+        def bad_circuit() -> qm.Vector[qm.Bit]:
+            qs = qubit_array(1, "qs")
+            bits = qm.measure(qs)
+            qs[0] = qm.qubit("fresh")  # ERROR: qs consumed by measure
+            return bits
+
+        with pytest.raises(QubitConsumedError):
+            bad_circuit.build()
+
+    def test_setitem_on_moved_array_raises_consumed_error(self):
+        """Writing to moved array handle should raise QubitConsumedError."""
+        from qamomile.circuit.frontend.tracer import trace
+
+        with trace():
+            qs = qubit_array(1, "qs")
+            _moved = qs.consume("move")
+            with pytest.raises(QubitConsumedError):
+                qs[0] = qm.qubit("fresh")
+
     def test_borrow_return_reborrow_still_works(self):
         """Normal borrow -> gate -> return -> reborrow should work."""
 
@@ -834,6 +860,19 @@ class TestCastConsumeAndValidation:
         graph = good_circuit.build()
         assert graph is not None
 
+    def test_setitem_after_cast_raises_consumed_error(self):
+        """Writing to source array after cast should raise QubitConsumedError."""
+
+        @qkernel
+        def bad_circuit() -> qm.QFixed:
+            qs = qubit_array(3, "qs")
+            qf = qm.cast(qs, qm.QFixed, int_bits=1)
+            qs[0] = qm.qubit("fresh")  # ERROR: qs consumed by cast
+            return qf
+
+        with pytest.raises(QubitConsumedError):
+            bad_circuit.build()
+
 
 class TestIterationProhibition:
     """Verify direct iteration over Vector is prohibited at both AST and runtime layers."""
@@ -909,3 +948,778 @@ class TestComputedIndexBorrowReturn:
 
         with pytest.raises(UnreturnedBorrowError):
             bad_circuit.build(n=3)
+
+
+# ---------------------------------------------------------------------------
+# Parametrize helpers
+# ---------------------------------------------------------------------------
+
+_SINGLE_QUBIT_GATES = [
+    ("h", qm.h),
+    ("x", qm.x),
+    ("y", qm.y),
+    ("z", qm.z),
+    ("t", qm.t),
+    ("s", qm.s),
+    ("sdg", qm.sdg),
+    ("tdg", qm.tdg),
+]
+
+_ROTATION_GATES = [
+    ("rx", qm.rx),
+    ("ry", qm.ry),
+    ("rz", qm.rz),
+    ("p", qm.p),
+]
+
+_TWO_QUBIT_GATES_NO_PARAM = [
+    ("cx", qm.cx),
+    ("cz", qm.cz),
+    ("swap", qm.swap),
+]
+
+_TWO_QUBIT_GATES_WITH_PARAM = [
+    ("cp", qm.cp),
+    ("rzz", qm.rzz),
+]
+
+
+class TestAllSingleQubitGatesDoubleUse:
+    """Every single-qubit gate must enforce linearity (double-use → error, reassign → OK)."""
+
+    @pytest.mark.parametrize("name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES])
+    def test_double_use_raises(self, name, gate):
+        """Using original qubit handle after gate should raise QubitConsumedError."""
+
+        @qkernel
+        def bad_circuit(q: Qubit) -> Qubit:
+            _q1 = gate(q)
+            q2 = qm.h(q)  # q already consumed
+            return q2
+
+        with pytest.raises(QubitConsumedError) as exc_info:
+            bad_circuit.build()
+
+        assert name.upper() in str(exc_info.value)
+
+    @pytest.mark.parametrize("name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES])
+    def test_reassign_works(self, name, gate):
+        """Proper reassignment after single-qubit gate should build without errors."""
+
+        @qkernel
+        def good_circuit(q: Qubit) -> Qubit:
+            q = gate(q)
+            return q
+
+        graph = good_circuit.build()
+        assert graph is not None
+
+
+class TestAllRotationGatesDoubleUse:
+    """Every rotation gate must enforce linearity."""
+
+    @pytest.mark.parametrize("name,gate", _ROTATION_GATES, ids=[g[0] for g in _ROTATION_GATES])
+    def test_double_use_raises(self, name, gate):
+        """Using original qubit handle after rotation gate should raise QubitConsumedError."""
+
+        @qkernel
+        def bad_circuit(q: Qubit, theta: qm.Float) -> Qubit:
+            _q1 = gate(q, theta)
+            q2 = qm.h(q)  # q already consumed
+            return q2
+
+        with pytest.raises(QubitConsumedError) as exc_info:
+            bad_circuit.build(parameters=["theta"])
+
+        assert name.upper() in str(exc_info.value)
+
+    @pytest.mark.parametrize("name,gate", _ROTATION_GATES, ids=[g[0] for g in _ROTATION_GATES])
+    def test_reassign_works(self, name, gate):
+        """Proper reassignment after rotation gate should build without errors."""
+
+        @qkernel
+        def good_circuit(q: Qubit, theta: qm.Float) -> Qubit:
+            q = gate(q, theta)
+            return q
+
+        graph = good_circuit.build(parameters=["theta"])
+        assert graph is not None
+
+    @pytest.mark.parametrize("name,gate", _ROTATION_GATES, ids=[g[0] for g in _ROTATION_GATES])
+    def test_float_angle_reusable(self, name, gate):
+        """Float angle should be reusable across multiple rotation gates."""
+
+        @qkernel
+        def good_circuit(q: Qubit, theta: qm.Float) -> Qubit:
+            q = gate(q, theta)
+            q = qm.rx(q, theta)  # reuse theta — OK for Float
+            return q
+
+        graph = good_circuit.build(parameters=["theta"])
+        assert graph is not None
+
+
+class TestAllTwoQubitGatesDoubleUse:
+    """Every two-qubit gate must consume both qubits."""
+
+    @pytest.mark.parametrize("name,gate", _TWO_QUBIT_GATES_NO_PARAM, ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM])
+    def test_reuse_first_qubit_raises(self, name, gate):
+        """Reusing first qubit after two-qubit gate should raise QubitConsumedError."""
+
+        @qkernel
+        def bad_circuit(q1: Qubit, q2: Qubit) -> tuple[Qubit, Qubit]:
+            _q1_out, q2_out = gate(q1, q2)
+            q1_bad = qm.h(q1)  # q1 already consumed
+            return q1_bad, q2_out
+
+        with pytest.raises(QubitConsumedError):
+            bad_circuit.build()
+
+    @pytest.mark.parametrize("name,gate", _TWO_QUBIT_GATES_NO_PARAM, ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM])
+    def test_reuse_second_qubit_raises(self, name, gate):
+        """Reusing second qubit after two-qubit gate should raise QubitConsumedError."""
+
+        @qkernel
+        def bad_circuit(q1: Qubit, q2: Qubit) -> tuple[Qubit, Qubit]:
+            q1_out, _q2_out = gate(q1, q2)
+            q2_bad = qm.h(q2)  # q2 already consumed
+            return q1_out, q2_bad
+
+        with pytest.raises(QubitConsumedError):
+            bad_circuit.build()
+
+    @pytest.mark.parametrize("name,gate", _TWO_QUBIT_GATES_NO_PARAM, ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM])
+    def test_reassign_both_works(self, name, gate):
+        """Proper reassignment of both qubits after two-qubit gate should succeed."""
+
+        @qkernel
+        def good_circuit(q1: Qubit, q2: Qubit) -> tuple[Qubit, Qubit]:
+            q1, q2 = gate(q1, q2)
+            return q1, q2
+
+        graph = good_circuit.build()
+        assert graph is not None
+
+    @pytest.mark.parametrize("name,gate", _TWO_QUBIT_GATES_WITH_PARAM, ids=[g[0] for g in _TWO_QUBIT_GATES_WITH_PARAM])
+    def test_reuse_first_qubit_param_gate_raises(self, name, gate):
+        """Reusing first qubit after parameterized two-qubit gate should raise QubitConsumedError."""
+
+        @qkernel
+        def bad_circuit(q1: Qubit, q2: Qubit, theta: qm.Float) -> tuple[Qubit, Qubit]:
+            _q1_out, q2_out = gate(q1, q2, theta)
+            q1_bad = qm.h(q1)  # q1 already consumed
+            return q1_bad, q2_out
+
+        with pytest.raises(QubitConsumedError):
+            bad_circuit.build(parameters=["theta"])
+
+    @pytest.mark.parametrize("name,gate", _TWO_QUBIT_GATES_WITH_PARAM, ids=[g[0] for g in _TWO_QUBIT_GATES_WITH_PARAM])
+    def test_reuse_second_qubit_param_gate_raises(self, name, gate):
+        """Reusing second qubit after parameterized two-qubit gate should raise QubitConsumedError."""
+
+        @qkernel
+        def bad_circuit(q1: Qubit, q2: Qubit, theta: qm.Float) -> tuple[Qubit, Qubit]:
+            q1_out, _q2_out = gate(q1, q2, theta)
+            q2_bad = qm.h(q2)  # q2 already consumed
+            return q1_out, q2_bad
+
+        with pytest.raises(QubitConsumedError):
+            bad_circuit.build(parameters=["theta"])
+
+    @pytest.mark.parametrize("name,gate", _TWO_QUBIT_GATES_WITH_PARAM, ids=[g[0] for g in _TWO_QUBIT_GATES_WITH_PARAM])
+    def test_reassign_both_param_gate_works(self, name, gate):
+        """Proper reassignment of both qubits after parameterized two-qubit gate should succeed."""
+
+        @qkernel
+        def good_circuit(q1: Qubit, q2: Qubit, theta: qm.Float) -> tuple[Qubit, Qubit]:
+            q1, q2 = gate(q1, q2, theta)
+            return q1, q2
+
+        graph = good_circuit.build(parameters=["theta"])
+        assert graph is not None
+
+
+class TestAllTwoQubitGatesAlias:
+    """Every two-qubit gate must detect aliasing (same qubit in both positions)."""
+
+    @pytest.mark.parametrize("name,gate", _TWO_QUBIT_GATES_NO_PARAM, ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM])
+    def test_alias_same_qubit_raises(self, name, gate):
+        """Same qubit in both positions should raise QubitAliasError."""
+
+        @qkernel
+        def bad_circuit(q: Qubit) -> tuple[Qubit, Qubit]:
+            return gate(q, q)
+
+        with pytest.raises(QubitAliasError) as exc_info:
+            bad_circuit.build()
+
+        assert name.upper() in str(exc_info.value)
+
+    @pytest.mark.parametrize("name,gate", _TWO_QUBIT_GATES_WITH_PARAM, ids=[g[0] for g in _TWO_QUBIT_GATES_WITH_PARAM])
+    def test_alias_same_qubit_param_gate_raises(self, name, gate):
+        """Same qubit in both positions of parameterized gate should raise QubitAliasError."""
+
+        @qkernel
+        def bad_circuit(q: Qubit, theta: qm.Float) -> tuple[Qubit, Qubit]:
+            return gate(q, q, theta)
+
+        with pytest.raises(QubitAliasError):
+            bad_circuit.build(parameters=["theta"])
+
+
+class TestThreeQubitGateDoubleUse:
+    """ccx must consume all three qubits; reusing any one raises QubitConsumedError."""
+
+    def test_reuse_control1_raises(self):
+        """Reusing control1 qubit after ccx should raise QubitConsumedError."""
+
+        @qkernel
+        def bad_circuit(q1: Qubit, q2: Qubit, q3: Qubit) -> tuple[Qubit, Qubit, Qubit]:
+            _q1_out, q2_out, q3_out = qm.ccx(q1, q2, q3)
+            q1_bad = qm.h(q1)  # q1 already consumed
+            return q1_bad, q2_out, q3_out
+
+        with pytest.raises(QubitConsumedError):
+            bad_circuit.build()
+
+    def test_reuse_control2_raises(self):
+        """Reusing control2 qubit after ccx should raise QubitConsumedError."""
+
+        @qkernel
+        def bad_circuit(q1: Qubit, q2: Qubit, q3: Qubit) -> tuple[Qubit, Qubit, Qubit]:
+            q1_out, _q2_out, q3_out = qm.ccx(q1, q2, q3)
+            q2_bad = qm.h(q2)  # q2 already consumed
+            return q1_out, q2_bad, q3_out
+
+        with pytest.raises(QubitConsumedError):
+            bad_circuit.build()
+
+    def test_reuse_target_raises(self):
+        """Reusing target qubit after ccx should raise QubitConsumedError."""
+
+        @qkernel
+        def bad_circuit(q1: Qubit, q2: Qubit, q3: Qubit) -> tuple[Qubit, Qubit, Qubit]:
+            q1_out, q2_out, _q3_out = qm.ccx(q1, q2, q3)
+            q3_bad = qm.h(q3)  # q3 already consumed
+            return q1_out, q2_out, q3_bad
+
+        with pytest.raises(QubitConsumedError):
+            bad_circuit.build()
+
+    def test_reassign_all_works(self):
+        """Proper reassignment of all three qubits after ccx should succeed."""
+
+        @qkernel
+        def good_circuit(q1: Qubit, q2: Qubit, q3: Qubit) -> tuple[Qubit, Qubit, Qubit]:
+            q1, q2, q3 = qm.ccx(q1, q2, q3)
+            return q1, q2, q3
+
+        graph = good_circuit.build()
+        assert graph is not None
+
+
+class TestVectorQubitPatterns:
+    """Gates used via Vector[Qubit] borrow-operate-return pattern."""
+
+    @pytest.mark.parametrize("name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES])
+    def test_single_qubit_gate_borrow_return_works(self, name, gate):
+        """Borrow from vector, apply single-qubit gate, return to vector should succeed."""
+
+        @qkernel
+        def good_circuit() -> qm.Vector[qm.Bit]:
+            qs = qubit_array(2, "qs")
+            q = qs[0]
+            q = gate(q)
+            qs[0] = q
+            return qm.measure(qs)
+
+        graph = good_circuit.build()
+        assert graph is not None
+
+    @pytest.mark.parametrize("name,gate", _ROTATION_GATES, ids=[g[0] for g in _ROTATION_GATES])
+    def test_rotation_gate_borrow_return_works(self, name, gate):
+        """Borrow from vector, apply rotation gate, return to vector should succeed."""
+
+        @qkernel
+        def good_circuit(theta: qm.Float) -> qm.Vector[qm.Bit]:
+            qs = qubit_array(2, "qs")
+            q = qs[0]
+            q = gate(q, theta)
+            qs[0] = q
+            return qm.measure(qs)
+
+        graph = good_circuit.build(parameters=["theta"])
+        assert graph is not None
+
+    @pytest.mark.parametrize("name,gate", _TWO_QUBIT_GATES_NO_PARAM, ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM])
+    def test_two_qubit_gate_borrow_return_works(self, name, gate):
+        """Borrow two elements from vector, apply two-qubit gate, return both should succeed."""
+
+        @qkernel
+        def good_circuit() -> qm.Vector[qm.Bit]:
+            qs = qubit_array(2, "qs")
+            q0 = qs[0]
+            q1 = qs[1]
+            q0, q1 = gate(q0, q1)
+            qs[0] = q0
+            qs[1] = q1
+            return qm.measure(qs)
+
+        graph = good_circuit.build()
+        assert graph is not None
+
+    @pytest.mark.parametrize("name,gate", _TWO_QUBIT_GATES_WITH_PARAM, ids=[g[0] for g in _TWO_QUBIT_GATES_WITH_PARAM])
+    def test_two_qubit_param_gate_borrow_return_works(self, name, gate):
+        """Borrow two elements, apply parameterized two-qubit gate, return both should succeed."""
+
+        @qkernel
+        def good_circuit(theta: qm.Float) -> qm.Vector[qm.Bit]:
+            qs = qubit_array(2, "qs")
+            q0 = qs[0]
+            q1 = qs[1]
+            q0, q1 = gate(q0, q1, theta)
+            qs[0] = q0
+            qs[1] = q1
+            return qm.measure(qs)
+
+        graph = good_circuit.build(parameters=["theta"])
+        assert graph is not None
+
+    def test_three_qubit_gate_borrow_return_works(self):
+        """Borrow three elements from vector, apply ccx, return all should succeed."""
+
+        @qkernel
+        def good_circuit() -> qm.Vector[qm.Bit]:
+            qs = qubit_array(3, "qs")
+            q0 = qs[0]
+            q1 = qs[1]
+            q2 = qs[2]
+            q0, q1, q2 = qm.ccx(q0, q1, q2)
+            qs[0] = q0
+            qs[1] = q1
+            qs[2] = q2
+            return qm.measure(qs)
+
+        graph = good_circuit.build()
+        assert graph is not None
+
+    @pytest.mark.parametrize("name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES])
+    def test_unreturned_borrow_after_gate_raises(self, name, gate):
+        """Borrowing, applying gate, not returning before measure should raise UnreturnedBorrowError."""
+
+        @qkernel
+        def bad_circuit() -> qm.Vector[qm.Bit]:
+            qs = qubit_array(2, "qs")
+            q = qs[0]
+            q = gate(q)
+            # Missing: qs[0] = q
+            return qm.measure(qs)
+
+        with pytest.raises(UnreturnedBorrowError):
+            bad_circuit.build()
+
+    def test_double_borrow_after_gate_raises(self):
+        """Borrowing an element, applying gate, then borrowing same element again should raise."""
+
+        @qkernel
+        def bad_circuit() -> Qubit:
+            qs = qubit_array(2, "qs")
+            q = qs[0]
+            q = qm.h(q)
+            # qs[0] still borrowed — trying to borrow again raises
+            q_again = qs[0]
+            return q_again
+
+        with pytest.raises(QubitConsumedError):
+            bad_circuit.build()
+
+
+class TestStubCompositeGateLinearity:
+    """Stub composite gates must enforce linearity on their qubit arguments."""
+
+    def _make_single_qubit_composite(self):
+        class StubSingleQubit(CompositeGate):
+            custom_name = "stub_h"
+
+            @property
+            def num_target_qubits(self) -> int:
+                return 1
+
+            def _decompose(self, qubits):
+                (q,) = qubits
+                return (qm.h(q),)
+
+        return StubSingleQubit()
+
+    def _make_two_qubit_composite(self):
+        class StubTwoQubit(CompositeGate):
+            custom_name = "stub_cx"
+
+            @property
+            def num_target_qubits(self) -> int:
+                return 2
+
+            def _decompose(self, qubits):
+                q0, q1 = qubits
+                q0, q1 = qm.cx(q0, q1)
+                return (q0, q1)
+
+        return StubTwoQubit()
+
+    def _make_controlled_composite(self):
+        class StubControlled(CompositeGate):
+            custom_name = "stub_ctrl_h"
+            num_control_qubits = 1
+
+            @property
+            def num_target_qubits(self) -> int:
+                return 1
+
+            def _decompose(self, qubits):
+                (q,) = qubits
+                return (qm.h(q),)
+
+        return StubControlled()
+
+    def test_single_qubit_composite_double_use_raises(self):
+        """Reusing qubit after single-qubit composite gate should raise QubitConsumedError."""
+        gate = self._make_single_qubit_composite()
+
+        @qkernel
+        def bad_circuit(q: Qubit) -> tuple[Qubit, Qubit]:
+            (q2,) = gate(q)
+            q3 = qm.x(q)  # q already consumed
+            return q2, q3
+
+        with pytest.raises(QubitConsumedError):
+            bad_circuit.build()
+
+    def test_single_qubit_composite_proper_use_works(self):
+        """Proper use of single-qubit composite gate should succeed."""
+        gate = self._make_single_qubit_composite()
+
+        @qkernel
+        def good_circuit(q: Qubit) -> Qubit:
+            (q,) = gate(q)
+            q = qm.x(q)
+            return q
+
+        graph = good_circuit.build()
+        assert graph is not None
+
+    def test_two_qubit_composite_double_use_first_raises(self):
+        """Reusing first qubit after two-qubit composite gate should raise QubitConsumedError."""
+        gate = self._make_two_qubit_composite()
+
+        @qkernel
+        def bad_circuit(q1: Qubit, q2: Qubit) -> tuple[Qubit, Qubit]:
+            _q1_out, q2_out = gate(q1, q2)
+            q1_bad = qm.h(q1)  # q1 already consumed
+            return q1_bad, q2_out
+
+        with pytest.raises(QubitConsumedError):
+            bad_circuit.build()
+
+    def test_two_qubit_composite_double_use_second_raises(self):
+        """Reusing second qubit after two-qubit composite gate should raise QubitConsumedError."""
+        gate = self._make_two_qubit_composite()
+
+        @qkernel
+        def bad_circuit(q1: Qubit, q2: Qubit) -> tuple[Qubit, Qubit]:
+            q1_out, _q2_out = gate(q1, q2)
+            q2_bad = qm.h(q2)  # q2 already consumed
+            return q1_out, q2_bad
+
+        with pytest.raises(QubitConsumedError):
+            bad_circuit.build()
+
+    def test_two_qubit_composite_alias_raises(self):
+        """Same qubit in both positions of two-qubit composite gate should raise a LinearTypeError.
+
+        Note: CompositeGate consumes targets sequentially, so the second use of
+        an already-consumed handle raises QubitConsumedError (not QubitAliasError
+        as with built-in gates that do an explicit alias check first).
+        """
+        gate = self._make_two_qubit_composite()
+
+        @qkernel
+        def bad_circuit(q: Qubit) -> tuple[Qubit, Qubit]:
+            return gate(q, q)
+
+        with pytest.raises(LinearTypeError):
+            bad_circuit.build()
+
+    def test_two_qubit_composite_proper_use_works(self):
+        """Proper use of two-qubit composite gate should succeed."""
+        gate = self._make_two_qubit_composite()
+
+        @qkernel
+        def good_circuit(q1: Qubit, q2: Qubit) -> tuple[Qubit, Qubit]:
+            q1, q2 = gate(q1, q2)
+            return q1, q2
+
+        graph = good_circuit.build()
+        assert graph is not None
+
+    def test_controlled_composite_reuse_control_raises(self):
+        """Reusing control qubit after composite gate call should raise QubitConsumedError."""
+        gate = self._make_controlled_composite()
+
+        @qkernel
+        def bad_circuit(ctrl: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit, Qubit]:
+            ctrl_out, tgt_out = gate(tgt, controls=(ctrl,))
+            ctrl_bad = qm.x(ctrl)  # ctrl already consumed
+            return ctrl_out, tgt_out, ctrl_bad
+
+        with pytest.raises(QubitConsumedError):
+            bad_circuit.build()
+
+    def test_controlled_composite_reuse_target_raises(self):
+        """Reusing target qubit after composite gate call should raise QubitConsumedError."""
+        gate = self._make_controlled_composite()
+
+        @qkernel
+        def bad_circuit(ctrl: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit, Qubit]:
+            ctrl_out, tgt_out = gate(tgt, controls=(ctrl,))
+            tgt_bad = qm.x(tgt)  # tgt already consumed
+            return ctrl_out, tgt_out, tgt_bad
+
+        with pytest.raises(QubitConsumedError):
+            bad_circuit.build()
+
+    def test_controlled_composite_proper_use_works(self):
+        """Proper use of controlled composite gate should succeed."""
+        gate = self._make_controlled_composite()
+
+        @qkernel
+        def good_circuit(ctrl: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit]:
+            ctrl, tgt = gate(tgt, controls=(ctrl,))
+            return ctrl, tgt
+
+        graph = good_circuit.build()
+        assert graph is not None
+
+
+class TestStdlibGatesLinearity:
+    """QFT, IQFT, and QPE must properly consume qubits."""
+
+    def test_qft_proper_use_works(self):
+        """qft on a vector should succeed when vector is properly reassigned."""
+
+        @qkernel
+        def good_circuit() -> qm.Vector[qm.Bit]:
+            qs = qubit_array(3, "qs")
+            qs = qft(qs)
+            return qm.measure(qs)
+
+        graph = good_circuit.build()
+        assert graph is not None
+
+    def test_iqft_proper_use_works(self):
+        """iqft on a vector should succeed when vector is properly reassigned."""
+
+        @qkernel
+        def good_circuit() -> qm.Vector[qm.Bit]:
+            qs = qubit_array(3, "qs")
+            qs = iqft(qs)
+            return qm.measure(qs)
+
+        graph = good_circuit.build()
+        assert graph is not None
+
+    def test_qft_then_iqft_works(self):
+        """Applying qft followed by iqft should succeed."""
+
+        @qkernel
+        def good_circuit() -> qm.Vector[qm.Bit]:
+            qs = qubit_array(3, "qs")
+            qs = qft(qs)
+            qs = iqft(qs)
+            return qm.measure(qs)
+
+        graph = good_circuit.build()
+        assert graph is not None
+
+    def test_qpe_proper_use_works(self):
+        """qpe with a valid unitary kernel should succeed."""
+
+        @qkernel
+        def phase_gate(q: Qubit, theta: qm.Float) -> Qubit:
+            return qm.p(q, theta)
+
+        @qkernel
+        def good_circuit(theta: qm.Float) -> qm.Float:
+            counting = qubit_array(3, "counting")
+            target = qm.qubit("target")
+            target = qm.x(target)
+            phase = qpe(target, counting, phase_gate, theta=theta)
+            return qm.measure(phase)
+
+        graph = good_circuit.build(parameters=["theta"])
+        assert graph is not None
+
+
+class TestControlledGateLinearity:
+    """qm.controlled() wrappers must enforce linearity on both control and target."""
+
+    def _make_sub_kernel(self):
+        @qkernel
+        def sub(q: Qubit) -> Qubit:
+            return qm.h(q)
+
+        return sub
+
+    def test_controlled_proper_use_works(self):
+        """Controlled gate with reassignment of both outputs should succeed."""
+        sub = self._make_sub_kernel()
+        ctrl_h = qm.controlled(sub)
+
+        @qkernel
+        def good_circuit(ctrl: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit]:
+            ctrl, tgt = ctrl_h(ctrl, tgt)
+            return ctrl, tgt
+
+        graph = good_circuit.build()
+        assert graph is not None
+
+    def test_controlled_reuse_control_raises(self):
+        """Reusing control qubit after controlled gate should raise QubitConsumedError."""
+        sub = self._make_sub_kernel()
+        ctrl_h = qm.controlled(sub)
+
+        @qkernel
+        def bad_circuit(ctrl: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit, Qubit]:
+            _ctrl_out, tgt_out = ctrl_h(ctrl, tgt)
+            ctrl_bad = qm.x(ctrl)  # ctrl already consumed
+            return _ctrl_out, tgt_out, ctrl_bad
+
+        with pytest.raises(QubitConsumedError):
+            bad_circuit.build()
+
+    def test_controlled_reuse_target_raises(self):
+        """Reusing target qubit after controlled gate should raise QubitConsumedError."""
+        sub = self._make_sub_kernel()
+        ctrl_h = qm.controlled(sub)
+
+        @qkernel
+        def bad_circuit(ctrl: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit, Qubit]:
+            ctrl_out, _tgt_out = ctrl_h(ctrl, tgt)
+            tgt_bad = qm.x(tgt)  # tgt already consumed
+            return ctrl_out, tgt_bad, _tgt_out
+
+        with pytest.raises(QubitConsumedError):
+            bad_circuit.build()
+
+    def test_controlled_alias_raises(self):
+        """Same qubit as both control and target should raise QubitAliasError."""
+        sub = self._make_sub_kernel()
+        ctrl_h = qm.controlled(sub)
+
+        @qkernel
+        def bad_circuit(q: Qubit) -> tuple[Qubit, Qubit]:
+            return ctrl_h(q, q)  # same qubit in both positions
+
+        with pytest.raises(QubitAliasError):
+            bad_circuit.build()
+
+    def test_double_controlled_proper_use_works(self):
+        """Double-controlled gate (num_controls=2) with reassignment should succeed."""
+        sub = self._make_sub_kernel()
+        cc_h = qm.controlled(sub, num_controls=2)
+
+        @qkernel
+        def good_circuit(c0: Qubit, c1: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit, Qubit]:
+            c0, c1, tgt = cc_h(c0, c1, tgt)
+            return c0, c1, tgt
+
+        graph = good_circuit.build()
+        assert graph is not None
+
+    def test_double_controlled_reuse_control_raises(self):
+        """Reusing a control qubit after double-controlled gate should raise QubitConsumedError."""
+        sub = self._make_sub_kernel()
+        cc_h = qm.controlled(sub, num_controls=2)
+
+        @qkernel
+        def bad_circuit(c0: Qubit, c1: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit, Qubit]:
+            _c0_out, c1_out, tgt_out = cc_h(c0, c1, tgt)
+            c0_bad = qm.x(c0)  # c0 already consumed
+            return c0_bad, c1_out, tgt_out
+
+        with pytest.raises(QubitConsumedError):
+            bad_circuit.build()
+
+
+class TestMeasurementAllPatterns:
+    """Measurement patterns: single qubit, vector, and linearity after measurement."""
+
+    def test_measure_single_after_gate_works(self):
+        """Measuring a qubit after a gate should succeed."""
+
+        @qkernel
+        def good_circuit(q: Qubit) -> qm.Bit:
+            q = qm.h(q)
+            return qm.measure(q)
+
+        graph = good_circuit.build()
+        assert graph is not None
+
+    def test_measure_vector_works(self):
+        """Measuring a vector of qubits should succeed."""
+
+        @qkernel
+        def good_circuit() -> qm.Vector[qm.Bit]:
+            qs = qubit_array(3, "qs")
+            return qm.measure(qs)
+
+        graph = good_circuit.build()
+        assert graph is not None
+
+    def test_measure_vector_after_gates_works(self):
+        """Measuring a vector after applying gates to each element should succeed."""
+
+        @qkernel
+        def good_circuit() -> qm.Vector[qm.Bit]:
+            qs = qubit_array(3, "qs")
+            for i in qm.range(3):
+                qs[i] = qm.h(qs[i])
+            return qm.measure(qs)
+
+        graph = good_circuit.build()
+        assert graph is not None
+
+    def test_measure_vector_unreturned_borrow_raises(self):
+        """Measuring a vector with an unreturned borrow should raise UnreturnedBorrowError."""
+
+        @qkernel
+        def bad_circuit() -> qm.Vector[qm.Bit]:
+            qs = qubit_array(3, "qs")
+            _q = qs[0]  # borrow but don't return
+            return qm.measure(qs)
+
+        with pytest.raises(UnreturnedBorrowError):
+            bad_circuit.build()
+
+    def test_reuse_qubit_after_measure_raises(self):
+        """Using a qubit after measure should raise QubitConsumedError."""
+
+        @qkernel
+        def bad_circuit(q: Qubit) -> qm.Bit:
+            bit = qm.measure(q)
+            _q2 = qm.h(q)  # q consumed by measure
+            return bit
+
+        with pytest.raises(QubitConsumedError):
+            bad_circuit.build()
+
+    @pytest.mark.parametrize("name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES])
+    def test_gate_then_measure_works(self, name, gate):
+        """Every single-qubit gate followed by measure should succeed."""
+
+        @qkernel
+        def good_circuit(q: Qubit) -> qm.Bit:
+            q = gate(q)
+            return qm.measure(q)
+
+        graph = good_circuit.build()
+        assert graph is not None
