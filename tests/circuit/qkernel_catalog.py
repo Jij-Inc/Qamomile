@@ -787,7 +787,7 @@ def naive_multi_controlled_z(n: qmc.UInt) -> tuple[qmc.Vector[qmc.Qubit], qmc.Qu
     qs = qmc.qubit_array(n, name="qs")
     target_q = qmc.qubit(name="target")
     qs, target_q = _naive_multi_controlled_z(qs, target_q)
-    return qs
+    return qs, target_q
 
 
 # ============================================================
