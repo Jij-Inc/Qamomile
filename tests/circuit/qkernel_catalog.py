@@ -807,9 +807,10 @@ def _grover_operator_network_decomposition(
     # which can be implemented as H + X + multi-controlled Z + X + H.
     qs = _all_h(qs)
     qs = _all_x(qs)
-    unpacked_qs, target_q = qmc.unpack_qubits(
+    unpacked_qs, target_q_vec = qmc.unpack_qubits(
         qs, num_unpacked=2, num_elements=[qs.shape[0] - 1, 1]
     )
+    target_q = target_q_vec[0]
     unpacked_qs, target_q = _network_decomposition_controlled_z(unpacked_qs, target_q)
     qs = qmc.pack_qubits(unpacked_qs, target_q)
     qs = _all_x(qs)
