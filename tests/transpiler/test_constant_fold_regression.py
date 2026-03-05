@@ -44,6 +44,117 @@ def x_mixer_test_circuit(
     return qmc.measure(q)
 
 
+# --- Float BinOp kernels: one per arithmetic operation ---
+
+
+@qmc.qkernel
+def binop_add_circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    """RX(theta + 1.0) on a single qubit."""
+    q = qmc.qubit_array(1, "q")
+    angle = theta + 1.0
+    q[0] = qmc.rx(q[0], angle=angle)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def binop_sub_circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    """RX(theta - 0.5) on a single qubit."""
+    q = qmc.qubit_array(1, "q")
+    angle = theta - 0.5
+    q[0] = qmc.rx(q[0], angle=angle)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def binop_mul_circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    """RX(theta * 3.0) on a single qubit."""
+    q = qmc.qubit_array(1, "q")
+    angle = theta * 3.0
+    q[0] = qmc.rx(q[0], angle=angle)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def binop_div_circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    """RX(theta / 2.0) on a single qubit."""
+    q = qmc.qubit_array(1, "q")
+    angle = theta / 2.0
+    q[0] = qmc.rx(q[0], angle=angle)
+    return qmc.measure(q)
+
+
+# --- Compound assignment kernels (+=, -=, *=) ---
+
+
+@qmc.qkernel
+def binop_iadd_circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    """RX with += compound assignment: angle = theta; angle += 1.0."""
+    q = qmc.qubit_array(1, "q")
+    angle = theta
+    angle += 1.0
+    q[0] = qmc.rx(q[0], angle=angle)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def binop_isub_circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    """RX with -= compound assignment: angle = theta; angle -= 0.5."""
+    q = qmc.qubit_array(1, "q")
+    angle = theta
+    angle -= 0.5
+    q[0] = qmc.rx(q[0], angle=angle)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def binop_imul_circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    """RX with *= compound assignment: angle = theta; angle *= 3.0."""
+    q = qmc.qubit_array(1, "q")
+    angle = theta
+    angle *= 3.0
+    q[0] = qmc.rx(q[0], angle=angle)
+    return qmc.measure(q)
+
+
+# --- Chained BinOp kernel (multiple operations) ---
+
+
+@qmc.qkernel
+def binop_chained_circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    """RX((theta * 2.0) + 0.5) on a single qubit — chained MUL then ADD."""
+    q = qmc.qubit_array(1, "q")
+    angle = theta * 2.0 + 0.5
+    q[0] = qmc.rx(q[0], angle=angle)
+    return qmc.measure(q)
+
+
+# --- UInt BinOp kernels (floordiv, pow) — affect loop bounds ---
+
+
+@qmc.qkernel
+def binop_floordiv_circuit(
+    n: qmc.UInt, theta: qmc.Float
+) -> qmc.Vector[qmc.Bit]:
+    """Apply RX(theta) to first n // 2 qubits of a 4-qubit register."""
+    q = qmc.qubit_array(4, "q")
+    count = n // 2
+    for i in qmc.range(count):
+        q[i] = qmc.rx(q[i], angle=theta)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def binop_pow_circuit(
+    n: qmc.UInt, theta: qmc.Float
+) -> qmc.Vector[qmc.Bit]:
+    """Apply RX(theta) to first n ** 2 qubits of a 4-qubit register."""
+    q = qmc.qubit_array(4, "q")
+    count = n ** 2
+    for i in qmc.range(count):
+        q[i] = qmc.rx(q[i], angle=theta)
+    return qmc.measure(q)
+
+
 @qmc.qkernel
 def variational_classifier(
     n: qmc.UInt,
@@ -217,6 +328,167 @@ class TestVariationalClassifier:
             assert np.isclose(angle, params[i]), (
                 f"RY[{i}] angle {angle} != expected {params[i]}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Tests — All BinOp kinds: angle propagation + statevector verification
+# ---------------------------------------------------------------------------
+
+
+def _extract_rx_angles(qc: "QuantumCircuit") -> list[float]:
+    """Extract all RX gate angles from a Qiskit circuit."""
+    return [
+        float(inst.operation.params[0])
+        for inst in qc.data
+        if inst.operation.name == "rx"
+    ]
+
+
+class TestBinOpAllOperations:
+    """Tests for all Float BinOp kinds: verify folded angles and statevectors.
+
+    Each test transpiles a kernel that applies a single BinOp to a Float
+    parameter, then checks:
+      1. The resulting RX gate angle matches the expected value.
+      2. The statevector matches RX(expected)|0⟩.
+    """
+
+    @pytest.mark.parametrize(
+        "kernel, bindings, expected_angle",
+        [
+            # Basic arithmetic operations
+            (binop_add_circuit, {"theta": 0.5}, 0.5 + 1.0),
+            (binop_sub_circuit, {"theta": 1.5}, 1.5 - 0.5),
+            (binop_mul_circuit, {"theta": 0.3}, 0.3 * 3.0),
+            (binop_div_circuit, {"theta": np.pi}, np.pi / 2.0),
+            # Compound assignments (same BinOp, different syntax)
+            (binop_iadd_circuit, {"theta": 0.5}, 0.5 + 1.0),
+            (binop_isub_circuit, {"theta": 1.5}, 1.5 - 0.5),
+            (binop_imul_circuit, {"theta": 0.3}, 0.3 * 3.0),
+            # Chained operations
+            (binop_chained_circuit, {"theta": 0.7}, 0.7 * 2.0 + 0.5),
+        ],
+        ids=[
+            "add(theta+1.0)",
+            "sub(theta-0.5)",
+            "mul(theta*3.0)",
+            "div(theta/2.0)",
+            "iadd(theta+=1.0)",
+            "isub(theta-=0.5)",
+            "imul(theta*=3.0)",
+            "chained(theta*2.0+0.5)",
+        ],
+    )
+    def test_binop_angle_propagation(
+        self,
+        kernel: Any,
+        bindings: dict[str, Any],
+        expected_angle: float,
+    ) -> None:
+        """Verify the folded BinOp angle in the RX gate matches expected."""
+        _, qc = _transpile_and_get_circuit(kernel, bindings=bindings)
+        rx_angles = _extract_rx_angles(qc)
+
+        assert len(rx_angles) == 1, f"Expected 1 RX gate, got {len(rx_angles)}"
+        assert np.isclose(rx_angles[0], expected_angle), (
+            f"RX angle {rx_angles[0]} != expected {expected_angle}"
+        )
+
+    @pytest.mark.parametrize(
+        "kernel, bindings, expected_angle",
+        [
+            (binop_add_circuit, {"theta": 0.5}, 0.5 + 1.0),
+            (binop_sub_circuit, {"theta": 1.5}, 1.5 - 0.5),
+            (binop_mul_circuit, {"theta": 0.3}, 0.3 * 3.0),
+            (binop_div_circuit, {"theta": np.pi}, np.pi / 2.0),
+            (binop_chained_circuit, {"theta": 0.7}, 0.7 * 2.0 + 0.5),
+        ],
+        ids=["add", "sub", "mul", "div", "chained"],
+    )
+    def test_binop_statevector(
+        self,
+        kernel: Any,
+        bindings: dict[str, Any],
+        expected_angle: float,
+    ) -> None:
+        """Statevector matches RX(expected_angle)|0⟩."""
+        _, qc = _transpile_and_get_circuit(kernel, bindings=bindings)
+        sv = _run_statevector(qc)
+
+        RX = GATE_SPECS["RX"].matrix_fn(expected_angle)
+        expected = RX @ all_zeros_state(1)
+        assert statevectors_equal(sv, expected)
+
+
+# ---------------------------------------------------------------------------
+# Tests — UInt BinOp (floordiv, pow) folding into loop bounds
+# ---------------------------------------------------------------------------
+
+
+class TestUIntBinOpFolding:
+    """Tests for UInt BinOp kinds (``//``, ``**``) that affect loop bounds.
+
+    These operations produce UInt results used as ``qmc.range`` arguments.
+    The constant folding pass must resolve them so the loop can be unrolled.
+    """
+
+    @pytest.mark.parametrize(
+        "n, theta, expected_rx_count",
+        [
+            (4, 0.5, 2),   # 4 // 2 = 2
+            (6, 0.3, 3),   # 6 // 2 = 3
+            (2, 1.0, 1),   # 2 // 2 = 1
+        ],
+        ids=["4//2=2", "6//2=3", "2//2=1"],
+    )
+    def test_floordiv_loop_bound(
+        self, n: int, theta: float, expected_rx_count: int
+    ) -> None:
+        """``n // 2`` correctly folded as loop bound; angles verified."""
+        _, qc = _transpile_and_get_circuit(
+            binop_floordiv_circuit, bindings={"n": n, "theta": theta}
+        )
+        rx_angles = _extract_rx_angles(qc)
+
+        assert len(rx_angles) == expected_rx_count, (
+            f"Expected {expected_rx_count} RX gates (n={n}, n//2={n // 2}), "
+            f"got {len(rx_angles)}"
+        )
+        for i, angle in enumerate(rx_angles):
+            assert np.isclose(angle, theta), (
+                f"RX[{i}] angle {angle} != expected {theta}"
+            )
+
+    @pytest.mark.parametrize(
+        "n, theta, expected_rx_count",
+        [
+            (2, 0.3, 4),   # 2 ** 2 = 4
+            (1, 0.5, 1),   # 1 ** 2 = 1
+        ],
+        ids=["2**2=4", "1**2=1"],
+    )
+    def test_pow_loop_bound(
+        self, n: int, theta: float, expected_rx_count: int
+    ) -> None:
+        """``n ** 2`` correctly folded as loop bound; angles verified."""
+        _, qc = _transpile_and_get_circuit(
+            binop_pow_circuit, bindings={"n": n, "theta": theta}
+        )
+        rx_angles = _extract_rx_angles(qc)
+
+        assert len(rx_angles) == expected_rx_count, (
+            f"Expected {expected_rx_count} RX gates (n={n}, n**2={n ** 2}), "
+            f"got {len(rx_angles)}"
+        )
+        for i, angle in enumerate(rx_angles):
+            assert np.isclose(angle, theta), (
+                f"RX[{i}] angle {angle} != expected {theta}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Tests — Edge cases
+# ---------------------------------------------------------------------------
 
 
 class TestConstantFoldEdgeCases:
