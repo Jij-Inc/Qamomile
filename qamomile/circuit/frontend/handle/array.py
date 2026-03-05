@@ -231,6 +231,7 @@ class ArrayBase(Handle, Generic[T]):
             value: The handle being written back.
 
         Raises:
+            QubitConsumedError: If the array was already consumed.
             LinearTypeError: If the index was borrowed **and** the value
                 was not borrowed from this array (``value.parent is not self``).
 
@@ -245,6 +246,17 @@ class ArrayBase(Handle, Generic[T]):
         """
         target_key = self._make_indices_key(indices)
         index_str = self._format_index(indices)
+
+        # Check if the array itself has been consumed (e.g., by cast or measure)
+        if self._consumed and self.value.type.is_quantum():
+            display_name = self.value.name or "array"
+            raise QubitConsumedError(
+                f"Array '{display_name}' was already consumed by "
+                f"'{self._consumed_by}' and cannot be accessed.",
+                handle_name=display_name,
+                operation_name="array element return",
+                first_use_location=self._consumed_by,
+            )
 
         # Determine the borrow key to release.
         # If the value carries provenance from this array, use its original
