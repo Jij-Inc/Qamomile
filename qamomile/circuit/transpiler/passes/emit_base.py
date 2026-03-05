@@ -25,6 +25,7 @@ class QubitResolutionResult:
     failure_reason: ResolutionFailureReason | None = None
     failure_details: str = ""
 
+
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.gate import (
@@ -83,40 +84,82 @@ def map_phi_outputs(
         if output.uuid in qubit_map or output.uuid in clbit_map:
             continue
 
-        # Quantum types: map phi output to same physical qubit
+        # Quantum types: map phi output to same physical qubit.
+        # Both branches must resolve to identical physical resources;
+        # mismatches indicate a quantum phi merge that cannot be
+        # statically resolved (the qubit identity depends on runtime).
         if output.type.is_quantum():
-            # Handle ArrayValue phi outputs: copy composite element keys
             if isinstance(output, ArrayValue):
-                for source in (true_val, false_val):
-                    if not isinstance(source, ArrayValue):
-                        continue
-                    # Copy all {source_uuid}_{i} -> {output_uuid}_{i}
-                    keys_propagated = False
-                    for key, phys_idx in list(qubit_map.items()):
-                        prefix = f"{source.uuid}_"
-                        if key.startswith(prefix):
-                            suffix = key[len(prefix):]
-                            out_key = f"{output.uuid}_{suffix}"
-                            if out_key not in qubit_map:
-                                qubit_map[out_key] = phys_idx
-                                keys_propagated = True
-                    if keys_propagated:
-                        break
+                # ArrayValue: collect suffix→phys_idx for each branch
+                true_prefix = (
+                    f"{true_val.uuid}_" if isinstance(true_val, ArrayValue) else ""
+                )
+                false_prefix = (
+                    f"{false_val.uuid}_" if isinstance(false_val, ArrayValue) else ""
+                )
+                true_mapping: dict[str, int] = {}
+                false_mapping: dict[str, int] = {}
+                for key, phys_idx in qubit_map.items():
+                    if true_prefix and key.startswith(true_prefix):
+                        true_mapping[key[len(true_prefix) :]] = phys_idx
+                    if false_prefix and key.startswith(false_prefix):
+                        false_mapping[key[len(false_prefix) :]] = phys_idx
+
+                if true_mapping or false_mapping:
+                    all_suffixes = set(true_mapping) | set(false_mapping)
+                    for suffix in sorted(all_suffixes):
+                        true_idx = true_mapping.get(suffix)
+                        false_idx = false_mapping.get(suffix)
+                        if true_idx is None or false_idx is None:
+                            from qamomile.circuit.transpiler.errors import EmitError
+
+                            raise EmitError(
+                                "Quantum PhiOp merge requires identical physical "
+                                "resources across branches",
+                                operation="PhiOp",
+                            )
+                        if true_idx != false_idx:
+                            from qamomile.circuit.transpiler.errors import EmitError
+
+                            raise EmitError(
+                                "Quantum PhiOp merge requires identical physical "
+                                "resources across branches",
+                                operation="PhiOp",
+                            )
+                        out_key = f"{output.uuid}_{suffix}"
+                        if out_key not in qubit_map:
+                            qubit_map[out_key] = true_idx
             else:
-                # Scalar qubit phi output
-                for source in (true_val, false_val):
+                # Scalar qubit phi output: resolve both branches
+                def _resolve_one(source: Any) -> int | None:
                     if source.uuid in qubit_map:
-                        qubit_map[output.uuid] = qubit_map[source.uuid]
-                        break
-                    # Try resolver callback or static fallback
+                        return qubit_map[source.uuid]
                     if resolve_scalar_qubit is not None:
-                        resolved = resolve_scalar_qubit(source, qubit_map)
-                    else:
-                        key, _ = ResourceAllocator._resolve_qubit_key(source)
-                        resolved = qubit_map.get(key) if key is not None else None
-                    if resolved is not None:
-                        qubit_map[output.uuid] = resolved
-                        break
+                        return resolve_scalar_qubit(source, qubit_map)
+                    key, _ = ResourceAllocator._resolve_qubit_key(source)
+                    return qubit_map.get(key) if key is not None else None
+
+                true_phys = _resolve_one(true_val)
+                false_phys = _resolve_one(false_val)
+
+                if true_phys is not None and false_phys is not None:
+                    if true_phys != false_phys:
+                        from qamomile.circuit.transpiler.errors import EmitError
+
+                        raise EmitError(
+                            "Quantum PhiOp merge requires identical physical "
+                            "resources across branches",
+                            operation="PhiOp",
+                        )
+                    qubit_map[output.uuid] = true_phys
+                elif true_phys is not None or false_phys is not None:
+                    from qamomile.circuit.transpiler.errors import EmitError
+
+                    raise EmitError(
+                        "Quantum PhiOp merge requires identical physical "
+                        "resources across branches",
+                        operation="PhiOp",
+                    )
 
         # Classical bit types: consolidate both branches to the same
         # physical clbit.  Under Qiskit's ``if_test`` only one branch
@@ -135,7 +178,7 @@ def map_phi_outputs(
                     for key, phys_idx in list(clbit_map.items()):
                         prefix = f"{primary.uuid}_"
                         if key.startswith(prefix):
-                            suffix = key[len(prefix):]
+                            suffix = key[len(prefix) :]
                             # Map phi output element to primary's clbit
                             out_key = f"{output.uuid}_{suffix}"
                             if out_key not in clbit_map:
@@ -158,7 +201,6 @@ def map_phi_outputs(
                         clbit_map[false_val.uuid] = true_clbit
                 elif false_clbit is not None:
                     clbit_map[output.uuid] = false_clbit
-
 
 
 class ResourceAllocator:
@@ -254,8 +296,12 @@ class ResourceAllocator:
                 self._allocate_recursive(op.operations, qubit_map, clbit_map, bindings)
 
             elif isinstance(op, IfOperation):
-                self._allocate_recursive(op.true_operations, qubit_map, clbit_map, bindings)
-                self._allocate_recursive(op.false_operations, qubit_map, clbit_map, bindings)
+                self._allocate_recursive(
+                    op.true_operations, qubit_map, clbit_map, bindings
+                )
+                self._allocate_recursive(
+                    op.false_operations, qubit_map, clbit_map, bindings
+                )
                 self._allocate_phi_ops(op.phi_ops, qubit_map, clbit_map)
 
             elif isinstance(op, WhileOperation):
@@ -456,7 +502,7 @@ class ResourceAllocator:
             vector_result = op.results[0]
             for key, idx in list(qubit_map.items()):
                 if key.startswith(f"{vector_operand.uuid}_"):
-                    suffix = key[len(f"{vector_operand.uuid}_"):]
+                    suffix = key[len(f"{vector_operand.uuid}_") :]
                     result_key = f"{vector_result.uuid}_{suffix}"
                     if result_key not in qubit_map:
                         qubit_map[result_key] = idx
@@ -906,10 +952,7 @@ class LoopAnalyzer:
                                 return True
 
                 if isinstance(op.theta, _Value):
-                    if (
-                        op.theta.parent_array is not None
-                        and op.theta.element_indices
-                    ):
+                    if op.theta.parent_array is not None and op.theta.element_indices:
                         for idx in op.theta.element_indices:
                             if self._index_depends_on_loop_var(idx, loop_var):
                                 return True
