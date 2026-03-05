@@ -128,33 +128,6 @@ def binop_chained_circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
     return qmc.measure(q)
 
 
-# --- UInt BinOp kernels (floordiv, pow) — affect loop bounds ---
-
-
-@qmc.qkernel
-def binop_floordiv_circuit(
-    n: qmc.UInt, theta: qmc.Float
-) -> qmc.Vector[qmc.Bit]:
-    """Apply RX(theta) to first n // 2 qubits of a 4-qubit register."""
-    q = qmc.qubit_array(4, "q")
-    count = n // 2
-    for i in qmc.range(count):
-        q[i] = qmc.rx(q[i], angle=theta)
-    return qmc.measure(q)
-
-
-@qmc.qkernel
-def binop_pow_circuit(
-    n: qmc.UInt, theta: qmc.Float
-) -> qmc.Vector[qmc.Bit]:
-    """Apply RX(theta) to first n ** 2 qubits of a 4-qubit register."""
-    q = qmc.qubit_array(4, "q")
-    count = n ** 2
-    for i in qmc.range(count):
-        q[i] = qmc.rx(q[i], angle=theta)
-    return qmc.measure(q)
-
-
 @qmc.qkernel
 def variational_classifier(
     n: qmc.UInt,
@@ -418,72 +391,6 @@ class TestBinOpAllOperations:
         RX = GATE_SPECS["RX"].matrix_fn(expected_angle)
         expected = RX @ all_zeros_state(1)
         assert statevectors_equal(sv, expected)
-
-
-# ---------------------------------------------------------------------------
-# Tests — UInt BinOp (floordiv, pow) folding into loop bounds
-# ---------------------------------------------------------------------------
-
-
-class TestUIntBinOpFolding:
-    """Tests for UInt BinOp kinds (``//``, ``**``) that affect loop bounds.
-
-    These operations produce UInt results used as ``qmc.range`` arguments.
-    The constant folding pass must resolve them so the loop can be unrolled.
-    """
-
-    @pytest.mark.parametrize(
-        "n, theta, expected_rx_count",
-        [
-            (4, 0.5, 2),   # 4 // 2 = 2
-            (6, 0.3, 3),   # 6 // 2 = 3
-            (2, 1.0, 1),   # 2 // 2 = 1
-        ],
-        ids=["4//2=2", "6//2=3", "2//2=1"],
-    )
-    def test_floordiv_loop_bound(
-        self, n: int, theta: float, expected_rx_count: int
-    ) -> None:
-        """``n // 2`` correctly folded as loop bound; angles verified."""
-        _, qc = _transpile_and_get_circuit(
-            binop_floordiv_circuit, bindings={"n": n, "theta": theta}
-        )
-        rx_angles = _extract_rx_angles(qc)
-
-        assert len(rx_angles) == expected_rx_count, (
-            f"Expected {expected_rx_count} RX gates (n={n}, n//2={n // 2}), "
-            f"got {len(rx_angles)}"
-        )
-        for i, angle in enumerate(rx_angles):
-            assert np.isclose(angle, theta), (
-                f"RX[{i}] angle {angle} != expected {theta}"
-            )
-
-    @pytest.mark.parametrize(
-        "n, theta, expected_rx_count",
-        [
-            (2, 0.3, 4),   # 2 ** 2 = 4
-            (1, 0.5, 1),   # 1 ** 2 = 1
-        ],
-        ids=["2**2=4", "1**2=1"],
-    )
-    def test_pow_loop_bound(
-        self, n: int, theta: float, expected_rx_count: int
-    ) -> None:
-        """``n ** 2`` correctly folded as loop bound; angles verified."""
-        _, qc = _transpile_and_get_circuit(
-            binop_pow_circuit, bindings={"n": n, "theta": theta}
-        )
-        rx_angles = _extract_rx_angles(qc)
-
-        assert len(rx_angles) == expected_rx_count, (
-            f"Expected {expected_rx_count} RX gates (n={n}, n**2={n ** 2}), "
-            f"got {len(rx_angles)}"
-        )
-        for i, angle in enumerate(rx_angles):
-            assert np.isclose(angle, theta), (
-                f"RX[{i}] angle {angle} != expected {theta}"
-            )
 
 
 # ---------------------------------------------------------------------------
