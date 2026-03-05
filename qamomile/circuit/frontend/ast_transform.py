@@ -1,6 +1,7 @@
 import ast
 import inspect
 import textwrap
+from dataclasses import dataclass
 from typing import Any, Callable, NoReturn
 
 
@@ -883,3 +884,192 @@ def transform_control_flow(func: Callable):
     exec(code_obj, name_space)
 
     return name_space[func.__name__]
+
+
+# ---------------------------------------------------------------------------
+# Quantum rebind analysis
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RebindViolation:
+    """A detected forbidden quantum variable rebinding."""
+
+    target_name: str
+    source_name: str
+    func_name: str | None
+    lineno: int
+
+
+class QuantumRebindAnalyzer(ast.NodeVisitor):
+    """Detects forbidden quantum variable reassignment at the AST level.
+
+    Forbidden patterns (target is an *existing* quantum variable):
+      - ``a = b``        where b is quantum with a different origin
+      - ``a = f(b, ...)`` where b is quantum with a different origin
+
+    Allowed patterns:
+      - ``a = f(a, ...)``  (self-update)
+      - ``new = f(b, ...)`` (new binding – target was not quantum before)
+      - ``alias = q``      (new alias – target was not quantum before)
+    """
+
+    def __init__(self, quantum_param_names: set[str]) -> None:
+        # name → origin (the parameter name it traces back to)
+        self.quantum_vars: dict[str, str] = {n: n for n in quantum_param_names}
+        self.violations: list[RebindViolation] = []
+
+    # ------------------------------------------------------------------
+    # visitor
+    # ------------------------------------------------------------------
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        if len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                self._check_single_assign(target.id, node.value, node.lineno)
+            elif isinstance(target, ast.Tuple):
+                self._check_tuple_assign(target, node.value, node.lineno)
+        self.generic_visit(node)
+
+    # ------------------------------------------------------------------
+    # single assignment:  name = expr
+    # ------------------------------------------------------------------
+
+    def _check_single_assign(
+        self, target: str, value: ast.expr, lineno: int
+    ) -> None:
+        # Case 1: Name = Name  (direct alias / overwrite)
+        if isinstance(value, ast.Name):
+            source = value.id
+            if source in self.quantum_vars:
+                if target in self.quantum_vars:
+                    # existing quantum target – check origin
+                    if self.quantum_vars[target] != self.quantum_vars[source]:
+                        self.violations.append(
+                            RebindViolation(target, source, None, lineno)
+                        )
+                    # update origin regardless (may be same origin)
+                    self.quantum_vars[target] = self.quantum_vars[source]
+                else:
+                    # new alias binding – allowed, propagate origin
+                    self.quantum_vars[target] = self.quantum_vars[source]
+            return
+
+        # Case 2: Name = Call(...)
+        if isinstance(value, ast.Call):
+            quantum_args = self._extract_quantum_args(value)
+            if not quantum_args:
+                return
+
+            if target in self.quantum_vars:
+                target_origin = self.quantum_vars[target]
+                has_self = any(
+                    self.quantum_vars.get(a) == target_origin for a in quantum_args
+                )
+                if not has_self:
+                    violating = quantum_args[0]
+                    func_name = self._get_func_name(value)
+                    self.violations.append(
+                        RebindViolation(target, violating, func_name, lineno)
+                    )
+
+            # propagate quantum status from first quantum arg
+            first_q = quantum_args[0]
+            self.quantum_vars[target] = self.quantum_vars.get(first_q, first_q)
+            return
+
+    # ------------------------------------------------------------------
+    # tuple assignment:  a, b = f(a, b)
+    # ------------------------------------------------------------------
+
+    def _check_tuple_assign(
+        self, targets: ast.Tuple, value: ast.expr, lineno: int
+    ) -> None:
+        if not isinstance(value, ast.Call):
+            return
+
+        quantum_args = self._extract_quantum_args(value)
+        if not quantum_args:
+            return
+
+        target_names = [
+            elt.id for elt in targets.elts if isinstance(elt, ast.Name)
+        ]
+
+        for tgt in target_names:
+            if tgt not in self.quantum_vars:
+                continue
+            tgt_origin = self.quantum_vars[tgt]
+            has_match = any(
+                self.quantum_vars.get(a) == tgt_origin for a in quantum_args
+            )
+            if not has_match:
+                func_name = self._get_func_name(value)
+                self.violations.append(
+                    RebindViolation(tgt, quantum_args[0], func_name, lineno)
+                )
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+
+    def _extract_quantum_args(self, call: ast.Call) -> list[str]:
+        """Recursively collect quantum variable names from args and kwargs."""
+        seen: set[str] = set()
+
+        def _collect(expr: ast.expr) -> None:
+            if isinstance(expr, ast.Name) and expr.id in self.quantum_vars:
+                seen.add(expr.id)
+            elif (
+                isinstance(expr, ast.Subscript)
+                and isinstance(expr.value, ast.Name)
+                and expr.value.id in self.quantum_vars
+            ):
+                seen.add(expr.value.id)
+            elif isinstance(expr, (ast.Tuple, ast.List, ast.Set)):
+                for e in expr.elts:
+                    _collect(e)
+            elif isinstance(expr, ast.Starred):
+                _collect(expr.value)
+
+        for arg in call.args:
+            _collect(arg)
+        for kw in call.keywords:
+            if kw.value is not None:
+                _collect(kw.value)
+
+        return list(seen)
+
+    @staticmethod
+    def _get_func_name(call: ast.Call) -> str | None:
+        if isinstance(call.func, ast.Name):
+            return call.func.id
+        if isinstance(call.func, ast.Attribute):
+            return call.func.attr
+        return None
+
+
+def collect_quantum_rebind_violations(
+    func: Callable,
+    quantum_param_names: set[str],
+) -> list[RebindViolation]:
+    """Analyze *func* for forbidden quantum rebind patterns.
+
+    Returns a (possibly empty) list of violations.  Never raises on
+    analysis failure – returns ``[]`` instead.
+    """
+    try:
+        source = textwrap.dedent(inspect.getsource(func))
+        tree = ast.parse(source)
+    except Exception:
+        return []
+
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            analyzer = QuantumRebindAnalyzer(quantum_param_names)
+            for stmt in node.body:
+                analyzer.visit(stmt)
+            return analyzer.violations
+
+    return []

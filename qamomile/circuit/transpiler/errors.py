@@ -279,3 +279,22 @@ class UnreturnedBorrowError(LinearTypeError):
     """
 
     pass
+
+
+class QubitRebindError(LinearTypeError):
+    """Quantum variable reassigned from a different quantum source.
+
+    When a quantum variable is reassigned, the RHS must consume the
+    same variable (self-update pattern). Reassigning from a different
+    quantum variable silently discards the original quantum state.
+
+    Example of incorrect code:
+        a = qm.h(b)  # ERROR: 'a' was quantum, now overwritten from 'b'
+        a = b         # ERROR: 'a' was quantum, now overwritten from 'b'
+
+    Correct patterns:
+        a = qm.h(a)      # Self-update (OK)
+        new = qm.h(b)    # New binding (OK, 'new' wasn't quantum before)
+    """
+
+    pass

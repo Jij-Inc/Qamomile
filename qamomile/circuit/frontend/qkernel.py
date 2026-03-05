@@ -17,7 +17,10 @@ from typing import (
 
 import numpy as np
 
-from qamomile.circuit.frontend.ast_transform import transform_control_flow
+from qamomile.circuit.frontend.ast_transform import (
+    collect_quantum_rebind_violations,
+    transform_control_flow,
+)
 from qamomile.circuit.frontend.constructors import qubit_array
 from qamomile.circuit.frontend.func_to_block import (
     create_dummy_input,
@@ -47,6 +50,19 @@ def _get_array_element_type(pt: Any) -> type | None:
     if hasattr(pt, "__args__") and pt.__args__:
         return pt.__args__[0]
     return getattr(pt, "element_type", None)
+
+
+def _get_quantum_param_names(input_types: dict[str, type]) -> set[str]:
+    """Return parameter names whose types are quantum (Qubit, Vector[Qubit])."""
+    quantum_names: set[str] = set()
+    for name, ptype in input_types.items():
+        if ptype is Qubit:
+            quantum_names.add(name)
+        elif is_array_type(ptype):
+            elem = _get_array_element_type(ptype)
+            if elem is Qubit:
+                quantum_names.add(name)
+    return quantum_names
 
 
 class QKernel(Generic[P, R]):
@@ -110,9 +126,46 @@ class QKernel(Generic[P, R]):
         # Lazy initialization for BlockValue
         self._block_value: BlockValue | None = None
 
+        # AST-level quantum rebind analysis (deferred raise until build/block)
+        quantum_params = _get_quantum_param_names(input_types)
+        if quantum_params:
+            self._rebind_violations = collect_quantum_rebind_violations(
+                self.raw_func, quantum_params
+            )
+        else:
+            self._rebind_violations = []
+
+    def _check_rebind_violations(self) -> None:
+        if not self._rebind_violations:
+            return
+        from qamomile.circuit.transpiler.errors import QubitRebindError
+
+        v = self._rebind_violations[0]
+        if v.func_name:
+            pattern = f"{v.target_name} = {v.func_name}({v.source_name}, ...)"
+            fix = (
+                f"  - Use self-update: {v.target_name} = {v.func_name}({v.target_name}, ...)\n"
+                f"  - Use a new variable: new_var = {v.func_name}({v.source_name}, ...)"
+            )
+        else:
+            pattern = f"{v.target_name} = {v.source_name}"
+            fix = (
+                f"  - Use a new variable: new_var = {v.source_name}\n"
+                f"  - Remove the assignment if '{v.target_name}' is no longer needed"
+            )
+        raise QubitRebindError(
+            f"Forbidden quantum variable reassignment at line {v.lineno}: "
+            f"'{pattern}' overwrites quantum variable '{v.target_name}' "
+            f"with a value derived from different quantum variable "
+            f"'{v.source_name}'.\n\nTo fix, either:\n{fix}",
+            handle_name=v.target_name,
+            operation_name="assignment_rebind",
+        )
+
     @property
     def block(self) -> BlockValue:
         """Compiles the function to a BlockValue (IR) if not already compiled."""
+        self._check_rebind_violations()
         if self._block_value is None:
             # Use self.func (AST-transformed) so that qm.range() is properly
             # converted to for_loop() context manager
@@ -592,6 +645,8 @@ class QKernel(Generic[P, R]):
             result = transpiler.emit(graph, binding={"theta": 0.5})
             ```
         """
+        self._check_rebind_violations()
+
         if parameters is None:
             parameters = self._auto_detect_parameters(kwargs)
 

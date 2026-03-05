@@ -19,6 +19,7 @@ from qamomile.circuit.transpiler.errors import (
     LinearTypeError,
     QubitAliasError,
     QubitConsumedError,
+    QubitRebindError,
     UnreturnedBorrowError,
 )
 
@@ -1727,3 +1728,159 @@ class TestArrayConsumeUnreturnedBorrow:
 
         graph = classical_circuit.build()
         assert graph is not None
+
+
+class TestQuantumRebindDetection:
+    """Test AST-level detection of forbidden quantum variable reassignment."""
+
+    # ---- Forbidden patterns ----
+
+    def test_build_scalar_overwrite_call_rejected(self):
+        """a = h(b) where a is existing quantum should raise QubitRebindError."""
+
+        @qkernel
+        def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
+            a = qm.h(b)
+            return a
+
+        with pytest.raises(QubitRebindError):
+            bad.build()
+
+    def test_build_scalar_overwrite_direct_rejected(self):
+        """a = b where a is existing quantum should raise QubitRebindError."""
+
+        @qkernel
+        def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
+            a = b
+            return a
+
+        with pytest.raises(QubitRebindError):
+            bad.build()
+
+    def test_transpile_scalar_overwrite_rebind_rejected(self):
+        """Rebind violation should also raise when accessing .block."""
+
+        @qkernel
+        def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
+            a = qm.h(b)
+            return a
+
+        with pytest.raises(QubitRebindError):
+            _ = bad.block
+
+    def test_build_vector_overwrite_direct_rejected(self):
+        """as_ = bs where both are Vector[Qubit] should raise."""
+
+        @qkernel
+        def bad(qs1: qm.Vector[qm.Qubit], qs2: qm.Vector[qm.Qubit]) -> qm.Vector[qm.Qubit]:
+            qs1 = qs2
+            return qs1
+
+        with pytest.raises(QubitRebindError):
+            bad.build()
+
+    def test_build_vector_overwrite_call_rejected(self):
+        """Vector quantum var overwritten from call with different source."""
+
+        @qkernel
+        def bad(qs1: qm.Vector[qm.Qubit], qs2: qm.Vector[qm.Qubit]) -> qm.Vector[qm.Qubit]:
+            qs1 = qft(qs2)
+            return qs1
+
+        with pytest.raises(QubitRebindError):
+            bad.build()
+
+    # ---- Allowed patterns ----
+
+    def test_scalar_new_binding_allowed(self):
+        """q3 = h(q1) where q3 is new should be allowed."""
+
+        @qkernel
+        def ok(q1: qm.Qubit) -> qm.Qubit:
+            q3 = qm.h(q1)
+            return q3
+
+        graph = ok.build()
+        assert graph is not None
+
+    def test_scalar_new_alias_allowed(self):
+        """alias = q where alias is new should be allowed."""
+
+        @qkernel
+        def ok(q: qm.Qubit) -> qm.Qubit:
+            alias = q
+            alias = qm.h(alias)
+            return alias
+
+        graph = ok.build()
+        assert graph is not None
+
+    def test_vector_new_binding_allowed(self):
+        """New variable from vector call is allowed."""
+
+        @qkernel
+        def ok(qs: qm.Vector[qm.Qubit]) -> qm.Vector[qm.Qubit]:
+            result = qft(qs)
+            return result
+
+        graph = ok.build()
+        assert graph is not None
+
+    def test_self_update_allowed(self):
+        """q = h(q) self-update should be allowed."""
+
+        @qkernel
+        def ok(q: qm.Qubit) -> qm.Qubit:
+            q = qm.h(q)
+            q = qm.x(q)
+            return q
+
+        graph = ok.build()
+        assert graph is not None
+
+    def test_same_origin_alias_allowed(self):
+        """alias = q; q = h(alias) should be allowed (same origin)."""
+
+        @qkernel
+        def ok(q: qm.Qubit) -> qm.Qubit:
+            alias = q
+            q = qm.h(alias)
+            return q
+
+        graph = ok.build()
+        assert graph is not None
+
+    def test_tuple_self_update_allowed(self):
+        """q1, q2 = cx(q1, q2) should be allowed."""
+
+        @qkernel
+        def ok(q1: qm.Qubit, q2: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
+            q1, q2 = qm.cx(q1, q2)
+            return q1, q2
+
+        graph = ok.build()
+        assert graph is not None
+
+    def test_implicit_discard_still_allowed(self):
+        """Not returning a qubit (implicit discard) should still be allowed."""
+
+        @qkernel
+        def ok(q1: qm.Qubit, q2: qm.Qubit) -> qm.Qubit:
+            q1 = qm.h(q1)
+            return q1
+
+        graph = ok.build()
+        assert graph is not None
+
+    def test_error_not_raised_at_definition(self):
+        """@qkernel definition should succeed even with violations."""
+
+        @qkernel
+        def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
+            a = qm.h(b)
+            return a
+
+        # Definition succeeded, error only on build/block access
+        assert bad.name == "bad"
+        with pytest.raises(QubitRebindError):
+            bad.build()
