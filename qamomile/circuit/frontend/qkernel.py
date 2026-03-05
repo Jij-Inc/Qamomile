@@ -4,7 +4,16 @@ import ast
 import inspect
 import textwrap
 import warnings
-from typing import TYPE_CHECKING, Any, Callable, Generic, ParamSpec, TypeVar, cast, get_type_hints
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Generic,
+    ParamSpec,
+    TypeVar,
+    cast,
+    get_type_hints,
+)
 
 import numpy as np
 
@@ -454,7 +463,10 @@ class QKernel(Generic[P, R]):
                 entries=[],  # Empty - data stored in params
                 params={"parameter": name, "bound_data": value},
             )
-            return Dict(value=dict_value, _entries=[])
+            dict_handle = Dict(value=dict_value, _entries=[])
+            if hasattr(param_type, "__args__") and param_type.__args__:
+                dict_handle._key_type = param_type.__args__[0]
+            return dict_handle
 
         raise TypeError(f"Cannot create bound value for type {param_type}")
 

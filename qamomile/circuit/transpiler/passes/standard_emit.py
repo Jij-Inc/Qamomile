@@ -40,6 +40,7 @@ from qamomile.circuit.transpiler.passes.emit_base import (
     ValueResolver,
     LoopAnalyzer,
     CompositeDecomposer,
+    map_phi_outputs,
 )
 from qamomile.circuit.transpiler.errors import (
     EmitError,
@@ -148,7 +149,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 self._emit_gate(circuit, op, qubit_map, bindings)
 
             elif isinstance(op, MeasureOperation):
-                self._emit_measure(circuit, op, qubit_map, clbit_map)
+                self._emit_measure(circuit, op, qubit_map, clbit_map, bindings)
 
             elif isinstance(op, MeasureVectorOperation):
                 self._emit_measure_vector(circuit, op, qubit_map, clbit_map, bindings)
@@ -320,13 +321,51 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         op: MeasureOperation,
         qubit_map: dict[str, int],
         clbit_map: dict[str, int],
+        bindings: dict[str, Any] | None = None,
     ) -> None:
-        """Emit a single measurement."""
-        qubit_uuid = op.operands[0].uuid
+        """Emit a single measurement.
+
+        Resolves the qubit operand using the full resolver (handles both
+        scalar qubits and array element qubits with composite keys).
+
+        Raises:
+            warnings.warn: If the qubit or clbit cannot be resolved, a
+                warning is emitted instead of silently dropping the
+                measurement.
+        """
+        import warnings
+
+        qubit_val = op.operands[0]
         clbit_uuid = op.results[0].uuid
-        if qubit_uuid in qubit_map and clbit_uuid in clbit_map:
+
+        # Use the resolver for proper array element handling
+        result = self._resolver.resolve_qubit_index_detailed(
+            qubit_val, qubit_map, bindings or {}
+        )
+        qubit_idx = result.index if result.success else None
+
+        # Fallback to direct UUID lookup
+        if qubit_idx is None and qubit_val.uuid in qubit_map:
+            qubit_idx = qubit_map[qubit_val.uuid]
+
+        if qubit_idx is not None and clbit_uuid in clbit_map:
             self._emitter.emit_measure(
-                circuit, qubit_map[qubit_uuid], clbit_map[clbit_uuid]
+                circuit, qubit_idx, clbit_map[clbit_uuid]
+            )
+        else:
+            details: list[str] = []
+            if qubit_idx is None:
+                details.append(
+                    f"qubit '{qubit_val.name}' (uuid: {qubit_val.uuid[:8]}...) "
+                    f"could not be resolved to a physical qubit index"
+                )
+            if clbit_uuid not in clbit_map:
+                details.append(
+                    f"clbit (uuid: {clbit_uuid[:8]}...) not found in clbit_map"
+                )
+            warnings.warn(
+                f"Measurement dropped: {'; '.join(details)}.",
+                stacklevel=2,
             )
 
     def _emit_measure_vector(
@@ -514,6 +553,9 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             elif len(op.key_vars) == 1:
                 # Single key variable
                 loop_bindings[op.key_vars[0]] = key
+                if op.key_is_vector:
+                    # Provide key length for Vector[UInt] shape resolution
+                    loop_bindings[f"{op.key_vars[0]}_dim0"] = len(key)
 
             # Bind value variable
             loop_bindings[op.value_var] = value
@@ -605,6 +647,32 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 circuit, op.false_operations, qubit_map, clbit_map, bindings
             )
             self._emitter.emit_if_end(circuit, context)
+
+            # Register phi output UUIDs so subsequent operations
+            # (e.g., measure) can resolve the merged values.
+            self._register_phi_outputs(op, qubit_map, clbit_map, bindings)
+
+    def _register_phi_outputs(
+        self,
+        op: IfOperation,
+        qubit_map: dict[str, int],
+        clbit_map: dict[str, int],
+        bindings: dict[str, Any] | None = None,
+    ) -> None:
+        """Register phi output UUIDs via the shared ``map_phi_outputs`` utility.
+
+        Uses the full ``ValueResolver.resolve_qubit_index_detailed`` for
+        scalar qubit resolution (handles array element operands).
+        """
+        resolver_bindings = bindings or {}
+
+        def _resolve_scalar(source: Value, qmap: dict[str, int]) -> int | None:
+            result = self._resolver.resolve_qubit_index_detailed(
+                source, qmap, resolver_bindings
+            )
+            return result.index if result.success else None
+
+        map_phi_outputs(op.phi_ops, qubit_map, clbit_map, _resolve_scalar)
 
     def _emit_while(
         self,

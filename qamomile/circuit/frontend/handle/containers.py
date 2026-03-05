@@ -101,6 +101,7 @@ class Dict(Handle, Generic[K, V]):
     value: DictValue
     _entries: list[tuple[Handle, Handle]] = dataclasses.field(default_factory=list)
     _size: UInt | None = None
+    _key_type: type | None = None
 
     def items(self) -> DictItemsIterator[K, V]:
         """Return an iterator over (key, value) pairs."""
