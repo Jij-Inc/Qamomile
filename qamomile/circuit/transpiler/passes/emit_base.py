@@ -732,9 +732,14 @@ class LoopAnalyzer:
             elif isinstance(op, WhileOperation):
                 if self._has_loop_var_binop(op.operations, loop_var):
                     return True
+            elif isinstance(op, ForItemsOperation):
+                # ForItemsOperation is unrolled for its own iteration, but its
+                # body may contain BinOps referencing the *outer* loop variable.
+                # Those BinOps still need concrete values, so we must recurse.
+                if self._has_loop_var_binop(op.operations, loop_var):
+                    return True
             # No action for other operation types (GateOperation, CastOperation, etc.)
             # — only BinOps and control-flow containers can carry loop-var dependencies.
-            # ForItemsOperation is always unrolled separately, so it is not checked here.
         return False
 
     def _has_dynamic_nested_loop(

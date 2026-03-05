@@ -19,6 +19,7 @@ import pytest
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.control_flow import (
+    ForItemsOperation,
     ForOperation,
     IfOperation,
     WhileOperation,
@@ -271,6 +272,40 @@ class TestLoopAnalyzerBinOp:
             results=[],
             loop_var="i",
             operations=[while_op],
+        )
+
+        assert self.analyzer.should_unroll(for_op, {}) is True
+
+    def test_binop_in_for_items_triggers_unroll(self) -> None:
+        """A BinOp inside ForItemsOperation referencing outer loop var triggers unrolling.
+
+        ForItemsOperation is unrolled for its own iteration (dict items),
+        but BinOps inside it may still reference the *outer* ForOperation's
+        loop variable.  The outer loop must be unrolled so the BinOp gets
+        concrete values.
+        """
+        loop_var_val = _uint_val("i")
+        const_val = _float_val("c", const=0.5)
+        binop, _ = _make_binop(loop_var_val, const_val, BinOpKind.ADD)
+
+        dict_val = Value(type=FloatType(), name="d")
+        for_items_op = ForItemsOperation(
+            operands=[dict_val],
+            results=[],
+            key_vars=["k"],
+            value_var="v",
+            operations=[binop],
+        )
+
+        start = _uint_val("start", const=0)
+        stop = _uint_val("stop", const=3)
+        step = _uint_val("step", const=1)
+
+        for_op = ForOperation(
+            operands=[start, stop, step],
+            results=[],
+            loop_var="i",
+            operations=[for_items_op],
         )
 
         assert self.analyzer.should_unroll(for_op, {}) is True
