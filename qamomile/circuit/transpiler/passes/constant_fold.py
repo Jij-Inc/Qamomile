@@ -8,6 +8,7 @@ from typing import Any
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
+from qamomile.circuit.ir.operation.gate import GateOperation
 from qamomile.circuit.ir.value import Value, ValueBase
 
 from . import Pass
@@ -228,8 +229,19 @@ class ConstantFoldingPass(Pass[Block, Block]):
             if extra_kwargs:
                 return dataclasses.replace(op, operands=new_operands, **extra_kwargs)
 
+        # Also substitute GateOperation.theta if it references a folded value
+        replacements: dict[str, Any] = {}
         if changed:
-            return dataclasses.replace(op, operands=new_operands)
+            replacements["operands"] = new_operands
+        if (
+            isinstance(op, GateOperation)
+            and isinstance(op.theta, Value)
+            and op.theta.uuid in folded_values
+        ):
+            replacements["theta"] = folded_values[op.theta.uuid]
+
+        if replacements:
+            return dataclasses.replace(op, **replacements)
         return op
 
     def _resolve_field_value(
