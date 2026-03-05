@@ -37,15 +37,14 @@ class TestPackQubitsRejects:
             ):
                 qmc.pack_qubits(f)
 
-    def test_rejects_dynamic_vector(self):
-        """Dynamic-size Vector[Qubit] should be rejected."""
+    def test_accepts_dynamic_vector(self):
+        """Dynamic-size Vector[Qubit] should be accepted (symbolic path)."""
         from qamomile.circuit.ir.value import ArrayValue, Value
         from qamomile.circuit.ir.types.primitives import QubitType, UIntType
         from qamomile.circuit.frontend.handle.array import Vector
         from qamomile.circuit.frontend.handle.primitives import UInt
 
         with trace():
-            # Create a symbolic (non-constant) size
             sym_size = Value(type=UIntType(), name="n_sym")
             arr_val = ArrayValue(type=QubitType(), name="qs_dyn", shape=(sym_size,))
             dyn_vec = Vector._create_from_value(
@@ -53,10 +52,9 @@ class TestPackQubitsRejects:
                 shape=(UInt(value=sym_size),),
                 name="qs_dyn",
             )
-            with pytest.raises(
-                ValueError, match=r"requires fixed-size Vector\[Qubit\]"
-            ):
-                qmc.pack_qubits(dyn_vec)
+            result = qmc.pack_qubits(dyn_vec)
+            assert isinstance(result, Vector)
+            assert result.value.params.get("has_symbolic_components") is True
 
 
 class TestPackQubitsAccepts:
