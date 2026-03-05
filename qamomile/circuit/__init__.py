@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 # Frontend API
 from .frontend.composite_gate import CompositeGate, composite_gate
 from .frontend.constructors import bit, float_, qubit, qubit_array, uint
@@ -25,6 +29,27 @@ from .frontend.qkernel import QKernel, qkernel
 
 # Standard library circuits
 from .stdlib import iqft, qft, qpe
+
+if TYPE_CHECKING:
+    from .visualization import CircuitStyle, DEFAULT_STYLE, MatplotlibDrawer
+
+_VISUALIZATION_NAMES = {"MatplotlibDrawer", "CircuitStyle", "DEFAULT_STYLE"}
+
+
+def __getattr__(name: str):  # type: ignore[no-untyped-def]
+    if name in _VISUALIZATION_NAMES:
+        from .visualization import CircuitStyle, DEFAULT_STYLE, MatplotlibDrawer
+
+        globals().update(
+            {
+                "MatplotlibDrawer": MatplotlibDrawer,
+                "CircuitStyle": CircuitStyle,
+                "DEFAULT_STYLE": DEFAULT_STYLE,
+            }
+        )
+        return globals()[name]
+    raise AttributeError(f"module 'qamomile.circuit' has no attribute {name!r}")
+
 
 __all__ = [
     "qkernel",
@@ -77,4 +102,8 @@ __all__ = [
     "iqft",
     "qft",
     "QKernel",
+    # Visualization (lazy-loaded)
+    "MatplotlibDrawer",
+    "CircuitStyle",
+    "DEFAULT_STYLE",
 ]

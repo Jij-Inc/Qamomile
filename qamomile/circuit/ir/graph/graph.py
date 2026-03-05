@@ -29,6 +29,7 @@ class Graph:
     operations: list[Operation]
     input_values: list[Value] = dataclasses.field(default_factory=list)
     output_values: list[Value] = dataclasses.field(default_factory=list)
+    output_names: list[str] = dataclasses.field(default_factory=list)
     name: str = ""
     parameters: dict[str, Value] = dataclasses.field(default_factory=dict)
 

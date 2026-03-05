@@ -107,6 +107,11 @@ def oracle_constant_0(
     return inputs, ancilla
 
 
+# draw() で qm.Vector[qm.Qubit] のサイズを引数名で指定できます。
+oracle_constant_0.draw(inputs=5)
+
+
+# %%
 # === 定数オラクル（常に1を返す）===
 @qm.qkernel
 def oracle_constant_1(
@@ -118,6 +123,10 @@ def oracle_constant_1(
     return inputs, ancilla
 
 
+oracle_constant_1.draw(inputs=5)
+
+
+# %%
 # === 均衡オラクル（XORパリティ）===
 @qm.qkernel
 def oracle_balanced_xor(
@@ -130,6 +139,10 @@ def oracle_balanced_xor(
     return inputs, ancilla
 
 
+oracle_balanced_xor.draw(inputs=5, fold_loops=False)
+
+
+# %%
 # === 均衡オラクル（最初のビットのみ）===
 @qm.qkernel
 def oracle_balanced_first_bit(
@@ -139,6 +152,8 @@ def oracle_balanced_first_bit(
     inputs[0], ancilla = qm.cx(inputs[0], ancilla)
     return inputs, ancilla
 
+
+oracle_balanced_first_bit.draw(inputs=5)
 
 # %% [markdown]
 # ### Deutsch-Jozsaアルゴリズムの本体
@@ -181,6 +196,16 @@ def deutsch_jozsa_constant_0(n: int) -> qm.Vector[qm.Bit]:
     return qm.measure(inputs)
 
 
+deutsch_jozsa_constant_0.draw(n=3, fold_loops=False)
+
+# %% [markdown]
+# draw() で inline=True を指定すると、インライン展開されたQKernelも展開できます。
+
+# %%
+deutsch_jozsa_constant_0.draw(n=3, fold_loops=False, inline=True)
+
+
+# %%
 @qm.qkernel
 def deutsch_jozsa_constant_1(n: int) -> qm.Vector[qm.Bit]:
     """Deutsch-Jozsa with constant oracle (f=1)"""
@@ -201,6 +226,10 @@ def deutsch_jozsa_constant_1(n: int) -> qm.Vector[qm.Bit]:
     return qm.measure(inputs)
 
 
+deutsch_jozsa_constant_1.draw(n=3, fold_loops=False, inline=True)
+
+
+# %%
 @qm.qkernel
 def deutsch_jozsa_balanced_xor(n: int) -> qm.Vector[qm.Bit]:
     """Deutsch-Jozsa with balanced oracle (XOR)"""
@@ -221,6 +250,10 @@ def deutsch_jozsa_balanced_xor(n: int) -> qm.Vector[qm.Bit]:
     return qm.measure(inputs)
 
 
+deutsch_jozsa_balanced_xor.draw(n=3, fold_loops=False, inline=True)
+
+
+# %%
 @qm.qkernel
 def deutsch_jozsa_balanced_first(n: int) -> qm.Vector[qm.Bit]:
     """Deutsch-Jozsa with balanced oracle (first bit)"""
@@ -240,6 +273,8 @@ def deutsch_jozsa_balanced_first(n: int) -> qm.Vector[qm.Bit]:
 
     return qm.measure(inputs)
 
+
+deutsch_jozsa_balanced_first.draw(n=3, fold_loops=False, inline=True)
 
 # %% [markdown]
 # ## 5. 実行と結果

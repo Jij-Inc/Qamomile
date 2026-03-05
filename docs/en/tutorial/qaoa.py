@@ -13,7 +13,6 @@
 #     name: qamomile
 # ---
 
-
 # %% [markdown]
 # # Quantum Approximate Optimization Algorithm (QAOA)
 # This tutorial explains how to implement the Quantum Approximate Optimization Algorithm (QAOA) using Qamomile.
@@ -37,6 +36,7 @@
 
 # %%
 import numpy as np
+
 import qamomile.circuit as qmc
 
 
@@ -53,17 +53,20 @@ def qaoa_cost_operator(
         i = edges[_e, 0]
         j = edges[_e, 1]
         wij = weights[_e]
-        qubits[i], qubits[j] = qmc.rzz(qubits[i], qubits[j], angle=gamma*wij)
+        qubits[i], qubits[j] = qmc.rzz(qubits[i], qubits[j], angle=gamma * wij)
 
     n = qubits.shape[0]
     for i in qmc.range(n):
         bi = bias[i]
-        qubits[i] = qmc.rz(qubits[i], angle=gamma*bi)
+        qubits[i] = qmc.rz(qubits[i], angle=gamma * bi)
     return qubits
 
 
+qaoa_cost_operator.draw(qubits=3, fold_loops=False)
+
 # %% [markdown]
 # Next, we define the QAOA Mixer operator.
+
 
 # %%
 @qmc.qkernel
@@ -73,12 +76,14 @@ def qaoa_mixer_operator(
 ) -> qmc.Vector[qmc.Qubit]:
     n = qubits.shape[0]
     for i in qmc.range(n):
-        qubits[i] = qmc.rx(qubits[i], angle=2*beta)
+        qubits[i] = qmc.rx(qubits[i], angle=2 * beta)
     return qubits
 
 
+qaoa_mixer_operator.draw(qubits=3, fold_loops=False)
 # %% [markdown]
 # Finally, we define the entire QAOA circuit.
+
 
 # %%
 @qmc.qkernel
@@ -99,12 +104,11 @@ def qaoa_circuit(
 
     # Apply QAOA layers
     for layer in qmc.range(p):
-        qubits = qaoa_cost_operator(
-            qubits, edges, weights, bias, gammas[layer]
-        )
+        qubits = qaoa_cost_operator(qubits, edges, weights, bias, gammas[layer])
         qubits = qaoa_mixer_operator(qubits, betas[layer])
 
     return qmc.measure(qubits)
+
 
 # %% [markdown]
 # ## Running QAOA with Different Quantum SDKs
@@ -216,7 +220,9 @@ def qaoa_circuit(
 
 # %%
 import random
+
 from qamomile.qiskit import QiskitTranspiler
+
 
 def random_ising(n: int, sparsity: float = 0.5):
     edges = []
@@ -237,9 +243,13 @@ def random_ising(n: int, sparsity: float = 0.5):
         bias,
     )
 
+
 n = 5
 edges, weights, bias = random_ising(n=n, sparsity=0.7)
 
+qaoa_circuit.draw(
+    edges=edges, weights=weights, bias=bias, p=2, fold_loops=False, inline=True
+)
 
 # %%
 transpiler = QiskitTranspiler()
@@ -256,7 +266,7 @@ executable = transpiler.transpile(
 
 
 init_gammas = np.random.uniform(0, np.pi, size=2)
-init_betas = np.random.uniform(0, np.pi/2, size=2)
+init_betas = np.random.uniform(0, np.pi / 2, size=2)
 
 job = executable.sample(
     transpiler.executor(),
@@ -283,8 +293,14 @@ print(qiskit_circuit.draw(output="text"))
 # and optimize parameters to minimize it.
 # First, let's define a function to calculate the Ising model energy.
 
+
 # %%
-def calculate_ising_energy(bitstring: list[int], edges: list[list[int]], weights: list[float], bias: list[float]) -> float:
+def calculate_ising_energy(
+    bitstring: list[int],
+    edges: list[list[int]],
+    weights: list[float],
+    bias: list[float],
+) -> float:
     """
     Calculate the Ising model energy.
 
@@ -335,7 +351,10 @@ from scipy.optimize import minimize
 # List to save optimization history
 energy_history = []
 
-def objective_function(params, transpiler, executable, edges, weights, bias, shots=1024):
+
+def objective_function(
+    params, transpiler, executable, edges, weights, bias, shots=1024
+):
     """
     Objective function to optimize.
     Takes parameters, runs the QAOA circuit, and returns the energy expectation value.
@@ -366,10 +385,12 @@ p = 2  # Number of QAOA layers
 
 # Initial parameters
 np.random.seed(42)
-init_params = np.concatenate([
-    np.random.uniform(0, np.pi, size=p),      # gammas
-    np.random.uniform(0, np.pi/2, size=p),    # betas
-])
+init_params = np.concatenate(
+    [
+        np.random.uniform(0, np.pi, size=p),  # gammas
+        np.random.uniform(0, np.pi / 2, size=p),  # betas
+    ]
+)
 
 # Clear history
 energy_history = []
@@ -383,7 +404,7 @@ result_opt = minimize(
     options={"maxiter": 100, "disp": True},
 )
 
-print(f"\nOptimized parameters:")
+print("\nOptimized parameters:")
 print(f"  gammas: {result_opt.x[:p]}")
 print(f"  betas: {result_opt.x[p:]}")
 print(f"Final energy: {result_opt.fun:.4f}")
@@ -396,7 +417,7 @@ print(f"Final energy: {result_opt.fun:.4f}")
 import matplotlib.pyplot as plt
 
 plt.figure(figsize=(10, 5))
-plt.plot(energy_history, marker='o', markersize=3)
+plt.plot(energy_history, marker="o", markersize=3)
 plt.xlabel("Iteration")
 plt.ylabel("Energy")
 plt.title("QAOA Optimization Convergence")
@@ -444,11 +465,14 @@ for bitstring, count, energy in results_with_energy[:10]:
 # %%
 from itertools import product
 
-def find_exact_ground_state(n: int, edges: list[list[int]], weights: list[float], bias: list[float]) -> tuple[tuple[int, ...], float]:
+
+def find_exact_ground_state(
+    n: int, edges: list[list[int]], weights: list[float], bias: list[float]
+) -> tuple[tuple[int, ...], float]:
     """
     Find the exact ground state by exhaustive search (only for small-scale problems).
     """
-    min_energy = float('inf')
+    min_energy = float("inf")
     best_bitstring: tuple[int, ...] = tuple([0] * n)
 
     for bitstring in product([0, 1], repeat=n):
@@ -465,8 +489,12 @@ qaoa_best = results_with_energy[0]
 
 print("Comparison with exact solution:")
 print("-" * 50)
-print(f"Exact solution:    {''.join(map(str, exact_solution))}, energy={exact_energy:.4f}")
-print(f"QAOA best solution: {''.join(map(str, qaoa_best[0]))}, energy={qaoa_best[2]:.4f}")
+print(
+    f"Exact solution:    {''.join(map(str, exact_solution))}, energy={exact_energy:.4f}"
+)
+print(
+    f"QAOA best solution: {''.join(map(str, qaoa_best[0]))}, energy={qaoa_best[2]:.4f}"
+)
 print(f"Energy difference: {qaoa_best[2] - exact_energy:.4f}")
 
 # Calculate approximation ratio (considering negative energy cases)

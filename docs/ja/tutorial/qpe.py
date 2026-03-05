@@ -16,20 +16,19 @@
 
 # %% [markdown]
 # # 量子位相推定 (QPE) チュートリアル
-#
+# 
 # このチュートリアルでは、Qamomileを使用して量子位相推定（QPE）アルゴリズムを実装する方法を説明します。
-#
+# 
 # ## 自ら実装する量子位相推定
 # まずは、Qamomileの基本的な量子ゲートを使用してQPEを実装してみましょう。
-#
+# 
 # ### 逆量子フーリエ変換 (IQFT)
 #
 # 逆量子フーリエ変換は、QPEアルゴリズムの重要な部分です。以下にIQFTを実装します。
-#
+# 
 
 # %%
 import math
-
 import qamomile.circuit as qmc
 
 
@@ -47,13 +46,14 @@ def iqft(qubits: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
     return qubits
 
 
+iqft.draw(qubits=3, fold_loops=False)
+
 # %% [markdown]
 # ### Phase Gate の定義
 # 今回はQPEのターゲットとしてPhase Gateを使用します。Phase Gateは以下のように定義されます。
 # $$P(\theta)|1\rangle = e^{i\theta}|1\rangle$$
 # ここで、$|1\rangle$ は固有状態であり、$e^{i\theta}$ は対応する固有値です。
 # この固有値をQPEで推定します。
-
 
 # %%
 @qmc.qkernel
@@ -62,6 +62,9 @@ def phase_gate(q: qmc.Qubit, theta: float, iter: int) -> qmc.Qubit:
     for _ in qmc.range(iter):
         q = qmc.p(q, theta)
     return q
+
+
+phase_gate.draw()
 
 
 # %%
@@ -84,15 +87,15 @@ def qpe(phase: float) -> qmc.Vector[qmc.Bit]:
     # controlled() API: (control, target, **params) -> (control_out, target_out)
     # 制御qubit i に対して 2^i 回のphase gateを適用
     for i in qmc.range(3):
-        phase_register[i], target = controlled_phase_gate(
-            phase_register[i], target, theta=phase, iter=2**i
-        )
-    phase_register = iqft(phase_register)
+        phase_register[i], target = controlled_phase_gate(phase_register[i], target, theta=phase, iter=2**i)
+    iqft(phase_register)
 
     bits = qmc.measure(phase_register)
 
     return bits
 
+
+qpe.draw(fold_loops=False, inline=True)
 
 # %% [markdown]
 # ### 異なる量子SDKでのQPE実行
@@ -168,6 +171,7 @@ def qpe(phase: float) -> qmc.Vector[qmc.Bit]:
 # %%
 from qamomile.qiskit import QiskitTranspiler
 
+
 transpiler = QiskitTranspiler()
 executable = transpiler.transpile(qpe, bindings={"phase": math.pi / 2})
 
@@ -177,12 +181,8 @@ sample_result = job.result()
 # Decode results
 num_bits = 3
 for bits, count in sample_result.results:
-    phase_estimate = sum(
-        bit * (1 / (2 ** (i + 1))) for i, bit in enumerate(reversed(bits))
-    )
-    print(
-        f"Measured bits: {bits}, Count: {count}, Estimated phase: {phase_estimate:.4f}"
-    )
+    phase_estimate = sum(bit * (1 / (2 ** (i + 1))) for i, bit in enumerate(reversed(bits)))
+    print(f"Measured bits: {bits}, Count: {count}, Estimated phase: {phase_estimate:.4f}")
 
 
 # %% [markdown]
@@ -204,7 +204,6 @@ print(qiskit_circuit.draw(output="text"))
 # **重要**: `qmc.qpe()`は内部で自動的に`U^(2^k)`の繰り返しを行うため、
 # ユニタリは**1回の適用のみ**を定義する必要があります。
 
-
 # %%
 # qmc.qpe()用のシンプルなphase gate（1回適用のみ）
 @qmc.qkernel
@@ -212,10 +211,9 @@ def p_gate(q: qmc.Qubit, theta: float) -> qmc.Qubit:
     """Simple phase gate: $P(\\theta)|1\\rangle = e^{i\\theta}|1\\rangle$"""
     return qmc.p(q, theta)
 
-
 @qmc.qkernel
-def qpe_3bit(phase: float) -> qmc.Float:
-    q_phase = qmc.qubit_array(3, name="phase_reg")
+def quantum_phase_estimation(phase: float, n: qmc.UInt) -> qmc.Float:
+    q_phase = qmc.qubit_array(n, name="phase_reg")
     target = qmc.qubit(name="target")
     target = qmc.x(target)  # |0⟩ → |1⟩
     # p_gateを使用（qmc.qpe()が内部で2^k回繰り返す）
@@ -223,17 +221,21 @@ def qpe_3bit(phase: float) -> qmc.Float:
     return qmc.measure(phase_q)
 
 
+quantum_phase_estimation.draw(n=3, fold_loops=False, inline=True)
+
 # %% [markdown]
 # phaseを格納するregisterを用意し、ターゲット状態を初期化した後、`qpe()`関数を呼び出すだけでQPEが実装できます。
 # 測定結果は`QFixed`型で返されるため、`measure()`関数で測定して`Float`型に変換します。`measure()`は渡される型に応じて自動的にデコードを行います。
-#
+# 
 # ### Qiskitを用いたシミュレーション実行
 # 先ほどと同様にQiskitシミュレータで実行し、結果を確認します。
 
 # %%
 transpiler = QiskitTranspiler()
 test_phase = math.pi / 2  # θ = π/2, expected output ≈ 0.25 (since θ/(2π) = 0.25)
-executable = transpiler.transpile(qpe_3bit, bindings={"phase": test_phase})
+executable = transpiler.transpile(
+    quantum_phase_estimation, bindings={"phase": test_phase, "n": 3}
+)
 
 executor = transpiler.executor()
 job = executable.sample(executor)
@@ -254,3 +256,4 @@ print(qiskit_circuit.draw(output="text"))
 # こちらも同様にQiskitの量子回路として生成されていることがわかります。
 # Qamomileではbackend側でサポートされている演算があれば可能な限り、直接その演算を使用するように量子回路が生成されます。
 # 例えば、QiskitではIQFTがネイティブにサポートされているため、QPEの中のIQFT部分も直接IQFTゲートとして生成されています。
+

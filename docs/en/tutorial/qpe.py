@@ -13,7 +13,6 @@
 #     name: qamomile
 # ---
 
-
 # %% [markdown]
 # # Quantum Phase Estimation (QPE) Tutorial
 #
@@ -47,6 +46,8 @@ def iqft(qubits: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
     return qubits
 
 
+iqft.draw(qubits=3, fold_loops=False)
+
 # %% [markdown]
 # ### Defining the Phase Gate
 # In this tutorial, we use the Phase Gate as the target for QPE. The Phase Gate is defined as follows:
@@ -62,6 +63,9 @@ def phase_gate(q: qmc.Qubit, theta: float, iter: int) -> qmc.Qubit:
     for _ in qmc.range(iter):
         q = qmc.p(q, theta)
     return q
+
+
+phase_gate.draw()
 
 
 # %%
@@ -87,12 +91,14 @@ def qpe(phase: float) -> qmc.Vector[qmc.Bit]:
         phase_register[i], target = controlled_phase_gate(
             phase_register[i], target, theta=phase, iter=2**i
         )
-    phase_register = iqft(phase_register)
+    iqft(phase_register)
 
     bits = qmc.measure(phase_register)
 
     return bits
 
+
+qpe.draw(fold_loops=False, inline=True)
 
 # %% [markdown]
 # ### Running QPE with Different Quantum SDKs
@@ -223,6 +229,8 @@ def quantum_phase_estimation(phase: float, n: qmc.UInt) -> qmc.Float:
     phase_q: qmc.QFixed = qmc.qpe(target, q_phase, p_gate, theta=phase)
     return qmc.measure(phase_q)
 
+
+quantum_phase_estimation.draw(n=3, fold_loops=False, inline=True)
 
 # %% [markdown]
 # Simply prepare a register to store the phase, initialize the target state, and call the qpe() function to implement QPE.

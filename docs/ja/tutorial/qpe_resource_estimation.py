@@ -23,12 +23,9 @@
 
 # %%
 import math
+
 import qamomile.circuit as qmc
 from qamomile.circuit.estimator import estimate_resources
-from qamomile.circuit.estimator.algorithmic import estimate_qpe
-import sympy as sp
-import matplotlib.pyplot as plt
-import pandas as pd
 
 # %% [markdown]
 # ## セクション1: 代数的リソース見積もりの紹介
@@ -63,6 +60,10 @@ def bell_state() -> qmc.Vector[qmc.Qubit]:
     q[0], q[1] = qmc.cx(q[0], q[1])
     return q
 
+
+bell_state.draw()
+
+# %%
 # qkernelのblockをestimate_resourcesに渡すだけ
 est = estimate_resources(bell_state.block)
 
@@ -90,6 +91,10 @@ def ghz_state(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
         q[i], q[i+1] = qmc.cx(q[i], q[i+1])
     return q
 
+
+ghz_state.draw(n=4, fold_loops=False)
+
+# %%
 # シンボリックパラメータnで見積もり
 est_ghz = estimate_resources(ghz_state.block)
 
@@ -162,6 +167,10 @@ def iqft(qubits: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
         qubits[j] = qmc.h(qubits[j])
     return qubits
 
+
+iqft.draw(qubits=4, fold_loops=False)
+
+# %%
 # シンボリックnでIQFTのリソースを見積もる
 @qmc.qkernel
 def iqft_n(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
@@ -194,6 +203,9 @@ def phase_gate(q: qmc.Qubit, theta: float, iter: int) -> qmc.Qubit:
     for i in qmc.range(iter):
         q = qmc.p(q, theta)
     return q
+
+
+phase_gate.draw(iter=4, fold_loops=False)
 
 # %% [markdown]
 # ### ステップ3: QPEをゼロから実装
@@ -231,6 +243,9 @@ def qpe_manual(theta: float, m: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     return bits
 
 
+qpe_manual.draw(theta=math.pi / 2, m=3, fold_loops=False, inline=True)
+
+# %%
 est_qpe_manual = estimate_resources(qpe_manual.block)
 print("\n手動QPEのリソース見積もり（シンボリックm）:")
 print(f"  量子ビット数: {est_qpe_manual.qubits}")
@@ -272,6 +287,10 @@ def qpe_builtin(theta: float, n: qmc.UInt) -> qmc.Float:
     phase = qmc.qpe(target, counting, simple_phase_gate, theta=theta)
     return qmc.measure(phase)
 
+
+qpe_builtin.draw(theta=math.pi / 2, n=3, fold_loops=False, inline=True)
+
+# %%
 est_builtin = estimate_resources(qpe_builtin.block)
 est_builtin = est_builtin.simplify()
 

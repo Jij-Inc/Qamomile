@@ -8,6 +8,7 @@ from typing import Any
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
+from qamomile.circuit.ir.operation.gate import ControlledUOperation, GateOperation
 from qamomile.circuit.ir.value import Value, ValueBase
 
 from . import Pass
@@ -191,46 +192,81 @@ class ConstantFoldingPass(Pass[Block, Block]):
             else:
                 new_operands.append(operand)
 
-        # Fold ControlledUOperation-specific dataclass fields.
-        from qamomile.circuit.ir.operation.gate import ControlledUOperation
+        result_op = dataclasses.replace(op, operands=new_operands) if changed else op
 
-        if isinstance(op, ControlledUOperation):
+        # Fold ControlledUOperation-specific dataclass fields.
+        if isinstance(result_op, ControlledUOperation):
             extra_kwargs: dict[str, Any] = {}
 
             # Fold num_controls: Value -> int if resolvable.
-            if isinstance(op.num_controls, Value):
-                new_nc = self._resolve_field_value(op.num_controls, folded_values)
-                if new_nc is not op.num_controls:
+            if isinstance(result_op.num_controls, Value):
+                new_nc = self._resolve_field_value(
+                    result_op.num_controls, folded_values
+                )
+                if new_nc is not result_op.num_controls:
                     extra_kwargs["num_controls"] = new_nc
                     changed = True
 
             # Fold target_indices list.
-            if op.target_indices is not None:
-                new_ti = self._fold_value_list(op.target_indices, folded_values)
+            if result_op.target_indices is not None:
+                new_ti = self._fold_value_list(result_op.target_indices, folded_values)
                 if new_ti is not None:
                     extra_kwargs["target_indices"] = new_ti
                     changed = True
 
             # Fold controlled_indices list.
-            if op.controlled_indices is not None:
-                new_ci = self._fold_value_list(op.controlled_indices, folded_values)
+            if result_op.controlled_indices is not None:
+                new_ci = self._fold_value_list(
+                    result_op.controlled_indices, folded_values
+                )
                 if new_ci is not None:
                     extra_kwargs["controlled_indices"] = new_ci
                     changed = True
 
             # Fold power: Value -> int if resolvable (strict-integer-only).
-            if isinstance(op.power, Value):
-                new_power = self._resolve_power_field_value(op.power, folded_values)
-                if new_power is not op.power:
+            if isinstance(result_op.power, Value):
+                new_power = self._resolve_power_field_value(
+                    result_op.power, folded_values
+                )
+                if new_power is not result_op.power:
                     extra_kwargs["power"] = new_power
                     changed = True
 
             if extra_kwargs:
-                return dataclasses.replace(op, operands=new_operands, **extra_kwargs)
+                result_op = dataclasses.replace(result_op, **extra_kwargs)
 
+        # Substitute folded values in GateOperation.theta field
+        if isinstance(result_op, GateOperation) and isinstance(result_op.theta, Value):
+            if result_op.theta.uuid in folded_values:
+                result_op = dataclasses.replace(
+                    result_op, theta=folded_values[result_op.theta.uuid]
+                )
+                changed = True
+
+        # Also substitute GateOperation.theta if it references a folded value
+        replacements: dict[str, Any] = {}
         if changed:
-            return dataclasses.replace(op, operands=new_operands)
-        return op
+            replacements["operands"] = new_operands
+        if isinstance(result_op, GateOperation) and isinstance(result_op.theta, Value):
+            if result_op.theta.uuid in folded_values:
+                replacements["theta"] = folded_values[result_op.theta.uuid]
+            elif result_op.theta.element_indices:
+                new_indices = []
+                indices_changed = False
+                for idx in result_op.theta.element_indices:
+                    if idx.uuid in folded_values:
+                        new_indices.append(folded_values[idx.uuid])
+                        indices_changed = True
+                    else:
+                        new_indices.append(idx)
+                if indices_changed:
+                    replacements["theta"] = dataclasses.replace(
+                        result_op.theta, element_indices=tuple(new_indices)
+                    )
+
+        if replacements:
+            return dataclasses.replace(result_op, **replacements)
+        return result_op
 
     def _resolve_field_value(
         self,
