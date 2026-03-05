@@ -699,69 +699,41 @@ class LoopAnalyzer:
         self,
         operations: list[Operation],
         loop_var: str,
-        _derived_names: set[str] | None = None,
     ) -> bool:
         """Check if operations contain BinOps that reference the loop variable.
 
-        When a BinOp depends on the loop variable (directly or transitively),
-        its result cannot be evaluated with native loop control flow (the
-        variable is symbolic).  The loop must be unrolled so the BinOp can
-        be evaluated with concrete iteration values.
+        When a BinOp depends on the loop variable, its result cannot be
+        evaluated with native loop control flow (the variable is symbolic).
+        The loop must be unrolled so the BinOp can be evaluated with
+        concrete iteration values.
 
         Args:
             operations: List of operations to check.
             loop_var: Name of the loop variable to search for.
-            _derived_names: Internal accumulator tracking names of BinOp
-                results that transitively depend on *loop_var*.  Callers
-                should not pass this argument.
 
         Returns:
-            True if any BinOp directly or transitively references the loop
-            variable.
+            True if any BinOp operand directly references *loop_var*.
         """
         from qamomile.circuit.ir.value import Value as _Value
 
-        if _derived_names is None:
-            _derived_names = set()
-
         for op in operations:
             if isinstance(op, BinOp):
-                depends = False
                 for operand in op.operands:
-                    if (
-                        isinstance(operand, _Value)
-                        and operand.name in {loop_var} | _derived_names
-                    ):
-                        depends = True
-                        break
-                if depends:
-                    # Track the result name so downstream BinOps are also
-                    # detected as transitive dependents.
-                    result_name = op.results[0].name if op.results else None
-                    if result_name is not None:
-                        _derived_names.add(result_name)
-                    return True
+                    if isinstance(operand, _Value) and operand.name == loop_var:
+                        return True
             elif isinstance(op, ForOperation):
-                if self._has_loop_var_binop(
-                    op.operations, loop_var, _derived_names
-                ):
+                if self._has_loop_var_binop(op.operations, loop_var):
                     return True
             elif isinstance(op, ForItemsOperation):
-                if self._has_loop_var_binop(
-                    op.operations, loop_var, _derived_names
-                ):
+                if self._has_loop_var_binop(op.operations, loop_var):
                     return True
             elif isinstance(op, IfOperation):
                 if self._has_loop_var_binop(
-                    op.true_operations, loop_var, _derived_names
-                ) or self._has_loop_var_binop(
-                    op.false_operations, loop_var, _derived_names
-                ):
+                    op.true_operations, loop_var
+                ) or self._has_loop_var_binop(op.false_operations, loop_var):
                     return True
             elif isinstance(op, WhileOperation):
-                if self._has_loop_var_binop(
-                    op.operations, loop_var, _derived_names
-                ):
+                if self._has_loop_var_binop(op.operations, loop_var):
                     return True
         return False
 
