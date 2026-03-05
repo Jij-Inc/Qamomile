@@ -91,6 +91,16 @@ def t_matrix() -> np.ndarray:
     return np.array([[1, 0], [0, np.exp(1j * np.pi / 4)]], dtype=complex)
 
 
+def sdg_matrix() -> np.ndarray:
+    """S-dagger gate (inverse of S)."""
+    return np.array([[1, 0], [0, -1j]], dtype=complex)
+
+
+def tdg_matrix() -> np.ndarray:
+    """T-dagger gate (inverse of T)."""
+    return np.array([[1, 0], [0, np.exp(-1j * np.pi / 4)]], dtype=complex)
+
+
 # =============================================================================
 # Single-qubit rotation gate matrices
 # =============================================================================
@@ -306,6 +316,8 @@ GATE_SPECS: dict[str, GateSpec] = {
     "Z": GateSpec("Z", GateCategory.SINGLE_QUBIT, 1, matrix_fn=z_matrix),
     "S": GateSpec("S", GateCategory.SINGLE_QUBIT, 1, matrix_fn=s_matrix),
     "T": GateSpec("T", GateCategory.SINGLE_QUBIT, 1, matrix_fn=t_matrix),
+    "SDG": GateSpec("SDG", GateCategory.SINGLE_QUBIT, 1, matrix_fn=sdg_matrix),
+    "TDG": GateSpec("TDG", GateCategory.SINGLE_QUBIT, 1, matrix_fn=tdg_matrix),
     # Single-qubit rotation gates
     "RX": GateSpec(
         "RX", GateCategory.SINGLE_QUBIT_ROTATION, 1, has_angle=True, matrix_fn=rx_matrix
