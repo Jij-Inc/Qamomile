@@ -687,6 +687,54 @@ class LoopAnalyzer:
         if self._has_array_element_access(op.operations, op.loop_var):
             return True
 
+        # Check for BinOps that depend on the loop variable.
+        # These produce values used as array indices or gate angles
+        # and require concrete loop variable values to evaluate.
+        if self._has_loop_var_binop(op.operations, op.loop_var):
+            return True
+
+        return False
+
+    def _has_loop_var_binop(
+        self,
+        operations: list[Operation],
+        loop_var: str,
+    ) -> bool:
+        """Check if operations contain BinOps that reference the loop variable.
+
+        When a BinOp depends on the loop variable, its result cannot be
+        evaluated with native loop control flow (the variable is symbolic).
+        The loop must be unrolled so the BinOp can be evaluated with
+        concrete iteration values.
+
+        Args:
+            operations: List of IR operations to inspect.
+            loop_var: Name of the enclosing loop variable to detect.
+
+        Returns:
+            True if any BinOp operand directly references *loop_var*.
+        """
+        from qamomile.circuit.ir.value import Value
+
+        for op in operations:
+            if isinstance(op, BinOp):
+                for operand in op.operands:
+                    if isinstance(operand, Value) and operand.name == loop_var:
+                        return True
+            elif isinstance(op, ForOperation):
+                if self._has_loop_var_binop(op.operations, loop_var):
+                    return True
+            elif isinstance(op, IfOperation):
+                if self._has_loop_var_binop(
+                    op.true_operations, loop_var
+                ) or self._has_loop_var_binop(op.false_operations, loop_var):
+                    return True
+            elif isinstance(op, WhileOperation):
+                if self._has_loop_var_binop(op.operations, loop_var):
+                    return True
+            # No action for other operation types (GateOperation, CastOperation, etc.)
+            # — only BinOps and control-flow containers can carry loop-var dependencies.
+            # ForItemsOperation is always unrolled separately, so it is not checked here.
         return False
 
     def _has_dynamic_nested_loop(
