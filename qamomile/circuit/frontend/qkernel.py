@@ -241,6 +241,16 @@ class QKernel(Generic[P, R]):
     def _validate_kwargs(self, parameters: list[str], kwargs: dict[str, Any]) -> None:
         """Validate that all non-parameter, non-Qubit arguments are provided or have defaults."""
 
+        # Check for unknown kwargs that don't match any declared parameter
+        known_names = set(self.signature.parameters.keys())
+        unknown = set(kwargs.keys()) - known_names
+        if unknown:
+            names = ", ".join(f"'{n}'" for n in sorted(unknown))
+            raise ValueError(
+                f"Unknown argument(s) {names} provided. "
+                f"Known parameters are: {sorted(known_names)}"
+            )
+
         for name, param in self.signature.parameters.items():
             if name in parameters:
                 continue
