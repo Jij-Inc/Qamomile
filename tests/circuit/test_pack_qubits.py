@@ -174,7 +174,7 @@ class TestPackQubitsTranspile:
     """
 
     def test_pack_measure_preserves_order(self):
-        """pack -> X(first only) -> measure should transpile correctly."""
+        """pack -> measure keeps output-index to clbit-index ordering."""
         pytest.importorskip("qiskit")
         from qamomile.qiskit import QiskitTranspiler
 
@@ -191,10 +191,14 @@ class TestPackQubitsTranspile:
         transpiler = QiskitTranspiler()
         executable = transpiler.transpile(k)
         assert executable is not None
-        assert len(executable.compiled_quantum) > 0
+        assert len(executable.compiled_quantum) == 1
+        clbit_map = executable.compiled_quantum[0].clbit_map
+        assert len(clbit_map) == 2
+        mapped = {ref.rsplit("_", 1)[-1]: clbit_idx for ref, clbit_idx in clbit_map.items()}
+        assert mapped == {"0": 0, "1": 1}
 
     def test_pack_expval_transpiles(self):
-        """pack -> expval should transpile with correct qubit mapping."""
+        """pack -> expval preserves packed qubit metadata for mapping checks."""
         pytest.importorskip("qiskit")
         import qamomile.observable as qm_o
         from qamomile.qiskit import QiskitTranspiler
@@ -214,3 +218,10 @@ class TestPackQubitsTranspile:
         executable = transpiler.transpile(k, bindings={"H": H})
         assert executable is not None
         assert len(executable.compiled_expval) == 1
+        segment = executable.compiled_expval[0].segment
+        assert len(segment.operations) == 1
+        expval_op = segment.operations[0]
+        element_uuids = expval_op.qubits.params.get("element_uuids")
+        assert element_uuids is not None
+        assert len(element_uuids) == 2
+        assert len(set(element_uuids)) == 2
