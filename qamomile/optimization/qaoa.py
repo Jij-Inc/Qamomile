@@ -4,8 +4,8 @@ from qamomile.circuit.algorithm.qaoa import (
     hubo_qaoa_state,
     qaoa_state,
 )
-from qamomile.circuit.transpiler.transpiler import Transpiler
 from qamomile.circuit.transpiler.executable import ExecutableProgram
+from qamomile.circuit.transpiler.transpiler import Transpiler
 
 from .converter import MathematicalProblemConverter
 from .utils import is_close_zero
@@ -104,7 +104,9 @@ class QAOAConverter(MathematicalProblemConverter):
             betas: qmc.Vector[qmc.Float],
             n: qmc.UInt,
         ) -> qmc.Vector[qmc.Bit]:
-            q = qaoa_state(p, quad, linear, n, gammas, betas)
+            q = qaoa_state(
+                p=p, quad=quad, linear=linear, n=n, gammas=gammas, betas=betas
+            )
             return qmc.measure(q)
 
         return transpiler.transpile(
@@ -128,7 +130,7 @@ class QAOAConverter(MathematicalProblemConverter):
 
         Decomposes k-body Z-rotation terms into CX ladder + RZ primitives
         via ``apply_phase_gadget``, while reusing the standard
-        ``ising_cost_circuit`` for quadratic and linear terms.
+        ``ising_cost`` for quadratic and linear terms.
 
         Args:
             transpiler (Transpiler): Backend transpiler to use.
@@ -137,20 +139,28 @@ class QAOAConverter(MathematicalProblemConverter):
         Returns:
             ExecutableProgram: The compiled circuit program.
         """
-        higher_terms = sorted(self.spin_model.higher.items())
 
-        # NOTE: @qkernel is defined inline (not at module level) because it
-        # captures `higher_terms` via `hubo_qaoa_state` at trace time.
+        # NOTE: @qkernel is defined inline (not at module level) because
+        # transpile() binds instance-specific data at call time.
         @qmc.qkernel
         def qaoa_sampling_hubo(
             p_val: qmc.UInt,
             quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
             linear: qmc.Dict[qmc.UInt, qmc.Float],
+            higher: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
             gammas: qmc.Vector[qmc.Float],
             betas: qmc.Vector[qmc.Float],
             n: qmc.UInt,
         ) -> qmc.Vector[qmc.Bit]:
-            q = hubo_qaoa_state(p_val, quad, linear, n, gammas, betas, higher_terms)
+            q = hubo_qaoa_state(
+                p_val=p_val,
+                quad=quad,
+                linear=linear,
+                higher=higher,
+                n=n,
+                gammas=gammas,
+                betas=betas,
+            )
             return qmc.measure(q)
 
         return transpiler.transpile(
@@ -158,6 +168,7 @@ class QAOAConverter(MathematicalProblemConverter):
             bindings={
                 "linear": self.spin_model.linear,
                 "quad": self.spin_model.quad,
+                "higher": self.spin_model.higher,
                 "n": self.spin_model.num_bits,
                 "p_val": p,
             },
