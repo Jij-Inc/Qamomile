@@ -2,7 +2,8 @@ import contextlib
 import copy
 import typing
 
-from qamomile.circuit.frontend.handle.array import ArrayBase
+from qamomile.circuit.frontend.func_to_block import is_array_type
+from qamomile.circuit.frontend.handle.array import ArrayBase, Vector
 from qamomile.circuit.frontend.handle.containers import Dict, DictItemsIterator
 from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, Qubit, UInt
 from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
@@ -464,26 +465,53 @@ def for_items(
     parent_tracer = get_current_tracer()
     body_tracer = Tracer()
 
-    # Create symbolic key handles (UInt for each key variable)
-    key_handles = []
-    for kv_name in key_var_names:
-        key_handle = UInt(
-            value=Value(type=UIntType(), name=kv_name),
-            init_value=0,  # Placeholder, actual value bound at emit time
+    # Check if Dict key type is a vector (e.g., Dict[Vector[UInt], Float])
+    key_type = getattr(d, "_key_type", None)
+    _key_is_vector = (
+        key_type is not None and is_array_type(key_type) and len(key_var_names) == 1
+    )
+
+    if _key_is_vector:
+        # Create a symbolic Vector[UInt] handle for the key variable
+        kv_name = key_var_names[0]
+        dim0_value = Value(type=UIntType(), name=f"{kv_name}_dim0", params={})
+        array_value = ArrayValue(
+            type=UIntType(),
+            name=kv_name,
+            shape=(dim0_value,),
         )
-        key_handles.append(key_handle)
+        dim0_handle = UInt(value=dim0_value)
+        key_result = object.__new__(Vector)
+        key_result.value = array_value
+        key_result._shape = (dim0_handle,)
+        key_result._borrowed_indices = {}
+        key_result.parent = None
+        key_result.indices = ()
+        key_result.name = kv_name
+        key_result.id = str(id(key_result))
+        key_result._consumed = False
+        key_result.element_type = UInt
+    else:
+        # Create symbolic key handles (UInt for each key variable)
+        key_handles = []
+        for kv_name in key_var_names:
+            key_handle = UInt(
+                value=Value(type=UIntType(), name=kv_name),
+                init_value=0,  # Placeholder, actual value bound at emit time
+            )
+            key_handles.append(key_handle)
+
+        # Package key handles: tuple for multiple keys, single handle otherwise
+        if len(key_handles) == 1:
+            key_result = key_handles[0]
+        else:
+            key_result = tuple(key_handles)
 
     # Create symbolic value handle (Float for Ising coefficients)
     value_handle = Float(
         value=Value(type=FloatType(), name=value_var_name),
         init_value=0.0,  # Placeholder, actual value bound at emit time
     )
-
-    # Package key handles: tuple for multiple keys, single handle otherwise
-    if len(key_handles) == 1:
-        key_result = key_handles[0]
-    else:
-        key_result = tuple(key_handles)
 
     with trace(body_tracer):
         yield (key_result, value_handle)
@@ -492,6 +520,7 @@ def for_items(
     for_items_op = ForItemsOperation(
         key_vars=key_var_names,
         value_var=value_var_name,
+        key_is_vector=_key_is_vector,
         operations=body_tracer.operations,
     )
     for_items_op.operands.append(d.value)  # The DictValue being iterated

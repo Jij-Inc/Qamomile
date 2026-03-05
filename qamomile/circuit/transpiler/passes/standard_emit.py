@@ -514,6 +514,9 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             elif len(op.key_vars) == 1:
                 # Single key variable
                 loop_bindings[op.key_vars[0]] = key
+                if op.key_is_vector:
+                    # Provide key length for Vector[UInt] shape resolution
+                    loop_bindings[f"{op.key_vars[0]}_dim0"] = len(key)
 
             # Bind value variable
             loop_bindings[op.value_var] = value
