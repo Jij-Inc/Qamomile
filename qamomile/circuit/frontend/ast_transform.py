@@ -828,10 +828,15 @@ def transform_control_flow(func: Callable):
 
     # Build resolver namespace for callable resolution (while condition QKernel check).
     # Includes globals and closure values available at function definition time.
+    # Empty cells (forward references not yet bound) are skipped here; the resolver
+    # treats unresolved callables as fail-open (see _resolve_callable).
     resolver_namespace: dict[str, Any] = dict(func.__globals__)
     if func.__closure__ is not None:
         for name, cell in zip(func.__code__.co_freevars, func.__closure__):
-            resolver_namespace[name] = cell.cell_contents
+            try:
+                resolver_namespace[name] = cell.cell_contents
+            except ValueError:
+                pass
 
     transformer = ControlFlowTransformer(
         global_names=global_names,
@@ -860,10 +865,19 @@ def transform_control_flow(func: Callable):
     )
 
     # クロージャ変数（関数内でインポートされた名前など）を追加
+    # Empty cells indicate forward references not yet bound at definition time.
+    # Skipping them would cause NameError at runtime, so we fail-closed here
+    # and let QKernel.__init__ fall back to the original function.
     if func.__closure__ is not None:
         free_vars = func.__code__.co_freevars
         for name, cell in zip(free_vars, func.__closure__):
-            name_space[name] = cell.cell_contents
+            try:
+                name_space[name] = cell.cell_contents
+            except ValueError:
+                raise NotImplementedError(
+                    f"Closure variable '{name}' is not yet bound (empty cell). "
+                    f"This typically happens with forward references in nested functions."
+                ) from None
 
     code_obj = compile(tree, filename="<qamomile-dsl>", mode="exec")
     exec(code_obj, name_space)

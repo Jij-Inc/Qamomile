@@ -143,6 +143,101 @@ class TestRuntimeLimitations:
         assert graph is not None
 
 
+class TestEmptyClosureCell:
+    """Empty closure cells (forward references) should not crash @qkernel."""
+
+    def test_empty_cell_does_not_raise_valueerror(self):
+        """@qkernel with forward-referenced freevar should not raise ValueError."""
+
+        def factory():
+            @qkernel
+            def circuit(q: Qubit) -> Qubit:
+                while helper(q):
+                    q = qm.h(q)
+                return q
+
+            def helper(q: Qubit) -> qm.Bit:
+                return qm.measure(q)
+
+            return circuit
+
+        # Must not raise ValueError: Cell is empty
+        kernel = factory()
+        assert kernel is not None
+
+    def test_empty_cell_triggers_fallback_warning(self):
+        """Empty cell should trigger AST transformation fallback warning."""
+        import warnings
+
+        def factory():
+            @qkernel
+            def circuit(q: Qubit) -> Qubit:
+                while helper(q):
+                    q = qm.h(q)
+                return q
+
+            def helper(q: Qubit) -> qm.Bit:
+                return qm.measure(q)
+
+            return circuit
+
+        with warnings.catch_warnings(record=True) as ws:
+            warnings.simplefilter("always")
+            factory()
+
+        fallback_warnings = [
+            w for w in ws if "AST transformation failed" in str(w.message)
+        ]
+        assert len(fallback_warnings) == 1
+
+    def test_empty_cell_fallback_no_nameerror(self):
+        """After fallback, build() must not raise NameError from missing freevars."""
+
+        def factory():
+            @qkernel
+            def circuit(q: Qubit) -> Qubit:
+                while helper(q):
+                    q = qm.h(q)
+                return q
+
+            def helper(q: Qubit) -> qm.Bit:
+                return qm.measure(q)
+
+            return circuit
+
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            kernel = factory()
+
+        # build() may fail for semantic reasons (e.g. QubitConsumedError),
+        # but must NOT fail with NameError from missing freevar injection.
+        try:
+            kernel.build()
+        except NameError:
+            pytest.fail("build() raised NameError — freevar injection regression")
+        except Exception:
+            pass  # Other exceptions (semantic) are acceptable
+
+    def test_bound_closure_still_works(self):
+        """Closure with all cells bound should still work normally."""
+
+        def factory():
+            n_qubits = 3
+
+            @qkernel
+            def circuit() -> Qubit:
+                qs = qubit_array(n_qubits, "qs")
+                return qs[0]
+
+            return circuit
+
+        kernel = factory()
+        graph = kernel.build()
+        assert graph is not None
+
+
 class TestQuantumOpsSpec:
     """Verify _QUANTUM_OPS matches the authoritative while-condition spec."""
 
