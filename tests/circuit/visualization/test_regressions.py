@@ -7,6 +7,8 @@ from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
 from qamomile.circuit.visualization.style import DEFAULT_STYLE
 from qamomile.circuit.visualization.visual_ir import (
     VFoldedBlock,
+    VGate,
+    VGateKind,
     VInlineBlock,
     VUnfoldedSequence,
 )
@@ -344,3 +346,225 @@ class TestInlineUnfoldedCallBlockArrayIndex:
                 f"All gate labels are identical: {gate_labels}. "
                 f"Array index should resolve per iteration."
             )
+
+
+class TestQAOARangeAliasDisplay:
+    """Regression: Unbound array loop stop should show name, not '?'."""
+
+    def test_named_value_fallback_no_question_mark(self):
+        """_format_value_as_expression should return value.name, not '?'."""
+        from qamomile.circuit.ir.value import Value
+        from qamomile.circuit.ir.types.primitives import UIntType
+
+        analyzer = object.__new__(CircuitAnalyzer)
+        analyzer.graph = None
+
+        # Simulate an unbound array shape value (e.g., edges_dim0)
+        value = Value(type=UIntType(), name="edges_dim0", params={})
+        result = analyzer._format_value_as_expression(value, set())
+        assert result == "edges_dim0", f"Expected 'edges_dim0', got '{result}'"
+        assert "?" not in result
+
+    def test_anonymous_value_still_returns_question_mark(self):
+        """Anonymous value (empty name) should still return '?'."""
+        from qamomile.circuit.ir.value import Value
+        from qamomile.circuit.ir.types.primitives import UIntType
+
+        analyzer = object.__new__(CircuitAnalyzer)
+        analyzer.graph = None
+
+        value = Value(type=UIntType(), name="", params={})
+        result = analyzer._format_value_as_expression(value, set())
+        assert result == "?"
+
+    def test_bound_range_shows_concrete(self):
+        """Bound array: header should show concrete value like qm.range(3)."""
+
+        @qm.qkernel
+        def circuit(n: int) -> qm.Vector[qm.Qubit]:
+            q = qm.qubit_array(n, name="q")
+            for e in qm.range(n):
+                q[0] = qm.rz(q[0], 0.5)
+            return q
+
+        graph = circuit._build_graph_for_visualization(n=3)
+        analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=False, fold_loops=True)
+        qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+        vc = analyzer.build_visual_ir(graph, qm_map, qm_names, num_q)
+
+        folded_blocks = [n for n in vc.children if isinstance(n, VFoldedBlock)]
+        assert len(folded_blocks) >= 1
+        found_range_3 = any(
+            "qm.range(3)" in block.header_label for block in folded_blocks
+        )
+        assert found_range_3, (
+            f"Expected 'qm.range(3)' in a folded header, got: "
+            f"{[b.header_label for b in folded_blocks]}"
+        )
+
+    def test_nested_loop_range_not_regressed(self):
+        """Nested loop: inner range(j) should still display correctly."""
+
+        @qm.qkernel
+        def circuit(n: int) -> qm.Vector[qm.Qubit]:
+            q = qm.qubit_array(n, name="q")
+            for j in qm.range(n):
+                for k in qm.range(j):
+                    q[k] = qm.cx(q[j], q[k])
+            return q
+
+        graph = circuit._build_graph_for_visualization(n=3)
+        analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=False, fold_loops=True)
+        qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+        vc = analyzer.build_visual_ir(graph, qm_map, qm_names, num_q)
+
+        folded_blocks = [n for n in vc.children if isinstance(n, VFoldedBlock)]
+        assert len(folded_blocks) >= 1
+        for block in folded_blocks:
+            if "qm.range(3)" in block.header_label:
+                for line in block.body_lines:
+                    if "qm.range" in line:
+                        assert "?" not in line, (
+                            f"Nested loop range contains '?': {line}"
+                        )
+
+
+class TestFreshQubitCallBlockVisualization:
+    """Regression: superposition_vector(n) fresh-qubit CallBlock visualization."""
+
+    @staticmethod
+    def _make_demo_kernel():
+        from qamomile.circuit.algorithm.qaoa import superposition_vector
+
+        @qm.qkernel
+        def demo(n: int) -> qm.Vector[qm.Bit]:
+            q = superposition_vector(n)
+            return qm.measure(q)
+
+        return demo
+
+    def test_inline_true_no_crash(self):
+        """inline=True: build_qubit_map + build_visual_ir should not raise."""
+        demo = self._make_demo_kernel()
+        graph = demo._build_graph_for_visualization(n=3)
+        analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=True)
+        qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+        assert num_q == 3
+        vc = analyzer.build_visual_ir(graph, qm_map, qm_names, num_q)
+        assert vc.num_qubits == 3
+
+    def test_inline_depth_1_no_crash(self):
+        """inline=True with inline_depth=1: boundary case."""
+        demo = self._make_demo_kernel()
+        graph = demo._build_graph_for_visualization(n=3)
+        analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=True, inline_depth=1)
+        qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+        assert num_q == 3
+
+    def test_block_box_has_qubit_indices(self):
+        """inline=False: BLOCK_BOX should span all fresh-return qubits."""
+        demo = self._make_demo_kernel()
+        graph = demo._build_graph_for_visualization(n=3)
+        analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=False)
+        qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+        vc = analyzer.build_visual_ir(graph, qm_map, qm_names, num_q)
+        block_boxes = [
+            n
+            for n in vc.children
+            if isinstance(n, VGate) and n.kind == VGateKind.BLOCK_BOX
+        ]
+        assert len(block_boxes) >= 1, "Expected at least one BLOCK_BOX"
+        assert sorted(block_boxes[0].qubit_indices) == [0, 1, 2]
+
+    def test_measure_vector_expands(self):
+        """inline=False: MEASURE_VECTOR should span all fresh-return qubits."""
+        demo = self._make_demo_kernel()
+        graph = demo._build_graph_for_visualization(n=3)
+        analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=False)
+        qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+        vc = analyzer.build_visual_ir(graph, qm_map, qm_names, num_q)
+        measure_nodes = [
+            n
+            for n in vc.children
+            if isinstance(n, VGate) and n.kind == VGateKind.MEASURE_VECTOR
+        ]
+        assert len(measure_nodes) >= 1, "Expected at least one MEASURE_VECTOR"
+        assert sorted(measure_nodes[0].qubit_indices) == [0, 1, 2]
+
+    def test_boundary_n1_n2(self):
+        """Boundary: n=1 and n=2 should work for both inline modes."""
+        demo = self._make_demo_kernel()
+        for n_val in (1, 2):
+            for inline in (True, False):
+                graph = demo._build_graph_for_visualization(n=n_val)
+                analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=inline)
+                qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+                assert num_q == n_val, (
+                    f"n={n_val}, inline={inline}: expected {n_val} qubits, got {num_q}"
+                )
+                vc = analyzer.build_visual_ir(graph, qm_map, qm_names, num_q)
+                assert vc.num_qubits == n_val
+
+    @pytest.mark.parametrize("n_val", [2, 3])
+    def test_inline_affected_qubits_fold_true(self, n_val):
+        """inline=True, fold_loops=True: parent VInlineBlock spans all fresh qubits."""
+        demo = self._make_demo_kernel()
+        graph = demo._build_graph_for_visualization(n=n_val)
+        analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=True, fold_loops=True)
+        qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+        vc = analyzer.build_visual_ir(graph, qm_map, qm_names, num_q)
+        inline_blocks = [n for n in vc.children if isinstance(n, VInlineBlock)]
+        assert len(inline_blocks) >= 1, "Expected at least one VInlineBlock"
+        assert sorted(inline_blocks[0].affected_qubits) == list(range(n_val))
+
+    @pytest.mark.parametrize("n_val", [2, 3])
+    def test_inline_affected_qubits_fold_false(self, n_val):
+        """inline=True, fold_loops=False: parent VInlineBlock spans all fresh qubits."""
+        demo = self._make_demo_kernel()
+        graph = demo._build_graph_for_visualization(n=n_val)
+        analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=True, fold_loops=False)
+        qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+        vc = analyzer.build_visual_ir(graph, qm_map, qm_names, num_q)
+        inline_blocks = [n for n in vc.children if isinstance(n, VInlineBlock)]
+        assert len(inline_blocks) >= 1, "Expected at least one VInlineBlock"
+        assert sorted(inline_blocks[0].affected_qubits) == list(range(n_val))
+
+    @pytest.mark.parametrize("fold_loops", [True, False])
+    def test_inline_layout_block_ranges(self, fold_loops):
+        """inline=True: layout block_ranges qubit_indices should span all fresh qubits."""
+        from qamomile.circuit.visualization.layout import CircuitLayoutEngine
+
+        demo = self._make_demo_kernel()
+        graph = demo._build_graph_for_visualization(n=3)
+        analyzer = CircuitAnalyzer(
+            graph, DEFAULT_STYLE, inline=True, fold_loops=fold_loops
+        )
+        qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+        vc = analyzer.build_visual_ir(graph, qm_map, qm_names, num_q)
+        layout_engine = CircuitLayoutEngine(DEFAULT_STYLE)
+        layout = layout_engine.compute_layout(vc)
+        # At least one block_range should cover all 3 qubits
+        found = any(
+            sorted(br["qubit_indices"]) == [0, 1, 2] for br in layout.block_ranges
+        )
+        assert found, (
+            f"No block_range spans [0,1,2]; got {[br['qubit_indices'] for br in layout.block_ranges]}"
+        )
+
+
+class TestDeutschPassthroughNoRegression:
+    """Negative regression: pass-through CallBlock should retain correct affected_qubits."""
+
+    def test_deutsch_all_h_inline(self):
+        """deutsch kernel's _all_h pass-through CallBlock keeps affected_qubits == [0, 1]."""
+        from tests.circuit.qkernel_catalog import deutsch
+
+        graph = deutsch._build_graph_for_visualization()
+        analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=True)
+        qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+        vc = analyzer.build_visual_ir(graph, qm_map, qm_names, num_q)
+        inline_blocks = [n for n in vc.children if isinstance(n, VInlineBlock)]
+        # _all_h should span both qubits [0, 1]
+        all_h_blocks = [b for b in inline_blocks if "all_h" in b.label.lower()]
+        assert len(all_h_blocks) >= 1, "Expected _all_h inline block"
+        assert sorted(all_h_blocks[0].affected_qubits) == [0, 1]

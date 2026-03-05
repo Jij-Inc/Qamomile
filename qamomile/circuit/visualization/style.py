@@ -59,7 +59,7 @@ class CircuitStyle:
     for_loop_text_color: str = "#000000"  # Black
     for_loop_edge_color: str = "#C4A882"  # Warm tan
 
-    # While-loop box colors
+    # While-loop box colors (future use: not yet dispatched)
     while_loop_face_color: str = "#E0D4F0"  # Light lavender
     while_loop_text_color: str = "#000000"  # Black
     while_loop_edge_color: str = "#A88BC8"  # Muted purple
@@ -69,7 +69,7 @@ class CircuitStyle:
     for_items_text_color: str = "#000000"  # Black
     for_items_edge_color: str = "#90B890"  # Muted green
 
-    # If-operation box colors
+    # If-operation box colors (future use: not yet dispatched)
     if_face_color: str = "#F0D8D0"  # Light coral
     if_text_color: str = "#000000"  # Black
     if_edge_color: str = "#C8A898"  # Muted tan

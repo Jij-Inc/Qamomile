@@ -807,7 +807,7 @@ class MatplotlibRenderer:
             edge_color = self.style.for_loop_edge_color
             text_color = self.style.for_loop_text_color
             linestyle = "-"
-        elif node.kind == VFoldedKind.WHILE:
+        elif node.kind == VFoldedKind.WHILE:  # Future use: not yet dispatched
             face_color = self.style.while_loop_face_color
             edge_color = self.style.while_loop_edge_color
             text_color = self.style.while_loop_text_color
@@ -817,7 +817,7 @@ class MatplotlibRenderer:
             edge_color = self.style.for_loop_edge_color
             text_color = self.style.for_loop_text_color
             linestyle = "-"
-        elif node.kind == VFoldedKind.IF:
+        elif node.kind == VFoldedKind.IF:  # Future use: not yet dispatched
             face_color = self.style.if_face_color
             edge_color = self.style.if_edge_color
             text_color = self.style.if_text_color
