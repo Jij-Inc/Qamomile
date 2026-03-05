@@ -291,7 +291,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 if resolved is None:
                     # Unresolvable: fail-open (allow)
                     continue
-                if type(resolved).__name__ == "QKernel":
+                if self._is_qkernel(resolved):
                     display = func_name or "<callable>"
                     raise SyntaxError(
                         f"Quantum kernel '{display}' in while condition "
@@ -318,6 +318,17 @@ class ControlFlowTransformer(ast.NodeTransformer):
             module.startswith("qamomile.circuit.frontend.operation")
             and name in ControlFlowTransformer._QUANTUM_OPS
         )
+
+    @staticmethod
+    def _is_qkernel(obj: Any) -> bool:
+        """Check if *obj* is a QKernel instance using type identity.
+
+        Uses a lazy import to avoid circular dependency
+        (qkernel.py imports transform_control_flow from this module).
+        """
+        from qamomile.circuit.frontend.qkernel import QKernel
+
+        return isinstance(obj, QKernel)
 
     def _resolve_callable(self, func_node: ast.expr) -> Any | None:
         """Try to resolve a callable AST node in the namespace.
