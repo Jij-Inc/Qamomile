@@ -16,15 +16,15 @@ import pytest
 import qamomile.circuit as qmc
 from tests.transpiler.gate_test_specs import (
     GATE_SPECS,
-    statevectors_equal,
     all_zeros_state,
+    bell_state,
     computational_basis_state,
     compute_expected_statevector,
-    tensor_product,
     identity,
-    bell_state,
-    plus_state,
     minus_state,
+    plus_state,
+    statevectors_equal,
+    tensor_product,
 )
 
 # ---------------------------------------------------------------------------
@@ -34,35 +34,34 @@ qiskit = pytest.importorskip("qiskit")
 pytest.importorskip("qiskit_aer")
 
 from qiskit import QuantumCircuit
-from qamomile.qiskit import QiskitTranspiler
-from qamomile.circuit.transpiler.transpiler import TranspilerConfig
-from qamomile.circuit.transpiler.executable import ExecutableProgram
-from qamomile.circuit.transpiler.segments import SimplifiedProgram
-from qamomile.circuit.ir.block import BlockKind
 
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.basic import (
+    cz_entangling_layer,
     rx_layer,
     ry_layer,
     rz_layer,
-    cz_entangling_layer,
-)
-from qamomile.circuit.algorithm.qaoa import (
-    ising_cost_circuit,
-    x_mixier_circuit,
-    qaoa_circuit,
-    superposition_vector,
-    qaoa_state,
 )
 from qamomile.circuit.algorithm.fqaoa import (
-    initial_occupations,
-    givens_rotation,
-    hopping_gate,
-    mixer_layer,
     cost_layer,
     fqaoa_state,
+    givens_rotation,
+    hopping_gate,
+    initial_occupations,
+    mixer_layer,
 )
-
+from qamomile.circuit.algorithm.qaoa import (
+    ising_cost,
+    qaoa_layers,
+    qaoa_state,
+    superposition_vector,
+    x_mixer,
+)
+from qamomile.circuit.ir.block import BlockKind
+from qamomile.circuit.transpiler.executable import ExecutableProgram
+from qamomile.circuit.transpiler.segments import SimplifiedProgram
+from qamomile.circuit.transpiler.transpiler import TranspilerConfig
+from qamomile.qiskit import QiskitTranspiler
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -3452,8 +3451,8 @@ class TestAlgorithmQAOAModules:
         expected = np.ones(2**n_qubits, dtype=complex) / np.sqrt(2**n_qubits)
         assert statevectors_equal(sv, expected)
 
-    def test_ising_cost_circuit_gate_count(self):
-        """ising_cost_circuit emits correct RZZ and RZ gate counts."""
+    def test_ising_cost_gate_count(self):
+        """ising_cost emits correct RZZ and RZ gate counts."""
 
         @qmc.qkernel
         def circuit(
@@ -3463,7 +3462,7 @@ class TestAlgorithmQAOAModules:
             gamma: qmc.Float,
         ) -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(n, "q")
-            q = ising_cost_circuit(quad, linear, q, gamma)
+            q = ising_cost(quad, linear, q, gamma)
             return qmc.measure(q)
 
         quad = {(0, 1): 1.0, (1, 2): -0.5}
@@ -3477,8 +3476,8 @@ class TestAlgorithmQAOAModules:
         assert rzz_count == len(quad)
         assert rz_count == len(linear)
 
-    def test_ising_cost_circuit_statevector(self):
-        """ising_cost_circuit on 2 qubits matches RZZ(gamma*J) on |00>."""
+    def test_ising_cost_statevector(self):
+        """ising_cost on 2 qubits matches RZZ(gamma*J) on |00>."""
 
         @qmc.qkernel
         def circuit(
@@ -3488,7 +3487,7 @@ class TestAlgorithmQAOAModules:
             gamma: qmc.Float,
         ) -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(n, "q")
-            q = ising_cost_circuit(quad, linear, q, gamma)
+            q = ising_cost(quad, linear, q, gamma)
             return qmc.measure(q)
 
         gamma = 0.7
@@ -3503,12 +3502,12 @@ class TestAlgorithmQAOAModules:
 
     @pytest.mark.parametrize("n_qubits", [2, 3, 4])
     def test_x_mixer_circuit_gate_count(self, n_qubits):
-        """x_mixier_circuit emits n RX gates."""
+        """x_mixer emits n RX gates."""
 
         @qmc.qkernel
         def circuit(n: qmc.UInt, beta: qmc.Float) -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(n, "q")
-            q = x_mixier_circuit(q, beta)
+            q = x_mixer(q, beta)
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(
@@ -3518,12 +3517,12 @@ class TestAlgorithmQAOAModules:
         assert rx_count == n_qubits
 
     def test_x_mixer_circuit_statevector(self):
-        """x_mixier_circuit statevector matches RX(2β) ⊗ RX(2β)."""
+        """x_mixer statevector matches RX(2β) ⊗ RX(2β)."""
 
         @qmc.qkernel
         def circuit(n: qmc.UInt, beta: qmc.Float) -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(n, "q")
-            q = x_mixier_circuit(q, beta)
+            q = x_mixer(q, beta)
             return qmc.measure(q)
 
         beta = 0.4
@@ -3533,8 +3532,8 @@ class TestAlgorithmQAOAModules:
         expected = tensor_product(RX, RX) @ all_zeros_state(2)
         assert statevectors_equal(sv, expected)
 
-    def test_qaoa_circuit_single_layer(self):
-        """qaoa_circuit with p=1: correct gate structure."""
+    def test_qaoa_layers_single_layer(self):
+        """qaoa_layers with p=1: correct gate structure."""
 
         @qmc.qkernel
         def circuit(
@@ -3546,7 +3545,7 @@ class TestAlgorithmQAOAModules:
             betas: qmc.Vector[qmc.Float],
         ) -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(n, "q")
-            q = qaoa_circuit(p, quad, linear, q, gammas, betas)
+            q = qaoa_layers(p, quad, linear, q, gammas, betas)
             return qmc.measure(q)
 
         quad = {(0, 1): 1.0}
