@@ -99,11 +99,8 @@ def _run_statevector(qc: "QuantumCircuit") -> np.ndarray:
     from qiskit import QuantumCircuit as QC
     from qiskit_aer import AerSimulator
 
-    # Build a new circuit without measurements
-    qc_no_meas = QC(qc.num_qubits)
-    for inst in qc.data:
-        if inst.operation.name != "measure":
-            qc_no_meas.append(inst)
+    # Build a new circuit without final measurements
+    qc_no_meas = qc.remove_final_measurements(inplace=False)
 
     sim = AerSimulator(method="statevector")
     qc_no_meas.save_statevector()
