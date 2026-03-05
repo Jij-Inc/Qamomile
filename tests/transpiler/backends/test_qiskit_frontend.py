@@ -3244,7 +3244,7 @@ class TestErrorCases:
 
         transpiler = QiskitTranspiler()
         # Provide a wrong key so 'theta' is still missing
-        with pytest.raises(ValueError, match="must be provided"):
+        with pytest.raises(ValueError, match="Unknown argument"):
             transpiler.transpile(circuit, bindings={"alpha": 0.5})
 
     def test_wrong_binding_type_for_uint_raises(self):
