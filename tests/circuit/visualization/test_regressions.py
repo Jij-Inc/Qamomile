@@ -353,8 +353,8 @@ class TestQAOARangeAliasDisplay:
 
     def test_named_value_fallback_no_question_mark(self):
         """_format_value_as_expression should return value.name, not '?'."""
-        from qamomile.circuit.ir.value import Value
         from qamomile.circuit.ir.types.primitives import UIntType
+        from qamomile.circuit.ir.value import Value
 
         analyzer = object.__new__(CircuitAnalyzer)
         analyzer.graph = None
@@ -367,8 +367,8 @@ class TestQAOARangeAliasDisplay:
 
     def test_anonymous_value_still_returns_question_mark(self):
         """Anonymous value (empty name) should still return '?'."""
-        from qamomile.circuit.ir.value import Value
         from qamomile.circuit.ir.types.primitives import UIntType
+        from qamomile.circuit.ir.value import Value
 
         analyzer = object.__new__(CircuitAnalyzer)
         analyzer.graph = None
@@ -410,7 +410,7 @@ class TestQAOARangeAliasDisplay:
             q = qm.qubit_array(n, name="q")
             for j in qm.range(n):
                 for k in qm.range(j):
-                    q[k] = qm.cx(q[j], q[k])
+                    q[j], q[k] = qm.cx(q[j], q[k])
             return q
 
         graph = circuit._build_graph_for_visualization(n=3)
