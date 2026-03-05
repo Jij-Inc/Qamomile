@@ -306,10 +306,10 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
         clifford_gates=3,
     ),
     "naive_multi_controlled_z": resource(
-        n,
+        n + 1,
         total=1,
-        two_qubit=sp.Piecewise((sp.Integer(1), sp.Eq(n, 2)), (sp.Integer(0), True)),
-        multi_qubit=sp.Piecewise((sp.Integer(1), n > 2), (sp.Integer(0), True)),
+        two_qubit=sp.Piecewise((sp.Integer(1), sp.Eq(n, 1)), (sp.Integer(0), True)),
+        multi_qubit=sp.Piecewise((sp.Integer(1), n > 1), (sp.Integer(0), True)),
     ),
     # --- Grover ---
     "grover_network_decomposition": resource(

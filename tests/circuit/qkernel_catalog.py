@@ -773,17 +773,20 @@ def __z(q: qmc.Qubit) -> qmc.Qubit:
 
 
 @qmc.qkernel
-def _naive_multi_controlled_z(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+def _naive_multi_controlled_z(
+    qs: qmc.Vector[qmc.Qubit], target_q: qmc.Qubit
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
     n = qs.shape[0]
-    multi_controlled_z = qmc.controlled(__z, num_controls=n - 1)
-    qs = multi_controlled_z(qs, target_indices=[n - 1])  # type: ignore
-    return qs
+    multi_controlled_z = qmc.controlled(__z, num_controls=n)
+    qs, target_q = multi_controlled_z(qs, target_q)
+    return qs, target_q
 
 
 @qmc.qkernel
-def naive_multi_controlled_z(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+def naive_multi_controlled_z(n: qmc.UInt) -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
     qs = qmc.qubit_array(n, name="qs")
-    qs = _naive_multi_controlled_z(qs)
+    target_q = qmc.qubit(name="target")
+    qs, target_q = _naive_multi_controlled_z(qs, target_q)
     return qs
 
 
@@ -866,7 +869,13 @@ def _grover_naive_multi_controlled_z(
         # which can be implemented as H + X + multi-controlled Z + X + H.
         qs = _all_h(qs)
         qs = _all_x(qs)
-        qs = _naive_multi_controlled_z(qs)
+        unpacked_qs, target_q_vec = qmc.unpack_qubits(
+            qs, num_unpacked=2, num_elements=[qs.shape[0] - 1, 1]
+        )
+        unpacked_qs, target_q_vec[0] = _naive_multi_controlled_z(
+            unpacked_qs, target_q_vec[0]
+        )
+        qs = qmc.pack_qubits(unpacked_qs, target_q_vec)
         qs = _all_x(qs)
         qs = _all_h(qs)
 
