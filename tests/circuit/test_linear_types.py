@@ -451,7 +451,7 @@ class TestArrayConsumePreservesState:
         ops = graph.operations
         assert len(ops) == 2
         assert isinstance(ops[0], QInitOperation)
-        assert isinstance(ops[0], MeasureVectorOperation)
+        assert isinstance(ops[1], MeasureVectorOperation)
 
 
 class TestSetitemConsumeAndValidation:
