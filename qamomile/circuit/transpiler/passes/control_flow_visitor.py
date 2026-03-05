@@ -47,6 +47,7 @@ class ControlFlowVisitor(ABC):
         elif isinstance(op, IfOperation):
             self.visit_operations(op.true_operations)
             self.visit_operations(op.false_operations)
+            self.visit_operations(op.phi_ops)
         elif isinstance(op, WhileOperation):
             self.visit_operations(op.operations)
 
@@ -89,8 +90,12 @@ class OperationTransformer(ABC):
         elif isinstance(op, IfOperation):
             new_true = self.transform_operations(op.true_operations)
             new_false = self.transform_operations(op.false_operations)
+            new_phi = self.transform_operations(op.phi_ops)
             return dataclasses.replace(
-                op, true_operations=new_true, false_operations=new_false
+                op,
+                true_operations=new_true,
+                false_operations=new_false,
+                phi_ops=new_phi,
             )
         elif isinstance(op, WhileOperation):
             new_ops = self.transform_operations(op.operations)
