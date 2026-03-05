@@ -321,12 +321,27 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         qubit_map: dict[str, int],
         clbit_map: dict[str, int],
     ) -> None:
-        """Emit a single measurement."""
-        qubit_uuid = op.operands[0].uuid
+        """Emit a single measurement.
+
+        Resolves the qubit operand using the full resolver (handles both
+        scalar qubits and array element qubits with composite keys).
+        """
+        qubit_val = op.operands[0]
         clbit_uuid = op.results[0].uuid
-        if qubit_uuid in qubit_map and clbit_uuid in clbit_map:
+
+        # Use the resolver for proper array element handling
+        result = self._resolver.resolve_qubit_index_detailed(
+            qubit_val, qubit_map, {}
+        )
+        qubit_idx = result.index if result.success else None
+
+        # Fallback to direct UUID lookup
+        if qubit_idx is None and qubit_val.uuid in qubit_map:
+            qubit_idx = qubit_map[qubit_val.uuid]
+
+        if qubit_idx is not None and clbit_uuid in clbit_map:
             self._emitter.emit_measure(
-                circuit, qubit_map[qubit_uuid], clbit_map[clbit_uuid]
+                circuit, qubit_idx, clbit_map[clbit_uuid]
             )
 
     def _emit_measure_vector(
@@ -605,6 +620,80 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 circuit, op.false_operations, qubit_map, clbit_map, bindings
             )
             self._emitter.emit_if_end(circuit, context)
+
+            # Register phi output UUIDs so subsequent operations
+            # (e.g., measure) can resolve the merged values.
+            self._register_phi_outputs(op, qubit_map, clbit_map)
+
+    def _register_phi_outputs(
+        self,
+        op: IfOperation,
+        qubit_map: dict[str, int],
+        clbit_map: dict[str, int],
+    ) -> None:
+        """Register phi output UUIDs to physical resources after if-else emission.
+
+        PhiOp merges values from the true and false branches.  The phi
+        output is a new Value (new UUID) that must map to the same physical
+        qubit or classical bit as its source operands.
+
+        For ArrayValue phi outputs (e.g., qubit arrays), this copies all
+        composite element keys ``{source_uuid}_{i}`` →
+        ``{output_uuid}_{i}`` so that subsequent element accesses on the
+        phi output resolve to the correct physical qubits.
+        """
+        from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
+        from qamomile.circuit.ir.types.primitives import BitType
+        from qamomile.circuit.ir.value import ArrayValue
+
+        for phi in op.phi_ops:
+            if not isinstance(phi, PhiOp):
+                continue
+            output = phi.results[0]
+            true_val = phi.operands[1]
+            false_val = phi.operands[2]
+
+            if output.uuid in qubit_map or output.uuid in clbit_map:
+                continue
+
+            # Quantum types: map to same physical qubit
+            if output.type.is_quantum():
+                # Handle ArrayValue phi outputs: copy composite element keys
+                if isinstance(output, ArrayValue):
+                    for source in (true_val, false_val):
+                        if not isinstance(source, ArrayValue):
+                            continue
+                        copied = False
+                        for key, phys_idx in list(qubit_map.items()):
+                            prefix = f"{source.uuid}_"
+                            if key.startswith(prefix):
+                                suffix = key[len(prefix):]
+                                out_key = f"{output.uuid}_{suffix}"
+                                if out_key not in qubit_map:
+                                    qubit_map[out_key] = phys_idx
+                                    copied = True
+                        if copied:
+                            break
+                else:
+                    # Scalar qubit phi output
+                    for source in (true_val, false_val):
+                        if source.uuid in qubit_map:
+                            qubit_map[output.uuid] = qubit_map[source.uuid]
+                            break
+                        # Try detailed resolution for array elements
+                        result = self._resolver.resolve_qubit_index_detailed(
+                            source, qubit_map, {}
+                        )
+                        if result.success and result.index is not None:
+                            qubit_map[output.uuid] = result.index
+                            break
+
+            # Classical bit types
+            elif isinstance(output.type, BitType):
+                for source in (true_val, false_val):
+                    if source.uuid in clbit_map:
+                        clbit_map[output.uuid] = clbit_map[source.uuid]
+                        break
 
     def _emit_while(
         self,
