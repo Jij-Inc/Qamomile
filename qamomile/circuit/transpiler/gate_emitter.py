@@ -24,7 +24,9 @@ class GateKind(Enum):
     Y = auto()
     Z = auto()
     S = auto()
+    SDG = auto()
     T = auto()
+    TDG = auto()
 
     # Single-qubit rotation gates (with angle parameter)
     RX = auto()
@@ -80,7 +82,9 @@ GATE_SPECS: dict[GateKind, GateSpec] = {
     GateKind.Y: GateSpec(GateKind.Y, num_qubits=1),
     GateKind.Z: GateSpec(GateKind.Z, num_qubits=1),
     GateKind.S: GateSpec(GateKind.S, num_qubits=1),
+    GateKind.SDG: GateSpec(GateKind.SDG, num_qubits=1),
     GateKind.T: GateSpec(GateKind.T, num_qubits=1),
+    GateKind.TDG: GateSpec(GateKind.TDG, num_qubits=1),
     # Single-qubit rotation gates
     GateKind.RX: GateSpec(GateKind.RX, num_qubits=1, has_angle=True),
     GateKind.RY: GateSpec(GateKind.RY, num_qubits=1, has_angle=True),
@@ -170,6 +174,16 @@ class GateEmitter(Protocol[T]):
     @abstractmethod
     def emit_t(self, circuit: T, qubit: int) -> None:
         """Emit T gate (√S)."""
+        ...
+
+    @abstractmethod
+    def emit_sdg(self, circuit: T, qubit: int) -> None:
+        """Emit S-dagger gate (inverse of S)."""
+        ...
+
+    @abstractmethod
+    def emit_tdg(self, circuit: T, qubit: int) -> None:
+        """Emit T-dagger gate (inverse of T)."""
         ...
 
     # Single-qubit rotation gates
