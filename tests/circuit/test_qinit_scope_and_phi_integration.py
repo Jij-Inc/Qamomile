@@ -1,5 +1,19 @@
 """Integration tests for QInit scope (Bug #5) and phi_ops (Bug #6).
 
+Bug #5: Sub-kernel QInit scope — ArrayValue.shape was not cloned/substituted
+    during inlining, so QInitOperation failed to resolve array size at emit
+    time.  Fixed in value_mapping.py (clone_value / substitute_value).
+
+Bug #6: IfOperation phi_ops — phi outputs were never allocated or emitted,
+    causing phi output UUIDs to be missing from qubit_map.  Fixed in
+    emit_base.py (ResourceAllocator), standard_emit.py (_register_phi_outputs,
+    _emit_measure), and control_flow_visitor.py (visit/transform phi_ops).
+
+Unit tests for the individual passes live in ``tests/transpiler/``:
+    - ``test_value_mapping.py``  (shape cloning/substitution, phi_ops cloning)
+    - ``test_emit_base.py``      (phi output allocation)
+    - ``test_control_flow_visitor.py`` (phi_ops visitor/transformer traversal)
+
 Note: Do NOT use ``from __future__ import annotations`` in this file.
 The @qkernel AST transformer relies on resolved type annotations to identify
 Float vs UInt etc.  PEP 563 deferred annotations turn them into strings, which
