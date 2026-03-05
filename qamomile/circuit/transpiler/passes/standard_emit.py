@@ -149,7 +149,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 self._emit_gate(circuit, op, qubit_map, bindings)
 
             elif isinstance(op, MeasureOperation):
-                self._emit_measure(circuit, op, qubit_map, clbit_map)
+                self._emit_measure(circuit, op, qubit_map, clbit_map, bindings)
 
             elif isinstance(op, MeasureVectorOperation):
                 self._emit_measure_vector(circuit, op, qubit_map, clbit_map, bindings)
@@ -321,6 +321,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         op: MeasureOperation,
         qubit_map: dict[str, int],
         clbit_map: dict[str, int],
+        bindings: dict[str, Any] | None = None,
     ) -> None:
         """Emit a single measurement.
 
@@ -339,7 +340,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
 
         # Use the resolver for proper array element handling
         result = self._resolver.resolve_qubit_index_detailed(
-            qubit_val, qubit_map, {}
+            qubit_val, qubit_map, bindings or {}
         )
         qubit_idx = result.index if result.success else None
 
@@ -646,22 +647,26 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
 
             # Register phi output UUIDs so subsequent operations
             # (e.g., measure) can resolve the merged values.
-            self._register_phi_outputs(op, qubit_map, clbit_map)
+            self._register_phi_outputs(op, qubit_map, clbit_map, bindings)
 
     def _register_phi_outputs(
         self,
         op: IfOperation,
         qubit_map: dict[str, int],
         clbit_map: dict[str, int],
+        bindings: dict[str, Any] | None = None,
     ) -> None:
         """Register phi output UUIDs via the shared ``map_phi_outputs`` utility.
 
         Uses the full ``ValueResolver.resolve_qubit_index_detailed`` for
         scalar qubit resolution (handles array element operands).
         """
+        resolver_bindings = bindings or {}
 
         def _resolve_scalar(source: Value, qmap: dict[str, int]) -> int | None:
-            result = self._resolver.resolve_qubit_index_detailed(source, qmap, {})
+            result = self._resolver.resolve_qubit_index_detailed(
+                source, qmap, resolver_bindings
+            )
             return result.index if result.success else None
 
         map_phi_outputs(op.phi_ops, qubit_map, clbit_map, _resolve_scalar)
