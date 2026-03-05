@@ -202,6 +202,59 @@ Look for latent bugs that the change may introduce in files that were **not** mo
 - **Pipeline pass ordering**: If a pass was added or modified, does the overall pipeline order in `Transpiler.transpile()` still make sense?
 - **Enum/constant additions**: If a new `OperationKind`, `GateOperationType`, or similar enum value was added, do all `match`/`if-elif` chains handle it?
 
+### Step 5.5: Root-Cause Consolidation via Fix Simulation
+
+After collecting all findings from Steps 4 and 5, perform a mental fix simulation to identify root causes and eliminate surface-level noise. This step does NOT modify any files — it is a reasoning exercise over the finding set.
+
+#### Process
+
+**Iteration 1 — Propose fix directions**
+
+For each finding collected so far, mentally propose the most natural fix direction (do not write code):
+- "Wrong base class" → change the parent class
+- "Missing docstring on `foo`" → add docstring
+- "Unused import of `Bar`" → remove the import
+
+**Iteration 2 — Simultaneous-fix re-evaluation**
+
+Assume ALL proposed fixes are applied simultaneously. Under that assumption, re-evaluate the full finding set:
+
+1. **Moot findings**: Would any finding become irrelevant?
+   - Example: Finding A says "`ErrorFoo` has wrong base class" and Finding B says "`ErrorFoo` is never referenced anywhere". Fixing A is pointless because the real issue is B (dead code). A is moot — replace it with B as the root cause.
+   - Example: Three style findings in a function, plus a fourth saying the function duplicates existing logic. Root cause is "extract and reuse" — style fixes become moot if the function is removed.
+
+2. **Emergent findings**: Would applying all fixes reveal a new issue not previously identified?
+   - Example: Removing dead code reveals that `__init__.py` re-exports a now-deleted symbol.
+   - Example: Fixing a type annotation reveals the corrected type is incompatible with a caller.
+
+3. **Fix-dependency chains**: Does fixing A require also fixing B, C, D?
+   - If a single root cause spawns 3+ dependent findings, consolidate them under the root cause.
+
+**Iteration 3 (if needed)**
+
+If Iteration 2 produced changes (moot findings removed, new findings added, or findings consolidated), repeat the re-evaluation once more. If still changing after this iteration, stop and note it in the report.
+
+#### Convergence
+
+- **Maximum 3 iterations** (initial proposal + 2 re-evaluations).
+- Stop early if the finding set stabilizes (no moot findings, no new findings, no consolidations).
+- If still changing after 3 iterations, append to the report: "Note: Some findings may have deeper interdependencies that warrant further investigation."
+
+#### Consolidation Rules
+
+1. **Replace surface findings with root causes.** If finding A is moot because of root-cause B, remove A. If B was not already in the set, add it.
+2. **Merge dependent findings under a single root cause.** Report the root cause as the primary finding with "Root cause of:" listing the dependent issues, and a single recommendation addressing the root cause.
+3. **Preserve independent findings as-is.**
+4. **Severity adjustment.** The consolidated finding inherits the **highest severity** among the root cause and its dependents. If multiple P3 findings stem from a single architectural issue, elevate to at least P2.
+
+#### Specific Patterns to Detect
+
+- **Dead code umbrella**: Multiple style/correctness findings in code that is never called → root cause: dead code (Section G). Severity: at least P2.
+- **Missing abstraction**: Multiple findings about repeated logic → root cause: missing shared utility or qkernel. Severity: P1 if it violates Section C.
+- **Incomplete rename/refactor**: Mismatched names, broken references, stale imports from an incomplete rename → root cause: the incomplete rename. Severity: P0 if runtime errors result.
+- **Wrong layer, cascading violations**: A file imported from the wrong layer causes multiple downstream dependency violations → root cause: the single misplaced import (Section B). Severity: P1.
+- **Type change ripple**: A type/signature change not propagated to callers → root cause: incomplete propagation. Severity: P0 if callers would fail at runtime.
+
 ### Step 6: Report
 
 Display a structured review report directly in the conversation.
@@ -219,5 +272,8 @@ For each finding, include:
 4. **Which rule is violated** (reference the section letter, e.g., "Violates Section C: @qkernel & Converter Pattern")
 5. A clear explanation of why this is an issue
 6. A specific recommendation with corrected code example
+7. For consolidated root-cause findings (from Step 5.5): a **"Root cause of:"** annotation listing the surface-level issues this finding subsumes
 
 End the report with a summary table of all findings grouped by severity.
+
+If the finding set did not converge within 3 iterations in Step 5.5, append: "**Note:** Some findings may have deeper interdependencies that warrant further investigation."

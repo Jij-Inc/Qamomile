@@ -2,15 +2,15 @@
 
 import pytest
 import sympy as sp
+
 import qamomile.circuit as qmc
-from qamomile.circuit.estimator import count_gates
 from qamomile.circuit.algorithm.basic import (
+    cz_entangling_layer,
     rx_layer,
     ry_layer,
     rz_layer,
-    cz_entangling_layer,
 )
-
+from qamomile.circuit.estimator import count_gates
 
 # ---------------------------------------------------------------------------
 # Symbolic gate count tests (count_gates on IR)
@@ -21,7 +21,7 @@ from qamomile.circuit.algorithm.basic import (
 def test_rx_layer_gate_count(num_qubits):
     """Test that rx_layer produces n RX gates."""
     counts = count_gates(rx_layer.block)
-    q_dim0 = sp.Symbol("q_dim0")
+    q_dim0 = sp.Symbol("q_dim0", integer=True, positive=True)
     assert counts.single_qubit.subs(q_dim0, num_qubits) == num_qubits
     assert counts.two_qubit.subs(q_dim0, num_qubits) == 0
 
@@ -30,7 +30,7 @@ def test_rx_layer_gate_count(num_qubits):
 def test_ry_layer_gate_count(num_qubits):
     """Test that ry_layer produces n RY gates."""
     counts = count_gates(ry_layer.block)
-    q_dim0 = sp.Symbol("q_dim0")
+    q_dim0 = sp.Symbol("q_dim0", integer=True, positive=True)
     assert counts.single_qubit.subs(q_dim0, num_qubits) == num_qubits
     assert counts.two_qubit.subs(q_dim0, num_qubits) == 0
 
@@ -39,7 +39,7 @@ def test_ry_layer_gate_count(num_qubits):
 def test_rz_layer_gate_count(num_qubits):
     """Test that rz_layer produces n RZ gates."""
     counts = count_gates(rz_layer.block)
-    q_dim0 = sp.Symbol("q_dim0")
+    q_dim0 = sp.Symbol("q_dim0", integer=True, positive=True)
     assert counts.single_qubit.subs(q_dim0, num_qubits) == num_qubits
     assert counts.two_qubit.subs(q_dim0, num_qubits) == 0
 
@@ -48,7 +48,7 @@ def test_rz_layer_gate_count(num_qubits):
 def test_cz_entangling_layer_gate_count(num_qubits):
     """Test that cz_entangling_layer produces n-1 CZ gates."""
     counts = count_gates(cz_entangling_layer.block)
-    q_dim0 = sp.Symbol("q_dim0")
+    q_dim0 = sp.Symbol("q_dim0", integer=True, positive=True)
     assert counts.single_qubit.subs(q_dim0, num_qubits) == 0
     assert counts.two_qubit.subs(q_dim0, num_qubits) == num_qubits - 1
 
@@ -84,7 +84,9 @@ def test_rx_layer_transpiled(num_qubits, offset):
 
     qc = executor.compiled_quantum[0].circuit
     rx_gates = [inst for inst in qc.data if inst.operation.name == "rx"]
-    assert len(rx_gates) == num_qubits, f"Expected {num_qubits} RX gates, got {len(rx_gates)}"
+    assert len(rx_gates) == num_qubits, (
+        f"Expected {num_qubits} RX gates, got {len(rx_gates)}"
+    )
 
     # Verify parameter values match thetas[offset], thetas[offset+1], ...
     expected_params = [thetas_val[offset + i] for i in range(num_qubits)]
@@ -121,7 +123,9 @@ def test_ry_layer_transpiled(num_qubits, offset):
 
     qc = executor.compiled_quantum[0].circuit
     ry_gates = [inst for inst in qc.data if inst.operation.name == "ry"]
-    assert len(ry_gates) == num_qubits, f"Expected {num_qubits} RY gates, got {len(ry_gates)}"
+    assert len(ry_gates) == num_qubits, (
+        f"Expected {num_qubits} RY gates, got {len(ry_gates)}"
+    )
 
     # Verify parameter values match thetas[offset], thetas[offset+1], ...
     expected_params = [thetas_val[offset + i] for i in range(num_qubits)]
@@ -158,7 +162,9 @@ def test_rz_layer_transpiled(num_qubits, offset):
 
     qc = executor.compiled_quantum[0].circuit
     rz_gates = [inst for inst in qc.data if inst.operation.name == "rz"]
-    assert len(rz_gates) == num_qubits, f"Expected {num_qubits} RZ gates, got {len(rz_gates)}"
+    assert len(rz_gates) == num_qubits, (
+        f"Expected {num_qubits} RZ gates, got {len(rz_gates)}"
+    )
 
     # Verify parameter values match thetas[offset], thetas[offset+1], ...
     expected_params = [thetas_val[offset + i] for i in range(num_qubits)]

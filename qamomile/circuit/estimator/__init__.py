@@ -5,14 +5,18 @@ including:
 
 1. **Qubit counting**: Algebraic qubit count with SymPy
 2. **Gate counting**: Breakdown by gate type (single/two-qubit, T gates, Clifford)
-3. **Depth estimation**: Circuit depth and T-depth
-4. **Algorithmic estimates**: Theoretical bounds for QAOA, QPE, Hamiltonian simulation
+3. **Algorithmic estimates**: Theoretical bounds for QAOA, QPE, Hamiltonian simulation
 
 All estimates are expressed as SymPy symbolic expressions, allowing
 dependency on problem size parameters.
 
 Usage:
-    Basic circuit analysis:
+    Basic circuit analysis (method API — recommended):
+        >>> estimate = my_circuit.estimate_resources()
+        >>> print(estimate.qubits)  # e.g., "n + 3"
+        >>> print(estimate.gates.total)  # e.g., "2*n"
+
+    Function API (also supported):
         >>> from qamomile.circuit.estimator import estimate_resources
         >>> estimate = estimate_resources(my_circuit.block)
         >>> print(estimate.qubits)  # e.g., "n + 3"
@@ -33,7 +37,6 @@ References:
 # Core estimators
 from qamomile.circuit.estimator.qubits_counter import qubits_counter
 from qamomile.circuit.estimator.gate_counter import GateCount, count_gates
-from qamomile.circuit.estimator.depth_estimator import CircuitDepth, estimate_depth
 from qamomile.circuit.estimator.resource_estimator import (
     ResourceEstimate,
     estimate_resources,
@@ -46,10 +49,8 @@ __all__ = [
     # Core types
     "ResourceEstimate",
     "GateCount",
-    "CircuitDepth",
     # Core estimators
     "qubits_counter",
     "count_gates",
-    "estimate_depth",
     "estimate_resources",
 ]

@@ -72,7 +72,6 @@ print(f"  総ゲート数: {est.gates.total}")
 print(f"  単一量子ビットゲート: {est.gates.single_qubit}")
 print(f"  2量子ビットゲート: {est.gates.two_qubit}")
 print(f"  Cliffordゲート: {est.gates.clifford_gates}")
-print(f"  回路深さ: {est.depth.total_depth}")
 
 # %% [markdown]
 # 期待通り: 2量子ビット、2ゲート（H + CX）、両方ともClifford、深さ2。
@@ -98,7 +97,6 @@ print("\nGHZ状態のリソース見積もり（シンボリック）:")
 print(f"  量子ビット数: {est_ghz.qubits}")
 print(f"  総ゲート数: {est_ghz.gates.total}")
 print(f"  2量子ビットゲート: {est_ghz.gates.two_qubit}")
-print(f"  回路深さ: {est_ghz.depth.total_depth}")
 
 # %% [markdown]
 # 結果にシンボル`n`が含まれていることに注目してください！これが代数的見積もりの力です。
@@ -176,7 +174,6 @@ print("IQFTのリソース見積もり（シンボリックn）:")
 print(f"  量子ビット数: {est_iqft.qubits}")
 print(f"  総ゲート数: {est_iqft.gates.total}")
 print(f"  2量子ビットゲート: {est_iqft.gates.two_qubit}")
-print(f"  深さ: {est_iqft.depth.total_depth}")
 
 # %% [markdown]
 # IQFTはネストされたループのため$O(n^2)$のゲートが必要です。
@@ -239,7 +236,6 @@ print("\n手動QPEのリソース見積もり（シンボリックm）:")
 print(f"  量子ビット数: {est_qpe_manual.qubits}")
 print(f"  総ゲート数: {est_qpe_manual.gates.total}")
 print(f"  2量子ビットゲート: {est_qpe_manual.gates.two_qubit}")
-print(f"  深さ: {est_qpe_manual.depth.total_depth}")
 
 
 # %% [markdown]
@@ -247,7 +243,7 @@ print(f"  深さ: {est_qpe_manual.depth.total_depth}")
 #
 # - **量子ビット数**: $m + 1$ (m個のカウント量子ビット + 1個の対象量子ビット) - 線形にスケール
 # - **ゲート数**: $2^m$の制御演算により精度とともに急速に増加
-# - **深さ**: 精度とともに大幅に増加
+# - **深さ**: 現行APIの`estimate_resources()`では返されません
 
 # %% [markdown]
 # ## セクション3: Qamomileの組み込みQPEを使用
@@ -283,6 +279,5 @@ print("\n組み込みQPE（m=8）のリソース見積もり:")
 print(f"  量子ビット数: {est_builtin.qubits}")
 print(f"  総ゲート数: {est_builtin.gates.total}")
 print(f"  2量子ビットゲート: {est_builtin.gates.two_qubit}")
-print(f"  深さ: {est_builtin.depth.total_depth}")
 
 # %%

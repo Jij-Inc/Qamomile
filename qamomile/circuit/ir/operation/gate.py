@@ -19,7 +19,9 @@ class GateOperationType(enum.Enum):
     Y = enum.auto()
     Z = enum.auto()
     T = enum.auto()
+    TDG = enum.auto()  # T† = P(-π/4)
     S = enum.auto()
+    SDG = enum.auto()  # S† = P(-π/2)
     P = enum.auto()  # Phase gate: P(θ)|1⟩ = e^{iθ}|1⟩
     RX = enum.auto()
     RY = enum.auto()
@@ -93,10 +95,24 @@ class ControlledUOperation(Operation):
         power: Number of times to apply U. Default is 1 (apply U once).
                For QPE, this is 2^k where k is the counting qubit index.
                The emitter will create Controlled(U^power), not Controlled(U)^power.
+               Must be a strictly positive integer. Symbolic values (Value) are
+               resolved during constant folding and validated at emit time.
     """
 
-    num_controls: int = 1
-    power: int = 1
+    num_controls: int | Value = 1  # int = concrete, Value = symbolic
+    power: int | Value = 1  # int = concrete, Value = symbolic (e.g. 2**k in QPE)
+    target_indices: list[Value] | None = None
+    controlled_indices: list[Value] | None = None
+
+    @property
+    def has_index_spec(self) -> bool:
+        """Whether target/control positions are specified via index lists."""
+        return self.target_indices is not None or self.controlled_indices is not None
+
+    @property
+    def is_symbolic_num_controls(self) -> bool:
+        """Whether num_controls is symbolic (Value) rather than concrete (int)."""
+        return isinstance(self.num_controls, Value)
 
     @property
     def block(self):
@@ -106,15 +122,42 @@ class ControlledUOperation(Operation):
     @property
     def control_operands(self):
         """Get the control qubit values."""
+        if self.has_index_spec:
+            return [self.operands[1]]  # Entire Vector
+        if self.is_symbolic_num_controls:
+            # Symbolic: operands[1] is the control array Value
+            return [self.operands[1]]
         return self.operands[1 : 1 + self.num_controls]
 
     @property
     def target_operands(self):
         """Get the target qubit values (arguments to U)."""
+        if self.has_index_spec:
+            return []  # Targets are implicit via index lists
+        if self.is_symbolic_num_controls:
+            # Symbolic: operands[2:] are targets (after BlockValue and control array)
+            return self.operands[2:]
         return self.operands[1 + self.num_controls :]
 
     @property
+    def param_operands(self):
+        """Get parameter operands (non-qubit, non-block)."""
+        if self.has_index_spec:
+            return self.operands[2:]
+        return []
+
+    @property
     def signature(self) -> Signature:
+        if self.has_index_spec:
+            raise NotImplementedError(
+                "Cannot compute signature for ControlledUOperation with "
+                "index spec."
+            )
+        if self.is_symbolic_num_controls:
+            raise NotImplementedError(
+                "Cannot compute signature for ControlledUOperation with "
+                "symbolic num_controls."
+            )
         num_targets = len(self.operands) - 1 - self.num_controls
         return Signature(
             operands=[
