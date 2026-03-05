@@ -298,7 +298,7 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
     # --- Multi-controlled gates ---
     "network_decomposition_controlled_z": resource(
         # Ref: Nielsen & Chuang P. 184 (circuit and ancillas)
-        2 * n - 2,
+        2 * n,
         total=2 * n - 1,
         single_qubit=2,
         two_qubit=1,
@@ -313,7 +313,7 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
     ),
     # --- Grover ---
     "grover_network_decomposition": resource(
-        2 * n - 1,
+        2 * n,
         total=(n + 2) + n_iters * (6 * n - 1),
         single_qubit=(n + 2) + n_iters * (4 * n + 2),
         two_qubit=n_iters,

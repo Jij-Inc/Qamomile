@@ -732,13 +732,11 @@ def qaoa_state_umbiguous(
 
 @qmc.qkernel
 def _network_decomposition_controlled_z(
-    qs: qmc.Vector[qmc.Qubit],
-) -> qmc.Vector[qmc.Qubit]:
-    total_qubits = qs.shape[0]
-    n = total_qubits - 1  # number of control qubits
+    qs: qmc.Vector[qmc.Qubit], target_qubit: qmc.Qubit
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
+    n = qs.shape[0]
     num_ancillas = n - 1
     ancillas = qmc.qubit_array(num_ancillas, name="ancillas")
-    target_position = total_qubits - 1
 
     qs[0], qs[1], ancillas[0] = qmc.ccx(qs[0], qs[1], ancillas[0])
     for i in qmc.range(0, num_ancillas - 1):
@@ -746,11 +744,11 @@ def _network_decomposition_controlled_z(
             qs[i + 2], ancillas[i], ancillas[i + 1]
         )
 
-    qs[target_position] = qmc.h(qs[target_position])
-    ancillas[num_ancillas - 1], qs[target_position] = qmc.cx(
-        ancillas[num_ancillas - 1], qs[target_position]
+    target_qubit = qmc.h(target_qubit)
+    ancillas[num_ancillas - 1], target_qubit = qmc.cx(
+        ancillas[num_ancillas - 1], target_qubit
     )
-    qs[target_position] = qmc.h(qs[target_position])
+    target_qubit = qmc.h(target_qubit)
 
     for i in qmc.range(num_ancillas - 2, -1, -1):
         qs[i + 2], ancillas[i], ancillas[i + 1] = qmc.ccx(
@@ -758,13 +756,14 @@ def _network_decomposition_controlled_z(
         )
     qs[0], qs[1], ancillas[0] = qmc.ccx(qs[0], qs[1], ancillas[0])
 
-    return qs
+    return qs, target_qubit
 
 
 @qmc.qkernel
 def network_decomposition_controlled_z(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
     qs = qmc.qubit_array(n, name="qs")
-    qs = _network_decomposition_controlled_z(qs)
+    qubit = qmc.qubit(name="target")
+    qs, qubit = _network_decomposition_controlled_z(qs, qubit)
     return qs
 
 
@@ -808,7 +807,11 @@ def _grover_operator_network_decomposition(
     # which can be implemented as H + X + multi-controlled Z + X + H.
     qs = _all_h(qs)
     qs = _all_x(qs)
-    qs = _network_decomposition_controlled_z(qs)
+    unpacked_qs, target_q = qmc.unpack_qubits(
+        qs, num_unpacked=2, num_elements=[qs.shape[0] - 1, 1]
+    )
+    unpacked_qs, target_q = _network_decomposition_controlled_z(unpacked_qs, target_q)
+    qs = qmc.pack_qubits(unpacked_qs, target_q)
     qs = _all_x(qs)
     qs = _all_h(qs)
 
