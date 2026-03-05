@@ -263,24 +263,32 @@ class ResourceAllocator:
         # (handle/array.py _get_element), so their UUIDs are unknown at
         # QInitOperation time.  Here we lazily map each element UUID to
         # the physical qubit already allocated under the {parent_uuid}_{idx} key.
+        # For unpack_qubits elements, the parent array is a sub-vector with
+        # a different UUID; _resolve_array_element_key handles fallback to
+        # element_uuids metadata.
         for operand in op.operands:
             if operand.uuid not in qubit_map:
                 if operand.parent_array is not None and operand.element_indices:
-                    # Array element: resolve via parent_array key
-                    parent_uuid = operand.parent_array.uuid
-                    idx_value = operand.element_indices[0]
-                    if idx_value.is_constant():
-                        idx = int(idx_value.get_const())
-                        key = f"{parent_uuid}_{idx}"
-                        assert key in qubit_map, (
-                            f"Array element key {key!r} not found in qubit_map. "
-                            f"This indicates a bug in the transpiler pipeline: "
-                            f"QInitOperation for the parent array was not processed "
-                            f"before this GateOperation."
-                        )
+                    key = self._resolve_array_element_key(operand, qubit_map)
+                    if key is not None:
                         qubit_map[operand.uuid] = qubit_map[key]
-                    # Non-constant indices (symbolic loop vars) are resolved
-                    # at emit time via ValueResolver.resolve_qubit_index_detailed.
+                    elif self._is_deferred_resolution(operand):
+                        # Symbolic loop index or split_spec: deferred to
+                        # emit-time ValueResolver.resolve_qubit_index_detailed.
+                        pass
+                    else:
+                        parent = operand.parent_array
+                        idx_repr = (
+                            operand.element_indices[0].name
+                            if operand.element_indices
+                            else "?"
+                        )
+                        raise EmitError(
+                            f"Array element key '{parent.uuid}_{idx_repr}' "
+                            f"not in qubit_map. Ensure QInitOperation was "
+                            f"emitted for the parent array '{parent.name}'.",
+                            operation=f"GateOperation({op.gate_type.name})",
+                        )
                 else:
                     # Scalar qubit: allocate new index.
                     # This path is used for @qkernel input parameters created with
@@ -297,14 +305,97 @@ class ResourceAllocator:
                     qubit_map[result.uuid] = qubit_map[operand.uuid]
 
     @staticmethod
-    def _resolve_qubit_key(qubit: "Value") -> tuple[str | None, bool]:
+    def _resolve_array_element_key(
+        operand: "Value",
+        qubit_map: dict[str, int],
+    ) -> str | None:
+        """Resolve an array element Value to its qubit_map key.
+
+        Resolution priority:
+        1. ``operand.uuid`` if already in qubit_map
+        2. ``{parent_uuid}_{idx}`` (standard parent array element key)
+        3. ``parent_array.params["element_uuids"][idx]`` (concrete canonical
+           from ``unpack_qubits``)
+
+        For ``split_spec`` (symbolic unpack), returns ``None`` so that
+        resolution is deferred to emit-time
+        ``ValueResolver.resolve_qubit_index_detailed`` which has bindings.
+
+        Args:
+            operand: The Value representing an array element.
+            qubit_map: Current qubit UUID-to-index mapping.
+
+        Returns:
+            The key found in qubit_map, or ``None`` if resolution requires
+            bindings (symbolic) or the index is non-constant.
+        """
+        if operand.uuid in qubit_map:
+            return operand.uuid
+
+        if operand.parent_array is None or not operand.element_indices:
+            return None
+
+        idx_value = operand.element_indices[0]
+        if not idx_value.is_constant():
+            return None  # Defer to emit-time resolution
+
+        idx = int(idx_value.get_const())
+        parent = operand.parent_array
+
+        # Priority 2: standard parent array key
+        parent_key = f"{parent.uuid}_{idx}"
+        if parent_key in qubit_map:
+            return parent_key
+
+        # Priority 3: element_uuids from unpack (concrete path)
+        element_uuids = parent.params.get("element_uuids")
+        if element_uuids is not None and idx < len(element_uuids):
+            canonical_uuid = element_uuids[idx]
+            if canonical_uuid in qubit_map:
+                return canonical_uuid
+
+        # split_spec is symbolic -- cannot resolve without bindings
+        return None
+
+    @staticmethod
+    def _is_deferred_resolution(operand: "Value") -> bool:
+        """Return True if qubit resolution must be deferred to emit time.
+
+        This is the case when:
+        - The element index is symbolic (e.g. a loop variable), or
+        - The parent array carries a ``split_spec`` (from ``unpack_qubits``).
+        """
+        if operand.element_indices:
+            idx_value = operand.element_indices[0]
+            if not idx_value.is_constant():
+                return True
+        if operand.parent_array is not None:
+            if "split_spec" in operand.parent_array.params:
+                return True
+        return False
+
+    @staticmethod
+    def _resolve_qubit_key(
+        qubit: "Value",
+        qubit_map: dict[str, int] | None = None,
+    ) -> tuple[str | None, bool]:
         """Resolve a qubit Value to its allocation key.
+
+        Args:
+            qubit: The qubit Value to resolve.
+            qubit_map: Optional qubit_map for enhanced resolution via
+                ``_resolve_array_element_key``.
 
         Returns:
             (key, is_array_element) where key is the qubit_map key
             or None if the index is non-constant.
         """
         if qubit.parent_array is not None and qubit.element_indices:
+            if qubit_map is not None:
+                key = ResourceAllocator._resolve_array_element_key(qubit, qubit_map)
+                if key is not None:
+                    return key, True
+            # Fallback to original logic
             parent_uuid = qubit.parent_array.uuid
             idx_value = qubit.element_indices[0]
             if idx_value.is_constant():
@@ -321,7 +412,7 @@ class ResourceAllocator:
     ) -> None:
         """Allocate qubits for a list of qubit Values and their results."""
         for qubit in all_qubits:
-            qubit_key, is_array = self._resolve_qubit_key(qubit)
+            qubit_key, is_array = self._resolve_qubit_key(qubit, qubit_map)
             if qubit_key is not None:
                 if qubit_key not in qubit_map:
                     # New allocation for qubits not yet registered.
@@ -334,7 +425,7 @@ class ResourceAllocator:
 
         for i, result in enumerate(results):
             if result.uuid not in qubit_map and i < len(all_qubits):
-                qubit_key, is_array = self._resolve_qubit_key(all_qubits[i])
+                qubit_key, is_array = self._resolve_qubit_key(all_qubits[i], qubit_map)
                 if qubit_key is not None:
                     qubit_map[result.uuid] = qubit_map.get(qubit_key, len(qubit_map))
 
@@ -360,7 +451,7 @@ class ResourceAllocator:
             vector_result = op.results[0]
             for key, idx in list(qubit_map.items()):
                 if key.startswith(f"{vector_operand.uuid}_"):
-                    suffix = key[len(f"{vector_operand.uuid}_"):]
+                    suffix = key[len(f"{vector_operand.uuid}_") :]
                     result_key = f"{vector_result.uuid}_{suffix}"
                     if result_key not in qubit_map:
                         qubit_map[result_key] = idx
@@ -509,15 +600,33 @@ class ValueResolver:
                     return QubitResolutionResult(
                         success=True, index=qubit_map[array_qubit_id]
                     )
-                else:
-                    return QubitResolutionResult(
-                        success=False,
-                        failure_reason=ResolutionFailureReason.ARRAY_ELEMENT_NOT_IN_QUBIT_MAP,
-                        failure_details=(
-                            f"Computed qubit ID '{array_qubit_id}' not found in qubit_map. "
-                            f"Index {idx} may be out of bounds for array '{v.parent_array.name}'."
-                        ),
+
+                # Fallback A: element_uuids (concrete unpack path)
+                element_uuids = v.parent_array.params.get("element_uuids")
+                if element_uuids is not None and idx < len(element_uuids):
+                    canonical_uuid = element_uuids[idx]
+                    if canonical_uuid in qubit_map:
+                        return QubitResolutionResult(
+                            success=True, index=qubit_map[canonical_uuid]
+                        )
+
+                # Fallback B: split_spec (symbolic unpack path)
+                split_spec = v.parent_array.params.get("split_spec")
+                if split_spec is not None and split_spec.get("mode") == "num_elements":
+                    spec_result = self._resolve_split_spec_index(
+                        split_spec, idx, qubit_map, bindings
                     )
+                    if spec_result is not None:
+                        return spec_result
+
+                return QubitResolutionResult(
+                    success=False,
+                    failure_reason=ResolutionFailureReason.ARRAY_ELEMENT_NOT_IN_QUBIT_MAP,
+                    failure_details=(
+                        f"Computed qubit ID '{array_qubit_id}' not found in qubit_map. "
+                        f"Index {idx} may be out of bounds for array '{v.parent_array.name}'."
+                    ),
+                )
 
         # Direct UUID lookup
         if v.uuid in qubit_map:
@@ -560,6 +669,128 @@ class ValueResolver:
 
         if value.parent_array is not None and value.element_indices:
             return self._resolve_array_element_value(value, bindings)
+
+        return None
+
+    def _resolve_split_spec_index(
+        self,
+        split_spec: dict[str, Any],
+        local_idx: int,
+        qubit_map: dict[str, int],
+        bindings: dict[str, Any],
+    ) -> QubitResolutionResult | None:
+        """Resolve a qubit index through a split_spec (symbolic unpack path).
+
+        Uses a dual-strategy offset computation:
+
+        **Strategy 1 (forward)**: ``offset = sum(sizes[0:group_index])``.
+        Works when all previous group sizes are evaluable.
+
+        **Strategy 2 (reverse)**: ``offset = total - sum(sizes[group_index:])``.
+        Works when total and all sizes from the current group onward are
+        evaluable.  This handles the common ``[n-1, 1]`` case where ``n-1``
+        is a symbolic BinOp result that cannot be directly evaluated, but
+        ``total`` (``n``) and the concrete trailing size (``1``) can.
+
+        Args:
+            split_spec: The ``split_spec`` dict from the parent array's params.
+            local_idx: The element index within this group.
+            qubit_map: Current qubit_map.
+            bindings: Current bindings for resolving symbolic expressions.
+
+        Returns:
+            ``QubitResolutionResult`` on success or definitive failure,
+            ``None`` if split_spec cannot be evaluated (caller should fall
+            through to the generic failure path).
+        """
+        source_uuid: str = split_spec["source_uuid"]
+        group_index: int = split_spec["group_index"]
+        num_elements_expr: list = split_spec["num_elements_expr"]
+        total_expr = split_spec.get("total_expr")
+        total_concrete: int | None = split_spec.get("total")
+        num_groups = len(num_elements_expr)
+
+        # Strategy 1: Forward offset = sum(sizes[0:group_index])
+        forward_offset = 0
+        forward_ok = True
+        for j in range(group_index):
+            size = self._evaluate_num_elements_expr(num_elements_expr[j], bindings)
+            if size is None:
+                forward_ok = False
+                break
+            forward_offset += size
+
+        if forward_ok:
+            source_idx = forward_offset + local_idx
+            source_key = f"{source_uuid}_{source_idx}"
+            if source_key in qubit_map:
+                return QubitResolutionResult(success=True, index=qubit_map[source_key])
+
+        # Strategy 2: Reverse offset = total - sum(sizes[group_index:num_groups])
+        total: int | None = total_concrete
+        if total is None and total_expr is not None:
+            total = self._evaluate_num_elements_expr(total_expr, bindings)
+        if total is not None:
+            reverse_sum = 0
+            reverse_ok = True
+            for j in range(group_index, num_groups):
+                size = self._evaluate_num_elements_expr(num_elements_expr[j], bindings)
+                if size is None:
+                    reverse_ok = False
+                    break
+                reverse_sum += size
+
+            if reverse_ok:
+                offset = total - reverse_sum
+                source_idx = offset + local_idx
+                source_key = f"{source_uuid}_{source_idx}"
+                if source_key in qubit_map:
+                    return QubitResolutionResult(
+                        success=True, index=qubit_map[source_key]
+                    )
+
+        # Both strategies failed
+        return QubitResolutionResult(
+            success=False,
+            failure_reason=ResolutionFailureReason.SPLIT_SPEC_EVAL_FAILED,
+            failure_details=(
+                f"Cannot evaluate split_spec for source_uuid="
+                f"'{source_uuid[:8]}...', group_index={group_index}. "
+                f"Ensure all symbolic sizes are bound."
+            ),
+        )
+
+    def _evaluate_num_elements_expr(
+        self,
+        expr: Any,
+        bindings: dict[str, Any],
+    ) -> int | None:
+        """Evaluate a ``num_elements`` expression to a concrete integer.
+
+        Handles ``int``, ``Value`` with constant, and ``Value`` resolvable
+        via :meth:`resolve_classical_value`.
+
+        Args:
+            expr: An ``int`` or ``Value`` from ``split_spec["num_elements_expr"]``
+                or ``split_spec["total_expr"]``.
+            bindings: Current variable bindings.
+
+        Returns:
+            Concrete integer, or ``None`` if the expression cannot be evaluated.
+        """
+        if isinstance(expr, int):
+            return expr
+
+        from qamomile.circuit.ir.value import Value
+
+        if isinstance(expr, Value):
+            if expr.is_constant():
+                return int(expr.get_const())
+            if expr.params and "const" in expr.params:
+                return int(expr.params["const"])
+            resolved = self.resolve_classical_value(expr, bindings)
+            if resolved is not None and isinstance(resolved, (int, float)):
+                return int(resolved)
 
         return None
 

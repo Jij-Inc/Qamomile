@@ -84,6 +84,7 @@ class ResolutionFailureReason(Enum):
     NESTED_ARRAY_RESOLUTION_FAILED = "nested_array_resolution_failed"
     DIRECT_UUID_NOT_FOUND = "direct_uuid_not_found"
     UNRESOLVED_ARRAY_SIZE = "unresolved_array_size"
+    SPLIT_SPEC_EVAL_FAILED = "split_spec_eval_failed"
     UNKNOWN = "unknown"
 
 
@@ -101,6 +102,11 @@ def _suggestions_for_reason(reason: ResolutionFailureReason) -> list[str]:
             "at compile time (e.g. bindings={'hi': np.array([...])}).",
             "Alternatively, bind the dimension variable directly "
             "(e.g. bindings={'n': 4}).",
+        ]
+    if reason == ResolutionFailureReason.SPLIT_SPEC_EVAL_FAILED:
+        return [
+            "Bind all symbolic num_elements values used in unpack_qubits "
+            "(e.g. bindings={'n': 5}).",
         ]
     return []
 
@@ -210,6 +216,11 @@ class QubitIndexResolutionError(EmitError):
                 suggestions.append(
                     f"The resolved index for '{info.operand_name}' is not a number. "
                     f"Ensure your bindings contain numeric values for array indices."
+                )
+            elif info.failure_reason == ResolutionFailureReason.SPLIT_SPEC_EVAL_FAILED:
+                suggestions.append(
+                    f"Bind all symbolic sizes used in unpack_qubits. "
+                    f"The transpiler needs concrete values to compute qubit offsets."
                 )
 
         if not suggestions:

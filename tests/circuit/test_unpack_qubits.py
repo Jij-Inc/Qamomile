@@ -549,3 +549,107 @@ class TestPackUnpackE2E:
                     assert dim.get_const() == 3
                     found = True
         assert found, "MeasureVectorOperation not found in folded block"
+
+
+class TestUnpackQubitsTranspile:
+    """Tests that gates on unpack_qubits output elements transpile correctly."""
+
+    def test_concrete_num_elements_gate_transpiles(self):
+        """Concrete num_elements unpack -> gate on singleton -> transpile succeeds."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def k() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, name="qs")
+            a, b = qmc.unpack_qubits(qs, num_unpacked=2, num_elements=[2, 1])
+            b = qmc.h(b)
+            result = qmc.pack_qubits(a, b)
+            return qmc.measure(result)
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(k)
+        assert executable is not None
+        assert len(executable.compiled_quantum) > 0
+
+    def test_concrete_num_elements_vector_gate_transpiles(self):
+        """Concrete num_elements unpack -> gate on vector element -> transpile succeeds."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def k() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, name="qs")
+            a, b = qmc.unpack_qubits(qs, num_unpacked=2, num_elements=[2, 1])
+            a[0] = qmc.h(a[0])
+            a[1] = qmc.x(a[1])
+            result = qmc.pack_qubits(a, b)
+            return qmc.measure(result)
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(k)
+        assert executable is not None
+        assert len(executable.compiled_quantum) > 0
+
+    def test_concrete_indices_gate_transpiles(self):
+        """Concrete indices unpack -> gate on element -> transpile succeeds."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def k() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, name="qs")
+            a, b = qmc.unpack_qubits(
+                qs, num_unpacked=2, indices=[[0, 1], [2]]
+            )
+            b = qmc.h(b)
+            result = qmc.pack_qubits(a, b)
+            return qmc.measure(result)
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(k)
+        assert executable is not None
+        assert len(executable.compiled_quantum) > 0
+
+    def test_symbolic_num_elements_gate_transpiles(self):
+        """Symbolic num_elements unpack -> gate on singleton -> transpile with bindings."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def k(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(n, name="qs")
+            a, b = qmc.unpack_qubits(qs, num_unpacked=2, num_elements=[n - 1, 1])
+            b = qmc.h(b)
+            qs2 = qmc.pack_qubits(a, b)
+            return qmc.measure(qs2)
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(k, bindings={"n": 3})
+        assert executable is not None
+        assert len(executable.compiled_quantum) > 0
+
+    def test_unpack_gate_correct_qubit_identity(self):
+        """Verify H gate targets the correct physical qubit after unpack."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def k() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, name="qs")
+            a, b = qmc.unpack_qubits(qs, num_unpacked=2, num_elements=[2, 1])
+            # b is the third qubit (index 2 in the original array)
+            b = qmc.h(b)
+            result = qmc.pack_qubits(a, b)
+            return qmc.measure(result)
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(k)
+        circuit = executable.compiled_quantum[0].circuit
+
+        from qiskit.circuit.library import HGate
+
+        h_ops = [inst for inst in circuit.data if isinstance(inst.operation, HGate)]
+        assert len(h_ops) == 1
+        # The H gate should be on physical qubit 2 (the third qubit)
+        assert circuit.find_bit(h_ops[0].qubits[0]).index == 2

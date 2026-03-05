@@ -428,6 +428,7 @@ def unpack_qubits(
                         "group_index": group_idx,
                         "num_elements_expr": ne_exprs,
                         "total_expr": total_expr,
+                        "total": total,
                     },
                 },
             )

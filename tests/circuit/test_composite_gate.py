@@ -1244,12 +1244,13 @@ class TestAllocateGateInvariant:
     """Test that _allocate_gate enforces invariants on malformed operations."""
 
     def test_missing_qinit_for_array_element(self):
-        """GateOperation on array element without QInitOperation raises AssertionError."""
+        """GateOperation on array element without QInitOperation raises EmitError."""
         from qamomile.circuit.ir.operation.gate import (
             GateOperation,
             GateOperationType,
         )
         from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+        from qamomile.circuit.transpiler.errors import EmitError
         from qamomile.circuit.transpiler.passes.emit_base import ResourceAllocator
 
         parent_array = ArrayValue(
@@ -1280,7 +1281,7 @@ class TestAllocateGateInvariant:
         )
 
         allocator = ResourceAllocator()
-        with pytest.raises(AssertionError, match="Array element key"):
+        with pytest.raises(EmitError, match="Array element key"):
             allocator.allocate([gate_op])
 
 
