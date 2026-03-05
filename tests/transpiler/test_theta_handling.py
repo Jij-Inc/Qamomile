@@ -25,7 +25,7 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperationType,
 )
 from qamomile.circuit.ir.types.primitives import FloatType, QubitType, UIntType
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
 from qamomile.circuit.transpiler.passes.emit_base import LoopAnalyzer
 from qamomile.circuit.transpiler.passes.value_mapping import (
@@ -205,6 +205,75 @@ class TestConstantFoldingTheta:
         assert isinstance(folded_gate, GateOperation)
         assert isinstance(folded_gate.theta, Value)
         assert folded_gate.theta.get_const() == pytest.approx(7.0)
+
+    def test_theta_element_indices_are_folded(self) -> None:
+        """Theta as array element params[offset+i] has its index BinOp folded."""
+        # BinOp: offset(2) + i(3) = 5
+        offset = _uint_val("offset", const=2)
+        i_val = _uint_val("i", const=3)
+        binop, binop_result = _make_binop(offset, i_val, BinOpKind.ADD)
+
+        # theta = params[binop_result] — an array element whose index is a BinOp
+        params_array = ArrayValue(type=FloatType(), name="params")
+        theta_elem = Value(
+            type=FloatType(),
+            name="params_idx",
+            parent_array=params_array,
+            element_indices=(binop_result,),
+        )
+
+        q = _qubit()
+        gate = _make_gate(GateOperationType.RY, [q], theta=theta_elem)
+        block = _make_block([binop, gate])
+
+        folded_block = ConstantFoldingPass().run(block)
+
+        # BinOp should be removed (folded)
+        assert len(folded_block.operations) == 1
+        folded_gate = folded_block.operations[0]
+        assert isinstance(folded_gate, GateOperation)
+        assert isinstance(folded_gate.theta, Value)
+
+        # element_indices should now contain the folded constant (5)
+        assert len(folded_gate.theta.element_indices) == 1
+        folded_idx = folded_gate.theta.element_indices[0]
+        assert folded_idx.is_constant()
+        assert folded_idx.get_const() == 5
+
+    def test_theta_element_indices_partial_fold(self) -> None:
+        """Only foldable indices in theta.element_indices are replaced."""
+        # BinOp: 1 + 2 = 3 (foldable)
+        a = _uint_val("a", const=1)
+        b = _uint_val("b", const=2)
+        binop, binop_result = _make_binop(a, b, BinOpKind.ADD)
+
+        # Non-foldable index
+        dynamic_idx = _uint_val("dynamic")
+
+        params_array = ArrayValue(type=FloatType(), name="params")
+        theta_elem = Value(
+            type=FloatType(),
+            name="params_ij",
+            parent_array=params_array,
+            element_indices=(binop_result, dynamic_idx),
+        )
+
+        q = _qubit()
+        gate = _make_gate(GateOperationType.RZ, [q], theta=theta_elem)
+        block = _make_block([binop, gate])
+
+        folded_block = ConstantFoldingPass().run(block)
+
+        assert len(folded_block.operations) == 1
+        folded_gate = folded_block.operations[0]
+        assert isinstance(folded_gate, GateOperation)
+        assert isinstance(folded_gate.theta, Value)
+
+        # First index folded, second unchanged
+        assert len(folded_gate.theta.element_indices) == 2
+        assert folded_gate.theta.element_indices[0].is_constant()
+        assert folded_gate.theta.element_indices[0].get_const() == 3
+        assert folded_gate.theta.element_indices[1].uuid == dynamic_idx.uuid
 
 
 # ===========================================================================
