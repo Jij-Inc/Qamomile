@@ -29,6 +29,7 @@
 
 # %%
 import math
+
 import qamomile.circuit as qmc
 
 
@@ -46,13 +47,13 @@ def iqft(qubits: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
     return qubits
 
 
-
 # %% [markdown]
 # ### Defining the Phase Gate
 # In this tutorial, we use the Phase Gate as the target for QPE. The Phase Gate is defined as follows:
 # $$P(\theta)|1\rangle = e^{i\theta}|1\rangle$$
 # Here, $|1\rangle$ is an eigenstate, and $e^{i\theta}$ is the corresponding eigenvalue.
 # We will estimate this eigenvalue using QPE.
+
 
 # %%
 @qmc.qkernel
@@ -61,6 +62,7 @@ def phase_gate(q: qmc.Qubit, theta: float, iter: int) -> qmc.Qubit:
     for _ in qmc.range(iter):
         q = qmc.p(q, theta)
     return q
+
 
 # %%
 # QPE Implementation
@@ -82,12 +84,15 @@ def qpe(phase: float) -> qmc.Vector[qmc.Bit]:
     # controlled() API: (control, target, **params) -> (control_out, target_out)
     # Apply phase gate 2^i times for control qubit i
     for i in qmc.range(3):
-        phase_register[i], target = controlled_phase_gate(phase_register[i], target, theta=phase, iter=2**i)
-    iqft(phase_register)
+        phase_register[i], target = controlled_phase_gate(
+            phase_register[i], target, theta=phase, iter=2**i
+        )
+    phase_register = iqft(phase_register)
 
     bits = qmc.measure(phase_register)
 
     return bits
+
 
 # %% [markdown]
 # ### Running QPE with Different Quantum SDKs
@@ -163,7 +168,6 @@ def qpe(phase: float) -> qmc.Vector[qmc.Bit]:
 # %%
 from qamomile.qiskit import QiskitTranspiler
 
-
 transpiler = QiskitTranspiler()
 executable = transpiler.transpile(qpe, bindings={"phase": math.pi / 2})
 
@@ -173,8 +177,12 @@ sample_result = job.result()
 # Decode results
 num_bits = 3
 for bits, count in sample_result.results:
-    phase_estimate = sum(bit * (1 / (2 ** (i + 1))) for i, bit in enumerate(reversed(bits)))
-    print(f"Measured bits: {bits}, Count: {count}, Estimated phase: {phase_estimate:.4f}")
+    phase_estimate = sum(
+        bit * (1 / (2 ** (i + 1))) for i, bit in enumerate(reversed(bits))
+    )
+    print(
+        f"Measured bits: {bits}, Count: {count}, Estimated phase: {phase_estimate:.4f}"
+    )
 
 
 # %% [markdown]
@@ -205,6 +213,7 @@ def p_gate(q: qmc.Qubit, theta: float) -> qmc.Qubit:
     """Simple phase gate: $P(\theta)|1\rangle = e^{i\theta}|1\rangle$"""
     return qmc.p(q, theta)
 
+
 @qmc.qkernel
 def quantum_phase_estimation(phase: float, n: qmc.UInt) -> qmc.Float:
     q_phase = qmc.qubit_array(n, name="phase_reg")
@@ -213,6 +222,7 @@ def quantum_phase_estimation(phase: float, n: qmc.UInt) -> qmc.Float:
     # Use p_gate (qmc.qpe() internally repeats 2^k times)
     phase_q: qmc.QFixed = qmc.qpe(target, q_phase, p_gate, theta=phase)
     return qmc.measure(phase_q)
+
 
 # %% [markdown]
 # Simply prepare a register to store the phase, initialize the target state, and call the qpe() function to implement QPE.
@@ -224,7 +234,9 @@ def quantum_phase_estimation(phase: float, n: qmc.UInt) -> qmc.Float:
 # %%
 transpiler = QiskitTranspiler()
 test_phase = math.pi / 2  # θ = π/2, expected output ≈ 0.25 (since θ/(2π) = 0.25)
-executable = transpiler.transpile(quantum_phase_estimation, bindings={"phase": test_phase, "n": 3})
+executable = transpiler.transpile(
+    quantum_phase_estimation, bindings={"phase": test_phase, "n": 3}
+)
 
 executor = transpiler.executor()
 job = executable.sample(executor)
