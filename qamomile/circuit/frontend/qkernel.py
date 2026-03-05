@@ -248,7 +248,7 @@ class QKernel(Generic[P, R]):
             names = ", ".join(f"'{n}'" for n in sorted(unknown))
             raise ValueError(
                 f"Unknown argument(s) {names} provided. "
-                f"Known parameters are: {sorted(known_names)}"
+                f"Known arguments are: {sorted(known_names)}"
             )
 
         for name, param in self.signature.parameters.items():
