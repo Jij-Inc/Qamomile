@@ -46,6 +46,30 @@ def _resolve_vector_size(vec: ArrayBase) -> int | None:
     return None
 
 
+def _get_root_source_logical_id(item: Qubit | ArrayBase) -> str | None:
+    """Get the root source logical_id of a pack item.
+
+    For items produced by ``unpack_qubits``, traces back through
+    ``split_spec.source_logical_id`` (sub-vectors) or
+    ``parent_array`` → ``split_spec`` (element access on sub-vectors).
+    For other items, returns the item's own logical_id.
+    """
+    if isinstance(item, Qubit):
+        val = item.value
+        if val.parent_array is not None:
+            split_spec = val.parent_array.params.get("split_spec")
+            if split_spec:
+                return split_spec["source_logical_id"]
+        return val.logical_id
+    elif isinstance(item, ArrayBase):
+        val = item.value
+        split_spec = val.params.get("split_spec")
+        if split_spec:
+            return split_spec["source_logical_id"]
+        return val.logical_id
+    return None
+
+
 def pack_qubits(*items: Qubit | Vector[Qubit]) -> Vector[Qubit]:
     """Pack individual qubits and/or qubit vectors into one vector.
 
@@ -139,6 +163,15 @@ def pack_qubits(*items: Qubit | Vector[Qubit]) -> Vector[Qubit]:
             },
         )
 
+        # Propagate source logical_id if all items trace to the same source
+        root_sources = set()
+        for item in items:
+            root = _get_root_source_logical_id(item)
+            if root is not None:
+                root_sources.add(root)
+        if len(root_sources) == 1:
+            packed_value.logical_id = root_sources.pop()
+
         return Vector._create_from_value(
             value=packed_value,
             shape=(acc_handle,),
@@ -161,6 +194,15 @@ def pack_qubits(*items: Qubit | Vector[Qubit]) -> Vector[Qubit]:
                 "element_logical_ids": element_logical_ids,
             },
         )
+
+        # Propagate source logical_id if all items trace to the same source
+        root_sources = set()
+        for item in items:
+            root = _get_root_source_logical_id(item)
+            if root is not None:
+                root_sources.add(root)
+        if len(root_sources) == 1:
+            packed_value.logical_id = root_sources.pop()
 
         return Vector._create_from_value(
             value=packed_value,

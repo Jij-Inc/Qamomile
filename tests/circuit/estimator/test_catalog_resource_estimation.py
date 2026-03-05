@@ -299,10 +299,10 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
     "network_decomposition_controlled_z": resource(
         # Ref: Nielsen & Chuang P. 184 (circuit and ancillas)
         2 * n,
-        total=2 * n - 1,
+        total=2 * n + 1,
         single_qubit=2,
         two_qubit=1,
-        multi_qubit=2 * n - 4,
+        multi_qubit=2 * n - 2,
         clifford_gates=3,
     ),
     "naive_multi_controlled_z": resource(
@@ -313,7 +313,7 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
     ),
     # --- Grover ---
     "grover_network_decomposition": resource(
-        n + 1 + n_iters * (n - 2),
+        2 * n - 1,
         total=(n + 2) + n_iters * (6 * n - 1),
         single_qubit=(n + 2) + n_iters * (4 * n + 2),
         two_qubit=n_iters,
@@ -336,7 +336,7 @@ EXPECTED_RESOURCES: dict[str, ResourceEstimate] = {
     ),
     "quantum_counting": resource(
         # Ref: Nielsen & Chuang (circuit)
-        n + m + (m - 1) + 1,
+        n + 2 * m - 1,
         total=n + m + 1 + n + n * (n + 1) / 2 + sp.floor(n / 2),  # type:ignore
         single_qubit=n + m + 1 + n,  # type:ignore
         two_qubit=n * (n - 1) / 2 + sp.floor(n / 2),

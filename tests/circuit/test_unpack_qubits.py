@@ -474,3 +474,70 @@ class TestPackUnpackE2E:
 
         graph = k.build()
         assert graph is not None
+
+    def test_symbolic_unpack_pack_measure_transpiles(self):
+        """Symbolic unpack -> pack -> measure should transpile with bindings."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def k(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(n, name="qs")
+            a, b = qmc.unpack_qubits(qs, num_unpacked=2, num_elements=[n - 1, 1])
+            qs2 = qmc.pack_qubits(a, b)
+            return qmc.measure(qs2)
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(k, bindings={"n": 3})
+        assert executable is not None
+        assert len(executable.compiled_quantum) > 0
+
+    def test_symbolic_unpack_pack_measure_no_bindings_fails(self):
+        """Symbolic unpack -> pack -> measure without bindings should fail."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def k(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(n, name="qs")
+            a, b = qmc.unpack_qubits(qs, num_unpacked=2, num_elements=[n - 1, 1])
+            qs2 = qmc.pack_qubits(a, b)
+            return qmc.measure(qs2)
+
+        transpiler = QiskitTranspiler()
+        with pytest.raises(Exception):
+            transpiler.transpile(k)
+
+    def test_constant_fold_canonicalizes_measure_shape(self):
+        """After constant_fold with bindings, MeasureVectorOperation shape should be const."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+        from qamomile.circuit.ir.value import ArrayValue
+        from qamomile.circuit.ir.operation.gate import MeasureVectorOperation
+
+        @qmc.qkernel
+        def k(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(n, name="qs")
+            a, b = qmc.unpack_qubits(qs, num_unpacked=2, num_elements=[n - 1, 1])
+            qs2 = qmc.pack_qubits(a, b)
+            return qmc.measure(qs2)
+
+        transpiler = QiskitTranspiler()
+        block = transpiler.to_block(k, bindings={"n": 3})
+        inlined = transpiler.inline(block)
+        folded = transpiler.constant_fold(inlined, bindings={"n": 3})
+
+        # Find MeasureVectorOperation and verify shape is concrete
+        found = False
+        for op in folded.operations:
+            if isinstance(op, MeasureVectorOperation):
+                result = op.results[0]
+                if isinstance(result, ArrayValue) and result.shape:
+                    dim = result.shape[0]
+                    assert dim.is_constant(), (
+                        f"shape[0] should be constant after folding, "
+                        f"got name={dim.name}, is_constant={dim.is_constant()}"
+                    )
+                    assert dim.get_const() == 3
+                    found = True
+        assert found, "MeasureVectorOperation not found in folded block"

@@ -156,7 +156,7 @@ class ConstantFoldingPass(Pass[Block, Block]):
         op: Operation,
         folded_values: dict[str, Value],
     ) -> Operation:
-        """Substitute folded constant values in operation operands.
+        """Substitute folded constant values in operation operands and results.
 
         Also propagates folded values into ``element_indices`` of Value
         operands so that gate operations referencing a folded BinOp result
@@ -164,7 +164,13 @@ class ConstantFoldingPass(Pass[Block, Block]):
 
         For ``ControlledUOperation``, also folds ``num_controls``,
         ``target_indices``, and ``controlled_indices`` fields.
+
+        For operations whose results contain ``ArrayValue`` instances,
+        canonicalizes ``shape`` tuples by replacing folded dimension
+        Values with their constant counterparts.
         """
+        from qamomile.circuit.ir.value import ArrayValue
+
         new_operands: list[Any] = []
         changed = False
 
@@ -191,12 +197,32 @@ class ConstantFoldingPass(Pass[Block, Block]):
             else:
                 new_operands.append(operand)
 
+        # Canonicalize ArrayValue.shape in results.
+        new_results: list[Any] | None = None
+        for i, result in enumerate(op.results):
+            if isinstance(result, ArrayValue) and result.shape:
+                new_shape: list[Value] = []
+                shape_changed = False
+                for dim_val in result.shape:
+                    if isinstance(dim_val, ValueBase) and dim_val.uuid in folded_values:
+                        new_shape.append(folded_values[dim_val.uuid])
+                        shape_changed = True
+                    else:
+                        new_shape.append(dim_val)
+                if shape_changed:
+                    if new_results is None:
+                        new_results = list(op.results)
+                    new_results[i] = dataclasses.replace(result, shape=tuple(new_shape))
+                    changed = True
+
         # Fold ControlledUOperation-specific dataclass fields.
         from qamomile.circuit.ir.operation.gate import ControlledUOperation
 
-        if isinstance(op, ControlledUOperation):
-            extra_kwargs: dict[str, Any] = {}
+        extra_kwargs: dict[str, Any] = {}
+        if new_results is not None:
+            extra_kwargs["results"] = new_results
 
+        if isinstance(op, ControlledUOperation):
             # Fold num_controls: Value -> int if resolvable.
             if isinstance(op.num_controls, Value):
                 new_nc = self._resolve_field_value(op.num_controls, folded_values)
@@ -225,11 +251,8 @@ class ConstantFoldingPass(Pass[Block, Block]):
                     extra_kwargs["power"] = new_power
                     changed = True
 
-            if extra_kwargs:
-                return dataclasses.replace(op, operands=new_operands, **extra_kwargs)
-
         if changed:
-            return dataclasses.replace(op, operands=new_operands)
+            return dataclasses.replace(op, operands=new_operands, **extra_kwargs)
         return op
 
     def _resolve_field_value(
