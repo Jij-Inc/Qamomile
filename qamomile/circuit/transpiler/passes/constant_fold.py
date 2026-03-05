@@ -247,13 +247,13 @@ class ConstantFoldingPass(Pass[Block, Block]):
         replacements: dict[str, Any] = {}
         if changed:
             replacements["operands"] = new_operands
-        if isinstance(op, GateOperation) and isinstance(op.theta, Value):
-            if op.theta.uuid in folded_values:
-                replacements["theta"] = folded_values[op.theta.uuid]
-            elif op.theta.element_indices:
+        if isinstance(result_op, GateOperation) and isinstance(result_op.theta, Value):
+            if result_op.theta.uuid in folded_values:
+                replacements["theta"] = folded_values[result_op.theta.uuid]
+            elif result_op.theta.element_indices:
                 new_indices = []
                 indices_changed = False
-                for idx in op.theta.element_indices:
+                for idx in result_op.theta.element_indices:
                     if idx.uuid in folded_values:
                         new_indices.append(folded_values[idx.uuid])
                         indices_changed = True
@@ -261,12 +261,12 @@ class ConstantFoldingPass(Pass[Block, Block]):
                         new_indices.append(idx)
                 if indices_changed:
                     replacements["theta"] = dataclasses.replace(
-                        op.theta, element_indices=tuple(new_indices)
+                        result_op.theta, element_indices=tuple(new_indices)
                     )
 
         if replacements:
-            return dataclasses.replace(op, **replacements)
-        return op
+            return dataclasses.replace(result_op, **replacements)
+        return result_op
 
     def _resolve_field_value(
         self,
