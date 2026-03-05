@@ -28,8 +28,9 @@
 # - How to implement expectation value calculation (estimate)
 
 # %%
+from qiskit import QuantumCircuit
+
 import qamomile.circuit as qm
-from qamomile.qiskit import QiskitTranspiler
 
 # %% [markdown]
 # ## 1. What is QuantumExecutor?
@@ -51,7 +52,6 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # The standard `QiskitTranspiler` uses `AerSimulator`, but
 # you can use any backend by creating a custom Executor.
-
 # %% [markdown]
 # ## 2. Basic Structure of QuantumExecutor
 #
@@ -64,7 +64,6 @@ from qamomile.qiskit import QiskitTranspiler
 # | `estimate()` | Optional | Calculate expectation values of observables |
 #
 # The most important method is `execute()`. It's sufficient to implement just this method.
-
 # %% [markdown]
 # ### The execute() Method Specification
 #
@@ -84,15 +83,13 @@ from qamomile.qiskit import QiskitTranspiler
 # **Important**: The returned bitstrings are in big-endian format.
 # - "011" means qubit[2]=0, qubit[1]=1, qubit[0]=1
 # - The leftmost bit is the highest indexed qubit
-
 # %% [markdown]
 # ## 3. Creating a Minimal Custom Executor
 #
 # Let's create a minimal Executor implementing only `execute()`.
-
 # %%
 from qamomile.circuit.transpiler.quantum_executor import QuantumExecutor
-from qiskit import QuantumCircuit
+from qamomile.qiskit import QiskitTranspiler
 
 
 class MySimpleExecutor(QuantumExecutor[QuantumCircuit]):
@@ -137,6 +134,7 @@ class MySimpleExecutor(QuantumExecutor[QuantumCircuit]):
 #
 # Let's use the created Executor to generate a Bell state.
 
+
 # %%
 @qm.qkernel
 def bell_state() -> tuple[qm.Bit, qm.Bit]:
@@ -148,6 +146,9 @@ def bell_state() -> tuple[qm.Bit, qm.Bit]:
     return qm.measure(q0), qm.measure(q1)
 
 
+bell_state.draw()
+
+# %%
 # Transpile
 transpiler = QiskitTranspiler()
 executable = transpiler.transpile(bell_state)
@@ -230,8 +231,8 @@ class IBMQuantumExecutor(QuantumExecutor[QuantumCircuit]):
                 "Please configure your token with QiskitRuntimeService.save_account()."
             )
 
-        from qiskit_ibm_runtime import SamplerV2 as Sampler
         from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
+        from qiskit_ibm_runtime import SamplerV2 as Sampler
 
         # Get backend
         backend = self.service.backend(self.backend_name)
@@ -307,8 +308,9 @@ for value, count in result.results:
 # - `get_ordered_params()`: Get parameters as ordered list (for QURI Parts)
 
 # %%
-from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
 from typing import Any
+
+from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
 
 
 class MyParametricExecutor(QuantumExecutor[QuantumCircuit]):
@@ -349,6 +351,7 @@ class MyParametricExecutor(QuantumExecutor[QuantumCircuit]):
 # %% [markdown]
 # ### Testing Parametric Circuits
 
+
 # %%
 @qm.qkernel
 def parametric_circuit(theta: qm.Float) -> qm.Bit:
@@ -360,6 +363,9 @@ def parametric_circuit(theta: qm.Float) -> qm.Bit:
     return qm.measure(q)
 
 
+parametric_circuit.draw()
+
+# %%
 # Transpile while preserving parameters
 executable_param = transpiler.transpile(parametric_circuit, parameters=["theta"])
 
@@ -398,8 +404,9 @@ for theta_val in [0.0, 1.57, 3.14]:  # 0, π/2, π
 # ```
 
 # %%
-import qamomile.observable as qm_o
 from typing import Sequence
+
+import qamomile.observable as qm_o
 
 
 class MyFullExecutor(QuantumExecutor[QuantumCircuit]):
@@ -447,6 +454,7 @@ class MyFullExecutor(QuantumExecutor[QuantumCircuit]):
         Uses the Qiskit Estimator primitive.
         """
         from qiskit.primitives import Estimator
+
         from qamomile.qiskit.observable import hamiltonian_to_sparse_pauli_op
 
         if self._estimator is None:

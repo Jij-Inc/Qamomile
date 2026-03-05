@@ -110,6 +110,16 @@ class QuriPartsGateEmitter:
         """Emit T gate."""
         circuit.add_T_gate(qubit)
 
+    def emit_sdg(
+        self, circuit: "LinearMappedUnboundParametricQuantumCircuit", qubit: int
+    ) -> None:
+        circuit.add_Sdag_gate(qubit)
+
+    def emit_tdg(
+        self, circuit: "LinearMappedUnboundParametricQuantumCircuit", qubit: int
+    ) -> None:
+        circuit.add_Tdag_gate(qubit)
+
     # Single-qubit rotation gates
     def emit_rx(
         self,

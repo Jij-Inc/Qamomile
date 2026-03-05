@@ -232,6 +232,7 @@ def create_dummy_input(
             dict_handle.name = name
             dict_handle.id = str(id(dict_handle))
             dict_handle._consumed = False
+            dict_handle._key_type = param_type.__args__[0]
             return dict_handle
         raise TypeError(f"Dict type missing key/value types: {param_type}")
 

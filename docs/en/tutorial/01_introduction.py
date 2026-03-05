@@ -82,6 +82,7 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # It works the same as a "NOT gate" in classical computers.
 
+
 # %%
 @qm.qkernel
 def x_gate_circuit() -> qm.Bit:
@@ -94,6 +95,9 @@ def x_gate_circuit() -> qm.Bit:
 
     # Measure and return the result
     return qm.measure(q)
+
+
+x_gate_circuit.draw()
 
 
 # %% [markdown]
@@ -131,13 +135,14 @@ def x_gate_circuit() -> qm.Bit:
 #
 # Let's see what happens when you write code incorrectly.
 
+
 # %%
 # Bad example 1: Using the same qubit twice
 @qm.qkernel
 def bad_example_reuse() -> tuple[qm.Bit, qm.Bit]:
     q = qm.qubit(name="q")
-    q1 = qm.h(q)   # Consume q into q1
-    q2 = qm.x(q)   # Bad! q was already used by q1
+    q1 = qm.h(q)  # Consume q into q1
+    q2 = qm.x(q)  # Bad! q was already used by q1
     return qm.measure(q1), qm.measure(q2)
 
 
@@ -148,7 +153,7 @@ try:
     transpiler_test.transpile(bad_example_reuse)
     print("No error occurred (unexpected behavior)")
 except Exception as e:
-    print(f"Error occurred (this is the correct behavior):")
+    print("Error occurred (this is the correct behavior):")
     print(f"  {type(e).__name__}: {e}")
 
 # %% [markdown]
@@ -156,12 +161,13 @@ except Exception as e:
 #
 # Ignoring the return value of a gate and continuing to use the old variable is also wrong.
 
+
 # %%
 @qm.qkernel
 def bad_example_ignore_return() -> qm.Bit:
     q = qm.qubit(name="q")
-    qm.h(q)        # Bad! Ignoring the return value
-    qm.x(q)        # Bad! Using the old q
+    qm.h(q)  # Bad! Ignoring the return value
+    qm.x(q)  # Bad! Using the old q
     return qm.measure(q)  # This is also the old q
 
 
@@ -171,7 +177,7 @@ try:
     transpiler_test.transpile(bad_example_ignore_return)
     print("No error occurred (unexpected behavior)")
 except Exception as e:
-    print(f"Error occurred (this is the correct behavior):")
+    print("Error occurred (this is the correct behavior):")
     print(f"  {type(e).__name__}: {e}")
 
 # %% [markdown]
@@ -179,14 +185,17 @@ except Exception as e:
 #
 # Always reassign the return value of a gate to the same variable.
 
+
 # %%
 @qm.qkernel
 def good_example() -> qm.Bit:
     q = qm.qubit(name="q")
-    q = qm.h(q)    # Correct! Reassign the result to q
-    q = qm.x(q)    # Correct! Use the updated q
+    q = qm.h(q)  # Correct! Reassign the result to q
+    q = qm.x(q)  # Correct! Use the updated q
     return qm.measure(q)
 
+
+good_example.draw()
 
 # %%
 # The correct circuit transpiles without problems
@@ -271,6 +280,7 @@ print(qiskit_circuit.draw(output="text"))
 #
 # For comparison, let's create a circuit that applies no gates.
 
+
 # %%
 @qm.qkernel
 def identity_circuit() -> qm.Bit:
@@ -279,6 +289,8 @@ def identity_circuit() -> qm.Bit:
     # Apply no gates
     return qm.measure(q)
 
+
+identity_circuit.draw()
 
 # %%
 # Execute

@@ -55,6 +55,8 @@ def two_qubits_independent() -> tuple[qm.Bit, qm.Bit]:
     return qm.measure(q0), qm.measure(q1)
 
 
+two_qubits_independent.draw()
+
 # %%
 exec_two = transpiler.transpile(two_qubits_independent)
 result_two = exec_two.sample(transpiler.executor(), shots=1000).result()
@@ -102,6 +104,8 @@ def cnot_example() -> tuple[qm.Bit, qm.Bit]:
 
     return qm.measure(q0), qm.measure(q1)
 
+
+cnot_example.draw()
 
 # %%
 exec_cnot = transpiler.transpile(cnot_example)
@@ -151,6 +155,8 @@ def bell_state() -> tuple[qm.Bit, qm.Bit]:
     return qm.measure(q0), qm.measure(q1)
 
 
+bell_state.draw()
+
 # %%
 exec_bell = transpiler.transpile(bell_state)
 result_bell = exec_bell.sample(transpiler.executor(), shots=1000).result()
@@ -196,6 +202,10 @@ def bell_phi_plus() -> tuple[qm.Bit, qm.Bit]:
     return qm.measure(q0), qm.measure(q1)
 
 
+bell_phi_plus.draw()
+
+
+# %%
 @qm.qkernel
 def bell_phi_minus() -> tuple[qm.Bit, qm.Bit]:
     """$|\\Phi^-\\rangle = (|00\\rangle - |11\\rangle)/\\sqrt{2}$"""
@@ -206,6 +216,10 @@ def bell_phi_minus() -> tuple[qm.Bit, qm.Bit]:
     return qm.measure(q0), qm.measure(q1)
 
 
+bell_phi_minus.draw()
+
+
+# %%
 @qm.qkernel
 def bell_psi_plus() -> tuple[qm.Bit, qm.Bit]:
     """$|\\Psi^+\\rangle = (|01\\rangle + |10\\rangle)/\\sqrt{2}$"""
@@ -216,6 +230,10 @@ def bell_psi_plus() -> tuple[qm.Bit, qm.Bit]:
     return qm.measure(q0), qm.measure(q1)
 
 
+bell_psi_plus.draw()
+
+
+# %%
 @qm.qkernel
 def bell_psi_minus() -> tuple[qm.Bit, qm.Bit]:
     """$|\\Psi^-\\rangle = (|01\\rangle - |10\\rangle)/\\sqrt{2}$"""
@@ -226,6 +244,8 @@ def bell_psi_minus() -> tuple[qm.Bit, qm.Bit]:
     q0 = qm.rz(q0, math.pi)
     return qm.measure(q0), qm.measure(q1)
 
+
+bell_psi_minus.draw()
 
 # %%
 bell_states = [
@@ -267,6 +287,8 @@ def array_example() -> qm.Vector[qm.Bit]:
     return qm.measure(qubits)
 
 
+array_example.draw()
+
 # %%
 exec_arr = transpiler.transpile(array_example)
 result_arr = exec_arr.sample(transpiler.executor(), shots=1000).result()
@@ -302,6 +324,14 @@ def loop_example(n: int) -> qm.Vector[qm.Bit]:
 
     return qm.measure(qubits)
 
+
+loop_example.draw(n=4)
+
+# %% [markdown]
+# `draw` 関数には `fold_loops` パラメータがあり、可視化時にループの折りたたみ/展開を制御できます。
+
+# %%
+loop_example.draw(n=4, fold_loops=False)
 
 # %%
 exec_loop = transpiler.transpile(loop_example, bindings={"n": 4})
@@ -340,6 +370,8 @@ def ghz_state(n: int) -> qm.Vector[qm.Bit]:
 
     return qm.measure(qubits)
 
+
+ghz_state.draw(n=4)
 
 # %%
 # 3量子ビットGHZ状態
@@ -405,6 +437,8 @@ def swap_example() -> tuple[qm.Bit, qm.Bit]:
     return qm.measure(q0), qm.measure(q1)
 
 
+swap_example.draw()
+
 # %%
 exec_swap = transpiler.transpile(swap_example)
 result_swap = exec_swap.sample(transpiler.executor(), shots=1000).result()
@@ -442,6 +476,8 @@ def rzz_example(theta: qm.Float) -> tuple[qm.Bit, qm.Bit]:
     return qm.measure(q0), qm.measure(q1)
 
 
+rzz_example.draw()
+
 # %%
 exec_rzz = transpiler.transpile(rzz_example, bindings={"theta": math.pi / 2})
 result_rzz = exec_rzz.sample(transpiler.executor(), shots=1000).result()
@@ -476,6 +512,8 @@ def cp_example() -> tuple[qm.Bit, qm.Bit]:
 
     return qm.measure(q0), qm.measure(q1)
 
+
+cp_example.draw()
 
 # %%
 exec_cp = transpiler.transpile(cp_example)

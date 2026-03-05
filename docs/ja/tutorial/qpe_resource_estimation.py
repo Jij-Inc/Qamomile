@@ -23,12 +23,9 @@
 
 # %%
 import math
+
 import qamomile.circuit as qmc
 from qamomile.circuit.estimator import estimate_resources
-from qamomile.circuit.estimator.algorithmic import estimate_qpe
-import sympy as sp
-import matplotlib.pyplot as plt
-import pandas as pd
 
 # %% [markdown]
 # ## セクション1: 代数的リソース見積もりの紹介
@@ -63,6 +60,10 @@ def bell_state() -> qmc.Vector[qmc.Qubit]:
     q[0], q[1] = qmc.cx(q[0], q[1])
     return q
 
+
+bell_state.draw()
+
+# %%
 # qkernelのblockをestimate_resourcesに渡すだけ
 est = estimate_resources(bell_state.block)
 
@@ -72,7 +73,6 @@ print(f"  総ゲート数: {est.gates.total}")
 print(f"  単一量子ビットゲート: {est.gates.single_qubit}")
 print(f"  2量子ビットゲート: {est.gates.two_qubit}")
 print(f"  Cliffordゲート: {est.gates.clifford_gates}")
-print(f"  回路深さ: {est.depth.total_depth}")
 
 # %% [markdown]
 # 期待通り: 2量子ビット、2ゲート（H + CX）、両方ともClifford、深さ2。
@@ -91,6 +91,10 @@ def ghz_state(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
         q[i], q[i+1] = qmc.cx(q[i], q[i+1])
     return q
 
+
+ghz_state.draw(n=4, fold_loops=False)
+
+# %%
 # シンボリックパラメータnで見積もり
 est_ghz = estimate_resources(ghz_state.block)
 
@@ -98,7 +102,6 @@ print("\nGHZ状態のリソース見積もり（シンボリック）:")
 print(f"  量子ビット数: {est_ghz.qubits}")
 print(f"  総ゲート数: {est_ghz.gates.total}")
 print(f"  2量子ビットゲート: {est_ghz.gates.two_qubit}")
-print(f"  回路深さ: {est_ghz.depth.total_depth}")
 
 # %% [markdown]
 # 結果にシンボル`n`が含まれていることに注目してください！これが代数的見積もりの力です。
@@ -164,6 +167,10 @@ def iqft(qubits: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
         qubits[j] = qmc.h(qubits[j])
     return qubits
 
+
+iqft.draw(qubits=4, fold_loops=False)
+
+# %%
 # シンボリックnでIQFTのリソースを見積もる
 @qmc.qkernel
 def iqft_n(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
@@ -176,7 +183,6 @@ print("IQFTのリソース見積もり（シンボリックn）:")
 print(f"  量子ビット数: {est_iqft.qubits}")
 print(f"  総ゲート数: {est_iqft.gates.total}")
 print(f"  2量子ビットゲート: {est_iqft.gates.two_qubit}")
-print(f"  深さ: {est_iqft.depth.total_depth}")
 
 # %% [markdown]
 # IQFTはネストされたループのため$O(n^2)$のゲートが必要です。
@@ -197,6 +203,9 @@ def phase_gate(q: qmc.Qubit, theta: float, iter: int) -> qmc.Qubit:
     for i in qmc.range(iter):
         q = qmc.p(q, theta)
     return q
+
+
+phase_gate.draw(iter=4, fold_loops=False)
 
 # %% [markdown]
 # ### ステップ3: QPEをゼロから実装
@@ -234,12 +243,14 @@ def qpe_manual(theta: float, m: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     return bits
 
 
+qpe_manual.draw(theta=math.pi / 2, m=3, fold_loops=False, inline=True)
+
+# %%
 est_qpe_manual = estimate_resources(qpe_manual.block)
 print("\n手動QPEのリソース見積もり（シンボリックm）:")
 print(f"  量子ビット数: {est_qpe_manual.qubits}")
 print(f"  総ゲート数: {est_qpe_manual.gates.total}")
 print(f"  2量子ビットゲート: {est_qpe_manual.gates.two_qubit}")
-print(f"  深さ: {est_qpe_manual.depth.total_depth}")
 
 
 # %% [markdown]
@@ -247,7 +258,7 @@ print(f"  深さ: {est_qpe_manual.depth.total_depth}")
 #
 # - **量子ビット数**: $m + 1$ (m個のカウント量子ビット + 1個の対象量子ビット) - 線形にスケール
 # - **ゲート数**: $2^m$の制御演算により精度とともに急速に増加
-# - **深さ**: 精度とともに大幅に増加
+# - **深さ**: 現行APIの`estimate_resources()`では返されません
 
 # %% [markdown]
 # ## セクション3: Qamomileの組み込みQPEを使用
@@ -276,6 +287,10 @@ def qpe_builtin(theta: float, n: qmc.UInt) -> qmc.Float:
     phase = qmc.qpe(target, counting, simple_phase_gate, theta=theta)
     return qmc.measure(phase)
 
+
+qpe_builtin.draw(theta=math.pi / 2, n=3, fold_loops=False, inline=True)
+
+# %%
 est_builtin = estimate_resources(qpe_builtin.block)
 est_builtin = est_builtin.simplify()
 
@@ -283,6 +298,5 @@ print("\n組み込みQPE（m=8）のリソース見積もり:")
 print(f"  量子ビット数: {est_builtin.qubits}")
 print(f"  総ゲート数: {est_builtin.gates.total}")
 print(f"  2量子ビットゲート: {est_builtin.gates.two_qubit}")
-print(f"  深さ: {est_builtin.depth.total_depth}")
 
 # %%

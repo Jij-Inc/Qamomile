@@ -20,6 +20,8 @@ jobs:
         python-version: ['3.12', '3.13']
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      MPLBACKEND: Agg
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python ${{ matrix.python-version }}
@@ -41,7 +43,9 @@ jobs:
           uv run pytest tests/circuit -v
           uv run pytest tests/transpiler/*.py -v
           uv run pytest tests/transpiler/backends/test_qiskit.py -v
-          uv run pytest tests/optimization -v
+          uv run pytest tests/circuit/test_basic_layers.py -v
+          uv run pytest tests/optimization/*.py -v
+          uv run pytest tests/transpiler/backends/test_qiskit_frontend.py -v
       - name: Run docs tests
         shell: bash
         run: |

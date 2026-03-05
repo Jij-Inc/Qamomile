@@ -1819,6 +1819,22 @@ wheels = [
 ]
 
 [[package]]
+name = "pytest-mpl"
+version = "0.18.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jinja2" },
+    { name = "matplotlib" },
+    { name = "packaging" },
+    { name = "pillow" },
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9c/40/ba3caed7a54a6a5fe035ecc62dbb473f6f41ecade2ea3e0474f7e8e65c5c/pytest_mpl-0.18.0.tar.gz", hash = "sha256:04c949ea1278a38ca3d8d675871f6c5a0958bfedfaf4fd8bfd4e25e5861759a7", size = 880354, upload-time = "2025-11-15T13:54:52.69Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/eb/01/f9128b75808840fc070042c57168c800da57d2d80b97071dc6f07c793d58/pytest_mpl-0.18.0-py3-none-any.whl", hash = "sha256:e474b7676957c521104dbe351df937da5e582231cd34daeb43b9d1ecc048e5c0", size = 28063, upload-time = "2025-11-15T13:54:51.147Z" },
+]
+
+[[package]]
 name = "python-dateutil"
 version = "2.9.0.post0"
 source = { registry = "https://pypi.org/simple" }
@@ -1977,6 +1993,7 @@ dev = [
     { name = "networkx" },
     { name = "pytest" },
     { name = "pytest-mock" },
+    { name = "pytest-mpl" },
     { name = "quri-parts-circuit" },
     { name = "quri-parts-core" },
     { name = "quri-parts-qulacs" },
@@ -2006,6 +2023,7 @@ dev = [
     { name = "networkx", specifier = ">=3.0" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest-mock", specifier = ">=3.14.0" },
+    { name = "pytest-mpl", specifier = ">=0.17.0" },
     { name = "quri-parts-circuit", specifier = ">=0.21.1" },
     { name = "quri-parts-core", specifier = ">=0.21.1" },
     { name = "quri-parts-qulacs", specifier = ">=0.21.1" },

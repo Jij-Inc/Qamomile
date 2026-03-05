@@ -29,6 +29,7 @@
 
 # %%
 import math
+
 import qamomile.circuit as qm
 from qamomile.qiskit import QiskitTranspiler
 
@@ -39,6 +40,7 @@ transpiler = QiskitTranspiler()
 #
 # So far, we have only worked with a single qubit.
 # To use multiple qubits, simply call `qm.qubit()` multiple times.
+
 
 # %%
 @qm.qkernel
@@ -54,6 +56,8 @@ def two_qubits_independent() -> tuple[qm.Bit, qm.Bit]:
     # Measure separately and return
     return qm.measure(q0), qm.measure(q1)
 
+
+two_qubits_independent.draw()
 
 # %%
 exec_two = transpiler.transpile(two_qubits_independent)
@@ -86,6 +90,7 @@ for value, count in result_two.results:
 # $$|10\rangle \rightarrow |11\rangle \quad \text{(control is 1, so target flips)}$$
 # $$|11\rangle \rightarrow |10\rangle \quad \text{(control is 1, so target flips)}$$
 
+
 # %%
 @qm.qkernel
 def cnot_example() -> tuple[qm.Bit, qm.Bit]:
@@ -102,6 +107,8 @@ def cnot_example() -> tuple[qm.Bit, qm.Bit]:
 
     return qm.measure(q0), qm.measure(q1)
 
+
+cnot_example.draw()
 
 # %%
 exec_cnot = transpiler.transpile(cnot_example)
@@ -135,6 +142,7 @@ print("\nSince the control bit is 1, the target also flips to (1, 1)")
 #
 # The most basic entangled state is the **Bell state**.
 
+
 # %%
 @qm.qkernel
 def bell_state() -> tuple[qm.Bit, qm.Bit]:
@@ -150,6 +158,8 @@ def bell_state() -> tuple[qm.Bit, qm.Bit]:
 
     return qm.measure(q0), qm.measure(q1)
 
+
+bell_state.draw()
 
 # %%
 exec_bell = transpiler.transpile(bell_state)
@@ -186,6 +196,7 @@ print(qiskit_bell.draw(output="text"))
 #
 # There are four Bell states, which are fundamental states in quantum information.
 
+
 # %%
 @qm.qkernel
 def bell_phi_plus() -> tuple[qm.Bit, qm.Bit]:
@@ -196,6 +207,10 @@ def bell_phi_plus() -> tuple[qm.Bit, qm.Bit]:
     return qm.measure(q0), qm.measure(q1)
 
 
+bell_phi_plus.draw()
+
+
+# %%
 @qm.qkernel
 def bell_phi_minus() -> tuple[qm.Bit, qm.Bit]:
     """$|\Phi^-\rangle = (|00\rangle - |11\rangle)/\sqrt{2}$"""
@@ -206,6 +221,10 @@ def bell_phi_minus() -> tuple[qm.Bit, qm.Bit]:
     return qm.measure(q0), qm.measure(q1)
 
 
+bell_phi_minus.draw()
+
+
+# %%
 @qm.qkernel
 def bell_psi_plus() -> tuple[qm.Bit, qm.Bit]:
     """$|\Psi^+\rangle = (|01\rangle + |10\rangle)/\sqrt{2}$"""
@@ -216,6 +235,10 @@ def bell_psi_plus() -> tuple[qm.Bit, qm.Bit]:
     return qm.measure(q0), qm.measure(q1)
 
 
+bell_psi_plus.draw()
+
+
+# %%
 @qm.qkernel
 def bell_psi_minus() -> tuple[qm.Bit, qm.Bit]:
     """$|\Psi^-\rangle = (|01\rangle - |10\rangle)/\sqrt{2}$"""
@@ -226,6 +249,8 @@ def bell_psi_minus() -> tuple[qm.Bit, qm.Bit]:
     q0 = qm.rz(q0, math.pi)
     return qm.measure(q0), qm.measure(q1)
 
+
+bell_psi_minus.draw()
 
 # %%
 bell_states = [
@@ -251,6 +276,7 @@ for name, circuit in bell_states:
 #
 # When working with many qubits, it's convenient to create them as an array using `qubit_array()`.
 
+
 # %%
 @qm.qkernel
 def array_example() -> qm.Vector[qm.Bit]:
@@ -266,6 +292,8 @@ def array_example() -> qm.Vector[qm.Bit]:
     # Measure the entire array
     return qm.measure(qubits)
 
+
+array_example.draw()
 
 # %%
 exec_arr = transpiler.transpile(array_example)
@@ -290,6 +318,7 @@ for value, count in result_arr.results:
 #
 # **Note**: Use `qm.range()` instead of Python's regular `range()`.
 
+
 # %%
 @qm.qkernel
 def loop_example(n: int) -> qm.Vector[qm.Bit]:
@@ -302,6 +331,14 @@ def loop_example(n: int) -> qm.Vector[qm.Bit]:
 
     return qm.measure(qubits)
 
+
+loop_example.draw(n=4)
+
+# %% [markdown]
+# `draw` function has `fold_loops` parameter to fold/unfold loops in visualization.
+
+# %%
+loop_example.draw(n=4, fold_loops=False)
 
 # %%
 exec_loop = transpiler.transpile(loop_example, bindings={"n": 4})
@@ -325,6 +362,7 @@ for value, count in sorted_results:
 #
 # It's an extension of the Bell state, where all qubits are either "all 0" or "all 1".
 
+
 # %%
 @qm.qkernel
 def ghz_state(n: int) -> qm.Vector[qm.Bit]:
@@ -340,6 +378,8 @@ def ghz_state(n: int) -> qm.Vector[qm.Bit]:
 
     return qm.measure(qubits)
 
+
+ghz_state.draw(n=4)
 
 # %%
 # 3-qubit GHZ state
@@ -388,6 +428,7 @@ print(qiskit_ghz.draw(output="text"))
 #
 # Exchanges the states of two qubits.
 
+
 # %%
 @qm.qkernel
 def swap_example() -> tuple[qm.Bit, qm.Bit]:
@@ -405,6 +446,8 @@ def swap_example() -> tuple[qm.Bit, qm.Bit]:
     return qm.measure(q0), qm.measure(q1)
 
 
+swap_example.draw()
+
 # %%
 exec_swap = transpiler.transpile(swap_example)
 result_swap = exec_swap.sample(transpiler.executor(), shots=1000).result()
@@ -420,6 +463,7 @@ for value, count in result_swap.results:
 #
 # Applies Z rotation to both qubits simultaneously.
 # This is an important gate for quantum optimization algorithms (QAOA).
+
 
 # %%
 @qm.qkernel
@@ -442,6 +486,8 @@ def rzz_example(theta: qm.Float) -> tuple[qm.Bit, qm.Bit]:
     return qm.measure(q0), qm.measure(q1)
 
 
+rzz_example.draw()
+
 # %%
 exec_rzz = transpiler.transpile(rzz_example, bindings={"theta": math.pi / 2})
 result_rzz = exec_rzz.sample(transpiler.executor(), shots=1000).result()
@@ -455,6 +501,7 @@ for value, count in result_rzz.results:
 #
 # Adds phase to the target when the control bit is $|1\rangle$.
 # Used in Quantum Fourier Transform (QFT).
+
 
 # %%
 @qm.qkernel
@@ -476,6 +523,8 @@ def cp_example() -> tuple[qm.Bit, qm.Bit]:
 
     return qm.measure(q0), qm.measure(q1)
 
+
+cp_example.draw()
 
 # %%
 exec_cp = transpiler.transpile(cp_example)
