@@ -167,6 +167,25 @@ class ArrayBase(Handle, Generic[T]):
                 key_parts.append(f"sym:{idx.value.uuid}")
         return tuple(key_parts)
 
+    def _indices_definitely_different(
+        self, lhs: tuple[UInt, ...], rhs: tuple[UInt, ...]
+    ) -> bool:
+        """Return True only when index mismatch can be proven safely.
+
+        We intentionally keep this conservative for symbolic expressions:
+        if an index is symbolic, we avoid rejecting because equivalent expressions
+        may be recomputed into different UUIDs.
+        """
+        if len(lhs) != len(rhs):
+            return True
+
+        for lhs_idx, rhs_idx in zip(lhs, rhs):
+            lhs_const = lhs_idx.value.get_const() if lhs_idx.value.is_constant() else None
+            rhs_const = rhs_idx.value.get_const() if rhs_idx.value.is_constant() else None
+            if lhs_const is not None and rhs_const is not None and lhs_const != rhs_const:
+                return True
+        return False
+
     def _get_element(self, indices: tuple[UInt, ...]) -> T:
         """Get an element at the given indices.
 
@@ -270,6 +289,21 @@ class ArrayBase(Handle, Generic[T]):
         source_key: tuple[str, ...] | None = None
         if isinstance(value, Handle) and value.parent is self and value.indices:
             source_key = self._make_indices_key(value.indices)
+
+        if (
+            self.value.type.is_quantum()
+            and source_key is not None
+            and source_key in self._borrowed_indices
+            and self._indices_definitely_different(indices, value.indices)
+        ):
+            source_index_str = self._format_index(value.indices)
+            raise LinearTypeError(
+                f"Cannot return borrowed element '{self.value.name}[{source_index_str}]' "
+                f"to '{self.value.name}[{index_str}]'.\n"
+                f"Borrowed elements must be returned to the same index.",
+                handle_name=self.value.name,
+                operation_name="array element return",
+            )
 
         release_key = (
             source_key

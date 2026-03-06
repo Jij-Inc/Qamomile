@@ -466,6 +466,21 @@ class TestArrayConsumePreservesState:
 class TestSetitemConsumeAndValidation:
     """__setitem__ must consume handle and validate return."""
 
+    def test_setitem_rejects_return_to_different_index(self):
+        """Returning a borrowed element to a different index should raise."""
+
+        @qkernel
+        def bad_circuit() -> tuple[Qubit, Qubit]:
+            qs = qubit_array(2, "qs")
+            q0 = qs[0]
+            q1 = qs[1]
+            qs[0] = q1  # ERROR: q1 was borrowed from qs[1], not qs[0]
+            qs[1] = q0
+            return q0, q1
+
+        with pytest.raises(LinearTypeError, match="same index"):
+            bad_circuit.build()
+
     def test_setitem_consumes_handle(self):
         """After qs[0] = q, reusing q should raise QubitConsumedError."""
 
