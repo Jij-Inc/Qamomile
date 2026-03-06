@@ -45,13 +45,27 @@ from qamomile.circuit.algorithm.basic import (
     rz_layer,
     cz_entangling_layer,
 )
-from qamomile.circuit.algorithm.qaoa import (
-    ising_cost_circuit,
-    x_mixier_circuit,
-    qaoa_circuit,
-    superposition_vector,
-    qaoa_state,
-)
+
+# The qaoa module was renamed between branches:
+#   old (feature branch): ising_cost_circuit, x_mixier_circuit, qaoa_circuit, superposition_vector
+#   new (new_qamomile):   ising_cost, x_mixer, qaoa_layers, superposition_vector (moved to basic)
+# Use try/except to support both.
+try:
+    from qamomile.circuit.algorithm.qaoa import (
+        ising_cost,
+        x_mixer,
+        qaoa_layers,
+        qaoa_state,
+    )
+    from qamomile.circuit.algorithm.basic import superposition_vector
+except ImportError:
+    from qamomile.circuit.algorithm.qaoa import (
+        ising_cost_circuit as ising_cost,
+        x_mixier_circuit as x_mixer,
+        qaoa_circuit as qaoa_layers,
+        superposition_vector,
+        qaoa_state,
+    )
 from qamomile.circuit.algorithm.fqaoa import (
     initial_occupations,
     givens_rotation,
@@ -3340,8 +3354,8 @@ class TestAlgorithmQAOAModules:
         linear = {0: 0.5, 1: -0.5}
         return quad, linear
 
-    def test_ising_cost_circuit(self):
-        """ising_cost_circuit produces a valid unitary evolution."""
+    def test_ising_cost(self):
+        """ising_cost produces a valid unitary evolution."""
         quad, linear = self._simple_ising()
 
         @qmc.qkernel
@@ -3353,7 +3367,7 @@ class TestAlgorithmQAOAModules:
             q = qmc.qubit_array(2, "q")
             for i in qmc.range(2):
                 q[i] = qmc.h(q[i])
-            q = ising_cost_circuit(quad_, linear_, q, gamma)
+            q = ising_cost(quad_, linear_, q, gamma)
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(
@@ -3371,14 +3385,14 @@ class TestAlgorithmQAOAModules:
             q = qmc.qubit_array(2, "q")
             for i in qmc.range(2):
                 q[i] = qmc.h(q[i])
-            q = x_mixier_circuit(q, beta)
+            q = x_mixer(q, beta)
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, bindings={"beta": np.pi / 4})
         sv = _run_statevector(qc)
         assert np.isclose(np.linalg.norm(sv), 1.0, atol=1e-10)
 
-    def test_qaoa_circuit_p1(self):
+    def test_qaoa_layers_p1(self):
         """Single-layer QAOA circuit produces valid state."""
         quad, linear = self._simple_ising()
 
@@ -3392,7 +3406,7 @@ class TestAlgorithmQAOAModules:
             q = qmc.qubit_array(2, "q")
             for i in qmc.range(2):
                 q[i] = qmc.h(q[i])
-            q = qaoa_circuit(qmc.uint(1), quad_, linear_, q, gammas, betas)
+            q = qaoa_layers(qmc.uint(1), quad_, linear_, q, gammas, betas)
             return qmc.measure(q)
 
         gammas = np.array([0.3])
