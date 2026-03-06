@@ -1,13 +1,28 @@
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.circuit.algorithm.qaoa import qaoa_state
-from qamomile.circuit.transpiler.transpiler import Transpiler
+from qamomile.circuit.algorithm.qaoa import (
+    hubo_qaoa_state,
+    qaoa_state,
+)
 from qamomile.circuit.transpiler.executable import ExecutableProgram
+from qamomile.circuit.transpiler.transpiler import Transpiler
 
 from .converter import MathematicalProblemConverter
 from .utils import is_close_zero
 
+
 class QAOAConverter(MathematicalProblemConverter):
+    """Converter for Quantum Approximate Optimization Algorithm (QAOA).
+
+    Supports both standard quadratic (QUBO/Ising) models and higher-order
+    binary optimization (HUBO) models. When higher-order terms are present,
+    automatically uses phase-gadget decomposition for k-body Z-rotations.
+
+    Example:
+        >>> model = BinaryModel.from_hubo({(0, 1, 2): 1.0, (0,): -2.0})
+        >>> converter = QAOAConverter(model)
+        >>> executable = converter.transpile(QiskitTranspiler(), p=2)
+    """
 
     def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
         """Construct the Ising cost Hamiltonian from the spin model.
@@ -44,13 +59,42 @@ class QAOAConverter(MathematicalProblemConverter):
         hamiltonian.constant = self.spin_model.constant
         return hamiltonian
 
-    def transpile(
-        self, 
+    def transpile(self, transpiler: Transpiler, *, p: int) -> ExecutableProgram:
+        """Transpile the model into an executable QAOA circuit.
+
+        Dispatches to the quadratic-only fast path when no higher-order terms
+        are present, otherwise uses the HUBO path with phase-gadget
+        decomposition.
+
+        Args:
+            transpiler (Transpiler): Backend transpiler to use.
+            p (int): Number of QAOA layers.
+
+        Returns:
+            ExecutableProgram: The compiled circuit program.
+        """
+        if not self.spin_model.higher:
+            return self._transpile_quadratic(transpiler, p=p)
+        return self._transpile_hubo(transpiler, p=p)
+
+    def _transpile_quadratic(
+        self,
         transpiler: Transpiler,
         *,
-        p: int
+        p: int,
     ) -> ExecutableProgram:
-        
+        """Transpile a quadratic-only model using the standard QAOA circuit.
+
+        Args:
+            transpiler (Transpiler): Backend transpiler to use.
+            p (int): Number of QAOA layers.
+
+        Returns:
+            ExecutableProgram: The compiled circuit program.
+        """
+
+        # NOTE: @qkernel is defined inline (not at module level) because
+        # transpile() binds instance-specific data at call time.
         @qmc.qkernel
         def qaoa_sampling(
             p: qmc.UInt,
@@ -61,23 +105,72 @@ class QAOAConverter(MathematicalProblemConverter):
             n: qmc.UInt,
         ) -> qmc.Vector[qmc.Bit]:
             q = qaoa_state(
-                p,
-                quad,
-                linear,
-                n,
-                gammas,
-                betas,
+                p=p, quad=quad, linear=linear, n=n, gammas=gammas, betas=betas
             )
             return qmc.measure(q)
 
-        executable = transpiler.transpile(
+        return transpiler.transpile(
             qaoa_sampling,
             bindings={
                 "linear": self.spin_model.linear,
                 "quad": self.spin_model.quad,
                 "n": self.spin_model.num_bits,
-                "p": p
+                "p": p,
             },
             parameters=["gammas", "betas"],
         )
-        return executable
+
+    def _transpile_hubo(
+        self,
+        transpiler: Transpiler,
+        *,
+        p: int,
+    ) -> ExecutableProgram:
+        """Transpile a model with higher-order terms using phase-gadget decomposition.
+
+        Decomposes k-body Z-rotation terms into CX ladder + RZ primitives
+        via ``phase_gadget``, while reusing the standard
+        ``ising_cost`` for quadratic and linear terms.
+
+        Args:
+            transpiler (Transpiler): Backend transpiler to use.
+            p (int): Number of QAOA layers.
+
+        Returns:
+            ExecutableProgram: The compiled circuit program.
+        """
+
+        # NOTE: @qkernel is defined inline (not at module level) because
+        # transpile() binds instance-specific data at call time.
+        @qmc.qkernel
+        def qaoa_sampling_hubo(
+            p_val: qmc.UInt,
+            quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+            linear: qmc.Dict[qmc.UInt, qmc.Float],
+            higher: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+            gammas: qmc.Vector[qmc.Float],
+            betas: qmc.Vector[qmc.Float],
+            n: qmc.UInt,
+        ) -> qmc.Vector[qmc.Bit]:
+            q = hubo_qaoa_state(
+                p_val=p_val,
+                quad=quad,
+                linear=linear,
+                higher=higher,
+                n=n,
+                gammas=gammas,
+                betas=betas,
+            )
+            return qmc.measure(q)
+
+        return transpiler.transpile(
+            qaoa_sampling_hubo,
+            bindings={
+                "linear": self.spin_model.linear,
+                "quad": self.spin_model.quad,
+                "higher": self.spin_model.higher,
+                "n": self.spin_model.num_bits,
+                "p_val": p,
+            },
+            parameters=["gammas", "betas"],
+        )
