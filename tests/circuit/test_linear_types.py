@@ -22,6 +22,14 @@ from qamomile.circuit.transpiler.errors import (
     QubitRebindError,
     UnreturnedBorrowError,
 )
+from tests.circuit._gate_catalog import (
+    ROTATION_GATES as _ROTATION_GATES,
+    SINGLE_QUBIT_GATES as _SINGLE_QUBIT_GATES,
+    STDLIB_GATES as _STDLIB_GATES,
+    THREE_QUBIT_GATES as _THREE_QUBIT_GATES,
+    TWO_QUBIT_GATES_NO_PARAM as _TWO_QUBIT_GATES_NO_PARAM,
+    TWO_QUBIT_GATES_WITH_PARAM as _TWO_QUBIT_GATES_WITH_PARAM,
+)
 
 
 class TestDoubleUseDetection:
@@ -786,40 +794,6 @@ class TestComputedIndexBorrowReturn:
 
         with pytest.raises(UnreturnedBorrowError):
             bad_circuit.build(n=3)
-
-
-# ---------------------------------------------------------------------------
-# Parametrize helpers
-# ---------------------------------------------------------------------------
-
-_SINGLE_QUBIT_GATES = [
-    ("h", qm.h),
-    ("x", qm.x),
-    ("y", qm.y),
-    ("z", qm.z),
-    ("t", qm.t),
-    ("s", qm.s),
-    ("sdg", qm.sdg),
-    ("tdg", qm.tdg),
-]
-
-_ROTATION_GATES = [
-    ("rx", qm.rx),
-    ("ry", qm.ry),
-    ("rz", qm.rz),
-    ("p", qm.p),
-]
-
-_TWO_QUBIT_GATES_NO_PARAM = [
-    ("cx", qm.cx),
-    ("cz", qm.cz),
-    ("swap", qm.swap),
-]
-
-_TWO_QUBIT_GATES_WITH_PARAM = [
-    ("cp", qm.cp),
-    ("rzz", qm.rzz),
-]
 
 
 class TestAllSingleQubitGatesDoubleUse:
@@ -1730,14 +1704,72 @@ class TestArrayConsumeUnreturnedBorrow:
         assert graph is not None
 
 
-class TestQuantumRebindDetection:
-    """Test AST-level detection of forbidden quantum variable reassignment."""
+_DIRECT_ELEMENT_FORBIDDEN_ERRORS = (QubitRebindError, QubitConsumedError)
 
-    # ---- Forbidden patterns ----
+
+class _SingleRebindComposite(CompositeGate):
+    custom_name = "single_rebind_comp"
+
+    @property
+    def num_target_qubits(self) -> int:
+        return 1
+
+    def _decompose(self, qubits):
+        (q0,) = qubits
+        q0 = qm.h(q0)
+        return (q0,)
+
+
+class _TwoRebindComposite(CompositeGate):
+    custom_name = "two_rebind_comp"
+
+    @property
+    def num_target_qubits(self) -> int:
+        return 2
+
+    def _decompose(self, qubits):
+        q0, q1 = qubits
+        q0, q1 = qm.cx(q0, q1)
+        return q0, q1
+
+
+class _ControlledRebindComposite(CompositeGate):
+    custom_name = "controlled_rebind_comp"
+
+    @property
+    def num_target_qubits(self) -> int:
+        return 1
+
+    @property
+    def num_control_qubits(self) -> int:
+        return 1
+
+    def _decompose(self, qubits):
+        (q0,) = qubits
+        q0 = qm.h(q0)
+        return (q0,)
+
+
+def _make_rebind_subkernels():
+    @qkernel
+    def k1(q: qm.Qubit) -> qm.Qubit:
+        return qm.h(q)
+
+    @qkernel
+    def k2(q1: qm.Qubit, q2: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
+        return qm.cx(q1, q2)
+
+    @qkernel
+    def kv(qs: qm.Vector[qm.Qubit]) -> qm.Vector[qm.Qubit]:
+        return qft(qs)
+
+    return k1, k2, kv
+
+
+class TestQuantumRebindDetectionBasics:
+    """Core AST-level detection and compatibility behavior."""
 
     def test_build_scalar_overwrite_call_rejected(self):
-        """a = h(b) where a is existing quantum should raise QubitRebindError."""
-
         @qkernel
         def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
             a = qm.h(b)
@@ -1747,8 +1779,6 @@ class TestQuantumRebindDetection:
             bad.build()
 
     def test_build_scalar_overwrite_direct_rejected(self):
-        """a = b where a is existing quantum should raise QubitRebindError."""
-
         @qkernel
         def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
             a = b
@@ -1758,8 +1788,6 @@ class TestQuantumRebindDetection:
             bad.build()
 
     def test_transpile_scalar_overwrite_rebind_rejected(self):
-        """Rebind violation should also raise when accessing .block."""
-
         @qkernel
         def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
             a = qm.h(b)
@@ -1769,101 +1797,27 @@ class TestQuantumRebindDetection:
             _ = bad.block
 
     def test_build_vector_overwrite_direct_rejected(self):
-        """as_ = bs where both are Vector[Qubit] should raise."""
-
         @qkernel
-        def bad(qs1: qm.Vector[qm.Qubit], qs2: qm.Vector[qm.Qubit]) -> qm.Vector[qm.Qubit]:
+        def bad(
+            qs1: qm.Vector[qm.Qubit], qs2: qm.Vector[qm.Qubit]
+        ) -> qm.Vector[qm.Qubit]:
             qs1 = qs2
             return qs1
 
         with pytest.raises(QubitRebindError):
             bad.build()
 
-    def test_build_vector_overwrite_call_rejected(self):
-        """Vector quantum var overwritten from call with different source."""
-
+    def test_error_not_raised_at_definition(self):
         @qkernel
-        def bad(qs1: qm.Vector[qm.Qubit], qs2: qm.Vector[qm.Qubit]) -> qm.Vector[qm.Qubit]:
-            qs1 = qft(qs2)
-            return qs1
+        def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
+            a = qm.h(b)
+            return a
 
+        assert bad.name == "bad"
         with pytest.raises(QubitRebindError):
             bad.build()
 
-    # ---- Allowed patterns ----
-
-    def test_scalar_new_binding_allowed(self):
-        """q3 = h(q1) where q3 is new should be allowed."""
-
-        @qkernel
-        def ok(q1: qm.Qubit) -> qm.Qubit:
-            q3 = qm.h(q1)
-            return q3
-
-        graph = ok.build()
-        assert graph is not None
-
-    def test_scalar_new_alias_allowed(self):
-        """alias = q where alias is new should be allowed."""
-
-        @qkernel
-        def ok(q: qm.Qubit) -> qm.Qubit:
-            alias = q
-            alias = qm.h(alias)
-            return alias
-
-        graph = ok.build()
-        assert graph is not None
-
-    def test_vector_new_binding_allowed(self):
-        """New variable from vector call is allowed."""
-
-        @qkernel
-        def ok(qs: qm.Vector[qm.Qubit]) -> qm.Vector[qm.Qubit]:
-            result = qft(qs)
-            return result
-
-        graph = ok.build()
-        assert graph is not None
-
-    def test_self_update_allowed(self):
-        """q = h(q) self-update should be allowed."""
-
-        @qkernel
-        def ok(q: qm.Qubit) -> qm.Qubit:
-            q = qm.h(q)
-            q = qm.x(q)
-            return q
-
-        graph = ok.build()
-        assert graph is not None
-
-    def test_same_origin_alias_allowed(self):
-        """alias = q; q = h(alias) should be allowed (same origin)."""
-
-        @qkernel
-        def ok(q: qm.Qubit) -> qm.Qubit:
-            alias = q
-            q = qm.h(alias)
-            return q
-
-        graph = ok.build()
-        assert graph is not None
-
-    def test_tuple_self_update_allowed(self):
-        """q1, q2 = cx(q1, q2) should be allowed."""
-
-        @qkernel
-        def ok(q1: qm.Qubit, q2: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
-            q1, q2 = qm.cx(q1, q2)
-            return q1, q2
-
-        graph = ok.build()
-        assert graph is not None
-
     def test_implicit_discard_still_allowed(self):
-        """Not returning a qubit (implicit discard) should still be allowed."""
-
         @qkernel
         def ok(q1: qm.Qubit, q2: qm.Qubit) -> qm.Qubit:
             q1 = qm.h(q1)
@@ -1872,15 +1826,792 @@ class TestQuantumRebindDetection:
         graph = ok.build()
         assert graph is not None
 
-    def test_error_not_raised_at_definition(self):
-        """@qkernel definition should succeed even with violations."""
+
+class TestQuantumRebindDetectionSingleQubit:
+    """Single-qubit and rotation gates with scalar + vector-element patterns."""
+
+    @pytest.mark.parametrize(
+        "name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES]
+    )
+    def test_scalar_overwrite_from_other_qubit_rejected(self, name, gate):
+        @qkernel
+        def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
+            a = gate(b)
+            return a
+
+        with pytest.raises(QubitRebindError):
+            bad.build()
+
+    @pytest.mark.parametrize(
+        "name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES]
+    )
+    def test_scalar_self_update_allowed(self, name, gate):
+        @qkernel
+        def ok(a: qm.Qubit) -> qm.Qubit:
+            a = gate(a)
+            return a
+
+        graph = ok.build()
+        assert graph is not None
+
+    @pytest.mark.parametrize(
+        "name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES]
+    )
+    def test_scalar_new_binding_allowed(self, name, gate):
+        @qkernel
+        def ok(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
+            new_q = gate(b)
+            return new_q
+
+        graph = ok.build()
+        assert graph is not None
+
+    @pytest.mark.parametrize(
+        "name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES]
+    )
+    def test_vector_element_direct_assign_from_other_vector_rejected(self, name, gate):
+        @qkernel
+        def bad() -> qm.Vector[qm.Qubit]:
+            qs1 = qubit_array(2, "qs1")
+            qs2 = qubit_array(2, "qs2")
+            qs1[0] = gate(qs2[0])
+            qs2[1] = gate(qs2[0])  # Re-borrowing same source element should fail.
+            return qs1
+
+        with pytest.raises(_DIRECT_ELEMENT_FORBIDDEN_ERRORS):
+            bad.build()
+
+    @pytest.mark.parametrize(
+        "name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES]
+    )
+    def test_vector_element_self_update_allowed(self, name, gate):
+        @qkernel
+        def ok() -> qm.Vector[qm.Qubit]:
+            qs = qubit_array(2, "qs")
+            qs[0] = gate(qs[0])
+            return qs
+
+        graph = ok.build()
+        assert graph is not None
+
+    @pytest.mark.parametrize(
+        "name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES]
+    )
+    def test_vector_element_new_binding_allowed(self, name, gate):
+        @qkernel
+        def ok() -> qm.Vector[qm.Qubit]:
+            qs = qubit_array(2, "qs")
+            new_q = gate(qs[0])
+            qs[0] = new_q
+            return qs
+
+        graph = ok.build()
+        assert graph is not None
+
+    @pytest.mark.parametrize(
+        "name,gate", _ROTATION_GATES, ids=[g[0] for g in _ROTATION_GATES]
+    )
+    def test_rotation_scalar_overwrite_from_other_qubit_rejected(self, name, gate):
+        @qkernel
+        def bad(a: qm.Qubit, b: qm.Qubit, theta: qm.Float) -> qm.Qubit:
+            a = gate(b, theta)
+            return a
+
+        with pytest.raises(QubitRebindError):
+            bad.build(parameters=["theta"])
+
+    @pytest.mark.parametrize(
+        "name,gate", _ROTATION_GATES, ids=[g[0] for g in _ROTATION_GATES]
+    )
+    def test_rotation_scalar_self_update_allowed(self, name, gate):
+        @qkernel
+        def ok(a: qm.Qubit, theta: qm.Float) -> qm.Qubit:
+            a = gate(a, theta)
+            return a
+
+        graph = ok.build(parameters=["theta"])
+        assert graph is not None
+
+    @pytest.mark.parametrize(
+        "name,gate", _ROTATION_GATES, ids=[g[0] for g in _ROTATION_GATES]
+    )
+    def test_rotation_scalar_new_binding_allowed(self, name, gate):
+        @qkernel
+        def ok(a: qm.Qubit, b: qm.Qubit, theta: qm.Float) -> qm.Qubit:
+            new_q = gate(b, theta)
+            return new_q
+
+        graph = ok.build(parameters=["theta"])
+        assert graph is not None
+
+    @pytest.mark.parametrize(
+        "name,gate", _ROTATION_GATES, ids=[g[0] for g in _ROTATION_GATES]
+    )
+    def test_rotation_vector_element_direct_assign_from_other_vector_rejected(
+        self, name, gate
+    ):
+        @qkernel
+        def bad(theta: qm.Float) -> qm.Vector[qm.Qubit]:
+            qs1 = qubit_array(2, "qs1")
+            qs2 = qubit_array(2, "qs2")
+            qs1[0] = gate(qs2[0], theta)
+            qs2[1] = gate(qs2[0], theta)
+            return qs1
+
+        with pytest.raises(_DIRECT_ELEMENT_FORBIDDEN_ERRORS):
+            bad.build(parameters=["theta"])
+
+    @pytest.mark.parametrize(
+        "name,gate", _ROTATION_GATES, ids=[g[0] for g in _ROTATION_GATES]
+    )
+    def test_rotation_vector_element_self_update_allowed(self, name, gate):
+        @qkernel
+        def ok(theta: qm.Float) -> qm.Vector[qm.Qubit]:
+            qs = qubit_array(2, "qs")
+            qs[0] = gate(qs[0], theta)
+            return qs
+
+        graph = ok.build(parameters=["theta"])
+        assert graph is not None
+
+    @pytest.mark.parametrize(
+        "name,gate", _ROTATION_GATES, ids=[g[0] for g in _ROTATION_GATES]
+    )
+    def test_rotation_vector_element_new_binding_allowed(self, name, gate):
+        @qkernel
+        def ok(theta: qm.Float) -> qm.Vector[qm.Qubit]:
+            qs = qubit_array(2, "qs")
+            new_q = gate(qs[0], theta)
+            qs[0] = new_q
+            return qs
+
+        graph = ok.build(parameters=["theta"])
+        assert graph is not None
+
+
+class TestQuantumRebindDetectionTwoQubit:
+    """Two/three-qubit gate tuple assignment and vector-element tuple patterns."""
+
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_NO_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM],
+    )
+    def test_scalar_tuple_overwrite_first_mismatch_rejected(self, name, gate):
+        @qkernel
+        def bad(q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
+            q1, q2 = gate(q1, q3)
+            return q1, q2
+
+        with pytest.raises(QubitRebindError):
+            bad.build()
+
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_NO_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM],
+    )
+    def test_scalar_tuple_overwrite_second_mismatch_rejected(self, name, gate):
+        @qkernel
+        def bad(q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
+            q1, q2 = gate(q3, q2)
+            return q1, q2
+
+        with pytest.raises(QubitRebindError):
+            bad.build()
+
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_NO_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM],
+    )
+    def test_scalar_tuple_overwrite_all_mismatch_rejected(self, name, gate):
+        @qkernel
+        def bad(
+            q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit, q4: qm.Qubit
+        ) -> tuple[qm.Qubit, qm.Qubit]:
+            q1, q2 = gate(q3, q4)
+            return q1, q2
+
+        with pytest.raises(QubitRebindError):
+            bad.build()
+
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_NO_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM],
+    )
+    def test_scalar_tuple_self_update_allowed(self, name, gate):
+        @qkernel
+        def ok(q1: qm.Qubit, q2: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
+            q1, q2 = gate(q1, q2)
+            return q1, q2
+
+        graph = ok.build()
+        assert graph is not None
+
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_NO_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM],
+    )
+    def test_scalar_tuple_new_binding_allowed(self, name, gate):
+        @qkernel
+        def ok(
+            q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit, q4: qm.Qubit
+        ) -> tuple[qm.Qubit, qm.Qubit]:
+            new_q1, new_q2 = gate(q3, q4)
+            return new_q1, new_q2
+
+        graph = ok.build()
+        assert graph is not None
+
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_WITH_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_WITH_PARAM],
+    )
+    def test_param_scalar_tuple_mismatch_rejected(self, name, gate):
+        @qkernel
+        def bad(
+            q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit, theta: qm.Float
+        ) -> tuple[qm.Qubit, qm.Qubit]:
+            q1, q2 = gate(q1, q3, theta)
+            return q1, q2
+
+        with pytest.raises(QubitRebindError):
+            bad.build(parameters=["theta"])
+
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_WITH_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_WITH_PARAM],
+    )
+    def test_param_scalar_tuple_self_update_allowed(self, name, gate):
+        @qkernel
+        def ok(
+            q1: qm.Qubit, q2: qm.Qubit, theta: qm.Float
+        ) -> tuple[qm.Qubit, qm.Qubit]:
+            q1, q2 = gate(q1, q2, theta)
+            return q1, q2
+
+        graph = ok.build(parameters=["theta"])
+        assert graph is not None
+
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_WITH_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_WITH_PARAM],
+    )
+    def test_param_scalar_tuple_new_binding_allowed(self, name, gate):
+        @qkernel
+        def ok(
+            q1: qm.Qubit,
+            q2: qm.Qubit,
+            q3: qm.Qubit,
+            q4: qm.Qubit,
+            theta: qm.Float,
+        ) -> tuple[qm.Qubit, qm.Qubit]:
+            new_q1, new_q2 = gate(q3, q4, theta)
+            return new_q1, new_q2
+
+        graph = ok.build(parameters=["theta"])
+        assert graph is not None
+
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_NO_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM],
+    )
+    def test_vector_element_tuple_overwrite_from_other_vector_rejected(self, name, gate):
+        @qkernel
+        def bad() -> tuple[qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
+            qs1 = qubit_array(2, "qs1")
+            qs2 = qubit_array(2, "qs2")
+            q0, q1 = qs1[0], qs1[1]
+            p0, p1 = qs2[0], qs2[1]
+            q0, q1 = gate(p0, p1)
+            qs1[0] = q0
+            qs1[1] = q1
+            return qs1, qs2
+
+        with pytest.raises((QubitRebindError, LinearTypeError)):
+            bad.build()
+
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_NO_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM],
+    )
+    def test_vector_element_tuple_self_update_allowed(self, name, gate):
+        @qkernel
+        def ok() -> qm.Vector[qm.Qubit]:
+            qs = qubit_array(2, "qs")
+            q0, q1 = qs[0], qs[1]
+            q0, q1 = gate(q0, q1)
+            qs[0] = q0
+            qs[1] = q1
+            return qs
+
+        graph = ok.build()
+        assert graph is not None
+
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_NO_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM],
+    )
+    def test_vector_element_tuple_new_binding_allowed(self, name, gate):
+        @qkernel
+        def ok() -> qm.Vector[qm.Qubit]:
+            qs = qubit_array(2, "qs")
+            p0, p1 = qs[0], qs[1]
+            new_q0, new_q1 = gate(p0, p1)
+            qs[0] = new_q0
+            qs[1] = new_q1
+            return qs
+
+        graph = ok.build()
+        assert graph is not None
+
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_WITH_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_WITH_PARAM],
+    )
+    def test_param_vector_element_tuple_overwrite_from_other_vector_rejected(
+        self, name, gate
+    ):
+        @qkernel
+        def bad(theta: qm.Float) -> tuple[qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
+            qs1 = qubit_array(2, "qs1")
+            qs2 = qubit_array(2, "qs2")
+            q0, q1 = qs1[0], qs1[1]
+            p0, p1 = qs2[0], qs2[1]
+            q0, q1 = gate(p0, p1, theta)
+            qs1[0] = q0
+            qs1[1] = q1
+            return qs1, qs2
+
+        with pytest.raises((QubitRebindError, LinearTypeError)):
+            bad.build(parameters=["theta"])
+
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_WITH_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_WITH_PARAM],
+    )
+    def test_param_vector_element_tuple_self_update_allowed(self, name, gate):
+        @qkernel
+        def ok(theta: qm.Float) -> qm.Vector[qm.Qubit]:
+            qs = qubit_array(2, "qs")
+            q0, q1 = qs[0], qs[1]
+            q0, q1 = gate(q0, q1, theta)
+            qs[0] = q0
+            qs[1] = q1
+            return qs
+
+        graph = ok.build(parameters=["theta"])
+        assert graph is not None
+
+    @pytest.mark.parametrize(
+        "name,gate",
+        _TWO_QUBIT_GATES_WITH_PARAM,
+        ids=[g[0] for g in _TWO_QUBIT_GATES_WITH_PARAM],
+    )
+    def test_param_vector_element_tuple_new_binding_allowed(self, name, gate):
+        @qkernel
+        def ok(theta: qm.Float) -> qm.Vector[qm.Qubit]:
+            qs = qubit_array(2, "qs")
+            p0, p1 = qs[0], qs[1]
+            new_q0, new_q1 = gate(p0, p1, theta)
+            qs[0] = new_q0
+            qs[1] = new_q1
+            return qs
+
+        graph = ok.build(parameters=["theta"])
+        assert graph is not None
+
+    @pytest.mark.parametrize(
+        "name,gate", _THREE_QUBIT_GATES, ids=[g[0] for g in _THREE_QUBIT_GATES]
+    )
+    def test_three_qubit_tuple_mixed_origin_rejected(self, name, gate):
+        @qkernel
+        def bad(
+            a: qm.Qubit, b: qm.Qubit, c: qm.Qubit, d: qm.Qubit
+        ) -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
+            a, b, c = gate(a, b, d)
+            return a, b, c
+
+        with pytest.raises(QubitRebindError):
+            bad.build()
+
+    @pytest.mark.parametrize(
+        "name,gate", _THREE_QUBIT_GATES, ids=[g[0] for g in _THREE_QUBIT_GATES]
+    )
+    def test_three_qubit_tuple_self_update_allowed(self, name, gate):
+        @qkernel
+        def ok(
+            a: qm.Qubit, b: qm.Qubit, c: qm.Qubit
+        ) -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
+            a, b, c = gate(a, b, c)
+            return a, b, c
+
+        graph = ok.build()
+        assert graph is not None
+
+    @pytest.mark.parametrize(
+        "name,gate", _THREE_QUBIT_GATES, ids=[g[0] for g in _THREE_QUBIT_GATES]
+    )
+    def test_three_qubit_tuple_new_binding_allowed(self, name, gate):
+        @qkernel
+        def ok(
+            a: qm.Qubit,
+            b: qm.Qubit,
+            c: qm.Qubit,
+        ) -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
+            r0, r1, r2 = gate(a, b, c)
+            return r0, r1, r2
+
+        graph = ok.build()
+        assert graph is not None
+
+
+class TestQuantumRebindDetectionComposite:
+    """Composite gate rebind behavior and controlled-call regression."""
+
+    def test_single_qubit_composite_overwrite_rejected(self):
+        gate = _SingleRebindComposite()
 
         @qkernel
         def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
-            a = qm.h(b)
+            a = gate(b)
             return a
 
-        # Definition succeeded, error only on build/block access
-        assert bad.name == "bad"
         with pytest.raises(QubitRebindError):
             bad.build()
+
+    def test_single_qubit_composite_self_update_allowed(self):
+        gate = _SingleRebindComposite()
+
+        @qkernel
+        def ok(a: qm.Qubit) -> qm.Qubit:
+            a = gate(a)
+            return a
+
+        graph = ok.build()
+        assert graph is not None
+
+    def test_single_qubit_composite_new_binding_allowed(self):
+        gate = _SingleRebindComposite()
+
+        @qkernel
+        def ok(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
+            out = gate(b)
+            return out
+
+        graph = ok.build()
+        assert graph is not None
+
+    def test_two_qubit_composite_tuple_mismatch_rejected(self):
+        gate = _TwoRebindComposite()
+
+        @qkernel
+        def bad(q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
+            q1, q2 = gate(q1, q3)
+            return q1, q2
+
+        with pytest.raises(QubitRebindError):
+            bad.build()
+
+    def test_two_qubit_composite_self_update_allowed(self):
+        gate = _TwoRebindComposite()
+
+        @qkernel
+        def ok(q1: qm.Qubit, q2: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
+            q1, q2 = gate(q1, q2)
+            return q1, q2
+
+        graph = ok.build()
+        assert graph is not None
+
+    def test_two_qubit_composite_new_binding_allowed(self):
+        gate = _TwoRebindComposite()
+
+        @qkernel
+        def ok(
+            q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit, q4: qm.Qubit
+        ) -> tuple[qm.Qubit, qm.Qubit]:
+            r1, r2 = gate(q3, q4)
+            return r1, r2
+
+        graph = ok.build()
+        assert graph is not None
+
+    def test_controlled_composite_keyword_controls_allowed(self):
+        gate = _ControlledRebindComposite()
+
+        @qkernel
+        def circuit(ctrl: qm.Qubit, tgt: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
+            ctrl, tgt = gate(tgt, controls=(ctrl,))
+            return ctrl, tgt
+
+        graph = circuit.build()
+        assert graph is not None
+
+
+class TestQuantumRebindDetectionViaQKernel:
+    """Rebind behavior through qkernel calls (scalar/tuple/vector/element)."""
+
+    def test_scalar_overwrite_rejected(self):
+        k1, _, _ = _make_rebind_subkernels()
+
+        @qkernel
+        def bad(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
+            a = k1(b)
+            return a
+
+        with pytest.raises(QubitRebindError):
+            bad.build()
+
+    def test_scalar_self_update_allowed(self):
+        k1, _, _ = _make_rebind_subkernels()
+
+        @qkernel
+        def ok(a: qm.Qubit) -> qm.Qubit:
+            a = k1(a)
+            return a
+
+        graph = ok.build()
+        assert graph is not None
+
+    def test_scalar_new_binding_allowed(self):
+        k1, _, _ = _make_rebind_subkernels()
+
+        @qkernel
+        def ok(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
+            out = k1(b)
+            return out
+
+        graph = ok.build()
+        assert graph is not None
+
+    def test_tuple_overwrite_first_mismatch_rejected(self):
+        _, k2, _ = _make_rebind_subkernels()
+
+        @qkernel
+        def bad(q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
+            q1, q2 = k2(q1, q3)
+            return q1, q2
+
+        with pytest.raises(QubitRebindError):
+            bad.build()
+
+    def test_tuple_overwrite_second_mismatch_rejected(self):
+        _, k2, _ = _make_rebind_subkernels()
+
+        @qkernel
+        def bad(q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
+            q1, q2 = k2(q3, q2)
+            return q1, q2
+
+        with pytest.raises(QubitRebindError):
+            bad.build()
+
+    def test_tuple_overwrite_all_mismatch_rejected(self):
+        _, k2, _ = _make_rebind_subkernels()
+
+        @qkernel
+        def bad(
+            q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit, q4: qm.Qubit
+        ) -> tuple[qm.Qubit, qm.Qubit]:
+            q1, q2 = k2(q3, q4)
+            return q1, q2
+
+        with pytest.raises(QubitRebindError):
+            bad.build()
+
+    def test_tuple_self_update_allowed(self):
+        _, k2, _ = _make_rebind_subkernels()
+
+        @qkernel
+        def ok(q1: qm.Qubit, q2: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
+            q1, q2 = k2(q1, q2)
+            return q1, q2
+
+        graph = ok.build()
+        assert graph is not None
+
+    def test_tuple_new_binding_allowed(self):
+        _, k2, _ = _make_rebind_subkernels()
+
+        @qkernel
+        def ok(
+            q1: qm.Qubit, q2: qm.Qubit, q3: qm.Qubit, q4: qm.Qubit
+        ) -> tuple[qm.Qubit, qm.Qubit]:
+            r1, r2 = k2(q3, q4)
+            return r1, r2
+
+        graph = ok.build()
+        assert graph is not None
+
+    def test_vector_whole_overwrite_rejected(self):
+        _, _, kv = _make_rebind_subkernels()
+
+        @qkernel
+        def bad(
+            qs1: qm.Vector[qm.Qubit], qs2: qm.Vector[qm.Qubit]
+        ) -> qm.Vector[qm.Qubit]:
+            qs1 = kv(qs2)
+            return qs1
+
+        with pytest.raises(QubitRebindError):
+            bad.build()
+
+    def test_vector_whole_self_update_allowed(self):
+        _, _, kv = _make_rebind_subkernels()
+
+        @qkernel
+        def ok(qs1: qm.Vector[qm.Qubit]) -> qm.Vector[qm.Qubit]:
+            qs1 = kv(qs1)
+            return qs1
+
+        graph = ok.build()
+        assert graph is not None
+
+    def test_vector_whole_new_binding_allowed(self):
+        _, _, kv = _make_rebind_subkernels()
+
+        @qkernel
+        def ok(
+            qs1: qm.Vector[qm.Qubit], qs2: qm.Vector[qm.Qubit]
+        ) -> qm.Vector[qm.Qubit]:
+            out = kv(qs2)
+            return out
+
+        graph = ok.build()
+        assert graph is not None
+
+    def test_vector_element_direct_assign_via_qkernel_rejected(self):
+        k1, _, _ = _make_rebind_subkernels()
+
+        @qkernel
+        def bad() -> qm.Vector[qm.Qubit]:
+            qs1 = qubit_array(2, "qs1")
+            qs2 = qubit_array(2, "qs2")
+            qs1[0] = k1(qs2[0])
+            qs2[1] = k1(qs2[0])
+            return qs1
+
+        with pytest.raises(_DIRECT_ELEMENT_FORBIDDEN_ERRORS):
+            bad.build()
+
+    def test_vector_element_self_update_via_qkernel_allowed(self):
+        k1, _, _ = _make_rebind_subkernels()
+
+        @qkernel
+        def ok() -> qm.Vector[qm.Qubit]:
+            qs = qubit_array(2, "qs")
+            qs[0] = k1(qs[0])
+            return qs
+
+        graph = ok.build()
+        assert graph is not None
+
+    def test_vector_element_new_binding_via_qkernel_allowed(self):
+        k1, _, _ = _make_rebind_subkernels()
+
+        @qkernel
+        def ok() -> qm.Vector[qm.Qubit]:
+            qs = qubit_array(2, "qs")
+            new_q = k1(qs[0])
+            qs[0] = new_q
+            return qs
+
+        graph = ok.build()
+        assert graph is not None
+
+
+class TestQuantumRebindDetectionStdlib:
+    """Rebind behavior through stdlib APIs (qft/iqft) and element-level patterns."""
+
+    @pytest.mark.parametrize("name,gate", _STDLIB_GATES, ids=[g[0] for g in _STDLIB_GATES])
+    def test_vector_whole_overwrite_rejected(self, name, gate):
+        @qkernel
+        def bad(
+            qs1: qm.Vector[qm.Qubit], qs2: qm.Vector[qm.Qubit]
+        ) -> qm.Vector[qm.Qubit]:
+            qs1 = gate(qs2)
+            return qs1
+
+        with pytest.raises(QubitRebindError):
+            bad.build()
+
+    @pytest.mark.parametrize("name,gate", _STDLIB_GATES, ids=[g[0] for g in _STDLIB_GATES])
+    def test_vector_whole_self_update_allowed(self, name, gate):
+        @qkernel
+        def ok(qs1: qm.Vector[qm.Qubit]) -> qm.Vector[qm.Qubit]:
+            qs1 = gate(qs1)
+            return qs1
+
+        graph = ok.build()
+        assert graph is not None
+
+    @pytest.mark.parametrize("name,gate", _STDLIB_GATES, ids=[g[0] for g in _STDLIB_GATES])
+    def test_vector_whole_new_binding_allowed(self, name, gate):
+        @qkernel
+        def ok(
+            qs1: qm.Vector[qm.Qubit], qs2: qm.Vector[qm.Qubit]
+        ) -> qm.Vector[qm.Qubit]:
+            out = gate(qs2)
+            return out
+
+        graph = ok.build()
+        assert graph is not None
+
+    def test_vector_element_direct_assign_via_frontend_gate_rejected(self):
+        @qkernel
+        def bad() -> qm.Vector[qm.Qubit]:
+            qs1 = qubit_array(2, "qs1")
+            qs2 = qubit_array(2, "qs2")
+            qs1[0] = qm.h(qs2[0])
+            qs2[1] = qm.h(qs2[0])
+            return qs1
+
+        with pytest.raises(_DIRECT_ELEMENT_FORBIDDEN_ERRORS):
+            bad.build()
+
+    def test_vector_element_direct_assign_via_qkernel_rejected(self):
+        k1, _, _ = _make_rebind_subkernels()
+
+        @qkernel
+        def bad() -> qm.Vector[qm.Qubit]:
+            qs1 = qubit_array(2, "qs1")
+            qs2 = qubit_array(2, "qs2")
+            qs1[0] = k1(qs2[0])
+            qs2[1] = k1(qs2[0])
+            return qs1
+
+        with pytest.raises(_DIRECT_ELEMENT_FORBIDDEN_ERRORS):
+            bad.build()
+
+    def test_vector_element_self_update_allowed(self):
+        @qkernel
+        def ok() -> qm.Vector[qm.Qubit]:
+            qs = qubit_array(2, "qs")
+            qs[0] = qm.h(qs[0])
+            return qs
+
+        graph = ok.build()
+        assert graph is not None
+
+    def test_vector_element_new_binding_allowed(self):
+        @qkernel
+        def ok() -> qm.Vector[qm.Qubit]:
+            qs = qubit_array(2, "qs")
+            new_q = qm.h(qs[0])
+            qs[0] = new_q
+            return qs
+
+        graph = ok.build()
+        assert graph is not None
