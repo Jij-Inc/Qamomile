@@ -73,6 +73,12 @@ def map_phi_outputs(
             for resolving scalar qubit values that are not directly in
             ``qubit_map`` (e.g., array element resolution).  When *None*,
             ``ResourceAllocator._resolve_qubit_key`` is used as fallback.
+
+    Raises:
+        EmitError: When a quantum PhiOp would merge different or partially
+            unresolved physical qubit resources across branches.  This means
+            the qubit identity depends on the runtime branch condition and
+            cannot be statically resolved.
     """
     for phi in phi_ops:
         if not isinstance(phi, PhiOp):
