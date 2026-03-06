@@ -129,7 +129,7 @@ print("parameters:", est.parameters)
 # %%
 for n_val in [4, 8, 16, 32]:
     c = est.substitute(n=n_val)
-    print(f"n={n_val:2d}: {c.gates.total:>3} gates total, {c.gates.two_qubit:>2} two-qubit")
+    print(f"n={n_val:2d}: {int(c.gates.total):>3} gates total, {int(c.gates.two_qubit):>2} two-qubit")
 
 # %% [markdown]
 # This lets you check whether a circuit is feasible at your target scale

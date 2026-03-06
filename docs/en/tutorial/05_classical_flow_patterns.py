@@ -18,14 +18,14 @@
 # Quantum circuits often have structure that depends on classical data:
 # iterating over qubits, applying gates based on a graph's edges,
 # or choosing between gate sequences. Qamomile supports these patterns
-# through `qmc.range`, `qmc.items`, and `if` branching.
+# through `qmc.range`, `qmc.items`, `if` branching, and `while` loops.
 #
 # This chapter covers:
 #
 # - `qmc.range()` for loops (recap and deeper usage)
 # - `qmc.items()` for iterating over dictionaries
-# - `if` branching on kernel parameters
-# - When `draw()` cannot handle a pattern and what to do instead
+# - `if` and `while` for conditional and iterative circuit construction
+# - Current limitations of `draw()` and `to_circuit()` with control flow
 
 # %%
 import qamomile.circuit as qmc
@@ -39,6 +39,7 @@ transpiler = QiskitTranspiler()
 # We saw `qmc.range(n)` in Tutorial 02 for simple loops.
 # Here is a slightly richer example: applying H to all qubits, then
 # entangling adjacent pairs with CX.
+
 
 # %%
 @qmc.qkernel
@@ -55,6 +56,7 @@ def hadamard_chain(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 
     return qmc.measure(q)
 
+
 # %%
 hadamard_chain.draw(n=4)
 
@@ -69,6 +71,7 @@ hadamard_chain.draw(n=4)
 # The dictionary type uses Qamomile's symbolic types:
 # `qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]` — keys are qubit
 # index pairs, values are interaction weights.
+
 
 # %%
 @qmc.qkernel
@@ -88,6 +91,7 @@ def sparse_coupling(
         q[i], q[j] = qmc.rzz(q[i], q[j], gamma * weight)
 
     return qmc.measure(q)
+
 
 # %% [markdown]
 # ## Inspecting with `to_circuit()`
@@ -109,53 +113,64 @@ print(circuit)
 # Only the three edges in `edge_data` produce RZZ gates — no wasted operations.
 
 # %% [markdown]
-# ## `if` Branching
+# ## `if` Branching and `while` Loops
 #
-# You can use `if` statements on kernel parameters to conditionally apply
-# different gates. Both branches must produce compatible return types.
+# Python `if` and `while` statements work inside kernels.
+# Conditions must be classical expressions (on kernel parameters),
+# not quantum measurement results.
+#
+# Here is an example that combines both: build layers of rotation
+# gates in a `while` loop, and optionally add entanglement with `if`.
+
 
 # %%
 @qmc.qkernel
-def choose_basis(flag: qmc.UInt) -> qmc.Bit:
-    q = qmc.qubit(name="q")
+def layered_circuit(
+    n: qmc.UInt, theta: qmc.Float, depth: qmc.UInt, entangle: qmc.UInt
+) -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(n, name="q")
 
-    if flag > 0:
-        q = qmc.h(q)    # Hadamard basis
-    else:
-        q = qmc.x(q)    # Flip to |1>
+    d = qmc.uint(0)
+    while d < depth:
+        for i in qmc.range(n):
+            q[i] = qmc.ry(q[i], theta)
+        if entangle > 0:
+            for i in qmc.range(n - 1):
+                q[i], q[i + 1] = qmc.cx(q[i], q[i + 1])
+        d = d + 1
 
     return qmc.measure(q)
 
+
 # %% [markdown]
-# ### Current `draw()` Limitations
+# `estimate_resources()` works with `if` and `while`:
+
+# %%
+est = layered_circuit.estimate_resources()
+print("qubits:", est.qubits)
+print("total gates:", est.gates.total)
+
+# %% [markdown]
+# ### Current `draw()` and `to_circuit()` Limitations
 #
-# Some branch patterns are valid in kernels but not yet fully supported
-# by `draw()`. If you encounter this, use `to_circuit()` or execute
-# the kernel directly to verify behavior.
+# `if` and `while` are valid in kernels, but `draw()` and `to_circuit()`
+# do not yet fully support them. If you encounter an error, use
+# `estimate_resources()` to verify the circuit structure.
 
 # %%
 try:
-    choose_basis.draw(flag=1)
-except NotImplementedError as e:
-    print(f"draw() limitation: {e}")
-    print()
-    print("Workaround: use to_circuit() to inspect the concrete circuit:")
-
-# %%
-print("flag=1 (H basis):")
-print(transpiler.to_circuit(choose_basis, bindings={"flag": 1}))
-
-print("flag=0 (X flip):")
-print(transpiler.to_circuit(choose_basis, bindings={"flag": 0}))
+    layered_circuit.draw(n=3, theta=0.5, depth=2, entangle=1)
+except Exception as e:
+    print(f"draw() limitation: {type(e).__name__}: {e}")
 
 # %% [markdown]
 # ## Summary
 #
 # - `qmc.range(n)` for looping over symbolic ranges.
 # - `qmc.items(dict)` for iterating over sparse key-value data (edges, weights).
-# - `if` branching for conditional gate application.
-# - When `draw()` hits a limitation, use `to_circuit()` with concrete bindings
-#   to inspect the circuit, or simply execute the kernel to verify behavior.
+# - `if` and `while` for conditional and iterative gate application.
+# - `if`/`while` work in kernel definitions and `estimate_resources()`,
+#   but `draw()` and `to_circuit()` support is still limited.
 #
 # **Next**: [Reuse Patterns](06_reuse_patterns.ipynb) — helper kernels,
 # composite gates, and stub gates for top-down design.

@@ -107,6 +107,11 @@ def biased_coin(theta: qmc.Float) -> qmc.Bit:
 # ## Inspect Before Running
 #
 # Before executing, you can inspect your kernel. `draw()` shows the circuit diagram:
+#
+# > **Note**: `draw()` visualizes the circuit at Qamomile's IR level.
+# > When transpiling to a backend (e.g., Qiskit), the backend may decompose
+# > or optimize gates, so the actual executed circuit can differ from what
+# > `draw()` shows. Use `to_circuit()` to see the backend-native circuit.
 
 # %%
 biased_coin.draw(theta=0.6)
