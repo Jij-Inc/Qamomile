@@ -6,7 +6,7 @@ Qamomile is a powerful SDK for quantum optimization algorithms, specializing in 
 
 ### Foundations
 
-- [Introduction to Qamomile](tutorial/01_introduction) - First circuit, linear types, execution with QiskitTranspiler
+- [Introduction to Qamomile](tutorial/01_introduction) - First circuit, affine types, execution with QiskitTranspiler
 - [Type System](tutorial/02_type_system) - Full type catalog: Qubit, Float, UInt, Bit, Vector, Dict
 - [Quantum Gates](tutorial/03_gates) - Complete gate reference (all 11 gates)
 - [Superposition & Entanglement](tutorial/04_superposition_entanglement) - Superposition, interference, Bell/GHZ states
@@ -62,7 +62,7 @@ print(f"Counts: {result.counts}")
 `@qkernel` errors are raised in two stages:
 
 - **AST transform stage**: Unsupported control-flow patterns (e.g. direct sequence iteration, quantum operations in `while` conditions) are rejected with `SyntaxError`.
-- **Transpiler / backend stage**: Type violations, linear-type errors, and backend-specific issues use the `QamomileCompileError` family.
+- **Transpiler / backend stage**: Type violations, affine-type errors, and backend-specific issues use the `QamomileCompileError` family.
 
 When catching errors from `@qkernel`, include both `SyntaxError` and `QamomileCompileError` in your exception handling.
 

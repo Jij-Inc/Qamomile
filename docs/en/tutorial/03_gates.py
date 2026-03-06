@@ -20,7 +20,7 @@
 # ## What We Will Learn
 # - All single-qubit gates available in Qamomile
 # - All multi-qubit gates available in Qamomile
-# - The gate return value pattern (linear types in action)
+# - The gate return value pattern (affine types in action)
 
 # %%
 import math
@@ -447,7 +447,7 @@ for value, count in result_rzz.results:
 # ## 4. Gate Return Value Pattern
 #
 # Every gate returns the qubits it consumed. This is a consequence of the
-# **linear type system**: once a qubit enters a gate, the old handle is
+# **affine type system**: once a qubit enters a gate, the old handle is
 # invalidated and a new handle is returned.
 #
 # ### Single-qubit gates: return one qubit
@@ -561,4 +561,4 @@ for value, count in result_rv.results:
 #
 # - **All single-qubit gates available in Qamomile** — H, X, P, RX, RY, and RZ, each taking a qubit (and optionally an angle) and returning the transformed qubit.
 # - **All multi-qubit gates available in Qamomile** — CX (CNOT), CZ, SWAP, CP, and RZZ, each consuming and returning all involved qubits as a tuple.
-# - **The gate return value pattern (linear types in action)** — Every gate returns the qubits it consumed; always capture the return value to satisfy the linear type system.
+# - **The gate return value pattern (affine types in action)** — Every gate returns the qubits it consumed; always capture the return value to satisfy the affine type system.

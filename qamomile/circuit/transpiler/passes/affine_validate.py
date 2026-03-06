@@ -1,4 +1,4 @@
-"""Linear type validation pass: Verify quantum resources are used correctly."""
+"""Affine type validation pass: Verify quantum resources are used correctly."""
 
 from __future__ import annotations
 
@@ -12,13 +12,13 @@ from qamomile.circuit.ir.operation.control_flow import (
 )
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.passes import Pass
-from qamomile.circuit.transpiler.errors import LinearTypeError
+from qamomile.circuit.transpiler.errors import AffineTypeError
 
 
-class LinearValidationPass(Pass[Block, Block]):
-    """Validate linear type semantics at IR level.
+class AffineValidationPass(Pass[Block, Block]):
+    """Validate affine type semantics at IR level.
 
-    This pass serves as a safety net to catch linear type violations
+    This pass serves as a safety net to catch affine type violations
     that may have bypassed the frontend checks. It verifies:
     1. Each quantum value is used (consumed) at most once
     2. Quantum values are not silently discarded
@@ -29,13 +29,13 @@ class LinearValidationPass(Pass[Block, Block]):
 
     @property
     def name(self) -> str:
-        return "linear_validate"
+        return "affine_validate"
 
     def run(self, input: Block) -> Block:
-        """Validate linear type semantics in the block.
+        """Validate affine type semantics in the block.
 
         Raises:
-            LinearTypeError: If a quantum value is consumed multiple times.
+            AffineTypeError: If a quantum value is consumed multiple times.
         """
         # Track which quantum values have been consumed
         # Maps uuid -> operation name that consumed it
@@ -50,7 +50,7 @@ class LinearValidationPass(Pass[Block, Block]):
         operations: list[Operation],
         consumed: dict[str, str],
     ) -> None:
-        """Validate operations for linear type violations.
+        """Validate operations for affine type violations.
 
         Note: This method handles control flow specially due to the need
         for scope management (e.g., loop scopes, branch merging).
@@ -98,7 +98,7 @@ class LinearValidationPass(Pass[Block, Block]):
         """Check if a value was already consumed and mark it as consumed.
 
         Raises:
-            LinearTypeError: If the value was already consumed.
+            AffineTypeError: If the value was already consumed.
         """
         # Skip if this is a result of the previous operation with same uuid
         # (SSA-style versioning means the same physical qubit has different versions)
@@ -106,7 +106,7 @@ class LinearValidationPass(Pass[Block, Block]):
 
         if value.uuid in consumed:
             first_consumer = consumed[value.uuid]
-            raise LinearTypeError(
+            raise AffineTypeError(
                 f"Quantum value '{value.name}' was already consumed by "
                 f"'{first_consumer}' and cannot be used again in '{operation_name}'.\n\n"
                 f"This is likely an internal error - if you see this message, "

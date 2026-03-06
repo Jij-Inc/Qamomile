@@ -1764,7 +1764,7 @@ class TestControlFlowIfElse:
     def test_if_else_both_branches(self):
         """If-else with true branch applying X and false as no-op.
 
-        Note: The linear type system traces both branches from the same state,
+        Note: The affine type system traces both branches from the same state,
         so both branches must use the same qubit handle consistently. Using
         different gates (e.g., X in true, H in false) on the same qubit causes
         a QubitConsumedError because the qubit gets consumed in branch tracing.
@@ -2192,10 +2192,10 @@ class TestTranspilerPassesPipeline:
 
         block = transpiler.to_block(main_kernel)
         inlined = transpiler.inline(block)
-        assert inlined.kind == BlockKind.LINEAR
+        assert inlined.kind == BlockKind.AFFINE
 
-    def test_linear_validate(self, transpiler):
-        """linear_validate() checks no-cloning on inlined block."""
+    def test_affine_validate(self, transpiler):
+        """affine_validate() checks no-cloning on inlined block."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -2206,7 +2206,7 @@ class TestTranspilerPassesPipeline:
 
         block = transpiler.to_block(circuit)
         inlined = transpiler.inline(block)
-        validated = transpiler.linear_validate(inlined)
+        validated = transpiler.affine_validate(inlined)
         # Should pass without error; returned block is same object or equivalent
         assert validated is not None
         assert len(validated.operations) > 0
@@ -2223,7 +2223,7 @@ class TestTranspilerPassesPipeline:
 
         block = transpiler.to_block(circuit, bindings={"theta": 0.5})
         inlined = transpiler.inline(block)
-        validated = transpiler.linear_validate(inlined)
+        validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated, bindings={"theta": 0.5})
         assert folded is not None
 
@@ -2238,7 +2238,7 @@ class TestTranspilerPassesPipeline:
 
         block = transpiler.to_block(circuit)
         inlined = transpiler.inline(block)
-        validated = transpiler.linear_validate(inlined)
+        validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated)
         analyzed = transpiler.analyze(folded)
         assert analyzed.kind == BlockKind.ANALYZED
@@ -2254,7 +2254,7 @@ class TestTranspilerPassesPipeline:
 
         block = transpiler.to_block(circuit)
         inlined = transpiler.inline(block)
-        validated = transpiler.linear_validate(inlined)
+        validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated)
         analyzed = transpiler.analyze(folded)
         separated = transpiler.separate(analyzed)
@@ -2273,7 +2273,7 @@ class TestTranspilerPassesPipeline:
 
         block = transpiler.to_block(circuit)
         inlined = transpiler.inline(block)
-        validated = transpiler.linear_validate(inlined)
+        validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated)
         analyzed = transpiler.analyze(folded)
         separated = transpiler.separate(analyzed)
@@ -2446,7 +2446,7 @@ class TestTranspilerConfigAndSubstitution:
 
         block = transpiler.to_block(circuit)
         inlined = transpiler.inline(block)
-        validated = transpiler.linear_validate(inlined)
+        validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated)
         analyzed = transpiler.analyze(folded)
         separated = transpiler.separate(analyzed)
@@ -2476,7 +2476,7 @@ class TestTranspilerConfigAndSubstitution:
         block = transpiler.to_block(qpe_circuit, bindings={"phase": np.pi / 2})
         substituted = transpiler.substitute(block)
         inlined = transpiler.inline(substituted)
-        validated = transpiler.linear_validate(inlined)
+        validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated, bindings={"phase": np.pi / 2})
         analyzed = transpiler.analyze(folded)
         separated = transpiler.separate(analyzed)
@@ -2562,7 +2562,7 @@ class TestTranspilerConfigAndSubstitution:
         block = transpiler.to_block(circuit)
         substituted = transpiler.substitute(block)
         inlined = transpiler.inline(substituted)
-        validated = transpiler.linear_validate(inlined)
+        validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated)
         analyzed = transpiler.analyze(folded)
         separated = transpiler.separate(analyzed)

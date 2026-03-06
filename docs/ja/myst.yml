@@ -55,7 +55,6 @@ project:
             - file: api/circuit/ir
             - file: api/circuit/qft
             - file: api/circuit/qpe
-            - file: api/circuit/resource_estimation
             - file: api/circuit/stdlib
             - file: api/circuit/transpiler
             - file: api/circuit/visualization

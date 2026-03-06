@@ -81,7 +81,7 @@
 # @qmc.qkernel
 # def my_circuit(param: qmc.Float) -> qmc.Bit:   # annotations required
 #     q = qmc.qubit(name="q")      # allocate qubits inside the function
-#     q = qmc.ry(q, param)         # apply gates (reassign to respect linear types)
+#     q = qmc.ry(q, param)         # apply gates (reassign to respect affine types)
 #     return qmc.measure(q)        # return measurement result
 # ```
 #

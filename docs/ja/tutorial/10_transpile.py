@@ -45,8 +45,8 @@
 #   Block (HIERARCHICAL, 戦略適用済み)
 #     |  inline
 #     v
-#   Block (LINEAR)
-#     |  linear_validate
+#   Block (AFFINE)
+#     |  affine_validate
 #     v
 #   Block (検証済み)
 #     |  constant_fold
@@ -201,9 +201,9 @@ print_block_operations(inlined)
 # インライン展開後、トランスパイラは正確性の検証とセグメント分離の準備のために
 # 3つのパスを実行します。それぞれを見ていきましょう。
 #
-# ### 4a. `linear_validate` — 複製不可能性のセーフティネット
+# ### 4a. `affine_validate` — 複製不可能性のセーフティネット
 #
-# `linear_validate` パスは、フロントエンドのチェックをすり抜けた可能性のある
+# `affine_validate` パスは、フロントエンドのチェックをすり抜けた可能性のある
 # 線形型違反を検出する**セーフティネット**です。実際には、ほとんどの違反
 # （消費済み量子ビットの再利用やエイリアシングなど）は、フロントエンドの
 # ハンドルシステムによって**トレース時**に検出されます。
@@ -211,8 +211,8 @@ print_block_operations(inlined)
 # このパスはIRレベルでの追加的な検証レイヤーを提供します。
 
 # %%
-validated = transpiler.linear_validate(inlined)
-print("=== After linear_validate ===")
+validated = transpiler.affine_validate(inlined)
+print("=== After affine_validate ===")
 print_block_operations(validated)
 
 # %% [markdown]
@@ -323,7 +323,7 @@ for op in separated.quantum.operations:
 # Re-run the pipeline without binding theta
 block_param = transpiler.to_block(my_circuit, bindings={"n": 2})
 inlined_param = transpiler.inline(block_param)
-validated_param = transpiler.linear_validate(inlined_param)
+validated_param = transpiler.affine_validate(inlined_param)
 folded_param = transpiler.constant_fold(validated_param, bindings={})  # theta unbound
 analyzed_param = transpiler.analyze(folded_param)
 separated_param = transpiler.separate(analyzed_param)
@@ -458,7 +458,7 @@ for value, count in result_qpe.results:
 # Run the pipeline step-by-step to inspect segments
 block_qpe = transpiler.to_block(qpe_3bit, bindings={"phase": test_phase})
 inlined_qpe = transpiler.inline(block_qpe)
-validated_qpe = transpiler.linear_validate(inlined_qpe)
+validated_qpe = transpiler.affine_validate(inlined_qpe)
 folded_qpe = transpiler.constant_fold(validated_qpe, bindings={"phase": test_phase})
 analyzed_qpe = transpiler.analyze(folded_qpe)
 separated_qpe = transpiler.separate(analyzed_qpe)
@@ -575,8 +575,8 @@ print(f"Approximate QFT gates: {circuit_approx.size()}")
 # |------|------|------|------|
 # | `to_block()` | `QKernel` | Block (HIERARCHICAL) | Python関数をIRに変換 |
 # | `substitute()` | Block | Block | `TranspilerConfig` の戦略ルールを適用（オプション） |
-# | `inline()` | Block | Block (LINEAR) | すべてのカーネル呼び出しを展開 |
-# | `linear_validate()` | Block | Block (検証済み) | 複製不可能性違反のセーフティネット |
+# | `inline()` | Block | Block (AFFINE) | すべてのカーネル呼び出しを展開 |
+# | `affine_validate()` | Block | Block (検証済み) | 複製不可能性違反のセーフティネット |
 # | `constant_fold()` | Block | Block (畳み込み済み) | 既知の定数を評価 |
 # | `analyze()` | Block | Block (ANALYZED) | 依存関係グラフの構築、I/O検証 |
 # | `separate()` | Block | SeparatedProgram | 古典/量子セグメントに分割 |
@@ -606,10 +606,10 @@ print(f"Approximate QFT gates: {circuit_approx.size()}")
 # %% [markdown]
 # ## このチュートリアルで学んだこと
 #
-# - **トランスパイラパイプラインの全体像と各パスの役割** — 8つのパス（`to_block` → `substitute` → `inline` → `linear_validate` → `constant_fold` → `analyze` → `separate` → `emit`）が `@qkernel` をバックエンド固有のコードに変換します。`substitute` パスはオプションであり、`TranspilerConfig` の戦略ルールを適用します。
+# - **トランスパイラパイプラインの全体像と各パスの役割** — 8つのパス（`to_block` → `substitute` → `inline` → `affine_validate` → `constant_fold` → `analyze` → `separate` → `emit`）が `@qkernel` をバックエンド固有のコードに変換します。`substitute` パスはオプションであり、`TranspilerConfig` の戦略ルールを適用します。
 # - **`draw()` による回路の可視化** — `inline=True` でサブカーネルの呼び出しを展開し、`inline_depth` で展開するネスト階層数を制御します。
 # - **カーネル呼び出しがフラットな命令列にインライン展開される仕組み** — `inline()` パスがすべての `CallBlockOperation` を再帰的に展開し、単一の線形ブロックを生成します。
-# - **検証、定数畳み込み、依存関係解析の動作** — `linear_validate` は複製不可能性違反のセーフティネットです（ほとんどはフロントエンドによりトレース時に検出されます）。`constant_fold` は `theta * 2` のような `BinOp` 式を具体的な値に評価し、`analyze` はI/O検証のための依存関係グラフを構築します。
+# - **検証、定数畳み込み、依存関係解析の動作** — `affine_validate` は複製不可能性違反のセーフティネットです（ほとんどはフロントエンドによりトレース時に検出されます）。`constant_fold` は `theta * 2` のような `BinOp` 式を具体的な値に評価し、`analyze` はI/O検証のための依存関係グラフを構築します。
 # - **プログラムが量子セグメントと古典セグメントに分離される仕組み** — `separate()` はブロックを `classical_prep`（値が未束縛の場合のランタイムパラメータ計算）、`quantum`、`classical_post` セグメントに分割します。QPEは `DecodeQFixedOperation` によるQFixed → Float変換で `classical_post` を実演しています。
 # - **emitパスによるバックエンド固有コードの生成** — `emit()` は量子セグメントを走査し、対象バックエンド向けのネイティブな回路オブジェクト（例：Qiskitの `QuantumCircuit`）を生成します。
 # - **`TranspilerConfig` による合成ゲート分解戦略の制御** — `TranspilerConfig.with_strategies()` がゲート名を戦略名にマッピングし、emitパス中に分解を選択します。

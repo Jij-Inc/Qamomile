@@ -1,4 +1,4 @@
-"""Tests for linear type enforcement in the circuit frontend."""
+"""Tests for affine type enforcement in the circuit frontend."""
 
 import pytest
 
@@ -16,7 +16,7 @@ from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.stdlib.qft import iqft, qft
 from qamomile.circuit.stdlib.qpe import qpe
 from qamomile.circuit.transpiler.errors import (
-    LinearTypeError,
+    AffineTypeError,
     QubitAliasError,
     QubitConsumedError,
     QubitRebindError,
@@ -392,7 +392,7 @@ class TestErrorMessageQuality:
 
 
 class TestClassicalValuesNotLinear:
-    """Test that classical values don't have linear type restrictions."""
+    """Test that classical values don't have affine type restrictions."""
 
     def test_float_can_be_used_multiple_times(self):
         """Float values should be reusable."""
@@ -478,7 +478,7 @@ class TestSetitemConsumeAndValidation:
             qs[1] = q0
             return q0, q1
 
-        with pytest.raises(LinearTypeError, match="same index"):
+        with pytest.raises(AffineTypeError, match="same index"):
             bad_circuit.build()
 
     def test_setitem_consumes_handle(self):
@@ -497,7 +497,7 @@ class TestSetitemConsumeAndValidation:
             bad_circuit.build()
 
     def test_setitem_rejects_rogue_return(self):
-        """Returning a qubit from a different array should raise LinearTypeError."""
+        """Returning a qubit from a different array should raise AffineTypeError."""
         from qamomile.circuit.frontend.tracer import trace
 
         with trace():
@@ -505,7 +505,7 @@ class TestSetitemConsumeAndValidation:
             qs2 = qubit_array(1, "qs2")
             _q1 = qs1[0]
             rogue = qs2[0]
-            with pytest.raises(LinearTypeError, match="not borrowed from this array"):
+            with pytest.raises(AffineTypeError, match="not borrowed from this array"):
                 qs1[0] = rogue
 
     def test_setitem_unborrowed_index_consumes_handle(self):
@@ -529,7 +529,7 @@ class TestSetitemConsumeAndValidation:
             qs1 = qubit_array(2, "qs1")
             qs2 = qubit_array(2, "qs2")
             foreign = qs2[0]  # borrowed from qs2, parent=qs2
-            with pytest.raises(LinearTypeError, match="not borrowed from this array"):
+            with pytest.raises(AffineTypeError, match="not borrowed from this array"):
                 qs1[1] = foreign  # unborrowed index, but foreign handle
 
     def test_setitem_after_measure_raises_consumed_error(self):
@@ -823,7 +823,7 @@ class TestComputedIndexBorrowReturn:
 
 
 class TestAllSingleQubitGatesDoubleUse:
-    """Every single-qubit gate must enforce linearity (double-use → error, reassign → OK)."""
+    """Every single-qubit gate must enforce affine usage (double-use → error, reassign → OK)."""
 
     @pytest.mark.parametrize(
         "name,gate", _SINGLE_QUBIT_GATES, ids=[g[0] for g in _SINGLE_QUBIT_GATES]
@@ -858,7 +858,7 @@ class TestAllSingleQubitGatesDoubleUse:
 
 
 class TestAllRotationGatesDoubleUse:
-    """Every rotation gate must enforce linearity."""
+    """Every rotation gate must enforce affine usage."""
 
     @pytest.mark.parametrize(
         "name,gate", _ROTATION_GATES, ids=[g[0] for g in _ROTATION_GATES]
@@ -1228,8 +1228,8 @@ class TestVectorQubitPatterns:
             bad_circuit.build()
 
 
-class TestStubCompositeGateLinearity:
-    """Stub composite gates must enforce linearity on their qubit arguments."""
+class TestStubCompositeGateAffine:
+    """Stub composite gates must enforce affine usage on their qubit arguments."""
 
     def _make_single_qubit_composite(self):
         class StubSingleQubit(CompositeGate):
@@ -1328,7 +1328,7 @@ class TestStubCompositeGateLinearity:
             bad_circuit.build()
 
     def test_two_qubit_composite_alias_raises(self):
-        """Same qubit in both positions of two-qubit composite gate should raise a LinearTypeError.
+        """Same qubit in both positions of two-qubit composite gate should raise an AffineTypeError.
 
         Note: CompositeGate consumes targets sequentially, so the second use of
         an already-consumed handle raises QubitConsumedError (not QubitAliasError
@@ -1340,7 +1340,7 @@ class TestStubCompositeGateLinearity:
         def bad_circuit(q: Qubit) -> tuple[Qubit, Qubit]:
             return gate(q, q)
 
-        with pytest.raises(LinearTypeError):
+        with pytest.raises(AffineTypeError):
             bad_circuit.build()
 
     def test_two_qubit_composite_proper_use_works(self):
@@ -1394,7 +1394,7 @@ class TestStubCompositeGateLinearity:
         assert graph is not None
 
 
-class TestStdlibGatesLinearity:
+class TestStdlibGatesAffine:
     """QFT, IQFT, and QPE must properly consume qubits."""
 
     def test_qft_proper_use_works(self):
@@ -1453,8 +1453,8 @@ class TestStdlibGatesLinearity:
         assert graph is not None
 
 
-class TestControlledGateLinearity:
-    """qm.controlled() wrappers must enforce linearity on both control and target."""
+class TestControlledGateAffine:
+    """qm.controlled() wrappers must enforce affine usage on both control and target."""
 
     def _make_sub_kernel(self):
         @qkernel
@@ -1547,7 +1547,7 @@ class TestControlledGateLinearity:
 
 
 class TestMeasurementAllPatterns:
-    """Measurement patterns: single qubit, vector, and linearity after measurement."""
+    """Measurement patterns: single qubit, vector, and affine usage after measurement."""
 
     def test_measure_single_after_gate_works(self):
         """Measuring a qubit after a gate should succeed."""
@@ -1733,7 +1733,7 @@ class TestArrayConsumeUnreturnedBorrow:
 _DIRECT_ELEMENT_FORBIDDEN_ERRORS = (
     QubitRebindError,
     QubitConsumedError,
-    LinearTypeError,
+    AffineTypeError,
 )
 
 
@@ -2182,7 +2182,7 @@ class TestQuantumRebindDetectionTwoQubit:
             qs1[1] = q1
             return qs1, qs2
 
-        with pytest.raises((QubitRebindError, LinearTypeError)):
+        with pytest.raises((QubitRebindError, AffineTypeError)):
             bad.build()
 
     @pytest.mark.parametrize(
@@ -2240,7 +2240,7 @@ class TestQuantumRebindDetectionTwoQubit:
             qs1[1] = q1
             return qs1, qs2
 
-        with pytest.raises((QubitRebindError, LinearTypeError)):
+        with pytest.raises((QubitRebindError, AffineTypeError)):
             bad.build(parameters=["theta"])
 
     @pytest.mark.parametrize(

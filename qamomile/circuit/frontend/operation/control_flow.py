@@ -148,7 +148,7 @@ def _fresh_handle_copy_for_tracing(h: typing.Any) -> typing.Any:
     ``_consumed_by`` attributes.  This is the **only** place where such access
     is acceptable: if-else branches are mutually exclusive, so both must be
     traceable independently.  Exposing a general-purpose copy method on Handle
-    would undermine the linear-type enforcement that prevents qubit reuse bugs.
+    would undermine the affine-type enforcement that prevents qubit reuse bugs.
 
     Non-Handle values (int, float, etc.) are returned unchanged.
     """

@@ -24,7 +24,7 @@
 # - The full catalogue of Qamomile types
 # - Quantum types vs classical types
 # - How to create qubits and qubit arrays
-# - Linear type errors: what they look like and how to fix them
+# - Affine type errors: what they look like and how to fix them
 # - Classical scalar types: `Float`, `UInt`, `Bit` (type annotations only)
 # - Symbolic values and iteration with `qmc.range()` and `qmc.items()`
 # - Container types: `Vector`, `Dict`, `Tuple`, `Matrix`, `Tensor`
@@ -79,7 +79,7 @@ transpiler = QiskitTranspiler()
 # The most important distinction is between **quantum** and **classical** types:
 #
 # - **Quantum types** (`Qubit`, `QFixed`, `Vector[Qubit]`) obey the
-#   **linear type rule**: each handle can only be used once, and we must
+#   **affine type rule**: each handle can only be used once, and we must
 #   reassign after every gate (`q = qmc.h(q)`).
 # - **Classical types** (`Float`, `UInt`, `Bit`) can be freely reused and
 #   copied -- they behave like ordinary Python values.
@@ -160,7 +160,7 @@ except Exception as e:
 # %% [markdown]
 # ### Linear Type Errors
 #
-# Because qubits obey the linear type rule, Qamomile catches common
+# Because qubits obey the affine type rule, Qamomile catches common
 # mistakes at trace time -- before our circuit ever reaches a backend.
 # There are three error types:
 #
@@ -519,7 +519,7 @@ qiskit_circuit.draw(output="mpl")
 # binary number. It is used in **Quantum Phase Estimation (QPE)** to
 # automatically decode the estimated phase from the measurement results.
 #
-# `QFixed` is a quantum type (subject to linear type rules). It is
+# `QFixed` is a quantum type (subject to affine type rules). It is
 # returned by `qmc.qpe()` -- we do not construct it directly.
 #
 # ```python
@@ -589,7 +589,7 @@ qiskit_circuit.draw(output="mpl")
 # 1. The most commonly used constructors are `qmc.qubit()` and
 #    `qmc.qubit_array()`. Classical constructors (`qmc.uint()`,
 #    `qmc.float_()`, `qmc.bit()`) exist but are rarely needed directly.
-# 2. **Quantum types** (`Qubit`, `QFixed`) enforce the linear type rule:
+# 2. **Quantum types** (`Qubit`, `QFixed`) enforce the affine type rule:
 #    always reassign after gates.
 # 3. **Classical types** (`Float`, `UInt`, `Bit`) can be freely reused.
 # 4. Use `qmc.range()` (not Python `range()`) for loops inside `@qkernel`.
@@ -633,9 +633,9 @@ qiskit_circuit.draw(output="mpl")
 # ## What We Learned
 #
 # - **The full catalogue of Qamomile types** — Qamomile provides quantum types (`Qubit`, `QFixed`), classical scalars (`Float`, `UInt`, `Bit`), containers (`Vector`, `Dict`, `Tuple`, `Matrix`, `Tensor`), and special types (`Observable`).
-# - **Quantum types vs classical types** — Quantum types enforce linear ownership (consume-and-return), while classical types can be freely reused.
+# - **Quantum types vs classical types** — Quantum types enforce affine ownership (consume-and-return), while classical types can be freely reused.
 # - **How to create qubits and qubit arrays** — `qmc.qubit(name=...)` and `qmc.qubit_array(n, name=...)` are the primary constructors; classical constructors (`qmc.uint()`, `qmc.float_()`, `qmc.bit()`) exist but are typically provided via type annotations and bindings.
-# - **Linear type errors: what they look like and how to fix them** — `QubitConsumedError`, `QubitAliasError`, and `UnreturnedBorrowError` are caught at trace time with clear messages; the fix is always to capture gate return values and avoid reusing consumed handles.
+# - **Affine type errors: what they look like and how to fix them** — `QubitConsumedError`, `QubitAliasError`, and `UnreturnedBorrowError` are caught at trace time with clear messages; the fix is always to capture gate return values and avoid reusing consumed handles.
 # - **Classical scalar types: `Float`, `UInt`, `Bit`** — These are typically declared as function parameters or returned by operations. Standalone constructors (`qmc.uint()`, `qmc.float_()`, `qmc.bit()`) are available but rarely needed directly.
 # - **Symbolic values and iteration with `qmc.range()` and `qmc.items()`** — `qmc.range(n)` creates symbolic loops over `UInt` bounds, and `qmc.items(d)` iterates over `Dict` handles inside `@qkernel`.
 # - **Container types: `Vector`, `Dict`, `Tuple`, `Matrix`, `Tensor`** — `Vector` holds qubit registers and measurement arrays; `Dict` and `Tuple` pass structured problem data via `bindings`.

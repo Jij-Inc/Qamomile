@@ -1,4 +1,4 @@
-"""Analyze pass: Validate and analyze dependencies in a linear block."""
+"""Analyze pass: Validate and analyze dependencies in an affine block."""
 
 from __future__ import annotations
 
@@ -15,14 +15,14 @@ from qamomile.circuit.transpiler.errors import DependencyError, ValidationError
 
 
 class AnalyzePass(Pass[Block, Block]):
-    """Analyze and validate a linear block.
+    """Analyze and validate an affine block.
 
     This pass:
     1. Builds a dependency graph between values
     2. Validates that quantum ops don't depend on non-parameter classical results
     3. Checks that block inputs/outputs are classical
 
-    Input: Block with BlockKind.LINEAR
+    Input: Block with BlockKind.AFFINE
     Output: Block with BlockKind.ANALYZED (with _dependency_graph populated)
     """
 
@@ -32,8 +32,8 @@ class AnalyzePass(Pass[Block, Block]):
 
     def run(self, input: Block) -> Block:
         """Analyze the block and validate dependencies."""
-        if input.kind != BlockKind.LINEAR:
-            raise ValidationError(f"AnalyzePass expects LINEAR block, got {input.kind}")
+        if input.kind != BlockKind.AFFINE:
+            raise ValidationError(f"AnalyzePass expects AFFINE block, got {input.kind}")
 
         # Check inputs/outputs are classical
         self._validate_io_classical(input)
@@ -170,7 +170,7 @@ class AnalyzePass(Pass[Block, Block]):
         ``Value`` instances that will be resolved at emit time.
 
         Args:
-            operations: The linear operation list to validate.
+            operations: The affine operation list to validate.
 
         Raises:
             ValidationError: If a concrete ``power`` value is invalid.

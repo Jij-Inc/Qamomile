@@ -45,8 +45,8 @@
 #   Block (HIERARCHICAL, strategies applied)
 #     |  inline
 #     v
-#   Block (LINEAR)
-#     |  linear_validate
+#   Block (AFFINE)
+#     |  affine_validate
 #     v
 #   Block (validated)
 #     |  constant_fold
@@ -208,18 +208,18 @@ print_block_operations(inlined)
 # After inlining, the transpiler runs three passes that validate correctness
 # and prepare the block for segment separation. Let's look at each one.
 #
-# ### 4a. `linear_validate` — Safety Net for No-Cloning
+# ### 4a. `affine_validate` — Safety Net for No-Cloning
 #
-# The `linear_validate` pass is a **safety net** that catches any linear type
+# The `affine_validate` pass is a **safety net** that catches any affine type
 # violations that may have bypassed frontend checks. In practice, most
 # violations (such as reusing a consumed qubit or aliasing) are caught at
-# **trace time** by the frontend's handle system — see the linear type errors
+# **trace time** by the frontend's handle system — see the affine type errors
 # in [Tutorial 02](02_type_system.ipynb). This pass provides an additional
 # layer of verification at the IR level.
 
 # %%
-validated = transpiler.linear_validate(inlined)
-print("=== After linear_validate ===")
+validated = transpiler.affine_validate(inlined)
+print("=== After affine_validate ===")
 print_block_operations(validated)
 
 # %% [markdown]
@@ -331,7 +331,7 @@ for op in separated.quantum.operations:
 # Re-run the pipeline without binding theta
 block_param = transpiler.to_block(my_circuit, bindings={"n": 2})
 inlined_param = transpiler.inline(block_param)
-validated_param = transpiler.linear_validate(inlined_param)
+validated_param = transpiler.affine_validate(inlined_param)
 folded_param = transpiler.constant_fold(validated_param, bindings={})  # theta unbound
 analyzed_param = transpiler.analyze(folded_param)
 separated_param = transpiler.separate(analyzed_param)
@@ -470,7 +470,7 @@ for value, count in result_qpe.results:
 # Run the pipeline step-by-step to inspect segments
 block_qpe = transpiler.to_block(qpe_3bit, bindings={"phase": test_phase})
 inlined_qpe = transpiler.inline(block_qpe)
-validated_qpe = transpiler.linear_validate(inlined_qpe)
+validated_qpe = transpiler.affine_validate(inlined_qpe)
 folded_qpe = transpiler.constant_fold(validated_qpe, bindings={"phase": test_phase})
 analyzed_qpe = transpiler.analyze(folded_qpe)
 separated_qpe = transpiler.separate(analyzed_qpe)
@@ -590,8 +590,8 @@ print(f"Approximate QFT gates: {circuit_approx.size()}")
 # |------|-------|--------|---------|
 # | `to_block()` | `QKernel` | Block (HIERARCHICAL) | Convert Python function to IR |
 # | `substitute()` | Block | Block | Apply strategy rules from `TranspilerConfig` (optional) |
-# | `inline()` | Block | Block (LINEAR) | Expand all kernel calls |
-# | `linear_validate()` | Block | Block (validated) | Safety net for no-cloning violations |
+# | `inline()` | Block | Block (AFFINE) | Expand all kernel calls |
+# | `affine_validate()` | Block | Block (validated) | Safety net for no-cloning violations |
 # | `constant_fold()` | Block | Block (folded) | Evaluate known constants |
 # | `analyze()` | Block | Block (ANALYZED) | Build dependency graph, validate I/O |
 # | `separate()` | Block | SeparatedProgram | Split into classical/quantum segments |
@@ -622,10 +622,10 @@ print(f"Approximate QFT gates: {circuit_approx.size()}")
 # %% [markdown]
 # ## What We Learned
 #
-# - **The full transpiler pipeline and the role of each pass** — Eight passes (`to_block` → `substitute` → `inline` → `linear_validate` → `constant_fold` → `analyze` → `separate` → `emit`) transform a `@qkernel` into backend-specific code. The `substitute` pass is optional and applies strategy rules from `TranspilerConfig`.
+# - **The full transpiler pipeline and the role of each pass** — Eight passes (`to_block` → `substitute` → `inline` → `affine_validate` → `constant_fold` → `analyze` → `separate` → `emit`) transform a `@qkernel` into backend-specific code. The `substitute` pass is optional and applies strategy rules from `TranspilerConfig`.
 # - **How `draw()` visualizes circuits** — `inline=True` expands sub-kernel calls; `inline_depth` controls how many nesting levels are expanded.
-# - **How kernel calls are inlined into a flat instruction sequence** — The `inline()` pass recursively expands all `CallBlockOperation`s, producing a single linear block.
-# - **How validation, constant folding, and dependency analysis work** — `linear_validate` is a safety net for no-cloning violations (most are caught at trace time by the frontend), `constant_fold` evaluates `BinOp` expressions like `theta * 2` into concrete values, and `analyze` builds a dependency graph for I/O validation.
+# - **How kernel calls are inlined into a flat instruction sequence** — The `inline()` pass recursively expands all `CallBlockOperation`s, producing a single affine block.
+# - **How validation, constant folding, and dependency analysis work** — `affine_validate` is a safety net for no-cloning violations (most are caught at trace time by the frontend), `constant_fold` evaluates `BinOp` expressions like `theta * 2` into concrete values, and `analyze` builds a dependency graph for I/O validation.
 # - **How the program is separated into quantum and classical segments** — `separate()` splits the block into `classical_prep` (runtime parameter computation when values are unbound), `quantum`, and `classical_post` segments. QPE demonstrates `classical_post` with `DecodeQFixedOperation` for QFixed → Float conversion.
 # - **How the emit pass generates backend-specific code** — `emit()` walks quantum segments and produces native circuit objects (e.g. Qiskit `QuantumCircuit`) for the target backend.
 # - **How `TranspilerConfig` controls composite gate decomposition strategies** — `TranspilerConfig.with_strategies()` maps gate names to strategy names, selecting decompositions during the emit pass.

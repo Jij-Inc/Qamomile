@@ -21,7 +21,7 @@
 # ## What We Will Learn
 # - What Qamomile is and where it fits in the quantum ecosystem
 # - Creating and running our first quantum circuit
-# - The linear type system (no-cloning enforcement)
+# - The affine type system (no-cloning enforcement)
 # - Execution with QiskitTranspiler
 # - How Qamomile traces and transpiles quantum programs
 # - Brief introduction to parametric circuits
@@ -51,7 +51,7 @@
 # |---------|-------------|
 # | **Pythonic syntax** | Define quantum program with `@qkernel` decorator |
 # | **Type safety** | All parameters and returns require type annotations |
-# | **Linear types** | Enforces quantum no-cloning before execution |
+# | **Affine types** | Enforces quantum no-cloning before execution |
 # | **Multi-backend** | Currently Qiskit; CUDA-Q and QURI Parts coming soon, more planned |
 # | **Standard library** | Built-in QFT, IQFT, QPE with decomposition strategies (more planned) |
 # | **Resource estimation** | Symbolic gate counts and depth analysis |
@@ -82,7 +82,7 @@
 # @qmc.qkernel
 # def my_circuit(param: qmc.Float) -> qmc.Bit:   # annotations required
 #     q = qmc.qubit(name="q")      # allocate qubits inside the function
-#     q = qmc.ry(q, param)         # apply gates (reassign to respect linear types)
+#     q = qmc.ry(q, param)         # apply gates (reassign to respect affine types)
 #     return qmc.measure(q)        # return measurement result
 # ```
 #
@@ -131,7 +131,7 @@ x_gate_circuit.draw()
 # We may have noticed the pattern `q = qmc.x(q)` — why must we reassign?
 #
 # In quantum mechanics, qubits cannot be copied (the **no-cloning theorem**).
-# Qamomile enforces this through its **linear type system**: once a qubit
+# Qamomile enforces this through its **affine type system**: once a qubit
 # enters a gate, the old handle is consumed and a new handle is returned.
 # We must always capture the return value.
 #
@@ -478,7 +478,7 @@ print(f"  Circuit depth: {est_ghz.depth.total_depth}")
 # This tutorial covered the essential concepts of Qamomile:
 #
 # 1. **`@qmc.qkernel`**: Define quantum circuits as Python functions
-# 2. **Linear types**: Always reassign after gates (`q = qmc.h(q)`)
+# 2. **Affine types**: Always reassign after gates (`q = qmc.h(q)`)
 # 3. **Execution**: `QiskitTranspiler` → `transpile()` → `sample()`
 # 4. **Tracing and transpilation**: `@qkernel` is traced into an IR graph, then transpiled through a multi-pass pipeline
 # 5. **Parametric circuits**: `qmc.Float` parameters with `bindings` / `parameters`
@@ -510,7 +510,7 @@ print(f"  Circuit depth: {est_ghz.depth.total_depth}")
 #
 # - **What Qamomile is and where it fits in the quantum ecosystem** — Qamomile bridges the path from NISQ to FTQC, providing a single framework for writing quantum programs across both paradigms.
 # - **Creating and running our first quantum circuit** — Used `@qmc.qkernel` with `qmc.qubit()`, gates like `qmc.x()`, and `qmc.measure()` to build and visualize circuits.
-# - **The linear type system (no-cloning enforcement)** — Gates consume and return qubits; always reassign (`q = qmc.h(q)`) to enforce the quantum no-cloning theorem at transpile time.
+# - **The affine type system (no-cloning enforcement)** — Gates consume and return qubits; always reassign (`q = qmc.h(q)`) to enforce the quantum no-cloning theorem at transpile time.
 # - **Execution with QiskitTranspiler** — `QiskitTranspiler` transpiles kernels via `transpile()` and runs them via `sample()` to obtain measurement results.
 # - **How Qamomile traces and transpiles quantum programs** — `@qkernel` functions are traced into an IR graph, then transpiled through a multi-pass pipeline (inline, constant fold, analyze, separate, emit) to produce backend-specific circuits.
 # - **Brief introduction to parametric circuits** — `qmc.Float` parameters can be fixed at transpile time with `bindings=` or kept free with `parameters=` for variational algorithms.
