@@ -46,6 +46,7 @@ jobs:
           uv run pytest tests/transpiler/backends/test_qiskit_frontend.py -v
           uv run pytest tests/transpiler/backends/test_quri_parts.py -v
           uv run pytest tests/transpiler/backends/test_quri_parts_frontend.py -v
+          uv run pytest tests/transpiler/backends/test_partial_measurement.py -v
           uv run pytest tests/quri_parts -v
           uv run pytest tests/optimization -v
           uv run pytest tests/observable -v
