@@ -408,6 +408,14 @@ class QuriPartsGateEmitter:
             circuit.add_CNOT_gate(control, target)
 
     # Measurement - QURI Parts doesn't support mid-circuit measurements
+    #
+    # When emit_measure is a no-op, the sampler returns an all-qubit
+    # bitstring indexed by qubit position.  The transpiler pipeline
+    # needs a clbit→qubit mapping to decode partial measurements
+    # correctly.  Setting this flag causes StandardEmitPass to build
+    # that mapping.
+    noop_measurement: bool = True
+
     def emit_measure(
         self,
         circuit: "LinearMappedUnboundParametricQuantumCircuit",
