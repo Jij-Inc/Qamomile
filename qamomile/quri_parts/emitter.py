@@ -10,6 +10,7 @@ circuits. Angles are specified as dictionaries: {param: coeff, CONST: offset}.
 from __future__ import annotations
 
 import math
+import warnings
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -76,41 +77,49 @@ class QuriPartsGateEmitter:
     def emit_h(
         self, circuit: "LinearMappedUnboundParametricQuantumCircuit", qubit: int
     ) -> None:
+        """Emit Hadamard gate."""
         circuit.add_H_gate(qubit)
 
     def emit_x(
         self, circuit: "LinearMappedUnboundParametricQuantumCircuit", qubit: int
     ) -> None:
+        """Emit Pauli-X gate."""
         circuit.add_X_gate(qubit)
 
     def emit_y(
         self, circuit: "LinearMappedUnboundParametricQuantumCircuit", qubit: int
     ) -> None:
+        """Emit Pauli-Y gate."""
         circuit.add_Y_gate(qubit)
 
     def emit_z(
         self, circuit: "LinearMappedUnboundParametricQuantumCircuit", qubit: int
     ) -> None:
+        """Emit Pauli-Z gate."""
         circuit.add_Z_gate(qubit)
 
     def emit_s(
         self, circuit: "LinearMappedUnboundParametricQuantumCircuit", qubit: int
     ) -> None:
+        """Emit S (phase) gate."""
         circuit.add_S_gate(qubit)
 
     def emit_t(
         self, circuit: "LinearMappedUnboundParametricQuantumCircuit", qubit: int
     ) -> None:
+        """Emit T gate."""
         circuit.add_T_gate(qubit)
 
     def emit_sdg(
         self, circuit: "LinearMappedUnboundParametricQuantumCircuit", qubit: int
     ) -> None:
+        """Emit S-dagger (inverse S) gate."""
         circuit.add_Sdag_gate(qubit)
 
     def emit_tdg(
         self, circuit: "LinearMappedUnboundParametricQuantumCircuit", qubit: int
     ) -> None:
+        """Emit T-dagger (inverse T) gate."""
         circuit.add_Tdag_gate(qubit)
 
     # Single-qubit rotation gates
@@ -120,6 +129,7 @@ class QuriPartsGateEmitter:
         qubit: int,
         angle: float | Any,
     ) -> None:
+        """Emit RX rotation gate."""
         angle_dict = self._make_angle_dict(angle)
         if isinstance(angle_dict, float):
             circuit.add_RX_gate(qubit, angle_dict)
@@ -132,6 +142,7 @@ class QuriPartsGateEmitter:
         qubit: int,
         angle: float | Any,
     ) -> None:
+        """Emit RY rotation gate."""
         angle_dict = self._make_angle_dict(angle)
         if isinstance(angle_dict, float):
             circuit.add_RY_gate(qubit, angle_dict)
@@ -144,6 +155,7 @@ class QuriPartsGateEmitter:
         qubit: int,
         angle: float | Any,
     ) -> None:
+        """Emit RZ rotation gate."""
         angle_dict = self._make_angle_dict(angle)
         if isinstance(angle_dict, float):
             circuit.add_RZ_gate(qubit, angle_dict)
@@ -156,15 +168,20 @@ class QuriPartsGateEmitter:
         qubit: int,
         angle: float | Any,
     ) -> None:
-        """Emit Phase gate.
+        """Emit Phase gate using U1.
 
-        QURI Parts doesn't have a native Phase gate. We use RZ which differs
-        by a global phase (which is physically irrelevant).
-        P(θ) = e^(iθ/2) * RZ(θ)
+        P(θ) = U1(θ) = diag(1, e^{iθ}).
+        For non-parametric angles we use the native U1 gate which is
+        mathematically identical to the Phase gate.
+        For parametric angles we fall back to ParametricRZ because QURI Parts
+        does not provide a ParametricU1 gate. RZ differs only by a global
+        phase: P(θ) = e^{iθ/2} · RZ(θ), which is physically irrelevant for
+        single-qubit usage. Controlled-phase (CP) has its own decomposition
+        and does not go through this path.
         """
         angle_dict = self._make_angle_dict(angle)
         if isinstance(angle_dict, float):
-            circuit.add_RZ_gate(qubit, angle_dict)
+            circuit.add_U1_gate(qubit, angle_dict)
         else:
             circuit.add_ParametricRZ_gate(qubit, angle_dict)
 
@@ -175,6 +192,7 @@ class QuriPartsGateEmitter:
         control: int,
         target: int,
     ) -> None:
+        """Emit CNOT (controlled-X) gate."""
         circuit.add_CNOT_gate(control, target)
 
     def emit_cz(
@@ -183,6 +201,7 @@ class QuriPartsGateEmitter:
         control: int,
         target: int,
     ) -> None:
+        """Emit controlled-Z gate."""
         circuit.add_CZ_gate(control, target)
 
     def emit_swap(
@@ -191,6 +210,7 @@ class QuriPartsGateEmitter:
         qubit1: int,
         qubit2: int,
     ) -> None:
+        """Emit SWAP gate."""
         circuit.add_SWAP_gate(qubit1, qubit2)
 
     # Two-qubit rotation gates
@@ -253,6 +273,7 @@ class QuriPartsGateEmitter:
         control2: int,
         target: int,
     ) -> None:
+        """Emit Toffoli (CCX) gate."""
         circuit.add_TOFFOLI_gate(control1, control2, target)
 
     # Controlled single-qubit gates (decomposition required)
@@ -387,6 +408,14 @@ class QuriPartsGateEmitter:
             circuit.add_CNOT_gate(control, target)
 
     # Measurement - QURI Parts doesn't support mid-circuit measurements
+    #
+    # When emit_measure is a no-op, the sampler returns an all-qubit
+    # bitstring indexed by qubit position.  The transpiler pipeline
+    # needs a clbit→qubit mapping to decode partial measurements
+    # correctly.  Setting this flag causes StandardEmitPass to build
+    # that mapping.
+    noop_measurement: bool = True
+
     def emit_measure(
         self,
         circuit: "LinearMappedUnboundParametricQuantumCircuit",
@@ -430,11 +459,15 @@ class QuriPartsGateEmitter:
         QURI Parts native gates which can be extended into the circuit.
         """
         if gate is not None:
-            # If we ever have a gate, try to extend
             try:
                 circuit.extend(gate)
-            except Exception:
-                pass
+            except Exception as e:
+                warnings.warn(
+                    f"Failed to append gate to QURI Parts circuit: {e}. "
+                    f"Falling back to manual decomposition.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
     def gate_power(self, gate: Any, power: int) -> Any:
         """Create gate raised to a power.

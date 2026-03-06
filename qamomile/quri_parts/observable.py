@@ -1,185 +1,80 @@
-"""QuriParts observable support.
+"""QURI Parts observable support.
 
-This module provides QuriParts-specific implementations for:
-- QuriPartsObservableEmitter: Converts ConcreteHamiltonian to QuriParts Operator
-- QuriPartsExpectationEstimator: Estimates expectation values
+This module provides conversion from qamomile.observable.Hamiltonian
+to QURI Parts Operator for use with QURI Parts estimator primitives.
 """
 
 from __future__ import annotations
 
-from typing import Sequence, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
-from qamomile.circuit.observable import (
-    ConcreteHamiltonian,
-    Observable,
-    ExpectationEstimator,
-)
-from qamomile.circuit.ir.types.hamiltonian import PauliKind
+# qamomile.observable is a core module, always available (not optional).
+import qamomile.observable as qm_o
 
 if TYPE_CHECKING:
     from quri_parts.core.operator import Operator
-    from quri_parts.circuit import NonParametricQuantumCircuit
+
+# Threshold for treating a coefficient as zero.
+# Matches the tolerance used in qamomile.qiskit.observable for consistency.
+_ZERO_THRESHOLD = 1e-15
 
 
-# Mapping from PauliKind to QuriParts single-qubit Pauli functions
-_PAULI_TO_QURI = {
-    PauliKind.I: lambda q: {},  # Identity doesn't contribute
-    PauliKind.X: lambda q: {(1, q)},  # X
-    PauliKind.Y: lambda q: {(2, q)},  # Y
-    PauliKind.Z: lambda q: {(3, q)},  # Z
-}
-
-
-class QuriPartsObservableEmitter:
-    """Emitter that converts ConcreteHamiltonian to QuriParts Operator.
-
-    Example:
-        emitter = QuriPartsObservableEmitter()
-        operator = emitter.emit_observable(hamiltonian)
-    """
-
-    def emit_observable(self, hamiltonian: ConcreteHamiltonian) -> "Operator":
-        """Convert ConcreteHamiltonian to QuriParts Operator.
-
-        Args:
-            hamiltonian: The Hamiltonian to convert
-
-        Returns:
-            QuriParts Operator representation
-        """
-        from quri_parts.core.operator import Operator, pauli_label, PAULI_IDENTITY
-
-        terms = {}
-
-        for pauli_string, coeff in hamiltonian:
-            if not pauli_string:
-                # Identity term
-                terms[PAULI_IDENTITY] = terms.get(PAULI_IDENTITY, 0) + coeff
-            else:
-                # Build QuriParts pauli label
-                # pauli_label format: frozenset of (pauli_id, qubit_index)
-                # pauli_id: 1=X, 2=Y, 3=Z
-                pauli_indices = []
-                for pauli_kind, qubit_idx in pauli_string:
-                    if pauli_kind == PauliKind.I:
-                        continue  # Skip identity
-                    pauli_id = {PauliKind.X: 1, PauliKind.Y: 2, PauliKind.Z: 3}[pauli_kind]
-                    pauli_indices.append((qubit_idx, pauli_id))
-
-                if pauli_indices:
-                    label = pauli_label(pauli_indices)
-                    terms[label] = terms.get(label, 0) + coeff
-                else:
-                    # All identities reduced to scalar
-                    terms[PAULI_IDENTITY] = terms.get(PAULI_IDENTITY, 0) + coeff
-
-        return Operator(terms)
-
-
-class QuriPartsExpectationEstimator(ExpectationEstimator["NonParametricQuantumCircuit"]):
-    """Expectation value estimator using QuriParts.
-
-    This estimator uses QuriParts to compute expectation values.
-
-    Example:
-        from quri_parts.qulacs.estimator import create_qulacs_vector_estimator
-
-        qulacs_estimator = create_qulacs_vector_estimator()
-        estimator = QuriPartsExpectationEstimator(qulacs_estimator)
-        exp_val = estimator.estimate(circuit, observable)
-    """
-
-    def __init__(self, quri_estimator=None):
-        """Initialize the estimator.
-
-        Args:
-            quri_estimator: QuriParts quantum estimator function.
-                            Should be a ConcurrentQuantumEstimator or similar.
-        """
-        self._quri_estimator = quri_estimator
-        self._emitter = QuriPartsObservableEmitter()
-
-    def _get_estimator(self):
-        """Get or create the QuriParts estimator."""
-        if self._quri_estimator is not None:
-            return self._quri_estimator
-
-        # Try to create a default estimator using Qulacs
-        try:
-            from quri_parts.qulacs.estimator import create_qulacs_vector_estimator
-            self._quri_estimator = create_qulacs_vector_estimator()
-            return self._quri_estimator
-        except ImportError:
-            raise ImportError(
-                "quri-parts-qulacs is required for default estimator. "
-                "Install it with: pip install quri-parts-qulacs"
-            )
-
-    def estimate(
-        self,
-        circuit: "NonParametricQuantumCircuit",
-        observable: Observable,
-        params: Sequence[float] | None = None,
-    ) -> float:
-        """Estimate the expectation value of an observable.
-
-        Args:
-            circuit: QuriParts circuit (state preparation ansatz)
-            observable: The observable to measure
-            params: Ignored for non-parametric circuits
-
-        Returns:
-            The estimated expectation value
-        """
-        estimator = self._get_estimator()
-        operator = self._emitter.emit_observable(observable.hamiltonian)
-
-        # Run estimation
-        estimate = estimator(operator, circuit)
-        return float(estimate.value.real)
-
-    def estimate_batch(
-        self,
-        circuit: "NonParametricQuantumCircuit",
-        observables: Sequence[Observable],
-        params: Sequence[float] | None = None,
-    ) -> list[float]:
-        """Estimate expectation values for multiple observables.
-
-        Args:
-            circuit: QuriParts circuit (state preparation ansatz)
-            observables: List of observables to measure
-            params: Ignored for non-parametric circuits
-
-        Returns:
-            List of estimated expectation values
-        """
-        estimator = self._get_estimator()
-        operators = [
-            self._emitter.emit_observable(obs.hamiltonian)
-            for obs in observables
-        ]
-
-        # Estimate each observable
-        results = []
-        for operator in operators:
-            estimate = estimator(operator, circuit)
-            results.append(float(estimate.value.real))
-
-        return results
-
-
-# Convenience function
-def to_quri_operator(hamiltonian: ConcreteHamiltonian) -> "Operator":
-    """Convert ConcreteHamiltonian to QuriParts Operator.
-
-    Convenience function that creates an emitter and converts.
+def hamiltonian_to_quri_operator(hamiltonian: qm_o.Hamiltonian) -> "Operator":
+    """Convert qamomile.observable.Hamiltonian to QURI Parts Operator.
 
     Args:
-        hamiltonian: The Hamiltonian to convert
+        hamiltonian (qm_o.Hamiltonian): The qamomile Hamiltonian to convert.
 
     Returns:
-        QuriParts Operator representation
+        Operator: QURI Parts Operator representation.
+
+    Example:
+        ```python
+        import qamomile.observable as qm_o
+        from qamomile.quri_parts.observable import hamiltonian_to_quri_operator
+
+        H = qm_o.Z(0) * qm_o.Z(1) + 0.5 * (qm_o.X(0) + qm_o.X(1))
+        operator = hamiltonian_to_quri_operator(H)
+        ```
     """
-    emitter = QuriPartsObservableEmitter()
-    return emitter.emit_observable(hamiltonian)
+    from quri_parts.core.operator import Operator, pauli_label, PAULI_IDENTITY
+
+    pauli_id_map = {
+        qm_o.Pauli.X: 1,
+        qm_o.Pauli.Y: 2,
+        qm_o.Pauli.Z: 3,
+    }
+
+    terms: dict[Any, complex] = {}
+
+    for operators, coeff in hamiltonian.terms.items():
+        pauli_indices = []
+        for op in operators:
+            if op.pauli == qm_o.Pauli.I:
+                continue
+            pauli_indices.append((op.index, pauli_id_map[op.pauli]))
+
+        if pauli_indices:
+            label = pauli_label(pauli_indices)
+            terms[label] = terms.get(label, 0) + coeff
+        else:
+            terms[PAULI_IDENTITY] = terms.get(PAULI_IDENTITY, 0) + coeff
+
+    if abs(hamiltonian.constant) > _ZERO_THRESHOLD:
+        terms[PAULI_IDENTITY] = terms.get(PAULI_IDENTITY, 0) + hamiltonian.constant
+
+    return Operator(terms)
+
+
+def to_quri_operator(hamiltonian: qm_o.Hamiltonian) -> "Operator":
+    """Convert Hamiltonian to QURI Parts Operator.
+
+    Convenience alias for :func:`hamiltonian_to_quri_operator`.
+
+    Args:
+        hamiltonian (qm_o.Hamiltonian): The qamomile Hamiltonian to convert.
+
+    Returns:
+        Operator: QURI Parts Operator representation.
+    """
+    return hamiltonian_to_quri_operator(hamiltonian)

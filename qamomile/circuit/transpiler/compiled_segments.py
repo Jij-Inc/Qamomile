@@ -31,6 +31,13 @@ class CompiledQuantumSegment(Generic[T]):
     # Mapping from Value UUIDs to classical bit indices (for measurements)
     clbit_map: dict[str, int] = dataclasses.field(default_factory=dict)
 
+    # Mapping from classical bit index to physical qubit index.
+    # Used by backends where emit_measure is a no-op (e.g., QURI Parts)
+    # and the sampler returns an all-qubit bitstring ordered by qubit index.
+    # When non-empty, convert_counts uses bits[measurement_qubit_map[clbit_idx]]
+    # instead of bits[clbit_idx] to correctly decode selective measurements.
+    measurement_qubit_map: dict[int, int] = dataclasses.field(default_factory=dict)
+
     # Parameter metadata for runtime binding
     parameter_metadata: ParameterMetadata = dataclasses.field(
         default_factory=ParameterMetadata
