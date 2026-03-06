@@ -5,6 +5,7 @@ from __future__ import annotations
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.control_flow import (
+    ForItemsOperation,
     ForOperation,
     IfOperation,
     WhileOperation,
@@ -70,6 +71,10 @@ class LinearValidationPass(Pass[Block, Block]):
                 self._validate_operations(op.operations, loop_consumed)
                 # Values consumed in loop may or may not be consumed after
                 # depending on loop execution - conservative: don't propagate
+            elif isinstance(op, ForItemsOperation):
+                # ForItems loops: same semantics as ForOperation
+                loop_consumed = consumed.copy()
+                self._validate_operations(op.operations, loop_consumed)
             elif isinstance(op, IfOperation):
                 # If: values consumed in either branch are consumed
                 true_consumed = consumed.copy()
