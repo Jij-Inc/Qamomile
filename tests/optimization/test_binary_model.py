@@ -510,6 +510,43 @@ def test_from_hubo_duplicate_accumulation():
     assert np.isclose(model.higher[(0, 1, 2)], 5.0)
 
 
+def test_from_hubo_empty_term_is_promoted_to_constant():
+    """from_hubo should treat empty-index term () as a constant contribution."""
+    model = BinaryModel.from_hubo(hubo={(): 1.25, (0, 2): 2.0}, constant=0.75)
+    assert np.isclose(model.constant, 2.0)
+    assert model.num_bits == 2
+    assert np.isclose(model.quad[(0, 1)], 2.0)
+    assert () not in model.coefficients
+
+
+def test_from_hubo_duplicate_indices_in_term_warn_and_normalize():
+    """from_hubo should warn and normalize duplicate indices within a term."""
+    with pytest.warns(
+        UserWarning,
+        match="Duplicate variable indices in HUBO term",
+    ):
+        model = BinaryModel.from_hubo(hubo={(0, 0, 2): 3.0}, constant=0.0)
+
+    assert model.num_bits == 2
+    assert np.isclose(model.quad[(0, 1)], 3.0)
+    assert model.coefficients == {(0, 1): 3.0}
+
+
+def test_binary_model_expr_duplicate_indices_warn_and_normalize():
+    """BinaryModel(expr) should warn and normalize duplicate indices in terms."""
+    expr = BinaryExpr(
+        vartype=VarType.SPIN,
+        constant=0.5,
+        coefficients={(0, 0, 1): 2.0, (): 1.0},
+    )
+    with pytest.warns(UserWarning, match="Duplicate variable indices in term"):
+        model = BinaryModel(expr)
+
+    assert np.isclose(model.constant, 1.5)
+    assert np.isclose(model.quad[(0, 1)], 2.0)
+    assert model.coefficients == {(0, 1): 2.0}
+
+
 # ---- Random test helpers ----
 
 NUM_RANDOM_ITERATIONS = 50
