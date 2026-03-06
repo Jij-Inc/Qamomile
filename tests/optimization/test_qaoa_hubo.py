@@ -260,9 +260,8 @@ def test_hubo_energy_optimization():
     # Starting point chosen empirically to converge to the global minimum
     # on a statevector simulator within the COBYLA iteration budget.
     x0 = [2.6, 0.11, 0.52, 0.45]
-    bounds = [(0, np.pi), (0, np.pi), (0, np.pi / 2), (0, np.pi / 2)]
     res = scipy.optimize.minimize(
-        _obj, x0=x0, bounds=bounds, method="COBYLA", options={"maxiter": 100}
+        _obj, x0=x0, method="COBYLA", options={"maxiter": 100}
     )
 
     gammas_opt = [res.x[0], res.x[1]]
