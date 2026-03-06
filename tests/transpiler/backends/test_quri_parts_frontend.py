@@ -44,28 +44,14 @@ from qamomile.circuit.algorithm.basic import (
     ry_layer,
     rz_layer,
     cz_entangling_layer,
+    superposition_vector,
 )
-
-# The qaoa module was renamed between branches:
-#   old (feature branch): ising_cost_circuit, x_mixier_circuit, qaoa_circuit, superposition_vector
-#   new (new_qamomile):   ising_cost, x_mixer, qaoa_layers, superposition_vector (moved to basic)
-# Use try/except to support both.
-try:
-    from qamomile.circuit.algorithm.qaoa import (
-        ising_cost,
-        x_mixer,
-        qaoa_layers,
-        qaoa_state,
-    )
-    from qamomile.circuit.algorithm.basic import superposition_vector
-except ImportError:
-    from qamomile.circuit.algorithm.qaoa import (
-        ising_cost_circuit as ising_cost,
-        x_mixier_circuit as x_mixer,
-        qaoa_circuit as qaoa_layers,
-        superposition_vector,
-        qaoa_state,
-    )
+from qamomile.circuit.algorithm.qaoa import (
+    ising_cost,
+    x_mixer,
+    qaoa_layers,
+    qaoa_state,
+)
 from qamomile.circuit.algorithm.fqaoa import (
     initial_occupations,
     givens_rotation,
