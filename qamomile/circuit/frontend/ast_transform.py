@@ -119,19 +119,23 @@ class ControlFlowTransformer(ast.NodeTransformer):
         new_body: list[ast.stmt] = []
         defined_so_far = set(initial_defined)
 
-        for i, stmt in enumerate(body):
-            # Collect vars from the original statement before transformation
-            stmt_collector = VariableCollector(global_names=self._global_names)
-            stmt_collector.visit(stmt)
+        # Precompute per-statement read sets and locally-defined sets (O(n))
+        per_stmt_collectors: list[VariableCollector] = []
+        for stmt in body:
+            c = VariableCollector(global_names=self._global_names)
+            c.visit(stmt)
+            per_stmt_collectors.append(c)
 
+        # Build suffix-union of read vars in reverse (O(n))
+        n = len(body)
+        suffix_reads: list[frozenset[str]] = [frozenset()] * (n + 1)
+        for j in range(n - 1, -1, -1):
+            suffix_reads[j] = frozenset(per_stmt_collectors[j].vars | suffix_reads[j + 1])
+
+        for i, stmt in enumerate(body):
             # Set context for visit_If
             self._outer_defined_vars = frozenset(defined_so_far)
-            after_read: set[str] = set()
-            for after_stmt in body[i + 1 :]:
-                c = VariableCollector(global_names=self._global_names)
-                c.visit(after_stmt)
-                after_read |= c.vars
-            self._after_stmt_read_vars = frozenset(after_read)
+            self._after_stmt_read_vars = suffix_reads[i + 1]
 
             # Visit the statement (may call visit_If, visit_For, etc.)
             result = self.visit(stmt)
@@ -141,7 +145,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 new_body.append(result)
 
             # Update defined vars from original statement
-            defined_so_far |= stmt_collector.locally_defined_vars
+            defined_so_far |= per_stmt_collectors[i].locally_defined_vars
 
         return new_body
 
@@ -327,14 +331,14 @@ class ControlFlowTransformer(ast.NodeTransformer):
         return new_body
 
     def visit_While(self, node: ast.While) -> Any:
-        # ネストされた制御フローを先に変換
-        new_body = [self.visit(stmt) for stmt in node.body]
-        flattened_body = []
-        for item in new_body:
-            if isinstance(item, list):
-                flattened_body.extend(item)
-            else:
-                flattened_body.append(item)
+        # ネストされた制御フローを先に変換 (with definition tracking)
+        saved_outer = self._outer_defined_vars
+        saved_after = self._after_stmt_read_vars
+        flattened_body = self._visit_body_with_tracking(
+            node.body, set(self._outer_defined_vars)
+        )
+        self._outer_defined_vars = saved_outer
+        self._after_stmt_read_vars = saved_after
 
         # lambda: <condition> を作成
         lambda_node = ast.Lambda(
@@ -417,14 +421,14 @@ class ControlFlowTransformer(ast.NodeTransformer):
             raise NotImplementedError(f"Unsupported target type: {type(target)}")
 
     def visit_For(self, node: ast.For) -> Any:
-        # ネストされた制御フローを先に変換
-        new_body = [self.visit(stmt) for stmt in node.body]
-        flattened_body = []
-        for item in new_body:
-            if isinstance(item, list):
-                flattened_body.extend(item)
-            else:
-                flattened_body.append(item)
+        # ネストされた制御フローを先に変換 (with definition tracking)
+        saved_outer = self._outer_defined_vars
+        saved_after = self._after_stmt_read_vars
+        initial_defined = set(self._outer_defined_vars)
+        initial_defined.update(self._extract_tuple_vars(node.target))
+        flattened_body = self._visit_body_with_tracking(node.body, initial_defined)
+        self._outer_defined_vars = saved_outer
+        self._after_stmt_read_vars = saved_after
 
         # Check for items() iteration first
         if self._is_items_call(node.iter):
