@@ -20,7 +20,7 @@ Section 3: Integration tests for UInt BinOp (``//``, ``**``) folding
     into loop bounds via the constant folding pass.
 """
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pytest
@@ -56,7 +56,6 @@ from qamomile.circuit.transpiler.passes.emit_base import (
     ResourceAllocator,
     map_phi_outputs,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers — phi_ops tests
@@ -911,7 +910,6 @@ if TYPE_CHECKING:
 
 from qamomile.qiskit.transpiler import QiskitTranspiler  # noqa: E402
 
-
 # ---------------------------------------------------------------------------
 # Module-level @qkernel definitions (required for inspect.getsource)
 # ---------------------------------------------------------------------------
@@ -923,7 +921,7 @@ def broken_phi_bit_array_example() -> qmc.Vector[qmc.Bit]:
 
     Before the fix, this returned ``[((0, 0, 0, 0, 1), 200)]`` because the phi
     always picked the true branch's physical resources regardless of the runtime
-    condition.  After the fix, transpile must raise ``EmitError``.
+    condition. the kernel transpiles and executes successfully.
     """
     c = qmc.qubit_array(1, "c")
     true_q = qmc.qubit_array(2, "true")
@@ -1079,8 +1077,7 @@ class TestPhiMergeAliasRegression:
         assert len(results) == 1
         bitstring, count = results[0]
         assert bitstring == 1, (
-            f"Expected 1 but got {bitstring}; "
-            "before the fix this was 0"
+            f"Expected 1 but got {bitstring}; before the fix this was 0"
         )
         assert count == 200
 
@@ -1096,8 +1093,7 @@ class TestPhiMergeAliasRegression:
         assert len(results) == 1
         bitstring, count = results[0]
         assert bitstring == 1, (
-            f"Expected 1 but got {bitstring}; "
-            "before the fix this was 0 due to stale b"
+            f"Expected 1 but got {bitstring}; before the fix this was 0 due to stale b"
         )
         assert count == 200
 
