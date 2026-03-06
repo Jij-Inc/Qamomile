@@ -956,7 +956,25 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
                     self.quantum_vars[target] = self.quantum_vars[source]
             return
 
-        # Case 2: Name = Call(...)
+        # Case 2: Name = Subscript(...)  (array element alias / overwrite)
+        # Example: a = qs[i]
+        if isinstance(value, ast.Subscript) and isinstance(value.value, ast.Name):
+            source = value.value.id
+            if source in self.quantum_vars:
+                if target in self.quantum_vars:
+                    # existing quantum target – check origin
+                    if self.quantum_vars[target] != self.quantum_vars[source]:
+                        self.violations.append(
+                            RebindViolation(target, source, None, lineno)
+                        )
+                    # update origin regardless (may be same origin)
+                    self.quantum_vars[target] = self.quantum_vars[source]
+                else:
+                    # new alias binding – allowed, propagate origin
+                    self.quantum_vars[target] = self.quantum_vars[source]
+            return
+
+        # Case 3: Name = Call(...)
         if isinstance(value, ast.Call):
             quantum_args = self._extract_quantum_args(value)
             if not quantum_args:

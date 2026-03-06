@@ -2492,6 +2492,41 @@ class TestQuantumRebindDetectionViaQKernel:
         graph = ok.build()
         assert graph is not None
 
+    def test_scalar_overwrite_from_vector_element_const_index_rejected(self):
+        """Overwriting an existing scalar qubit from qs[0] should raise rebind error."""
+
+        @qkernel
+        def bad(a: qm.Qubit, qs: qm.Vector[qm.Qubit]) -> qm.Qubit:
+            a = qs[0]
+            return a
+
+        with pytest.raises(QubitRebindError):
+            bad.build()
+
+    def test_scalar_overwrite_from_vector_element_symbolic_index_rejected(self):
+        """Overwriting an existing scalar qubit from qs[i] should raise rebind error."""
+
+        @qkernel
+        def bad(
+            a: qm.Qubit, qs: qm.Vector[qm.Qubit], i: qm.UInt
+        ) -> qm.Qubit:
+            a = qs[i]
+            return a
+
+        with pytest.raises(QubitRebindError):
+            bad.build(i=0)
+
+    def test_scalar_new_binding_from_vector_element_symbolic_index_allowed(self):
+        """Binding qs[i] to a new name should remain allowed."""
+
+        @qkernel
+        def ok(qs: qm.Vector[qm.Qubit], i: qm.UInt) -> qm.Qubit:
+            new_q = qs[i]
+            return new_q
+
+        graph = ok.build(i=0)
+        assert graph is not None
+
     def test_vector_element_direct_assign_via_qkernel_rejected(self):
         k1, _, _ = _make_rebind_subkernels()
 
