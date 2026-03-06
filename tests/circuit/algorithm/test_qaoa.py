@@ -2,6 +2,8 @@
 
 import pytest
 
+pytest.importorskip("qiskit")
+
 import qamomile.circuit as qmc
 from qamomile.circuit.algorithm.qaoa import (
     hubo_ising_cost,
