@@ -61,7 +61,7 @@ def ghz_with_helper(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 
 
 # %%
-ghz_with_helper.draw(n=4)
+ghz_with_helper.draw(n=4, fold_loops=False)
 
 # %%
 result = (
@@ -88,7 +88,7 @@ print("GHZ result:", result.results)
 
 
 # %%
-@qmc.composite_gate(name="entangle_link")
+@qmc.composite_gate(name="entangle")
 @qmc.qkernel
 def entangle_link(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
     q0, q1 = qmc.cx(q0, q1)
@@ -107,7 +107,7 @@ def ghz_with_composite(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 
 
 # %%
-ghz_with_composite.draw(n=4)
+ghz_with_composite.draw(n=4, fold_loops=False)
 
 # %% [markdown]
 # ### どちらを使うべきか?
@@ -129,7 +129,7 @@ ghz_with_composite.draw(n=4)
 # %%
 @qmc.composite_gate(
     stub=True,
-    name="oracle_box",
+    name="oracle",
     num_qubits=3,
     resource_metadata=ResourceMetadata(
         query_complexity=1,
@@ -151,7 +151,7 @@ def algorithm_skeleton() -> qmc.Vector[qmc.Qubit]:
 
 
 # %%
-algorithm_skeleton.draw()
+algorithm_skeleton.draw(fold_loops=False)
 
 # %% [markdown]
 # ### スタブによるリソース推定

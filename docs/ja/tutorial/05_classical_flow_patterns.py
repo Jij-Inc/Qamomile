@@ -57,7 +57,7 @@ def hadamard_chain(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 
 
 # %%
-hadamard_chain.draw(n=4)
+hadamard_chain.draw(n=4, fold_loops=False)
 
 # %% [markdown]
 # ## `qmc.items` によるスパースな相互作用データの処理

@@ -78,7 +78,7 @@ def rotation_layer(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
 # 角度を指定しています。
 
 # %%
-rotation_layer.draw(n=4, theta=0.3)
+rotation_layer.draw(n=4, theta=0.3, fold_loops=False)
 
 # %% [markdown]
 # ## インデックスベースの更新

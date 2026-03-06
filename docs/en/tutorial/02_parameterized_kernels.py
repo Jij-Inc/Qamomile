@@ -78,7 +78,7 @@ def rotation_layer(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
 # provides a placeholder angle.
 
 # %%
-rotation_layer.draw(n=4, theta=0.3)
+rotation_layer.draw(n=4, theta=0.3, fold_loops=False)
 
 # %% [markdown]
 # ## Index-Based Updates

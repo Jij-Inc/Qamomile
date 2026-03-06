@@ -83,7 +83,7 @@ def scalable_circuit(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
 
 
 # %%
-scalable_circuit.draw(n=4)
+scalable_circuit.draw(n=4, fold_loops=False)
 
 # %%
 est = scalable_circuit.estimate_resources()
