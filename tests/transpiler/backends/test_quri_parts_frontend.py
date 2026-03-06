@@ -4028,6 +4028,66 @@ class TestExpvalQuriPartsPipeline:
         result_pi = exe_pi.run(executor).result()
         assert np.isclose(result_pi, -1.0, atol=1e-6)
 
+    def test_expval_parametric_bound_at_run(self):
+        """Parametric expval: theta preserved as parameter, bound at run().
+
+        This tests the scenario where theta is left unbound during transpile()
+        (using parameters=["theta"]) and bound later at run() time. The executor
+        must handle the bound circuit correctly in estimate_expectation().
+        """
+        H = qm_o.Z(0)
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float, obs: qmc.Observable) -> qmc.Float:
+            q = qmc.qubit("q")
+            q = qmc.ry(q, theta)
+            return qmc.expval((q,), obs)
+
+        transpiler = QuriPartsTranspiler()
+        executor = transpiler.executor()
+
+        exe = transpiler.transpile(
+            circuit,
+            bindings={"obs": H},
+            parameters=["theta"],
+        )
+        assert exe.has_parameters
+
+        # theta=0: <0|Z|0>=1
+        result_0 = exe.run(executor, bindings={"theta": 0.0}).result()
+        assert np.isclose(result_0, 1.0, atol=1e-6)
+
+        # theta=pi/2: <+y|Z|+y>=0 (RY(pi/2)|0> = equal superposition)
+        result_half = exe.run(executor, bindings={"theta": np.pi / 2}).result()
+        assert np.isclose(result_half, 0.0, atol=1e-5)
+
+        # theta=pi: <1|Z|1>=-1
+        result_pi = exe.run(executor, bindings={"theta": np.pi}).result()
+        assert np.isclose(result_pi, -1.0, atol=1e-6)
+
+    def test_expval_parametric_sweep_bound_at_run(self):
+        """Sweep theta as a runtime parameter for expval, verifying cos(theta)."""
+        H = qm_o.Z(0)
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float, obs: qmc.Observable) -> qmc.Float:
+            q = qmc.qubit("q")
+            q = qmc.ry(q, theta)
+            return qmc.expval((q,), obs)
+
+        transpiler = QuriPartsTranspiler()
+        executor = transpiler.executor()
+        exe = transpiler.transpile(
+            circuit, bindings={"obs": H}, parameters=["theta"]
+        )
+
+        for theta in [0.0, 0.3, np.pi / 4, np.pi / 2, np.pi, 1.5 * np.pi]:
+            result = exe.run(executor, bindings={"theta": theta}).result()
+            expected = np.cos(theta)
+            assert np.isclose(result, expected, atol=1e-5), (
+                f"theta={theta}: got {result}, expected {expected}"
+            )
+
     def test_expval_missing_observable_raises(self):
         """Transpilation without Observable binding raises RuntimeError."""
 

@@ -81,6 +81,7 @@ class QuriPartsExecutor(
         """
         self._sampler = sampler
         self._estimator = estimator
+        self._non_parametric_estimator: Any = None
 
     @property
     def sampler(self) -> Any:
@@ -113,6 +114,28 @@ class QuriPartsExecutor(
                     "Install with: pip install quri-parts-qulacs"
                 ) from e
         return self._estimator
+
+    @property
+    def non_parametric_estimator(self) -> Any:
+        """Lazy initialization of non-parametric estimator.
+
+        Used when the circuit has already been bound (parameters resolved)
+        or is a non-parametric circuit. Unlike the parametric estimator,
+        this takes (operator, state) without parameter values.
+        """
+        if self._non_parametric_estimator is None:
+            try:
+                from quri_parts.qulacs.estimator import (
+                    create_qulacs_vector_estimator,
+                )
+
+                self._non_parametric_estimator = create_qulacs_vector_estimator()
+            except ImportError as e:
+                raise ImportError(
+                    "quri-parts-qulacs is required for QuriPartsExecutor. "
+                    "Install with: pip install quri-parts-qulacs"
+                ) from e
+        return self._non_parametric_estimator
 
     def execute(self, circuit: Any, shots: int) -> dict[str, int]:
         """Execute circuit and return bitstring counts.
@@ -201,14 +224,20 @@ class QuriPartsExecutor(
         hamiltonian: "qp_o.Operator",
         param_values: Sequence[float],
     ) -> float:
-        """Estimate expectation value of hamiltonian for parametric circuit.
+        """Estimate expectation value of hamiltonian for a circuit.
 
-        Used during optimization (e.g., QAOA).
+        Handles both unbound parametric circuits (used during optimization)
+        and already-bound or non-parametric circuits. When the circuit has
+        already been bound (e.g., by ``_run_expval`` in ``ExecutableProgram``),
+        ``apply_circuit`` produces a ``GeneralCircuitQuantumState`` instead
+        of a ``ParametricCircuitQuantumState``, so we dispatch to the
+        non-parametric estimator automatically.
 
         Args:
-            circuit: The unbound parametric circuit
+            circuit: The quantum circuit (unbound parametric or bound/concrete)
             hamiltonian: QURI Parts Operator representing the Hamiltonian
-            param_values: Sequence of parameter values in order
+            param_values: Sequence of parameter values in order (ignored for
+                bound/non-parametric circuits)
 
         Returns:
             Real part of the expectation value
@@ -216,11 +245,23 @@ class QuriPartsExecutor(
         from quri_parts.core.state import quantum_state, apply_circuit
 
         cb_state = quantum_state(circuit.qubit_count, bits=0)
-        parametric_state = apply_circuit(circuit, cb_state)
+        circuit_state = apply_circuit(circuit, cb_state)
 
-        estimate = self.parametric_estimator(
-            hamiltonian, parametric_state, param_values
-        )
+        # Dispatch based on whether the state is parametric or not.
+        # apply_circuit creates ParametricCircuitQuantumState for unbound
+        # parametric circuits, and GeneralCircuitQuantumState for bound
+        # or non-parametric circuits.
+        if hasattr(circuit_state, "parametric_circuit"):
+            # Unbound parametric circuit → use parametric estimator
+            estimate = self.parametric_estimator(
+                hamiltonian, circuit_state, param_values
+            )
+        else:
+            # Bound or non-parametric circuit → use non-parametric estimator
+            estimate = self.non_parametric_estimator(
+                hamiltonian, circuit_state
+            )
+
         return estimate.value.real
 
 
