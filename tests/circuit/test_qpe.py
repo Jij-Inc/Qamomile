@@ -57,7 +57,7 @@ def naive_qpe(n: int, phase: float) -> qmc.Vector[qmc.Bit]:
         phase_register[i], target = controlled_phase_gate(
             phase_register[i], target, theta=phase, iter=2**i
         )
-    _iqft(phase_register)
+    phase_register = _iqft(phase_register)
     bits = qmc.measure(phase_register)
     return bits
 
@@ -156,9 +156,7 @@ class TestQPEConsistency:
             (math.pi, 0.5),
         ],
     )
-    def test_naive_and_builtin_agree(
-        self, qiskit_transpiler, theta, expected_phase
-    ):
+    def test_naive_and_builtin_agree(self, qiskit_transpiler, theta, expected_phase):
         """Both implementations estimate the same phase."""
         # Naive QPE
         naive_exec = qiskit_transpiler.transpile(
@@ -175,9 +173,7 @@ class TestQPEConsistency:
         builtin_exec = qiskit_transpiler.transpile(
             builtin_qpe, bindings={"n": 3, "phase": theta}
         )
-        builtin_job = builtin_exec.sample(
-            qiskit_transpiler.executor(), shots=1024
-        )
+        builtin_job = builtin_exec.sample(qiskit_transpiler.executor(), shots=1024)
         builtin_result = builtin_job.result()
         builtin_phases = set()
         for value, count in builtin_result.results:
@@ -185,8 +181,7 @@ class TestQPEConsistency:
 
         # Both return the same phase set
         assert naive_phases == builtin_phases, (
-            f"theta={theta}: naive got {naive_phases}, "
-            f"built-in got {builtin_phases}"
+            f"theta={theta}: naive got {naive_phases}, built-in got {builtin_phases}"
         )
 
         # Expected phase is in the results
@@ -196,9 +191,7 @@ class TestQPEConsistency:
 
     @pytest.mark.parametrize("n_qubits", [3, 5, 7])
     @pytest.mark.parametrize("seed", [901 + i for i in range(100)])
-    def test_random_angle_consistency(
-        self, qiskit_transpiler, seed, n_qubits
-    ):
+    def test_random_angle_consistency(self, qiskit_transpiler, seed, n_qubits):
         r"""Both QPE implementations return a theoretically valid phase for random angles.
 
         Mathematical background
@@ -277,9 +270,7 @@ class TestQPEConsistency:
         builtin_exec = qiskit_transpiler.transpile(
             builtin_qpe, bindings={"n": n_qubits, "phase": theta}
         )
-        builtin_job = builtin_exec.sample(
-            qiskit_transpiler.executor(), shots=shots
-        )
+        builtin_job = builtin_exec.sample(qiskit_transpiler.executor(), shots=shots)
         builtin_result = builtin_job.result()
         builtin_phase_counts = {}
         for value, count in builtin_result.results:

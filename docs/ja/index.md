@@ -57,6 +57,15 @@ result = job.result()
 print(f"Counts: {result.counts}")
 ```
 
+## エラーハンドリング
+
+`@qkernel` のエラーは2段階で発生します：
+
+- **AST変換段階**: サポートされない制御フローパターン（直接シーケンス反復、`while` 条件内の量子操作など）は `SyntaxError` として拒否されます。
+- **トランスパイラ / バックエンド段階**: 型違反、線形型エラー、バックエンド固有の問題は `QamomileCompileError` ファミリーを使用します。
+
+`@qkernel` のエラーをキャッチする際は、`SyntaxError` と `QamomileCompileError` の両方を例外処理に含めてください。
+
 ## リンク
 
 - [GitHub リポジトリ](https://github.com/Jij-Inc/Qamomile)

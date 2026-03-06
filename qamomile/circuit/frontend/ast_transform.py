@@ -1,7 +1,9 @@
 import ast
 import inspect
 import textwrap
-from typing import Any, Callable
+import warnings
+from dataclasses import dataclass
+from typing import Any, Callable, NoReturn
 
 
 from qamomile.circuit.frontend.operation.control_flow import (
@@ -91,7 +93,12 @@ class ControlFlowTransformer(ast.NodeTransformer):
     if_func_name = "emit_if"
     for_func_name = "emit_for"
 
-    def __init__(self, global_names: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        global_names: set[str] | None = None,
+        param_names: set[str] | None = None,
+        namespace: dict[str, Any] | None = None,
+    ) -> None:
         self.counter: int = 0
         # 変数名 -> 型注釈ノード(ast.AST) を保持する辞書
         self.type_registry: dict[str, ast.AST] = {}
@@ -100,6 +107,10 @@ class ControlFlowTransformer(ast.NodeTransformer):
         # Scope tracking for visit_If input/output separation
         self._outer_defined_vars: frozenset[str] = frozenset()
         self._after_stmt_read_vars: frozenset[str] = frozenset()
+        # 関数パラメータ名（ループ変数シャドウイング検出用）
+        self._param_names = param_names or set()
+        # Namespace for resolving callables (used in while condition QKernel check)
+        self._namespace = namespace or {}
 
     def _get_unique_name(self, prefix: str) -> str:
         name = f"_{prefix}_{self.counter}"
@@ -292,6 +303,111 @@ class ControlFlowTransformer(ast.NodeTransformer):
         )  # type: ignore
         return func_def, func_name
 
+    # Authoritative spec: callable names prohibited in while conditions.
+    # Must match implemented quantum operations in
+    # qamomile/circuit/frontend/operation/{qubit_gates,measurement,expval}.py.
+    _QUANTUM_OPS = frozenset(
+        {
+            "h",
+            "x",
+            "y",
+            "z",
+            "s",
+            "t",
+            "sdg",
+            "tdg",
+            "cx",
+            "cz",
+            "rx",
+            "ry",
+            "rz",
+            "p",
+            "cp",
+            "swap",
+            "ccx",
+            "rzz",
+            "measure",
+            "expval",
+        }
+    )
+
+    def _check_no_quantum_ops_in_condition(
+        self, test_node: ast.expr, lineno: int
+    ) -> None:
+        """Detect quantum operations in while condition and raise SyntaxError.
+
+        Uses resolved callable identity to distinguish Qamomile quantum
+        operations from classical functions that happen to share the same name.
+        Unresolvable callables are allowed (fail-open).
+        """
+        for node in ast.walk(test_node):
+            if isinstance(node, ast.Call):
+                func_name = None
+                if isinstance(node.func, ast.Name):
+                    func_name = node.func.id
+                elif isinstance(node.func, ast.Attribute):
+                    func_name = node.func.attr
+                # Resolve callable in namespace to check identity
+                resolved = self._resolve_callable(node.func)
+                if resolved is None:
+                    # Unresolvable: fail-open (allow)
+                    continue
+                if self._is_qkernel(resolved):
+                    display = func_name or "<callable>"
+                    raise SyntaxError(
+                        f"Quantum kernel '{display}' in while condition "
+                        f"is not supported. @qkernel functions consume "
+                        f"quantum arguments, which is not allowed in "
+                        f"while conditions."
+                    )
+                if self._is_qamomile_quantum_op(resolved):
+                    display = func_name or "<callable>"
+                    raise SyntaxError(
+                        f"Quantum operation '{display}' in while condition "
+                        f"is not supported. Move the operation before the loop "
+                        f"and use the result as condition."
+                    )
+
+    @staticmethod
+    def _is_qamomile_quantum_op(obj: Any) -> bool:
+        """Check if *obj* is a Qamomile quantum operation by module and name."""
+        module = getattr(obj, "__module__", None)
+        name = getattr(obj, "__name__", None)
+        if module is None or name is None:
+            return False
+        return (
+            module.startswith("qamomile.circuit.frontend.operation")
+            and name in ControlFlowTransformer._QUANTUM_OPS
+        )
+
+    @staticmethod
+    def _is_qkernel(obj: Any) -> bool:
+        """Check if *obj* is a QKernel instance using type identity.
+
+        Uses a lazy import to avoid circular dependency
+        (qkernel.py imports transform_control_flow from this module).
+        """
+        from qamomile.circuit.frontend.qkernel import QKernel
+
+        return isinstance(obj, QKernel)
+
+    def _resolve_callable(self, func_node: ast.expr) -> Any | None:
+        """Try to resolve a callable AST node in the namespace.
+
+        Returns the resolved object, or None if unresolvable.
+        """
+        if not self._namespace:
+            return None
+        if isinstance(func_node, ast.Name):
+            return self._namespace.get(func_node.id)
+        if isinstance(func_node, ast.Attribute) and isinstance(
+            func_node.value, ast.Name
+        ):
+            base = self._namespace.get(func_node.value.id)
+            if base is not None:
+                return getattr(base, func_node.attr, None)
+        return None
+
     @staticmethod
     def _has_top_level_return(body_nodes: list[ast.stmt]) -> bool:
         """Check if any top-level statement in body_nodes is a Return with a value."""
@@ -331,6 +447,8 @@ class ControlFlowTransformer(ast.NodeTransformer):
         return new_body
 
     def visit_While(self, node: ast.While) -> Any:
+        # Check for quantum operations in while condition
+        self._check_no_quantum_ops_in_condition(node.test, node.lineno)
         # ネストされた制御フローを先に変換 (with definition tracking)
         saved_outer = self._outer_defined_vars
         saved_after = self._after_stmt_read_vars
@@ -430,6 +548,15 @@ class ControlFlowTransformer(ast.NodeTransformer):
         self._outer_defined_vars = saved_outer
         self._after_stmt_read_vars = saved_after
 
+        # Check for parameter shadowing (common to all for-loop variants)
+        all_binding_names = self._extract_tuple_vars(node.target)
+        for var_name in all_binding_names:
+            if var_name in self._param_names:
+                raise SyntaxError(
+                    f"Loop variable '{var_name}' shadows a function parameter. "
+                    f"Use a different variable name to avoid silent value loss."
+                )
+
         # Check for items() iteration first
         if self._is_items_call(node.iter):
             return self._transform_for_items(node, flattened_body)
@@ -504,8 +631,8 @@ class ControlFlowTransformer(ast.NodeTransformer):
         return with_stmt
 
     def _transform_for_sequence(
-        self, node: ast.For, flattened_body: list[ast.stmt]
-    ) -> ast.With:
+        self, node: ast.For, _flattened_body: list[ast.stmt]
+    ) -> NoReturn:
         """Prohibit direct sequence iteration to prevent common bugs.
 
         Direct iteration like 'for item in vector:' doesn't support in-place
@@ -788,7 +915,15 @@ class ControlFlowTransformer(ast.NodeTransformer):
 
 
 def transform_control_flow(func: Callable):
-    src = inspect.getsource(func)
+    try:
+        src = inspect.getsource(func)
+    except (OSError, TypeError) as e:
+        func_name = getattr(func, "__name__", "<unknown>")
+        raise SyntaxError(
+            f"Cannot retrieve source code for '{func_name}'. "
+            f"@qkernel functions must be defined in .py files "
+            f"(not REPL/exec/eval)."
+        ) from e
     src = textwrap.dedent(src)
     tree = ast.parse(src)
 
@@ -800,7 +935,26 @@ def transform_control_flow(func: Callable):
     if func.__closure__ is not None:
         global_names.update(func.__code__.co_freevars)
 
-    transformer = ControlFlowTransformer(global_names=global_names)
+    # Extract parameter names for loop variable shadowing detection
+    param_names = set(inspect.signature(func).parameters.keys())
+
+    # Build resolver namespace for callable resolution (while condition QKernel check).
+    # Includes globals and closure values available at function definition time.
+    # Empty cells (forward references not yet bound) are skipped here; the resolver
+    # treats unresolved callables as fail-open (see _resolve_callable).
+    resolver_namespace: dict[str, Any] = dict(func.__globals__)
+    if func.__closure__ is not None:
+        for name, cell in zip(func.__code__.co_freevars, func.__closure__):
+            try:
+                resolver_namespace[name] = cell.cell_contents
+            except ValueError:
+                pass
+
+    transformer = ControlFlowTransformer(
+        global_names=global_names,
+        param_names=param_names,
+        namespace=resolver_namespace,
+    )
     tree = transformer.visit(tree)
 
     # デコレータを削除（再帰を防ぐ）
@@ -823,12 +977,271 @@ def transform_control_flow(func: Callable):
     )
 
     # クロージャ変数（関数内でインポートされた名前など）を追加
+    # Empty cells indicate forward references not yet bound at definition time.
+    # Skipping them would cause NameError at runtime, so we fail-closed here
+    # and let QKernel.__init__ fall back to the original function.
     if func.__closure__ is not None:
         free_vars = func.__code__.co_freevars
         for name, cell in zip(free_vars, func.__closure__):
-            name_space[name] = cell.cell_contents
+            try:
+                name_space[name] = cell.cell_contents
+            except ValueError:
+                raise NotImplementedError(
+                    f"Closure variable '{name}' is not yet bound (empty cell). "
+                    f"This typically happens with forward references in nested functions."
+                ) from None
 
     code_obj = compile(tree, filename="<qamomile-dsl>", mode="exec")
     exec(code_obj, name_space)
 
     return name_space[func.__name__]
+
+
+# ---------------------------------------------------------------------------
+# Quantum rebind analysis
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RebindViolation:
+    """A detected forbidden quantum variable rebinding."""
+
+    target_name: str
+    source_name: str
+    func_name: str | None
+    lineno: int
+
+
+class QuantumRebindAnalyzer(ast.NodeVisitor):
+    """Detects forbidden quantum variable reassignment at the AST level.
+
+    Forbidden patterns (target is an *existing* quantum variable):
+      - ``a = b``        where b is quantum with a different origin
+      - ``a = f(b, ...)`` where b is quantum with a different origin
+
+    Allowed patterns:
+      - ``a = f(a, ...)``  (self-update)
+      - ``new = f(b, ...)`` (new binding – target was not quantum before)
+      - ``alias = q``      (new alias – target was not quantum before)
+    """
+
+    def __init__(self, quantum_param_names: set[str]) -> None:
+        # name → origin (the parameter name it traces back to)
+        self.quantum_vars: dict[str, str] = {n: n for n in quantum_param_names}
+        self.violations: list[RebindViolation] = []
+
+    # ------------------------------------------------------------------
+    # visitor
+    # ------------------------------------------------------------------
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        if len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                self._check_single_assign(target.id, node.value, node.lineno)
+            elif isinstance(target, ast.Tuple):
+                self._check_tuple_assign(target, node.value, node.lineno)
+        self.generic_visit(node)
+
+    # ------------------------------------------------------------------
+    # single assignment:  name = expr
+    # ------------------------------------------------------------------
+
+    def _check_single_assign(
+        self, target: str, value: ast.expr, lineno: int
+    ) -> None:
+        # Case 1: Name = Name  (direct alias / overwrite)
+        if isinstance(value, ast.Name):
+            source = value.id
+            if source in self.quantum_vars:
+                if target in self.quantum_vars:
+                    # existing quantum target – check origin
+                    if self.quantum_vars[target] != self.quantum_vars[source]:
+                        self.violations.append(
+                            RebindViolation(target, source, None, lineno)
+                        )
+                    # update origin regardless (may be same origin)
+                    self.quantum_vars[target] = self.quantum_vars[source]
+                else:
+                    # new alias binding – allowed, propagate origin
+                    self.quantum_vars[target] = self.quantum_vars[source]
+            return
+
+        # Case 2: Name = Subscript(...)  (array element alias / overwrite)
+        # Example: a = qs[i]
+        if isinstance(value, ast.Subscript) and isinstance(value.value, ast.Name):
+            source = value.value.id
+            if source in self.quantum_vars:
+                if target in self.quantum_vars:
+                    # existing quantum target – check origin
+                    if self.quantum_vars[target] != self.quantum_vars[source]:
+                        self.violations.append(
+                            RebindViolation(target, source, None, lineno)
+                        )
+                    # update origin regardless (may be same origin)
+                    self.quantum_vars[target] = self.quantum_vars[source]
+                else:
+                    # new alias binding – allowed, propagate origin
+                    self.quantum_vars[target] = self.quantum_vars[source]
+            return
+
+        # Case 3: Name = Call(...)
+        if isinstance(value, ast.Call):
+            # Calls like measure/expval return classical values.
+            # If the target was tracked as quantum, clear it here so we don't
+            # produce false-positive rebind violations across branches.
+            if self._is_classical_returning_call(value):
+                self.quantum_vars.pop(target, None)
+                return
+
+            quantum_args = self._extract_quantum_args(value)
+            if not quantum_args:
+                return
+
+            if target in self.quantum_vars:
+                target_origin = self.quantum_vars[target]
+                has_self = any(
+                    self.quantum_vars.get(a) == target_origin for a in quantum_args
+                )
+                if not has_self:
+                    violating = quantum_args[0]
+                    func_name = self._get_func_name(value)
+                    self.violations.append(
+                        RebindViolation(target, violating, func_name, lineno)
+                    )
+
+            # propagate quantum status from first quantum arg
+            first_q = quantum_args[0]
+            self.quantum_vars[target] = self.quantum_vars.get(first_q, first_q)
+            return
+
+    # ------------------------------------------------------------------
+    # tuple assignment:  a, b = f(a, b)
+    # ------------------------------------------------------------------
+
+    def _check_tuple_assign(
+        self, targets: ast.Tuple, value: ast.expr, lineno: int
+    ) -> None:
+        if not isinstance(value, ast.Call):
+            return
+
+        target_names = [
+            elt.id for elt in targets.elts if isinstance(elt, ast.Name)
+        ]
+        if not target_names:
+            return
+
+        if self._is_classical_returning_call(value):
+            for tgt in target_names:
+                self.quantum_vars.pop(tgt, None)
+            return
+
+        quantum_args = self._extract_quantum_args(value)
+        if not quantum_args:
+            return
+
+        arg_origins = [self.quantum_vars.get(a, a) for a in quantum_args]
+
+        for i, tgt in enumerate(target_names):
+            mapped_source = (
+                quantum_args[i] if i < len(quantum_args) else quantum_args[-1]
+            )
+            mapped_origin = self.quantum_vars.get(mapped_source, mapped_source)
+
+            # Existing quantum targets keep their own origin when present anywhere
+            # in call arguments (e.g. ctrl, tgt = gate(tgt, controls=(ctrl,))).
+            if tgt in self.quantum_vars:
+                tgt_origin = self.quantum_vars[tgt]
+                if tgt_origin in arg_origins:
+                    self.quantum_vars[tgt] = tgt_origin
+                    continue
+                func_name = self._get_func_name(value)
+                self.violations.append(
+                    RebindViolation(tgt, mapped_source, func_name, lineno)
+                )
+
+            # For new targets (or mismatched existing ones), track mapped origin.
+            self.quantum_vars[tgt] = mapped_origin
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+
+    def _extract_quantum_args(self, call: ast.Call) -> list[str]:
+        """Recursively collect quantum variable names from args and kwargs.
+
+        Uses a dict to preserve insertion (AST traversal) order while
+        deduplicating, so that ``quantum_args[0]`` is deterministic.
+        """
+        seen: dict[str, None] = {}
+
+        def _collect(expr: ast.expr) -> None:
+            if isinstance(expr, ast.Name) and expr.id in self.quantum_vars:
+                seen[expr.id] = None
+            elif (
+                isinstance(expr, ast.Subscript)
+                and isinstance(expr.value, ast.Name)
+                and expr.value.id in self.quantum_vars
+            ):
+                seen[expr.value.id] = None
+            elif isinstance(expr, (ast.Tuple, ast.List, ast.Set)):
+                for e in expr.elts:
+                    _collect(e)
+            elif isinstance(expr, ast.Starred):
+                _collect(expr.value)
+
+        for arg in call.args:
+            _collect(arg)
+        for kw in call.keywords:
+            if kw.value is not None:
+                _collect(kw.value)
+
+        return list(seen)
+
+    @staticmethod
+    def _get_func_name(call: ast.Call) -> str | None:
+        if isinstance(call.func, ast.Name):
+            return call.func.id
+        if isinstance(call.func, ast.Attribute):
+            return call.func.attr
+        return None
+
+    @staticmethod
+    def _is_classical_returning_call(call: ast.Call) -> bool:
+        """Return True when the call is a known classical-returning frontend op."""
+        if isinstance(call.func, ast.Name):
+            return call.func.id in {"measure", "expval"}
+        if isinstance(call.func, ast.Attribute):
+            return call.func.attr in {"measure", "expval"}
+        return False
+
+
+def collect_quantum_rebind_violations(
+    func: Callable,
+    quantum_param_names: set[str],
+) -> list[RebindViolation]:
+    """Analyze *func* for forbidden quantum rebind patterns.
+
+    Returns a (possibly empty) list of violations.  Never raises on
+    analysis failure – returns ``[]`` instead.
+    """
+    try:
+        source = textwrap.dedent(inspect.getsource(func))
+        tree = ast.parse(source)
+    except (OSError, TypeError, SyntaxError) as e:
+        func_name = getattr(func, "__name__", "<unknown>")
+        warnings.warn(
+            f"Quantum rebind analysis skipped for '{func_name}': {e}",
+            UserWarning,
+            stacklevel=2,
+        )
+        return []
+
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            analyzer = QuantumRebindAnalyzer(quantum_param_names)
+            for stmt in node.body:
+                analyzer.visit(stmt)
+            return analyzer.violations
+
+    return []

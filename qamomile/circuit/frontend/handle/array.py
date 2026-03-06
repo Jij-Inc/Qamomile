@@ -6,11 +6,15 @@ import uuid
 from typing import Generic, Iterator, TypeVar, overload
 
 from qamomile.circuit.frontend.tracer import get_current_tracer
-from qamomile.circuit.ir.operation.operation import QInitOperation, CInitOperation
+from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
 from qamomile.circuit.ir.types import ValueType
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
-from qamomile.circuit.transpiler.errors import QubitConsumedError, UnreturnedBorrowError
+from qamomile.circuit.transpiler.errors import (
+    LinearTypeError,
+    QubitConsumedError,
+    UnreturnedBorrowError,
+)
 
 from .handle import Handle
 from .primitives import Bit, Float, Qubit, UInt
@@ -117,12 +121,14 @@ class ArrayBase(Handle, Generic[T]):
         return instance
 
     def consume(self, operation_name: str = "unknown") -> "ArrayBase[T]":
-        """Override to preserve array-specific fields."""
-        result = super().consume(operation_name)
-        result._shape = self._shape
-        result._borrowed_indices = dict(self._borrowed_indices)
-        result.element_type = self.element_type
-        return result
+        """Consume the array, enforcing borrow-return contract for quantum arrays.
+
+        For quantum arrays, all borrowed elements must be returned before the
+        array can be consumed. This ensures that no unreturned borrows are
+        silently discarded by operations like qkernel calls or controlled gates.
+        """
+        self.validate_all_returned()
+        return super().consume(operation_name)  # type: ignore[return-value]
 
     @property
     def shape(self) -> tuple[int | UInt, ...]:
@@ -161,14 +167,45 @@ class ArrayBase(Handle, Generic[T]):
                 key_parts.append(f"sym:{idx.value.uuid}")
         return tuple(key_parts)
 
+    def _indices_definitely_different(
+        self, lhs: tuple[UInt, ...], rhs: tuple[UInt, ...]
+    ) -> bool:
+        """Return True only when index mismatch can be proven safely.
+
+        We intentionally keep this conservative for symbolic expressions:
+        if an index is symbolic, we avoid rejecting because equivalent expressions
+        may be recomputed into different UUIDs.
+        """
+        if len(lhs) != len(rhs):
+            return True
+
+        for lhs_idx, rhs_idx in zip(lhs, rhs):
+            lhs_const = lhs_idx.value.get_const() if lhs_idx.value.is_constant() else None
+            rhs_const = rhs_idx.value.get_const() if rhs_idx.value.is_constant() else None
+            if lhs_const is not None and rhs_const is not None and lhs_const != rhs_const:
+                return True
+        return False
+
     def _get_element(self, indices: tuple[UInt, ...]) -> T:
         """Get an element at the given indices.
 
         Raises:
-            QubitConsumedError: If this element is already borrowed (for quantum arrays).
+            QubitConsumedError: If the array was consumed or the element is
+                already borrowed (for quantum arrays).
         """
         indices_key = self._make_indices_key(indices)
         index_str = self._format_index(indices)
+
+        # Check if the array itself has been consumed (e.g., by cast or measure)
+        if self._consumed and self.value.type.is_quantum():
+            display_name = self.value.name or "array"
+            raise QubitConsumedError(
+                f"Array '{display_name}' was already consumed by "
+                f"'{self._consumed_by}' and cannot be accessed.",
+                handle_name=display_name,
+                operation_name="array element access",
+                first_use_location=self._consumed_by,
+            )
 
         # Check if already borrowed (only enforce for quantum types)
         if indices_key in self._borrowed_indices and self.value.type.is_quantum():
@@ -200,11 +237,124 @@ class ArrayBase(Handle, Generic[T]):
         )
         return self.element_type(value=element_value, parent=self, indices=indices)
 
-    def _set_element(self, indices: tuple[UInt, ...]) -> None:
-        """Mark an element as returned (no longer borrowed)."""
-        indices_key = self._make_indices_key(indices)
-        if indices_key in self._borrowed_indices:
-            self._borrowed_indices.pop(indices_key)
+    def _return_element(self, indices: tuple[UInt, ...], value: T) -> None:
+        """Validate, consume, and release a borrowed element.
+
+        Order: validate -> consume -> borrow release (fixed sequence).
+
+        Three paths for quantum arrays:
+
+        1. **Borrowed index, correct parent**: validates identity, consumes
+           handle, releases borrow. Normal borrow-return path.
+        2. **Borrowed index, wrong parent**: raises ``LinearTypeError``.
+           Prevents returning a value from a different array.
+        3. **Unborrowed index**: consumes the handle without identity check.
+           Allows writing a fresh qubit to an index that was never borrowed.
+
+        Args:
+            indices: The indices where the element is being returned.
+            value: The handle being written back.
+
+        Raises:
+            QubitConsumedError: If the array was already consumed.
+            LinearTypeError: If the index was borrowed **and** the value
+                was not borrowed from this array (``value.parent is not self``).
+
+        Notes:
+            For computed symbolic indices (e.g. ``i + 1``, ``n - j - 1``),
+            each evaluation creates a new UInt with a different uuid, so a
+            key derived from the LHS indices may not match the borrow key.
+            To handle this, we also derive a *source key* from the value's
+            provenance (``value.indices``), which still holds the original
+            UInt handles from ``_get_element`` and thus matches the borrow
+            key reliably.
+        """
+        target_key = self._make_indices_key(indices)
+        index_str = self._format_index(indices)
+
+        # Check if the array itself has been consumed (e.g., by cast or measure)
+        if self._consumed and self.value.type.is_quantum():
+            display_name = self.value.name or "array"
+            raise QubitConsumedError(
+                f"Array '{display_name}' was already consumed by "
+                f"'{self._consumed_by}' and cannot be accessed.",
+                handle_name=display_name,
+                operation_name="array element return",
+                first_use_location=self._consumed_by,
+            )
+
+        # Determine the borrow key to release.
+        # If the value carries provenance from this array, use its original
+        # indices key (stable across re-evaluations of computed indices).
+        source_key: tuple[str, ...] | None = None
+        if isinstance(value, Handle) and value.parent is self and value.indices:
+            source_key = self._make_indices_key(value.indices)
+
+        if (
+            self.value.type.is_quantum()
+            and source_key is not None
+            and source_key in self._borrowed_indices
+            and self._indices_definitely_different(indices, value.indices)
+        ):
+            source_index_str = self._format_index(value.indices)
+            raise LinearTypeError(
+                f"Cannot return borrowed element '{self.value.name}[{source_index_str}]' "
+                f"to '{self.value.name}[{index_str}]'.\n"
+                f"Borrowed elements must be returned to the same index.",
+                handle_name=self.value.name,
+                operation_name="array element return",
+            )
+
+        release_key = (
+            source_key
+            if source_key is not None and source_key in self._borrowed_indices
+            else target_key
+        )
+
+        if self.value.type.is_quantum():
+            if release_key in self._borrowed_indices:
+                # Borrow-return path: element was borrowed, validate identity
+                if not isinstance(value, Handle) or value.parent is not self:
+                    raise LinearTypeError(
+                        f"Cannot return a value to '{self.value.name}[{index_str}]' "
+                        f"that was not borrowed from this array.",
+                        handle_name=self.value.name,
+                        operation_name="array element return",
+                    )
+            else:
+                # Non-borrowed index: reject handles actively borrowed from
+                # a *different*, still-live array.  Handles whose parent was
+                # already consumed (e.g. returned from a @qkernel call) are
+                # treated as detached/fresh and allowed.
+                if (
+                    isinstance(value, Handle)
+                    and value.parent is not None
+                    and value.parent is not self
+                    and not value.parent._consumed
+                ):
+                    raise LinearTypeError(
+                        f"Cannot assign a handle borrowed from another array "
+                        f"to '{self.value.name}[{index_str}]' — "
+                        f"it was not borrowed from this array.",
+                        handle_name=self.value.name,
+                        operation_name="array element return",
+                    )
+
+            # Consume the handle (prevents reuse of old handle)
+            value.consume(operation_name=f"return to {self.value.name}[{index_str}]")
+
+        # Release the borrow
+        if release_key in self._borrowed_indices:
+            del self._borrowed_indices[release_key]
+        else:
+            # Classical types are freely copyable — no linear enforcement needed
+            pass
+
+    def _copy_subclass_state_to(self, new_handle: "ArrayBase") -> None:
+        """Copy ArrayBase-specific state to a new handle created by consume()."""
+        new_handle._shape = self._shape
+        new_handle._borrowed_indices = dict(self._borrowed_indices)
+        new_handle.element_type = self.element_type
 
     def validate_all_returned(self) -> None:
         """Validate all borrowed elements have been returned.
@@ -280,7 +430,7 @@ class Vector(ArrayBase[T]):
         """Set element at the given index."""
         if isinstance(index, int):
             index = self._make_uint_index(index)
-        self._set_element((index,))
+        self._return_element((index,), value)
 
     def __iter__(self) -> Iterator[T]:
         """Iteration over Vector is prohibited to prevent common bugs.
@@ -353,7 +503,7 @@ class Matrix(ArrayBase[T]):
             i = self._make_uint_index(i)
         if isinstance(j, int):
             j = self._make_uint_index(j)
-        self._set_element((i, j))
+        self._return_element((i, j), value)
 
 
 @dataclasses.dataclass
@@ -396,4 +546,4 @@ class Tensor(ArrayBase[T]):
         converted = tuple(
             self._make_uint_index(i) if isinstance(i, int) else i for i in index
         )
-        self._set_element(converted)
+        self._return_element(converted, value)

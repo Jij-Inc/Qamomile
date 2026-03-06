@@ -57,6 +57,15 @@ result = job.result()
 print(f"Counts: {result.counts}")
 ```
 
+## Error Handling
+
+`@qkernel` errors are raised in two stages:
+
+- **AST transform stage**: Unsupported control-flow patterns (e.g. direct sequence iteration, quantum operations in `while` conditions) are rejected with `SyntaxError`.
+- **Transpiler / backend stage**: Type violations, linear-type errors, and backend-specific issues use the `QamomileCompileError` family.
+
+When catching errors from `@qkernel`, include both `SyntaxError` and `QamomileCompileError` in your exception handling.
+
 ## Links
 
 - [GitHub Repository](https://github.com/Jij-Inc/Qamomile)
