@@ -5,7 +5,6 @@ import sympy as sp
 
 import qamomile.circuit as qm
 from qamomile.circuit.estimator import estimate_resources
-from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 from qamomile.circuit.estimator.algorithmic import (
     estimate_qaoa,
     estimate_qdrift,
@@ -13,6 +12,7 @@ from qamomile.circuit.estimator.algorithmic import (
     estimate_qsvt,
     estimate_trotter,
 )
+from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 
 
 class TestBasicCircuitEstimation:
@@ -96,7 +96,7 @@ class TestBasicCircuitEstimation:
         # Should NOT contain auto-generated temp symbols
         assert "uint_tmp" not in str(est.gates.single_qubit)
 
-    def test_qaoa_circuit_estimation(self):
+    def test_qaoa_layers_estimation(self):
         """Test resource estimation for QAOA circuit."""
 
         # Test with concrete size to avoid IR complexity

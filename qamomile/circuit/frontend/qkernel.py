@@ -17,7 +17,10 @@ from typing import (
 
 import numpy as np
 
-from qamomile.circuit.frontend.ast_transform import transform_control_flow
+from qamomile.circuit.frontend.ast_transform import (
+    collect_quantum_rebind_violations,
+    transform_control_flow,
+)
 from qamomile.circuit.frontend.constructors import qubit_array
 from qamomile.circuit.frontend.func_to_block import (
     create_dummy_input,
@@ -47,6 +50,19 @@ def _get_array_element_type(pt: Any) -> type | None:
     if hasattr(pt, "__args__") and pt.__args__:
         return pt.__args__[0]
     return getattr(pt, "element_type", None)
+
+
+def _get_quantum_param_names(input_types: dict[str, type]) -> set[str]:
+    """Return parameter names whose types are quantum (Qubit, Vector[Qubit])."""
+    quantum_names: set[str] = set()
+    for name, ptype in input_types.items():
+        if ptype is Qubit:
+            quantum_names.add(name)
+        elif is_array_type(ptype):
+            elem = _get_array_element_type(ptype)
+            if elem is Qubit:
+                quantum_names.add(name)
+    return quantum_names
 
 
 class QKernel(Generic[P, R]):
@@ -110,9 +126,46 @@ class QKernel(Generic[P, R]):
         # Lazy initialization for BlockValue
         self._block_value: BlockValue | None = None
 
+        # AST-level quantum rebind analysis (deferred raise until build/block)
+        quantum_params = _get_quantum_param_names(input_types)
+        if quantum_params:
+            self._rebind_violations = collect_quantum_rebind_violations(
+                self.raw_func, quantum_params
+            )
+        else:
+            self._rebind_violations = []
+
+    def _check_rebind_violations(self) -> None:
+        if not self._rebind_violations:
+            return
+        from qamomile.circuit.transpiler.errors import QubitRebindError
+
+        v = self._rebind_violations[0]
+        if v.func_name:
+            pattern = f"{v.target_name} = {v.func_name}({v.source_name}, ...)"
+            fix = (
+                f"  - Use self-update: {v.target_name} = {v.func_name}({v.target_name}, ...)\n"
+                f"  - Use a new variable: new_var = {v.func_name}({v.source_name}, ...)"
+            )
+        else:
+            pattern = f"{v.target_name} = {v.source_name}"
+            fix = (
+                f"  - Use a new variable: new_var = {v.source_name}\n"
+                f"  - Remove the assignment if '{v.target_name}' is no longer needed"
+            )
+        raise QubitRebindError(
+            f"Forbidden quantum variable reassignment at line {v.lineno}: "
+            f"'{pattern}' overwrites quantum variable '{v.target_name}' "
+            f"with a value derived from different quantum variable "
+            f"'{v.source_name}'.\n\nTo fix, either:\n{fix}",
+            handle_name=v.target_name,
+            operation_name="assignment_rebind",
+        )
+
     @property
     def block(self) -> BlockValue:
         """Compiles the function to a BlockValue (IR) if not already compiled."""
+        self._check_rebind_violations()
         if self._block_value is None:
             # Use self.func (AST-transformed) so that qm.range() is properly
             # converted to for_loop() context manager
@@ -132,11 +185,49 @@ class QKernel(Generic[P, R]):
 
         # Prepare inputs for the IR call (unwrap Handles to Values)
         inputs_map = {}
+        # Track borrow provenance for input-derived quantum scalar handles.
+        # After the call, return values with matching logical_id will have
+        # their parent/indices restored so that borrow-return validation
+        # in ArrayBase._return_element succeeds.
+        provenance_map: dict[str, tuple[Any, tuple]] = {}
+        # Collect scalar handles borrowed from arrays that are also arguments.
+        # Their borrows must be released before the parent array is consumed,
+        # since ArrayBase.consume() enforces that all borrows are returned.
+        borrowed_scalars: list[tuple[Any, tuple]] = []
         for name, handle in bound_args.arguments.items():
             if not isinstance(handle, Handle):
                 raise TypeError(
                     f"Argument '{name}' must be a Handle instance, got {type(handle)}"
                 )
+            # Record provenance before consume (which preserves parent)
+            if (
+                handle.parent is not None
+                and not is_array_type(type(handle))
+                and handle._should_enforce_linear()
+            ):
+                provenance_map[handle.value.logical_id] = (
+                    handle.parent,
+                    handle.indices,
+                )
+                borrowed_scalars.append((handle.parent, handle.indices))
+
+        # Release borrows for scalar elements whose parent arrays are also
+        # being passed to this call.  This allows the parent's consume()
+        # (which validates all borrows returned) to succeed.
+        array_args = {
+            id(h) for h in bound_args.arguments.values() if is_array_type(type(h))
+        }
+        for parent, indices in borrowed_scalars:
+            if id(parent) in array_args:
+                key = parent._make_indices_key(indices)
+                parent._borrowed_indices.pop(key, None)
+
+        for name, handle in bound_args.arguments.items():
+            if not isinstance(handle, Handle):
+                continue
+            # Consume quantum handles to enforce linear type
+            if handle._should_enforce_linear():
+                handle = handle.consume(operation_name=f"QKernel[{self.name}]")
             inputs_map[name] = handle.value
 
         # Ensure the block IR is compiled
@@ -172,7 +263,14 @@ class QKernel(Generic[P, R]):
                 )
             else:
                 # Instantiate the specific Handle type (Qubit, UInt, etc.)
-                wrapped_results.append(handle_type(value=val))
+                # Restore borrow provenance for input-derived quantum scalars
+                if val.logical_id in provenance_map:
+                    parent, indices = provenance_map[val.logical_id]
+                    wrapped_results.append(
+                        handle_type(value=val, parent=parent, indices=indices)
+                    )
+                else:
+                    wrapped_results.append(handle_type(value=val))
 
         # Return tuple or single value to match Python function signature
         if len(wrapped_results) == 1:
@@ -557,6 +655,8 @@ class QKernel(Generic[P, R]):
             result = transpiler.emit(graph, binding={"theta": 0.5})
             ```
         """
+        self._check_rebind_violations()
+
         if parameters is None:
             parameters = self._auto_detect_parameters(kwargs)
 

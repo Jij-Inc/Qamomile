@@ -35,8 +35,9 @@ def cast(
 ) -> QFixed:
     """Cast a quantum value to a different type without allocating new qubits.
 
-    The cast creates an alias over the same quantum resources. Both the
-    source and target refer to the same physical qubits.
+    The cast performs a move: the source handle is consumed and cannot be
+    reused after the cast. The returned handle references the same physical
+    qubits.
 
     Args:
         source: The value to cast (currently supports Vector[Qubit])
@@ -83,15 +84,18 @@ def _cast_vector_qubit_to_qfixed(
     source: Vector[Qubit],
     int_bits: int = 0,
 ) -> QFixed:
-    """Cast Vector[Qubit] to QFixed.
+    """Cast Vector[Qubit] to QFixed (move semantics).
 
     Args:
-        source: The qubit array to cast
+        source: The qubit array to cast. Consumed after the cast.
         int_bits: Number of integer bits (rest are fractional)
 
     Returns:
         QFixed handle referencing the same qubits
     """
+    # Ensure all borrowed elements have been returned before casting
+    source.validate_all_returned()
+
     # Get the number of qubits
     size = source.shape[0]
     if isinstance(size, int):
@@ -115,13 +119,17 @@ def _cast_vector_qubit_to_qfixed(
 
     frac_bits = num_qubits - int_bits
 
-    # Collect qubit UUIDs and logical_ids from the source array
+    # Collect qubit UUIDs and logical_ids via borrow-return cycle
     qubit_uuids: list[str] = []
     qubit_logical_ids: list[str] = []
     for i in range(num_qubits):
-        element = source[i]
+        element = source[i]  # borrow
         qubit_uuids.append(element.value.uuid)
         qubit_logical_ids.append(element.value.logical_id)
+        source[i] = element  # return
+
+    # Consume the source (move semantics - prevents reuse)
+    source = source.consume(operation_name="cast")
 
     # Create the result QFixed value
     result_type = QFixedType(integer_bits=int_bits, fractional_bits=frac_bits)

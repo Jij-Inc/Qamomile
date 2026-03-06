@@ -4,15 +4,15 @@ Tests verify that BinOp expressions are correctly folded and propagated
 to GateOperation.theta during the constant folding pass.
 """
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.circuit.algorithm.qaoa import x_mixier_circuit
-from qamomile.circuit.algorithm.basic import ry_layer, cz_entangling_layer
+from qamomile.circuit.algorithm.basic import cz_entangling_layer, ry_layer
+from qamomile.circuit.algorithm.qaoa import x_mixer
 from qamomile.qiskit.transpiler import QiskitTranspiler
 
 pytest.importorskip("qiskit")
@@ -28,19 +28,16 @@ from tests.transpiler.gate_test_specs import (
     tensor_product,
 )
 
-
 # ---------------------------------------------------------------------------
 # Module-level @qkernel definitions (required for inspect.getsource)
 # ---------------------------------------------------------------------------
 
 
 @qmc.qkernel
-def x_mixer_test_circuit(
-    n: qmc.UInt, beta: qmc.Float
-) -> qmc.Vector[qmc.Bit]:
-    """Wrapper that applies x_mixier_circuit and measures."""
+def x_mixer_test_circuit(n: qmc.UInt, beta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    """Wrapper that applies x_mixer and measures."""
     q = qmc.qubit_array(n, "q")
-    q = x_mixier_circuit(q, beta)
+    q = x_mixer(q, beta)
     return qmc.measure(q)
 
 
@@ -180,7 +177,6 @@ def _run_statevector(qc: "QuantumCircuit") -> np.ndarray:
     Returns:
         Complex statevector as a numpy array.
     """
-    from qiskit import QuantumCircuit as QC
     from qiskit_aer import AerSimulator
 
     # Build a new circuit without final measurements
@@ -219,13 +215,13 @@ class TestBinOpConstantFolding:
     @pytest.mark.parametrize(
         "n, beta",
         [
-            (1, 0.0),                # edge: identity rotation
-            (2, 0.4),                # original regression case
-            (1, np.pi),              # edge: full π rotation
-            (3, np.pi / 4),          # non-trivial angle, larger array
-            (2, _RANDOM_BETAS[0]),   # random
-            (1, _RANDOM_BETAS[1]),   # random, single qubit
-            (3, _RANDOM_BETAS[2]),   # random, 3 qubits
+            (1, 0.0),  # edge: identity rotation
+            (2, 0.4),  # original regression case
+            (1, np.pi),  # edge: full π rotation
+            (3, np.pi / 4),  # non-trivial angle, larger array
+            (2, _RANDOM_BETAS[0]),  # random
+            (1, _RANDOM_BETAS[1]),  # random, single qubit
+            (3, _RANDOM_BETAS[2]),  # random, 3 qubits
         ],
         ids=[
             "n=1,beta=0",
@@ -238,7 +234,7 @@ class TestBinOpConstantFolding:
         ],
     )
     def test_x_mixer_circuit_statevector(self, n: int, beta: float) -> None:
-        """Statevector of x_mixier_circuit matches ⊗ RX(2β) |0…0⟩."""
+        """Statevector of x_mixer matches ⊗ RX(2β) |0…0⟩."""
         _, qc = _transpile_and_get_circuit(
             x_mixer_test_circuit, bindings={"n": n, "beta": beta}
         )
@@ -260,8 +256,8 @@ class TestVariationalClassifier:
     @pytest.mark.parametrize(
         "n, num_layers, expected_ry, expected_cz",
         [
-            (3, 2, 6, 4),   # original regression case: 3 qubits, 2 layers
-            (2, 2, 4, 2),   # 2 qubits, 2 layers
+            (3, 2, 6, 4),  # original regression case: 3 qubits, 2 layers
+            (2, 2, 4, 2),  # 2 qubits, 2 layers
         ],
         ids=["3q_2layer", "2q_2layer"],
     )
