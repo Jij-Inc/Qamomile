@@ -87,7 +87,7 @@ qaoa_mixer_operator.draw(qubits=3, fold_loops=False)
 
 # %%
 @qmc.qkernel
-def qaoa_circuit(
+def qaoa_layers(
     edges: qmc.Matrix[qmc.UInt],
     weights: qmc.Vector[qmc.Float],
     bias: qmc.Vector[qmc.Float],
@@ -125,7 +125,7 @@ def qaoa_circuit(
 #
 # transpiler = QiskitTranspiler()
 # executable = transpiler.transpile(
-#     qaoa_circuit,
+#     qaoa_layers,
 #     bindings={"edges": edges, "weights": weights, "bias": bias, "p": 2},
 #     parameters=["gammas", "betas"],
 # )
@@ -147,7 +147,7 @@ def qaoa_circuit(
 #
 # transpiler = QuriPartsCircuitTranspiler()
 # executable = transpiler.transpile(
-#     qaoa_circuit,
+#     qaoa_layers,
 #     bindings={"edges": edges, "weights": weights, "bias": bias, "p": 2},
 #     parameters=["gammas", "betas"],
 # )
@@ -170,7 +170,7 @@ def qaoa_circuit(
 #
 # transpiler = PennylaneTranspiler()
 # executable = transpiler.transpile(
-#     qaoa_circuit,
+#     qaoa_layers,
 #     bindings={"edges": edges, "weights": weights, "bias": bias, "p": 2},
 #     parameters=["gammas", "betas"],
 # )
@@ -196,7 +196,7 @@ def qaoa_circuit(
 #
 # transpiler = CudaqTranspiler()
 # executable = transpiler.transpile(
-#     qaoa_circuit,
+#     qaoa_layers,
 #     bindings={"edges": edges, "weights": weights, "bias": bias, "p": 2},
 #     parameters=["gammas", "betas"],
 # )
@@ -247,14 +247,14 @@ def random_ising(n: int, sparsity: float = 0.5):
 n = 5
 edges, weights, bias = random_ising(n=n, sparsity=0.7)
 
-qaoa_circuit.draw(
+qaoa_layers.draw(
     edges=edges, weights=weights, bias=bias, p=2, fold_loops=False, inline=True
 )
 
 # %%
 transpiler = QiskitTranspiler()
 executable = transpiler.transpile(
-    qaoa_circuit,
+    qaoa_layers,
     bindings={
         "edges": edges,
         "weights": weights,

@@ -1,41 +1,47 @@
 """Algorithm building blocks for quantum circuits."""
 
-from .qaoa import (
-    ising_cost_circuit,
-    x_mixier_circuit,
-    qaoa_circuit,
-    superposition_vector,
-    qaoa_state,
-)
 from .basic import (
+    cz_entangling_layer,
+    superposition_vector,
     rx_layer,
     ry_layer,
     rz_layer,
-    cz_entangling_layer,
 )
 from .fqaoa import (
-    initial_occupations,
-    givens_rotation,
-    givens_rotations,
-    hopping_gate,
-    mixer_layer,
     cost_layer,
     fqaoa_layers,
     fqaoa_state,
+    givens_rotation,
+    givens_rotations,
+    hopping_gate,
+    initial_occupations,
+    mixer_layer,
+)
+from .qaoa import (
+    hubo_ising_cost,
+    hubo_qaoa_layers,
+    hubo_qaoa_state,
+    ising_cost,
+    qaoa_layers,
+    qaoa_state,
+    x_mixer,
 )
 
 __all__ = [
     # QAOA
-    "ising_cost_circuit",
-    "x_mixier_circuit",
-    "qaoa_circuit",
-    "superposition_vector",
+    "ising_cost",
+    "x_mixer",
+    "qaoa_layers",
     "qaoa_state",
+    "hubo_ising_cost",
+    "hubo_qaoa_layers",
+    "hubo_qaoa_state",
     # Basic layers
     "rx_layer",
     "ry_layer",
     "rz_layer",
     "cz_entangling_layer",
+    "superposition_vector",
     # FQAOA
     "initial_occupations",
     "givens_rotation",

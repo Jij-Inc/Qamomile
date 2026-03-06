@@ -1053,3 +1053,176 @@ class TestIfElseOneSidedReturnErrors:
                 else:
                     while True:
                         return qm.h(q1)
+
+
+# ===========================================================================
+# Input/output variable separation (Issues 2 & 3)
+# ===========================================================================
+
+
+class TestIfBranchVariableMerge:
+    """Tests for input/output variable separation in visit_If."""
+
+    def test_if_both_branch_new_local_definition_builds(self):
+        """Both branches define a new local; build should not raise NameError."""
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit, q2: Qubit) -> qm.Bit:
+            cond = qm.measure(q0)
+            if cond:
+                a = qm.measure(q1)
+            else:
+                a = qm.measure(q2)
+            return a
+
+        # Should not raise NameError
+        graph = circuit.build()
+        assert graph is not None
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        # 'a' should be in the phi_ops (new local merged from both branches)
+        assert any(isinstance(p, PhiOp) for p in if_ops[0].phi_ops)
+
+    def test_if_both_branch_new_local_definition_transpile_no_nameerror(self):
+        """Both branches define a new local; transpile should not raise NameError."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit.transpiler import QiskitTranspiler
+
+        @qkernel
+        def circuit() -> qm.Bit:
+            q0 = qm.qubit("q0")
+            q1 = qm.qubit("q1")
+            q2 = qm.qubit("q2")
+            cond = qm.measure(q0)
+            if cond:
+                a = qm.measure(q1)
+            else:
+                a = qm.measure(q2)
+            return a
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        assert exe is not None
+
+    def test_if_store_only_reassignment_is_merged(self):
+        """Store-only reassignment of existing var should be merged, not stale."""
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit, q2: Qubit, q3: Qubit) -> qm.Bit:
+            b = qm.measure(q1)
+            cond = qm.measure(q0)
+            if cond:
+                b = qm.measure(q2)
+            else:
+                b = qm.measure(q3)
+            # b should be the merged phi, not the original measure
+            return b
+
+        block = circuit.block
+        if_ops = [op for op in block.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        # The if should have phi_ops for the reassigned variable b
+        bit_phis = [
+            p
+            for p in if_ops[0].phi_ops
+            if isinstance(p, PhiOp) and isinstance(p.results[0].type, BitType)
+        ]
+        # At least one phi for 'b' (BitType) beyond the condition phi
+        assert len(bit_phis) >= 1
+
+    def test_if_only_store_only_reassignment_affects_following_if(self):
+        """If-only (no else) store-only reassignment should produce a phi merge."""
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit, q2: Qubit) -> qm.Bit:
+            b = qm.measure(q1)
+            cond = qm.measure(q0)
+            if cond:
+                b = qm.measure(q2)
+            # b should be phi-merged (true: new measure, false: original)
+            return b
+
+        block = circuit.block
+        if_ops = [op for op in block.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        phi_ops = if_ops[0].phi_ops
+        assert len(phi_ops) > 0
+
+    def test_if_one_sided_new_local_definition_raises_syntax_error(self):
+        """New local defined in only one branch and read after should raise SyntaxError."""
+        with pytest.raises(SyntaxError, match="defined in only one branch"):
+
+            @qkernel
+            def circuit(q0: Qubit, q1: Qubit) -> qm.Bit:
+                cond = qm.measure(q0)
+                if cond:
+                    a = qm.measure(q1)
+                # a is read after the if but only defined in the true branch
+                return a
+
+    def test_if_one_sided_existing_outer_scope_reassignment_is_allowed(self):
+        """One-sided reassignment of an existing outer var should not be rejected."""
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit, q2: Qubit) -> qm.Bit:
+            b = qm.measure(q1)
+            cond = qm.measure(q0)
+            if cond:
+                b = qm.measure(q2)
+            return b
+
+        # Should not raise - b exists in outer scope
+        graph = circuit.build()
+        assert graph is not None
+
+    def test_if_one_sided_new_local_not_read_after_if_is_allowed(self):
+        """New local defined in only one branch but not read after should be allowed."""
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit) -> qm.Bit:
+            cond = qm.measure(q0)
+            if cond:
+                _unused = qm.measure(q1)
+            # _unused is not read after the if
+            return cond
+
+        # Should not raise - _unused is not used after the if
+        graph = circuit.build()
+        assert graph is not None
+
+
+class TestIfNestedInLoop:
+    """Regression: if nested inside for/while must see correct outer scope."""
+
+    def test_if_inside_for_sees_loop_body_definitions(self):
+        """Variable defined before if inside for body should be in outer_defined."""
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit, n: UInt) -> Qubit:
+            for _i in qm.range(n):
+                cond = qm.measure(q0)
+                if cond:
+                    q1 = qm.x(q1)
+                else:
+                    q1 = qm.h(q1)
+            return q1
+
+        graph = circuit.build(n=3)
+        assert graph is not None
+
+    def test_if_inside_for_with_reassignment(self):
+        """Store-only reassignment inside for body + if should merge correctly."""
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit, n: UInt) -> qm.Bit:
+            b = qm.measure(q0)
+            for _i in qm.range(n):
+                if b:
+                    q1 = qm.x(q1)
+                else:
+                    q1 = qm.h(q1)
+                b = qm.measure(q1)
+            return b
+
+        graph = circuit.build(n=2)
+        assert graph is not None

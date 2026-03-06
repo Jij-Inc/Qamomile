@@ -172,7 +172,7 @@ class TestFreshQubitReturnCallBlock:
 
     def test_draw_callblock_fresh_qubit_array_return(self):
         """superposition_vector(n) returns fresh qubits - draw should not crash."""
-        from qamomile.circuit.algorithm.qaoa import superposition_vector
+        from qamomile.circuit.algorithm.basic import superposition_vector
 
         @qm.qkernel
         def demo(n: int) -> qm.Vector[qm.Bit]:
@@ -434,7 +434,7 @@ class TestFreshQubitCallBlockVisualization:
 
     @staticmethod
     def _make_demo_kernel():
-        from qamomile.circuit.algorithm.qaoa import superposition_vector
+        from qamomile.circuit.algorithm.basic import superposition_vector
 
         @qm.qkernel
         def demo(n: int) -> qm.Vector[qm.Bit]:

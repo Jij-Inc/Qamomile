@@ -85,7 +85,7 @@ def qaoa_mixer_operator(
 
 # %%
 @qmc.qkernel
-def qaoa_circuit(
+def qaoa_layers(
     edges: qmc.Matrix[qmc.UInt],
     weights: qmc.Vector[qmc.Float],
     bias: qmc.Vector[qmc.Float],
@@ -123,7 +123,7 @@ def qaoa_circuit(
 #
 # transpiler = QiskitTranspiler()
 # executable = transpiler.transpile(
-#     qaoa_circuit,
+#     qaoa_layers,
 #     bindings={"edges": edges, "weights": weights, "bias": bias, "p": 2},
 #     parameters=["gammas", "betas"],
 # )
@@ -145,7 +145,7 @@ def qaoa_circuit(
 #
 # transpiler = QuriPartsCircuitTranspiler()
 # executable = transpiler.transpile(
-#     qaoa_circuit,
+#     qaoa_layers,
 #     bindings={"edges": edges, "weights": weights, "bias": bias, "p": 2},
 #     parameters=["gammas", "betas"],
 # )
@@ -168,7 +168,7 @@ def qaoa_circuit(
 #
 # transpiler = PennylaneTranspiler()
 # executable = transpiler.transpile(
-#     qaoa_circuit,
+#     qaoa_layers,
 #     bindings={"edges": edges, "weights": weights, "bias": bias, "p": 2},
 #     parameters=["gammas", "betas"],
 # )
@@ -194,7 +194,7 @@ def qaoa_circuit(
 #
 # transpiler = CudaqTranspiler()
 # executable = transpiler.transpile(
-#     qaoa_circuit,
+#     qaoa_layers,
 #     bindings={"edges": edges, "weights": weights, "bias": bias, "p": 2},
 #     parameters=["gammas", "betas"],
 # )
@@ -249,7 +249,7 @@ edges, weights, bias = random_ising(n=n, sparsity=0.7)
 # %%
 transpiler = QiskitTranspiler()
 executable = transpiler.transpile(
-    qaoa_circuit,
+    qaoa_layers,
     bindings={
         "edges": edges,
         "weights": weights,
@@ -402,7 +402,7 @@ result_opt = minimize(
     options={"maxiter": 100, "disp": True},
 )
 
-print(f"\n最適化されたパラメータ:")
+print("\n最適化されたパラメータ:")
 print(f"  gammas: {result_opt.x[:p]}")
 print(f"  betas: {result_opt.x[p:]}")
 print(f"最終エネルギー: {result_opt.fun:.4f}")
