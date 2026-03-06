@@ -255,7 +255,7 @@ class TestSingleQubitGatesFrontend:
         assert "RZ" in _gate_names(qc)
 
     def test_p_creation(self):
-        """P gate transpiles to circuit containing 'RZ' (P emitted as RZ)."""
+        """P gate transpiles to circuit containing 'U1' (P ≡ U1)."""
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Bit:
@@ -264,7 +264,7 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 4})
-        assert "RZ" in _gate_names(qc)
+        assert "U1" in _gate_names(qc)
 
     # -- Statevector tests --
 

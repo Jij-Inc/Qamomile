@@ -166,16 +166,20 @@ class QuriPartsGateEmitter:
         qubit: int,
         angle: float | Any,
     ) -> None:
-        """Emit Phase gate.
+        """Emit Phase gate using U1.
 
-        QURI Parts doesn't have a native Phase gate. We use RZ which differs
-        by a global phase: P(θ) = e^(iθ/2) * RZ(θ).
-        For single-qubit usage the global phase is physically irrelevant.
-        For controlled gates, the CP decomposition compensates accordingly.
+        P(θ) = U1(θ) = diag(1, e^{iθ}).
+        For non-parametric angles we use the native U1 gate which is
+        mathematically identical to the Phase gate.
+        For parametric angles we fall back to ParametricRZ because QURI Parts
+        does not provide a ParametricU1 gate. RZ differs only by a global
+        phase: P(θ) = e^{iθ/2} · RZ(θ), which is physically irrelevant for
+        single-qubit usage. Controlled-phase (CP) has its own decomposition
+        and does not go through this path.
         """
         angle_dict = self._make_angle_dict(angle)
         if isinstance(angle_dict, float):
-            circuit.add_RZ_gate(qubit, angle_dict)
+            circuit.add_U1_gate(qubit, angle_dict)
         else:
             circuit.add_ParametricRZ_gate(qubit, angle_dict)
 
