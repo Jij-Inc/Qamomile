@@ -1,4 +1,4 @@
-from .transpiler import QuriPartsCircuitTranspiler
+from .transpiler import QuriPartsTranspiler
 from .transpiler import QuriPartsEmitPass
 from .transpiler import QuriPartsExecutor
 from .emitter import QuriPartsGateEmitter
@@ -7,7 +7,7 @@ from .observable import hamiltonian_to_quri_operator, to_quri_operator
 
 
 __all__ = [
-    "QuriPartsCircuitTranspiler",
+    "QuriPartsTranspiler",
     "QuriPartsEmitPass",
     "QuriPartsExecutor",
     "QuriPartsGateEmitter",

@@ -1,6 +1,6 @@
 """Rich QURI Parts frontend-to-backend test suite.
 
-Tests the full pipeline: @qkernel definition -> QuriPartsCircuitTranspiler -> execution.
+Tests the full pipeline: @qkernel definition -> QuriPartsTranspiler -> execution.
 Covers every available frontend gate, gate combinations, transpiler passes,
 parametric circuits, basic execution, algorithm modules, and edge cases.
 
@@ -33,7 +33,7 @@ from tests.transpiler.gate_test_specs import (
 pytest.importorskip("quri_parts")
 pytest.importorskip("quri_parts.qulacs")
 
-from qamomile.quri_parts import QuriPartsCircuitTranspiler
+from qamomile.quri_parts import QuriPartsTranspiler
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.segments import SimplifiedProgram
 from qamomile.circuit.ir.block import BlockKind
@@ -92,7 +92,7 @@ def _run_statevector(circuit) -> np.ndarray:
 
 def _transpile_and_get_circuit(kernel, bindings=None, parameters=None):
     """Transpile a qkernel and return (ExecutableProgram, QURI Parts circuit)."""
-    transpiler = QuriPartsCircuitTranspiler()
+    transpiler = QuriPartsTranspiler()
     exe = transpiler.transpile(kernel, bindings=bindings, parameters=parameters)
     circuit = exe.compiled_quantum[0].circuit
     return exe, circuit
@@ -1926,7 +1926,7 @@ class TestTranspilerPassesPipeline:
 
     @pytest.fixture
     def transpiler(self):
-        return QuriPartsCircuitTranspiler()
+        return QuriPartsTranspiler()
 
     def test_to_block(self, transpiler):
         """to_block converts QKernel to Block."""
@@ -2127,14 +2127,14 @@ class TestTranspilerConfigPortable:
         """set_config() applies TranspilerConfig to transpiler."""
         from qamomile.circuit.transpiler.transpiler import TranspilerConfig
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         config = TranspilerConfig.with_strategies({"qft": "approximate_k2"})
         transpiler.set_config(config)
         assert transpiler.config is config
 
     def test_substitute_no_rules_is_noop(self):
         """substitute() with no config rules returns block unchanged."""
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -2157,7 +2157,7 @@ class TestTranspilerConfigPortable:
             q = qmc.qft(q)
             return qmc.measure(q)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         config = TranspilerConfig.with_strategies({"qft": "approximate_k2"})
         transpiler.set_config(config)
 
@@ -2168,7 +2168,7 @@ class TestTranspilerConfigPortable:
 
     def test_separate_segments_simple_circuit(self):
         """separate() produces SimplifiedProgram with quantum segment."""
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -2204,7 +2204,7 @@ class TestTranspilerConfigPortable:
             phase_q = qmc.qpe(target, phase_register, phase_gate, theta=phase)
             return qmc.measure(phase_q)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         block = transpiler.to_block(qpe_circuit, bindings={"phase": np.pi / 2})
         substituted = transpiler.substitute(block)
         inlined = transpiler.inline(substituted)
@@ -2229,14 +2229,14 @@ class TestTranspilerConfigPortable:
             return qmc.measure(q)
 
         # Standard QFT (default)
-        transpiler_std = QuriPartsCircuitTranspiler()
+        transpiler_std = QuriPartsTranspiler()
         exe_std = transpiler_std.transpile(circuit)
         circ_std = exe_std.compiled_quantum[0].circuit
         gates_std = _gate_names(circ_std)
         gates_std_count = len(gates_std)
 
         # Approximate QFT (k=2)
-        transpiler_approx = QuriPartsCircuitTranspiler()
+        transpiler_approx = QuriPartsTranspiler()
         config = TranspilerConfig.with_strategies({"qft": "approximate_k2"})
         transpiler_approx.set_config(config)
         exe_approx = transpiler_approx.transpile(circuit)
@@ -2278,7 +2278,7 @@ class TestParameterizedCircuits:
             q = qmc.rx(q, theta)
             return qmc.measure(q)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit, parameters=["theta"])
         qc = exe.compiled_quantum[0].circuit
         assert qc.parameter_count > 0
@@ -2292,7 +2292,7 @@ class TestParameterizedCircuits:
             q = qmc.rx(q, theta)
             return qmc.measure(q)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit, parameters=["theta"])
 
         job = exe.sample(transpiler.executor(), bindings={"theta": np.pi}, shots=100)
@@ -2310,7 +2310,7 @@ class TestParameterizedCircuits:
                 q[i] = qmc.rx(q[i], theta)
             return qmc.measure(q)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit, bindings={"n": 3}, parameters=["theta"])
         qc = exe.compiled_quantum[0].circuit
         assert qc.parameter_count > 0
@@ -2324,7 +2324,7 @@ class TestParameterizedCircuits:
             q = qmc.ry(q, theta)
             return qmc.measure(q)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit, parameters=["theta"])
         executor = transpiler.executor()
 
@@ -2514,7 +2514,7 @@ class TestStdlibQPE:
             phase_q = qmc.qpe(target, phase_register, phase_gate, theta=phase)
             return qmc.measure(phase_q)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(qpe_3bit, bindings={"phase": np.pi / 2})
         executor = transpiler.executor()
 
@@ -2760,7 +2760,7 @@ class TestExecution:
             q = qmc.x(q)
             return qmc.measure(q)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit)
         executor = transpiler.executor()
 
@@ -2780,7 +2780,7 @@ class TestExecution:
             q[0], q[1] = qmc.cx(q[0], q[1])
             return qmc.measure(q)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit)
         executor = transpiler.executor()
 
@@ -2801,7 +2801,7 @@ class TestExecution:
             q = qmc.h(q)
             return qmc.measure(q)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit)
         executor = transpiler.executor()
 
@@ -2819,7 +2819,7 @@ class TestExecution:
             q = qmc.rx(q, theta)
             return qmc.measure(q)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit, parameters=["theta"])
         executor = transpiler.executor()
 
@@ -2845,7 +2845,7 @@ class TestExecution:
             q[2] = qmc.x(q[2])
             return qmc.measure(q)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit)
         executor = transpiler.executor()
 
@@ -3045,7 +3045,7 @@ class TestErrorCases:
             q = qmc.rx(q, theta)
             return qmc.measure(q)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         # Provide a wrong key so 'theta' is still missing
         with pytest.raises(ValueError, match="Unknown argument"):
             transpiler.transpile(circuit, bindings={"alpha": 0.5})
@@ -3060,7 +3060,7 @@ class TestErrorCases:
                 q[i] = qmc.h(q[i])
             return qmc.measure(q)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         # Provide a string for a UInt param — should fail
         with pytest.raises((TypeError, ValueError)):
             transpiler.transpile(circuit, bindings={"n": "not_a_number"})
@@ -3505,7 +3505,7 @@ class TestAlgorithmQAOAModules:
 
         gammas = np.array([0.5])
         betas = np.array([0.8])
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(
             circuit,
             bindings={
@@ -3563,7 +3563,7 @@ class TestAdvancedParameterHandling:
             q = qmc.ry(q, theta)
             return qmc.expval((q,), obs)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         executor = transpiler.executor()
 
         for theta in [0.0, np.pi / 4, np.pi / 2, np.pi]:
@@ -3585,7 +3585,7 @@ class TestAdvancedParameterHandling:
             q = qmc.ry(q, theta)
             return qmc.measure(q)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit, parameters=["theta"])
         assert exe.has_parameters
         qc = exe.compiled_quantum[0].circuit
@@ -3603,7 +3603,7 @@ class TestAdvancedParameterHandling:
                 q[i] = qmc.ry(q[i], thetas[i])
             return qmc.measure(q)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit, bindings={"n": 3}, parameters=["thetas"])
         assert exe.has_parameters
         qc = exe.compiled_quantum[0].circuit
@@ -3624,7 +3624,7 @@ class TestAdvancedParameterHandling:
             q[0] = qmc.rz(q[0], theta)
             return qmc.measure(q)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(
             circuit, bindings={"n": 3}, parameters=["theta", "params"]
         )
@@ -3645,7 +3645,7 @@ class TestAdvancedParameterHandling:
             q = cz_entangling_layer(q)
             return qmc.measure(q)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit, bindings={"n": 3}, parameters=["params"])
         assert exe.has_parameters
         qc = exe.compiled_quantum[0].circuit
@@ -3660,7 +3660,7 @@ class TestAdvancedParameterHandling:
             q = qmc.ry(q, theta)
             return qmc.measure(q)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit, parameters=["theta"])
         executor = transpiler.executor()
 
@@ -3686,7 +3686,7 @@ class TestAdvancedParameterHandling:
             q = qmc.rx(q, theta)
             return qmc.measure(q)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit, parameters=["theta"])
 
         rng = np.random.default_rng(seed)
@@ -3918,7 +3918,7 @@ class TestExpvalQuriPartsPipeline:
             return qmc.expval(q, H)
 
         H = qm_o.Z(0) * qm_o.Z(1)
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(vqe, bindings={"H": H, "n": 2})
         assert len(exe.compiled_expval) == 1
         assert isinstance(exe.compiled_expval[0].hamiltonian, qm_o.Hamiltonian)
@@ -3932,7 +3932,7 @@ class TestExpvalQuriPartsPipeline:
             q = qmc.qubit("q")
             return qmc.expval((q,), obs)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit, bindings={"obs": H})
         executor = transpiler.executor()
         result = exe.run(executor).result()
@@ -3948,7 +3948,7 @@ class TestExpvalQuriPartsPipeline:
             q = qmc.x(q)
             return qmc.expval((q,), obs)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit, bindings={"obs": H})
         executor = transpiler.executor()
         result = exe.run(executor).result()
@@ -3964,7 +3964,7 @@ class TestExpvalQuriPartsPipeline:
             q = qmc.h(q)
             return qmc.expval((q,), obs)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit, bindings={"obs": H})
         executor = transpiler.executor()
         result = exe.run(executor).result()
@@ -3981,7 +3981,7 @@ class TestExpvalQuriPartsPipeline:
             q[0], q[1] = qmc.cx(q[0], q[1])
             return qmc.expval(q, obs)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit, bindings={"obs": H})
         executor = transpiler.executor()
         result = exe.run(executor).result()
@@ -3998,7 +3998,7 @@ class TestExpvalQuriPartsPipeline:
             q[1] = qmc.h(q[1])
             return qmc.expval(q, obs)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit, bindings={"obs": H})
         executor = transpiler.executor()
         result = exe.run(executor).result()
@@ -4016,7 +4016,7 @@ class TestExpvalQuriPartsPipeline:
             q = qmc.ry(q, theta)
             return qmc.expval((q,), obs)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         executor = transpiler.executor()
         # theta=0: <0|Z|0>=1
         exe_0 = transpiler.transpile(circuit, bindings={"theta": 0.0, "obs": H})
@@ -4036,7 +4036,7 @@ class TestExpvalQuriPartsPipeline:
             q = qmc.qubit_array(n, "q")
             return qmc.expval(q, H)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         with pytest.raises(RuntimeError, match="Observable.*not found in bindings"):
             transpiler.transpile(circuit, bindings={"n": 2})
 
@@ -4084,7 +4084,7 @@ class TestVariationalClassifierPattern:
             return qmc.measure(q)
 
         params = np.array([0.5, 0.3, 0.7, 0.1])
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(classifier, bindings={"thetas": params})
         executor = transpiler.executor()
         job = exe.sample(executor, bindings={}, shots=200)
@@ -4108,7 +4108,7 @@ class TestVariationalClassifierPattern:
 
         H_label = qm_o.Hamiltonian(num_qubits=3)
         H_label += qm_o.Z(0)
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(
             classifier,
             bindings={"n": 3, "params": [0.1, 0.2, 0.3], "H": H_label},
@@ -4136,7 +4136,7 @@ class TestVariationalClassifierPattern:
 
         H_label = qm_o.Hamiltonian(num_qubits=2)
         H_label += qm_o.Z(0)
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(
             classifier,
             bindings={"n": 2, "params": [0.5, 1.0], "H": H_label},
@@ -4162,7 +4162,7 @@ class TestVariationalClassifierPattern:
         H_label = qm_o.Hamiltonian(num_qubits=3)
         H_label += qm_o.Z(0)
         params = [0.1 * i for i in range(6)]  # 2 layers * 3 qubits
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(
             classifier,
             bindings={"n": 3, "params": params, "H": H_label},
@@ -4193,7 +4193,7 @@ class TestVariationalClassifierPattern:
 
         H_label = qm_o.Hamiltonian(num_qubits=3)
         H_label += qm_o.Z(0)
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(
             classifier,
             bindings={
@@ -4226,7 +4226,7 @@ class TestVariationalClassifierPattern:
 
         H_label = qm_o.Hamiltonian(num_qubits=2)
         H_label += qm_o.Z(0)
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(
             classifier,
             bindings={"n": 2, "H": H_label},

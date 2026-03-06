@@ -1,6 +1,6 @@
 """QURI Parts backend transpiler implementation.
 
-This module provides QuriPartsCircuitTranspiler for converting Qamomile QKernels
+This module provides QuriPartsTranspiler for converting Qamomile QKernels
 into QURI Parts quantum circuits.
 """
 
@@ -224,7 +224,7 @@ class QuriPartsExecutor(
         return estimate.value.real
 
 
-class QuriPartsCircuitTranspiler(
+class QuriPartsTranspiler(
     Transpiler["qp_c.LinearMappedUnboundParametricQuantumCircuit"]
 ):
     """QURI Parts transpiler for qamomile.circuit module.
@@ -232,7 +232,7 @@ class QuriPartsCircuitTranspiler(
     Converts Qamomile QKernels into QURI Parts quantum circuits.
 
     Example:
-        from qamomile.quri_parts import QuriPartsCircuitTranspiler
+        from qamomile.quri_parts import QuriPartsTranspiler
         import qamomile.circuit as qm
 
         @qm.qkernel
@@ -241,7 +241,7 @@ class QuriPartsCircuitTranspiler(
             q0, q1 = qm.cx(q0, q1)
             return qm.measure(q0), qm.measure(q1)
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         circuit = transpiler.to_circuit(bell_state)
     """
 

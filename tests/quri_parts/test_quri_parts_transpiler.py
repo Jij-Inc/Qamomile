@@ -1,4 +1,4 @@
-"""Tests for QuriPartsCircuitTranspiler (new qamomile.circuit API)."""
+"""Tests for QuriPartsTranspiler (new qamomile.circuit API)."""
 
 import math
 
@@ -168,29 +168,29 @@ class TestQuriPartsGateEmitter:
         assert result is None
 
 
-class TestQuriPartsCircuitTranspiler:
+class TestQuriPartsTranspiler:
     """Test the transpiler configuration."""
 
     def test_transpiler_creation(self) -> None:
         """Test transpiler can be created."""
-        from qamomile.quri_parts import QuriPartsCircuitTranspiler
+        from qamomile.quri_parts import QuriPartsTranspiler
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         assert transpiler is not None
 
     def test_executor_creation(self) -> None:
         """Test executor can be created from transpiler."""
-        from qamomile.quri_parts import QuriPartsCircuitTranspiler
+        from qamomile.quri_parts import QuriPartsTranspiler
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         executor = transpiler.executor()
         assert executor is not None
 
     def test_executor_with_custom_sampler(self) -> None:
         """Test executor with custom sampler."""
-        from qamomile.quri_parts import QuriPartsCircuitTranspiler
+        from qamomile.quri_parts import QuriPartsTranspiler
 
-        transpiler = QuriPartsCircuitTranspiler()
+        transpiler = QuriPartsTranspiler()
         # Custom sampler can be passed to executor
         executor = transpiler.executor(sampler=None, estimator=None)
         assert executor is not None
