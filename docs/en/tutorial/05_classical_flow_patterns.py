@@ -24,8 +24,7 @@
 #
 # - `qmc.range()` for loops (recap and deeper usage)
 # - `qmc.items()` for iterating over dictionaries
-# - `if` and `while` for conditional and iterative circuit construction
-# - Current limitations of `draw()` and `to_circuit()` with control flow
+# - `if` and `while` on measurement results for mid-circuit branching
 
 # %%
 import qamomile.circuit as qmc
@@ -115,62 +114,139 @@ print(circuit)
 # %% [markdown]
 # ## `if` Branching and `while` Loops
 #
-# Python `if` and `while` statements work inside kernels.
-# Conditions must be classical expressions (on kernel parameters),
-# not quantum measurement results.
+# Qamomile supports **mid-circuit measurement** followed by classical
+# branching. The condition must be a **measurement result** (`Bit`),
+# not a kernel parameter.
 #
-# Here is an example that combines both: build layers of rotation
-# gates in a `while` loop, and optionally add entanglement with `if`.
+# This maps directly to hardware-level conditional execution:
+# measure a qubit, then decide what to do next based on the outcome.
 
+# %% [markdown]
+# ### `if` on a measurement result
+#
+# A common pattern: measure one qubit and conditionally apply a gate
+# to another qubit based on the outcome.
 
 # %%
 @qmc.qkernel
-def layered_circuit(
-    n: qmc.UInt, theta: qmc.Float, depth: qmc.UInt, entangle: qmc.UInt
-) -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(n, name="q")
+def conditional_flip() -> qmc.Bit:
+    q0 = qmc.qubit("q0")
+    q1 = qmc.qubit("q1")
 
-    d = qmc.uint(0)
-    while d < depth:
-        for i in qmc.range(n):
-            q[i] = qmc.ry(q[i], theta)
-        if entangle > 0:
-            for i in qmc.range(n - 1):
-                q[i], q[i + 1] = qmc.cx(q[i], q[i + 1])
-        d = d + 1
+    q0 = qmc.x(q0)  # Prepare |1⟩
+    bit = qmc.measure(q0)
 
-    return qmc.measure(q)
+    # Conditionally flip q1 based on q0's measurement
+    if bit:
+        q1 = qmc.x(q1)
+    else:
+        q1 = q1  # no-op — both branches must handle q1
+
+    return qmc.measure(q1)
 
 
 # %% [markdown]
-# `estimate_resources()` works with `if` and `while`:
+# > **Note**: Both `if` and `else` branches must handle the same qubit
+# > handles due to the affine type system. If the true branch applies
+# > a gate to `q1`, the false branch must also reassign `q1` (even as
+# > a no-op `q1 = q1`).
+
+# %% [markdown]
+# This transpiles to a Qiskit `if_else` instruction and can be executed:
 
 # %%
-est = layered_circuit.estimate_resources()
-print("qubits:", est.qubits)
-print("total gates:", est.gates.total)
+exe = transpiler.transpile(conditional_flip)
+executor = transpiler.executor()
+job = exe.sample(executor, bindings={}, shots=100)
+result = job.result()
+for value, count in result.results:
+    print(f"  bit={value}: {count} shots")
 
 # %% [markdown]
-# ### Current `draw()` and `to_circuit()` Limitations
+# Since `q0` is prepared as |1⟩, the measurement always yields 1,
+# so `q1` always gets flipped — every shot should return 1.
+
+# %% [markdown]
+# ### `while` on a measurement result
 #
-# `if` and `while` are valid in kernels, but `draw()` and `to_circuit()`
-# do not yet fully support them. If you encounter an error, use
-# `estimate_resources()` to verify the circuit structure.
+# A `while` loop repeats until the measurement condition becomes false.
+# This is useful for repeat-until-success protocols.
 
 # %%
-try:
-    layered_circuit.draw(n=3, theta=0.5, depth=2, entangle=1)
-except Exception as e:
-    print(f"draw() limitation: {type(e).__name__}: {e}")
+@qmc.qkernel
+def repeat_until_zero() -> qmc.Bit:
+    q = qmc.qubit("q")
+    q = qmc.h(q)  # 50/50 chance of |0⟩ or |1⟩
+    bit = qmc.measure(q)
+
+    while bit:
+        # Re-prepare and re-measure until we get 0
+        q = qmc.qubit("q2")
+        q = qmc.h(q)
+        bit = qmc.measure(q)
+
+    return bit
+
+
+# %% [markdown]
+# This transpiles to a Qiskit `while_loop` instruction:
+
+# %%
+exe = transpiler.transpile(repeat_until_zero)
+job = exe.sample(executor, bindings={}, shots=100)
+result = job.result()
+for value, count in result.results:
+    print(f"  bit={value}: {count} shots")
+
+# %% [markdown]
+# The loop keeps running until the measurement yields 0,
+# so the final result is always 0.
+
+# %% [markdown]
+# ### Combining `if` and `while`
+#
+# You can combine both patterns. Here is a protocol that repeatedly
+# measures and conditionally applies a correction gate:
+
+# %%
+@qmc.qkernel
+def measure_and_correct() -> qmc.Bit:
+    q0 = qmc.qubit("q0")
+    q1 = qmc.qubit("q1")
+
+    q0 = qmc.h(q0)
+    bit = qmc.measure(q0)
+
+    while bit:
+        # If bit is 1, apply correction to q1
+        if bit:
+            q1 = qmc.x(q1)
+        else:
+            q1 = q1
+        # Re-prepare and re-measure
+        q0 = qmc.qubit("q0_retry")
+        q0 = qmc.h(q0)
+        bit = qmc.measure(q0)
+
+    return qmc.measure(q1)
+
+
+# %%
+exe = transpiler.transpile(measure_and_correct)
+job = exe.sample(executor, bindings={}, shots=100)
+result = job.result()
+for value, count in result.results:
+    print(f"  bit={value}: {count} shots")
 
 # %% [markdown]
 # ## Summary
 #
 # - `qmc.range(n)` for looping over symbolic ranges.
 # - `qmc.items(dict)` for iterating over sparse key-value data (edges, weights).
-# - `if` and `while` for conditional and iterative gate application.
-# - `if`/`while` work in kernel definitions and `estimate_resources()`,
-#   but `draw()` and `to_circuit()` support is still limited.
+# - `if bit:` and `while bit:` for branching on **measurement results**.
+#   Both branches must handle the same qubit handles (affine rule).
+# - These control flow patterns transpile to native backend instructions
+#   (e.g., Qiskit `if_else` and `while_loop`).
 #
 # **Next**: [Reuse Patterns](06_reuse_patterns.ipynb) — helper kernels,
 # composite gates, and stub gates for top-down design.
