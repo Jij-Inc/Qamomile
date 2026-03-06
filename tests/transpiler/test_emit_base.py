@@ -20,7 +20,7 @@ Section 3: Integration tests for UInt BinOp (``//``, ``**``) folding
     into loop bounds via the constant folding pass.
 """
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pytest
@@ -50,11 +50,12 @@ from qamomile.circuit.ir.types.primitives import (
     UIntType,
 )
 from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.passes.emit_base import (
     LoopAnalyzer,
     ResourceAllocator,
+    map_phi_outputs,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers — phi_ops tests
@@ -66,7 +67,9 @@ def _make_value(name: str, type_cls: type = UIntType) -> Value:
     return Value(type=type_cls(), name=name)
 
 
-def _make_const_value(name: str, const: int | float, type_cls: type = UIntType) -> Value:
+def _make_const_value(
+    name: str, const: int | float, type_cls: type = UIntType
+) -> Value:
     """Create a constant Value with a ``const`` param entry."""
     return Value(type=type_cls(), name=name, params={"const": const})
 
@@ -360,9 +363,7 @@ class TestPhiOpsAllocation:
         qubit_map[phi_output.uuid] = sentinel_idx
 
         # Re-running allocation should not overwrite it
-        allocator._allocate_phi_ops(
-            if_op.phi_ops, qubit_map, clbit_map
-        )
+        allocator._allocate_phi_ops(if_op.phi_ops, qubit_map, clbit_map)
         assert qubit_map[phi_output.uuid] == sentinel_idx
 
     def test_multiple_phi_ops_all_allocated(self) -> None:
@@ -446,9 +447,7 @@ class TestPhiOpsAllocation:
         assert clbit_map[phi_bit.uuid] == clbit_map[true_bit.uuid]
 
     @pytest.mark.parametrize("array_size", [1, 2, 4])
-    def test_phi_bit_array_consolidates_both_branches(
-        self, array_size: int
-    ) -> None:
+    def test_phi_bit_array_consolidates_both_branches(self, array_size: int) -> None:
         """BitType ArrayValue phi must consolidate per-element clbits across branches."""
         size_val = _make_const_value("size", array_size)
 
@@ -458,20 +457,28 @@ class TestPhiOpsAllocation:
         # Measure q[0] → condition
         q0_idx = _make_const_value("idx_0", 0)
         q0_elem = Value(
-            type=QubitType(), name="q[0]",
-            parent_array=q_array, element_indices=(q0_idx,),
+            type=QubitType(),
+            name="q[0]",
+            parent_array=q_array,
+            element_indices=(q0_idx,),
         )
         cond = _make_value("cond", BitType)
         measure_cond = MeasureOperation(operands=[q0_elem], results=[cond])
 
         # True branch: measure into true_bits array
-        true_bits = _make_array_value("true_bits", shape_vals=(size_val,), type_cls=BitType)
-        false_bits = _make_array_value("false_bits", shape_vals=(size_val,), type_cls=BitType)
+        true_bits = _make_array_value(
+            "true_bits", shape_vals=(size_val,), type_cls=BitType
+        )
+        false_bits = _make_array_value(
+            "false_bits", shape_vals=(size_val,), type_cls=BitType
+        )
 
         # Simulate allocation of individual array element clbits
         # (MeasureVectorOperation would do this, but for unit test we pre-fill)
 
-        phi_bits = _make_array_value("phi_bits", shape_vals=(size_val,), type_cls=BitType)
+        phi_bits = _make_array_value(
+            "phi_bits", shape_vals=(size_val,), type_cls=BitType
+        )
         phi = PhiOp(
             operands=[cond, true_bits, false_bits],
             results=[phi_bits],
@@ -490,8 +497,6 @@ class TestPhiOpsAllocation:
             clbit_map[f"{true_bits.uuid}_{i}"] = i + 1
             clbit_map[f"{false_bits.uuid}_{i}"] = array_size + i + 1
 
-        from qamomile.circuit.transpiler.passes.emit_base import map_phi_outputs
-
         map_phi_outputs(if_op.phi_ops, {}, clbit_map)
 
         # Phi output elements should exist AND both branches consolidated
@@ -504,6 +509,109 @@ class TestPhiOpsAllocation:
             assert clbit_map[false_key] == clbit_map[true_key], (
                 f"element {i}: false branch clbit not consolidated"
             )
+
+    # --- Quantum phi merge validation tests ---
+
+    def test_quantum_phi_scalar_different_resources_raises_emit_error(self) -> None:
+        """Scalar qubit phi with different physical resources must raise EmitError."""
+        q0 = _make_value("q0", QubitType)
+        q0_out = q0.next_version()
+        q1 = _make_value("q1", QubitType)
+        q1_out = q1.next_version()
+        cond = _make_value("cond", BitType)
+
+        phi_output = _make_value("q_phi", QubitType)
+        phi = PhiOp(operands=[cond, q0_out, q1_out], results=[phi_output])
+
+        qubit_map: dict[str, int] = {q0_out.uuid: 0, q1_out.uuid: 1}
+        with pytest.raises(EmitError, match="Quantum PhiOp merge requires identical"):
+            map_phi_outputs([phi], qubit_map, {})
+
+    def test_quantum_phi_array_different_resources_raises_emit_error(self) -> None:
+        """Array qubit phi with different physical resources must raise EmitError."""
+        size_val = _make_const_value("size", 2)
+        arr_a = _make_array_value("arr_a", shape_vals=(size_val,))
+        arr_b = _make_array_value("arr_b", shape_vals=(size_val,))
+        cond = _make_value("cond", BitType)
+
+        phi_output = _make_array_value("phi_arr", shape_vals=(size_val,))
+        phi = PhiOp(operands=[cond, arr_a, arr_b], results=[phi_output])
+
+        qubit_map: dict[str, int] = {
+            f"{arr_a.uuid}_0": 0,
+            f"{arr_a.uuid}_1": 1,
+            f"{arr_b.uuid}_0": 2,
+            f"{arr_b.uuid}_1": 3,
+        }
+        with pytest.raises(EmitError, match="Quantum PhiOp merge requires identical"):
+            map_phi_outputs([phi], qubit_map, {})
+
+    def test_quantum_phi_scalar_unresolved_branch_raises_emit_error(self) -> None:
+        """Scalar qubit phi with one unresolved branch must raise EmitError."""
+        q0 = _make_value("q0", QubitType)
+        q0_out = q0.next_version()
+        q1 = _make_value("q1", QubitType)
+        q1_out = q1.next_version()
+        cond = _make_value("cond", BitType)
+
+        phi_output = _make_value("q_phi", QubitType)
+        phi = PhiOp(operands=[cond, q0_out, q1_out], results=[phi_output])
+
+        # Only q0_out is in qubit_map; q1_out is unresolved
+        qubit_map: dict[str, int] = {q0_out.uuid: 0}
+        with pytest.raises(EmitError, match="Quantum PhiOp merge requires identical"):
+            map_phi_outputs([phi], qubit_map, {})
+
+    def test_quantum_phi_array_unresolved_suffix_raises_emit_error(self) -> None:
+        """Array qubit phi with missing suffix in one branch must raise EmitError."""
+        size_val = _make_const_value("size", 2)
+        arr_a = _make_array_value("arr_a", shape_vals=(size_val,))
+        arr_b = _make_array_value("arr_b", shape_vals=(size_val,))
+        cond = _make_value("cond", BitType)
+
+        phi_output = _make_array_value("phi_arr", shape_vals=(size_val,))
+        phi = PhiOp(operands=[cond, arr_a, arr_b], results=[phi_output])
+
+        # arr_a has both suffixes, arr_b only has _0
+        qubit_map: dict[str, int] = {
+            f"{arr_a.uuid}_0": 0,
+            f"{arr_a.uuid}_1": 1,
+            f"{arr_b.uuid}_0": 0,
+        }
+        with pytest.raises(EmitError, match="Quantum PhiOp merge requires identical"):
+            map_phi_outputs([phi], qubit_map, {})
+
+    def test_quantum_phi_scalar_identity_still_allowed(self) -> None:
+        """Identity scalar phi (same physical resource) must succeed."""
+        q = _make_value("q", QubitType)
+        q_out = q.next_version()
+        cond = _make_value("cond", BitType)
+
+        phi_output = _make_value("q_phi", QubitType)
+        phi = PhiOp(operands=[cond, q_out, q_out], results=[phi_output])
+
+        qubit_map: dict[str, int] = {q_out.uuid: 0}
+        map_phi_outputs([phi], qubit_map, {})
+        assert phi_output.uuid in qubit_map
+        assert qubit_map[phi_output.uuid] == 0
+
+    def test_quantum_phi_array_identity_still_allowed(self) -> None:
+        """Identity array phi (same physical resources) must succeed."""
+        size_val = _make_const_value("size", 3)
+        arr = _make_array_value("arr", shape_vals=(size_val,))
+        cond = _make_value("cond", BitType)
+
+        phi_output = _make_array_value("phi_arr", shape_vals=(size_val,))
+        phi = PhiOp(operands=[cond, arr, arr], results=[phi_output])
+
+        qubit_map: dict[str, int] = {
+            f"{arr.uuid}_0": 0,
+            f"{arr.uuid}_1": 1,
+            f"{arr.uuid}_2": 2,
+        }
+        map_phi_outputs([phi], qubit_map, {})
+        for i in range(3):
+            assert qubit_map[f"{phi_output.uuid}_{i}"] == i
 
 
 # ===========================================================================
@@ -802,16 +910,85 @@ if TYPE_CHECKING:
 
 from qamomile.qiskit.transpiler import QiskitTranspiler  # noqa: E402
 
-
 # ---------------------------------------------------------------------------
 # Module-level @qkernel definitions (required for inspect.getsource)
 # ---------------------------------------------------------------------------
 
 
 @qmc.qkernel
-def binop_floordiv_circuit(
-    n: qmc.UInt, theta: qmc.Float
-) -> qmc.Vector[qmc.Bit]:
+def broken_phi_bit_array_example() -> qmc.Vector[qmc.Bit]:
+    """Regression: different qubit arrays in true/false branches must not silently merge.
+
+    Before the fix, this returned ``[((0, 0, 0, 0, 1), 200)]`` because the phi
+    always picked the true branch's physical resources regardless of the runtime
+    condition. the kernel transpiles and executes successfully.
+    """
+    c = qmc.qubit_array(1, "c")
+    true_q = qmc.qubit_array(2, "true")
+    false_q = qmc.qubit_array(2, "false")
+
+    m = qmc.measure(c[0])
+    false_q[1] = qmc.x(false_q[1])
+
+    out = None
+    if m:
+        out = qmc.measure(true_q)
+    else:
+        out = qmc.measure(false_q)
+
+    return out
+
+
+@qmc.qkernel
+def broken_phi_bit_scalar_example() -> qmc.Bit:
+    """Regression: scalar bit phi with different source qubits.
+
+    Before the fix, the phi always read the true branch's clbit regardless of
+    the runtime condition.  ``b`` is 0, so the else branch (``measure(q[2])``,
+    which is ``|1>``) must be chosen → result ``(1, 200)``.
+    Before the fix this returned ``(0, 200)``.
+    """
+    q = qmc.qubit_array(3, "q")
+
+    b = qmc.measure(q[0])  # Always zero
+    q[2] = qmc.x(q[2])  # q[2] is one
+
+    if b:
+        b = qmc.measure(q[1])  # 0
+    else:
+        b = qmc.measure(q[2])  # 1
+
+    return b
+
+
+@qmc.qkernel
+def frontend_target_vars_leak_example() -> qmc.Bit:
+    """Regression: Store-only reassignment of ``b`` leaked from phi merge.
+
+    Before the fix, ``b = qmc.bit(False)`` was never updated by the phi merge
+    (Store-only reassignment excluded from ``target_vars``), so the second
+    ``if b`` always saw the stale ``False`` value and skipped the X gate.
+    Before the fix this returned ``(0, 200)``.
+    """
+    q = qmc.qubit_array(4, "q")
+    b = qmc.bit(False)
+
+    c = qmc.measure(q[0])  # 0
+
+    if c:
+        b = qmc.measure(q[1])
+    else:
+        q[2] = qmc.x(q[2])  # |1>
+        b = qmc.measure(q[2])  # 1
+
+    if b:
+        q[3] = qmc.x(q[3])  # |1>
+
+    return qmc.measure(q[3])  # 1
+
+
+@qmc.qkernel
+def binop_floordiv_circuit(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
     """Apply RX(theta) to first n // 2 qubits of a 4-qubit register."""
     q = qmc.qubit_array(4, "q")
     count = n // 2
@@ -821,12 +998,10 @@ def binop_floordiv_circuit(
 
 
 @qmc.qkernel
-def binop_pow_circuit(
-    n: qmc.UInt, theta: qmc.Float
-) -> qmc.Vector[qmc.Bit]:
+def binop_pow_circuit(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
     """Apply RX(theta) to first n ** 2 qubits of a 4-qubit register."""
     q = qmc.qubit_array(4, "q")
-    count = n ** 2
+    count = n**2
     for i in qmc.range(count):
         q[i] = qmc.rx(q[i], angle=theta)
     return qmc.measure(q)
@@ -862,6 +1037,67 @@ def _extract_rx_angles(qc: "QuantumCircuit") -> list[float]:
 # ---------------------------------------------------------------------------
 
 
+class TestPhiMergeAliasRegression:
+    """End-to-end regression for phi quantum merge alias miscompile.
+
+    ``broken_phi_bit_array_example`` uses distinct qubit arrays (``true_q``,
+    ``false_q``) in the two branches.  Before the fix the transpiler silently
+    picked the true branch's physical qubits, producing wrong results
+    ``[((0, 0, 0, 0, 1), 200)]``.  After the fix the classical bit
+    consolidation path correctly merges the measurement results and the
+    circuit returns ``(0, 1)`` — the else branch's ``false_q`` after X on
+    index 1.
+    """
+
+    def test_phi_bit_array_produces_correct_result(self) -> None:
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(broken_phi_bit_array_example)
+        executor = transpiler.executor()
+        job = exe.sample(executor, shots=200, bindings={})
+        results = job.result().results
+        # m = measure(c[0]) is always 0 → else branch taken
+        # false_q[1] = X(false_q[1]) → false_q = [|0>, |1>]
+        # out = measure(false_q) → (0, 1)
+        assert len(results) == 1
+        bitstring, count = results[0]
+        assert bitstring == (0, 1), (
+            f"Expected (0, 1) but got {bitstring}; "
+            "before the fix this was (0, 0, 0, 0, 1)"
+        )
+        assert count == 200
+
+    def test_phi_bit_scalar_produces_correct_result(self) -> None:
+        """Scalar bit phi must pick the else branch (measure q[2] = |1>)."""
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(broken_phi_bit_scalar_example)
+        executor = transpiler.executor()
+        job = exe.sample(executor, shots=200, bindings={})
+        results = job.result().results
+        # b = measure(q[0]) = 0 → else branch → b = measure(q[2]) = 1
+        assert len(results) == 1
+        bitstring, count = results[0]
+        assert bitstring == 1, (
+            f"Expected 1 but got {bitstring}; before the fix this was 0"
+        )
+        assert count == 200
+
+    def test_frontend_target_vars_leak_produces_correct_result(self) -> None:
+        """Store-only reassignment of ``b`` must be merged so second if sees new value."""
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(frontend_target_vars_leak_example)
+        executor = transpiler.executor()
+        job = exe.sample(executor, shots=200, bindings={})
+        results = job.result().results
+        # c = 0 → else: X(q[2]), b = measure(q[2]) = 1
+        # b = 1 → if b: X(q[3]) → measure(q[3]) = 1
+        assert len(results) == 1
+        bitstring, count = results[0]
+        assert bitstring == 1, (
+            f"Expected 1 but got {bitstring}; before the fix this was 0 due to stale b"
+        )
+        assert count == 200
+
+
 class TestUIntBinOpFolding:
     """Tests for UInt BinOp kinds (``//``, ``**``) that affect loop bounds.
 
@@ -874,9 +1110,9 @@ class TestUIntBinOpFolding:
     @pytest.mark.parametrize(
         "n, theta, expected_rx_count",
         [
-            (4, 0.5, 2),   # 4 // 2 = 2
-            (6, 0.3, 3),   # 6 // 2 = 3
-            (2, 1.0, 1),   # 2 // 2 = 1
+            (4, 0.5, 2),  # 4 // 2 = 2
+            (6, 0.3, 3),  # 6 // 2 = 3
+            (2, 1.0, 1),  # 2 // 2 = 1
         ],
         ids=["4//2=2", "6//2=3", "2//2=1"],
     )
@@ -901,14 +1137,12 @@ class TestUIntBinOpFolding:
     @pytest.mark.parametrize(
         "n, theta, expected_rx_count",
         [
-            (2, 0.3, 4),   # 2 ** 2 = 4
-            (1, 0.5, 1),   # 1 ** 2 = 1
+            (2, 0.3, 4),  # 2 ** 2 = 4
+            (1, 0.5, 1),  # 1 ** 2 = 1
         ],
         ids=["2**2=4", "1**2=1"],
     )
-    def test_pow_loop_bound(
-        self, n: int, theta: float, expected_rx_count: int
-    ) -> None:
+    def test_pow_loop_bound(self, n: int, theta: float, expected_rx_count: int) -> None:
         """``n ** 2`` correctly folded as loop bound; angles verified."""
         _, qc = _transpile_and_get_circuit(
             binop_pow_circuit, bindings={"n": n, "theta": theta}
@@ -916,7 +1150,7 @@ class TestUIntBinOpFolding:
         rx_angles = _extract_rx_angles(qc)
 
         assert len(rx_angles) == expected_rx_count, (
-            f"Expected {expected_rx_count} RX gates (n={n}, n**2={n ** 2}), "
+            f"Expected {expected_rx_count} RX gates (n={n}, n**2={n**2}), "
             f"got {len(rx_angles)}"
         )
         for i, angle in enumerate(rx_angles):
