@@ -1,6 +1,7 @@
 import ast
 import inspect
 import textwrap
+import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, NoReturn
 
@@ -916,7 +917,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
 def transform_control_flow(func: Callable):
     try:
         src = inspect.getsource(func)
-    except OSError as e:
+    except (OSError, TypeError) as e:
         func_name = getattr(func, "__name__", "<unknown>")
         raise SyntaxError(
             f"Cannot retrieve source code for '{func_name}'. "
@@ -1124,44 +1125,65 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
         if not isinstance(value, ast.Call):
             return
 
+        target_names = [
+            elt.id for elt in targets.elts if isinstance(elt, ast.Name)
+        ]
+        if not target_names:
+            return
+
+        if self._is_classical_returning_call(value):
+            for tgt in target_names:
+                self.quantum_vars.pop(tgt, None)
+            return
+
         quantum_args = self._extract_quantum_args(value)
         if not quantum_args:
             return
 
-        target_names = [
-            elt.id for elt in targets.elts if isinstance(elt, ast.Name)
-        ]
+        arg_origins = [self.quantum_vars.get(a, a) for a in quantum_args]
 
-        for tgt in target_names:
-            if tgt not in self.quantum_vars:
-                continue
-            tgt_origin = self.quantum_vars[tgt]
-            has_match = any(
-                self.quantum_vars.get(a) == tgt_origin for a in quantum_args
+        for i, tgt in enumerate(target_names):
+            mapped_source = (
+                quantum_args[i] if i < len(quantum_args) else quantum_args[-1]
             )
-            if not has_match:
+            mapped_origin = self.quantum_vars.get(mapped_source, mapped_source)
+
+            # Existing quantum targets keep their own origin when present anywhere
+            # in call arguments (e.g. ctrl, tgt = gate(tgt, controls=(ctrl,))).
+            if tgt in self.quantum_vars:
+                tgt_origin = self.quantum_vars[tgt]
+                if tgt_origin in arg_origins:
+                    self.quantum_vars[tgt] = tgt_origin
+                    continue
                 func_name = self._get_func_name(value)
                 self.violations.append(
-                    RebindViolation(tgt, quantum_args[0], func_name, lineno)
+                    RebindViolation(tgt, mapped_source, func_name, lineno)
                 )
+
+            # For new targets (or mismatched existing ones), track mapped origin.
+            self.quantum_vars[tgt] = mapped_origin
 
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
 
     def _extract_quantum_args(self, call: ast.Call) -> list[str]:
-        """Recursively collect quantum variable names from args and kwargs."""
-        seen: set[str] = set()
+        """Recursively collect quantum variable names from args and kwargs.
+
+        Uses a dict to preserve insertion (AST traversal) order while
+        deduplicating, so that ``quantum_args[0]`` is deterministic.
+        """
+        seen: dict[str, None] = {}
 
         def _collect(expr: ast.expr) -> None:
             if isinstance(expr, ast.Name) and expr.id in self.quantum_vars:
-                seen.add(expr.id)
+                seen[expr.id] = None
             elif (
                 isinstance(expr, ast.Subscript)
                 and isinstance(expr.value, ast.Name)
                 and expr.value.id in self.quantum_vars
             ):
-                seen.add(expr.value.id)
+                seen[expr.value.id] = None
             elif isinstance(expr, (ast.Tuple, ast.List, ast.Set)):
                 for e in expr.elts:
                     _collect(e)
@@ -1206,7 +1228,13 @@ def collect_quantum_rebind_violations(
     try:
         source = textwrap.dedent(inspect.getsource(func))
         tree = ast.parse(source)
-    except Exception:
+    except (OSError, TypeError, SyntaxError) as e:
+        func_name = getattr(func, "__name__", "<unknown>")
+        warnings.warn(
+            f"Quantum rebind analysis skipped for '{func_name}': {e}",
+            UserWarning,
+            stacklevel=2,
+        )
         return []
 
     for node in tree.body:

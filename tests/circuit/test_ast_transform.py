@@ -89,6 +89,41 @@ class TestRuntimeLimitations:
         with pytest.raises(SyntaxError, match="Cannot retrieve source code"):
             transform_control_flow(ns["f"])
 
+    def test_getsource_builtin_typeerror_gives_descriptive_error(self):
+        """Passing a builtin (TypeError from getsource) should give descriptive SyntaxError."""
+        from qamomile.circuit.frontend.ast_transform import transform_control_flow
+
+        with pytest.raises(SyntaxError, match="Cannot retrieve source code"):
+            transform_control_flow(len)
+
+    def test_collect_quantum_rebind_violations_warns_on_source_unavailable(
+        self, monkeypatch
+    ):
+        """Rebind analysis should warn and return empty list when source is unavailable."""
+        import warnings
+
+        import qamomile.circuit.frontend.ast_transform as ast_transform
+
+        def _raise_oserror(_obj):
+            raise OSError("source unavailable")
+
+        monkeypatch.setattr(ast_transform.inspect, "getsource", _raise_oserror)
+
+        def dummy(q: Qubit) -> Qubit:
+            return q
+
+        with warnings.catch_warnings(record=True) as ws:
+            warnings.simplefilter("always")
+            violations = ast_transform.collect_quantum_rebind_violations(
+                dummy, {"q"}
+            )
+
+        assert violations == []
+        rebind_warnings = [
+            w for w in ws if "Quantum rebind analysis skipped" in str(w.message)
+        ]
+        assert len(rebind_warnings) == 1
+
     def test_while_quantum_condition_raises(self):
         """while condition with quantum operation should raise SyntaxError."""
         with pytest.raises(SyntaxError, match="Quantum operation"):

@@ -287,6 +287,24 @@ class ArrayBase(Handle, Generic[T]):
                         handle_name=self.value.name,
                         operation_name="array element return",
                     )
+            else:
+                # Non-borrowed index: reject handles actively borrowed from
+                # a *different*, still-live array.  Handles whose parent was
+                # already consumed (e.g. returned from a @qkernel call) are
+                # treated as detached/fresh and allowed.
+                if (
+                    isinstance(value, Handle)
+                    and value.parent is not None
+                    and value.parent is not self
+                    and not value.parent._consumed
+                ):
+                    raise LinearTypeError(
+                        f"Cannot assign a handle borrowed from another array "
+                        f"to '{self.value.name}[{index_str}]' — "
+                        f"it was not borrowed from this array.",
+                        handle_name=self.value.name,
+                        operation_name="array element return",
+                    )
 
             # Consume the handle (prevents reuse of old handle)
             value.consume(operation_name=f"return to {self.value.name}[{index_str}]")

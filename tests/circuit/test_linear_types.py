@@ -506,6 +506,17 @@ class TestSetitemConsumeAndValidation:
             with pytest.raises(QubitConsumedError):
                 qm.h(rogue)
 
+    def test_setitem_unborrowed_rejects_foreign_array_handle(self):
+        """Writing a handle borrowed from another array to an unborrowed index should raise."""
+        from qamomile.circuit.frontend.tracer import trace
+
+        with trace():
+            qs1 = qubit_array(2, "qs1")
+            qs2 = qubit_array(2, "qs2")
+            foreign = qs2[0]  # borrowed from qs2, parent=qs2
+            with pytest.raises(LinearTypeError, match="not borrowed from this array"):
+                qs1[1] = foreign  # unborrowed index, but foreign handle
+
     def test_setitem_after_measure_raises_consumed_error(self):
         """Writing to measured array should raise QubitConsumedError."""
 
@@ -1704,7 +1715,11 @@ class TestArrayConsumeUnreturnedBorrow:
         assert graph is not None
 
 
-_DIRECT_ELEMENT_FORBIDDEN_ERRORS = (QubitRebindError, QubitConsumedError)
+_DIRECT_ELEMENT_FORBIDDEN_ERRORS = (
+    QubitRebindError,
+    QubitConsumedError,
+    LinearTypeError,
+)
 
 
 class _SingleRebindComposite(CompositeGate):
@@ -1825,6 +1840,23 @@ class TestQuantumRebindDetectionBasics:
 
         graph = ok.build()
         assert graph is not None
+
+    def test_rebind_error_message_deterministic_with_multiple_quantum_args(self):
+        """Error message should consistently reference the first traversed quantum arg."""
+
+        @qkernel
+        def bad(a: qm.Qubit, b: qm.Qubit, c: qm.Qubit) -> qm.Qubit:
+            a = qm.cx(b, c)  # a's origin is a; neither b nor c matches
+            return a
+
+        with pytest.raises(QubitRebindError) as exc_info:
+            bad.build()
+        msg = str(exc_info.value)
+        assert "b" in msg or "c" in msg
+        for _ in range(5):
+            with pytest.raises(QubitRebindError) as exc2:
+                bad.build()
+            assert str(exc2.value) == msg
 
 
 class TestQuantumRebindDetectionSingleQubit:
@@ -2454,6 +2486,19 @@ class TestQuantumRebindDetectionViaQKernel:
 
         graph = ok.build()
         assert graph is not None
+
+    def test_tuple_intermediate_alias_rebind_rejected(self):
+        """Tuple result alias used to overwrite an existing quantum var should be rejected."""
+        _, k2, _ = _make_rebind_subkernels()
+
+        @qkernel
+        def bad(a: qm.Qubit, b: qm.Qubit, c: qm.Qubit) -> qm.Qubit:
+            x, _y = k2(b, c)
+            a = x
+            return a
+
+        with pytest.raises(QubitRebindError):
+            bad.build()
 
     def test_vector_whole_overwrite_rejected(self):
         _, _, kv = _make_rebind_subkernels()
