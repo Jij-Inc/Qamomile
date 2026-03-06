@@ -117,15 +117,17 @@ def qaoa_state(
     """Generate QAOA State for Ising model.
 
     Args:
-        p: Number of QAOA layers.
-        quad: Quadratic coefficients of Ising model.
-        linear: Linear coefficients of Ising model.
-        n: Number of qubits.
-        gammas: Vector of gamma parameters.
-        betas: Vector of beta parameters.
+        p (qmc.UInt): Number of QAOA layers.
+        quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]):
+            Quadratic coefficients of the Ising model.
+        linear (qmc.Dict[qmc.UInt, qmc.Float]):
+            Linear coefficients of the Ising model.
+        n (qmc.UInt): Number of qubits.
+        gammas (qmc.Vector[qmc.Float]): Cost-layer parameters, one per layer.
+        betas (qmc.Vector[qmc.Float]): Mixer-layer parameters, one per layer.
 
     Returns:
-        QAOA state vector.
+        qmc.Vector[qmc.Qubit]: QAOA state vector.
     """
     q = superposition_vector(n)
     q = qaoa_layers(p, quad, linear, q, gammas, betas)
@@ -143,12 +145,13 @@ def phase_gadget(
     Decomposes a k-body Z-rotation into CX + RZ primitives.
 
     Args:
-        q: Qubit register.
-        indices: Qubit indices for the interaction term.
-        angle: Rotation angle in radians.
+        q (qmc.Vector[qmc.Qubit]): Qubit register.
+        indices (qmc.Vector[qmc.UInt]): Qubit indices for the interaction term.
+            Must be non-empty.
+        angle (qmc.Float): Rotation angle in radians.
 
     Returns:
-        Updated qubit register.
+        qmc.Vector[qmc.Qubit]: Updated qubit register.
     """
     # Preconditions: indices must be non-empty.
     k = indices.shape[0]
