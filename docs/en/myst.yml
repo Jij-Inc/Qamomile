@@ -7,8 +7,7 @@ project:
   keywords:
     - quantum computing
     - optimization
-    - QAOA
-    - qiskit
+    - resource estimation
   authors:
     - name: Jij Inc.
   github: https://github.com/Jij-Inc/Qamomile
@@ -25,13 +24,6 @@ project:
         - file: tutorial/04_execution_models.ipynb
         - file: tutorial/05_classical_flow_patterns.ipynb
         - file: tutorial/06_reuse_patterns.ipynb
-        - file: tutorial/07_debugging_and_backend.ipynb
-    - title: Optimization
-      children:
-        - file: optimization/qaoa.ipynb
-        - file: optimization/fqaoa.ipynb
-        - file: optimization/qrao31.ipynb
-        - file: optimization/custom_converter.ipynb
 
 # --- API Reference (auto-generated) ---
     - title: API Reference

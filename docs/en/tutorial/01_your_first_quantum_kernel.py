@@ -50,12 +50,6 @@
 # pip install qamomile
 # ```
 #
-# For development in the repository:
-#
-# ```bash
-# uv sync
-# ```
-#
 # In this tutorial we use Qiskit as the concrete backend.
 # QuriParts is also supported, and backend options will continue to grow.
 

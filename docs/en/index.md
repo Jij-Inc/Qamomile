@@ -1,28 +1,15 @@
 # Welcome to Qamomile Documentation
 
-Qamomile is a powerful SDK for quantum optimization algorithms, specializing in the conversion of mathematical models into quantum circuits.
+Qamomile is a quantum programming SDK. Write quantum circuits as typed Python functions and run them on backends like Qiskit and QuriParts.
 
 ## Tutorials
 
-### Foundations
-
-- [Introduction to Qamomile](tutorial/01_introduction) - First circuit, affine types, execution with QiskitTranspiler
-- [Type System](tutorial/02_type_system) - Full type catalog: Qubit, Float, UInt, Bit, Vector, Dict
-- [Quantum Gates](tutorial/03_gates) - Complete gate reference (all 11 gates)
-- [Superposition & Entanglement](tutorial/04_superposition_entanglement) - Superposition, interference, Bell/GHZ states
-
-### Standard Library & Algorithms
-
-- [Standard Library](tutorial/05_stdlib) - QFT, IQFT, QPE, and the algorithm module
-- [Composite Gates](tutorial/06_composite_gate) - CompositeGate, `@composite_gate`, stub gates
-- [First Algorithm: Deutsch-Jozsa](tutorial/07_first_algorithm) - Oracle pattern, quantum parallelism, and interference
-- [Parametric Circuits & VQA](tutorial/08_parametric_circuits) - bindings vs parameters, Observable, expval, variational classifier
-
-### Advanced Topics
-
-- [Resource Estimation](tutorial/09_resource_estimation) - Algebraic gate counts and circuit depth as SymPy expressions
-- [Transpiler Internals](tutorial/10_transpile) - The full transpiler pipeline from @qkernel to executable
-- [Custom Executor](tutorial/11_custom_executor) - Connecting to cloud quantum backends (IBM Quantum, etc.)
+1. [Your First Quantum Kernel](tutorial/01_your_first_quantum_kernel) — Define, visualize, and execute a kernel; the affine rule
+2. [Parameterized Kernels](tutorial/02_parameterized_kernels) — Structure vs runtime parameters, bind/sweep pattern
+3. [Resource Estimation](tutorial/03_resource_estimation) — Symbolic cost analysis, gate breakdown, scaling
+4. [Execution Models](tutorial/04_execution_models) — `sample()` vs `run()`, observables, bit ordering
+5. [Classical Flow Patterns](tutorial/05_classical_flow_patterns) — Loops, sparse data, conditional branching
+6. [Reuse Patterns](tutorial/06_reuse_patterns) — Helper kernels, composite gates, stubs
 
 ## Optimization
 
@@ -44,27 +31,20 @@ import qamomile.circuit as qmc
 from qamomile.qiskit import QiskitTranspiler
 
 @qmc.qkernel
-def bell_state(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Bit, qmc.Bit]:
+def bell_state() -> tuple[qmc.Bit, qmc.Bit]:
+    q0 = qmc.qubit(name="q0")
+    q1 = qmc.qubit(name="q1")
     q0 = qmc.h(q0)
     q0, q1 = qmc.cx(q0, q1)
     return qmc.measure(q0), qmc.measure(q1)
 
 transpiler = QiskitTranspiler()
-executor = transpiler.executor()
-executable = transpiler.compile(bell_state)
-job = executable.sample(executor, shots=1000)
-result = job.result()
-print(f"Counts: {result.counts}")
+exe = transpiler.transpile(bell_state)
+result = exe.sample(transpiler.executor(), shots=1000).result()
+
+for outcome, count in result.results:
+    print(f"  {outcome}: {count}")
 ```
-
-## Error Handling
-
-`@qkernel` errors are raised in two stages:
-
-- **AST transform stage**: Unsupported control-flow patterns (e.g. direct sequence iteration, quantum operations in `while` conditions) are rejected with `SyntaxError`.
-- **Transpiler / backend stage**: Type violations, affine-type errors, and backend-specific issues use the `QamomileCompileError` family.
-
-When catching errors from `@qkernel`, include both `SyntaxError` and `QamomileCompileError` in your exception handling.
 
 ## Links
 

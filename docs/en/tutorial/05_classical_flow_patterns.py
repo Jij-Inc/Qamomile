@@ -127,6 +127,7 @@ print(circuit)
 # A common pattern: measure one qubit and conditionally apply a gate
 # to another qubit based on the outcome.
 
+
 # %%
 @qmc.qkernel
 def conditional_flip() -> qmc.Bit:
@@ -144,12 +145,6 @@ def conditional_flip() -> qmc.Bit:
 
     return qmc.measure(q1)
 
-
-# %% [markdown]
-# > **Note**: Both `if` and `else` branches must handle the same qubit
-# > handles due to the affine type system. If the true branch applies
-# > a gate to `q1`, the false branch must also reassign `q1` (even as
-# > a no-op `q1 = q1`).
 
 # %% [markdown]
 # This transpiles to a Qiskit `if_else` instruction and can be executed:
@@ -172,6 +167,7 @@ for value, count in result.results:
 # A `while` loop repeats until the measurement condition becomes false.
 # This is useful for repeat-until-success protocols.
 
+
 # %%
 @qmc.qkernel
 def repeat_until_zero() -> qmc.Bit:
@@ -189,24 +185,20 @@ def repeat_until_zero() -> qmc.Bit:
 
 
 # %% [markdown]
-# This transpiles to a Qiskit `while_loop` instruction:
+# This transpiles to a Qiskit `while_loop` instruction.
+# We can inspect the generated circuit structure:
 
 # %%
-exe = transpiler.transpile(repeat_until_zero)
-job = exe.sample(executor, bindings={}, shots=100)
-result = job.result()
-for value, count in result.results:
-    print(f"  bit={value}: {count} shots")
-
-# %% [markdown]
-# The loop keeps running until the measurement yields 0,
-# so the final result is always 0.
+exe_while = transpiler.transpile(repeat_until_zero)
+qc_while = exe_while.compiled_quantum[0].circuit
+print(qc_while)
 
 # %% [markdown]
 # ### Combining `if` and `while`
 #
 # You can combine both patterns. Here is a protocol that repeatedly
 # measures and conditionally applies a correction gate:
+
 
 # %%
 @qmc.qkernel
@@ -232,11 +224,9 @@ def measure_and_correct() -> qmc.Bit:
 
 
 # %%
-exe = transpiler.transpile(measure_and_correct)
-job = exe.sample(executor, bindings={}, shots=100)
-result = job.result()
-for value, count in result.results:
-    print(f"  bit={value}: {count} shots")
+exe_combined = transpiler.transpile(measure_and_correct)
+qc_combined = exe_combined.compiled_quantum[0].circuit
+print(qc_combined)
 
 # %% [markdown]
 # ## Summary

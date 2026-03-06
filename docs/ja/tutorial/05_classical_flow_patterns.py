@@ -13,18 +13,18 @@
 # ---
 
 # %% [markdown]
-# # 古典制御フローパターン
+# # 古典フローパターン
 #
-# 量子回路はしばしば古典データに依存する構造を持ちます。
-# 例えば、量子ビットに対するイテレーション、グラフのエッジに基づくゲート適用、
-# ゲートシーケンスの選択などです。Qamomile では `qmc.range`、`qmc.items`、
-# `if` 分岐、`while` ループによってこれらのパターンをサポートしています。
+# 量子回路の構造は古典データに依存することが多くあります。
+# 量子ビットのイテレーション、グラフのエッジに基づくゲート適用、
+# ゲート列の条件分岐などです。Qamomile では `qmc.range`、`qmc.items`、
+# `if` 分岐、`while` ループでこれらをサポートしています。
 #
-# この章では以下を扱います:
+# この章では以下を扱います：
 #
 # - `qmc.range()` によるループ（復習とより深い使い方）
 # - `qmc.items()` による辞書のイテレーション
-# - 測定結果に対する `if` と `while` による回路途中での分岐
+# - 測定結果に対する `if` / `while` による回路途中の分岐
 
 # %%
 import qamomile.circuit as qmc
@@ -36,8 +36,8 @@ transpiler = QiskitTranspiler()
 # ## `qmc.range` ループ
 #
 # チュートリアル 02 で `qmc.range(n)` を使った単純なループを見ました。
-# ここではもう少し豊富な例を示します。全ての量子ビットに H を適用し、
-# 隣接するペアを CX でエンタングルします。
+# ここではもう少しリッチな例として、全量子ビットに H を適用し、
+# 隣接ペアを CX でエンタングルします。
 
 
 # %%
@@ -62,14 +62,13 @@ hadamard_chain.draw(n=4)
 # %% [markdown]
 # ## `qmc.items` によるスパースな相互作用データの処理
 #
-# 多くの量子アルゴリズム（QAOA、VQE）では、グラフや相互作用マップで
-# 決定された特定の量子ビットペアにのみゲートを適用します。全てのペアを
-# ループするのではなく、相互作用の**辞書**を渡して `qmc.items()` で
-# イテレーションすることができます。
+# QAOA や VQE など多くの量子アルゴリズムでは、グラフや相互作用マップで
+# 決まる特定の量子ビットペアにのみゲートを適用します。全ペアをループする
+# のではなく、相互作用の**辞書**を渡して `qmc.items()` でイテレーションできます。
 #
-# 辞書型は Qamomile のシンボリック型を使用します:
-# `qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]` — キーは量子ビット
-# インデックスのペア、値は相互作用の重みです。
+# 辞書型には Qamomile のシンボリック型を使います：
+# `qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]` — キーが量子ビット
+# インデックスのペア、値が相互作用の重みです。
 
 
 # %%
@@ -95,9 +94,9 @@ def sparse_coupling(
 # %% [markdown]
 # ## `to_circuit()` による確認
 #
-# `draw()` は全てのパターン（特に複雑な型を伴う `items`）にはまだ対応して
-# いません。そのような場合は `to_circuit()` を使用して、全パラメータが
-# バインドされた後の具体的なバックエンド回路を確認してください。
+# `draw()` は全パターン（特に複雑な型を伴う `items`）にはまだ対応していません。
+# そのような場合は `to_circuit()` で全パラメータをバインドした後の
+# バックエンド回路を確認してください。
 
 # %%
 edge_data = {(0, 1): 1.0, (1, 2): -0.7, (0, 2): 0.3}
@@ -109,22 +108,23 @@ circuit = transpiler.to_circuit(
 print(circuit)
 
 # %% [markdown]
-# `edge_data` の 3 つのエッジのみが RZZ ゲートを生成し、無駄な操作はありません。
+# `edge_data` の 3 つのエッジのみが RZZ ゲートを生成します。
 
 # %% [markdown]
 # ## `if` 分岐と `while` ループ
 #
-# Qamomile は**回路途中での測定**とそれに続く古典的な分岐をサポートしています。
-# 条件は**測定結果**（`Bit`）でなければならず、カーネルパラメータではありません。
+# Qamomile は**回路途中での測定**に続く古典分岐をサポートしています。
+# 条件は**測定結果**（`Bit`）でなければならず、カーネルパラメータは使えません。
 #
-# これはハードウェアレベルの条件付き実行に直接対応します:
+# これはハードウェアレベルの条件付き実行に直接対応します：
 # 量子ビットを測定し、その結果に基づいて次の操作を決定します。
 
 # %% [markdown]
 # ### 測定結果に対する `if`
 #
-# よくあるパターン: 一つの量子ビットを測定し、その結果に基づいて
-# 別の量子ビットに条件付きでゲートを適用します。
+# よくあるパターンとして、ある量子ビットを測定し、その結果に基づいて
+# 別の量子ビットにゲートを条件付きで適用します。
+
 
 # %%
 @qmc.qkernel
@@ -143,12 +143,6 @@ def conditional_flip() -> qmc.Bit:
 
     return qmc.measure(q1)
 
-
-# %% [markdown]
-# > **注意**: アフィン型システムにより、`if` と `else` の両方の分岐で
-# > 同じ量子ビットハンドルを扱う必要があります。true 分岐で `q1` に
-# > ゲートを適用する場合、false 分岐でも `q1` を再代入する必要があります
-# > （何もしない場合でも `q1 = q1` とします）。
 
 # %% [markdown]
 # これは Qiskit の `if_else` 命令にトランスパイルされ、実行できます:
@@ -171,6 +165,7 @@ for value, count in result.results:
 # `while` ループは測定条件が false になるまで繰り返します。
 # これは repeat-until-success プロトコルに有用です。
 
+
 # %%
 @qmc.qkernel
 def repeat_until_zero() -> qmc.Bit:
@@ -188,24 +183,20 @@ def repeat_until_zero() -> qmc.Bit:
 
 
 # %% [markdown]
-# これは Qiskit の `while_loop` 命令にトランスパイルされます:
+# これは Qiskit の `while_loop` 命令にトランスパイルされます。
+# 生成された回路構造を確認できます:
 
 # %%
-exe = transpiler.transpile(repeat_until_zero)
-job = exe.sample(executor, bindings={}, shots=100)
-result = job.result()
-for value, count in result.results:
-    print(f"  bit={value}: {count} shots")
-
-# %% [markdown]
-# ループは測定結果が 0 になるまで実行され続けるため、
-# 最終結果は常に 0 です。
+exe_while = transpiler.transpile(repeat_until_zero)
+qc_while = exe_while.compiled_quantum[0].circuit
+print(qc_while)
 
 # %% [markdown]
 # ### `if` と `while` の組み合わせ
 #
 # 両方のパターンを組み合わせることができます。以下は測定を繰り返し行い、
 # 条件付きで補正ゲートを適用するプロトコルです:
+
 
 # %%
 @qmc.qkernel
@@ -231,21 +222,19 @@ def measure_and_correct() -> qmc.Bit:
 
 
 # %%
-exe = transpiler.transpile(measure_and_correct)
-job = exe.sample(executor, bindings={}, shots=100)
-result = job.result()
-for value, count in result.results:
-    print(f"  bit={value}: {count} shots")
+exe_combined = transpiler.transpile(measure_and_correct)
+qc_combined = exe_combined.compiled_quantum[0].circuit
+print(qc_combined)
 
 # %% [markdown]
 # ## まとめ
 #
-# - `qmc.range(n)` でシンボリックな範囲に対するループ。
+# - `qmc.range(n)` でシンボリック範囲のループ。
 # - `qmc.items(dict)` でスパースなキーバリューデータ（エッジ、重み）のイテレーション。
-# - `if bit:` と `while bit:` で**測定結果**に基づく分岐。
-#   両方の分岐で同じ量子ビットハンドルを扱う必要があります（アフィン規則）。
-# - これらの制御フローパターンはネイティブなバックエンド命令
-#   （例: Qiskit の `if_else` や `while_loop`）にトランスパイルされます。
+# - `if bit:` / `while bit:` で**測定結果**に基づく分岐。
+#   両分岐で同じ量子ビットハンドルを扱う必要があります（アフィンルール）。
+# - これらの制御フローはネイティブなバックエンド命令
+#   （例：Qiskit の `if_else` や `while_loop`）にトランスパイルされます。
 #
-# **次へ**: [再利用パターン](06_reuse_patterns.ipynb) — ヘルパーカーネル、
-# コンポジットゲート、トップダウン設計のためのスタブゲート。
+# **次へ**：[再利用パターン](06_reuse_patterns.ipynb) — ヘルパーカーネル、
+# コンポジットゲート、スタブゲート。

@@ -13,33 +13,34 @@
 # ---
 
 # %% [markdown]
-# # 再利用パターン: QKernel の合成とコンポジットゲート
+# # 再利用パターン：QKernel の合成とコンポジットゲート
 #
-# 回路が大きくなると、ゲート列のコピー&ペーストを避けたくなります。
-# Qamomile は2つの補完的な再利用メカニズムを提供しています:
+# 回路が大きくなると、ゲート列のコピー＆ペーストを避けたくなります。
+# Qamomile は 2 つの再利用メカニズムを提供しています：
 #
 # 1. **ヘルパー QKernel** — ある `@qkernel` を別の `@qkernel` から呼び出す、
-#    通常の関数合成と同様の方法です。
+#    通常の関数合成と同じ方法です。
 # 2. **`@composite_gate`** — カーネルを**名前付きゲート**に昇格させ、
-#    図中では単一のボックスとして表示され、バックエンド固有の処理が可能になります。
+#    図中で単一のボックスとして表示し、バックエンド固有の処理も可能にします。
 #
-# また、トップダウン設計のための第3のパターンもあります:
+# さらにトップダウン設計のための第 3 のパターンもあります：
 #
 # 3. **スタブコンポジット** — 実装本体を持たないゲートで、
-#    分解が確定する前のリソース推定に使用します。
+#    分解が確定する前のリソース推定に使います。
 
 # %%
 import qamomile.circuit as qmc
-from qamomile.qiskit import QiskitTranspiler
 from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
+from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
 
 # %% [markdown]
 # ## パターン 1: ヘルパー QKernel
 #
-# どの `@qkernel` 関数も、別の `@qkernel` から呼び出すことができます。
-# コンパイラが呼び出しをインライン展開するため、結果はフラットな回路になります。
+# どの `@qkernel` 関数も別の `@qkernel` から呼び出せます。
+# コンパイラが呼び出しをインライン展開するため、結果はフラットな回路です。
+
 
 # %%
 @qmc.qkernel
@@ -58,14 +59,19 @@ def ghz_with_helper(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 
     return qmc.measure(q)
 
+
 # %%
 ghz_with_helper.draw(n=4)
 
 # %%
-result = transpiler.transpile(ghz_with_helper, bindings={"n": 4}).sample(
-    transpiler.executor(),
-    shots=128,
-).result()
+result = (
+    transpiler.transpile(ghz_with_helper, bindings={"n": 4})
+    .sample(
+        transpiler.executor(),
+        shots=128,
+    )
+    .result()
+)
 print("GHZ result:", result.results)
 
 # %% [markdown]
@@ -75,11 +81,11 @@ print("GHZ result:", result.results)
 # %% [markdown]
 # ## パターン 2: `@composite_gate`
 #
-# 再利用可能なブロックを回路図中で**名前付きボックス**として表示したい場合
-# (さらにバックエンド固有のネイティブ実装を持つ可能性がある場合)、
-# `@composite_gate` で昇格させます。
+# 再利用可能なブロックを回路図で**名前付きボックス**として表示したい場合
+# `@composite_gate` でを使うこともできます。またコンピジットゲートをにすることでその他のカスタムも可能になります。
 #
-# `@qkernel` の上に `@composite_gate(name="...")` を重ねます:
+# `@qkernel` の上に `@composite_gate(name="...")` を重ねます：
+
 
 # %%
 @qmc.composite_gate(name="entangle_link")
@@ -99,31 +105,26 @@ def ghz_with_composite(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 
     return qmc.measure(q)
 
+
 # %%
 ghz_with_composite.draw(n=4)
 
 # %% [markdown]
 # ### どちらを使うべきか?
 #
-# | パターン | `draw()` での表示 | バックエンド固有の処理 | 使用場面 |
-# |---------|-------------------|--------------------------|----|
-# | ヘルパー `@qkernel` | インライン展開(フラット) | なし | コードの整理 |
-# | `@composite_gate` | 名前付きボックス | あり(エミッターがネイティブ版を提供可能) | ドメインレベルの抽象化 |
-#
-# 単に繰り返しを避けたい場合はプレーンなヘルパーを使います。
-# ブロックに意味のある名前があり、図中で見えるべきで、
-# ネイティブバックエンドのサポートの恩恵を受ける可能性がある場合
-# (例えば Qiskit がネイティブに実装できる QFT など)は `@composite_gate` を使います。
+# | パターン | `draw()` での表示 | 使用場面 |
+# |---------|-------------------|--------------------------|
+# | ヘルパー `@qkernel` | インライン展開(フラット) | コードの整理 |
+# | `@composite_gate` | 名前付きボックス | ドメインレベルの抽象化/高度なカスタム |
 
 # %% [markdown]
 # ## パターン 3: トップダウン設計のためのスタブコンポジット
 #
-# すべてのサブコンポーネントを実装する前に、アルゴリズムの構造を設計したい場合があります。
-# **スタブコンポジット**は実装本体を持たず、名前、量子ビット数、
-# およびオプションのリソースメタデータのみを持ちます。
+# オラクルなどを想定する量子アルゴリズムを設計する場合に内部は未知のまま回路を組みたいこともあると思います。
+# **スタブコンポジット**は実装本体を持たず、名前・量子ビット数・オプションのリソースメタデータだけを持ちます。
 #
-# これにより、オラクルやサブルーチンがまだ開発中の段階でも、
-# アルゴリズム全体のコストを推定できます。
+# オラクルあるいはサブルーチンが開発中でも、アルゴリズム全体のコストを推定できます。
+
 
 # %%
 @qmc.composite_gate(
@@ -148,6 +149,7 @@ def algorithm_skeleton() -> qmc.Vector[qmc.Qubit]:
     q[0], q[1], q[2] = oracle_box(q[0], q[1], q[2])
     return q
 
+
 # %%
 algorithm_skeleton.draw()
 
@@ -155,7 +157,7 @@ algorithm_skeleton.draw()
 # ### スタブによるリソース推定
 #
 # `estimate_resources()` はスタブのメタデータを自動的に取得します。
-# メタデータを直接クエリすることもできます。
+# メタデータは直接参照することもできます。
 
 # %%
 est = algorithm_skeleton.estimate_resources().simplify()
@@ -168,19 +170,16 @@ print("oracle query complexity:", meta.query_complexity)
 print("oracle T-gate count:", meta.t_gates)
 
 # %% [markdown]
-# このトップダウンアプローチにより、完全な分解にコミットする前に、
-# アルゴリズムレベルのコスト(量子ビット数、オラクルクエリ数、T ゲート予算)
-# について検討できます。
+# このトップダウンアプローチにより、完全な分解を実装する前に
+# アルゴリズムレベルのコスト（量子ビット数、ゲート数、オラクルクエリ数）を
+# 確認できます。
 
 # %% [markdown]
 # ## まとめ
 #
-# - **ヘルパー `@qkernel`**: コード再利用のために、あるカーネルから別のカーネルを呼び出します。
-#   コンパイラが呼び出しをフラットな回路にインライン展開します。
-# - **`@composite_gate`**: カーネルに、図やバックエンドで可視化される名前付きの
-#   アイデンティティを与えます。`@qkernel` の上に重ねて使用します。
-# - **スタブコンポジット**: `stub=True` と `ResourceMetadata` を使って、
-#   完全な実装なしにトップダウン設計とリソース推定を行います。
-#
-# **次へ**: [デバッグとバックエンド](07_debugging_and_backend.ipynb) — カーネルを
-# 動作させるための実践的チェックリスト、よくあるエラーメッセージ、クイックリファレンス。
+# - **ヘルパー `@qkernel`**：あるカーネルから別のカーネルを呼び出してコードを再利用。
+#   コンパイラがインライン展開し、フラットな回路になります。
+# - **`@composite_gate`**：カーネルに名前付きの識別子を与え、図やバックエンドで
+#   可視化します。`@qkernel` の上に重ねて使います。
+# - **スタブコンポジット**：`stub=True` と `ResourceMetadata` で、
+#   実装なしにトップダウン設計とリソース推定が可能です。

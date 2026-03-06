@@ -30,8 +30,8 @@
 
 # %%
 import qamomile.circuit as qmc
-from qamomile.qiskit import QiskitTranspiler
 from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
+from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
 
@@ -40,6 +40,7 @@ transpiler = QiskitTranspiler()
 #
 # Any `@qkernel` function can be called from another `@qkernel`.
 # The compiler inlines the call — the result is a flat circuit.
+
 
 # %%
 @qmc.qkernel
@@ -58,14 +59,19 @@ def ghz_with_helper(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 
     return qmc.measure(q)
 
+
 # %%
 ghz_with_helper.draw(n=4)
 
 # %%
-result = transpiler.transpile(ghz_with_helper, bindings={"n": 4}).sample(
-    transpiler.executor(),
-    shots=128,
-).result()
+result = (
+    transpiler.transpile(ghz_with_helper, bindings={"n": 4})
+    .sample(
+        transpiler.executor(),
+        shots=128,
+    )
+    .result()
+)
 print("GHZ result:", result.results)
 
 # %% [markdown]
@@ -80,6 +86,7 @@ print("GHZ result:", result.results)
 # promote it with `@composite_gate`.
 #
 # Stack `@composite_gate(name="...")` on top of `@qkernel`:
+
 
 # %%
 @qmc.composite_gate(name="entangle_link")
@@ -99,6 +106,7 @@ def ghz_with_composite(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 
     return qmc.measure(q)
 
+
 # %%
 ghz_with_composite.draw(n=4)
 
@@ -106,7 +114,7 @@ ghz_with_composite.draw(n=4)
 # ### When to use which?
 #
 # | Pattern | Appears in `draw()` | Backend-specific handling | Use when |
-# |---------|-------------------|--------------------------|----|
+# |---------|---------------------|--------------------------|------|
 # | Helper `@qkernel` | Inlined (flat) | No | Code organization |
 # | `@composite_gate` | Named box | Yes (emitters can provide native versions) | Domain-level abstraction |
 #
@@ -124,6 +132,7 @@ ghz_with_composite.draw(n=4)
 #
 # This lets you estimate the cost of the overall algorithm while the
 # oracle or sub-routine is still under development.
+
 
 # %%
 @qmc.composite_gate(
@@ -147,6 +156,7 @@ def algorithm_skeleton() -> qmc.Vector[qmc.Qubit]:
 
     q[0], q[1], q[2] = oracle_box(q[0], q[1], q[2])
     return q
+
 
 # %%
 algorithm_skeleton.draw()
@@ -181,6 +191,3 @@ print("oracle T-gate count:", meta.t_gates)
 #   diagrams and backends. Stack it on top of `@qkernel`.
 # - **Stub composite**: `stub=True` with `ResourceMetadata` for top-down
 #   design and resource estimation without a full implementation.
-#
-# **Next**: [Debugging and Backend](07_debugging_and_backend.ipynb) — a practical
-# checklist for getting kernels to work, common error messages, and a quick reference.
