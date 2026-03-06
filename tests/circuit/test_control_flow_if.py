@@ -1189,3 +1189,40 @@ class TestIfBranchVariableMerge:
         # Should not raise - _unused is not used after the if
         graph = circuit.build()
         assert graph is not None
+
+
+class TestIfNestedInLoop:
+    """Regression: if nested inside for/while must see correct outer scope."""
+
+    def test_if_inside_for_sees_loop_body_definitions(self):
+        """Variable defined before if inside for body should be in outer_defined."""
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit, n: UInt) -> Qubit:
+            for _i in qm.range(n):
+                cond = qm.measure(q0)
+                if cond:
+                    q1 = qm.x(q1)
+                else:
+                    q1 = qm.h(q1)
+            return q1
+
+        graph = circuit.build(n=3)
+        assert graph is not None
+
+    def test_if_inside_for_with_reassignment(self):
+        """Store-only reassignment inside for body + if should merge correctly."""
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit, n: UInt) -> qm.Bit:
+            b = qm.measure(q0)
+            for _i in qm.range(n):
+                if b:
+                    q1 = qm.x(q1)
+                else:
+                    q1 = qm.h(q1)
+                b = qm.measure(q1)
+            return b
+
+        graph = circuit.build(n=2)
+        assert graph is not None
