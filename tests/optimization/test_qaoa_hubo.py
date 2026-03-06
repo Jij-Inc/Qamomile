@@ -3,7 +3,7 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.circuit.algorithm import phase_gadget
+from qamomile.circuit.algorithm.basic import phase_gadget
 from qamomile.circuit.transpiler.errors import QubitIndexResolutionError
 from qamomile.optimization.binary_model import BinaryExpr, BinaryModel, binary
 from qamomile.optimization.qaoa import QAOAConverter

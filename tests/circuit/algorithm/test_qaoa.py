@@ -5,14 +5,16 @@ import pytest
 pytest.importorskip("qiskit")
 
 import qamomile.circuit as qmc
+from qamomile.circuit.algorithm.basic import (
+    phase_gadget,
+    superposition_vector,
+)
 from qamomile.circuit.algorithm.qaoa import (
     hubo_ising_cost,
     hubo_qaoa_state,
     ising_cost,
-    phase_gadget,
     qaoa_layers,
     qaoa_state,
-    superposition_vector,
     x_mixer,
 )
 from qamomile.qiskit.transpiler import QiskitTranspiler

@@ -38,6 +38,7 @@ from qiskit import QuantumCircuit
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.basic import (
     cz_entangling_layer,
+    superposition_vector,
     rx_layer,
     ry_layer,
     rz_layer,
@@ -54,7 +55,6 @@ from qamomile.circuit.algorithm.qaoa import (
     ising_cost,
     qaoa_layers,
     qaoa_state,
-    superposition_vector,
     x_mixer,
 )
 from qamomile.circuit.ir.block import BlockKind
