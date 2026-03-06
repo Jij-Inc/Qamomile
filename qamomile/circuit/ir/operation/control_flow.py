@@ -81,6 +81,7 @@ class ForItemsOperation(Operation):
 
     key_vars: list[str] = dataclasses.field(default_factory=list)
     value_var: str = ""
+    key_is_vector: bool = False
     operations: list[Operation] = dataclasses.field(default_factory=list)
 
     @property

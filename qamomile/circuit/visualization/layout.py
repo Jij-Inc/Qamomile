@@ -315,7 +315,7 @@ class CircuitLayoutEngine:
         for i, iteration_children in enumerate(node.iterations):
             # For If: i=0 is "true", i=1 is "false"
             # For loops: i is iteration index
-            if node.kind == VUnfoldedKind.IF:
+            if node.kind == VUnfoldedKind.IF:  # Future use: not yet dispatched
                 iter_key = (*node.node_key, "true" if i == 0 else "false")
             else:
                 iter_key = (*node.node_key, i)

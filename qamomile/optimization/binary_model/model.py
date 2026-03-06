@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Generic
+import warnings
 
 import numpy as np
 
@@ -41,21 +42,49 @@ class BinaryModel(Generic[VT]):
         return self._expr.vartype
 
     def _update_internal_coefficients(self) -> None:
-        order = 0
+        self._linear = {}
+        self._quad = {}
+        self._higher = {}
+
+        constant = self._expr.constant
+
         for inds, coeff in self._expr.coefficients.items():
             if is_close_zero(coeff):
                 continue
+
+            if len(set(inds)) != len(inds):
+                normalized = tuple(sorted(set(inds)))
+                warnings.warn(
+                    "Duplicate variable indices in term "
+                    f"{inds} were normalized to {normalized}.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                inds = normalized
+
+            if len(inds) == 0:
+                constant += coeff
+                continue
+
             # inds contains original indices, map to new sequential indices
             new_inds = tuple(sorted(self.index_origin_to_new[i] for i in inds))
-            order = max(order, len(new_inds))
             if len(new_inds) == 1:
-                self._linear[new_inds[0]] = coeff
+                idx = new_inds[0]
+                self._linear[idx] = self._linear.get(idx, 0.0) + coeff
             elif len(new_inds) == 2:
-                self._quad[new_inds] = coeff
+                self._quad[new_inds] = self._quad.get(new_inds, 0.0) + coeff
             else:
-                self._higher[new_inds] = coeff
-        self.constant = self._expr.constant
-        self.order = order
+                self._higher[new_inds] = self._higher.get(new_inds, 0.0) + coeff
+
+        self.constant = constant
+        if self._higher:
+            self.order = max(len(inds) for inds in self._higher)
+        elif self._quad:
+            self.order = 2
+        elif self._linear:
+            self.order = 1
+        else:
+            self.order = 0
 
     @classmethod
     def from_qubo(
@@ -108,7 +137,10 @@ class BinaryModel(Generic[VT]):
 
         Args:
             hubo: HUBO coefficients mapping index tuples to values.
-                  Duplicate index tuples (e.g. (0,1,2) and (2,0,1)) are accumulated.
+                  Index tuples are sorted and deduplicated.
+                  Duplicate indices in a single term (e.g., ``(0, 0, 2)``) emit
+                  a warning and are normalized to unique indices (``(0, 2)``).
+                  Empty tuples (``()``) are accumulated into the constant term.
             constant: Constant offset term.
             simplify: If True, remove near-zero coefficients.
 
@@ -117,7 +149,17 @@ class BinaryModel(Generic[VT]):
         """
         expr = BinaryExpr(vartype=VarType.BINARY, constant=constant, coefficients={})
         for indices, coeff in hubo.items():
-            key = tuple(sorted(indices))
+            key = tuple(sorted(set(indices)))
+            if len(key) != len(indices):
+                warnings.warn(
+                    "Duplicate variable indices in HUBO term "
+                    f"{indices} were normalized to {key}.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            if len(key) == 0:
+                expr.constant += coeff
+                continue
             expr.coefficients[key] = expr.coefficients.get(key, 0.0) + coeff
         if simplify:
             expr.coefficients = {
@@ -140,11 +182,19 @@ class BinaryModel(Generic[VT]):
     @property
     def coefficients(self) -> dict[tuple[int, ...], float]:
         """All coefficients as a single flat dictionary using sequential indices."""
-        return {
-            tuple(sorted(self.index_origin_to_new[i] for i in inds)): coeff
-            for inds, coeff in self._expr.coefficients.items()
-            if not is_close_zero(coeff)
-        }
+        coeffs: dict[tuple[int, ...], float] = {}
+
+        for i, coeff in self._linear.items():
+            if not is_close_zero(coeff):
+                coeffs[(i,)] = coeff
+        for inds, coeff in self._quad.items():
+            if not is_close_zero(coeff):
+                coeffs[inds] = coeff
+        for inds, coeff in self._higher.items():
+            if not is_close_zero(coeff):
+                coeffs[inds] = coeff
+
+        return coeffs
 
     def calc_energy(self, state: list[int]) -> float:
         """Calculate the energy for a given variable assignment.

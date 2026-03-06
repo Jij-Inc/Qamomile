@@ -97,11 +97,68 @@ class ControlFlowTransformer(ast.NodeTransformer):
         self.type_registry: dict[str, ast.AST] = {}
         # グローバル変数名（モジュール、組み込み関数など）
         self._global_names = global_names or set()
+        # Scope tracking for visit_If input/output separation
+        self._outer_defined_vars: frozenset[str] = frozenset()
+        self._after_stmt_read_vars: frozenset[str] = frozenset()
 
     def _get_unique_name(self, prefix: str) -> str:
         name = f"_{prefix}_{self.counter}"
         self.counter += 1
         return name
+
+    def _visit_body_with_tracking(
+        self, body: list[ast.stmt], initial_defined: set[str]
+    ) -> list[ast.stmt]:
+        """Process a statement body sequentially, tracking defined variables.
+
+        Before visiting each statement, sets ``_outer_defined_vars`` (variables
+        defined before the statement) and ``_after_stmt_read_vars`` (variables
+        referenced in subsequent statements) so that ``visit_If`` can compute
+        input/output variable sets correctly.
+        """
+        new_body: list[ast.stmt] = []
+        defined_so_far = set(initial_defined)
+
+        # Precompute per-statement read sets and locally-defined sets (O(n))
+        per_stmt_collectors: list[VariableCollector] = []
+        for stmt in body:
+            c = VariableCollector(global_names=self._global_names)
+            c.visit(stmt)
+            per_stmt_collectors.append(c)
+
+        # Build suffix-union of read vars in reverse (O(n))
+        n = len(body)
+        suffix_reads: list[frozenset[str]] = [frozenset()] * (n + 1)
+        for j in range(n - 1, -1, -1):
+            suffix_reads[j] = frozenset(per_stmt_collectors[j].vars | suffix_reads[j + 1])
+
+        for i, stmt in enumerate(body):
+            # Set context for visit_If
+            self._outer_defined_vars = frozenset(defined_so_far)
+            self._after_stmt_read_vars = suffix_reads[i + 1]
+
+            # Visit the statement (may call visit_If, visit_For, etc.)
+            result = self.visit(stmt)
+            if isinstance(result, list):
+                new_body.extend(result)
+            elif result is not None:
+                new_body.append(result)
+
+            # Update defined vars from original statement
+            defined_so_far |= per_stmt_collectors[i].locally_defined_vars
+
+        return new_body
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
+        """Process the function body with definition tracking.
+
+        Collects parameter names as the initial set of defined variables
+        and delegates to ``_visit_body_with_tracking`` for sequential
+        statement processing.
+        """
+        param_names = {arg.arg for arg in node.args.args}
+        node.body = self._visit_body_with_tracking(node.body, param_names)
+        return node
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> Any:
         """
@@ -210,17 +267,19 @@ class ControlFlowTransformer(ast.NodeTransformer):
         body_nodes: list[ast.stmt],
         var_names: list[str],
         lineno: int,
+        return_var_names: list[str] | None = None,
         return_type_ast: ast.AST | None = None,
     ) -> tuple[ast.FunctionDef, str]:
         func_name = self._get_unique_name(name_prefix)
         func_args = self._make_arguments(var_names)
 
+        ret_vars = return_var_names if return_var_names is not None else var_names
         new_body = list(body_nodes)
-        new_body.append(self._create_return_node(var_names))
+        new_body.append(self._create_return_node(ret_vars))
 
         # 戻り値の型注釈が指定されていなければ自動生成
         if return_type_ast is None:
-            return_type_ast = self._create_return_annotation(var_names)
+            return_type_ast = self._create_return_annotation(ret_vars)
 
         func_def = ast.FunctionDef(
             name=func_name,
@@ -272,14 +331,14 @@ class ControlFlowTransformer(ast.NodeTransformer):
         return new_body
 
     def visit_While(self, node: ast.While) -> Any:
-        # ネストされた制御フローを先に変換
-        new_body = [self.visit(stmt) for stmt in node.body]
-        flattened_body = []
-        for item in new_body:
-            if isinstance(item, list):
-                flattened_body.extend(item)
-            else:
-                flattened_body.append(item)
+        # ネストされた制御フローを先に変換 (with definition tracking)
+        saved_outer = self._outer_defined_vars
+        saved_after = self._after_stmt_read_vars
+        flattened_body = self._visit_body_with_tracking(
+            node.body, set(self._outer_defined_vars)
+        )
+        self._outer_defined_vars = saved_outer
+        self._after_stmt_read_vars = saved_after
 
         # lambda: <condition> を作成
         lambda_node = ast.Lambda(
@@ -362,14 +421,14 @@ class ControlFlowTransformer(ast.NodeTransformer):
             raise NotImplementedError(f"Unsupported target type: {type(target)}")
 
     def visit_For(self, node: ast.For) -> Any:
-        # ネストされた制御フローを先に変換
-        new_body = [self.visit(stmt) for stmt in node.body]
-        flattened_body = []
-        for item in new_body:
-            if isinstance(item, list):
-                flattened_body.extend(item)
-            else:
-                flattened_body.append(item)
+        # ネストされた制御フローを先に変換 (with definition tracking)
+        saved_outer = self._outer_defined_vars
+        saved_after = self._after_stmt_read_vars
+        initial_defined = set(self._outer_defined_vars)
+        initial_defined.update(self._extract_tuple_vars(node.target))
+        flattened_body = self._visit_body_with_tracking(node.body, initial_defined)
+        self._outer_defined_vars = saved_outer
+        self._after_stmt_read_vars = saved_after
 
         # Check for items() iteration first
         if self._is_items_call(node.iter):
@@ -562,15 +621,48 @@ class ControlFlowTransformer(ast.NodeTransformer):
             for stmt in node.orelse:
                 collector_orelse.visit(stmt)
 
-        # incoming_vars のみ使用（ブランチ内で初定義される変数を除外）
-        target_vars = sorted(
+        # --- Input/output variable separation ---
+        # input_vars: variables that exist before the if (passed to inner funcs)
+        input_vars_set = (
             collector_test.vars
             | collector_body.incoming_vars
             | collector_orelse.incoming_vars
         )
 
+        body_assigned = collector_body.locally_defined_vars
+        orelse_assigned = collector_orelse.locally_defined_vars
+        outer_defined = set(self._outer_defined_vars)
+        has_else = bool(node.orelse)
+
+        # Existing vars re-assigned in any branch (Store-only reassignment)
+        reassigned_existing = (body_assigned | orelse_assigned) & outer_defined
+
+        # New locals defined in BOTH branches
+        shared_new_locals = (
+            ((body_assigned & orelse_assigned) - outer_defined) if has_else else set()
+        )
+
+        # One-sided new local rejection: reject only if read after the if
+        if has_else:
+            one_sided_new = (body_assigned ^ orelse_assigned) - outer_defined
+        else:
+            one_sided_new = body_assigned - outer_defined
+        exposed_one_sided = one_sided_new & set(self._after_stmt_read_vars)
+        if exposed_one_sided:
+            raise SyntaxError(
+                f"Variable(s) {sorted(exposed_one_sided)} defined in only one "
+                f"branch of if-else at line {node.lineno} but used afterward.\n"
+                f"Define in both branches, or move the definition outside the if."
+            )
+
+        # Ensure reassigned_existing are passed into branches
+        input_vars_set |= reassigned_existing
+
+        input_vars = sorted(input_vars_set)
+        output_vars = sorted(input_vars_set | shared_new_locals)
+
         # Detect return inside for/while in if-else branches (unsupported).
-        # Must run before generic_visit which transforms loops into with-stmts.
+        # Must run before nested control flow transformation.
         if self._has_return_under_loop(node.body) or self._has_return_under_loop(
             node.orelse if node.orelse else []
         ):
@@ -578,8 +670,15 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 "'return' inside for/while in @qkernel if-else is not supported"
             )
 
-        # ネストされた制御フローを変換
-        self.generic_visit(node)
+        # ネストされた制御フローを変換 (with definition tracking)
+        saved_outer = self._outer_defined_vars
+        saved_after = self._after_stmt_read_vars
+        inner_scope = set(input_vars)
+        node.body = self._visit_body_with_tracking(node.body, inner_scope)
+        if node.orelse:
+            node.orelse = self._visit_body_with_tracking(node.orelse, inner_scope)
+        self._outer_defined_vars = saved_outer
+        self._after_stmt_read_vars = saved_after
 
         # 明示的 return の検出と変換
         orelse_body = node.orelse if node.orelse else []
@@ -610,34 +709,44 @@ class ControlFlowTransformer(ast.NodeTransformer):
             false_body = self._transform_returns_to_assignments(
                 orelse_body, ret_var_name
             )
-            target_vars.append(ret_var_name)
+            output_vars.append(ret_var_name)
         else:
             true_body = node.body
             false_body = orelse_body
 
-        # Cond: returns bool
+        # Cond: returns bool (only needs input_vars)
         cond_name = self._get_unique_name("cond")
         cond_def = ast.FunctionDef(
             name=cond_name,
-            args=self._make_arguments(target_vars),
+            args=self._make_arguments(input_vars),
             body=[ast.Return(value=node.test)],
             decorator_list=[],
             returns=ast.Name(id="bool", ctx=ast.Load()),
             lineno=node.lineno,
         )  # type: ignore
 
-        # True Body
+        # True Body: params=input_vars, return=output_vars
         true_def, true_name = self._create_inner_func(
-            "body", true_body, target_vars, node.lineno
+            "body",
+            true_body,
+            input_vars,
+            node.lineno,
+            return_var_names=output_vars,
         )
 
-        # False Body
+        # False Body: params=input_vars, return=output_vars
         false_def, false_name = self._create_inner_func(
-            "body", false_body, target_vars, node.lineno
+            "body",
+            false_body,
+            input_vars,
+            node.lineno,
+            return_var_names=output_vars,
         )
 
+        # var_list: input_vars values (passed to emit_if)
         var_list = ast.List(
-            elts=[ast.Name(id=v, ctx=ast.Load()) for v in target_vars], ctx=ast.Load()
+            elts=[ast.Name(id=v, ctx=ast.Load()) for v in input_vars],
+            ctx=ast.Load(),
         )
 
         call_expr = ast.Call(
@@ -651,7 +760,8 @@ class ControlFlowTransformer(ast.NodeTransformer):
             keywords=[],
         )
 
-        assign_node = self._create_assignment_node(target_vars, call_expr, node.lineno)
+        # Assignment: output_vars = emit_if(...)
+        assign_node = self._create_assignment_node(output_vars, call_expr, node.lineno)
 
         result_stmts: list[ast.stmt] = [cond_def, true_def, false_def]
 

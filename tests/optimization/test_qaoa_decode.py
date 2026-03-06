@@ -3,6 +3,7 @@ from qamomile.optimization.qaoa import QAOAConverter
 from qamomile.qiskit.transpiler import QiskitTranspiler
 from qamomile.optimization.binary_model import binary, BinaryExpr, BinaryModel
 import jijmodeling as jm
+from math import isclose
 
 
 def test_simple_qaoa_decode():
@@ -29,9 +30,13 @@ def test_simple_qaoa_decode():
 
     converter = QAOAConverter(model)
 
-    assert converter.spin_model.constant == 1/2 - 1/2*0.1
-    assert converter.spin_model.linear == {0: -3/4, 2: 1/4 + 1/2*0.1}
-    assert converter.spin_model.quad == {(0, 1): 1/4, (1, 2): -1/4}
+    assert isclose(converter.spin_model.constant, 1 / 2 - 1 / 2 * 0.1)
+    assert set(converter.spin_model.linear) == {0, 2}
+    assert isclose(converter.spin_model.linear[0], -3 / 4)
+    assert isclose(converter.spin_model.linear[2], 1 / 4 + 1 / 2 * 0.1)
+    assert set(converter.spin_model.quad) == {(0, 1), (1, 2)}
+    assert isclose(converter.spin_model.quad[(0, 1)], 1 / 4)
+    assert isclose(converter.spin_model.quad[(1, 2)], -1 / 4)
 
 
     transpiler = QiskitTranspiler()
@@ -100,9 +105,13 @@ def test_qaoa_decode():
     # = 1/2-1/2*0.1 -3/4 s_x + 1/4 s_x s_y + (1/4 + 1/2*0.1) s_z - 1/4 s_y s_z
 
     # Check spin model values (index assignment may vary in jijmodeling v2)
-    assert converter.spin_model.constant == 1/2 - 1/2*0.1
-    assert sorted(converter.spin_model.linear.values()) == sorted([-3/4, 1/4 + 1/2*0.1])
-    assert sorted(converter.spin_model.quad.values()) == sorted([1/4, -1/4])
+    assert isclose(converter.spin_model.constant, 1 / 2 - 1 / 2 * 0.1)
+    expected_linear = sorted([-3 / 4, 1 / 4 + 1 / 2 * 0.1])
+    actual_linear = sorted(converter.spin_model.linear.values())
+    assert all(isclose(a, b) for a, b in zip(actual_linear, expected_linear))
+    expected_quad = sorted([1 / 4, -1 / 4])
+    actual_quad = sorted(converter.spin_model.quad.values())
+    assert all(isclose(a, b) for a, b in zip(actual_quad, expected_quad))
 
     # Check structural relationships:
     # The variable with linear=-0.75 (x) and the one with no linear term (y) form
@@ -111,14 +120,14 @@ def test_qaoa_decode():
     # a quadratic pair with coefficient -0.25.
     linear = converter.spin_model.linear
     quad = converter.spin_model.quad
-    idx_x = [k for k, v in linear.items() if v == -3/4][0]
+    idx_x = [k for k, v in linear.items() if isclose(v, -3 / 4)][0]
     idx_z = [k for k, v in linear.items() if abs(v - 0.3) < 1e-10][0]
     all_indices = set()
     for pair in quad:
         all_indices.update(pair)
     idx_y = (all_indices - {idx_x, idx_z}).pop()
-    assert quad.get((min(idx_x, idx_y), max(idx_x, idx_y))) == 1/4
-    assert quad.get((min(idx_y, idx_z), max(idx_y, idx_z))) == -1/4
+    assert isclose(quad[(min(idx_x, idx_y), max(idx_x, idx_y))], 1 / 4)
+    assert isclose(quad[(min(idx_y, idx_z), max(idx_y, idx_z))], -1 / 4)
 
     transpiler = QiskitTranspiler()
     executable = converter.transpile(transpiler, p=2)

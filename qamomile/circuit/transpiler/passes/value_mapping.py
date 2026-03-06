@@ -13,6 +13,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     IfOperation,
     WhileOperation,
 )
+from qamomile.circuit.ir.operation.gate import GateOperation
 from qamomile.circuit.ir.value import (
     ArrayValue,
     DictValue,
@@ -88,12 +89,14 @@ class UUIDRemapper:
         elif isinstance(op, IfOperation):
             cloned_true = self.clone_operations(op.true_operations)
             cloned_false = self.clone_operations(op.false_operations)
+            cloned_phi = [self.clone_operation(p) for p in op.phi_ops]
             return dataclasses.replace(
                 op,
                 operands=new_operands,
                 results=new_results,
                 true_operations=cloned_true,
                 false_operations=cloned_false,
+                phi_ops=cloned_phi,
             )
         elif isinstance(op, WhileOperation):
             cloned_body = self.clone_operations(op.operations)
@@ -104,11 +107,17 @@ class UUIDRemapper:
                 operations=cloned_body,
             )
         else:
-            return dataclasses.replace(
+            cloned = dataclasses.replace(
                 op,
                 operands=new_operands,
                 results=new_results,
             )
+            # Handle GateOperation.theta (a Value stored outside operands)
+            if isinstance(cloned, GateOperation) and isinstance(cloned.theta, Value):
+                cloned = dataclasses.replace(
+                    cloned, theta=cast(Value, self.clone_value(cloned.theta))
+                )
+            return cloned
 
     def clone_value(self, value: ValueBase) -> ValueBase:
         """Clone any value type with a fresh UUID and logical_id.
@@ -160,8 +169,8 @@ class UUIDRemapper:
                 logical_id=new_logical_id,
                 entries=new_entries,
             )
-        elif isinstance(value, Value):
-            # Regular Value or ArrayValue
+        elif isinstance(value, ArrayValue):
+            # ArrayValue: clone parent_array, element_indices, AND shape
             new_parent_array: ArrayValue | None = None
             if value.parent_array is not None:
                 new_parent_array = cast(
@@ -171,7 +180,16 @@ class UUIDRemapper:
             new_element_indices: tuple[Value, ...] | None = None
             if value.element_indices:
                 new_element_indices = tuple(
-                    cast(Value, self.clone_value(idx)) for idx in value.element_indices
+                    cast(Value, self.clone_value(idx))
+                    for idx in value.element_indices
+                )
+
+            # Clone shape values so sub-kernel dimension parameters
+            # get fresh UUIDs that can be mapped during inlining.
+            new_shape: tuple[Value, ...] = ()
+            if value.shape:
+                new_shape = tuple(
+                    cast(Value, self.clone_value(dim)) for dim in value.shape
                 )
 
             cloned = dataclasses.replace(
@@ -180,6 +198,31 @@ class UUIDRemapper:
                 logical_id=new_logical_id,
                 parent_array=new_parent_array,
                 element_indices=new_element_indices if new_element_indices else (),
+                shape=new_shape,
+            )
+        elif isinstance(value, Value):
+            # Regular Value (not ArrayValue)
+            new_parent_array_v: ArrayValue | None = None
+            if value.parent_array is not None:
+                new_parent_array_v = cast(
+                    ArrayValue, self.clone_value(value.parent_array)
+                )
+
+            new_element_indices_v: tuple[Value, ...] | None = None
+            if value.element_indices:
+                new_element_indices_v = tuple(
+                    cast(Value, self.clone_value(idx))
+                    for idx in value.element_indices
+                )
+
+            cloned = dataclasses.replace(
+                value,
+                uuid=new_uuid,
+                logical_id=new_logical_id,
+                parent_array=new_parent_array_v,
+                element_indices=new_element_indices_v
+                if new_element_indices_v
+                else (),
             )
         else:
             # Fallback for any other ValueBase type
@@ -203,7 +246,11 @@ class ValueSubstitutor:
         self._value_map = value_map
 
     def substitute_operation(self, op: Operation) -> Operation:
-        """Substitute values in an operation using the value map."""
+        """Substitute values in an operation using the value map.
+
+        Handles control-flow operations (IfOperation, ForOperation, etc.)
+        by recursing into their nested operation lists and phi_ops.
+        """
         new_operands = []
         for v in op.operands:
             if isinstance(v, ValueBase):
@@ -218,11 +265,31 @@ class ValueSubstitutor:
             else:
                 new_results.append(v)
 
-        return dataclasses.replace(
+        # Handle IfOperation: also substitute inside phi_ops
+        if isinstance(op, IfOperation):
+            new_phi_ops = [self.substitute_operation(p) for p in op.phi_ops]
+            return dataclasses.replace(
+                op,
+                operands=new_operands,
+                results=new_results,
+                phi_ops=new_phi_ops,
+            )
+
+        substituted = dataclasses.replace(
             op,
             operands=new_operands,
             results=new_results,
         )
+
+        # Handle GateOperation.theta (a Value stored outside operands)
+        if isinstance(substituted, GateOperation) and isinstance(
+            substituted.theta, Value
+        ):
+            new_theta = self.substitute_value(substituted.theta)
+            if isinstance(new_theta, Value) and new_theta is not substituted.theta:
+                substituted = dataclasses.replace(substituted, theta=new_theta)
+
+        return substituted
 
     def substitute_value(self, v: ValueBase) -> ValueBase:
         """Substitute a single value using the value map.
@@ -300,6 +367,24 @@ class ValueSubstitutor:
                         new_indices.append(idx)
                 if indices_changed:
                     replacements["element_indices"] = tuple(new_indices)
+
+            # Substitute ArrayValue.shape dimensions so sub-kernel
+            # dimension parameters are resolved to caller arguments.
+            if isinstance(v, ArrayValue) and v.shape:
+                new_shape_dims: list[Value] = []
+                shape_changed = False
+                for dim in v.shape:
+                    if dim.uuid in self._value_map:
+                        sub_dim = self._value_map[dim.uuid]
+                        if isinstance(sub_dim, Value):
+                            new_shape_dims.append(sub_dim)
+                            shape_changed = True
+                        else:
+                            new_shape_dims.append(dim)
+                    else:
+                        new_shape_dims.append(dim)
+                if shape_changed:
+                    replacements["shape"] = tuple(new_shape_dims)
 
             if replacements:
                 return dataclasses.replace(v, **replacements)
