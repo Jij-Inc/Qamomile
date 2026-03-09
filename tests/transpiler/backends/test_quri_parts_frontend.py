@@ -5567,7 +5567,424 @@ class TestQubitArrayPatterns:
 
 
 # ============================================================================
-# 30. Portable TranspilerConfig Tests
+# 30. Control Flow: While Loop (not natively supported by QURI Parts)
+# ============================================================================
+
+
+class TestControlFlowWhileStructure:
+    """Test while-loop transpilation behavior for QURI Parts.
+
+    QURI Parts does NOT support native while loops or mid-circuit measurement.
+    The emit pass silently drops while loop bodies when
+    ``supports_while_loop()`` returns ``False``.
+
+    These tests document and verify this silent-drop behavior,
+    which mirrors the Qiskit structural tests but checks that while-loop
+    body gates are correctly excluded from the emitted circuit.
+    """
+
+    def test_while_loop_transpilation_succeeds(self):
+        """Transpiling a kernel with while loop does not raise an error."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        # Should not raise
+        _, circ = _transpile_and_get_circuit(circuit)
+        assert circ is not None
+
+    def test_while_loop_body_gates_dropped(self):
+        """While loop body gates are silently dropped (not emitted).
+
+        Since QURI Parts does not support native while loops,
+        the body gates (H, measure inside the while) should NOT appear
+        as separate entries in the circuit beyond the pre-loop gates.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        _, circ = _transpile_and_get_circuit(circuit)
+        names = _gate_names(circ)
+        # Only the pre-while-loop H should be emitted;
+        # the body's H is dropped along with the while loop.
+        h_count = sum(1 for n in names if n == "H")
+        assert h_count == 1, (
+            f"Expected exactly 1 H gate (pre-loop only), got {h_count}. "
+            f"Gate names: {names}"
+        )
+
+    def test_while_loop_no_while_instruction_in_circuit(self):
+        """QURI Parts circuit should NOT contain any while_loop instruction.
+
+        Unlike Qiskit which has native while_loop, QURI Parts should have
+        no trace of while loop in the emitted circuit.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        _, circ = _transpile_and_get_circuit(circuit)
+        names = _gate_names(circ)
+        assert "while_loop" not in names
+        assert "WhileLoop" not in names
+
+    def test_pre_while_gates_preserved(self):
+        """Gates before the while loop are correctly emitted."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        _, circ = _transpile_and_get_circuit(circuit)
+        names = _gate_names(circ)
+        # H gate from pre-loop must be present
+        assert "H" in names
+
+    def test_while_loop_with_x_init_body_dropped(self):
+        """X init gate preserved, while loop body dropped."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)  # |1>
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        _, circ = _transpile_and_get_circuit(circuit)
+        names = _gate_names(circ)
+        # X gate before while should be present
+        assert "X" in names
+        # Body H should be dropped
+        h_count = sum(1 for n in names if n == "H")
+        assert h_count == 0, (
+            f"Expected no H gate (while body should be dropped), got {h_count}. "
+            f"Gate names: {names}"
+        )
+
+    def test_while_loop_qubit_count(self):
+        """Circuit has correct number of qubits despite while loop body.
+
+        The while loop body allocates q2, but since the body is dropped,
+        qubit allocation still happens at the IR level. The qubit count
+        depends on how many qubits the IR allocates.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        _, circ = _transpile_and_get_circuit(circuit)
+        # At minimum 1 qubit for the initial q
+        assert circ.qubit_count >= 1
+
+    def test_while_loop_multiple_body_gates_all_dropped(self):
+        """Multiple different gates in while body are all dropped."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.x(q)
+                q = qmc.h(q)
+                q = qmc.z(q)
+                bit = qmc.measure(q)
+            return bit
+
+        _, circ = _transpile_and_get_circuit(circuit)
+        names = _gate_names(circ)
+        # Only pre-while H should be present
+        h_count = sum(1 for n in names if n == "H")
+        x_count = sum(1 for n in names if n == "X")
+        z_count = sum(1 for n in names if n == "Z")
+        assert h_count == 1, f"Expected 1 H (pre-loop), got {h_count}"
+        assert x_count == 0, f"Expected 0 X (body dropped), got {x_count}"
+        assert z_count == 0, f"Expected 0 Z (body dropped), got {z_count}"
+
+    def test_gates_after_while_preserved(self):
+        """Gates after while loop block should still be emitted.
+
+        Note: The while loop body is dropped, but gates after the while
+        statement should still be emitted normally.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            # Gate after the while loop
+            q2 = qmc.qubit("q_after")
+            q2 = qmc.x(q2)
+            return qmc.measure(q2)
+
+        _, circ = _transpile_and_get_circuit(circuit)
+        names = _gate_names(circ)
+        # Both pre-while H and post-while X should be present
+        assert "H" in names
+        assert "X" in names
+
+    def test_while_loop_measurement_qubit_map_covers_all_clbits(self):
+        """measurement_qubit_map should have entries for all allocated clbits.
+
+        BUG EXPOSURE: Due to SSA-like value versioning, the body's measure
+        creates a new Value with a different UUID, allocating clbit 1 in
+        addition to clbit 0 (the initial measure). The returned `bit` after
+        the while loop references the body's measurement UUID (clbit 1),
+        but clbit 1 is not in measurement_qubit_map.
+
+        Expected (with fix): Both measurements alias to the same clbit (clbit 0),
+        so measurement_qubit_map covers all allocated clbits.
+
+        Actual (without fix): clbit 1 exists in clbit_map but has no entry
+        in measurement_qubit_map, causing the returned value to be read
+        incorrectly.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)  # |1>
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(circuit)
+        cq = exe.compiled_quantum[0]
+
+        # Every clbit in clbit_map should have a corresponding entry
+        # in measurement_qubit_map
+        mqm = cq.measurement_qubit_map
+        all_clbit_indices = set(cq.clbit_map.values())
+        mapped_clbit_indices = set(mqm.keys())
+        assert all_clbit_indices == mapped_clbit_indices, (
+            f"Not all clbits are covered by measurement_qubit_map. "
+            f"clbit_map indices: {all_clbit_indices}, "
+            f"measurement_qubit_map keys: {mapped_clbit_indices}"
+        )
+
+    def test_while_loop_single_clbit_in_map(self):
+        """Only one clbit should be allocated for the while loop pattern.
+
+        BUG EXPOSURE: Without the fix, two clbits are allocated (one for the
+        initial measure, one for the body measure), even though logically
+        they should be the same classical bit.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(circuit)
+        cq = exe.compiled_quantum[0]
+
+        # With the bug fix, both measurements should share the same clbit
+        clbit_indices = set(cq.clbit_map.values())
+        assert len(clbit_indices) == 1, (
+            f"Expected 1 unique clbit index (aliased), got {len(clbit_indices)}. "
+            f"clbit_map: {cq.clbit_map}"
+        )
+
+
+class TestControlFlowWhileSampling:
+    """Test while-loop sampling/statevector behavior for QURI Parts.
+
+    Since QURI Parts doesn't support while loops (body is silently dropped)
+    and measurements are no-ops, the circuit effectively only has pre-loop
+    gates. These tests verify that sampling and statevector results are
+    consistent with this behavior.
+    """
+
+    def test_while_loop_statevector_only_pre_loop(self):
+        """Statevector reflects only pre-while-loop gates.
+
+        H|0⟩ → |+⟩, then while loop body is dropped.
+        Result should be |+⟩ = (1/√2, 1/√2).
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        _, circ = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(circ)
+        # Only H was applied → |+⟩ state
+        # But qubit count may be > 1 due to IR allocation of q2
+        # The statevector for qubit 0 should be in |+⟩ state
+        n_qubits = circ.qubit_count
+        if n_qubits == 1:
+            expected = np.array([1, 1], dtype=complex) / np.sqrt(2)
+            assert statevectors_equal(sv, expected)
+        else:
+            # Multi-qubit: q0 in |+⟩, other qubits in |0⟩
+            # |+⟩⊗|0⟩^(n-1) = (1/√2)(|0...0⟩ + |1,0,...,0⟩)
+            expected = np.zeros(2**n_qubits, dtype=complex)
+            expected[0] = 1 / np.sqrt(2)
+            expected[1] = 1 / np.sqrt(2)
+            assert statevectors_equal(sv, expected)
+
+    def test_while_loop_x_init_statevector(self):
+        """X|0⟩ → |1⟩, while body dropped.
+
+        With X as init, statevector should show |1⟩ (or |1,0,...0⟩ for multi-qubit).
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)  # |1>
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        _, circ = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(circ)
+        n_qubits = circ.qubit_count
+        if n_qubits == 1:
+            expected = np.array([0, 1], dtype=complex)
+            assert statevectors_equal(sv, expected)
+        else:
+            # |1⟩⊗|0⟩^(n-1)
+            expected = np.zeros(2**n_qubits, dtype=complex)
+            expected[1] = 1.0
+            assert statevectors_equal(sv, expected)
+
+    def test_while_loop_sampling_produces_valid_results(self):
+        """Sampling a while-loop kernel produces valid bitstring results."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        assert result is not None
+        assert len(result.results) > 0
+        total = sum(count for _, count in result.results)
+        assert total == 100
+
+    def test_while_loop_sampling_x_init_all_ones(self):
+        """X|0⟩ → |1⟩, sampling should return all 1s (body is dropped).
+
+        BUG EXPOSURE: Since the while body is dropped and measure is a no-op,
+        the circuit is just X applied to qubit 0. All samples should show
+        qubit 0 in state |1⟩. However, due to the clbit aliasing bug, the
+        returned `bit` references the body measurement's qubit (q2) instead
+        of qubit 0, so this test FAILS without the bug fix — returning 0
+        instead of 1.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)  # |1>
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        assert result is not None
+        # Since the circuit is just X|0⟩ = |1⟩, all results should be 1
+        for value, _ in result.results:
+            if isinstance(value, tuple):
+                # If multi-qubit, first qubit should be 1
+                assert value[0] == 1
+            else:
+                assert value == 1
+
+
+# ============================================================================
+# 31. Portable TranspilerConfig Tests
 # ============================================================================
 
 
