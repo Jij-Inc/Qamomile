@@ -1902,8 +1902,16 @@ class TestControlFlowIfElse:
         assert len(if_else_insts) >= 2
 
 
-class TestControlFlowWhile:
-    """Test while-loop control flow in @qkernel."""
+class TestControlFlowWhileStructure:
+    """Structural tests for while-loop transpilation.
+
+    These tests verify the Qiskit circuit structure without executing
+    the circuit. They check gate presence, qubit/clbit counts, body
+    contents, and — critically — that the body measurement writes to
+    the same classical bit as the while condition.
+    """
+
+    # -- basic gate-level checks ------------------------------------------
 
     def test_while_loop_creation(self):
         """While loop transpiles into Qiskit while_loop instruction."""
@@ -2008,6 +2016,319 @@ class TestControlFlowWhile:
         body_names = [inst.operation.name for inst in body.data]
         assert "h" in body_names
         assert "measure" in body_names
+
+    # -- clbit aliasing (the root cause of the infinite-loop bug) ----------
+
+    def test_while_loop_body_measure_same_clbit(self):
+        """Body measurement must write to the same clbit as the condition.
+
+        Without this, the while condition checks clbit[0] but the body
+        writes to clbit[1], so the condition never updates and the loop
+        never terminates.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+
+        # Find the while_loop instruction
+        while_insts = [i for i in qc.data if i.operation.name == "while_loop"]
+        assert len(while_insts) == 1
+
+        # The while_loop condition clbit
+        while_inst = while_insts[0]
+        condition_clbit = while_inst.clbits[0]
+
+        # The body circuit is in params[0]
+        body = while_inst.operation.params[0]
+        body_measures = [i for i in body.data if i.operation.name == "measure"]
+        assert len(body_measures) >= 1
+
+        # The body measure must target the same classical bit index as
+        # the while condition.  In Qiskit's while_loop, the body circuit
+        # shares the same classical register as the outer circuit, so
+        # the clbit index used inside the body must match the condition.
+        body_measure_clbit = body_measures[0].clbits[0]
+        assert body.clbits.index(body_measure_clbit) == qc.clbits.index(
+            condition_clbit
+        ), (
+            f"Body measure writes to clbit index "
+            f"{body.clbits.index(body_measure_clbit)} "
+            f"but while condition checks clbit index "
+            f"{qc.clbits.index(condition_clbit)}"
+        )
+
+    def test_while_loop_single_clbit_allocated(self):
+        """Loop-carried aliasing should not waste a classical bit.
+
+        When the body measurement aliases to the condition's clbit,
+        only one classical bit should be allocated (not two).
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_clbits == 1, (
+            f"Expected 1 classical bit but got {qc.num_clbits}. "
+            "The body measurement should alias to the condition's clbit."
+        )
+
+    # -- body gate ordering -----------------------------------------------
+
+    def test_while_loop_body_gate_order(self):
+        """Body gates must appear in source order: H → measure."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        while_insts = [i for i in qc.data if i.operation.name == "while_loop"]
+        body = while_insts[0].operation.params[0]
+        body_names = [inst.operation.name for inst in body.data]
+        h_idx = body_names.index("h")
+        measure_idx = body_names.index("measure")
+        assert h_idx < measure_idx, (
+            f"H gate at index {h_idx} must appear before measure at index {measure_idx}"
+        )
+
+    # -- outer circuit gate ordering --------------------------------------
+
+    def test_while_loop_outer_gate_order(self):
+        """Initial measure must appear before while_loop in the outer circuit."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        names = _gate_names(qc)
+        first_measure = names.index("measure")
+        while_idx = names.index("while_loop")
+        assert first_measure < while_idx, (
+            "Initial measure must come before while_loop in outer circuit"
+        )
+
+    # -- condition wiring -------------------------------------------------
+
+    def test_while_loop_condition_uses_initial_measure_clbit(self):
+        """The while condition must reference the clbit from the initial measurement."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+
+        # Find the initial measure instruction (before while_loop)
+        measure_insts = [i for i in qc.data if i.operation.name == "measure"]
+        assert len(measure_insts) >= 1
+        initial_measure_clbit = measure_insts[0].clbits[0]
+
+        # The while condition must reference the same clbit
+        while_insts = [i for i in qc.data if i.operation.name == "while_loop"]
+        condition_clbit = while_insts[0].clbits[0]
+        assert qc.clbits.index(condition_clbit) == qc.clbits.index(
+            initial_measure_clbit
+        ), (
+            "while_loop condition must reference the clbit from the initial measure"
+        )
+
+    # -- X-body structure: initial X, body has H + measure ----------------
+
+    def test_while_loop_x_init_body_contains_expected_gates(self):
+        """X-initialized while loop body must contain H and measure."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        while_insts = [i for i in qc.data if i.operation.name == "while_loop"]
+        assert len(while_insts) == 1
+        body = while_insts[0].operation.params[0]
+        body_names = [inst.operation.name for inst in body.data]
+        assert "h" in body_names
+        assert "measure" in body_names
+
+
+class TestControlFlowWhileSampling:
+    """Sampling (execution) tests for while-loop circuits.
+
+    These tests actually run the circuits on AerSimulator with shots
+    and verify the measurement results. They require the clbit-aliasing
+    bug fix to pass — without it the loop never terminates.
+    """
+
+    def test_while_loop_skip_when_zero(self):
+        """Initial qubit in |0⟩ → measure gives 0 → loop body never entered.
+
+        The result must always be 0.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            # q stays |0⟩, so bit = 0 → while condition is false
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        assert result is not None
+        assert len(result.results) > 0
+        # All shots must return 0 (loop never entered)
+        for value, count in result.results:
+            assert value == 0, f"Expected all 0, got value={value}"
+        total_counts = sum(count for _, count in result.results)
+        assert total_counts == 100
+
+    def test_while_loop_deterministic_termination(self):
+        """X gate makes bit=1, body applies H → 50% chance of 0 each iteration.
+
+        The loop must terminate (not hang). Every returned value must be 0
+        (the loop exits when bit becomes 0).
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)  # |1⟩ → bit = 1 → enter loop
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)  # 50% chance of |0⟩ each iteration
+                bit = qmc.measure(q)
+            return bit
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        assert result is not None
+        assert len(result.results) > 0
+        # Loop only exits when bit=0, so all results must be 0
+        for value, count in result.results:
+            assert value == 0, (
+                f"While loop should only exit with bit=0, got value={value}"
+            )
+        total_counts = sum(count for _, count in result.results)
+        assert total_counts == 100
+
+    def test_while_loop_repeat_until_zero(self):
+        """Full repeat-until-zero pattern: H → measure → while bit → H → measure.
+
+        This is the canonical repeat-until-success pattern. The circuit must
+        terminate and always return 0. Tests with enough shots to ensure
+        the loop runs at least some iterations statistically.
+        """
+
+        @qmc.qkernel
+        def repeat_until_zero() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(repeat_until_zero)
+        executor = transpiler.executor()
+
+        job = exe.sample(executor, bindings={}, shots=200)
+        result = job.result()
+        assert result is not None
+        assert len(result.results) > 0
+        # The returned value is always 0 (loop exit condition)
+        for value, count in result.results:
+            assert value == 0, (
+                f"repeat_until_zero must always return 0, got value={value}"
+            )
+        total_counts = sum(count for _, count in result.results)
+        assert total_counts == 200
+
+    def test_while_loop_execution_returns_valid_bits(self):
+        """All sample results must be valid Bit values (0 or 1)."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        for value, count in result.results:
+            assert value in (0, 1), f"Bit value must be 0 or 1, got {value}"
+            assert count > 0
 
 
 # ============================================================================
