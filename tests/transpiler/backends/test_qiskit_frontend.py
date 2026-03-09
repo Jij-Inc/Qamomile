@@ -2009,6 +2009,74 @@ class TestControlFlowWhile:
         assert "h" in body_names
         assert "measure" in body_names
 
+    def test_while_loop_body_measure_same_clbit(self):
+        """Body measurement must write to the same clbit as the condition.
+
+        Without this, the while condition checks clbit[0] but the body
+        writes to clbit[1], so the condition never updates and the loop
+        never terminates.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+
+        # Find the while_loop instruction
+        while_insts = [i for i in qc.data if i.operation.name == "while_loop"]
+        assert len(while_insts) == 1
+
+        # The while_loop condition clbit
+        while_inst = while_insts[0]
+        condition_clbit = while_inst.clbits[0]
+
+        # The body circuit is in params[0]
+        body = while_inst.operation.params[0]
+        body_measures = [i for i in body.data if i.operation.name == "measure"]
+        assert len(body_measures) >= 1
+
+        # The body measure must target the same classical bit index as
+        # the while condition.  In Qiskit's while_loop, the body circuit
+        # shares the same classical register as the outer circuit, so
+        # the clbit index used inside the body must match the condition.
+        body_measure_clbit = body_measures[0].clbits[0]
+        assert body.clbits.index(body_measure_clbit) == qc.clbits.index(
+            condition_clbit
+        ), (
+            f"Body measure writes to clbit index "
+            f"{body.clbits.index(body_measure_clbit)} "
+            f"but while condition checks clbit index "
+            f"{qc.clbits.index(condition_clbit)}"
+        )
+
+    def test_while_loop_single_clbit_allocated(self):
+        """Loop-carried aliasing should not waste a classical bit."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_clbits == 1, (
+            f"Expected 1 classical bit but got {qc.num_clbits}. "
+            "The body measurement should alias to the condition's clbit."
+        )
+
 
 # ============================================================================
 # 3b. QAOA Pattern Tests

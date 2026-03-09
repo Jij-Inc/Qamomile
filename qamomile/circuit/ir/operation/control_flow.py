@@ -18,6 +18,8 @@ class WhileOperation(Operation):
 
     @property
     def signature(self) -> Signature:
+        # operands[0]: initial condition (required)
+        # operands[1]: loop-carried condition update (optional, for clbit aliasing)
         return Signature(operands=[ParamHint("condition", BlockType())], results=[])
 
     @property

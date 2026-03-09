@@ -311,6 +311,33 @@ class ResourceAllocator:
                 self._allocate_phi_ops(op.phi_ops, qubit_map, clbit_map)
 
             elif isinstance(op, WhileOperation):
+                # If the while loop has a loop-carried condition (operands[1]),
+                # pre-register its UUID as an alias to the initial condition's
+                # clbit so that the body measurement writes to the same
+                # classical bit that the while condition checks.
+                if len(op.operands) >= 2:
+                    initial_cond = op.operands[0]
+                    loop_carried = op.operands[1]
+                    init_val = (
+                        initial_cond.value
+                        if hasattr(initial_cond, "value")
+                        else initial_cond
+                    )
+                    carried_val = (
+                        loop_carried.value
+                        if hasattr(loop_carried, "value")
+                        else loop_carried
+                    )
+                    init_uuid = (
+                        init_val.uuid if hasattr(init_val, "uuid") else str(init_val)
+                    )
+                    carried_uuid = (
+                        carried_val.uuid
+                        if hasattr(carried_val, "uuid")
+                        else str(carried_val)
+                    )
+                    if init_uuid in clbit_map and carried_uuid not in clbit_map:
+                        clbit_map[carried_uuid] = clbit_map[init_uuid]
                 self._allocate_recursive(op.operations, qubit_map, clbit_map, bindings)
 
             elif isinstance(op, CompositeGateOperation):

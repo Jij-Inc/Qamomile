@@ -61,12 +61,28 @@ def while_loop(cond: typing.Callable) -> typing.Generator[WhileLoop, None, None]
         yield WhileLoop()
 
     # 5. After the with block exits, body_tracer.operations contains the body
-    # 6. Create WhileOperation with captured body operations
-    while_op = WhileOperation(operations=body_tracer.operations)
-    # Add condition result (the Handle representing the condition expression)
-    while_op.operands.append(condition_result)
+    # 6. Re-evaluate the condition lambda to capture loop-carried updates.
+    #    Python closures capture variables by reference, so if the body
+    #    reassigned the condition variable (e.g., bit = qmc.measure(q)),
+    #    calling cond() again returns the NEW handle.  This lets us detect
+    #    that the body produces an updated condition and alias both to the
+    #    same classical bit during resource allocation.
+    # Re-evaluate in a temporary tracer to discard any side-effect operations
+    # (e.g., CompOp from comparison conditions like `while i < n:`).
+    temp_tracer = Tracer()
+    with trace(temp_tracer):
+        condition_after = cond()
 
-    # 7. Add the WhileOperation to the PARENT tracer (not a local one)
+    # 7. Create WhileOperation with captured body operations
+    while_op = WhileOperation(operations=body_tracer.operations)
+    # operands[0]: initial condition (checked at loop entry)
+    while_op.operands.append(condition_result)
+    # operands[1]: loop-carried condition (updated inside body)
+    # Only append if the body actually produced a different handle.
+    if condition_after is not condition_result:
+        while_op.operands.append(condition_after)
+
+    # 8. Add the WhileOperation to the PARENT tracer (not a local one)
     parent_tracer.add_operation(while_op)
 
 
