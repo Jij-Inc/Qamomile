@@ -34,6 +34,14 @@ qiskit = pytest.importorskip("qiskit")
 pytest.importorskip("qiskit_aer")
 
 from qiskit import QuantumCircuit
+from qiskit.circuit.library import (
+    HGate, XGate, ZGate, SGate, SdgGate, TGate, TdgGate,
+    RXGate, RYGate, RZGate, PhaseGate,
+    CXGate, CZGate, CPhaseGate, RZZGate, SwapGate,
+    CCXGate,
+)
+from qiskit.circuit import Measure
+from qiskit.circuit.controlflow import WhileLoopOp, IfElseOp
 
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.basic import (
@@ -152,7 +160,7 @@ class TestSingleQubitGatesFrontend:
     # -- Hadamard --
 
     def test_h_creation(self):
-        """H gate transpiles to a Qiskit circuit containing 'h' instruction."""
+        """H gate transpiles to: H(q0) → Measure(q0→c0)."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -161,7 +169,14 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        assert "h" in _gate_names(qc)
+        assert len(qc.data) == 2  # H + measure
+        assert isinstance(qc.data[0].operation, HGate)
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0]
+        assert isinstance(qc.data[1].operation, Measure)
+        assert [qc.find_bit(q).index for q in qc.data[1].qubits] == [0]
+        assert [qc.find_bit(c).index for c in qc.data[1].clbits] == [0]
+        assert qc.num_qubits == 1
+        assert qc.num_clbits == 1
 
     def test_h_statevector(self):
         """H|0⟩ produces equal superposition (|0⟩+|1⟩)/√2."""
@@ -180,7 +195,7 @@ class TestSingleQubitGatesFrontend:
     # -- Pauli-X --
 
     def test_x_creation(self):
-        """X gate transpiles to a Qiskit circuit containing 'x' instruction."""
+        """X gate transpiles to: X(q0) → Measure(q0→c0)."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -189,7 +204,12 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        assert "x" in _gate_names(qc)
+        assert len(qc.data) == 2
+        assert isinstance(qc.data[0].operation, XGate)
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0]
+        assert isinstance(qc.data[1].operation, Measure)
+        assert qc.num_qubits == 1
+        assert qc.num_clbits == 1
 
     def test_x_statevector(self):
         """X|0⟩ = |1⟩ statevector verification."""
@@ -208,7 +228,7 @@ class TestSingleQubitGatesFrontend:
     # -- RX --
 
     def test_rx_creation(self):
-        """RX gate transpiles to a Qiskit circuit containing 'rx' instruction."""
+        """RX gate transpiles to: RX(q0) → Measure(q0→c0)."""
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Bit:
@@ -217,7 +237,12 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 4})
-        assert "rx" in _gate_names(qc)
+        assert len(qc.data) == 2
+        assert isinstance(qc.data[0].operation, RXGate)
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0]
+        assert isinstance(qc.data[1].operation, Measure)
+        assert qc.num_qubits == 1
+        assert qc.num_clbits == 1
 
     def test_rx_determined(self):
         """RX(pi) |0> = -i|1>."""
@@ -268,7 +293,12 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 4})
-        assert "ry" in _gate_names(qc)
+        assert len(qc.data) == 2
+        assert isinstance(qc.data[0].operation, RYGate)
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0]
+        assert isinstance(qc.data[1].operation, Measure)
+        assert qc.num_qubits == 1
+        assert qc.num_clbits == 1
 
     def test_ry_determined(self):
         """RY(pi/2) |0> -> (|0> + |1>) / sqrt(2)."""
@@ -319,7 +349,12 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 4})
-        assert "rz" in _gate_names(qc)
+        assert len(qc.data) == 2
+        assert isinstance(qc.data[0].operation, RZGate)
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0]
+        assert isinstance(qc.data[1].operation, Measure)
+        assert qc.num_qubits == 1
+        assert qc.num_clbits == 1
 
     def test_rz_determined(self):
         """RZ(π)|0⟩ statevector matches analytical RZ matrix."""
@@ -370,7 +405,12 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 4})
-        assert "p" in _gate_names(qc)
+        assert len(qc.data) == 2
+        assert isinstance(qc.data[0].operation, PhaseGate)
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0]
+        assert isinstance(qc.data[1].operation, Measure)
+        assert qc.num_qubits == 1
+        assert qc.num_clbits == 1
 
     def test_p_determined(self):
         """P(pi) on |1> gives phase e^{i*pi} = -1."""
@@ -429,7 +469,12 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        assert "z" in _gate_names(qc)
+        assert len(qc.data) == 2
+        assert isinstance(qc.data[0].operation, ZGate)
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0]
+        assert isinstance(qc.data[1].operation, Measure)
+        assert qc.num_qubits == 1
+        assert qc.num_clbits == 1
 
     def test_z_on_zero(self):
         """Z|0⟩ = |0⟩ (no change on computational basis |0⟩)."""
@@ -494,7 +539,12 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        assert "s" in _gate_names(qc)
+        assert len(qc.data) == 2
+        assert isinstance(qc.data[0].operation, SGate)
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0]
+        assert isinstance(qc.data[1].operation, Measure)
+        assert qc.num_qubits == 1
+        assert qc.num_clbits == 1
 
     def test_s_on_zero(self):
         """S|0⟩ = |0⟩ (no change on computational basis |0⟩)."""
@@ -560,7 +610,12 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        assert "sdg" in _gate_names(qc)
+        assert len(qc.data) == 2
+        assert isinstance(qc.data[0].operation, SdgGate)
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0]
+        assert isinstance(qc.data[1].operation, Measure)
+        assert qc.num_qubits == 1
+        assert qc.num_clbits == 1
 
     def test_sdg_on_zero(self):
         """SDG|0⟩ = |0⟩ (no change on computational basis |0⟩)."""
@@ -626,7 +681,12 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        assert "t" in _gate_names(qc)
+        assert len(qc.data) == 2
+        assert isinstance(qc.data[0].operation, TGate)
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0]
+        assert isinstance(qc.data[1].operation, Measure)
+        assert qc.num_qubits == 1
+        assert qc.num_clbits == 1
 
     def test_t_on_zero(self):
         """T|0⟩ = |0⟩ (no change on computational basis |0⟩)."""
@@ -697,7 +757,12 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        assert "tdg" in _gate_names(qc)
+        assert len(qc.data) == 2
+        assert isinstance(qc.data[0].operation, TdgGate)
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0]
+        assert isinstance(qc.data[1].operation, Measure)
+        assert qc.num_qubits == 1
+        assert qc.num_clbits == 1
 
     def test_tdg_on_zero(self):
         """TDG|0⟩ = |0⟩ (no change on computational basis |0⟩)."""
@@ -767,7 +832,13 @@ class TestTwoQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        assert "cx" in _gate_names(qc)
+        assert len(qc.data) == 3  # CX + 2 measures
+        assert isinstance(qc.data[0].operation, CXGate)
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0, 1]
+        assert isinstance(qc.data[1].operation, Measure)
+        assert isinstance(qc.data[2].operation, Measure)
+        assert qc.num_qubits == 2
+        assert qc.num_clbits == 2
 
     def test_cx_from_00(self):
         """CX |00> = |00>."""
@@ -849,7 +920,13 @@ class TestTwoQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        assert "cz" in _gate_names(qc)
+        assert len(qc.data) == 3
+        assert isinstance(qc.data[0].operation, CZGate)
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0, 1]
+        assert isinstance(qc.data[1].operation, Measure)
+        assert isinstance(qc.data[2].operation, Measure)
+        assert qc.num_qubits == 2
+        assert qc.num_clbits == 2
 
     def test_cz_from_00(self):
         """CZ |00> = |00> (no phase)."""
@@ -931,7 +1008,13 @@ class TestTwoQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 4})
-        assert "cp" in _gate_names(qc)
+        assert len(qc.data) == 3
+        assert isinstance(qc.data[0].operation, CPhaseGate)
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0, 1]
+        assert isinstance(qc.data[1].operation, Measure)
+        assert isinstance(qc.data[2].operation, Measure)
+        assert qc.num_qubits == 2
+        assert qc.num_clbits == 2
 
     def test_cp_determined(self):
         """CP(pi) on |11> gives phase e^{i*pi} = -1."""
@@ -986,7 +1069,13 @@ class TestTwoQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 4})
-        assert "rzz" in _gate_names(qc)
+        assert len(qc.data) == 3
+        assert isinstance(qc.data[0].operation, RZZGate)
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0, 1]
+        assert isinstance(qc.data[1].operation, Measure)
+        assert isinstance(qc.data[2].operation, Measure)
+        assert qc.num_qubits == 2
+        assert qc.num_clbits == 2
 
     def test_rzz_determined(self):
         """RZZ(pi) on |00>."""
@@ -1039,7 +1128,13 @@ class TestTwoQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        assert "swap" in _gate_names(qc)
+        assert len(qc.data) == 3
+        assert isinstance(qc.data[0].operation, SwapGate)
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0, 1]
+        assert isinstance(qc.data[1].operation, Measure)
+        assert isinstance(qc.data[2].operation, Measure)
+        assert qc.num_qubits == 2
+        assert qc.num_clbits == 2
 
     def test_swap_determined(self):
         """SWAP |10> = |01>."""
@@ -1074,7 +1169,14 @@ class TestThreeQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        assert "ccx" in _gate_names(qc)
+        assert len(qc.data) == 4  # CCX + 3 measures
+        assert isinstance(qc.data[0].operation, CCXGate)
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0, 1, 2]
+        assert isinstance(qc.data[1].operation, Measure)
+        assert isinstance(qc.data[2].operation, Measure)
+        assert isinstance(qc.data[3].operation, Measure)
+        assert qc.num_qubits == 3
+        assert qc.num_clbits == 3
 
     @pytest.mark.parametrize(
         "x_targets, basis_idx",
@@ -1743,7 +1845,7 @@ class TestControlFlowIfElse:
     """Test if-else control flow in @qkernel (measure → conditional gate)."""
 
     def test_if_else_creation(self):
-        """If-else transpiles into Qiskit if_else instruction."""
+        """If-else transpiles to: X(q0) → Measure(q0→c0) → IfElse(q1,c0) → Measure(q1→c2)."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -1758,8 +1860,16 @@ class TestControlFlowIfElse:
             return qmc.measure(q1)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        names = _gate_names(qc)
-        assert "if_else" in names
+        assert len(qc.data) == 4  # X + Measure + IfElse + Measure
+        assert isinstance(qc.data[0].operation, XGate)
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0]
+        assert isinstance(qc.data[1].operation, Measure)
+        assert [qc.find_bit(q).index for q in qc.data[1].qubits] == [0]
+        assert [qc.find_bit(c).index for c in qc.data[1].clbits] == [0]
+        assert isinstance(qc.data[2].operation, IfElseOp)
+        assert [qc.find_bit(q).index for q in qc.data[2].qubits] == [1]
+        assert isinstance(qc.data[3].operation, Measure)
+        assert qc.num_qubits == 2
 
     def test_if_else_both_branches(self):
         """If-else with true branch applying X and false as no-op.
@@ -1783,11 +1893,12 @@ class TestControlFlowIfElse:
             return qmc.measure(q1)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        names = _gate_names(qc)
-        assert "if_else" in names
-        # Extract the if_else instruction
-        if_else_insts = [i for i in qc.data if i.operation.name == "if_else"]
-        assert len(if_else_insts) >= 1
+        assert len(qc.data) == 4
+        assert isinstance(qc.data[0].operation, XGate)
+        assert isinstance(qc.data[1].operation, Measure)
+        assert isinstance(qc.data[2].operation, IfElseOp)
+        assert [qc.find_bit(q).index for q in qc.data[2].qubits] == [1]
+        assert isinstance(qc.data[3].operation, Measure)
 
     def test_if_else_execution(self):
         """Execute an if-else circuit and verify it runs without error.
@@ -1822,7 +1933,7 @@ class TestControlFlowIfElse:
             assert count > 0
 
     def test_if_only_no_else(self):
-        """If-only (no else branch) compiles to if_else with no-op false."""
+        """If-only (no else) transpiles to: X(q0) → Measure(q0→c0) → IfElse(q1) → Measure(q1)."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -1835,11 +1946,14 @@ class TestControlFlowIfElse:
             return qmc.measure(q1)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        names = _gate_names(qc)
-        assert "if_else" in names
+        assert len(qc.data) == 4
+        assert isinstance(qc.data[0].operation, XGate)
+        assert isinstance(qc.data[1].operation, Measure)
+        assert isinstance(qc.data[2].operation, IfElseOp)
+        assert isinstance(qc.data[3].operation, Measure)
 
     def test_if_else_on_zero_measurement(self):
-        """Measure |0⟩ (always false) — if_else instruction still created."""
+        """Measure |0⟩: Measure(q0→c0) → IfElse(q1,c0) → Measure(q1)."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -1854,11 +1968,15 @@ class TestControlFlowIfElse:
             return qmc.measure(q1)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        names = _gate_names(qc)
-        assert "if_else" in names
+        assert len(qc.data) == 3  # no X init → Measure + IfElse + Measure
+        assert isinstance(qc.data[0].operation, Measure)
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0]
+        assert isinstance(qc.data[1].operation, IfElseOp)
+        assert [qc.find_bit(q).index for q in qc.data[1].qubits] == [1]
+        assert isinstance(qc.data[2].operation, Measure)
 
     def test_if_else_with_parametric_gate(self):
-        """True branch applies RX(theta), false branch is no-op."""
+        """Parametric if-else: X(q0) → Measure(q0) → IfElse(q1) → Measure(q1)."""
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Bit:
@@ -1873,8 +1991,11 @@ class TestControlFlowIfElse:
             return qmc.measure(q1)
 
         _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 4})
-        names = _gate_names(qc)
-        assert "if_else" in names
+        assert len(qc.data) == 4
+        assert isinstance(qc.data[0].operation, XGate)
+        assert isinstance(qc.data[1].operation, Measure)
+        assert isinstance(qc.data[2].operation, IfElseOp)
+        assert isinstance(qc.data[3].operation, Measure)
 
     def test_multiple_sequential_if_else(self):
         """Two sequential if-else blocks on different measurements."""
@@ -1914,7 +2035,7 @@ class TestControlFlowWhileStructure:
     # -- basic gate-level checks ------------------------------------------
 
     def test_while_loop_creation(self):
-        """While loop transpiles into Qiskit while_loop instruction."""
+        """While loop transpiles to: H(q0) → Measure(q0→c0) → WhileLoop."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -1928,11 +2049,25 @@ class TestControlFlowWhileStructure:
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
-        names = _gate_names(qc)
-        assert "while_loop" in names
+
+        # Exactly 3 top-level instructions
+        assert len(qc.data) == 3
+
+        # [0] H gate on qubit 0
+        assert isinstance(qc.data[0].operation, HGate)
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0]
+        assert qc.data[0].clbits == ()
+
+        # [1] Measure on qubit 0 → clbit 0
+        assert isinstance(qc.data[1].operation, Measure)
+        assert [qc.find_bit(q).index for q in qc.data[1].qubits] == [0]
+        assert [qc.find_bit(c).index for c in qc.data[1].clbits] == [0]
+
+        # [2] WhileLoopOp
+        assert isinstance(qc.data[2].operation, WhileLoopOp)
 
     def test_while_loop_structure(self):
-        """While loop has correct body structure."""
+        """While loop body sub-circuit: H(q0) → Measure(q0→c)."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -1946,14 +2081,26 @@ class TestControlFlowWhileStructure:
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
-        while_insts = [i for i in qc.data if i.operation.name == "while_loop"]
-        assert len(while_insts) >= 1
-        # The while_loop params contain one QuantumCircuit (body)
-        body = while_insts[0].operation.params[0]
-        assert body.num_qubits > 0
+
+        # Extract the while loop body
+        while_inst = qc.data[2]
+        assert isinstance(while_inst.operation, WhileLoopOp)
+        body = while_inst.operation.params[0]
+
+        # Body has exactly 2 instructions
+        assert len(body.data) == 2
+        assert body.num_qubits == 1
+
+        # Body[0]: H on body-qubit 0
+        assert isinstance(body.data[0].operation, HGate)
+        assert [body.find_bit(q).index for q in body.data[0].qubits] == [0]
+
+        # Body[1]: Measure on body-qubit 0
+        assert isinstance(body.data[1].operation, Measure)
+        assert [body.find_bit(q).index for q in body.data[1].qubits] == [0]
 
     def test_while_loop_circuit_structure(self):
-        """While loop circuit has correct top-level structure (qubits, clbits, while_loop)."""
+        """Top-level resource counts for a while-loop circuit."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -1967,17 +2114,18 @@ class TestControlFlowWhileStructure:
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
-        names = _gate_names(qc)
-        # Must have initial H + measure before the while
-        assert "h" in names
-        assert "measure" in names
-        assert "while_loop" in names
-        # Circuit has qubits and classical bits
+
+        assert len(qc.data) == 3  # H + Measure + WhileLoop
         assert qc.num_qubits >= 1
         assert qc.num_clbits >= 1
 
+        # Verify types at each position
+        assert isinstance(qc.data[0].operation, HGate)
+        assert isinstance(qc.data[1].operation, Measure)
+        assert isinstance(qc.data[2].operation, WhileLoopOp)
+
     def test_while_loop_with_x_body(self):
-        """While body with X gate (always flips to |0⟩ on second iteration)."""
+        """X-init while loop: X(q0) → Measure(q0→c0) → WhileLoop."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -1991,12 +2139,24 @@ class TestControlFlowWhileStructure:
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
-        names = _gate_names(qc)
-        assert "while_loop" in names
-        assert "x" in names
+
+        # Exactly 3 top-level instructions
+        assert len(qc.data) == 3
+
+        # [0] X gate on qubit 0
+        assert isinstance(qc.data[0].operation, XGate)
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0]
+
+        # [1] Measure on qubit 0 → clbit 0
+        assert isinstance(qc.data[1].operation, Measure)
+        assert [qc.find_bit(q).index for q in qc.data[1].qubits] == [0]
+        assert [qc.find_bit(c).index for c in qc.data[1].clbits] == [0]
+
+        # [2] WhileLoopOp
+        assert isinstance(qc.data[2].operation, WhileLoopOp)
 
     def test_while_loop_body_gate_verification(self):
-        """Verify while loop body subcircuit contains expected gates."""
+        """Body sub-circuit has H then Measure, both targeting body-qubit 0."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -2010,12 +2170,26 @@ class TestControlFlowWhileStructure:
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
-        while_insts = [i for i in qc.data if i.operation.name == "while_loop"]
-        assert len(while_insts) >= 1
-        body = while_insts[0].operation.params[0]
-        body_names = [inst.operation.name for inst in body.data]
-        assert "h" in body_names
-        assert "measure" in body_names
+
+        # Get while loop body
+        assert isinstance(qc.data[2].operation, WhileLoopOp)
+        body = qc.data[2].operation.params[0]
+
+        # Body has exactly 2 instructions
+        assert len(body.data) == 2
+
+        # Body[0]: H on body-qubit 0
+        assert isinstance(body.data[0].operation, HGate)
+        assert [body.find_bit(q).index for q in body.data[0].qubits] == [0]
+
+        # Body[1]: Measure on body-qubit 0
+        assert isinstance(body.data[1].operation, Measure)
+        assert [body.find_bit(q).index for q in body.data[1].qubits] == [0]
+
+        # H and Measure target the same qubit
+        h_target = [body.find_bit(q).index for q in body.data[0].qubits]
+        m_target = [body.find_bit(q).index for q in body.data[1].qubits]
+        assert h_target == m_target
 
     # -- clbit aliasing (the root cause of the infinite-loop bug) ----------
 
