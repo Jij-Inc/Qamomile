@@ -144,6 +144,8 @@ exe = transpiler.transpile(biased_coin, parameters=["theta"])
 # ステップ 2: 実行
 # bindings={"theta": ...} は theta の具体的な値を指定します。
 # shots=256 は回路を 256 回実行することを意味します。
+# デフォルトのexecutor（transpiler.executor()）はローカルシミュレータを使用しますが、
+# 独自のカスタムexecutor（例: 実機やクラウドサービス）を接続することもできます。
 job = exe.sample(
     transpiler.executor(),
     shots=256,
@@ -152,8 +154,6 @@ job = exe.sample(
 
 # ステップ 3: 結果の読み取り
 # .result() はジョブが完了するまで待ち、SampleResult を返します。
-# デフォルトのexecutorはローカルシミュレータを使用しますが、
-# 独自のカスタムexecutor（例: 実機やクラウドサービス）を接続することもできます。
 result = job.result()
 
 print("sample results:", result.results)

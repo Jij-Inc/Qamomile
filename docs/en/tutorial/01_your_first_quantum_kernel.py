@@ -144,6 +144,8 @@ exe = transpiler.transpile(biased_coin, parameters=["theta"])
 # Step 2: Execute
 # bindings={"theta": ...} provides the concrete value for theta.
 # shots=256 means we run the circuit 256 times.
+# The default executor (transpiler.executor()) uses a local simulator, but you can plug in
+# your own custom executor (e.g., for real hardware or cloud services).
 job = exe.sample(
     transpiler.executor(),
     shots=256,
@@ -152,8 +154,6 @@ job = exe.sample(
 
 # Step 3: Read results
 # .result() blocks until the job completes and returns a SampleResult.
-# The default executor uses a local simulator, but you can plug in
-# your own custom executor (e.g., for real hardware or cloud services).
 result = job.result()
 
 print("sample results:", result.results)
