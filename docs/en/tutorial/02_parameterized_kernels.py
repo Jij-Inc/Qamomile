@@ -13,35 +13,42 @@
 # ---
 
 # %% [markdown]
-# # Parameterized Kernels
+# # Parameterized Quantum Kernels
 #
-# In Tutorial 01 we built kernels with a fixed number of qubits.
-# Real quantum programs often need to vary both the **circuit structure**
-# (how many qubits, how many layers) and **runtime values** (rotation angles).
+# In Tutorial 01 we built qkernels with a fixed number of qubits.
+# Qamomile allows you to treat values that determine circuit structure
+# — such as the number of qubits and layers — as symbolic parameters.
+# For instance, you can write a qkernel that contains
+# `n` qubits and applies H gates to all of them,
+# or one that applies a certain sequence of gates for `p` iterations.
+# In Qamomile, parameters for circuit structure and those for
+# rotation angles are required to be bound at different times:
+# structure parameters must be bound at transpile time, while
+# rotation angles must be bound at runtime.
 #
 # This chapter teaches:
 #
-# - The typical roles of `UInt` and `Float` in kernel inputs
+# - The typical roles of `UInt` and `Float` in qkernel inputs
 # - `qubit_array()` and `qmc.range()` for parameterized circuits
-# - The **bind/sweep** pattern: compile once, execute many times
+# - The **bind/sweep** pattern: transpile once, execute many times
 
 # %% [markdown]
 # ## Typical Roles of `UInt` and `Float`
 #
-# Kernel parameters come in two flavors:
+# Qkernel parameters typically come in two flavors:
 #
 # | Type | Typical role |
 # |------|-------------|
-# | `qmc.UInt` | Circuit structure (qubit count, loop bound) |
-# | `qmc.Float` | Continuous values (rotation angles, weights) |
+# | `qmc.UInt` | Circuit structure (qubit count, number of iterations) |
+# | `qmc.Float` | Gate parameters (rotation angles, weights) |
 #
 # In practice, `UInt` values that control `qubit_array` size or `qmc.range`
 # bounds **must** be bound at transpile time, because the target quantum SDK
 # needs a fixed circuit structure.
 # `Float` values can stay as sweepable parameters.
 #
-# The common pattern is: bind structure at transpile time, sweep continuous
-# values at execution time.
+# The common pattern is: bind structure at transpile time, sweep gate parameters
+# at execution time.
 
 # %%
 import qamomile.circuit as qmc
@@ -54,9 +61,12 @@ transpiler = QiskitTranspiler()
 #
 # When the number of qubits depends on a parameter `n`, use `qubit_array(n)`.
 # To loop over the array, use `qmc.range(n)` instead of Python's built-in `range()`.
+# `qmc.range` takes `start`, `stop`, and `step` arguments just like Python's `range()`.
+# For instance, if you want to apply a gate to every other qubit, you can write
+# `for i in qmc.range(0, n, 2): ...`.
 #
 # > **Why not Python `range()`?** At trace time, `n` is a symbol, not a Python
-# > integer — the kernel body is traced to build an IR, and Python's `range()`
+# > integer — the qkernel body is traced to build an IR, and Python's `range()`
 # > cannot iterate over a symbol. `qmc.range()` emits a **loop node** in the IR
 # > that the transpiler expands when `n` is bound to a concrete value.
 
@@ -85,13 +95,13 @@ rotation_layer.draw(n=4, theta=0.3, fold_loops=False)
 # ## Index-Based Updates
 #
 # Notice the pattern: `q[i] = qmc.h(q[i])`.
-# You index into the array, apply the gate, and write the result back to the
-# same index. This follows the affine rule from Tutorial 01 — the old handle
-# at `q[i]` is consumed, and the returned handle takes its place.
+# Qamomile treats quantum handles as affine
+# — the accessed qubit is consumed,
+# and the updated handle must be stored back in the same place.
 #
 # **Anti-pattern: iterating directly over the array.**
-# Writing `for qi in q:` does not work because it bypasses the ownership
-# tracking that Qamomile uses to enforce the affine rule.
+# We intentionally raise an error for the `for qi in q:` pattern
+# because it is incompatible with Qamomile's affine enforcement.
 
 # %%
 try:
@@ -114,14 +124,14 @@ except Exception as e:
 # %% [markdown]
 # ## The Bind/Sweep Pattern
 #
-# This is the central workflow pattern for parameterized kernels:
+# This is the central workflow pattern for parameterized qkernels:
 #
 # 1. **Transpile once**: bind structure parameters (`n`) and declare runtime
 #    parameters (`theta`) as sweepable.
-# 2. **Execute many times**: reuse the same compiled executable with different
+# 2. **Execute many times**: reuse the same transpiled executable with different
 #    runtime bindings.
 #
-# This avoids recompiling the circuit for every parameter value.
+# This avoids re-transpiling the circuit for every parameter value.
 
 # %%
 # Transpile: fix n=4, keep theta as a sweepable parameter
@@ -159,7 +169,7 @@ for theta in [0.1, 0.5, 1.0]:
 # - Use `qmc.qubit_array(n)` and `qmc.range(n)` for parameterized circuits.
 #   Always use index-based updates: `q[i] = qmc.gate(q[i])`.
 # - The bind/sweep pattern — `transpile(bindings=..., parameters=...)` then loop —
-#   compiles once and executes many times.
+#   transpiles once and executes many times.
 #
 # **Next**: [Resource Estimation](03_resource_estimation.ipynb) — symbolic cost
 # analysis, gate breakdowns, and comparing design candidates.
