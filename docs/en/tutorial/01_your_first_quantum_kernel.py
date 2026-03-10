@@ -347,4 +347,3 @@ except Exception as e:
 # 3. [Execution Models](04_execution_models.ipynb) — `sample()` vs `run()`, observables, bit ordering
 # 4. [Classical Flow Patterns](05_classical_flow_patterns.ipynb) — loops, sparse data, branching
 # 5. [Reuse Patterns](06_reuse_patterns.ipynb) — helper kernels, composite gates, stubs
-# 6. [Debugging and Backend](07_debugging_and_backend.ipynb) — debug checklist, error messages, quick reference
