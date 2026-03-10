@@ -11,13 +11,6 @@ Qamomile is a quantum programming SDK. Write quantum circuits as typed Python fu
 5. [Classical Flow Patterns](tutorial/05_classical_flow_patterns) — Loops, sparse data, conditional branching
 6. [Reuse Patterns](tutorial/06_reuse_patterns) — Helper kernels, composite gates, stubs
 
-## Optimization
-
-- [QAOA](optimization/qaoa) - Solving Max-Cut with Quantum Approximate Optimization Algorithm
-- [FQAOA](optimization/fqaoa) - Constrained optimization with Fermionic QAOA
-- [QRAO](optimization/qrao31) - Qubit-efficient encoding with Quantum Random Access Optimization
-- [Custom Converter](optimization/custom_converter) - Building your own optimization converter
-
 ## Installation
 
 ```bash
