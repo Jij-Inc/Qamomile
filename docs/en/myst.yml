@@ -60,7 +60,6 @@ project:
             - file: api/quri_parts/emitter
             - file: api/quri_parts/exceptions
             - file: api/quri_parts/observable
-            - file: api/quri_parts/parameter_converter
             - file: api/quri_parts/transpiler
 # --- End API Reference ---
 
