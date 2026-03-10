@@ -17,7 +17,7 @@
 #
 # This chapter takes you from zero to a running quantum program.
 # By the end, you will understand every line and every concept needed
-# to write, visualize, and execute a Qamomile kernel.
+# to write, visualize, and execute a Qamomile quantum kernel (qkernel).
 #
 # ## What is Qamomile?
 #
@@ -25,7 +25,7 @@
 # in Python, then run them on any supported quantum SDK (Qiskit, QuriParts, and more in plan).
 # It uses a **typed, symbolic** approach: you write a Python function
 # decorated with `@qkernel`, and Qamomile traces it into an intermediate
-# representation that can be analyzed, visualized, and compiled.
+# representation that can be analyzed, visualized, and transpiled.
 #
 # The core workflow is a simple pipeline:
 #
@@ -33,9 +33,9 @@
 # @qkernel define  →  draw() / estimate_resources()  →  transpile()  →  sample() / run()  →  .result()
 # ```
 #
-# - **Define**: Write a kernel function with type annotations.
+# - **Define**: Write a qkernel function with type annotations.
 # - **Inspect**: Visualize the circuit with `draw()`, or estimate costs with `estimate_resources()`.
-# - **Transpile**: Compile the kernel into an executable for your chosen quantum SDK.
+# - **Transpile**: Transpile the qkernel into an executable for your chosen quantum SDK.
 # - **Execute**: Run it with `sample()` (for measured bits) or `run()` (for expectation values).
 # - **Read results**: Call `.result()` to get the output.
 #
@@ -62,10 +62,11 @@ from qamomile.qiskit import QiskitTranspiler
 transpiler = QiskitTranspiler()
 
 # %% [markdown]
-# ## First Kernel: The Biased Coin
+# ## First QKernel: The Biased Coin
 #
-# A **kernel** is a Python function decorated with `@qmc.qkernel`.
+# A **QKernel** is a Python function decorated with `@qmc.qkernel`.
 # It describes a quantum circuit using typed handles and gate operations.
+# > A handle is an "identifier" or "token" that indirectly references some resource or object.
 #
 # Let's build the simplest possible example: a single qubit rotated by
 # an angle `theta`, then measured. Depending on `theta`, the qubit is
@@ -88,8 +89,8 @@ def biased_coin(theta: qmc.Float) -> qmc.Bit:
 # %% [markdown]
 # Key things to notice:
 #
-# - **Type annotations are required**: `theta: qmc.Float` says theta is a
-#   floating-point parameter. The return type `qmc.Bit` says this kernel
+# - **Type annotations are required**. `theta: qmc.Float` says theta is a
+#   floating-point parameter. The return type `qmc.Bit` says this qkernel
 #   produces one classical bit.
 # - **`qmc.qubit(name="q")`** creates a qubit handle. The `name` appears
 #   in circuit diagrams.
@@ -100,18 +101,19 @@ def biased_coin(theta: qmc.Float) -> qmc.Bit:
 # %% [markdown]
 # ## Inspect Before Running
 #
-# Before executing, you can inspect your kernel. `draw()` shows the circuit diagram:
+# Before executing, you can inspect your qkernel. `draw()` shows the circuit diagram:
 #
 # > **Note**: `draw()` visualizes the circuit at Qamomile's IR level.
-# > When transpiling to a quantum SDK (e.g., Qiskit), the SDK may decompose
-# > or optimize gates, so the actual executed circuit can differ from what
-# > `draw()` shows. Use `to_circuit()` to see the circuit in the target SDK's format.
+# > When transpiling to a quantum SDK (e.g., Qiskit),
+# > the gates may be decomposed or optimized through the transpiling process,
+# > so the actual executed circuit can differ from what
+# > `draw()` shows. Use `transpiler.to_circuit()` to see the circuit in the target SDK's format.
 
 # %%
 biased_coin.draw(theta=0.6)
 
 # %% [markdown]
-# You can also check the cost of a kernel before running it.
+# You can also check the cost of a qkernel before running it.
 # `estimate_resources()` reports qubit count and gate counts:
 
 # %%
@@ -120,16 +122,16 @@ print("qubits:", est.qubits)
 print("total gates:", est.gates.total)
 
 # %% [markdown]
-# For this simple kernel the numbers are concrete, but for parameterized
-# kernels they become symbolic SymPy expressions — we will explore this
+# For this simple qkernel the numbers are concrete, but for parameterized
+# qkernels they become symbolic SymPy expressions — we will explore this
 # in detail in [Tutorial 02](02_parameterized_kernels.ipynb).
 
 # %% [markdown]
 # ## The Execution Pipeline
 #
-# Now let's actually run this kernel. The process has three steps:
+# Now let's actually run this qkernel. The process has three steps:
 #
-# 1. **Transpile**: Compile the kernel into an executable object with a user-specific quantum SDK.
+# 1. **Transpile**: Transpile the qkernel into an executable object with a user-specific quantum SDK.
 # 2. **Execute**: Call `sample()` to run it with specific parameter values.
 # 3. **Read results**: Call `.result()` on the returned Job.
 #
@@ -138,7 +140,7 @@ print("total gates:", est.gates.total)
 # %%
 # Step 1: Transpile
 # parameters=["theta"] tells the transpiler: "theta will be provided later,
-# keep it as a sweepable parameter in the compiled circuit."
+# keep it as a sweepable parameter in the transpiled circuit."
 exe = transpiler.transpile(biased_coin, parameters=["theta"])
 
 # Step 2: Execute
@@ -161,18 +163,19 @@ print("sample results:", result.results)
 # %% [markdown]
 # Let's unpack the three concepts:
 #
-# - **`parameters=["theta"]`** at transpile time declares which kernel inputs
-#   remain as tunable knobs in the compiled program. Inputs *not* listed here
+# - **`parameters=["theta"]`** at transpile time declares which qkernel inputs
+#   remain as tunable knobs in the transpiled program. Inputs *not* listed here
 #   must be provided via `bindings` at transpile time (we will see this in Tutorial 02).
 #
 # - **`bindings={"theta": math.pi / 4}`** at execution time fills in the
 #   concrete value for the parameter.
+#   The default executor uses a local simulator,
+#   but you may swap in a custom executor (e.g., real hardware or
+#   a cloud service) without changing your code.
 #
 # - **`.result()`**: `sample()` returns a **Job** object, not the result
 #   directly. Calling `.result()` waits for the job to finish and returns a
-#   `SampleResult`. The default executor uses a local simulator, but the
-#   Job pattern lets you swap in a custom executor (e.g., real hardware or
-#   a cloud service) without changing your kernel code.
+#   `SampleResult`.
 
 # %% [markdown]
 # ## Reading `SampleResult`
@@ -202,7 +205,7 @@ print("probabilities:", result.probabilities())
 # %% [markdown]
 # ## Inspecting the Transpiled Circuit
 #
-# `to_circuit()` compiles a kernel with **all** parameters bound and returns
+# `to_circuit()` transpiles a qkernel with **all** parameters bound and returns
 # the quantum SDK-native circuit (e.g., a Qiskit `QuantumCircuit`).
 # This is useful for debugging — you can see exactly how the circuit looks in the target SDK.
 
@@ -263,7 +266,7 @@ for outcome, count in demo_result.results:
 # %% [markdown]
 # ## The Affine Rule
 #
-# In Qamomile, quantum handles are **affine**: once a gate consumes a handle,
+# In Qamomile, quantum handles are **affine-typed**: once a gate consumes a handle,
 # you **must** use the returned handle for all subsequent operations.
 # Think of it as a "move" — the old handle is invalidated.
 #
@@ -275,18 +278,19 @@ for outcome, count in demo_result.results:
 # In quantum computing, if you use a qubit for a temporary computation and
 # leave it entangled with the rest of the system without cleaning it up,
 # subsequent operations on other qubits can be affected in unexpected ways.
-# Strictly speaking, a **linear** type system (where every handle must be
+# Strictly speaking, a **linear type** system (where every handle must be
 # used exactly once) would be the safest model — it would force you to
 # always "uncompute" (reverse) temporary qubits before discarding them.
 #
 # However, enforcing linear types in Python would make simple programs
-# awkward to write. Qamomile chooses **affine** types instead: a handle
+# awkward to write. Qamomile chooses **affine types** instead: a handle
 # must be used **at most** once, but you are allowed to drop it. This
 # keeps the API Pythonic — you can write natural code without ceremony.
 #
 # > **Trade-off**: if you allocate a temporary qubit, entangle it with your
-# > main register, and then forget about it, the physics still applies —
-# > that leftover qubit will pollute your results. The compiler won't
+# > main qubit, and then forget about the temporary qubit,
+# > the physics still applies —
+# > that leftover temporary qubit will pollute your results. The transpiler won't
 # > catch this for you. So remember: **if you entangle a temporary qubit,
 # > uncompute it before you stop using it.**
 #
@@ -315,7 +319,7 @@ except Exception as e:
 #
 # You now know how to:
 #
-# - Define a kernel with `@qmc.qkernel`
+# - Define a qkernel with `@qmc.qkernel`
 # - Create qubits, apply gates, and measure
 # - Visualize with `draw()`
 # - Execute with `transpile()` → `sample()` → `.result()`
@@ -326,7 +330,7 @@ except Exception as e:
 #
 # ## Supported Quantum SDKs
 #
-# Qamomile compiles the same `@qkernel` to different quantum frameworks.
+# Qamomile transpiles the same `@qkernel` to different quantum SDKs.
 # Currently supported:
 #
 # | Quantum SDK | Status | Notes |
@@ -335,15 +339,15 @@ except Exception as e:
 # | **QuriParts** | Supported | Full gate set, observables |
 # | **CUDA-Q** | Coming soon | GPU-accelerated simulation |
 #
-# > **Important**: Not every kernel feature is available on every quantum SDK.
-# > For example, `if` branching inside a kernel is supported by Qiskit but
+# > **Important**: Not every qkernel feature is available on every quantum SDK.
+# > For example, `if` branching inside a qkernel is supported by Qiskit but
 # > may not yet be supported by other SDKs. If a feature is not available
 # > for your chosen SDK, you will get a clear error at transpile time.
 #
 # ## Next Chapters
 #
-# 1. [Parameterized Kernels](02_parameterized_kernels.ipynb) — structure vs runtime parameters, the bind/sweep pattern
+# 1. [Parameterized QKernels](02_parameterized_kernels.ipynb) — structure vs runtime parameters, the bind/sweep pattern
 # 2. [Resource Estimation](03_resource_estimation.ipynb) — symbolic cost analysis, gate breakdowns, comparing designs
 # 3. [Execution Models](04_execution_models.ipynb) — `sample()` vs `run()`, observables, bit ordering
 # 4. [Classical Flow Patterns](05_classical_flow_patterns.ipynb) — loops, sparse data, branching
-# 5. [Reuse Patterns](06_reuse_patterns.ipynb) — helper kernels, composite gates, stubs
+# 5. [Reuse Patterns](06_reuse_patterns.ipynb) — helper qkernels, composite gates, stubs
