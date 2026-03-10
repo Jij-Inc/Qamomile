@@ -15,9 +15,10 @@
 # %% [markdown]
 # # Your First Quantum Kernel
 #
-# This chapter takes you from zero to a running quantum program.
-# By the end, you will understand every line and every concept needed
-# to write, visualize, and execute a Qamomile quantum kernel (qkernel).
+# This chapter introduces the basic workflow for a first-time Qamomile user
+# to define and run a quantum kernel.
+# Note that this chapter does not dive into quantum computing fundamentals
+# or quantum algorithm details.
 #
 # ## What is Qamomile?
 #
@@ -264,11 +265,10 @@ for outcome, count in demo_result.results:
 # This brings us to an important rule.
 
 # %% [markdown]
-# ## The Affine Rule
+# ## The Affine Type System
 #
 # In Qamomile, quantum handles are **affine-typed**: once a gate consumes a handle,
 # you **must** use the returned handle for all subsequent operations.
-# Think of it as a "move" — the old handle is invalidated.
 #
 # - Single-qubit gate: `q = qmc.h(q)` — reassign the same variable.
 # - Two-qubit gate: `q0, q1 = qmc.cx(q0, q1)` — reassign both variables.
@@ -325,7 +325,7 @@ except Exception as e:
 # - Execute with `transpile()` → `sample()` → `.result()`
 # - Read `SampleResult` outcomes
 # - Inspect the transpiled circuit with `to_circuit()`
-# - Follow the affine rule (`q = qmc.gate(q)`)
+# - Follow the affine type system (`q = qmc.gate(q)`)
 # - Estimate resources with `estimate_resources()`
 #
 # ## Supported Quantum SDKs
