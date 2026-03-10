@@ -9,7 +9,7 @@ project:
     - 最適化
     - リソース推定
   authors:
-    - name: Jij Inc.
+    - name: JIJ Inc.
   github: https://github.com/Jij-Inc/Qamomile
   jupyter: true
   execute:
