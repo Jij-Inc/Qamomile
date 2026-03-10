@@ -83,3 +83,33 @@
 .dark\:hover\:ring-blue-500:hover:is(.dark *) { --tw-ring-color: #C08A40 !important; }
 .dark\:focus\:border-blue-500:focus:is(.dark *) { border-color: #C08A40 !important; }
 .dark\:focus\:ring-blue-500:focus:is(.dark *) { --tw-ring-color: #C08A40 !important; }
+
+/* Google Colab launch button (injected at build output) */
+.qamomile-colab-button {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  margin-left: 0.5rem;
+  text-decoration: none;
+  color: inherit;
+  opacity: 0.65;
+  align-items: center;
+  justify-content: center;
+}
+
+.qamomile-colab-button:hover {
+  color: #E18435;
+  opacity: 1;
+}
+
+.qamomile-colab-icon {
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+  border: 1px solid currentColor;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+  font-family: system-ui, sans-serif;
+}

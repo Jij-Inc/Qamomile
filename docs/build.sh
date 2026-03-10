@@ -95,6 +95,7 @@ build_en() {
     cd en
     MPLBACKEND=agg uv run jupyter-book build --html --execute
     cd ..
+    uv run python scripts/inject_colab_launch.py en
     info "English documentation built: en/_build/html/index.html"
 }
 
@@ -105,6 +106,7 @@ build_ja() {
     cd ja
     MPLBACKEND=agg uv run jupyter-book build --html --execute
     cd ..
+    uv run python scripts/inject_colab_launch.py ja
     info "Japanese documentation built: ja/_build/html/index.html"
 }
 
