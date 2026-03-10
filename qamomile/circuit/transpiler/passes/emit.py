@@ -167,11 +167,17 @@ class EmitPass(Pass[SimplifiedProgram, ExecutableProgram[T]], Generic[T]):
         # Build parameter metadata after emission
         param_metadata = self._build_parameter_metadata()
 
+        # Retrieve measurement qubit map if available (StandardEmitPass sets it)
+        measurement_qubit_map: dict[int, int] = getattr(
+            self, "_measurement_qubit_map", {}
+        )
+
         return CompiledQuantumSegment(
             segment=segment,
             circuit=circuit,
             qubit_map=qubit_map,
             clbit_map=clbit_map,
+            measurement_qubit_map=dict(measurement_qubit_map),
             parameter_metadata=param_metadata,
         )
 

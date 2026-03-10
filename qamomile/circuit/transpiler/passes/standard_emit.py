@@ -87,6 +87,11 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         # Cache for backend parameter objects
         self._parameter_map: dict[str, Any] = {}
 
+        # Mapping from classical bit index to physical qubit index.
+        # Populated during measurement emission to support backends
+        # where emit_measure is a no-op (e.g., QURI Parts).
+        self._measurement_qubit_map: dict[int, int] = {}
+
     def _build_parameter_metadata(self) -> ParameterMetadata:
         """Build parameter metadata from created parameter objects."""
         params = []
@@ -125,6 +130,9 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
 
         # Create circuit
         circuit = self._emitter.create_circuit(qubit_count, clbit_count)
+
+        # Reset measurement map before emission
+        self._measurement_qubit_map.clear()
 
         # Second pass: emit gates
         self._emit_operations(circuit, operations, qubit_map, clbit_map, bindings)
@@ -349,9 +357,10 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             qubit_idx = qubit_map[qubit_val.uuid]
 
         if qubit_idx is not None and clbit_uuid in clbit_map:
-            self._emitter.emit_measure(
-                circuit, qubit_idx, clbit_map[clbit_uuid]
-            )
+            clbit_idx = clbit_map[clbit_uuid]
+            self._emitter.emit_measure(circuit, qubit_idx, clbit_idx)
+            if getattr(self._emitter, "noop_measurement", False):
+                self._measurement_qubit_map[clbit_idx] = qubit_idx
         else:
             details: list[str] = []
             if qubit_idx is None:
@@ -399,9 +408,11 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
 
                         clbit_id = f"{bits_array.uuid}_{i}"
                         if qubit_uuid in qubit_map and clbit_id in clbit_map:
-                            self._emitter.emit_measure(
-                                circuit, qubit_map[qubit_uuid], clbit_map[clbit_id]
-                            )
+                            q_idx = qubit_map[qubit_uuid]
+                            c_idx = clbit_map[clbit_id]
+                            self._emitter.emit_measure(circuit, q_idx, c_idx)
+                            if getattr(self._emitter, "noop_measurement", False):
+                                self._measurement_qubit_map[c_idx] = q_idx
 
     def _emit_measure_qfixed(
         self,
@@ -418,9 +429,11 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         for i, qubit_uuid in enumerate(qubit_uuids):
             clbit_id = f"{result.uuid}_{i}"
             if qubit_uuid in qubit_map and clbit_id in clbit_map:
-                self._emitter.emit_measure(
-                    circuit, qubit_map[qubit_uuid], clbit_map[clbit_id]
-                )
+                q_idx = qubit_map[qubit_uuid]
+                c_idx = clbit_map[clbit_id]
+                self._emitter.emit_measure(circuit, q_idx, c_idx)
+                if getattr(self._emitter, "noop_measurement", False):
+                    self._measurement_qubit_map[c_idx] = q_idx
 
     def _emit_for(
         self,

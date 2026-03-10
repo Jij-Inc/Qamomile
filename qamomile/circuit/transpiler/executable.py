@@ -224,9 +224,16 @@ class ExecutableProgram(Generic[T]):
                 # Load measurement results using clbit_map
                 if compiled_quantum:
                     clbit_map = compiled_quantum[0].clbit_map
+                    meas_map = compiled_quantum[0].measurement_qubit_map
                     for uuid, clbit_idx in clbit_map.items():
-                        if clbit_idx < len(bits):
-                            context.set(uuid, bits[clbit_idx])
+                        # When measurement_qubit_map is set, use the actual
+                        # physical qubit index to look up the bit value.
+                        # This is needed for backends like QURI Parts where
+                        # emit_measure is a no-op and the sampler returns an
+                        # all-qubit bitstring indexed by qubit position.
+                        bit_idx = meas_map.get(clbit_idx, clbit_idx)
+                        if bit_idx < len(bits):
+                            context.set(uuid, bits[bit_idx])
 
                 # 2. Execute ClassicalSegments
                 for seg_type, index in execution_order:
@@ -333,9 +340,11 @@ class ExecutableProgram(Generic[T]):
             # Load measurement results using clbit_map
             if compiled_quantum:
                 clbit_map = compiled_quantum[0].clbit_map
+                meas_map = compiled_quantum[0].measurement_qubit_map
                 for uuid, clbit_idx in clbit_map.items():
-                    if clbit_idx < len(bits):
-                        context.set(uuid, bits[clbit_idx])
+                    bit_idx = meas_map.get(clbit_idx, clbit_idx)
+                    if bit_idx < len(bits):
+                        context.set(uuid, bits[bit_idx])
 
             # 2. Execute ClassicalSegments
             classical_executor = ClassicalExecutor()
