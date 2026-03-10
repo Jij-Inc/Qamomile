@@ -15,14 +15,14 @@
 # %% [markdown]
 # # Execution Models: `sample()` vs `run()`
 #
-# Qamomile provides two execution methods depending on what your kernel returns:
+# Qamomile provides two execution methods depending on what your qkernel returns:
 #
-# | Kernel returns | Use | You get back |
+# | Qkernel returns | Use | You get back |
 # |----------------|-----|-------------|
 # | `Bit`, `Vector[Bit]`, `tuple[Bit, ...]` | `sample()` | `SampleResult` — counted outcomes |
 # | `Float` (from `expval`) | `run()` | `float` — expectation value |
 #
-# This chapter explains both modes and introduces **observables** for
+# This chapter explains both methods and introduces **observables** for
 # expectation-value computation.
 
 # %%
@@ -35,7 +35,7 @@ transpiler = QiskitTranspiler()
 # %% [markdown]
 # ## Multi-Qubit `sample()`
 #
-# In Tutorial 01 we sampled a single `Bit`. When a kernel returns multiple bits,
+# In Tutorial 01 we sampled a single `Bit`. When a qkernel returns multiple bits,
 # each outcome is a **tuple** of integer values (`0` or `1`).
 
 
@@ -77,7 +77,7 @@ for outcome, count in sample_result.results:
 # Qamomile uses **big-endian** ordering in its output: the **leftmost** position
 # corresponds to the **first** qubit in the return tuple.
 #
-# For a kernel returning `(measure(q0), measure(q1), measure(q2))`:
+# For a qkernel returning `(measure(q0), measure(q1), measure(q2))`:
 #
 # | Outcome tuple | q0 | q1 | q2 |
 # |--------------|----|----|-----|
@@ -95,7 +95,7 @@ for outcome, count in sample_result.results:
 # Sometimes you don't want individual measurement outcomes — you want the
 # **average value** of a quantum observable. This is common in:
 #
-# - **VQE** (Variational Quantum Eigensolver): minimize `<psi|H|psi>`
+# - **VQE** (Variational Quantum Eigensolver): minimize $\langle \psi \rvert H \lvert \psi \rangle$
 # - **QAOA**: evaluate cost function expectation values
 # - Any optimization loop over quantum parameters
 #
@@ -106,9 +106,8 @@ for outcome, count in sample_result.results:
 #
 # There are two related things to understand:
 #
-# 1. **`qmc.Observable`** — a **handle type** used in kernel signatures.
-#    It is a placeholder during tracing, just like `qmc.Float` is a placeholder
-#    for a number.
+# 1. **`qmc.Observable`** — a **handle type** used in qkernel signatures.
+#    Like `qmc.Float`, you use it in type annotations for qkernel arguments and return values.
 #
 # 2. **`qamomile.observable` module** — where you build **concrete** observable values
 #    that you pass via bindings. For example:
@@ -116,20 +115,17 @@ for outcome, count in sample_result.results:
 # ```python
 # import qamomile.observable as qmo
 #
-# H = qmo.Z(0)                         # Pauli Z on qubit 0
+# H = qmo.Z(0)                        # Pauli Z on qubit 0
 # H = qmo.Z(0) * qmo.Z(1)             # ZZ interaction
 # H = 0.5 * qmo.X(0) + 0.3 * qmo.Y(1) # Linear combination
 # ```
-#
-# Think of it like this: `qmc.Observable` is the **type annotation** in the kernel;
-# `qmo.Z(0)` is the **value** you bind at transpile time.
 
 # %% [markdown]
 # ## `expval()`: Measuring an Observable
 #
-# `expval(qubit, hamiltonian)` computes the expectation value
-# `<psi|hamiltonian|psi>` and returns a `Float`.
-# A kernel that returns `Float` from `expval` should be executed with `run()`.
+# `expval(qubit, hamiltonian)` computes the expectation value $\langle \psi \rvert H \lvert \psi \rangle$
+# ( $\psi$ represents `qubit` and $H$ represents `hamiltonian` ) and returns a `qmc.Float`.
+# A qkernel that returns `Float` from `expval` should be executed with `run()`.
 
 
 # %%
@@ -148,7 +144,7 @@ z_expectation.draw(theta=0.7, hamiltonian=H)
 # %% [markdown]
 # ## Running with `run()`
 #
-# For expectation-value kernels, use `run()` instead of `sample()`.
+# For expectation-value qkernels, use `run()` instead of `sample()`.
 # The observable is bound at transpile time (it affects the measurement circuit),
 # while `theta` remains a sweepable runtime parameter.
 
@@ -168,29 +164,32 @@ print("expectation value:", run_result)
 print("python type:", type(run_result))
 
 # %% [markdown]
-# `run().result()` returns a plain `float` — the estimated `<psi|Z|psi>` value.
-# For `theta = 0.7`, the RY gate rotates the qubit, and the Z expectation
-# is `cos(0.7) ≈ 0.765`.
+# `run().result()` returns a plain `float` — the estimated $\langle \psi \rvert Z \lvert \psi \rangle$ value.
+# For $\theta = 0.7$, the RY gate rotates the qubit as
+# $$
+# R_Y(\theta) \lvert 0 \rangle = \cos\left( \frac{\theta}{2} \right) \lvert 0 \rangle + \sin\left( \frac{\theta}{2} \right) \lvert 1 \rangle
+# $$
+# so the Z expectation is $\cos^2\left( \frac{\theta}{2} \right) - \sin^2\left( \frac{\theta}{2} \right) = \cos(\theta) \approx 0.765$.
 
 # %% [markdown]
-# ## Decision Guide: `sample()` vs `run()`
+# ## `sample()` vs `run()`
 #
-# | Kernel returns | Execution method | `.result()` returns |
+# | Qkernel returns | Execution method | `.result()` returns |
 # |----------------|-----------------|-------------------|
 # | `Bit` | `sample()` | `SampleResult` with `.results: list[tuple[int, int]]` |
 # | `tuple[Bit, Bit]` | `sample()` | `SampleResult` with `.results: list[tuple[tuple[int, int], int]]` |
 # | `Vector[Bit]` | `sample()` | `SampleResult` with `.results: list[tuple[tuple[int, ...], int]]` |
 # | `Float` (from `expval`) | `run()` | `float` |
 #
-# **Rule of thumb**: if your kernel ends with `measure()`, use `sample()`.
+# **Rule of thumb**: if your qkernel ends with `measure()`, use `sample()`.
 # If it ends with `expval()`, use `run()`.
 
 # %% [markdown]
 # ## Summary
 #
-# - `sample()` is for kernels returning measured bits — you get a distribution
+# - `sample()` is for qkernels returning measured bits — you get a distribution
 #   of outcomes with counts.
-# - `run()` is for kernels returning `Float` via `expval()` — you get a single
+# - `run()` is for qkernels returning `Float` via `expval()` — you get a single
 #   expectation value.
 # - `qmc.Observable` is the handle type; `qamomile.observable.Z(0)` etc. are
 #   the concrete values. Bind observables at transpile time.
