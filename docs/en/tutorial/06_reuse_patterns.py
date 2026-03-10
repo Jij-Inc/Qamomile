@@ -95,11 +95,12 @@ print(qc.draw())
 # making it a composite gate allows you to give it custom settings such as
 # giving it multiple ways of implementation.
 #
-# Write `@composite_gate(name="...")` instead of `@qkernel`:
+# Stack `@composite_gate(name="...")` on top of `@qkernel`:
 
 
 # %%
 @qmc.composite_gate(name="entangle")
+@qmc.qkernel
 def entangle_link(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
     q0, q1 = qmc.cx(q0, q1)
     return q0, q1
@@ -196,6 +197,6 @@ print("oracle T-gate count:", meta.t_gates)
 # - **Helper `@qkernel`**: call one qkernel from another for code reuse.
 #   The transpiler inlines the call into a flat circuit.
 # - **`@composite_gate`**: gives a qkernel a named identity visible in
-#   diagrams. Write `@composite_gate` instead of `@qkernel`.
+#   diagrams. Stack `@composite_gate` on top of `@qkernel`.
 # - **Stub composite gate**: `stub=True` with `ResourceMetadata` for top-down
 #   design and resource estimation without a full implementation.

@@ -92,11 +92,12 @@ print(qc.draw())
 # また、より高度な内容としてコンポジットゲートにすることで
 # 複数の実装方式を与えるといったカスタム設定を与えることも可能です。
 #
-# `@qkernel` の代わりに `@composite_gate(name="...")` と書きます：
+# `@qkernel` の上に `@composite_gate(name="...")` を重ねて書きます：
 
 
 # %%
 @qmc.composite_gate(name="entangle")
+@qmc.qkernel
 def entangle_link(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
     q0, q1 = qmc.cx(q0, q1)
     return q0, q1
@@ -191,6 +192,6 @@ print("oracle T-gate count:", meta.t_gates)
 # - **ヘルパー `@qkernel`**：ある量子カーネルから別の量子カーネルを呼び出してコードを再利用できます。
 #   トランスパイラがインライン展開し、結果はフラットな回路になります。
 # - **`@composite_gate`**：量子カーネルに名前付きの識別子を与え、図で一つのゲートとして可視化します。
-#   `@qkernel` の代わりに `@composite_gate` とデコレータを書きます。
+#   `@qkernel` の上に `@composite_gate` デコレータを重ねて書きます。
 # - **スタブゲート**：`stub=True` と `ResourceMetadata` で、
 #   実装なしにトップダウン設計とリソース推定が可能です。
