@@ -35,7 +35,7 @@
 #
 # - **Define**: Write a kernel function with type annotations.
 # - **Inspect**: Visualize the circuit with `draw()`, or estimate costs with `estimate_resources()`.
-# - **Transpile**: Compile the kernel into an executable object with a user-specific quantum SDK.
+# - **Transpile**: Compile the kernel into an executable for your chosen quantum SDK.
 # - **Execute**: Run it with `sample()` (for measured bits) or `run()` (for expectation values).
 # - **Read results**: Call `.result()` to get the output.
 #
@@ -51,7 +51,7 @@
 # ```
 #
 # In this tutorial we use Qiskit as the concrete quantum SDK.
-# QuriParts is also supported, and quantum SDK options will continue to grow.
+# QuriParts is also supported, and more quantum SDKs will be added over time.
 
 # %%
 import math
@@ -105,7 +105,7 @@ def biased_coin(theta: qmc.Float) -> qmc.Bit:
 # > **Note**: `draw()` visualizes the circuit at Qamomile's IR level.
 # > When transpiling to a quantum SDK (e.g., Qiskit), the SDK may decompose
 # > or optimize gates, so the actual executed circuit can differ from what
-# > `draw()` shows. Use `to_circuit()` to see the SDK-native circuit.
+# > `draw()` shows. Use `to_circuit()` to see the circuit in the target SDK's format.
 
 # %%
 biased_coin.draw(theta=0.6)
@@ -204,7 +204,7 @@ print("probabilities:", result.probabilities())
 #
 # `to_circuit()` compiles a kernel with **all** parameters bound and returns
 # the quantum SDK-native circuit (e.g., a Qiskit `QuantumCircuit`).
-# This is useful for debugging — you can see exactly what it is in the target SDK form.
+# This is useful for debugging — you can see exactly how the circuit looks in the target SDK.
 
 # %%
 qiskit_circuit = transpiler.to_circuit(
@@ -327,9 +327,9 @@ except Exception as e:
 # ## Supported Quantum SDKs
 #
 # Qamomile compiles the same `@qkernel` to different quantum frameworks.
-# Current support:
+# Currently supported:
 #
-# | quantum SDK | Status | Notes |
+# | Quantum SDK | Status | Notes |
 # |---------|--------|-------|
 # | **Qiskit** | Supported | Full gate set, control flow, observables |
 # | **QuriParts** | Supported | Full gate set, observables |

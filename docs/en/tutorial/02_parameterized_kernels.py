@@ -36,8 +36,8 @@
 # | `qmc.Float` | Continuous values (rotation angles, weights) |
 #
 # In practice, `UInt` values that control `qubit_array` size or `qmc.range`
-# bounds **must** be bound at transpile time, because the quantum SDK
-# to which the kernel will be transpiled needs a fixed circuit structure.
+# bounds **must** be bound at transpile time, because the target quantum SDK
+# needs a fixed circuit structure.
 # `Float` values can stay as sweepable parameters.
 #
 # The common pattern is: bind structure at transpile time, sweep continuous
