@@ -21,7 +21,7 @@
 # 1. **Helper QKernel** — call one `@qkernel` from another, like normal
 #    function composition.
 # 2. **`@composite_gate`** — promote a kernel to a **named gate** that
-#    appears as a single box in diagrams and can have backend-specific handling.
+#    appears as a single box in diagrams.
 #
 # There is also a third pattern for top-down design:
 #
@@ -82,8 +82,7 @@ print("GHZ result:", result.results)
 # ## Pattern 2: `@composite_gate`
 #
 # When you want a reusable block to appear as a **named box** in circuit
-# diagrams (and potentially have backend-specific native implementations),
-# promote it with `@composite_gate`.
+# diagrams, promote it with `@composite_gate`.
 #
 # Stack `@composite_gate(name="...")` on top of `@qkernel`:
 
@@ -113,15 +112,10 @@ ghz_with_composite.draw(n=4, fold_loops=False)
 # %% [markdown]
 # ### When to use which?
 #
-# | Pattern | Appears in `draw()` | Backend-specific handling | Use when |
-# |---------|---------------------|--------------------------|------|
-# | Helper `@qkernel` | Inlined (flat) | No | Code organization |
-# | `@composite_gate` | Named box | Yes (emitters can provide native versions) | Domain-level abstraction |
-#
-# Use a plain helper when you just want to avoid repetition.
-# Use `@composite_gate` when the block has a meaningful name that
-# should be visible in diagrams and may benefit from native backend support
-# (like QFT, which Qiskit can implement natively).
+# | Pattern | Appears in `draw()` | Use when |
+# |---------|---------------------|------|
+# | Helper `@qkernel` | Inlined (flat) | Code organization |
+# | `@composite_gate` | Named box | Domain-level abstraction |
 
 # %% [markdown]
 # ## Pattern 3: Stub Composite for Top-Down Design
@@ -188,6 +182,6 @@ print("oracle T-gate count:", meta.t_gates)
 # - **Helper `@qkernel`**: call one kernel from another for code reuse.
 #   The compiler inlines the call into a flat circuit.
 # - **`@composite_gate`**: gives a kernel a named identity visible in
-#   diagrams and backends. Stack it on top of `@qkernel`.
+#   diagrams. Stack it on top of `@qkernel`.
 # - **Stub composite**: `stub=True` with `ResourceMetadata` for top-down
 #   design and resource estimation without a full implementation.

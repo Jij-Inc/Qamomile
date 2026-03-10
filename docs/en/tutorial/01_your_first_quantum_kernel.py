@@ -22,7 +22,7 @@
 # ## What is Qamomile?
 #
 # Qamomile is a quantum circuit SDK that lets you write quantum programs
-# in Python, then run them on any supported backend (Qiskit, QuriParts, and more in plan).
+# in Python, then run them on any supported quantum SDK (Qiskit, QuriParts, and more in plan).
 # It uses a **typed, symbolic** approach: you write a Python function
 # decorated with `@qkernel`, and Qamomile traces it into an intermediate
 # representation that can be analyzed, visualized, and compiled.
@@ -35,7 +35,7 @@
 #
 # - **Define**: Write a kernel function with type annotations.
 # - **Inspect**: Visualize the circuit with `draw()`, or estimate costs with `estimate_resources()`.
-# - **Transpile**: Compile the kernel into a backend-specific executable.
+# - **Transpile**: Compile the kernel into an executable object with a user-specific quantum SDK.
 # - **Execute**: Run it with `sample()` (for measured bits) or `run()` (for expectation values).
 # - **Read results**: Call `.result()` to get the output.
 #
@@ -50,8 +50,8 @@
 # pip install qamomile
 # ```
 #
-# In this tutorial we use Qiskit as the concrete backend.
-# QuriParts is also supported, and backend options will continue to grow.
+# In this tutorial we use Qiskit as the concrete quantum SDK.
+# QuriParts is also supported, and quantum SDK options will continue to grow.
 
 # %%
 import math
@@ -103,9 +103,9 @@ def biased_coin(theta: qmc.Float) -> qmc.Bit:
 # Before executing, you can inspect your kernel. `draw()` shows the circuit diagram:
 #
 # > **Note**: `draw()` visualizes the circuit at Qamomile's IR level.
-# > When transpiling to a backend (e.g., Qiskit), the backend may decompose
+# > When transpiling to a quantum SDK (e.g., Qiskit), the SDK may decompose
 # > or optimize gates, so the actual executed circuit can differ from what
-# > `draw()` shows. Use `to_circuit()` to see the backend-native circuit.
+# > `draw()` shows. Use `to_circuit()` to see the SDK-native circuit.
 
 # %%
 biased_coin.draw(theta=0.6)
@@ -129,7 +129,7 @@ print("total gates:", est.gates.total)
 #
 # Now let's actually run this kernel. The process has three steps:
 #
-# 1. **Transpile**: Compile the kernel into a backend-executable form.
+# 1. **Transpile**: Compile the kernel into an executable object with a user-specific quantum SDK.
 # 2. **Execute**: Call `sample()` to run it with specific parameter values.
 # 3. **Read results**: Call `.result()` on the returned Job.
 #
@@ -200,11 +200,11 @@ print("most common:", result.most_common(1))
 print("probabilities:", result.probabilities())
 
 # %% [markdown]
-# ## Inspecting the Backend Circuit
+# ## Inspecting the Transpiled Circuit
 #
 # `to_circuit()` compiles a kernel with **all** parameters bound and returns
-# the backend-native circuit (e.g., a Qiskit `QuantumCircuit`).
-# This is useful for debugging — you can see exactly what the backend receives.
+# the quantum SDK-native circuit (e.g., a Qiskit `QuantumCircuit`).
+# This is useful for debugging — you can see exactly what it is in the target SDK form.
 
 # %%
 qiskit_circuit = transpiler.to_circuit(
@@ -320,27 +320,25 @@ except Exception as e:
 # - Visualize with `draw()`
 # - Execute with `transpile()` → `sample()` → `.result()`
 # - Read `SampleResult` outcomes
-# - Inspect the backend circuit with `to_circuit()`
+# - Inspect the transpiled circuit with `to_circuit()`
 # - Follow the affine rule (`q = qmc.gate(q)`)
 # - Estimate resources with `estimate_resources()`
 #
-# ## Supported Backends
+# ## Supported Quantum SDKs
 #
 # Qamomile compiles the same `@qkernel` to different quantum frameworks.
-# Current backend support:
+# Current support:
 #
-# | Backend | Status | Notes |
+# | quantum SDK | Status | Notes |
 # |---------|--------|-------|
 # | **Qiskit** | Supported | Full gate set, control flow, observables |
 # | **QuriParts** | Supported | Full gate set, observables |
 # | **CUDA-Q** | Coming soon | GPU-accelerated simulation |
 #
-# > **Important**: Not every kernel feature is available on every backend.
+# > **Important**: Not every kernel feature is available on every quantum SDK.
 # > For example, `if` branching inside a kernel is supported by Qiskit but
-# > may not yet be supported by other backends. If a feature is not available
-# > for your chosen backend, you will get a clear error at transpile time.
-# > When in doubt, start with Qiskit for development and switch backends
-# > when you are ready to deploy.
+# > may not yet be supported by other SDKs. If a feature is not available
+# > for your chosen SDK, you will get a clear error at transpile time.
 #
 # ## Next Chapters
 #

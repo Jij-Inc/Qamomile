@@ -97,7 +97,7 @@ def sparse_coupling(
 #
 # `draw()` does not yet support all patterns (particularly `items` with
 # complex types). In such cases, use `to_circuit()` to see the concrete
-# backend circuit after all parameters are bound.
+# transpiled circuit after all parameters are bound.
 
 # %%
 edge_data = {(0, 1): 1.0, (1, 2): -0.7, (0, 2): 0.3}
@@ -235,7 +235,7 @@ print(qc_combined)
 # - `qmc.items(dict)` for iterating over sparse key-value data (edges, weights).
 # - `if bit:` and `while bit:` for branching on **measurement results**.
 #   Both branches must handle the same qubit handles (affine rule).
-# - These control flow patterns transpile to native backend instructions
+# - These control flow patterns transpile to native quantum SDK instructions
 #   (e.g., Qiskit `if_else` and `while_loop`).
 #
 # **Next**: [Reuse Patterns](06_reuse_patterns.ipynb) — helper kernels,
