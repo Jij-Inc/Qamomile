@@ -13,16 +13,16 @@
 # ---
 
 # %% [markdown]
-# # Classical Flow Patterns
+# # Classical Control Flow Patterns
 #
-# Quantum circuits often have structure that depends on classical data:
+# Quantum circuits often have structure that depends on classical control flow:
 # iterating over qubits, applying gates based on a graph's edges,
 # or choosing between gate sequences. Qamomile supports these patterns
 # through `qmc.range`, `qmc.items`, `if` branching, and `while` loops.
 #
 # This chapter covers:
 #
-# - `qmc.range()` for loops (recap and deeper usage)
+# - `qmc.range()` for loops
 # - `qmc.items()` for iterating over dictionaries
 # - `if` and `while` on measurement results for mid-circuit branching
 
@@ -35,9 +35,9 @@ transpiler = QiskitTranspiler()
 # %% [markdown]
 # ## `qmc.range` Loops
 #
-# We saw `qmc.range(n)` in Tutorial 02 for simple loops.
-# Here is a slightly richer example: applying H to all qubits, then
-# entangling adjacent pairs with CX.
+# `qmc.range` may take `start`, `stop`, and `step` arguments.
+# Here we create a qkernel that applies H to every other qubit and
+# then entangles adjacent pairs with CX.
 
 
 # %%
@@ -45,8 +45,8 @@ transpiler = QiskitTranspiler()
 def hadamard_chain(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(n, name="q")
 
-    # Apply H to every qubit
-    for i in qmc.range(n):
+    # Apply H to every other qubit
+    for i in qmc.range(0, n, 2):
         q[i] = qmc.h(q[i])
 
     # Entangle adjacent pairs
@@ -57,7 +57,7 @@ def hadamard_chain(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 
 
 # %%
-hadamard_chain.draw(n=4, fold_loops=False)
+hadamard_chain.draw(n=5, fold_loops=False)
 
 # %% [markdown]
 # ## `qmc.items` for Sparse Interaction Data
@@ -93,10 +93,11 @@ def sparse_coupling(
 
 
 # %% [markdown]
-# ## Inspecting with `to_circuit()`
+# ## Inspecting with `transpiler.to_circuit()`
 #
 # `draw()` does not yet support all patterns (particularly `items` with
-# complex types). In such cases, use `to_circuit()` to see the concrete
+# complex types, `if`, and `while`).
+# In such cases, use `transpiler.to_circuit()` to see the concrete
 # transpiled circuit after all parameters are bound.
 
 # %%
@@ -116,7 +117,7 @@ print(circuit)
 #
 # Qamomile supports **mid-circuit measurement** followed by classical
 # branching. The condition must be a **measurement result** (`Bit`),
-# not a kernel parameter.
+# not an argument of qkernels.
 #
 # This maps directly to hardware-level conditional execution:
 # measure a qubit, then decide what to do next based on the outcome.
@@ -141,7 +142,7 @@ def conditional_flip() -> qmc.Bit:
     if bit:
         q1 = qmc.x(q1)
     else:
-        q1 = q1  # no-op — both branches must handle q1
+        pass
 
     return qmc.measure(q1)
 
@@ -238,5 +239,5 @@ print(qc_combined)
 # - These control flow patterns transpile to native quantum SDK instructions
 #   (e.g., Qiskit `if_else` and `while_loop`).
 #
-# **Next**: [Reuse Patterns](06_reuse_patterns.ipynb) — helper kernels,
+# **Next**: [Reuse Patterns](06_reuse_patterns.ipynb) — helper qkernels,
 # composite gates, and stub gates for top-down design.

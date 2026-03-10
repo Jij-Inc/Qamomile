@@ -13,16 +13,16 @@
 # ---
 
 # %% [markdown]
-# # 古典フローパターン
+# # 古典制御フローパターン
 #
-# 量子回路の構造は古典データに依存することが多くあります。
+# 量子回路の構造は古典制御フローに依存することが多くあります。
 # 量子ビットのイテレーション、グラフのエッジに基づくゲート適用、
 # ゲート列の条件分岐などです。Qamomile では `qmc.range`、`qmc.items`、
 # `if` 分岐、`while` ループでこれらをサポートしています。
 #
 # この章では以下を扱います：
 #
-# - `qmc.range()` によるループ（復習とより深い使い方）
+# - `qmc.range()` によるループ
 # - `qmc.items()` による辞書のイテレーション
 # - 測定結果に対する `if` / `while` による回路途中の分岐
 
@@ -35,9 +35,9 @@ transpiler = QiskitTranspiler()
 # %% [markdown]
 # ## `qmc.range` ループ
 #
-# チュートリアル 02 で `qmc.range(n)` を使った単純なループを見ました。
-# ここではもう少しリッチな例として、全量子ビットに H を適用し、
-# 隣接ペアを CX でエンタングルします。
+# `qmc.range` は `start`、`stop`、`step` を引数に取ることができます。
+# ここでは偶数番目の量子ビットに H ゲートを適用し、
+# 隣接ペアを CX でエンタングルする量子カーネルを作ってみます。
 
 
 # %%
@@ -45,8 +45,8 @@ transpiler = QiskitTranspiler()
 def hadamard_chain(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(n, name="q")
 
-    # 全ての量子ビットに H を適用
-    for i in qmc.range(n):
+    # 偶数番目の量子ビットに H を適用
+    for i in qmc.range(0, n, 2):
         q[i] = qmc.h(q[i])
 
     # 隣接するペアをエンタングル
@@ -57,7 +57,7 @@ def hadamard_chain(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 
 
 # %%
-hadamard_chain.draw(n=4, fold_loops=False)
+hadamard_chain.draw(n=5, fold_loops=False)
 
 # %% [markdown]
 # ## `qmc.items` によるスパースな相互作用データの処理
@@ -92,10 +92,10 @@ def sparse_coupling(
 
 
 # %% [markdown]
-# ## `to_circuit()` による確認
+# ## `transpiler.to_circuit()` による確認
 #
-# `draw()` は全パターン（特に複雑な型を伴う `items`）にはまだ対応していません。
-# そのような場合は `to_circuit()` で全パラメータをバインドした後の
+# `draw()` は全パターン（特に複雑な型を伴う `items`、`if`、`while`）にはまだ対応していません。
+# そのような場合は `transpiler.to_circuit()` で全パラメータをバインドした後の
 # トランスパイル済みの回路を確認してください。
 
 # %%
@@ -114,7 +114,7 @@ print(circuit)
 # ## `if` 分岐と `while` ループ
 #
 # Qamomile は**回路途中での測定**に続く古典分岐をサポートしています。
-# 条件は**測定結果**（`Bit`）でなければならず、カーネルパラメータは使えません。
+# 条件は**測定結果**（`Bit`）でなければならず、量子カーネルの引数は使えません。
 #
 # これはハードウェアレベルの条件付き実行に直接対応します：
 # 量子ビットを測定し、その結果に基づいて次の操作を決定します。
@@ -139,7 +139,7 @@ def conditional_flip() -> qmc.Bit:
     if bit:
         q1 = qmc.x(q1)
     else:
-        q1 = q1  # 何もしない — 両方の分岐で q1 を扱う必要がある
+        pass
 
     return qmc.measure(q1)
 
@@ -236,5 +236,5 @@ print(qc_combined)
 # - これらの制御フローは対象の量子SDKのネイティブな命令
 #   （例：Qiskit の `if_else` や `while_loop`）にトランスパイルされます。
 #
-# **次へ**：[再利用パターン](06_reuse_patterns.ipynb) — ヘルパーカーネル、
+# **次へ**：[再利用パターン](06_reuse_patterns.ipynb) — ヘルパー量子カーネル、
 # コンポジットゲート、スタブゲート。
