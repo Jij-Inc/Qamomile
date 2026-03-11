@@ -2009,6 +2009,215 @@ class TestControlFlowWhile:
         assert "h" in body_names
         assert "measure" in body_names
 
+    # ------------------------------------------------------------------
+    # Execution and structural tests for while + if-else / if-only
+    # ------------------------------------------------------------------
+
+    def test_while_loop_execution_terminates(self):
+        """Simple while loop terminates after a few iterations on a real simulator."""
+        from qiskit_aer import AerSimulator
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)  # |1⟩ → measure gives 1 → enter loop
+            bit = qmc.measure(q)
+            while bit:
+                q2 = qmc.qubit("q2")  # fresh |0⟩ → measure gives 0 → exit
+                bit = qmc.measure(q2)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+
+        # Structure: 1 classical bit — initial measure and body measure
+        # alias to the same clbit[0] so the while condition reads the
+        # updated value each iteration.
+        assert qc.num_clbits == 1, f"Expected 1 clbit, got {qc.num_clbits}"
+
+        # Execution: must terminate and final bit should be 0
+        result = AerSimulator().run(qc, shots=100).result()
+        counts = result.get_counts()
+        # Final bit (the while condition) must be 0 for the loop to have exited
+        for bitstring in counts:
+            bits = bitstring.replace(" ", "")
+            assert bits == "0", f"While condition bit should be 0 after exit, got {bitstring}"
+
+    def test_while_loop_with_if_else_execution(self):
+        """While loop with if-else branching: both branches measure into the same clbit."""
+        from qiskit_aer import AerSimulator
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)  # |1⟩ → enter loop
+            bit = qmc.measure(q)
+            while bit:
+                if bit:
+                    q2 = qmc.qubit("q2")
+                    bit = qmc.measure(q2)  # |0⟩ → 0 → exit
+                else:
+                    q3 = qmc.qubit("q3")
+                    bit = qmc.measure(q3)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+
+        # Structure: 1 clbit — all measures of `bit` alias to clbit[0]
+        assert qc.num_clbits == 1, f"Expected 1 clbit, got {qc.num_clbits}"
+
+        # Execution: must terminate
+        result = AerSimulator().run(qc, shots=100).result()
+        counts = result.get_counts()
+        for bitstring in counts:
+            bits = bitstring.replace(" ", "")
+            assert bits == "0", f"While condition bit should be 0 after exit, got {bitstring}"
+
+    def test_while_loop_with_if_else_clbit_structure(self):
+        """Deep structural verification: while+if-else clbit aliasing through nested blocks."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            bit = qmc.measure(q)
+            while bit:
+                if bit:
+                    q2 = qmc.qubit("q2")
+                    bit = qmc.measure(q2)
+                else:
+                    q3 = qmc.qubit("q3")
+                    bit = qmc.measure(q3)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+
+        # Top-level: 1 clbit — all measures alias to the single condition bit
+        assert qc.num_clbits == 1
+
+        # Find while_loop instruction
+        while_insts = [i for i in qc.data if i.operation.name == "while_loop"]
+        assert len(while_insts) == 1
+
+        # While body sub-circuit
+        body = while_insts[0].operation.params[0]
+        body_names = [inst.operation.name for inst in body.data]
+        assert "if_else" in body_names
+
+        # Find if_else inside the while body
+        if_else_insts = [i for i in body.data if i.operation.name == "if_else"]
+        assert len(if_else_insts) == 1
+
+        # Both branches should have exactly 1 measure each
+        ie = if_else_insts[0].operation
+        true_body = ie.params[0]
+        false_body = ie.params[1]
+        true_measures = [i for i in true_body.data if i.operation.name == "measure"]
+        false_measures = [i for i in false_body.data if i.operation.name == "measure"]
+        assert len(true_measures) == 1
+        assert len(false_measures) == 1
+
+    def test_while_loop_with_if_only_no_else(self):
+        """While loop with if-only (no else branch): must not leak extra clbits.
+
+        This is the key regression test for the canonical_clbit saving fix.
+        Without the fix, map_phi_outputs redirects the initial condition's
+        clbit, causing the while condition to read from a stale classical
+        bit and producing an extra leaked clbit.
+        """
+        from qiskit_aer import AerSimulator
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)  # |1⟩ → enter loop
+            bit = qmc.measure(q)
+            while bit:
+                if bit:
+                    q2 = qmc.qubit("q2")
+                    bit = qmc.measure(q2)  # |0⟩ → 0 → exit
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+
+        # Structure: 1 clbit — all measures of `bit` alias to clbit[0].
+        # Without the canonical_clbit fix, map_phi_outputs in the if-only
+        # case would redirect the initial condition's clbit, leaking an
+        # extra clbit (2 instead of 1).
+        assert qc.num_clbits == 1, f"Expected 1 clbit, got {qc.num_clbits}"
+
+        # Execution: must terminate
+        result = AerSimulator().run(qc, shots=100).result()
+        counts = result.get_counts()
+        for bitstring in counts:
+            bits = bitstring.replace(" ", "")
+            assert bits == "0", f"While condition bit should be 0 after exit, got {bitstring}"
+
+    def test_while_loop_with_if_else_else_branch_taken(self):
+        """While + if-else where the else branch is taken first."""
+        from qiskit_aer import AerSimulator
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)  # |1⟩ → enter loop
+            bit = qmc.measure(q)
+            while bit:
+                if bit:
+                    q2 = qmc.qubit("q2")
+                    bit = qmc.measure(q2)  # |0⟩ → exit
+                else:
+                    q3 = qmc.qubit("q3")
+                    q3 = qmc.x(q3)  # |1⟩
+                    bit = qmc.measure(q3)  # would keep looping
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+
+        # Structure check: 1 clbit — all measures alias to clbit[0]
+        assert qc.num_clbits == 1, f"Expected 1 clbit, got {qc.num_clbits}"
+
+        # Execution: bit=1 → true branch → measure |0⟩ → exit
+        result = AerSimulator().run(qc, shots=100).result()
+        counts = result.get_counts()
+        for bitstring in counts:
+            bits = bitstring.replace(" ", "")
+            assert bits == "0"
+
+    def test_while_loop_with_nested_if_else(self):
+        """While loop with nested if-else: measurements consolidate correctly."""
+        from qiskit_aer import AerSimulator
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)  # |1⟩
+            bit = qmc.measure(q)
+            q2 = qmc.qubit("q2")
+            q2 = qmc.x(q2)  # |1⟩
+            bit2 = qmc.measure(q2)
+            while bit:
+                if bit:
+                    if bit2:
+                        q3 = qmc.qubit("q3")
+                        bit = qmc.measure(q3)  # |0⟩ → exit
+                    else:
+                        q4 = qmc.qubit("q4")
+                        bit = qmc.measure(q4)
+                else:
+                    q5 = qmc.qubit("q5")
+                    bit = qmc.measure(q5)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+
+        # 2 clbits: bit (aliased across all branches) + bit2 (independent)
+        assert qc.num_clbits == 2, f"Expected 2 clbits, got {qc.num_clbits}"
+
+        # Execution: must terminate
+        result = AerSimulator().run(qc, shots=100).result()
+        counts = result.get_counts()
+        assert len(counts) > 0, "Circuit should produce results"
+
 
 # ============================================================================
 # 3b. QAOA Pattern Tests

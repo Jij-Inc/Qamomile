@@ -14,11 +14,42 @@ if typing.TYPE_CHECKING:
 
 @dataclasses.dataclass
 class WhileOperation(Operation):
+    """Represents a while loop operation.
+
+    Example:
+        while condition:
+            body
+
+    Attributes:
+        operations: List of operations in the loop body
+        operands[0]: initial condition (always present, Bit type)
+        operands[1]: loop-carried condition (present only when the body
+                     reassigns the condition variable via measurement +
+                     if-else / if-only branching)
+
+    The loop-carried operand (operands[1]) is added by the frontend
+    ``while_loop`` builder when it detects that the condition variable
+    was reassigned inside the body.  The transpiler emit pass uses this
+    to alias the loop-carried classical bit back to the initial
+    condition's classical bit so that Qiskit's ``while_loop`` reads the
+    updated value on each iteration.
+    """
+
     operations: list[Operation] = dataclasses.field(default_factory=list)
 
     @property
     def signature(self) -> Signature:
-        return Signature(operands=[ParamHint("condition", BlockType())], results=[])
+        # The signature declares both the initial condition and the
+        # optional loop-carried condition.  At construction time
+        # operands may have 1 or 2 entries; the emit pass asserts
+        # exactly 2 when the loop body reassigns the condition.
+        return Signature(
+            operands=[
+                ParamHint("condition", BitType()),
+                ParamHint("loop_carried", BitType()),
+            ],
+            results=[],
+        )
 
     @property
     def operation_kind(self) -> OperationKind:

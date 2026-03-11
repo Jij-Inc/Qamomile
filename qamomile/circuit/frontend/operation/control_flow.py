@@ -63,10 +63,38 @@ def while_loop(cond: typing.Callable) -> typing.Generator[WhileLoop, None, None]
     # 5. After the with block exits, body_tracer.operations contains the body
     # 6. Create WhileOperation with captured body operations
     while_op = WhileOperation(operations=body_tracer.operations)
-    # Add condition result (the Handle representing the condition expression)
+
+    # Add initial condition (operands[0])
     while_op.operands.append(condition_result)
 
-    # 7. Add the WhileOperation to the PARENT tracer (not a local one)
+    # 7. Re-evaluate the condition lambda AFTER body tracing.
+    #    If the body reassigned the condition variable (e.g., via
+    #    measurement inside an if-else), the lambda now returns a
+    #    *different* Handle/Value (the loop-carried condition).
+    #    We record it as operands[1] so the emit pass can alias the
+    #    loop-carried classical bit back to the initial condition's bit.
+    post_condition = cond()
+
+    # Extract underlying Values for identity comparison
+    pre_val = (
+        condition_result.value
+        if hasattr(condition_result, "value")
+        else condition_result
+    )
+    post_val = (
+        post_condition.value
+        if hasattr(post_condition, "value")
+        else post_condition
+    )
+
+    pre_uuid = pre_val.uuid if hasattr(pre_val, "uuid") else str(pre_val)
+    post_uuid = post_val.uuid if hasattr(post_val, "uuid") else str(post_val)
+
+    if pre_uuid != post_uuid:
+        # Body changed the condition variable → record loop-carried (operands[1])
+        while_op.operands.append(post_condition)
+
+    # 8. Add the WhileOperation to the PARENT tracer (not a local one)
     parent_tracer.add_operation(while_op)
 
 
