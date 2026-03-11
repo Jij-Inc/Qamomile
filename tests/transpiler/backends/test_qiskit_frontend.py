@@ -2365,7 +2365,7 @@ class TestControlFlowWhileStructure:
         _, qc = _transpile_and_get_circuit(circuit)
 
         # Find the while_loop instruction
-        while_insts = [i for i in qc.data if i.operation.name == "while_loop"]
+        while_insts = [i for i in qc.data if isinstance(i.operation, WhileLoopOp)]
         assert len(while_insts) == 1
 
         # The while_loop condition clbit
@@ -2374,7 +2374,7 @@ class TestControlFlowWhileStructure:
 
         # The body circuit is in params[0]
         body = while_inst.operation.params[0]
-        body_measures = [i for i in body.data if i.operation.name == "measure"]
+        body_measures = [i for i in body.data if isinstance(i.operation, Measure)]
         assert len(body_measures) >= 1
 
         # The body measure must target the same classical bit index as
@@ -2432,14 +2432,11 @@ class TestControlFlowWhileStructure:
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
-        while_insts = [i for i in qc.data if i.operation.name == "while_loop"]
-        body = while_insts[0].operation.params[0]
-        body_names = [inst.operation.name for inst in body.data]
-        h_idx = body_names.index("h")
-        measure_idx = body_names.index("measure")
-        assert h_idx < measure_idx, (
-            f"H gate at index {h_idx} must appear before measure at index {measure_idx}"
-        )
+        assert isinstance(qc.data[2].operation, WhileLoopOp)
+        body = qc.data[2].operation.params[0]
+        assert len(body.data) == 2
+        assert isinstance(body.data[0].operation, HGate)
+        assert isinstance(body.data[1].operation, Measure)
 
     # -- outer circuit gate ordering --------------------------------------
 
@@ -2458,12 +2455,11 @@ class TestControlFlowWhileStructure:
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
-        names = _gate_names(qc)
-        first_measure = names.index("measure")
-        while_idx = names.index("while_loop")
-        assert first_measure < while_idx, (
-            "Initial measure must come before while_loop in outer circuit"
-        )
+        # Verify ordering: H → Measure → WhileLoop
+        assert len(qc.data) == 3
+        assert isinstance(qc.data[0].operation, HGate)
+        assert isinstance(qc.data[1].operation, Measure)
+        assert isinstance(qc.data[2].operation, WhileLoopOp)
 
     # -- condition wiring -------------------------------------------------
 
@@ -2484,13 +2480,12 @@ class TestControlFlowWhileStructure:
         _, qc = _transpile_and_get_circuit(circuit)
 
         # Find the initial measure instruction (before while_loop)
-        measure_insts = [i for i in qc.data if i.operation.name == "measure"]
-        assert len(measure_insts) >= 1
-        initial_measure_clbit = measure_insts[0].clbits[0]
+        assert isinstance(qc.data[1].operation, Measure)
+        initial_measure_clbit = qc.data[1].clbits[0]
 
         # The while condition must reference the same clbit
-        while_insts = [i for i in qc.data if i.operation.name == "while_loop"]
-        condition_clbit = while_insts[0].clbits[0]
+        assert isinstance(qc.data[2].operation, WhileLoopOp)
+        condition_clbit = qc.data[2].clbits[0]
         assert qc.clbits.index(condition_clbit) == qc.clbits.index(
             initial_measure_clbit
         ), (
@@ -2514,12 +2509,11 @@ class TestControlFlowWhileStructure:
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
-        while_insts = [i for i in qc.data if i.operation.name == "while_loop"]
-        assert len(while_insts) == 1
-        body = while_insts[0].operation.params[0]
-        body_names = [inst.operation.name for inst in body.data]
-        assert "h" in body_names
-        assert "measure" in body_names
+        assert isinstance(qc.data[2].operation, WhileLoopOp)
+        body = qc.data[2].operation.params[0]
+        assert len(body.data) == 2
+        assert isinstance(body.data[0].operation, HGate)
+        assert isinstance(body.data[1].operation, Measure)
 
     def test_while_loop_body_measure_same_clbit(self):
         """Body measurement must write to the same clbit as the condition.
@@ -2543,16 +2537,13 @@ class TestControlFlowWhileStructure:
         _, qc = _transpile_and_get_circuit(circuit)
 
         # Find the while_loop instruction
-        while_insts = [i for i in qc.data if i.operation.name == "while_loop"]
-        assert len(while_insts) == 1
-
-        # The while_loop condition clbit
-        while_inst = while_insts[0]
+        assert isinstance(qc.data[2].operation, WhileLoopOp)
+        while_inst = qc.data[2]
         condition_clbit = while_inst.clbits[0]
 
         # The body circuit is in params[0]
         body = while_inst.operation.params[0]
-        body_measures = [i for i in body.data if i.operation.name == "measure"]
+        body_measures = [i for i in body.data if isinstance(i.operation, Measure)]
         assert len(body_measures) == 1
 
         # The body measure must target the same classical bit index as
@@ -2617,10 +2608,10 @@ class TestControlFlowWhileStructure:
         assert qc.num_clbits == 1, (
             f"Expected 1 classical bit but got {qc.num_clbits}."
         )
-        while_insts = [i for i in qc.data if i.operation.name == "while_loop"]
+        while_insts = [i for i in qc.data if isinstance(i.operation, WhileLoopOp)]
         assert len(while_insts) == 1
         body = while_insts[0].operation.params[0]
-        body_measures = [i for i in body.data if i.operation.name == "measure"]
+        body_measures = [i for i in body.data if isinstance(i.operation, Measure)]
         assert len(body_measures) == 1
         # Body measure must target the same clbit as the while condition.
         cond_clbit_idx = qc.clbits.index(while_insts[0].clbits[0])
@@ -2688,7 +2679,7 @@ class TestControlFlowWhileStructure:
         )
 
         # Find the while_loop and its condition clbit index.
-        while_insts = [i for i in qc.data if i.operation.name == "while_loop"]
+        while_insts = [i for i in qc.data if isinstance(i.operation, WhileLoopOp)]
         assert len(while_insts) == 1
         while_inst = while_insts[0]
         cond_clbit_idx = qc.clbits.index(while_inst.clbits[0])
@@ -2696,7 +2687,7 @@ class TestControlFlowWhileStructure:
         # Inside the while body there is an if_else block.
         body = while_inst.operation.params[0]
         if_else_insts = [
-            i for i in body.data if i.operation.name == "if_else"
+            i for i in body.data if isinstance(i.operation, IfElseOp)
         ]
         assert len(if_else_insts) == 1
 
@@ -2707,7 +2698,7 @@ class TestControlFlowWhileStructure:
         for branch_idx, block in enumerate(if_else_op.operation.blocks):
             branch_name = "if" if branch_idx == 0 else "else"
             measures = [
-                i for i in block.data if i.operation.name == "measure"
+                i for i in block.data if isinstance(i.operation, Measure)
             ]
             assert len(measures) == 1, (
                 f"Expected 1 measurement in {branch_name}-branch but "
