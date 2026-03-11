@@ -2041,7 +2041,7 @@ class TestControlFlowWhile:
         # The body circuit is in params[0]
         body = while_inst.operation.params[0]
         body_measures = [i for i in body.data if i.operation.name == "measure"]
-        assert len(body_measures) >= 1
+        assert len(body_measures) == 1
 
         # The body measure must target the same classical bit index as
         # the while condition.  In Qiskit's while_loop, the body circuit
@@ -2076,6 +2076,346 @@ class TestControlFlowWhile:
             f"Expected 1 classical bit but got {qc.num_clbits}. "
             "The body measurement should alias to the condition's clbit."
         )
+
+    def test_while_loop_execution_terminates(self):
+        """Execute a while loop that is guaranteed to terminate.
+
+        q0 starts in |1⟩ (X gate), so measure → bit = 1 and the loop
+        enters.  Inside the loop, q1 starts in |0⟩ (no gate), so
+        measure → bit = 0 and the loop exits on the next condition
+        check.  The returned bit must always be 0.
+
+        This test catches regressions where the body measurement writes
+        to a different clbit than the while condition, causing the loop
+        to never see the updated value (infinite loop / wrong result).
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.x(q0)  # |1⟩ → bit = 1, enter loop
+            bit = qmc.measure(q0)
+            while bit:
+                q1 = qmc.qubit("q1")  # |0⟩ → bit = 0, exit loop
+                bit = qmc.measure(q1)
+            return bit
+
+        # --- Structure checks ---
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_clbits == 1, (
+            f"Expected 1 classical bit but got {qc.num_clbits}."
+        )
+        while_insts = [i for i in qc.data if i.operation.name == "while_loop"]
+        assert len(while_insts) == 1
+        body = while_insts[0].operation.params[0]
+        body_measures = [i for i in body.data if i.operation.name == "measure"]
+        assert len(body_measures) == 1
+        # Body measure must target the same clbit as the while condition.
+        cond_clbit_idx = qc.clbits.index(while_insts[0].clbits[0])
+        body_clbit_idx = body.clbits.index(body_measures[0].clbits[0])
+        assert body_clbit_idx == cond_clbit_idx, (
+            f"Body measure targets clbit {body_clbit_idx} but while "
+            f"condition checks clbit {cond_clbit_idx}."
+        )
+
+        # --- Execution check ---
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        assert result is not None
+        # Every shot must return 0 (the loop always exits after one
+        # iteration because q1 is measured as 0).
+        for value, count in result.results:
+            assert value == 0, (
+                f"Expected all shots to return 0 but got value={value} "
+                f"({count} shots). The while-loop condition is not being "
+                "updated correctly."
+            )
+
+    def test_while_loop_with_if_else_clbit_structure(self):
+        """While loop with if-else: both branch measurements alias to the
+        condition clbit.
+
+        This is the structural counterpart of the execution test below.
+        Without the clbit aliasing fix, the allocator would create
+        separate clbits for each branch measurement (5 clbits total),
+        and the while condition would never observe the updated value.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.h(q0)
+            bit = qmc.measure(q0)
+
+            q1 = qmc.qubit("q1")
+            q1 = qmc.h(q1)
+            sel = qmc.measure(q1)
+
+            while bit:
+                if sel:
+                    q2 = qmc.qubit("q2")
+                    q2 = qmc.h(q2)
+                    bit = qmc.measure(q2)
+                else:
+                    q3 = qmc.qubit("q3")
+                    q3 = qmc.h(q3)
+                    bit = qmc.measure(q3)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+
+        # Two classical bits: one for the while condition, one for sel.
+        assert qc.num_clbits == 2, (
+            f"Expected 2 classical bits but got {qc.num_clbits}. "
+            "Branch measurements are not being aliased to the "
+            "while-condition clbit."
+        )
+
+        # Find the while_loop and its condition clbit index.
+        while_insts = [i for i in qc.data if i.operation.name == "while_loop"]
+        assert len(while_insts) == 1
+        while_inst = while_insts[0]
+        cond_clbit_idx = qc.clbits.index(while_inst.clbits[0])
+
+        # Inside the while body there is an if_else block.
+        body = while_inst.operation.params[0]
+        if_else_insts = [
+            i for i in body.data if i.operation.name == "if_else"
+        ]
+        assert len(if_else_insts) == 1
+
+        # Both branches (if / else) must have exactly one measurement
+        # each, and both must target the same clbit as the while
+        # condition.
+        if_else_op = if_else_insts[0]
+        for branch_idx, block in enumerate(if_else_op.operation.blocks):
+            branch_name = "if" if branch_idx == 0 else "else"
+            measures = [
+                i for i in block.data if i.operation.name == "measure"
+            ]
+            assert len(measures) == 1, (
+                f"Expected 1 measurement in {branch_name}-branch but "
+                f"got {len(measures)}."
+            )
+            # Resolve the measurement's clbit index back through the
+            # nesting: block → if_else → while_body → top-level circuit.
+            meas_clbit_in_block = block.clbits.index(measures[0].clbits[0])
+            if_else_clbits = [
+                body.clbits.index(c) for c in if_else_insts[0].clbits
+            ]
+            meas_clbit_in_body = if_else_clbits[meas_clbit_in_block]
+            while_clbits = [
+                qc.clbits.index(c) for c in while_inst.clbits
+            ]
+            meas_clbit_in_circuit = while_clbits[meas_clbit_in_body]
+            assert meas_clbit_in_circuit == cond_clbit_idx, (
+                f"{branch_name}-branch measure targets circuit clbit "
+                f"{meas_clbit_in_circuit} but while condition checks "
+                f"clbit {cond_clbit_idx}."
+            )
+
+    def test_while_loop_with_if_else_execution(self):
+        """Execute a while loop containing an if-else with measurements.
+
+        q0 = X → bit = 1 (enter loop), q1 = X → sel = 1 (always take
+        if-branch).  Inside the if-branch, q2 is |0⟩ → bit = 0, so
+        the loop exits.  The returned bit must always be 0.
+
+        This is the exact pattern that triggered the clbit aliasing bug:
+        measurements inside if-else branches within a while loop were
+        allocated separate clbits, so the while condition never saw the
+        updated measurement and the loop ran forever.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.x(q0)  # |1⟩ → bit = 1, enter loop
+            bit = qmc.measure(q0)
+
+            q1 = qmc.qubit("q1")
+            q1 = qmc.x(q1)  # |1⟩ → sel = 1, always take if-branch
+            sel = qmc.measure(q1)
+
+            while bit:
+                if sel:
+                    q2 = qmc.qubit("q2")  # |0⟩ → bit = 0, exit
+                    bit = qmc.measure(q2)
+                else:
+                    q3 = qmc.qubit("q3")  # |0⟩ → bit = 0, exit
+                    bit = qmc.measure(q3)
+            return bit
+
+        # --- Structure checks ---
+        # 4 distinct qubits: q0, q1, q2, q3 (q2 and q3 are in mutually
+        # exclusive branches so they are different physical qubits).
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_clbits == 2, (
+            f"Expected 2 classical bits but got {qc.num_clbits}. "
+            "Branch measurements are not being aliased to the "
+            "while-condition clbit."
+        )
+
+        # --- Execution check ---
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        assert result is not None
+        for value, count in result.results:
+            assert value == 0, (
+                f"Expected all shots to return 0 but got value={value} "
+                f"({count} shots). The while-loop with if-else is not "
+                "aliasing branch measurements to the condition clbit."
+            )
+
+    def test_while_loop_with_if_only_no_else(self):
+        """While + if-only (no else): condition clbit must not leak.
+
+        When the if block has no else branch, the PhiOp's false_val is
+        the original condition from before the if.  map_phi_outputs may
+        redirect the original condition's clbit to the true-branch's
+        clbit, orphaning the original index.  The while-loop aliasing
+        must restore the canonical clbit.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.x(q0)  # bit=1, enter loop
+            bit = qmc.measure(q0)
+
+            q1 = qmc.qubit("q1")
+            q1 = qmc.x(q1)  # sel=1, always take if-branch
+            sel = qmc.measure(q1)
+
+            while bit:
+                if sel:
+                    q2 = qmc.qubit("q2")  # |0⟩ → bit=0, exit
+                    bit = qmc.measure(q2)
+            return bit
+
+        # --- Structure: 2 clbits (bit + sel), not 3 ---
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_clbits == 2, (
+            f"Expected 2 classical bits but got {qc.num_clbits}. "
+            "if-only PhiOp is leaking an extra clbit."
+        )
+
+        # --- Execution: always returns 0 ---
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        for value, count in result.results:
+            assert value == 0, (
+                f"Expected all shots to return 0 but got value={value} "
+                f"({count} shots)."
+            )
+
+    def test_while_loop_with_if_else_else_branch_taken(self):
+        """While + if-else where the else branch terminates the loop.
+
+        sel=0 (q1 stays |0⟩), so the else branch is always taken.
+        q3 is |0⟩ → bit=0, loop exits.  Verifies that the else-branch
+        measurement is correctly aliased to the condition clbit.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.x(q0)  # bit=1, enter loop
+            bit = qmc.measure(q0)
+
+            q1 = qmc.qubit("q1")
+            # q1 stays |0⟩ → sel=0, always take else-branch
+            sel = qmc.measure(q1)
+
+            while bit:
+                if sel:
+                    q2 = qmc.qubit("q2")
+                    q2 = qmc.x(q2)  # bit=1 (never taken)
+                    bit = qmc.measure(q2)
+                else:
+                    q3 = qmc.qubit("q3")  # |0⟩ → bit=0, exit
+                    bit = qmc.measure(q3)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_clbits == 2, (
+            f"Expected 2 classical bits but got {qc.num_clbits}."
+        )
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        for value, count in result.results:
+            assert value == 0, (
+                f"Expected all shots to return 0 but got value={value} "
+                f"({count} shots)."
+            )
+
+    def test_while_loop_with_nested_if_else(self):
+        """While + nested if-else: recursive phi tracing must work.
+
+        sel1=1, sel2=1, so the innermost if-branch is taken.
+        q3 is |0⟩ → bit=0, loop exits.  Tests that
+        _alias_loop_carried_clbits recurses through nested IfOperations.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.x(q0)  # bit=1
+            bit = qmc.measure(q0)
+
+            q1 = qmc.qubit("q1")
+            q1 = qmc.x(q1)  # sel1=1
+            sel1 = qmc.measure(q1)
+
+            q2 = qmc.qubit("q2")
+            q2 = qmc.x(q2)  # sel2=1
+            sel2 = qmc.measure(q2)
+
+            while bit:
+                if sel1:
+                    if sel2:
+                        q3 = qmc.qubit("q3")  # |0⟩ → bit=0
+                        bit = qmc.measure(q3)
+                    else:
+                        q4 = qmc.qubit("q4")
+                        q4 = qmc.x(q4)  # bit=1 (not taken)
+                        bit = qmc.measure(q4)
+                else:
+                    q5 = qmc.qubit("q5")  # |0⟩ → bit=0 (not taken)
+                    bit = qmc.measure(q5)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_clbits == 3, (
+            f"Expected 3 classical bits (bit, sel1, sel2) but got "
+            f"{qc.num_clbits}."
+        )
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        for value, count in result.results:
+            assert value == 0, (
+                f"Expected all shots to return 0 but got value={value} "
+                f"({count} shots)."
+            )
 
 
 # ============================================================================
