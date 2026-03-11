@@ -321,7 +321,13 @@ class ResourceAllocator:
                 # (e.g. a phi-merged measurement from an if-else).
                 # We recursively trace IfOperation phi_ops and map all
                 # upstream branch-measurement UUIDs to the canonical clbit.
-                if len(op.operands) >= 2:
+                #
+                # WhileOperation operands:
+                #   operands[0]: initial condition (always present)
+                #   operands[1]: loop-carried condition (present only when the
+                #                body reassigns the condition variable)
+                # No other operand count is valid.
+                if len(op.operands) == 2:
                     initial_cond = op.operands[0]
                     loop_carried = op.operands[1]
                     init_val = (
@@ -356,6 +362,13 @@ class ResourceAllocator:
                         )
                     elif init_clbit is not None and carried_uuid not in clbit_map:
                         clbit_map[carried_uuid] = init_clbit
+                else:
+                    assert len(op.operands) == 1, (
+                        "[FOR DEVELOPER] WhileOperation must have exactly 1 or 2 "
+                        "operands (initial condition and optional loop-carried "
+                        f"condition), but got {len(op.operands)}. This indicates "
+                        "a bug in the WhileOperation construction."
+                    )
 
             elif isinstance(op, CompositeGateOperation):
                 self._allocate_composite(op, qubit_map)
