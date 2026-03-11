@@ -363,11 +363,11 @@ class ResourceAllocator:
                     elif init_clbit is not None and carried_uuid not in clbit_map:
                         clbit_map[carried_uuid] = init_clbit
                 else:
-                    assert len(op.operands) == 1, (
-                        "[FOR DEVELOPER] WhileOperation must have exactly 1 or 2 "
-                        "operands (initial condition and optional loop-carried "
-                        f"condition), but got {len(op.operands)}. This indicates "
-                        "a bug in the WhileOperation construction."
+                    assert False, (
+                        "[FOR DEVELOPER] WhileOperation must have exactly 2 "
+                        "operands to reach this branch, but got "
+                        f"{len(op.operands)}. This indicates a bug in the "
+                        "WhileOperation construction."
                     )
 
             elif isinstance(op, CompositeGateOperation):
