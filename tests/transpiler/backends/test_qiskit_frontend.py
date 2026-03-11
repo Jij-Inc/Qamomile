@@ -3404,44 +3404,76 @@ class TestTranspilerConfigAndSubstitution:
         transpiler_approx.set_config(config)
         exe_approx = transpiler_approx.transpile(circuit)
         qc_approx = exe_approx.compiled_quantum[0].circuit
-        # Approximate QFT k=2 5q: 5H + 8CP + 2SWAP + 5M = 20 (but actual is 19)
+        # Approximate QFT k=2 5q: 5H + 7CP + 2SWAP + 5M = 19
         # Each qubit gets at most k=2 CP gates after its H
         assert len(qc_approx.data) == 19
         # Verify structure: H(0) 2CP H(1) 2CP H(2) 2CP H(3) 1CP H(4) 2SWAP 5M
         idx = 0
-        # qubit 0: H + 2 CP
+
+        # qubit 0: H + CP(q1,q0,π/2) + CP(q2,q0,π/4)
         assert isinstance(qc_approx.data[idx].operation, HGate)
-        idx += 1
-        for _ in range(2):
-            assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-            idx += 1
-        # qubit 1: H + 2 CP
-        assert isinstance(qc_approx.data[idx].operation, HGate)
-        idx += 1
-        for _ in range(2):
-            assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-            idx += 1
-        # qubit 2: H + 2 CP
-        assert isinstance(qc_approx.data[idx].operation, HGate)
-        idx += 1
-        for _ in range(2):
-            assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-            idx += 1
-        # qubit 3: H + 1 CP
-        assert isinstance(qc_approx.data[idx].operation, HGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [0]
         idx += 1
         assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [1, 0]
+        assert np.isclose(float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10)
         idx += 1
+        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [2, 0]
+        assert np.isclose(float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10)
+        idx += 1
+
+        # qubit 1: H + CP(q2,q1,π/2) + CP(q3,q1,π/4)
+        assert isinstance(qc_approx.data[idx].operation, HGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [1]
+        idx += 1
+        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [2, 1]
+        assert np.isclose(float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10)
+        idx += 1
+        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [3, 1]
+        assert np.isclose(float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10)
+        idx += 1
+
+        # qubit 2: H + CP(q3,q2,π/2) + CP(q4,q2,π/4)
+        assert isinstance(qc_approx.data[idx].operation, HGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [2]
+        idx += 1
+        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [3, 2]
+        assert np.isclose(float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10)
+        idx += 1
+        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [4, 2]
+        assert np.isclose(float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10)
+        idx += 1
+
+        # qubit 3: H + CP(q4,q3,π/2)
+        assert isinstance(qc_approx.data[idx].operation, HGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [3]
+        idx += 1
+        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [4, 3]
+        assert np.isclose(float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10)
+        idx += 1
+
         # qubit 4: H only
         assert isinstance(qc_approx.data[idx].operation, HGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [4]
         idx += 1
-        # 2 SWAP gates
+
+        # 2 SWAP gates for bit reversal
         assert isinstance(qc_approx.data[idx].operation, SwapGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [0, 4]
         idx += 1
         assert isinstance(qc_approx.data[idx].operation, SwapGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [1, 3]
         idx += 1
+
         for i in range(5):
             assert isinstance(qc_approx.data[idx].operation, Measure)
+            assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [i]
             idx += 1
 
         # Approximate has strictly fewer total gates
@@ -4530,7 +4562,7 @@ class TestAlgorithmBasicLayers:
         for i in range(3):
             assert isinstance(qc.data[i].operation, RYGate)
             assert [qc.find_bit(q).index for q in qc.data[i].qubits] == [i]
-            assert np.isclose(float(qc.data[i].operation.params[0]), thetas[i])
+            assert np.isclose(float(qc.data[i].operation.params[0]), thetas[i], atol=1e-10)
         assert isinstance(qc.data[3].operation, CZGate)
         assert [qc.find_bit(q).index for q in qc.data[3].qubits] == [0, 1]
         assert isinstance(qc.data[4].operation, CZGate)
@@ -4607,16 +4639,16 @@ class TestAlgorithmQAOAModules:
         assert len(qc.data) == 7
         assert isinstance(qc.data[0].operation, RZZGate)
         assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0, 1]
-        assert np.isclose(float(qc.data[0].operation.params[0]), gamma * 1.0)
+        assert np.isclose(float(qc.data[0].operation.params[0]), gamma * 1.0, atol=1e-10)
         assert isinstance(qc.data[1].operation, RZZGate)
         assert [qc.find_bit(q).index for q in qc.data[1].qubits] == [1, 2]
-        assert np.isclose(float(qc.data[1].operation.params[0]), gamma * (-0.5))
+        assert np.isclose(float(qc.data[1].operation.params[0]), gamma * (-0.5), atol=1e-10)
         assert isinstance(qc.data[2].operation, RZGate)
         assert [qc.find_bit(q).index for q in qc.data[2].qubits] == [0]
-        assert np.isclose(float(qc.data[2].operation.params[0]), gamma * 0.3)
+        assert np.isclose(float(qc.data[2].operation.params[0]), gamma * 0.3, atol=1e-10)
         assert isinstance(qc.data[3].operation, RZGate)
         assert [qc.find_bit(q).index for q in qc.data[3].qubits] == [2]
-        assert np.isclose(float(qc.data[3].operation.params[0]), gamma * (-0.1))
+        assert np.isclose(float(qc.data[3].operation.params[0]), gamma * (-0.1), atol=1e-10)
         for i in range(3):
             assert isinstance(qc.data[4 + i].operation, Measure)
             assert [qc.find_bit(q).index for q in qc.data[4 + i].qubits] == [i]
@@ -4664,7 +4696,7 @@ class TestAlgorithmQAOAModules:
         for i in range(n_qubits):
             assert isinstance(qc.data[i].operation, RXGate)
             assert [qc.find_bit(q).index for q in qc.data[i].qubits] == [i]
-            assert np.isclose(float(qc.data[i].operation.params[0]), 2.0 * beta)
+            assert np.isclose(float(qc.data[i].operation.params[0]), 2.0 * beta, atol=1e-10)
         for i in range(n_qubits):
             assert isinstance(qc.data[n_qubits + i].operation, Measure)
             assert [qc.find_bit(q).index for q in qc.data[n_qubits + i].qubits] == [i]
@@ -4719,13 +4751,13 @@ class TestAlgorithmQAOAModules:
         assert len(qc.data) == 5
         assert isinstance(qc.data[0].operation, RZZGate)
         assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0, 1]
-        assert np.isclose(float(qc.data[0].operation.params[0]), gamma * 1.0)
+        assert np.isclose(float(qc.data[0].operation.params[0]), gamma * 1.0, atol=1e-10)
         assert isinstance(qc.data[1].operation, RXGate)
         assert [qc.find_bit(q).index for q in qc.data[1].qubits] == [0]
-        assert np.isclose(float(qc.data[1].operation.params[0]), 2.0 * beta)
+        assert np.isclose(float(qc.data[1].operation.params[0]), 2.0 * beta, atol=1e-10)
         assert isinstance(qc.data[2].operation, RXGate)
         assert [qc.find_bit(q).index for q in qc.data[2].qubits] == [1]
-        assert np.isclose(float(qc.data[2].operation.params[0]), 2.0 * beta)
+        assert np.isclose(float(qc.data[2].operation.params[0]), 2.0 * beta, atol=1e-10)
         for i in range(2):
             assert isinstance(qc.data[3 + i].operation, Measure)
             assert [qc.find_bit(q).index for q in qc.data[3 + i].qubits] == [i]
@@ -4821,14 +4853,14 @@ class TestAlgorithmQAOAModules:
                 assert isinstance(qc.data[idx].operation, RZZGate)
                 assert [qc.find_bit(q).index for q in qc.data[idx].qubits] == [qi, qj]
                 assert np.isclose(
-                    float(qc.data[idx].operation.params[0]), gamma * quad_vals[e]
+                    float(qc.data[idx].operation.params[0]), gamma * quad_vals[e], atol=1e-10
                 )
                 idx += 1
             for i in range(n_qubits):
                 assert isinstance(qc.data[idx].operation, RXGate)
                 assert [qc.find_bit(q).index for q in qc.data[idx].qubits] == [i]
                 assert np.isclose(
-                    float(qc.data[idx].operation.params[0]), 2.0 * beta
+                    float(qc.data[idx].operation.params[0]), 2.0 * beta, atol=1e-10
                 )
                 idx += 1
         # Measure gates
@@ -5770,26 +5802,26 @@ class TestFQAOAIntegration:
         half_pi = np.pi / 2
         assert isinstance(qc.data[0].operation, RXGate)
         assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0]
-        assert np.isclose(float(qc.data[0].operation.params[0]), -half_pi)
+        assert np.isclose(float(qc.data[0].operation.params[0]), -half_pi, atol=1e-10)
         assert isinstance(qc.data[1].operation, RXGate)
         assert [qc.find_bit(q).index for q in qc.data[1].qubits] == [1]
-        assert np.isclose(float(qc.data[1].operation.params[0]), half_pi)
+        assert np.isclose(float(qc.data[1].operation.params[0]), half_pi, atol=1e-10)
         assert isinstance(qc.data[2].operation, CXGate)
         assert [qc.find_bit(q).index for q in qc.data[2].qubits] == [0, 1]
         assert isinstance(qc.data[3].operation, RXGate)
         assert [qc.find_bit(q).index for q in qc.data[3].qubits] == [0]
-        assert np.isclose(float(qc.data[3].operation.params[0]), -beta)
+        assert np.isclose(float(qc.data[3].operation.params[0]), -beta, atol=1e-10)
         assert isinstance(qc.data[4].operation, RZGate)
         assert [qc.find_bit(q).index for q in qc.data[4].qubits] == [1]
-        assert np.isclose(float(qc.data[4].operation.params[0]), beta)
+        assert np.isclose(float(qc.data[4].operation.params[0]), beta, atol=1e-10)
         assert isinstance(qc.data[5].operation, CXGate)
         assert [qc.find_bit(q).index for q in qc.data[5].qubits] == [0, 1]
         assert isinstance(qc.data[6].operation, RXGate)
         assert [qc.find_bit(q).index for q in qc.data[6].qubits] == [0]
-        assert np.isclose(float(qc.data[6].operation.params[0]), half_pi)
+        assert np.isclose(float(qc.data[6].operation.params[0]), half_pi, atol=1e-10)
         assert isinstance(qc.data[7].operation, RXGate)
         assert [qc.find_bit(q).index for q in qc.data[7].qubits] == [1]
-        assert np.isclose(float(qc.data[7].operation.params[0]), -half_pi)
+        assert np.isclose(float(qc.data[7].operation.params[0]), -half_pi, atol=1e-10)
         for i in range(2):
             assert isinstance(qc.data[8 + i].operation, Measure)
             assert [qc.find_bit(q).index for q in qc.data[8 + i].qubits] == [i]
@@ -5984,7 +6016,7 @@ class TestDeepNestedQKernelComposition:
         assert len(qc.data) == 3
         assert isinstance(qc.data[0].operation, RXGate)
         assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0]
-        assert np.isclose(float(qc.data[0].operation.params[0]), 0.5)
+        assert np.isclose(float(qc.data[0].operation.params[0]), 0.5, atol=1e-10)
         assert isinstance(qc.data[1].operation, HGate)
         assert [qc.find_bit(q).index for q in qc.data[1].qubits] == [0]
         assert isinstance(qc.data[2].operation, Measure)
@@ -6345,7 +6377,7 @@ class TestManualQFTCircuit:
         assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0]
         assert isinstance(qc.data[1].operation, CPhaseGate)
         assert [qc.find_bit(q).index for q in qc.data[1].qubits] == [0, 1]
-        assert np.isclose(float(qc.data[1].operation.params[0]), np.pi / 2)
+        assert np.isclose(float(qc.data[1].operation.params[0]), np.pi / 2, atol=1e-10)
         assert isinstance(qc.data[2].operation, HGate)
         assert [qc.find_bit(q).index for q in qc.data[2].qubits] == [1]
         assert isinstance(qc.data[3].operation, SwapGate)
@@ -6418,15 +6450,15 @@ class TestManualQFTCircuit:
         assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0]
         assert isinstance(qc.data[1].operation, CPhaseGate)
         assert [qc.find_bit(q).index for q in qc.data[1].qubits] == [0, 1]
-        assert np.isclose(float(qc.data[1].operation.params[0]), np.pi / 2)
+        assert np.isclose(float(qc.data[1].operation.params[0]), np.pi / 2, atol=1e-10)
         assert isinstance(qc.data[2].operation, CPhaseGate)
         assert [qc.find_bit(q).index for q in qc.data[2].qubits] == [0, 2]
-        assert np.isclose(float(qc.data[2].operation.params[0]), np.pi / 4)
+        assert np.isclose(float(qc.data[2].operation.params[0]), np.pi / 4, atol=1e-10)
         assert isinstance(qc.data[3].operation, HGate)
         assert [qc.find_bit(q).index for q in qc.data[3].qubits] == [1]
         assert isinstance(qc.data[4].operation, CPhaseGate)
         assert [qc.find_bit(q).index for q in qc.data[4].qubits] == [1, 2]
-        assert np.isclose(float(qc.data[4].operation.params[0]), np.pi / 2)
+        assert np.isclose(float(qc.data[4].operation.params[0]), np.pi / 2, atol=1e-10)
         assert isinstance(qc.data[5].operation, HGate)
         assert [qc.find_bit(q).index for q in qc.data[5].qubits] == [2]
         assert isinstance(qc.data[6].operation, SwapGate)
