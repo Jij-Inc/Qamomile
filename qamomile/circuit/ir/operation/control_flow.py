@@ -14,11 +14,37 @@ if typing.TYPE_CHECKING:
 
 @dataclasses.dataclass
 class WhileOperation(Operation):
+    """Represents a while loop operation.
+
+    Example:
+        while bit:
+            body
+
+    Attributes:
+        operations: List of operations in the loop body
+        operands[0]: Initial condition (required, Bit type from measurement
+            or comparison checked at loop entry)
+        operands[1]: Loop-carried condition (optional). When the loop body
+            reassigns the condition variable (e.g., ``bit = qmc.measure(q)``),
+            this captures the updated handle so that the transpiler can alias
+            both UUIDs to the same classical bit during resource allocation.
+            Without this alias, SSA-like value versioning would allocate a
+            separate clbit for the body measurement, causing the while
+            condition to never update (infinite loop on Qiskit) or read from
+            the wrong qubit (wrong return value on QURI Parts).
+    """
+
     operations: list[Operation] = dataclasses.field(default_factory=list)
 
     @property
     def signature(self) -> Signature:
-        return Signature(operands=[ParamHint("condition", BlockType())], results=[])
+        return Signature(
+            operands=[
+                ParamHint("condition", BlockType()),
+                ParamHint("loop_carried", BlockType()),
+            ],
+            results=[],
+        )
 
     @property
     def operation_kind(self) -> OperationKind:
