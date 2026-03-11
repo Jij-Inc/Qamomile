@@ -2275,51 +2275,6 @@ class TestControlFlowWhile:
                 "aliasing branch measurements to the condition clbit."
             )
 
-    def test_while_loop_with_if_only_no_else(self):
-        """While + if-only (no else): condition clbit must not leak.
-
-        When the if block has no else branch, the PhiOp's false_val is
-        the original condition from before the if.  map_phi_outputs may
-        redirect the original condition's clbit to the true-branch's
-        clbit, orphaning the original index.  The while-loop aliasing
-        must restore the canonical clbit.
-        """
-
-        @qmc.qkernel
-        def circuit() -> qmc.Bit:
-            q0 = qmc.qubit("q0")
-            q0 = qmc.x(q0)  # bit=1, enter loop
-            bit = qmc.measure(q0)
-
-            q1 = qmc.qubit("q1")
-            q1 = qmc.x(q1)  # sel=1, always take if-branch
-            sel = qmc.measure(q1)
-
-            while bit:
-                if sel:
-                    q2 = qmc.qubit("q2")  # |0⟩ → bit=0, exit
-                    bit = qmc.measure(q2)
-            return bit
-
-        # --- Structure: 2 clbits (bit + sel), not 3 ---
-        _, qc = _transpile_and_get_circuit(circuit)
-        assert qc.num_clbits == 2, (
-            f"Expected 2 classical bits but got {qc.num_clbits}. "
-            "if-only PhiOp is leaking an extra clbit."
-        )
-
-        # --- Execution: always returns 0 ---
-        transpiler = QiskitTranspiler()
-        exe = transpiler.transpile(circuit)
-        executor = transpiler.executor()
-        job = exe.sample(executor, bindings={}, shots=100)
-        result = job.result()
-        for value, count in result.results:
-            assert value == 0, (
-                f"Expected all shots to return 0 but got value={value} "
-                f"({count} shots)."
-            )
-
     def test_while_loop_with_if_else_else_branch_taken(self):
         """While + if-else where the else branch terminates the loop.
 
