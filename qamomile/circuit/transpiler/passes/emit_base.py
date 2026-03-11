@@ -311,10 +311,16 @@ class ResourceAllocator:
                 self._allocate_phi_ops(op.phi_ops, qubit_map, clbit_map)
 
             elif isinstance(op, WhileOperation):
-                # If the while loop has a loop-carried condition (operands[1]),
-                # pre-register its UUID as an alias to the initial condition's
-                # clbit so that the body measurement writes to the same
-                # classical bit that the while condition checks.
+                # Allocate the loop body first so that IfOperation phi
+                # mappings inside the body are fully resolved.
+                self._allocate_recursive(op.operations, qubit_map, clbit_map, bindings)
+
+                # Alias the loop-carried condition to the initial
+                # while-condition clbit.  After body allocation the
+                # loop-carried UUID may point to a different clbit
+                # (e.g. a phi-merged measurement from an if-else).
+                # We recursively trace IfOperation phi_ops and map all
+                # upstream branch-measurement UUIDs to the canonical clbit.
                 if len(op.operands) >= 2:
                     initial_cond = op.operands[0]
                     loop_carried = op.operands[1]
@@ -336,9 +342,20 @@ class ResourceAllocator:
                         if hasattr(carried_val, "uuid")
                         else str(carried_val)
                     )
-                    if init_uuid in clbit_map and carried_uuid not in clbit_map:
-                        clbit_map[carried_uuid] = clbit_map[init_uuid]
-                self._allocate_recursive(op.operations, qubit_map, clbit_map, bindings)
+                    init_clbit = clbit_map.get(init_uuid)
+                    carried_clbit = clbit_map.get(carried_uuid)
+
+                    if (
+                        init_clbit is not None
+                        and carried_clbit is not None
+                        and init_clbit != carried_clbit
+                    ):
+                        clbit_map[carried_uuid] = init_clbit
+                        self._alias_loop_carried_clbits(
+                            op.operations, carried_uuid, init_clbit, clbit_map
+                        )
+                    elif init_clbit is not None and carried_uuid not in clbit_map:
+                        clbit_map[carried_uuid] = init_clbit
 
             elif isinstance(op, CompositeGateOperation):
                 self._allocate_composite(op, qubit_map)
@@ -348,6 +365,43 @@ class ResourceAllocator:
 
             elif isinstance(op, CastOperation):
                 self._allocate_cast(op, qubit_map)
+
+    def _alias_loop_carried_clbits(
+        self,
+        operations: list[Operation],
+        target_uuid: str,
+        canonical_clbit: int,
+        clbit_map: dict[str, int],
+    ) -> None:
+        """Recursively trace PhiOp sources and alias them to *canonical_clbit*.
+
+        When a while loop body contains an if-else with measurements in
+        both branches, the phi-merged result (the loop-carried condition)
+        and all its upstream branch-measurement UUIDs must write to the
+        same classical bit as the initial while condition.
+        """
+        for op in operations:
+            if not isinstance(op, IfOperation):
+                continue
+            for phi in op.phi_ops:
+                if not isinstance(phi, PhiOp):
+                    continue
+                output = phi.results[0]
+                if output.uuid != target_uuid:
+                    continue
+                true_val = phi.operands[1]
+                false_val = phi.operands[2]
+                if true_val.uuid in clbit_map:
+                    clbit_map[true_val.uuid] = canonical_clbit
+                if false_val.uuid in clbit_map:
+                    clbit_map[false_val.uuid] = canonical_clbit
+                # Recurse into branches for nested if-else
+                self._alias_loop_carried_clbits(
+                    op.true_operations, true_val.uuid, canonical_clbit, clbit_map
+                )
+                self._alias_loop_carried_clbits(
+                    op.false_operations, false_val.uuid, canonical_clbit, clbit_map
+                )
 
     def _allocate_phi_ops(
         self,
