@@ -138,7 +138,6 @@ ghz_with_composite.draw(n=4, fold_loops=False)
     num_qubits=3,
     resource_metadata=ResourceMetadata(
         query_complexity=1,
-        total_gates=40,
         t_gates=40,
     ),
 )
@@ -162,7 +161,7 @@ algorithm_skeleton.draw(fold_loops=False)
 # %% [markdown]
 # ### Resource Estimation with Stub Composite Gates
 #
-# `estimate_resources()` picks up the stub's metadata automatically. You can also query the metadata directly.
+# `estimate_resources()` picks up the stub's metadata automatically. You can also query the metadata directly. In addition, `est.gates.oracle_calls` lets you inspect per-oracle call counts, including symbolic expressions.
 
 # %%
 est = algorithm_skeleton.estimate_resources().simplify()
@@ -173,6 +172,59 @@ print("total gates:", est.gates.total)
 meta = oracle_box.get_resource_metadata()
 print("oracle query complexity:", meta.query_complexity)
 print("oracle T-gate count:", meta.t_gates)
+
+# %% [markdown]
+# Next, we check `oracle_calls` with multiple oracles and symbolic loop counts.
+
+
+# %%
+@qmc.composite_gate(
+    stub=True,
+    name="phase_oracle",
+    num_qubits=3,
+    resource_metadata=ResourceMetadata(query_complexity=2),
+)
+def phase_oracle():
+    pass
+
+
+@qmc.composite_gate(
+    stub=True,
+    name="mixing_oracle",
+    num_qubits=3,
+    resource_metadata=ResourceMetadata(query_complexity=1),
+)
+def mixing_oracle():
+    pass
+
+
+@qmc.qkernel
+def iterative_oracle_skeleton(rounds: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+    q = qmc.qubit_array(3, name="q")
+
+    # One call outside the loop
+    q[0], q[1], q[2] = phase_oracle(q[0], q[1], q[2])
+
+    # Symbolic number of calls inside the loop
+    for i in qmc.range(rounds):
+        q[0], q[1], q[2] = phase_oracle(q[0], q[1], q[2])
+        q[0], q[1], q[2] = mixing_oracle(q[0], q[1], q[2])
+
+    return q
+
+
+# %%
+oracle_est = iterative_oracle_skeleton.estimate_resources().simplify()
+print("oracle_calls:", oracle_est.gates.oracle_calls)
+print("oracle_queries:", oracle_est.gates.oracle_queries)
+
+# %%
+oracle_est_4 = oracle_est.substitute(rounds=4)
+print("oracle_calls (rounds=4):", oracle_est_4.gates.oracle_calls)
+print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
+
+# %% [markdown]
+# In this example, `oracle_calls` looks like `{'phase_oracle': rounds + 1, 'mixing_oracle': rounds}`. `oracle_queries` is weighted by each stub's `query_complexity` (`phase_oracle` is multiplied by 2).
 
 # %% [markdown]
 # This top-down approach lets you reason about algorithm-level costs (such as qubit count, oracle queries) before committing to a full decomposition.
@@ -186,3 +238,4 @@ print("oracle T-gate count:", meta.t_gates)
 #   diagrams. Stack `@composite_gate` on top of `@qkernel`.
 # - **Stub composite gate**: `stub=True` with `ResourceMetadata` for top-down
 #   design and resource estimation without a full implementation.
+# - **`est.gates.oracle_calls`**: as shown in the stub-gate examples, this reports per-oracle call counts as a dict, including symbolic call counts.

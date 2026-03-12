@@ -160,7 +160,7 @@ algorithm_skeleton.draw(fold_loops=False)
 # %% [markdown]
 # ### スタブゲートによるリソース推定
 #
-# `estimate_resources()` はスタブのメタデータを自動的に取得します。メタデータは直接参照することもできます。
+# `estimate_resources()` はスタブのメタデータを自動的に取得します。メタデータは直接参照することもできます。さらに `est.gates.oracle_calls` を見ると、オラクル名ごとの呼び出し回数（シンボリックな式を含む）を確認できます。
 
 # %%
 est = algorithm_skeleton.estimate_resources().simplify()
@@ -171,6 +171,58 @@ print("total gates:", est.gates.total)
 meta = oracle_box.get_resource_metadata()
 print("oracle query complexity:", meta.query_complexity)
 print("oracle T-gate count:", meta.t_gates)
+
+# %% [markdown]
+# 次に `oracle_calls` を複数オラクルかつシンボリック回数で確認します。
+
+# %%
+@qmc.composite_gate(
+    stub=True,
+    name="phase_oracle",
+    num_qubits=3,
+    resource_metadata=ResourceMetadata(query_complexity=2),
+)
+def phase_oracle():
+    pass
+
+
+@qmc.composite_gate(
+    stub=True,
+    name="mixing_oracle",
+    num_qubits=3,
+    resource_metadata=ResourceMetadata(query_complexity=1),
+)
+def mixing_oracle():
+    pass
+
+
+@qmc.qkernel
+def iterative_oracle_skeleton(rounds: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+    q = qmc.qubit_array(3, name="q")
+
+    # ループ外で 1 回
+    q[0], q[1], q[2] = phase_oracle(q[0], q[1], q[2])
+
+    # ループ内でシンボリック回数だけ呼び出し
+    for i in qmc.range(rounds):
+        q[0], q[1], q[2] = phase_oracle(q[0], q[1], q[2])
+        q[0], q[1], q[2] = mixing_oracle(q[0], q[1], q[2])
+
+    return q
+
+
+# %%
+oracle_est = iterative_oracle_skeleton.estimate_resources().simplify()
+print("oracle_calls:", oracle_est.gates.oracle_calls)
+print("oracle_queries:", oracle_est.gates.oracle_queries)
+
+# %%
+oracle_est_4 = oracle_est.substitute(rounds=4)
+print("oracle_calls (rounds=4):", oracle_est_4.gates.oracle_calls)
+print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
+
+# %% [markdown]
+# この例では `oracle_calls` が `{'phase_oracle': rounds + 1, 'mixing_oracle': rounds}` のように名前別で返ります。`oracle_queries` は `query_complexity` を掛けた値（`phase_oracle` は 2 倍）になります。
 
 # %% [markdown]
 # このトップダウンアプローチにより、完全な分解を実装する前にアルゴリズムレベルのコスト（量子ビット数、オラクルクエリ数等）を確認できます。
@@ -184,3 +236,4 @@ print("oracle T-gate count:", meta.t_gates)
 #   `@qkernel` の上に `@composite_gate` デコレータを重ねて書きます。
 # - **スタブゲート**：`stub=True` と `ResourceMetadata` で、
 #   実装なしにトップダウン設計とリソース推定が可能です。
+# - **`est.gates.oracle_calls`**：スタブゲート節の実例のとおり、オラクル呼び出し回数を名前別の辞書として確認できます（シンボリックな回数もそのまま扱えます）。
