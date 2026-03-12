@@ -3006,20 +3006,40 @@ class TestControlFlowWhileStructure:
             "If-only (no else) in while loop is leaking orphan clbits."
         )
 
-        # The while condition clbit must be the initial measurement's clbit.
-        while_insts = [i for i in qc.data if isinstance(i.operation, WhileLoopOp)]
-        assert len(while_insts) == 1
-        while_inst = while_insts[0]
-        cond_clbit_idx = qc.clbits.index(while_inst.clbits[0])
+        # Exactly test full structure
+        assert (
+            len(qc.data) == 5
+        )  # x -> measure -> x -> measure -> while (if is in while body)
+        assert isinstance(qc.data[0].operation, XGate)
+        assert isinstance(qc.data[1].operation, Measure)
+        assert isinstance(qc.data[2].operation, XGate)
+        assert isinstance(qc.data[3].operation, Measure)
+        assert isinstance(qc.data[4].operation, WhileLoopOp)
+        while_inst = qc.data[4]
+        while_body = while_inst.operation.params[0]
+        assert len(while_body.data) == 1  # if (measure is inside if)
+        assert isinstance(while_body.data[0].operation, IfElseOp)
+        if_inst = while_body.data[0]
+        if_body = if_inst.operation.blocks[0]
+        assert len(if_body.data) == 1  # measure
+        assert isinstance(if_body.data[0].operation, Measure)
 
-        # The initial measure (before the while) should be on clbit 0.
-        initial_measures = [i for i in qc.data if isinstance(i.operation, Measure)]
-        assert len(initial_measures) >= 1
-        first_meas_clbit_idx = qc.clbits.index(initial_measures[0].clbits[0])
-        assert cond_clbit_idx == first_meas_clbit_idx, (
-            f"While condition uses clbit {cond_clbit_idx} but initial "
-            f"measurement uses clbit {first_meas_clbit_idx}."
-        )
+        # Test if the initial measurement writes to the clbit used by the while condition.
+        while_cond_clbit_idx = qc.clbits.index(while_inst.operation.condition[0])
+        initial_measure = qc.data[1]
+        initial_measure_clbit_idx = qc.clbits.index(initial_measure.clbits[0])
+        assert while_cond_clbit_idx == initial_measure_clbit_idx
+
+        # Test if the second measurement writes to the clbit used in the if condition.
+        if_cond_clbit_idx = qc.clbits.index(if_inst.operation.condition[0])
+        second_measure = qc.data[3]
+        second_measure_clbit_idx = qc.clbits.index(second_measure.clbits[0])
+        assert if_cond_clbit_idx == second_measure_clbit_idx
+
+        # Test if the third measurement (in the if body) writes to the same clbit as the while condition.
+        if_body_measure = if_body.data[0]
+        if_body_measure_clbit_idx = qc.clbits.index(if_body_measure.clbits[0])
+        assert if_body_measure_clbit_idx == while_cond_clbit_idx
 
         # --- Execution check ---
         transpiler = QiskitTranspiler()
@@ -3066,6 +3086,54 @@ class TestControlFlowWhileStructure:
         assert qc.num_clbits == 3, (
             f"Expected 3 classical bits (bit, sel1, sel2) but got {qc.num_clbits}."
         )
+
+        # Exactly test full structure
+        assert (
+            len(qc.data) == 7
+        )  # x -> measure -> x -> measure -> x -> measure -> while
+        assert isinstance(qc.data[0].operation, XGate)
+        assert isinstance(qc.data[1].operation, Measure)
+        assert isinstance(qc.data[2].operation, XGate)
+        assert isinstance(qc.data[3].operation, Measure)
+        assert isinstance(qc.data[4].operation, XGate)
+        assert isinstance(qc.data[5].operation, Measure)
+        assert isinstance(qc.data[6].operation, WhileLoopOp)
+        while_inst = qc.data[6]
+        while_body = while_inst.operation.params[0]
+        assert len(while_body.data) == 1  # outer if
+        assert isinstance(while_body.data[0].operation, IfElseOp)
+        outer_if_inst = while_body.data[0]
+        outer_if_body = outer_if_inst.operation.blocks[0]
+        outer_else_body = outer_if_inst.operation.blocks[1]
+        assert len(outer_else_body.data) == 0  # no else
+        assert len(outer_if_body.data) == 1  # inner if
+        assert isinstance(outer_if_body.data[0].operation, IfElseOp)
+        inner_if_inst = outer_if_body.data[0]
+        inner_if_body = inner_if_inst.operation.blocks[0]
+        inner_else_body = inner_if_inst.operation.blocks[1]
+        assert len(inner_else_body.data) == 0  # no else
+        assert len(inner_if_body.data) == 1  # measure
+        assert isinstance(inner_if_body.data[0].operation, Measure)
+
+        # Clbit mapping checks
+        while_cond_clbit_idx = qc.clbits.index(while_inst.operation.condition[0])
+        initial_measure = qc.data[1]
+        initial_measure_clbit_idx = qc.clbits.index(initial_measure.clbits[0])
+        assert while_cond_clbit_idx == initial_measure_clbit_idx
+
+        outer_if_cond_clbit_idx = qc.clbits.index(outer_if_inst.operation.condition[0])
+        second_measure = qc.data[3]
+        second_measure_clbit_idx = qc.clbits.index(second_measure.clbits[0])
+        assert outer_if_cond_clbit_idx == second_measure_clbit_idx
+
+        inner_if_cond_clbit_idx = qc.clbits.index(inner_if_inst.operation.condition[0])
+        third_measure = qc.data[5]
+        third_measure_clbit_idx = qc.clbits.index(third_measure.clbits[0])
+        assert inner_if_cond_clbit_idx == third_measure_clbit_idx
+
+        inner_if_body_measure = inner_if_body.data[0]
+        inner_if_body_measure_clbit_idx = qc.clbits.index(inner_if_body_measure.clbits[0])
+        assert inner_if_body_measure_clbit_idx == while_cond_clbit_idx
 
         # --- Execution check ---
         transpiler = QiskitTranspiler()
