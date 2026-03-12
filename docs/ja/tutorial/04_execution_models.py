@@ -70,9 +70,9 @@ for outcome, count in sample_result.results:
 # %% [markdown]
 # ## ビット順序の規約
 #
-# Qamomileの出力は**ビッグエンディアン**順序を使用します: **最も左**の位置が戻り値タプルの**最初の**量子ビットに対応します。
+# Qamomileの出力は**ビッグエンディアン**順序を使用します：**最も左**の位置が戻り値タプルの**最初の**量子ビットに対応します。
 #
-# `(measure(q0), measure(q1), measure(q2))`を返す量子カーネルの場合:
+# `(measure(q0), measure(q1), measure(q2))`を返す量子カーネルの場合：
 #
 # | 結果タプル | q0 | q1 | q2 |
 # |--------------|----|----|-----|
@@ -81,7 +81,7 @@ for outcome, count in sample_result.results:
 #
 # タプルの位置`i`が戻り値の量子ビット`i`に対応します。
 #
-# > **注意**: Qiskitは内部的にリトルエンディアンを使用しますが、Qamomileが変換を処理します。結果は常に記述した順序で得られます。
+# > **注意**：Qiskitは内部的にリトルエンディアンを使用しますが、Qamomileが変換を処理します。結果は常に記述した順序で得られます。
 
 # %% [markdown]
 # ## 期待値が必要な場合
@@ -99,11 +99,9 @@ for outcome, count in sample_result.results:
 #
 # 関連する2つの概念があります：
 #
-# 1. **`qmc.Observable`** — 量子カーネルのシグネチャで使用する**ハンドル型**です。
-#    `qmc.Float`と同様に、量子カーネルの引数や戻り値の型アノテーションで使用します。
+# 1. `qmc.Observable` — 量子カーネルのシグネチャで使用するハンドル型です。`qmc.Float`と同様に、量子カーネルの引数や戻り値の型アノテーションで使用します。
 #
-# 2. **`qamomile.observable`モジュール** — バインディングで渡す**具体的な**
-#    オブザーバブル値を構築する場所です。例えば
+# 2. `qamomile.observable`モジュール — バインディングで渡す具体的なオブザーバブル値を構築する場所です。例えば
 #
 # ```python
 # import qamomile.observable as qmo
@@ -169,15 +167,14 @@ print("python type:", type(run_result))
 # | `Vector[Bit]` | `sample()` | `SampleResult` (`.results: list[tuple[tuple[int, ...], int]]`) |
 # | `Float` (`expval`から) | `run()` | `float` |
 #
-# **使い分け**:量子カーネルが`measure()`で終わる場合は`sample()`を使用します。`expval()`で終わる場合は`run()`を使用します。
+# **使い分け**：量子カーネルが`measure()`で終わる場合は`sample()`を使用します。`expval()`で終わる場合は`run()`を使用します。
 
 # %% [markdown]
 # ## まとめ
 #
 # - `sample()`は測定ビットを返す量子カーネル用 — カウント付きの測定結果分布が得られます。
 # - `run()`は`expval()`で`Float`を返す量子カーネル用 — 単一の期待値が得られます。
-# - `qmc.Observable`はハンドル型、`qamomile.observable.Z(0)`等が具体的な値です。
-#   オブザーバブルはトランスパイル時にバインドします。
+# - `qmc.Observable`はハンドル型、`qamomile.observable.Z(0)`等が具体的な値です。オブザーバブルはトランスパイル時にバインドします。
 # - ビット順序はビッグエンディアン：戻り値タプルの位置が量子ビットの順序に対応します。
 #
 # **次へ**：[古典フローパターン](05_classical_flow_patterns.ipynb) — `qmc.range`によるループ、`qmc.items`によるスパースデータ、条件分岐。

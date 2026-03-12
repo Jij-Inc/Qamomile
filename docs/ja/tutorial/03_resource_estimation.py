@@ -58,7 +58,7 @@ print("two-qubit gates:", est.gates.two_qubit)
 # %% [markdown]
 # ## シンボリックなリソース推定
 #
-# 量子カーネルに未バインドのパラメータ（例: `n: qmc.UInt`）がある場合、`estimate_resources()`は**SymPy式**を返します。特定の値を選ばなくてもコストのスケーリングが分かります。
+# 量子カーネルに未バインドのパラメータ（例：`n: qmc.UInt`）がある場合、`estimate_resources()`は**SymPy式**を返します。特定の値を選ばなくてもコストのスケーリングが分かります。
 
 
 # %%

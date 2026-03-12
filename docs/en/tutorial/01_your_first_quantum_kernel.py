@@ -82,9 +82,9 @@ def biased_coin(theta: qmc.Float) -> qmc.Bit:
 # - **Type annotations are required**. `theta: qmc.Float` says theta is a
 #   floating-point parameter. The return type `qmc.Bit` says this qkernel
 #   produces one classical bit.
-# - **`qmc.qubit(name="q")`** creates a qubit handle. The `name` appears
+# - `qmc.qubit(name="q")` creates a qubit handle. The `name` appears
 #   in circuit diagrams.
-# - **`q = qmc.ry(q, theta)`** applies the RY gate and **reassigns `q`**.
+# - `q = qmc.ry(q, theta)` applies the RY gate and reassigns `q`.
 #   This reassignment is important — we will explain why shortly.
 # - **`qmc.measure(q)`** measures the qubit state and returns a `Bit`.
 
