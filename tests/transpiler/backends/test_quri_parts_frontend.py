@@ -102,6 +102,7 @@ def _get_gates(circuit) -> list:
     """Return list of gate objects from a QURI Parts circuit.
 
     Handles both parametric and non-parametric circuits.
+    For parametric circuits, binds with zeros to obtain concrete gates.
     Returns QuantumGate objects with .name, .target_indices,
     .control_indices, and .params properties.
     """
@@ -110,7 +111,10 @@ def _get_gates(circuit) -> list:
         if gates:
             return gates
     if hasattr(circuit, "bind_parameters"):
-        bound = circuit.bind_parameters([])
+        if hasattr(circuit, "parameter_count") and circuit.parameter_count > 0:
+            bound = circuit.bind_parameters([0.0] * circuit.parameter_count)
+        else:
+            bound = circuit.bind_parameters([])
         if hasattr(bound, "gates"):
             return list(bound.gates)
     return []
