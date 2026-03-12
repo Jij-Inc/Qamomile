@@ -2599,7 +2599,12 @@ class TestParametricGates:
     # -- BinOp parametric tests --
 
     def test_parametric_mul_binop(self):
-        """theta * c via items() loop, bind and verify numerical result."""
+        """theta * c via items() loop, bind and verify numerical result.
+
+        Note: QURI Parts' Rust-backed Parameter does not support arithmetic
+        operators (*, +, -) with floats, so BinOp with unbound parameters
+        is not possible. We test with fully bound parameters instead.
+        """
 
         @qmc.qkernel
         def circuit(
@@ -2620,7 +2625,11 @@ class TestParametricGates:
         assert np.isclose(rx_gates[0].params[0], 3.0, atol=1e-10)
 
     def test_parametric_add_binop(self):
-        """theta + o via items() loop, bind and verify numerical result."""
+        """theta + o via items() loop, bind and verify numerical result.
+
+        Note: QURI Parts' Rust-backed Parameter does not support arithmetic
+        operators, so BinOp with unbound parameters is not possible.
+        """
 
         @qmc.qkernel
         def circuit(
@@ -2641,7 +2650,11 @@ class TestParametricGates:
         assert np.isclose(rx_gates[0].params[0], 1.5, atol=1e-10)
 
     def test_parametric_sub_binop(self):
-        """theta - o via items() loop, bind and verify numerical result."""
+        """theta - o via items() loop, bind and verify numerical result.
+
+        Note: QURI Parts' Rust-backed Parameter does not support arithmetic
+        operators, so BinOp with unbound parameters is not possible.
+        """
 
         @qmc.qkernel
         def circuit(
