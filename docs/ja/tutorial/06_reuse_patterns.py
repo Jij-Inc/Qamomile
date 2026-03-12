@@ -13,20 +13,20 @@
 # ---
 
 # %% [markdown]
-# # 再利用パターン：QKernel の合成とコンポジットゲート
+# # 再利用パターン：QKernelの合成とコンポジットゲート
 #
-# 回路が大きくなると、ゲート列のコピー＆ペーストを避けたくなります。Qamomile は 2 つの再利用メカニズムを提供しています：
+# 回路が大きくなると、ゲート列のコピー＆ペーストを避けたくなります。Qamomileは2つの再利用メカニズムを提供しています：
 #
-# 1. **ヘルパー QKernel** — ある `@qkernel` を別の `@qkernel` から呼び出す、
+# 1. **ヘルパーQKernel** — ある`@qkernel`を別の`@qkernel`から呼び出す、
 #    通常の関数合成と同じ方法です。
 # 2. **`@composite_gate`** — 量子カーネルをカスタム可能な**名前付きゲート**に昇格させ、
 #    図中で単一のボックスとして表示します。
 #
-# さらにトップダウン設計のための第 3 のパターンもあります：
+# さらにトップダウン設計のための第3のパターンもあります：
 #
 # 3. **スタブゲート** — 実装本体を持たないゲートで、リソース推定に使います。
 #    例えば、グローバー探索アルゴリズムを設計しており、
-#    オラクルが約 40 個の T ゲートを使用することはわかっているが、まだ実装していないとします。
+#    オラクルが約40個のTゲートを使用することはわかっているが、まだ実装していないとします。
 #    スタブゲートを使用すると、完全なオラクル実装なしでアルゴリズムの総コストを推定できます。
 
 # %%
@@ -37,9 +37,9 @@ from qamomile.qiskit import QiskitTranspiler
 transpiler = QiskitTranspiler()
 
 # %% [markdown]
-# ## パターン 1: ヘルパー QKernel
+# ## パターン1:ヘルパーQKernel
 #
-# どの `@qkernel` 関数も別の `@qkernel` から呼び出せます。トランスパイル時にインライン展開されるため、トランスパイル結果はフラットな回路になります。
+# どの`@qkernel`関数も別の`@qkernel`から呼び出せます。トランスパイル時にインライン展開されるため、トランスパイル結果はフラットな回路になります。
 
 
 # %%
@@ -75,18 +75,18 @@ result = (
 print("GHZ result:", result.results)
 
 # %% [markdown]
-# ヘルパー `entangle_once` により、呼び出し側のコードが読みやすくなります。トランスパイル後の回路ではインライン展開されるため、サブブロックではなく個々の CX ゲートが見えます。
+# ヘルパー`entangle_once`により、呼び出し側のコードが読みやすくなります。トランスパイル後の回路ではインライン展開されるため、サブブロックではなく個々のCXゲートが見えます。
 
 # %%
 qc = transpiler.to_circuit(ghz_with_helper, bindings={"n": 4})
 print(qc.draw())
 
 # %% [markdown]
-# ## パターン 2: `@composite_gate`
+# ## パターン2: `@composite_gate`
 #
-# 再利用可能なブロックを回路図で**名前付きボックス**として表示したい場合`@composite_gate` でを使うこともできます。また、より高度な内容としてコンポジットゲートにすることで複数の実装方式を与えるといったカスタム設定を与えることも可能です。
+# 再利用可能なブロックを回路図で**名前付きボックス**として表示したい場合`@composite_gate`でを使うこともできます。また、より高度な内容としてコンポジットゲートにすることで複数の実装方式を与えるといったカスタム設定を与えることも可能です。
 #
-# `@qkernel` の上に `@composite_gate(name="...")` を重ねて書きます：
+# `@qkernel`の上に`@composite_gate(name="...")`を重ねて書きます：
 
 
 # %%
@@ -114,19 +114,19 @@ ghz_with_composite.draw(n=4, fold_loops=False)
 # %% [markdown]
 # ### どちらを使うべきか?
 #
-# | パターン | `draw()` での表示 | 使用場面 |
+# | パターン | `draw()`での表示 | 使用場面 |
 # |---------|-------------------|--------------------------|
-# | ヘルパー `@qkernel` | インライン展開(フラット) | コードの整理 |
+# | ヘルパー`@qkernel` | インライン展開(フラット) | コードの整理 |
 # | `@composite_gate` | 名前付きボックス | ドメインレベルの抽象化/高度なカスタム |
 
 # %% [markdown]
-# ## パターン 3: トップダウン設計のためのスタブゲート
+# ## パターン3:トップダウン設計のためのスタブゲート
 #
 # オラクルなどを想定する量子アルゴリズムを設計する場合に内部は未知のまま回路を組みたいこともあると思います。**スタブゲート**は実装本体を持たず、名前・量子ビット数・オプションのリソースメタデータだけを持ちます。
 #
 # オラクルあるいはサブルーチンが開発中でも、アルゴリズム全体のコストを推定できます。
 #
-# スタブゲートを使うためには `@composite_gate` の引数として `stub=True` を指定します。このとき同時にリソース情報を `ResrouceMetadata` として与えられます。
+# スタブゲートを使うためには`@composite_gate`の引数として`stub=True`を指定します。このとき同時にリソース情報を`ResrouceMetadata`として与えられます。
 
 
 # %%
@@ -157,9 +157,9 @@ def algorithm_skeleton() -> qmc.Vector[qmc.Qubit]:
 algorithm_skeleton.draw(fold_loops=False)
 
 # %% [markdown]
-# ### スタブゲートを含む qkernel のリソース推定
+# ### スタブゲートを含むqkernelのリソース推定
 #
-# `estimate_resources()` は、オラクル内部が未実装でも qkernel 全体を解析できます。既知の回路部分は通常どおり集計され、未知のスタブ部分は `est.gates.oracle_calls` / `est.gates.oracle_queries` として追跡されます。
+# `estimate_resources()`は、オラクル内部が未実装でもqkernel全体を解析できます。既知の回路部分は通常どおり集計され、未知のスタブ部分は`est.gates.oracle_calls` / `est.gates.oracle_queries`として追跡されます。
 
 # %%
 est = algorithm_skeleton.estimate_resources().simplify()
@@ -167,7 +167,7 @@ print("qubits:", est.qubits)
 print("total gates:", est.gates.total)
 
 # %% [markdown]
-# 次に、通常ゲートと複数スタブオラクルを混在させた qkernel で確認します。
+# 次に、通常ゲートと複数スタブオラクルを混在させたqkernelで確認します。
 
 # %%
 @qmc.composite_gate(
@@ -226,7 +226,7 @@ print("oracle_calls (rounds=4):", oracle_est_4.gates.oracle_calls)
 print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
 
 # %% [markdown]
-# この例では、オラクル内部が不明でも回路解析を進められます。既知部分は `total` / `two_qubit` に反映され、未知オラクル部分は `oracle_calls`（例: `{'phase_oracle': rounds + 1, 'mixing_oracle': rounds}`）と `oracle_queries`（`query_complexity` で重み付け）として追跡されます。
+# この例では、オラクル内部が不明でも回路解析を進められます。既知部分は`total` / `two_qubit`に反映され、未知オラクル部分は`oracle_calls`（例: `{'phase_oracle': rounds + 1, 'mixing_oracle': rounds}`）と`oracle_queries`（`query_complexity`で重み付け）として追跡されます。
 
 # %% [markdown]
 # このトップダウンアプローチにより、完全な分解を実装する前にアルゴリズムレベルのコスト（量子ビット数、オラクルクエリ数等）を確認できます。
@@ -234,10 +234,10 @@ print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
 # %% [markdown]
 # ## まとめ
 #
-# - **ヘルパー `@qkernel`**：ある量子カーネルから別の量子カーネルを呼び出してコードを再利用できます。
+# - **ヘルパー`@qkernel`**：ある量子カーネルから別の量子カーネルを呼び出してコードを再利用できます。
 #   トランスパイラがインライン展開し、結果はフラットな回路になります。
 # - **`@composite_gate`**：量子カーネルに名前付きの識別子を与え、図で一つのゲートとして可視化します。
-#   `@qkernel` の上に `@composite_gate` デコレータを重ねて書きます。
-# - **スタブゲート**：`stub=True` と `ResourceMetadata` で、
+#   `@qkernel`の上に`@composite_gate`デコレータを重ねて書きます。
+# - **スタブゲート**：`stub=True`と`ResourceMetadata`で、
 #   実装なしにトップダウン設計とリソース推定が可能です。
 # - **`est.gates.oracle_calls`**：オラクル内部が不明な状態でも、呼び出し回数を名前別の辞書として確認できます（シンボリックな回数もそのまま扱えます）。
