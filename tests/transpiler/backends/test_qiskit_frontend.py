@@ -40,7 +40,7 @@ from qiskit.circuit.library import (
     CXGate, CZGate, CPhaseGate, RZZGate, SwapGate,
     CCXGate,
 )
-from qiskit.circuit import Measure, Barrier
+from qiskit.circuit import Measure, Barrier, Parameter, ParameterExpression
 from qiskit.circuit.controlflow import WhileLoopOp, IfElseOp
 
 import qamomile.observable as qm_o
@@ -1176,6 +1176,151 @@ class TestThreeQubitGatesFrontend:
             GATE_SPECS["TOFFOLI"].matrix_fn(),
         )
         assert statevectors_equal(sv, expected)
+
+
+# ============================================================================
+# 1b. Parametric Gate Tests (unbound parameters)
+# ============================================================================
+
+
+class TestParametricGates:
+    """Test that gates with unbound parameters produce parameterized circuits.
+
+    Uses ``parameters=["theta"]`` to keep float args as Qiskit Parameter
+    objects, verifying gate type, parameter name, and circuit structure.
+    """
+
+    def test_rx_parametric(self):
+        """RX with unbound theta contains a Parameter in the gate."""
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit, parameters=["theta"])
+        qc = exe.compiled_quantum[0].circuit
+        assert len(qc.parameters) == 1
+        assert isinstance(qc.data[0].operation, RXGate)
+        param = qc.data[0].operation.params[0]
+        assert isinstance(param, ParameterExpression)
+        assert "theta" in str(param)
+
+    def test_ry_parametric(self):
+        """RY with unbound theta contains a Parameter in the gate."""
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.ry(q, theta)
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit, parameters=["theta"])
+        qc = exe.compiled_quantum[0].circuit
+        assert len(qc.parameters) == 1
+        assert isinstance(qc.data[0].operation, RYGate)
+        param = qc.data[0].operation.params[0]
+        assert isinstance(param, ParameterExpression)
+        assert "theta" in str(param)
+
+    def test_rz_parametric(self):
+        """RZ with unbound theta contains a Parameter in the gate."""
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.rz(q, theta)
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit, parameters=["theta"])
+        qc = exe.compiled_quantum[0].circuit
+        assert len(qc.parameters) == 1
+        assert isinstance(qc.data[0].operation, RZGate)
+        param = qc.data[0].operation.params[0]
+        assert isinstance(param, ParameterExpression)
+        assert "theta" in str(param)
+
+    def test_p_parametric(self):
+        """P with unbound theta contains a Parameter in the gate."""
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.p(q, theta)
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit, parameters=["theta"])
+        qc = exe.compiled_quantum[0].circuit
+        assert len(qc.parameters) == 1
+        assert isinstance(qc.data[0].operation, PhaseGate)
+        param = qc.data[0].operation.params[0]
+        assert isinstance(param, ParameterExpression)
+        assert "theta" in str(param)
+
+    def test_cp_parametric(self):
+        """CP with unbound theta contains a Parameter in the gate."""
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            q[0], q[1] = qmc.cp(q[0], q[1], theta)
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit, parameters=["theta"])
+        qc = exe.compiled_quantum[0].circuit
+        assert len(qc.parameters) == 1
+        assert isinstance(qc.data[0].operation, CPhaseGate)
+        param = qc.data[0].operation.params[0]
+        assert isinstance(param, ParameterExpression)
+        assert "theta" in str(param)
+
+    def test_rzz_parametric(self):
+        """RZZ with unbound theta contains a Parameter in the gate."""
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            q[0], q[1] = qmc.rzz(q[0], q[1], theta)
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit, parameters=["theta"])
+        qc = exe.compiled_quantum[0].circuit
+        assert len(qc.parameters) == 1
+        assert isinstance(qc.data[0].operation, RZZGate)
+        param = qc.data[0].operation.params[0]
+        assert isinstance(param, ParameterExpression)
+        assert "theta" in str(param)
+
+    def test_vector_parametric(self):
+        """Vector[Float] parameter produces multiple indexed Parameters."""
+
+        @qmc.qkernel
+        def circuit(
+            n: qmc.UInt, thetas: qmc.Vector[qmc.Float]
+        ) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            for i in qmc.range(n):
+                q[i] = qmc.ry(q[i], thetas[i])
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(
+            circuit, bindings={"n": 3}, parameters=["thetas"]
+        )
+        qc = exe.compiled_quantum[0].circuit
+        assert len(qc.parameters) == 3
+        # Each RY gate has a ParameterExpression
+        for i in range(3):
+            assert isinstance(qc.data[i].operation, RYGate)
+            param = qc.data[i].operation.params[0]
+            assert isinstance(param, ParameterExpression)
 
 
 # ============================================================================
