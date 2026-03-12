@@ -2,6 +2,8 @@
 
 Qamomile is a quantum programming SDK. Write quantum circuits as typed Python functions and run them on quantum SDKs like Qiskit and QuriParts.
 
+> **Note**: Qamomile is under active development, and breaking changes may be introduced between releases.
+
 ## Tutorials
 
 1. [Your First Quantum Kernel](tutorial/01_your_first_quantum_kernel) — Define, visualize, and execute a kernel; the affine rule
