@@ -15,11 +15,7 @@
 # %% [markdown]
 # # Resource Estimation
 #
-# Before running a quantum kernel on real hardware, you may want to know its
-# required resources, such as qubit count and gate count.
-# Or, you may want to know the resource requirements of a quantum kernel you defined in the first place.
-# Qamomile's `estimate_resources()` fills this need **without executing the qkernel**.
-# It works with both concrete and symbolic (parameterized) qkernels.
+# Before running a quantum kernel on real hardware, you may want to know its required resources, such as qubit count and gate count. Or, you may want to know the resource requirements of a quantum kernel you defined in the first place. Qamomile's `estimate_resources()` fills this need **without executing the qkernel**. It works with both concrete and symbolic (parameterized) qkernels.
 #
 # This chapter covers:
 #
@@ -34,8 +30,7 @@ import qamomile.circuit as qmc
 # %% [markdown]
 # ## Estimating Resources of a Fixed QKernel
 #
-# For a qkernel with no parameters, `estimate_resources()` returns
-# concrete numbers.
+# For a qkernel with no parameters, `estimate_resources()` returns concrete numbers.
 
 
 # %%
@@ -63,10 +58,7 @@ print("two-qubit gates:", est.gates.two_qubit)
 # %% [markdown]
 # ## Symbolic Resource Estimation
 #
-# When a qkernel has unbound parameters (like `n: qmc.UInt`),
-# `estimate_resources()` returns **SymPy expressions** that show how
-# costs scale with the parameter. This lets you analyze scaling
-# without picking a specific value.
+# When a qkernel has unbound parameters (like `n: qmc.UInt`), `estimate_resources()` returns **SymPy expressions** that show how costs scale with the parameter. This lets you analyze scaling without picking a specific value.
 
 
 # %%
@@ -97,8 +89,7 @@ print("rotation gates:", est.gates.rotation_gates)
 print("parameters:", est.parameters)
 
 # %% [markdown]
-# The output contains SymPy expressions like `n` for qubits and `3*n - 1`
-# for total gates. These are exact — not approximations.
+# The output contains SymPy expressions like `n` for qubits and `3*n - 1` for total gates. These are exact — not approximations.
 
 # %% [markdown]
 # ## `ResourceEstimate` Fields Reference
@@ -116,14 +107,12 @@ print("parameters:", est.parameters)
 # | `est.gates.oracle_calls` | Oracle call counts (dict by name) |
 # | `est.parameters` | Dict of symbol names → SymPy symbols |
 #
-# All fields are SymPy expressions. For fixed qkernels they evaluate to
-# plain integers.
+# All fields are SymPy expressions. For fixed qkernels they evaluate to plain integers.
 
 # %% [markdown]
 # ## Scaling Analysis with `.substitute()`
 #
-# The symbolic expressions tell you the *formula*, but often you want
-# concrete numbers at specific sizes. Use `.substitute()` to evaluate:
+# The symbolic expressions tell you the *formula*, but often you want concrete numbers at specific sizes. Use `.substitute()` to evaluate:
 
 # %%
 for n_val in [4, 8, 16, 32]:
@@ -139,5 +128,4 @@ for n_val in [4, 8, 16, 32]:
 # - For parameterized qkernels, results are SymPy expressions showing exact scaling.
 # - Use `.substitute(n=...)` to evaluate at specific sizes and check feasibility.
 #
-# **Next**: [Execution Models](04_execution_models.ipynb) — `sample()` vs `run()`,
-# observables, and bit ordering.
+# **Next**: [Execution Models](04_execution_models.ipynb) — `sample()` vs `run()`, observables, and bit ordering.

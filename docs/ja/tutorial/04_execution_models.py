@@ -34,8 +34,7 @@ transpiler = QiskitTranspiler()
 # %% [markdown]
 # ## 複数量子ビットの `sample()`
 #
-# チュートリアル 01 では単一の `Bit` をサンプリングしました。量子カーネルが複数ビットを返す場合、
-# 各測定結果は整数値（`0` または `1`）の**タプル**になります。
+# チュートリアル 01 では単一の `Bit` をサンプリングしました。量子カーネルが複数ビットを返す場合、各測定結果は整数値（`0` または `1`）の**タプル**になります。
 
 
 # %%
@@ -66,15 +65,12 @@ for outcome, count in sample_result.results:
     print(f"  outcome={outcome}, count={count}")
 
 # %% [markdown]
-# 各 `outcome` は `(0, 1)` や `(1, 0)` のようなタプルです。
-# 最初の要素は `q0` に、2番目の要素は `q1` に対応し、
-# `return` 文での順序と一致します。
+# 各 `outcome` は `(0, 1)` や `(1, 0)` のようなタプルです。最初の要素は `q0` に、2番目の要素は `q1` に対応し、`return` 文での順序と一致します。
 
 # %% [markdown]
 # ## ビット順序の規約
 #
-# Qamomile の出力は**ビッグエンディアン**順序を使用します: **最も左**の位置が
-# 戻り値タプルの**最初の**量子ビットに対応します。
+# Qamomile の出力は**ビッグエンディアン**順序を使用します: **最も左**の位置が戻り値タプルの**最初の**量子ビットに対応します。
 #
 # `(measure(q0), measure(q1), measure(q2))` を返す量子カーネルの場合:
 #
@@ -85,14 +81,12 @@ for outcome, count in sample_result.results:
 #
 # タプルの位置 `i` が戻り値の量子ビット `i` に対応します。
 #
-# > **注意**: Qiskit は内部的にリトルエンディアンを使用しますが、Qamomile が
-# > 変換を処理します。結果は常に記述した順序で得られます。
+# > **注意**: Qiskit は内部的にリトルエンディアンを使用しますが、Qamomile が変換を処理します。結果は常に記述した順序で得られます。
 
 # %% [markdown]
 # ## 期待値が必要な場合
 #
-# 個々の測定結果ではなく、量子オブザーバブルの**期待値**（平均値）が必要な場面があります。
-# 例えば：
+# 個々の測定結果ではなく、量子オブザーバブルの**期待値**（平均値）が必要な場面があります。例えば：
 #
 # - **VQE**（変分量子固有値ソルバー）：$\langle \psi \rvert H \lvert \psi \rangle$ の最小化
 # - **QAOA**：コスト関数の期待値の評価
@@ -122,10 +116,7 @@ for outcome, count in sample_result.results:
 # %% [markdown]
 # ## `expval()`: オブザーバブルの測定
 #
-# `expval(qubit, hamiltonian)` は期待値 $\langle \psi \rvert H \lvert \psi \rangle$
-# （ $\lvert \psi \rangle$ は `qubit` を 表し、 $H$ は `hamiltonian` に対応）を計算し、
-# `qmc.Float` を返します。
-# `expval` から `Float` を返す量子カーネルは `run()` で実行する必要があります。
+# `expval(qubit, hamiltonian)` は期待値 $\langle \psi \rvert H \lvert \psi \rangle$（ $\lvert \psi \rangle$ は `qubit` を 表し、 $H$ は `hamiltonian` に対応）を計算し、`qmc.Float` を返します。`expval` から `Float` を返す量子カーネルは `run()` で実行する必要があります。
 
 
 # %%
@@ -144,9 +135,7 @@ z_expectation.draw(theta=0.7, hamiltonian=H)
 # %% [markdown]
 # ## `run()` による実行
 #
-# 期待値を返す量子カーネルには `sample()` の代わりに `run()` を使います。
-# オブザーバブルはトランスパイル時にバインドし（測定回路に影響するため）、
-# `theta` はスイープ可能なパラメータとして残します。
+# 期待値を返す量子カーネルには `sample()` の代わりに `run()` を使います。オブザーバブルはトランスパイル時にバインドし（測定回路に影響するため）、`theta` はスイープ可能なパラメータとして残します。
 
 # %%
 exe_run = transpiler.transpile(
@@ -164,13 +153,11 @@ print("expectation value:", run_result)
 print("python type:", type(run_result))
 
 # %% [markdown]
-# `run().result()` はプレーンな `float` を返します — 推定された $\langle \psi \rvert Z \lvert \psi \rangle$ の値です。
-# $\theta = 0.7$ の場合、RY ゲートが量子ビットを
+# `run().result()` はプレーンな `float` を返します — 推定された $\langle \psi \rvert Z \lvert \psi \rangle$ の値です。$\theta = 0.7$ の場合、RY ゲートが量子ビットを
 # $$
 # R_Y(\theta) \lvert 0 \rangle = \cos\left( \frac{\theta}{2} \right) \lvert 0 \rangle + \sin\left( \frac{\theta}{2} \right) \lvert 1 \rangle
 # $$
-# のように回転させ、
-# Z の期待値は $\cos^2\left( \frac{\theta}{2} \right) - \sin^2\left( \frac{\theta}{2} \right) = \cos(\theta) \approx 0.765$ となります。
+# のように回転させ、Z の期待値は $\cos^2\left( \frac{\theta}{2} \right) - \sin^2\left( \frac{\theta}{2} \right) = \cos(\theta) \approx 0.765$ となります。
 
 # %% [markdown]
 # ## `sample()` と `run()`
@@ -182,8 +169,7 @@ print("python type:", type(run_result))
 # | `Vector[Bit]` | `sample()` | `SampleResult` (`.results: list[tuple[tuple[int, ...], int]]`) |
 # | `Float` (`expval` から) | `run()` | `float` |
 #
-# **使い分け**: 量子カーネルが `measure()` で終わる場合は `sample()` を使用します。
-# `expval()` で終わる場合は `run()` を使用します。
+# **使い分け**: 量子カーネルが `measure()` で終わる場合は `sample()` を使用します。`expval()` で終わる場合は `run()` を使用します。
 
 # %% [markdown]
 # ## まとめ
@@ -194,5 +180,4 @@ print("python type:", type(run_result))
 #   オブザーバブルはトランスパイル時にバインドします。
 # - ビット順序はビッグエンディアン：戻り値タプルの位置が量子ビットの順序に対応します。
 #
-# **次へ**：[古典フローパターン](05_classical_flow_patterns.ipynb) — `qmc.range` によるループ、
-# `qmc.items` によるスパースデータ、条件分岐。
+# **次へ**：[古典フローパターン](05_classical_flow_patterns.ipynb) — `qmc.range` によるループ、`qmc.items` によるスパースデータ、条件分岐。

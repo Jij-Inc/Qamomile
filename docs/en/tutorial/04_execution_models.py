@@ -22,8 +22,7 @@
 # | `Bit`, `Vector[Bit]`, `tuple[Bit, ...]` | `sample()` | `SampleResult` — counted outcomes |
 # | `Float` (from `expval`) | `run()` | `float` — expectation value |
 #
-# This chapter explains both methods and introduces **observables** for
-# expectation-value computation.
+# This chapter explains both methods and introduces **observables** for expectation-value computation.
 
 # %%
 import qamomile.circuit as qmc
@@ -35,8 +34,7 @@ transpiler = QiskitTranspiler()
 # %% [markdown]
 # ## Multi-Qubit `sample()`
 #
-# In Tutorial 01 we sampled a single `Bit`. When a qkernel returns multiple bits,
-# each outcome is a **tuple** of integer values (`0` or `1`).
+# In Tutorial 01 we sampled a single `Bit`. When a qkernel returns multiple bits, each outcome is a **tuple** of integer values (`0` or `1`).
 
 
 # %%
@@ -67,15 +65,12 @@ for outcome, count in sample_result.results:
     print(f"  outcome={outcome}, count={count}")
 
 # %% [markdown]
-# Each `outcome` is a tuple like `(0, 1)` or `(1, 0)`.
-# The first element corresponds to `q0`, the second to `q1`,
-# matching the order in the `return` statement.
+# Each `outcome` is a tuple like `(0, 1)` or `(1, 0)`. The first element corresponds to `q0`, the second to `q1`, matching the order in the `return` statement.
 
 # %% [markdown]
 # ## Bit Ordering Convention
 #
-# Qamomile uses **big-endian** ordering in its output: the **leftmost** position
-# corresponds to the **first** qubit in the return tuple.
+# Qamomile uses **big-endian** ordering in its output: the **leftmost** position corresponds to the **first** qubit in the return tuple.
 #
 # For a qkernel returning `(measure(q0), measure(q1), measure(q2))`:
 #
@@ -86,14 +81,12 @@ for outcome, count in sample_result.results:
 #
 # This is straightforward — position `i` in the tuple is qubit `i` in the return.
 #
-# > **Note**: Qiskit internally uses little-endian, but Qamomile handles the
-# > conversion for you. You always get results in the order you wrote them.
+# > **Note**: Qiskit internally uses little-endian, but Qamomile handles the conversion for you. You always get results in the order you wrote them.
 
 # %% [markdown]
 # ## When You Need Expectation Values
 #
-# Sometimes you don't want individual measurement outcomes — you want the
-# **average value** of a quantum observable. This is common in:
+# Sometimes you don't want individual measurement outcomes — you want the **average value** of a quantum observable. This is common in:
 #
 # - **VQE** (Variational Quantum Eigensolver): minimize $\langle \psi \rvert H \lvert \psi \rangle$
 # - **QAOA**: evaluate cost function expectation values
@@ -123,9 +116,7 @@ for outcome, count in sample_result.results:
 # %% [markdown]
 # ## `expval()`: Measuring an Observable
 #
-# `expval(qubit, hamiltonian)` computes the expectation value $\langle \psi \rvert H \lvert \psi \rangle$
-# ( $\lvert \psi \rangle$ represents `qubit` and $H$ represents `hamiltonian` ) and returns a `qmc.Float`.
-# A qkernel that returns `Float` from `expval` should be executed with `run()`.
+# `expval(qubit, hamiltonian)` computes the expectation value $\langle \psi \rvert H \lvert \psi \rangle$ ( $\lvert \psi \rangle$ represents `qubit` and $H$ represents `hamiltonian` ) and returns a `qmc.Float`. A qkernel that returns `Float` from `expval` should be executed with `run()`.
 
 
 # %%
@@ -144,9 +135,7 @@ z_expectation.draw(theta=0.7, hamiltonian=H)
 # %% [markdown]
 # ## Running with `run()`
 #
-# For expectation-value qkernels, use `run()` instead of `sample()`.
-# The observable is bound at transpile time (it affects the measurement circuit),
-# while `theta` remains a sweepable runtime parameter.
+# For expectation-value qkernels, use `run()` instead of `sample()`. The observable is bound at transpile time (it affects the measurement circuit), while `theta` remains a sweepable runtime parameter.
 
 # %%
 exe_run = transpiler.transpile(
@@ -164,8 +153,7 @@ print("expectation value:", run_result)
 print("python type:", type(run_result))
 
 # %% [markdown]
-# `run().result()` returns a plain `float` — the estimated $\langle \psi \rvert Z \lvert \psi \rangle$ value.
-# For $\theta = 0.7$, the RY gate rotates the qubit as
+# `run().result()` returns a plain `float` — the estimated $\langle \psi \rvert Z \lvert \psi \rangle$ value. For $\theta = 0.7$, the RY gate rotates the qubit as
 # $$
 # R_Y(\theta) \lvert 0 \rangle = \cos\left( \frac{\theta}{2} \right) \lvert 0 \rangle + \sin\left( \frac{\theta}{2} \right) \lvert 1 \rangle
 # $$
@@ -181,8 +169,7 @@ print("python type:", type(run_result))
 # | `Vector[Bit]` | `sample()` | `SampleResult` with `.results: list[tuple[tuple[int, ...], int]]` |
 # | `Float` (from `expval`) | `run()` | `float` |
 #
-# **Rule of thumb**: if your qkernel ends with `measure()`, use `sample()`.
-# If it ends with `expval()`, use `run()`.
+# **Rule of thumb**: if your qkernel ends with `measure()`, use `sample()`. If it ends with `expval()`, use `run()`.
 
 # %% [markdown]
 # ## Summary
@@ -195,5 +182,4 @@ print("python type:", type(run_result))
 #   the concrete values. Bind observables at transpile time.
 # - Bit ordering is big-endian: position in the return tuple matches qubit order.
 #
-# **Next**: [Classical Flow Patterns](05_classical_flow_patterns.ipynb) — loops
-# with `qmc.range`, sparse data with `qmc.items`, and conditional branching.
+# **Next**: [Classical Flow Patterns](05_classical_flow_patterns.ipynb) — loops with `qmc.range`, sparse data with `qmc.items`, and conditional branching.

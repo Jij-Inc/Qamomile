@@ -15,8 +15,7 @@
 # %% [markdown]
 # # Reuse Patterns: QKernel Composition and Composite Gates
 #
-# As circuits grow, you want to avoid copy-pasting gate sequences.
-# Qamomile offers two complementary reuse mechanisms:
+# As circuits grow, you want to avoid copy-pasting gate sequences. Qamomile offers two complementary reuse mechanisms:
 #
 # 1. **Helper QKernel** — call one `@qkernel` from another, like normal
 #    function composition.
@@ -42,8 +41,7 @@ transpiler = QiskitTranspiler()
 # %% [markdown]
 # ## Pattern 1: Helper QKernel
 #
-# Any `@qkernel` function can be called from another `@qkernel`.
-# The transpiler inlines the call — the result is a flat circuit.
+# Any `@qkernel` function can be called from another `@qkernel`. The transpiler inlines the call — the result is a flat circuit.
 
 
 # %%
@@ -79,8 +77,7 @@ result = (
 print("GHZ result:", result.results)
 
 # %% [markdown]
-# The helper `entangle_once` keeps the call site readable. In the transpiled
-# circuit, it is inlined — you see individual CX gates, not a sub-block.
+# The helper `entangle_once` keeps the call site readable. In the transpiled circuit, it is inlined — you see individual CX gates, not a sub-block.
 
 # %%
 qc = transpiler.to_circuit(ghz_with_helper, bindings={"n": 4})
@@ -89,11 +86,7 @@ print(qc.draw())
 # %% [markdown]
 # ## Pattern 2: `@composite_gate`
 #
-# When you want a reusable block to appear as a **named box** in circuit
-# diagrams, promote it with `@composite_gate`.
-# Also, as a more advanced use case,
-# making it a composite gate allows you to give it custom settings such as
-# giving it multiple ways of implementation.
+# When you want a reusable block to appear as a **named box** in circuit diagrams, promote it with `@composite_gate`. Also, as a more advanced use case, making it a composite gate allows you to give it custom settings such as giving it multiple ways of implementation.
 #
 # Stack `@composite_gate(name="...")` on top of `@qkernel`:
 
@@ -131,15 +124,11 @@ ghz_with_composite.draw(n=4, fold_loops=False)
 # %% [markdown]
 # ## Pattern 3: Stub Composite Gate for Top-Down Design
 #
-# Sometimes you want to design an algorithm's structure before implementing
-# every sub-component. A **stub composite gate** has no implementation body — just
-# a name, qubit count, and optional resource metadata.
+# Sometimes you want to design an algorithm's structure before implementing every sub-component. A **stub composite gate** has no implementation body — just a name, qubit count, and optional resource metadata.
 #
-# This lets you estimate the cost of the overall algorithm while the
-# oracle or sub-routine is still under development.
+# This lets you estimate the cost of the overall algorithm while the oracle or sub-routine is still under development.
 #
-# To use a stub composite gate, specify `stub=True` in the `@composite_gate` decorator.
-# At the same time, you can also give it resource information as `ResourceMetadata`.
+# To use a stub composite gate, specify `stub=True` in the `@composite_gate` decorator. At the same time, you can also give it resource information as `ResourceMetadata`.
 
 
 # %%
@@ -173,8 +162,7 @@ algorithm_skeleton.draw(fold_loops=False)
 # %% [markdown]
 # ### Resource Estimation with Stub Composite Gates
 #
-# `estimate_resources()` picks up the stub's metadata automatically.
-# You can also query the metadata directly.
+# `estimate_resources()` picks up the stub's metadata automatically. You can also query the metadata directly.
 
 # %%
 est = algorithm_skeleton.estimate_resources().simplify()
@@ -187,9 +175,7 @@ print("oracle query complexity:", meta.query_complexity)
 print("oracle T-gate count:", meta.t_gates)
 
 # %% [markdown]
-# This top-down approach lets you reason about algorithm-level costs
-# (such as qubit count, oracle queries) before committing to
-# a full decomposition.
+# This top-down approach lets you reason about algorithm-level costs (such as qubit count, oracle queries) before committing to a full decomposition.
 
 # %% [markdown]
 # ## Summary

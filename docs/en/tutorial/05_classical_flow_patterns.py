@@ -15,10 +15,7 @@
 # %% [markdown]
 # # Classical Control Flow Patterns
 #
-# Quantum circuits often have structure that depends on classical control flow:
-# iterating over qubits, applying gates based on a graph's edges,
-# or choosing between gate sequences. Qamomile supports these patterns
-# through `qmc.range`, `qmc.items`, `if` branching, and `while` loops.
+# Quantum circuits often have structure that depends on classical control flow: iterating over qubits, applying gates based on a graph's edges, or choosing between gate sequences. Qamomile supports these patterns through `qmc.range`, `qmc.items`, `if` branching, and `while` loops.
 #
 # This chapter covers:
 #
@@ -35,9 +32,7 @@ transpiler = QiskitTranspiler()
 # %% [markdown]
 # ## `qmc.range` Loops
 #
-# `qmc.range` may take `start`, `stop`, and `step` arguments.
-# Here we create a qkernel that applies H to every other qubit and
-# then entangles adjacent pairs with CX.
+# `qmc.range` may take `start`, `stop`, and `step` arguments. Here we create a qkernel that applies H to every other qubit and then entangles adjacent pairs with CX.
 
 
 # %%
@@ -62,14 +57,9 @@ hadamard_chain.draw(n=5, fold_loops=False)
 # %% [markdown]
 # ## `qmc.items` for Sparse Interaction Data
 #
-# Many quantum algorithms (QAOA, VQE) apply gates only on specific pairs
-# of qubits, determined by a graph or interaction map. Rather than looping
-# over all pairs, you can pass a **dictionary** of interactions and iterate
-# with `qmc.items()`.
+# Many quantum algorithms (QAOA, VQE) apply gates only on specific pairs of qubits, determined by a graph or interaction map. Rather than looping over all pairs, you can pass a **dictionary** of interactions and iterate with `qmc.items()`.
 #
-# The dictionary type uses Qamomile's symbolic types:
-# `qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]` — keys are qubit
-# index pairs, values are interaction weights.
+# The dictionary type uses Qamomile's symbolic types: `qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]` — keys are qubit index pairs, values are interaction weights.
 
 
 # %%
@@ -95,10 +85,7 @@ def sparse_coupling(
 # %% [markdown]
 # ## Inspecting with `transpiler.to_circuit()`
 #
-# `draw()` does not yet support all patterns (particularly `items` with
-# complex types, `if`, and `while`).
-# In such cases, use `transpiler.to_circuit()` to see the concrete
-# transpiled circuit after all parameters are bound.
+# `draw()` does not yet support all patterns (particularly `items` with complex types, `if`, and `while`). In such cases, use `transpiler.to_circuit()` to see the concrete transpiled circuit after all parameters are bound.
 
 # %%
 edge_data = {(0, 1): 1.0, (1, 2): -0.7, (0, 2): 0.3}
@@ -115,18 +102,14 @@ print(circuit)
 # %% [markdown]
 # ## `if` Branching and `while` Loops
 #
-# Qamomile supports **mid-circuit measurement** followed by classical
-# branching. The condition must be a **measurement result** (`Bit`),
-# not an argument of qkernels.
+# Qamomile supports **mid-circuit measurement** followed by classical branching. The condition must be a **measurement result** (`Bit`), not an argument of qkernels.
 #
-# This maps directly to hardware-level conditional execution:
-# measure a qubit, then decide what to do next based on the outcome.
+# This maps directly to hardware-level conditional execution: measure a qubit, then decide what to do next based on the outcome.
 
 # %% [markdown]
 # ### `if` on a measurement result
 #
-# A common pattern: measure one qubit and conditionally apply a gate
-# to another qubit based on the outcome.
+# A common pattern: measure one qubit and conditionally apply a gate to another qubit based on the outcome.
 
 
 # %%
@@ -159,14 +142,12 @@ for value, count in result.results:
     print(f"  bit={value}: {count} shots")
 
 # %% [markdown]
-# Since `q0` is prepared as |1⟩, the measurement always yields 1,
-# so `q1` always gets flipped — every shot should return 1.
+# Since `q0` is prepared as |1⟩, the measurement always yields 1, so `q1` always gets flipped — every shot should return 1.
 
 # %% [markdown]
 # ### `while` on a measurement result
 #
-# A `while` loop repeats until the measurement condition becomes false.
-# This is useful for repeat-until-success protocols.
+# A `while` loop repeats until the measurement condition becomes false. This is useful for repeat-until-success protocols.
 
 
 # %%
@@ -186,8 +167,7 @@ def repeat_until_zero() -> qmc.Bit:
 
 
 # %% [markdown]
-# This transpiles to a Qiskit `while_loop` instruction.
-# We can inspect the generated circuit structure:
+# This transpiles to a Qiskit `while_loop` instruction. We can inspect the generated circuit structure:
 
 # %%
 exe_while = transpiler.transpile(repeat_until_zero)
@@ -197,8 +177,7 @@ print(qc_while)
 # %% [markdown]
 # ### Combining `if` and `while`
 #
-# You can combine both patterns. Here is a protocol that repeatedly
-# measures and conditionally applies a correction gate:
+# You can combine both patterns. Here is a protocol that repeatedly measures and conditionally applies a correction gate:
 
 
 # %%
@@ -239,5 +218,4 @@ print(qc_combined)
 # - These control flow patterns transpile to native quantum SDK instructions
 #   (e.g., Qiskit `if_else` and `while_loop`).
 #
-# **Next**: [Reuse Patterns](06_reuse_patterns.ipynb) — helper qkernels,
-# composite gates, and stub gates for top-down design.
+# **Next**: [Reuse Patterns](06_reuse_patterns.ipynb) — helper qkernels, composite gates, and stub gates for top-down design.

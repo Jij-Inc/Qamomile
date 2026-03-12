@@ -15,18 +15,11 @@
 # %% [markdown]
 # # Your First Quantum Kernel
 #
-# This chapter introduces the basic workflow for a first-time Qamomile user
-# to define and run a quantum kernel.
-# Note that this chapter does not dive into quantum computing fundamentals
-# or quantum algorithm details.
+# This chapter introduces the basic workflow for a first-time Qamomile user to define and run a quantum kernel. Note that this chapter does not dive into quantum computing fundamentals or quantum algorithm details.
 #
 # ## What is Qamomile?
 #
-# Qamomile is a quantum circuit SDK that lets you write quantum programs
-# in Python, then run them on any supported quantum SDK (Qiskit, QuriParts, and more in plan).
-# It uses a **typed, symbolic** approach: you write a Python function
-# decorated with `@qkernel`, and Qamomile traces it into an intermediate
-# representation that can be analyzed, visualized, and transpiled.
+# Qamomile is a quantum circuit SDK that lets you write quantum programs in Python, then run them on any supported quantum SDK (Qiskit, QuriParts, and more in plan). It uses a **typed, symbolic** approach: you write a Python function decorated with `@qkernel`, and Qamomile traces it into an intermediate representation that can be analyzed, visualized, and transpiled.
 #
 # The core workflow is a simple pipeline:
 #
@@ -51,8 +44,7 @@
 # pip install qamomile
 # ```
 #
-# In this tutorial we use Qiskit as the concrete quantum SDK.
-# QuriParts is also supported, and more quantum SDKs will be added over time.
+# In this tutorial we use Qiskit as the concrete quantum SDK. QuriParts is also supported, and more quantum SDKs will be added over time.
 
 # %%
 import math
@@ -65,13 +57,10 @@ transpiler = QiskitTranspiler()
 # %% [markdown]
 # ## First QKernel: The Biased Coin
 #
-# A **QKernel** is a Python function decorated with `@qmc.qkernel`.
-# It describes a quantum circuit using typed handles and gate operations.
+# A **QKernel** is a Python function decorated with `@qmc.qkernel`. It describes a quantum circuit using typed handles and gate operations.
 # > A handle is an "identifier" or "token" that indirectly references some resource or object.
 #
-# Let's build the simplest possible example: a single qubit rotated by
-# an angle `theta`, then measured. Depending on `theta`, the qubit is
-# biased toward `0` or `1` — like a biased coin.
+# Let's build the simplest possible example: a single qubit rotated by an angle `theta`, then measured. Depending on `theta`, the qubit is biased toward `0` or `1` — like a biased coin.
 
 
 # %%
@@ -104,18 +93,13 @@ def biased_coin(theta: qmc.Float) -> qmc.Bit:
 #
 # Before executing, you can inspect your qkernel. `draw()` shows the circuit diagram:
 #
-# > **Note**: `draw()` visualizes the circuit at Qamomile's IR level.
-# > When transpiling to a quantum SDK (e.g., Qiskit),
-# > the gates may be decomposed or optimized through the transpiling process,
-# > so the actual executed circuit can differ from what
-# > `draw()` shows. Use `transpiler.to_circuit()` to see the circuit in the target SDK's format.
+# > **Note**: `draw()` visualizes the circuit at Qamomile's IR level. When transpiling to a quantum SDK (e.g., Qiskit), the gates may be decomposed or optimized through the transpiling process, so the actual executed circuit can differ from what `draw()` shows. Use `transpiler.to_circuit()` to see the circuit in the target SDK's format.
 
 # %%
 biased_coin.draw(theta=0.6)
 
 # %% [markdown]
-# You can also check the cost of a qkernel before running it.
-# `estimate_resources()` reports qubit count and gate counts:
+# You can also check the cost of a qkernel before running it. `estimate_resources()` reports qubit count and gate counts:
 
 # %%
 est = biased_coin.estimate_resources()
@@ -123,9 +107,7 @@ print("qubits:", est.qubits)
 print("total gates:", est.gates.total)
 
 # %% [markdown]
-# For this simple qkernel the numbers are concrete, but for parameterized
-# qkernels they become symbolic SymPy expressions — we will explore this
-# in detail in [Tutorial 02](02_parameterized_kernels.ipynb).
+# For this simple qkernel the numbers are concrete, but for parameterized qkernels they become symbolic SymPy expressions — we will explore this in detail in [Tutorial 02](02_parameterized_kernels.ipynb).
 
 # %% [markdown]
 # ## The Execution Pipeline
@@ -186,8 +168,7 @@ print("sample results:", result.results)
 # - `T` is the measured output type (here, `int` — `0` or `1` for a `Bit`)
 # - `int` is the count: how many times that outcome appeared
 #
-# For example, `[(0, 150), (1, 106)]` means outcome `0` appeared 150 times
-# and outcome `1` appeared 106 times out of 256 shots.
+# For example, `[(0, 150), (1, 106)]` means outcome `0` appeared 150 times and outcome `1` appeared 106 times out of 256 shots.
 
 # %%
 for value, count in result.results:
@@ -206,9 +187,7 @@ print("probabilities:", result.probabilities())
 # %% [markdown]
 # ## Inspecting the Transpiled Circuit
 #
-# `to_circuit()` transpiles a qkernel with **all** parameters bound and returns
-# the quantum SDK-native circuit (e.g., a Qiskit `QuantumCircuit`).
-# This is useful for debugging — you can see exactly how the circuit looks in the target SDK.
+# `to_circuit()` transpiles a qkernel with **all** parameters bound and returns the quantum SDK-native circuit (e.g., a Qiskit `QuantumCircuit`). This is useful for debugging — you can see exactly how the circuit looks in the target SDK.
 
 # %%
 qiskit_circuit = transpiler.to_circuit(
@@ -267,32 +246,18 @@ for outcome, count in demo_result.results:
 # %% [markdown]
 # ## The Affine Type System
 #
-# In Qamomile, quantum handles are **affine-typed**: once a gate consumes a handle,
-# you **must** use the returned handle for all subsequent operations.
+# In Qamomile, quantum handles are **affine-typed**: once a gate consumes a handle, you **must** use the returned handle for all subsequent operations.
 #
 # - Single-qubit gate: `q = qmc.h(q)` — reassign the same variable.
 # - Two-qubit gate: `q0, q1 = qmc.cx(q0, q1)` — reassign both variables.
 #
 # ### Why affine, not linear?
 #
-# In quantum computing, if you use a qubit for a temporary computation and
-# leave it entangled with the rest of the system without cleaning it up,
-# subsequent operations on other qubits can be affected in unexpected ways.
-# Strictly speaking, a **linear type** system (where every handle must be
-# used exactly once) would be the safest model — it would force you to
-# always "uncompute" (reverse) temporary qubits before discarding them.
+# In quantum computing, if you use a qubit for a temporary computation and leave it entangled with the rest of the system without cleaning it up, subsequent operations on other qubits can be affected in unexpected ways. Strictly speaking, a **linear type** system (where every handle must be used exactly once) would be the safest model — it would force you to always "uncompute" (reverse) temporary qubits before discarding them.
 #
-# However, enforcing linear types in Python would make simple programs
-# awkward to write. Qamomile chooses **affine types** instead: a handle
-# must be used **at most** once, but you are allowed to drop it. This
-# keeps the API Pythonic — you can write natural code without ceremony.
+# However, enforcing linear types in Python would make simple programs awkward to write. Qamomile chooses **affine types** instead: a handle must be used **at most** once, but you are allowed to drop it. This keeps the API Pythonic — you can write natural code without ceremony.
 #
-# > **Trade-off**: if you allocate a temporary qubit, entangle it with your
-# > main qubit, and then forget about the temporary qubit,
-# > the physics still applies —
-# > that leftover temporary qubit will pollute your results. The transpiler won't
-# > catch this for you. So remember: **if you entangle a temporary qubit,
-# > uncompute it before you stop using it.**
+# > **Trade-off**: if you allocate a temporary qubit, entangle it with your main qubit, and then forget about the temporary qubit, the physics still applies — that leftover temporary qubit will pollute your results. The transpiler won't catch this for you. So remember: **if you entangle a temporary qubit, uncompute it before you stop using it.**
 #
 # If you forget to reassign, you get an error. Here is what happens:
 
@@ -330,8 +295,7 @@ except Exception as e:
 #
 # ## Supported Quantum SDKs
 #
-# Qamomile transpiles the same `@qkernel` to different quantum SDKs.
-# Currently supported:
+# Qamomile transpiles the same `@qkernel` to different quantum SDKs. Currently supported:
 #
 # | Quantum SDK | Status | Notes |
 # |---------|--------|-------|
@@ -339,10 +303,7 @@ except Exception as e:
 # | **QuriParts** | Supported | Full gate set, observables |
 # | **CUDA-Q** | Coming soon | GPU-accelerated simulation |
 #
-# > **Important**: Not every qkernel feature is available on every quantum SDK.
-# > For example, `if` branching inside a qkernel is supported by Qiskit but
-# > may not yet be supported by other SDKs. If a feature is not available
-# > for your chosen SDK, you will get a clear error at transpile time.
+# > **Important**: Not every qkernel feature is available on every quantum SDK. For example, `if` branching inside a qkernel is supported by Qiskit but may not yet be supported by other SDKs. If a feature is not available for your chosen SDK, you will get a clear error at transpile time.
 #
 # ## Next Chapters
 #

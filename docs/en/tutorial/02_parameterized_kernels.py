@@ -15,16 +15,7 @@
 # %% [markdown]
 # # Parameterized Quantum Kernels
 #
-# In Tutorial 01 we built qkernels with a fixed number of qubits.
-# Qamomile allows you to treat values that determine circuit structure
-# — such as the number of qubits and layers — as symbolic parameters.
-# For instance, you can write a qkernel that contains
-# `n` qubits and applies H gates to all of them,
-# or one that applies a certain sequence of gates for `p` iterations.
-# In Qamomile, parameters for circuit structure and those for
-# rotation angles are required to be bound at different times:
-# structure parameters must be bound at transpile time, while
-# rotation angles must be bound at runtime.
+# In Tutorial 01 we built qkernels with a fixed number of qubits. Qamomile allows you to treat values that determine circuit structure — such as the number of qubits and layers — as symbolic parameters. For instance, you can write a qkernel that contains `n` qubits and applies H gates to all of them, or one that applies a certain sequence of gates for `p` iterations. In Qamomile, parameters for circuit structure and those for rotation angles are required to be bound at different times: structure parameters must be bound at transpile time, while rotation angles must be bound at runtime.
 #
 # This chapter teaches:
 #
@@ -42,13 +33,9 @@
 # | `qmc.UInt` | Circuit structure (qubit count, number of iterations) |
 # | `qmc.Float` | Gate parameters (rotation angles, weights) |
 #
-# In practice, `UInt` values that control `qubit_array` size or `qmc.range`
-# bounds **must** be bound at transpile time, because the target quantum SDK
-# needs a fixed circuit structure.
-# `Float` values can stay as sweepable parameters.
+# In practice, `UInt` values that control `qubit_array` size or `qmc.range` bounds **must** be bound at transpile time, because the target quantum SDK needs a fixed circuit structure. `Float` values can stay as sweepable parameters.
 #
-# The common pattern is: bind structure at transpile time, sweep gate parameters
-# at execution time.
+# The common pattern is: bind structure at transpile time, sweep gate parameters at execution time.
 
 # %%
 import qamomile.circuit as qmc
@@ -59,16 +46,9 @@ transpiler = QiskitTranspiler()
 # %% [markdown]
 # ## `qubit_array` and `qmc.range`
 #
-# When the number of qubits depends on a parameter `n`, use `qubit_array(n)`.
-# To loop over the array, use `qmc.range(n)` instead of Python's built-in `range()`.
-# `qmc.range` takes `start`, `stop`, and `step` arguments just like Python's `range()`.
-# For instance, if you want to apply a gate to every other qubit, you can write
-# `for i in qmc.range(0, n, 2): ...`.
+# When the number of qubits depends on a parameter `n`, use `qubit_array(n)`. To loop over the array, use `qmc.range(n)` instead of Python's built-in `range()`. `qmc.range` takes `start`, `stop`, and `step` arguments just like Python's `range()`. For instance, if you want to apply a gate to every other qubit, you can write `for i in qmc.range(0, n, 2): ...`.
 #
-# > **Why not Python `range()`?** At trace time, `n` is a symbol, not a Python
-# > integer — the qkernel body is traced to build an IR, and Python's `range()`
-# > cannot iterate over a symbol. `qmc.range()` emits a **loop node** in the IR
-# > that the transpiler expands when `n` is bound to a concrete value.
+# > **Why not Python `range()`?** At trace time, `n` is a symbol, not a Python integer — the qkernel body is traced to build an IR, and Python's `range()` cannot iterate over a symbol. `qmc.range()` emits a **loop node** in the IR that the transpiler expands when `n` is bound to a concrete value.
 
 
 # %%
@@ -84,9 +64,7 @@ def rotation_layer(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
 
 
 # %% [markdown]
-# `draw()` accepts keyword arguments that bind parameters to concrete values
-# for visualization. Here `n=4` fixes the circuit to 4 qubits and `theta=0.3`
-# provides a placeholder angle.
+# `draw()` accepts keyword arguments that bind parameters to concrete values for visualization. Here `n=4` fixes the circuit to 4 qubits and `theta=0.3` provides a placeholder angle.
 
 # %%
 rotation_layer.draw(n=4, theta=0.3, fold_loops=False)
@@ -94,14 +72,9 @@ rotation_layer.draw(n=4, theta=0.3, fold_loops=False)
 # %% [markdown]
 # ## Index-Based Updates
 #
-# Notice the pattern: `q[i] = qmc.h(q[i])`.
-# Qamomile treats quantum handles as affine
-# — the accessed qubit is consumed,
-# and the updated handle must be stored back in the same place.
+# Notice the pattern: `q[i] = qmc.h(q[i])`. Qamomile treats quantum handles as affine — the accessed qubit is consumed, and the updated handle must be stored back in the same place.
 #
-# **Anti-pattern: iterating directly over the array.**
-# We intentionally raise an error for the `for qi in q:` pattern
-# because it is incompatible with Qamomile's affine enforcement.
+# **Anti-pattern: iterating directly over the array.** We intentionally raise an error for the `for qi in q:` pattern because it is incompatible with Qamomile's affine enforcement.
 
 # %%
 try:
@@ -151,8 +124,7 @@ for theta in [0.1, 0.5, 1.0]:
     print(f"theta={theta:.1f} -> {result.results}")
 
 # %% [markdown]
-# The transpiled executable is reused across all three runs — only the runtime
-# binding `{"theta": theta}` changes.
+# The transpiled executable is reused across all three runs — only the runtime binding `{"theta": theta}` changes.
 #
 # To recap:
 #
@@ -171,5 +143,4 @@ for theta in [0.1, 0.5, 1.0]:
 # - The bind/sweep pattern — `transpile(bindings=..., parameters=...)` then loop —
 #   transpiles once and executes many times.
 #
-# **Next**: [Resource Estimation](03_resource_estimation.ipynb) — symbolic cost
-# analysis, gate breakdowns, and comparing design candidates.
+# **Next**: [Resource Estimation](03_resource_estimation.ipynb) — symbolic cost analysis, gate breakdowns, and comparing design candidates.
