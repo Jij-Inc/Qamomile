@@ -138,6 +138,12 @@ class AnalyzePass(Pass[Block, Block]):
                     if not isinstance(operand, ValueBase):
                         continue
 
+                    # Quantum-typed operands (e.g. phi-merged qubits) are not
+                    # subject to the measurement-dependency ban.  Only classical
+                    # operands must be free of measurement derivation.
+                    if operand.type.is_quantum():
+                        continue
+
                     if outer_self._depends_on_measurement(
                         operand.uuid,
                         dependency_graph,

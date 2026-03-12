@@ -2353,6 +2353,87 @@ class TestControlFlowIfElse:
         assert [qc.find_bit(q).index for q in qc.data[5].qubits] == [2]
         assert qc.num_qubits == 3
 
+    def test_sequential_if_same_qubit_different_measurements(self):
+        """Two sequential if blocks acting on the SAME qubit from different measurements.
+
+        This is the teleportation-style correction pattern:
+          m0 = measure(alice)
+          m1 = measure(bell0)
+          if m1: bell1 = X(bell1)
+          if m0: bell1 = Z(bell1)
+
+        The second if's quantum operand (bell1_phi_0) is a phi-merged qubit
+        from the first if.  The analyze pass must allow this because the
+        operand is quantum-typed, not a classical measurement result.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            alice = qmc.qubit("alice")
+            bell0 = qmc.qubit("bell0")
+            bell1 = qmc.qubit("bell1")
+
+            # Prepare entangled pair + teleportation setup
+            bell0 = qmc.h(bell0)
+            bell0, bell1 = qmc.cx(bell0, bell1)
+            alice, bell0 = qmc.cx(alice, bell0)
+            alice = qmc.h(alice)
+
+            # Sequential conditional corrections on bell1
+            m0 = qmc.measure(alice)
+            m1 = qmc.measure(bell0)
+            if m1:
+                bell1 = qmc.x(bell1)
+            if m0:
+                bell1 = qmc.z(bell1)
+
+            return qmc.measure(bell1)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+
+        # Count IfElseOps — should be exactly 2
+        if_else_ops = [inst for inst in qc.data if isinstance(inst.operation, IfElseOp)]
+        assert len(if_else_ops) == 2
+
+        # Final measurement must exist
+        measures = [inst for inst in qc.data if isinstance(inst.operation, Measure)]
+        assert len(measures) >= 3  # m1, m0, final
+
+    def test_sequential_if_same_qubit_execution(self):
+        """Execute sequential-if correction circuit and verify it runs."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            alice = qmc.qubit("alice")
+            bell0 = qmc.qubit("bell0")
+            bell1 = qmc.qubit("bell1")
+
+            bell0 = qmc.h(bell0)
+            bell0, bell1 = qmc.cx(bell0, bell1)
+            alice, bell0 = qmc.cx(alice, bell0)
+            alice = qmc.h(alice)
+
+            m0 = qmc.measure(alice)
+            m1 = qmc.measure(bell0)
+            if m1:
+                bell1 = qmc.x(bell1)
+            if m0:
+                bell1 = qmc.z(bell1)
+
+            return qmc.measure(bell1)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        assert result is not None
+        assert len(result.results) > 0
+        for value, count in result.results:
+            assert value in (0, 1)
+            assert count > 0
+
 
 class TestControlFlowWhileStructure:
     """Structural tests for while-loop transpilation.
@@ -3524,6 +3605,43 @@ class TestTranspilerPassesPipeline:
             q = qmc.qubit("q")
             q = qmc.h(q)
             return qmc.measure(q)
+
+        block = transpiler.to_block(circuit)
+        inlined = transpiler.inline(block)
+        validated = transpiler.linear_validate(inlined)
+        folded = transpiler.constant_fold(validated)
+        analyzed = transpiler.analyze(folded)
+        assert analyzed.kind == BlockKind.ANALYZED
+
+    def test_analyze_allows_quantum_phi_operand_after_measurement_condition(
+        self, transpiler
+    ):
+        """analyze() must NOT reject quantum phi operands from if-else merges.
+
+        When a qubit passes through an if-else block conditioned on a
+        measurement, the phi-merged output (e.g. ``q1_phi_0``) is
+        quantum-typed.  A subsequent quantum gate using that qubit must
+        be allowed even though the phi value transitively depends on a
+        measurement via the dependency graph.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            q2 = qmc.qubit("q2")
+
+            m0 = qmc.measure(q0)
+            if m0:
+                q1 = qmc.x(q1)
+
+            # q1 is now a phi-merged qubit — quantum-typed
+            m1 = qmc.measure(q2)
+            if m1:
+                # Using phi-merged q1 as quantum operand must be allowed
+                q1 = qmc.z(q1)
+
+            return qmc.measure(q1)
 
         block = transpiler.to_block(circuit)
         inlined = transpiler.inline(block)
