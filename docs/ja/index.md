@@ -1,17 +1,17 @@
-# Qamomile ドキュメントへようこそ
+# Qamomileドキュメントへようこそ
 
-Qamomile は量子プログラミング SDK です。型付き Python 関数で量子回路を記述し、Qiskit・QuriParts などのバックエンドで実行できます。
+Qamomileは量子プログラミングSDKです。型付きPython関数で量子回路を記述し、Qiskit・QuriPartsなどのバックエンドで実行できます。また、シンボリックな代数的リソース推定やブラックボックス（オラクル）を含むような実行そのものができない回路のリソース推定も可能です。
 
-> **注意**: Qamomile は現在もアクティブに開発中であり、リリース間で破壊的変更が加わる可能性があります。
+> **注意**: Qamomileは現在もアクティブに開発中であり、リリース間で破壊的変更が加わる可能性があります。
 
-> **不具合報告**: 不具合を見つけた場合は、[GitHub Issues](https://github.com/Jij-Inc/Qamomile/issues/new) でお知らせいただければ幸いです。
+> **不具合報告**: 不具合を見つけた場合は、[GitHub Issues](https://github.com/Jij-Inc/Qamomile/issues/new)でお知らせいただければ幸いです。
 
 ## チュートリアル
 
 1. [はじめての量子カーネル](tutorial/01_your_first_quantum_kernel) — カーネルの定義・可視化・実行、アフィンルール
 2. [パラメータ付きカーネル](tutorial/02_parameterized_kernels) — 構造パラメータとランタイムパラメータ、バインド/スイープパターン
 3. [リソース推定](tutorial/03_resource_estimation) — シンボリックなコスト分析、ゲート内訳、スケーリング分析
-4. [実行モデル](tutorial/04_execution_models) — `sample()` と `run()`、オブザーバブル、ビット順序
+4. [実行モデル](tutorial/04_execution_models) — `sample()`と`run()`、オブザーバブル、ビット順序
 5. [古典フローパターン](tutorial/05_classical_flow_patterns) — ループ、スパースデータ、条件分岐
 6. [再利用パターン](tutorial/06_reuse_patterns) — ヘルパーカーネル、コンポジットゲート、スタブ
 
@@ -45,5 +45,5 @@ for outcome, count in result.results:
 
 ## リンク
 
-- [GitHub リポジトリ](https://github.com/Jij-Inc/Qamomile)
-- [API リファレンス](api/index.md)
+- [GitHubリポジトリ](https://github.com/Jij-Inc/Qamomile)
+- [APIリファレンス](api/index.md)
