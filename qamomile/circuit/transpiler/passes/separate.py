@@ -23,7 +23,11 @@ from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.value import Value, ArrayValue, ValueBase
 from qamomile.circuit.ir.types.primitives import BitType, QubitType, UIntType
 from qamomile.circuit.transpiler.passes import Pass
-from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowVisitor
+from qamomile.circuit.transpiler.errors import SeparationError
+from qamomile.circuit.transpiler.passes.control_flow_visitor import (
+    ControlFlowVisitor,
+    OperationCollector,
+)
 from qamomile.circuit.transpiler.segments import (
     ClassicalSegment,
     ExpvalSegment,
@@ -104,9 +108,6 @@ class SeparatePass(Pass[Block, SimplifiedProgram]):
         - No expval inside control flow (if/for/while)
         - No quantum/hybrid operations after expval (except ReturnOperation)
         """
-        from qamomile.circuit.transpiler.errors import SeparationError
-
-        expval_count = 0
         seen_expval = False
 
         for op in block.operations:
@@ -125,8 +126,7 @@ class SeparatePass(Pass[Block, SimplifiedProgram]):
                     )
 
             if isinstance(op, ExpvalOp):
-                expval_count += 1
-                if expval_count > 1:
+                if seen_expval:
                     raise SeparationError(
                         "Multiple expval operations are not supported.\n\n"
                         "Only a single top-level expval is allowed per kernel. "
@@ -145,28 +145,12 @@ class SeparatePass(Pass[Block, SimplifiedProgram]):
                         "expval must be the final quantum operation in the kernel."
                     )
 
-    def _contains_expval(self, op: Operation) -> bool:
+    @staticmethod
+    def _contains_expval(op: Operation) -> bool:
         """Check if a control flow operation contains ExpvalOp anywhere inside."""
-        if isinstance(op, ForOperation):
-            ops = op.operations
-        elif isinstance(op, ForItemsOperation):
-            ops = op.operations
-        elif isinstance(op, IfOperation):
-            ops = list(op.true_operations) + list(op.false_operations)
-        elif isinstance(op, WhileOperation):
-            ops = op.operations
-        else:
-            return False
-
-        for inner_op in ops:
-            if isinstance(inner_op, ExpvalOp):
-                return True
-            if isinstance(
-                inner_op, (ForOperation, ForItemsOperation, IfOperation, WhileOperation)
-            ):
-                if self._contains_expval(inner_op):
-                    return True
-        return False
+        collector = OperationCollector(lambda o: isinstance(o, ExpvalOp))
+        collector._visit_control_flow(op)
+        return len(collector.collected) > 0
 
     # =========================================================================
     # Phase 2: Lower high-level operations
@@ -271,8 +255,6 @@ class SeparatePass(Pass[Block, SimplifiedProgram]):
         # Step 2: VALIDATE single quantum segment
         quantum_segs = [s for s in segments if isinstance(s, QuantumSegment)]
         if len(quantum_segs) == 0:
-            from qamomile.circuit.transpiler.errors import SeparationError
-
             raise SeparationError("No quantum segment found")
         if len(quantum_segs) > 1:
             raise MultipleQuantumSegmentsError(

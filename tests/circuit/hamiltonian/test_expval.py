@@ -246,6 +246,40 @@ class TestExpvalContractValidation:
                 bindings={"n": 2, "H": qm_o.Z(0)},
             )
 
+    def test_expval_inside_control_flow_rejected(self):
+        """expval inside a for loop should be rejected by separate pass."""
+        from qamomile.circuit.ir.block import Block
+        from qamomile.circuit.ir.operation.control_flow import ForOperation
+        from qamomile.circuit.ir.operation.expval import ExpvalOp
+        from qamomile.circuit.ir.types.primitives import FloatType, UIntType
+        from qamomile.circuit.ir.value import Value
+        from qamomile.circuit.transpiler.errors import SeparationError
+        from qamomile.circuit.transpiler.passes.separate import SeparatePass
+
+        # Build a Block containing a ForOperation with an ExpvalOp inside
+        start = Value(type=UIntType(), name="start")
+        stop = Value(type=UIntType(), name="stop")
+        step = Value(type=UIntType(), name="step")
+        qubits_val = Value(type=UIntType(), name="q")
+        obs_val = Value(type=UIntType(), name="H")
+        result_val = Value(type=FloatType(), name="ev")
+
+        inner_expval = ExpvalOp(
+            operands=[qubits_val, obs_val],
+            results=[result_val],
+        )
+        for_op = ForOperation(
+            operands=[start, stop, step],
+            results=[],
+            loop_var="i",
+            operations=[inner_expval],
+        )
+        block = Block(operations=[for_op])
+
+        sep = SeparatePass()
+        with pytest.raises(SeparationError, match="expval inside control flow"):
+            sep._validate_expval_contract(block)
+
     def test_single_toplevel_expval_still_works(self):
         """Single top-level expval should still work end-to-end."""
         pytest.importorskip("qiskit")

@@ -7,6 +7,7 @@ from typing import Callable
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.control_flow import (
+    ForItemsOperation,
     ForOperation,
     IfOperation,
     WhileOperation,
@@ -43,6 +44,8 @@ class ControlFlowVisitor(ABC):
     def _visit_control_flow(self, op: Operation) -> None:
         """Recursively visit operations inside control flow constructs."""
         if isinstance(op, ForOperation):
+            self.visit_operations(op.operations)
+        elif isinstance(op, ForItemsOperation):
             self.visit_operations(op.operations)
         elif isinstance(op, IfOperation):
             self.visit_operations(op.true_operations)
@@ -85,6 +88,9 @@ class OperationTransformer(ABC):
         import dataclasses
 
         if isinstance(op, ForOperation):
+            new_ops = self.transform_operations(op.operations)
+            return dataclasses.replace(op, operations=new_ops)
+        elif isinstance(op, ForItemsOperation):
             new_ops = self.transform_operations(op.operations)
             return dataclasses.replace(op, operations=new_ops)
         elif isinstance(op, IfOperation):

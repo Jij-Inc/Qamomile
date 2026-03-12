@@ -6,17 +6,12 @@ value of a Hamiltonian observable with respect to a quantum state.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from qamomile.circuit.frontend.handle import Float, Qubit, Vector, Observable
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.types.primitives import FloatType
 from qamomile.circuit.ir.value import Value, ArrayValue
 from qamomile.circuit.transpiler.errors import QubitConsumedError
-
-if TYPE_CHECKING:
-    pass
 
 
 def expval(
@@ -102,7 +97,8 @@ def expval(
         qubits = qubits.consume(operation_name="expval")
         qubits_value = qubits.value
     else:
-        # Single qubit - wrap in array-like structure
+        # Single qubit - consume it
+        qubits = qubits.consume(operation_name="expval")
         qubits_value = qubits.value
 
     # Create result Float value
