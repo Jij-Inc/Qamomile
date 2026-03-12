@@ -159,22 +159,17 @@ def algorithm_skeleton() -> qmc.Vector[qmc.Qubit]:
 algorithm_skeleton.draw(fold_loops=False)
 
 # %% [markdown]
-# ### Resource Estimation with Stub Composite Gates
+# ### Resource Estimation for QKernels that Include Stub Gates
 #
-# `estimate_resources()` picks up the stub's metadata automatically. You can also query the metadata directly. In addition, `est.gates.oracle_calls` lets you inspect per-oracle call counts, including symbolic expressions.
+# `estimate_resources()` can analyze a full qkernel even when oracle internals are unknown. Known scaffold gates are counted directly, and stub components are tracked through `est.gates.oracle_calls` / `est.gates.oracle_queries`.
 
 # %%
 est = algorithm_skeleton.estimate_resources().simplify()
 print("qubits:", est.qubits)
 print("total gates:", est.gates.total)
 
-# %%
-meta = oracle_box.get_resource_metadata()
-print("oracle query complexity:", meta.query_complexity)
-print("oracle T-gate count:", meta.t_gates)
-
 # %% [markdown]
-# Next, we check `oracle_calls` with multiple oracles and symbolic loop counts.
+# Next, we build a qkernel that mixes ordinary gates with multiple stub oracles.
 
 
 # %%
@@ -202,19 +197,29 @@ def mixing_oracle():
 def iterative_oracle_skeleton(rounds: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
     q = qmc.qubit_array(3, name="q")
 
-    # One call outside the loop
+    # Known scaffold (non-oracle) gates
+    q[0] = qmc.h(q[0])
+    q[1] = qmc.h(q[1])
+    q[0], q[1] = qmc.cx(q[0], q[1])
+
+    # One oracle call outside the loop
     q[0], q[1], q[2] = phase_oracle(q[0], q[1], q[2])
 
-    # Symbolic number of calls inside the loop
+    # Each round mixes known gates and unknown oracle blocks
     for i in qmc.range(rounds):
+        q[1] = qmc.ry(q[1], 0.3)
+        q[1], q[2] = qmc.cx(q[1], q[2])
         q[0], q[1], q[2] = phase_oracle(q[0], q[1], q[2])
         q[0], q[1], q[2] = mixing_oracle(q[0], q[1], q[2])
+        q[1], q[2] = qmc.cx(q[1], q[2])
 
     return q
 
 
 # %%
 oracle_est = iterative_oracle_skeleton.estimate_resources().simplify()
+print("total gates:", oracle_est.gates.total)
+print("two-qubit gates:", oracle_est.gates.two_qubit)
 print("oracle_calls:", oracle_est.gates.oracle_calls)
 print("oracle_queries:", oracle_est.gates.oracle_queries)
 
@@ -224,7 +229,7 @@ print("oracle_calls (rounds=4):", oracle_est_4.gates.oracle_calls)
 print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
 
 # %% [markdown]
-# In this example, `oracle_calls` looks like `{'phase_oracle': rounds + 1, 'mixing_oracle': rounds}`. `oracle_queries` is weighted by each stub's `query_complexity` (`phase_oracle` is multiplied by 2).
+# In this example, resource analysis still works without oracle internals: known gates contribute to `total` / `two_qubit`, while unknown oracle blocks are tracked as `oracle_calls` (for example, `{'phase_oracle': rounds + 1, 'mixing_oracle': rounds}`) and `oracle_queries` (weighted by each stub's `query_complexity`).
 
 # %% [markdown]
 # This top-down approach lets you reason about algorithm-level costs (such as qubit count, oracle queries) before committing to a full decomposition.
@@ -238,4 +243,4 @@ print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
 #   diagrams. Stack `@composite_gate` on top of `@qkernel`.
 # - **Stub composite gate**: `stub=True` with `ResourceMetadata` for top-down
 #   design and resource estimation without a full implementation.
-# - **`est.gates.oracle_calls`**: as shown in the stub-gate examples, this reports per-oracle call counts as a dict, including symbolic call counts.
+# - **`est.gates.oracle_calls`**: even when oracle internals are unknown, this reports per-oracle call counts as a dict (including symbolic call counts).

@@ -136,7 +136,6 @@ ghz_with_composite.draw(n=4, fold_loops=False)
     num_qubits=3,
     resource_metadata=ResourceMetadata(
         query_complexity=1,
-        total_gates=40,
         t_gates=40,
     ),
 )
@@ -158,22 +157,17 @@ def algorithm_skeleton() -> qmc.Vector[qmc.Qubit]:
 algorithm_skeleton.draw(fold_loops=False)
 
 # %% [markdown]
-# ### スタブゲートによるリソース推定
+# ### スタブゲートを含む qkernel のリソース推定
 #
-# `estimate_resources()` はスタブのメタデータを自動的に取得します。メタデータは直接参照することもできます。さらに `est.gates.oracle_calls` を見ると、オラクル名ごとの呼び出し回数（シンボリックな式を含む）を確認できます。
+# `estimate_resources()` は、オラクル内部が未実装でも qkernel 全体を解析できます。既知の回路部分は通常どおり集計され、未知のスタブ部分は `est.gates.oracle_calls` / `est.gates.oracle_queries` として追跡されます。
 
 # %%
 est = algorithm_skeleton.estimate_resources().simplify()
 print("qubits:", est.qubits)
 print("total gates:", est.gates.total)
 
-# %%
-meta = oracle_box.get_resource_metadata()
-print("oracle query complexity:", meta.query_complexity)
-print("oracle T-gate count:", meta.t_gates)
-
 # %% [markdown]
-# 次に `oracle_calls` を複数オラクルかつシンボリック回数で確認します。
+# 次に、通常ゲートと複数スタブオラクルを混在させた qkernel で確認します。
 
 # %%
 @qmc.composite_gate(
@@ -200,19 +194,29 @@ def mixing_oracle():
 def iterative_oracle_skeleton(rounds: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
     q = qmc.qubit_array(3, name="q")
 
-    # ループ外で 1 回
+    # 既知の回路部分（非オラクル）
+    q[0] = qmc.h(q[0])
+    q[1] = qmc.h(q[1])
+    q[0], q[1] = qmc.cx(q[0], q[1])
+
+    # ループ外で 1 回オラクル呼び出し
     q[0], q[1], q[2] = phase_oracle(q[0], q[1], q[2])
 
-    # ループ内でシンボリック回数だけ呼び出し
+    # 各ラウンドで既知ゲートと未知オラクルを混在
     for i in qmc.range(rounds):
+        q[1] = qmc.ry(q[1], 0.3)
+        q[1], q[2] = qmc.cx(q[1], q[2])
         q[0], q[1], q[2] = phase_oracle(q[0], q[1], q[2])
         q[0], q[1], q[2] = mixing_oracle(q[0], q[1], q[2])
+        q[1], q[2] = qmc.cx(q[1], q[2])
 
     return q
 
 
 # %%
 oracle_est = iterative_oracle_skeleton.estimate_resources().simplify()
+print("total gates:", oracle_est.gates.total)
+print("two-qubit gates:", oracle_est.gates.two_qubit)
 print("oracle_calls:", oracle_est.gates.oracle_calls)
 print("oracle_queries:", oracle_est.gates.oracle_queries)
 
@@ -222,7 +226,7 @@ print("oracle_calls (rounds=4):", oracle_est_4.gates.oracle_calls)
 print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
 
 # %% [markdown]
-# この例では `oracle_calls` が `{'phase_oracle': rounds + 1, 'mixing_oracle': rounds}` のように名前別で返ります。`oracle_queries` は `query_complexity` を掛けた値（`phase_oracle` は 2 倍）になります。
+# この例では、オラクル内部が不明でも回路解析を進められます。既知部分は `total` / `two_qubit` に反映され、未知オラクル部分は `oracle_calls`（例: `{'phase_oracle': rounds + 1, 'mixing_oracle': rounds}`）と `oracle_queries`（`query_complexity` で重み付け）として追跡されます。
 
 # %% [markdown]
 # このトップダウンアプローチにより、完全な分解を実装する前にアルゴリズムレベルのコスト（量子ビット数、オラクルクエリ数等）を確認できます。
@@ -236,4 +240,4 @@ print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
 #   `@qkernel` の上に `@composite_gate` デコレータを重ねて書きます。
 # - **スタブゲート**：`stub=True` と `ResourceMetadata` で、
 #   実装なしにトップダウン設計とリソース推定が可能です。
-# - **`est.gates.oracle_calls`**：スタブゲート節の実例のとおり、オラクル呼び出し回数を名前別の辞書として確認できます（シンボリックな回数もそのまま扱えます）。
+# - **`est.gates.oracle_calls`**：オラクル内部が不明な状態でも、呼び出し回数を名前別の辞書として確認できます（シンボリックな回数もそのまま扱えます）。
