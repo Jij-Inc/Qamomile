@@ -2357,9 +2357,9 @@ class TestControlFlowIfElse:
         """Two sequential if blocks acting on the SAME qubit from different measurements.
 
         This is the teleportation-style correction pattern:
+          m0 = measure(alice)
           m1 = measure(bell0)
           if m1: bell1 = X(bell1)
-          m0 = measure(alice)
           if m0: bell1 = Z(bell1)
 
         The second if's quantum operand (bell1_phi_0) is a phi-merged qubit
