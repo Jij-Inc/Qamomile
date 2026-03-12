@@ -237,7 +237,7 @@ print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
 # In this example, resource analysis works without oracle internals: known gates contribute to `total` / `two_qubit`, while unknown oracle blocks are tracked as `oracle_calls` (for example, `{'phase_oracle': rounds + 1, 'mixing_oracle': rounds}`) and `oracle_queries` (weighted by each stub's `query_complexity`).
 
 # %% [markdown]
-# This top-down approach lets you reason about algorithm-level costs (such as qubit count, oracle queries) before committing to a full decomposition.
+# This lets you reason about algorithm-level costs (such as qubit count, oracle queries) before committing to a full decomposition.
 
 # %% [markdown]
 # ## Summary
