@@ -99,10 +99,15 @@ def expval(
         # Vector[Qubit] - consume (includes validation of returned borrows)
         qubits = qubits.consume(operation_name="expval")
         qubits_value = qubits.value
-    else:
+    elif isinstance(qubits, Qubit):
         # Single qubit - consume it
         qubits = qubits.consume(operation_name="expval")
         qubits_value = qubits.value
+    else:
+        raise TypeError(
+            f"expval expects Qubit, Vector[Qubit], or tuple[Qubit, ...], "
+            f"got {type(qubits).__name__}"
+        )
 
     # Create result Float value
     result_value = Value(type=FloatType(), name="expval_result")
