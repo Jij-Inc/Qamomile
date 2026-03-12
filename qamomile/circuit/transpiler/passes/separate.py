@@ -56,6 +56,9 @@ class SeparatePass(Pass[Block, SimplifiedProgram]):
         # Phase 1: Materialize return operations
         block = self._materialize_return(input)
 
+        # Phase 1.5: Validate expval usage contract
+        self._validate_expval_contract(block)
+
         # Phase 2: Lower high-level operations (MeasureQFixedOperation)
         block = self._lower_operations(block)
 
@@ -88,6 +91,82 @@ class SeparatePass(Pass[Block, SimplifiedProgram]):
 
         # No ReturnOperation found, keep existing output_values
         return block
+
+    # =========================================================================
+    # Phase 1.5: Validate expval usage contract
+    # =========================================================================
+
+    def _validate_expval_contract(self, block: Block) -> None:
+        """Validate expval usage follows the supported contract.
+
+        Enforces:
+        - At most one top-level expval per kernel
+        - No expval inside control flow (if/for/while)
+        - No quantum/hybrid operations after expval (except ReturnOperation)
+        """
+        from qamomile.circuit.transpiler.errors import SeparationError
+
+        expval_count = 0
+        seen_expval = False
+
+        for op in block.operations:
+            if isinstance(op, ReturnOperation):
+                continue
+
+            # Check for expval inside control flow
+            if isinstance(
+                op, (ForOperation, ForItemsOperation, IfOperation, WhileOperation)
+            ):
+                if self._contains_expval(op):
+                    raise SeparationError(
+                        "expval inside control flow (if/for/while) is not supported.\n\n"
+                        "expval must be a top-level operation in the kernel. "
+                        "Conditional or iterated expectation values are not yet supported."
+                    )
+
+            if isinstance(op, ExpvalOp):
+                expval_count += 1
+                if expval_count > 1:
+                    raise SeparationError(
+                        "Multiple expval operations are not supported.\n\n"
+                        "Only a single top-level expval is allowed per kernel. "
+                        "Use separate kernels for different expectation values."
+                    )
+                seen_expval = True
+                continue
+
+            # After expval, no quantum or hybrid operations allowed
+            if seen_expval:
+                op_kind = op.operation_kind
+                if op_kind in (OperationKind.QUANTUM, OperationKind.HYBRID):
+                    raise SeparationError(
+                        f"Quantum operation '{type(op).__name__}' found after expval.\n\n"
+                        "No quantum or measurement operations are allowed after expval. "
+                        "expval must be the final quantum operation in the kernel."
+                    )
+
+    def _contains_expval(self, op: Operation) -> bool:
+        """Check if a control flow operation contains ExpvalOp anywhere inside."""
+        if isinstance(op, ForOperation):
+            ops = op.operations
+        elif isinstance(op, ForItemsOperation):
+            ops = op.operations
+        elif isinstance(op, IfOperation):
+            ops = list(op.true_operations) + list(op.false_operations)
+        elif isinstance(op, WhileOperation):
+            ops = op.operations
+        else:
+            return False
+
+        for inner_op in ops:
+            if isinstance(inner_op, ExpvalOp):
+                return True
+            if isinstance(
+                inner_op, (ForOperation, ForItemsOperation, IfOperation, WhileOperation)
+            ):
+                if self._contains_expval(inner_op):
+                    return True
+        return False
 
     # =========================================================================
     # Phase 2: Lower high-level operations

@@ -167,10 +167,7 @@ class TestExpvalTranspiler:
         transpiler = QiskitTranspiler()
 
         # Transpile with Hamiltonian in bindings
-        executable = transpiler.transpile(
-            vqe,
-            bindings={"H": H, "n": 2}
-        )
+        executable = transpiler.transpile(vqe, bindings={"H": H, "n": 2})
 
         # Should have compiled expval segment
         assert len(executable.compiled_expval) == 1
@@ -194,6 +191,78 @@ class TestExpvalTranspiler:
         # Should raise RuntimeError because H is not in bindings
         with pytest.raises(RuntimeError, match="Observable.*not found in bindings"):
             transpiler.transpile(vqe, bindings={"n": 2})
+
+
+class TestExpvalContractValidation:
+    """Test fail-closed validation for expval usage patterns in transpiler."""
+
+    def test_multiple_expval_rejected(self):
+        """Two expval operations should be rejected by separate pass."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+        from qamomile.circuit.transpiler.errors import SeparationError
+
+        @qm.qkernel
+        def bad(
+            n: qm.UInt, H1: qm.Observable, H2: qm.Observable
+        ) -> tuple[qm.Float, qm.Float]:
+            q1 = qm.qubit_array(n, "q1")
+            q2 = qm.qubit_array(n, "q2")
+            q1[0] = qm.h(q1[0])
+            e1 = qm.expval(q1, H1)
+            e2 = qm.expval(q2, H2)
+            return e1, e2
+
+        transpiler = QiskitTranspiler()
+        with pytest.raises(SeparationError, match="Multiple expval"):
+            transpiler.transpile(
+                bad,
+                bindings={
+                    "n": 2,
+                    "H1": qm_o.Z(0),
+                    "H2": qm_o.Z(0),
+                },
+            )
+
+    def test_expval_after_quantum_op_rejected(self):
+        """Quantum operations after expval should be rejected."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+        from qamomile.circuit.transpiler.errors import SeparationError
+
+        @qm.qkernel
+        def bad(n: qm.UInt, H: qm.Observable) -> qm.Float:
+            q = qm.qubit_array(n, "q")
+            q[0] = qm.h(q[0])
+            result = qm.expval(q, H)
+            q2 = qm.qubit_array(n, "q2")
+            q2[0] = qm.x(q2[0])  # quantum op after expval
+            return result
+
+        transpiler = QiskitTranspiler()
+        with pytest.raises(SeparationError, match="after expval"):
+            transpiler.transpile(
+                bad,
+                bindings={"n": 2, "H": qm_o.Z(0)},
+            )
+
+    def test_single_toplevel_expval_still_works(self):
+        """Single top-level expval should still work end-to-end."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        H = qm_o.Z(0) * qm_o.Z(1) + 0.5 * (qm_o.X(0) + qm_o.X(1))
+
+        @qm.qkernel
+        def vqe(n: qm.UInt, H: qm.Observable) -> qm.Float:
+            q = qm.qubit_array(n, "q")
+            q[0] = qm.h(q[0])
+            q[0], q[1] = qm.cx(q[0], q[1])
+            return qm.expval(q, H)
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(vqe, bindings={"H": H, "n": 2})
+        assert len(executable.compiled_expval) == 1
 
 
 class TestHamiltonianRemapQubits:
