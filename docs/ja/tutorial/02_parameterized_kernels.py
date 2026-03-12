@@ -48,7 +48,7 @@ transpiler = QiskitTranspiler()
 #
 # 量子ビット数がパラメータ`n`に依存する場合、`qubit_array(n)`を使用します。配列をループするには、Python組み込みの`range()`ではなく`qmc.range(n)`を使用します。`qmc.range`はPythonの`range()`と同様に`start`、`stop`、`step`引数を取ります。例えば、すべての偶数番目の量子ビットにゲートを適用したい場合は、`for i in qmc.range(0, n, 2): ...`と書くことができます。
 #
-# > **なぜPythonの`range()`ではダメなのか？**トレース時に`n`はシンボルであり、Pythonの整数ではありません。Pythonの`range()`はシンボルに対して反復できないため、代わりに`qmc.range()`を使います。`qmc.range()`はIR内に**ループノード**を生成し、`n`が具体的な値にバインドされた時点でトランスパイラが展開します。
+# > **なぜPythonの`range()`ではダメなのか？**：トレース時に`n`はシンボルであり、Pythonの整数ではありません。Pythonの`range()`はシンボルに対して反復できないため、代わりに`qmc.range()`を使います。`qmc.range()`はIR内に**ループノード**を生成し、`n`が具体的な値にバインドされた時点でトランスパイラが展開します。
 
 
 # %%

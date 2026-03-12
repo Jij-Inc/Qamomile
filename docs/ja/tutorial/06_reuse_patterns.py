@@ -164,10 +164,11 @@ print("total gates:", est.gates.total)
 # %% [markdown]
 # 次に、通常ゲートと複数スタブオラクルを混在させたqkernelで確認します。
 
+
 # %%
 @qmc.composite_gate(
     stub=True,
-    name="phase_oracle",
+    name="oracle",
     num_qubits=3,
     resource_metadata=ResourceMetadata(query_complexity=2),
 )
@@ -177,7 +178,7 @@ def phase_oracle():
 
 @qmc.composite_gate(
     stub=True,
-    name="mixing_oracle",
+    name="mixing",
     num_qubits=3,
     resource_metadata=ResourceMetadata(query_complexity=1),
 )
@@ -208,6 +209,9 @@ def iterative_oracle_skeleton(rounds: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
     return q
 
 
+iterative_oracle_skeleton.draw(rounds=4, fold_loops=False)
+
+
 # %%
 oracle_est = iterative_oracle_skeleton.estimate_resources().simplify()
 print("total gates:", oracle_est.gates.total)
@@ -215,13 +219,16 @@ print("two-qubit gates:", oracle_est.gates.two_qubit)
 print("oracle_calls:", oracle_est.gates.oracle_calls)
 print("oracle_queries:", oracle_est.gates.oracle_queries)
 
+# %% [markdown]
+# `rounds`に具体的な値を代入して、数値的なカウントを確認します：
+
 # %%
 oracle_est_4 = oracle_est.substitute(rounds=4)
 print("oracle_calls (rounds=4):", oracle_est_4.gates.oracle_calls)
 print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
 
 # %% [markdown]
-# この例では、オラクル内部が不明でも回路解析を進められます。既知部分は`total` / `two_qubit`に反映され、未知オラクル部分は`oracle_calls`（例: `{'phase_oracle': rounds + 1, 'mixing_oracle': rounds}`）と`oracle_queries`（`query_complexity`で重み付け）として追跡されます。
+# この例のように、オラクル内部が不明でも回路解析を進められます。既知部分は通常通りカウントされ、未知オラクル部分は`oracle_calls`（例: `{'phase_oracle': rounds + 1, 'mixing_oracle': rounds}`）と`oracle_queries`（`query_complexity`で重み付け）として追跡されます。
 
 # %% [markdown]
 # このトップダウンアプローチにより、完全な分解を実装する前にアルゴリズムレベルのコスト（量子ビット数、オラクルクエリ数等）を確認できます。

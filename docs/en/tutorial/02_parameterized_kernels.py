@@ -48,7 +48,7 @@ transpiler = QiskitTranspiler()
 #
 # When the number of qubits depends on a parameter `n`, use `qubit_array(n)`. To loop over the array, use `qmc.range(n)` instead of Python's built-in `range()`. `qmc.range` takes `start`, `stop`, and `step` arguments just like Python's `range()`. For instance, if you want to apply a gate to every other qubit, you can write `for i in qmc.range(0, n, 2): ...`.
 #
-# > **Why not Python `range()`?** At trace time, `n` is a symbol, not a Python integer — the qkernel body is traced to build an IR, and Python's `range()` cannot iterate over a symbol. `qmc.range()` emits a **loop node** in the IR that the transpiler expands when `n` is bound to a concrete value.
+# > **Why not Python `range()`?**: At trace time, `n` is a symbol, not a Python integer — the qkernel body is traced to build an IR, and Python's `range()` cannot iterate over a symbol. `qmc.range()` emits a **loop node** in the IR that the transpiler expands when `n` is bound to a concrete value.
 
 
 # %%

@@ -216,6 +216,8 @@ def iterative_oracle_skeleton(rounds: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
     return q
 
 
+iterative_oracle_skeleton.draw(rounds=4, fold_loops=False)
+
 # %%
 oracle_est = iterative_oracle_skeleton.estimate_resources().simplify()
 print("total gates:", oracle_est.gates.total)
@@ -223,13 +225,16 @@ print("two-qubit gates:", oracle_est.gates.two_qubit)
 print("oracle_calls:", oracle_est.gates.oracle_calls)
 print("oracle_queries:", oracle_est.gates.oracle_queries)
 
+# %% [markdown]
+# Substitute a concrete value for `rounds` to get numeric counts:
+
 # %%
 oracle_est_4 = oracle_est.substitute(rounds=4)
 print("oracle_calls (rounds=4):", oracle_est_4.gates.oracle_calls)
 print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
 
 # %% [markdown]
-# In this example, resource analysis still works without oracle internals: known gates contribute to `total` / `two_qubit`, while unknown oracle blocks are tracked as `oracle_calls` (for example, `{'phase_oracle': rounds + 1, 'mixing_oracle': rounds}`) and `oracle_queries` (weighted by each stub's `query_complexity`).
+# In this example, resource analysis works without oracle internals: known gates contribute to `total` / `two_qubit`, while unknown oracle blocks are tracked as `oracle_calls` (for example, `{'phase_oracle': rounds + 1, 'mixing_oracle': rounds}`) and `oracle_queries` (weighted by each stub's `query_complexity`).
 
 # %% [markdown]
 # This top-down approach lets you reason about algorithm-level costs (such as qubit count, oracle queries) before committing to a full decomposition.
