@@ -2770,6 +2770,19 @@ class TestExpvalConsumeContract:
         with pytest.raises(UnreturnedBorrowError):
             bad.build(n=2)
 
+    def test_expval_single_qubit_reuse_raises(self):
+        """Reusing a single bare qubit after expval should raise QubitConsumedError."""
+
+        @qkernel
+        def bad(q: Qubit, H: qm.Observable) -> qm.Float:
+            q = qm.h(q)
+            result = qm.expval(q, H)
+            _q2 = qm.x(q)  # ERROR: q consumed by expval
+            return result
+
+        with pytest.raises(QubitConsumedError, match="expval"):
+            bad.build()
+
     def test_expval_single_toplevel_ok(self):
         """Single top-level expval with tuple should still work."""
 

@@ -280,6 +280,38 @@ class TestExpvalContractValidation:
         with pytest.raises(SeparationError, match="expval inside control flow"):
             sep._validate_expval_contract(block)
 
+    def test_expval_classical_after_expval_rejected(self):
+        """Classical operations after expval should also be rejected."""
+        from qamomile.circuit.ir.block import Block
+        from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
+        from qamomile.circuit.ir.operation.expval import ExpvalOp
+        from qamomile.circuit.ir.types.primitives import FloatType, UIntType
+        from qamomile.circuit.ir.value import Value
+        from qamomile.circuit.transpiler.errors import SeparationError
+        from qamomile.circuit.transpiler.passes.separate import SeparatePass
+
+        qubits_val = Value(type=UIntType(), name="q")
+        obs_val = Value(type=UIntType(), name="H")
+        result_val = Value(type=FloatType(), name="ev")
+        const_val = Value(type=FloatType(), name="one")
+        add_result = Value(type=FloatType(), name="sum")
+
+        expval_op = ExpvalOp(
+            operands=[qubits_val, obs_val],
+            results=[result_val],
+        )
+        # Classical BinOp (e.g., ev + 1.0) after expval
+        binop = BinOp(
+            operands=[result_val, const_val],
+            results=[add_result],
+            kind=BinOpKind.ADD,
+        )
+        block = Block(operations=[expval_op, binop])
+
+        sep = SeparatePass()
+        with pytest.raises(SeparationError, match="after expval"):
+            sep._validate_expval_contract(block)
+
     def test_single_toplevel_expval_still_works(self):
         """Single top-level expval should still work end-to-end."""
         pytest.importorskip("qiskit")
