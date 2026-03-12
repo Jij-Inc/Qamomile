@@ -124,7 +124,7 @@ for outcome, count in sample_result.results:
 # ## `expval()`: Measuring an Observable
 #
 # `expval(qubit, hamiltonian)` computes the expectation value $\langle \psi \rvert H \lvert \psi \rangle$
-# ( $\psi$ represents `qubit` and $H$ represents `hamiltonian` ) and returns a `qmc.Float`.
+# ( $\lvert \psi \rangle$ represents `qubit` and $H$ represents `hamiltonian` ) and returns a `qmc.Float`.
 # A qkernel that returns `Float` from `expval` should be executed with `run()`.
 
 

@@ -123,7 +123,7 @@ for outcome, count in sample_result.results:
 # ## `expval()`: オブザーバブルの測定
 #
 # `expval(qubit, hamiltonian)` は期待値 $\langle \psi \rvert H \lvert \psi \rangle$
-# （ $\psi$ は `qubit` を 表し、 $H$ は `hamiltonian` に対応）を計算し、
+# （ $\lvert \psi \rangle$ は `qubit` を 表し、 $H$ は `hamiltonian` に対応）を計算し、
 # `qmc.Float` を返します。
 # `expval` から `Float` を返す量子カーネルは `run()` で実行する必要があります。
 
