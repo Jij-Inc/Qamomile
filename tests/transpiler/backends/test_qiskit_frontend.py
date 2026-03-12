@@ -3025,7 +3025,7 @@ class TestControlFlowWhileStructure:
         assert isinstance(if_body.data[0].operation, Measure)
 
         # Test if the initial measurement writes to the clbit used by the while condition.
-        while_cond_clbit_idx = qc.clbits.index(while_inst.operation.condition[0])
+        while_cond_clbit_idx = qc.clbits.index(while_inst.clbits[0])
         initial_measure = qc.data[1]
         initial_measure_clbit_idx = qc.clbits.index(initial_measure.clbits[0])
         assert while_cond_clbit_idx == initial_measure_clbit_idx
@@ -3116,7 +3116,7 @@ class TestControlFlowWhileStructure:
         assert isinstance(inner_if_body.data[0].operation, Measure)
 
         # Clbit mapping checks
-        while_cond_clbit_idx = qc.clbits.index(while_inst.operation.condition[0])
+        while_cond_clbit_idx = qc.clbits.index(while_inst.clbits[0])
         initial_measure = qc.data[1]
         initial_measure_clbit_idx = qc.clbits.index(initial_measure.clbits[0])
         assert while_cond_clbit_idx == initial_measure_clbit_idx
