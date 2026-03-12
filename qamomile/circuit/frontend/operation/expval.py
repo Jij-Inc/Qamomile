@@ -67,6 +67,10 @@ def expval(
     """
     # Convert qubits to Value, consuming the quantum resource
     if isinstance(qubits, tuple):
+        if len(qubits) == 0:
+            raise ValueError(
+                "expval requires at least one qubit. Got an empty tuple."
+            )
         # Tuple of individual Qubits - consume each qubit
         # Duplicate detection: track consumed qubit IDs
         seen_ids: set[str] = set()
@@ -92,8 +96,7 @@ def expval(
             params={"qubit_values": qubit_values},
         )
     elif isinstance(qubits, Vector):
-        # Vector[Qubit] - validate all returned, then consume
-        qubits.validate_all_returned()
+        # Vector[Qubit] - consume (includes validation of returned borrows)
         qubits = qubits.consume(operation_name="expval")
         qubits_value = qubits.value
     else:
