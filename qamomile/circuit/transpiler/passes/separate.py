@@ -135,15 +135,14 @@ class SeparatePass(Pass[Block, SimplifiedProgram]):
                 seen_expval = True
                 continue
 
-            # After expval, no quantum or hybrid operations allowed
+            # After expval, no operations allowed (except ReturnOperation)
             if seen_expval:
-                op_kind = self._effective_kind(op)
-                if op_kind in (OperationKind.QUANTUM, OperationKind.HYBRID):
-                    raise SeparationError(
-                        f"Quantum or hybrid operation '{type(op).__name__}' found after expval.\n\n"
-                        "No quantum or hybrid operations are allowed after expval. "
-                        "expval must be the final quantum/hybrid operation in the kernel."
-                    )
+                raise SeparationError(
+                    f"Operation '{type(op).__name__}' found after expval.\n\n"
+                    "No operations are allowed after expval (except return). "
+                    "expval must be the final operation in the kernel. "
+                    "Perform any post-processing on the result outside the kernel."
+                )
 
     @staticmethod
     def _contains_expval(op: Operation) -> bool:
