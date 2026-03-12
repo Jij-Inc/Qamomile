@@ -117,7 +117,7 @@ def _get_gates(circuit) -> list:
 
 
 # ============================================================================
-# 1. Individual Gate Statevector Tests
+# 1. Individual Gate Tests
 # ============================================================================
 
 
@@ -1391,7 +1391,7 @@ class TestGateCombinations:
 
 
 # ============================================================================
-# 3. Transpiler Pipeline Tests
+# 3. Control Flow Tests
 # ============================================================================
 
 
@@ -1584,10 +1584,6 @@ class TestControlFlowRange:
             assert g.target_indices == (idx + 1,)
 
 
-# ============================================================================
-# 22. Control Flow: qmc.items (trace-time unrolled — backend-agnostic)
-# ============================================================================
-
 
 class TestControlFlowItems:
     """Test qmc.items loop through the QuriParts frontend pipeline.
@@ -1767,11 +1763,6 @@ class TestControlFlowItems:
         assert statevectors_equal(sv_pos, expected_pos)
 
 
-# ============================================================================
-# 23. Control Flow: Nested (trace-time unrolled combinations)
-# ============================================================================
-
-
 class TestControlFlowNested:
     """Test nested control flow patterns (all trace-time unrolled)."""
 
@@ -1876,7 +1867,7 @@ class TestControlFlowNested:
 
 
 # ============================================================================
-# 24. Control Flow: QAOA Pattern (range + items combined)
+# 3b. QAOA Pattern Tests
 # ============================================================================
 
 
@@ -1999,7 +1990,7 @@ class TestControlFlowQAOAPattern:
 
 
 # ============================================================================
-# 25. Stdlib QFT / IQFT (manual decomposition path)
+# 4. Transpiler Pass Tests
 # ============================================================================
 
 
@@ -2183,10 +2174,6 @@ class TestTranspilerPassesPipeline:
         assert statevectors_equal(sv_full, sv_step)
 
 
-# ============================================================================
-# 4. Parametric Circuit Tests
-# ============================================================================
-
 
 class TestTranspilerConfigPortable:
     """Test TranspilerConfig, substitute(), and segment structure on QuriParts.
@@ -2343,11 +2330,6 @@ class TestTranspilerConfigPortable:
         assert approx_resources.custom_metadata["num_h_gates"] == 5
 
 
-# ============================================================================
-# 31. Controlled Gate (single-control fallback decomposition)
-# ============================================================================
-
-
 class TestParameterizedCircuits:
     """Test parametric circuit transpilation and execution."""
 
@@ -2459,7 +2441,7 @@ class TestParameterizedCircuits:
 
 
 # ============================================================================
-# 4b. Per-Gate Parametric (Unbound Parameter) Tests
+# 1b. Parametric Gate Tests (unbound parameters)
 # ============================================================================
 
 
@@ -2676,7 +2658,7 @@ class TestParametricGates:
 
 
 # ============================================================================
-# 5. Basic Execution Tests
+# 5. Stdlib Tests (QFT, IQFT, controlled, CompositeGate)
 # ============================================================================
 
 
@@ -2755,9 +2737,6 @@ class TestStdlibQFT:
         assert swap_gates[0].target_indices == (0, 2)
 
 
-# ============================================================================
-# 26. Stdlib QPE (structure check)
-# ============================================================================
 
 
 class TestStdlibQPE:
@@ -2813,9 +2792,6 @@ class TestStdlibQPE:
             assert count > 0
 
 
-# ============================================================================
-# 27. Manual QFT Circuit (CP decomposed to 3×RZ + 2×CNOT)
-# ============================================================================
 
 
 class TestControlledGate:
@@ -2919,9 +2895,6 @@ class TestControlledGate:
         assert statevectors_equal(sv, expected)
 
 
-# ============================================================================
-# 32. Custom CompositeGate (fallback inline decomposition)
-# ============================================================================
 
 
 class TestCustomCompositeGate:
@@ -3034,7 +3007,7 @@ class TestCustomCompositeGate:
 
 
 # ============================================================================
-# 33. Controlled SubRoutines (statevector + power, single-control fallback)
+# 6. Execution Tests
 # ============================================================================
 
 
@@ -3149,7 +3122,7 @@ class TestExecution:
 
 
 # ============================================================================
-# 6. Edge Cases and Error Handling
+# 7. Edge Cases & Error Handling
 # ============================================================================
 
 
@@ -3290,10 +3263,6 @@ class TestEdgeCases:
         assert statevectors_equal(sv, expected)
 
 
-# ============================================================================
-# 7. Algorithm – Basic Layers
-# ============================================================================
-
 
 class TestErrorCases:
     """Verify that invalid inputs raise the correct exception types."""
@@ -3357,7 +3326,7 @@ class TestErrorCases:
 
 
 # ============================================================================
-# 21. Control Flow: qmc.range (trace-time unrolled — backend-agnostic)
+# 8. Advanced Algorithm Module Tests
 # ============================================================================
 
 
@@ -3625,9 +3594,6 @@ class TestAlgorithmBasicLayers:
         assert statevectors_equal(sv, state)
 
 
-# ============================================================================
-# 8. Algorithm – QAOA Modules
-# ============================================================================
 
 
 class TestAlgorithmQAOAModules:
@@ -3821,11 +3787,6 @@ class TestAlgorithmQAOAModules:
         assert total == 500
 
 
-# ============================================================================
-# 9. All Four Bell States
-# ============================================================================
-
-
 class TestAdvancedParameterHandling:
     """Test advanced parametric circuit features."""
 
@@ -4003,7 +3964,7 @@ class TestAdvancedParameterHandling:
 
 
 # ============================================================================
-# 19. Variational Classifier Pattern
+# 9. Algorithm Tests: Deutsch-Jozsa
 # ============================================================================
 
 
@@ -4217,7 +4178,7 @@ class TestDeutschJozsaAlgorithm:
 
 
 # ============================================================================
-# 12. Bernstein-Vazirani Algorithm Pattern
+# 10. Expectation Value Pipeline Tests
 # ============================================================================
 
 
@@ -4423,7 +4384,7 @@ class TestExpvalQuriPartsPipeline:
 
 
 # ============================================================================
-# 14. FQAOA Integration
+# 11. Variational Classifier Pattern Tests
 # ============================================================================
 
 
@@ -4639,7 +4600,7 @@ class TestVariationalClassifierPattern:
 
 
 # ============================================================================
-# 20. Error Cases
+# 12. Bernstein-Vazirani Algorithm Tests
 # ============================================================================
 
 
@@ -4746,7 +4707,7 @@ class TestBernsteinVaziraniAlgorithm:
 
 
 # ============================================================================
-# 13. Expectation Value Pipeline
+# 13. FQAOA Integration Tests
 # ============================================================================
 
 
@@ -4993,7 +4954,7 @@ class TestFQAOAIntegration:
 
 
 # ============================================================================
-# 15. Deep Nested QKernel Composition
+# 14. Advanced Circuit Pattern Tests
 # ============================================================================
 
 
@@ -5129,9 +5090,6 @@ class TestDeepNestedQKernelComposition:
         assert statevectors_equal(sv, expected)
 
 
-# ============================================================================
-# 16. Phase Kickback Pattern
-# ============================================================================
 
 
 class TestControlledSubRoutines:
@@ -5404,9 +5362,6 @@ class TestAllFourBellStates:
         assert statevectors_equal(sv, bell_state(3))
 
 
-# ============================================================================
-# 10. GHZ State Parametrised
-# ============================================================================
 
 
 class TestGHZStateParametrised:
@@ -5432,9 +5387,6 @@ class TestGHZStateParametrised:
         assert statevectors_equal(sv, expected)
 
 
-# ============================================================================
-# 11. Deutsch-Jozsa Algorithm Pattern
-# ============================================================================
 
 
 class TestManualQFTCircuit:
@@ -5558,9 +5510,6 @@ class TestManualQFTCircuit:
         assert swap_gates[0].target_indices == (0, 2)
 
 
-# ============================================================================
-# 28. Qubit Array Patterns (pure gate circuits — Group 1 only)
-# ============================================================================
 
 
 class TestPhaseKickbackPattern:
@@ -5589,9 +5538,6 @@ class TestPhaseKickbackPattern:
         assert statevectors_equal(sv, expected)
 
 
-# ============================================================================
-# 17. Entanglement and Parity Patterns
-# ============================================================================
 
 
 class TestEntanglementAndParityPatterns:
@@ -5704,7 +5650,7 @@ class TestEntanglementAndParityPatterns:
 
 
 # ============================================================================
-# 18. Advanced Parameter Handling
+# 15. Qubit Array Pattern Tests
 # ============================================================================
 
 
@@ -5953,10 +5899,5 @@ class TestQubitArrayPatterns:
         # Both should be 3-qubit GHZ
         assert np.isclose(abs(sv_par[0]), 1.0 / np.sqrt(2), atol=1e-10)
         assert np.isclose(abs(sv_par[7]), 1.0 / np.sqrt(2), atol=1e-10)
-
-
-# ============================================================================
-# 30. Portable TranspilerConfig Tests
-# ============================================================================
 
 
