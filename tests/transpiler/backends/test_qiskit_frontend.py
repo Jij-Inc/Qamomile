@@ -1322,6 +1322,101 @@ class TestParametricGates:
             param = qc.data[i].operation.params[0]
             assert isinstance(param, ParameterExpression)
 
+    # -- BinOp with parameters (via items loop for constant folding) --------
+
+    def test_parametric_mul_binop(self):
+        """theta * constant produces ParameterExpression with correct binding."""
+
+        @qmc.qkernel
+        def circuit(
+            coeffs: qmc.Dict[qmc.UInt, qmc.Float],
+            theta: qmc.Float,
+            H: qmc.Observable,
+        ) -> qmc.Float:
+            q = qmc.qubit("q")
+            for _, c in qmc.items(coeffs):
+                q = qmc.rx(q, theta * c)
+            return qmc.expval(q, H)
+
+        H = qm_o.Hamiltonian(num_qubits=1)
+        H += qm_o.Z(0)
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(
+            circuit,
+            bindings={"coeffs": {0: 2.0}, "H": H},
+            parameters=["theta"],
+        )
+        qc = exe.compiled_quantum[0].circuit
+        assert len(qc.parameters) == 1
+        param_expr = qc.data[0].operation.params[0]
+        assert isinstance(param_expr, ParameterExpression)
+        # Bind theta=1.5 → gate angle should be 1.5 * 2.0 = 3.0
+        theta_param = list(qc.parameters)[0]
+        bound = qc.assign_parameters({theta_param: 1.5})
+        assert np.isclose(float(bound.data[0].operation.params[0]), 3.0, atol=1e-10)
+
+    def test_parametric_add_binop(self):
+        """theta + constant produces ParameterExpression with correct binding."""
+
+        @qmc.qkernel
+        def circuit(
+            offsets: qmc.Dict[qmc.UInt, qmc.Float],
+            theta: qmc.Float,
+            H: qmc.Observable,
+        ) -> qmc.Float:
+            q = qmc.qubit("q")
+            for _, o in qmc.items(offsets):
+                q = qmc.rx(q, theta + o)
+            return qmc.expval(q, H)
+
+        H = qm_o.Hamiltonian(num_qubits=1)
+        H += qm_o.Z(0)
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(
+            circuit,
+            bindings={"offsets": {0: 0.5}, "H": H},
+            parameters=["theta"],
+        )
+        qc = exe.compiled_quantum[0].circuit
+        assert len(qc.parameters) == 1
+        param_expr = qc.data[0].operation.params[0]
+        assert isinstance(param_expr, ParameterExpression)
+        # Bind theta=1.0 → gate angle should be 1.0 + 0.5 = 1.5
+        theta_param = list(qc.parameters)[0]
+        bound = qc.assign_parameters({theta_param: 1.0})
+        assert np.isclose(float(bound.data[0].operation.params[0]), 1.5, atol=1e-10)
+
+    def test_parametric_sub_binop(self):
+        """theta - constant produces ParameterExpression with correct binding."""
+
+        @qmc.qkernel
+        def circuit(
+            offsets: qmc.Dict[qmc.UInt, qmc.Float],
+            theta: qmc.Float,
+            H: qmc.Observable,
+        ) -> qmc.Float:
+            q = qmc.qubit("q")
+            for _, o in qmc.items(offsets):
+                q = qmc.rx(q, theta - o)
+            return qmc.expval(q, H)
+
+        H = qm_o.Hamiltonian(num_qubits=1)
+        H += qm_o.Z(0)
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(
+            circuit,
+            bindings={"offsets": {0: 0.5}, "H": H},
+            parameters=["theta"],
+        )
+        qc = exe.compiled_quantum[0].circuit
+        assert len(qc.parameters) == 1
+        param_expr = qc.data[0].operation.params[0]
+        assert isinstance(param_expr, ParameterExpression)
+        # Bind theta=1.0 → gate angle should be 1.0 - 0.5 = 0.5
+        theta_param = list(qc.parameters)[0]
+        bound = qc.assign_parameters({theta_param: 1.0})
+        assert np.isclose(float(bound.data[0].operation.params[0]), 0.5, atol=1e-10)
+
 
 # ============================================================================
 # 2. Gate Combination Tests
