@@ -3,6 +3,7 @@
 Qamomile は量子プログラミング SDK です。型付き Python 関数で量子回路を記述し、Qiskit・QuriParts などのバックエンドで実行できます。
 
 > **注意**: Qamomile は現在もアクティブに開発中であり、リリース間で破壊的変更が加わる可能性があります。
+
 > **不具合報告**: 不具合を見つけた場合は、[GitHub Issues](https://github.com/Jij-Inc/Qamomile/issues/new) でお知らせいただければ幸いです。
 
 ## チュートリアル
