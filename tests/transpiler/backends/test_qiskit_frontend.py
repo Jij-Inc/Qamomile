@@ -3050,6 +3050,183 @@ class TestControlFlowWhileStructure:
                 f"Expected all shots to return 0 but got value={value} ({count} shots)."
             )
 
+    def test_while_loop_with_if_only_no_else(self):
+        """While loop with if-only (no else): clbit count must not leak.
+
+        When the while body contains an if without else, the PhiOp's
+        false_val is the pre-if while-condition value.  map_phi_outputs
+        redirects this UUID, which used to corrupt the while-condition's
+        canonical clbit and cause an extra orphaned clbit to appear.
+
+        Verifies:
+        - num_clbits == 2 (bit + sel, no orphan)
+        - while condition clbit == initial measurement clbit
+        - sampling always returns 0 (loop terminates correctly)
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.x(q0)  # bit=1, enter loop
+            bit = qmc.measure(q0)
+
+            q1 = qmc.qubit("q1")
+            q1 = qmc.x(q1)  # sel=1, always take if-branch
+            sel = qmc.measure(q1)
+
+            while bit:
+                if sel:
+                    q2 = qmc.qubit("q2")  # |0⟩ → bit=0, exit
+                    bit = qmc.measure(q2)
+            return bit
+
+        # --- Structure checks ---
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_clbits == 2, (
+            f"Expected 2 classical bits but got {qc.num_clbits}. "
+            "If-only (no else) in while loop is leaking orphan clbits."
+        )
+
+        # Exactly test full structure
+        assert (
+            len(qc.data) == 5
+        )  # x -> measure -> x -> measure -> while (if is in while body)
+        assert isinstance(qc.data[0].operation, XGate)
+        assert isinstance(qc.data[1].operation, Measure)
+        assert isinstance(qc.data[2].operation, XGate)
+        assert isinstance(qc.data[3].operation, Measure)
+        assert isinstance(qc.data[4].operation, WhileLoopOp)
+        while_inst = qc.data[4]
+        while_body = while_inst.operation.params[0]
+        assert len(while_body.data) == 1  # if (measure is inside if)
+        assert isinstance(while_body.data[0].operation, IfElseOp)
+        if_inst = while_body.data[0]
+        if_body = if_inst.operation.blocks[0]
+        assert len(if_body.data) == 1  # measure
+        assert isinstance(if_body.data[0].operation, Measure)
+
+        # Test if the initial measurement writes to the clbit used by the while condition.
+        while_cond_clbit_idx = qc.clbits.index(while_inst.clbits[0])
+        initial_measure = qc.data[1]
+        initial_measure_clbit_idx = qc.clbits.index(initial_measure.clbits[0])
+        assert while_cond_clbit_idx == initial_measure_clbit_idx
+
+        # Test if the second measurement writes to the clbit used in the if condition.
+        if_cond_clbit_idx = qc.clbits.index(if_inst.operation.condition[0])
+        second_measure = qc.data[3]
+        second_measure_clbit_idx = qc.clbits.index(second_measure.clbits[0])
+        assert if_cond_clbit_idx == second_measure_clbit_idx
+
+        # Test if the third measurement (in the if body) writes to the same clbit as the while condition.
+        if_body_measure = if_body.data[0]
+        if_body_measure_clbit_idx = qc.clbits.index(if_body_measure.clbits[0])
+        assert if_body_measure_clbit_idx == while_cond_clbit_idx
+
+        # --- Execution check ---
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        for value, count in result.results:
+            assert value == 0, (
+                f"Expected all shots to return 0 but got value={value} "
+                f"({count} shots). While + if-only loop is not terminating."
+            )
+
+    def test_while_loop_with_nested_if_only_no_else(self):
+        """While loop with nested if-only (no else): clbit count must not leak.
+
+        A deeper nesting test: while body has an if-only containing another
+        if-only that reassigns the while condition.  Verifies that the
+        canonical clbit save/restore handles nested if-only correctly.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.x(q0)  # bit=1, enter loop
+            bit = qmc.measure(q0)
+
+            q1 = qmc.qubit("q1")
+            q1 = qmc.x(q1)  # sel1=1
+            sel1 = qmc.measure(q1)
+
+            q2 = qmc.qubit("q2")
+            q2 = qmc.x(q2)  # sel2=1
+            sel2 = qmc.measure(q2)
+
+            while bit:
+                if sel1:
+                    if sel2:
+                        q3 = qmc.qubit("q3")  # |0⟩ → bit=0, exit
+                        bit = qmc.measure(q3)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_clbits == 3, (
+            f"Expected 3 classical bits (bit, sel1, sel2) but got {qc.num_clbits}."
+        )
+
+        # Exactly test full structure
+        assert (
+            len(qc.data) == 7
+        )  # x -> measure -> x -> measure -> x -> measure -> while
+        assert isinstance(qc.data[0].operation, XGate)
+        assert isinstance(qc.data[1].operation, Measure)
+        assert isinstance(qc.data[2].operation, XGate)
+        assert isinstance(qc.data[3].operation, Measure)
+        assert isinstance(qc.data[4].operation, XGate)
+        assert isinstance(qc.data[5].operation, Measure)
+        assert isinstance(qc.data[6].operation, WhileLoopOp)
+        while_inst = qc.data[6]
+        while_body = while_inst.operation.params[0]
+        assert len(while_body.data) == 1  # outer if
+        assert isinstance(while_body.data[0].operation, IfElseOp)
+        outer_if_inst = while_body.data[0]
+        outer_if_body = outer_if_inst.operation.blocks[0]
+        outer_else_body = outer_if_inst.operation.blocks[1]
+        assert len(outer_else_body.data) == 0  # no else
+        assert len(outer_if_body.data) == 1  # inner if
+        assert isinstance(outer_if_body.data[0].operation, IfElseOp)
+        inner_if_inst = outer_if_body.data[0]
+        inner_if_body = inner_if_inst.operation.blocks[0]
+        inner_else_body = inner_if_inst.operation.blocks[1]
+        assert len(inner_else_body.data) == 0  # no else
+        assert len(inner_if_body.data) == 1  # measure
+        assert isinstance(inner_if_body.data[0].operation, Measure)
+
+        # Clbit mapping checks
+        while_cond_clbit_idx = qc.clbits.index(while_inst.clbits[0])
+        initial_measure = qc.data[1]
+        initial_measure_clbit_idx = qc.clbits.index(initial_measure.clbits[0])
+        assert while_cond_clbit_idx == initial_measure_clbit_idx
+
+        outer_if_cond_clbit_idx = qc.clbits.index(outer_if_inst.operation.condition[0])
+        second_measure = qc.data[3]
+        second_measure_clbit_idx = qc.clbits.index(second_measure.clbits[0])
+        assert outer_if_cond_clbit_idx == second_measure_clbit_idx
+
+        inner_if_cond_clbit_idx = qc.clbits.index(inner_if_inst.operation.condition[0])
+        third_measure = qc.data[5]
+        third_measure_clbit_idx = qc.clbits.index(third_measure.clbits[0])
+        assert inner_if_cond_clbit_idx == third_measure_clbit_idx
+
+        inner_if_body_measure = inner_if_body.data[0]
+        inner_if_body_measure_clbit_idx = qc.clbits.index(inner_if_body_measure.clbits[0])
+        assert inner_if_body_measure_clbit_idx == while_cond_clbit_idx
+
+        # --- Execution check ---
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        for value, count in result.results:
+            assert value == 0, (
+                f"Expected all shots to return 0 but got value={value} ({count} shots)."
+            )
+
 
 class TestControlFlowWhileSampling:
     """Sampling (execution) tests for while-loop circuits.
