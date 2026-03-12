@@ -232,29 +232,16 @@ class TestSingleQubitGatesFrontend:
         assert qc.num_qubits == 1
         assert qc.num_clbits == 1
 
-    def test_rx_determined(self):
-        """RX(pi) |0> = -i|1>."""
-
-        @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.rx(q, theta)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi})
-        sv = _run_statevector(qc)
-        expected = compute_expected_statevector(
-            all_zeros_state(1), GATE_SPECS["RX"].matrix_fn(np.pi)
-        )
-        assert statevectors_equal(sv, expected)
-
     @pytest.mark.parametrize(
-        "seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+        "angle",
+        [np.pi]
+        + [
+            np.random.default_rng(s).uniform(0, 2 * np.pi)
+            for s in [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+        ],
     )
-    def test_rx_random(self, seed):
-        """RX(random θ) statevector matches analytical RX matrix."""
-        rng = np.random.default_rng(seed)
-        angle = rng.uniform(0, 2 * np.pi)
+    def test_rx_statevector(self, angle):
+        """RX(θ) statevector matches analytical RX matrix."""
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Bit:
@@ -288,29 +275,16 @@ class TestSingleQubitGatesFrontend:
         assert qc.num_qubits == 1
         assert qc.num_clbits == 1
 
-    def test_ry_determined(self):
-        """RY(pi/2) |0> -> (|0> + |1>) / sqrt(2)."""
-
-        @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.ry(q, theta)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 2})
-        sv = _run_statevector(qc)
-        expected = compute_expected_statevector(
-            all_zeros_state(1), GATE_SPECS["RY"].matrix_fn(np.pi / 2)
-        )
-        assert statevectors_equal(sv, expected)
-
     @pytest.mark.parametrize(
-        "seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+        "angle",
+        [np.pi / 2]
+        + [
+            np.random.default_rng(s).uniform(0, 2 * np.pi)
+            for s in [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+        ],
     )
-    def test_ry_random(self, seed):
-        """RY(random θ) statevector matches analytical RY matrix."""
-        rng = np.random.default_rng(seed)
-        angle = rng.uniform(0, 2 * np.pi)
+    def test_ry_statevector(self, angle):
+        """RY(θ) statevector matches analytical RY matrix."""
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Bit:
@@ -344,29 +318,16 @@ class TestSingleQubitGatesFrontend:
         assert qc.num_qubits == 1
         assert qc.num_clbits == 1
 
-    def test_rz_determined(self):
-        """RZ(π)|0⟩ statevector matches analytical RZ matrix."""
-
-        @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.rz(q, theta)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi})
-        sv = _run_statevector(qc)
-        expected = compute_expected_statevector(
-            all_zeros_state(1), GATE_SPECS["RZ"].matrix_fn(np.pi)
-        )
-        assert statevectors_equal(sv, expected)
-
     @pytest.mark.parametrize(
-        "seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+        "angle",
+        [np.pi]
+        + [
+            np.random.default_rng(s).uniform(0, 2 * np.pi)
+            for s in [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+        ],
     )
-    def test_rz_random(self, seed):
-        """RZ(random θ) statevector matches analytical RZ matrix."""
-        rng = np.random.default_rng(seed)
-        angle = rng.uniform(0, 2 * np.pi)
+    def test_rz_statevector(self, angle):
+        """RZ(θ) statevector matches analytical RZ matrix."""
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Bit:
@@ -400,33 +361,16 @@ class TestSingleQubitGatesFrontend:
         assert qc.num_qubits == 1
         assert qc.num_clbits == 1
 
-    def test_p_determined(self):
-        """P(pi) on |1> gives phase e^{i*pi} = -1."""
-
-        @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.x(q)  # Prepare |1>
-            q = qmc.p(q, theta)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi})
-        sv = _run_statevector(qc)
-        state_after_x = compute_expected_statevector(
-            all_zeros_state(1), GATE_SPECS["X"].matrix_fn()
-        )
-        expected = compute_expected_statevector(
-            state_after_x, GATE_SPECS["P"].matrix_fn(np.pi)
-        )
-        assert statevectors_equal(sv, expected)
-
     @pytest.mark.parametrize(
-        "seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+        "angle",
+        [np.pi]
+        + [
+            np.random.default_rng(s).uniform(0, 2 * np.pi)
+            for s in [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+        ],
     )
-    def test_p_random(self, seed):
-        """P(random θ) on |1⟩ statevector matches analytical P matrix."""
-        rng = np.random.default_rng(seed)
-        angle = rng.uniform(0, 2 * np.pi)
+    def test_p_statevector(self, angle):
+        """P(θ) on |1⟩ statevector matches analytical P matrix."""
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Bit:
@@ -1004,31 +948,16 @@ class TestTwoQubitGatesFrontend:
         assert qc.num_qubits == 2
         assert qc.num_clbits == 2
 
-    def test_cp_determined(self):
-        """CP(pi) on |11> gives phase e^{i*pi} = -1."""
-
-        @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(2, "q")
-            q[0] = qmc.x(q[0])
-            q[1] = qmc.x(q[1])
-            q[0], q[1] = qmc.cp(q[0], q[1], theta)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi})
-        sv = _run_statevector(qc)
-        expected = compute_expected_statevector(
-            computational_basis_state(2, 3), GATE_SPECS["CP"].matrix_fn(np.pi)
-        )
-        assert statevectors_equal(sv, expected)
-
     @pytest.mark.parametrize(
-        "seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+        "angle",
+        [np.pi]
+        + [
+            np.random.default_rng(s).uniform(0, 2 * np.pi)
+            for s in [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+        ],
     )
-    def test_cp_random(self, seed):
-        """CP(random θ) on |11⟩ statevector matches analytical CP matrix."""
-        rng = np.random.default_rng(seed)
-        angle = rng.uniform(0, 2 * np.pi)
+    def test_cp_statevector(self, angle):
+        """CP(θ) on |11⟩ statevector matches analytical CP matrix."""
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -1065,29 +994,16 @@ class TestTwoQubitGatesFrontend:
         assert qc.num_qubits == 2
         assert qc.num_clbits == 2
 
-    def test_rzz_determined(self):
-        """RZZ(pi) on |00>."""
-
-        @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(2, "q")
-            q[0], q[1] = qmc.rzz(q[0], q[1], theta)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi})
-        sv = _run_statevector(qc)
-        expected = compute_expected_statevector(
-            all_zeros_state(2), GATE_SPECS["RZZ"].matrix_fn(np.pi)
-        )
-        assert statevectors_equal(sv, expected)
-
     @pytest.mark.parametrize(
-        "seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+        "angle",
+        [np.pi]
+        + [
+            np.random.default_rng(s).uniform(0, 2 * np.pi)
+            for s in [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+        ],
     )
-    def test_rzz_random(self, seed):
-        """RZZ(random θ) on |11⟩ statevector matches analytical RZZ matrix."""
-        rng = np.random.default_rng(seed)
-        angle = rng.uniform(0, 2 * np.pi)
+    def test_rzz_statevector(self, angle):
+        """RZZ(θ) on |11⟩ statevector matches analytical RZZ matrix."""
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -2342,78 +2258,8 @@ class TestControlFlowWhileStructure:
         assert h_target == m_target
 
     # -- clbit aliasing (the root cause of the infinite-loop bug) ----------
-
-    def test_while_loop_body_measure_same_clbit(self):
-        """Body measurement must write to the same clbit as the condition.
-
-        Without this, the while condition checks clbit[0] but the body
-        writes to clbit[1], so the condition never updates and the loop
-        never terminates.
-        """
-
-        @qmc.qkernel
-        def circuit() -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.h(q)
-            bit = qmc.measure(q)
-            while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
-            return bit
-
-        _, qc = _transpile_and_get_circuit(circuit)
-
-        # Find the while_loop instruction
-        while_insts = [i for i in qc.data if isinstance(i.operation, WhileLoopOp)]
-        assert len(while_insts) == 1
-
-        # The while_loop condition clbit
-        while_inst = while_insts[0]
-        condition_clbit = while_inst.clbits[0]
-
-        # The body circuit is in params[0]
-        body = while_inst.operation.params[0]
-        body_measures = [i for i in body.data if isinstance(i.operation, Measure)]
-        assert len(body_measures) >= 1
-
-        # The body measure must target the same classical bit index as
-        # the while condition.  In Qiskit's while_loop, the body circuit
-        # shares the same classical register as the outer circuit, so
-        # the clbit index used inside the body must match the condition.
-        body_measure_clbit = body_measures[0].clbits[0]
-        assert body.clbits.index(body_measure_clbit) == qc.clbits.index(
-            condition_clbit
-        ), (
-            f"Body measure writes to clbit index "
-            f"{body.clbits.index(body_measure_clbit)} "
-            f"but while condition checks clbit index "
-            f"{qc.clbits.index(condition_clbit)}"
-        )
-
-    def test_while_loop_single_clbit_allocated(self):
-        """Loop-carried aliasing should not waste a classical bit.
-
-        When the body measurement aliases to the condition's clbit,
-        only one classical bit should be allocated (not two).
-        """
-
-        @qmc.qkernel
-        def circuit() -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.h(q)
-            bit = qmc.measure(q)
-            while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
-            return bit
-
-        _, qc = _transpile_and_get_circuit(circuit)
-        assert qc.num_clbits == 1, (
-            f"Expected 1 classical bit but got {qc.num_clbits}. "
-            "The body measurement should alias to the condition's clbit."
-        )
+    # NOTE: clbit aliasing and single-clbit tests are in the X-body section
+    # below to avoid duplication.
 
     # -- body gate ordering -----------------------------------------------
 
