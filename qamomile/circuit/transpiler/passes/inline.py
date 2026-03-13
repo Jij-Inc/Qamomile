@@ -19,7 +19,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     WhileOperation,
 )
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.value import ArrayValue, ValueBase
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.value_mapping import (
     UUIDRemapper,
@@ -56,7 +56,7 @@ class InlinePass(Pass[Block, Block]):
             return input
 
         # Build value substitution map for inlining
-        value_map: dict[str, Value] = {}
+        value_map: dict[str, ValueBase] = {}
 
         serialized_ops = self._serialize_operations(
             input.operations,
@@ -79,7 +79,7 @@ class InlinePass(Pass[Block, Block]):
     def _serialize_operations(
         self,
         operations: list[Operation],
-        value_map: dict[str, Value],
+        value_map: dict[str, ValueBase],
     ) -> list[Operation]:
         """Recursively serialize a list of operations."""
         result: list[Operation] = []
@@ -161,7 +161,7 @@ class InlinePass(Pass[Block, Block]):
     def _inline_call(
         self,
         call_op: CallBlockOperation,
-        value_map: dict[str, Value],
+        value_map: dict[str, ValueBase],
     ) -> list[Operation]:
         """Inline a CallBlockOperation.
 
@@ -193,7 +193,7 @@ class InlinePass(Pass[Block, Block]):
         uuid_remap = remapper.uuid_remap
 
         # Build remapped_local_map with cloned UUIDs
-        remapped_local_map: dict[str, Value] = {}
+        remapped_local_map: dict[str, ValueBase] = {}
         for old_uuid, value in local_map.items():
             new_uuid = uuid_remap.get(old_uuid, old_uuid)
             remapped_local_map[new_uuid] = value
@@ -208,28 +208,31 @@ class InlinePass(Pass[Block, Block]):
         # Recursively serialize the cloned operations
         inlined = self._serialize_operations(cloned_ops, remapped_local_map)
 
+        substitutor = ValueSubstitutor(remapped_local_map)
+
         # Get return values from ReturnOperation (source of truth)
         return_op = find_return_operation(cloned_ops)
-        return_values = list(return_op.operands) if return_op else block.return_values
+        if return_op is not None:
+            raw_return_values = [
+                v for v in return_op.operands if isinstance(v, ValueBase)
+            ]
+        else:
+            raw_return_values = [remapper.clone_value(v) for v in block.return_values]
+
+        return_values = [
+            substitutor.substitute_value(v) for v in raw_return_values
+        ]
 
         # Map block's return values to call's result values
         for block_return, call_result in zip(return_values, call_op.results):
-            remapped_uuid = uuid_remap.get(block_return.uuid, block_return.uuid)
-            if remapped_uuid in remapped_local_map:
-                # The return value was mapped during inlining (modified input)
-                value_map[call_result.uuid] = remapped_local_map[remapped_uuid]
-            else:
-                # The return value is a newly created value (not a modified input)
-                # Use the cloned return value directly, which is what the inlined
-                # operations reference in their results
-                value_map[call_result.uuid] = block_return
+            value_map[call_result.uuid] = block_return
 
         return inlined
 
     def _substitute_values(
         self,
         op: Operation,
-        value_map: dict[str, Value],
+        value_map: dict[str, ValueBase],
     ) -> Operation:
         """Substitute values in an operation using the value map."""
         substitutor = ValueSubstitutor(value_map)
@@ -259,7 +262,7 @@ class InlinePass(Pass[Block, Block]):
     def _inline_composite(
         self,
         op: CompositeGateOperation,
-        value_map: dict[str, Value],
+        value_map: dict[str, ValueBase],
     ) -> list[Operation]:
         """Inline a CompositeGateOperation's implementation.
 
@@ -280,11 +283,10 @@ class InlinePass(Pass[Block, Block]):
         # Clone operations with fresh UUIDs using UUIDRemapper
         remapper = UUIDRemapper()
         cloned_ops = remapper.clone_operations(impl.operations)
-        uuid_remap = remapper.uuid_remap
 
         # Map block's input values to operation's qubit arguments
         # Since uuid is now unique per Value, we can use simple uuid mapping
-        local_map: dict[str, Value] = {}
+        local_map: dict[str, ValueBase] = {}
 
         for block_input, qubit_arg in zip(impl.input_values, qubit_args):
             resolved_arg = value_map.get(qubit_arg.uuid, qubit_arg)

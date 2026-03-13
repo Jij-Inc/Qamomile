@@ -14,6 +14,52 @@ from qamomile.circuit.ir.value import Value, ArrayValue
 from qamomile.circuit.transpiler.errors import QubitConsumedError
 
 
+def _consume_tuple_qubits(qubits: tuple[Qubit, ...]) -> ArrayValue:
+    """Consume a tuple of distinct qubits and package it as a synthetic array."""
+    if len(qubits) == 0:
+        raise ValueError("expval requires at least one qubit. Got an empty tuple.")
+
+    seen_ids: set[str] = set()
+    qubit_values: list[Value] = []
+
+    for qubit in qubits:
+        if qubit.id in seen_ids:
+            raise QubitConsumedError(
+                f"Duplicate qubit in expval tuple: qubit '{qubit.value.name}' "
+                f"appears more than once.\n\n"
+                f"Each qubit in the expval tuple must be distinct.",
+                handle_name=qubit.value.name,
+                operation_name="expval",
+                first_use_location="expval (earlier in same tuple)",
+            )
+        seen_ids.add(qubit.id)
+        qubit_values.append(qubit.consume(operation_name="expval").value)
+
+    return ArrayValue(
+        type=qubit_values[0].type,
+        name="expval_qubits",
+        shape=tuple(),
+        params={"qubit_values": qubit_values},
+    )
+
+
+def _consume_expval_target(
+    qubits: Qubit | Vector[Qubit] | tuple[Qubit, ...],
+) -> Value | ArrayValue:
+    """Consume an expval target and normalize it to the IR operand form."""
+    if isinstance(qubits, tuple):
+        return _consume_tuple_qubits(qubits)
+    if isinstance(qubits, Vector):
+        return qubits.consume(operation_name="expval").value
+    if isinstance(qubits, Qubit):
+        return qubits.consume(operation_name="expval").value
+
+    raise TypeError(
+        f"expval expects Qubit, Vector[Qubit], or tuple[Qubit, ...], "
+        f"got {type(qubits).__name__}"
+    )
+
+
 def expval(
     qubits: Qubit | Vector[Qubit] | tuple[Qubit, ...],
     hamiltonian: Observable,
@@ -65,47 +111,7 @@ def expval(
         executable = transpiler.transpile(vqe_step, bindings={"H": H})
         ```
     """
-    # Convert qubits to Value, consuming the quantum resource
-    if isinstance(qubits, tuple):
-        if len(qubits) == 0:
-            raise ValueError("expval requires at least one qubit. Got an empty tuple.")
-        # Tuple of individual Qubits - consume each qubit
-        # Duplicate detection: track consumed qubit IDs
-        seen_ids: set[str] = set()
-        consumed_qubits: list[Qubit] = []
-        for q in qubits:
-            if q.id in seen_ids:
-                raise QubitConsumedError(
-                    f"Duplicate qubit in expval tuple: qubit '{q.value.name}' "
-                    f"appears more than once.\n\n"
-                    f"Each qubit in the expval tuple must be distinct.",
-                    handle_name=q.value.name,
-                    operation_name="expval",
-                    first_use_location="expval (earlier in same tuple)",
-                )
-            seen_ids.add(q.id)
-            consumed_qubits.append(q.consume(operation_name="expval"))
-
-        qubit_values = [q.value for q in consumed_qubits]
-        qubits_value = ArrayValue(
-            type=qubit_values[0].type,
-            name="expval_qubits",
-            shape=tuple(),
-            params={"qubit_values": qubit_values},
-        )
-    elif isinstance(qubits, Vector):
-        # Vector[Qubit] - consume (includes validation of returned borrows)
-        qubits = qubits.consume(operation_name="expval")
-        qubits_value = qubits.value
-    elif isinstance(qubits, Qubit):
-        # Single qubit - consume it
-        qubits = qubits.consume(operation_name="expval")
-        qubits_value = qubits.value
-    else:
-        raise TypeError(
-            f"expval expects Qubit, Vector[Qubit], or tuple[Qubit, ...], "
-            f"got {type(qubits).__name__}"
-        )
+    qubits_value = _consume_expval_target(qubits)
 
     # Create result Float value
     result_value = Value(type=FloatType(), name="expval_result")

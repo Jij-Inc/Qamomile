@@ -470,54 +470,7 @@ class ResourceAllocator:
         Returns:
             Resolved size as int, or None if cannot resolve
         """
-        import re
-
-        # Check for constant in params
-        if hasattr(size_val, "params") and "const" in size_val.params:
-            return int(size_val.params["const"])
-
-        # Check if it's a Value with parent_array (e.g., hi.shape[0])
-        if hasattr(size_val, "parent_array") and size_val.parent_array is not None:
-            array_name = size_val.parent_array.name
-            if array_name in bindings:
-                array_data = bindings[array_name]
-                # Get the shape/length of the bound array
-                if hasattr(array_data, "__len__"):
-                    return len(array_data)
-
-        # Check by name in bindings
-        if hasattr(size_val, "name") and size_val.name in bindings:
-            bound = bindings[size_val.name]
-            if isinstance(bound, (int, float)):
-                return int(bound)
-            if hasattr(bound, "__len__"):
-                return len(bound)
-
-        # Check by uuid in bindings
-        if hasattr(size_val, "uuid") and size_val.uuid in bindings:
-            bound = bindings[size_val.uuid]
-            if isinstance(bound, (int, float)):
-                return int(bound)
-
-        # Check for dimension naming pattern (e.g., "hi_dim0" -> array "hi", dimension 0)
-        # This handles cases where parent_array is None after inlining
-        if hasattr(size_val, "name") and size_val.name:
-            match = re.match(r"^(.+)_dim(\d+)$", size_val.name)
-            if match:
-                array_name = match.group(1)
-                dim_index = int(match.group(2))
-                if array_name in bindings:
-                    array_data = bindings[array_name]
-                    # Get shape at specified dimension
-                    if hasattr(array_data, "shape"):
-                        # numpy array or similar
-                        if dim_index < len(array_data.shape):
-                            return int(array_data.shape[dim_index])
-                    elif dim_index == 0 and hasattr(array_data, "__len__"):
-                        # For 1D sequences, dim0 is length
-                        return len(array_data)
-
-        return None
+        return shared_resolve_int_value(size_val, BindingLookup(bindings))
 
     def _allocate_gate(
         self,

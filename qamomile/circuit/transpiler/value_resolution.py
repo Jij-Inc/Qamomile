@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numbers
+import re
 from typing import Any, Mapping, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -25,10 +26,79 @@ class BindingLookup:
         raise KeyError(key)
 
 
+_DIMENSION_NAME_RE = re.compile(r"^(.+)_dim(\d+)$")
+
+
 def is_concrete_real_number(value: Any) -> bool:
     """Return True for concrete builtin/numpy real scalars."""
 
     return isinstance(value, numbers.Real)
+
+
+def _lookup_bound_array(
+    array_name: str,
+    parameter_name: str | None,
+    bindings: BindingLookup,
+) -> Any | None:
+    """Look up bound array-like data by array name or parameter name."""
+    if bindings.has(array_name):
+        return bindings.get(array_name)
+    if parameter_name is not None and bindings.has(parameter_name):
+        return bindings.get(parameter_name)
+    return None
+
+
+def _resolve_bound_array_dimension(array_data: Any, dim_index: int) -> int | None:
+    """Resolve one dimension of a bound array-like object."""
+    if hasattr(array_data, "shape"):
+        shape = array_data.shape
+        if dim_index < len(shape):
+            dim_value = shape[dim_index]
+            if is_concrete_real_number(dim_value):
+                return int(dim_value)
+
+    if dim_index == 0 and hasattr(array_data, "__len__"):
+        return len(array_data)
+
+    return None
+
+
+def resolve_array_dimension_value(
+    value: "Value",
+    bindings: BindingLookup,
+) -> int | None:
+    """Resolve synthetic array-dimension values like ``hi_dim0``.
+
+    These values can appear either as:
+    - shape-derived values that still point at ``parent_array`` before inlining
+    - renamed symbolic values such as ``hi_dim0`` after inlining/substitution
+    """
+    # Pre-inline shape access: keep following the parent array when available.
+    if value.parent_array is not None and not value.element_indices:
+        match = _DIMENSION_NAME_RE.match(value.name)
+        dim_index = int(match.group(2)) if match else 0
+        array_data = _lookup_bound_array(
+            value.parent_array.name,
+            value.parent_array.parameter_name(),
+            bindings,
+        )
+        if array_data is not None:
+            resolved = _resolve_bound_array_dimension(array_data, dim_index)
+            if resolved is not None:
+                return resolved
+
+    # Post-inline shape access: values become standalone names like ``hi_dim0``.
+    match = _DIMENSION_NAME_RE.match(value.name)
+    if match is None:
+        return None
+
+    array_name = match.group(1)
+    dim_index = int(match.group(2))
+    array_data = _lookup_bound_array(array_name, value.parameter_name(), bindings)
+    if array_data is None:
+        return None
+
+    return _resolve_bound_array_dimension(array_data, dim_index)
 
 
 def resolve_classical_value(
@@ -43,8 +113,9 @@ def resolve_classical_value(
         1. uuid
         2. parameter name (optional)
         3. value name
-        4. array element via parent array + element indices
-        5. constant value
+        4. synthetic array dimension value (e.g. hi_dim0)
+        5. array element via parent array + element indices
+        6. constant value
     """
 
     if bindings.has(value.uuid):
@@ -57,6 +128,10 @@ def resolve_classical_value(
 
     if bindings.has(value.name):
         return bindings.get(value.name)
+
+    resolved_dim = resolve_array_dimension_value(value, bindings)
+    if resolved_dim is not None:
+        return resolved_dim
 
     if value.parent_array is not None and value.element_indices:
         return resolve_array_element_value(value, bindings)
@@ -139,7 +214,10 @@ def resolve_int_value(
             bound_val = bindings.get(value.name)
             if is_concrete_real_number(bound_val):
                 return int(bound_val)
-            return None
+
+        resolved_dim = resolve_array_dimension_value(value, bindings)
+        if resolved_dim is not None:
+            return resolved_dim
 
         if value.parent_array is not None and value.element_indices:
             resolved = resolve_array_element_value(value, bindings)
