@@ -664,6 +664,10 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             # Register phi output UUIDs so subsequent operations
             # (e.g., measure) can resolve the merged values.
             self._register_phi_outputs(op, qubit_map, clbit_map, bindings)
+        else:
+            raise NotImplementedError(
+                f"{type(self._emitter).__name__} does not support IfOperation yet"
+            )
 
     def _register_phi_outputs(
         self,
@@ -718,6 +722,10 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 circuit, op.operations, qubit_map, clbit_map, bindings
             )
             self._emitter.emit_while_end(circuit, context)
+        else:
+            raise NotImplementedError(
+                f"{type(self._emitter).__name__} does not support WhileOperation yet"
+            )
 
     def _emit_composite_gate(
         self,

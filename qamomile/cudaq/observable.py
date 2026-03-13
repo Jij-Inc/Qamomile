@@ -1,0 +1,74 @@
+"""CUDA-Q observable support.
+
+This module provides conversion from qamomile.observable.Hamiltonian
+to CUDA-Q SpinOperator for use with ``cudaq.observe``.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import qamomile.observable as qm_o
+
+_ZERO_THRESHOLD = 1e-15
+
+
+def hamiltonian_to_cudaq_spin_op(hamiltonian: qm_o.Hamiltonian) -> Any:
+    """Convert qamomile.observable.Hamiltonian to cudaq.SpinOperator.
+
+    Args:
+        hamiltonian: The qamomile Hamiltonian to convert.
+
+    Returns:
+        A CUDA-Q SpinOperator built from ``cudaq.spin`` primitives.
+
+    Example:
+        ```python
+        import qamomile.observable as qm_o
+        from qamomile.cudaq.observable import hamiltonian_to_cudaq_spin_op
+
+        H = qm_o.Z(0) * qm_o.Z(1) + 0.5 * (qm_o.X(0) + qm_o.X(1))
+        spin_op = hamiltonian_to_cudaq_spin_op(H)
+        ```
+    """
+    from cudaq import spin
+
+    pauli_fn_map = {
+        qm_o.Pauli.X: spin.x,
+        qm_o.Pauli.Y: spin.y,
+        qm_o.Pauli.Z: spin.z,
+    }
+
+    result = None
+
+    # Add constant term
+    if abs(hamiltonian.constant) > _ZERO_THRESHOLD:
+        result = hamiltonian.constant * spin.i(0)
+
+    # Convert each term
+    for operators, coeff in hamiltonian.terms.items():
+        term = None
+        for op in operators:
+            if op.pauli == qm_o.Pauli.I:
+                continue
+            pauli_op = pauli_fn_map[op.pauli](op.index)
+            if term is None:
+                term = pauli_op
+            else:
+                term = term * pauli_op
+
+        if term is None:
+            # All-identity term
+            scaled = coeff * spin.i(0)
+        else:
+            scaled = coeff * term
+
+        if result is None:
+            result = scaled
+        else:
+            result = result + scaled
+
+    if result is None:
+        return 0.0 * spin.i(0)
+
+    return result
