@@ -64,6 +64,26 @@ class VariableCollector(ast.NodeVisitor):
         for target in node.targets:
             self.visit(target)
 
+    def visit_AugAssign(self, node: ast.AugAssign):
+        """AugAssign (e.g. x += 1) は暗黙の Read-before-Write。
+
+        右辺を先に走査し、Name ターゲットは Load + Store として記録する。
+        first_context は "Load"（既存値の読み出しが先行するため）。
+        """
+        self.visit(node.value)
+        target = node.target
+        if isinstance(target, ast.Name):
+            name = target.id
+            if name not in self._exclude and name not in self._global_names:
+                self.vars.add(name)
+                self._load_names.add(name)
+                self._store_names.add(name)
+                if name not in self._first_context:
+                    self._first_context[name] = "Load"
+        else:
+            # Subscript / Attribute: visit normally to capture base/index loads
+            self.visit(target)
+
     def visit_FunctionDef(self, node: ast.FunctionDef):
         """内部関数定義の走査をスキップする。"""
         pass
@@ -592,6 +612,9 @@ class ControlFlowTransformer(ast.NodeTransformer):
         saved_after_load = self._after_stmt_load_vars
         initial_defined = set(self._outer_defined_vars)
         initial_defined.update(self._extract_tuple_vars(node.target))
+        # Unlike visit_While, the for iterator expression is evaluated once
+        # before the loop, not re-evaluated each iteration, so we only
+        # propagate the outer scope's after-loads without unioning iterator loads.
         flattened_body = self._visit_body_with_tracking(
             node.body, initial_defined, outer_after_loads=saved_after_load
         )
