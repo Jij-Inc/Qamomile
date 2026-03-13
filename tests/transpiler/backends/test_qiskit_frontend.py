@@ -3645,7 +3645,7 @@ class TestTranspilerPassesPipeline:
 
         block = transpiler.to_block(circuit)
         inlined = transpiler.inline(block)
-        validated = transpiler.linear_validate(inlined)
+        validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated)
         analyzed = transpiler.analyze(folded)
         assert analyzed.kind == BlockKind.ANALYZED
