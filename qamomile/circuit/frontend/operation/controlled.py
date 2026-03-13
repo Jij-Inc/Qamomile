@@ -155,7 +155,7 @@ class ControlledGate:
                 )
             seen_ids.add(lid)
 
-        # Consume all qubit handles (enforces linear type)
+        # Consume all qubit handles (enforces affine type)
         controls = tuple(
             c.consume(operation_name="ControlledU[control]") for c in controls
         )
@@ -296,7 +296,7 @@ class ControlledGate:
         )
 
         vector = args[0]
-        # Consume the Vector (linear type)
+        # Consume the Vector (affine type)
         vector = vector.consume(operation_name="ControlledU[index_spec]")
 
         block = self._qkernel.block
@@ -364,7 +364,7 @@ class ControlledGate:
         if not target_args:
             raise ValueError("ControlledU requires at least 1 target qubit.")
 
-        # Consume control vector (linear type enforcement)
+        # Consume control vector (affine type enforcement)
         control_vector = control_vector.consume(operation_name="ControlledU[controls]")
 
         # Consume target qubits

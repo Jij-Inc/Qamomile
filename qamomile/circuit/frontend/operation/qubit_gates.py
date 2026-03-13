@@ -7,7 +7,7 @@ from qamomile.circuit.transpiler.errors import QubitAliasError
 
 def _apply_single_qubit_gate(qubit: Qubit, gate_type: GateOperationType) -> Qubit:
     """Apply a single-qubit gate and return the output qubit."""
-    # Consume the input handle (enforces linear type)
+    # Consume the input handle (enforces affine type)
     qubit = qubit.consume(operation_name=gate_type.name)
 
     output_value = qubit.value.next_version()
@@ -37,7 +37,7 @@ def _apply_two_qubit_gate(
             operation_name=gate_type.name,
         )
 
-    # Consume both input handles (enforces linear type)
+    # Consume both input handles (enforces affine type)
     control = control.consume(operation_name=f"{gate_type.name}[control]")
     target = target.consume(operation_name=f"{gate_type.name}[target]")
 
@@ -80,7 +80,7 @@ def _apply_three_qubit_gate(
                 operation_name=gate_type.name,
             )
 
-    # Consume all three input handles (enforces linear type)
+    # Consume all three input handles (enforces affine type)
     control1 = control1.consume(operation_name=f"{gate_type.name}[control1]")
     control2 = control2.consume(operation_name=f"{gate_type.name}[control2]")
     target = target.consume(operation_name=f"{gate_type.name}[target]")
@@ -159,7 +159,7 @@ def cz(control: Qubit, target: Qubit) -> tuple[Qubit, Qubit]:
 
 def p(qubit: Qubit, theta: float | Float) -> Qubit:
     """Phase gate: P(theta)|1> = e^{i*theta}|1>."""
-    # Consume the input handle (enforces linear type)
+    # Consume the input handle (enforces affine type)
     qubit = qubit.consume(operation_name="P")
 
     output_value = qubit.value.next_version()
@@ -191,7 +191,7 @@ def cp(control: Qubit, target: Qubit, theta: float | Float) -> tuple[Qubit, Qubi
             operation_name="CP",
         )
 
-    # Consume both input handles (enforces linear type)
+    # Consume both input handles (enforces affine type)
     control = control.consume(operation_name="CP[control]")
     target = target.consume(operation_name="CP[target]")
 
@@ -221,7 +221,7 @@ def _apply_rotation_gate(
     qubit: Qubit, angle: float | Float, gate_type: GateOperationType
 ) -> Qubit:
     """Apply a rotation gate with angle."""
-    # Consume the input handle (enforces linear type)
+    # Consume the input handle (enforces affine type)
     qubit = qubit.consume(operation_name=gate_type.name)
 
     output_value = qubit.value.next_version()
@@ -279,7 +279,7 @@ def rzz(qubit_0: Qubit, qubit_1: Qubit, angle: float | Float) -> tuple[Qubit, Qu
             operation_name="RZZ",
         )
 
-    # Consume both input handles (enforces linear type)
+    # Consume both input handles (enforces affine type)
     qubit_0 = qubit_0.consume(operation_name="RZZ[0]")
     qubit_1 = qubit_1.consume(operation_name="RZZ[1]")
 

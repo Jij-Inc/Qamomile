@@ -11,7 +11,7 @@ from qamomile.circuit.ir.types import ValueType
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.errors import (
-    LinearTypeError,
+    AffineTypeError,
     QubitConsumedError,
     UnreturnedBorrowError,
 )
@@ -246,7 +246,7 @@ class ArrayBase(Handle, Generic[T]):
 
         1. **Borrowed index, correct parent**: validates identity, consumes
            handle, releases borrow. Normal borrow-return path.
-        2. **Borrowed index, wrong parent**: raises ``LinearTypeError``.
+        2. **Borrowed index, wrong parent**: raises ``AffineTypeError``.
            Prevents returning a value from a different array.
         3. **Unborrowed index**: consumes the handle without identity check.
            Allows writing a fresh qubit to an index that was never borrowed.
@@ -257,7 +257,7 @@ class ArrayBase(Handle, Generic[T]):
 
         Raises:
             QubitConsumedError: If the array was already consumed.
-            LinearTypeError: If the index was borrowed **and** the value
+            AffineTypeError: If the index was borrowed **and** the value
                 was not borrowed from this array (``value.parent is not self``).
 
         Notes:
@@ -297,7 +297,7 @@ class ArrayBase(Handle, Generic[T]):
             and self._indices_definitely_different(indices, value.indices)
         ):
             source_index_str = self._format_index(value.indices)
-            raise LinearTypeError(
+            raise AffineTypeError(
                 f"Cannot return borrowed element '{self.value.name}[{source_index_str}]' "
                 f"to '{self.value.name}[{index_str}]'.\n"
                 f"Borrowed elements must be returned to the same index.",
@@ -315,7 +315,7 @@ class ArrayBase(Handle, Generic[T]):
             if release_key in self._borrowed_indices:
                 # Borrow-return path: element was borrowed, validate identity
                 if not isinstance(value, Handle) or value.parent is not self:
-                    raise LinearTypeError(
+                    raise AffineTypeError(
                         f"Cannot return a value to '{self.value.name}[{index_str}]' "
                         f"that was not borrowed from this array.",
                         handle_name=self.value.name,
@@ -332,7 +332,7 @@ class ArrayBase(Handle, Generic[T]):
                     and value.parent is not self
                     and not value.parent._consumed
                 ):
-                    raise LinearTypeError(
+                    raise AffineTypeError(
                         f"Cannot assign a handle borrowed from another array "
                         f"to '{self.value.name}[{index_str}]' — "
                         f"it was not borrowed from this array.",

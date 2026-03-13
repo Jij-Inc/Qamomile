@@ -13,7 +13,7 @@ from qamomile.circuit.transpiler.errors import QamomileCompileError
 from qamomile.circuit.transpiler.passes.inline import InlinePass
 from qamomile.circuit.transpiler.passes.analyze import AnalyzePass
 from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
-from qamomile.circuit.transpiler.passes.linear_validate import LinearValidationPass
+from qamomile.circuit.transpiler.passes.affine_validate import AffineValidationPass
 from qamomile.circuit.transpiler.passes.separate import SeparatePass
 from qamomile.circuit.transpiler.passes.emit import EmitPass
 from qamomile.circuit.transpiler.passes.substitution import (
@@ -112,8 +112,10 @@ class Transpiler(ABC, Generic[T]):
 
         # Option 2: Step-by-step
         block = transpiler.to_block(kernel)
-        linear = transpiler.inline(block)
-        folded = transpiler.constant_fold(linear, bindings={"theta": 0.5})
+        substituted = transpiler.substitute(block)
+        affine = transpiler.inline(substituted)
+        validated = transpiler.affine_validate(affine)
+        folded = transpiler.constant_fold(validated, bindings={"theta": 0.5})
         analyzed = transpiler.analyze(folded)
         separated = transpiler.separate(analyzed)
         executable = transpiler.emit(separated, bindings={"theta": 0.5})
@@ -128,7 +130,7 @@ class Transpiler(ABC, Generic[T]):
 
     # Generic passes (can be overridden by subclasses)
     _inline_pass: InlinePass = InlinePass()
-    _linear_validate_pass: LinearValidationPass = LinearValidationPass()
+    _affine_validate_pass: AffineValidationPass = AffineValidationPass()
     _analyze_pass: AnalyzePass = AnalyzePass()
 
     @property
@@ -238,14 +240,14 @@ class Transpiler(ABC, Generic[T]):
         """Pass 1: Inline all CallBlockOperations."""
         return self._inline_pass.run(block)
 
-    def linear_validate(self, block: Block) -> Block:
-        """Pass 1.5: Validate linear type semantics.
+    def affine_validate(self, block: Block) -> Block:
+        """Pass 1.5: Validate affine type semantics.
 
-        This is a safety net to catch linear type violations that may
+        This is a safety net to catch affine type violations that may
         have bypassed frontend checks. Validates that quantum values
         are used at most once.
         """
-        return self._linear_validate_pass.run(block)
+        return self._affine_validate_pass.run(block)
 
     def constant_fold(
         self,
@@ -313,7 +315,7 @@ class Transpiler(ABC, Generic[T]):
             1. to_block: Convert QKernel to Block
             2. substitute: Apply substitutions (if configured)
             3. inline: Inline CallBlockOperations
-            4. linear_validate: Validate linear type semantics
+            4. affine_validate: Validate affine type semantics
             5. constant_fold: Fold constant expressions
             6. analyze: Validate and analyze dependencies
             7. separate: Split into quantum/classical segments
@@ -323,8 +325,8 @@ class Transpiler(ABC, Generic[T]):
         block = self.to_block(kernel, bindings, parameters)
         # Apply substitutions if configured
         substituted = self.substitute(block)
-        linear = self.inline(substituted)
-        validated = self.linear_validate(linear)
+        affine = self.inline(substituted)
+        validated = self.affine_validate(affine)
         folded = self.constant_fold(validated, bindings)
         analyzed = self.analyze(folded)
         separated = self.separate(analyzed)

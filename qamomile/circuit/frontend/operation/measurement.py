@@ -80,7 +80,7 @@ def _measure_qubit(qubit: Qubit) -> Bit:
     Returns:
         Bit containing the measurement result.
     """
-    # Consume the input handle (enforces linear type - measurement is destructive)
+    # Consume the input handle (enforces affine type - measurement is destructive)
     qubit = qubit.consume(operation_name="measure")
 
     # Create output bit value
@@ -111,7 +111,7 @@ def _measure_qfixed(qfixed: QFixed) -> Float:
     Returns:
         Float containing the decoded measurement result.
     """
-    # Consume the input handle (enforces linear type - measurement is destructive)
+    # Consume the input handle (enforces affine type - measurement is destructive)
     qfixed = qfixed.consume(operation_name="measure")
 
     # Create Float output value
@@ -149,7 +149,7 @@ def _measure_vector_qubit(qubits: Vector[Qubit]) -> Vector[Bit]:
     # Ensure all borrowed elements have been returned before measuring
     qubits.validate_all_returned()
 
-    # Consume the input handle (enforces linear type - measurement is destructive)
+    # Consume the input handle (enforces affine type - measurement is destructive)
     qubits = qubits.consume(operation_name="measure")
 
     # Get shape values - prefer IR shape from ArrayValue, fallback to frontend shape

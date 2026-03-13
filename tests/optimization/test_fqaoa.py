@@ -10,16 +10,22 @@ from tests.utils import Utils
 
 @pytest.fixture
 def simple_problem():
-    J = jm.Placeholder("J", ndim=2)
-    n = J.len_at(0, latex="n")
-    D = jm.Placeholder("D")
-    x = jm.BinaryVar("x", shape=(n, D))
-
     problem = jm.Problem("qubo")
-    i, j = jm.Element("i", n), jm.Element("j", n)
-    d, d_dash = jm.Element("d", D), jm.Element("d'", D)
-    problem += jm.sum([i, j], J[i, j] * jm.sum([d, d_dash], x[i, d] * x[j, d_dash]))
-    problem += jm.Constraint("constraint", jm.sum([i, d], x[i, d]) == 4)
+
+    @problem.update
+    def _(problem: jm.DecoratedProblem):
+        J = problem.Float(ndim=2)
+        n = J.len_at(0, latex="n")
+        D = problem.Dim()
+        x = problem.BinaryVar(shape=(n, D))
+
+        # Quadratic objective
+        problem += J.ndenumerate().map(
+            lambda ij_v: ij_v[1] * x[ij_v[0][0]].sum() * x[ij_v[0][1]].sum()
+        ).sum()
+
+        # Equality constraint
+        problem += problem.Constraint("constraint", x.sum() == 4)
 
     instance_data = {
         "J": [
@@ -30,7 +36,7 @@ def simple_problem():
         ],
         "D": 2,
     }
-    instance = jm.Interpreter(instance_data).eval_problem(problem)
+    instance = problem.eval(instance_data)
 
     return instance
 
@@ -85,8 +91,7 @@ def test_n_body_problem_with_constraints(instance_data):
     - ValueError is raised.
     """
     n_body_problem = Utils.get_n_body_problem()
-    interpreter = jm.Interpreter(instance_data)
-    instance = interpreter.eval_problem(n_body_problem)
+    instance = n_body_problem.eval(instance_data)
 
     with pytest.raises(ValueError):
         FQAOAConverter(instance, num_fermions=0)

@@ -23,6 +23,7 @@ def uint(arg: str) -> UInt: ...
 
 
 def uint(arg: int | str) -> UInt:
+    """Create a UInt handle from an integer literal or declare a named UInt parameter."""
     name = str(arg) if isinstance(arg, str) else "uint_const"
     if isinstance(arg, int):
         # Set params={"const": arg} so Value.is_constant() returns True
@@ -40,6 +41,7 @@ def float_(arg: str) -> Float: ...
 
 
 def float_(arg: float | str) -> Float:
+    """Create a Float handle from a float literal or declare a named Float parameter."""
     name = str(arg) if isinstance(arg, str) else "float_const"
     value = Value(type=ir_type.FloatType(), name=name)
     if isinstance(arg, float):
@@ -59,6 +61,7 @@ def bit(arg: int) -> Bit: ...
 
 
 def bit(arg: bool | str | int) -> Bit:
+    """Create a Bit handle from a boolean/int literal or declare a named Bit parameter."""
     name = str(arg) if isinstance(arg, str) else "bit_const"
     value = Value(type=ir_type.BitType(), name=name)
     if isinstance(arg, bool):

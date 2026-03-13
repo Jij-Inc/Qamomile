@@ -40,7 +40,7 @@ class TestConstantFoldControlledUFields:
         transpiler = QiskitTranspiler()
         block = transpiler.to_block(kernel, bindings={"n": 4})
         inlined = transpiler.inline(transpiler.substitute(block))
-        validated = transpiler.linear_validate(inlined)
+        validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated, bindings={"n": 4})
 
         cu = self._find_controlled_u(folded.operations)
@@ -65,7 +65,7 @@ class TestConstantFoldControlledUFields:
         transpiler = QiskitTranspiler()
         block = transpiler.to_block(kernel, bindings={"n": 4})
         inlined = transpiler.inline(transpiler.substitute(block))
-        validated = transpiler.linear_validate(inlined)
+        validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated, bindings={"n": 4})
 
         cu = self._find_controlled_u(folded.operations)
@@ -90,7 +90,7 @@ class TestConstantFoldControlledUFields:
         transpiler = QiskitTranspiler()
         block = transpiler.to_block(kernel)
         inlined = transpiler.inline(transpiler.substitute(block))
-        validated = transpiler.linear_validate(inlined)
+        validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated)
 
         cu = self._find_controlled_u(folded.operations)
@@ -113,7 +113,7 @@ class TestConstantFoldControlledUFields:
         transpiler = QiskitTranspiler()
         block = transpiler.to_block(kernel, bindings={"n": 4})
         inlined = transpiler.inline(transpiler.substitute(block))
-        validated = transpiler.linear_validate(inlined)
+        validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated, bindings={"n": 4})
 
         cu = self._find_controlled_u(folded.operations)
@@ -140,7 +140,7 @@ class TestConstantFoldControlledUFields:
         transpiler = QiskitTranspiler()
         block = transpiler.to_block(kernel)
         inlined = transpiler.inline(transpiler.substitute(block))
-        validated = transpiler.linear_validate(inlined)
+        validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated)
 
         cu = self._find_controlled_u(folded.operations)
