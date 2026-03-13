@@ -1363,7 +1363,7 @@ class TestIfElseDeadPhiFiltering:
         assert len(qubit_phis) >= 1
 
     def test_if_shared_new_local_used_only_by_augassign_is_merged(self):
-        """Both branches assign angle from parameter, afterward angle += 1.0 -> must be in output."""
+        """Both branches assign angle from parameter, afterward angle += 1.0 -> float phi must exist."""
 
         @qkernel
         def circuit(q0: Qubit, theta: Float) -> qm.Float:
@@ -1378,8 +1378,13 @@ class TestIfElseDeadPhiFiltering:
         graph = circuit.build()
         if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
         assert len(if_ops) == 1
-        result_names = [r.name for r in if_ops[0].results]
-        assert any("angle" in name for name in result_names)
+        # angle (= theta + x) becomes a float_tmp in IR; check FloatType phi exists
+        float_phis = [
+            p
+            for p in if_ops[0].phi_ops
+            if isinstance(p, PhiOp) and isinstance(p.results[0].type, FloatType)
+        ]
+        assert len(float_phis) >= 1
 
     def test_if_one_sided_new_local_used_only_by_augassign_raises_syntax_error(self):
         """One-sided new local, afterward angle += 1.0 -> must raise SyntaxError."""
