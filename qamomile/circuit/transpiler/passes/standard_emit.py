@@ -1646,15 +1646,15 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             case BinOpKind.MUL:
                 result = lhs * rhs
             case BinOpKind.DIV:
-                result = (
-                    lhs / rhs
-                    if (isinstance(rhs, (int, float)) and rhs != 0)
-                    else (lhs / rhs if rhs != 0 else 0.0)
-                )
+                if isinstance(rhs, (int, float)) and rhs == 0:
+                    raise EmitError("Division by zero during classical pre-evaluation")
+                result = lhs / rhs
             case BinOpKind.FLOORDIV:
-                result = (
-                    lhs // rhs if (isinstance(rhs, (int, float)) and rhs != 0) else 0
-                )
+                if isinstance(rhs, (int, float)) and rhs == 0:
+                    raise EmitError(
+                        "Floor division by zero during classical pre-evaluation"
+                    )
+                result = lhs // rhs
             case BinOpKind.POW:
                 result = lhs**rhs
 

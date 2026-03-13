@@ -13,6 +13,7 @@ from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateType,
 )
 from qamomile.circuit.ir.value import Value
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import (
     CompiledClassicalSegment,
     CompiledExpvalSegment,
@@ -227,9 +228,17 @@ class EmitPass(Pass[SimplifiedProgram, ExecutableProgram[T]], Generic[T]):
                     case BinOpKind.MUL:
                         result = lhs_val * rhs_val
                     case BinOpKind.DIV:
-                        result = lhs_val / rhs_val if rhs_val != 0 else 0.0
+                        if rhs_val == 0:
+                            raise EmitError(
+                                "Division by zero during classical pre-evaluation"
+                            )
+                        result = lhs_val / rhs_val
                     case BinOpKind.FLOORDIV:
-                        result = lhs_val // rhs_val if rhs_val != 0 else 0
+                        if rhs_val == 0:
+                            raise EmitError(
+                                "Floor division by zero during classical pre-evaluation"
+                            )
+                        result = lhs_val // rhs_val
                     case BinOpKind.POW:
                         result = lhs_val**rhs_val
                 if result is not None and op.results:

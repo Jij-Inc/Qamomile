@@ -216,11 +216,26 @@ class ClassicalExecutor:
         context: ExecutionContext,
         results: dict[str, Any],
     ) -> Any:
-        """Get the concrete value from context or results."""
+        """Get the concrete value from context or results.
+
+        Lookup priority:
+            1. results[uuid] — SSA intermediate values (exact match only)
+            2. context[uuid]
+            3. context[parameter_name] — user-provided parameter bindings
+            4. context[name] — fallback for name-keyed bindings
+            5. constant value from IR
+            6. raise ExecutionError
+        """
         if value.uuid in results:
             return results[value.uuid]
         if context.has(value.uuid):
             return context.get(value.uuid)
+        # Fallback: resolve by parameter name or value name (context only)
+        param_name = value.parameter_name()
+        if param_name is not None and context.has(param_name):
+            return context.get(param_name)
+        if context.has(value.name):
+            return context.get(value.name)
         # Check if it's a constant
         if value.is_constant():
             return value.get_const()
