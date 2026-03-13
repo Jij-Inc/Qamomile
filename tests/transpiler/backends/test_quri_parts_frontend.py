@@ -37,6 +37,8 @@ from qamomile.quri_parts import QuriPartsTranspiler
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.segments import SimplifiedProgram
 from qamomile.circuit.ir.block import BlockKind
+from quri_parts.circuit import gate_names
+from quri_parts.core.operator import SinglePauli
 
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.basic import (
@@ -67,17 +69,19 @@ from qamomile.circuit.algorithm.fqaoa import (
 # ---------------------------------------------------------------------------
 
 
-def _run_statevector(circuit) -> np.ndarray:
+def _run_statevector(circuit, parameter_bindings=None) -> np.ndarray:
     """Run a QURI Parts circuit and return the statevector via Qulacs.
 
     Handles both parametric (unbound) and bound circuits.
-    For parametric circuits with no parameter values, binds with empty list.
+    If *parameter_bindings* is given, uses those values; otherwise binds
+    with zeros for parametric circuits.
     """
     from quri_parts.core.state import GeneralCircuitQuantumState
     from quri_parts.qulacs.simulator import evaluate_state_to_vector
 
     if hasattr(circuit, "parameter_count") and circuit.parameter_count > 0:
-        bound_circuit = circuit.bind_parameters([0.0] * circuit.parameter_count)
+        values = parameter_bindings if parameter_bindings is not None else [0.0] * circuit.parameter_count
+        bound_circuit = circuit.bind_parameters(values)
     elif hasattr(circuit, "bind_parameters"):
         bound_circuit = circuit.bind_parameters([])
     else:
@@ -98,25 +102,30 @@ def _transpile_and_get_circuit(kernel, bindings=None, parameters=None):
     return exe, circuit
 
 
-def _get_gates(circuit) -> list:
+def _get_gates(circuit, parameter_bindings=None) -> list:
     """Return list of gate objects from a QURI Parts circuit.
 
     Handles both parametric and non-parametric circuits.
-    For parametric circuits, binds with zeros to obtain concrete gates.
+    If *parameter_bindings* is given, uses those values; otherwise binds
+    with zeros for parametric circuits.
     Returns QuantumGate objects with .name, .target_indices,
     .control_indices, and .params properties.
     """
+    # Parametric circuits must be bound first to get concrete gates
+    if hasattr(circuit, "bind_parameters"):
+        if hasattr(circuit, "parameter_count") and circuit.parameter_count > 0:
+            values = parameter_bindings if parameter_bindings is not None else [0.0] * circuit.parameter_count
+            bound = circuit.bind_parameters(values)
+            if hasattr(bound, "gates"):
+                return list(bound.gates)
+        else:
+            bound = circuit.bind_parameters([])
+            if hasattr(bound, "gates"):
+                return list(bound.gates)
     if hasattr(circuit, "gates"):
         gates = list(circuit.gates)
         if gates:
             return gates
-    if hasattr(circuit, "bind_parameters"):
-        if hasattr(circuit, "parameter_count") and circuit.parameter_count > 0:
-            bound = circuit.bind_parameters([0.0] * circuit.parameter_count)
-        else:
-            bound = circuit.bind_parameters([])
-        if hasattr(bound, "gates"):
-            return list(bound.gates)
     return []
 
 
@@ -142,7 +151,7 @@ class TestSingleQubitGatesFrontend:
         _, qc = _transpile_and_get_circuit(circuit)
         gates = _get_gates(qc)
         assert len(gates) == 1
-        assert gates[0].name == "H"
+        assert gates[0].name == gate_names.H
         assert gates[0].target_indices == (0,)
 
     def test_x_creation(self):
@@ -157,7 +166,7 @@ class TestSingleQubitGatesFrontend:
         _, qc = _transpile_and_get_circuit(circuit)
         gates = _get_gates(qc)
         assert len(gates) == 1
-        assert gates[0].name == "X"
+        assert gates[0].name == gate_names.X
         assert gates[0].target_indices == (0,)
 
     def test_y_creation(self):
@@ -172,7 +181,7 @@ class TestSingleQubitGatesFrontend:
         _, qc = _transpile_and_get_circuit(circuit)
         gates = _get_gates(qc)
         assert len(gates) == 1
-        assert gates[0].name == "Y"
+        assert gates[0].name == gate_names.Y
         assert gates[0].target_indices == (0,)
 
     def test_z_creation(self):
@@ -187,7 +196,7 @@ class TestSingleQubitGatesFrontend:
         _, qc = _transpile_and_get_circuit(circuit)
         gates = _get_gates(qc)
         assert len(gates) == 1
-        assert gates[0].name == "Z"
+        assert gates[0].name == gate_names.Z
         assert gates[0].target_indices == (0,)
 
     def test_s_creation(self):
@@ -202,7 +211,7 @@ class TestSingleQubitGatesFrontend:
         _, qc = _transpile_and_get_circuit(circuit)
         gates = _get_gates(qc)
         assert len(gates) == 1
-        assert gates[0].name == "S"
+        assert gates[0].name == gate_names.S
         assert gates[0].target_indices == (0,)
 
     def test_sdg_creation(self):
@@ -217,7 +226,7 @@ class TestSingleQubitGatesFrontend:
         _, qc = _transpile_and_get_circuit(circuit)
         gates = _get_gates(qc)
         assert len(gates) == 1
-        assert gates[0].name == "Sdag"
+        assert gates[0].name == gate_names.Sdag
         assert gates[0].target_indices == (0,)
 
     def test_t_creation(self):
@@ -232,7 +241,7 @@ class TestSingleQubitGatesFrontend:
         _, qc = _transpile_and_get_circuit(circuit)
         gates = _get_gates(qc)
         assert len(gates) == 1
-        assert gates[0].name == "T"
+        assert gates[0].name == gate_names.T
         assert gates[0].target_indices == (0,)
 
     def test_tdg_creation(self):
@@ -247,7 +256,7 @@ class TestSingleQubitGatesFrontend:
         _, qc = _transpile_and_get_circuit(circuit)
         gates = _get_gates(qc)
         assert len(gates) == 1
-        assert gates[0].name == "Tdag"
+        assert gates[0].name == gate_names.Tdag
         assert gates[0].target_indices == (0,)
 
     def test_rx_creation(self):
@@ -262,7 +271,7 @@ class TestSingleQubitGatesFrontend:
         _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 4})
         gates = _get_gates(qc)
         assert len(gates) == 1
-        assert gates[0].name == "RX"
+        assert gates[0].name == gate_names.RX
         assert gates[0].target_indices == (0,)
         assert np.isclose(gates[0].params[0], np.pi / 4, atol=1e-10)
 
@@ -278,7 +287,7 @@ class TestSingleQubitGatesFrontend:
         _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 4})
         gates = _get_gates(qc)
         assert len(gates) == 1
-        assert gates[0].name == "RY"
+        assert gates[0].name == gate_names.RY
         assert gates[0].target_indices == (0,)
         assert np.isclose(gates[0].params[0], np.pi / 4, atol=1e-10)
 
@@ -294,7 +303,7 @@ class TestSingleQubitGatesFrontend:
         _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 4})
         gates = _get_gates(qc)
         assert len(gates) == 1
-        assert gates[0].name == "RZ"
+        assert gates[0].name == gate_names.RZ
         assert gates[0].target_indices == (0,)
         assert np.isclose(gates[0].params[0], np.pi / 4, atol=1e-10)
 
@@ -310,7 +319,7 @@ class TestSingleQubitGatesFrontend:
         _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 4})
         gates = _get_gates(qc)
         assert len(gates) == 1
-        assert gates[0].name == "U1"
+        assert gates[0].name == gate_names.U1
         assert gates[0].target_indices == (0,)
         assert np.isclose(gates[0].params[0], np.pi / 4, atol=1e-10)
 
@@ -774,7 +783,7 @@ class TestTwoQubitGatesFrontend:
         _, qc = _transpile_and_get_circuit(circuit)
         gates = _get_gates(qc)
         assert len(gates) == 1
-        assert gates[0].name == "CNOT"
+        assert gates[0].name == gate_names.CNOT
         assert gates[0].target_indices == (1,)
         assert gates[0].control_indices == (0,)
 
@@ -862,7 +871,7 @@ class TestTwoQubitGatesFrontend:
         _, qc = _transpile_and_get_circuit(circuit)
         gates = _get_gates(qc)
         assert len(gates) == 1
-        assert gates[0].name == "CZ"
+        assert gates[0].name == gate_names.CZ
         assert gates[0].target_indices == (1,)
         assert gates[0].control_indices == (0,)
 
@@ -950,19 +959,19 @@ class TestTwoQubitGatesFrontend:
         gates = _get_gates(qc)
         assert len(gates) == 5
         half_theta = np.pi / 8  # θ/2 = (π/4)/2
-        assert gates[0].name == "RZ"
+        assert gates[0].name == gate_names.RZ
         assert gates[0].target_indices == (1,)
         assert np.isclose(gates[0].params[0], half_theta, atol=1e-10)
-        assert gates[1].name == "CNOT"
+        assert gates[1].name == gate_names.CNOT
         assert gates[1].target_indices == (1,)
         assert gates[1].control_indices == (0,)
-        assert gates[2].name == "RZ"
+        assert gates[2].name == gate_names.RZ
         assert gates[2].target_indices == (1,)
         assert np.isclose(gates[2].params[0], -half_theta, atol=1e-10)
-        assert gates[3].name == "CNOT"
+        assert gates[3].name == gate_names.CNOT
         assert gates[3].target_indices == (1,)
         assert gates[3].control_indices == (0,)
-        assert gates[4].name == "RZ"
+        assert gates[4].name == gate_names.RZ
         assert gates[4].target_indices == (0,)
         assert np.isclose(gates[4].params[0], half_theta, atol=1e-10)
 
@@ -1006,9 +1015,9 @@ class TestTwoQubitGatesFrontend:
         _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 4})
         gates = _get_gates(qc)
         assert len(gates) == 1
-        assert gates[0].name == "PauliRotation"
+        assert gates[0].name == gate_names.PauliRotation
         assert gates[0].target_indices == (0, 1)
-        assert gates[0].pauli_ids == (3, 3)  # ZZ
+        assert gates[0].pauli_ids == (SinglePauli.Z, SinglePauli.Z)  # ZZ
         assert np.isclose(gates[0].params[0], np.pi / 4, atol=1e-10)
 
     @pytest.mark.parametrize(
@@ -1051,7 +1060,7 @@ class TestTwoQubitGatesFrontend:
         _, qc = _transpile_and_get_circuit(circuit)
         gates = _get_gates(qc)
         assert len(gates) == 1
-        assert gates[0].name == "SWAP"
+        assert gates[0].name == gate_names.SWAP
         assert gates[0].target_indices == (0, 1)
 
     def test_swap_determined(self):
@@ -1089,7 +1098,7 @@ class TestThreeQubitGatesFrontend:
         _, qc = _transpile_and_get_circuit(circuit)
         gates = _get_gates(qc)
         assert len(gates) == 1
-        assert gates[0].name == "TOFFOLI"
+        assert gates[0].name == gate_names.TOFFOLI
         assert gates[0].target_indices == (2,)
         assert gates[0].control_indices == (0, 1)
 
@@ -1385,11 +1394,11 @@ class TestGateCombinations:
         alice_q = gates[0].target_indices[0]
         bell0_q = gates[1].target_indices[0]
         bell1_q = gates[2].target_indices[0]
-        assert gates[0].name == "X" and gates[0].target_indices == (alice_q,)
-        assert gates[1].name == "H" and gates[1].target_indices == (bell0_q,)
-        assert gates[2].name == "CNOT" and gates[2].control_indices == (bell0_q,) and gates[2].target_indices == (bell1_q,)
-        assert gates[3].name == "CNOT" and gates[3].control_indices == (alice_q,) and gates[3].target_indices == (bell0_q,)
-        assert gates[4].name == "H" and gates[4].target_indices == (alice_q,)
+        assert gates[0].name == gate_names.X and gates[0].target_indices == (alice_q,)
+        assert gates[1].name == gate_names.H and gates[1].target_indices == (bell0_q,)
+        assert gates[2].name == gate_names.CNOT and gates[2].control_indices == (bell0_q,) and gates[2].target_indices == (bell1_q,)
+        assert gates[3].name == gate_names.CNOT and gates[3].control_indices == (alice_q,) and gates[3].target_indices == (bell0_q,)
+        assert gates[4].name == gate_names.H and gates[4].target_indices == (alice_q,)
         # All three qubits are distinct
         assert len({alice_q, bell0_q, bell1_q}) == 3
 
@@ -1419,7 +1428,7 @@ class TestControlFlowRange:
 
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": n_qubits})
         gates = _get_gates(circ)
-        h_gates = [g for g in gates if g.name == "H"]
+        h_gates = [g for g in gates if g.name == gate_names.H]
         assert len(h_gates) == n_qubits
         for i, g in enumerate(h_gates):
             assert g.target_indices == (i,)
@@ -1442,7 +1451,7 @@ class TestControlFlowRange:
             circuit, bindings={"n": n_qubits, "thetas": thetas}
         )
         gates = _get_gates(circ)
-        rx_gates = [g for g in gates if g.name == "RX"]
+        rx_gates = [g for g in gates if g.name == gate_names.RX]
         assert len(rx_gates) == n_qubits
         for i, g in enumerate(rx_gates):
             assert g.target_indices == (i,)
@@ -1460,7 +1469,7 @@ class TestControlFlowRange:
 
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": n_qubits})
         gates = _get_gates(circ)
-        h_gates = [g for g in gates if g.name == "H"]
+        h_gates = [g for g in gates if g.name == gate_names.H]
         assert len(h_gates) == 2
         assert h_gates[0].target_indices == (1,)
         assert h_gates[1].target_indices == (2,)
@@ -1480,7 +1489,7 @@ class TestControlFlowRange:
 
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": n_qubits})
         gates = _get_gates(circ)
-        cz_gates = [g for g in gates if g.name == "CZ"]
+        cz_gates = [g for g in gates if g.name == gate_names.CZ]
         assert len(cz_gates) == n_qubits - 1
         for i, g in enumerate(cz_gates):
             assert g.target_indices == (i + 1,)
@@ -1499,7 +1508,7 @@ class TestControlFlowRange:
 
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": n_qubits})
         gates = _get_gates(circ)
-        h_gates = [g for g in gates if g.name == "H"]
+        h_gates = [g for g in gates if g.name == gate_names.H]
         expected = (n_qubits + 1) // 2  # even indices: 0, 2, 4, ...
         assert len(h_gates) == expected
         for idx, g in enumerate(h_gates):
@@ -1518,7 +1527,7 @@ class TestControlFlowRange:
 
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": n_qubits})
         gates = _get_gates(circ)
-        h_gates = [g for g in gates if g.name == "H"]
+        h_gates = [g for g in gates if g.name == gate_names.H]
         expected = n_qubits // 2  # odd indices: 1, 3, 5, ...
         assert len(h_gates) == expected
         for idx, g in enumerate(h_gates):
@@ -1537,7 +1546,7 @@ class TestControlFlowRange:
 
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": 6})
         gates = _get_gates(circ)
-        h_gates = [g for g in gates if g.name == "H"]
+        h_gates = [g for g in gates if g.name == gate_names.H]
         assert len(h_gates) == 0
 
     def test_multiple_sequential_ranges(self):
@@ -1560,8 +1569,8 @@ class TestControlFlowRange:
             circuit, bindings={"n": n, "thetas": thetas}
         )
         gates = _get_gates(circ)
-        h_gates = [g for g in gates if g.name == "H"]
-        rz_gates = [g for g in gates if g.name == "RZ"]
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        rz_gates = [g for g in gates if g.name == gate_names.RZ]
         assert len(h_gates) == n
         assert len(rz_gates) == n
         for i, g in enumerate(h_gates):
@@ -1582,7 +1591,7 @@ class TestControlFlowRange:
         n = 5
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": n})
         gates = _get_gates(circ)
-        h_gates = [g for g in gates if g.name == "H"]
+        h_gates = [g for g in gates if g.name == gate_names.H]
         assert len(h_gates) == n - 2  # indices 1, 2, 3
         for idx, g in enumerate(h_gates):
             assert g.target_indices == (idx + 1,)
@@ -1622,10 +1631,10 @@ class TestControlFlowItems:
         )
         # QuriParts emits RZZ as PauliRotation
         gates = _get_gates(circ)
-        rzz_gates = [g for g in gates if g.name == "PauliRotation"]
+        rzz_gates = [g for g in gates if g.name == gate_names.PauliRotation]
         assert len(rzz_gates) == len(ising)
         for g in rzz_gates:
-            assert g.pauli_ids == (3, 3)  # ZZ
+            assert g.pauli_ids == (SinglePauli.Z, SinglePauli.Z)  # ZZ
 
     def test_items_single_key_dict(self):
         """Apply RZ gates from single-key dict."""
@@ -1645,7 +1654,7 @@ class TestControlFlowItems:
             circuit, bindings={"n": 3, "angles": angles}
         )
         gates = _get_gates(circ)
-        rz_gates = [g for g in gates if g.name == "RZ"]
+        rz_gates = [g for g in gates if g.name == gate_names.RZ]
         assert len(rz_gates) == 3
         for i, g in enumerate(rz_gates):
             assert g.target_indices == (i,)
@@ -1667,7 +1676,7 @@ class TestControlFlowItems:
             circuit, bindings={"n": 2, "ising": {}}
         )
         gates = _get_gates(circ)
-        rzz_gates = [g for g in gates if g.name == "PauliRotation"]
+        rzz_gates = [g for g in gates if g.name == gate_names.PauliRotation]
         assert len(rzz_gates) == 0
 
     def test_items_large_dict(self):
@@ -1690,10 +1699,10 @@ class TestControlFlowItems:
             circuit, bindings={"n": 5, "ising": ising}
         )
         gates = _get_gates(circ)
-        rzz_gates = [g for g in gates if g.name == "PauliRotation"]
+        rzz_gates = [g for g in gates if g.name == gate_names.PauliRotation]
         assert len(rzz_gates) == 10
         for g in rzz_gates:
-            assert g.pauli_ids == (3, 3)  # ZZ
+            assert g.pauli_ids == (SinglePauli.Z, SinglePauli.Z)  # ZZ
 
     def test_items_statevector_verification(self):
         """Items loop on 2-qubit Ising produces correct statevector."""
@@ -1787,7 +1796,7 @@ class TestControlFlowNested:
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": n})
         # n*(n-1)/2 = 3 CZ gates
         gates = _get_gates(circ)
-        cz_gates = [g for g in gates if g.name == "CZ"]
+        cz_gates = [g for g in gates if g.name == gate_names.CZ]
         assert len(cz_gates) == n * (n - 1) // 2
         expected_pairs = [(i, j) for i in range(n - 1) for j in range(i + 1, n)]
         for g, (ci, ti) in zip(cz_gates, expected_pairs):
@@ -1814,14 +1823,14 @@ class TestControlFlowNested:
             circuit, bindings={"n": 3, "ising": ising, "gamma": 0.5}
         )
         gates = _get_gates(circ)
-        h_gates = [g for g in gates if g.name == "H"]
-        rzz_gates = [g for g in gates if g.name == "PauliRotation"]
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        rzz_gates = [g for g in gates if g.name == gate_names.PauliRotation]
         assert len(h_gates) == 3
         assert len(rzz_gates) == 2
         for i, g in enumerate(h_gates):
             assert g.target_indices == (i,)
         for g in rzz_gates:
-            assert g.pauli_ids == (3, 3)  # ZZ
+            assert g.pauli_ids == (SinglePauli.Z, SinglePauli.Z)  # ZZ
 
     def test_cx_ladder_via_range(self):
         """CX entangling ladder: X on q0 propagates to all qubits → |1111⟩."""
@@ -1837,7 +1846,7 @@ class TestControlFlowNested:
         n = 4
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": n})
         gates = _get_gates(circ)
-        cx_gates = [g for g in gates if g.name == "CNOT"]
+        cx_gates = [g for g in gates if g.name == gate_names.CNOT]
         assert len(cx_gates) == n - 1
         for i, g in enumerate(cx_gates):
             assert g.target_indices == (i + 1,)
@@ -1863,7 +1872,7 @@ class TestControlFlowNested:
 
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": n})
         gates = _get_gates(circ)
-        cz_gates = [g for g in gates if g.name == "CZ"]
+        cz_gates = [g for g in gates if g.name == gate_names.CZ]
         assert len(cz_gates) == n * (n - 1) // 2
         expected_pairs = [(i, j) for i in range(n - 1) for j in range(i + 1, n)]
         for g, (ci, ti) in zip(cz_gates, expected_pairs):
@@ -1903,16 +1912,16 @@ class TestControlFlowQAOAPattern:
             bindings={"n": 3, "ising": ising, "gamma": 0.5, "beta": 0.7},
         )
         gates = _get_gates(circ)
-        h_gates = [g for g in gates if g.name == "H"]
-        rzz_gates = [g for g in gates if g.name == "PauliRotation"]
-        rx_gates = [g for g in gates if g.name == "RX"]
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        rzz_gates = [g for g in gates if g.name == gate_names.PauliRotation]
+        rx_gates = [g for g in gates if g.name == gate_names.RX]
         assert len(h_gates) == 3
         assert len(rzz_gates) == 3
         assert len(rx_gates) == 3
         for i, g in enumerate(h_gates):
             assert g.target_indices == (i,)
         for g in rzz_gates:
-            assert g.pauli_ids == (3, 3)  # ZZ
+            assert g.pauli_ids == (SinglePauli.Z, SinglePauli.Z)  # ZZ
         for i, g in enumerate(rx_gates):
             assert g.target_indices == (i,)
 
@@ -1973,7 +1982,7 @@ class TestControlFlowQAOAPattern:
         n = 6
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": n})
         gates = _get_gates(circ)
-        cz_gates = [g for g in gates if g.name == "CZ"]
+        cz_gates = [g for g in gates if g.name == gate_names.CZ]
         # Even pairs: 3 (0-1, 2-3, 4-5), Odd pairs: 2 (1-2, 3-4) = 5 total
         even_pairs_list = list(range(0, n - 1, 2))
         odd_pairs_list = list(range(1, n - 1, 2))
@@ -2458,7 +2467,7 @@ class TestParametricGates:
     """
 
     def test_rx_parametric(self):
-        """RX with parameters=['theta'] keeps parameter unbound."""
+        """RX with parameters=['theta'] keeps parameter unbound and produces correct statevector."""
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Bit:
@@ -2470,12 +2479,17 @@ class TestParametricGates:
         exe = transpiler.transpile(circuit, parameters=["theta"])
         qc = exe.compiled_quantum[0].circuit
         assert qc.parameter_count == 1
-        bound = qc.bind_parameters([0.5])
-        gates = list(bound.gates)
-        assert any(g.name == "RX" for g in gates)
+        angle = np.pi / 3
+        gates = _get_gates(qc, parameter_bindings=[angle])
+        assert any(g.name == gate_names.RX for g in gates)
+        sv = _run_statevector(qc, parameter_bindings=[angle])
+        expected = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["RX"].matrix_fn(angle)
+        )
+        assert statevectors_equal(sv, expected)
 
     def test_ry_parametric(self):
-        """RY with parameters=['theta'] keeps parameter unbound."""
+        """RY with parameters=['theta'] keeps parameter unbound and produces correct statevector."""
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Bit:
@@ -2487,12 +2501,17 @@ class TestParametricGates:
         exe = transpiler.transpile(circuit, parameters=["theta"])
         qc = exe.compiled_quantum[0].circuit
         assert qc.parameter_count == 1
-        bound = qc.bind_parameters([0.5])
-        gates = list(bound.gates)
-        assert any(g.name == "RY" for g in gates)
+        angle = np.pi / 3
+        gates = _get_gates(qc, parameter_bindings=[angle])
+        assert any(g.name == gate_names.RY for g in gates)
+        sv = _run_statevector(qc, parameter_bindings=[angle])
+        expected = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["RY"].matrix_fn(angle)
+        )
+        assert statevectors_equal(sv, expected)
 
     def test_rz_parametric(self):
-        """RZ with parameters=['theta'] keeps parameter unbound."""
+        """RZ with parameters=['theta'] keeps parameter unbound and produces correct statevector."""
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Bit:
@@ -2504,12 +2523,21 @@ class TestParametricGates:
         exe = transpiler.transpile(circuit, parameters=["theta"])
         qc = exe.compiled_quantum[0].circuit
         assert qc.parameter_count == 1
-        bound = qc.bind_parameters([0.5])
-        gates = list(bound.gates)
-        assert any(g.name == "RZ" for g in gates)
+        angle = np.pi / 3
+        gates = _get_gates(qc, parameter_bindings=[angle])
+        assert any(g.name == gate_names.RZ for g in gates)
+        sv = _run_statevector(qc, parameter_bindings=[angle])
+        expected = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["RZ"].matrix_fn(angle)
+        )
+        assert statevectors_equal(sv, expected)
 
     def test_p_parametric(self):
-        """P with parameters=['theta'] keeps parameter unbound (emits RZ in parametric path)."""
+        """P with parameters=['theta'] keeps parameter unbound (emits RZ in parametric path).
+
+        P(θ)|0⟩ = |0⟩ (diagonal gate, trivial on |0⟩), so we compare against
+        RZ(θ)|0⟩ which differs only by global phase — statevectors_equal handles this.
+        """
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Bit:
@@ -2521,10 +2549,15 @@ class TestParametricGates:
         exe = transpiler.transpile(circuit, parameters=["theta"])
         qc = exe.compiled_quantum[0].circuit
         assert qc.parameter_count == 1
-        bound = qc.bind_parameters([0.5])
-        gates = list(bound.gates)
+        angle = np.pi / 3
+        gates = _get_gates(qc, parameter_bindings=[angle])
         # P gate emits as RZ in parametric path (U1 in non-parametric)
-        assert any(g.name == "RZ" for g in gates)
+        assert any(g.name == gate_names.RZ for g in gates)
+        sv = _run_statevector(qc, parameter_bindings=[angle])
+        expected = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["P"].matrix_fn(angle)
+        )
+        assert statevectors_equal(sv, expected)
 
     def test_cp_parametric(self):
         """CP with parameters=['theta'] keeps parameter unbound (decomposes to RZ+CNOT)."""
@@ -2539,12 +2572,17 @@ class TestParametricGates:
         exe = transpiler.transpile(circuit, parameters=["theta"])
         qc = exe.compiled_quantum[0].circuit
         assert qc.parameter_count == 1
+        angle = np.pi / 4
         # CP decomposes to RZ + CNOT pattern
-        bound = qc.bind_parameters([np.pi / 4])
-        gates = list(bound.gates)
-        gate_names = {g.name for g in gates}
-        assert "RZ" in gate_names
-        assert "CNOT" in gate_names
+        gates = _get_gates(qc, parameter_bindings=[angle])
+        gate_name_set = {g.name for g in gates}
+        assert gate_names.RZ in gate_name_set
+        assert gate_names.CNOT in gate_name_set
+        sv = _run_statevector(qc, parameter_bindings=[angle])
+        expected = compute_expected_statevector(
+            all_zeros_state(2), GATE_SPECS["CP"].matrix_fn(angle)
+        )
+        assert statevectors_equal(sv, expected)
 
     def test_rzz_parametric(self):
         """RZZ with parameters=['theta'] keeps parameter unbound (emits PauliRotation)."""
@@ -2559,12 +2597,17 @@ class TestParametricGates:
         exe = transpiler.transpile(circuit, parameters=["theta"])
         qc = exe.compiled_quantum[0].circuit
         assert qc.parameter_count == 1
-        bound = qc.bind_parameters([0.5])
-        gates = list(bound.gates)
-        assert any(g.name == "PauliRotation" for g in gates)
+        angle = np.pi / 3
+        gates = _get_gates(qc, parameter_bindings=[angle])
+        assert any(g.name == gate_names.PauliRotation for g in gates)
+        sv = _run_statevector(qc, parameter_bindings=[angle])
+        expected = compute_expected_statevector(
+            all_zeros_state(2), GATE_SPECS["RZZ"].matrix_fn(angle)
+        )
+        assert statevectors_equal(sv, expected)
 
     def test_vector_parametric(self):
-        """Vector[Float] with parameters=['thetas'] gives 3 indexed params."""
+        """Vector[Float] with parameters=['thetas'] gives 3 indexed params and correct statevector."""
 
         @qmc.qkernel
         def circuit(
@@ -2581,6 +2624,17 @@ class TestParametricGates:
         )
         qc = exe.compiled_quantum[0].circuit
         assert qc.parameter_count == 3
+        angles = [np.pi / 4, np.pi / 3, np.pi / 6]
+        sv = _run_statevector(qc, parameter_bindings=angles)
+        expected = compute_expected_statevector(
+            all_zeros_state(3),
+            tensor_product(
+                GATE_SPECS["RY"].matrix_fn(angles[2]),
+                GATE_SPECS["RY"].matrix_fn(angles[1]),
+                GATE_SPECS["RY"].matrix_fn(angles[0]),
+            ),
+        )
+        assert statevectors_equal(sv, expected)
 
     # -- BinOp parametric tests --
 
@@ -2606,7 +2660,7 @@ class TestParametricGates:
             circuit, bindings={"theta": 1.5, "coeff": {0: 2.0}}
         )
         gates = _get_gates(qc)
-        rx_gates = [g for g in gates if g.name == "RX"]
+        rx_gates = [g for g in gates if g.name == gate_names.RX]
         assert len(rx_gates) == 1
         assert np.isclose(rx_gates[0].params[0], 3.0, atol=1e-10)
 
@@ -2631,7 +2685,7 @@ class TestParametricGates:
             circuit, bindings={"theta": 1.0, "offset": {0: 0.5}}
         )
         gates = _get_gates(qc)
-        rx_gates = [g for g in gates if g.name == "RX"]
+        rx_gates = [g for g in gates if g.name == gate_names.RX]
         assert len(rx_gates) == 1
         assert np.isclose(rx_gates[0].params[0], 1.5, atol=1e-10)
 
@@ -2656,7 +2710,7 @@ class TestParametricGates:
             circuit, bindings={"theta": 1.0, "offset": {0: 0.5}}
         )
         gates = _get_gates(qc)
-        rx_gates = [g for g in gates if g.name == "RX"]
+        rx_gates = [g for g in gates if g.name == gate_names.RX]
         assert len(rx_gates) == 1
         assert np.isclose(rx_gates[0].params[0], 0.5, atol=1e-10)
 
@@ -2728,10 +2782,10 @@ class TestStdlibQFT:
         _, circ = _transpile_and_get_circuit(circuit)
         gates = _get_gates(circ)
         # 3-qubit QFT: 3 H gates + 3 CP (each → 3 RZ + 2 CNOT) + 1 SWAP = 19 gates
-        h_gates = [g for g in gates if g.name == "H"]
-        rz_gates = [g for g in gates if g.name == "RZ"]
-        cx_gates = [g for g in gates if g.name == "CNOT"]
-        swap_gates = [g for g in gates if g.name == "SWAP"]
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        rz_gates = [g for g in gates if g.name == gate_names.RZ]
+        cx_gates = [g for g in gates if g.name == gate_names.CNOT]
+        swap_gates = [g for g in gates if g.name == gate_names.SWAP]
         assert len(h_gates) == 3
         for i, g in enumerate(h_gates):
             assert g.target_indices == (i,)
@@ -2938,8 +2992,8 @@ class TestCustomCompositeGate:
         gates = _get_gates(circ)
         # BellPair: H(0), CNOT(ctrl=0, tgt=1)
         assert len(gates) == 2
-        assert gates[0].name == "H" and gates[0].target_indices == (0,)
-        assert gates[1].name == "CNOT" and gates[1].target_indices == (1,) and gates[1].control_indices == (0,)
+        assert gates[0].name == gate_names.H and gates[0].target_indices == (0,)
+        assert gates[1].name == gate_names.CNOT and gates[1].target_indices == (1,) and gates[1].control_indices == (0,)
 
     def test_composite_statevector(self):
         """BellPair CompositeGate produces Bell state |Φ+⟩."""
@@ -3001,8 +3055,8 @@ class TestCustomCompositeGate:
 
         _, circ = _transpile_and_get_circuit(circuit)
         gates = _get_gates(circ)
-        h_gates = [g for g in gates if g.name == "H"]
-        cx_gates = [g for g in gates if g.name == "CNOT"]
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        cx_gates = [g for g in gates if g.name == gate_names.CNOT]
         assert len(h_gates) == 1
         assert len(cx_gates) == 1
         assert h_gates[0].target_indices == (0,)
@@ -3497,7 +3551,7 @@ class TestAlgorithmBasicLayers:
             circuit, bindings={"n": n_qubits, "thetas": thetas}
         )
         gates = _get_gates(qc)
-        ry_gates = [g for g in gates if g.name == "RY"]
+        ry_gates = [g for g in gates if g.name == gate_names.RY]
         assert len(ry_gates) == n_qubits
         for i, g in enumerate(ry_gates):
             assert g.target_indices == (i,)
@@ -3516,7 +3570,7 @@ class TestAlgorithmBasicLayers:
 
         _, qc = _transpile_and_get_circuit(circuit, bindings={"n": n_qubits})
         gates = _get_gates(qc)
-        cz_gates = [g for g in gates if g.name == "CZ"]
+        cz_gates = [g for g in gates if g.name == gate_names.CZ]
         assert len(cz_gates) == n_qubits - 1
         for i, g in enumerate(cz_gates):
             assert g.target_indices == (i + 1,)
@@ -3564,8 +3618,8 @@ class TestAlgorithmBasicLayers:
             circuit, bindings={"n": 3, "thetas": thetas}
         )
         gates = _get_gates(qc)
-        ry_gates = [g for g in gates if g.name == "RY"]
-        cz_gates = [g for g in gates if g.name == "CZ"]
+        ry_gates = [g for g in gates if g.name == gate_names.RY]
+        cz_gates = [g for g in gates if g.name == gate_names.CZ]
         assert len(ry_gates) == 3
         assert len(cz_gates) == 2
         for i, g in enumerate(ry_gates):
@@ -4048,8 +4102,8 @@ class TestDeutschJozsaAlgorithm:
         n = 3
         _, qc = _transpile_and_get_circuit(dj_c0, bindings={"n": n})
         gates = _get_gates(qc)
-        h_gates = [g for g in gates if g.name == "H"]
-        x_gates = [g for g in gates if g.name == "X"]
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        x_gates = [g for g in gates if g.name == gate_names.X]
         assert len(h_gates) == 2 * n + 1  # n input H before + n H after + 1 ancilla H
         assert len(x_gates) == 1  # ancilla init
         assert x_gates[0].target_indices == (n,)  # X on ancilla qubit
@@ -4134,9 +4188,9 @@ class TestDeutschJozsaAlgorithm:
 
         _, qc = _transpile_and_get_circuit(dj_bxor, bindings={"n_val": n})
         gates = _get_gates(qc)
-        h_gates = [g for g in gates if g.name == "H"]
-        cx_gates = [g for g in gates if g.name == "CNOT"]
-        x_gates = [g for g in gates if g.name == "X"]
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        cx_gates = [g for g in gates if g.name == gate_names.CNOT]
+        x_gates = [g for g in gates if g.name == gate_names.X]
         assert len(h_gates) == 2 * n + 1
         assert len(cx_gates) == n
         assert len(x_gates) == 1
@@ -4461,8 +4515,8 @@ class TestVariationalClassifierPattern:
         )
         qc = exe.compiled_quantum[0].circuit
         gates = _get_gates(qc)
-        ry_gates = [g for g in gates if g.name == "RY"]
-        cz_gates = [g for g in gates if g.name == "CZ"]
+        ry_gates = [g for g in gates if g.name == gate_names.RY]
+        cz_gates = [g for g in gates if g.name == gate_names.CZ]
         assert len(ry_gates) == 3
         assert len(cz_gates) == 2
         for i, g in enumerate(ry_gates):
@@ -4517,8 +4571,8 @@ class TestVariationalClassifierPattern:
         )
         qc = exe.compiled_quantum[0].circuit
         gates = _get_gates(qc)
-        ry_gates = [g for g in gates if g.name == "RY"]
-        cz_gates = [g for g in gates if g.name == "CZ"]
+        ry_gates = [g for g in gates if g.name == gate_names.RY]
+        cz_gates = [g for g in gates if g.name == gate_names.CZ]
         assert len(ry_gates) == 6  # 2 layers × 3 qubits
         assert len(cz_gates) == 4  # 2 layers × 2 CZ each (n-1=2)
         # RY gates target qubits 0,1,2 in each layer
@@ -4563,8 +4617,8 @@ class TestVariationalClassifierPattern:
         )
         qc = exe.compiled_quantum[0].circuit
         gates = _get_gates(qc)
-        ry_gates = [g for g in gates if g.name == "RY"]
-        cz_gates = [g for g in gates if g.name == "CZ"]
+        ry_gates = [g for g in gates if g.name == gate_names.RY]
+        cz_gates = [g for g in gates if g.name == gate_names.CZ]
         assert len(ry_gates) == 6  # 3 x-encode + 3 params
         assert len(cz_gates) == 4  # 2 entangling layers × 2 CZ each (n-1=2)
         # RY gates target qubits 0,1,2 in each of 2 layers
@@ -4807,7 +4861,7 @@ class TestFQAOAIntegration:
             circuit, bindings={"n": 2, "theta": 0.5}
         )
         gates = _get_gates(circ)
-        cx_gates = [g for g in gates if g.name == "CNOT"]
+        cx_gates = [g for g in gates if g.name == gate_names.CNOT]
         # 2 outer CX + 2 from CRY decomposition = 4
         assert len(cx_gates) == 4
         # All CNOT gates operate on qubits 0 and 1
@@ -4829,9 +4883,9 @@ class TestFQAOAIntegration:
             circuit, bindings={"n": 2, "beta": 0.3, "hopping_val": 1.0}
         )
         gates = _get_gates(circ)
-        cx_gates = [g for g in gates if g.name == "CNOT"]
-        rx_gates = [g for g in gates if g.name == "RX"]
-        rz_gates = [g for g in gates if g.name == "RZ"]
+        cx_gates = [g for g in gates if g.name == gate_names.CNOT]
+        rx_gates = [g for g in gates if g.name == gate_names.RX]
+        rz_gates = [g for g in gates if g.name == gate_names.RZ]
         # From code: 4 outer RX (±π/2) + 1 inner RX + 2 CNOT + 1 RZ
         assert len(cx_gates) == 2
         assert len(rx_gates) == 5  # 4 outer + 1 inner
@@ -4864,8 +4918,8 @@ class TestFQAOAIntegration:
             bindings={"n": 3, "gamma": 0.5, "linear": linear, "quad": quad},
         )
         gates = _get_gates(circ)
-        rz_gates = [g for g in gates if g.name == "RZ"]
-        rzz_gates = [g for g in gates if g.name == "PauliRotation"]
+        rz_gates = [g for g in gates if g.name == gate_names.RZ]
+        rzz_gates = [g for g in gates if g.name == gate_names.PauliRotation]
         assert len(rz_gates) == len(linear)
         assert len(rzz_gates) == len(quad)
         # RZ gates target the linear term qubits
@@ -4874,7 +4928,7 @@ class TestFQAOAIntegration:
             assert qubit in rz_targets
         # RZZ gates are PauliRotation(ZZ) on the quad term qubit pairs
         for g in rzz_gates:
-            assert g.pauli_ids == (3, 3)  # ZZ
+            assert g.pauli_ids == (SinglePauli.Z, SinglePauli.Z)  # ZZ
             assert len(g.target_indices) == 2
 
     @pytest.mark.parametrize("n_qubits", [4, 6])
@@ -4902,7 +4956,7 @@ class TestFQAOAIntegration:
         total_hopping = even_pairs + odd_pairs + 1
         # Each hopping gate has 2 CNOT
         gates = _get_gates(circ)
-        cx_gates = [g for g in gates if g.name == "CNOT"]
+        cx_gates = [g for g in gates if g.name == gate_names.CNOT]
         assert len(cx_gates) == total_hopping * 2
         # All CNOT gates should target adjacent qubit pairs
         for g in cx_gates:
@@ -5068,7 +5122,7 @@ class TestDeepNestedQKernelComposition:
 
         _, circ = _transpile_and_get_circuit(main, bindings={"n": 4})
         gates = _get_gates(circ)
-        h_gates = [g for g in gates if g.name == "H"]
+        h_gates = [g for g in gates if g.name == gate_names.H]
         assert len(h_gates) == 4
         for i, g in enumerate(h_gates):
             assert g.target_indices == (i,)
@@ -5421,10 +5475,10 @@ class TestManualQFTCircuit:
 
         _, circ = _transpile_and_get_circuit(qft2)
         gates = _get_gates(circ)
-        h_gates = [g for g in gates if g.name == "H"]
-        rz_gates = [g for g in gates if g.name == "RZ"]
-        cx_gates = [g for g in gates if g.name == "CNOT"]
-        swap_gates = [g for g in gates if g.name == "SWAP"]
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        rz_gates = [g for g in gates if g.name == gate_names.RZ]
+        cx_gates = [g for g in gates if g.name == gate_names.CNOT]
+        swap_gates = [g for g in gates if g.name == gate_names.SWAP]
         assert len(h_gates) == 2
         # CP decomposed: 3 RZ + 2 CNOT per CP, 1 CP total
         assert len(rz_gates) == 3
@@ -5498,10 +5552,10 @@ class TestManualQFTCircuit:
 
         _, circ = _transpile_and_get_circuit(qft3)
         gates = _get_gates(circ)
-        h_gates = [g for g in gates if g.name == "H"]
-        rz_gates = [g for g in gates if g.name == "RZ"]
-        cx_gates = [g for g in gates if g.name == "CNOT"]
-        swap_gates = [g for g in gates if g.name == "SWAP"]
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        rz_gates = [g for g in gates if g.name == gate_names.RZ]
+        cx_gates = [g for g in gates if g.name == gate_names.CNOT]
+        swap_gates = [g for g in gates if g.name == gate_names.SWAP]
         assert len(h_gates) == 3
         # 3 CP gates, each decomposed to 3 RZ + 2 CNOT
         assert len(rz_gates) == 9
