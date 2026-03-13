@@ -40,7 +40,8 @@ def module_belongs_to_package(module: griffe.Module, package_dir: Path) -> bool:
         return False
     try:
         module_path = Path(module.filepath).resolve()
-        return str(module_path).startswith(str(package_dir.resolve()))
+        package_root = package_dir.resolve()
+        return module_path.is_relative_to(package_root)
     except Exception:
         return False
 
