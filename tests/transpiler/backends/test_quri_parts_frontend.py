@@ -2025,7 +2025,7 @@ class TestTranspilerPassesPipeline:
 
         block = transpiler.to_block(circuit)
         assert block is not None
-        assert len(block.operations) > 0
+        assert len(block.operations) == 4
 
     def test_inline(self, transpiler):
         """inline() flattens CallBlockOperations from sub-kernel calls."""
@@ -2059,7 +2059,7 @@ class TestTranspilerPassesPipeline:
         inlined = transpiler.inline(block)
         validated = transpiler.linear_validate(inlined)
         assert validated is not None
-        assert len(validated.operations) > 0
+        assert len(validated.operations) == 4
 
     def test_constant_fold(self, transpiler):
         """constant_fold reduces constant expressions."""
@@ -2076,6 +2076,7 @@ class TestTranspilerPassesPipeline:
         validated = transpiler.linear_validate(inlined)
         folded = transpiler.constant_fold(validated, bindings={"theta": 0.5})
         assert folded is not None
+        assert len(folded.operations) == 3
 
     def test_analyze(self, transpiler):
         """analyze() validates dependencies and marks block ANALYZED."""
@@ -2130,7 +2131,7 @@ class TestTranspilerPassesPipeline:
         exe = transpiler.emit(separated)
 
         assert isinstance(exe, ExecutableProgram)
-        assert len(exe.compiled_quantum) > 0
+        assert len(exe.compiled_quantum) == 1
 
     def test_full_transpile(self, transpiler):
         """Full transpile() pipeline end-to-end."""
@@ -2144,6 +2145,7 @@ class TestTranspilerPassesPipeline:
         exe = transpiler.transpile(circuit)
         assert exe is not None
         assert exe.quantum_circuit is not None
+        assert len(_get_gates(exe.quantum_circuit)) == 1
 
     def test_to_circuit_convenience(self, transpiler):
         """to_circuit() returns the QURI Parts circuit directly."""
@@ -2156,7 +2158,7 @@ class TestTranspilerPassesPipeline:
 
         qc = transpiler.to_circuit(circuit)
         assert qc is not None
-        assert qc.qubit_count > 0
+        assert qc.qubit_count == 1
 
     def test_step_by_step_matches_transpile(self, transpiler):
         """Step-by-step pipeline produces same statevector as transpile()."""
@@ -2245,8 +2247,9 @@ class TestTranspilerConfigPortable:
 
         block = transpiler.to_block(circuit)
         substituted = transpiler.substitute(block)
-        # The substitution pass should have been applied
+        # The substitution pass should return a new block (not the original)
         assert substituted is not None
+        assert substituted is not block
 
     def test_separate_segments_simple_circuit(self):
         """separate() produces SimplifiedProgram with quantum segment."""
@@ -2358,7 +2361,7 @@ class TestParameterizedCircuits:
         transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit, parameters=["theta"])
         qc = exe.compiled_quantum[0].circuit
-        assert qc.parameter_count > 0
+        assert qc.parameter_count == 1
 
     def test_parametric_bind_and_execute(self):
         """Bind parameters and execute."""
@@ -2390,7 +2393,7 @@ class TestParameterizedCircuits:
         transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit, bindings={"n": 3}, parameters=["theta"])
         qc = exe.compiled_quantum[0].circuit
-        assert qc.parameter_count > 0
+        assert qc.parameter_count == 1
 
     # NOTE: test_parametric_bind_and_rebind is in TestAdvancedParameterHandling
     # to avoid duplication (identical circuit and purpose).
@@ -2880,6 +2883,7 @@ class TestControlledGate:
 
         _, circ = _transpile_and_get_circuit(circuit)
         assert circ.qubit_count == 2
+        assert len(_get_gates(circ)) > 0
 
     def test_controlled_h_statevector(self):
         """controlled(H) with ctrl=|1⟩: statevector matches CH matrix."""
@@ -2925,6 +2929,7 @@ class TestControlledGate:
 
         _, circ = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 2})
         assert circ.qubit_count == 2
+        assert len(_get_gates(circ)) > 0
 
     def test_controlled_rx_statevector(self):
         """controlled(RX) with ctrl=|1⟩: statevector matches CRX matrix."""
