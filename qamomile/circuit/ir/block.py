@@ -17,7 +17,7 @@ class BlockKind(Enum):
     """Classification of block structure for pipeline stages."""
 
     HIERARCHICAL = auto()  # May contain CallBlockOperations
-    LINEAR = auto()  # No CallBlockOperations, For/If preserved
+    AFFINE = auto()  # No CallBlockOperations, For/If preserved
     ANALYZED = auto()  # Validated and dependency-analyzed
 
 
@@ -50,9 +50,9 @@ class Block:
         """Return list of unbound parameter names."""
         return list(self.parameters.keys())
 
-    def is_linear(self) -> bool:
+    def is_affine(self) -> bool:
         """Check if block contains no CallBlockOperations."""
-        return self.kind in (BlockKind.LINEAR, BlockKind.ANALYZED)
+        return self.kind in (BlockKind.AFFINE, BlockKind.ANALYZED)
 
     @classmethod
     def from_block_value(

@@ -7,7 +7,7 @@ from qamomile.circuit.transpiler.errors import (
     QamomileCompileError,
     DependencyError,
     ValidationError,
-    LinearTypeError,
+    AffineTypeError,
 )
 
 InputT = TypeVar("InputT")
@@ -31,7 +31,7 @@ class Pass(ABC, Generic[InputT, OutputT]):
 
 # Import submodule passes after Pass is defined to avoid circular imports
 from .constant_fold import ConstantFoldingPass  # noqa: E402
-from .linear_validate import LinearValidationPass  # noqa: E402
+from .affine_validate import AffineValidationPass  # noqa: E402
 from .control_flow_visitor import (  # noqa: E402
     ControlFlowVisitor,
     OperationTransformer,
@@ -46,9 +46,9 @@ __all__ = [
     "QamomileCompileError",
     "ValidationError",
     "DependencyError",
-    "LinearTypeError",
+    "AffineTypeError",
     "ConstantFoldingPass",
-    "LinearValidationPass",
+    "AffineValidationPass",
     "ControlFlowVisitor",
     "OperationTransformer",
     "OperationCollector",

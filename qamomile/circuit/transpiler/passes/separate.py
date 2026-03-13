@@ -43,7 +43,7 @@ class SeparatePass(Pass[Block, SimplifiedProgram]):
     2. Splits the operation list into quantum and classical segments
     3. Validates single quantum segment (enforces C→Q→C pattern)
 
-    Input: Block (typically ANALYZED or LINEAR)
+    Input: Block (typically ANALYZED or AFFINE)
     Output: SimplifiedProgram with single quantum segment and optional prep/post
     """
 

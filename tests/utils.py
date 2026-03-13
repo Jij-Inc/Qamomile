@@ -80,28 +80,32 @@ class Utils:
 
     @staticmethod
     def get_n_body_problem():
-        N = jm.Placeholder("N")
-        x = jm.BinaryVar("x", shape=(N,))
-        a = jm.Placeholder("a", shape=(N,))
-        i = jm.Element("i", belong_to=(0, N))
-
         problem = jm.Problem("N-body problem")
 
-        problem += jm.prod(i, x[i])
-        problem += jm.sum(i, a[i] * x[i])
+        @problem.update
+        def _(problem: jm.DecoratedProblem):
+            N = problem.Dim()
+            x = problem.BinaryVar(shape=(N,))
+            a = problem.Float(shape=(N,))
+
+            problem += jm.prod(x)
+            problem += (a * x).sum()
+
         return problem
 
     @staticmethod
     def get_n_body_problem_with_constraints():
-        N = jm.Placeholder("N")
-        x = jm.BinaryVar("x", shape=(N,))
-        a = jm.Placeholder("a", shape=(N,))
-        i = jm.Element("i", belong_to=(0, N))
-
         problem = jm.Problem("N-body problem")
 
-        problem += jm.prod(i, x[i])
-        problem += jm.sum(i, a[i] * x[i])
+        @problem.update
+        def _(problem: jm.DecoratedProblem):
+            N = problem.Dim()
+            x = problem.BinaryVar(shape=(N,))
+            a = problem.Float(shape=(N,))
 
-        problem += jm.Constraint("constraint", jm.sum(i, x[i]) > 0)
+            problem += jm.prod(x)
+            problem += (a * x).sum()
+
+            problem += problem.Constraint("constraint", x.sum() > 0)
+
         return problem

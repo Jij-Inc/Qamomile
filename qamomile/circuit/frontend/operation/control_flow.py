@@ -164,7 +164,7 @@ def _fresh_handle_copy_for_tracing(h: typing.Any) -> typing.Any:
     ``_consumed_by`` attributes.  This is the **only** place where such access
     is acceptable: if-else branches are mutually exclusive, so both must be
     traceable independently.  Exposing a general-purpose copy method on Handle
-    would undermine the linear-type enforcement that prevents qubit reuse bugs.
+    would undermine the affine-type enforcement that prevents qubit reuse bugs.
 
     Non-Handle values (int, float, etc.) are returned unchanged.
     """
@@ -411,10 +411,12 @@ def range(
     This function accepts UInt (symbolic) values and is transformed
     by the AST transformer into for_loop() calls.
 
-    Usage:
-        for i in qmc.range(n):  # 0 to n-1
+    Example:
+        ```python
+        for i in qmc.range(n):          # 0 to n-1
         for i in qmc.range(start, stop):  # start to stop-1
         for i in qmc.range(start, stop, step):
+        ```
 
     Note:
         This function is a placeholder - the actual looping is handled by
@@ -431,9 +433,11 @@ def items(d: Dict) -> DictItemsIterator:
     This function returns an iterator over (key, value) pairs from a Dict.
     Used for iterating over Ising coefficients and similar data structures.
 
-    Usage:
+    Example:
+        ```python
         for (i, j), Jij in qmc.items(ising):
             q[i], q[j] = qmc.rzz(q[i], q[j], gamma * Jij)
+        ```
 
     Args:
         d: A Dict handle to iterate over
