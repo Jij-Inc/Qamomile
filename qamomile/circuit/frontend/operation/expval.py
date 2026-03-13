@@ -15,7 +15,7 @@ from qamomile.circuit.transpiler.errors import QubitConsumedError
 
 
 def expval(
-    qubits: Vector[Qubit] | tuple[Qubit, ...],
+    qubits: Qubit | Vector[Qubit] | tuple[Qubit, ...],
     hamiltonian: Observable,
 ) -> Float:
     """Compute the expectation value of an observable on a quantum state.
@@ -29,7 +29,7 @@ def expval(
 
     Args:
         qubits: The quantum register holding the prepared state.
-            Can be a Vector[Qubit] or a tuple of individual Qubits.
+            Can be a single Qubit, a Vector[Qubit], or a tuple of individual Qubits.
             For Vector[Qubit], all borrowed elements must be returned first.
             For tuple[Qubit, ...], each qubit is consumed individually;
             duplicate qubits will raise QubitConsumedError.
@@ -68,9 +68,7 @@ def expval(
     # Convert qubits to Value, consuming the quantum resource
     if isinstance(qubits, tuple):
         if len(qubits) == 0:
-            raise ValueError(
-                "expval requires at least one qubit. Got an empty tuple."
-            )
+            raise ValueError("expval requires at least one qubit. Got an empty tuple.")
         # Tuple of individual Qubits - consume each qubit
         # Duplicate detection: track consumed qubit IDs
         seen_ids: set[str] = set()

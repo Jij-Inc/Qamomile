@@ -297,10 +297,8 @@ class ExecutableProgram(Generic[T]):
             result = job.result()
             print(result)  # 0.25 (for QFixed) or (0, 1) (for bits)
         """
-        # Check if this is an expval-only execution
-        if self.compiled_expval and not any(
-            seg_type == "classical" for seg_type, _ in self.execution_order
-        ):
+        # Check if this program has expval segments
+        if self.compiled_expval:
             return self._run_expval(executor, bindings)
 
         circuit = self.get_first_circuit()
@@ -404,12 +402,17 @@ class ExecutableProgram(Generic[T]):
                 circuit, indexed_bindings, param_metadata
             )
 
-        # Execute expval segments in order
-        context = ExecutionContext()
+        # Execute segments in order (classical_prep, then expval)
+        context = ExecutionContext(initial_bindings=bindings or {})
         result_value = None
 
         for seg_type, index in self.execution_order:
-            if seg_type == "expval":
+            if seg_type == "classical":
+                seg = self.compiled_classical[index]
+                classical_executor = ClassicalExecutor()
+                results = classical_executor.execute(seg.segment, context)
+                context.update(results)
+            elif seg_type == "expval":
                 expval_seg = self.compiled_expval[index]
 
                 # Apply qubit mapping to remap Pauli indices to physical qubits
