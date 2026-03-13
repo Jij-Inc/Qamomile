@@ -19,6 +19,10 @@ from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.segments import ClassicalSegment
 from qamomile.circuit.transpiler.execution_context import ExecutionContext
 from qamomile.circuit.transpiler.errors import ExecutionError
+from qamomile.circuit.transpiler.value_resolution import (
+    BindingLookup,
+    resolve_classical_value,
+)
 
 
 class ClassicalExecutor:
@@ -223,20 +227,15 @@ class ClassicalExecutor:
             2. context[uuid]
             3. context[parameter_name] — user-provided parameter bindings
             4. context[name] — fallback for name-keyed bindings
-            5. constant value from IR
-            6. raise ExecutionError
+            5. array element via parent_array + element_indices
+            6. constant value from IR
+            7. raise ExecutionError
         """
-        if value.uuid in results:
-            return results[value.uuid]
-        if context.has(value.uuid):
-            return context.get(value.uuid)
-        # Fallback: resolve by parameter name or value name (context only)
-        param_name = value.parameter_name()
-        if param_name is not None and context.has(param_name):
-            return context.get(param_name)
-        if context.has(value.name):
-            return context.get(value.name)
-        # Check if it's a constant
-        if value.is_constant():
-            return value.get_const()
+        resolved = resolve_classical_value(
+            value,
+            BindingLookup(results, context._state),
+            allow_parameter_name=True,
+        )
+        if resolved is not None:
+            return resolved
         raise ExecutionError(f"Value {value.name} not found in context or results")

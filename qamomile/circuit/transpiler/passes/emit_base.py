@@ -10,22 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
-from qamomile.circuit.transpiler.errors import ResolutionFailureReason
-
-if TYPE_CHECKING:
-    from qamomile.circuit.ir.value import Value
-
-
-@dataclass
-class QubitResolutionResult:
-    """Result of attempting to resolve a qubit index."""
-
-    success: bool
-    index: int | None = None
-    failure_reason: ResolutionFailureReason | None = None
-    failure_details: str = ""
-
-
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.gate import (
@@ -46,6 +30,27 @@ from qamomile.circuit.ir.operation.control_flow import (
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, PhiOp
 from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import ArrayValue
+from qamomile.circuit.transpiler.errors import ResolutionFailureReason
+from qamomile.circuit.transpiler.value_resolution import (
+    BindingLookup,
+    is_concrete_real_number,
+    resolve_array_element_value as shared_resolve_array_element_value,
+    resolve_classical_value as shared_resolve_classical_value,
+    resolve_int_value as shared_resolve_int_value,
+)
+
+if TYPE_CHECKING:
+    from qamomile.circuit.ir.value import Value
+
+
+@dataclass
+class QubitResolutionResult:
+    """Result of attempting to resolve a qubit index."""
+
+    success: bool
+    index: int | None = None
+    failure_reason: ResolutionFailureReason | None = None
+    failure_details: str = ""
 
 
 def map_phi_outputs(
@@ -723,7 +728,7 @@ class ValueResolver:
                 idx = int(idx_value.get_const())
             elif idx_value.name in bindings:
                 bound_val = bindings[idx_value.name]
-                if isinstance(bound_val, (int, float)):
+                if is_concrete_real_number(bound_val):
                     idx = int(bound_val)
                 else:
                     return QubitResolutionResult(
@@ -736,7 +741,7 @@ class ValueResolver:
                     )
             elif idx_value.uuid in bindings:
                 bound_val = bindings[idx_value.uuid]
-                if isinstance(bound_val, (int, float)):
+                if is_concrete_real_number(bound_val):
                     idx = int(bound_val)
                 else:
                     return QubitResolutionResult(
@@ -814,22 +819,7 @@ class ValueResolver:
         Returns:
             Resolved value (int, float, etc.), or None if cannot resolve
         """
-        if value.is_constant():
-            return value.get_const()
-
-        if value.uuid in bindings:
-            return bindings[value.uuid]
-
-        if value.name in bindings:
-            return bindings[value.name]
-
-        if value.params and "const" in value.params:
-            return value.params["const"]
-
-        if value.parent_array is not None and value.element_indices:
-            return self._resolve_array_element_value(value, bindings)
-
-        return None
+        return shared_resolve_classical_value(value, BindingLookup(bindings))
 
     def _resolve_array_element_value(
         self,
@@ -845,34 +835,7 @@ class ValueResolver:
         Returns:
             Resolved numeric value, or None if cannot resolve
         """
-        if v.parent_array is None or not v.element_indices:
-            return None
-
-        array_name = v.parent_array.name
-        if array_name not in bindings:
-            return None
-
-        array_data = bindings[array_name]
-
-        indices = []
-        for idx in v.element_indices:
-            idx_val = self.resolve_int_value(idx, bindings)
-            if idx_val is None:
-                return None
-            indices.append(idx_val)
-
-        try:
-            import numbers
-
-            result = array_data
-            for idx in indices:
-                result = result[idx]
-            # Check for numeric types including numpy integers/floats
-            if isinstance(result, numbers.Real):
-                return result
-            return None
-        except (IndexError, TypeError, KeyError):
-            return None
+        return shared_resolve_array_element_value(v, BindingLookup(bindings))
 
     def resolve_int_value(
         self,
@@ -888,31 +851,7 @@ class ValueResolver:
         Returns:
             Integer value, or None if cannot resolve
         """
-        from qamomile.circuit.ir.value import Value
-
-        if isinstance(val, (int, float)):
-            return int(val)
-        elif isinstance(val, Value):
-            if val.is_constant():
-                return int(val.get_const())
-            elif val.is_parameter():
-                param_name = val.parameter_name()
-                if param_name and param_name in bindings:
-                    bound_val = bindings[param_name]
-                    if isinstance(bound_val, (int, float)):
-                        return int(bound_val)
-                    return None
-            elif val.uuid in bindings:
-                bound_val = bindings[val.uuid]
-                if isinstance(bound_val, (int, float)):
-                    return int(bound_val)
-                return None
-            elif val.name in bindings:
-                bound_val = bindings[val.name]
-                if isinstance(bound_val, (int, float)):
-                    return int(bound_val)
-                return None
-        return 0
+        return shared_resolve_int_value(val, BindingLookup(bindings))
 
     def get_parameter_key(
         self,
@@ -936,17 +875,7 @@ class ValueResolver:
             if parent_name in self.parameters:
                 if value.element_indices and len(value.element_indices) > 0:
                     idx_value = value.element_indices[0]
-                    idx = None
-                    if idx_value.is_constant():
-                        idx = int(idx_value.get_const())
-                    elif idx_value.name in bindings:
-                        bound_val = bindings[idx_value.name]
-                        if isinstance(bound_val, (int, float)):
-                            idx = int(bound_val)
-                    elif idx_value.uuid in bindings:
-                        bound_val = bindings[idx_value.uuid]
-                        if isinstance(bound_val, (int, float)):
-                            idx = int(bound_val)
+                    idx = shared_resolve_int_value(idx_value, BindingLookup(bindings))
 
                     if idx is not None:
                         return f"{parent_name}[{idx}]"

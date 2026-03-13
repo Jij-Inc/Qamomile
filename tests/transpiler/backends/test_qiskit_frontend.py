@@ -5939,6 +5939,49 @@ class TestExpvalQiskitPipeline:
         # rx(pi)|0> -> <Z>=cos(pi)=-1.0
         assert np.isclose(results[2], -1.0, atol=0.1)
 
+    def test_qaoa_vector_params_bound_at_sample_runtime(self):
+        """Runtime vector bindings must work for parametric QAOA sampling."""
+
+        class DummyQiskitExecutor:
+            def bind_parameters(self, circuit, bindings, metadata):
+                return circuit.assign_parameters(metadata.to_binding_dict(bindings))
+
+            def execute(self, circuit, shots):
+                return {"0" * circuit.num_clbits: shots}
+
+        @qmc.qkernel
+        def circuit(
+            p: qmc.UInt,
+            quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+            linear: qmc.Dict[qmc.UInt, qmc.Float],
+            n: qmc.UInt,
+            gammas: qmc.Vector[qmc.Float],
+            betas: qmc.Vector[qmc.Float],
+        ) -> qmc.Vector[qmc.Bit]:
+            q = qaoa_state(p, quad, linear, n, gammas, betas)
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(
+            circuit,
+            bindings={
+                "p": 1,
+                "quad": {(0, 1): 1.0},
+                "linear": {},
+                "n": 2,
+            },
+            parameters=["gammas", "betas"],
+        )
+
+        result = exe.sample(
+            DummyQiskitExecutor(),
+            bindings={"gammas": [0.3], "betas": [0.2]},
+            shots=32,
+        ).result()
+
+        assert len(result.results) > 0
+        assert all(len(bits) == 2 for bits, _count in result.results)
+
 
 # ===========================================================================
 # 11. Variational Classifier Pattern Tests

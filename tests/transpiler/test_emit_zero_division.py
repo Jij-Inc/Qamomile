@@ -5,6 +5,7 @@ StandardEmitPass._evaluate_binop() raise EmitError on exact zero
 division instead of silently returning 0.
 """
 
+import numpy as np
 import pytest
 
 from qamomile.circuit.ir.types.primitives import FloatType
@@ -110,6 +111,20 @@ class TestStandardEmitPassZeroDivision:
         with pytest.raises(EmitError, match="Floor division by zero"):
             std._evaluate_binop(op, bindings)
 
+    def test_div_by_numpy_float_zero_raises_emit_error(self):
+        op = _make_binop(BinOpKind.DIV, 1.0, np.float64(0.0))
+        std = StandardEmitPass(DummyEmitter())
+        bindings: dict = {}
+        with pytest.raises(EmitError, match="Division by zero"):
+            std._evaluate_binop(op, bindings)
+
+    def test_floordiv_by_numpy_int_zero_raises_emit_error(self):
+        op = _make_binop(BinOpKind.FLOORDIV, 1.0, np.int64(0))
+        std = StandardEmitPass(DummyEmitter())
+        bindings: dict = {}
+        with pytest.raises(EmitError, match="Floor division by zero"):
+            std._evaluate_binop(op, bindings)
+
     def test_div_nonzero_succeeds(self):
         op = _make_binop(BinOpKind.DIV, 10.0, 4.0)
         std = StandardEmitPass(DummyEmitter())
@@ -123,3 +138,10 @@ class TestStandardEmitPassZeroDivision:
         bindings: dict = {}
         std._evaluate_binop(op, bindings)
         assert bindings[op.results[0].uuid] == 3.0
+
+    def test_div_with_numpy_nonzero_succeeds(self):
+        op = _make_binop(BinOpKind.DIV, 10.0, np.float64(4.0))
+        std = StandardEmitPass(DummyEmitter())
+        bindings: dict = {}
+        std._evaluate_binop(op, bindings)
+        assert bindings[op.results[0].uuid] == 2.5

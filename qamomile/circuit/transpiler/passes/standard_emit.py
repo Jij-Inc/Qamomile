@@ -50,6 +50,7 @@ from qamomile.circuit.transpiler.errors import (
 )
 from qamomile.circuit.transpiler.gate_emitter import GateEmitter
 from qamomile.circuit.transpiler.executable import ParameterMetadata, ParameterInfo
+from qamomile.circuit.transpiler.value_resolution import is_concrete_real_number
 
 T = TypeVar("T")  # Backend circuit type
 
@@ -1646,11 +1647,11 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             case BinOpKind.MUL:
                 result = lhs * rhs
             case BinOpKind.DIV:
-                if isinstance(rhs, (int, float)) and rhs == 0:
+                if is_concrete_real_number(rhs) and rhs == 0:
                     raise EmitError("Division by zero during classical pre-evaluation")
                 result = lhs / rhs
             case BinOpKind.FLOORDIV:
-                if isinstance(rhs, (int, float)) and rhs == 0:
+                if is_concrete_real_number(rhs) and rhs == 0:
                     raise EmitError(
                         "Floor division by zero during classical pre-evaluation"
                     )
