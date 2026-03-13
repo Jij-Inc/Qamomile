@@ -34,22 +34,35 @@ qiskit = pytest.importorskip("qiskit")
 pytest.importorskip("qiskit_aer")
 
 from qiskit import QuantumCircuit
+from qiskit.circuit import Barrier, Measure, ParameterExpression
+from qiskit.circuit.controlflow import IfElseOp, WhileLoopOp
 from qiskit.circuit.library import (
-    HGate, XGate, ZGate, SGate, SdgGate, TGate, TdgGate,
-    RXGate, RYGate, RZGate, PhaseGate,
-    CXGate, CZGate, CPhaseGate, RZZGate, SwapGate,
     CCXGate,
+    CPhaseGate,
+    CXGate,
+    CZGate,
+    HGate,
+    PhaseGate,
+    RXGate,
+    RYGate,
+    RZGate,
+    RZZGate,
+    SdgGate,
+    SGate,
+    SwapGate,
+    TdgGate,
+    TGate,
+    XGate,
+    ZGate,
 )
-from qiskit.circuit import Measure, Barrier, Parameter, ParameterExpression
-from qiskit.circuit.controlflow import WhileLoopOp, IfElseOp
 
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.basic import (
     cz_entangling_layer,
-    superposition_vector,
     rx_layer,
     ry_layer,
     rz_layer,
+    superposition_vector,
 )
 from qamomile.circuit.algorithm.fqaoa import (
     cost_layer,
@@ -1302,18 +1315,14 @@ class TestParametricGates:
         """Vector[Float] parameter produces multiple indexed Parameters."""
 
         @qmc.qkernel
-        def circuit(
-            n: qmc.UInt, thetas: qmc.Vector[qmc.Float]
-        ) -> qmc.Vector[qmc.Bit]:
+        def circuit(n: qmc.UInt, thetas: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(n, "q")
             for i in qmc.range(n):
                 q[i] = qmc.ry(q[i], thetas[i])
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
-        exe = transpiler.transpile(
-            circuit, bindings={"n": 3}, parameters=["thetas"]
-        )
+        exe = transpiler.transpile(circuit, bindings={"n": 3}, parameters=["thetas"])
         qc = exe.compiled_quantum[0].circuit
         assert len(qc.parameters) == 3
         # Each RY gate has a ParameterExpression
@@ -1665,7 +1674,9 @@ class TestControlFlowRange:
         for i in range(n_qubits):
             assert isinstance(qc.data[i].operation, RXGate)
             assert [qc.find_bit(q).index for q in qc.data[i].qubits] == [i]
-            assert np.isclose(float(qc.data[i].operation.params[0]), thetas[i], atol=1e-10)
+            assert np.isclose(
+                float(qc.data[i].operation.params[0]), thetas[i], atol=1e-10
+            )
         for i in range(n_qubits):
             idx = n_qubits + i
             assert isinstance(qc.data[idx].operation, Measure)
@@ -1812,7 +1823,9 @@ class TestControlFlowRange:
         for i in range(n):
             assert isinstance(qc.data[n + i].operation, RZGate)
             assert [qc.find_bit(q).index for q in qc.data[n + i].qubits] == [i]
-            assert np.isclose(float(qc.data[n + i].operation.params[0]), thetas[i], atol=1e-10)
+            assert np.isclose(
+                float(qc.data[n + i].operation.params[0]), thetas[i], atol=1e-10
+            )
         for i in range(n):
             assert isinstance(qc.data[2 * n + i].operation, Measure)
         assert qc.num_qubits == n
@@ -1877,7 +1890,9 @@ class TestControlFlowItems:
             assert isinstance(qc.data[pos].operation, RZZGate)
             assert [qc.find_bit(q).index for q in qc.data[pos].qubits] == [i, j]
             expected_param = 0.5 * ising[(i, j)]
-            assert np.isclose(float(qc.data[pos].operation.params[0]), expected_param, atol=1e-10)
+            assert np.isclose(
+                float(qc.data[pos].operation.params[0]), expected_param, atol=1e-10
+            )
         for i in range(n_qubits):
             assert isinstance(qc.data[n_rzz + i].operation, Measure)
         assert qc.num_qubits == n_qubits
@@ -1903,7 +1918,9 @@ class TestControlFlowItems:
         for pos, k in enumerate(keys):
             assert isinstance(qc.data[pos].operation, RZGate)
             assert [qc.find_bit(q).index for q in qc.data[pos].qubits] == [k]
-            assert np.isclose(float(qc.data[pos].operation.params[0]), angles[k], atol=1e-10)
+            assert np.isclose(
+                float(qc.data[pos].operation.params[0]), angles[k], atol=1e-10
+            )
         for i in range(3):
             assert isinstance(qc.data[len(keys) + i].operation, Measure)
         assert qc.num_qubits == 3
@@ -1951,7 +1968,9 @@ class TestControlFlowItems:
         for pos, (i, j) in enumerate(edges):
             assert isinstance(qc.data[pos].operation, RZZGate)
             assert [qc.find_bit(q).index for q in qc.data[pos].qubits] == [i, j]
-            assert np.isclose(float(qc.data[pos].operation.params[0]), ising[(i, j)], atol=1e-10)
+            assert np.isclose(
+                float(qc.data[pos].operation.params[0]), ising[(i, j)], atol=1e-10
+            )
         for i in range(5):
             assert isinstance(qc.data[10 + i].operation, Measure)
         assert qc.num_qubits == 5
@@ -1979,7 +1998,9 @@ class TestControlFlowItems:
         assert len(qc.data) == 3
         assert isinstance(qc.data[0].operation, RZZGate)
         assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0, 1]
-        assert np.isclose(float(qc.data[0].operation.params[0]), gamma * -1.0, atol=1e-10)
+        assert np.isclose(
+            float(qc.data[0].operation.params[0]), gamma * -1.0, atol=1e-10
+        )
         assert isinstance(qc.data[1].operation, Measure)
         assert isinstance(qc.data[2].operation, Measure)
         assert qc.num_qubits == 2
@@ -2069,7 +2090,11 @@ class TestControlFlowNested:
             idx = 3 + pos
             assert isinstance(qc.data[idx].operation, RZZGate)
             assert [qc.find_bit(q).index for q in qc.data[idx].qubits] == [ei, ej]
-            assert np.isclose(float(qc.data[idx].operation.params[0]), 0.5 * ising[(ei, ej)], atol=1e-10)
+            assert np.isclose(
+                float(qc.data[idx].operation.params[0]),
+                0.5 * ising[(ei, ej)],
+                atol=1e-10,
+            )
         for i in range(3):
             assert isinstance(qc.data[3 + len(edges) + i].operation, Measure)
         assert qc.num_qubits == 3
@@ -2328,6 +2353,87 @@ class TestControlFlowIfElse:
         assert [qc.find_bit(q).index for q in qc.data[5].qubits] == [2]
         assert qc.num_qubits == 3
 
+    def test_sequential_if_same_qubit_different_measurements(self):
+        """Two sequential if blocks acting on the SAME qubit from different measurements.
+
+        This is the teleportation-style correction pattern:
+          m0 = measure(alice)
+          m1 = measure(bell0)
+          if m1: bell1 = X(bell1)
+          if m0: bell1 = Z(bell1)
+
+        The second if's quantum operand (bell1_phi_0) is a phi-merged qubit
+        from the first if.  The analyze pass must allow this because the
+        operand is quantum-typed, not a classical measurement result.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            alice = qmc.qubit("alice")
+            bell0 = qmc.qubit("bell0")
+            bell1 = qmc.qubit("bell1")
+
+            # Prepare entangled pair + teleportation setup
+            bell0 = qmc.h(bell0)
+            bell0, bell1 = qmc.cx(bell0, bell1)
+            alice, bell0 = qmc.cx(alice, bell0)
+            alice = qmc.h(alice)
+
+            # Sequential conditional corrections on bell1
+            m0 = qmc.measure(alice)
+            m1 = qmc.measure(bell0)
+            if m1:
+                bell1 = qmc.x(bell1)
+            if m0:
+                bell1 = qmc.z(bell1)
+
+            return qmc.measure(bell1)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+
+        # Count IfElseOps — should be exactly 2
+        if_else_ops = [inst for inst in qc.data if isinstance(inst.operation, IfElseOp)]
+        assert len(if_else_ops) == 2
+
+        # Final measurement must exist
+        measures = [inst for inst in qc.data if isinstance(inst.operation, Measure)]
+        assert len(measures) >= 3  # m1, m0, final
+
+    def test_sequential_if_same_qubit_execution(self):
+        """Execute sequential-if correction circuit and verify it runs."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            alice = qmc.qubit("alice")
+            bell0 = qmc.qubit("bell0")
+            bell1 = qmc.qubit("bell1")
+
+            bell0 = qmc.h(bell0)
+            bell0, bell1 = qmc.cx(bell0, bell1)
+            alice, bell0 = qmc.cx(alice, bell0)
+            alice = qmc.h(alice)
+
+            m0 = qmc.measure(alice)
+            m1 = qmc.measure(bell0)
+            if m1:
+                bell1 = qmc.x(bell1)
+            if m0:
+                bell1 = qmc.z(bell1)
+
+            return qmc.measure(bell1)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        assert result is not None
+        assert len(result.results) > 0
+        for value, count in result.results:
+            assert value in (0, 1)
+            assert count > 0
+
 
 class TestControlFlowWhileStructure:
     """Structural tests for while-loop transpilation.
@@ -2574,9 +2680,7 @@ class TestControlFlowWhileStructure:
         condition_clbit = qc.data[2].clbits[0]
         assert qc.clbits.index(condition_clbit) == qc.clbits.index(
             initial_measure_clbit
-        ), (
-            "while_loop condition must reference the clbit from the initial measure"
-        )
+        ), "while_loop condition must reference the clbit from the initial measure"
 
     # -- X-body structure: initial X, body has H + measure ----------------
 
@@ -2691,9 +2795,7 @@ class TestControlFlowWhileStructure:
 
         # --- Structure checks ---
         _, qc = _transpile_and_get_circuit(circuit)
-        assert qc.num_clbits == 1, (
-            f"Expected 1 classical bit but got {qc.num_clbits}."
-        )
+        assert qc.num_clbits == 1, f"Expected 1 classical bit but got {qc.num_clbits}."
         while_insts = [i for i in qc.data if isinstance(i.operation, WhileLoopOp)]
         assert len(while_insts) == 1
         body = while_insts[0].operation.params[0]
@@ -2772,9 +2874,7 @@ class TestControlFlowWhileStructure:
 
         # Inside the while body there is an if_else block.
         body = while_inst.operation.params[0]
-        if_else_insts = [
-            i for i in body.data if isinstance(i.operation, IfElseOp)
-        ]
+        if_else_insts = [i for i in body.data if isinstance(i.operation, IfElseOp)]
         assert len(if_else_insts) == 1
 
         # Both branches (if / else) must have exactly one measurement
@@ -2783,9 +2883,7 @@ class TestControlFlowWhileStructure:
         if_else_op = if_else_insts[0]
         for branch_idx, block in enumerate(if_else_op.operation.blocks):
             branch_name = "if" if branch_idx == 0 else "else"
-            measures = [
-                i for i in block.data if isinstance(i.operation, Measure)
-            ]
+            measures = [i for i in block.data if isinstance(i.operation, Measure)]
             assert len(measures) == 1, (
                 f"Expected 1 measurement in {branch_name}-branch but "
                 f"got {len(measures)}."
@@ -2793,13 +2891,9 @@ class TestControlFlowWhileStructure:
             # Resolve the measurement's clbit index back through the
             # nesting: block → if_else → while_body → top-level circuit.
             meas_clbit_in_block = block.clbits.index(measures[0].clbits[0])
-            if_else_clbits = [
-                body.clbits.index(c) for c in if_else_insts[0].clbits
-            ]
+            if_else_clbits = [body.clbits.index(c) for c in if_else_insts[0].clbits]
             meas_clbit_in_body = if_else_clbits[meas_clbit_in_block]
-            while_clbits = [
-                qc.clbits.index(c) for c in while_inst.clbits
-            ]
+            while_clbits = [qc.clbits.index(c) for c in while_inst.clbits]
             meas_clbit_in_circuit = while_clbits[meas_clbit_in_body]
             assert meas_clbit_in_circuit == cond_clbit_idx, (
                 f"{branch_name}-branch measure targets circuit clbit "
@@ -2893,9 +2987,7 @@ class TestControlFlowWhileStructure:
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
-        assert qc.num_clbits == 2, (
-            f"Expected 2 classical bits but got {qc.num_clbits}."
-        )
+        assert qc.num_clbits == 2, f"Expected 2 classical bits but got {qc.num_clbits}."
 
         transpiler = QiskitTranspiler()
         exe = transpiler.transpile(circuit)
@@ -2904,8 +2996,7 @@ class TestControlFlowWhileStructure:
         result = job.result()
         for value, count in result.results:
             assert value == 0, (
-                f"Expected all shots to return 0 but got value={value} "
-                f"({count} shots)."
+                f"Expected all shots to return 0 but got value={value} ({count} shots)."
             )
 
     def test_while_loop_with_nested_if_else(self):
@@ -2946,8 +3037,7 @@ class TestControlFlowWhileStructure:
 
         _, qc = _transpile_and_get_circuit(circuit)
         assert qc.num_clbits == 3, (
-            f"Expected 3 classical bits (bit, sel1, sel2) but got "
-            f"{qc.num_clbits}."
+            f"Expected 3 classical bits (bit, sel1, sel2) but got {qc.num_clbits}."
         )
 
         transpiler = QiskitTranspiler()
@@ -2957,8 +3047,184 @@ class TestControlFlowWhileStructure:
         result = job.result()
         for value, count in result.results:
             assert value == 0, (
+                f"Expected all shots to return 0 but got value={value} ({count} shots)."
+            )
+
+    def test_while_loop_with_if_only_no_else(self):
+        """While loop with if-only (no else): clbit count must not leak.
+
+        When the while body contains an if without else, the PhiOp's
+        false_val is the pre-if while-condition value.  map_phi_outputs
+        redirects this UUID, which used to corrupt the while-condition's
+        canonical clbit and cause an extra orphaned clbit to appear.
+
+        Verifies:
+        - num_clbits == 2 (bit + sel, no orphan)
+        - while condition clbit == initial measurement clbit
+        - sampling always returns 0 (loop terminates correctly)
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.x(q0)  # bit=1, enter loop
+            bit = qmc.measure(q0)
+
+            q1 = qmc.qubit("q1")
+            q1 = qmc.x(q1)  # sel=1, always take if-branch
+            sel = qmc.measure(q1)
+
+            while bit:
+                if sel:
+                    q2 = qmc.qubit("q2")  # |0⟩ → bit=0, exit
+                    bit = qmc.measure(q2)
+            return bit
+
+        # --- Structure checks ---
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_clbits == 2, (
+            f"Expected 2 classical bits but got {qc.num_clbits}. "
+            "If-only (no else) in while loop is leaking orphan clbits."
+        )
+
+        # Exactly test full structure
+        assert (
+            len(qc.data) == 5
+        )  # x -> measure -> x -> measure -> while (if is in while body)
+        assert isinstance(qc.data[0].operation, XGate)
+        assert isinstance(qc.data[1].operation, Measure)
+        assert isinstance(qc.data[2].operation, XGate)
+        assert isinstance(qc.data[3].operation, Measure)
+        assert isinstance(qc.data[4].operation, WhileLoopOp)
+        while_inst = qc.data[4]
+        while_body = while_inst.operation.params[0]
+        assert len(while_body.data) == 1  # if (measure is inside if)
+        assert isinstance(while_body.data[0].operation, IfElseOp)
+        if_inst = while_body.data[0]
+        if_body = if_inst.operation.blocks[0]
+        assert len(if_body.data) == 1  # measure
+        assert isinstance(if_body.data[0].operation, Measure)
+
+        # Test if the initial measurement writes to the clbit used by the while condition.
+        while_cond_clbit_idx = qc.clbits.index(while_inst.clbits[0])
+        initial_measure = qc.data[1]
+        initial_measure_clbit_idx = qc.clbits.index(initial_measure.clbits[0])
+        assert while_cond_clbit_idx == initial_measure_clbit_idx
+
+        # Test if the second measurement writes to the clbit used in the if condition.
+        if_cond_clbit_idx = qc.clbits.index(if_inst.operation.condition[0])
+        second_measure = qc.data[3]
+        second_measure_clbit_idx = qc.clbits.index(second_measure.clbits[0])
+        assert if_cond_clbit_idx == second_measure_clbit_idx
+
+        # Test if the third measurement (in the if body) writes to the same clbit as the while condition.
+        if_body_measure = if_body.data[0]
+        if_body_measure_clbit_idx = qc.clbits.index(if_body_measure.clbits[0])
+        assert if_body_measure_clbit_idx == while_cond_clbit_idx
+
+        # --- Execution check ---
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        for value, count in result.results:
+            assert value == 0, (
                 f"Expected all shots to return 0 but got value={value} "
-                f"({count} shots)."
+                f"({count} shots). While + if-only loop is not terminating."
+            )
+
+    def test_while_loop_with_nested_if_only_no_else(self):
+        """While loop with nested if-only (no else): clbit count must not leak.
+
+        A deeper nesting test: while body has an if-only containing another
+        if-only that reassigns the while condition.  Verifies that the
+        canonical clbit save/restore handles nested if-only correctly.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.x(q0)  # bit=1, enter loop
+            bit = qmc.measure(q0)
+
+            q1 = qmc.qubit("q1")
+            q1 = qmc.x(q1)  # sel1=1
+            sel1 = qmc.measure(q1)
+
+            q2 = qmc.qubit("q2")
+            q2 = qmc.x(q2)  # sel2=1
+            sel2 = qmc.measure(q2)
+
+            while bit:
+                if sel1:
+                    if sel2:
+                        q3 = qmc.qubit("q3")  # |0⟩ → bit=0, exit
+                        bit = qmc.measure(q3)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_clbits == 3, (
+            f"Expected 3 classical bits (bit, sel1, sel2) but got {qc.num_clbits}."
+        )
+
+        # Exactly test full structure
+        assert (
+            len(qc.data) == 7
+        )  # x -> measure -> x -> measure -> x -> measure -> while
+        assert isinstance(qc.data[0].operation, XGate)
+        assert isinstance(qc.data[1].operation, Measure)
+        assert isinstance(qc.data[2].operation, XGate)
+        assert isinstance(qc.data[3].operation, Measure)
+        assert isinstance(qc.data[4].operation, XGate)
+        assert isinstance(qc.data[5].operation, Measure)
+        assert isinstance(qc.data[6].operation, WhileLoopOp)
+        while_inst = qc.data[6]
+        while_body = while_inst.operation.params[0]
+        assert len(while_body.data) == 1  # outer if
+        assert isinstance(while_body.data[0].operation, IfElseOp)
+        outer_if_inst = while_body.data[0]
+        outer_if_body = outer_if_inst.operation.blocks[0]
+        outer_else_body = outer_if_inst.operation.blocks[1]
+        assert len(outer_else_body.data) == 0  # no else
+        assert len(outer_if_body.data) == 1  # inner if
+        assert isinstance(outer_if_body.data[0].operation, IfElseOp)
+        inner_if_inst = outer_if_body.data[0]
+        inner_if_body = inner_if_inst.operation.blocks[0]
+        inner_else_body = inner_if_inst.operation.blocks[1]
+        assert len(inner_else_body.data) == 0  # no else
+        assert len(inner_if_body.data) == 1  # measure
+        assert isinstance(inner_if_body.data[0].operation, Measure)
+
+        # Clbit mapping checks
+        while_cond_clbit_idx = qc.clbits.index(while_inst.clbits[0])
+        initial_measure = qc.data[1]
+        initial_measure_clbit_idx = qc.clbits.index(initial_measure.clbits[0])
+        assert while_cond_clbit_idx == initial_measure_clbit_idx
+
+        outer_if_cond_clbit_idx = qc.clbits.index(outer_if_inst.operation.condition[0])
+        second_measure = qc.data[3]
+        second_measure_clbit_idx = qc.clbits.index(second_measure.clbits[0])
+        assert outer_if_cond_clbit_idx == second_measure_clbit_idx
+
+        inner_if_cond_clbit_idx = qc.clbits.index(inner_if_inst.operation.condition[0])
+        third_measure = qc.data[5]
+        third_measure_clbit_idx = qc.clbits.index(third_measure.clbits[0])
+        assert inner_if_cond_clbit_idx == third_measure_clbit_idx
+
+        inner_if_body_measure = inner_if_body.data[0]
+        inner_if_body_measure_clbit_idx = qc.clbits.index(inner_if_body_measure.clbits[0])
+        assert inner_if_body_measure_clbit_idx == while_cond_clbit_idx
+
+        # --- Execution check ---
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        for value, count in result.results:
+            assert value == 0, (
+                f"Expected all shots to return 0 but got value={value} ({count} shots)."
             )
 
 
@@ -3347,6 +3613,43 @@ class TestTranspilerPassesPipeline:
         analyzed = transpiler.analyze(folded)
         assert analyzed.kind == BlockKind.ANALYZED
 
+    def test_analyze_allows_quantum_phi_operand_after_measurement_condition(
+        self, transpiler
+    ):
+        """analyze() must NOT reject quantum phi operands from if-else merges.
+
+        When a qubit passes through an if-else block conditioned on a
+        measurement, the phi-merged output (e.g. ``q1_phi_0``) is
+        quantum-typed.  A subsequent quantum gate using that qubit must
+        be allowed even though the phi value transitively depends on a
+        measurement via the dependency graph.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            q2 = qmc.qubit("q2")
+
+            m0 = qmc.measure(q0)
+            if m0:
+                q1 = qmc.x(q1)
+
+            # q1 is now a phi-merged qubit — quantum-typed
+            m1 = qmc.measure(q2)
+            if m1:
+                # Using phi-merged q1 as quantum operand must be allowed
+                q1 = qmc.z(q1)
+
+            return qmc.measure(q1)
+
+        block = transpiler.to_block(circuit)
+        inlined = transpiler.inline(block)
+        validated = transpiler.linear_validate(inlined)
+        folded = transpiler.constant_fold(validated)
+        analyzed = transpiler.analyze(folded)
+        assert analyzed.kind == BlockKind.ANALYZED
+
     def test_separate(self, transpiler):
         """separate() splits into C->Q->C segments."""
 
@@ -3501,12 +3804,22 @@ class TestTranspilerConfigAndSubstitution:
         assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [0]
         idx += 1
         assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [1, 0]
-        assert np.isclose(float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
+            1,
+            0,
+        ]
+        assert np.isclose(
+            float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
+        )
         idx += 1
         assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [2, 0]
-        assert np.isclose(float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
+            2,
+            0,
+        ]
+        assert np.isclose(
+            float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10
+        )
         idx += 1
 
         # qubit 1: H + CP(q2,q1,π/2) + CP(q3,q1,π/4)
@@ -3514,12 +3827,22 @@ class TestTranspilerConfigAndSubstitution:
         assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [1]
         idx += 1
         assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [2, 1]
-        assert np.isclose(float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
+            2,
+            1,
+        ]
+        assert np.isclose(
+            float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
+        )
         idx += 1
         assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [3, 1]
-        assert np.isclose(float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
+            3,
+            1,
+        ]
+        assert np.isclose(
+            float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10
+        )
         idx += 1
 
         # qubit 2: H + CP(q3,q2,π/2) + CP(q4,q2,π/4)
@@ -3527,12 +3850,22 @@ class TestTranspilerConfigAndSubstitution:
         assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [2]
         idx += 1
         assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [3, 2]
-        assert np.isclose(float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
+            3,
+            2,
+        ]
+        assert np.isclose(
+            float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
+        )
         idx += 1
         assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [4, 2]
-        assert np.isclose(float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
+            4,
+            2,
+        ]
+        assert np.isclose(
+            float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10
+        )
         idx += 1
 
         # qubit 3: H + CP(q4,q3,π/2)
@@ -3540,8 +3873,13 @@ class TestTranspilerConfigAndSubstitution:
         assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [3]
         idx += 1
         assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [4, 3]
-        assert np.isclose(float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
+            4,
+            3,
+        ]
+        assert np.isclose(
+            float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
+        )
         idx += 1
 
         # qubit 4: H only
@@ -3551,15 +3889,23 @@ class TestTranspilerConfigAndSubstitution:
 
         # 2 SWAP gates for bit reversal
         assert isinstance(qc_approx.data[idx].operation, SwapGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [0, 4]
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
+            0,
+            4,
+        ]
         idx += 1
         assert isinstance(qc_approx.data[idx].operation, SwapGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [1, 3]
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
+            1,
+            3,
+        ]
         idx += 1
 
         for i in range(5):
             assert isinstance(qc_approx.data[idx].operation, Measure)
-            assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [i]
+            assert [
+                qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits
+            ] == [i]
             idx += 1
 
         # Approximate has strictly fewer total gates
@@ -3591,7 +3937,9 @@ class TestTranspilerConfigAndSubstitution:
         qc_approx = exe_approx.compiled_quantum[0].circuit
         # Approximate: 5H + 7CP + 2SWAP + 5M = 19
         assert len(qc_approx.data) == 19
-        cp_approx = sum(1 for i in qc_approx.data if isinstance(i.operation, CPhaseGate))
+        cp_approx = sum(
+            1 for i in qc_approx.data if isinstance(i.operation, CPhaseGate)
+        )
         assert cp_approx == 7  # truncated to k=2 neighbors
         assert cp_approx < cp_std
 
@@ -4509,7 +4857,9 @@ class TestAlgorithmBasicLayers:
         for i in range(n_qubits):
             assert isinstance(qc.data[i].operation, RYGate)
             assert [qc.find_bit(q).index for q in qc.data[i].qubits] == [i]
-            assert np.isclose(float(qc.data[i].operation.params[0]), thetas[i], atol=1e-10)
+            assert np.isclose(
+                float(qc.data[i].operation.params[0]), thetas[i], atol=1e-10
+            )
         for i in range(n_qubits):
             assert isinstance(qc.data[n_qubits + i].operation, Measure)
         assert qc.num_qubits == n_qubits
@@ -4648,7 +4998,9 @@ class TestAlgorithmBasicLayers:
         for i in range(3):
             assert isinstance(qc.data[i].operation, RYGate)
             assert [qc.find_bit(q).index for q in qc.data[i].qubits] == [i]
-            assert np.isclose(float(qc.data[i].operation.params[0]), thetas[i], atol=1e-10)
+            assert np.isclose(
+                float(qc.data[i].operation.params[0]), thetas[i], atol=1e-10
+            )
         assert isinstance(qc.data[3].operation, CZGate)
         assert [qc.find_bit(q).index for q in qc.data[3].qubits] == [0, 1]
         assert isinstance(qc.data[4].operation, CZGate)
@@ -4725,16 +5077,24 @@ class TestAlgorithmQAOAModules:
         assert len(qc.data) == 7
         assert isinstance(qc.data[0].operation, RZZGate)
         assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0, 1]
-        assert np.isclose(float(qc.data[0].operation.params[0]), gamma * 1.0, atol=1e-10)
+        assert np.isclose(
+            float(qc.data[0].operation.params[0]), gamma * 1.0, atol=1e-10
+        )
         assert isinstance(qc.data[1].operation, RZZGate)
         assert [qc.find_bit(q).index for q in qc.data[1].qubits] == [1, 2]
-        assert np.isclose(float(qc.data[1].operation.params[0]), gamma * (-0.5), atol=1e-10)
+        assert np.isclose(
+            float(qc.data[1].operation.params[0]), gamma * (-0.5), atol=1e-10
+        )
         assert isinstance(qc.data[2].operation, RZGate)
         assert [qc.find_bit(q).index for q in qc.data[2].qubits] == [0]
-        assert np.isclose(float(qc.data[2].operation.params[0]), gamma * 0.3, atol=1e-10)
+        assert np.isclose(
+            float(qc.data[2].operation.params[0]), gamma * 0.3, atol=1e-10
+        )
         assert isinstance(qc.data[3].operation, RZGate)
         assert [qc.find_bit(q).index for q in qc.data[3].qubits] == [2]
-        assert np.isclose(float(qc.data[3].operation.params[0]), gamma * (-0.1), atol=1e-10)
+        assert np.isclose(
+            float(qc.data[3].operation.params[0]), gamma * (-0.1), atol=1e-10
+        )
         for i in range(3):
             assert isinstance(qc.data[4 + i].operation, Measure)
             assert [qc.find_bit(q).index for q in qc.data[4 + i].qubits] == [i]
@@ -4782,7 +5142,9 @@ class TestAlgorithmQAOAModules:
         for i in range(n_qubits):
             assert isinstance(qc.data[i].operation, RXGate)
             assert [qc.find_bit(q).index for q in qc.data[i].qubits] == [i]
-            assert np.isclose(float(qc.data[i].operation.params[0]), 2.0 * beta, atol=1e-10)
+            assert np.isclose(
+                float(qc.data[i].operation.params[0]), 2.0 * beta, atol=1e-10
+            )
         for i in range(n_qubits):
             assert isinstance(qc.data[n_qubits + i].operation, Measure)
             assert [qc.find_bit(q).index for q in qc.data[n_qubits + i].qubits] == [i]
@@ -4837,7 +5199,9 @@ class TestAlgorithmQAOAModules:
         assert len(qc.data) == 5
         assert isinstance(qc.data[0].operation, RZZGate)
         assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0, 1]
-        assert np.isclose(float(qc.data[0].operation.params[0]), gamma * 1.0, atol=1e-10)
+        assert np.isclose(
+            float(qc.data[0].operation.params[0]), gamma * 1.0, atol=1e-10
+        )
         assert isinstance(qc.data[1].operation, RXGate)
         assert [qc.find_bit(q).index for q in qc.data[1].qubits] == [0]
         assert np.isclose(float(qc.data[1].operation.params[0]), 2.0 * beta, atol=1e-10)
@@ -4939,7 +5303,9 @@ class TestAlgorithmQAOAModules:
                 assert isinstance(qc.data[idx].operation, RZZGate)
                 assert [qc.find_bit(q).index for q in qc.data[idx].qubits] == [qi, qj]
                 assert np.isclose(
-                    float(qc.data[idx].operation.params[0]), gamma * quad_vals[e], atol=1e-10
+                    float(qc.data[idx].operation.params[0]),
+                    gamma * quad_vals[e],
+                    atol=1e-10,
                 )
                 idx += 1
             for i in range(n_qubits):
