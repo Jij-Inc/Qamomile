@@ -118,9 +118,7 @@ class TestRuntimeLimitations:
 
         with warnings.catch_warnings(record=True) as ws:
             warnings.simplefilter("always")
-            violations = ast_transform.collect_quantum_rebind_violations(
-                dummy, {"q"}
-            )
+            violations = ast_transform.collect_quantum_rebind_violations(dummy, {"q"})
 
         assert violations == []
         rebind_warnings = [
@@ -466,3 +464,128 @@ class TestLoopBackedgeIfLiveness:
 
         emit_if_stmt = self._find_emit_if_stmt(self._find_loop_body(func_def))
         assert "x" not in self._assignment_target_names(emit_if_stmt)
+
+
+class TestLoopElseReject:
+    """for ... else and while ... else must be rejected at AST transform time."""
+
+    @staticmethod
+    def _transform_source(source: str) -> ast.FunctionDef:
+        tree = ast.parse(textwrap.dedent(source))
+        result = ControlFlowTransformer().visit(tree)
+        return result.body[0]
+
+    def test_for_else_raises(self):
+        with pytest.raises(
+            SyntaxError, match="for ... else is not supported in @qkernel"
+        ):
+            self._transform_source(
+                """
+                def f(n, x):
+                    for i in range(n):
+                        x = x + 1
+                    else:
+                        x = 0
+                    return x
+                """
+            )
+
+    def test_while_else_raises(self):
+        with pytest.raises(
+            SyntaxError, match="while ... else is not supported in @qkernel"
+        ):
+            self._transform_source(
+                """
+                def f(cond, x):
+                    while cond:
+                        x = x + 1
+                    else:
+                        x = 0
+                    return x
+                """
+            )
+
+    def test_for_else_pass_raises(self):
+        """Even `else: pass` is rejected -- loop-else syntax itself is unsupported."""
+        with pytest.raises(
+            SyntaxError, match="for ... else is not supported in @qkernel"
+        ):
+            self._transform_source(
+                """
+                def f(n, x):
+                    for i in range(n):
+                        x = x + 1
+                    else:
+                        pass
+                    return x
+                """
+            )
+
+    def test_while_else_pass_raises(self):
+        """Even `else: pass` is rejected -- loop-else syntax itself is unsupported."""
+        with pytest.raises(
+            SyntaxError, match="while ... else is not supported in @qkernel"
+        ):
+            self._transform_source(
+                """
+                def f(cond, x):
+                    while cond:
+                        x = x + 1
+                    else:
+                        pass
+                    return x
+                """
+            )
+
+    def test_for_without_else_works(self):
+        """Normal for loop (no else) must still work."""
+        func_def = self._transform_source(
+            """
+            def f(n, x):
+                for i in range(n):
+                    x = x + 1
+                return x
+            """
+        )
+        assert isinstance(func_def, ast.FunctionDef)
+
+    def test_while_without_else_works(self):
+        """Normal while loop (no else) must still work."""
+        func_def = self._transform_source(
+            """
+            def f(cond, x):
+                while cond:
+                    x = x + 1
+                    cond = 0
+                return x
+            """
+        )
+        assert isinstance(func_def, ast.FunctionDef)
+
+    def test_qkernel_for_else_raises(self):
+        """@qkernel decorator propagates the SyntaxError."""
+        with pytest.raises(
+            SyntaxError, match="for ... else is not supported in @qkernel"
+        ):
+
+            @qkernel
+            def bad(n: qm.UInt, x: qm.UInt) -> qm.UInt:
+                for i in qm.range(n):
+                    x = x + 1
+                else:
+                    x = qm.UInt(0)
+                return x
+
+    def test_qkernel_while_else_raises(self):
+        """@qkernel decorator propagates the SyntaxError."""
+        with pytest.raises(
+            SyntaxError, match="while ... else is not supported in @qkernel"
+        ):
+
+            @qkernel
+            def bad(cond: qm.Bit, x: qm.UInt) -> qm.UInt:
+                while cond:
+                    x = x + 1
+                else:
+                    x = qm.UInt(0)
+                return x

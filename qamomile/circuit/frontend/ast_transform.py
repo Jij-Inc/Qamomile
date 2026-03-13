@@ -573,6 +573,8 @@ class ControlFlowTransformer(ast.NodeTransformer):
             live = next_live
 
     def visit_While(self, node: ast.While) -> Any:
+        if node.orelse:
+            raise SyntaxError("while ... else is not supported in @qkernel")
         # Check for quantum operations in while condition
         self._check_no_quantum_ops_in_condition(node.test, node.lineno)
         # ネストされた制御フローを先に変換 (with definition tracking)
@@ -682,6 +684,8 @@ class ControlFlowTransformer(ast.NodeTransformer):
             raise NotImplementedError(f"Unsupported target type: {type(target)}")
 
     def visit_For(self, node: ast.For) -> Any:
+        if node.orelse:
+            raise SyntaxError("for ... else is not supported in @qkernel")
         # ネストされた制御フローを先に変換 (with definition tracking)
         saved_outer = self._outer_defined_vars
         saved_after = self._after_stmt_read_vars
