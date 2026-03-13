@@ -503,6 +503,75 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 new_body.append(stmt)
         return new_body
 
+    def _collect_load_vars_set(self, node: ast.AST) -> set[str]:
+        collector = VariableCollector(global_names=self._global_names)
+        collector.visit(node)
+        return set(collector.load_vars)
+
+    def _stmt_live_in(self, stmt: ast.stmt, live_out: set[str]) -> set[str]:
+        """Compute variables that must be live before executing *stmt*."""
+        if isinstance(stmt, ast.If):
+            test_loads = self._collect_load_vars_set(stmt.test)
+            true_live_in = self._block_live_in(stmt.body, live_out)
+            false_live_in = (
+                self._block_live_in(stmt.orelse, live_out)
+                if stmt.orelse
+                else set(live_out)
+            )
+            return test_loads | true_live_in | false_live_in
+
+        if isinstance(stmt, ast.While):
+            post_loop_live = (
+                self._block_live_in(stmt.orelse, live_out)
+                if stmt.orelse
+                else set(live_out)
+            )
+            cond_loads = self._collect_load_vars_set(stmt.test)
+            body_entry_live_in = self._loop_body_entry_live_in(
+                stmt.body, post_loop_live | cond_loads
+            )
+            return post_loop_live | cond_loads | body_entry_live_in
+
+        if isinstance(stmt, ast.For):
+            post_loop_live = (
+                self._block_live_in(stmt.orelse, live_out)
+                if stmt.orelse
+                else set(live_out)
+            )
+            iter_loads = self._collect_load_vars_set(stmt.iter)
+            body_entry_live_in = self._loop_body_entry_live_in(
+                stmt.body,
+                post_loop_live,
+                bound_vars=set(self._extract_tuple_vars(stmt.target)),
+            )
+            return post_loop_live | iter_loads | body_entry_live_in
+
+        collector = VariableCollector(global_names=self._global_names)
+        collector.visit(stmt)
+        return set(collector.load_vars) | (set(live_out) - set(collector.store_vars))
+
+    def _block_live_in(self, body: list[ast.stmt], live_out: set[str]) -> set[str]:
+        live = set(live_out)
+        for stmt in reversed(body):
+            live = self._stmt_live_in(stmt, live)
+        return live
+
+    def _loop_body_entry_live_in(
+        self,
+        body: list[ast.stmt],
+        exit_live: set[str],
+        bound_vars: set[str] | None = None,
+    ) -> set[str]:
+        """Compute loop self-edge liveness at the start of the loop body."""
+        bound = set(bound_vars or ())
+        live = set()
+        while True:
+            next_live = self._block_live_in(body, set(exit_live) | live)
+            next_live.difference_update(bound)
+            if next_live == live:
+                return next_live
+            live = next_live
+
     def visit_While(self, node: ast.While) -> Any:
         # Check for quantum operations in while condition
         self._check_no_quantum_ops_in_condition(node.test, node.lineno)
@@ -512,10 +581,17 @@ class ControlFlowTransformer(ast.NodeTransformer):
         saved_after_load = self._after_stmt_load_vars
         # The while condition is re-evaluated each iteration, so its
         # load vars must be live at the end of each iteration body.
-        # Also propagate the outer scope's after-loads.
+        # Also propagate loop back-edge liveness. VariableCollector.incoming_vars
+        # is lexical and misses mixed-path Load-before-Store cases at loop entry.
         cond_collector = VariableCollector(global_names=self._global_names)
         cond_collector.visit(node.test)
-        while_body_after = frozenset(cond_collector.load_vars | set(saved_after_load))
+        cond_loads = set(cond_collector.load_vars)
+        body_entry_live_in = self._loop_body_entry_live_in(
+            node.body, set(saved_after_load) | cond_loads
+        )
+        while_body_after = frozenset(
+            set(saved_after_load) | cond_loads | body_entry_live_in
+        )
         flattened_body = self._visit_body_with_tracking(
             node.body,
             set(self._outer_defined_vars),
@@ -611,12 +687,15 @@ class ControlFlowTransformer(ast.NodeTransformer):
         saved_after = self._after_stmt_read_vars
         saved_after_load = self._after_stmt_load_vars
         initial_defined = set(self._outer_defined_vars)
-        initial_defined.update(self._extract_tuple_vars(node.target))
-        # Unlike visit_While, the for iterator expression is evaluated once
-        # before the loop, not re-evaluated each iteration, so we only
-        # propagate the outer scope's after-loads without unioning iterator loads.
+        bound_vars = set(self._extract_tuple_vars(node.target))
+        initial_defined.update(bound_vars)
+        body_entry_live_in = self._loop_body_entry_live_in(
+            node.body, set(saved_after_load), bound_vars=bound_vars
+        )
         flattened_body = self._visit_body_with_tracking(
-            node.body, initial_defined, outer_after_loads=saved_after_load
+            node.body,
+            initial_defined,
+            outer_after_loads=frozenset(set(saved_after_load) | body_entry_live_in),
         )
         self._outer_defined_vars = saved_outer
         self._after_stmt_read_vars = saved_after
