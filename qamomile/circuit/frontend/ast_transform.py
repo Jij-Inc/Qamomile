@@ -28,6 +28,8 @@ class VariableCollector(ast.NodeVisitor):
         self._exclude = set()  # 除外する名前
         self._global_names = global_names or set()
         self._first_context: dict[str, str] = {}  # name -> "Store" | "Load"
+        self._load_names: set[str] = set()
+        self._store_names: set[str] = set()
 
     def visit_Call(self, node: ast.Call):
         """関数呼び出しの関数名を除外"""
@@ -71,6 +73,10 @@ class VariableCollector(ast.NodeVisitor):
         if isinstance(node.id, str):
             if node.id not in self._exclude and node.id not in self._global_names:
                 self.vars.add(node.id)
+                if isinstance(node.ctx, ast.Load):
+                    self._load_names.add(node.id)
+                if isinstance(node.ctx, ast.Store):
+                    self._store_names.add(node.id)
                 if node.id not in self._first_context:
                     if isinstance(node.ctx, ast.Store):
                         self._first_context[node.id] = "Store"
@@ -86,6 +92,16 @@ class VariableCollector(ast.NodeVisitor):
     def incoming_vars(self) -> set[str]:
         """外部スコープから渡される必要がある変数（初回が Load）。"""
         return self.vars - self.locally_defined_vars
+
+    @property
+    def load_vars(self) -> set[str]:
+        """Load コンテキストで参照される変数（実際に読まれる変数）。"""
+        return self._load_names & self.vars
+
+    @property
+    def store_vars(self) -> set[str]:
+        """Store コンテキストで代入される変数。"""
+        return self._store_names & self.vars
 
 
 class ControlFlowTransformer(ast.NodeTransformer):
@@ -107,6 +123,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         # Scope tracking for visit_If input/output separation
         self._outer_defined_vars: frozenset[str] = frozenset()
         self._after_stmt_read_vars: frozenset[str] = frozenset()
+        self._after_stmt_load_vars: frozenset[str] = frozenset()
         # 関数パラメータ名（ループ変数シャドウイング検出用）
         self._param_names = param_names or set()
         # Namespace for resolving callables (used in while condition QKernel check)
@@ -118,7 +135,10 @@ class ControlFlowTransformer(ast.NodeTransformer):
         return name
 
     def _visit_body_with_tracking(
-        self, body: list[ast.stmt], initial_defined: set[str]
+        self,
+        body: list[ast.stmt],
+        initial_defined: set[str],
+        outer_after_loads: frozenset[str] = frozenset(),
     ) -> list[ast.stmt]:
         """Process a statement body sequentially, tracking defined variables.
 
@@ -126,6 +146,11 @@ class ControlFlowTransformer(ast.NodeTransformer):
         defined before the statement) and ``_after_stmt_read_vars`` (variables
         referenced in subsequent statements) so that ``visit_If`` can compute
         input/output variable sets correctly.
+
+        Args:
+            outer_after_loads: Variables that are loaded after this entire body
+                completes.  Seeded into the suffix-load array so that nested
+                ``visit_If`` calls can see outer-scope liveness.
         """
         new_body: list[ast.stmt] = []
         defined_so_far = set(initial_defined)
@@ -141,12 +166,24 @@ class ControlFlowTransformer(ast.NodeTransformer):
         n = len(body)
         suffix_reads: list[frozenset[str]] = [frozenset()] * (n + 1)
         for j in range(n - 1, -1, -1):
-            suffix_reads[j] = frozenset(per_stmt_collectors[j].vars | suffix_reads[j + 1])
+            suffix_reads[j] = frozenset(
+                per_stmt_collectors[j].vars | suffix_reads[j + 1]
+            )
+
+        # Build suffix-union of Load-only vars (dead-variable filtering).
+        # Seed with outer_after_loads so nested visit_If sees outer liveness.
+        suffix_loads: list[frozenset[str]] = [frozenset()] * (n + 1)
+        suffix_loads[n] = outer_after_loads
+        for j in range(n - 1, -1, -1):
+            suffix_loads[j] = frozenset(
+                per_stmt_collectors[j].load_vars | suffix_loads[j + 1]
+            )
 
         for i, stmt in enumerate(body):
             # Set context for visit_If
             self._outer_defined_vars = frozenset(defined_so_far)
             self._after_stmt_read_vars = suffix_reads[i + 1]
+            self._after_stmt_load_vars = suffix_loads[i + 1]
 
             # Visit the statement (may call visit_If, visit_For, etc.)
             result = self.visit(stmt)
@@ -452,11 +489,21 @@ class ControlFlowTransformer(ast.NodeTransformer):
         # ネストされた制御フローを先に変換 (with definition tracking)
         saved_outer = self._outer_defined_vars
         saved_after = self._after_stmt_read_vars
+        saved_after_load = self._after_stmt_load_vars
+        # The while condition is re-evaluated each iteration, so its
+        # load vars must be live at the end of each iteration body.
+        # Also propagate the outer scope's after-loads.
+        cond_collector = VariableCollector(global_names=self._global_names)
+        cond_collector.visit(node.test)
+        while_body_after = frozenset(cond_collector.load_vars | set(saved_after_load))
         flattened_body = self._visit_body_with_tracking(
-            node.body, set(self._outer_defined_vars)
+            node.body,
+            set(self._outer_defined_vars),
+            outer_after_loads=while_body_after,
         )
         self._outer_defined_vars = saved_outer
         self._after_stmt_read_vars = saved_after
+        self._after_stmt_load_vars = saved_after_load
 
         # lambda: <condition> を作成
         lambda_node = ast.Lambda(
@@ -542,11 +589,15 @@ class ControlFlowTransformer(ast.NodeTransformer):
         # ネストされた制御フローを先に変換 (with definition tracking)
         saved_outer = self._outer_defined_vars
         saved_after = self._after_stmt_read_vars
+        saved_after_load = self._after_stmt_load_vars
         initial_defined = set(self._outer_defined_vars)
         initial_defined.update(self._extract_tuple_vars(node.target))
-        flattened_body = self._visit_body_with_tracking(node.body, initial_defined)
+        flattened_body = self._visit_body_with_tracking(
+            node.body, initial_defined, outer_after_loads=saved_after_load
+        )
         self._outer_defined_vars = saved_outer
         self._after_stmt_read_vars = saved_after
+        self._after_stmt_load_vars = saved_after_load
 
         # Check for parameter shadowing (common to all for-loop variants)
         all_binding_names = self._extract_tuple_vars(node.target)
@@ -774,7 +825,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             one_sided_new = (body_assigned ^ orelse_assigned) - outer_defined
         else:
             one_sided_new = body_assigned - outer_defined
-        exposed_one_sided = one_sided_new & set(self._after_stmt_read_vars)
+        exposed_one_sided = one_sided_new & set(self._after_stmt_load_vars)
         if exposed_one_sided:
             raise SyntaxError(
                 f"Variable(s) {sorted(exposed_one_sided)} defined in only one "
@@ -785,8 +836,19 @@ class ControlFlowTransformer(ast.NodeTransformer):
         # Ensure reassigned_existing are passed into branches
         input_vars_set |= reassigned_existing
 
+        # Filter dead-and-modified variables from output.  A variable that is
+        # stored (modified) in a branch but never loaded after the if would
+        # generate an unnecessary PhiOp whose physical resources may differ
+        # across branches, causing EmitError at emit time.
+        # Variables that are dead but NOT stored in any branch pass through
+        # unchanged (their phi has identical resources) and are harmless.
+        after_loads = set(self._after_stmt_load_vars)
+        stored_in_branches = collector_body.store_vars | collector_orelse.store_vars
+        dead_modified = (stored_in_branches & input_vars_set) - after_loads
+        live_shared = shared_new_locals & after_loads
+
         input_vars = sorted(input_vars_set)
-        output_vars = sorted(input_vars_set | shared_new_locals)
+        output_vars = sorted((input_vars_set - dead_modified) | live_shared)
 
         # Detect return inside for/while in if-else branches (unsupported).
         # Must run before nested control flow transformation.
@@ -800,12 +862,21 @@ class ControlFlowTransformer(ast.NodeTransformer):
         # ネストされた制御フローを変換 (with definition tracking)
         saved_outer = self._outer_defined_vars
         saved_after = self._after_stmt_read_vars
+        saved_after_load = self._after_stmt_load_vars
         inner_scope = set(input_vars)
-        node.body = self._visit_body_with_tracking(node.body, inner_scope)
+        # Pass output_vars as outer_after_loads so that nested visit_If calls
+        # know which variables the enclosing if needs to return.
+        outer_loads_for_branches = frozenset(output_vars)
+        node.body = self._visit_body_with_tracking(
+            node.body, inner_scope, outer_after_loads=outer_loads_for_branches
+        )
         if node.orelse:
-            node.orelse = self._visit_body_with_tracking(node.orelse, inner_scope)
+            node.orelse = self._visit_body_with_tracking(
+                node.orelse, inner_scope, outer_after_loads=outer_loads_for_branches
+            )
         self._outer_defined_vars = saved_outer
         self._after_stmt_read_vars = saved_after
+        self._after_stmt_load_vars = saved_after_load
 
         # 明示的 return の検出と変換
         orelse_body = node.orelse if node.orelse else []
@@ -1047,9 +1118,7 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
     # single assignment:  name = expr
     # ------------------------------------------------------------------
 
-    def _check_single_assign(
-        self, target: str, value: ast.expr, lineno: int
-    ) -> None:
+    def _check_single_assign(self, target: str, value: ast.expr, lineno: int) -> None:
         # Case 1: Name = Name  (direct alias / overwrite)
         if isinstance(value, ast.Name):
             source = value.id
@@ -1125,9 +1194,7 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
         if not isinstance(value, ast.Call):
             return
 
-        target_names = [
-            elt.id for elt in targets.elts if isinstance(elt, ast.Name)
-        ]
+        target_names = [elt.id for elt in targets.elts if isinstance(elt, ast.Name)]
         if not target_names:
             return
 

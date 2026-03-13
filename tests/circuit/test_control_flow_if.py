@@ -1226,3 +1226,95 @@ class TestIfNestedInLoop:
 
         graph = circuit.build(n=2)
         assert graph is not None
+
+
+class TestIfElseDeadPhiFiltering:
+    """Dead variables (not loaded after if) must not generate PhiOps."""
+
+    def test_if_dead_shared_new_local_not_merged(self):
+        """Both branches define b_new via measure, but it is dead after if."""
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit, q2: Qubit) -> qm.Bit:
+            cond = qm.measure(q0)
+            if cond:
+                b_new = qm.measure(q1)
+            else:
+                b_new = qm.measure(q2)  # noqa: F841
+            # b_new is dead; only cond is returned
+            return cond
+
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        # b_new is dead -> should NOT appear in IfOperation results
+        result_names = [r.name for r in if_ops[0].results]
+        assert not any("b_new" in name for name in result_names)
+
+    def test_if_dead_reassigned_existing_not_merged(self):
+        """Outer qubit reassigned in both branches but dead -> no qubit phi."""
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit, q_t: Qubit) -> qm.Bit:
+            cond = qm.measure(q0)
+            b = qm.measure(q1)
+            if cond:
+                q_t = qm.x(q_t)
+            else:
+                q_t = qm.h(q_t)
+            # q_t is dead; only b is returned
+            return b
+
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        qubit_phis = [
+            p
+            for p in if_ops[0].phi_ops
+            if isinstance(p, PhiOp) and isinstance(p.results[0].type, QubitType)
+        ]
+        assert len(qubit_phis) == 0
+
+    def test_if_live_reassigned_existing_is_merged(self):
+        """Outer qubit reassigned and read after if -> phi must exist (regression)."""
+
+        @qkernel
+        def circuit(q0: Qubit, q_t: Qubit) -> qm.Bit:
+            cond = qm.measure(q0)
+            if cond:
+                q_t = qm.x(q_t)
+            else:
+                q_t = qm.h(q_t)
+            # q_t is live (read after if)
+            return qm.measure(q_t)
+
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        qubit_phis = [
+            p
+            for p in if_ops[0].phi_ops
+            if isinstance(p, PhiOp) and isinstance(p.results[0].type, QubitType)
+        ]
+        assert len(qubit_phis) >= 1
+
+
+class TestWhileNewLocalBoundary:
+    """While-loop boundary: variables used after loop."""
+
+    def test_while_outer_reassigned_used_after_loop_allowed(self):
+        """Outer variable reassigned inside while and read after -> allowed."""
+
+        @qkernel
+        def circuit() -> qm.Bit:
+            q = qm.qubit("q")
+            q = qm.h(q)
+            bit = qm.measure(q)
+            while bit:
+                q = qm.qubit("q2")
+                q = qm.h(q)
+                bit = qm.measure(q)
+            return bit
+
+        graph = circuit.build()
+        assert graph is not None
