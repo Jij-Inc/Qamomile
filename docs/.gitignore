@@ -1,0 +1,23 @@
+# Jupyter Book build outputs
+en/_build/
+ja/_build/
+
+# Unified site for GitHub Pages
+_site/
+
+# Jupyter execution cache (inside each language dir)
+**/.jupyter_cache/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~

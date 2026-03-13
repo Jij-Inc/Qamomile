@@ -1,8 +1,8 @@
 name: Deploy Jupyter Book to GitHub Pages
 
 on:
-  push:
-    branches: ["main"]
+  # push:
+  #   branches: ["main"]
   workflow_dispatch:
 
 permissions:
@@ -14,106 +14,63 @@ concurrency:
   group: "pages"
   cancel-in-progress: false
 
-# Build the landing page and jupyter book, integrate those pages and deploy those pages to GitHub Pages separately.
-jobs: 
-  build-lp:
+jobs:
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
         with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: 'docs/qamomile-lp/package-lock.json'
-      # - name: Build Landing Page
-      #   run: |
-      #     cd docs/qamomile-lp
-      - name: Build the LP
-        run: |
-          cd docs/qamomile-lp
-          npm ci
-          npm run build
-          mkdir -p ../_build/html
-          cp dist/landing.html ../_build/html/landing.html
-          cp dist/jij.html ../_build/html/jij.html
-          cp ../index.html ../_build/html/index.html
-          cp dist/*.png ../_build/html/
-          cp dist/*.svg ../_build/html/
-          cp -r dist/assets ../_build/html/
-          cd ../..
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: doc-landing-page
-          path: 'docs/_build/html'
-  
-  build-jupyter-book:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        lang: [en, ja]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+          version: "latest"
+
       - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
+        run: uv python install 3.12
+
       - name: Install dependencies
+        run: uv sync
+
+      - name: Build documentation
+        working-directory: docs
         run: |
-          pip install poetry
-          poetry install --with doc
-      - name: Build the book
-        run: |
-          cd docs
-          poetry run jupyter-book build ${{ matrix.lang }}
-          cd ..
+          # Generate API reference
+          uv run python generate_api.py
+          cp -r api/ en/api/
+          cp -r api/ ja/api/
+
+          # Convert .py to .ipynb
+          uv run jupytext --to ipynb en/tutorial/*.py || true
+          uv run jupytext --to ipynb en/transpile/*.py || true
+          uv run jupytext --to ipynb ja/tutorial/*.py || true
+          uv run jupytext --to ipynb ja/transpile/*.py || true
+
+          # Build both language versions
+          cd en && uv run jupyter-book build --html && cd ..
+          cd ja && uv run jupyter-book build --html && cd ..
+
+          # Create unified site
+          mkdir -p _site/en _site/ja
+          cp -r en/_build/html/* _site/en/
+          cp -r ja/_build/html/* _site/ja/
+          cp index.html _site/
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
+
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-pages-artifact@v3
         with:
-          name: doc-jupyter-book-${{ matrix.lang }}
-          path: 'docs/${{ matrix.lang }}/_build/html'
-  
-  integrate-pages:
-    needs: [build-lp, build-jupyter-book]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-      - name: Create unified site structure
-        run: |
-          mkdir -p docs/_build/html
-          cp -r doc-landing-page/* docs/_build/html
-          mkdir -p docs/_build/html/en && cp -r doc-jupyter-book-en/* docs/_build/html/en/
-          mkdir -p docs/_build/html/ja && cp -r doc-jupyter-book-ja/* docs/_build/html/ja/
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: doc-jupyter-book
-          path: 'docs/_build/html'
+          path: 'docs/_site'
 
   deploy:
-    needs: [build-lp, build-jupyter-book, integrate-pages]
+    needs: build
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: doc-jupyter-book
-          path: .
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: "."
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

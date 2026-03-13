@@ -17,35 +17,32 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.10', '3.11' ]
+        python-version: ['3.12', '3.13']
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      MPLBACKEND: Agg
     steps:
-      - uses: actions/checkout@v3
-      - name: Install poetry
-        run: pipx install poetry
+      - uses: actions/checkout@v4
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: 'poetry'
-      - name: Poetry Install
-        shell: bash
-        run:  |
-          set -eux
-          poetry install --all-extras
-      # Install cudaq if only the os is linux.
-      - name: Install CUDA Quantum (Linux only)
-        if: runner.os == 'Linux'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      # --frozen ensures exact versions from uv.lock are used (CI best practice)
+      - name: Install dependencies
         shell: bash
         run: |
           set -eux
-          poetry run pip install cudaq
-      - name: Test
+          uv sync --frozen
+      - name: Run unit tests
         shell: bash
         run: |
           set -eux
-          poetry run pip list
-          poetry run pip install qiskit
-          cd tests
-          poetry run pytest
+          uv run pytest tests -v
+      - name: Run docs tests
+        shell: bash
+        run: |
+          set -eux
+          uv run pytest -m docs tests/docs -v

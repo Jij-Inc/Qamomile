@@ -1,5 +1,8 @@
-from qamomile.qiskit.transpiler import QiskitTranspiler
-from qamomile.qiskit.exceptions import QamomileQiskitTranspileError
-from qamomile.qiskit.parameter_converter import convert_parameter
+from qamomile.qiskit.transpiler import QiskitTranspiler, QiskitExecutor
+from qamomile.qiskit.observable import hamiltonian_to_sparse_pauli_op
 
-__all__ = ["QiskitTranspiler", "QamomileQiskitTranspileError", "convert_parameter"]
+__all__ = [
+    "QiskitTranspiler",
+    "QiskitExecutor",
+    "hamiltonian_to_sparse_pauli_op",
+]

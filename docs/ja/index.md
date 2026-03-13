@@ -1,37 +1,49 @@
-# Qamomileへようこそ
+# Qamomileドキュメントへようこそ
 
-Qamomileは、量子最適化アルゴリズムのために設計された強力なSDKであり、数理モデルを量子回路へ変換することを専門としています。これは、古典的な最適化問題と量子コンピューティングによる解決法との橋渡しをする役割を果たします。
+Qamomileは量子プログラミングSDKです。型付きPython関数で量子回路を記述し、Qiskit・QuriPartsなどのバックエンドで実行できます。また、シンボリックな代数的リソース推定やブラックボックス（オラクル）を含むような実行そのものができない回路のリソース推定も可能です。
 
-## 主な特徴
+> **注意**：Qamomileは現在もアクティブに開発中であり、リリース間で破壊的変更が加わる可能性があります。
 
-- **多様な互換性**：QiskitやQuri-partsなど、主要な量子回路SDKに対応
-- **高度なアルゴリズム対応**：QAOAを超え、QRAOのような高度なエンコーディングやアルゴリズムにも対応
-- **柔軟なモデル変換**：数理モデルの記述と、さまざまな量子回路SDKへの変換にJijModelingを活用
-- **中間表現の活用**：ハミルトニアンや量子回路の両方を中間形式として表現可能
-- **スタンドアロン機能**：他の量子回路SDKのように、単体でも量子回路の実装が可能
+> **不具合報告**：不具合を見つけた場合は、[GitHub Issues](https://github.com/Jij-Inc/Qamomile/issues/new)でお知らせいただければ幸いです。
 
-## クイックスタート
+## チュートリアル
 
-Qamomileの使用を始めるには、[クイックスタートガイド](quickstart.ipynb)をご覧ください。インストール手順と簡単な例を紹介しています。
+1. [はじめての量子カーネル](tutorial/01_your_first_quantum_kernel) — カーネルの定義・可視化・実行、アフィンルール
+2. [パラメータ付きカーネル](tutorial/02_parameterized_kernels) — 構造パラメータとランタイムパラメータ、バインド/スイープパターン
+3. [リソース推定](tutorial/03_resource_estimation) — シンボリックなコスト分析、ゲート内訳、スケーリング分析
+4. [実行モデル](tutorial/04_execution_models) — `sample()`と`run()`、オブザーバブル、ビット順序
+5. [古典フローパターン](tutorial/05_classical_flow_patterns) — ループ、スパースデータ、条件分岐
+6. [再利用パターン](tutorial/06_reuse_patterns) — ヘルパーカーネル、コンポジットゲート、スタブ
 
-## 詳しく知るには
+## インストール
 
-Qamomileの機能をより深く理解するために、以下のドキュメントをご活用ください：
+```bash
+pip install qamomile
+```
 
-- [クイックスタートガイド](quickstart.ipynb)：インストール手順と簡単な使用例。
-- [APIリファレンス](api_index.md)：QamomileのAPIの完全なドキュメント。
-- チュートリアル：ステップバイステップのガイドと実例。
-    - [ライブラリの基本的な使い方](tutorial/usage/index_usage.md)
-    - [QAOAによる問題解決](tutorial/qaoa/index_qaoa.md)
-    - [量子最適化のための高度な手法](tutorial/opt_advance/index_advance.md)
-    - [量子化学](tutorial/chemistry/index_chemistry.md)
+## クイック例
 
-## コントリビューションについて
+```python
+import qamomile.circuit as qmc
+from qamomile.qiskit import QiskitTranspiler
 
-コミュニティからの貢献を歓迎しています！Qamomileの改善にご興味のある方は、[コントリビューションガイドライン](contribute.md)をご確認ください。
+@qmc.qkernel
+def bell_state() -> tuple[qmc.Bit, qmc.Bit]:
+    q0 = qmc.qubit(name="q0")
+    q1 = qmc.qubit(name="q1")
+    q0 = qmc.h(q0)
+    q0, q1 = qmc.cx(q0, q1)
+    return qmc.measure(q0), qmc.measure(q1)
 
-## サポート
+transpiler = QiskitTranspiler()
+exe = transpiler.transpile(bell_state)
+result = exe.sample(transpiler.executor(), shots=1000).result()
 
-問題が発生した場合や質問がある場合は、[GitHubリポジトリ](https://github.com/Jij-Inc/Qamomile)でIssueを登録するか、コミュニティディスカッションフォーラムにご参加ください。
+for outcome, count in result.results:
+    print(f"  {outcome}: {count}")
+```
 
-Qamomileへようこそ！量子最適化をお楽しみください！
+## リンク
+
+- [GitHubリポジトリ](https://github.com/Jij-Inc/Qamomile)
+- [APIリファレンス](api/index.md)
