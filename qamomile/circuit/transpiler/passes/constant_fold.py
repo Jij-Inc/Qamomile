@@ -160,48 +160,52 @@ class ConstantFoldingPass(Pass[Block, Block]):
     ) -> Operation:
         """Substitute folded constant values in operation operands and results.
 
-        Uses ``substitute_value_recursive`` to propagate folded values
-        through nested ``element_indices`` (index-of-index), ``parent_array``,
-        and other Value-tree structures.
+        Propagates folded values into nested ``element_indices``
+        (index-of-index) recursively via ``substitute_value_recursive``,
+        so that patterns like ``q[indices[last]]`` are updated when
+        ``last`` is folded.
+
+        For ``GateOperation``, also substitutes results with nested
+        element_indices to keep SSA values consistent.
 
         For ``ControlledUOperation``, also folds ``num_controls``,
         ``target_indices``, ``controlled_indices``, and ``power`` fields.
         """
-        # Cast folded_values to the broader type expected by the helper.
         value_map: dict[str, ValueBase] = dict(folded_values)
 
-        # Substitute operands recursively.
         new_operands: list[Any] = []
-        operands_changed = False
+        changed = False
+
         for operand in op.operands:
-            if isinstance(operand, ValueBase):
-                new_operand = substitute_value_recursive(operand, value_map)
-                new_operands.append(new_operand)
-                if new_operand is not operand:
-                    operands_changed = True
+            if isinstance(operand, ValueBase) and operand.uuid in folded_values:
+                new_operands.append(folded_values[operand.uuid])
+                changed = True
+            elif isinstance(operand, Value) and operand.element_indices:
+                new_op = substitute_value_recursive(operand, value_map)
+                new_operands.append(new_op)
+                if new_op is not operand:
+                    changed = True
             else:
                 new_operands.append(operand)
 
-        # Substitute results recursively.
-        new_results: list[Any] = []
-        results_changed = False
-        for result in op.results:
-            if isinstance(result, ValueBase):
-                new_result = substitute_value_recursive(result, value_map)
-                new_results.append(new_result)
-                if new_result is not result:
-                    results_changed = True
-            else:
-                new_results.append(result)
+        result_op = dataclasses.replace(op, operands=new_operands) if changed else op
 
-        changed = operands_changed or results_changed
-        replacements: dict[str, Any] = {}
-        if operands_changed:
-            replacements["operands"] = new_operands
-        if results_changed:
-            replacements["results"] = new_results
-
-        result_op = dataclasses.replace(op, **replacements) if replacements else op
+        # Substitute results for GateOperation (not for control-flow ops
+        # whose results define loop variables).
+        if isinstance(result_op, GateOperation):
+            new_results: list[Any] = []
+            results_changed = False
+            for result in result_op.results:
+                if isinstance(result, Value) and result.element_indices:
+                    new_r = substitute_value_recursive(result, value_map)
+                    new_results.append(new_r)
+                    if new_r is not result:
+                        results_changed = True
+                else:
+                    new_results.append(result)
+            if results_changed:
+                result_op = dataclasses.replace(result_op, results=new_results)
+                changed = True
 
         # Fold ControlledUOperation-specific dataclass fields.
         if isinstance(result_op, ControlledUOperation):
@@ -249,7 +253,6 @@ class ConstantFoldingPass(Pass[Block, Block]):
             new_theta = substitute_value_recursive(result_op.theta, value_map)
             if isinstance(new_theta, Value) and new_theta is not result_op.theta:
                 result_op = dataclasses.replace(result_op, theta=new_theta)
-                changed = True
 
         return result_op
 

@@ -273,6 +273,142 @@ class TestConstantFoldingTheta:
         assert folded_gate.theta.element_indices[0].get_const() == 3
         assert folded_gate.theta.element_indices[1].uuid == dynamic_idx.uuid
 
+    def test_nested_element_indices_are_folded_in_operands(self) -> None:
+        """Operand q[indices[last]] has nested index folded when last is a BinOp.
+
+        This is the pattern used by phase_gadget: last = k - 1, then
+        q[indices[last]] as operand to RZ.
+        """
+        k = _uint_val("k", const=3)
+        one = _uint_val("one", const=1)
+        binop, last = _make_binop(k, one, BinOpKind.SUB, result_name="last")
+
+        # indices is an array; indices[last] is a nested index
+        indices_array = ArrayValue(type=UIntType(), name="indices")
+        indices_last = Value(
+            type=UIntType(),
+            name="indices_elem",
+            parent_array=indices_array,
+            element_indices=(last,),
+        )
+
+        # q[indices[last]] — a qubit with nested element_indices
+        q_array = ArrayValue(type=QubitType(), name="q")
+        q_operand = Value(
+            type=QubitType(),
+            name="q_elem",
+            parent_array=q_array,
+            element_indices=(indices_last,),
+        )
+
+        gate = _make_gate(GateOperationType.RZ, [q_operand], theta=0.5)
+        block = _make_block([binop, gate])
+
+        folded_block = ConstantFoldingPass().run(block)
+
+        assert len(folded_block.operations) == 1
+        folded_gate = folded_block.operations[0]
+        assert isinstance(folded_gate, GateOperation)
+
+        # Check operand: q[indices[folded_last]]
+        q_op = folded_gate.operands[0]
+        assert isinstance(q_op, Value)
+        assert len(q_op.element_indices) == 1
+        inner = q_op.element_indices[0]
+        assert isinstance(inner, Value)
+        assert len(inner.element_indices) == 1
+        folded_last = inner.element_indices[0]
+        assert folded_last.is_constant()
+        assert folded_last.get_const() == 2  # k(3) - 1 = 2
+
+    def test_nested_element_indices_are_folded_in_results(self) -> None:
+        """Result q[indices[last]] also has nested index folded."""
+        k = _uint_val("k", const=3)
+        one = _uint_val("one", const=1)
+        binop, last = _make_binop(k, one, BinOpKind.SUB, result_name="last")
+
+        indices_array = ArrayValue(type=UIntType(), name="indices")
+        indices_last = Value(
+            type=UIntType(),
+            name="indices_elem",
+            parent_array=indices_array,
+            element_indices=(last,),
+        )
+
+        q_array = ArrayValue(type=QubitType(), name="q")
+        q_operand = Value(
+            type=QubitType(),
+            name="q_elem",
+            parent_array=q_array,
+            element_indices=(indices_last,),
+        )
+
+        gate = _make_gate(GateOperationType.RZ, [q_operand], theta=0.5)
+        block = _make_block([binop, gate])
+
+        folded_block = ConstantFoldingPass().run(block)
+
+        assert len(folded_block.operations) == 1
+        folded_gate = folded_block.operations[0]
+        assert isinstance(folded_gate, GateOperation)
+
+        # Check result: q[indices[folded_last]]
+        q_res = folded_gate.results[0]
+        assert isinstance(q_res, Value)
+        assert len(q_res.element_indices) == 1
+        inner = q_res.element_indices[0]
+        assert isinstance(inner, Value)
+        assert len(inner.element_indices) == 1
+        folded_last = inner.element_indices[0]
+        assert folded_last.is_constant()
+        assert folded_last.get_const() == 2  # k(3) - 1 = 2
+
+    def test_stale_nested_index_does_not_survive_fold(self) -> None:
+        """After fold, no stale uint_tmp reference remains in the gate."""
+        k = _uint_val("k", const=5)
+        one = _uint_val("one", const=1)
+        binop, last = _make_binop(k, one, BinOpKind.SUB, result_name="uint_tmp")
+
+        indices_array = ArrayValue(type=UIntType(), name="indices")
+        indices_last = Value(
+            type=UIntType(),
+            name="indices_elem",
+            parent_array=indices_array,
+            element_indices=(last,),
+        )
+
+        q_array = ArrayValue(type=QubitType(), name="q")
+        q_operand = Value(
+            type=QubitType(),
+            name="q_elem",
+            parent_array=q_array,
+            element_indices=(indices_last,),
+        )
+
+        gate = _make_gate(GateOperationType.RZ, [q_operand], theta=0.5)
+        block = _make_block([binop, gate])
+
+        folded_block = ConstantFoldingPass().run(block)
+
+        folded_gate = folded_block.operations[0]
+        assert isinstance(folded_gate, GateOperation)
+
+        # Verify the deepest index is now a folded constant (not the
+        # original unresolved BinOp result) in both operands and results.
+        for label, val_list in [("operands", folded_gate.operands),
+                                ("results", folded_gate.results)]:
+            q_val = val_list[0]
+            assert isinstance(q_val, Value)
+            inner = q_val.element_indices[0]
+            assert isinstance(inner, Value)
+            deepest = inner.element_indices[0]
+            assert deepest.is_constant(), (
+                f"Deepest index in {label} is not constant: {deepest}"
+            )
+            assert deepest.get_const() == 4, (  # k(5) - 1 = 4
+                f"Deepest index in {label} has wrong value: {deepest.get_const()}"
+            )
+
 
 # ===========================================================================
 # UUIDRemapper — theta cloning
