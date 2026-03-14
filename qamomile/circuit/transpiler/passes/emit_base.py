@@ -631,8 +631,11 @@ class ResourceAllocator:
                     if qubit_key in qubit_map:
                         qubit_map[result.uuid] = qubit_map[qubit_key]
                     else:
-                        qubit_map[result.uuid] = self._next_qubit_index
-                        self._next_qubit_index += 1
+                        raise AssertionError(
+                            f"Missing qubit_key '{qubit_key}' in qubit_map when "
+                            f"allocating result '{result.uuid}'. "
+                            "This indicates a bug in operand allocation."
+                        )
 
     def _allocate_composite(
         self,
