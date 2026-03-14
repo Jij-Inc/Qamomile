@@ -56,7 +56,7 @@ class Handle(abc.ABC):
     def _should_enforce_linear(self) -> bool:
         """Check if this handle type requires linear enforcement.
 
-        Only quantum types (Qubit) require linear type enforcement.
+        Only quantum types (Qubit) require affine type enforcement.
         Classical values (Float, UInt, Bit) can be used multiple times.
         """
         return self.value.type.is_quantum()
@@ -80,7 +80,7 @@ class Handle(abc.ABC):
             raise QubitConsumedError(
                 f"Qubit '{display_name}' was already consumed by '{self._consumed_by}' "
                 f"and cannot be used again in '{operation_name}'.\n\n"
-                f"Linear type rule: Each qubit handle can only be used once. "
+                f"Affine type rule: Each qubit handle can only be used once. "
                 f"After a gate operation, reassign the result to use the new handle.\n\n"
                 f"Fix:\n"
                 f"  q = qm.h(q)  # Reassign to capture the new handle\n"

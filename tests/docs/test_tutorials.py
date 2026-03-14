@@ -20,12 +20,12 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 TUTORIAL_PATTERNS = [
     "docs/en/tutorial/**/*.py",
     "docs/ja/tutorial/**/*.py",
-    "docs/en/transpile/**/*.py",
-    "docs/ja/transpile/**/*.py",
+    "docs/en/optimization/**/*.py",
+    "docs/ja/optimization/**/*.py",
     "docs/en/tutorial/**/*.ipynb",
     "docs/ja/tutorial/**/*.ipynb",
-    "docs/en/transpile/**/*.ipynb",
-    "docs/ja/transpile/**/*.ipynb",
+    "docs/en/optimization/**/*.ipynb",
+    "docs/ja/optimization/**/*.ipynb",
 ]
 
 

@@ -108,6 +108,9 @@ class CircuitLayoutEngine:
         elif node.kind == VGateKind.MEASURE_VECTOR:
             for q in affected_qubits:
                 state.qubit_end_positions[q] = min_column + op_half_width
+        elif node.kind == VGateKind.EXPVAL:
+            for q in affected_qubits:
+                state.qubit_end_positions[q] = min_column + op_half_width
 
         # Update actual_width
         op_actual_width = min_column + op_half_width + 0.5
