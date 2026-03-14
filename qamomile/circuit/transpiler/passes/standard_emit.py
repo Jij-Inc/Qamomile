@@ -55,7 +55,11 @@ from qamomile.circuit.transpiler.executable import (
     ParameterInfo,
 )
 from qamomile.circuit.transpiler.segments import ClassicalSegment, SimplifiedProgram
-from qamomile.circuit.transpiler.value_resolution import is_concrete_real_number
+from qamomile.circuit.transpiler.value_resolution import (
+    BindingLookup,
+    is_concrete_real_number,
+    resolve_classical_value as shared_resolve_classical_value,
+)
 
 T = TypeVar("T")  # Backend circuit type
 
@@ -102,6 +106,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         # where emit_measure is a no-op (e.g., QURI Parts).
         self._measurement_qubit_map: dict[int, int] = {}
 
+        self._pre_allocated: tuple[T, dict[str, int], dict[str, int]] | None = None
+
     def _build_parameter_metadata(self) -> ParameterMetadata:
         """Build parameter metadata from created parameter objects."""
         params = []
@@ -132,7 +138,14 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         classical pre-evaluation, so that emitters that require a live
         circuit for ``create_parameter`` (e.g. QURI Parts) work correctly.
         """
+        self._pre_allocated = None
+        self._bind_folded_constant_values(input.quantum.operations)
+
         if input.classical_prep and input.quantum:
+            # Resolve concrete classical-prep BinOps first so computed array
+            # sizes are present in bindings before resource allocation.
+            self._pre_evaluate_concrete_classical_prep(input.classical_prep)
+
             qubit_map, clbit_map = self._allocator.allocate(
                 input.quantum.operations, self.bindings
             )
@@ -143,10 +156,112 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 qubit_map,
                 clbit_map,
             )
-        else:
-            self._pre_allocated = None
 
         return super().run(input)
+
+    def _bind_folded_constant_values(self, operations: list[Operation]) -> None:
+        """Cache folded constant aliases so shared UUIDs resolve during emit."""
+
+        seen_values: set[int] = set()
+
+        def visit_value(value: Value) -> None:
+            value_id = id(value)
+            if value_id in seen_values:
+                return
+            seen_values.add(value_id)
+
+            if value.is_constant():
+                const_value = value.get_const()
+                self.bindings.setdefault(value.uuid, const_value)
+                self.bindings.setdefault(value.name, const_value)
+
+            if isinstance(value, Value):
+                for index_value in value.element_indices:
+                    visit_value(index_value)
+
+            if hasattr(value, "shape"):
+                for shape_value in value.shape:
+                    visit_value(shape_value)
+
+        def visit_operations(ops: list[Operation]) -> None:
+            for op in ops:
+                for operand in op.operands:
+                    if isinstance(operand, Value):
+                        visit_value(operand)
+                for result in op.results:
+                    if isinstance(result, Value):
+                        visit_value(result)
+
+                if isinstance(op, ForOperation):
+                    visit_operations(op.operations)
+                elif isinstance(op, ForItemsOperation):
+                    visit_operations(op.operations)
+                elif isinstance(op, IfOperation):
+                    visit_operations(op.true_operations)
+                    visit_operations(op.false_operations)
+                    visit_operations(op.phi_ops)
+                elif isinstance(op, WhileOperation):
+                    visit_operations(op.operations)
+
+        visit_operations(operations)
+
+    def _pre_evaluate_concrete_classical_prep(
+        self,
+        segment: "ClassicalSegment",
+    ) -> None:
+        """Evaluate only concrete classical-prep BinOps before allocation.
+
+        This early pass resolves bound inputs via parameter names so computed
+        sizes like ``m = n + 1`` are available for pre-allocation, but it skips
+        symbolic expressions that would otherwise require ``create_parameter``.
+        """
+        lookup = BindingLookup(self.bindings)
+
+        for op in segment.operations:
+            if not isinstance(op, BinOp):
+                continue
+
+            lhs = shared_resolve_classical_value(
+                op.lhs,
+                lookup,
+                allow_parameter_name=True,
+            )
+            rhs = shared_resolve_classical_value(
+                op.rhs,
+                lookup,
+                allow_parameter_name=True,
+            )
+
+            if lhs is None or rhs is None:
+                continue
+
+            result = None
+            match op.kind:
+                case BinOpKind.ADD:
+                    result = lhs + rhs
+                case BinOpKind.SUB:
+                    result = lhs - rhs
+                case BinOpKind.MUL:
+                    result = lhs * rhs
+                case BinOpKind.DIV:
+                    if rhs == 0:
+                        raise EmitError(
+                            "Division by zero during classical pre-evaluation"
+                        )
+                    result = lhs / rhs
+                case BinOpKind.FLOORDIV:
+                    if rhs == 0:
+                        raise EmitError(
+                            "Floor division by zero during classical pre-evaluation"
+                        )
+                    result = lhs // rhs
+                case BinOpKind.POW:
+                    result = lhs**rhs
+
+            if result is not None and op.results:
+                output = op.results[0]
+                self.bindings[output.uuid] = result
+                self.bindings[output.name] = result
 
     def _pre_evaluate_classical(self, segment: "ClassicalSegment") -> None:
         """Pre-evaluate classical segment using the full symbolic resolver.

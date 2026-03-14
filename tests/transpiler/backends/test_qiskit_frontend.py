@@ -1,3 +1,4 @@
+# ruff: noqa: E402
 """Rich Qiskit frontend-to-backend test suite.
 
 Tests the full pipeline: @qkernel definition -> QiskitTranspiler -> execution.
@@ -4180,6 +4181,25 @@ class TestParameterizedCircuits:
         exe = transpiler.transpile(circuit, bindings={"n": 3}, parameters=["theta"])
         qc = exe.compiled_quantum[0].circuit
         assert len(qc.parameters) > 0
+
+    def test_computed_size_qubit_array_with_classical_prep(self):
+        """Computed UInt sizes in classical_prep allocate the expected qubits."""
+
+        @qmc.qkernel
+        def circuit(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            m = n + 1
+            q = qmc.qubit_array(m, "q")
+            for i in qmc.range(m):
+                q[i] = qmc.h(q[i])
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit, bindings={"n": 2})
+        qc = exe.compiled_quantum[0].circuit
+
+        assert qc.num_qubits == 3
+        assert qc.num_clbits == 3
+        assert sum(isinstance(inst.operation, HGate) for inst in qc.data) == 3
 
 
 class TestSubKernelInlining:

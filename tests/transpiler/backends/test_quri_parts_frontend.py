@@ -1,3 +1,4 @@
+# ruff: noqa: E402
 """Rich QURI Parts frontend-to-backend test suite.
 
 Tests the full pipeline: @qkernel definition -> QuriPartsTranspiler -> execution.
@@ -3592,6 +3593,24 @@ class TestAdvancedParameterHandling:
         param_names = exe.parameter_names
         # Should have theta + params[0], params[1], params[2]
         assert len(param_names) >= 4
+
+    def test_computed_size_qubit_array_with_classical_prep(self):
+        """Computed UInt sizes in classical_prep allocate the expected qubits."""
+
+        @qmc.qkernel
+        def circuit(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            m = n + 1
+            q = qmc.qubit_array(m, "q")
+            for i in qmc.range(m):
+                q[i] = qmc.h(q[i])
+            return qmc.measure(q)
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(circuit, bindings={"n": 2})
+        qc = exe.compiled_quantum[0].circuit
+
+        assert qc.qubit_count == 3
+        assert _gate_names(qc).count("H") == 3
 
     def test_parametric_variational_classifier_pattern(self):
         """ry_layer + cz_entangling_layer with parametric Vector."""
