@@ -3403,6 +3403,8 @@ class TestPhantomQubitRegression:
             f"Expected 4 qubits (1 scalar + 3 array) but got {qc.num_qubits}."
         )
 
+
+class TestControlFlowWhileSampling:
     """Sampling (execution) tests for while-loop circuits.
 
     These tests actually run the circuits on AerSimulator with shots
