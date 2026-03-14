@@ -35,6 +35,7 @@ pytest.importorskip("quri_parts.qulacs")
 
 from qamomile.quri_parts import QuriPartsTranspiler
 from qamomile.circuit.transpiler.executable import ExecutableProgram
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.segments import SimplifiedProgram
 from qamomile.circuit.ir.block import BlockKind
 
@@ -3182,7 +3183,6 @@ class TestAlgorithmBasicLayers:
     def test_variational_ansatz_pattern(self, seed):
         """Full variational ansatz: RY -> CZ -> RY -> CZ -> RY."""
         rng = np.random.default_rng(seed)
-        n_qubits = 3
 
         @qmc.qkernel
         def ansatz(thetas: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
@@ -4074,6 +4074,123 @@ class TestExpvalQuriPartsPipeline:
 
         assert len(result.results) > 0
         assert all(len(bits) == 2 for bits, _count in result.results)
+
+    def test_classical_prep_parametric_emit_runtime_sweep(self):
+        """classical_prep BinOp must emit parametric expression, not 0.0.
+
+        When a and b are declared as parameters (not bound at transpile
+        time), the classical_prep ``theta = a + b`` must survive as a
+        backend parameter expression so that runtime binding produces
+        correct gate angles.
+        """
+
+        @qmc.qkernel
+        def circuit(a: qmc.Float, b: qmc.Float, H: qmc.Observable) -> qmc.Float:
+            # BinOp before any quantum op → lands in classical_prep
+            theta = a + b
+            q = qmc.qubit("q")
+            q = qmc.ry(q, theta)
+            return qmc.expval((q,), H)
+
+        H_label = qm_o.Hamiltonian(num_qubits=1)
+        H_label += qm_o.Z(0)
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(
+            circuit,
+            bindings={"H": H_label},
+            parameters=["a", "b"],
+        )
+
+        # classical_prep must be in execution order
+        assert ("classical", 0) in exe.execution_order
+
+        executor = transpiler.executor()
+        for a_val, b_val, expected in [
+            (0.0, 0.0, 1.0),
+            (np.pi / 4, np.pi / 4, 0.0),
+            (np.pi / 2, np.pi / 2, -1.0),
+        ]:
+            result = exe.run(
+                executor,
+                bindings={"a": a_val, "b": b_val},
+            ).result()
+            assert np.isclose(result, expected, atol=0.15), (
+                f"a={a_val}, b={b_val}: got {result}, expected {expected}"
+            )
+
+    def test_classical_prep_affine_mul_runtime_sweep(self):
+        """Affine symbolic multiplication by a constant stays parametric."""
+
+        @qmc.qkernel
+        def circuit(a: qmc.Float, H: qmc.Observable) -> qmc.Float:
+            theta = a * 2.0
+            q = qmc.qubit("q")
+            q = qmc.ry(q, theta)
+            return qmc.expval((q,), H)
+
+        H_label = qm_o.Hamiltonian(num_qubits=1)
+        H_label += qm_o.Z(0)
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(
+            circuit,
+            bindings={"H": H_label},
+            parameters=["a"],
+        )
+
+        executor = transpiler.executor()
+        for a_val, expected in [
+            (0.0, 1.0),
+            (np.pi / 4, 0.0),
+            (np.pi / 2, -1.0),
+        ]:
+            result = exe.run(executor, bindings={"a": a_val}).result()
+            assert np.isclose(result, expected, atol=0.15), (
+                f"a={a_val}: got {result}, expected {expected}"
+            )
+
+    def test_classical_prep_non_affine_mul_raises_emit_error(self):
+        """Non-affine symbolic multiplication is rejected at transpile time."""
+
+        @qmc.qkernel
+        def circuit(a: qmc.Float, b: qmc.Float, H: qmc.Observable) -> qmc.Float:
+            theta = a * b
+            q = qmc.qubit("q")
+            q = qmc.ry(q, theta)
+            return qmc.expval((q,), H)
+
+        H_label = qm_o.Hamiltonian(num_qubits=1)
+        H_label += qm_o.Z(0)
+        transpiler = QuriPartsTranspiler()
+        with pytest.raises(
+            EmitError, match="BinOp 'MUL'.*affine parameter expressions"
+        ):
+            transpiler.transpile(
+                circuit,
+                bindings={"H": H_label},
+                parameters=["a", "b"],
+            )
+
+    def test_classical_prep_symbolic_divisor_raises_emit_error(self):
+        """Division by a symbolic expression is rejected at transpile time."""
+
+        @qmc.qkernel
+        def circuit(a: qmc.Float, b: qmc.Float, H: qmc.Observable) -> qmc.Float:
+            theta = a / b
+            q = qmc.qubit("q")
+            q = qmc.ry(q, theta)
+            return qmc.expval((q,), H)
+
+        H_label = qm_o.Hamiltonian(num_qubits=1)
+        H_label += qm_o.Z(0)
+        transpiler = QuriPartsTranspiler()
+        with pytest.raises(
+            EmitError, match="BinOp 'DIV'.*affine parameter expressions"
+        ):
+            transpiler.transpile(
+                circuit,
+                bindings={"H": H_label},
+                parameters=["a", "b"],
+            )
 
     def test_expval_missing_observable_raises(self):
         """Transpilation without Observable binding raises RuntimeError."""

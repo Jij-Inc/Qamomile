@@ -212,6 +212,12 @@ class EmitPass(Pass[SimplifiedProgram, ExecutableProgram[T]], Generic[T]):
         Evaluates BinOps using current bindings so that their results
         are available during quantum emission (e.g., for gate angles
         computed from user-provided parameters).
+
+        The default implementation resolves only concrete values (constants
+        and already-bound names/UUIDs).  Built-in backends (via
+        ``StandardEmitPass``) override this to use the full symbolic
+        resolver so that unbound parameters produce backend parameter
+        expressions instead of being silently dropped.
         """
         for op in segment.operations:
             if isinstance(op, BinOp):

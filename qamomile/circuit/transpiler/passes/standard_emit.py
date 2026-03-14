@@ -49,7 +49,12 @@ from qamomile.circuit.transpiler.errors import (
     ResolutionFailureReason,
 )
 from qamomile.circuit.transpiler.gate_emitter import GateEmitter
-from qamomile.circuit.transpiler.executable import ParameterMetadata, ParameterInfo
+from qamomile.circuit.transpiler.executable import (
+    ExecutableProgram,
+    ParameterMetadata,
+    ParameterInfo,
+)
+from qamomile.circuit.transpiler.segments import ClassicalSegment, SimplifiedProgram
 from qamomile.circuit.transpiler.value_resolution import is_concrete_real_number
 
 T = TypeVar("T")  # Backend circuit type
@@ -88,6 +93,10 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         # Cache for backend parameter objects
         self._parameter_map: dict[str, Any] = {}
 
+        # UUIDs of BinOp outputs that _pre_evaluate_classical tried but
+        # could not resolve.  Used by _resolve_angle to fail-closed.
+        self._unresolved_prep_outputs: set[str] = set()
+
         # Mapping from classical bit index to physical qubit index.
         # Populated during measurement emission to support backends
         # where emit_measure is a no-op (e.g., QURI Parts).
@@ -116,26 +125,76 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
 
         return ParameterMetadata(parameters=params)
 
+    def run(self, input: "SimplifiedProgram") -> "ExecutableProgram[T]":
+        """Emit backend code from simplified program.
+
+        Overrides the base to pre-allocate the backend circuit before
+        classical pre-evaluation, so that emitters that require a live
+        circuit for ``create_parameter`` (e.g. QURI Parts) work correctly.
+        """
+        if input.classical_prep and input.quantum:
+            qubit_map, clbit_map = self._allocator.allocate(
+                input.quantum.operations, self.bindings
+            )
+            qubit_count = max(qubit_map.values()) + 1 if qubit_map else 0
+            clbit_count = max(clbit_map.values()) + 1 if clbit_map else 0
+            self._pre_allocated = (
+                self._emitter.create_circuit(qubit_count, clbit_count),
+                qubit_map,
+                clbit_map,
+            )
+        else:
+            self._pre_allocated = None
+
+        return super().run(input)
+
+    def _pre_evaluate_classical(self, segment: "ClassicalSegment") -> None:
+        """Pre-evaluate classical segment using the full symbolic resolver.
+
+        Overrides the base ``EmitPass._pre_evaluate_classical`` which can only
+        resolve ``const`` / ``uuid`` / ``name`` values.  This version delegates
+        each ``BinOp`` to ``_evaluate_binop`` so that unbound parameters are
+        converted to backend parameter objects (via ``ValueResolver`` /
+        ``get_parameter_key``) and stored in ``self.bindings``.
+
+        This ensures that classical-prep computations like ``theta = a + b`` or
+        ``theta = params[1] + 0.5`` are preserved as parametric expressions
+        rather than silently falling back to ``0.0``.
+
+        BinOp outputs that could not be resolved are tracked in
+        ``_unresolved_prep_outputs`` so that ``_resolve_angle`` can
+        fail-closed instead of silently returning ``0.0``.
+        """
+        for op in segment.operations:
+            if isinstance(op, BinOp):
+                self._evaluate_binop(op, self.bindings)
+                # Track outputs that _evaluate_binop could not resolve
+                if op.results:
+                    output = op.results[0]
+                    if output.uuid not in self.bindings:
+                        self._unresolved_prep_outputs.add(output.uuid)
+
     def _emit_quantum_segment(
         self,
         operations: list[Operation],
         bindings: dict[str, Any],
     ) -> tuple[T, dict[str, int], dict[str, int]]:
         """Generate backend circuit from operations."""
-        # First pass: allocate resources (pass bindings for dynamic size resolution)
-        qubit_map, clbit_map = self._allocator.allocate(operations, bindings)
-
-        # Count physical qubits/clbits
-        qubit_count = max(qubit_map.values()) + 1 if qubit_map else 0
-        clbit_count = max(clbit_map.values()) + 1 if clbit_map else 0
-
-        # Create circuit
-        circuit = self._emitter.create_circuit(qubit_count, clbit_count)
+        if self._pre_allocated is not None:
+            # Reuse circuit created before classical pre-evaluation
+            circuit, qubit_map, clbit_map = self._pre_allocated
+            self._pre_allocated = None
+        else:
+            # Normal path: allocate and create fresh
+            qubit_map, clbit_map = self._allocator.allocate(operations, bindings)
+            qubit_count = max(qubit_map.values()) + 1 if qubit_map else 0
+            clbit_count = max(clbit_map.values()) + 1 if clbit_map else 0
+            circuit = self._emitter.create_circuit(qubit_count, clbit_count)
 
         # Reset measurement map before emission
         self._measurement_qubit_map.clear()
 
-        # Second pass: emit gates
+        # Emit gates
         self._emit_operations(circuit, operations, qubit_map, clbit_map, bindings)
 
         return circuit, qubit_map, clbit_map
@@ -1639,25 +1698,52 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             return
 
         result = None
-        match op.kind:
-            case BinOpKind.ADD:
-                result = lhs + rhs
-            case BinOpKind.SUB:
-                result = lhs - rhs
-            case BinOpKind.MUL:
-                result = lhs * rhs
-            case BinOpKind.DIV:
-                if is_concrete_real_number(rhs) and rhs == 0:
-                    raise EmitError("Division by zero during classical pre-evaluation")
-                result = lhs / rhs
-            case BinOpKind.FLOORDIV:
-                if is_concrete_real_number(rhs) and rhs == 0:
-                    raise EmitError(
-                        "Floor division by zero during classical pre-evaluation"
-                    )
-                result = lhs // rhs
-            case BinOpKind.POW:
-                result = lhs**rhs
+        symbolic_operands = (
+            lhs_param_key is not None
+            or rhs_param_key is not None
+            or not is_concrete_real_number(lhs)
+            or not is_concrete_real_number(rhs)
+        )
+        try:
+            match op.kind:
+                case BinOpKind.ADD:
+                    result = lhs + rhs
+                case BinOpKind.SUB:
+                    result = lhs - rhs
+                case BinOpKind.MUL:
+                    result = lhs * rhs
+                case BinOpKind.DIV:
+                    if is_concrete_real_number(rhs) and rhs == 0:
+                        raise EmitError(
+                            "Division by zero during classical pre-evaluation"
+                        )
+                    result = lhs / rhs
+                case BinOpKind.FLOORDIV:
+                    if is_concrete_real_number(rhs) and rhs == 0:
+                        raise EmitError(
+                            "Floor division by zero during classical pre-evaluation"
+                        )
+                    result = lhs // rhs
+                case BinOpKind.POW:
+                    result = lhs**rhs
+        except ZeroDivisionError as exc:
+            if op.kind == BinOpKind.DIV:
+                raise EmitError(
+                    "Division by zero during classical pre-evaluation"
+                ) from exc
+            if op.kind == BinOpKind.FLOORDIV:
+                raise EmitError(
+                    "Floor division by zero during classical pre-evaluation"
+                ) from exc
+            raise
+        except TypeError as exc:
+            if not symbolic_operands:
+                raise
+            raise EmitError(
+                f"Cannot evaluate classical-prep BinOp '{op.kind.name}' for "
+                f"operands '{op.lhs.name}' and '{op.rhs.name}': {exc}",
+                operation=f"BinOp({op.kind.name})",
+            ) from exc
 
         if result is not None and op.results:
             output = op.results[0]
@@ -1669,7 +1755,14 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         op: GateOperation,
         bindings: dict[str, Any],
     ) -> float | Any:
-        """Resolve angle parameter for rotation gates."""
+        """Resolve angle parameter for rotation gates.
+
+        Raises:
+            EmitError: If the gate has an explicit ``theta`` that cannot be
+                resolved to a concrete value or a backend parameter expression.
+                This prevents silent miscompilation where an unresolvable angle
+                would otherwise default to ``0.0``.
+        """
         if hasattr(op, "theta") and op.theta is not None:
             theta = op.theta
             if isinstance(theta, (int, float)):
@@ -1688,6 +1781,19 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                     if not isinstance(resolved, (int, float)):
                         return resolved
                     return float(resolved)
+
+                # Fail-closed for classical-prep outputs that could not be
+                # resolved.  This prevents silent 0.0 miscompilation when
+                # e.g. params[i] + 0.5 has an unresolved index.
+                if theta.uuid in self._unresolved_prep_outputs:
+                    raise EmitError(
+                        f"Cannot resolve gate angle for '{theta.name}' "
+                        f"(uuid={theta.uuid}). The value is a classical-prep "
+                        f"output that could not be resolved to a concrete "
+                        f"value or parametric expression. Ensure all "
+                        f"classical-prep operands are bound or computable "
+                        f"at emit time."
+                    )
 
         for operand in op.operands:
             if hasattr(operand, "type") and operand.type.is_classical():

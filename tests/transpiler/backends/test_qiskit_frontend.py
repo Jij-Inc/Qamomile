@@ -5939,6 +5939,59 @@ class TestExpvalQiskitPipeline:
         # rx(pi)|0> -> <Z>=cos(pi)=-1.0
         assert np.isclose(results[2], -1.0, atol=0.1)
 
+    def test_classical_prep_parametric_emit_runtime_sweep(self):
+        """classical_prep BinOp must emit parametric expression, not 0.0.
+
+        When a and b are declared as parameters (not bound at transpile
+        time), the classical_prep ``theta = a + b`` must survive as a
+        backend parameter expression so that runtime binding produces
+        correct gate angles.
+
+        This test exercises the emit-time path (not constant_fold) by
+        passing parameters=["a", "b"] at transpile time and binding
+        concrete values only at run time.
+        """
+
+        @qmc.qkernel
+        def circuit(a: qmc.Float, b: qmc.Float, H: qmc.Observable) -> qmc.Float:
+            # BinOp before any quantum op → lands in classical_prep
+            theta = a + b
+            q = qmc.qubit("q")
+            q = qmc.rx(q, theta)
+            return qmc.expval((q,), H)
+
+        H_label = qm_o.Hamiltonian(num_qubits=1)
+        H_label += qm_o.Z(0)
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(
+            circuit,
+            bindings={"H": H_label},
+            parameters=["a", "b"],
+        )
+
+        # classical_prep must be in execution order
+        assert ("classical", 0) in exe.execution_order
+
+        # Sweep: runtime binding must produce varying expectation values
+        results = []
+        for a_val, b_val in [
+            (0.0, 0.0),
+            (np.pi / 4, np.pi / 4),
+            (np.pi / 2, np.pi / 2),
+        ]:
+            result = exe.run(
+                transpiler.executor(),
+                bindings={"a": a_val, "b": b_val},
+            ).result()
+            results.append(result)
+
+        # rx(0)|0> -> <Z>=1.0
+        assert np.isclose(results[0], 1.0, atol=0.1)
+        # rx(pi/2)|0> -> <Z>=cos(pi/2)=0.0
+        assert np.isclose(results[1], 0.0, atol=0.15)
+        # rx(pi)|0> -> <Z>=cos(pi)=-1.0
+        assert np.isclose(results[2], -1.0, atol=0.1)
+
     def test_qaoa_vector_params_bound_at_sample_runtime(self):
         """Runtime vector bindings must work for parametric QAOA sampling."""
 

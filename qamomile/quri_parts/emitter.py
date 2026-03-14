@@ -20,6 +20,179 @@ if TYPE_CHECKING:
     )
 
 
+class QuriPartsParamExpr:
+    """Affine combination of QURI Parts Parameters with a constant offset.
+
+    QURI Parts ``Parameter`` objects do not support arithmetic.  This
+    wrapper allows ``StandardEmitPass._evaluate_binop`` to compose
+    parameter expressions (e.g. ``a + b``, ``params[1] + 0.5``) which
+    are later converted to the ``{Parameter: coeff, CONST: offset}``
+    dict format that QURI Parts parametric gates accept.
+    """
+
+    __slots__ = ("terms", "const")
+
+    def __init__(
+        self,
+        terms: dict["Parameter", float] | None = None,
+        const: float = 0.0,
+    ) -> None:
+        """Initialize an affine parameter expression."""
+        self.terms = self._normalize_terms(terms if terms is not None else {})
+        self.const = const
+
+    @staticmethod
+    def _normalize_terms(terms: dict["Parameter", float]) -> dict["Parameter", float]:
+        """Drop zero-coefficient terms from an affine expression."""
+        return {param: coeff for param, coeff in terms.items() if coeff != 0.0}
+
+    def is_constant(self) -> bool:
+        """Return whether the expression has no symbolic parameter terms."""
+        return not self.terms
+
+    @staticmethod
+    def _coerce_constant(other: Any) -> float | None:
+        """Convert numeric or constant-only expressions to a float."""
+        if isinstance(other, (int, float)):
+            return float(other)
+        if isinstance(other, QuriPartsParamExpr) and other.is_constant():
+            return other.const
+        return None
+
+    @staticmethod
+    def _non_affine_error(detail: str) -> TypeError:
+        """Build an error for unsupported nonlinear parameter arithmetic."""
+        return TypeError(
+            "QURI Parts supports only affine parameter expressions; "
+            f"{detail} is not supported."
+        )
+
+    # -- arithmetic ----------------------------------------------------------
+
+    def __add__(self, other: Any) -> "QuriPartsParamExpr":
+        if isinstance(other, QuriPartsParamExpr):
+            new_terms = dict(self.terms)
+            for p, c in other.terms.items():
+                new_terms[p] = new_terms.get(p, 0.0) + c
+            return QuriPartsParamExpr(new_terms, self.const + other.const)
+        if isinstance(other, (int, float)):
+            return QuriPartsParamExpr(dict(self.terms), self.const + float(other))
+        return NotImplemented
+
+    def __radd__(self, other: Any) -> "QuriPartsParamExpr":
+        return self.__add__(other)
+
+    def __sub__(self, other: Any) -> "QuriPartsParamExpr":
+        if isinstance(other, QuriPartsParamExpr):
+            new_terms = dict(self.terms)
+            for p, c in other.terms.items():
+                new_terms[p] = new_terms.get(p, 0.0) - c
+            return QuriPartsParamExpr(new_terms, self.const - other.const)
+        if isinstance(other, (int, float)):
+            return QuriPartsParamExpr(dict(self.terms), self.const - float(other))
+        return NotImplemented
+
+    def __rsub__(self, other: Any) -> "QuriPartsParamExpr":
+        if isinstance(other, (int, float)):
+            neg = {p: -c for p, c in self.terms.items()}
+            return QuriPartsParamExpr(neg, float(other) - self.const)
+        return NotImplemented
+
+    def __mul__(self, other: Any) -> "QuriPartsParamExpr":
+        """Multiply by a constant while preserving affine form."""
+        scalar = self._coerce_constant(other)
+        if scalar is not None:
+            new_terms = {p: c * scalar for p, c in self.terms.items()}
+            return QuriPartsParamExpr(new_terms, self.const * scalar)
+        if isinstance(other, QuriPartsParamExpr) and self.is_constant():
+            return other * self.const
+        raise self._non_affine_error("multiplication between parameterized expressions")
+
+    def __rmul__(self, other: Any) -> "QuriPartsParamExpr":
+        """Multiply from the right by a constant."""
+        return self.__mul__(other)
+
+    def __truediv__(self, other: Any) -> "QuriPartsParamExpr":
+        """Divide by a constant while preserving affine form."""
+        scalar = self._coerce_constant(other)
+        if scalar is None:
+            raise self._non_affine_error("division by a parameterized expression")
+        if scalar == 0.0:
+            raise ZeroDivisionError("division by zero")
+        new_terms = {p: c / scalar for p, c in self.terms.items()}
+        return QuriPartsParamExpr(new_terms, self.const / scalar)
+
+    def __rtruediv__(self, other: Any) -> "QuriPartsParamExpr":
+        """Divide a numeric constant by a constant-only expression."""
+        scalar = self._coerce_constant(other)
+        if scalar is None:
+            return NotImplemented
+        if not self.is_constant():
+            raise self._non_affine_error("division by a parameterized expression")
+        if self.const == 0.0:
+            raise ZeroDivisionError("division by zero")
+        return QuriPartsParamExpr(const=scalar / self.const)
+
+    def __floordiv__(self, other: Any) -> "QuriPartsParamExpr":
+        """Floor-divide constant-only expressions."""
+        scalar = self._coerce_constant(other)
+        if scalar is None:
+            raise self._non_affine_error("floor division by a parameterized expression")
+        if scalar == 0.0:
+            raise ZeroDivisionError("float floor division by zero")
+        if not self.is_constant():
+            raise self._non_affine_error("floor division of a parameterized expression")
+        return QuriPartsParamExpr(const=self.const // scalar)
+
+    def __rfloordiv__(self, other: Any) -> "QuriPartsParamExpr":
+        """Floor-divide a numeric constant by a constant-only expression."""
+        scalar = self._coerce_constant(other)
+        if scalar is None:
+            return NotImplemented
+        if not self.is_constant():
+            raise self._non_affine_error("floor division by a parameterized expression")
+        if self.const == 0.0:
+            raise ZeroDivisionError("float floor division by zero")
+        return QuriPartsParamExpr(const=scalar // self.const)
+
+    def __pow__(self, other: Any) -> "QuriPartsParamExpr":
+        """Raise constant-only expressions to a constant power."""
+        scalar = self._coerce_constant(other)
+        if scalar is None:
+            raise self._non_affine_error("power with a parameterized exponent")
+        if not self.is_constant():
+            raise self._non_affine_error("power of a parameterized expression")
+        return QuriPartsParamExpr(const=self.const**scalar)
+
+    def __rpow__(self, other: Any) -> "QuriPartsParamExpr":
+        """Raise a numeric constant to a constant-only expression."""
+        scalar = self._coerce_constant(other)
+        if scalar is None:
+            return NotImplemented
+        if not self.is_constant():
+            raise self._non_affine_error("power with a parameterized exponent")
+        return QuriPartsParamExpr(const=scalar**self.const)
+
+    def __neg__(self) -> "QuriPartsParamExpr":
+        neg = {p: -c for p, c in self.terms.items()}
+        return QuriPartsParamExpr(neg, -self.const)
+
+    def to_angle_dict(self) -> dict[Any, float]:
+        """Convert to the ``{Parameter: coeff, CONST: offset}`` dict."""
+        from quri_parts.circuit import CONST
+
+        result: dict[Any, float] = dict(self.terms)
+        if self.const != 0.0:
+            result[CONST] = self.const
+        return result
+
+    def __repr__(self) -> str:
+        parts = [f"{c}*{p.name}" for p, c in self.terms.items()]
+        if self.const != 0.0:
+            parts.append(str(self.const))
+        return " + ".join(parts) if parts else "0.0"
+
+
 class QuriPartsGateEmitter:
     """GateEmitter implementation for QURI Parts.
 
@@ -52,25 +225,35 @@ class QuriPartsGateEmitter:
         self._param_map.clear()
         return circuit
 
-    def create_parameter(self, name: str) -> "Parameter":
-        """Create a QURI Parts parameter and register it with the circuit."""
+    def create_parameter(self, name: str) -> QuriPartsParamExpr:
+        """Create a QURI Parts parameter wrapped in a ``QuriPartsParamExpr``.
+
+        The wrapper supports arithmetic so that ``_evaluate_binop`` can
+        compose expressions like ``a + b`` without requiring QURI Parts
+        ``Parameter`` objects to support operators directly. Only affine
+        symbolic expressions are supported because QURI Parts uses a
+        linear parameter mapping model.
+        """
         if self._current_circuit is None:
             raise RuntimeError("create_circuit must be called before create_parameter")
 
         if name not in self._param_map:
             param = self._current_circuit.add_parameter(name)
             self._param_map[name] = param
-        return self._param_map[name]
+        return QuriPartsParamExpr({self._param_map[name]: 1.0})
 
     def _make_angle_dict(self, angle: float | Any) -> dict[Any, float] | float:
         """Convert angle to QURI Parts format.
 
         If angle is a float, return it directly.
-        If angle is a Parameter, return {parameter: 1.0}.
+        If angle is a ``QuriPartsParamExpr``, convert to ``{Parameter: coeff}`` dict.
+        If angle is a raw ``Parameter``, return ``{parameter: 1.0}``.
         """
         if isinstance(angle, (int, float)):
             return float(angle)
-        # Assume it's a QURI Parts Parameter
+        if isinstance(angle, QuriPartsParamExpr):
+            return angle.to_angle_dict()
+        # Fallback: assume it's a QURI Parts Parameter
         return {angle: 1.0}
 
     # Single-qubit gates (no parameters)
