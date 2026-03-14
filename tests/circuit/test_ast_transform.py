@@ -7,7 +7,10 @@ import pytest
 
 import qamomile.circuit as qm
 from qamomile.circuit.frontend.constructors import qubit_array
-from qamomile.circuit.frontend.ast_transform import ControlFlowTransformer
+from qamomile.circuit.frontend.ast_transform import (
+    ControlFlowTransformer,
+    VariableCollector,
+)
 from qamomile.circuit.frontend.handle import Qubit
 from qamomile.circuit.frontend.qkernel import qkernel
 
@@ -178,6 +181,44 @@ class TestRuntimeLimitations:
         # Should not raise — measure here is a classical function, not qm.measure
         graph = circuit.build(n=1)
         assert graph is not None
+
+
+class TestVariableCollectorAttributeAccess:
+    """Attribute access should distinguish user variables from module names."""
+
+    def test_attribute_access_keeps_user_variable_live(self):
+        """User-variable attribute access must count as a load."""
+        tree = ast.parse(
+            textwrap.dedent(
+                """
+                n = qs.shape[0]
+                """
+            )
+        )
+
+        collector = VariableCollector(global_names={"qm"})
+        collector.visit(tree)
+
+        assert "qs" in collector.vars
+        assert "qs" in collector.load_vars
+        assert collector._first_context["qs"] == "Load"
+
+    def test_module_attribute_access_still_excludes_module_name(self):
+        """Module attribute access must not treat the module name as a variable."""
+        tree = ast.parse(
+            textwrap.dedent(
+                """
+                q = qm.h(q)
+                """
+            )
+        )
+
+        collector = VariableCollector(global_names={"qm"})
+        collector.visit(tree)
+
+        assert "qm" not in collector.vars
+        assert "qm" not in collector.load_vars
+        assert "q" in collector.load_vars
 
 
 class TestEmptyClosureCell:

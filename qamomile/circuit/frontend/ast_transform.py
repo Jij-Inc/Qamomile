@@ -19,7 +19,7 @@ class VariableCollector(ast.NodeVisitor):
 
     以下を除外:
     - 関数呼び出しの関数名 (func in Call)
-    - 属性アクセスのベースオブジェクト (value in Attribute)
+    - 属性アクセスのグローバルなベースオブジェクト (value in Attribute)
     - グローバル変数（モジュール、組み込み関数など）
     """
 
@@ -46,10 +46,21 @@ class VariableCollector(ast.NodeVisitor):
             self.visit(node.func)
 
     def visit_Attribute(self, node: ast.Attribute):
-        """属性アクセスのベースオブジェクト（モジュール名）を除外"""
+        """属性アクセスのベース名を記録する。
+
+        モジュール名などグローバル名 (`qm.h`) は従来どおり除外し、
+        ユーザー変数 (`qs.shape`) は Load として扱う。
+        """
         if isinstance(node.value, ast.Name):
-            # qm.x の qm を除外
-            self._exclude.add(node.value.id)
+            name = node.value.id
+            if name in self._global_names:
+                # qm.x の qm を除外
+                self._exclude.add(name)
+            else:
+                self.vars.add(name)
+                self._load_names.add(name)
+                if name not in self._first_context:
+                    self._first_context[name] = "Load"
         else:
             # ネストした属性アクセス (a.b.c) の場合は再帰
             self.visit(node.value)
