@@ -4167,6 +4167,33 @@ class TestExpvalQuriPartsPipeline:
                 f"a={a_val}: got {result}, expected {expected}"
             )
 
+    def test_classical_prep_affine_mul_accepts_numpy_scalar_binding(self):
+        """NumPy real scalar bindings must preserve valid affine emit."""
+
+        @qmc.qkernel
+        def circuit(a: qmc.Float, scale: qmc.Float, H: qmc.Observable) -> qmc.Float:
+            t = a - a
+            theta = t * scale
+            q = qmc.qubit("q")
+            q = qmc.ry(q, theta)
+            return qmc.expval((q,), H)
+
+        H_label = qm_o.Hamiltonian(num_qubits=1)
+        H_label += qm_o.Z(0)
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(
+            circuit,
+            bindings={"H": H_label, "scale": np.float32(0.5)},
+            parameters=["a"],
+        )
+
+        executor = transpiler.executor()
+        for a_val in [0.0, np.pi / 4, np.pi / 2]:
+            result = exe.run(executor, bindings={"a": a_val}).result()
+            assert np.isclose(result, 1.0, atol=0.15), (
+                f"a={a_val}: got {result}, expected 1.0"
+            )
+
     def test_classical_prep_non_affine_mul_raises_emit_error(self):
         """Non-affine symbolic multiplication is rejected at transpile time."""
 

@@ -80,6 +80,7 @@ from qamomile.circuit.algorithm.qaoa import (
     x_mixer,
 )
 from qamomile.circuit.ir.block import BlockKind
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.segments import SimplifiedProgram
 from qamomile.circuit.transpiler.transpiler import TranspilerConfig
@@ -6011,6 +6012,34 @@ class TestExpvalQiskitPipeline:
         assert np.isclose(results[1], 0.0, atol=0.15)
         # rx(pi)|0> -> <Z>=cos(pi)=-1.0
         assert np.isclose(results[2], -1.0, atol=0.1)
+
+    def test_classical_prep_unresolved_temp_name_collision_raises_emit_error(self):
+        """Unresolved later temporaries must not reuse an earlier float_tmp."""
+
+        @qmc.qkernel
+        def circuit(
+            a: qmc.Float,
+            params: qmc.Vector[qmc.Float],
+            i: qmc.UInt,
+            H: qmc.Observable,
+        ) -> qmc.Float:
+            theta1 = a + 1.0
+            _ = theta1
+            theta2 = params[i] + 0.5
+            q = qmc.qubit("q")
+            q = qmc.ry(q, theta2)
+            return qmc.expval((q,), H)
+
+        H_label = qm_o.Hamiltonian(num_qubits=1)
+        H_label += qm_o.Z(0)
+        transpiler = QiskitTranspiler()
+
+        with pytest.raises(EmitError, match="Cannot resolve gate angle"):
+            transpiler.transpile(
+                circuit,
+                bindings={"H": H_label},
+                parameters=["a", "params", "i"],
+            )
 
     def test_qaoa_vector_params_bound_at_sample_runtime(self):
         """Runtime vector bindings must work for parametric QAOA sampling."""

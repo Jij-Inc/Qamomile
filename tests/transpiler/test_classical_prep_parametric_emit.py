@@ -242,6 +242,35 @@ class TestFailClosedUnresolvedTheta:
         with pytest.raises(EmitError, match="Cannot resolve gate angle"):
             std._resolve_angle(gate, std.bindings)
 
+    def test_unresolved_prep_output_does_not_reuse_same_name_temporary(self):
+        """Fail closed even when an earlier temporary reused the same name."""
+        a = Value(type=FloatType(), name="a", params={"parameter": "a"})
+        one = Value(type=FloatType(), name="one", params={"const": 1.0})
+        resolved_out = Value(type=FloatType(), name="float_tmp")
+        resolved_op = BinOp(
+            operands=[a, one],
+            results=[resolved_out],
+            kind=BinOpKind.ADD,
+        )
+
+        unknown = Value(type=FloatType(), name="unknown")
+        bias = Value(type=FloatType(), name="bias", params={"const": 0.5})
+        unresolved_out = Value(type=FloatType(), name="float_tmp")
+        unresolved_op = BinOp(
+            operands=[unknown, bias],
+            results=[unresolved_out],
+            kind=BinOpKind.ADD,
+        )
+        seg = ClassicalSegment(operations=[resolved_op, unresolved_op])
+
+        std = StandardEmitPass(DummyEmitter(), bindings={}, parameters=["a"])
+        std._pre_evaluate_classical(seg)
+
+        assert resolved_out.name in std.bindings
+        gate = _make_gate_with_theta(unresolved_out)
+        with pytest.raises(EmitError, match="Cannot resolve gate angle"):
+            std._resolve_angle(gate, std.bindings)
+
     def test_unresolved_symbolic_index_does_not_produce_zero(self):
         """params[i] + 0.5 with unresolved i must not silently produce 0.0.
 

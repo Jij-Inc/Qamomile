@@ -13,6 +13,8 @@ import math
 import warnings
 from typing import Any, TYPE_CHECKING
 
+from qamomile.circuit.transpiler.value_resolution import is_concrete_real_number
+
 if TYPE_CHECKING:
     from quri_parts.circuit import (
         LinearMappedUnboundParametricQuantumCircuit,
@@ -53,7 +55,7 @@ class QuriPartsParamExpr:
     @staticmethod
     def _coerce_constant(other: Any) -> float | None:
         """Convert numeric or constant-only expressions to a float."""
-        if isinstance(other, (int, float)):
+        if is_concrete_real_number(other):
             return float(other)
         if isinstance(other, QuriPartsParamExpr) and other.is_constant():
             return other.const
@@ -75,8 +77,9 @@ class QuriPartsParamExpr:
             for p, c in other.terms.items():
                 new_terms[p] = new_terms.get(p, 0.0) + c
             return QuriPartsParamExpr(new_terms, self.const + other.const)
-        if isinstance(other, (int, float)):
-            return QuriPartsParamExpr(dict(self.terms), self.const + float(other))
+        scalar = self._coerce_constant(other)
+        if scalar is not None:
+            return QuriPartsParamExpr(dict(self.terms), self.const + scalar)
         return NotImplemented
 
     def __radd__(self, other: Any) -> "QuriPartsParamExpr":
@@ -88,14 +91,16 @@ class QuriPartsParamExpr:
             for p, c in other.terms.items():
                 new_terms[p] = new_terms.get(p, 0.0) - c
             return QuriPartsParamExpr(new_terms, self.const - other.const)
-        if isinstance(other, (int, float)):
-            return QuriPartsParamExpr(dict(self.terms), self.const - float(other))
+        scalar = self._coerce_constant(other)
+        if scalar is not None:
+            return QuriPartsParamExpr(dict(self.terms), self.const - scalar)
         return NotImplemented
 
     def __rsub__(self, other: Any) -> "QuriPartsParamExpr":
-        if isinstance(other, (int, float)):
+        scalar = self._coerce_constant(other)
+        if scalar is not None:
             neg = {p: -c for p, c in self.terms.items()}
-            return QuriPartsParamExpr(neg, float(other) - self.const)
+            return QuriPartsParamExpr(neg, scalar - self.const)
         return NotImplemented
 
     def __mul__(self, other: Any) -> "QuriPartsParamExpr":
@@ -249,7 +254,7 @@ class QuriPartsGateEmitter:
         If angle is a ``QuriPartsParamExpr``, convert to ``{Parameter: coeff}`` dict.
         If angle is a raw ``Parameter``, return ``{parameter: 1.0}``.
         """
-        if isinstance(angle, (int, float)):
+        if is_concrete_real_number(angle):
             return float(angle)
         if isinstance(angle, QuriPartsParamExpr):
             return angle.to_angle_dict()

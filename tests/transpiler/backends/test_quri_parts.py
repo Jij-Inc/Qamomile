@@ -64,3 +64,71 @@ class TestQuriPartsTranspiler(TranspilerTestSuite):
         statevector = evaluate_state_to_vector(circuit_state)
 
         return np.array(statevector.vector)
+
+
+# ---------------------------------------------------------------------------
+# QuriPartsParamExpr numpy scalar regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestQuriPartsParamExprNumpyScalars:
+    """Verify QuriPartsParamExpr arithmetic accepts numpy scalar types.
+
+    numpy scalars like np.float32 and np.int32 are not subclasses of
+    Python float/int (except np.float64). The emitter must accept them
+    via is_concrete_real_number (numbers.Real) rather than isinstance(..., (int, float)).
+    """
+
+    @staticmethod
+    def _make_expr() -> Any:
+        """Create a QuriPartsParamExpr with a dummy parameter term."""
+        from qamomile.quri_parts.emitter import QuriPartsParamExpr
+
+        # Use a string as a stand-in for a Parameter object; arithmetic
+        # only needs dict key identity, not QURI Parts runtime.
+        return QuriPartsParamExpr(terms={"p": 1.0}, const=0.0)
+
+    def test_coerce_constant_np_float32(self) -> None:
+        from qamomile.quri_parts.emitter import QuriPartsParamExpr
+
+        result = QuriPartsParamExpr._coerce_constant(np.float32(1.5))
+        assert result == 1.5
+        assert isinstance(result, float)
+
+    def test_coerce_constant_np_int32(self) -> None:
+        from qamomile.quri_parts.emitter import QuriPartsParamExpr
+
+        result = QuriPartsParamExpr._coerce_constant(np.int32(3))
+        assert result == 3.0
+        assert isinstance(result, float)
+
+    def test_mul_np_float32(self) -> None:
+        expr = self._make_expr()
+        result = expr * np.float32(2.0)
+        assert result.terms["p"] == 2.0
+        assert result.const == 0.0
+
+    def test_add_np_float32(self) -> None:
+        expr = self._make_expr()
+        result = expr + np.float32(0.5)
+        assert result.const == 0.5
+        assert result.terms["p"] == 1.0
+
+    def test_sub_np_int32(self) -> None:
+        expr = self._make_expr()
+        result = expr - np.int32(1)
+        assert result.const == -1.0
+
+    def test_rsub_np_float32(self) -> None:
+        expr = self._make_expr()
+        result = np.float32(3.0) - expr
+        assert result.const == 3.0
+        assert result.terms["p"] == -1.0
+
+    def test_make_angle_dict_np_float32(self) -> None:
+        from qamomile.quri_parts.emitter import QuriPartsGateEmitter
+
+        emitter = QuriPartsGateEmitter()
+        result = emitter._make_angle_dict(np.float32(1.5))
+        assert result == 1.5
+        assert isinstance(result, float)

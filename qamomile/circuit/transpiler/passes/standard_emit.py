@@ -1880,7 +1880,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         """
         if hasattr(op, "theta") and op.theta is not None:
             theta = op.theta
-            if isinstance(theta, (int, float)):
+            if is_concrete_real_number(theta):
                 return float(theta)
             elif isinstance(theta, Value):
                 param_key = self._resolver.get_parameter_key(theta, bindings)
@@ -1891,15 +1891,9 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                         )
                     return self._parameter_map[param_key]
 
-                resolved = self._resolver.resolve_classical_value(theta, bindings)
-                if resolved is not None:
-                    if not isinstance(resolved, (int, float)):
-                        return resolved
-                    return float(resolved)
-
-                # Fail-closed for classical-prep outputs that could not be
-                # resolved.  This prevents silent 0.0 miscompilation when
-                # e.g. params[i] + 0.5 has an unresolved index.
+                # Fail-closed before generic name-based resolution so an
+                # earlier temporary with the same frontend name cannot be
+                # reused for an unresolved classical-prep output.
                 if theta.uuid in self._unresolved_prep_outputs:
                     raise EmitError(
                         f"Cannot resolve gate angle for '{theta.name}' "
@@ -1909,6 +1903,12 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                         f"classical-prep operands are bound or computable "
                         f"at emit time."
                     )
+
+                resolved = self._resolver.resolve_classical_value(theta, bindings)
+                if resolved is not None:
+                    if not is_concrete_real_number(resolved):
+                        return resolved
+                    return float(resolved)
 
         for operand in op.operands:
             if hasattr(operand, "type") and operand.type.is_classical():
@@ -1922,7 +1922,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
 
                 resolved = self._resolver.resolve_classical_value(operand, bindings)
                 if resolved is not None:
-                    if not isinstance(resolved, (int, float)):
+                    if not is_concrete_real_number(resolved):
                         return resolved
                     return float(resolved)
 
