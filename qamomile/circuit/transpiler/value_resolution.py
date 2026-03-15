@@ -27,12 +27,25 @@ class BindingLookup:
 
 
 _DIMENSION_NAME_RE = re.compile(r"^(.+)_dim(\d+)$")
+_SYNTHETIC_TEMPORARY_NAMES = frozenset({"uint_tmp", "float_tmp", "bit_tmp"})
 
 
 def is_concrete_real_number(value: Any) -> bool:
     """Return True for concrete builtin/numpy real scalars."""
 
     return isinstance(value, numbers.Real)
+
+
+def is_frontend_temporary_name(name: str) -> bool:
+    """Return True for frontend-generated temporary result names."""
+
+    return name in _SYNTHETIC_TEMPORARY_NAMES
+
+
+def can_fallback_to_value_name(value: "Value") -> bool:
+    """Return whether generic ``bindings[value.name]`` lookup is safe."""
+
+    return not is_frontend_temporary_name(value.name)
 
 
 def _lookup_bound_array(
@@ -112,10 +125,10 @@ def resolve_classical_value(
     Lookup order:
         1. uuid
         2. parameter name (optional)
-        3. value name
-        4. synthetic array dimension value (e.g. hi_dim0)
-        5. array element via parent array + element indices
-        6. constant value
+        3. synthetic array dimension value (e.g. hi_dim0)
+        4. array element via parent array + element indices
+        5. constant value
+        6. value name for stable user-facing symbols only
     """
 
     if bindings.has(value.uuid):
@@ -126,21 +139,23 @@ def resolve_classical_value(
         if param_name is not None and bindings.has(param_name):
             return bindings.get(param_name)
 
-    if bindings.has(value.name):
-        return bindings.get(value.name)
-
     resolved_dim = resolve_array_dimension_value(value, bindings)
     if resolved_dim is not None:
         return resolved_dim
 
     if value.parent_array is not None and value.element_indices:
-        return resolve_array_element_value(value, bindings)
+        resolved = resolve_array_element_value(value, bindings)
+        if resolved is not None:
+            return resolved
 
     if value.is_constant():
         return value.get_const()
 
     if value.params and "const" in value.params:
         return value.params["const"]
+
+    if can_fallback_to_value_name(value) and bindings.has(value.name):
+        return bindings.get(value.name)
 
     return None
 
@@ -193,27 +208,18 @@ def resolve_int_value(
         return int(value)
 
     if isinstance(value, Value):
-        if value.is_constant():
-            return int(value.get_const())
-
-        if value.is_parameter():
-            param_name = value.parameter_name()
-            if param_name and bindings.has(param_name):
-                bound_val = bindings.get(param_name)
-                if is_concrete_real_number(bound_val):
-                    return int(bound_val)
-                return None
-
         if bindings.has(value.uuid):
             bound_val = bindings.get(value.uuid)
             if is_concrete_real_number(bound_val):
                 return int(bound_val)
             return None
 
-        if bindings.has(value.name):
-            bound_val = bindings.get(value.name)
+        param_name = value.parameter_name()
+        if param_name is not None and bindings.has(param_name):
+            bound_val = bindings.get(param_name)
             if is_concrete_real_number(bound_val):
                 return int(bound_val)
+            return None
 
         resolved_dim = resolve_array_dimension_value(value, bindings)
         if resolved_dim is not None:
@@ -224,5 +230,22 @@ def resolve_int_value(
             if is_concrete_real_number(resolved):
                 return int(resolved)
             return None
+
+        if value.is_constant():
+            const_value = value.get_const()
+            if is_concrete_real_number(const_value):
+                return int(const_value)
+            return None
+
+        if value.params and "const" in value.params:
+            const_value = value.params["const"]
+            if is_concrete_real_number(const_value):
+                return int(const_value)
+            return None
+
+        if can_fallback_to_value_name(value) and bindings.has(value.name):
+            bound_val = bindings.get(value.name)
+            if is_concrete_real_number(bound_val):
+                return int(bound_val)
 
     return None

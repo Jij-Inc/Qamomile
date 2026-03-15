@@ -3,6 +3,13 @@
 import pytest
 
 import qamomile.circuit as qm
+from qamomile.circuit.errors import (
+    AffineTypeError as SharedAffineTypeError,
+    QubitAliasError as SharedQubitAliasError,
+    QubitConsumedError as SharedQubitConsumedError,
+    QubitRebindError as SharedQubitRebindError,
+    UnreturnedBorrowError as SharedUnreturnedBorrowError,
+)
 from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.constructors import qubit_array
 from qamomile.circuit.frontend.handle import Qubit
@@ -30,6 +37,16 @@ from tests.circuit._gate_catalog import (
     TWO_QUBIT_GATES_NO_PARAM as _TWO_QUBIT_GATES_NO_PARAM,
     TWO_QUBIT_GATES_WITH_PARAM as _TWO_QUBIT_GATES_WITH_PARAM,
 )
+
+
+def test_affine_error_reexport_preserves_type_identity():
+    """Shared affine errors and transpiler re-exports must stay identical."""
+
+    assert SharedAffineTypeError is AffineTypeError
+    assert SharedQubitAliasError is QubitAliasError
+    assert SharedQubitConsumedError is QubitConsumedError
+    assert SharedQubitRebindError is QubitRebindError
+    assert SharedUnreturnedBorrowError is UnreturnedBorrowError
 
 
 class TestDoubleUseDetection:

@@ -46,6 +46,20 @@ class TestResolveIntValueUuidLookup:
         result = resolver.resolve_int_value(val, bindings)
         assert result == 42
 
+    def test_synthetic_temp_name_does_not_resolve_from_earlier_temp(self):
+        """Later unresolved frontend temps must not reuse same-name bindings."""
+        resolver = ValueResolver()
+
+        resolved = Value(type=UIntType(), name="uint_tmp")
+        unresolved = Value(type=UIntType(), name="uint_tmp")
+        bindings: dict[str, int] = {
+            resolved.uuid: 8,
+            resolved.name: 8,
+        }
+
+        result = resolver.resolve_int_value(unresolved, bindings)
+        assert result is None
+
     def test_constant_value_unaffected(self):
         """Constant Values resolve correctly regardless of UUID/name lookup."""
         resolver = ValueResolver()

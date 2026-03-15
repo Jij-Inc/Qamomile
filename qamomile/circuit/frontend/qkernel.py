@@ -138,7 +138,7 @@ class QKernel(Generic[P, R]):
     def _check_rebind_violations(self) -> None:
         if not self._rebind_violations:
             return
-        from qamomile.circuit.transpiler.errors import QubitRebindError
+        from qamomile.circuit.errors import QubitRebindError
 
         v = self._rebind_violations[0]
         if v.func_name:

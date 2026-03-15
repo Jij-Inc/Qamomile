@@ -57,6 +57,7 @@ from qamomile.circuit.transpiler.executable import (
 from qamomile.circuit.transpiler.segments import ClassicalSegment, SimplifiedProgram
 from qamomile.circuit.transpiler.value_resolution import (
     BindingLookup,
+    is_frontend_temporary_name,
     is_concrete_real_number,
     resolve_classical_value as shared_resolve_classical_value,
 )
@@ -173,7 +174,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             if value.is_constant():
                 const_value = value.get_const()
                 self.bindings.setdefault(value.uuid, const_value)
-                self.bindings.setdefault(value.name, const_value)
+                if not is_frontend_temporary_name(value.name):
+                    self.bindings.setdefault(value.name, const_value)
 
             if isinstance(value, Value):
                 for index_value in value.element_indices:
@@ -261,7 +263,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             if result is not None and op.results:
                 output = op.results[0]
                 self.bindings[output.uuid] = result
-                self.bindings[output.name] = result
+                if not is_frontend_temporary_name(output.name):
+                    self.bindings[output.name] = result
 
     def _pre_evaluate_classical(self, segment: "ClassicalSegment") -> None:
         """Pre-evaluate classical segment using the full symbolic resolver.
@@ -1863,7 +1866,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         if result is not None and op.results:
             output = op.results[0]
             bindings[output.uuid] = result
-            bindings[output.name] = result
+            if not is_frontend_temporary_name(output.name):
+                bindings[output.name] = result
 
     def _resolve_angle(
         self,

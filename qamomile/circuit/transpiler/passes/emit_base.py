@@ -30,7 +30,7 @@ from qamomile.circuit.ir.operation.control_flow import (
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, PhiOp
 from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import ArrayValue
-from qamomile.circuit.transpiler.errors import ResolutionFailureReason
+from qamomile.circuit.transpiler.errors import EmitError, ResolutionFailureReason
 from qamomile.circuit.transpiler.value_resolution import (
     BindingLookup,
     is_concrete_real_number,
@@ -270,11 +270,17 @@ class ResourceAllocator:
                     if result.shape:
                         size_val = result.shape[0]
                         size = self._resolve_size(size_val, bindings)
-                        if size is not None:
-                            for i in range(size):
-                                qubit_id = f"{result.uuid}_{i}"
-                                if qubit_id not in qubit_map:
-                                    qubit_map[qubit_id] = len(qubit_map)
+                        if size is None:
+                            size_name = getattr(size_val, "name", repr(size_val))
+                            raise EmitError(
+                                f"Cannot resolve array size for '{result.name}' "
+                                f"from '{size_name}'.",
+                                operation="QInitOperation",
+                            )
+                        for i in range(size):
+                            qubit_id = f"{result.uuid}_{i}"
+                            if qubit_id not in qubit_map:
+                                qubit_map[qubit_id] = len(qubit_map)
                     continue
                 if result.uuid not in qubit_map:
                     qubit_map[result.uuid] = len(qubit_map)
@@ -289,11 +295,17 @@ class ResourceAllocator:
                 if isinstance(result, ArrayValue) and result.shape:
                     size_val = result.shape[0]
                     size = self._resolve_size(size_val, bindings)
-                    if size is not None:
-                        for i in range(size):
-                            clbit_id = f"{result.uuid}_{i}"
-                            if clbit_id not in clbit_map:
-                                clbit_map[clbit_id] = len(clbit_map)
+                    if size is None:
+                        size_name = getattr(size_val, "name", repr(size_val))
+                        raise EmitError(
+                            f"Cannot resolve measurement vector size for "
+                            f"'{result.name}' from '{size_name}'.",
+                            operation="MeasureVectorOperation",
+                        )
+                    for i in range(size):
+                        clbit_id = f"{result.uuid}_{i}"
+                        if clbit_id not in clbit_map:
+                            clbit_map[clbit_id] = len(clbit_map)
 
             elif isinstance(op, MeasureQFixedOperation):
                 qfixed = op.operands[0]

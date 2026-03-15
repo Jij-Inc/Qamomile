@@ -11,7 +11,7 @@ from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.types.primitives import FloatType
 from qamomile.circuit.ir.value import Value, ArrayValue
-from qamomile.circuit.transpiler.errors import QubitConsumedError
+from qamomile.circuit.errors import QubitConsumedError
 
 
 def _consume_tuple_qubits(qubits: tuple[Qubit, ...]) -> ArrayValue:

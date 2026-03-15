@@ -4202,6 +4202,29 @@ class TestParameterizedCircuits:
         assert qc.num_clbits == 3
         assert sum(isinstance(inst.operation, HGate) for inst in qc.data) == 3
 
+    def test_computed_size_qubit_array_unresolved_temp_collision_fails_closed(self):
+        """Unresolved later uint_tmp values must not reuse earlier size bindings."""
+
+        @qmc.qkernel
+        def circuit(
+            params: qmc.Vector[qmc.UInt],
+            i: qmc.UInt,
+        ) -> qmc.Vector[qmc.Bit]:
+            m1 = params[1] + 1
+            _ = m1
+            m2 = params[i] + 1
+            q = qmc.qubit_array(m2, "q")
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+
+        with pytest.raises(EmitError, match="Cannot resolve array size"):
+            transpiler.transpile(
+                circuit,
+                bindings={"params": [5, 7]},
+                parameters=["i"],
+            )
+
 
 class TestSubKernelInlining:
     """Test sub-kernel calls and inlining."""

@@ -14,7 +14,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOpKind,
 )
 from qamomile.circuit.ir.value import Value
-from qamomile.circuit.transpiler.errors import QubitConsumedError
+from qamomile.circuit.errors import QubitConsumedError
 
 if typing.TYPE_CHECKING:
     from .array import ArrayBase

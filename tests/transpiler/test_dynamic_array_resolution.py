@@ -10,7 +10,9 @@ These tests were added to prevent regression of bugs fixed in the emit pass.
 """
 
 import numpy as np
+import pytest
 import qamomile.circuit as qmc
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.qiskit.transpiler import QiskitTranspiler
 
 
@@ -38,6 +40,21 @@ def kernel_matrix_size(
     """Kernel with qubit array sized by matrix dimension."""
     n = edges.shape[0]
     q = qmc.qubit_array(n, name="q")
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def kernel_unresolved_temp_size_collision(
+    params: qmc.Vector[qmc.UInt],
+    i: qmc.UInt,
+) -> qmc.Vector[qmc.Bit]:
+    """Kernel that used to reuse an earlier uint_tmp for dynamic sizing."""
+    m1 = params[1] + 1
+    _ = m1
+    m2 = params[i] + 1
+    q = qmc.qubit_array(m2, name="q")
+    for j in qmc.range(m2):
+        q[j] = qmc.h(q[j])
     return qmc.measure(q)
 
 
@@ -166,6 +183,17 @@ class TestDynamicArraySizeResolution:
         assert result is not None
         for bitstring, _count in result.results:
             assert len(bitstring) == 3
+
+    def test_unresolved_uint_tmp_size_collision_fails_closed(self):
+        """Later unresolved uint_tmp values must not mis-size dynamic arrays."""
+        transpiler = QiskitTranspiler()
+
+        with pytest.raises(EmitError, match="Cannot resolve array size"):
+            transpiler.transpile(
+                kernel_unresolved_temp_size_collision,
+                bindings={"params": [5, 7]},
+                parameters=["i"],
+            )
 
 
 class TestNestedArrayAccess:

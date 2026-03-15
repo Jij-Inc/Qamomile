@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Union
 
+from qamomile.circuit.errors import QubitAliasError
 from qamomile.circuit.frontend.handle import Handle
 from qamomile.circuit.frontend.handle.primitives import Float, Qubit, UInt
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.types.primitives import FloatType, UIntType
 from qamomile.circuit.ir.value import Value
-from qamomile.circuit.transpiler.errors import QubitAliasError
 
 if TYPE_CHECKING:
     from qamomile.circuit.frontend.qkernel import QKernel
