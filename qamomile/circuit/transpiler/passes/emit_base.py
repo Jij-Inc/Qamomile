@@ -10,22 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
-from qamomile.circuit.transpiler.errors import ResolutionFailureReason
-
-if TYPE_CHECKING:
-    from qamomile.circuit.ir.value import Value
-
-
-@dataclass
-class QubitResolutionResult:
-    """Result of attempting to resolve a qubit index."""
-
-    success: bool
-    index: int | None = None
-    failure_reason: ResolutionFailureReason | None = None
-    failure_details: str = ""
-
-
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.gate import (
@@ -46,6 +30,27 @@ from qamomile.circuit.ir.operation.control_flow import (
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, PhiOp
 from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import ArrayValue
+from qamomile.circuit.transpiler.errors import EmitError, ResolutionFailureReason
+from qamomile.circuit.transpiler.value_resolution import (
+    BindingLookup,
+    is_concrete_real_number,
+    resolve_array_element_value as shared_resolve_array_element_value,
+    resolve_classical_value as shared_resolve_classical_value,
+    resolve_int_value as shared_resolve_int_value,
+)
+
+if TYPE_CHECKING:
+    from qamomile.circuit.ir.value import Value
+
+
+@dataclass
+class QubitResolutionResult:
+    """Result of attempting to resolve a qubit index."""
+
+    success: bool
+    index: int | None = None
+    failure_reason: ResolutionFailureReason | None = None
+    failure_details: str = ""
 
 
 def map_phi_outputs(
@@ -265,11 +270,17 @@ class ResourceAllocator:
                     if result.shape:
                         size_val = result.shape[0]
                         size = self._resolve_size(size_val, bindings)
-                        if size is not None:
-                            for i in range(size):
-                                qubit_id = f"{result.uuid}_{i}"
-                                if qubit_id not in qubit_map:
-                                    qubit_map[qubit_id] = len(qubit_map)
+                        if size is None:
+                            size_name = getattr(size_val, "name", repr(size_val))
+                            raise EmitError(
+                                f"Cannot resolve array size for '{result.name}' "
+                                f"from '{size_name}'.",
+                                operation="QInitOperation",
+                            )
+                        for i in range(size):
+                            qubit_id = f"{result.uuid}_{i}"
+                            if qubit_id not in qubit_map:
+                                qubit_map[qubit_id] = len(qubit_map)
                     continue
                 if result.uuid not in qubit_map:
                     qubit_map[result.uuid] = len(qubit_map)
@@ -284,11 +295,17 @@ class ResourceAllocator:
                 if isinstance(result, ArrayValue) and result.shape:
                     size_val = result.shape[0]
                     size = self._resolve_size(size_val, bindings)
-                    if size is not None:
-                        for i in range(size):
-                            clbit_id = f"{result.uuid}_{i}"
-                            if clbit_id not in clbit_map:
-                                clbit_map[clbit_id] = len(clbit_map)
+                    if size is None:
+                        size_name = getattr(size_val, "name", repr(size_val))
+                        raise EmitError(
+                            f"Cannot resolve measurement vector size for "
+                            f"'{result.name}' from '{size_name}'.",
+                            operation="MeasureVectorOperation",
+                        )
+                    for i in range(size):
+                        clbit_id = f"{result.uuid}_{i}"
+                        if clbit_id not in clbit_map:
+                            clbit_map[clbit_id] = len(clbit_map)
 
             elif isinstance(op, MeasureQFixedOperation):
                 qfixed = op.operands[0]
@@ -465,54 +482,7 @@ class ResourceAllocator:
         Returns:
             Resolved size as int, or None if cannot resolve
         """
-        import re
-
-        # Check for constant in params
-        if hasattr(size_val, "params") and "const" in size_val.params:
-            return int(size_val.params["const"])
-
-        # Check if it's a Value with parent_array (e.g., hi.shape[0])
-        if hasattr(size_val, "parent_array") and size_val.parent_array is not None:
-            array_name = size_val.parent_array.name
-            if array_name in bindings:
-                array_data = bindings[array_name]
-                # Get the shape/length of the bound array
-                if hasattr(array_data, "__len__"):
-                    return len(array_data)
-
-        # Check by name in bindings
-        if hasattr(size_val, "name") and size_val.name in bindings:
-            bound = bindings[size_val.name]
-            if isinstance(bound, (int, float)):
-                return int(bound)
-            if hasattr(bound, "__len__"):
-                return len(bound)
-
-        # Check by uuid in bindings
-        if hasattr(size_val, "uuid") and size_val.uuid in bindings:
-            bound = bindings[size_val.uuid]
-            if isinstance(bound, (int, float)):
-                return int(bound)
-
-        # Check for dimension naming pattern (e.g., "hi_dim0" -> array "hi", dimension 0)
-        # This handles cases where parent_array is None after inlining
-        if hasattr(size_val, "name") and size_val.name:
-            match = re.match(r"^(.+)_dim(\d+)$", size_val.name)
-            if match:
-                array_name = match.group(1)
-                dim_index = int(match.group(2))
-                if array_name in bindings:
-                    array_data = bindings[array_name]
-                    # Get shape at specified dimension
-                    if hasattr(array_data, "shape"):
-                        # numpy array or similar
-                        if dim_index < len(array_data.shape):
-                            return int(array_data.shape[dim_index])
-                    elif dim_index == 0 and hasattr(array_data, "__len__"):
-                        # For 1D sequences, dim0 is length
-                        return len(array_data)
-
-        return None
+        return shared_resolve_int_value(size_val, BindingLookup(bindings))
 
     def _allocate_gate(
         self,
@@ -723,7 +693,7 @@ class ValueResolver:
                 idx = int(idx_value.get_const())
             elif idx_value.name in bindings:
                 bound_val = bindings[idx_value.name]
-                if isinstance(bound_val, (int, float)):
+                if is_concrete_real_number(bound_val):
                     idx = int(bound_val)
                 else:
                     return QubitResolutionResult(
@@ -736,7 +706,7 @@ class ValueResolver:
                     )
             elif idx_value.uuid in bindings:
                 bound_val = bindings[idx_value.uuid]
-                if isinstance(bound_val, (int, float)):
+                if is_concrete_real_number(bound_val):
                     idx = int(bound_val)
                 else:
                     return QubitResolutionResult(
@@ -814,22 +784,7 @@ class ValueResolver:
         Returns:
             Resolved value (int, float, etc.), or None if cannot resolve
         """
-        if value.is_constant():
-            return value.get_const()
-
-        if value.uuid in bindings:
-            return bindings[value.uuid]
-
-        if value.name in bindings:
-            return bindings[value.name]
-
-        if value.params and "const" in value.params:
-            return value.params["const"]
-
-        if value.parent_array is not None and value.element_indices:
-            return self._resolve_array_element_value(value, bindings)
-
-        return None
+        return shared_resolve_classical_value(value, BindingLookup(bindings))
 
     def _resolve_array_element_value(
         self,
@@ -845,34 +800,7 @@ class ValueResolver:
         Returns:
             Resolved numeric value, or None if cannot resolve
         """
-        if v.parent_array is None or not v.element_indices:
-            return None
-
-        array_name = v.parent_array.name
-        if array_name not in bindings:
-            return None
-
-        array_data = bindings[array_name]
-
-        indices = []
-        for idx in v.element_indices:
-            idx_val = self.resolve_int_value(idx, bindings)
-            if idx_val is None:
-                return None
-            indices.append(idx_val)
-
-        try:
-            import numbers
-
-            result = array_data
-            for idx in indices:
-                result = result[idx]
-            # Check for numeric types including numpy integers/floats
-            if isinstance(result, numbers.Real):
-                return result
-            return None
-        except (IndexError, TypeError, KeyError):
-            return None
+        return shared_resolve_array_element_value(v, BindingLookup(bindings))
 
     def resolve_int_value(
         self,
@@ -888,31 +816,7 @@ class ValueResolver:
         Returns:
             Integer value, or None if cannot resolve
         """
-        from qamomile.circuit.ir.value import Value
-
-        if isinstance(val, (int, float)):
-            return int(val)
-        elif isinstance(val, Value):
-            if val.is_constant():
-                return int(val.get_const())
-            elif val.is_parameter():
-                param_name = val.parameter_name()
-                if param_name and param_name in bindings:
-                    bound_val = bindings[param_name]
-                    if isinstance(bound_val, (int, float)):
-                        return int(bound_val)
-                    return None
-            elif val.uuid in bindings:
-                bound_val = bindings[val.uuid]
-                if isinstance(bound_val, (int, float)):
-                    return int(bound_val)
-                return None
-            elif val.name in bindings:
-                bound_val = bindings[val.name]
-                if isinstance(bound_val, (int, float)):
-                    return int(bound_val)
-                return None
-        return 0
+        return shared_resolve_int_value(val, BindingLookup(bindings))
 
     def get_parameter_key(
         self,
@@ -936,17 +840,7 @@ class ValueResolver:
             if parent_name in self.parameters:
                 if value.element_indices and len(value.element_indices) > 0:
                     idx_value = value.element_indices[0]
-                    idx = None
-                    if idx_value.is_constant():
-                        idx = int(idx_value.get_const())
-                    elif idx_value.name in bindings:
-                        bound_val = bindings[idx_value.name]
-                        if isinstance(bound_val, (int, float)):
-                            idx = int(bound_val)
-                    elif idx_value.uuid in bindings:
-                        bound_val = bindings[idx_value.uuid]
-                        if isinstance(bound_val, (int, float)):
-                            idx = int(bound_val)
+                    idx = shared_resolve_int_value(idx_value, BindingLookup(bindings))
 
                     if idx is not None:
                         return f"{parent_name}[{idx}]"

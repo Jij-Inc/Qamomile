@@ -13,6 +13,7 @@ from qamomile.circuit.ir.value import Value, ValueBase
 
 from . import Pass
 from .control_flow_visitor import OperationTransformer
+from .value_mapping import substitute_value_recursive
 
 
 class ConstantFoldingPass(Pass[Block, Block]):
@@ -157,15 +158,21 @@ class ConstantFoldingPass(Pass[Block, Block]):
         op: Operation,
         folded_values: dict[str, Value],
     ) -> Operation:
-        """Substitute folded constant values in operation operands.
+        """Substitute folded constant values in operation operands and results.
 
-        Also propagates folded values into ``element_indices`` of Value
-        operands so that gate operations referencing a folded BinOp result
-        as a qubit index are updated correctly.
+        Propagates folded values into nested ``element_indices``
+        (index-of-index) recursively via ``substitute_value_recursive``,
+        so that patterns like ``q[indices[last]]`` are updated when
+        ``last`` is folded.
+
+        For ``GateOperation``, also substitutes results with nested
+        element_indices to keep SSA values consistent.
 
         For ``ControlledUOperation``, also folds ``num_controls``,
-        ``target_indices``, and ``controlled_indices`` fields.
+        ``target_indices``, ``controlled_indices``, and ``power`` fields.
         """
+        value_map: dict[str, ValueBase] = dict(folded_values)
+
         new_operands: list[Any] = []
         changed = False
 
@@ -174,25 +181,31 @@ class ConstantFoldingPass(Pass[Block, Block]):
                 new_operands.append(folded_values[operand.uuid])
                 changed = True
             elif isinstance(operand, Value) and operand.element_indices:
-                new_indices = []
-                indices_changed = False
-                for idx in operand.element_indices:
-                    if idx.uuid in folded_values:
-                        new_indices.append(folded_values[idx.uuid])
-                        indices_changed = True
-                    else:
-                        new_indices.append(idx)
-                if indices_changed:
-                    new_operands.append(
-                        dataclasses.replace(operand, element_indices=tuple(new_indices))
-                    )
+                new_op = substitute_value_recursive(operand, value_map)
+                new_operands.append(new_op)
+                if new_op is not operand:
                     changed = True
-                else:
-                    new_operands.append(operand)
             else:
                 new_operands.append(operand)
 
         result_op = dataclasses.replace(op, operands=new_operands) if changed else op
+
+        # Substitute results for GateOperation (not for control-flow ops
+        # whose results define loop variables).
+        if isinstance(result_op, GateOperation):
+            new_results: list[Any] = []
+            results_changed = False
+            for result in result_op.results:
+                if isinstance(result, Value) and result.element_indices:
+                    new_r = substitute_value_recursive(result, value_map)
+                    new_results.append(new_r)
+                    if new_r is not result:
+                        results_changed = True
+                else:
+                    new_results.append(result)
+            if results_changed:
+                result_op = dataclasses.replace(result_op, results=new_results)
+                changed = True
 
         # Fold ControlledUOperation-specific dataclass fields.
         if isinstance(result_op, ControlledUOperation):
@@ -235,37 +248,12 @@ class ConstantFoldingPass(Pass[Block, Block]):
             if extra_kwargs:
                 result_op = dataclasses.replace(result_op, **extra_kwargs)
 
-        # Substitute folded values in GateOperation.theta field
+        # Substitute GateOperation.theta recursively.
         if isinstance(result_op, GateOperation) and isinstance(result_op.theta, Value):
-            if result_op.theta.uuid in folded_values:
-                result_op = dataclasses.replace(
-                    result_op, theta=folded_values[result_op.theta.uuid]
-                )
-                changed = True
+            new_theta = substitute_value_recursive(result_op.theta, value_map)
+            if isinstance(new_theta, Value) and new_theta is not result_op.theta:
+                result_op = dataclasses.replace(result_op, theta=new_theta)
 
-        # Also substitute GateOperation.theta if it references a folded value
-        replacements: dict[str, Any] = {}
-        if changed:
-            replacements["operands"] = new_operands
-        if isinstance(result_op, GateOperation) and isinstance(result_op.theta, Value):
-            if result_op.theta.uuid in folded_values:
-                replacements["theta"] = folded_values[result_op.theta.uuid]
-            elif result_op.theta.element_indices:
-                new_indices = []
-                indices_changed = False
-                for idx in result_op.theta.element_indices:
-                    if idx.uuid in folded_values:
-                        new_indices.append(folded_values[idx.uuid])
-                        indices_changed = True
-                    else:
-                        new_indices.append(idx)
-                if indices_changed:
-                    replacements["theta"] = dataclasses.replace(
-                        result_op.theta, element_indices=tuple(new_indices)
-                    )
-
-        if replacements:
-            return dataclasses.replace(result_op, **replacements)
         return result_op
 
     def _resolve_field_value(

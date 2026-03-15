@@ -19,6 +19,10 @@ from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.segments import ClassicalSegment
 from qamomile.circuit.transpiler.execution_context import ExecutionContext
 from qamomile.circuit.transpiler.errors import ExecutionError
+from qamomile.circuit.transpiler.value_resolution import (
+    BindingLookup,
+    resolve_classical_value,
+)
 
 
 class ClassicalExecutor:
@@ -216,12 +220,22 @@ class ClassicalExecutor:
         context: ExecutionContext,
         results: dict[str, Any],
     ) -> Any:
-        """Get the concrete value from context or results."""
-        if value.uuid in results:
-            return results[value.uuid]
-        if context.has(value.uuid):
-            return context.get(value.uuid)
-        # Check if it's a constant
-        if value.is_constant():
-            return value.get_const()
+        """Get the concrete value from context or results.
+
+        Lookup priority:
+            1. results[uuid] — SSA intermediate values (exact match only)
+            2. context[uuid]
+            3. context[parameter_name] — user-provided parameter bindings
+            4. context[name] — fallback for name-keyed bindings
+            5. array element via parent_array + element_indices
+            6. constant value from IR
+            7. raise ExecutionError
+        """
+        resolved = resolve_classical_value(
+            value,
+            BindingLookup(results, context._state),
+            allow_parameter_name=True,
+        )
+        if resolved is not None:
+            return resolved
         raise ExecutionError(f"Value {value.name} not found in context or results")

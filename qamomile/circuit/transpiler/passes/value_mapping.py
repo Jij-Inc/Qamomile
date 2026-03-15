@@ -23,6 +23,117 @@ from qamomile.circuit.ir.value import (
 )
 
 
+def substitute_value_recursive(
+    v: ValueBase,
+    value_map: dict[str, ValueBase],
+) -> ValueBase:
+    """Recursively substitute values throughout a Value tree.
+
+    Unlike shallow substitution that only checks top-level UUIDs and
+    one level of ``element_indices``, this helper traverses the full
+    Value tree including nested ``element_indices`` (index-of-index),
+    ``parent_array``, ``TupleValue.elements``, ``DictValue.entries``,
+    and ``ArrayValue.shape``.
+
+    Args:
+        v: The value to substitute.
+        value_map: Mapping from UUID to replacement value.
+
+    Returns:
+        The substituted value, or the original if nothing changed.
+    """
+    # Direct lookup first
+    if v.uuid in value_map:
+        return value_map[v.uuid]
+
+    # TupleValue: recurse into elements
+    if isinstance(v, TupleValue):
+        new_elements: list[Value] = []
+        changed = False
+        for elem in v.elements:
+            new_elem = substitute_value_recursive(elem, value_map)
+            if isinstance(new_elem, Value):
+                new_elements.append(new_elem)
+                if new_elem is not elem:
+                    changed = True
+            else:
+                new_elements.append(elem)
+        if changed:
+            return dataclasses.replace(v, elements=tuple(new_elements))
+        return v
+
+    # DictValue: recurse into entries
+    if isinstance(v, DictValue):
+        new_entries: list[tuple[TupleValue | Value, Value]] = []
+        changed = False
+        for k, val in v.entries:
+            new_k = substitute_value_recursive(k, value_map)
+            new_v = substitute_value_recursive(val, value_map)
+            if not isinstance(new_k, (TupleValue, Value)):
+                new_k = k
+            if not isinstance(new_v, Value):
+                new_v = val
+            if new_k is not k or new_v is not val:
+                changed = True
+            new_entries.append((new_k, new_v))  # type: ignore[arg-type]
+        if changed:
+            return dataclasses.replace(v, entries=new_entries)
+        return v
+
+    # Value / ArrayValue: recurse into parent_array, element_indices, shape
+    if isinstance(v, Value):
+        replacements: dict[str, object] = {}
+
+        # Recurse into parent_array
+        if v.parent_array is not None:
+            if v.parent_array.uuid in value_map:
+                new_parent = value_map[v.parent_array.uuid]
+                if isinstance(new_parent, ArrayValue):
+                    replacements["parent_array"] = new_parent
+            else:
+                new_parent = substitute_value_recursive(v.parent_array, value_map)
+                if (
+                    isinstance(new_parent, ArrayValue)
+                    and new_parent is not v.parent_array
+                ):
+                    replacements["parent_array"] = new_parent
+
+        # Recurse into element_indices (the key fix for nested index-of-index)
+        if v.element_indices:
+            new_indices: list[Value] = []
+            indices_changed = False
+            for idx in v.element_indices:
+                new_idx = substitute_value_recursive(idx, value_map)
+                if isinstance(new_idx, Value):
+                    new_indices.append(new_idx)
+                    if new_idx is not idx:
+                        indices_changed = True
+                else:
+                    new_indices.append(idx)
+            if indices_changed:
+                replacements["element_indices"] = tuple(new_indices)
+
+        # ArrayValue.shape
+        if isinstance(v, ArrayValue) and v.shape:
+            new_shape_dims: list[Value] = []
+            shape_changed = False
+            for dim in v.shape:
+                new_dim = substitute_value_recursive(dim, value_map)
+                if isinstance(new_dim, Value):
+                    new_shape_dims.append(new_dim)
+                    if new_dim is not dim:
+                        shape_changed = True
+                else:
+                    new_shape_dims.append(dim)
+            if shape_changed:
+                replacements["shape"] = tuple(new_shape_dims)
+
+        if replacements:
+            return dataclasses.replace(v, **replacements)
+
+    return v
+
+
 class UUIDRemapper:
     """Clones values and operations with fresh UUIDs and logical_ids.
 
@@ -180,8 +291,7 @@ class UUIDRemapper:
             new_element_indices: tuple[Value, ...] | None = None
             if value.element_indices:
                 new_element_indices = tuple(
-                    cast(Value, self.clone_value(idx))
-                    for idx in value.element_indices
+                    cast(Value, self.clone_value(idx)) for idx in value.element_indices
                 )
 
             # Clone shape values so sub-kernel dimension parameters
@@ -211,8 +321,7 @@ class UUIDRemapper:
             new_element_indices_v: tuple[Value, ...] | None = None
             if value.element_indices:
                 new_element_indices_v = tuple(
-                    cast(Value, self.clone_value(idx))
-                    for idx in value.element_indices
+                    cast(Value, self.clone_value(idx)) for idx in value.element_indices
                 )
 
             cloned = dataclasses.replace(
@@ -220,9 +329,7 @@ class UUIDRemapper:
                 uuid=new_uuid,
                 logical_id=new_logical_id,
                 parent_array=new_parent_array_v,
-                element_indices=new_element_indices_v
-                if new_element_indices_v
-                else (),
+                element_indices=new_element_indices_v if new_element_indices_v else (),
             )
         else:
             # Fallback for any other ValueBase type
@@ -294,99 +401,9 @@ class ValueSubstitutor:
     def substitute_value(self, v: ValueBase) -> ValueBase:
         """Substitute a single value using the value map.
 
-        Handles all value types and array elements by substituting
-        their parent_array if needed.
+        Delegates to the recursive ``substitute_value_recursive`` helper
+        so that nested ``element_indices`` (index-of-index), ``parent_array``,
+        ``TupleValue.elements``, ``DictValue.entries``, and ``ArrayValue.shape``
+        are all traversed.
         """
-        # First try direct lookup
-        if v.uuid in self._value_map:
-            return self._value_map[v.uuid]
-
-        # Handle TupleValue - substitute elements
-        if isinstance(v, TupleValue):
-            new_elements = []
-            changed = False
-            for elem in v.elements:
-                if elem.uuid in self._value_map:
-                    substituted = self._value_map[elem.uuid]
-                    if isinstance(substituted, Value):
-                        new_elements.append(substituted)
-                        changed = True
-                    else:
-                        new_elements.append(elem)
-                else:
-                    new_elements.append(elem)
-            if changed:
-                return dataclasses.replace(v, elements=tuple(new_elements))
-            return v
-
-        # Handle DictValue - substitute entries
-        if isinstance(v, DictValue):
-            new_entries: list[tuple[TupleValue | Value, Value]] = []
-            changed = False
-            for k, val in v.entries:
-                new_k = k
-                new_v = val
-                if isinstance(k, (TupleValue, Value)) and k.uuid in self._value_map:
-                    sub_k = self._value_map[k.uuid]
-                    if isinstance(sub_k, (TupleValue, Value)):
-                        new_k = sub_k  # type: ignore
-                        changed = True
-                if val.uuid in self._value_map:
-                    sub_v = self._value_map[val.uuid]
-                    if isinstance(sub_v, Value):
-                        new_v = sub_v
-                        changed = True
-                new_entries.append((new_k, new_v))
-            if changed:
-                return dataclasses.replace(v, entries=new_entries)
-            return v
-
-        # Handle regular Value/ArrayValue
-        if isinstance(v, Value):
-            replacements: dict[str, object] = {}
-
-            # Check if this is an array element whose parent_array should be substituted
-            if v.parent_array is not None and v.parent_array.uuid in self._value_map:
-                new_parent = self._value_map[v.parent_array.uuid]
-                if isinstance(new_parent, ArrayValue):
-                    replacements["parent_array"] = new_parent
-
-            # Also check element_indices for substitution
-            if v.element_indices:
-                new_indices = []
-                indices_changed = False
-                for idx in v.element_indices:
-                    if idx.uuid in self._value_map:
-                        sub_idx = self._value_map[idx.uuid]
-                        if isinstance(sub_idx, Value):
-                            new_indices.append(sub_idx)
-                            indices_changed = True
-                        else:
-                            new_indices.append(idx)
-                    else:
-                        new_indices.append(idx)
-                if indices_changed:
-                    replacements["element_indices"] = tuple(new_indices)
-
-            # Substitute ArrayValue.shape dimensions so sub-kernel
-            # dimension parameters are resolved to caller arguments.
-            if isinstance(v, ArrayValue) and v.shape:
-                new_shape_dims: list[Value] = []
-                shape_changed = False
-                for dim in v.shape:
-                    if dim.uuid in self._value_map:
-                        sub_dim = self._value_map[dim.uuid]
-                        if isinstance(sub_dim, Value):
-                            new_shape_dims.append(sub_dim)
-                            shape_changed = True
-                        else:
-                            new_shape_dims.append(dim)
-                    else:
-                        new_shape_dims.append(dim)
-                if shape_changed:
-                    replacements["shape"] = tuple(new_shape_dims)
-
-            if replacements:
-                return dataclasses.replace(v, **replacements)
-
-        return v
+        return substitute_value_recursive(v, self._value_map)

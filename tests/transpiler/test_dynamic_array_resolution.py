@@ -11,8 +11,8 @@ These tests were added to prevent regression of bugs fixed in the emit pass.
 
 import numpy as np
 import pytest
-
 import qamomile.circuit as qmc
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.qiskit.transpiler import QiskitTranspiler
 
 
@@ -40,6 +40,21 @@ def kernel_matrix_size(
     """Kernel with qubit array sized by matrix dimension."""
     n = edges.shape[0]
     q = qmc.qubit_array(n, name="q")
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def kernel_unresolved_temp_size_collision(
+    params: qmc.Vector[qmc.UInt],
+    i: qmc.UInt,
+) -> qmc.Vector[qmc.Bit]:
+    """Kernel that used to reuse an earlier uint_tmp for dynamic sizing."""
+    m1 = params[1] + 1
+    _ = m1
+    m2 = params[i] + 1
+    q = qmc.qubit_array(m2, name="q")
+    for j in qmc.range(m2):
+        q[j] = qmc.h(q[j])
     return qmc.measure(q)
 
 
@@ -169,6 +184,17 @@ class TestDynamicArraySizeResolution:
         for bitstring, _count in result.results:
             assert len(bitstring) == 3
 
+    def test_unresolved_uint_tmp_size_collision_fails_closed(self):
+        """Later unresolved uint_tmp values must not mis-size dynamic arrays."""
+        transpiler = QiskitTranspiler()
+
+        with pytest.raises(EmitError, match="Cannot resolve array size"):
+            transpiler.transpile(
+                kernel_unresolved_temp_size_collision,
+                bindings={"params": [5, 7]},
+                parameters=["i"],
+            )
+
 
 class TestNestedArrayAccess:
     """Tests for nested array access resolution.
@@ -255,3 +281,47 @@ class TestQAOAPattern:
         # Verify all bitstrings have correct length (3 qubits)
         for bitstring, _count in result.results:
             assert len(bitstring) == 3
+
+    def test_inline_preserves_returned_array_shape_metadata(self):
+        """Inlined nested-call returns should not leak unresolved shape params."""
+        from qamomile.circuit.algorithm.qaoa import qaoa_state
+        from qamomile.circuit.ir.operation.control_flow import ForOperation
+
+        @qmc.qkernel
+        def circuit(
+            quad_: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+            linear_: qmc.Dict[qmc.UInt, qmc.Float],
+            gammas: qmc.Vector[qmc.Float],
+            betas: qmc.Vector[qmc.Float],
+        ) -> qmc.Vector[qmc.Bit]:
+            q = qaoa_state(qmc.uint(1), quad_, linear_, qmc.uint(2), gammas, betas)
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        block = transpiler.to_block(
+            circuit,
+            bindings={
+                "quad_": {(0, 1): 1.0},
+                "linear_": {0: 0.5, 1: -0.5},
+                "gammas": np.array([0.5]),
+                "betas": np.array([0.8]),
+            },
+        )
+        block = transpiler.substitute(block)
+        block = transpiler.inline(block)
+
+        loop_stops = []
+
+        def collect_loop_stops(operations):
+            for op in operations:
+                if isinstance(op, ForOperation) and len(op.operands) > 1:
+                    loop_stops.append(op.operands[1])
+                    collect_loop_stops(op.operations)
+
+        collect_loop_stops(block.operations)
+
+        assert loop_stops
+        assert not any(
+            stop.name == "n" and stop.parameter_name() == "n" for stop in loop_stops
+        )
+        assert any(stop.is_constant() and stop.get_const() == 2 for stop in loop_stops)

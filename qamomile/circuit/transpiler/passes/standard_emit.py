@@ -49,7 +49,18 @@ from qamomile.circuit.transpiler.errors import (
     ResolutionFailureReason,
 )
 from qamomile.circuit.transpiler.gate_emitter import GateEmitter
-from qamomile.circuit.transpiler.executable import ParameterMetadata, ParameterInfo
+from qamomile.circuit.transpiler.executable import (
+    ExecutableProgram,
+    ParameterMetadata,
+    ParameterInfo,
+)
+from qamomile.circuit.transpiler.segments import ClassicalSegment, SimplifiedProgram
+from qamomile.circuit.transpiler.value_resolution import (
+    BindingLookup,
+    is_frontend_temporary_name,
+    is_concrete_real_number,
+    resolve_classical_value as shared_resolve_classical_value,
+)
 
 T = TypeVar("T")  # Backend circuit type
 
@@ -87,10 +98,16 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         # Cache for backend parameter objects
         self._parameter_map: dict[str, Any] = {}
 
+        # UUIDs of BinOp outputs that _pre_evaluate_classical tried but
+        # could not resolve.  Used by _resolve_angle to fail-closed.
+        self._unresolved_prep_outputs: set[str] = set()
+
         # Mapping from classical bit index to physical qubit index.
         # Populated during measurement emission to support backends
         # where emit_measure is a no-op (e.g., QURI Parts).
         self._measurement_qubit_map: dict[int, int] = {}
+
+        self._pre_allocated: tuple[T, dict[str, int], dict[str, int]] | None = None
 
     def _build_parameter_metadata(self) -> ParameterMetadata:
         """Build parameter metadata from created parameter objects."""
@@ -115,26 +132,187 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
 
         return ParameterMetadata(parameters=params)
 
+    def run(self, input: "SimplifiedProgram") -> "ExecutableProgram[T]":
+        """Emit backend code from simplified program.
+
+        Overrides the base to pre-allocate the backend circuit before
+        classical pre-evaluation, so that emitters that require a live
+        circuit for ``create_parameter`` (e.g. QURI Parts) work correctly.
+        """
+        self._pre_allocated = None
+        self._bind_folded_constant_values(input.quantum.operations)
+
+        if input.classical_prep and input.quantum:
+            # Resolve concrete classical-prep BinOps first so computed array
+            # sizes are present in bindings before resource allocation.
+            self._pre_evaluate_concrete_classical_prep(input.classical_prep)
+
+            qubit_map, clbit_map = self._allocator.allocate(
+                input.quantum.operations, self.bindings
+            )
+            qubit_count = max(qubit_map.values()) + 1 if qubit_map else 0
+            clbit_count = max(clbit_map.values()) + 1 if clbit_map else 0
+            self._pre_allocated = (
+                self._emitter.create_circuit(qubit_count, clbit_count),
+                qubit_map,
+                clbit_map,
+            )
+
+        return super().run(input)
+
+    def _bind_folded_constant_values(self, operations: list[Operation]) -> None:
+        """Cache folded constant aliases so shared UUIDs resolve during emit."""
+
+        seen_values: set[int] = set()
+
+        def visit_value(value: Value) -> None:
+            value_id = id(value)
+            if value_id in seen_values:
+                return
+            seen_values.add(value_id)
+
+            if value.is_constant():
+                const_value = value.get_const()
+                self.bindings.setdefault(value.uuid, const_value)
+                if not is_frontend_temporary_name(value.name):
+                    self.bindings.setdefault(value.name, const_value)
+
+            if isinstance(value, Value):
+                for index_value in value.element_indices:
+                    visit_value(index_value)
+
+            if hasattr(value, "shape"):
+                for shape_value in value.shape:
+                    visit_value(shape_value)
+
+        def visit_operations(ops: list[Operation]) -> None:
+            for op in ops:
+                for operand in op.operands:
+                    if isinstance(operand, Value):
+                        visit_value(operand)
+                for result in op.results:
+                    if isinstance(result, Value):
+                        visit_value(result)
+
+                if isinstance(op, ForOperation):
+                    visit_operations(op.operations)
+                elif isinstance(op, ForItemsOperation):
+                    visit_operations(op.operations)
+                elif isinstance(op, IfOperation):
+                    visit_operations(op.true_operations)
+                    visit_operations(op.false_operations)
+                    visit_operations(op.phi_ops)
+                elif isinstance(op, WhileOperation):
+                    visit_operations(op.operations)
+
+        visit_operations(operations)
+
+    def _pre_evaluate_concrete_classical_prep(
+        self,
+        segment: "ClassicalSegment",
+    ) -> None:
+        """Evaluate only concrete classical-prep BinOps before allocation.
+
+        This early pass resolves bound inputs via parameter names so computed
+        sizes like ``m = n + 1`` are available for pre-allocation, but it skips
+        symbolic expressions that would otherwise require ``create_parameter``.
+        """
+        lookup = BindingLookup(self.bindings)
+
+        for op in segment.operations:
+            if not isinstance(op, BinOp):
+                continue
+
+            lhs = shared_resolve_classical_value(
+                op.lhs,
+                lookup,
+                allow_parameter_name=True,
+            )
+            rhs = shared_resolve_classical_value(
+                op.rhs,
+                lookup,
+                allow_parameter_name=True,
+            )
+
+            if lhs is None or rhs is None:
+                continue
+
+            result = None
+            match op.kind:
+                case BinOpKind.ADD:
+                    result = lhs + rhs
+                case BinOpKind.SUB:
+                    result = lhs - rhs
+                case BinOpKind.MUL:
+                    result = lhs * rhs
+                case BinOpKind.DIV:
+                    if rhs == 0:
+                        raise EmitError(
+                            "Division by zero during classical pre-evaluation"
+                        )
+                    result = lhs / rhs
+                case BinOpKind.FLOORDIV:
+                    if rhs == 0:
+                        raise EmitError(
+                            "Floor division by zero during classical pre-evaluation"
+                        )
+                    result = lhs // rhs
+                case BinOpKind.POW:
+                    result = lhs**rhs
+
+            if result is not None and op.results:
+                output = op.results[0]
+                self.bindings[output.uuid] = result
+                if not is_frontend_temporary_name(output.name):
+                    self.bindings[output.name] = result
+
+    def _pre_evaluate_classical(self, segment: "ClassicalSegment") -> None:
+        """Pre-evaluate classical segment using the full symbolic resolver.
+
+        Overrides the base ``EmitPass._pre_evaluate_classical`` which can only
+        resolve ``const`` / ``uuid`` / ``name`` values.  This version delegates
+        each ``BinOp`` to ``_evaluate_binop`` so that unbound parameters are
+        converted to backend parameter objects (via ``ValueResolver`` /
+        ``get_parameter_key``) and stored in ``self.bindings``.
+
+        This ensures that classical-prep computations like ``theta = a + b`` or
+        ``theta = params[1] + 0.5`` are preserved as parametric expressions
+        rather than silently falling back to ``0.0``.
+
+        BinOp outputs that could not be resolved are tracked in
+        ``_unresolved_prep_outputs`` so that ``_resolve_angle`` can
+        fail-closed instead of silently returning ``0.0``.
+        """
+        for op in segment.operations:
+            if isinstance(op, BinOp):
+                self._evaluate_binop(op, self.bindings)
+                # Track outputs that _evaluate_binop could not resolve
+                if op.results:
+                    output = op.results[0]
+                    if output.uuid not in self.bindings:
+                        self._unresolved_prep_outputs.add(output.uuid)
+
     def _emit_quantum_segment(
         self,
         operations: list[Operation],
         bindings: dict[str, Any],
     ) -> tuple[T, dict[str, int], dict[str, int]]:
         """Generate backend circuit from operations."""
-        # First pass: allocate resources (pass bindings for dynamic size resolution)
-        qubit_map, clbit_map = self._allocator.allocate(operations, bindings)
-
-        # Count physical qubits/clbits
-        qubit_count = max(qubit_map.values()) + 1 if qubit_map else 0
-        clbit_count = max(clbit_map.values()) + 1 if clbit_map else 0
-
-        # Create circuit
-        circuit = self._emitter.create_circuit(qubit_count, clbit_count)
+        if self._pre_allocated is not None:
+            # Reuse circuit created before classical pre-evaluation
+            circuit, qubit_map, clbit_map = self._pre_allocated
+            self._pre_allocated = None
+        else:
+            # Normal path: allocate and create fresh
+            qubit_map, clbit_map = self._allocator.allocate(operations, bindings)
+            qubit_count = max(qubit_map.values()) + 1 if qubit_map else 0
+            clbit_count = max(clbit_map.values()) + 1 if clbit_map else 0
+            circuit = self._emitter.create_circuit(qubit_count, clbit_count)
 
         # Reset measurement map before emission
         self._measurement_qubit_map.clear()
 
-        # Second pass: emit gates
+        # Emit gates
         self._emit_operations(circuit, operations, qubit_map, clbit_map, bindings)
 
         return circuit, qubit_map, clbit_map
@@ -1638,40 +1816,75 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             return
 
         result = None
-        match op.kind:
-            case BinOpKind.ADD:
-                result = lhs + rhs
-            case BinOpKind.SUB:
-                result = lhs - rhs
-            case BinOpKind.MUL:
-                result = lhs * rhs
-            case BinOpKind.DIV:
-                result = (
-                    lhs / rhs
-                    if (isinstance(rhs, (int, float)) and rhs != 0)
-                    else (lhs / rhs if rhs != 0 else 0.0)
-                )
-            case BinOpKind.FLOORDIV:
-                result = (
-                    lhs // rhs if (isinstance(rhs, (int, float)) and rhs != 0) else 0
-                )
-            case BinOpKind.POW:
-                result = lhs**rhs
+        symbolic_operands = (
+            lhs_param_key is not None
+            or rhs_param_key is not None
+            or not is_concrete_real_number(lhs)
+            or not is_concrete_real_number(rhs)
+        )
+        try:
+            match op.kind:
+                case BinOpKind.ADD:
+                    result = lhs + rhs
+                case BinOpKind.SUB:
+                    result = lhs - rhs
+                case BinOpKind.MUL:
+                    result = lhs * rhs
+                case BinOpKind.DIV:
+                    if is_concrete_real_number(rhs) and rhs == 0:
+                        raise EmitError(
+                            "Division by zero during classical pre-evaluation"
+                        )
+                    result = lhs / rhs
+                case BinOpKind.FLOORDIV:
+                    if is_concrete_real_number(rhs) and rhs == 0:
+                        raise EmitError(
+                            "Floor division by zero during classical pre-evaluation"
+                        )
+                    result = lhs // rhs
+                case BinOpKind.POW:
+                    result = lhs**rhs
+        except ZeroDivisionError as exc:
+            if op.kind == BinOpKind.DIV:
+                raise EmitError(
+                    "Division by zero during classical pre-evaluation"
+                ) from exc
+            if op.kind == BinOpKind.FLOORDIV:
+                raise EmitError(
+                    "Floor division by zero during classical pre-evaluation"
+                ) from exc
+            raise
+        except TypeError as exc:
+            if not symbolic_operands:
+                raise
+            raise EmitError(
+                f"Cannot evaluate classical-prep BinOp '{op.kind.name}' for "
+                f"operands '{op.lhs.name}' and '{op.rhs.name}': {exc}",
+                operation=f"BinOp({op.kind.name})",
+            ) from exc
 
         if result is not None and op.results:
             output = op.results[0]
             bindings[output.uuid] = result
-            bindings[output.name] = result
+            if not is_frontend_temporary_name(output.name):
+                bindings[output.name] = result
 
     def _resolve_angle(
         self,
         op: GateOperation,
         bindings: dict[str, Any],
     ) -> float | Any:
-        """Resolve angle parameter for rotation gates."""
+        """Resolve angle parameter for rotation gates.
+
+        Raises:
+            EmitError: If the gate has an explicit ``theta`` that cannot be
+                resolved to a concrete value or a backend parameter expression.
+                This prevents silent miscompilation where an unresolvable angle
+                would otherwise default to ``0.0``.
+        """
         if hasattr(op, "theta") and op.theta is not None:
             theta = op.theta
-            if isinstance(theta, (int, float)):
+            if is_concrete_real_number(theta):
                 return float(theta)
             elif isinstance(theta, Value):
                 param_key = self._resolver.get_parameter_key(theta, bindings)
@@ -1682,9 +1895,22 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                         )
                     return self._parameter_map[param_key]
 
+                # Fail-closed before generic name-based resolution so an
+                # earlier temporary with the same frontend name cannot be
+                # reused for an unresolved classical-prep output.
+                if theta.uuid in self._unresolved_prep_outputs:
+                    raise EmitError(
+                        f"Cannot resolve gate angle for '{theta.name}' "
+                        f"(uuid={theta.uuid}). The value is a classical-prep "
+                        f"output that could not be resolved to a concrete "
+                        f"value or parametric expression. Ensure all "
+                        f"classical-prep operands are bound or computable "
+                        f"at emit time."
+                    )
+
                 resolved = self._resolver.resolve_classical_value(theta, bindings)
                 if resolved is not None:
-                    if not isinstance(resolved, (int, float)):
+                    if not is_concrete_real_number(resolved):
                         return resolved
                     return float(resolved)
 
@@ -1700,7 +1926,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
 
                 resolved = self._resolver.resolve_classical_value(operand, bindings)
                 if resolved is not None:
-                    if not isinstance(resolved, (int, float)):
+                    if not is_concrete_real_number(resolved):
                         return resolved
                     return float(resolved)
 

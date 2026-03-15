@@ -6,15 +6,15 @@ import uuid
 from typing import Generic, Iterator, TypeVar, overload
 
 from qamomile.circuit.frontend.tracer import get_current_tracer
-from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
-from qamomile.circuit.ir.types import ValueType
-from qamomile.circuit.ir.types.primitives import BitType, FloatType, QubitType, UIntType
-from qamomile.circuit.ir.value import ArrayValue, Value
-from qamomile.circuit.transpiler.errors import (
+from qamomile.circuit.errors import (
     AffineTypeError,
     QubitConsumedError,
     UnreturnedBorrowError,
 )
+from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
+from qamomile.circuit.ir.types import ValueType
+from qamomile.circuit.ir.types.primitives import BitType, FloatType, QubitType, UIntType
+from qamomile.circuit.ir.value import ArrayValue, Value
 
 from .handle import Handle
 from .primitives import Bit, Float, Qubit, UInt
@@ -180,9 +180,17 @@ class ArrayBase(Handle, Generic[T]):
             return True
 
         for lhs_idx, rhs_idx in zip(lhs, rhs):
-            lhs_const = lhs_idx.value.get_const() if lhs_idx.value.is_constant() else None
-            rhs_const = rhs_idx.value.get_const() if rhs_idx.value.is_constant() else None
-            if lhs_const is not None and rhs_const is not None and lhs_const != rhs_const:
+            lhs_const = (
+                lhs_idx.value.get_const() if lhs_idx.value.is_constant() else None
+            )
+            rhs_const = (
+                rhs_idx.value.get_const() if rhs_idx.value.is_constant() else None
+            )
+            if (
+                lhs_const is not None
+                and rhs_const is not None
+                and lhs_const != rhs_const
+            ):
                 return True
         return False
 

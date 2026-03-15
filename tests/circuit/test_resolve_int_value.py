@@ -1,6 +1,10 @@
 """Test that resolve_int_value uses UUID-based lookup for BinOp results."""
 
+import numpy as np
+
+from qamomile.circuit.ir.types.primitives import FloatType
 from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import ArrayValue
 from qamomile.circuit.ir.types.primitives import UIntType
 from qamomile.circuit.transpiler.passes.emit_base import ValueResolver
 
@@ -42,6 +46,20 @@ class TestResolveIntValueUuidLookup:
         result = resolver.resolve_int_value(val, bindings)
         assert result == 42
 
+    def test_synthetic_temp_name_does_not_resolve_from_earlier_temp(self):
+        """Later unresolved frontend temps must not reuse same-name bindings."""
+        resolver = ValueResolver()
+
+        resolved = Value(type=UIntType(), name="uint_tmp")
+        unresolved = Value(type=UIntType(), name="uint_tmp")
+        bindings: dict[str, int] = {
+            resolved.uuid: 8,
+            resolved.name: 8,
+        }
+
+        result = resolver.resolve_int_value(unresolved, bindings)
+        assert result is None
+
     def test_constant_value_unaffected(self):
         """Constant Values resolve correctly regardless of UUID/name lookup."""
         resolver = ValueResolver()
@@ -51,3 +69,34 @@ class TestResolveIntValueUuidLookup:
 
         result = resolver.resolve_int_value(val, bindings)
         assert result == 7
+
+    def test_dimension_name_resolves_from_bound_vector(self):
+        """Synthetic values like hi_dim0 resolve from the bound array length."""
+        resolver = ValueResolver()
+
+        val = Value(type=UIntType(), name="hi_dim0")
+        bindings = {"hi": np.array([0.1, 0.2, 0.3])}
+
+        result = resolver.resolve_int_value(val, bindings)
+        assert result == 3
+
+    def test_dimension_name_resolves_nonzero_matrix_axis(self):
+        """Synthetic dimension names also work for higher-rank arrays."""
+        resolver = ValueResolver()
+
+        val = Value(type=UIntType(), name="edges_dim1")
+        bindings = {"edges": np.zeros((3, 2), dtype=np.uint64)}
+
+        result = resolver.resolve_int_value(val, bindings)
+        assert result == 2
+
+    def test_parent_array_shape_value_resolves_first_dimension(self):
+        """Pre-inline shape values still resolve through their parent array."""
+        resolver = ValueResolver()
+
+        array = ArrayValue(type=FloatType(), name="weights")
+        val = Value(type=UIntType(), name="shape_dim", parent_array=array)
+        bindings = {"weights": np.array([1.0, 2.0, 3.0, 4.0])}
+
+        result = resolver.resolve_int_value(val, bindings)
+        assert result == 4

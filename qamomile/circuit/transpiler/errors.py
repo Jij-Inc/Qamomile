@@ -1,13 +1,16 @@
 """Compilation error classes for Qamomile transpiler."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
-
-class QamomileCompileError(Exception):
-    """Base class for all Qamomile compilation errors."""
-
-    pass
+from qamomile.circuit.errors import (
+    AffineTypeError,
+    QamomileCompileError,
+    QubitAliasError,
+    QubitConsumedError,
+    QubitRebindError,
+    UnreturnedBorrowError,
+)
 
 
 class InliningError(QamomileCompileError):
@@ -123,16 +126,12 @@ class QubitIndexResolutionError(EmitError):
         bindings_sample = self.available_bindings_keys[:10]
         lines.append(f"  Bindings keys (sample): {bindings_sample}")
         if len(self.available_bindings_keys) > 10:
-            lines.append(
-                f"    ... and {len(self.available_bindings_keys) - 10} more"
-            )
+            lines.append(f"    ... and {len(self.available_bindings_keys) - 10} more")
 
         qubit_map_sample = self.available_qubit_map_keys[:10]
         lines.append(f"  Qubit map keys (sample): {qubit_map_sample}")
         if len(self.available_qubit_map_keys) > 10:
-            lines.append(
-                f"    ... and {len(self.available_qubit_map_keys) - 10} more"
-            )
+            lines.append(f"    ... and {len(self.available_qubit_map_keys) - 10} more")
         lines.append("")
 
         lines.append("=== Suggested Fixes ===")
@@ -149,8 +148,8 @@ class QubitIndexResolutionError(EmitError):
         for info in self.operand_infos:
             if info.failure_reason == ResolutionFailureReason.SYMBOLIC_INDEX_NOT_BOUND:
                 suggestions.append(
-                    f"Bind the index variable by passing it in bindings "
-                    f"or ensure the loop variable is properly propagated."
+                    "Bind the index variable by passing it in bindings "
+                    "or ensure the loop variable is properly propagated."
                 )
             elif (
                 info.failure_reason
@@ -165,12 +164,12 @@ class QubitIndexResolutionError(EmitError):
                 == ResolutionFailureReason.NESTED_ARRAY_RESOLUTION_FAILED
             ):
                 suggestions.append(
-                    f"The index expression involves nested array access. "
-                    f"Ensure all intermediate arrays are bound in the bindings dict."
+                    "The index expression involves nested array access. "
+                    "Ensure all intermediate arrays are bound in the bindings dict."
                 )
                 suggestions.append(
-                    f"Example: transpiler.transpile(kernel, "
-                    f"bindings={{'edges': np.array([[0,1],[1,2]]), ...}})"
+                    "Example: transpiler.transpile(kernel, "
+                    "bindings={'edges': np.array([[0,1],[1,2]]), ...})"
                 )
             elif info.failure_reason == ResolutionFailureReason.INDEX_NOT_NUMERIC:
                 suggestions.append(
@@ -205,96 +204,20 @@ class ExecutionError(QamomileCompileError):
     pass
 
 
-class AffineTypeError(QamomileCompileError):
-    """Base class for affine type violations.
-
-    Affine types enforce that quantum resources (qubits) are used at most once.
-    This prevents common errors such as reusing a consumed qubit or aliasing.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        handle_name: str | None = None,
-        operation_name: str | None = None,
-        first_use_location: str | None = None,
-    ):
-        self.handle_name = handle_name
-        self.operation_name = operation_name
-        self.first_use_location = first_use_location
-        super().__init__(message)
-
-
-class QubitConsumedError(AffineTypeError):
-    """Qubit handle used after being consumed by a previous operation.
-
-    Each qubit handle can only be used once. After a gate operation,
-    you must reassign the result to use the new handle.
-
-    Example of incorrect code:
-        q1 = qm.h(q)
-        q2 = qm.x(q)  # ERROR: q was already consumed by h()
-
-    Correct code:
-        q = qm.h(q)  # Reassign to capture new handle
-        q = qm.x(q)  # Use the reassigned handle
-    """
-
-    pass
-
-
-class QubitAliasError(AffineTypeError):
-    """Same qubit used multiple times in one operation.
-
-    Operations like cx() require distinct qubits for control and target.
-    Using the same qubit in both positions is physically impossible
-    and indicates a programming error.
-
-    Example of incorrect code:
-        q1, q2 = qm.cx(q, q)  # ERROR: same qubit as control and target
-
-    Correct code:
-        q1, q2 = qm.cx(control, target)  # Use distinct qubits
-    """
-
-    pass
-
-
-class UnreturnedBorrowError(AffineTypeError):
-    """Borrowed array element not returned before array use.
-
-    When you borrow an element from a qubit array, you must return it
-    (write it back) before using other elements or the array itself.
-
-    Example of incorrect code:
-        q0 = qubits[0]
-        q0 = qm.h(q0)
-        q1 = qubits[1]  # ERROR: q0 not returned yet
-
-    Correct code:
-        q0 = qubits[0]
-        q0 = qm.h(q0)
-        qubits[0] = q0  # Return the borrowed element
-        q1 = qubits[1]  # Now safe to borrow another
-    """
-
-    pass
-
-
-class QubitRebindError(AffineTypeError):
-    """Quantum variable reassigned from a different quantum source.
-
-    When a quantum variable is reassigned, the RHS must consume the
-    same variable (self-update pattern). Reassigning from a different
-    quantum variable silently discards the original quantum state.
-
-    Example of incorrect code:
-        a = qm.h(b)  # ERROR: 'a' was quantum, now overwritten from 'b'
-        a = b         # ERROR: 'a' was quantum, now overwritten from 'b'
-
-    Correct patterns:
-        a = qm.h(a)      # Self-update (OK)
-        new = qm.h(b)    # New binding (OK, 'new' wasn't quantum before)
-    """
-
-    pass
+__all__ = [
+    "AffineTypeError",
+    "DependencyError",
+    "EmitError",
+    "ExecutionError",
+    "InliningError",
+    "OperandResolutionInfo",
+    "QamomileCompileError",
+    "QubitAliasError",
+    "QubitConsumedError",
+    "QubitIndexResolutionError",
+    "QubitRebindError",
+    "ResolutionFailureReason",
+    "SeparationError",
+    "UnreturnedBorrowError",
+    "ValidationError",
+]

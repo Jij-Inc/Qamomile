@@ -3,6 +3,13 @@
 import pytest
 
 import qamomile.circuit as qm
+from qamomile.circuit.errors import (
+    AffineTypeError as SharedAffineTypeError,
+    QubitAliasError as SharedQubitAliasError,
+    QubitConsumedError as SharedQubitConsumedError,
+    QubitRebindError as SharedQubitRebindError,
+    UnreturnedBorrowError as SharedUnreturnedBorrowError,
+)
 from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.constructors import qubit_array
 from qamomile.circuit.frontend.handle import Qubit
@@ -30,6 +37,16 @@ from tests.circuit._gate_catalog import (
     TWO_QUBIT_GATES_NO_PARAM as _TWO_QUBIT_GATES_NO_PARAM,
     TWO_QUBIT_GATES_WITH_PARAM as _TWO_QUBIT_GATES_WITH_PARAM,
 )
+
+
+def test_affine_error_reexport_preserves_type_identity():
+    """Shared affine errors and transpiler re-exports must stay identical."""
+
+    assert SharedAffineTypeError is AffineTypeError
+    assert SharedQubitAliasError is QubitAliasError
+    assert SharedQubitConsumedError is QubitConsumedError
+    assert SharedQubitRebindError is QubitRebindError
+    assert SharedUnreturnedBorrowError is UnreturnedBorrowError
 
 
 class TestDoubleUseDetection:
@@ -2170,7 +2187,9 @@ class TestQuantumRebindDetectionTwoQubit:
         _TWO_QUBIT_GATES_NO_PARAM,
         ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM],
     )
-    def test_vector_element_tuple_overwrite_from_other_vector_rejected(self, name, gate):
+    def test_vector_element_tuple_overwrite_from_other_vector_rejected(
+        self, name, gate
+    ):
         @qkernel
         def bad() -> tuple[qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
             qs1 = qubit_array(2, "qs1")
@@ -2567,9 +2586,7 @@ class TestQuantumRebindDetectionViaQKernel:
         """Overwriting an existing scalar qubit from qs[i] should raise rebind error."""
 
         @qkernel
-        def bad(
-            a: qm.Qubit, qs: qm.Vector[qm.Qubit], i: qm.UInt
-        ) -> qm.Qubit:
+        def bad(a: qm.Qubit, qs: qm.Vector[qm.Qubit], i: qm.UInt) -> qm.Qubit:
             a = qs[i]
             return a
 
@@ -2630,7 +2647,9 @@ class TestQuantumRebindDetectionViaQKernel:
 class TestQuantumRebindDetectionStdlib:
     """Rebind behavior through stdlib APIs (qft/iqft) and element-level patterns."""
 
-    @pytest.mark.parametrize("name,gate", _STDLIB_GATES, ids=[g[0] for g in _STDLIB_GATES])
+    @pytest.mark.parametrize(
+        "name,gate", _STDLIB_GATES, ids=[g[0] for g in _STDLIB_GATES]
+    )
     def test_vector_whole_overwrite_rejected(self, name, gate):
         @qkernel
         def bad(
@@ -2642,7 +2661,9 @@ class TestQuantumRebindDetectionStdlib:
         with pytest.raises(QubitRebindError):
             bad.build()
 
-    @pytest.mark.parametrize("name,gate", _STDLIB_GATES, ids=[g[0] for g in _STDLIB_GATES])
+    @pytest.mark.parametrize(
+        "name,gate", _STDLIB_GATES, ids=[g[0] for g in _STDLIB_GATES]
+    )
     def test_vector_whole_self_update_allowed(self, name, gate):
         @qkernel
         def ok(qs1: qm.Vector[qm.Qubit]) -> qm.Vector[qm.Qubit]:
@@ -2652,7 +2673,9 @@ class TestQuantumRebindDetectionStdlib:
         graph = ok.build()
         assert graph is not None
 
-    @pytest.mark.parametrize("name,gate", _STDLIB_GATES, ids=[g[0] for g in _STDLIB_GATES])
+    @pytest.mark.parametrize(
+        "name,gate", _STDLIB_GATES, ids=[g[0] for g in _STDLIB_GATES]
+    )
     def test_vector_whole_new_binding_allowed(self, name, gate):
         @qkernel
         def ok(
@@ -2710,3 +2733,93 @@ class TestQuantumRebindDetectionStdlib:
 
         graph = ok.build()
         assert graph is not None
+
+
+class TestExpvalConsumeContract:
+    """Test that expval consumes qubits and enforces linear type contract."""
+
+    def test_expval_tuple_reuse_after_expval_raises(self):
+        """Reusing a qubit after expval(tuple) should raise QubitConsumedError."""
+
+        @qkernel
+        def bad(q: Qubit, H: qm.Observable) -> qm.Float:
+            q = qm.h(q)
+            result = qm.expval((q,), H)
+            _q2 = qm.x(q)  # ERROR: q consumed by expval
+            return result
+
+        with pytest.raises(QubitConsumedError, match="expval"):
+            bad.build()
+
+    def test_expval_vector_reuse_after_expval_raises(self):
+        """Reusing a Vector[Qubit] after expval should raise QubitConsumedError."""
+
+        @qkernel
+        def bad(n: qm.UInt, H: qm.Observable) -> qm.Float:
+            q = qubit_array(n, "q")
+            q[0] = qm.h(q[0])
+            result = qm.expval(q, H)
+            _elem = q[0]  # ERROR: q consumed by expval
+            return result
+
+        with pytest.raises(QubitConsumedError):
+            bad.build(n=2)
+
+    def test_expval_tuple_duplicate_qubit_raises(self):
+        """Duplicate qubit in expval tuple should raise QubitConsumedError."""
+
+        @qkernel
+        def bad(q: Qubit, H: qm.Observable) -> qm.Float:
+            return qm.expval((q, q), H)  # ERROR: duplicate qubit
+
+        with pytest.raises(QubitConsumedError, match="Duplicate"):
+            bad.build()
+
+    def test_expval_vector_unreturned_borrow_raises(self):
+        """Unreturned borrow + expval(vector) should raise UnreturnedBorrowError."""
+
+        @qkernel
+        def bad(n: qm.UInt, H: qm.Observable) -> qm.Float:
+            q = qubit_array(n, "q")
+            _elem = q[0]  # borrow without return
+            return qm.expval(q, H)  # ERROR: unreturned borrow
+
+        with pytest.raises(UnreturnedBorrowError):
+            bad.build(n=2)
+
+    def test_expval_single_qubit_reuse_raises(self):
+        """Reusing a single bare qubit after expval should raise QubitConsumedError."""
+
+        @qkernel
+        def bad(q: Qubit, H: qm.Observable) -> qm.Float:
+            q = qm.h(q)
+            result = qm.expval(q, H)
+            _q2 = qm.x(q)  # ERROR: q consumed by expval
+            return result
+
+        with pytest.raises(QubitConsumedError, match="expval"):
+            bad.build()
+
+    def test_expval_single_toplevel_ok(self):
+        """Single top-level expval with tuple should still work."""
+
+        @qkernel
+        def ok(q0: Qubit, q1: Qubit, H: qm.Observable) -> qm.Float:
+            q0 = qm.h(q0)
+            return qm.expval((q0, q1), H)
+
+        block = ok.build()
+        assert block is not None
+
+    def test_expval_single_toplevel_vector_ok(self):
+        """Single top-level expval with Vector should still work."""
+
+        @qkernel
+        def ok(n: qm.UInt, H: qm.Observable) -> qm.Float:
+            q = qubit_array(n, "q")
+            q[0] = qm.h(q[0])
+            q[0], q[1] = qm.cx(q[0], q[1])
+            return qm.expval(q, H)
+
+        block = ok.build(n=2)
+        assert block is not None

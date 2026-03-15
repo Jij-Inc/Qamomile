@@ -132,6 +132,33 @@ class ExecutableProgram(Generic[T]):
                 result[key] = value
         return result
 
+    def _build_runtime_classical_context(
+        self,
+        bindings: dict[str, Any] | None = None,
+    ) -> ExecutionContext:
+        """Build an ExecutionContext populated with user bindings for runtime classical execution.
+
+        Includes both raw name-keyed bindings and indexed (vector-expanded) bindings
+        so that ClassicalExecutor can resolve parameters by uuid, parameter_name, or name.
+
+        Args:
+            bindings: User-provided parameter bindings.
+
+        Returns:
+            ExecutionContext with user bindings loaded.
+        """
+        context = ExecutionContext()
+        if bindings:
+            # Load raw name-keyed bindings (e.g. {"a": 1.0, "b": 2.0})
+            for key, value in bindings.items():
+                context.set(key, value)
+            # Also load indexed bindings (e.g. {"gammas[0]": 0.1})
+            indexed = self._convert_user_bindings(bindings)
+            for key, value in indexed.items():
+                if not context.has(key):
+                    context.set(key, value)
+        return context
+
     def _validate_bindings(
         self,
         indexed_bindings: dict[str, Any],
@@ -210,6 +237,7 @@ class ExecutableProgram(Generic[T]):
         compiled_classical = self.compiled_classical
         execution_order = self.execution_order
         output_refs = self.output_refs
+        runtime_context_template = self._build_runtime_classical_context(bindings)
 
         def convert_counts(raw_counts: dict[str, int]) -> list[tuple[Any, int]]:
             """Convert bitstring counts by executing classical segments."""
@@ -217,8 +245,10 @@ class ExecutableProgram(Generic[T]):
             classical_executor = ClassicalExecutor()
 
             for bitstring, count in raw_counts.items():
-                # 1. Create context and load bits
-                context = ExecutionContext()
+                # 1. Create context with user bindings and load bits
+                context = ExecutionContext(
+                    initial_bindings=runtime_context_template._state
+                )
                 bits = tuple(int(b) for b in reversed(bitstring))
 
                 # Load measurement results using clbit_map
@@ -297,10 +327,8 @@ class ExecutableProgram(Generic[T]):
             result = job.result()
             print(result)  # 0.25 (for QFixed) or (0, 1) (for bits)
         """
-        # Check if this is an expval-only execution
-        if self.compiled_expval and not any(
-            seg_type == "classical" for seg_type, _ in self.execution_order
-        ):
+        # Check if this program has expval segments
+        if self.compiled_expval:
             return self._run_expval(executor, bindings)
 
         circuit = self.get_first_circuit()
@@ -330,11 +358,12 @@ class ExecutableProgram(Generic[T]):
         compiled_classical = self.compiled_classical
         execution_order = self.execution_order
         output_refs = self.output_refs
+        runtime_context_template = self._build_runtime_classical_context(bindings)
 
         def convert_result(bitstring: str) -> Any:
             """Convert bitstring by executing classical segments."""
-            # 1. Create context and load bits
-            context = ExecutionContext()
+            # 1. Create context with user bindings and load bits
+            context = ExecutionContext(initial_bindings=runtime_context_template._state)
             bits = tuple(int(b) for b in reversed(bitstring))
 
             # Load measurement results using clbit_map
@@ -404,12 +433,17 @@ class ExecutableProgram(Generic[T]):
                 circuit, indexed_bindings, param_metadata
             )
 
-        # Execute expval segments in order
-        context = ExecutionContext()
+        # Execute segments in order (classical_prep, then expval)
+        context = self._build_runtime_classical_context(bindings)
         result_value = None
 
         for seg_type, index in self.execution_order:
-            if seg_type == "expval":
+            if seg_type == "classical":
+                seg = self.compiled_classical[index]
+                classical_executor = ClassicalExecutor()
+                results = classical_executor.execute(seg.segment, context)
+                context.update(results)
+            elif seg_type == "expval":
                 expval_seg = self.compiled_expval[index]
 
                 # Apply qubit mapping to remap Pauli indices to physical qubits

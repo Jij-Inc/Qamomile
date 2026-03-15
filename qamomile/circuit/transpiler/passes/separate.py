@@ -23,7 +23,11 @@ from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.value import Value, ArrayValue, ValueBase
 from qamomile.circuit.ir.types.primitives import BitType, QubitType, UIntType
 from qamomile.circuit.transpiler.passes import Pass
-from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowVisitor
+from qamomile.circuit.transpiler.errors import SeparationError
+from qamomile.circuit.transpiler.passes.control_flow_visitor import (
+    ControlFlowVisitor,
+    OperationCollector,
+)
 from qamomile.circuit.transpiler.segments import (
     ClassicalSegment,
     ExpvalSegment,
@@ -55,6 +59,9 @@ class SeparatePass(Pass[Block, SimplifiedProgram]):
         """Separate the block into segments."""
         # Phase 1: Materialize return operations
         block = self._materialize_return(input)
+
+        # Phase 1.5: Validate expval usage contract
+        self._validate_expval_contract(block)
 
         # Phase 2: Lower high-level operations (MeasureQFixedOperation)
         block = self._lower_operations(block)
@@ -88,6 +95,61 @@ class SeparatePass(Pass[Block, SimplifiedProgram]):
 
         # No ReturnOperation found, keep existing output_values
         return block
+
+    # =========================================================================
+    # Phase 1.5: Validate expval usage contract
+    # =========================================================================
+
+    def _validate_expval_contract(self, block: Block) -> None:
+        """Validate expval usage follows the supported contract.
+
+        Enforces:
+        - At most one top-level expval per kernel
+        - No expval inside control flow (if/for/while)
+        - No quantum/hybrid operations after expval (except ReturnOperation)
+        """
+        seen_expval = False
+
+        for op in block.operations:
+            if isinstance(op, ReturnOperation):
+                continue
+
+            # Check for expval inside control flow
+            if isinstance(
+                op, (ForOperation, ForItemsOperation, IfOperation, WhileOperation)
+            ):
+                if self._contains_expval(op):
+                    raise SeparationError(
+                        "expval inside control flow (if/for/while) is not supported.\n\n"
+                        "expval must be a top-level operation in the kernel. "
+                        "Conditional or iterated expectation values are not yet supported."
+                    )
+
+            if isinstance(op, ExpvalOp):
+                if seen_expval:
+                    raise SeparationError(
+                        "Multiple expval operations are not supported.\n\n"
+                        "Only a single top-level expval is allowed per kernel. "
+                        "Use separate kernels for different expectation values."
+                    )
+                seen_expval = True
+                continue
+
+            # After expval, no operations allowed (except ReturnOperation)
+            if seen_expval:
+                raise SeparationError(
+                    f"Operation '{type(op).__name__}' found after expval.\n\n"
+                    "No operations are allowed after expval (except return). "
+                    "expval must be the final operation in the kernel. "
+                    "Perform any post-processing on the result outside the kernel."
+                )
+
+    @staticmethod
+    def _contains_expval(op: Operation) -> bool:
+        """Check if a control flow operation contains ExpvalOp anywhere inside."""
+        collector = OperationCollector(lambda o: isinstance(o, ExpvalOp))
+        collector._visit_control_flow(op)
+        return len(collector.collected) > 0
 
     # =========================================================================
     # Phase 2: Lower high-level operations
@@ -192,8 +254,6 @@ class SeparatePass(Pass[Block, SimplifiedProgram]):
         # Step 2: VALIDATE single quantum segment
         quantum_segs = [s for s in segments if isinstance(s, QuantumSegment)]
         if len(quantum_segs) == 0:
-            from qamomile.circuit.transpiler.errors import SeparationError
-
             raise SeparationError("No quantum segment found")
         if len(quantum_segs) > 1:
             raise MultipleQuantumSegmentsError(

@@ -6,20 +6,62 @@ value of a Hamiltonian observable with respect to a quantum state.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from qamomile.circuit.frontend.handle import Float, Qubit, Vector, Observable
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.types.primitives import FloatType
 from qamomile.circuit.ir.value import Value, ArrayValue
+from qamomile.circuit.errors import QubitConsumedError
 
-if TYPE_CHECKING:
-    pass
+
+def _consume_tuple_qubits(qubits: tuple[Qubit, ...]) -> ArrayValue:
+    """Consume a tuple of distinct qubits and package it as a synthetic array."""
+    if len(qubits) == 0:
+        raise ValueError("expval requires at least one qubit. Got an empty tuple.")
+
+    seen_ids: set[str] = set()
+    qubit_values: list[Value] = []
+
+    for qubit in qubits:
+        if qubit.id in seen_ids:
+            raise QubitConsumedError(
+                f"Duplicate qubit in expval tuple: qubit '{qubit.value.name}' "
+                f"appears more than once.\n\n"
+                f"Each qubit in the expval tuple must be distinct.",
+                handle_name=qubit.value.name,
+                operation_name="expval",
+                first_use_location="expval (earlier in same tuple)",
+            )
+        seen_ids.add(qubit.id)
+        qubit_values.append(qubit.consume(operation_name="expval").value)
+
+    return ArrayValue(
+        type=qubit_values[0].type,
+        name="expval_qubits",
+        shape=tuple(),
+        params={"qubit_values": qubit_values},
+    )
+
+
+def _consume_expval_target(
+    qubits: Qubit | Vector[Qubit] | tuple[Qubit, ...],
+) -> Value | ArrayValue:
+    """Consume an expval target and normalize it to the IR operand form."""
+    if isinstance(qubits, tuple):
+        return _consume_tuple_qubits(qubits)
+    if isinstance(qubits, Vector):
+        return qubits.consume(operation_name="expval").value
+    if isinstance(qubits, Qubit):
+        return qubits.consume(operation_name="expval").value
+
+    raise TypeError(
+        f"expval expects Qubit, Vector[Qubit], or tuple[Qubit, ...], "
+        f"got {type(qubits).__name__}"
+    )
 
 
 def expval(
-    qubits: Vector[Qubit] | tuple[Qubit, ...],
+    qubits: Qubit | Vector[Qubit] | tuple[Qubit, ...],
     hamiltonian: Observable,
 ) -> Float:
     """Compute the expectation value of an observable on a quantum state.
@@ -27,17 +69,26 @@ def expval(
     This function computes <psi|H|psi> where psi is the quantum state
     represented by the qubits and H is the Hamiltonian observable.
 
-    The quantum state (qubits) is NOT consumed by this operation - the
-    qubits can still be used for further operations after expval.
+    The quantum state (qubits) is consumed by this operation. The qubits
+    cannot be used for further quantum operations after expval.
+    Only a single top-level expval is supported per kernel.
 
     Args:
         qubits: The quantum register holding the prepared state.
-            Can be a Vector[Qubit] or a tuple of individual Qubits.
+            Can be a single Qubit, a Vector[Qubit], or a tuple of individual Qubits.
+            For Vector[Qubit], all borrowed elements must be returned first.
+            For tuple[Qubit, ...], each qubit is consumed individually;
+            duplicate qubits will raise QubitConsumedError.
         hamiltonian: The Observable parameter representing the Hamiltonian.
             The actual qamomile.observable.Hamiltonian is provided via bindings.
 
     Returns:
         Float containing the expectation value.
+
+    Raises:
+        QubitConsumedError: If any qubit in the tuple has already been consumed,
+            or if a duplicate qubit appears in the tuple.
+        UnreturnedBorrowError: If a Vector[Qubit] has unreturned borrowed elements.
 
     Example:
         ```python
@@ -53,30 +104,14 @@ def expval(
             q[0] = qm.ry(q[0], theta)
             q[0], q[1] = qm.cx(q[0], q[1])
 
-            # Expectation value -> Float
+            # Expectation value -> Float (consumes q)
             return qm.expval(q, H)
 
         # Pass Hamiltonian via bindings
         executable = transpiler.transpile(vqe_step, bindings={"H": H})
         ```
     """
-    # Convert qubits to Value
-    if isinstance(qubits, tuple):
-        # Tuple of individual Qubits - collect their values
-        # For now, we create a pseudo-ArrayValue to group them
-        # The emitter will handle unpacking
-        qubit_values = [q.value for q in qubits]
-        qubits_value = ArrayValue(
-            type=qubit_values[0].type,
-            name="expval_qubits",
-            shape=tuple(),
-            params={"qubit_values": qubit_values},
-        )
-    elif isinstance(qubits, Vector):
-        qubits_value = qubits.value
-    else:
-        # Single qubit - wrap in array-like structure
-        qubits_value = qubits.value
+    qubits_value = _consume_expval_target(qubits)
 
     # Create result Float value
     result_value = Value(type=FloatType(), name="expval_result")

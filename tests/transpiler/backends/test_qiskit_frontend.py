@@ -1,3 +1,4 @@
+# ruff: noqa: E402
 """Rich Qiskit frontend-to-backend test suite.
 
 Tests the full pipeline: @qkernel definition -> QiskitTranspiler -> execution.
@@ -79,6 +80,7 @@ from qamomile.circuit.algorithm.qaoa import (
     x_mixer,
 )
 from qamomile.circuit.ir.block import BlockKind
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.segments import SimplifiedProgram
 from qamomile.circuit.transpiler.transpiler import TranspilerConfig
@@ -3213,7 +3215,9 @@ class TestControlFlowWhileStructure:
         assert inner_if_cond_clbit_idx == third_measure_clbit_idx
 
         inner_if_body_measure = inner_if_body.data[0]
-        inner_if_body_measure_clbit_idx = qc.clbits.index(inner_if_body_measure.clbits[0])
+        inner_if_body_measure_clbit_idx = qc.clbits.index(
+            inner_if_body_measure.clbits[0]
+        )
         assert inner_if_body_measure_clbit_idx == while_cond_clbit_idx
 
         # --- Execution check ---
@@ -4178,6 +4182,48 @@ class TestParameterizedCircuits:
         exe = transpiler.transpile(circuit, bindings={"n": 3}, parameters=["theta"])
         qc = exe.compiled_quantum[0].circuit
         assert len(qc.parameters) > 0
+
+    def test_computed_size_qubit_array_with_classical_prep(self):
+        """Computed UInt sizes in classical_prep allocate the expected qubits."""
+
+        @qmc.qkernel
+        def circuit(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            m = n + 1
+            q = qmc.qubit_array(m, "q")
+            for i in qmc.range(m):
+                q[i] = qmc.h(q[i])
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit, bindings={"n": 2})
+        qc = exe.compiled_quantum[0].circuit
+
+        assert qc.num_qubits == 3
+        assert qc.num_clbits == 3
+        assert sum(isinstance(inst.operation, HGate) for inst in qc.data) == 3
+
+    def test_computed_size_qubit_array_unresolved_temp_collision_fails_closed(self):
+        """Unresolved later uint_tmp values must not reuse earlier size bindings."""
+
+        @qmc.qkernel
+        def circuit(
+            params: qmc.Vector[qmc.UInt],
+            i: qmc.UInt,
+        ) -> qmc.Vector[qmc.Bit]:
+            m1 = params[1] + 1
+            _ = m1
+            m2 = params[i] + 1
+            q = qmc.qubit_array(m2, "q")
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+
+        with pytest.raises(EmitError, match="Cannot resolve array size"):
+            transpiler.transpile(
+                circuit,
+                bindings={"params": [5, 7]},
+                parameters=["i"],
+            )
 
 
 class TestSubKernelInlining:
@@ -5874,6 +5920,192 @@ class TestExpvalQiskitPipeline:
         transpiler = QiskitTranspiler()
         with pytest.raises(RuntimeError, match="Observable.*not found in bindings"):
             transpiler.transpile(circuit, bindings={"n": 2})
+
+    def test_expval_with_classical_prep_runtime_bindings(self):
+        """classical_prep + quantum + expval returns float, not None or error.
+
+        When a kernel computes theta = a + b before using it as a gate
+        angle, the classical computation is separated into classical_prep.
+        The run() dispatch must still route to _run_expval() and
+        correctly handle the execution order.
+        """
+
+        @qmc.qkernel
+        def circuit(a: qmc.Float, b: qmc.Float, H: qmc.Observable) -> qmc.Float:
+            q = qmc.qubit("q")
+            theta = a + b
+            q = qmc.rx(q, theta)
+            return qmc.expval((q,), H)
+
+        H_label = qm_o.Hamiltonian(num_qubits=1)
+        H_label += qm_o.Z(0)
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit, bindings={"H": H_label, "a": 0.0, "b": 0.0})
+        result = exe.run(transpiler.executor()).result()
+        # rx(0) leaves |0>, so <Z> = +1.0
+        assert isinstance(result, float)
+        assert np.isclose(result, 1.0, atol=0.1)
+
+    def test_expval_classical_prep_param_sweep(self):
+        """Changing a+b produces different expectation values.
+
+        Tests that the angle computed from user bindings actually
+        affects the quantum circuit output, not silently fixed to 0.
+        """
+
+        @qmc.qkernel
+        def circuit(a: qmc.Float, b: qmc.Float, H: qmc.Observable) -> qmc.Float:
+            q = qmc.qubit("q")
+            theta = a + b
+            q = qmc.rx(q, theta)
+            return qmc.expval((q,), H)
+
+        H_label = qm_o.Hamiltonian(num_qubits=1)
+        H_label += qm_o.Z(0)
+        transpiler = QiskitTranspiler()
+
+        results = []
+        for a_val, b_val in [
+            (0.0, 0.0),
+            (np.pi / 4, np.pi / 4),
+            (np.pi / 2, np.pi / 2),
+        ]:
+            exe = transpiler.transpile(
+                circuit, bindings={"H": H_label, "a": a_val, "b": b_val}
+            )
+            result = exe.run(transpiler.executor()).result()
+            results.append(result)
+
+        # rx(0)|0> -> <Z>=1.0
+        assert np.isclose(results[0], 1.0, atol=0.1)
+        # rx(pi/2)|0> -> <Z>=cos(pi/2)=0.0
+        assert np.isclose(results[1], 0.0, atol=0.15)
+        # rx(pi)|0> -> <Z>=cos(pi)=-1.0
+        assert np.isclose(results[2], -1.0, atol=0.1)
+
+    def test_classical_prep_parametric_emit_runtime_sweep(self):
+        """classical_prep BinOp must emit parametric expression, not 0.0.
+
+        When a and b are declared as parameters (not bound at transpile
+        time), the classical_prep ``theta = a + b`` must survive as a
+        backend parameter expression so that runtime binding produces
+        correct gate angles.
+
+        This test exercises the emit-time path (not constant_fold) by
+        passing parameters=["a", "b"] at transpile time and binding
+        concrete values only at run time.
+        """
+
+        @qmc.qkernel
+        def circuit(a: qmc.Float, b: qmc.Float, H: qmc.Observable) -> qmc.Float:
+            # BinOp before any quantum op → lands in classical_prep
+            theta = a + b
+            q = qmc.qubit("q")
+            q = qmc.rx(q, theta)
+            return qmc.expval((q,), H)
+
+        H_label = qm_o.Hamiltonian(num_qubits=1)
+        H_label += qm_o.Z(0)
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(
+            circuit,
+            bindings={"H": H_label},
+            parameters=["a", "b"],
+        )
+
+        # classical_prep must be in execution order
+        assert ("classical", 0) in exe.execution_order
+
+        # Sweep: runtime binding must produce varying expectation values
+        results = []
+        for a_val, b_val in [
+            (0.0, 0.0),
+            (np.pi / 4, np.pi / 4),
+            (np.pi / 2, np.pi / 2),
+        ]:
+            result = exe.run(
+                transpiler.executor(),
+                bindings={"a": a_val, "b": b_val},
+            ).result()
+            results.append(result)
+
+        # rx(0)|0> -> <Z>=1.0
+        assert np.isclose(results[0], 1.0, atol=0.1)
+        # rx(pi/2)|0> -> <Z>=cos(pi/2)=0.0
+        assert np.isclose(results[1], 0.0, atol=0.15)
+        # rx(pi)|0> -> <Z>=cos(pi)=-1.0
+        assert np.isclose(results[2], -1.0, atol=0.1)
+
+    def test_classical_prep_unresolved_temp_name_collision_raises_emit_error(self):
+        """Unresolved later temporaries must not reuse an earlier float_tmp."""
+
+        @qmc.qkernel
+        def circuit(
+            a: qmc.Float,
+            params: qmc.Vector[qmc.Float],
+            i: qmc.UInt,
+            H: qmc.Observable,
+        ) -> qmc.Float:
+            theta1 = a + 1.0
+            _ = theta1
+            theta2 = params[i] + 0.5
+            q = qmc.qubit("q")
+            q = qmc.ry(q, theta2)
+            return qmc.expval((q,), H)
+
+        H_label = qm_o.Hamiltonian(num_qubits=1)
+        H_label += qm_o.Z(0)
+        transpiler = QiskitTranspiler()
+
+        with pytest.raises(EmitError, match="Cannot resolve gate angle"):
+            transpiler.transpile(
+                circuit,
+                bindings={"H": H_label},
+                parameters=["a", "params", "i"],
+            )
+
+    def test_qaoa_vector_params_bound_at_sample_runtime(self):
+        """Runtime vector bindings must work for parametric QAOA sampling."""
+
+        class DummyQiskitExecutor:
+            def bind_parameters(self, circuit, bindings, metadata):
+                return circuit.assign_parameters(metadata.to_binding_dict(bindings))
+
+            def execute(self, circuit, shots):
+                return {"0" * circuit.num_clbits: shots}
+
+        @qmc.qkernel
+        def circuit(
+            p: qmc.UInt,
+            quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+            linear: qmc.Dict[qmc.UInt, qmc.Float],
+            n: qmc.UInt,
+            gammas: qmc.Vector[qmc.Float],
+            betas: qmc.Vector[qmc.Float],
+        ) -> qmc.Vector[qmc.Bit]:
+            q = qaoa_state(p, quad, linear, n, gammas, betas)
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(
+            circuit,
+            bindings={
+                "p": 1,
+                "quad": {(0, 1): 1.0},
+                "linear": {},
+                "n": 2,
+            },
+            parameters=["gammas", "betas"],
+        )
+
+        result = exe.sample(
+            DummyQiskitExecutor(),
+            bindings={"gammas": [0.3], "betas": [0.2]},
+            shots=32,
+        ).result()
+
+        assert len(result.results) > 0
+        assert all(len(bits) == 2 for bits, _count in result.results)
 
 
 # ===========================================================================
