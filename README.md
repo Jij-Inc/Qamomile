@@ -63,11 +63,18 @@ Runtime-only environment from source with QURI Parts support:
 uv sync --no-dev --extra quri_parts
 ```
 
+Runtime-only environment from source with qBraid support:
+
+```bash
+uv sync --no-dev --extra qbraid
+```
+
 If you prefer an explicit editable install inside your environment, this also works from the cloned repository:
 
 ```bash
 pip install -e .
 pip install -e ".[quri_parts]"  # optional
+pip install -e ".[qbraid]"      # optional
 ```
 
 If you intentionally want the latest published release instead, `pip install qamomile` installs the PyPI package, not this work-in-progress branch.
@@ -116,6 +123,7 @@ If it returns a `qmc.Float` from `qmc.expval(...)`, use `run()` instead.
 - `qamomile.circuit`: the main entry point for typed quantum kernels, gates, control flow, drawing, and resource estimation
 - `qamomile.observable`: Hamiltonians and Pauli observables used with expectation-value workflows
 - `qamomile.qiskit`: Qiskit transpiler and executor support
+- `qamomile.qbraid`: optional qBraid executor support for running Qiskit circuits on qBraid-supported devices
 - `qamomile.quri_parts`: optional QURI Parts transpiler and executor support
 - `qamomile.optimization`: optimization-oriented functionality retained for continuity with older Qamomile workflows
 
