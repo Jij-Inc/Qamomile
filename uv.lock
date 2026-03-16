@@ -358,6 +358,12 @@ wheels = [
 ]
 
 [[package]]
+name = "cudaq"
+version = "0.13.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b7/7e/e87a3f735e24e8355a290ebf34ab8ab35a05afea3ca98d5c166392997304/cudaq-0.13.0.tar.gz", hash = "sha256:9b49d281780f7c62b17cd16f840cc2d03fae4da76459c7f15dbfc1f44159c6e5", size = 9188, upload-time = "2025-11-18T22:18:25.72Z" }
+
+[[package]]
 name = "cycler"
 version = "0.12.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2049,6 +2055,7 @@ wheels = [
 name = "qamomile"
 source = { editable = "." }
 dependencies = [
+    { name = "cudaq" },
     { name = "jijmodeling" },
     { name = "ommx" },
     { name = "qiskit" },
@@ -2085,6 +2092,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cudaq", specifier = ">=0.13.0" },
     { name = "jijmodeling", specifier = ">=2.1.0" },
     { name = "ommx", specifier = ">=2.3.3" },
     { name = "qiskit", specifier = ">=2.3.0" },

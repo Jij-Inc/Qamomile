@@ -9,6 +9,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "cudaq>=0.13.0",
     "jijmodeling>=2.1.0",
     "ommx>=2.3.3",
     "qiskit>=2.3.0",

@@ -36,6 +36,12 @@ jobs:
         run: |
           set -eux
           uv sync --frozen
+      - name: Install CUDA-Q (Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -eux
+          uv pip install cudaq
       - name: Run unit tests
         shell: bash
         run: |
