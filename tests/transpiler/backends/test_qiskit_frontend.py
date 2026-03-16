@@ -3217,7 +3217,9 @@ class TestControlFlowWhileStructure:
         assert inner_if_cond_clbit_idx == third_measure_clbit_idx
 
         inner_if_body_measure = inner_if_body.data[0]
-        inner_if_body_measure_clbit_idx = qc.clbits.index(inner_if_body_measure.clbits[0])
+        inner_if_body_measure_clbit_idx = qc.clbits.index(
+            inner_if_body_measure.clbits[0]
+        )
         assert inner_if_body_measure_clbit_idx == while_cond_clbit_idx
 
         # --- Execution check ---
@@ -7667,7 +7669,9 @@ class TestLoopBackedgeIfLivenessTranspilation:
         resolved_branch_clbits = []
         if_else_clbits = [body.clbits.index(c) for c in if_inst.clbits]
         for branch_idx, block in enumerate(if_inst.operation.blocks):
-            measures = [inst for inst in block.data if isinstance(inst.operation, Measure)]
+            measures = [
+                inst for inst in block.data if isinstance(inst.operation, Measure)
+            ]
             assert len(measures) == 1, (
                 f"Expected 1 measurement in branch {branch_idx} but got "
                 f"{len(measures)}."
@@ -7721,7 +7725,9 @@ class TestLoopBackedgeIfLivenessTranspilation:
 
         _, qc = _transpile_and_get_circuit(circuit)
 
-        while_insts = [inst for inst in qc.data if isinstance(inst.operation, WhileLoopOp)]
+        while_insts = [
+            inst for inst in qc.data if isinstance(inst.operation, WhileLoopOp)
+        ]
         assert len(while_insts) == 1
         body = while_insts[0].operation.params[0]
         if_insts = [inst for inst in body.data if isinstance(inst.operation, IfElseOp)]
@@ -7731,7 +7737,9 @@ class TestLoopBackedgeIfLivenessTranspilation:
         resolved_branch_clbits = []
         if_else_clbits = [body.clbits.index(c) for c in if_inst.clbits]
         for branch_idx, block in enumerate(if_inst.operation.blocks):
-            measures = [inst for inst in block.data if isinstance(inst.operation, Measure)]
+            measures = [
+                inst for inst in block.data if isinstance(inst.operation, Measure)
+            ]
             assert len(measures) == 1, (
                 f"Expected 1 measurement in branch {branch_idx} but got "
                 f"{len(measures)}."
@@ -7817,3 +7825,91 @@ class TestDeadPhiTranspilation:
 
         _, qc = _transpile_and_get_circuit(circuit)
         assert qc is not None
+
+
+class TestWhileIfSharedLocalPhi:
+    """While-if with quantum shared new locals: dead must transpile, live must error."""
+
+    def test_while_loop_with_if_else_same_name_dead_local_transpile(self):
+        """Both branches define q2 but it is dead after if — transpile must succeed."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.x(q0)
+            bit = qmc.measure(q0)
+
+            q1 = qmc.qubit("q1")
+            q1 = qmc.x(q1)
+            sel = qmc.measure(q1)
+
+            while bit:
+                if sel:
+                    q2 = qmc.qubit("q2_t")
+                    q2 = qmc.h(q2)
+                    bit = qmc.measure(q2)
+                else:
+                    q2 = qmc.qubit("q2_f")
+                    bit = qmc.measure(q2)
+            return bit
+
+        # Previously raised EmitError due to dead q2 generating quantum PhiOp
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_clbits >= 1
+
+    def test_while_loop_with_if_else_same_name_dead_local_reassigned_transpile(self):
+        """Dead shared local q2 reassigned after if — transpile must succeed."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.x(q0)
+            bit = qmc.measure(q0)
+
+            q1 = qmc.qubit("q1")
+            q1 = qmc.x(q1)
+            sel = qmc.measure(q1)
+
+            while bit:
+                if sel:
+                    q2 = qmc.qubit("q2_t")
+                    q2 = qmc.h(q2)
+                else:
+                    q2 = qmc.qubit("q2_f")
+                    q2 = qmc.x(q2)
+                # q2 is store-only (reassigned, not read) after if
+                q2 = qmc.qubit("q2_new")
+                bit = qmc.measure(q2)
+            return bit
+
+        # Previously raised EmitError
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_clbits >= 1
+
+    def test_while_loop_with_if_else_same_name_live_local_dependency_error(self):
+        """Live shared local q2 read after if must still fail with a compile error."""
+        from qamomile.circuit.transpiler.errors import DependencyError, EmitError
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.x(q0)
+            bit = qmc.measure(q0)
+
+            q1 = qmc.qubit("q1")
+            q1 = qmc.x(q1)
+            sel = qmc.measure(q1)
+
+            while bit:
+                if sel:
+                    q2 = qmc.qubit("q2_t")
+                    q2 = qmc.h(q2)
+                else:
+                    q2 = qmc.qubit("q2_f")
+                    q2 = qmc.x(q2)
+                # q2 is read after if — merge required but resources differ
+                bit = qmc.measure(q2)
+            return bit
+
+        with pytest.raises((DependencyError, EmitError)):
+            _transpile_and_get_circuit(circuit)
