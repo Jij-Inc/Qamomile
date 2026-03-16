@@ -201,13 +201,16 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 per_stmt_collectors[j].vars | suffix_reads[j + 1]
             )
 
-        # Build suffix-union of Load-only vars (dead-variable filtering).
+        # Build kill-based suffix liveness of Load-only vars (dead-variable
+        # filtering).  A store at position j kills downstream liveness unless
+        # the same variable is also loaded at j (e.g. ``q = qm.h(q)``).
         # Seed with outer_after_loads so nested visit_If sees outer liveness.
         suffix_loads: list[frozenset[str]] = [frozenset()] * (n + 1)
         suffix_loads[n] = outer_after_loads
         for j in range(n - 1, -1, -1):
             suffix_loads[j] = frozenset(
-                per_stmt_collectors[j].load_vars | suffix_loads[j + 1]
+                per_stmt_collectors[j].load_vars
+                | (suffix_loads[j + 1] - per_stmt_collectors[j].store_vars)
             )
 
         for i, stmt in enumerate(body):

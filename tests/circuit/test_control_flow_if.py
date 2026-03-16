@@ -1421,3 +1421,49 @@ class TestWhileNewLocalBoundary:
         while_ops = [op for op in graph.operations if isinstance(op, WhileOperation)]
         assert len(while_ops) == 1
         assert len(while_ops[0].operands) == 2  # initial + loop-carried condition
+
+
+class TestIfSharedNewLocalLiveness:
+    """Quantum shared/one-sided new locals must respect kill-based liveness."""
+
+    def test_if_shared_new_local_store_only_after_if_not_emitted(self):
+        """Shared new local dead after if should build without error.
+
+        Previously, the dead q2 variable was unconditionally included in
+        emit_if outputs, generating a quantum PhiOp that failed at transpile
+        time.  With the kill-based liveness fix, dead shared new locals are
+        excluded from the output variable set.
+        """
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit) -> qm.Bit:
+            cond = qm.measure(q0)
+            if cond:
+                q2 = qm.qubit("q2_t")
+                q2 = qm.h(q2)
+            else:
+                q2 = qm.qubit("q2_f")
+                q2 = qm.x(q2)
+            # q2 is NOT read after the if — dead shared new local
+            return cond
+
+        graph = circuit.build()
+        assert graph is not None
+
+    def test_if_one_sided_new_local_store_only_after_if_is_allowed(self):
+        """One-sided new local followed by store-only reassignment should not
+        raise SyntaxError."""
+
+        @qkernel
+        def circuit(q0: Qubit) -> qm.Bit:
+            cond = qm.measure(q0)
+            if cond:
+                q2 = qm.qubit("q2_t")
+                q2 = qm.h(q2)
+            # q2 is only stored (not read) after the if
+            q2 = qm.qubit("q2_new")
+            return cond
+
+        # Should not raise SyntaxError — q2 is only stored after the if
+        graph = circuit.build()
+        assert graph is not None
