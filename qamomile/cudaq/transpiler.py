@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Sequence, TYPE_CHECKING
 
+from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.transpiler import Transpiler
@@ -67,7 +68,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
 
     def _emit_quantum_segment(
         self,
-        operations: list,
+        operations: list[Operation],
         bindings: dict[str, Any],
     ) -> tuple[CudaqCircuit, dict[str, int], dict[str, int]]:
         """Emit quantum segment with post-processing for ``c_if`` circuits.
@@ -110,9 +111,8 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
         CUDA-Q's builder API supports ``c_if`` (if-then only). Else
         branches are not supported and raise ``EmitError``.
 
-        Compile-time constant conditions (e.g., ``if python_int & 1:``
-        inside ``@qkernel``) are constant-folded: only the active branch
-        is emitted without any ``c_if`` wrapper.
+        Compile-time constant conditions are handled by the base class
+        (``StandardEmitPass._emit_if``).
 
         For runtime conditions (measurement results), the ``QuakeValue``
         from ``kernel.mz()`` is obtained lazily: since
@@ -134,18 +134,9 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
         """
         condition = op.condition
 
-        # Handle compile-time constant conditions (plain Python int/bool
-        # from closure variables captured by @qkernel AST transformer).
+        # Compile-time constant conditions are handled by the base class.
         if not hasattr(condition, "uuid"):
-            if condition:
-                self._emit_operations(
-                    circuit, op.true_operations, qubit_map, clbit_map, bindings
-                )
-            else:
-                self._emit_operations(
-                    circuit, op.false_operations, qubit_map, clbit_map, bindings
-                )
-            self._register_phi_outputs(op, qubit_map, clbit_map, bindings)
+            super()._emit_if(circuit, op, qubit_map, clbit_map, bindings)
             return
 
         condition_uuid = condition.uuid
@@ -226,7 +217,10 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
         counts: dict[str, int] = {}
         for bitstring in result:
             count = result.count(bitstring)
-            # Pad bitstring to num_qubits length
+            assert len(bitstring) <= num_qubits, (
+                f"Bitstring '{bitstring}' has length {len(bitstring)} > "
+                f"num_qubits={num_qubits}"
+            )
             padded = bitstring.zfill(num_qubits)
             counts[padded] = counts.get(padded, 0) + count
 

@@ -120,7 +120,14 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         bindings: dict[str, Any],
     ) -> None:
         """Emit if/else using Qiskit's if_test context manager."""
-        condition_uuid = op.condition.uuid
+        condition = op.condition
+
+        # Compile-time constant conditions are handled by the base class.
+        if not hasattr(condition, "uuid"):
+            super()._emit_if(circuit, op, qubit_map, clbit_map, bindings)
+            return
+
+        condition_uuid = condition.uuid
 
         if condition_uuid not in clbit_map:
             return
@@ -266,18 +273,22 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
             try:
                 # Try qiskit_aer Estimator first (supports more features)
                 from qiskit_aer.primitives import Estimator
+
                 self._estimator = Estimator()
             except ImportError:
                 try:
                     from qiskit.primitives import StatevectorEstimator
+
                     self._estimator = StatevectorEstimator()
                 except ImportError:
                     # Fallback for older Qiskit versions
                     from qiskit.primitives import Estimator
+
                     self._estimator = Estimator()
 
         # Convert Hamiltonian to SparsePauliOp
         from qamomile.qiskit.observable import hamiltonian_to_sparse_pauli_op
+
         sparse_pauli_op = hamiltonian_to_sparse_pauli_op(hamiltonian)
 
         # Run estimation
@@ -296,7 +307,9 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
             return float(result[0].data.evs)
         except (TypeError, AttributeError):
             # Fall back to V1 interface
-            job = self._estimator.run([circuit], [sparse_pauli_op], [param_values] if param_values else None)
+            job = self._estimator.run(
+                [circuit], [sparse_pauli_op], [param_values] if param_values else None
+            )
             result = job.result()
             return float(result.values[0])
 

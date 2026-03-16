@@ -87,7 +87,7 @@ class CudaqGateEmitter:
             )
 
         self._current_circuit = circuit
-        self._param_map.clear()
+        self._param_map = {}
         return circuit
 
     def create_parameter(self, name: str) -> Any:
@@ -321,9 +321,9 @@ class CudaqGateEmitter:
 
         For circuits **with** ``c_if``, ``CudaqEmitPass`` calls ``mz()``
         lazily in ``_emit_if`` for the condition qubit, and then
-        ``_finalize_measurements`` adds ``mz()`` for any remaining
-        measured qubits so that ``cudaq.sample()`` reports full
-        bitstrings.
+        ``_emit_quantum_segment`` post-processing adds ``mz()`` for any
+        remaining measured qubits so that ``cudaq.sample()`` reports
+        full bitstrings.
         """
         pass
 

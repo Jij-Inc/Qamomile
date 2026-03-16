@@ -44,8 +44,10 @@ def hamiltonian_to_cudaq_spin_op(hamiltonian: qm_o.Hamiltonian) -> Any:
     if not math.isclose(hamiltonian.constant, 0.0, abs_tol=1e-15):
         result = hamiltonian.constant * spin.i(0)
 
-    # Convert each term
+    # Convert each term (skip near-zero coefficients to avoid noise)
     for operators, coeff in hamiltonian.terms.items():
+        if math.isclose(coeff, 0.0, abs_tol=1e-15):
+            continue
         term = None
         for op in operators:
             if op.pauli == qm_o.Pauli.I:

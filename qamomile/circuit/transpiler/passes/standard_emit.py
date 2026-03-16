@@ -642,8 +642,35 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         clbit_map: dict[str, int],
         bindings: dict[str, Any],
     ) -> None:
-        """Emit if/else operation."""
-        condition_uuid = op.condition.uuid
+        """Emit if/else operation.
+
+        Handles two condition types:
+
+        1. **Compile-time constant** (plain Python ``int``/``bool`` from
+           ``@qkernel`` AST transformer closure variables): the active
+           branch is emitted unconditionally, the inactive branch is
+           discarded.  No backend ``c_if`` / ``if_test`` is needed.
+        2. **Runtime condition** (measurement ``Value`` with ``.uuid``):
+           delegates to the backend's ``emit_if_start`` /
+           ``emit_else_start`` / ``emit_if_end`` protocol.
+        """
+        condition = op.condition
+
+        # Compile-time constant condition (plain int/bool captured by
+        # @qkernel AST transformer from closure variables).
+        if not hasattr(condition, "uuid"):
+            if condition:
+                self._emit_operations(
+                    circuit, op.true_operations, qubit_map, clbit_map, bindings
+                )
+            else:
+                self._emit_operations(
+                    circuit, op.false_operations, qubit_map, clbit_map, bindings
+                )
+            self._register_phi_outputs(op, qubit_map, clbit_map, bindings)
+            return
+
+        condition_uuid = condition.uuid
 
         if condition_uuid not in clbit_map:
             return

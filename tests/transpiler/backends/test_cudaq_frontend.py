@@ -1331,6 +1331,20 @@ class TestStdlibQFT:
         expected = computational_basis_state(3, 5)  # |101>
         assert statevectors_equal(sv, expected)
 
+    def test_qft_single_qubit(self):
+        """QFT on 1 qubit reduces to H gate: QFT|0> = |+>."""
+
+        @qmc.qkernel
+        def circuit(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            q = qmc.qft(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"n": 1})
+        sv = _run_statevector(qc)
+        expected = np.array([1, 1], dtype=complex) / np.sqrt(2)
+        assert statevectors_equal(sv, expected)
+
 
 # ============================================================================
 # 12. Bell States
@@ -1524,45 +1538,28 @@ class TestEdgeCases:
 # ============================================================================
 # 15. Error Cases
 # ============================================================================
+# Note: c_if transpile-ok, if-with-else EmitError, and while-loop EmitError
+# tests live in test_cudaq.py::TestCudaqControlFlowErrors to avoid duplication.
 
 
-class TestErrorCases:
-    """Test expected error conditions."""
+class TestParametricErrors:
+    """Test parametric circuit error conditions."""
 
-    def test_c_if_transpiles_ok(self):
-        """c_if (if-only, no else) should transpile without error."""
-
-        @qmc.qkernel
-        def circuit_with_c_if() -> qmc.Bit:
-            q0 = qmc.qubit("q0")
-            q1 = qmc.qubit("q1")
-            q0 = qmc.x(q0)
-            b = qmc.measure(q0)
-            if b:
-                q1 = qmc.x(q1)
-            return qmc.measure(q1)
-
-        transpiler = CudaqTranspiler()
-        exe = transpiler.transpile(circuit_with_c_if)
-        assert exe.compiled_quantum[0].circuit.num_qubits == 2
-
-    def test_while_loop_raises_emit_error(self):
-        """WhileOperation on CUDA-Q backend must raise EmitError."""
+    def test_missing_parameter_binding_raises(self) -> None:
+        """Missing parameter binding in bind_parameters raises ValueError."""
 
         @qmc.qkernel
-        def circuit_with_while() -> qmc.Bit:
+        def circuit(theta: qmc.Float) -> qmc.Bit:
             q = qmc.qubit("q")
-            q = qmc.h(q)
-            bit = qmc.measure(q)
-            while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
-            return bit
+            q = qmc.rx(q, theta)
+            return qmc.measure(q)
 
         transpiler = CudaqTranspiler()
-        with pytest.raises(EmitError, match="while loop control flow"):
-            transpiler.transpile(circuit_with_while)
+        exe = transpiler.transpile(circuit, parameters=["theta"])
+        qc = exe.compiled_quantum[0].circuit
+        executor = transpiler.executor()
+        with pytest.raises(ValueError, match="Missing binding"):
+            executor.bind_parameters(qc, {}, exe.compiled_quantum[0].parameter_metadata)
 
 
 # ============================================================================
@@ -1865,18 +1862,16 @@ class TestCIfControlFlow:
         assert qc.num_qubits == 2
 
     def test_c_if_execution_true_branch(self) -> None:
-        """X(q0)→measure=1→c_if fires X(q1): verify c_if condition is true."""
+        """X(q0)→measure=1→c_if fires X(q1): both qubits end up |1⟩."""
         transpiler = CudaqTranspiler()
         exe = transpiler.transpile(_c_if_basic)
         executor = transpiler.executor()
         counts = executor.execute(exe.compiled_quantum[0].circuit, shots=1000)
         total = sum(counts.values())
         assert total == 1000
-        # Verify all measured bits are 1 (c_if condition q0=1 was true).
-        # CUDA-Q may report only mz()-measured qubits, so the bitstring
-        # may be shorter than num_qubits. Check all reported bits are '1'.
-        for bs in counts:
-            assert all(c == "1" for c in bs), f"Expected all 1s, got {bs}"
+        # q0=1 (X applied), c_if fires → q1=1. Both qubits measured as 1.
+        assert "11" in counts, f"Expected '11' in counts, got {counts}"
+        assert counts["11"] == total
 
     def test_c_if_execution_false_branch(self) -> None:
         """q0=|0⟩→measure=0→c_if does NOT fire: both qubits stay |0⟩."""
@@ -1897,9 +1892,9 @@ class TestCIfControlFlow:
         counts = executor.execute(exe.compiled_quantum[0].circuit, shots=1000)
         total = sum(counts.values())
         assert total == 1000
-        # RX(pi) ≈ -iX, so q1 flips to |1⟩. Verify all measured bits are 1.
-        for bs in counts:
-            assert all(c == "1" for c in bs), f"Expected all 1s, got {bs}"
+        # RX(pi) ≈ -iX, so q1 flips to |1⟩. Both qubits measured as 1.
+        assert "11" in counts, f"Expected '11' in counts, got {counts}"
+        assert counts["11"] == total
 
     def test_c_if_with_else_raises_emit_error(self) -> None:
         """Else branches must raise EmitError on CUDA-Q."""
