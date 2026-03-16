@@ -59,7 +59,9 @@ class TestCudaqControlFlowErrors:
         from qamomile.cudaq import CudaqTranspiler
 
         @qmc.qkernel
-        def circuit_with_c_if(q0: qmc.Qubit, q1: qmc.Qubit) -> qmc.Bit:
+        def circuit_with_c_if() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
             q0 = qmc.x(q0)
             b = qmc.measure(q0)
             if b:
@@ -68,7 +70,7 @@ class TestCudaqControlFlowErrors:
 
         transpiler = CudaqTranspiler()
         exe = transpiler.transpile(circuit_with_c_if)
-        assert exe.circuit.num_qubits == 2
+        assert exe.compiled_quantum[0].circuit.num_qubits == 2
 
     def test_if_with_else_raises_emit_error(self) -> None:
         """IfOperation with else branch on CUDA-Q must raise EmitError."""
@@ -77,10 +79,9 @@ class TestCudaqControlFlowErrors:
         from qamomile.cudaq import CudaqTranspiler
 
         @qmc.qkernel
-        def circuit_with_if_else(
-            q0: qmc.Qubit,
-            q1: qmc.Qubit,
-        ) -> qmc.Bit:
+        def circuit_with_if_else() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
             q0 = qmc.h(q0)
             b = qmc.measure(q0)
             if b:
@@ -100,15 +101,15 @@ class TestCudaqControlFlowErrors:
         from qamomile.cudaq import CudaqTranspiler
 
         @qmc.qkernel
-        def _while_body(q: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Bit]:
-            q = qmc.x(q)
-            return q, qmc.measure(q)
-
-        @qmc.qkernel
-        def circuit_with_while(q: qmc.Qubit) -> qmc.Bit:
-            b = qmc.measure(q)
-            q, b = qmc.while_loop(b, _while_body, q)
-            return b
+        def circuit_with_while() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
 
         transpiler = CudaqTranspiler()
         with pytest.raises(EmitError, match="while loop control flow"):

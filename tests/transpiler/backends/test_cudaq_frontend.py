@@ -471,27 +471,19 @@ class TestTwoQubitGatesFrontend:
 class TestThreeQubitGatesFrontend:
     """Test three-qubit gates through the frontend pipeline."""
 
-    @pytest.mark.parametrize(
-        "x_targets, basis_idx",
-        [
-            ([], 0),
-            ([0], 1),
-            ([1], 2),
-            ([0, 1], 3),
-            ([2], 4),
-            ([0, 2], 5),
-            ([1, 2], 6),
-            ([0, 1, 2], 7),
-        ],
-    )
-    def test_ccx_statevector(self, x_targets, basis_idx):
+    @pytest.mark.parametrize("basis_idx", list(range(8)))
+    def test_ccx_statevector(self, basis_idx):
         """Toffoli on all 8 basis states (uses cx([controls], target))."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(3, "q")
-            for t in x_targets:
-                q[t] = qmc.x(q[t])
+            if basis_idx & 1:
+                q[0] = qmc.x(q[0])
+            if basis_idx & 2:
+                q[1] = qmc.x(q[1])
+            if basis_idx & 4:
+                q[2] = qmc.x(q[2])
             q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
             return qmc.measure(q)
 
@@ -538,7 +530,9 @@ class TestParametricGates:
         assert "theta" in exe.parameter_names
         # Bind and verify statevector
         executor = transpiler.executor()
-        bound = executor.bind_parameters(qc, {"theta": np.pi}, exe.parameter_metadata)
+        bound = executor.bind_parameters(
+            qc, {"theta": np.pi}, exe.compiled_quantum[0].parameter_metadata
+        )
         sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["RX"].matrix_fn(np.pi)
@@ -564,7 +558,7 @@ class TestParametricGates:
         # Bind and verify
         executor = transpiler.executor()
         bound = executor.bind_parameters(
-            qc, {"theta": np.pi / 2}, exe.parameter_metadata
+            qc, {"theta": np.pi / 2}, exe.compiled_quantum[0].parameter_metadata
         )
         sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
         expected = compute_expected_statevector(
@@ -590,7 +584,9 @@ class TestParametricGates:
         assert "theta" in exe.parameter_names
         # Bind and verify
         executor = transpiler.executor()
-        bound = executor.bind_parameters(qc, {"theta": np.pi}, exe.parameter_metadata)
+        bound = executor.bind_parameters(
+            qc, {"theta": np.pi}, exe.compiled_quantum[0].parameter_metadata
+        )
         sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["RZ"].matrix_fn(np.pi)
@@ -615,7 +611,9 @@ class TestParametricGates:
         assert "theta" in exe.parameter_names
         # Bind and verify
         executor = transpiler.executor()
-        bound = executor.bind_parameters(qc, {"theta": np.pi}, exe.parameter_metadata)
+        bound = executor.bind_parameters(
+            qc, {"theta": np.pi}, exe.compiled_quantum[0].parameter_metadata
+        )
         sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["P"].matrix_fn(np.pi)
@@ -642,7 +640,9 @@ class TestParametricGates:
         assert "theta" in exe.parameter_names
         # Bind and verify on |11> state
         executor = transpiler.executor()
-        bound = executor.bind_parameters(qc, {"theta": np.pi}, exe.parameter_metadata)
+        bound = executor.bind_parameters(
+            qc, {"theta": np.pi}, exe.compiled_quantum[0].parameter_metadata
+        )
         sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
         initial = computational_basis_state(2, 3)
         expected = compute_expected_statevector(
@@ -670,7 +670,9 @@ class TestParametricGates:
         assert "theta" in exe.parameter_names
         # Bind and verify on |11> state
         executor = transpiler.executor()
-        bound = executor.bind_parameters(qc, {"theta": np.pi}, exe.parameter_metadata)
+        bound = executor.bind_parameters(
+            qc, {"theta": np.pi}, exe.compiled_quantum[0].parameter_metadata
+        )
         sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
         initial = computational_basis_state(2, 3)
         expected = compute_expected_statevector(
@@ -697,7 +699,9 @@ class TestParametricGates:
         # Bind and verify: RY(pi/2) on each qubit
         executor = transpiler.executor()
         angles = [np.pi / 2, np.pi / 2, np.pi / 2]
-        bound = executor.bind_parameters(qc, {"thetas": angles}, exe.parameter_metadata)
+        bound = executor.bind_parameters(
+            qc, {"thetas": angles}, exe.compiled_quantum[0].parameter_metadata
+        )
         sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
         # Each qubit: RY(pi/2)|0> = (|0>+|1>)/sqrt(2)
         single = compute_expected_statevector(
@@ -1521,30 +1525,32 @@ class TestErrorCases:
         """c_if (if-only, no else) should transpile without error."""
 
         @qmc.qkernel
-        def circuit_with_c_if(q: qmc.Qubit) -> qmc.Bit:
-            q = qmc.h(q)
-            b = qmc.measure(q)
+        def circuit_with_c_if() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            q0 = qmc.x(q0)
+            b = qmc.measure(q0)
             if b:
-                q = qmc.x(q)
-            return qmc.measure(q)
+                q1 = qmc.x(q1)
+            return qmc.measure(q1)
 
         transpiler = CudaqTranspiler()
         exe = transpiler.transpile(circuit_with_c_if)
-        assert exe.circuit.num_qubits == 1
+        assert exe.compiled_quantum[0].circuit.num_qubits == 2
 
     def test_while_loop_raises_emit_error(self):
         """WhileOperation on CUDA-Q backend must raise EmitError."""
 
         @qmc.qkernel
-        def _while_body(q: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Bit]:
-            q = qmc.x(q)
-            return q, qmc.measure(q)
-
-        @qmc.qkernel
-        def circuit_with_while(q: qmc.Qubit) -> qmc.Bit:
-            b = qmc.measure(q)
-            q, b = qmc.while_loop(b, _while_body, q)
-            return b
+        def circuit_with_while() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
 
         transpiler = CudaqTranspiler()
         with pytest.raises(EmitError, match="while loop control flow"):
@@ -1773,7 +1779,7 @@ class TestQAOAPattern:
         # Bind concrete values and verify statevector is valid
         executor = transpiler.executor()
         bound = executor.bind_parameters(
-            qc, {"beta": 0.5, "gamma": 0.3}, exe.parameter_metadata
+            qc, {"beta": 0.5, "gamma": 0.3}, exe.compiled_quantum[0].parameter_metadata
         )
         sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
         assert np.isclose(np.linalg.norm(sv), 1.0, atol=1e-6)
@@ -1787,8 +1793,10 @@ class TestQAOAPattern:
 
 
 @qmc.qkernel
-def _c_if_basic(q0: qmc.Qubit, q1: qmc.Qubit) -> qmc.Bit:
+def _c_if_basic() -> qmc.Bit:
     """X(q0) → measure → c_if(bit, X(q1)) → measure(q1)."""
+    q0 = qmc.qubit("q0")
+    q1 = qmc.qubit("q1")
     q0 = qmc.x(q0)
     b = qmc.measure(q0)
     if b:
@@ -1797,8 +1805,10 @@ def _c_if_basic(q0: qmc.Qubit, q1: qmc.Qubit) -> qmc.Bit:
 
 
 @qmc.qkernel
-def _c_if_false_branch(q0: qmc.Qubit, q1: qmc.Qubit) -> qmc.Bit:
+def _c_if_false_branch() -> qmc.Bit:
     """No X on q0 → measure(q0)=0 → c_if should NOT fire."""
+    q0 = qmc.qubit("q0")
+    q1 = qmc.qubit("q1")
     b = qmc.measure(q0)
     if b:
         q1 = qmc.x(q1)
@@ -1806,12 +1816,10 @@ def _c_if_false_branch(q0: qmc.Qubit, q1: qmc.Qubit) -> qmc.Bit:
 
 
 @qmc.qkernel
-def _c_if_with_rotation(
-    q0: qmc.Qubit,
-    q1: qmc.Qubit,
-    theta: qmc.Float,
-) -> qmc.Bit:
+def _c_if_with_rotation(theta: qmc.Float) -> qmc.Bit:
     """c_if with parametric RX gate in true branch."""
+    q0 = qmc.qubit("q0")
+    q1 = qmc.qubit("q1")
     q0 = qmc.x(q0)
     b = qmc.measure(q0)
     if b:
@@ -1820,8 +1828,10 @@ def _c_if_with_rotation(
 
 
 @qmc.qkernel
-def _c_if_with_else(q0: qmc.Qubit, q1: qmc.Qubit) -> qmc.Bit:
+def _c_if_with_else() -> qmc.Bit:
     """c_if with else branch — should raise EmitError."""
+    q0 = qmc.qubit("q0")
+    q1 = qmc.qubit("q1")
     q0 = qmc.h(q0)
     b = qmc.measure(q0)
     if b:
@@ -1849,7 +1859,7 @@ class TestCIfControlFlow:
         transpiler = CudaqTranspiler()
         exe = transpiler.transpile(_c_if_basic)
         executor = transpiler.executor()
-        counts = executor.execute(exe.circuit, shots=1000)
+        counts = executor.execute(exe.compiled_quantum[0].circuit, shots=1000)
         # q0=1 (X gate), q1=1 (c_if fires X) → "11"
         assert "11" in counts
         total = sum(counts.values())
@@ -1860,7 +1870,7 @@ class TestCIfControlFlow:
         transpiler = CudaqTranspiler()
         exe = transpiler.transpile(_c_if_false_branch)
         executor = transpiler.executor()
-        counts = executor.execute(exe.circuit, shots=1000)
+        counts = executor.execute(exe.compiled_quantum[0].circuit, shots=1000)
         # q0=0, q1=0 (c_if doesn't fire) → "00"
         assert "00" in counts
         total = sum(counts.values())
@@ -1871,7 +1881,7 @@ class TestCIfControlFlow:
         transpiler = CudaqTranspiler()
         exe = transpiler.transpile(_c_if_with_rotation, bindings={"theta": np.pi})
         executor = transpiler.executor()
-        counts = executor.execute(exe.circuit, shots=1000)
+        counts = executor.execute(exe.compiled_quantum[0].circuit, shots=1000)
         # RX(pi) ≈ -iX, so q1 flips to |1⟩ (global phase doesn't affect measurement)
         assert "11" in counts
         total = sum(counts.values())
@@ -1886,15 +1896,15 @@ class TestCIfControlFlow:
         """While loops remain unsupported on CUDA-Q."""
 
         @qmc.qkernel
-        def _while_body(q: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Bit]:
-            q = qmc.x(q)
-            return q, qmc.measure(q)
-
-        @qmc.qkernel
-        def circuit_with_while(q: qmc.Qubit) -> qmc.Bit:
-            b = qmc.measure(q)
-            q, b = qmc.while_loop(b, _while_body, q)
-            return b
+        def circuit_with_while() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
 
         with pytest.raises(EmitError, match="while loop control flow"):
             _transpile_and_get_circuit(circuit_with_while)

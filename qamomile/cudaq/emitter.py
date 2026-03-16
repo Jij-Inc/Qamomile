@@ -151,18 +151,26 @@ class CudaqGateEmitter:
 
     def emit_rx(self, circuit: CudaqCircuit, qubit: int, angle: float | Any) -> None:
         """Emit RX rotation gate on the specified qubit."""
+        if isinstance(angle, (int, float)):
+            angle = float(angle)
         circuit.kernel.rx(angle, circuit.qubits[qubit])
 
     def emit_ry(self, circuit: CudaqCircuit, qubit: int, angle: float | Any) -> None:
         """Emit RY rotation gate on the specified qubit."""
+        if isinstance(angle, (int, float)):
+            angle = float(angle)
         circuit.kernel.ry(angle, circuit.qubits[qubit])
 
     def emit_rz(self, circuit: CudaqCircuit, qubit: int, angle: float | Any) -> None:
         """Emit RZ rotation gate on the specified qubit."""
+        if isinstance(angle, (int, float)):
+            angle = float(angle)
         circuit.kernel.rz(angle, circuit.qubits[qubit])
 
     def emit_p(self, circuit: CudaqCircuit, qubit: int, angle: float | Any) -> None:
         """Emit phase gate (R1) on the specified qubit."""
+        if isinstance(angle, (int, float)):
+            angle = float(angle)
         circuit.kernel.r1(angle, circuit.qubits[qubit])
 
     # ------------------------------------------------------------------
@@ -225,6 +233,8 @@ class CudaqGateEmitter:
             RZ(q2, theta)
             CNOT(q1, q2)
         """
+        if isinstance(angle, (int, float)):
+            angle = float(angle)
         k = circuit.kernel
         q = circuit.qubits
         k.cx(q[qubit1], q[qubit2])
@@ -278,18 +288,24 @@ class CudaqGateEmitter:
         self, circuit: CudaqCircuit, control: int, target: int, angle: float | Any
     ) -> None:
         """Emit controlled-RX gate (native CUDA-Q)."""
+        if isinstance(angle, (int, float)):
+            angle = float(angle)
         circuit.kernel.crx(angle, circuit.qubits[control], circuit.qubits[target])
 
     def emit_cry(
         self, circuit: CudaqCircuit, control: int, target: int, angle: float | Any
     ) -> None:
         """Emit controlled-RY gate (native CUDA-Q)."""
+        if isinstance(angle, (int, float)):
+            angle = float(angle)
         circuit.kernel.cry(angle, circuit.qubits[control], circuit.qubits[target])
 
     def emit_crz(
         self, circuit: CudaqCircuit, control: int, target: int, angle: float | Any
     ) -> None:
         """Emit controlled-RZ gate (native CUDA-Q)."""
+        if isinstance(angle, (int, float)):
+            angle = float(angle)
         circuit.kernel.crz(angle, circuit.qubits[control], circuit.qubits[target])
 
     # ------------------------------------------------------------------
