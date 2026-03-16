@@ -197,6 +197,14 @@ def map_phi_outputs(
             else:
                 # Scalar BitType: pick the first available clbit as
                 # canonical, redirect the other branch to it.
+                #
+                # NOTE: For if-only (no else), false_val is the pre-if
+                # value of the variable.  When this runs inside a while
+                # loop body, false_val.uuid may be the while-condition
+                # UUID.  The redirect below will overwrite that UUID's
+                # canonical clbit.  The WhileOperation allocation branch
+                # compensates by saving/restoring init_uuid's clbit
+                # around body allocation.
                 true_clbit = clbit_map.get(true_val.uuid)
                 false_clbit = clbit_map.get(false_val.uuid)
 
@@ -215,7 +223,18 @@ class ResourceAllocator:
     This class handles the first pass of circuit emission: determining
     how many physical qubits and classical bits are needed and mapping
     Value UUIDs to their physical indices.
+
+    New physical indices are assigned via monotonic counters
+    (``_next_qubit_index`` / ``_next_clbit_index``) so that alias
+    entries — which reuse an existing physical index — never inflate
+    the counter.  Using ``len(map)`` would cause sparse (gapped)
+    physical indices because alias keys increase the map size without
+    adding new physical resources.
     """
+
+    def __init__(self) -> None:
+        self._next_qubit_index: int = 0
+        self._next_clbit_index: int = 0
 
     def allocate(
         self,
@@ -233,6 +252,8 @@ class ResourceAllocator:
         """
         qubit_map: dict[str, int] = {}
         clbit_map: dict[str, int] = {}
+        self._next_qubit_index = 0
+        self._next_clbit_index = 0
         self._allocate_recursive(operations, qubit_map, clbit_map, bindings or {})
         return qubit_map, clbit_map
 
@@ -261,15 +282,18 @@ class ResourceAllocator:
                             for i in range(size):
                                 qubit_id = f"{result.uuid}_{i}"
                                 if qubit_id not in qubit_map:
-                                    qubit_map[qubit_id] = len(qubit_map)
+                                    qubit_map[qubit_id] = self._next_qubit_index
+                                    self._next_qubit_index += 1
                     continue
                 if result.uuid not in qubit_map:
-                    qubit_map[result.uuid] = len(qubit_map)
+                    qubit_map[result.uuid] = self._next_qubit_index
+                    self._next_qubit_index += 1
 
             elif isinstance(op, MeasureOperation):
                 result = op.results[0]
                 if result.uuid not in clbit_map:
-                    clbit_map[result.uuid] = len(clbit_map)
+                    clbit_map[result.uuid] = self._next_clbit_index
+                    self._next_clbit_index += 1
 
             elif isinstance(op, MeasureVectorOperation):
                 result = op.results[0]
@@ -280,7 +304,8 @@ class ResourceAllocator:
                         for i in range(size):
                             clbit_id = f"{result.uuid}_{i}"
                             if clbit_id not in clbit_map:
-                                clbit_map[clbit_id] = len(clbit_map)
+                                clbit_map[clbit_id] = self._next_clbit_index
+                                self._next_clbit_index += 1
 
             elif isinstance(op, MeasureQFixedOperation):
                 qfixed = op.operands[0]
@@ -289,7 +314,8 @@ class ResourceAllocator:
                 for i, qubit_uuid in enumerate(qubit_uuids):
                     clbit_id = f"{result.uuid}_{i}"
                     if clbit_id not in clbit_map:
-                        clbit_map[clbit_id] = len(clbit_map)
+                        clbit_map[clbit_id] = self._next_clbit_index
+                        self._next_clbit_index += 1
 
             elif isinstance(op, GateOperation):
                 self._allocate_gate(op, qubit_map)
@@ -311,23 +337,19 @@ class ResourceAllocator:
                 self._allocate_phi_ops(op.phi_ops, qubit_map, clbit_map)
 
             elif isinstance(op, WhileOperation):
-                # Allocate the loop body first so that IfOperation phi
-                # mappings inside the body are fully resolved.
-                self._allocate_recursive(op.operations, qubit_map, clbit_map, bindings)
-
-                # Alias the loop-carried condition to the initial
-                # while-condition clbit.  After body allocation the
-                # loop-carried UUID may point to a different clbit
-                # (e.g. a phi-merged measurement from an if-else).
-                # We recursively trace IfOperation phi_ops and map all
-                # upstream branch-measurement UUIDs to the canonical clbit.
-                #
                 # WhileOperation operands:
                 #   operands[0]: initial condition (always present)
                 #   operands[1]: loop-carried condition (present only when the
                 #                body reassigns the condition variable)
                 # No other operand count is valid.
-                if len(op.operands) == 2:
+                if len(op.operands) == 1:
+                    # Invariant condition: the condition variable is not
+                    # reassigned inside the loop body.  No loop-carried
+                    # clbit aliasing is needed; just allocate the body.
+                    self._allocate_recursive(
+                        op.operations, qubit_map, clbit_map, bindings
+                    )
+                elif len(op.operands) == 2:
                     initial_cond = op.operands[0]
                     loop_carried = op.operands[1]
                     init_val = (
@@ -335,33 +357,62 @@ class ResourceAllocator:
                         if hasattr(initial_cond, "value")
                         else initial_cond
                     )
+                    init_uuid = (
+                        init_val.uuid if hasattr(init_val, "uuid") else str(init_val)
+                    )
+
+                    # Save the canonical clbit for the initial condition
+                    # BEFORE body allocation.  An if-only (no else) inside
+                    # the loop body produces a PhiOp whose false_val is the
+                    # pre-if while-condition value.  map_phi_outputs will
+                    # redirect that false_val UUID to the true-branch clbit,
+                    # overwriting clbit_map[init_uuid] and making the
+                    # post-body mismatch detection ineffective.
+                    saved_init_clbit = clbit_map.get(init_uuid)
+
+                    # Allocate the loop body so that IfOperation phi
+                    # mappings inside the body are fully resolved.
+                    self._allocate_recursive(
+                        op.operations, qubit_map, clbit_map, bindings
+                    )
+
+                    # Restore the canonical clbit for init_uuid if it was
+                    # overwritten during body allocation.
+                    if saved_init_clbit is not None:
+                        clbit_map[init_uuid] = saved_init_clbit
+
                     carried_val = (
                         loop_carried.value
                         if hasattr(loop_carried, "value")
                         else loop_carried
-                    )
-                    init_uuid = (
-                        init_val.uuid if hasattr(init_val, "uuid") else str(init_val)
                     )
                     carried_uuid = (
                         carried_val.uuid
                         if hasattr(carried_val, "uuid")
                         else str(carried_val)
                     )
-                    init_clbit = clbit_map.get(init_uuid)
                     carried_clbit = clbit_map.get(carried_uuid)
 
+                    # Alias the loop-carried condition to the initial
+                    # while-condition clbit.  After body allocation the
+                    # loop-carried UUID may point to a different clbit
+                    # (e.g. a phi-merged measurement from an if-else).
+                    # We recursively trace IfOperation phi_ops and map all
+                    # upstream branch-measurement UUIDs to the canonical clbit.
                     if (
-                        init_clbit is not None
+                        saved_init_clbit is not None
                         and carried_clbit is not None
-                        and init_clbit != carried_clbit
+                        and saved_init_clbit != carried_clbit
                     ):
-                        clbit_map[carried_uuid] = init_clbit
+                        clbit_map[carried_uuid] = saved_init_clbit
                         self._alias_loop_carried_clbits(
-                            op.operations, carried_uuid, init_clbit, clbit_map
+                            op.operations,
+                            carried_uuid,
+                            saved_init_clbit,
+                            clbit_map,
                         )
-                    elif init_clbit is not None and carried_uuid not in clbit_map:
-                        clbit_map[carried_uuid] = init_clbit
+                    elif saved_init_clbit is not None and carried_uuid not in clbit_map:
+                        clbit_map[carried_uuid] = saved_init_clbit
                 else:
                     assert False, (
                         "[FOR DEVELOPER] WhileOperation must have exactly 2 "
@@ -529,7 +580,8 @@ class ResourceAllocator:
                     # emit_init=False (func_to_block.py), which have no QInitOperation.
                     # ResourceAllocator.allocate() receives only operations, not the
                     # block's input_values, so these qubits are first registered here.
-                    qubit_map[operand.uuid] = len(qubit_map)
+                    qubit_map[operand.uuid] = self._next_qubit_index
+                    self._next_qubit_index += 1
 
         # Phase 2: Map each result to its corresponding operand (1:1)
         for i, result in enumerate(op.results):
@@ -570,7 +622,8 @@ class ResourceAllocator:
                     # For scalar qubits, this handles @qkernel input parameters
                     # (emit_init=False) that have no preceding QInitOperation.
                     # For array elements, this handles first-seen element keys.
-                    qubit_map[qubit_key] = len(qubit_map)
+                    qubit_map[qubit_key] = self._next_qubit_index
+                    self._next_qubit_index += 1
                 if qubit.uuid not in qubit_map:
                     qubit_map[qubit.uuid] = qubit_map[qubit_key]
 
@@ -578,7 +631,18 @@ class ResourceAllocator:
             if result.uuid not in qubit_map and i < len(all_qubits):
                 qubit_key, is_array = self._resolve_qubit_key(all_qubits[i])
                 if qubit_key is not None:
-                    qubit_map[result.uuid] = qubit_map.get(qubit_key, len(qubit_map))
+                    # Alias: result must map to the same physical index as its
+                    # corresponding operand.  If qubit_key is somehow missing
+                    # (should not happen after the operand loop above), this is
+                    # a bug — raise explicitly rather than silently allocating.
+                    if qubit_key in qubit_map:
+                        qubit_map[result.uuid] = qubit_map[qubit_key]
+                    else:
+                        raise AssertionError(
+                            f"Missing qubit_key '{qubit_key}' in qubit_map when "
+                            f"allocating result '{result.uuid}'. "
+                            "This indicates a bug in operand allocation."
+                        )
 
     def _allocate_composite(
         self,

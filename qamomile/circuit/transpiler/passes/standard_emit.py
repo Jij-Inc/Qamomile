@@ -665,8 +665,9 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             # (e.g., measure) can resolve the merged values.
             self._register_phi_outputs(op, qubit_map, clbit_map, bindings)
         else:
-            raise NotImplementedError(
-                f"{type(self._emitter).__name__} does not support IfOperation yet"
+            raise EmitError(
+                "Backend does not support native if/else control flow. "
+                "Cannot emit IfOperation."
             )
 
     def _register_phi_outputs(
@@ -723,8 +724,9 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             )
             self._emitter.emit_while_end(circuit, context)
         else:
-            raise NotImplementedError(
-                f"{type(self._emitter).__name__} does not support WhileOperation yet"
+            raise EmitError(
+                "Backend does not support native while loop control flow. "
+                "Cannot emit WhileOperation."
             )
 
     def _emit_composite_gate(

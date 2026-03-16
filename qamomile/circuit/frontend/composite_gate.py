@@ -419,7 +419,7 @@ class CompositeGate(abc.ABC):
             impl = self.get_implementation()
         has_impl = impl is not None
 
-        # Consume all qubit handles (enforces linear type)
+        # Consume all qubit handles (enforces affine type)
         gate_name = self.custom_name or self.gate_type.value
         consumed_controls = [
             c.consume(operation_name=f"{gate_name}[control]") for c in controls

@@ -1,8 +1,8 @@
 name: Deploy Jupyter Book to GitHub Pages
 
 on:
-  push:
-    branches: ["main"]
+  # push:
+  #   branches: ["main"]
   workflow_dispatch:
 
 permissions:
@@ -27,7 +27,7 @@ jobs:
           version: "latest"
 
       - name: Setup Python
-        run: uv python install 3.11
+        run: uv python install 3.12
 
       - name: Install dependencies
         run: uv sync
@@ -35,6 +35,11 @@ jobs:
       - name: Build documentation
         working-directory: docs
         run: |
+          # Generate API reference
+          uv run python generate_api.py
+          cp -r api/ en/api/
+          cp -r api/ ja/api/
+
           # Convert .py to .ipynb
           uv run jupytext --to ipynb en/tutorial/*.py || true
           uv run jupytext --to ipynb en/transpile/*.py || true

@@ -1366,8 +1366,9 @@ class TestEdgeCases:
 class TestErrorCases:
     """Test expected error conditions."""
 
-    def test_if_else_raises_not_implemented(self):
-        """IfOperation on CUDA-Q backend must raise NotImplementedError."""
+    def test_if_else_raises_emit_error(self):
+        """IfOperation on CUDA-Q backend must raise EmitError."""
+        from qamomile.circuit.transpiler.errors import EmitError
 
         @qmc.qkernel
         def circuit_with_if(q: qmc.Qubit) -> qmc.Bit:
@@ -1377,11 +1378,12 @@ class TestErrorCases:
             return qmc.measure(q)
 
         transpiler = CudaqTranspiler()
-        with pytest.raises(NotImplementedError, match="does not support IfOperation"):
+        with pytest.raises(EmitError, match="if/else control flow"):
             transpiler.transpile(circuit_with_if)
 
-    def test_while_loop_raises_not_implemented(self):
-        """WhileOperation on CUDA-Q backend must raise NotImplementedError."""
+    def test_while_loop_raises_emit_error(self):
+        """WhileOperation on CUDA-Q backend must raise EmitError."""
+        from qamomile.circuit.transpiler.errors import EmitError
 
         @qmc.qkernel
         def circuit_with_while(q: qmc.Qubit) -> qmc.Bit:
@@ -1395,9 +1397,7 @@ class TestErrorCases:
             return q, qmc.measure(q)
 
         transpiler = CudaqTranspiler()
-        with pytest.raises(
-            NotImplementedError, match="does not support WhileOperation"
-        ):
+        with pytest.raises(EmitError, match="while loop control flow"):
             transpiler.transpile(circuit_with_while)
 
     def test_expval_missing_observable_raises(self):

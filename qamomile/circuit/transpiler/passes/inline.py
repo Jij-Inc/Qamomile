@@ -1,4 +1,4 @@
-"""Inline pass: Inline CallBlockOperations to create a linear block."""
+"""Inline pass: Inline CallBlockOperations to create an affine block."""
 
 from __future__ import annotations
 
@@ -36,13 +36,13 @@ def find_return_operation(operations: list[Operation]) -> ReturnOperation | None
 
 
 class InlinePass(Pass[Block, Block]):
-    """Inline all CallBlockOperations to create a linear block.
+    """Inline all CallBlockOperations to create an affine block.
 
     This pass recursively inlines function calls while preserving
     control flow structures (For, If, While).
 
     Input: Block with BlockKind.HIERARCHICAL (may contain CallBlockOperations)
-    Output: Block with BlockKind.LINEAR (no CallBlockOperations)
+    Output: Block with BlockKind.AFFINE (no CallBlockOperations)
     """
 
     @property
@@ -72,7 +72,7 @@ class InlinePass(Pass[Block, Block]):
             input_values=input.input_values,
             output_values=output_values,
             operations=serialized_ops,
-            kind=BlockKind.LINEAR,
+            kind=BlockKind.AFFINE,
             parameters=input.parameters,
         )
 

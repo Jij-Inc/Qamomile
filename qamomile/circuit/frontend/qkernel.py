@@ -225,7 +225,7 @@ class QKernel(Generic[P, R]):
         for name, handle in bound_args.arguments.items():
             if not isinstance(handle, Handle):
                 continue
-            # Consume quantum handles to enforce linear type
+            # Consume quantum handles to enforce affine type
             if handle._should_enforce_linear():
                 handle = handle.consume(operation_name=f"QKernel[{self.name}]")
             inputs_map[name] = handle.value

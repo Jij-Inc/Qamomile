@@ -205,11 +205,11 @@ class ExecutionError(QamomileCompileError):
     pass
 
 
-class LinearTypeError(QamomileCompileError):
-    """Base class for linear type violations.
+class AffineTypeError(QamomileCompileError):
+    """Base class for affine type violations.
 
-    Linear types enforce that quantum resources (qubits) are used exactly once.
-    This prevents common errors like using a consumed qubit or aliasing.
+    Affine types enforce that quantum resources (qubits) are used at most once.
+    This prevents common errors such as reusing a consumed qubit or aliasing.
     """
 
     def __init__(
@@ -225,7 +225,7 @@ class LinearTypeError(QamomileCompileError):
         super().__init__(message)
 
 
-class QubitConsumedError(LinearTypeError):
+class QubitConsumedError(AffineTypeError):
     """Qubit handle used after being consumed by a previous operation.
 
     Each qubit handle can only be used once. After a gate operation,
@@ -243,7 +243,7 @@ class QubitConsumedError(LinearTypeError):
     pass
 
 
-class QubitAliasError(LinearTypeError):
+class QubitAliasError(AffineTypeError):
     """Same qubit used multiple times in one operation.
 
     Operations like cx() require distinct qubits for control and target.
@@ -260,7 +260,7 @@ class QubitAliasError(LinearTypeError):
     pass
 
 
-class UnreturnedBorrowError(LinearTypeError):
+class UnreturnedBorrowError(AffineTypeError):
     """Borrowed array element not returned before array use.
 
     When you borrow an element from a qubit array, you must return it
@@ -281,7 +281,7 @@ class UnreturnedBorrowError(LinearTypeError):
     pass
 
 
-class QubitRebindError(LinearTypeError):
+class QubitRebindError(AffineTypeError):
     """Quantum variable reassigned from a different quantum source.
 
     When a quantum variable is reassigned, the RHS must consume the

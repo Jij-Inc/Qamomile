@@ -89,11 +89,11 @@ def _make_gate(
 
 
 def _make_block(operations: list) -> Block:
-    """Create a minimal LINEAR block wrapping given operations."""
+    """Create a minimal AFFINE block wrapping given operations."""
     return Block(
         name="test_block",
         operations=operations,
-        kind=BlockKind.LINEAR,
+        kind=BlockKind.AFFINE,
     )
 
 

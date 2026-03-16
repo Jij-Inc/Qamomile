@@ -13,7 +13,7 @@ import pytest
 
 cudaq = pytest.importorskip("cudaq")
 
-from tests.transpiler.base_test import TranspilerTestSuite
+from tests.transpiler.base_test import TranspilerTestSuite  # noqa: E402
 
 
 class TestCudaqTranspiler(TranspilerTestSuite):
@@ -53,9 +53,10 @@ class TestCudaqTranspiler(TranspilerTestSuite):
 class TestCudaqControlFlowErrors:
     """Test that unsupported control flow raises explicit errors."""
 
-    def test_if_else_raises_not_implemented(self) -> None:
-        """IfOperation on CUDA-Q backend must raise NotImplementedError."""
+    def test_if_else_raises_emit_error(self) -> None:
+        """IfOperation on CUDA-Q backend must raise EmitError."""
         import qamomile.circuit as qm
+        from qamomile.circuit.transpiler.errors import EmitError
         from qamomile.cudaq import CudaqTranspiler
 
         @qm.qkernel
@@ -66,12 +67,13 @@ class TestCudaqControlFlowErrors:
             return qm.measure(q)
 
         transpiler = CudaqTranspiler()
-        with pytest.raises(NotImplementedError, match="does not support IfOperation"):
+        with pytest.raises(EmitError, match="if/else control flow"):
             transpiler.transpile(circuit_with_if)
 
-    def test_while_loop_raises_not_implemented(self) -> None:
-        """WhileOperation on CUDA-Q backend must raise NotImplementedError."""
+    def test_while_loop_raises_emit_error(self) -> None:
+        """WhileOperation on CUDA-Q backend must raise EmitError."""
         import qamomile.circuit as qm
+        from qamomile.circuit.transpiler.errors import EmitError
         from qamomile.cudaq import CudaqTranspiler
 
         @qm.qkernel
@@ -86,7 +88,5 @@ class TestCudaqControlFlowErrors:
             return q, qm.measure(q)
 
         transpiler = CudaqTranspiler()
-        with pytest.raises(
-            NotImplementedError, match="does not support WhileOperation"
-        ):
+        with pytest.raises(EmitError, match="while loop control flow"):
             transpiler.transpile(circuit_with_while)
