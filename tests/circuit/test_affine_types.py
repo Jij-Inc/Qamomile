@@ -2823,3 +2823,71 @@ class TestExpvalConsumeContract:
 
         block = ok.build(n=2)
         assert block is not None
+
+    # -- contract boundary tests --
+
+    def test_expval_empty_tuple_raises_value_error(self):
+        """Empty tuple should raise ValueError."""
+
+        @qkernel
+        def bad(H: qm.Observable) -> qm.Float:
+            return qm.expval((), H)
+
+        with pytest.raises(ValueError, match="requires at least one qubit"):
+            bad.build()
+
+    def test_expval_toplevel_invalid_type_raises_type_error(self):
+        """Non-qubit top-level argument should raise TypeError."""
+
+        @qkernel
+        def bad(theta: qm.Float, H: qm.Observable) -> qm.Float:
+            return qm.expval(theta, H)
+
+        with pytest.raises(TypeError, match="expval expects Qubit, Vector\\[Qubit\\]"):
+            bad.build()
+
+    def test_expval_tuple_non_qubit_single_raises_type_error(self):
+        """Tuple with a single non-Qubit member should raise TypeError."""
+
+        @qkernel
+        def bad(theta: qm.Float, H: qm.Observable) -> qm.Float:
+            x = theta + 1.0
+            return qm.expval((x,), H)
+
+        with pytest.raises(TypeError, match="expval tuple expects only Qubit elements"):
+            bad.build()
+
+    def test_expval_tuple_mixed_qubit_and_non_qubit_raises_type_error(self):
+        """Tuple with mixed Qubit and non-Qubit should raise TypeError."""
+
+        @qkernel
+        def bad(theta: qm.Float, H: qm.Observable) -> qm.Float:
+            q = qm.qubit(name="q")
+            q = qm.h(q)
+            return qm.expval((q, theta), H)
+
+        with pytest.raises(TypeError, match="expval tuple expects only Qubit elements"):
+            bad.build()
+
+    def test_expval_tuple_all_non_qubit_raises_type_error(self):
+        """Tuple with all non-Qubit members should raise TypeError (not QubitConsumedError)."""
+
+        @qkernel
+        def bad(theta: qm.Float, H: qm.Observable) -> qm.Float:
+            x = theta + 1.0
+            return qm.expval((x, x), H)
+
+        with pytest.raises(TypeError, match="expval tuple expects only Qubit elements"):
+            bad.build()
+
+    def test_expval_tuple_pre_consumed_qubit_raises(self):
+        """Pre-consumed qubit in tuple should raise QubitConsumedError."""
+
+        @qkernel
+        def bad(q: Qubit, H: qm.Observable) -> qm.Float:
+            q = qm.h(q)
+            _bit = qm.measure(q)
+            return qm.expval((q,), H)
+
+        with pytest.raises(QubitConsumedError, match="already consumed"):
+            bad.build()

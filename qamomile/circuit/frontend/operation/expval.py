@@ -19,6 +19,14 @@ def _consume_tuple_qubits(qubits: tuple[Qubit, ...]) -> ArrayValue:
     if len(qubits) == 0:
         raise ValueError("expval requires at least one qubit. Got an empty tuple.")
 
+    # Validate all members are Qubit before consuming or checking duplicates.
+    for i, member in enumerate(qubits):
+        if not isinstance(member, Qubit):
+            raise TypeError(
+                f"expval tuple expects only Qubit elements, "
+                f"got {type(member).__name__} at index {i}"
+            )
+
     seen_ids: set[str] = set()
     qubit_values: list[Value] = []
 
@@ -86,7 +94,10 @@ def expval(
         Float containing the expectation value.
 
     Raises:
-        QubitConsumedError: If any qubit in the tuple has already been consumed,
+        TypeError: If the target is not Qubit, Vector[Qubit], or tuple[Qubit, ...],
+            or if any element in a tuple is not a Qubit.
+        ValueError: If the tuple is empty.
+        QubitConsumedError: If any qubit has already been consumed,
             or if a duplicate qubit appears in the tuple.
         UnreturnedBorrowError: If a Vector[Qubit] has unreturned borrowed elements.
 

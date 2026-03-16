@@ -331,6 +331,36 @@ class TestExpvalContractValidation:
         assert len(executable.compiled_expval) == 1
 
 
+class TestExpvalTupleValidation:
+    """Test that invalid tuple members are rejected at build time."""
+
+    def test_tuple_non_qubit_rejected_before_ir(self):
+        """Non-Qubit tuple member should be rejected before ExpvalOp is created."""
+
+        @qm.qkernel
+        def bad(theta: qm.Float, H: qm.Observable) -> qm.Float:
+            x = theta + 1.0
+            return qm.expval((x,), H)
+
+        with pytest.raises(TypeError, match="expval tuple expects only Qubit elements"):
+            bad.build()
+
+    def test_tuple_invalid_rejected_before_transpile(self):
+        """Invalid tuple should fail at build, never reaching transpile."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qm.qkernel
+        def bad(theta: qm.Float, H: qm.Observable) -> qm.Float:
+            q = qm.qubit(name="q")
+            q = qm.h(q)
+            return qm.expval((q, theta), H)
+
+        # Should raise TypeError at build time (inside transpile), not silently pass
+        with pytest.raises(TypeError, match="expval tuple expects only Qubit elements"):
+            QiskitTranspiler().transpile(bad, bindings={"H": qm_o.Z(0)})
+
+
 class TestHamiltonianRemapQubits:
     """Test Hamiltonian.remap_qubits method."""
 
