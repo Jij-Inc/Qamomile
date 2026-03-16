@@ -313,8 +313,23 @@ class CudaqGateEmitter:
     # ------------------------------------------------------------------
 
     def emit_measure(self, circuit: CudaqCircuit, qubit: int, clbit: int) -> None:
-        """No-op: measurements are handled by the executor."""
-        pass
+        """Emit measurement using ``kernel.mz()``.
+
+        Explicit ``mz()`` calls ensure that ``cudaq.sample()`` reports all
+        measured qubits.  Without them, ``cudaq.sample()`` auto-measures
+        **all** qubits when no ``mz()`` is present, but reports **only**
+        the explicitly measured ones when at least one ``mz()`` exists
+        (e.g. from a ``c_if`` condition).  By emitting ``mz()`` for every
+        measure operation we guarantee consistent bitstring output
+        regardless of whether the circuit contains ``c_if``.
+
+        Results are cached in ``circuit.measurement_results`` so that
+        ``_emit_if`` can reuse them without calling ``mz()`` twice on
+        the same qubit.
+        """
+        if clbit not in circuit.measurement_results:
+            mz_result = circuit.kernel.mz(circuit.qubits[qubit])
+            circuit.measurement_results[clbit] = mz_result
 
     # ------------------------------------------------------------------
     # Barrier
