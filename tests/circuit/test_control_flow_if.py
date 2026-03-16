@@ -1,8 +1,12 @@
 """Tests for if-else control flow in @qkernel."""
 
+import ast
+import textwrap
+
 import pytest
 
 import qamomile.circuit as qm
+from qamomile.circuit.frontend.ast_transform import ControlFlowTransformer
 from qamomile.circuit.frontend.handle import Qubit, UInt, Vector
 from qamomile.circuit.frontend.handle.primitives import Float
 from qamomile.circuit.frontend.operation.control_flow import _create_phi_for_values
@@ -16,6 +20,43 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, QubitType
 from qamomile.circuit.ir.value import Value
+
+
+def _collect_emit_if_bindings(source: str) -> list[tuple[list[str], list[str]]]:
+    """Return transformed emit_if assignment targets and input variable names."""
+    tree = ast.parse(textwrap.dedent(source))
+    transformed = ControlFlowTransformer(global_names=set()).visit(tree)
+    function_def = next(
+        node for node in transformed.body if isinstance(node, ast.FunctionDef)
+    )
+
+    bindings: list[tuple[list[str], list[str]]] = []
+    for stmt in function_def.body:
+        if not (
+            isinstance(stmt, ast.Assign)
+            and isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Name)
+            and stmt.value.func.id == "emit_if"
+        ):
+            continue
+
+        target = stmt.targets[0]
+        if isinstance(target, ast.Name):
+            target_names = [target.id]
+        elif isinstance(target, ast.Tuple):
+            target_names = [elt.id for elt in target.elts if isinstance(elt, ast.Name)]
+        else:
+            raise AssertionError(f"Unexpected emit_if target: {ast.dump(target)}")
+
+        var_list = stmt.value.args[3]
+        if not isinstance(var_list, ast.List):
+            raise AssertionError(
+                f"Unexpected emit_if var list node: {ast.dump(var_list)}"
+            )
+        input_names = [elt.id for elt in var_list.elts if isinstance(elt, ast.Name)]
+        bindings.append((target_names, input_names))
+
+    return bindings
 
 
 class TestIfElseScalarQubit:
@@ -1398,6 +1439,132 @@ class TestIfElseDeadPhiFiltering:
                     angle = theta + 1.0
                 angle += 1.0
                 return angle
+
+
+class TestSequentialPureStoreFollowers:
+    """Sequential pure-store followers must preserve only truly live values."""
+
+    def test_if_else_then_if_else_pure_store_skips_old_input_in_transform(self):
+        """Both-sided pure-store follower must not request the dead old value."""
+        bindings = _collect_emit_if_bindings(
+            """
+            def circuit(m0, m1, theta):
+                if m0:
+                    angle = theta + 1.0
+                else:
+                    angle = theta + 2.0
+                if m1:
+                    angle = 0.0
+                else:
+                    angle = 4.0
+                return angle
+            """
+        )
+
+        assert len(bindings) == 2
+        first_targets, _ = bindings[0]
+        _, second_inputs = bindings[1]
+        assert "angle" not in first_targets
+        assert second_inputs == ["m1"]
+
+    def test_if_else_then_if_pure_store_keeps_old_input_in_transform(self):
+        """One-sided pure-store follower must keep the old value live."""
+        bindings = _collect_emit_if_bindings(
+            """
+            def circuit(m0, m1, theta):
+                if m0:
+                    angle = theta + 1.0
+                else:
+                    angle = theta + 2.0
+                if m1:
+                    angle = 0.0
+                return angle
+            """
+        )
+
+        assert len(bindings) == 2
+        first_targets, _ = bindings[0]
+        _, second_inputs = bindings[1]
+        assert "angle" in first_targets
+        assert second_inputs == ["angle", "m1"]
+
+    def test_if_else_then_if_else_pure_store_builds(self):
+        """Sequential if/else pure-store follower should build without unbound errors."""
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit, theta: Float) -> qm.Float:
+            m0 = qm.measure(q0)
+            m1 = qm.measure(q1)
+            if m0:
+                angle = theta + 1.0
+            else:
+                angle = theta + 2.0
+            if m1:
+                angle = 0.0
+            else:
+                angle = 4.0
+            return angle
+
+        graph = circuit.build(theta=1.5)
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 2
+
+    def test_if_else_then_if_pure_store_builds(self):
+        """Sequential one-sided pure-store follower should keep the prior value live."""
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit, theta: Float) -> qm.Float:
+            m0 = qm.measure(q0)
+            m1 = qm.measure(q1)
+            if m0:
+                angle = theta + 1.0
+            else:
+                angle = theta + 2.0
+            if m1:
+                angle = theta + 0.0
+            return angle
+
+        graph = circuit.build(theta=1.5)
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 2
+
+    def test_if_else_then_while_pure_store_keeps_value_live_in_transform(self):
+        """A while follower must preserve the zero-iteration path for old values."""
+        bindings = _collect_emit_if_bindings(
+            """
+            def circuit(m0, cond, theta):
+                if m0:
+                    angle = theta + 1.0
+                else:
+                    angle = theta + 2.0
+                while cond:
+                    angle = 0.0
+                return angle
+            """
+        )
+
+        assert len(bindings) == 1
+        first_targets, _ = bindings[0]
+        assert "angle" in first_targets
+
+    def test_if_else_then_for_pure_store_keeps_value_live_in_transform(self):
+        """A for follower must preserve the zero-iteration path for old values."""
+        bindings = _collect_emit_if_bindings(
+            """
+            def circuit(m0, n, theta):
+                if m0:
+                    angle = theta + 1.0
+                else:
+                    angle = theta + 2.0
+                for i in range(n):
+                    angle = 0.0
+                return angle
+            """
+        )
+
+        assert len(bindings) == 1
+        first_targets, _ = bindings[0]
+        assert "angle" in first_targets
 
 
 class TestWhileNewLocalBoundary:
