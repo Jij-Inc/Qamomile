@@ -8,7 +8,7 @@ from qamomile.circuit.frontend.handle.primitives import Float
 from qamomile.circuit.frontend.operation.control_flow import _create_phi_for_values
 from qamomile.circuit.frontend.qkernel import qkernel
 from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
-from qamomile.circuit.ir.operation.control_flow import IfOperation
+from qamomile.circuit.ir.operation.control_flow import IfOperation, WhileOperation
 from qamomile.circuit.ir.operation.gate import (
     GateOperationType,
     MeasureOperation,
@@ -1226,3 +1226,198 @@ class TestIfNestedInLoop:
 
         graph = circuit.build(n=2)
         assert graph is not None
+
+
+class TestIfElseDeadPhiFiltering:
+    """Dead variables (not loaded after if) must not generate PhiOps."""
+
+    def test_if_dead_shared_new_local_not_merged(self):
+        """Both branches define b_new via measure, but it is dead after if."""
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit, q2: Qubit) -> qm.Bit:
+            cond = qm.measure(q0)
+            if cond:
+                b_new = qm.measure(q1)
+            else:
+                b_new = qm.measure(q2)  # noqa: F841
+            # b_new is dead; only cond is returned
+            return cond
+
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        # b_new is dead -> should NOT appear in IfOperation results
+        result_names = [r.name for r in if_ops[0].results]
+        assert not any("b_new" in name for name in result_names)
+
+    def test_if_dead_reassigned_existing_not_merged(self):
+        """Outer qubit reassigned in both branches but dead -> no qubit phi."""
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit, q_t: Qubit) -> qm.Bit:
+            cond = qm.measure(q0)
+            b = qm.measure(q1)
+            if cond:
+                q_t = qm.x(q_t)
+            else:
+                q_t = qm.h(q_t)
+            # q_t is dead; only b is returned
+            return b
+
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        qubit_phis = [
+            p
+            for p in if_ops[0].phi_ops
+            if isinstance(p, PhiOp) and isinstance(p.results[0].type, QubitType)
+        ]
+        assert len(qubit_phis) == 0
+
+    def test_if_live_reassigned_existing_is_merged(self):
+        """Outer qubit reassigned and read after if -> phi must exist (regression)."""
+
+        @qkernel
+        def circuit(q0: Qubit, q_t: Qubit) -> qm.Bit:
+            cond = qm.measure(q0)
+            if cond:
+                q_t = qm.x(q_t)
+            else:
+                q_t = qm.h(q_t)
+            # q_t is live (read after if)
+            return qm.measure(q_t)
+
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        qubit_phis = [
+            p
+            for p in if_ops[0].phi_ops
+            if isinstance(p, PhiOp) and isinstance(p.results[0].type, QubitType)
+        ]
+        assert len(qubit_phis) >= 1
+
+    def test_if_only_dead_reassigned_existing_not_merged(self):
+        """If-only (no else): outer qubit reassigned but dead -> no qubit phi."""
+
+        @qkernel
+        def circuit(q0: Qubit, q_t: Qubit) -> qm.Bit:
+            cond = qm.measure(q0)
+            b = qm.measure(q_t)
+            if cond:
+                q_t = qm.x(q_t)
+            # q_t is dead; only b is returned
+            return b
+
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        qubit_phis = [
+            p
+            for p in if_ops[0].phi_ops
+            if isinstance(p, PhiOp) and isinstance(p.results[0].type, QubitType)
+        ]
+        assert len(qubit_phis) == 0
+
+    def test_if_one_sided_new_local_followed_by_store_only_is_allowed(self):
+        """One-sided new local, only stored (not loaded) after -> allowed."""
+
+        @qkernel
+        def circuit(q0: Qubit, q1: Qubit) -> qm.Bit:
+            cond = qm.measure(q0)
+            if cond:
+                b_new = qm.measure(q1)  # noqa: F841
+            # b_new is only overwritten, never read
+            b_new = qm.measure(q1)  # noqa: F841
+            return cond
+
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        result_names = [r.name for r in if_ops[0].results]
+        assert not any("b_new" in name for name in result_names)
+
+    def test_if_live_reassigned_existing_non_return_load(self):
+        """Outer qubit reassigned, read after if via measure (not return) -> phi exists."""
+
+        @qkernel
+        def circuit(q0: Qubit, q_t: Qubit) -> qm.Bit:
+            cond = qm.measure(q0)
+            if cond:
+                q_t = qm.x(q_t)
+            else:
+                q_t = qm.h(q_t)
+            # q_t is live: read via measure, not via return
+            result = qm.measure(q_t)
+            return result
+
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        qubit_phis = [
+            p
+            for p in if_ops[0].phi_ops
+            if isinstance(p, PhiOp) and isinstance(p.results[0].type, QubitType)
+        ]
+        assert len(qubit_phis) >= 1
+
+    def test_if_shared_new_local_used_only_by_augassign_is_merged(self):
+        """Both branches assign angle from parameter, afterward angle += 1.0 -> float phi must exist."""
+
+        @qkernel
+        def circuit(q0: Qubit, theta: Float) -> qm.Float:
+            cond = qm.measure(q0)
+            if cond:
+                angle = theta + 1.0
+            else:
+                angle = theta + 2.0
+            angle += 1.0
+            return angle
+
+        graph = circuit.build()
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        # angle (= theta + x) becomes a float_tmp in IR; check FloatType phi exists
+        float_phis = [
+            p
+            for p in if_ops[0].phi_ops
+            if isinstance(p, PhiOp) and isinstance(p.results[0].type, FloatType)
+        ]
+        assert len(float_phis) >= 1
+
+    def test_if_one_sided_new_local_used_only_by_augassign_raises_syntax_error(self):
+        """One-sided new local, afterward angle += 1.0 -> must raise SyntaxError."""
+
+        with pytest.raises(SyntaxError):
+
+            @qkernel
+            def circuit(q0: Qubit, theta: Float) -> qm.Float:
+                cond = qm.measure(q0)
+                if cond:
+                    angle = theta + 1.0
+                angle += 1.0
+                return angle
+
+
+class TestWhileNewLocalBoundary:
+    """While-loop boundary: bit loop-carried liveness."""
+
+    def test_while_bit_loop_carried_liveness_preserved(self):
+        """bit is reassigned via measure inside while and read after loop -> WhileOperation has loop-carried condition."""
+
+        @qkernel
+        def circuit() -> qm.Bit:
+            q = qm.qubit("q")
+            q = qm.h(q)
+            bit = qm.measure(q)
+            while bit:
+                q = qm.qubit("q2")
+                q = qm.h(q)
+                bit = qm.measure(q)
+            return bit
+
+        graph = circuit.build()
+        while_ops = [op for op in graph.operations if isinstance(op, WhileOperation)]
+        assert len(while_ops) == 1
+        assert len(while_ops[0].operands) == 2  # initial + loop-carried condition

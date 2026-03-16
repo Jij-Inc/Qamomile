@@ -35,7 +35,7 @@ pytest.importorskip("qiskit_aer")
 
 from qiskit import QuantumCircuit
 from qiskit.circuit import Barrier, Measure, ParameterExpression
-from qiskit.circuit.controlflow import IfElseOp, WhileLoopOp
+from qiskit.circuit.controlflow import ForLoopOp, IfElseOp, WhileLoopOp
 from qiskit.circuit.library import (
     CCXGate,
     CPhaseGate,
@@ -7455,3 +7455,189 @@ class TestQubitArrayPatterns:
         # Both should be 3-qubit GHZ
         assert np.isclose(abs(sv_par[0]), 1.0 / np.sqrt(2), atol=1e-10)
         assert np.isclose(abs(sv_par[7]), 1.0 / np.sqrt(2), atol=1e-10)
+
+
+class TestLoopBackedgeIfLivenessTranspilation:
+    """Loop-carried if outputs must collapse branch measurements into one state slot."""
+
+    def test_for_if_loop_carried_bit_uses_single_branch_result_clbit(self):
+        """Nested if in a for-loop should emit one shared state clbit across branches."""
+
+        @qmc.qkernel
+        def circuit(n: qmc.UInt) -> qmc.Bit:
+            init_q = qmc.qubit("init")
+            state = qmc.measure(init_q)
+            out = state
+            for _i in qmc.range(n):
+                out = state
+                if state:
+                    q_zero = qmc.qubit("zero")
+                    state = qmc.measure(q_zero)
+                else:
+                    q_one = qmc.qubit("one")
+                    q_one = qmc.x(q_one)
+                    state = qmc.measure(q_one)
+            return out
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"n": 2})
+
+        for_insts = [inst for inst in qc.data if isinstance(inst.operation, ForLoopOp)]
+        assert len(for_insts) == 1
+        body = for_insts[0].operation.params[-1]
+        if_insts = [inst for inst in body.data if isinstance(inst.operation, IfElseOp)]
+        assert len(if_insts) == 1
+        if_inst = if_insts[0]
+
+        resolved_branch_clbits = []
+        if_else_clbits = [body.clbits.index(c) for c in if_inst.clbits]
+        for branch_idx, block in enumerate(if_inst.operation.blocks):
+            measures = [inst for inst in block.data if isinstance(inst.operation, Measure)]
+            assert len(measures) == 1, (
+                f"Expected 1 measurement in branch {branch_idx} but got "
+                f"{len(measures)}."
+            )
+            meas_clbit_in_block = block.clbits.index(measures[0].clbits[0])
+            resolved_branch_clbits.append(if_else_clbits[meas_clbit_in_block])
+
+        assert len(if_inst.clbits) == 2
+        assert len(set(resolved_branch_clbits)) == 1, (
+            "Loop-carried if state should use one shared branch-result clbit."
+        )
+
+    def test_while_if_loop_carried_bit_uses_single_branch_result_clbit(self):
+        """First nested if in a while-loop should emit one shared state clbit."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            run_q = qmc.qubit("run")
+            run_q = qmc.x(run_q)
+            run = qmc.measure(run_q)
+
+            step_q = qmc.qubit("step")
+            step = qmc.measure(step_q)
+
+            init_q = qmc.qubit("init")
+            state = qmc.measure(init_q)
+            out = state
+
+            while run:
+                out = state
+                if state:
+                    q_zero = qmc.qubit("zero")
+                    state = qmc.measure(q_zero)
+                else:
+                    q_one = qmc.qubit("one")
+                    q_one = qmc.x(q_one)
+                    state = qmc.measure(q_one)
+
+                if step:
+                    run_stop = qmc.qubit("run_stop")
+                    run = qmc.measure(run_stop)
+                else:
+                    run_keep = qmc.qubit("run_keep")
+                    run_keep = qmc.x(run_keep)
+                    run = qmc.measure(run_keep)
+
+                    step_next = qmc.qubit("step_next")
+                    step_next = qmc.x(step_next)
+                    step = qmc.measure(step_next)
+            return out
+
+        _, qc = _transpile_and_get_circuit(circuit)
+
+        while_insts = [inst for inst in qc.data if isinstance(inst.operation, WhileLoopOp)]
+        assert len(while_insts) == 1
+        body = while_insts[0].operation.params[0]
+        if_insts = [inst for inst in body.data if isinstance(inst.operation, IfElseOp)]
+        assert len(if_insts) >= 1
+        if_inst = if_insts[0]
+
+        resolved_branch_clbits = []
+        if_else_clbits = [body.clbits.index(c) for c in if_inst.clbits]
+        for branch_idx, block in enumerate(if_inst.operation.blocks):
+            measures = [inst for inst in block.data if isinstance(inst.operation, Measure)]
+            assert len(measures) == 1, (
+                f"Expected 1 measurement in branch {branch_idx} but got "
+                f"{len(measures)}."
+            )
+            meas_clbit_in_block = block.clbits.index(measures[0].clbits[0])
+            resolved_branch_clbits.append(if_else_clbits[meas_clbit_in_block])
+
+        assert len(if_inst.clbits) == 2
+        assert len(set(resolved_branch_clbits)) == 1, (
+            "Loop-carried if state should use one shared branch-result clbit."
+        )
+
+
+class TestDeadPhiTranspilation:
+    """Dead quantum variables in if branches must not cause EmitError."""
+
+    def test_if_only_dead_reassigned_existing_transpile_ok(self):
+        """Outer qubit reassigned in if branches but dead -> transpile succeeds."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q_t = qmc.qubit("q_t")
+            q0 = qmc.x(q0)
+            cond = qmc.measure(q0)
+            if cond:
+                q_t = qmc.x(q_t)
+            else:
+                q_t = qmc.h(q_t)
+            # q_t is dead
+            return cond
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc is not None
+
+    def test_while_if_dead_reassigned_existing_transpile_ok(self):
+        """While-if with dead reassigned qubit -> transpile succeeds."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q_t = qmc.qubit("q_t")
+            q1 = qmc.qubit("q1")
+            q0 = qmc.h(q0)
+            bit = qmc.measure(q0)
+            while bit:
+                cond = qmc.measure(q1)
+                if cond:
+                    q_t = qmc.x(q_t)
+                else:
+                    q_t = qmc.h(q_t)
+                # q_t is dead within the while body
+                q0 = qmc.qubit("q_loop")
+                q0 = qmc.h(q0)
+                bit = qmc.measure(q0)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc is not None
+
+    def test_while_if_shared_new_same_name_dead_transpile_ok(self):
+        """Both if branches define same-named new local inside while, dead -> ok."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.h(q0)
+            bit = qmc.measure(q0)
+            while bit:
+                q_sel = qmc.qubit("q_sel")
+                cond = qmc.measure(q_sel)
+                if cond:
+                    q_a = qmc.qubit("q_a")
+                    b_new = qmc.measure(q_a)
+                else:
+                    q_b = qmc.qubit("q_b")
+                    b_new = qmc.measure(q_b)  # noqa: F841
+                # b_new is dead
+                q_next = qmc.qubit("q_next")
+                q_next = qmc.h(q_next)
+                bit = qmc.measure(q_next)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc is not None

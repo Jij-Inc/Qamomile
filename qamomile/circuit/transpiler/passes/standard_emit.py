@@ -664,6 +664,11 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             # Register phi output UUIDs so subsequent operations
             # (e.g., measure) can resolve the merged values.
             self._register_phi_outputs(op, qubit_map, clbit_map, bindings)
+        else:
+            raise EmitError(
+                "Backend does not support native if/else control flow. "
+                "Cannot emit IfOperation."
+            )
 
     def _register_phi_outputs(
         self,
@@ -718,6 +723,11 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 circuit, op.operations, qubit_map, clbit_map, bindings
             )
             self._emitter.emit_while_end(circuit, context)
+        else:
+            raise EmitError(
+                "Backend does not support native while loop control flow. "
+                "Cannot emit WhileOperation."
+            )
 
     def _emit_composite_gate(
         self,

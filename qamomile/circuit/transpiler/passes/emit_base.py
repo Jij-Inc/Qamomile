@@ -324,7 +324,14 @@ class ResourceAllocator:
                 #   operands[1]: loop-carried condition (present only when the
                 #                body reassigns the condition variable)
                 # No other operand count is valid.
-                if len(op.operands) == 2:
+                if len(op.operands) == 1:
+                    # Invariant condition: the condition variable is not
+                    # reassigned inside the loop body.  No loop-carried
+                    # clbit aliasing is needed; just allocate the body.
+                    self._allocate_recursive(
+                        op.operations, qubit_map, clbit_map, bindings
+                    )
+                elif len(op.operands) == 2:
                     initial_cond = op.operands[0]
                     loop_carried = op.operands[1]
                     init_val = (

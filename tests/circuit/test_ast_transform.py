@@ -1,9 +1,16 @@
 """Tests for AST transform guards (loop-variable shadowing, while-condition checks, etc.)."""
 
+import ast
+import textwrap
+
 import pytest
 
 import qamomile.circuit as qm
 from qamomile.circuit.frontend.constructors import qubit_array
+from qamomile.circuit.frontend.ast_transform import (
+    ControlFlowTransformer,
+    VariableCollector,
+)
 from qamomile.circuit.frontend.handle import Qubit
 from qamomile.circuit.frontend.qkernel import qkernel
 
@@ -114,9 +121,7 @@ class TestRuntimeLimitations:
 
         with warnings.catch_warnings(record=True) as ws:
             warnings.simplefilter("always")
-            violations = ast_transform.collect_quantum_rebind_violations(
-                dummy, {"q"}
-            )
+            violations = ast_transform.collect_quantum_rebind_violations(dummy, {"q"})
 
         assert violations == []
         rebind_warnings = [
@@ -176,6 +181,44 @@ class TestRuntimeLimitations:
         # Should not raise — measure here is a classical function, not qm.measure
         graph = circuit.build(n=1)
         assert graph is not None
+
+
+class TestVariableCollectorAttributeAccess:
+    """Attribute access should distinguish user variables from module names."""
+
+    def test_attribute_access_keeps_user_variable_live(self):
+        """User-variable attribute access must count as a load."""
+        tree = ast.parse(
+            textwrap.dedent(
+                """
+                n = qs.shape[0]
+                """
+            )
+        )
+
+        collector = VariableCollector(global_names={"qm"})
+        collector.visit(tree)
+
+        assert "qs" in collector.vars
+        assert "qs" in collector.load_vars
+        assert collector._first_context["qs"] == "Load"
+
+    def test_module_attribute_access_still_excludes_module_name(self):
+        """Module attribute access must not treat the module name as a variable."""
+        tree = ast.parse(
+            textwrap.dedent(
+                """
+                q = qm.h(q)
+                """
+            )
+        )
+
+        collector = VariableCollector(global_names={"qm"})
+        collector.visit(tree)
+
+        assert "qm" not in collector.vars
+        assert "qm" not in collector.load_vars
+        assert "q" in collector.load_vars
 
 
 class TestEmptyClosureCell:
@@ -307,3 +350,283 @@ class TestQuantumOpsSpec:
         extra = ControlFlowTransformer._QUANTUM_OPS - expected
         assert missing == set(), f"Missing from _QUANTUM_OPS: {missing}"
         assert extra == set(), f"Extra in _QUANTUM_OPS: {extra}"
+
+
+class TestLoopBackedgeIfLiveness:
+    """Loop body-entry liveness must be preserved across nested ifs."""
+
+    @staticmethod
+    def _transform_source(source: str) -> ast.FunctionDef:
+        tree = ast.parse(textwrap.dedent(source))
+        transformed = ControlFlowTransformer().visit(tree)
+        ast.fix_missing_locations(transformed)
+        func_def = transformed.body[0]
+        assert isinstance(func_def, ast.FunctionDef)
+        return func_def
+
+    @staticmethod
+    def _find_loop_body(func_def: ast.FunctionDef) -> list[ast.stmt]:
+        loop_stmt = next(stmt for stmt in func_def.body if isinstance(stmt, ast.With))
+        return loop_stmt.body
+
+    @staticmethod
+    def _find_emit_if_stmt(loop_body: list[ast.stmt], index: int = 0) -> ast.stmt:
+        emit_if_stmts = []
+        for stmt in loop_body:
+            value = None
+            if isinstance(stmt, ast.Assign):
+                value = stmt.value
+            elif isinstance(stmt, ast.Expr):
+                value = stmt.value
+            if (
+                isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Name)
+                and value.func.id == "emit_if"
+            ):
+                emit_if_stmts.append(stmt)
+        return emit_if_stmts[index]
+
+    @staticmethod
+    def _assignment_target_names(stmt: ast.stmt) -> list[str]:
+        if not isinstance(stmt, ast.Assign):
+            return []
+        target = stmt.targets[0]
+        if isinstance(target, ast.Name):
+            return [target.id]
+        if isinstance(target, ast.Tuple):
+            return [elt.id for elt in target.elts if isinstance(elt, ast.Name)]
+        return []
+
+    def test_for_next_iteration_only_live_if_is_assigned_back(self):
+        func_def = self._transform_source(
+            """
+            def f(n, state):
+                out = state
+                for i in range(n):
+                    out = state
+                    if state:
+                        state = 0
+                    else:
+                        state = 1
+                return out
+            """
+        )
+
+        emit_if_stmt = self._find_emit_if_stmt(self._find_loop_body(func_def))
+        assert isinstance(emit_if_stmt, ast.Assign)
+        assert "state" in self._assignment_target_names(emit_if_stmt)
+
+    def test_while_next_iteration_only_live_if_is_assigned_back(self):
+        func_def = self._transform_source(
+            """
+            def f(run, step, state):
+                out = state
+                while run:
+                    out = state
+                    if state:
+                        state = 0
+                    else:
+                        state = 1
+                    if step:
+                        run = 0
+                    else:
+                        run = 1
+                        step = 1
+                return out
+            """
+        )
+
+        emit_if_stmt = self._find_emit_if_stmt(self._find_loop_body(func_def), index=0)
+        assert isinstance(emit_if_stmt, ast.Assign)
+        assert "state" in self._assignment_target_names(emit_if_stmt)
+
+    def test_for_mixed_path_loop_head_preserves_load_first_value(self):
+        func_def = self._transform_source(
+            """
+            def f(n, flag, init, x):
+                for i in range(n):
+                    if flag:
+                        x = init
+                    else:
+                        x = x + 1
+                return 0
+            """
+        )
+
+        emit_if_stmt = self._find_emit_if_stmt(self._find_loop_body(func_def))
+        assert "x" in self._assignment_target_names(emit_if_stmt)
+
+    def test_while_mixed_path_loop_head_preserves_load_first_value(self):
+        func_def = self._transform_source(
+            """
+            def f(run, flag, init, x):
+                while run:
+                    if flag:
+                        x = init
+                    else:
+                        x = x + 1
+                    run = 0
+                return 0
+            """
+        )
+
+        emit_if_stmt = self._find_emit_if_stmt(self._find_loop_body(func_def))
+        assert "x" in self._assignment_target_names(emit_if_stmt)
+
+    def test_for_store_first_loop_head_keeps_dead_value_filtered(self):
+        func_def = self._transform_source(
+            """
+            def f(n, theta, x):
+                for i in range(n):
+                    if theta:
+                        x = 1
+                    else:
+                        x = 2
+                return 0
+            """
+        )
+
+        emit_if_stmt = self._find_emit_if_stmt(self._find_loop_body(func_def))
+        assert "x" not in self._assignment_target_names(emit_if_stmt)
+
+    def test_while_store_first_loop_head_keeps_dead_value_filtered(self):
+        func_def = self._transform_source(
+            """
+            def f(run, theta, x):
+                while run:
+                    if theta:
+                        x = 1
+                    else:
+                        x = 2
+                    run = 0
+                return 0
+            """
+        )
+
+        emit_if_stmt = self._find_emit_if_stmt(self._find_loop_body(func_def))
+        assert "x" not in self._assignment_target_names(emit_if_stmt)
+
+
+class TestLoopElseReject:
+    """for ... else and while ... else must be rejected at AST transform time."""
+
+    @staticmethod
+    def _transform_source(source: str) -> ast.FunctionDef:
+        tree = ast.parse(textwrap.dedent(source))
+        result = ControlFlowTransformer().visit(tree)
+        return result.body[0]
+
+    def test_for_else_raises(self):
+        with pytest.raises(
+            SyntaxError, match="for ... else is not supported in @qkernel"
+        ):
+            self._transform_source(
+                """
+                def f(n, x):
+                    for i in range(n):
+                        x = x + 1
+                    else:
+                        x = 0
+                    return x
+                """
+            )
+
+    def test_while_else_raises(self):
+        with pytest.raises(
+            SyntaxError, match="while ... else is not supported in @qkernel"
+        ):
+            self._transform_source(
+                """
+                def f(cond, x):
+                    while cond:
+                        x = x + 1
+                    else:
+                        x = 0
+                    return x
+                """
+            )
+
+    def test_for_else_pass_raises(self):
+        """Even `else: pass` is rejected -- loop-else syntax itself is unsupported."""
+        with pytest.raises(
+            SyntaxError, match="for ... else is not supported in @qkernel"
+        ):
+            self._transform_source(
+                """
+                def f(n, x):
+                    for i in range(n):
+                        x = x + 1
+                    else:
+                        pass
+                    return x
+                """
+            )
+
+    def test_while_else_pass_raises(self):
+        """Even `else: pass` is rejected -- loop-else syntax itself is unsupported."""
+        with pytest.raises(
+            SyntaxError, match="while ... else is not supported in @qkernel"
+        ):
+            self._transform_source(
+                """
+                def f(cond, x):
+                    while cond:
+                        x = x + 1
+                    else:
+                        pass
+                    return x
+                """
+            )
+
+    def test_for_without_else_works(self):
+        """Normal for loop (no else) must still work."""
+        func_def = self._transform_source(
+            """
+            def f(n, x):
+                for i in range(n):
+                    x = x + 1
+                return x
+            """
+        )
+        assert isinstance(func_def, ast.FunctionDef)
+
+    def test_while_without_else_works(self):
+        """Normal while loop (no else) must still work."""
+        func_def = self._transform_source(
+            """
+            def f(cond, x):
+                while cond:
+                    x = x + 1
+                    cond = 0
+                return x
+            """
+        )
+        assert isinstance(func_def, ast.FunctionDef)
+
+    def test_qkernel_for_else_raises(self):
+        """@qkernel decorator propagates the SyntaxError."""
+        with pytest.raises(
+            SyntaxError, match="for ... else is not supported in @qkernel"
+        ):
+
+            @qkernel
+            def bad(n: qm.UInt, x: qm.UInt) -> qm.UInt:
+                for i in qm.range(n):
+                    x = x + 1
+                else:
+                    x = qm.UInt(0)
+                return x
+
+    def test_qkernel_while_else_raises(self):
+        """@qkernel decorator propagates the SyntaxError."""
+        with pytest.raises(
+            SyntaxError, match="while ... else is not supported in @qkernel"
+        ):
+
+            @qkernel
+            def bad(cond: qm.Bit, x: qm.UInt) -> qm.UInt:
+                while cond:
+                    x = x + 1
+                else:
+                    x = qm.UInt(0)
+                return x
