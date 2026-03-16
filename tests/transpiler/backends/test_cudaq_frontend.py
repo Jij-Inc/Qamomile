@@ -4,8 +4,8 @@ Tests the full pipeline: @qkernel definition -> CudaqTranspiler -> execution.
 Covers every frontend gate, gate combinations, control flow (loops), stdlib,
 measurement, parametric circuits, expval, and edge cases.
 
-CUDA-Q does not support mid-circuit measurement feedback (if/while), so
-those test categories are excluded. Tests that rely on Qiskit-specific circuit
+CUDA-Q supports ``c_if`` (if-then, no else) for mid-circuit measurement
+feedback but does not support while-loops. Tests that rely on Qiskit-specific circuit
 introspection are replaced with statevector or sampling verification.
 
 Note: Do NOT use ``from __future__ import annotations`` in this file.
@@ -34,6 +34,7 @@ cudaq = pytest.importorskip("cudaq")
 
 from qamomile.cudaq import CudaqTranspiler  # noqa: E402
 from qamomile.cudaq.emitter import CudaqCircuit  # noqa: E402
+from qamomile.circuit.transpiler.errors import EmitError  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1496,20 +1497,20 @@ class TestEdgeCases:
 class TestErrorCases:
     """Test expected error conditions."""
 
-    def test_if_else_raises_emit_error(self):
-        """IfOperation on CUDA-Q backend must raise EmitError."""
-        from qamomile.circuit.transpiler.errors import EmitError
+    def test_c_if_transpiles_ok(self):
+        """c_if (if-only, no else) should transpile without error."""
 
         @qmc.qkernel
-        def circuit_with_if(q: qmc.Qubit) -> qmc.Bit:
+        def circuit_with_c_if(q: qmc.Qubit) -> qmc.Bit:
             q = qmc.h(q)
             b = qmc.measure(q)
-            q = qmc.cond(b, qmc.x, q)
+            if b:
+                q = qmc.x(q)
             return qmc.measure(q)
 
         transpiler = CudaqTranspiler()
-        with pytest.raises(EmitError, match="if/else control flow"):
-            transpiler.transpile(circuit_with_if)
+        exe = transpiler.transpile(circuit_with_c_if)
+        assert exe.circuit.num_qubits == 1
 
     def test_while_loop_raises_emit_error(self):
         """WhileOperation on CUDA-Q backend must raise EmitError."""
@@ -1771,3 +1772,122 @@ class TestQAOAPattern:
         assert np.isclose(np.linalg.norm(sv), 1.0, atol=1e-6)
         # Verify it's not all zeros (actually computed something)
         assert not np.allclose(sv, all_zeros_state(3), atol=1e-6)
+
+
+# ============================================================================
+# Module-level qkernel definitions for c_if tests
+# ============================================================================
+
+
+@qmc.qkernel
+def _c_if_basic(q0: qmc.Qubit, q1: qmc.Qubit) -> qmc.Bit:
+    """X(q0) → measure → c_if(bit, X(q1)) → measure(q1)."""
+    q0 = qmc.x(q0)
+    b = qmc.measure(q0)
+    if b:
+        q1 = qmc.x(q1)
+    return qmc.measure(q1)
+
+
+@qmc.qkernel
+def _c_if_false_branch(q0: qmc.Qubit, q1: qmc.Qubit) -> qmc.Bit:
+    """No X on q0 → measure(q0)=0 → c_if should NOT fire."""
+    b = qmc.measure(q0)
+    if b:
+        q1 = qmc.x(q1)
+    return qmc.measure(q1)
+
+
+@qmc.qkernel
+def _c_if_with_rotation(
+    q0: qmc.Qubit,
+    q1: qmc.Qubit,
+    theta: qmc.Float,
+) -> qmc.Bit:
+    """c_if with parametric RX gate in true branch."""
+    q0 = qmc.x(q0)
+    b = qmc.measure(q0)
+    if b:
+        q1 = qmc.rx(q1, theta)
+    return qmc.measure(q1)
+
+
+@qmc.qkernel
+def _c_if_with_else(q0: qmc.Qubit, q1: qmc.Qubit) -> qmc.Bit:
+    """c_if with else branch — should raise EmitError."""
+    q0 = qmc.h(q0)
+    b = qmc.measure(q0)
+    if b:
+        q1 = qmc.x(q1)
+    else:
+        q1 = qmc.h(q1)
+    return qmc.measure(q1)
+
+
+# ============================================================================
+# c_if Control Flow Tests
+# ============================================================================
+
+
+class TestCIfControlFlow:
+    """Test mid-circuit measurement feedback via CUDA-Q ``c_if``."""
+
+    def test_c_if_basic_transpile(self) -> None:
+        """c_if (if-then, no else) transpiles without error and has correct qubit count."""
+        _, qc = _transpile_and_get_circuit(_c_if_basic)
+        assert qc.num_qubits == 2
+
+    def test_c_if_execution_true_branch(self) -> None:
+        """X(q0)→measure=1→c_if fires X(q1): both qubits should be |1⟩."""
+        transpiler = CudaqTranspiler()
+        exe = transpiler.transpile(_c_if_basic)
+        executor = transpiler.executor()
+        counts = executor.execute(exe.circuit, shots=1000)
+        # q0=1 (X gate), q1=1 (c_if fires X) → "11"
+        assert "11" in counts
+        total = sum(counts.values())
+        assert counts["11"] == total
+
+    def test_c_if_execution_false_branch(self) -> None:
+        """q0=|0⟩→measure=0→c_if does NOT fire: both qubits stay |0⟩."""
+        transpiler = CudaqTranspiler()
+        exe = transpiler.transpile(_c_if_false_branch)
+        executor = transpiler.executor()
+        counts = executor.execute(exe.circuit, shots=1000)
+        # q0=0, q1=0 (c_if doesn't fire) → "00"
+        assert "00" in counts
+        total = sum(counts.values())
+        assert counts["00"] == total
+
+    def test_c_if_with_rotation(self) -> None:
+        """Conditional RX(pi) in true branch should flip q1."""
+        transpiler = CudaqTranspiler()
+        exe = transpiler.transpile(_c_if_with_rotation, bindings={"theta": np.pi})
+        executor = transpiler.executor()
+        counts = executor.execute(exe.circuit, shots=1000)
+        # RX(pi) ≈ -iX, so q1 flips to |1⟩ (global phase doesn't affect measurement)
+        assert "11" in counts
+        total = sum(counts.values())
+        assert counts["11"] == total
+
+    def test_c_if_with_else_raises_emit_error(self) -> None:
+        """Else branches must raise EmitError on CUDA-Q."""
+        with pytest.raises(EmitError, match="does not support else"):
+            _transpile_and_get_circuit(_c_if_with_else)
+
+    def test_while_loop_still_raises_emit_error(self) -> None:
+        """While loops remain unsupported on CUDA-Q."""
+
+        @qmc.qkernel
+        def _while_body(q: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Bit]:
+            q = qmc.x(q)
+            return q, qmc.measure(q)
+
+        @qmc.qkernel
+        def circuit_with_while(q: qmc.Qubit) -> qmc.Bit:
+            b = qmc.measure(q)
+            q, b = qmc.while_loop(b, _while_body, q)
+            return b
+
+        with pytest.raises(EmitError, match="while loop control flow"):
+            _transpile_and_get_circuit(circuit_with_while)

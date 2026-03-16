@@ -21,7 +21,7 @@ class TestCudaqTranspiler(TranspilerTestSuite):
 
     CUDA-Q supports most standard gates but has some limitations:
     - Measurements are not supported in circuits (no-op in emitter)
-    - Control flow (if/while) is not natively supported
+    - c_if (if-then, no else) is supported; while-loops raise EmitError
     - CP and RZZ are decomposed (no native gates)
     - CH and CY are decomposed
     """
@@ -53,22 +53,45 @@ class TestCudaqTranspiler(TranspilerTestSuite):
 class TestCudaqControlFlowErrors:
     """Test that unsupported control flow raises explicit errors."""
 
-    def test_if_else_raises_emit_error(self) -> None:
-        """IfOperation on CUDA-Q backend must raise EmitError."""
+    def test_c_if_transpiles_ok(self) -> None:
+        """c_if (if-then, no else) should transpile without error."""
+        import qamomile.circuit as qm
+        from qamomile.cudaq import CudaqTranspiler
+
+        @qm.qkernel
+        def circuit_with_c_if(q0: qm.Qubit, q1: qm.Qubit) -> qm.Bit:
+            q0 = qm.x(q0)
+            b = qm.measure(q0)
+            if b:
+                q1 = qm.x(q1)
+            return qm.measure(q1)
+
+        transpiler = CudaqTranspiler()
+        exe = transpiler.transpile(circuit_with_c_if)
+        assert exe.circuit.num_qubits == 2
+
+    def test_if_with_else_raises_emit_error(self) -> None:
+        """IfOperation with else branch on CUDA-Q must raise EmitError."""
         import qamomile.circuit as qm
         from qamomile.circuit.transpiler.errors import EmitError
         from qamomile.cudaq import CudaqTranspiler
 
         @qm.qkernel
-        def circuit_with_if(q: qm.Qubit) -> qm.Bit:
-            q = qm.h(q)
-            b = qm.measure(q)
-            q = qm.cond(b, qm.x, q)
-            return qm.measure(q)
+        def circuit_with_if_else(
+            q0: qm.Qubit,
+            q1: qm.Qubit,
+        ) -> qm.Bit:
+            q0 = qm.h(q0)
+            b = qm.measure(q0)
+            if b:
+                q1 = qm.x(q1)
+            else:
+                q1 = qm.h(q1)
+            return qm.measure(q1)
 
         transpiler = CudaqTranspiler()
-        with pytest.raises(EmitError, match="if/else control flow"):
-            transpiler.transpile(circuit_with_if)
+        with pytest.raises(EmitError, match="does not support else"):
+            transpiler.transpile(circuit_with_if_else)
 
     def test_while_loop_raises_emit_error(self) -> None:
         """WhileOperation on CUDA-Q backend must raise EmitError."""

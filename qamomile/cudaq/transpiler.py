@@ -9,6 +9,8 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Sequence, TYPE_CHECKING
 
+from qamomile.circuit.ir.operation.control_flow import IfOperation
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.transpiler import Transpiler
 from qamomile.circuit.transpiler.passes.emit import EmitPass
 from qamomile.circuit.transpiler.passes.separate import SeparatePass
@@ -48,8 +50,9 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
     """CUDA-Q-specific emission pass.
 
     Uses StandardEmitPass with CudaqGateEmitter for gate emission.
-    CUDA-Q does not support native control flow in this implementation,
-    so all for-loops are unrolled and if/while raise ``EmitError``.
+    Supports ``c_if`` (if-then, no else) for mid-circuit measurement
+    feedback via ``kernel.c_if(mz_result, callable)``. For-loops are
+    unrolled and while-loops raise ``EmitError``.
     """
 
     def __init__(
@@ -61,6 +64,71 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
         emitter = CudaqGateEmitter(parametric=parametric)
         composite_emitters: list[Any] = []
         super().__init__(emitter, bindings, parameters, composite_emitters)
+
+    def _emit_if(
+        self,
+        circuit: CudaqCircuit,
+        op: IfOperation,
+        qubit_map: dict[str, int],
+        clbit_map: dict[str, int],
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit conditional execution using CUDA-Q ``kernel.c_if``.
+
+        CUDA-Q's builder API supports ``c_if`` (if-then only). Else
+        branches are not supported and raise ``EmitError``.
+
+        The measurement result (``QuakeValue`` from ``kernel.mz()``) is
+        obtained lazily: since ``noop_measurement`` is ``True``, no
+        ``mz()`` call is emitted during measurement processing. Instead,
+        ``mz()`` is called here just before ``c_if``, using the
+        ``_measurement_qubit_map`` populated by ``StandardEmitPass``.
+
+        Args:
+            circuit (CudaqCircuit): The CUDA-Q circuit being built.
+            op (IfOperation): The if-operation from the IR.
+            qubit_map (dict[str, int]): UUID-to-qubit-index mapping.
+            clbit_map (dict[str, int]): UUID-to-clbit-index mapping.
+            bindings (dict[str, Any]): Parameter bindings.
+
+        Raises:
+            EmitError: If the operation has else branches or if the
+                condition classical bit has no associated measurement.
+        """
+        condition_uuid = op.condition.uuid
+
+        if condition_uuid not in clbit_map:
+            return
+
+        if op.false_operations:
+            raise EmitError(
+                "CUDA-Q c_if does not support else branches. "
+                "Use if-then only (no else) for mid-circuit measurement feedback."
+            )
+
+        clbit_idx = clbit_map[condition_uuid]
+
+        qubit_idx = self._measurement_qubit_map.get(clbit_idx)
+        if qubit_idx is None:
+            raise EmitError(
+                f"No measurement found for classical bit {clbit_idx}. "
+                "CUDA-Q c_if requires a measurement result as condition."
+            )
+
+        # Get or create the mz QuakeValue (avoid double-mz on same qubit)
+        if clbit_idx not in circuit.measurement_results:
+            mz_result = circuit.kernel.mz(circuit.qubits[qubit_idx])
+            circuit.measurement_results[clbit_idx] = mz_result
+        mz_result = circuit.measurement_results[clbit_idx]
+
+        def true_body() -> None:
+            self._emit_operations(
+                circuit, op.true_operations, qubit_map, clbit_map, bindings
+            )
+
+        circuit.kernel.c_if(mz_result, true_body)
+
+        self._register_phi_outputs(op, qubit_map, clbit_map, bindings)
 
 
 class CudaqExecutor(QuantumExecutor[CudaqCircuit]):

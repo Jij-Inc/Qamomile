@@ -29,6 +29,9 @@ class CudaqCircuit:
         param_vector (Any | None): Vector parameter from
             ``cudaq.make_kernel(list)``, or None for non-parametric kernels.
         param_count (int): Number of parameters created so far.
+        measurement_results (dict[int, Any]): Maps clbit index to the
+            QuakeValue returned by ``kernel.mz()``. Used by ``c_if``
+            to avoid calling ``mz()`` twice on the same qubit.
     """
 
     kernel: Any
@@ -37,6 +40,7 @@ class CudaqCircuit:
     num_clbits: int
     param_vector: Any = None
     param_count: int = 0
+    measurement_results: dict[int, Any] = dataclasses.field(default_factory=dict)
 
 
 class CudaqGateEmitter:
@@ -333,8 +337,8 @@ class CudaqGateEmitter:
         return False
 
     def supports_if_else(self) -> bool:
-        """Return False: CUDA-Q does not support native if/else emission."""
-        return False
+        """Return True: CUDA-Q supports ``c_if`` (if-then, no else)."""
+        return True
 
     def supports_while_loop(self) -> bool:
         """Return False: CUDA-Q does not support native while-loop emission."""
