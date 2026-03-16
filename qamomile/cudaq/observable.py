@@ -6,11 +6,10 @@ to CUDA-Q SpinOperator for use with ``cudaq.observe``.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import qamomile.observable as qm_o
-
-_ZERO_THRESHOLD = 1e-15
 
 
 def hamiltonian_to_cudaq_spin_op(hamiltonian: qm_o.Hamiltonian) -> Any:
@@ -42,7 +41,7 @@ def hamiltonian_to_cudaq_spin_op(hamiltonian: qm_o.Hamiltonian) -> Any:
     result = None
 
     # Add constant term
-    if abs(hamiltonian.constant) > _ZERO_THRESHOLD:
+    if not math.isclose(hamiltonian.constant, 0.0, abs_tol=1e-15):
         result = hamiltonian.constant * spin.i(0)
 
     # Convert each term

@@ -32,6 +32,11 @@ class BoundCudaqCircuit:
     The executor dispatches to ``cudaq.sample(kernel, param_values, ...)``
     or ``cudaq.observe(kernel, spin_op, param_values)`` when it receives
     this type.
+
+    Args:
+        kernel (Any): The CUDA-Q kernel builder instance.
+        num_qubits (int): Number of qubits in the circuit.
+        param_values (list[float]): Bound parameter values in order.
     """
 
     kernel: Any
@@ -44,7 +49,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
 
     Uses StandardEmitPass with CudaqGateEmitter for gate emission.
     CUDA-Q does not support native control flow in this implementation,
-    so all for-loops are unrolled and if/while raise NotImplementedError.
+    so all for-loops are unrolled and if/while raise ``EmitError``.
     """
 
     def __init__(
@@ -70,7 +75,11 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
     """
 
     def __init__(self, target: str | None = None):
+        import cudaq
+
         self._target = target
+        if self._target:
+            cudaq.set_target(self._target)
 
     def execute(self, circuit: Any, shots: int) -> dict[str, int]:
         """Execute circuit and return bitstring counts.
@@ -83,9 +92,6 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
         explicit ``mz`` calls are present in the kernel.
         """
         import cudaq
-
-        if self._target:
-            cudaq.set_target(self._target)
 
         if isinstance(circuit, BoundCudaqCircuit):
             result = cudaq.sample(
@@ -154,9 +160,6 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
 
         from qamomile.cudaq.observable import hamiltonian_to_cudaq_spin_op
 
-        if self._target:
-            cudaq.set_target(self._target)
-
         if isinstance(hamiltonian, qm_o.Hamiltonian):
             spin_op = hamiltonian_to_cudaq_spin_op(hamiltonian)
         else:
@@ -165,7 +168,7 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
         if isinstance(circuit, BoundCudaqCircuit):
             result = cudaq.observe(circuit.kernel, spin_op, circuit.param_values)
         elif isinstance(circuit, CudaqCircuit):
-            if params:
+            if params is not None:
                 result = cudaq.observe(circuit.kernel, spin_op, list(params))
             else:
                 result = cudaq.observe(circuit.kernel, spin_op)

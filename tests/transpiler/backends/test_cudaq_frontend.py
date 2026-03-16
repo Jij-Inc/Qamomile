@@ -517,7 +517,7 @@ class TestParametricGates:
         assert "theta" in exe.parameter_names
         # Bind and verify statevector
         executor = transpiler.executor()
-        bound = executor.bind_parameters(qc, {"theta": np.pi})
+        bound = executor.bind_parameters(qc, {"theta": np.pi}, exe.parameter_metadata)
         sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["RX"].matrix_fn(np.pi)
@@ -542,7 +542,9 @@ class TestParametricGates:
         assert "theta" in exe.parameter_names
         # Bind and verify
         executor = transpiler.executor()
-        bound = executor.bind_parameters(qc, {"theta": np.pi / 2})
+        bound = executor.bind_parameters(
+            qc, {"theta": np.pi / 2}, exe.parameter_metadata
+        )
         sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["RY"].matrix_fn(np.pi / 2)
@@ -567,7 +569,7 @@ class TestParametricGates:
         assert "theta" in exe.parameter_names
         # Bind and verify
         executor = transpiler.executor()
-        bound = executor.bind_parameters(qc, {"theta": np.pi})
+        bound = executor.bind_parameters(qc, {"theta": np.pi}, exe.parameter_metadata)
         sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["RZ"].matrix_fn(np.pi)
@@ -592,7 +594,7 @@ class TestParametricGates:
         assert "theta" in exe.parameter_names
         # Bind and verify
         executor = transpiler.executor()
-        bound = executor.bind_parameters(qc, {"theta": np.pi})
+        bound = executor.bind_parameters(qc, {"theta": np.pi}, exe.parameter_metadata)
         sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["P"].matrix_fn(np.pi)
@@ -619,7 +621,7 @@ class TestParametricGates:
         assert "theta" in exe.parameter_names
         # Bind and verify on |11> state
         executor = transpiler.executor()
-        bound = executor.bind_parameters(qc, {"theta": np.pi})
+        bound = executor.bind_parameters(qc, {"theta": np.pi}, exe.parameter_metadata)
         sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
         initial = computational_basis_state(2, 3)
         expected = compute_expected_statevector(
@@ -647,7 +649,7 @@ class TestParametricGates:
         assert "theta" in exe.parameter_names
         # Bind and verify on |11> state
         executor = transpiler.executor()
-        bound = executor.bind_parameters(qc, {"theta": np.pi})
+        bound = executor.bind_parameters(qc, {"theta": np.pi}, exe.parameter_metadata)
         sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
         initial = computational_basis_state(2, 3)
         expected = compute_expected_statevector(
@@ -674,7 +676,7 @@ class TestParametricGates:
         # Bind and verify: RY(pi/2) on each qubit
         executor = transpiler.executor()
         angles = [np.pi / 2, np.pi / 2, np.pi / 2]
-        bound = executor.bind_parameters(qc, {"thetas": angles})
+        bound = executor.bind_parameters(qc, {"thetas": angles}, exe.parameter_metadata)
         sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
         # Each qubit: RY(pi/2)|0> = (|0>+|1>)/sqrt(2)
         single = compute_expected_statevector(
@@ -1514,15 +1516,15 @@ class TestErrorCases:
         from qamomile.circuit.transpiler.errors import EmitError
 
         @qmc.qkernel
+        def _while_body(q: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Bit]:
+            q = qmc.x(q)
+            return q, qmc.measure(q)
+
+        @qmc.qkernel
         def circuit_with_while(q: qmc.Qubit) -> qmc.Bit:
             b = qmc.measure(q)
             q, b = qmc.while_loop(b, _while_body, q)
             return b
-
-        @qmc.qkernel
-        def _while_body(q: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Bit]:
-            q = qmc.x(q)
-            return q, qmc.measure(q)
 
         transpiler = CudaqTranspiler()
         with pytest.raises(EmitError, match="while loop control flow"):
@@ -1762,7 +1764,9 @@ class TestQAOAPattern:
         assert any("gamma" in p for p in param_names)
         # Bind concrete values and verify statevector is valid
         executor = transpiler.executor()
-        bound = executor.bind_parameters(qc, {"beta": 0.5, "gamma": 0.3})
+        bound = executor.bind_parameters(
+            qc, {"beta": 0.5, "gamma": 0.3}, exe.parameter_metadata
+        )
         sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
         assert np.isclose(np.linalg.norm(sv), 1.0, atol=1e-6)
         # Verify it's not all zeros (actually computed something)

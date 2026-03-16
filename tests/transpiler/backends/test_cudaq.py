@@ -77,15 +77,15 @@ class TestCudaqControlFlowErrors:
         from qamomile.cudaq import CudaqTranspiler
 
         @qm.qkernel
+        def _while_body(q: qm.Qubit) -> tuple[qm.Qubit, qm.Bit]:
+            q = qm.x(q)
+            return q, qm.measure(q)
+
+        @qm.qkernel
         def circuit_with_while(q: qm.Qubit) -> qm.Bit:
             b = qm.measure(q)
             q, b = qm.while_loop(b, _while_body, q)
             return b
-
-        @qm.qkernel
-        def _while_body(q: qm.Qubit) -> tuple[qm.Qubit, qm.Bit]:
-            q = qm.x(q)
-            return q, qm.measure(q)
 
         transpiler = CudaqTranspiler()
         with pytest.raises(EmitError, match="while loop control flow"):

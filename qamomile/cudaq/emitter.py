@@ -20,14 +20,23 @@ class CudaqCircuit:
     """Wrapper around CUDA-Q kernel with qubit register.
 
     This serves as the circuit type ``T`` for the CUDA-Q backend.
+
+    Args:
+        kernel (Any): The CUDA-Q kernel builder instance.
+        qubits (Any): Qubit register allocated via ``kernel.qalloc(n)``.
+        num_qubits (int): Number of qubits in the circuit.
+        num_clbits (int): Number of classical bits in the circuit.
+        param_vector (Any | None): Vector parameter from
+            ``cudaq.make_kernel(list)``, or None for non-parametric kernels.
+        param_count (int): Number of parameters created so far.
     """
 
     kernel: Any
     qubits: Any
     num_qubits: int
     num_clbits: int
-    _param_vector: Any = None
-    _param_count: int = 0
+    param_vector: Any = None
+    param_count: int = 0
 
 
 class CudaqGateEmitter:
@@ -36,7 +45,7 @@ class CudaqGateEmitter:
     Emits individual quantum gates to CUDA-Q kernels via the builder API.
 
     Args:
-        parametric: If True, creates a parametric kernel using
+        parametric (bool): If True, creates a parametric kernel using
             ``cudaq.make_kernel(list)`` so that symbolic parameters
             can be indexed from the vector.
     """
@@ -60,8 +69,8 @@ class CudaqGateEmitter:
                 qubits=qubits,
                 num_qubits=num_qubits,
                 num_clbits=num_clbits,
-                _param_vector=thetas,
-                _param_count=0,
+                param_vector=thetas,
+                param_count=0,
             )
         else:
             kernel = cudaq.make_kernel()
@@ -83,45 +92,53 @@ class CudaqGateEmitter:
             raise RuntimeError("create_circuit must be called before create_parameter")
 
         circuit = self._current_circuit
-        if circuit._param_vector is None:
+        if circuit.param_vector is None:
             raise RuntimeError(
                 "Cannot create parameters on a non-parametric kernel. "
                 "Ensure CudaqGateEmitter is initialized with parametric=True."
             )
 
         if name not in self._param_map:
-            idx = circuit._param_count
+            idx = circuit.param_count
             self._param_map[name] = idx
-            circuit._param_count += 1
+            circuit.param_count += 1
 
-        return circuit._param_vector[self._param_map[name]]
+        return circuit.param_vector[self._param_map[name]]
 
     # ------------------------------------------------------------------
     # Single-qubit gates (no parameters)
     # ------------------------------------------------------------------
 
     def emit_h(self, circuit: CudaqCircuit, qubit: int) -> None:
+        """Emit Hadamard gate on the specified qubit."""
         circuit.kernel.h(circuit.qubits[qubit])
 
     def emit_x(self, circuit: CudaqCircuit, qubit: int) -> None:
+        """Emit Pauli-X gate on the specified qubit."""
         circuit.kernel.x(circuit.qubits[qubit])
 
     def emit_y(self, circuit: CudaqCircuit, qubit: int) -> None:
+        """Emit Pauli-Y gate on the specified qubit."""
         circuit.kernel.y(circuit.qubits[qubit])
 
     def emit_z(self, circuit: CudaqCircuit, qubit: int) -> None:
+        """Emit Pauli-Z gate on the specified qubit."""
         circuit.kernel.z(circuit.qubits[qubit])
 
     def emit_s(self, circuit: CudaqCircuit, qubit: int) -> None:
+        """Emit S (phase) gate on the specified qubit."""
         circuit.kernel.s(circuit.qubits[qubit])
 
     def emit_sdg(self, circuit: CudaqCircuit, qubit: int) -> None:
+        """Emit S-dagger gate on the specified qubit."""
         circuit.kernel.sdg(circuit.qubits[qubit])
 
     def emit_t(self, circuit: CudaqCircuit, qubit: int) -> None:
+        """Emit T gate on the specified qubit."""
         circuit.kernel.t(circuit.qubits[qubit])
 
     def emit_tdg(self, circuit: CudaqCircuit, qubit: int) -> None:
+        """Emit T-dagger gate on the specified qubit."""
         circuit.kernel.tdg(circuit.qubits[qubit])
 
     # ------------------------------------------------------------------
@@ -129,15 +146,19 @@ class CudaqGateEmitter:
     # ------------------------------------------------------------------
 
     def emit_rx(self, circuit: CudaqCircuit, qubit: int, angle: float | Any) -> None:
+        """Emit RX rotation gate on the specified qubit."""
         circuit.kernel.rx(angle, circuit.qubits[qubit])
 
     def emit_ry(self, circuit: CudaqCircuit, qubit: int, angle: float | Any) -> None:
+        """Emit RY rotation gate on the specified qubit."""
         circuit.kernel.ry(angle, circuit.qubits[qubit])
 
     def emit_rz(self, circuit: CudaqCircuit, qubit: int, angle: float | Any) -> None:
+        """Emit RZ rotation gate on the specified qubit."""
         circuit.kernel.rz(angle, circuit.qubits[qubit])
 
     def emit_p(self, circuit: CudaqCircuit, qubit: int, angle: float | Any) -> None:
+        """Emit phase gate (R1) on the specified qubit."""
         circuit.kernel.r1(angle, circuit.qubits[qubit])
 
     # ------------------------------------------------------------------
@@ -145,12 +166,15 @@ class CudaqGateEmitter:
     # ------------------------------------------------------------------
 
     def emit_cx(self, circuit: CudaqCircuit, control: int, target: int) -> None:
+        """Emit CNOT (controlled-X) gate."""
         circuit.kernel.cx(circuit.qubits[control], circuit.qubits[target])
 
     def emit_cz(self, circuit: CudaqCircuit, control: int, target: int) -> None:
+        """Emit controlled-Z gate."""
         circuit.kernel.cz(circuit.qubits[control], circuit.qubits[target])
 
     def emit_swap(self, circuit: CudaqCircuit, qubit1: int, qubit2: int) -> None:
+        """Emit SWAP gate between two qubits."""
         circuit.kernel.swap(circuit.qubits[qubit1], circuit.qubits[qubit2])
 
     # ------------------------------------------------------------------
@@ -285,16 +309,19 @@ class CudaqGateEmitter:
     # ------------------------------------------------------------------
 
     def circuit_to_gate(self, circuit: CudaqCircuit, name: str = "U") -> Any:
-        """CUDA-Q kernel builder does not support circuit-to-gate conversion."""
+        """No-op: CUDA-Q kernel builder does not support circuit-to-gate conversion."""
         return None
 
     def append_gate(self, circuit: CudaqCircuit, gate: Any, qubits: list[int]) -> None:
+        """No-op: not supported by CUDA-Q kernel builder."""
         pass
 
     def gate_power(self, gate: Any, power: int) -> Any:
+        """No-op: not supported by CUDA-Q kernel builder."""
         return None
 
     def gate_controlled(self, gate: Any, num_controls: int) -> Any:
+        """No-op: not supported by CUDA-Q kernel builder."""
         return None
 
     # ------------------------------------------------------------------
@@ -302,33 +329,43 @@ class CudaqGateEmitter:
     # ------------------------------------------------------------------
 
     def supports_for_loop(self) -> bool:
+        """Return False: CUDA-Q does not support native for-loop emission."""
         return False
 
     def supports_if_else(self) -> bool:
+        """Return False: CUDA-Q does not support native if/else emission."""
         return False
 
     def supports_while_loop(self) -> bool:
+        """Return False: CUDA-Q does not support native while-loop emission."""
         return False
 
     def emit_for_loop_start(self, circuit: CudaqCircuit, indexset: range) -> Any:
+        """Not supported: for-loops are unrolled by the transpiler."""
         raise NotImplementedError
 
     def emit_for_loop_end(self, circuit: CudaqCircuit, context: Any) -> None:
+        """Not supported: for-loops are unrolled by the transpiler."""
         raise NotImplementedError
 
     def emit_if_start(self, circuit: CudaqCircuit, clbit: int, value: int = 1) -> Any:
+        """Not supported: if/else raises ``EmitError`` in the transpiler."""
         raise NotImplementedError
 
     def emit_else_start(self, circuit: CudaqCircuit, context: Any) -> None:
+        """Not supported: if/else raises ``EmitError`` in the transpiler."""
         raise NotImplementedError
 
     def emit_if_end(self, circuit: CudaqCircuit, context: Any) -> None:
+        """Not supported: if/else raises ``EmitError`` in the transpiler."""
         raise NotImplementedError
 
     def emit_while_start(
         self, circuit: CudaqCircuit, clbit: int, value: int = 1
     ) -> Any:
+        """Not supported: while-loop raises ``EmitError`` in the transpiler."""
         raise NotImplementedError
 
     def emit_while_end(self, circuit: CudaqCircuit, context: Any) -> None:
+        """Not supported: while-loop raises ``EmitError`` in the transpiler."""
         raise NotImplementedError
