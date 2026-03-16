@@ -36,7 +36,7 @@ pytest.importorskip("qiskit_aer")
 
 from qiskit import QuantumCircuit
 from qiskit.circuit import Barrier, Measure, ParameterExpression
-from qiskit.circuit.controlflow import IfElseOp, WhileLoopOp
+from qiskit.circuit.controlflow import ForLoopOp, IfElseOp, WhileLoopOp
 from qiskit.circuit.library import (
     CCXGate,
     CPhaseGate,
@@ -2939,6 +2939,10 @@ class TestControlFlowWhileStructure:
         # 4 distinct qubits: q0, q1, q2, q3 (q2 and q3 are in mutually
         # exclusive branches so they are different physical qubits).
         _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_qubits == 4, (
+            f"Expected 4 qubits but got {qc.num_qubits}. "
+            "Alias entries in qubit_map are inflating the physical qubit count."
+        )
         assert qc.num_clbits == 2, (
             f"Expected 2 classical bits but got {qc.num_clbits}. "
             "Branch measurements are not being aliased to the "
@@ -3230,6 +3234,178 @@ class TestControlFlowWhileStructure:
             assert value == 0, (
                 f"Expected all shots to return 0 but got value={value} ({count} shots)."
             )
+
+
+class TestPhantomQubitRegression:
+    """Regression tests for phantom qubits caused by sparse physical index allocation.
+
+    The ResourceAllocator previously used ``len(map)`` to assign new physical
+    indices.  Because alias entries (SSA versions that share the same physical
+    resource) also increase the map size, subsequent *new* allocations received
+    inflated indices, producing gaps in the physical index space and causing
+    ``max(values) + 1`` to overcount ``num_qubits`` / ``num_clbits``.
+
+    The fix replaces ``len(map)`` with monotonic counters that only advance on
+    genuinely new physical allocations.
+    """
+
+    def test_two_qubit_while_loop_dense_qubits(self):
+        """Minimal 2-qubit while loop: num_qubits must be 2, not 3."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.h(q0)
+            bit = qmc.measure(q0)
+            while bit:
+                q1 = qmc.qubit("q1")
+                q1 = qmc.h(q1)
+                bit = qmc.measure(q1)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_qubits == 2, (
+            f"Expected 2 qubits but got {qc.num_qubits}. "
+            "Sparse index allocation is inflating qubit count."
+        )
+
+    def test_while_if_else_x_dense_qubits(self):
+        """4-qubit while+if-else with X gates: num_qubits must be 4."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.x(q0)
+            bit = qmc.measure(q0)
+            q1 = qmc.qubit("q1")
+            q1 = qmc.x(q1)
+            sel = qmc.measure(q1)
+            while bit:
+                if sel:
+                    q2 = qmc.qubit("q2")
+                    q2 = qmc.x(q2)
+                    bit = qmc.measure(q2)
+                else:
+                    q3 = qmc.qubit("q3")
+                    q3 = qmc.x(q3)
+                    bit = qmc.measure(q3)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_qubits == 4, f"Expected 4 qubits but got {qc.num_qubits}."
+        assert qc.num_clbits == 2, f"Expected 2 clbits but got {qc.num_clbits}."
+
+    def test_while_if_else_h_dense_qubits(self):
+        """4-qubit while+if-else with H gates: num_qubits must be 4."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.h(q0)
+            bit = qmc.measure(q0)
+            q1 = qmc.qubit("q1")
+            q1 = qmc.h(q1)
+            sel = qmc.measure(q1)
+            while bit:
+                if sel:
+                    q2 = qmc.qubit("q2")
+                    q2 = qmc.h(q2)
+                    bit = qmc.measure(q2)
+                else:
+                    q3 = qmc.qubit("q3")
+                    q3 = qmc.h(q3)
+                    bit = qmc.measure(q3)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_qubits == 4, f"Expected 4 qubits but got {qc.num_qubits}."
+
+    def test_while_if_else_dense_clbits(self):
+        """While+if-else: clbit count must not be inflated by aliases."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.x(q0)
+            bit = qmc.measure(q0)
+            q1 = qmc.qubit("q1")
+            q1 = qmc.x(q1)
+            sel = qmc.measure(q1)
+            while bit:
+                if sel:
+                    q2 = qmc.qubit("q2")
+                    bit = qmc.measure(q2)
+                else:
+                    q3 = qmc.qubit("q3")
+                    bit = qmc.measure(q3)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_qubits == 4, f"Expected 4 qubits but got {qc.num_qubits}."
+        assert qc.num_clbits == 2, (
+            f"Expected 2 clbits but got {qc.num_clbits}. "
+            "Sparse index allocation is inflating clbit count."
+        )
+
+    def test_composite_gate_after_alias_dense_qubits(self):
+        """Composite gate after alias: new qubit index must be dense."""
+
+        @qmc.qkernel
+        def my_gate(q: qmc.Qubit) -> qmc.Qubit:
+            q = qmc.h(q)
+            q = qmc.x(q)
+            return q
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.h(q0)
+            _b = qmc.measure(q0)  # noqa: F841
+            # After measure, q0 has an alias in the map.
+            # A new qubit allocated next should get index 1, not a gap.
+            q1 = qmc.qubit("q1")
+            q1 = my_gate(q1)
+            b2 = qmc.measure(q1)
+            return b2
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_qubits == 2, f"Expected 2 qubits but got {qc.num_qubits}."
+
+    def test_controlled_gate_after_alias_dense_qubits(self):
+        """Controlled gate after alias: qubit indices must be dense."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.h(q0)
+            _b = qmc.measure(q0)  # noqa: F841
+            q1 = qmc.qubit("q1")
+            q2 = qmc.qubit("q2")
+            q1, q2 = qmc.cx(q1, q2)
+            b2 = qmc.measure(q2)
+            return b2
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_qubits == 3, f"Expected 3 qubits but got {qc.num_qubits}."
+
+    def test_qubit_array_after_alias_dense_qubits(self):
+        """Qubit array after alias: array element indices must be dense."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.h(q0)
+            _b = qmc.measure(q0)  # noqa: F841
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.h(qs[0])
+            qs[1] = qmc.x(qs[1])
+            b2 = qmc.measure(qs[2])
+            return b2
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_qubits == 4, (
+            f"Expected 4 qubits (1 scalar + 3 array) but got {qc.num_qubits}."
+        )
 
 
 class TestControlFlowWhileSampling:
@@ -7687,3 +7863,189 @@ class TestQubitArrayPatterns:
         # Both should be 3-qubit GHZ
         assert np.isclose(abs(sv_par[0]), 1.0 / np.sqrt(2), atol=1e-10)
         assert np.isclose(abs(sv_par[7]), 1.0 / np.sqrt(2), atol=1e-10)
+
+
+class TestLoopBackedgeIfLivenessTranspilation:
+    """Loop-carried if outputs must collapse branch measurements into one state slot."""
+
+    def test_for_if_loop_carried_bit_uses_single_branch_result_clbit(self):
+        """Nested if in a for-loop should emit one shared state clbit across branches."""
+
+        @qmc.qkernel
+        def circuit(n: qmc.UInt) -> qmc.Bit:
+            init_q = qmc.qubit("init")
+            state = qmc.measure(init_q)
+            out = state
+            for _i in qmc.range(n):
+                out = state
+                if state:
+                    q_zero = qmc.qubit("zero")
+                    state = qmc.measure(q_zero)
+                else:
+                    q_one = qmc.qubit("one")
+                    q_one = qmc.x(q_one)
+                    state = qmc.measure(q_one)
+            return out
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"n": 2})
+
+        for_insts = [inst for inst in qc.data if isinstance(inst.operation, ForLoopOp)]
+        assert len(for_insts) == 1
+        body = for_insts[0].operation.params[-1]
+        if_insts = [inst for inst in body.data if isinstance(inst.operation, IfElseOp)]
+        assert len(if_insts) == 1
+        if_inst = if_insts[0]
+
+        resolved_branch_clbits = []
+        if_else_clbits = [body.clbits.index(c) for c in if_inst.clbits]
+        for branch_idx, block in enumerate(if_inst.operation.blocks):
+            measures = [inst for inst in block.data if isinstance(inst.operation, Measure)]
+            assert len(measures) == 1, (
+                f"Expected 1 measurement in branch {branch_idx} but got "
+                f"{len(measures)}."
+            )
+            meas_clbit_in_block = block.clbits.index(measures[0].clbits[0])
+            resolved_branch_clbits.append(if_else_clbits[meas_clbit_in_block])
+
+        assert len(if_inst.clbits) == 2
+        assert len(set(resolved_branch_clbits)) == 1, (
+            "Loop-carried if state should use one shared branch-result clbit."
+        )
+
+    def test_while_if_loop_carried_bit_uses_single_branch_result_clbit(self):
+        """First nested if in a while-loop should emit one shared state clbit."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            run_q = qmc.qubit("run")
+            run_q = qmc.x(run_q)
+            run = qmc.measure(run_q)
+
+            step_q = qmc.qubit("step")
+            step = qmc.measure(step_q)
+
+            init_q = qmc.qubit("init")
+            state = qmc.measure(init_q)
+            out = state
+
+            while run:
+                out = state
+                if state:
+                    q_zero = qmc.qubit("zero")
+                    state = qmc.measure(q_zero)
+                else:
+                    q_one = qmc.qubit("one")
+                    q_one = qmc.x(q_one)
+                    state = qmc.measure(q_one)
+
+                if step:
+                    run_stop = qmc.qubit("run_stop")
+                    run = qmc.measure(run_stop)
+                else:
+                    run_keep = qmc.qubit("run_keep")
+                    run_keep = qmc.x(run_keep)
+                    run = qmc.measure(run_keep)
+
+                    step_next = qmc.qubit("step_next")
+                    step_next = qmc.x(step_next)
+                    step = qmc.measure(step_next)
+            return out
+
+        _, qc = _transpile_and_get_circuit(circuit)
+
+        while_insts = [inst for inst in qc.data if isinstance(inst.operation, WhileLoopOp)]
+        assert len(while_insts) == 1
+        body = while_insts[0].operation.params[0]
+        if_insts = [inst for inst in body.data if isinstance(inst.operation, IfElseOp)]
+        assert len(if_insts) >= 1
+        if_inst = if_insts[0]
+
+        resolved_branch_clbits = []
+        if_else_clbits = [body.clbits.index(c) for c in if_inst.clbits]
+        for branch_idx, block in enumerate(if_inst.operation.blocks):
+            measures = [inst for inst in block.data if isinstance(inst.operation, Measure)]
+            assert len(measures) == 1, (
+                f"Expected 1 measurement in branch {branch_idx} but got "
+                f"{len(measures)}."
+            )
+            meas_clbit_in_block = block.clbits.index(measures[0].clbits[0])
+            resolved_branch_clbits.append(if_else_clbits[meas_clbit_in_block])
+
+        assert len(if_inst.clbits) == 2
+        assert len(set(resolved_branch_clbits)) == 1, (
+            "Loop-carried if state should use one shared branch-result clbit."
+        )
+
+
+class TestDeadPhiTranspilation:
+    """Dead quantum variables in if branches must not cause EmitError."""
+
+    def test_if_only_dead_reassigned_existing_transpile_ok(self):
+        """Outer qubit reassigned in if branches but dead -> transpile succeeds."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q_t = qmc.qubit("q_t")
+            q0 = qmc.x(q0)
+            cond = qmc.measure(q0)
+            if cond:
+                q_t = qmc.x(q_t)
+            else:
+                q_t = qmc.h(q_t)
+            # q_t is dead
+            return cond
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc is not None
+
+    def test_while_if_dead_reassigned_existing_transpile_ok(self):
+        """While-if with dead reassigned qubit -> transpile succeeds."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q_t = qmc.qubit("q_t")
+            q1 = qmc.qubit("q1")
+            q0 = qmc.h(q0)
+            bit = qmc.measure(q0)
+            while bit:
+                cond = qmc.measure(q1)
+                if cond:
+                    q_t = qmc.x(q_t)
+                else:
+                    q_t = qmc.h(q_t)
+                # q_t is dead within the while body
+                q0 = qmc.qubit("q_loop")
+                q0 = qmc.h(q0)
+                bit = qmc.measure(q0)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc is not None
+
+    def test_while_if_shared_new_same_name_dead_transpile_ok(self):
+        """Both if branches define same-named new local inside while, dead -> ok."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.h(q0)
+            bit = qmc.measure(q0)
+            while bit:
+                q_sel = qmc.qubit("q_sel")
+                cond = qmc.measure(q_sel)
+                if cond:
+                    q_a = qmc.qubit("q_a")
+                    b_new = qmc.measure(q_a)
+                else:
+                    q_b = qmc.qubit("q_b")
+                    b_new = qmc.measure(q_b)  # noqa: F841
+                # b_new is dead
+                q_next = qmc.qubit("q_next")
+                q_next = qmc.h(q_next)
+                bit = qmc.measure(q_next)
+            return bit
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc is not None

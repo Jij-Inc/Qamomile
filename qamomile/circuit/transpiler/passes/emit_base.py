@@ -228,7 +228,18 @@ class ResourceAllocator:
     This class handles the first pass of circuit emission: determining
     how many physical qubits and classical bits are needed and mapping
     Value UUIDs to their physical indices.
+
+    New physical indices are assigned via monotonic counters
+    (``_next_qubit_index`` / ``_next_clbit_index``) so that alias
+    entries — which reuse an existing physical index — never inflate
+    the counter.  Using ``len(map)`` would cause sparse (gapped)
+    physical indices because alias keys increase the map size without
+    adding new physical resources.
     """
+
+    def __init__(self) -> None:
+        self._next_qubit_index: int = 0
+        self._next_clbit_index: int = 0
 
     def allocate(
         self,
@@ -246,6 +257,8 @@ class ResourceAllocator:
         """
         qubit_map: dict[str, int] = {}
         clbit_map: dict[str, int] = {}
+        self._next_qubit_index = 0
+        self._next_clbit_index = 0
         self._allocate_recursive(operations, qubit_map, clbit_map, bindings or {})
         return qubit_map, clbit_map
 
@@ -280,15 +293,18 @@ class ResourceAllocator:
                         for i in range(size):
                             qubit_id = f"{result.uuid}_{i}"
                             if qubit_id not in qubit_map:
-                                qubit_map[qubit_id] = len(qubit_map)
+                                qubit_map[qubit_id] = self._next_qubit_index
+                                self._next_qubit_index += 1
                     continue
                 if result.uuid not in qubit_map:
-                    qubit_map[result.uuid] = len(qubit_map)
+                    qubit_map[result.uuid] = self._next_qubit_index
+                    self._next_qubit_index += 1
 
             elif isinstance(op, MeasureOperation):
                 result = op.results[0]
                 if result.uuid not in clbit_map:
-                    clbit_map[result.uuid] = len(clbit_map)
+                    clbit_map[result.uuid] = self._next_clbit_index
+                    self._next_clbit_index += 1
 
             elif isinstance(op, MeasureVectorOperation):
                 result = op.results[0]
@@ -305,7 +321,8 @@ class ResourceAllocator:
                     for i in range(size):
                         clbit_id = f"{result.uuid}_{i}"
                         if clbit_id not in clbit_map:
-                            clbit_map[clbit_id] = len(clbit_map)
+                            clbit_map[clbit_id] = self._next_clbit_index
+                            self._next_clbit_index += 1
 
             elif isinstance(op, MeasureQFixedOperation):
                 qfixed = op.operands[0]
@@ -314,7 +331,8 @@ class ResourceAllocator:
                 for i, qubit_uuid in enumerate(qubit_uuids):
                     clbit_id = f"{result.uuid}_{i}"
                     if clbit_id not in clbit_map:
-                        clbit_map[clbit_id] = len(clbit_map)
+                        clbit_map[clbit_id] = self._next_clbit_index
+                        self._next_clbit_index += 1
 
             elif isinstance(op, GateOperation):
                 self._allocate_gate(op, qubit_map)
@@ -341,7 +359,14 @@ class ResourceAllocator:
                 #   operands[1]: loop-carried condition (present only when the
                 #                body reassigns the condition variable)
                 # No other operand count is valid.
-                if len(op.operands) == 2:
+                if len(op.operands) == 1:
+                    # Invariant condition: the condition variable is not
+                    # reassigned inside the loop body.  No loop-carried
+                    # clbit aliasing is needed; just allocate the body.
+                    self._allocate_recursive(
+                        op.operations, qubit_map, clbit_map, bindings
+                    )
+                elif len(op.operands) == 2:
                     initial_cond = op.operands[0]
                     loop_carried = op.operands[1]
                     init_val = (
@@ -525,7 +550,8 @@ class ResourceAllocator:
                     # emit_init=False (func_to_block.py), which have no QInitOperation.
                     # ResourceAllocator.allocate() receives only operations, not the
                     # block's input_values, so these qubits are first registered here.
-                    qubit_map[operand.uuid] = len(qubit_map)
+                    qubit_map[operand.uuid] = self._next_qubit_index
+                    self._next_qubit_index += 1
 
         # Phase 2: Map each result to its corresponding operand (1:1)
         for i, result in enumerate(op.results):
@@ -566,7 +592,8 @@ class ResourceAllocator:
                     # For scalar qubits, this handles @qkernel input parameters
                     # (emit_init=False) that have no preceding QInitOperation.
                     # For array elements, this handles first-seen element keys.
-                    qubit_map[qubit_key] = len(qubit_map)
+                    qubit_map[qubit_key] = self._next_qubit_index
+                    self._next_qubit_index += 1
                 if qubit.uuid not in qubit_map:
                     qubit_map[qubit.uuid] = qubit_map[qubit_key]
 
@@ -574,7 +601,18 @@ class ResourceAllocator:
             if result.uuid not in qubit_map and i < len(all_qubits):
                 qubit_key, is_array = self._resolve_qubit_key(all_qubits[i])
                 if qubit_key is not None:
-                    qubit_map[result.uuid] = qubit_map.get(qubit_key, len(qubit_map))
+                    # Alias: result must map to the same physical index as its
+                    # corresponding operand.  If qubit_key is somehow missing
+                    # (should not happen after the operand loop above), this is
+                    # a bug — raise explicitly rather than silently allocating.
+                    if qubit_key in qubit_map:
+                        qubit_map[result.uuid] = qubit_map[qubit_key]
+                    else:
+                        raise AssertionError(
+                            f"Missing qubit_key '{qubit_key}' in qubit_map when "
+                            f"allocating result '{result.uuid}'. "
+                            "This indicates a bug in operand allocation."
+                        )
 
     def _allocate_composite(
         self,
