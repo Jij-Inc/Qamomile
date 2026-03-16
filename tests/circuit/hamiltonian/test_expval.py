@@ -246,39 +246,137 @@ class TestExpvalContractValidation:
                 bindings={"n": 2, "H": qm_o.Z(0)},
             )
 
-    def test_expval_inside_control_flow_rejected(self):
-        """expval inside a for loop should be rejected by separate pass."""
+    @pytest.mark.parametrize(
+        "kind",
+        ["for", "for_items", "if", "while"],
+        ids=["ForOperation", "ForItemsOperation", "IfOperation", "WhileOperation"],
+    )
+    def test_expval_inside_control_flow_rejected(self, kind: str):
+        """expval inside any control-flow kind should be rejected."""
         from qamomile.circuit.ir.block import Block
-        from qamomile.circuit.ir.operation.control_flow import ForOperation
+        from qamomile.circuit.ir.operation.control_flow import (
+            ForItemsOperation,
+            ForOperation,
+            IfOperation,
+            WhileOperation,
+        )
         from qamomile.circuit.ir.operation.expval import ExpvalOp
-        from qamomile.circuit.ir.types.primitives import FloatType, UIntType
+        from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
         from qamomile.circuit.ir.value import Value
         from qamomile.circuit.transpiler.errors import SeparationError
         from qamomile.circuit.transpiler.passes.separate import SeparatePass
 
-        # Build a Block containing a ForOperation with an ExpvalOp inside
-        start = Value(type=UIntType(), name="start")
-        stop = Value(type=UIntType(), name="stop")
-        step = Value(type=UIntType(), name="step")
         qubits_val = Value(type=UIntType(), name="q")
         obs_val = Value(type=UIntType(), name="H")
         result_val = Value(type=FloatType(), name="ev")
+        inner_expval = ExpvalOp(operands=[qubits_val, obs_val], results=[result_val])
 
-        inner_expval = ExpvalOp(
-            operands=[qubits_val, obs_val],
-            results=[result_val],
-        )
-        for_op = ForOperation(
-            operands=[start, stop, step],
-            results=[],
-            loop_var="i",
-            operations=[inner_expval],
-        )
-        block = Block(operations=[for_op])
+        if kind == "for":
+            op = ForOperation(
+                operands=[
+                    Value(type=UIntType(), name="start"),
+                    Value(type=UIntType(), name="stop"),
+                    Value(type=UIntType(), name="step"),
+                ],
+                results=[],
+                loop_var="i",
+                operations=[inner_expval],
+            )
+        elif kind == "for_items":
+            op = ForItemsOperation(
+                operands=[Value(type=UIntType(), name="items")],
+                results=[],
+                key_vars=["k"],
+                value_var="v",
+                operations=[inner_expval],
+            )
+        elif kind == "if":
+            op = IfOperation(
+                operands=[Value(type=BitType(), name="cond")],
+                results=[],
+                true_operations=[inner_expval],
+                false_operations=[],
+                phi_ops=[],
+            )
+        else:  # while
+            op = WhileOperation(
+                operands=[Value(type=BitType(), name="cond")],
+                results=[],
+                operations=[inner_expval],
+            )
 
         sep = SeparatePass()
         with pytest.raises(SeparationError, match="expval inside control flow"):
-            sep._validate_expval_contract(block)
+            sep._validate_expval_contract(Block(operations=[op]))
+
+    def test_expval_inside_if_false_branch_rejected(self):
+        """expval in IfOperation.false_operations should be rejected."""
+        from qamomile.circuit.ir.block import Block
+        from qamomile.circuit.ir.operation.control_flow import IfOperation
+        from qamomile.circuit.ir.operation.expval import ExpvalOp
+        from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
+        from qamomile.circuit.ir.value import Value
+        from qamomile.circuit.transpiler.errors import SeparationError
+        from qamomile.circuit.transpiler.passes.separate import SeparatePass
+
+        inner_expval = ExpvalOp(
+            operands=[
+                Value(type=UIntType(), name="q"),
+                Value(type=UIntType(), name="H"),
+            ],
+            results=[Value(type=FloatType(), name="ev")],
+        )
+        if_op = IfOperation(
+            operands=[Value(type=BitType(), name="cond")],
+            results=[],
+            true_operations=[],
+            false_operations=[inner_expval],
+            phi_ops=[],
+        )
+
+        sep = SeparatePass()
+        with pytest.raises(SeparationError, match="expval inside control flow"):
+            sep._validate_expval_contract(Block(operations=[if_op]))
+
+    def test_expval_inside_nested_control_flow_rejected(self):
+        """expval nested two levels deep in control flow should be rejected."""
+        from qamomile.circuit.ir.block import Block
+        from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation
+        from qamomile.circuit.ir.operation.expval import ExpvalOp
+        from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
+        from qamomile.circuit.ir.value import Value
+        from qamomile.circuit.transpiler.errors import SeparationError
+        from qamomile.circuit.transpiler.passes.separate import SeparatePass
+
+        inner_expval = ExpvalOp(
+            operands=[
+                Value(type=UIntType(), name="q"),
+                Value(type=UIntType(), name="H"),
+            ],
+            results=[Value(type=FloatType(), name="ev")],
+        )
+        # ForOperation -> IfOperation -> ExpvalOp (2-level nesting)
+        nested_if = IfOperation(
+            operands=[Value(type=BitType(), name="cond")],
+            results=[],
+            true_operations=[inner_expval],
+            false_operations=[],
+            phi_ops=[],
+        )
+        outer_for = ForOperation(
+            operands=[
+                Value(type=UIntType(), name="start"),
+                Value(type=UIntType(), name="stop"),
+                Value(type=UIntType(), name="step"),
+            ],
+            results=[],
+            loop_var="i",
+            operations=[nested_if],
+        )
+
+        sep = SeparatePass()
+        with pytest.raises(SeparationError, match="expval inside control flow"):
+            sep._validate_expval_contract(Block(operations=[outer_for]))
 
     def test_expval_classical_after_expval_rejected(self):
         """Classical operations after expval should also be rejected."""
