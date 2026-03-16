@@ -78,11 +78,16 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
         CUDA-Q's builder API supports ``c_if`` (if-then only). Else
         branches are not supported and raise ``EmitError``.
 
-        The measurement result (``QuakeValue`` from ``kernel.mz()``) is
-        obtained lazily: since ``noop_measurement`` is ``True``, no
-        ``mz()`` call is emitted during measurement processing. Instead,
-        ``mz()`` is called here just before ``c_if``, using the
-        ``_measurement_qubit_map`` populated by ``StandardEmitPass``.
+        Compile-time constant conditions (e.g., ``if python_int & 1:``
+        inside ``@qkernel``) are constant-folded: only the active branch
+        is emitted without any ``c_if`` wrapper.
+
+        For runtime conditions (measurement results), the ``QuakeValue``
+        from ``kernel.mz()`` is obtained lazily: since
+        ``noop_measurement`` is ``True``, no ``mz()`` call is emitted
+        during measurement processing. Instead, ``mz()`` is called here
+        just before ``c_if``, using the ``_measurement_qubit_map``
+        populated by ``StandardEmitPass``.
 
         Args:
             circuit (CudaqCircuit): The CUDA-Q circuit being built.
@@ -95,7 +100,23 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
             EmitError: If the operation has else branches or if the
                 condition classical bit has no associated measurement.
         """
-        condition_uuid = op.condition.uuid
+        condition = op.condition
+
+        # Handle compile-time constant conditions (plain Python int/bool
+        # from closure variables captured by @qkernel AST transformer).
+        if not hasattr(condition, "uuid"):
+            if condition:
+                self._emit_operations(
+                    circuit, op.true_operations, qubit_map, clbit_map, bindings
+                )
+            else:
+                self._emit_operations(
+                    circuit, op.false_operations, qubit_map, clbit_map, bindings
+                )
+            self._register_phi_outputs(op, qubit_map, clbit_map, bindings)
+            return
+
+        condition_uuid = condition.uuid
 
         if condition_uuid not in clbit_map:
             return

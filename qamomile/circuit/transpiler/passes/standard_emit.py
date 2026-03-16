@@ -870,6 +870,9 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
     ) -> None:
         """Emit approximate IQFT with truncated rotations.
 
+        IQFT = QFT†.  SWAP comes first (undoing QFT's trailing SWAP),
+        then reversed H+CP stages with negated angles.
+
         Args:
             circuit: Target circuit
             qubit_indices: Qubit indices
@@ -881,6 +884,10 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
 
         k = truncation_depth
 
+        # Bit-reversal SWAP first (inverse of QFT's trailing SWAP)
+        for i in range(n // 2):
+            self._emitter.emit_swap(circuit, qubit_indices[i], qubit_indices[n - 1 - i])
+
         for i in range(n - 1, -1, -1):
             self._emitter.emit_h(circuit, qubit_indices[i])
             for j in range(max(0, i - k), i):
@@ -890,9 +897,6 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                     self._emitter.emit_cp(
                         circuit, qubit_indices[j], qubit_indices[i], angle
                     )
-
-        for i in range(n // 2):
-            self._emitter.emit_swap(circuit, qubit_indices[i], qubit_indices[n - 1 - i])
 
     def _emit_qft_manual(self, circuit: T, qubit_indices: list[int]) -> None:
         """Emit QFT using decomposition."""
@@ -913,10 +917,19 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             self._emitter.emit_swap(circuit, qubit_indices[i], qubit_indices[n - 1 - i])
 
     def _emit_iqft_manual(self, circuit: T, qubit_indices: list[int]) -> None:
-        """Emit inverse QFT using decomposition."""
+        """Emit inverse QFT using decomposition.
+
+        IQFT = QFT†.  Since QFT = SWAP · G (H+CP stages then bit-reversal),
+        IQFT = G† · SWAP.  The SWAP must come *first* (undoing QFT's trailing
+        SWAP), followed by the reversed H+CP stages with negated angles.
+        """
         n = len(qubit_indices)
         if n == 0:
             return
+
+        # Bit-reversal SWAP first (inverse of QFT's trailing SWAP)
+        for i in range(n // 2):
+            self._emitter.emit_swap(circuit, qubit_indices[i], qubit_indices[n - 1 - i])
 
         for i in range(n - 1, -1, -1):
             self._emitter.emit_h(circuit, qubit_indices[i])
@@ -926,9 +939,6 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 self._emitter.emit_cp(
                     circuit, qubit_indices[j], qubit_indices[i], angle
                 )
-
-        for i in range(n // 2):
-            self._emitter.emit_swap(circuit, qubit_indices[i], qubit_indices[n - 1 - i])
 
     def _emit_qpe_manual(
         self,
