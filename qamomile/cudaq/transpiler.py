@@ -65,6 +65,38 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
         composite_emitters: list[Any] = []
         super().__init__(emitter, bindings, parameters, composite_emitters)
 
+    def _emit_quantum_segment(
+        self,
+        operations: list,
+        bindings: dict[str, Any],
+    ) -> tuple[CudaqCircuit, dict[str, int], dict[str, int]]:
+        """Emit quantum segment with post-processing for ``c_if`` circuits.
+
+        After the standard emission, if any ``mz()`` calls were emitted
+        (by ``_emit_if`` for ``c_if`` conditions), this method adds
+        ``mz()`` for the remaining measured qubits.  This ensures
+        ``cudaq.sample()`` reports full-length bitstrings covering all
+        measured qubits, not just the ``c_if`` condition qubits.
+
+        For circuits **without** ``c_if``, no ``mz()`` calls exist and
+        ``cudaq.sample()`` auto-measures all qubits — so no post-processing
+        is needed and ``cudaq.get_state()`` still returns a pure state.
+        """
+        circuit, qubit_map, clbit_map = super()._emit_quantum_segment(
+            operations, bindings
+        )
+
+        # If c_if emitted any mz() calls, also emit mz() for the
+        # remaining measured-but-not-yet-mz'd qubits so that
+        # cudaq.sample() reports full bitstrings.
+        if circuit.measurement_results:
+            for clbit_idx, qubit_idx in self._measurement_qubit_map.items():
+                if clbit_idx not in circuit.measurement_results:
+                    mz_result = circuit.kernel.mz(circuit.qubits[qubit_idx])
+                    circuit.measurement_results[clbit_idx] = mz_result
+
+        return circuit, qubit_map, clbit_map
+
     def _emit_if(
         self,
         circuit: CudaqCircuit,
