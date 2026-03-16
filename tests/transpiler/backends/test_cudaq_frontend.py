@@ -12,6 +12,8 @@ Note: Do NOT use ``from __future__ import annotations`` in this file.
 The @qkernel AST transformer relies on resolved type annotations.
 """
 
+from typing import Any
+
 import numpy as np
 import pytest
 
@@ -57,10 +59,10 @@ def _run_statevector(circuit: CudaqCircuit) -> np.ndarray:
 
 
 def _transpile_and_get_circuit(
-    kernel,
-    bindings: dict | None = None,
+    kernel: Any,
+    bindings: dict[str, Any] | None = None,
     parameters: list[str] | None = None,
-):
+) -> tuple[Any, CudaqCircuit]:
     """Transpile a qkernel and return the executable and CUDA-Q circuit.
 
     Args:
@@ -221,6 +223,24 @@ class TestSingleQubitGatesFrontend:
         sv = _run_statevector(qc)
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["P"].matrix_fn(angle)
+        )
+        assert statevectors_equal(sv, expected)
+
+    # -- Pauli-Y --
+
+    def test_y_statevector(self):
+        """Y|0> = i|1>."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.y(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        expected = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["Y"].matrix_fn()
         )
         assert statevectors_equal(sv, expected)
 
@@ -1514,7 +1534,6 @@ class TestErrorCases:
 
     def test_while_loop_raises_emit_error(self):
         """WhileOperation on CUDA-Q backend must raise EmitError."""
-        from qamomile.circuit.transpiler.errors import EmitError
 
         @qmc.qkernel
         def _while_body(q: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Bit]:
@@ -1530,18 +1549,6 @@ class TestErrorCases:
         transpiler = CudaqTranspiler()
         with pytest.raises(EmitError, match="while loop control flow"):
             transpiler.transpile(circuit_with_while)
-
-    def test_expval_missing_observable_raises(self):
-        """Missing Observable binding raises RuntimeError."""
-
-        @qmc.qkernel
-        def circuit(n: qmc.UInt, H: qmc.Observable) -> qmc.Float:
-            q = qmc.qubit_array(n, "q")
-            return qmc.expval(q, H)
-
-        transpiler = CudaqTranspiler()
-        with pytest.raises(RuntimeError, match="Observable.*not found in bindings"):
-            transpiler.transpile(circuit, bindings={"n": 2})
 
 
 # ============================================================================

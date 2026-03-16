@@ -55,16 +55,16 @@ class TestCudaqControlFlowErrors:
 
     def test_c_if_transpiles_ok(self) -> None:
         """c_if (if-then, no else) should transpile without error."""
-        import qamomile.circuit as qm
+        import qamomile.circuit as qmc
         from qamomile.cudaq import CudaqTranspiler
 
-        @qm.qkernel
-        def circuit_with_c_if(q0: qm.Qubit, q1: qm.Qubit) -> qm.Bit:
-            q0 = qm.x(q0)
-            b = qm.measure(q0)
+        @qmc.qkernel
+        def circuit_with_c_if(q0: qmc.Qubit, q1: qmc.Qubit) -> qmc.Bit:
+            q0 = qmc.x(q0)
+            b = qmc.measure(q0)
             if b:
-                q1 = qm.x(q1)
-            return qm.measure(q1)
+                q1 = qmc.x(q1)
+            return qmc.measure(q1)
 
         transpiler = CudaqTranspiler()
         exe = transpiler.transpile(circuit_with_c_if)
@@ -72,22 +72,22 @@ class TestCudaqControlFlowErrors:
 
     def test_if_with_else_raises_emit_error(self) -> None:
         """IfOperation with else branch on CUDA-Q must raise EmitError."""
-        import qamomile.circuit as qm
+        import qamomile.circuit as qmc
         from qamomile.circuit.transpiler.errors import EmitError
         from qamomile.cudaq import CudaqTranspiler
 
-        @qm.qkernel
+        @qmc.qkernel
         def circuit_with_if_else(
-            q0: qm.Qubit,
-            q1: qm.Qubit,
-        ) -> qm.Bit:
-            q0 = qm.h(q0)
-            b = qm.measure(q0)
+            q0: qmc.Qubit,
+            q1: qmc.Qubit,
+        ) -> qmc.Bit:
+            q0 = qmc.h(q0)
+            b = qmc.measure(q0)
             if b:
-                q1 = qm.x(q1)
+                q1 = qmc.x(q1)
             else:
-                q1 = qm.h(q1)
-            return qm.measure(q1)
+                q1 = qmc.h(q1)
+            return qmc.measure(q1)
 
         transpiler = CudaqTranspiler()
         with pytest.raises(EmitError, match="does not support else"):
@@ -95,19 +95,19 @@ class TestCudaqControlFlowErrors:
 
     def test_while_loop_raises_emit_error(self) -> None:
         """WhileOperation on CUDA-Q backend must raise EmitError."""
-        import qamomile.circuit as qm
+        import qamomile.circuit as qmc
         from qamomile.circuit.transpiler.errors import EmitError
         from qamomile.cudaq import CudaqTranspiler
 
-        @qm.qkernel
-        def _while_body(q: qm.Qubit) -> tuple[qm.Qubit, qm.Bit]:
-            q = qm.x(q)
-            return q, qm.measure(q)
+        @qmc.qkernel
+        def _while_body(q: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Bit]:
+            q = qmc.x(q)
+            return q, qmc.measure(q)
 
-        @qm.qkernel
-        def circuit_with_while(q: qm.Qubit) -> qm.Bit:
-            b = qm.measure(q)
-            q, b = qm.while_loop(b, _while_body, q)
+        @qmc.qkernel
+        def circuit_with_while(q: qmc.Qubit) -> qmc.Bit:
+            b = qmc.measure(q)
+            q, b = qmc.while_loop(b, _while_body, q)
             return b
 
         transpiler = CudaqTranspiler()
