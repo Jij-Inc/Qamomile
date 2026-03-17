@@ -301,9 +301,21 @@ except Exception as e:
 # |---------|--------|-------|
 # | **Qiskit** | Supported | Full gate set, control flow, observables |
 # | **QuriParts** | Supported | Full gate set, observables |
-# | **CUDA-Q** | Coming soon | GPU-accelerated simulation |
+# | **CUDA-Q** | Supported | GPU-accelerated simulation. Supported: `c_if` (if-then only, no else), for-loops (unrolled). Unsupported: while-loops |
 #
-# > **Important**: Not every qkernel feature is available on every quantum SDK. For example, `if` branching inside a qkernel is supported by Qiskit but may not yet be supported by other SDKs. If a feature is not available for your chosen SDK, you will get a clear error at transpile time.
+# > **Important**: Not every qkernel feature is available on every quantum SDK. For example, `if`/`else` branching inside a qkernel is supported by Qiskit but only `if`-then (no `else`) is supported by CUDA-Q. If a feature is not available for your chosen SDK, you will get a clear error at transpile time.
+#
+# ### CUDA-Q Platform Support
+#
+# CUDA-Q is supported on the following environments:
+#
+# | Environment | Status | Notes |
+# |---------|--------|-------|
+# | Linux | Supported | Native path |
+# | macOS ARM64 (Apple silicon) | Supported | CPU-only simulation; Intel macOS unsupported |
+# | Windows via WSL2 | Supported | Install and run inside the WSL2 Linux environment |
+# | Native Windows | Unsupported | Use WSL2 instead |
+# | macOS x86_64 (Intel) | Unsupported | Apple silicon only |
 #
 # ## Next Chapters
 #
