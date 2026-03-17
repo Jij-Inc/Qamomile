@@ -9,7 +9,6 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "cudaq>=0.13.0",
     "jijmodeling>=2.1.0",
     "ommx>=2.3.3",
     "qiskit>=2.3.0",
@@ -21,6 +20,9 @@ dependencies = [
 include = ["qamomile*"]
 
 [project.optional-dependencies]
+cudaq = [
+    "cudaq>=0.13.0",
+]
 quri_parts = [
     "quri-parts-core>=0.21.1",
     "quri-parts-circuit>=0.21.1",
