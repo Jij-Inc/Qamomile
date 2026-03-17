@@ -9,7 +9,6 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Sequence, TYPE_CHECKING
 
-from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.transpiler import Transpiler
@@ -51,9 +50,9 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
     """CUDA-Q-specific emission pass.
 
     Uses StandardEmitPass with CudaqGateEmitter for gate emission.
-    Supports ``c_if`` (if-then, no else) for mid-circuit measurement
-    feedback via ``kernel.c_if(mz_result, callable)``. For-loops are
-    unrolled and while-loops raise ``EmitError``.
+    Measurement-dependent conditional branching (``c_if``) is not supported
+    under CUDA-Q 0.14.x and raises ``EmitError`` at emit time.
+    For-loops are unrolled and while-loops raise ``EmitError``.
     """
 
     def __init__(
@@ -66,38 +65,6 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
         composite_emitters: list[Any] = []
         super().__init__(emitter, bindings, parameters, composite_emitters)
 
-    def _emit_quantum_segment(
-        self,
-        operations: list[Operation],
-        bindings: dict[str, Any],
-    ) -> tuple[CudaqCircuit, dict[str, int], dict[str, int]]:
-        """Emit quantum segment with post-processing for ``c_if`` circuits.
-
-        After the standard emission, if any ``mz()`` calls were emitted
-        (by ``_emit_if`` for ``c_if`` conditions), this method adds
-        ``mz()`` for the remaining measured qubits.  This ensures
-        ``cudaq.sample()`` reports full-length bitstrings covering all
-        measured qubits, not just the ``c_if`` condition qubits.
-
-        For circuits **without** ``c_if``, no ``mz()`` calls exist and
-        ``cudaq.sample()`` auto-measures all qubits — so no post-processing
-        is needed and ``cudaq.get_state()`` still returns a pure state.
-        """
-        circuit, qubit_map, clbit_map = super()._emit_quantum_segment(
-            operations, bindings
-        )
-
-        # If c_if emitted any mz() calls, also emit mz() for the
-        # remaining measured-but-not-yet-mz'd qubits so that
-        # cudaq.sample() reports full bitstrings.
-        if circuit.measurement_results:
-            for clbit_idx, qubit_idx in self._measurement_qubit_map.items():
-                if clbit_idx not in circuit.measurement_results:
-                    mz_result = circuit.kernel.mz(circuit.qubits[qubit_idx])
-                    circuit.measurement_results[clbit_idx] = mz_result
-
-        return circuit, qubit_map, clbit_map
-
     def _emit_if(
         self,
         circuit: CudaqCircuit,
@@ -106,20 +73,16 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
         clbit_map: dict[str, int],
         bindings: dict[str, Any],
     ) -> None:
-        """Emit conditional execution using CUDA-Q ``kernel.c_if``.
+        """Reject measurement-dependent conditional branching.
 
-        CUDA-Q's builder API supports ``c_if`` (if-then only). Else
-        branches are not supported and raise ``EmitError``.
+        CUDA-Q 0.14.x removed the builder ``c_if`` API.  Any
+        ``IfOperation`` whose condition is a runtime measurement result
+        (i.e. a Value with a UUID) is therefore unsupported and raises
+        ``EmitError``.
 
-        Compile-time constant conditions are handled by the base class
-        (``StandardEmitPass._emit_if``).
-
-        For runtime conditions (measurement results), the ``QuakeValue``
-        from ``kernel.mz()`` is obtained lazily: since
-        ``noop_measurement`` is ``True``, no ``mz()`` call is emitted
-        during measurement processing. Instead, ``mz()`` is called here
-        just before ``c_if``, using the ``_measurement_qubit_map``
-        populated by ``StandardEmitPass``.
+        Compile-time constant conditions are forwarded to the base-class
+        implementation (``StandardEmitPass._emit_if``) which handles
+        them without relying on ``c_if``.
 
         Args:
             circuit (CudaqCircuit): The CUDA-Q circuit being built.
@@ -129,8 +92,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
             bindings (dict[str, Any]): Parameter bindings.
 
         Raises:
-            EmitError: If the operation has else branches or if the
-                condition classical bit has no associated measurement.
+            EmitError: When the condition is a runtime measurement result.
         """
         condition = op.condition
 
@@ -139,40 +101,11 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
             super()._emit_if(circuit, op, qubit_map, clbit_map, bindings)
             return
 
-        condition_uuid = condition.uuid
-
-        if condition_uuid not in clbit_map:
-            return
-
-        if op.false_operations:
-            raise EmitError(
-                "CUDA-Q c_if does not support else branches. "
-                "Use if-then only (no else) for mid-circuit measurement feedback."
-            )
-
-        clbit_idx = clbit_map[condition_uuid]
-
-        qubit_idx = self._measurement_qubit_map.get(clbit_idx)
-        if qubit_idx is None:
-            raise EmitError(
-                f"No measurement found for classical bit {clbit_idx}. "
-                "CUDA-Q c_if requires a measurement result as condition."
-            )
-
-        # Get or create the mz QuakeValue (avoid double-mz on same qubit)
-        if clbit_idx not in circuit.measurement_results:
-            mz_result = circuit.kernel.mz(circuit.qubits[qubit_idx])
-            circuit.measurement_results[clbit_idx] = mz_result
-        mz_result = circuit.measurement_results[clbit_idx]
-
-        def true_body() -> None:
-            self._emit_operations(
-                circuit, op.true_operations, qubit_map, clbit_map, bindings
-            )
-
-        circuit.kernel.c_if(mz_result, true_body)
-
-        self._register_phi_outputs(op, qubit_map, clbit_map, bindings)
+        raise EmitError(
+            "CUDA-Q 0.14.x does not support measurement-dependent conditional "
+            "branching. The `c_if` builder API was removed in 0.14.0. "
+            "Refactor to use static circuits without runtime conditional branching."
+        )
 
 
 class CudaqExecutor(QuantumExecutor[CudaqCircuit]):

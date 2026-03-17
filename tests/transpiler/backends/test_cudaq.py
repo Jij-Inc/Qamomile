@@ -21,7 +21,8 @@ class TestCudaqTranspiler(TranspilerTestSuite):
 
     CUDA-Q supports most standard gates but has some limitations:
     - Measurements are not supported in circuits (no-op in emitter)
-    - c_if (if-then, no else) is supported; while-loops raise EmitError
+    - Measurement-dependent conditional branching raises EmitError (0.14.x)
+    - While-loops raise EmitError
     - CP and RZZ are decomposed (no native gates)
     - CH and CY are decomposed
     """
@@ -53,9 +54,10 @@ class TestCudaqTranspiler(TranspilerTestSuite):
 class TestCudaqControlFlowErrors:
     """Test that unsupported control flow raises explicit errors."""
 
-    def test_c_if_transpiles_ok(self) -> None:
-        """c_if (if-then, no else) should transpile without error."""
+    def test_c_if_raises_emit_error(self) -> None:
+        """measurement-dependent c_if is rejected under CUDA-Q 0.14.x."""
         import qamomile.circuit as qmc
+        from qamomile.circuit.transpiler.errors import EmitError
         from qamomile.cudaq import CudaqTranspiler
 
         @qmc.qkernel
@@ -69,8 +71,8 @@ class TestCudaqControlFlowErrors:
             return qmc.measure(q1)
 
         transpiler = CudaqTranspiler()
-        exe = transpiler.transpile(circuit_with_c_if)
-        assert exe.compiled_quantum[0].circuit.num_qubits == 2
+        with pytest.raises(EmitError, match="measurement-dependent"):
+            transpiler.transpile(circuit_with_c_if)
 
     def test_if_with_else_raises_emit_error(self) -> None:
         """IfOperation with else branch on CUDA-Q must raise EmitError."""
@@ -91,7 +93,7 @@ class TestCudaqControlFlowErrors:
             return qmc.measure(q1)
 
         transpiler = CudaqTranspiler()
-        with pytest.raises(EmitError, match="does not support else"):
+        with pytest.raises(EmitError, match="measurement-dependent"):
             transpiler.transpile(circuit_with_if_else)
 
     def test_while_loop_raises_emit_error(self) -> None:

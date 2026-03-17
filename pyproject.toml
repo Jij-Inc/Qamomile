@@ -21,7 +21,7 @@ include = ["qamomile*"]
 
 [project.optional-dependencies]
 cudaq = [
-    "cudaq>=0.13.0",
+    "cudaq>=0.14.0",
 ]
 quri_parts = [
     "quri-parts-core>=0.21.1",

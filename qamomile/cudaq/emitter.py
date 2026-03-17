@@ -29,9 +29,6 @@ class CudaqCircuit:
         param_vector (Any | None): Vector parameter from
             ``cudaq.make_kernel(list)``, or None for non-parametric kernels.
         param_count (int): Number of parameters created so far.
-        measurement_results (dict[int, Any]): Maps clbit index to the
-            QuakeValue returned by ``kernel.mz()``. Used by ``c_if``
-            to avoid calling ``mz()`` twice on the same qubit.
     """
 
     kernel: Any
@@ -40,7 +37,6 @@ class CudaqCircuit:
     num_clbits: int
     param_vector: Any = None
     param_count: int = 0
-    measurement_results: dict[int, Any] = dataclasses.field(default_factory=dict)
 
 
 class CudaqGateEmitter:
@@ -313,17 +309,12 @@ class CudaqGateEmitter:
     # ------------------------------------------------------------------
 
     def emit_measure(self, circuit: CudaqCircuit, qubit: int, clbit: int) -> None:
-        """No-op: measurements are deferred.
+        """No-op: ``cudaq.sample()`` auto-measures all qubits.
 
-        For circuits **without** ``c_if``, ``cudaq.sample()`` auto-measures
-        all qubits — no explicit ``mz()`` is needed, and omitting it keeps
-        the state pure for ``cudaq.get_state()`` (statevector tests).
-
-        For circuits **with** ``c_if``, ``CudaqEmitPass`` calls ``mz()``
-        lazily in ``_emit_if`` for the condition qubit, and then
-        ``_emit_quantum_segment`` post-processing adds ``mz()`` for any
-        remaining measured qubits so that ``cudaq.sample()`` reports
-        full bitstrings.
+        Explicit ``mz()`` calls are not emitted during measurement processing.
+        ``cudaq.sample()`` automatically measures all qubits when no explicit
+        ``mz()`` calls are present, keeping the state pure for
+        ``cudaq.get_state()`` in statevector tests.
         """
         pass
 
@@ -364,13 +355,12 @@ class CudaqGateEmitter:
         return False
 
     def supports_if_else(self) -> bool:
-        """Return False: emitter-level if/else protocol is not used.
+        """Return False: conditional branching on measurement results is not supported.
 
-        CUDA-Q supports ``c_if`` (if-then, no else), but the conditional
-        logic is handled entirely by ``CudaqEmitPass._emit_if`` which
-        calls ``kernel.c_if()`` directly.  The generic
+        CUDA-Q 0.14.x removed the builder ``c_if`` API.  The generic
         ``emit_if_start`` / ``emit_else_start`` / ``emit_if_end``
-        protocol is not implemented.
+        protocol is not implemented and measurement-dependent ``IfOperation``
+        is rejected at emit time by ``CudaqEmitPass._emit_if``.
         """
         return False
 

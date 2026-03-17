@@ -4,8 +4,8 @@ Tests the full pipeline: @qkernel definition -> CudaqTranspiler -> execution.
 Covers every frontend gate, gate combinations, control flow (loops), stdlib,
 measurement, parametric circuits, expval, and edge cases.
 
-CUDA-Q supports ``c_if`` (if-then, no else) for mid-circuit measurement
-feedback but does not support while-loops. Tests that rely on Qiskit-specific circuit
+CUDA-Q 0.14.x does not support measurement-dependent conditional branching
+(``c_if`` was removed). Tests that rely on Qiskit-specific circuit
 introspection are replaced with statevector or sampling verification.
 
 Note: Do NOT use ``from __future__ import annotations`` in this file.
@@ -1854,52 +1854,39 @@ def _c_if_with_else() -> qmc.Bit:
 
 
 class TestCIfControlFlow:
-    """Test mid-circuit measurement feedback via CUDA-Q ``c_if``."""
+    """Test that measurement-dependent conditional branching is rejected under CUDA-Q 0.14.x."""
 
-    def test_c_if_basic_transpile(self) -> None:
-        """c_if (if-then, no else) transpiles without error and has correct qubit count."""
-        _, qc = _transpile_and_get_circuit(_c_if_basic)
-        assert qc.num_qubits == 2
+    def test_c_if_basic_raises_emit_error(self) -> None:
+        """measurement-dependent c_if (if-then, no else) raises EmitError under 0.14.x."""
+        with pytest.raises(EmitError, match="measurement-dependent"):
+            _transpile_and_get_circuit(_c_if_basic)
 
-    def test_c_if_execution_true_branch(self) -> None:
-        """X(q0)→measure=1→c_if fires X(q1): both qubits end up |1⟩."""
-        transpiler = CudaqTranspiler()
-        exe = transpiler.transpile(_c_if_basic)
-        executor = transpiler.executor()
-        counts = executor.execute(exe.compiled_quantum[0].circuit, shots=1000)
-        total = sum(counts.values())
-        assert total == 1000
-        # q0=1 (X applied), c_if fires → q1=1. Both qubits measured as 1.
-        assert "11" in counts, f"Expected '11' in counts, got {counts}"
-        assert counts["11"] == total
+    def test_c_if_false_branch_raises_emit_error(self) -> None:
+        """measurement-dependent c_if (false-branch path) raises EmitError under 0.14.x."""
+        with pytest.raises(EmitError, match="measurement-dependent"):
+            _transpile_and_get_circuit(_c_if_false_branch)
 
-    def test_c_if_execution_false_branch(self) -> None:
-        """q0=|0⟩→measure=0→c_if does NOT fire: both qubits stay |0⟩."""
-        transpiler = CudaqTranspiler()
-        exe = transpiler.transpile(_c_if_false_branch)
-        executor = transpiler.executor()
-        counts = executor.execute(exe.compiled_quantum[0].circuit, shots=1000)
-        # q0=0, q1=0 (c_if doesn't fire) → "00"
-        assert "00" in counts
-        total = sum(counts.values())
-        assert counts["00"] == total
-
-    def test_c_if_with_rotation(self) -> None:
-        """Conditional RX(pi) in true branch should flip q1."""
-        transpiler = CudaqTranspiler()
-        exe = transpiler.transpile(_c_if_with_rotation, bindings={"theta": np.pi})
-        executor = transpiler.executor()
-        counts = executor.execute(exe.compiled_quantum[0].circuit, shots=1000)
-        total = sum(counts.values())
-        assert total == 1000
-        # RX(pi) ≈ -iX, so q1 flips to |1⟩. Both qubits measured as 1.
-        assert "11" in counts, f"Expected '11' in counts, got {counts}"
-        assert counts["11"] == total
+    def test_c_if_with_rotation_raises_emit_error(self) -> None:
+        """measurement-dependent c_if with parametric body raises EmitError under 0.14.x."""
+        with pytest.raises(EmitError, match="measurement-dependent"):
+            _transpile_and_get_circuit(_c_if_with_rotation, bindings={"theta": np.pi})
 
     def test_c_if_with_else_raises_emit_error(self) -> None:
-        """Else branches must raise EmitError on CUDA-Q."""
-        with pytest.raises(EmitError, match="does not support else"):
+        """Measurement-dependent if-else must raise EmitError on CUDA-Q 0.14.x."""
+        with pytest.raises(EmitError, match="measurement-dependent"):
             _transpile_and_get_circuit(_c_if_with_else)
+
+    def test_measurement_without_conditional_transpiles_ok(self) -> None:
+        """Mid-circuit measurement without conditional branching must not be rejected."""
+
+        @qmc.qkernel
+        def measure_only() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.h(q0)
+            return qmc.measure(q0)
+
+        _, qc = _transpile_and_get_circuit(measure_only)
+        assert qc.num_qubits == 1
 
     def test_while_loop_still_raises_emit_error(self) -> None:
         """While loops remain unsupported on CUDA-Q."""
