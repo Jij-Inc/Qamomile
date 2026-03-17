@@ -459,6 +459,231 @@ class TestExpvalTupleValidation:
             QiskitTranspiler().transpile(bad, bindings={"H": qm_o.Z(0)})
 
 
+class TestExpvalRemapContract:
+    """Test that expval Hamiltonian remap is compile-time only (no runtime double remap)."""
+
+    def test_runtime_does_not_double_remap(self):
+        """CompiledExpvalSegment.hamiltonian should be passed through as-is at runtime."""
+        from qamomile.circuit.transpiler.compiled_segments import (
+            CompiledExpvalSegment,
+            CompiledQuantumSegment,
+        )
+        from qamomile.circuit.transpiler.executable import ExecutableProgram
+        from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
+        from qamomile.circuit.transpiler.quantum_executor import QuantumExecutor
+        from qamomile.circuit.transpiler.segments import ExpvalSegment, QuantumSegment
+
+        class RecorderExecutor(QuantumExecutor[object]):
+            def __init__(self):
+                self.last_h = None
+
+            def bind_parameters(self, circuit, bindings, metadata):
+                return circuit
+
+            def execute(self, circuit, shots):
+                return {"0": shots}
+
+            def estimate(self, circuit, hamiltonian, params=None):
+                self.last_h = hamiltonian
+                return 0.0
+
+        # Compile-time remapped Hamiltonian: Z(0)->Z(1), Z(1)->Z(0)
+        compiled_h = (qm_o.Z(0) + 2 * qm_o.Z(1)).remap_qubits({0: 1, 1: 0})
+
+        exe = ExecutableProgram(
+            compiled_quantum=[
+                CompiledQuantumSegment(
+                    segment=QuantumSegment(operations=[]),
+                    circuit=object(),
+                    parameter_metadata=ParameterMetadata(),
+                )
+            ],
+            compiled_expval=[
+                CompiledExpvalSegment(
+                    segment=ExpvalSegment(result_ref="ev"),
+                    hamiltonian=compiled_h,
+                    result_ref="ev",
+                    qubit_map={0: 1, 1: 0},
+                )
+            ],
+            execution_order=[("quantum", 0), ("expval", 0)],
+        )
+        executor = RecorderExecutor()
+        exe.run(executor).result()
+
+        # Runtime must pass compiled_h through without additional remap
+        assert executor.last_h is compiled_h
+
+    def test_build_qubit_map_vector_prefix_keys(self):
+        """_build_qubit_map should resolve Vector[Qubit] via prefix-key scan."""
+        pytest.importorskip("qiskit")
+        from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+        from qamomile.circuit.ir.value import ArrayValue, Value
+        from qamomile.circuit.transpiler.compiled_segments import CompiledQuantumSegment
+        from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
+        from qamomile.circuit.transpiler.segments import QuantumSegment
+        from qamomile.qiskit.transpiler import QiskitEmitPass
+
+        size = Value(type=UIntType(), name="n", params={"const": 2})
+        vec = ArrayValue(type=QubitType(), name="q", shape=(size,))
+
+        compiled_quantum = [
+            CompiledQuantumSegment(
+                segment=QuantumSegment(operations=[]),
+                circuit=object(),
+                qubit_map={f"{vec.uuid}_0": 5, f"{vec.uuid}_1": 3},
+                parameter_metadata=ParameterMetadata(),
+            )
+        ]
+
+        result = QiskitEmitPass(bindings={})._build_qubit_map(vec, 0, compiled_quantum)
+        assert result == {0: 5, 1: 3}
+
+    def test_build_qubit_map_vector_partial_raises(self):
+        """_build_qubit_map should raise EmitError on partial vector prefix keys."""
+        pytest.importorskip("qiskit")
+        from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+        from qamomile.circuit.ir.value import ArrayValue, Value
+        from qamomile.circuit.transpiler.compiled_segments import CompiledQuantumSegment
+        from qamomile.circuit.transpiler.errors import EmitError
+        from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
+        from qamomile.circuit.transpiler.segments import QuantumSegment
+        from qamomile.qiskit.transpiler import QiskitEmitPass
+
+        size = Value(type=UIntType(), name="n", params={"const": 3})
+        vec = ArrayValue(type=QubitType(), name="q", shape=(size,))
+
+        # Only indices 0 and 2 present (missing index 1) → partial map
+        compiled_quantum = [
+            CompiledQuantumSegment(
+                segment=QuantumSegment(operations=[]),
+                circuit=object(),
+                qubit_map={f"{vec.uuid}_0": 5, f"{vec.uuid}_2": 7},
+                parameter_metadata=ParameterMetadata(),
+            )
+        ]
+
+        with pytest.raises(EmitError, match="Incomplete vector qubit mapping"):
+            QiskitEmitPass(bindings={})._build_qubit_map(vec, 0, compiled_quantum)
+
+    def test_build_qubit_map_vector_missing_tail_raises(self):
+        """_build_qubit_map should raise EmitError when tail indices are missing."""
+        pytest.importorskip("qiskit")
+        from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+        from qamomile.circuit.ir.value import ArrayValue, Value
+        from qamomile.circuit.transpiler.compiled_segments import CompiledQuantumSegment
+        from qamomile.circuit.transpiler.errors import EmitError
+        from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
+        from qamomile.circuit.transpiler.segments import QuantumSegment
+        from qamomile.qiskit.transpiler import QiskitEmitPass
+
+        size = Value(type=UIntType(), name="n", params={"const": 3})
+        vec = ArrayValue(type=QubitType(), name="q", shape=(size,))
+
+        # Only indices 0 and 1 present for size-3 vector → missing tail
+        compiled_quantum = [
+            CompiledQuantumSegment(
+                segment=QuantumSegment(operations=[]),
+                circuit=object(),
+                qubit_map={f"{vec.uuid}_0": 5, f"{vec.uuid}_1": 3},
+                parameter_metadata=ParameterMetadata(),
+            )
+        ]
+
+        with pytest.raises(EmitError, match="Incomplete vector qubit mapping"):
+            QiskitEmitPass(bindings={})._build_qubit_map(vec, 0, compiled_quantum)
+
+    def test_build_qubit_map_vector_extra_index_raises(self):
+        """_build_qubit_map should raise EmitError on gapless extra indices."""
+        pytest.importorskip("qiskit")
+        from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+        from qamomile.circuit.ir.value import ArrayValue, Value
+        from qamomile.circuit.transpiler.compiled_segments import CompiledQuantumSegment
+        from qamomile.circuit.transpiler.errors import EmitError
+        from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
+        from qamomile.circuit.transpiler.segments import QuantumSegment
+        from qamomile.qiskit.transpiler import QiskitEmitPass
+
+        size = Value(type=UIntType(), name="n", params={"const": 3})
+        vec = ArrayValue(type=QubitType(), name="q", shape=(size,))
+
+        # Indices 0,1,2,3 present for size-3 vector → extra index
+        compiled_quantum = [
+            CompiledQuantumSegment(
+                segment=QuantumSegment(operations=[]),
+                circuit=object(),
+                qubit_map={
+                    f"{vec.uuid}_0": 5,
+                    f"{vec.uuid}_1": 3,
+                    f"{vec.uuid}_2": 8,
+                    f"{vec.uuid}_3": 9,
+                },
+                parameter_metadata=ParameterMetadata(),
+            )
+        ]
+
+        with pytest.raises(EmitError, match="Incomplete vector qubit mapping"):
+            QiskitEmitPass(bindings={})._build_qubit_map(vec, 0, compiled_quantum)
+
+    def test_build_qubit_map_vector_empty_map_raises(self):
+        """_build_qubit_map should raise EmitError on empty map for positive-size vector."""
+        pytest.importorskip("qiskit")
+        from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+        from qamomile.circuit.ir.value import ArrayValue, Value
+        from qamomile.circuit.transpiler.compiled_segments import CompiledQuantumSegment
+        from qamomile.circuit.transpiler.errors import EmitError
+        from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
+        from qamomile.circuit.transpiler.segments import QuantumSegment
+        from qamomile.qiskit.transpiler import QiskitEmitPass
+
+        size = Value(type=UIntType(), name="n", params={"const": 3})
+        vec = ArrayValue(type=QubitType(), name="q", shape=(size,))
+
+        # No prefix keys at all for positive-size vector → empty map
+        compiled_quantum = [
+            CompiledQuantumSegment(
+                segment=QuantumSegment(operations=[]),
+                circuit=object(),
+                qubit_map={},
+                parameter_metadata=ParameterMetadata(),
+            )
+        ]
+
+        with pytest.raises(EmitError, match="Incomplete vector qubit mapping"):
+            QiskitEmitPass(bindings={})._build_qubit_map(vec, 0, compiled_quantum)
+
+    def test_build_qubit_map_tuple_still_works(self):
+        """_build_qubit_map still resolves tuple synthetic arrays correctly."""
+        pytest.importorskip("qiskit")
+        from qamomile.circuit.ir.types.primitives import QubitType
+        from qamomile.circuit.ir.value import ArrayValue, Value
+        from qamomile.circuit.transpiler.compiled_segments import CompiledQuantumSegment
+        from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
+        from qamomile.circuit.transpiler.segments import QuantumSegment
+        from qamomile.qiskit.transpiler import QiskitEmitPass
+
+        q0 = Value(type=QubitType(), name="q0")
+        q1 = Value(type=QubitType(), name="q1")
+        arr = ArrayValue(
+            type=QubitType(),
+            name="expval_qubits",
+            shape=(),
+            params={"qubit_values": [q0, q1]},
+        )
+
+        compiled_quantum = [
+            CompiledQuantumSegment(
+                segment=QuantumSegment(operations=[]),
+                circuit=object(),
+                qubit_map={q0.uuid: 3, q1.uuid: 1},
+                parameter_metadata=ParameterMetadata(),
+            )
+        ]
+
+        result = QiskitEmitPass(bindings={})._build_qubit_map(arr, 0, compiled_quantum)
+        assert result == {0: 3, 1: 1}
+
+
 class TestHamiltonianRemapQubits:
     """Test Hamiltonian.remap_qubits method."""
 

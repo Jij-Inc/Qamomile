@@ -156,6 +156,17 @@ class InlinePass(Pass[Block, Block]):
                 substituted = self._substitute_values(op, value_map)
                 result.append(substituted)
 
+                # Promote canonicalized results into value_map so that
+                # subsequent operations (especially CallBlockOperations)
+                # see the substituted result rather than a stale clone.
+                for old_r, new_r in zip(op.results, substituted.results):
+                    if (
+                        isinstance(old_r, ValueBase)
+                        and isinstance(new_r, ValueBase)
+                        and new_r is not old_r
+                    ):
+                        value_map[old_r.uuid] = new_r
+
         return result
 
     def _inline_call(
@@ -219,13 +230,24 @@ class InlinePass(Pass[Block, Block]):
         else:
             raw_return_values = [remapper.clone_value(v) for v in block.return_values]
 
-        return_values = [
-            substitutor.substitute_value(v) for v in raw_return_values
-        ]
+        return_values = [substitutor.substitute_value(v) for v in raw_return_values]
 
         # Map block's return values to call's result values
         for block_return, call_result in zip(return_values, call_op.results):
             value_map[call_result.uuid] = block_return
+
+            # Also map nested ArrayValue.shape dim UUIDs pairwise so that
+            # caller-generated ops (e.g. measure(q)) that reference
+            # call_result.shape[i] get resolved to the inlined shape dims.
+            if (
+                isinstance(call_result, ArrayValue)
+                and isinstance(block_return, ArrayValue)
+                and call_result.shape
+                and block_return.shape
+            ):
+                for call_dim, return_dim in zip(call_result.shape, block_return.shape):
+                    if call_dim.uuid not in value_map:
+                        value_map[call_dim.uuid] = return_dim
 
         return inlined
 

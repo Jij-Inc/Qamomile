@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
-from qamomile.circuit.ir.value import ArrayValue
+from qamomile.circuit.ir.value import ArrayValue, Value
 
 
 class TestXMixerShapePropagation:
@@ -81,6 +81,221 @@ class TestQAOAPatternShapePropagation:
         result_val = call_op.results[0]
         assert isinstance(result_val, ArrayValue)
         assert len(result_val.shape) == 1
+
+
+class TestCallReturnShapeNormalization:
+    """Test that BlockValue.call() normalizes shape dims for non-input array returns.
+
+    When a subkernel creates an array internally (not an input-alias return),
+    its shape dims may reference callee input Values.  BlockValue.call() must
+    substitute those dims with the corresponding caller args so that
+    downstream caller operations (e.g. measure) never carry stale
+    callee-scoped metadata.
+    """
+
+    def test_non_input_return_shape_substituted_with_caller_arg(self):
+        """Shape dim referencing callee scalar input is replaced by caller arg."""
+        from qamomile.circuit.ir.block_value import BlockValue
+        from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+
+        n_callee = Value(type=UIntType(), name="n")
+        q_array = ArrayValue(type=QubitType(), name="q", shape=(n_callee,))
+
+        block = BlockValue(
+            name="make_array",
+            label_args=["n"],
+            input_values=[n_callee],
+            return_values=[q_array],
+            operations=[],
+        )
+
+        n_caller = Value(type=UIntType(), name="size", params={"const": 5})
+        call_op = block.call(n=n_caller)
+
+        result = call_op.results[0]
+        assert isinstance(result, ArrayValue)
+        assert len(result.shape) == 1
+        assert result.shape[0].uuid == n_caller.uuid
+        assert result.shape[0].params.get("const") == 5
+
+    def test_non_input_return_shape_with_array_input_dims(self):
+        """Shape dim referencing callee array-input shape dim is replaced."""
+        from qamomile.circuit.ir.block_value import BlockValue
+        from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+
+        callee_dim = Value(type=UIntType(), name="q_dim0")
+        q_callee = ArrayValue(type=QubitType(), name="q", shape=(callee_dim,))
+        # Return a new array whose shape references the input array's dim
+        r_array = ArrayValue(type=QubitType(), name="r", shape=(callee_dim,))
+
+        block = BlockValue(
+            name="clone_array",
+            label_args=["q"],
+            input_values=[q_callee],
+            return_values=[r_array],
+            operations=[],
+        )
+
+        caller_dim = Value(type=UIntType(), name="caller_dim", params={"const": 3})
+        q_caller = ArrayValue(type=QubitType(), name="q_caller", shape=(caller_dim,))
+        call_op = block.call(q=q_caller)
+
+        result = call_op.results[0]
+        assert isinstance(result, ArrayValue)
+        assert result.shape[0].uuid == caller_dim.uuid
+
+    def test_input_alias_return_not_affected(self):
+        """Input-alias returns still use next_version (no shape substitution)."""
+        from qamomile.circuit.ir.block_value import BlockValue
+        from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+
+        callee_dim = Value(type=UIntType(), name="q_dim0")
+        q_callee = ArrayValue(type=QubitType(), name="q", shape=(callee_dim,))
+
+        block = BlockValue(
+            name="identity",
+            label_args=["q"],
+            input_values=[q_callee],
+            return_values=[q_callee],  # input-alias: returns same value
+            operations=[],
+        )
+
+        caller_dim = Value(type=UIntType(), name="caller_dim", params={"const": 4})
+        q_caller = ArrayValue(type=QubitType(), name="q_caller", shape=(caller_dim,))
+        call_op = block.call(q=q_caller)
+
+        result = call_op.results[0]
+        assert isinstance(result, ArrayValue)
+        # Input-alias uses next_version of caller arg
+        assert result.logical_id == q_caller.logical_id
+
+
+class TestDerivedSizeShapePropagation:
+    """Test that derived-size (e.g. m = n + 1) propagates through to allocation."""
+
+    @pytest.fixture
+    def qiskit_transpiler(self):
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        return QiskitTranspiler()
+
+    def test_no_loop_derived_size_transpiles(self, qiskit_transpiler):
+        """single_plain: m = n + 1; q = qubit_array(m); measure(q) succeeds."""
+
+        @qmc.qkernel
+        def single_plain(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            m = n + 1
+            q = qmc.qubit_array(m, name="q")
+            return qmc.measure(q)
+
+        exe = qiskit_transpiler.transpile(single_plain, bindings={"n": 2})
+        job = exe.sample(qiskit_transpiler.executor(), shots=10)
+        result = job.result()
+        assert result is not None
+        for bitstring, _ in result.results:
+            assert len(bitstring) == 3
+
+    def test_subkernel_derived_size_transpiles(self, qiskit_transpiler):
+        """Subkernel returning qubit_array(n+1), caller measure() succeeds."""
+
+        @qmc.qkernel
+        def make_plus_one(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+            m = n + qmc.uint(1)
+            q = qmc.qubit_array(m, name="q")
+            return q
+
+        @qmc.qkernel
+        def outer(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = make_plus_one(n)
+            return qmc.measure(q)
+
+        exe = qiskit_transpiler.transpile(outer, bindings={"n": 2})
+        job = exe.sample(qiskit_transpiler.executor(), shots=10)
+        result = job.result()
+        assert result is not None
+        for bitstring, _ in result.results:
+            assert len(bitstring) == 3
+
+
+class TestInlineRegularResultCanonicalization:
+    """Test that inline promotes canonicalized regular-op results into value_map.
+
+    When a regular op (e.g. QInitOperation) produces an ArrayValue and that
+    value is subsequently passed through an input-alias-return subkernel,
+    the inline pass must ensure the canonicalized (substituted) result is
+    used — not the stale clone.
+    """
+
+    @pytest.fixture
+    def qiskit_transpiler(self):
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        return QiskitTranspiler()
+
+    def test_qinit_through_identity_subkernel_measure(self, qiskit_transpiler):
+        """QInit -> inner(q) -> return q -> caller measure(q) transpiles."""
+
+        @qmc.qkernel
+        def inner(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            return q
+
+        @qmc.qkernel
+        def mid(num_qubits: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+            q = qmc.qubit_array(num_qubits, name="q")
+            q = inner(q)
+            return q
+
+        @qmc.qkernel
+        def top(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = mid(n)
+            return qmc.measure(q)
+
+        exe = qiskit_transpiler.transpile(top, bindings={"n": 4})
+        job = exe.sample(qiskit_transpiler.executor(), shots=10)
+        result = job.result()
+        assert result is not None
+        for bitstring, _ in result.results:
+            assert len(bitstring) == 4
+
+    def test_inline_preserves_measure_shape_caller_local(self, qiskit_transpiler):
+        """After inline, MeasureVectorOperation.results[0].shape stays caller-local."""
+        from qamomile.circuit.ir.operation.gate import MeasureVectorOperation
+        from qamomile.circuit.transpiler.passes.inline import InlinePass
+
+        @qmc.qkernel
+        def inner(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            return q
+
+        @qmc.qkernel
+        def mid(num_qubits: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+            q = qmc.qubit_array(num_qubits, name="q")
+            q = inner(q)
+            return q
+
+        @qmc.qkernel
+        def top(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = mid(n)
+            return qmc.measure(q)
+
+        block = qiskit_transpiler.to_block(top, bindings={"n": 4})
+        inlined = InlinePass().run(block)
+
+        # Find MeasureVectorOperation in inlined block
+        measure_ops = [
+            op for op in inlined.operations if isinstance(op, MeasureVectorOperation)
+        ]
+        assert len(measure_ops) == 1
+        measure_result = measure_ops[0].results[0]
+        assert isinstance(measure_result, ArrayValue)
+        assert len(measure_result.shape) == 1
+        # Shape dim must NOT be the callee-local 'num_qubits' — it must
+        # be the caller-local value (either 'n' or a const=4 derivative).
+        dim = measure_result.shape[0]
+        assert dim.name != "num_qubits", (
+            f"MeasureVectorOperation shape regressed to callee symbol: {dim.name}"
+        )
 
 
 class TestShapePropagationWithTranspiler:

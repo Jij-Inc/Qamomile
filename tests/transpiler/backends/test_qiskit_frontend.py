@@ -6283,6 +6283,60 @@ class TestExpvalQiskitPipeline:
         assert len(result.results) > 0
         assert all(len(bits) == 2 for bits, _count in result.results)
 
+    def test_expval_tuple_permutation_no_double_remap(self):
+        """Tuple permutation (q1, q0) must remap once at compile-time only.
+
+        Uses an asymmetric Hamiltonian Z(0) + 2*Z(1) with reversed
+        tuple order to verify that the backend receives the correctly
+        remapped observable, not a double-remapped one.
+        """
+
+        @qmc.qkernel
+        def circuit(H: qmc.Observable) -> qmc.Float:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            q0 = qmc.x(q0)  # |1> on physical q0
+            # Tuple order reversed: (q1, q0) → Pauli 0 maps to q1, Pauli 1 maps to q0
+            return qmc.expval((q1, q0), H)
+
+        # H = Z(0) + 2*Z(1)
+        # After remap: Z(phys_q1) + 2*Z(phys_q0)
+        # q0 is |1> → Z = -1, q1 is |0> → Z = +1
+        # Expected: 1*Z(q1) + 2*Z(q0) = 1*(+1) + 2*(-1) = -1.0
+        H_label = qm_o.Z(0) + 2 * qm_o.Z(1)
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit, bindings={"H": H_label})
+        result = exe.run(transpiler.executor()).result()
+        assert np.isclose(result, -1.0, atol=0.1)
+
+    def test_expval_vector_remap_nontrivial(self):
+        """Vector[Qubit] expval with non-trivial physical mapping.
+
+        Verifies that Vector[Qubit] prefix-key scan correctly resolves
+        the physical qubit mapping at compile time.
+        """
+
+        @qmc.qkernel
+        def circuit(n: qmc.UInt, H: qmc.Observable) -> qmc.Float:
+            q = qmc.qubit_array(n, "q")
+            q[0] = qmc.x(q[0])  # |1> on q[0]
+            return qmc.expval(q, H)
+
+        # H = Z(0) + 2*Z(1)
+        # q[0] is |1> → Z = -1, q[1] is |0> → Z = +1
+        # Expected: 1*(-1) + 2*(+1) = +1.0
+        H_label = qm_o.Z(0) + 2 * qm_o.Z(1)
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit, bindings={"H": H_label, "n": 2})
+
+        # Verify vector mapping was built (non-empty)
+        assert exe.compiled_expval[0].qubit_map, (
+            "Vector[Qubit] should produce a non-empty qubit_map"
+        )
+
+        result = exe.run(transpiler.executor()).result()
+        assert np.isclose(result, 1.0, atol=0.1)
+
 
 # ===========================================================================
 # 11. Variational Classifier Pattern Tests

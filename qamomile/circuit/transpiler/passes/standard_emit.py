@@ -1133,23 +1133,9 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         if op.operands and hasattr(op.operands[0], "operations"):
             block_value = op.operands[0]
 
-            local_bindings = bindings.copy()
-            if hasattr(block_value, "input_values"):
-                param_operands = op.parameters
-                param_inputs = [
-                    iv
-                    for iv in block_value.input_values
-                    if hasattr(iv, "type") and iv.type.is_classical()
-                ]
-
-                for param_input, param_operand in zip(param_inputs, param_operands):
-                    param_name = param_input.name
-                    if param_operand.is_constant():
-                        local_bindings[param_name] = param_operand.get_const()
-                    elif param_operand.is_parameter():
-                        outer_name = param_operand.parameter_name()
-                        if outer_name and outer_name in bindings:
-                            local_bindings[param_name] = bindings[outer_name]
+            local_bindings = self._bind_callee_classical_params(
+                op.parameters, block_value, bindings
+            )
 
             self._emit_controlled_powers(
                 circuit, block_value, counting_indices, target_indices, local_bindings
@@ -1252,6 +1238,20 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                             target_indices,
                             loop_bindings,
                         )
+                else:
+                    unresolved = []
+                    if start is None:
+                        unresolved.append("start")
+                    if stop is None:
+                        unresolved.append("stop")
+                    if step is None:
+                        unresolved.append("step")
+                    raise EmitError(
+                        f"Cannot resolve loop bounds ({', '.join(unresolved)}) "
+                        f"for ForOperation in controlled path. "
+                        f"All loop bounds must be statically resolvable.",
+                        operation="ControlledOperations",
+                    )
 
     def _emit_controlled_gate(
         self,
@@ -1379,6 +1379,50 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             operation="ControlledUOperation",
         )
 
+    def _bind_callee_classical_params(
+        self,
+        param_operands: list,
+        block_value: Any,
+        bindings: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bind caller classical operands to callee input names.
+
+        Uses ``resolve_classical_value`` (uuid-first) for correct lookup,
+        ensuring that synthetic temporaries produced by ``_evaluate_binop``
+        (stored by UUID only) reach callee inputs.
+
+        Raises:
+            EmitError: If any required callee parameter cannot be resolved.
+        """
+        local_bindings = bindings.copy()
+        if not hasattr(block_value, "input_values"):
+            return local_bindings
+
+        param_inputs = [
+            iv
+            for iv in block_value.input_values
+            if hasattr(iv, "type") and iv.type.is_classical()
+        ]
+        for i, operand in enumerate(param_operands):
+            if i >= len(param_inputs):
+                break
+            param_name = param_inputs[i].name
+            resolved = shared_resolve_classical_value(
+                operand,
+                BindingLookup(bindings),
+                allow_parameter_name=True,
+            )
+            if resolved is not None:
+                local_bindings[param_name] = resolved
+            else:
+                raise EmitError(
+                    f"Cannot resolve classical parameter '{operand.name}' "
+                    f"(uuid={operand.uuid}) for callee input '{param_name}' "
+                    f"in controlled subkernel.",
+                    operation="ControlledUOperation",
+                )
+        return local_bindings
+
     def _emit_controlled_u_with_index_spec(
         self,
         circuit: T,
@@ -1486,32 +1530,9 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         param_operands = [
             v for v in op.operands[2:] if hasattr(v, "type") and v.type.is_classical()
         ]
-        local_bindings = bindings.copy()
-
-        if hasattr(block_value, "input_values"):
-            param_inputs = [
-                iv
-                for iv in block_value.input_values
-                if hasattr(iv, "type") and iv.type.is_classical()
-            ]
-            for i, operand in enumerate(param_operands):
-                if i >= len(param_inputs):
-                    break
-                param_name = param_inputs[i].name
-                if operand.is_constant():
-                    local_bindings[param_name] = operand.get_const()
-                elif operand.is_parameter():
-                    outer_name = operand.parameter_name()
-                    if outer_name and outer_name in bindings:
-                        local_bindings[param_name] = bindings[outer_name]
-                elif operand.name in bindings:
-                    local_bindings[param_name] = bindings[operand.name]
-                elif (
-                    hasattr(operand, "params")
-                    and operand.params
-                    and "const" in operand.params
-                ):
-                    local_bindings[param_name] = operand.params["const"]
+        local_bindings = self._bind_callee_classical_params(
+            param_operands, block_value, bindings
+        )
 
         # 8. Build and emit gate
         num_targets = len(target_phys)
@@ -1596,34 +1617,9 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         if not control_indices or not target_indices:
             return
 
-        local_bindings = bindings.copy()
-
-        if hasattr(block_value, "input_values"):
-            param_inputs = [
-                iv
-                for iv in block_value.input_values
-                if hasattr(iv, "type") and iv.type.is_classical()
-            ]
-            for i, operand in enumerate(param_operands):
-                if i >= len(param_inputs):
-                    break
-
-                param_name = param_inputs[i].name
-
-                if operand.is_constant():
-                    local_bindings[param_name] = operand.get_const()
-                elif operand.is_parameter():
-                    outer_name = operand.parameter_name()
-                    if outer_name and outer_name in bindings:
-                        local_bindings[param_name] = bindings[outer_name]
-                elif operand.name in bindings:
-                    local_bindings[param_name] = bindings[operand.name]
-                elif (
-                    hasattr(operand, "params")
-                    and operand.params
-                    and "const" in operand.params
-                ):
-                    local_bindings[param_name] = operand.params["const"]
+        local_bindings = self._bind_callee_classical_params(
+            param_operands, block_value, bindings
+        )
 
         num_targets = len(target_indices)
         unitary_gate = self._blockvalue_to_gate(

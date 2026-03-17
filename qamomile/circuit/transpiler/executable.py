@@ -406,6 +406,11 @@ class ExecutableProgram(Generic[T]):
         This is used when the program has expval segments and returns
         a Float expectation value.
 
+        The Hamiltonian stored in each ``CompiledExpvalSegment`` is
+        already remapped to physical qubit indices at compile time by
+        ``EmitPass._compile_expval()``.  This method passes it through
+        to the executor **without** additional remapping.
+
         Args:
             executor: Backend-specific quantum executor with estimate() support.
             bindings: Parameter bindings.
@@ -446,13 +451,9 @@ class ExecutableProgram(Generic[T]):
             elif seg_type == "expval":
                 expval_seg = self.compiled_expval[index]
 
-                # Apply qubit mapping to remap Pauli indices to physical qubits
-                hamiltonian = expval_seg.hamiltonian
-                if expval_seg.qubit_map:
-                    hamiltonian = hamiltonian.remap_qubits(expval_seg.qubit_map)
-
-                # Use executor's estimate method
-                exp_val = executor.estimate(circuit, hamiltonian)
+                # Hamiltonian is already remapped at compile time.
+                # Pass through to executor as-is.
+                exp_val = executor.estimate(circuit, expval_seg.hamiltonian)
                 context.set(expval_seg.result_ref, exp_val)
                 result_value = exp_val
 

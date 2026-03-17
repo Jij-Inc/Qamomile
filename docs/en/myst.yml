@@ -32,6 +32,7 @@ project:
         - file: api/circuit/index
           children:
             - file: api/circuit/algorithm
+            - file: api/circuit/errors
             - file: api/circuit/estimator
             - file: api/circuit/frontend
             - file: api/circuit/ir

@@ -293,3 +293,163 @@ class TestConstantFoldPowerStrictValidation:
 
     def test_whole_float_accepted(self):
         assert ConstantFoldingPass._strict_int_cast(4.0) == 4
+
+
+# -- Classical binding through controlled subkernel --------------------------
+
+
+@qm.qkernel
+def _rz_gate(q: qm.Qubit, theta: float) -> qm.Qubit:
+    q = qm.rz(q, theta)
+    return q
+
+
+class TestControlledUClassicalBinding:
+    """Verify uuid-only temporaries from BinOp reach controlled subkernel."""
+
+    def test_binop_temp_reaches_controlled_callee(self):
+        """BinOp producing float_tmp should be resolved via uuid in controlled path."""
+
+        @qm.qkernel
+        def kernel(a: float, b: float) -> qm.Bit:
+            theta = a + b
+            ctrl = qm.qubit("ctrl")
+            tgt = qm.qubit("tgt")
+            crz = qm.controlled(_rz_gate)
+            ctrl, tgt = crz(ctrl, tgt, theta=theta)  # type: ignore
+            return qm.measure(ctrl)
+
+        from qamomile.qiskit import QiskitTranspiler
+
+        transpiler = QiskitTranspiler()
+        result = transpiler.transpile(kernel, bindings={"a": 0.3, "b": 0.2})
+        assert result is not None
+
+    def test_constant_classical_param_still_works(self):
+        """Constant classical param should still be resolved correctly."""
+
+        @qm.qkernel
+        def kernel() -> qm.Bit:
+            ctrl = qm.qubit("ctrl")
+            tgt = qm.qubit("tgt")
+            crz = qm.controlled(_rz_gate)
+            ctrl, tgt = crz(ctrl, tgt, theta=0.5)  # type: ignore
+            return qm.measure(ctrl)
+
+        from qamomile.qiskit import QiskitTranspiler
+
+        transpiler = QiskitTranspiler()
+        result = transpiler.transpile(kernel)
+        assert result is not None
+
+    def test_parameter_name_classical_param_works(self):
+        """Parameter-name-keyed classical param should be resolved."""
+
+        @qm.qkernel
+        def kernel(theta: float) -> qm.Bit:
+            ctrl = qm.qubit("ctrl")
+            tgt = qm.qubit("tgt")
+            crz = qm.controlled(_rz_gate)
+            ctrl, tgt = crz(ctrl, tgt, theta=theta)  # type: ignore
+            return qm.measure(ctrl)
+
+        from qamomile.qiskit import QiskitTranspiler
+
+        transpiler = QiskitTranspiler()
+        result = transpiler.transpile(kernel, bindings={"theta": 0.5})
+        assert result is not None
+
+
+# -- Controlled fallback: fail-closed on unresolved ForOperation loop --------
+
+
+class TestControlledFallbackFailClosed:
+    """Verify that unresolved ForOperation loop bounds in controlled path
+    raise EmitError instead of being silently skipped."""
+
+    def test_unresolved_for_loop_in_controlled_subkernel_raises(self):
+        """ForOperation with unresolvable stop bound must raise EmitError."""
+        from qamomile.circuit.ir.operation.control_flow import ForOperation
+        from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
+        from qamomile.circuit.ir.value import Value
+        from qamomile.circuit.ir.types.primitives import UIntType, QubitType
+        from qamomile.circuit.transpiler.errors import EmitError
+        from qamomile.qiskit.emitter import QiskitGateEmitter
+        from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
+
+        emitter = QiskitGateEmitter()
+        emit_pass = StandardEmitPass(emitter, bindings={})
+
+        # Create a qubit value for the gate body
+        q = Value(type=QubitType(), name="q")
+        q_out = q.next_version()
+        gate_op = GateOperation(
+            operands=[q],
+            results=[q_out],
+            gate_type=GateOperationType.H,
+        )
+
+        # Create ForOperation with an unresolvable stop bound
+        # (Value with no const, no uuid in bindings, no parameter_name)
+        start = Value(type=UIntType(), name="start", params={"const": 0})
+        stop = Value(
+            type=UIntType(), name="unresolvable_stop"
+        )  # no const, not in bindings
+        step = Value(type=UIntType(), name="step", params={"const": 1})
+
+        for_op = ForOperation(
+            operands=[start, stop, step],
+            results=[],
+            loop_var="i",
+            operations=[gate_op],
+        )
+
+        # Create a minimal circuit
+        from qiskit import QuantumCircuit
+
+        circuit = QuantumCircuit(2)
+
+        with pytest.raises(EmitError, match="Cannot resolve loop bounds"):
+            emit_pass._emit_controlled_operations(
+                circuit, [for_op], control_idx=0, target_indices=[1], bindings={}
+            )
+
+    def test_resolved_for_loop_in_controlled_subkernel_succeeds(self):
+        """ForOperation with fully resolvable bounds should emit normally."""
+        from qamomile.circuit.ir.operation.control_flow import ForOperation
+        from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
+        from qamomile.circuit.ir.value import Value
+        from qamomile.circuit.ir.types.primitives import UIntType, QubitType
+        from qamomile.qiskit.emitter import QiskitGateEmitter
+        from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
+
+        emitter = QiskitGateEmitter()
+        emit_pass = StandardEmitPass(emitter, bindings={})
+
+        q = Value(type=QubitType(), name="q")
+        q_out = q.next_version()
+        gate_op = GateOperation(
+            operands=[q],
+            results=[q_out],
+            gate_type=GateOperationType.H,
+        )
+
+        start = Value(type=UIntType(), name="start", params={"const": 0})
+        stop = Value(type=UIntType(), name="stop", params={"const": 3})
+        step = Value(type=UIntType(), name="step", params={"const": 1})
+
+        for_op = ForOperation(
+            operands=[start, stop, step],
+            results=[],
+            loop_var="i",
+            operations=[gate_op],
+        )
+
+        from qiskit import QuantumCircuit
+
+        circuit = QuantumCircuit(2)
+
+        # Should not raise
+        emit_pass._emit_controlled_operations(
+            circuit, [for_op], control_idx=0, target_indices=[1], bindings={}
+        )

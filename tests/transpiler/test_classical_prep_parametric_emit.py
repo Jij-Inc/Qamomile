@@ -243,7 +243,13 @@ class TestFailClosedUnresolvedTheta:
             std._resolve_angle(gate, std.bindings)
 
     def test_unresolved_prep_output_does_not_reuse_same_name_temporary(self):
-        """Fail closed even when an earlier temporary reused the same name."""
+        """Fail closed even when an earlier temporary reused the same name.
+
+        Synthetic temporaries (float_tmp, uint_tmp, bit_tmp) are stored by
+        UUID only — never by name — to avoid same-name collision.  The
+        resolved earlier temp must be reachable via UUID, and the later
+        unresolved temp must still trigger EmitError.
+        """
         a = Value(type=FloatType(), name="a", params={"parameter": "a"})
         one = Value(type=FloatType(), name="one", params={"const": 1.0})
         resolved_out = Value(type=FloatType(), name="float_tmp")
@@ -266,7 +272,9 @@ class TestFailClosedUnresolvedTheta:
         std = StandardEmitPass(DummyEmitter(), bindings={}, parameters=["a"])
         std._pre_evaluate_classical(seg)
 
-        assert resolved_out.name in std.bindings
+        # UUID-only contract: resolved temp is stored by UUID, not by name
+        assert resolved_out.uuid in std.bindings
+        assert resolved_out.name not in std.bindings
         gate = _make_gate_with_theta(unresolved_out)
         with pytest.raises(EmitError, match="Cannot resolve gate angle"):
             std._resolve_angle(gate, std.bindings)

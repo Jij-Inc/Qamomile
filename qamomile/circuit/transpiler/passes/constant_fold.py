@@ -9,7 +9,7 @@ from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.gate import ControlledUOperation, GateOperation
-from qamomile.circuit.ir.value import Value, ValueBase
+from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
 
 from . import Pass
 from .control_flow_visitor import OperationTransformer
@@ -190,22 +190,32 @@ class ConstantFoldingPass(Pass[Block, Block]):
 
         result_op = dataclasses.replace(op, operands=new_operands) if changed else op
 
-        # Substitute results for GateOperation (not for control-flow ops
-        # whose results define loop variables).
-        if isinstance(result_op, GateOperation):
-            new_results: list[Any] = []
-            results_changed = False
-            for result in result_op.results:
-                if isinstance(result, Value) and result.element_indices:
-                    new_r = substitute_value_recursive(result, value_map)
-                    new_results.append(new_r)
-                    if new_r is not result:
-                        results_changed = True
-                else:
-                    new_results.append(result)
-            if results_changed:
-                result_op = dataclasses.replace(result_op, results=new_results)
-                changed = True
+        # Substitute results: propagate folded values into element_indices
+        # (GateOperation) and ArrayValue.shape (all ops including QInitOperation).
+        # Control-flow ops whose results define loop variables are excluded
+        # from element_indices substitution but still need shape propagation.
+        new_results: list[Any] = []
+        results_changed = False
+        for result in result_op.results:
+            if isinstance(result, ArrayValue) and result.shape:
+                new_r = substitute_value_recursive(result, value_map)
+                new_results.append(new_r)
+                if new_r is not result:
+                    results_changed = True
+            elif (
+                isinstance(result_op, GateOperation)
+                and isinstance(result, Value)
+                and result.element_indices
+            ):
+                new_r = substitute_value_recursive(result, value_map)
+                new_results.append(new_r)
+                if new_r is not result:
+                    results_changed = True
+            else:
+                new_results.append(result)
+        if results_changed:
+            result_op = dataclasses.replace(result_op, results=new_results)
+            changed = True
 
         # Fold ControlledUOperation-specific dataclass fields.
         if isinstance(result_op, ControlledUOperation):

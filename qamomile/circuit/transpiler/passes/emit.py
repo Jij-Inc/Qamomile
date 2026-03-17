@@ -328,19 +328,40 @@ class EmitPass(Pass[SimplifiedProgram, ExecutableProgram[T]], Generic[T]):
     ) -> dict[int, int]:
         """Build mapping from Pauli index to physical qubit index.
 
-        For expval((q0, q1), H), the Pauli index i maps to qubits[i].
-        This method resolves the mapping through the compiled quantum
-        segment's qubit_map.
+        Resolves the logical-to-physical qubit mapping for the expval target
+        through the compiled quantum segment's ``qubit_map``.  Three target
+        shapes are supported:
+
+        * **Tuple synthetic array** – ``ArrayValue`` with
+          ``params["qubit_values"]``.  Each element's UUID is looked up
+          directly in ``uuid_to_physical``.
+        * **Vector[Qubit] plain array** – ``ArrayValue`` *without*
+          ``params["qubit_values"]``.  The physical mapping is recovered by
+          scanning ``uuid_to_physical`` for keys matching the prefix
+          ``"{array_uuid}_"``, then parsing the integer suffix as the logical
+          index.
+        * **Scalar Qubit** – A plain ``Value`` whose UUID is looked up
+          directly.
 
         Args:
-            qubits_value: The Value representing the qubit tuple/array
-            quantum_segment_index: Index of the quantum segment
-            compiled_quantum: List of compiled quantum segments
+            qubits_value: The Value representing the qubit tuple/array/scalar.
+            quantum_segment_index: Index of the quantum segment providing the
+                state.
+            compiled_quantum: List of already compiled quantum segments.
 
         Returns:
-            Dict mapping Pauli index -> physical qubit index
+            Dict mapping Pauli index -> physical qubit index.
+
+        Raises:
+            EmitError: If a vector prefix-key scan finds keys that do not
+                exactly match the declared shape, or if a positive-size
+                vector has no prefix keys at all.
         """
         from qamomile.circuit.ir.value import ArrayValue
+        from qamomile.circuit.transpiler.value_resolution import (
+            BindingLookup,
+            resolve_int_value,
+        )
 
         qubit_map: dict[int, int] = {}
 
@@ -353,16 +374,55 @@ class EmitPass(Pass[SimplifiedProgram, ExecutableProgram[T]], Generic[T]):
         compiled_seg = compiled_quantum[quantum_segment_index]
         uuid_to_physical = compiled_seg.qubit_map
 
-        # Check if qubits_value is an ArrayValue with qubit_values
-        # (created when tuple of qubits is passed to expval)
         if isinstance(qubits_value, ArrayValue):
             qubit_values = qubits_value.params.get("qubit_values", [])
-            for i, qv in enumerate(qubit_values):
-                # qv is a Value object; look up its UUID in the qubit_map
-                if hasattr(qv, "uuid") and qv.uuid in uuid_to_physical:
-                    qubit_map[i] = uuid_to_physical[qv.uuid]
+            if qubit_values:
+                # Tuple synthetic array: each element's UUID is in qubit_map
+                for i, qv in enumerate(qubit_values):
+                    if hasattr(qv, "uuid") and qv.uuid in uuid_to_physical:
+                        qubit_map[i] = uuid_to_physical[qv.uuid]
+            else:
+                # Vector[Qubit] plain array: scan for prefix keys
+                prefix = f"{qubits_value.uuid}_"
+                for key, physical in uuid_to_physical.items():
+                    if key.startswith(prefix):
+                        suffix = key[len(prefix) :]
+                        try:
+                            logical_idx = int(suffix)
+                        except ValueError:
+                            continue
+                        qubit_map[logical_idx] = physical
+
+                # Resolve declared size from shape for exact validation
+                expected_size: int | None = None
+                if qubits_value.shape:
+                    lookup = BindingLookup(self.bindings)
+                    expected_size = resolve_int_value(qubits_value.shape[0], lookup)
+
+                if expected_size is not None and expected_size > 0:
+                    # Fail-closed: found indices must exactly match
+                    # {0, 1, ..., expected_size - 1}.
+                    expected_indices = set(range(expected_size))
+                    if qubit_map.keys() != expected_indices:
+                        raise EmitError(
+                            f"Incomplete vector qubit mapping: "
+                            f"declared size {expected_size}, "
+                            f"found prefix keys for {sorted(qubit_map.keys())} "
+                            f"but expected indices {sorted(expected_indices)}."
+                        )
+                elif qubit_map:
+                    # Fallback when declared size is unavailable:
+                    # reject internal gaps up to observed max.
+                    expected = set(range(max(qubit_map.keys()) + 1))
+                    missing = expected - qubit_map.keys()
+                    if missing:
+                        raise EmitError(
+                            f"Incomplete vector qubit mapping: "
+                            f"found prefix keys for {sorted(qubit_map.keys())} "
+                            f"but logical indices {sorted(missing)} are missing."
+                        )
         else:
-            # Single qubit or Vector case - map index 0 to the qubit
+            # Scalar qubit
             if hasattr(qubits_value, "uuid") and qubits_value.uuid in uuid_to_physical:
                 qubit_map[0] = uuid_to_physical[qubits_value.uuid]
 

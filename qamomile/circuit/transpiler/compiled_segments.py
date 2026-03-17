@@ -58,13 +58,21 @@ class CompiledExpvalSegment:
     This segment computes <psi|H|psi> where psi is the quantum state
     from a quantum circuit and H is a qamomile.observable.Hamiltonian.
 
+    The ``hamiltonian`` is **already remapped** to physical qubit indices
+    at compile time by ``EmitPass._compile_expval()``.  Runtime execution
+    must pass it through to the backend executor as-is, without additional
+    remapping.
+
     Attributes:
-        segment: The original ExpvalSegment
-        hamiltonian: The qamomile.observable.Hamiltonian to measure
-        quantum_segment_index: Index of the quantum segment providing the state
-        result_ref: UUID where to store the expectation value result
-        qubit_map: Mapping from Pauli index to physical qubit index.
-            e.g., {0: 5, 1: 3} means Z(0) acts on qubit 5, Z(1) on qubit 3
+        segment: The original ExpvalSegment.
+        hamiltonian: The qamomile.observable.Hamiltonian already remapped
+            to physical qubit indices.  This is the final observable that
+            backend executors receive directly.
+        quantum_segment_index: Index of the quantum segment providing the
+            state.
+        result_ref: UUID where to store the expectation value result.
+        qubit_map: Mapping from Pauli index to physical qubit index
+            (debug / introspection metadata only — not used at runtime).
     """
 
     segment: ExpvalSegment
