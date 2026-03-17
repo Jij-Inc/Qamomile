@@ -364,8 +364,15 @@ class CudaqGateEmitter:
         return False
 
     def supports_if_else(self) -> bool:
-        """Return True: CUDA-Q supports ``c_if`` (if-then, no else)."""
-        return True
+        """Return False: emitter-level if/else protocol is not used.
+
+        CUDA-Q supports ``c_if`` (if-then, no else), but the conditional
+        logic is handled entirely by ``CudaqEmitPass._emit_if`` which
+        calls ``kernel.c_if()`` directly.  The generic
+        ``emit_if_start`` / ``emit_else_start`` / ``emit_if_end``
+        protocol is not implemented.
+        """
+        return False
 
     def supports_while_loop(self) -> bool:
         """Return False: CUDA-Q does not support native while-loop emission."""
@@ -380,16 +387,16 @@ class CudaqGateEmitter:
         raise NotImplementedError
 
     def emit_if_start(self, circuit: CudaqCircuit, clbit: int, value: int = 1) -> Any:
-        """Not supported: if/else raises ``EmitError`` in the transpiler."""
-        raise NotImplementedError
+        """Not used: ``CudaqEmitPass._emit_if`` handles c_if directly."""
+        raise NotImplementedError("Use CudaqEmitPass._emit_if instead")
 
     def emit_else_start(self, circuit: CudaqCircuit, context: Any) -> None:
-        """Not supported: if/else raises ``EmitError`` in the transpiler."""
-        raise NotImplementedError
+        """Not used: ``CudaqEmitPass._emit_if`` handles c_if directly."""
+        raise NotImplementedError("Use CudaqEmitPass._emit_if instead")
 
     def emit_if_end(self, circuit: CudaqCircuit, context: Any) -> None:
-        """Not supported: if/else raises ``EmitError`` in the transpiler."""
-        raise NotImplementedError
+        """Not used: ``CudaqEmitPass._emit_if`` handles c_if directly."""
+        raise NotImplementedError("Use CudaqEmitPass._emit_if instead")
 
     def emit_while_start(
         self, circuit: CudaqCircuit, clbit: int, value: int = 1

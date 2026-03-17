@@ -217,10 +217,11 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
         counts: dict[str, int] = {}
         for bitstring in result:
             count = result.count(bitstring)
-            assert len(bitstring) <= num_qubits, (
-                f"Bitstring '{bitstring}' has length {len(bitstring)} > "
-                f"num_qubits={num_qubits}"
-            )
+            if len(bitstring) > num_qubits:
+                raise ValueError(
+                    f"Bitstring '{bitstring}' has length {len(bitstring)} > "
+                    f"num_qubits={num_qubits}"
+                )
             padded = bitstring.zfill(num_qubits)
             counts[padded] = counts.get(padded, 0) + count
 
