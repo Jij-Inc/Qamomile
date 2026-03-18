@@ -7,7 +7,6 @@ from qiskit import QuantumCircuit
 
 from qamomile.qbraid.executor import QBraidExecutor
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -91,12 +90,14 @@ class TestConstructor:
         mock_dev, _, _ = _mock_device()
         mock_resolve.return_value = mock_dev
 
-        QBraidExecutor(device_id="dev123", api_key="mykey")
+        executor = QBraidExecutor(device_id="dev123", api_key="mykey")
         mock_resolve.assert_called_once_with("dev123", None, "mykey")
+        assert executor.device is mock_dev
 
     def test_default_params(self):
         device, _, _ = _mock_device()
         executor = QBraidExecutor(device=device)
+        assert executor.device is device
         assert executor.expval_shots == 4096
         assert executor.timeout is None
         assert executor.poll_interval == 5
@@ -111,6 +112,7 @@ class TestConstructor:
             poll_interval=10,
             run_kwargs={"name": "test"},
         )
+        assert executor.device is device
         assert executor.expval_shots == 2048
         assert executor.timeout == 120
         assert executor.poll_interval == 10
@@ -126,7 +128,7 @@ class TestConstructor:
         """run_kwargs with 'shots' among other keys is still rejected."""
         device, _, _ = _mock_device()
         with pytest.raises(ValueError, match="shots"):
-            QBraidExecutor(device=device, run_kwargs={"name": "job", "shots": 50})
+            QBraidExecutor(device=device, run_kwargs={"name": "test", "shots": 50})
 
 
 # ---------------------------------------------------------------------------
@@ -249,11 +251,12 @@ class TestExecute:
 
 class TestBindParameters:
     def test_bind_parameters(self):
+        from qiskit.circuit import Parameter
+
         from qamomile.circuit.transpiler.parameter_binding import (
             ParameterInfo,
             ParameterMetadata,
         )
-        from qiskit.circuit import Parameter
 
         device, _, _ = _mock_device()
         executor = QBraidExecutor(device=device)
