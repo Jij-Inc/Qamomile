@@ -19,7 +19,7 @@
 
 # %% [markdown]
 # ## What this notebook shows
-# This notebook is a qBraid-first tutorial built around a MaxCut workflow. The main goal is to show how to configure `QBraidExecutor`, transpile a qkernel with `QiskitTranspiler`, reuse the same remote executor throughout the optimization loop, and inspect the final samples returned by qBraid.
+# This notebook is a tutorial with `QBraidExecutor` built around a MaxCut workflow. The main goal is to show how to configure `QBraidExecutor`, transpile a qkernel with `QiskitTranspiler`, reuse the same remote executor throughout the optimization loop, and inspect the final samples returned by qBraid.
 
 # %% [markdown]
 # ## Installation
