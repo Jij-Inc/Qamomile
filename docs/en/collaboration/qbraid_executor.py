@@ -154,7 +154,7 @@ executable = transpiler.transpile(
 energy_history = []
 # Convert the spin model into the corresponding binary model to evaluate
 # the energy of the sampled bitstrings
-binary_model = spin_model_normalized.change_vartype(VarType.BINARY)
+binary_model = spin_model.change_vartype(VarType.BINARY)
 
 
 # Define the objective function for optimization
