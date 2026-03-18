@@ -56,6 +56,8 @@ rng = np.random.default_rng(seed)
 # qBraidは、対応するシミュレータや量子ハードウェアを統一的なインターフェースで扱える実行基盤です。Qamomileでは、`QBraidExecutor`がQiskit回路をqBraidのデバイスへ送信し、リモートジョブの完了を待ち、他のQamomile executorと同じ形式で結果を返します。
 #
 # このノートでは、最初にexecutorを作成し、それをパラメータ最適化と最後の評価の両方で使い回します。下のwarning filterはこのセットアップ用セルだけに作用するため、既知の`pyqir` runtime warningのみを抑制し、それ以外のwarningには影響しません。
+#
+# **注意:** 下のセルの `"YOUR_API_KEY"` をご自身のqBraid APIキーに置き換えてください。APIキーは [qBraidアカウントページ](https://account.qbraid.com/) から取得できます。
 
 # %%
 device_id = "qbraid:qbraid:sim:qir-sv"
