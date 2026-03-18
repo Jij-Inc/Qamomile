@@ -15,7 +15,7 @@
 # %% [markdown]
 # # qBraid Support - QBraidExecutor
 #
-# This page introduces [qBraid](https://www.qbraid.com/) support in Qamomile and shows how to run a Qamomile workflow through `QBraidExecutor`. Qamomile currently connects to qBraid through the Qiskit, so the usual flow is `qkernel` -> `QiskitTranspiler` -> `QBraidExecutor`.
+# This page introduces [qBraid](https://www.qbraid.com/) support in Qamomile and shows how to run a Qamomile workflow with `QBraidExecutor`. Qamomile currently connects to qBraid through its Qiskit integration, so the usual flow is `qkernel` -> `QiskitTranspiler` -> `QBraidExecutor`.
 
 # %% [markdown]
 # ## Installation
@@ -48,9 +48,9 @@ rng = np.random.default_rng(seed)
 
 # %% [markdown]
 # ## QBraid Executor
-# qBraid provides a unified interface for running quantum programs on supported simulators and hardware backends. In Qamomile, `QBraidExecutor` is the executor that submits Qiskit circuits to a qBraid device, waits for the remote job to finish, and returns the measurement results in the same style as other Qamomile executors.
+# qBraid provides a unified interface for running quantum programs on supported simulators and hardware backends. In Qamomile, `QBraidExecutor` submits Qiskit circuits to a qBraid device, waits for the remote job to finish, and returns the measurement results in the same format as other Qamomile executors.
 #
-# The example below shows the simplest setup: choose a qBraid `device_id`, provide your own API key, and keep using the transpiled Qamomile executable.
+# The example below shows a minimal setup: choose a qBraid `device_id`, provide your API key, and use the resulting executor with the transpiled Qamomile executable.
 
 # %%
 device_id = "qbraid:qbraid:sim:qir-sv"
@@ -134,7 +134,7 @@ executable = transpiler.transpile(
 
 # %% [markdown]
 # ### Optimization
-# The objective function evaluates one candidate parameter vector at a time. For each trial, it binds `gammas` and `betas`, samples the transpiled circuit through an executor, here we will use `QBraidExecutor`, converts the sampled bitstrings into binary energies, and averages those energies to estimate the objective value. `scipy.optimize.minimize(...)` then updates the parameters using only these sampled energy estimates, while `energy_history` records the convergence trend.
+# The objective function evaluates one candidate parameter vector at a time. For each trial, it binds `gammas` and `betas`, samples the transpiled circuit through `QBraidExecutor`, converts the sampled bitstrings into binary energies, and averages those energies to estimate the objective value. `scipy.optimize.minimize(...)` then updates the parameters using only these sampled energy estimates, while `energy_history` records the convergence trend.
 
 # %%
 # List to save optimization history
@@ -147,22 +147,22 @@ binary_model = spin_model_normalized.change_vartype(VarType.BINARY)
 # Define the objective function for optimization
 def objective_function(params, executable, executor, shots=2000):
     """
-    Objective function for VQE optimization.
+    Objective function for QAOA parameter optimization.
 
     Args:
         params: Concatenated [gammas, betas] parameters
         executable: Compiled QAOA circuit
-        converter: QAOAConverter for decoding results
+        executor: Executor used for circuit sampling
         shots: Number of measurement shots
 
     Returns:
-        Expected energy value
+        Estimated mean energy
     """
     p = len(params) // 2
     gammas = params[:p]
     betas = params[p:]
 
-    # Sample the circuit with the current parameters using the provided executor, which will be `QBraidExecutor` in this case
+    # Sample the circuit with the current parameters using the provided executor.
     job = executable.sample(
         executor,
         bindings={
@@ -346,7 +346,7 @@ def _(problem: jm.DecoratedProblem):
 problem
 
 # %%
-# Create OMMX format with the defined graph
+# Create the OMMX instance from the graph data.
 V = graph.number_of_nodes()
 E = graph.edges()
 data = {"V": V, "E": E}
