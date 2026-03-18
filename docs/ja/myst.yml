@@ -40,6 +40,7 @@ project:
             - file: api/circuit/stdlib
             - file: api/circuit/transpiler
             - file: api/circuit/visualization
+        - file: api/cudaq
         - file: api/observable
         - file: api/optimization/index
           children:
