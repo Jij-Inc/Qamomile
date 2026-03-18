@@ -6337,6 +6337,54 @@ class TestExpvalQiskitPipeline:
         result = exe.run(transpiler.executor()).result()
         assert np.isclose(result, 1.0, atol=0.1)
 
+    def test_expval_borrowed_scalar_element(self):
+        """Borrowed scalar element expval(q[1], H) must resolve correctly.
+
+        Uses q[1] (a borrowed array element) as the scalar expval target.
+        The compile-time qubit_map must be non-empty and the result must
+        reflect the X gate applied to q[1].
+        """
+
+        @qmc.qkernel
+        def circuit(H: qmc.Observable) -> qmc.Float:
+            q = qmc.qubit_array(2, "q")
+            q[1] = qmc.x(q[1])
+            return qmc.expval(q[1], H)
+
+        H = qm_o.Z(0)
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit, bindings={"H": H})
+
+        assert exe.compiled_expval[0].qubit_map, (
+            "Borrowed scalar element should produce a non-empty qubit_map"
+        )
+
+        result = exe.run(transpiler.executor()).result()
+        assert np.isclose(result, -1.0, atol=0.1)
+
+    def test_expval_borrowed_tuple_element(self):
+        """Borrowed tuple element expval((q[1],), H) must resolve correctly.
+
+        Uses a tuple containing a borrowed array element as the expval target.
+        """
+
+        @qmc.qkernel
+        def circuit(H: qmc.Observable) -> qmc.Float:
+            q = qmc.qubit_array(2, "q")
+            q[1] = qmc.x(q[1])
+            return qmc.expval((q[1],), H)
+
+        H = qm_o.Z(0)
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit, bindings={"H": H})
+
+        assert exe.compiled_expval[0].qubit_map, (
+            "Borrowed tuple element should produce a non-empty qubit_map"
+        )
+
+        result = exe.run(transpiler.executor()).result()
+        assert np.isclose(result, -1.0, atol=0.1)
+
 
 # ===========================================================================
 # 11. Variational Classifier Pattern Tests
@@ -7953,7 +8001,9 @@ class TestLoopBackedgeIfLivenessTranspilation:
         resolved_branch_clbits = []
         if_else_clbits = [body.clbits.index(c) for c in if_inst.clbits]
         for branch_idx, block in enumerate(if_inst.operation.blocks):
-            measures = [inst for inst in block.data if isinstance(inst.operation, Measure)]
+            measures = [
+                inst for inst in block.data if isinstance(inst.operation, Measure)
+            ]
             assert len(measures) == 1, (
                 f"Expected 1 measurement in branch {branch_idx} but got "
                 f"{len(measures)}."
@@ -8007,7 +8057,9 @@ class TestLoopBackedgeIfLivenessTranspilation:
 
         _, qc = _transpile_and_get_circuit(circuit)
 
-        while_insts = [inst for inst in qc.data if isinstance(inst.operation, WhileLoopOp)]
+        while_insts = [
+            inst for inst in qc.data if isinstance(inst.operation, WhileLoopOp)
+        ]
         assert len(while_insts) == 1
         body = while_insts[0].operation.params[0]
         if_insts = [inst for inst in body.data if isinstance(inst.operation, IfElseOp)]
@@ -8017,7 +8069,9 @@ class TestLoopBackedgeIfLivenessTranspilation:
         resolved_branch_clbits = []
         if_else_clbits = [body.clbits.index(c) for c in if_inst.clbits]
         for branch_idx, block in enumerate(if_inst.operation.blocks):
-            measures = [inst for inst in block.data if isinstance(inst.operation, Measure)]
+            measures = [
+                inst for inst in block.data if isinstance(inst.operation, Measure)
+            ]
             assert len(measures) == 1, (
                 f"Expected 1 measurement in branch {branch_idx} but got "
                 f"{len(measures)}."

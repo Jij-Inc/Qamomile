@@ -683,6 +683,180 @@ class TestExpvalRemapContract:
         result = QiskitEmitPass(bindings={})._build_qubit_map(arr, 0, compiled_quantum)
         assert result == {0: 3, 1: 1}
 
+    def test_build_qubit_map_borrowed_scalar_element(self):
+        """_build_qubit_map resolves borrowed scalar element (e.g. q[1])."""
+        pytest.importorskip("qiskit")
+        from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+        from qamomile.circuit.ir.value import ArrayValue, Value
+        from qamomile.circuit.transpiler.compiled_segments import CompiledQuantumSegment
+        from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
+        from qamomile.circuit.transpiler.segments import QuantumSegment
+        from qamomile.qiskit.transpiler import QiskitEmitPass
+
+        # Create a qubit array and a borrowed element q[1]
+        q_array = ArrayValue(
+            type=QubitType(),
+            name="q",
+            shape=(Value(type=UIntType(), name="n", params={"const": 2}),),
+        )
+        idx_val = Value(type=UIntType(), name="idx", params={"const": 1})
+        borrowed_elem = Value(
+            type=QubitType(),
+            name="q[1]",
+            parent_array=q_array,
+            element_indices=(idx_val,),
+        )
+
+        compiled_quantum = [
+            CompiledQuantumSegment(
+                segment=QuantumSegment(operations=[]),
+                circuit=object(),
+                qubit_map={f"{q_array.uuid}_0": 0, f"{q_array.uuid}_1": 7},
+                parameter_metadata=ParameterMetadata(),
+            )
+        ]
+
+        result = QiskitEmitPass(bindings={})._build_qubit_map(
+            borrowed_elem, 0, compiled_quantum
+        )
+        assert result == {0: 7}
+
+    def test_build_qubit_map_borrowed_tuple_elements(self):
+        """_build_qubit_map resolves borrowed elements inside a tuple."""
+        pytest.importorskip("qiskit")
+        from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+        from qamomile.circuit.ir.value import ArrayValue, Value
+        from qamomile.circuit.transpiler.compiled_segments import CompiledQuantumSegment
+        from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
+        from qamomile.circuit.transpiler.segments import QuantumSegment
+        from qamomile.qiskit.transpiler import QiskitEmitPass
+
+        q_array = ArrayValue(
+            type=QubitType(),
+            name="q",
+            shape=(Value(type=UIntType(), name="n", params={"const": 3}),),
+        )
+        idx0 = Value(type=UIntType(), name="i0", params={"const": 1})
+        idx1 = Value(type=UIntType(), name="i1", params={"const": 2})
+        borrowed_q1 = Value(
+            type=QubitType(),
+            name="q[1]",
+            parent_array=q_array,
+            element_indices=(idx0,),
+        )
+        borrowed_q2 = Value(
+            type=QubitType(),
+            name="q[2]",
+            parent_array=q_array,
+            element_indices=(idx1,),
+        )
+
+        arr = ArrayValue(
+            type=QubitType(),
+            name="expval_qubits",
+            shape=(),
+            params={"qubit_values": [borrowed_q1, borrowed_q2]},
+        )
+
+        compiled_quantum = [
+            CompiledQuantumSegment(
+                segment=QuantumSegment(operations=[]),
+                circuit=object(),
+                qubit_map={
+                    f"{q_array.uuid}_0": 0,
+                    f"{q_array.uuid}_1": 5,
+                    f"{q_array.uuid}_2": 3,
+                },
+                parameter_metadata=ParameterMetadata(),
+            )
+        ]
+
+        result = QiskitEmitPass(bindings={})._build_qubit_map(arr, 0, compiled_quantum)
+        assert result == {0: 5, 1: 3}
+
+    def test_build_qubit_map_unresolved_scalar_raises(self):
+        """_build_qubit_map raises EmitError for unresolvable scalar target."""
+        pytest.importorskip("qiskit")
+        from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+        from qamomile.circuit.ir.value import ArrayValue, Value
+        from qamomile.circuit.transpiler.compiled_segments import CompiledQuantumSegment
+        from qamomile.circuit.transpiler.errors import EmitError
+        from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
+        from qamomile.circuit.transpiler.segments import QuantumSegment
+        from qamomile.qiskit.transpiler import QiskitEmitPass
+
+        # Borrowed element whose parent array is not in qubit_map
+        q_array = ArrayValue(
+            type=QubitType(),
+            name="q",
+            shape=(Value(type=UIntType(), name="n", params={"const": 2}),),
+        )
+        idx_val = Value(type=UIntType(), name="idx", params={"const": 0})
+        borrowed_elem = Value(
+            type=QubitType(),
+            name="q[0]",
+            parent_array=q_array,
+            element_indices=(idx_val,),
+        )
+
+        compiled_quantum = [
+            CompiledQuantumSegment(
+                segment=QuantumSegment(operations=[]),
+                circuit=object(),
+                qubit_map={},  # Empty - nothing to resolve against
+                parameter_metadata=ParameterMetadata(),
+            )
+        ]
+
+        with pytest.raises(EmitError, match="Cannot resolve expval target"):
+            QiskitEmitPass(bindings={})._build_qubit_map(
+                borrowed_elem, 0, compiled_quantum
+            )
+
+    def test_build_qubit_map_unresolved_tuple_element_raises(self):
+        """_build_qubit_map raises EmitError for unresolvable tuple element."""
+        pytest.importorskip("qiskit")
+        from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+        from qamomile.circuit.ir.value import ArrayValue, Value
+        from qamomile.circuit.transpiler.compiled_segments import CompiledQuantumSegment
+        from qamomile.circuit.transpiler.errors import EmitError
+        from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
+        from qamomile.circuit.transpiler.segments import QuantumSegment
+        from qamomile.qiskit.transpiler import QiskitEmitPass
+
+        q_array = ArrayValue(
+            type=QubitType(),
+            name="q",
+            shape=(Value(type=UIntType(), name="n", params={"const": 2}),),
+        )
+        # Symbolic (unbound) index
+        symbolic_idx = Value(type=UIntType(), name="i")
+        borrowed_elem = Value(
+            type=QubitType(),
+            name="q[i]",
+            parent_array=q_array,
+            element_indices=(symbolic_idx,),
+        )
+
+        arr = ArrayValue(
+            type=QubitType(),
+            name="expval_qubits",
+            shape=(),
+            params={"qubit_values": [borrowed_elem]},
+        )
+
+        compiled_quantum = [
+            CompiledQuantumSegment(
+                segment=QuantumSegment(operations=[]),
+                circuit=object(),
+                qubit_map={f"{q_array.uuid}_0": 0, f"{q_array.uuid}_1": 1},
+                parameter_metadata=ParameterMetadata(),
+            )
+        ]
+
+        with pytest.raises(EmitError, match="Cannot resolve expval target"):
+            QiskitEmitPass(bindings={})._build_qubit_map(arr, 0, compiled_quantum)
+
 
 class TestHamiltonianRemapQubits:
     """Test Hamiltonian.remap_qubits method."""

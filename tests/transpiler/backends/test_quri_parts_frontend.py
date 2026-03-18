@@ -4304,6 +4304,54 @@ class TestExpvalQuriPartsPipeline:
         result = exe.run(transpiler.executor()).result()
         assert np.isclose(result, 1.0, atol=1e-6)
 
+    def test_expval_borrowed_scalar_element(self):
+        """Borrowed scalar element expval(q[1], H) must resolve correctly.
+
+        Uses q[1] (a borrowed array element) as the scalar expval target.
+        The compile-time qubit_map must be non-empty and the result must
+        reflect the X gate applied to q[1].
+        """
+
+        @qmc.qkernel
+        def circuit(H: qmc.Observable) -> qmc.Float:
+            q = qmc.qubit_array(2, "q")
+            q[1] = qmc.x(q[1])
+            return qmc.expval(q[1], H)
+
+        H = qm_o.Z(0)
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(circuit, bindings={"H": H})
+
+        assert exe.compiled_expval[0].qubit_map, (
+            "Borrowed scalar element should produce a non-empty qubit_map"
+        )
+
+        result = exe.run(transpiler.executor()).result()
+        assert np.isclose(result, -1.0, atol=1e-6)
+
+    def test_expval_borrowed_tuple_element(self):
+        """Borrowed tuple element expval((q[1],), H) must resolve correctly.
+
+        Uses a tuple containing a borrowed array element as the expval target.
+        """
+
+        @qmc.qkernel
+        def circuit(H: qmc.Observable) -> qmc.Float:
+            q = qmc.qubit_array(2, "q")
+            q[1] = qmc.x(q[1])
+            return qmc.expval((q[1],), H)
+
+        H = qm_o.Z(0)
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(circuit, bindings={"H": H})
+
+        assert exe.compiled_expval[0].qubit_map, (
+            "Borrowed tuple element should produce a non-empty qubit_map"
+        )
+
+        result = exe.run(transpiler.executor()).result()
+        assert np.isclose(result, -1.0, atol=1e-6)
+
 
 # ============================================================================
 # 14. FQAOA Integration

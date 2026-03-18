@@ -333,15 +333,18 @@ class EmitPass(Pass[SimplifiedProgram, ExecutableProgram[T]], Generic[T]):
         shapes are supported:
 
         * **Tuple synthetic array** – ``ArrayValue`` with
-          ``params["qubit_values"]``.  Each element's UUID is looked up
-          directly in ``uuid_to_physical``.
+          ``params["qubit_values"]``.  Each element is resolved via
+          ``ValueResolver.resolve_qubit_index_detailed()`` which handles
+          both direct UUID lookup and borrowed array element resolution
+          (e.g. ``q[i]``).
         * **Vector[Qubit] plain array** – ``ArrayValue`` *without*
           ``params["qubit_values"]``.  The physical mapping is recovered by
           scanning ``uuid_to_physical`` for keys matching the prefix
           ``"{array_uuid}_"``, then parsing the integer suffix as the logical
           index.
-        * **Scalar Qubit** – A plain ``Value`` whose UUID is looked up
-          directly.
+        * **Scalar Qubit** – Resolved via
+          ``ValueResolver.resolve_qubit_index_detailed()`` which handles
+          both direct UUID lookup and borrowed array element resolution.
 
         Args:
             qubits_value: The Value representing the qubit tuple/array/scalar.
@@ -354,10 +357,12 @@ class EmitPass(Pass[SimplifiedProgram, ExecutableProgram[T]], Generic[T]):
 
         Raises:
             EmitError: If a vector prefix-key scan finds keys that do not
-                exactly match the declared shape, or if a positive-size
-                vector has no prefix keys at all.
+                exactly match the declared shape, if a positive-size
+                vector has no prefix keys at all, or if a scalar/tuple
+                borrowed element cannot be resolved.
         """
         from qamomile.circuit.ir.value import ArrayValue
+        from qamomile.circuit.transpiler.passes.emit_base import ValueResolver
         from qamomile.circuit.transpiler.value_resolution import (
             BindingLookup,
             resolve_int_value,
@@ -373,14 +378,30 @@ class EmitPass(Pass[SimplifiedProgram, ExecutableProgram[T]], Generic[T]):
 
         compiled_seg = compiled_quantum[quantum_segment_index]
         uuid_to_physical = compiled_seg.qubit_map
+        resolver = ValueResolver(self.parameters)
 
         if isinstance(qubits_value, ArrayValue):
             qubit_values = qubits_value.params.get("qubit_values", [])
             if qubit_values:
-                # Tuple synthetic array: each element's UUID is in qubit_map
+                # Tuple synthetic array: resolve each element via ValueResolver
+                unresolved: list[tuple[int, str]] = []
                 for i, qv in enumerate(qubit_values):
-                    if hasattr(qv, "uuid") and qv.uuid in uuid_to_physical:
-                        qubit_map[i] = uuid_to_physical[qv.uuid]
+                    result = resolver.resolve_qubit_index_detailed(
+                        qv, uuid_to_physical, self.bindings
+                    )
+                    if result.success:
+                        qubit_map[i] = result.index
+                    else:
+                        unresolved.append((i, result.failure_details or "unknown"))
+                if unresolved:
+                    details = "; ".join(
+                        f"element {i}: {reason}" for i, reason in unresolved
+                    )
+                    raise EmitError(
+                        f"Cannot resolve expval target: "
+                        f"tuple has {len(unresolved)} unresolved element(s). "
+                        f"{details}"
+                    )
             else:
                 # Vector[Qubit] plain array: scan for prefix keys
                 prefix = f"{qubits_value.uuid}_"
@@ -422,9 +443,18 @@ class EmitPass(Pass[SimplifiedProgram, ExecutableProgram[T]], Generic[T]):
                             f"but logical indices {sorted(missing)} are missing."
                         )
         else:
-            # Scalar qubit
-            if hasattr(qubits_value, "uuid") and qubits_value.uuid in uuid_to_physical:
-                qubit_map[0] = uuid_to_physical[qubits_value.uuid]
+            # Scalar qubit: resolve via ValueResolver
+            result = resolver.resolve_qubit_index_detailed(
+                qubits_value, uuid_to_physical, self.bindings
+            )
+            if result.success:
+                qubit_map[0] = result.index
+            else:
+                raise EmitError(
+                    f"Cannot resolve expval target: "
+                    f"scalar qubit resolution failed. "
+                    f"{result.failure_details}"
+                )
 
         return qubit_map
 
