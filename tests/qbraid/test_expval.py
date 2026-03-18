@@ -209,6 +209,41 @@ class TestRemappedQubits:
 
 
 # ---------------------------------------------------------------------------
+# Out-of-range Hamiltonian qubit index
+# ---------------------------------------------------------------------------
+
+
+class TestOutOfRangeHamiltonian:
+    def test_single_qubit_out_of_range(self):
+        """Z(1) on 1-qubit circuit must raise ExecutionError."""
+        device = _mock_device_multi([{"0": 100}])
+        executor = QBraidExecutor(device=device, expval_shots=100)
+
+        qc = QuantumCircuit(1)
+        with pytest.raises(ExecutionError, match="qubit index 1"):
+            executor.estimate(qc, Z(1))
+
+    def test_multi_qubit_term_out_of_range(self):
+        """Z(0)*Z(2) on 2-qubit circuit must raise ExecutionError."""
+        device = _mock_device_multi([{"00": 100}])
+        executor = QBraidExecutor(device=device, expval_shots=100)
+
+        qc = QuantumCircuit(2)
+        hamiltonian = Z(0) * Z(2)
+        with pytest.raises(ExecutionError, match="qubit index 2"):
+            executor.estimate(qc, hamiltonian)
+
+    def test_in_range_still_works(self):
+        """Z(0) on 1-qubit circuit should work normally."""
+        device = _mock_device_multi([{"0": 100}])
+        executor = QBraidExecutor(device=device, expval_shots=100)
+
+        qc = QuantumCircuit(1)
+        result = executor.estimate(qc, Z(0))
+        assert math.isclose(result, 1.0, abs_tol=1e-10)
+
+
+# ---------------------------------------------------------------------------
 # Imaginary part handling
 # ---------------------------------------------------------------------------
 

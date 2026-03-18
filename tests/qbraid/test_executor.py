@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from qiskit import QuantumCircuit
 
+from qamomile.circuit.transpiler.errors import ExecutionError
 from qamomile.qbraid.executor import QBraidExecutor
 
 # ---------------------------------------------------------------------------
@@ -242,6 +243,196 @@ class TestExecute:
 
         executor.execute(qc, shots=100)
         assert qc.num_clbits == original_clbits
+
+
+# ---------------------------------------------------------------------------
+# Counts normalization
+# ---------------------------------------------------------------------------
+
+
+class TestCountsNormalization:
+    def test_short_key_padded_2bit(self):
+        """Under-width key '1' is zero-padded to '01' for 2-clbit circuit."""
+        device, _, _ = _mock_device({"1": 5})
+        executor = QBraidExecutor(device=device)
+
+        qc = QuantumCircuit(2, 2)
+        qc.measure(0, 0)
+        qc.measure(1, 1)
+        counts = executor.execute(qc, shots=5)
+        assert counts == {"01": 5}
+
+    def test_short_key_padded_3bit(self):
+        """Under-width key '10' is zero-padded to '010' for 3-clbit circuit."""
+        device, _, _ = _mock_device({"10": 5})
+        executor = QBraidExecutor(device=device)
+
+        qc = QuantumCircuit(3, 3)
+        qc.measure(0, 0)
+        qc.measure(1, 1)
+        qc.measure(2, 2)
+        counts = executor.execute(qc, shots=5)
+        assert counts == {"010": 5}
+
+    def test_space_separated_key_flattened(self):
+        """Space-separated key '01 0' is flattened to '010'."""
+        device, _, _ = _mock_device({"01 0": 5})
+        executor = QBraidExecutor(device=device)
+
+        qc = QuantumCircuit(3, 3)
+        qc.measure(0, 0)
+        qc.measure(1, 1)
+        qc.measure(2, 2)
+        counts = executor.execute(qc, shots=5)
+        assert counts == {"010": 5}
+
+    def test_already_padded_key_unchanged(self):
+        """Full-width key '010' passes through unchanged."""
+        device, _, _ = _mock_device({"010": 3, "111": 7})
+        executor = QBraidExecutor(device=device)
+
+        qc = QuantumCircuit(3, 3)
+        qc.measure(0, 0)
+        qc.measure(1, 1)
+        qc.measure(2, 2)
+        counts = executor.execute(qc, shots=10)
+        assert counts == {"010": 3, "111": 7}
+
+    def test_non_binary_key_raises(self):
+        """Non-binary key after space removal raises ExecutionError."""
+        device, _, _ = _mock_device({"0x1": 5})
+        executor = QBraidExecutor(device=device)
+
+        qc = QuantumCircuit(2, 2)
+        qc.measure(0, 0)
+        qc.measure(1, 1)
+        with pytest.raises(ExecutionError, match="non-binary"):
+            executor.execute(qc, shots=5)
+
+    def test_width_1_key_unchanged(self):
+        """Width-1 keys '0' and '1' pass through unchanged."""
+        device, _, _ = _mock_device({"0": 60, "1": 40})
+        executor = QBraidExecutor(device=device)
+
+        qc = QuantumCircuit(1, 1)
+        qc.measure(0, 0)
+        counts = executor.execute(qc, shots=100)
+        assert counts == {"0": 60, "1": 40}
+
+    def test_short_key_via_measure_all(self):
+        """Short key is padded when circuit gets measure_all via execute()."""
+        device, _, _ = _mock_device({"1": 5})
+        executor = QBraidExecutor(device=device)
+
+        qc = QuantumCircuit(2)
+        counts = executor.execute(qc, shots=5)
+        assert counts == {"01": 5}
+
+    def test_integration_sample_with_short_key(self):
+        """QiskitTranspiler + QBraidExecutor: short key decodes without None."""
+        from qamomile.qiskit import QiskitTranspiler
+        import qamomile.circuit as qm
+
+        @qm.qkernel
+        def three_bit_kernel() -> tuple[qm.Bit, qm.Bit, qm.Bit]:
+            qs = qm.qubit_array(3, "qs")
+            return qm.measure(qs[0]), qm.measure(qs[1]), qm.measure(qs[2])
+
+        exe = QiskitTranspiler().transpile(three_bit_kernel)
+
+        device, _, _ = _mock_device({"10": 1})
+        executor = QBraidExecutor(device=device)
+
+        sample_results = exe.sample(executor, shots=1).result().results
+        assert len(sample_results) == 1
+        values, count = sample_results[0]
+        assert None not in values, f"None found in decoded values: {values}"
+        assert count == 1
+
+    def test_integration_run_with_short_key(self):
+        """QiskitTranspiler + QBraidExecutor: short key decodes without None."""
+        from qamomile.qiskit import QiskitTranspiler
+        import qamomile.circuit as qm
+
+        @qm.qkernel
+        def three_bit_kernel() -> tuple[qm.Bit, qm.Bit, qm.Bit]:
+            qs = qm.qubit_array(3, "qs")
+            return qm.measure(qs[0]), qm.measure(qs[1]), qm.measure(qs[2])
+
+        exe = QiskitTranspiler().transpile(three_bit_kernel)
+
+        device, _, _ = _mock_device({"10": 1})
+        executor = QBraidExecutor(device=device)
+
+        run_result = exe.run(executor).result()
+        assert isinstance(run_result, tuple)
+        assert None not in run_result, f"None found in run result: {run_result}"
+
+
+# ---------------------------------------------------------------------------
+# Seeded random width-normalization regression
+# ---------------------------------------------------------------------------
+
+
+class TestRandomShortKeyPadding:
+    """Seeded random tests verifying width normalization across widths."""
+
+    @pytest.mark.parametrize("seed,width", [(0, 2), (7, 3), (42, 5)])
+    def test_random_short_keys_padded_to_target_width(self, seed, width):
+        import random
+
+        rng = random.Random(seed)
+        max_outcomes = min(8, 2**width)
+        num_outcomes = rng.randint(2, max_outcomes)
+        outcomes = rng.sample(range(2**width), num_outcomes)
+
+        for outcome in outcomes:
+            canonical = format(outcome, f"0{width}b")
+            # Simulate qBraid stripping leading zeros
+            short = canonical.lstrip("0") or "0"
+
+            device, _, _ = _mock_device({short: 1})
+            executor = QBraidExecutor(device=device)
+
+            qc = QuantumCircuit(width, width)
+            for i in range(width):
+                qc.measure(i, i)
+            counts = executor.execute(qc, shots=1)
+
+            for key in counts:
+                assert len(key) == width, (
+                    f"seed={seed}, width={width}, outcome={outcome}: "
+                    f"expected key length {width}, got {len(key)} for key {key!r}"
+                )
+            assert counts == {canonical: 1}, (
+                f"seed={seed}, width={width}, outcome={outcome}: "
+                f"expected {{{canonical!r}: 1}}, got {counts}"
+            )
+
+    @pytest.mark.parametrize("seed,width", [(0, 2), (7, 3), (42, 5)])
+    def test_already_padded_keys_unchanged(self, seed, width):
+        import random
+
+        rng = random.Random(seed)
+        max_outcomes = min(8, 2**width)
+        num_outcomes = rng.randint(2, max_outcomes)
+        outcomes = rng.sample(range(2**width), num_outcomes)
+
+        for outcome in outcomes:
+            canonical = format(outcome, f"0{width}b")
+
+            device, _, _ = _mock_device({canonical: 1})
+            executor = QBraidExecutor(device=device)
+
+            qc = QuantumCircuit(width, width)
+            for i in range(width):
+                qc.measure(i, i)
+            counts = executor.execute(qc, shots=1)
+
+            assert counts == {canonical: 1}, (
+                f"seed={seed}, width={width}: "
+                f"padded key {canonical!r} should pass through unchanged"
+            )
 
 
 # ---------------------------------------------------------------------------
