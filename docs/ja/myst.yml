@@ -14,6 +14,8 @@ project:
   jupyter: true
   execute:
     cache: true
+    exclude_patterns:
+      - collaboration/qbraid_executor.ipynb
   toc:
     - file: index.md
     - title: チュートリアル
@@ -24,6 +26,9 @@ project:
         - file: tutorial/04_execution_models.ipynb
         - file: tutorial/05_classical_flow_patterns.ipynb
         - file: tutorial/06_reuse_patterns.ipynb
+    - title: コラボレーション
+      children:
+        - file: collaboration/qbraid_executor.ipynb
 
 # --- API Reference (auto-generated) ---
     - title: API Reference
