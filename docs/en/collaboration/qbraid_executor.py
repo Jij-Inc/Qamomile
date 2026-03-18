@@ -18,6 +18,10 @@
 # This page introduces [qBraid](https://www.qbraid.com/) support in Qamomile and shows how to run a Qamomile workflow with `QBraidExecutor`. Qamomile currently connects to qBraid through its Qiskit integration, so the usual flow is `qkernel` -> `QiskitTranspiler` -> `QBraidExecutor`.
 
 # %% [markdown]
+# ## What this notebook shows
+# This notebook is a qBraid-first tutorial built around a MaxCut workflow. The main goal is to show how to configure `QBraidExecutor`, transpile a qkernel with `QiskitTranspiler`, reuse the same remote executor throughout the optimization loop, and inspect the final samples returned by qBraid.
+
+# %% [markdown]
 # ## Installation
 #
 # Install the qBraid integration with the optional `qbraid` dependency group:
@@ -29,6 +33,7 @@
 # This installs Qamomile together with the qBraid package and its Qiskit integration.
 
 # %%
+import warnings
 from collections import defaultdict
 
 import matplotlib.pyplot as plt
@@ -47,26 +52,34 @@ seed = 901
 rng = np.random.default_rng(seed)
 
 # %% [markdown]
-# ## QBraid Executor
-# qBraid provides a unified interface for running quantum programs on supported simulators and hardware backends. In Qamomile, `QBraidExecutor` submits Qiskit circuits to a qBraid device, waits for the remote job to finish, and returns the measurement results in the same format as other Qamomile executors.
+# ## qBraid Setup
+# qBraid provides a unified interface for running quantum programs on supported simulators and hardware backends. In Qamomile, `QBraidExecutor` is the piece that submits Qiskit circuits to a qBraid device, waits for the remote job to finish, and returns the results in the same format as other Qamomile executors.
 #
-# The example below shows a minimal setup: choose a qBraid `device_id`, provide your API key, and use the resulting executor with the transpiled Qamomile executable.
+# In this notebook, we create the executor first and then reuse it for both parameter optimization and the final evaluation step. The warning filter below is scoped to this setup cell only, so it suppresses the known `pyqir` runtime warning without affecting unrelated warnings elsewhere in the notebook.
 
 # %%
 device_id = "qbraid:qbraid:sim:qir-sv"
 api_key = "YOUR_API_KEY"
-qbraid_executor = QBraidExecutor(
-    device_id=device_id,
-    api_key=api_key,
-)
+
+with warnings.catch_warnings():
+    warnings.filterwarnings(
+        "ignore",
+        message=r"The default runtime configuration for device 'qbraid:qbraid:sim:qir-sv' includes transpilation to program type 'pyqir', which is not registered\.",
+        category=RuntimeWarning,
+        module=r"qbraid\.runtime\.native\.provider",
+    )
+    qbraid_executor = QBraidExecutor(
+        device_id=device_id,
+        api_key=api_key,
+    )
 
 # %% [markdown]
 # ## MaxCut Example
-# The rest of this notebook walks through an end-to-end MaxCut example. We first generate a graph instance, convert it into an Ising Hamiltonian, build a QAOA circuit with Qamomile, optimize the variational parameters by repeated sampling on qBraid through `QBraidExecutor`, and finally inspect the best cut found from the measured bitstrings.
+# With the qBraid executor ready, we now prepare a single parameterized QAOA program for MaxCut and use qBraid to sample it repeatedly during optimization. The overall flow is graph construction -> Ising model -> parameterized QAOA qkernel -> Qiskit transpilation -> qBraid sampling -> solution analysis.
 
 # %% [markdown]
 # ### Constructing the problem
-# We use `networkx.random_regular_graph` to create a small random 3-regular graph with 8 nodes as the MaxCut instance. The figure is only a visualization of the problem structure; the optimization itself uses the graph data stored in `graph`.
+# We use `networkx.random_regular_graph` to create a small random 3-regular graph with 8 nodes as the MaxCut instance. This graph is the classical input data that will later be encoded into a QAOA circuit and sampled on qBraid. The figure is only a visualization of the problem structure; the optimization itself uses the graph data.
 # %%
 # Create a random graph using networkx
 graph = nx.random_regular_graph(d=3, n=8, seed=seed)
@@ -81,7 +94,7 @@ plt.show()
 
 # %% [markdown]
 # ### Constructing the Ising Hamiltonian
-# MaxCut can be written as an Ising optimization problem in which an edge contributes when its two endpoints are assigned to opposite spin states. In this construction, each graph edge adds a quadratic interaction term, while the constant term shifts the objective so that minimizing the Ising energy corresponds to maximizing the cut value. After building the spin model, `normalize_by_rms()` rescales the coefficients to a comparable magnitude, which is often helpful when searching for good QAOA parameters.
+# MaxCut can be written as an Ising optimization problem in which an edge contributes when its two endpoints are assigned to opposite spin states. In this construction, each graph edge adds a quadratic interaction term, while the constant term shifts the objective so that minimizing the Ising energy corresponds to maximizing the cut value. After building the spin model, `normalize_by_rms()` rescales the coefficients to a comparable magnitude, which is often helpful before repeatedly sampling the corresponding QAOA circuit on qBraid.
 
 # %%
 quad = {}
@@ -100,7 +113,7 @@ spin_model_normalized._expr
 
 # %% [markdown]
 # ### Constructing the QAOA circuit
-# `qaoa_state(...)` builds the layered QAOA ansatz for the Ising model, and `qmc.measure(q)` turns the state preparation circuit into a sampling qkernel that returns measured bits. We then transpile the qkernel with `QiskitTranspiler`, binding the fixed problem data once while leaving `gammas` and `betas` as variational parameters so the same executable can be reused throughout the optimization loop.
+# `qaoa_state(...)` builds the layered QAOA ansatz for the Ising model, and `qmc.measure(q)` turns the state preparation circuit into a sampling qkernel that returns measured bits. We then transpile the qkernel with `QiskitTranspiler`, binding the fixed problem data once while leaving `gammas` and `betas` as variational parameters.
 
 
 # %%
@@ -134,7 +147,7 @@ executable = transpiler.transpile(
 
 # %% [markdown]
 # ### Optimization
-# The objective function evaluates one candidate parameter vector at a time. For each trial, it binds `gammas` and `betas`, samples the transpiled circuit through `QBraidExecutor`, converts the sampled bitstrings into binary energies, and averages those energies to estimate the objective value. `scipy.optimize.minimize(...)` then updates the parameters using only these sampled energy estimates, while `energy_history` records the convergence trend.
+# The objective function evaluates one candidate parameter vector at a time. For each trial, it binds `gammas` and `betas`, sends the executable to qBraid through `QBraidExecutor`, converts the sampled bitstrings into binary energies, and averages those energies to estimate the objective value. `scipy.optimize.minimize(...)` handles the outer classical search, while qBraid sampling provides the measurement data that drives each update. The same executor is reused across all iterations, which keeps the remote execution path explicit throughout the optimization loop.
 
 # %%
 # List to save optimization history
@@ -221,7 +234,7 @@ plt.show()
 
 # %% [markdown]
 # ### Evaluation
-# After the optimization step, we sample the circuit again with the optimized parameters to see how often each energy level appears. This makes it easy to inspect the final distribution, identify the lowest-energy bitstring observed in the samples, and interpret that bitstring as a MaxCut solution on the original graph.
+# After the optimization step, we call qBraid one more time with the optimized parameters and collect a larger sample of measurement outcomes. This lets us inspect the final energy distribution, identify the lowest-energy bitstring observed in the remote samples, and interpret that bitstring as a MaxCut solution on the original graph.
 
 # %%
 # Sample with optimized parameters
@@ -317,8 +330,8 @@ def show_solution(graph, solution, title):
 show_solution(graph, best_solution, "QAOA")
 
 # %% [markdown]
-# ## Additional Notes
-# In the final section, we solve the same MaxCut instance as a classical optimization problem with [JijModeling](https://jij-inc-jijmodeling-tutorials-en.readthedocs-hosted.com/en/latest/introduction.html) and `OMMXPySCIPOptAdapter`. This provides a classical reference solution that helps us compare the QAOA result against a conventional optimizer and check whether the sampled qBraid workflow is finding low-energy cuts.
+# ## Optional Classical Comparison
+# The main qBraid workflow ends above. The final section is an optional comparison against a classical optimizer built with [JijModeling](https://jij-inc-jijmodeling-tutorials-en.readthedocs-hosted.com/en/latest/introduction.html) and `OMMXPySCIPOptAdapter`. This provides a reference solution for the same MaxCut instance and helps us judge how good the QAOA result is.
 
 # %%
 import jijmodeling as jm
