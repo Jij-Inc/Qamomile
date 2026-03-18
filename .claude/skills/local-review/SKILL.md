@@ -96,6 +96,7 @@ Dependencies flow only downstream (left to right). Upstream (reverse) dependenci
 
 - **Jupytext percent format**: `.py` files are the source of truth.
 - `.ipynb` files are committed to git but must be **exactly identical** to their `.py` counterparts (generated via `jupytext --to notebook`). Any divergence is a P1 issue.
+- **Exception: `collaboration/` directory**: Files under `docs/*/collaboration/` are exempt from the `.py`/`.ipynb` sync requirement. These tutorials involve external service integrations (e.g., QBraid) that require API keys or credentials at runtime, so they cannot be mechanically executed or regenerated via `jupytext`. The `.ipynb` files in this directory may be maintained independently.
 - Jupyter Book 2 with MyST Markdown Engine.
 - Bilingual: English (`docs/en/`) and Japanese (`docs/ja/`).
 - Tutorials follow progressive complexity.
@@ -166,7 +167,7 @@ For each changed file, systematically check:
 6. **Module organization** (Section F) — Proper `__all__`? TYPE_CHECKING guards?
 7. **Python style** (Section G) — Google-style docstrings on ALL functions/classes with type hints? Modern Python syntax? No dead code?
 8. **Testing** (Section H) — Are tests parametrized? Random testing used? Clear docstrings describing what is tested? Edge cases and negative tests covered? Numerical assertions use `np.allclose`?
-9. **Documentation** (Section I) — `.py` and `.ipynb` in sync? Proper Jupytext format?
+9. **Documentation** (Section I) — `.py` and `.ipynb` in sync? Proper Jupytext format? (Note: `collaboration/` directories are exempt from sync requirement.)
 10. **Numerical correctness** (Section J) — Float comparisons use `isclose`/`is_close_zero`? Tests use `np.allclose`? Tolerance assumptions documented?
 11. **Performance & memory** (Section K) — Unnecessary copies? Mutable default arguments? Large iterations use generators?
 12. **Defensive programming** (Section L) — Do `if-else`/`match` statements include `else`/default branches? Are defensive checks using `assert` for internal invariants? Are unreachable branches clearly marked?
