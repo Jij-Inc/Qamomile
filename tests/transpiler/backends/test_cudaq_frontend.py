@@ -1904,3 +1904,69 @@ class TestCIfControlFlow:
 
         with pytest.raises(EmitError, match="while loop control flow"):
             _transpile_and_get_circuit(circuit_with_while)
+
+
+# ============================================================================
+# Sampling Ordering Regression Tests
+# ============================================================================
+
+
+class TestSamplingOrdering:
+    """Verify that CUDA-Q executor returns canonical big-endian bitstrings.
+
+    CUDA-Q raw ``__global__`` uses allocation order (first declared qubit =
+    leftmost), while the executor contract requires big-endian (highest
+    qubit index = leftmost).  These tests ensure the normalization is correct.
+    """
+
+    def test_non_symmetric_full_register_sample(self):
+        """X on q[0] only — sample must decode logical q0=1."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0] = qmc.x(q[0])
+            return qmc.measure(q)
+
+        transpiler = CudaqTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        for value, _ in result.results:
+            assert value == (1, 0, 0), f"Expected (1, 0, 0), got {value}"
+
+    def test_reverse_order_selective_measurement_sample(self):
+        """Measure q[2] then q[0] with X on q[0] — sample must return (0, 1)."""
+
+        @qmc.qkernel
+        def measure_reverse_order() -> tuple[qmc.Bit, qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            return qmc.measure(qs[2]), qmc.measure(qs[0])
+
+        transpiler = CudaqTranspiler()
+        exe = transpiler.transpile(measure_reverse_order)
+        executor = transpiler.executor()
+
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        for value, _ in result.results:
+            assert value == (0, 1), f"Expected (0, 1), got {value}"
+
+    def test_reverse_order_selective_measurement_run(self):
+        """run() with reverse-order selective measurement must return (0, 1)."""
+
+        @qmc.qkernel
+        def measure_reverse_order() -> tuple[qmc.Bit, qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            qs[0] = qmc.x(qs[0])
+            return qmc.measure(qs[2]), qmc.measure(qs[0])
+
+        transpiler = CudaqTranspiler()
+        exe = transpiler.transpile(measure_reverse_order)
+        executor = transpiler.executor()
+
+        result = exe.run(executor).result()
+        assert result == (0, 1), f"Expected (0, 1), got {result}"

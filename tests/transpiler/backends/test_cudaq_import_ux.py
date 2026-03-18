@@ -13,12 +13,14 @@ from unittest.mock import patch
 
 import pytest
 
+_ORIGINAL_FIND_SPEC = importlib.util.find_spec
+
 
 def _make_find_spec_missing(name: str, *args, **kwargs):
     """Simulate ``cudaq`` being absent from the environment."""
     if name == "cudaq":
         return None
-    return importlib.util.find_spec.__wrapped__(name, *args, **kwargs)  # type: ignore[attr-defined]
+    return _ORIGINAL_FIND_SPEC(name, *args, **kwargs)
 
 
 class TestCudaqImportUX:
