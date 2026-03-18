@@ -127,7 +127,12 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
             cudaq.set_target(self._target)
 
     def execute(self, circuit: Any, shots: int) -> dict[str, int]:
-        """Execute circuit and return bitstring counts.
+        """Execute circuit and return canonical big-endian bitstring counts.
+
+        CUDA-Q ``sample`` returns bitstrings in allocation order (first
+        declared qubit = leftmost bit).  The executor contract requires
+        big-endian format (highest qubit index = leftmost bit), so this
+        method reverses each bitstring before returning.
 
         For non-parametric circuits (``CudaqCircuit``), calls
         ``cudaq.sample(kernel, shots_count=shots)``.
@@ -156,7 +161,8 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
                     f"num_qubits={num_qubits}"
                 )
             padded = bitstring.zfill(num_qubits)
-            counts[padded] = counts.get(padded, 0) + count
+            canonical = padded[::-1]  # allocation-order → big-endian
+            counts[canonical] = counts.get(canonical, 0) + count
 
         return counts
 
