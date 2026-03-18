@@ -170,55 +170,11 @@ print("python type:", type(run_result))
 # **使い分け**：量子カーネルが`measure()`で終わる場合は`sample()`を使用します。`expval()`で終わる場合は`run()`を使用します。
 
 # %% [markdown]
-# ## qBraidをエグゼキューターとして使用する
-#
-# ローカルのQiskitエグゼキューターに加えて、Qamomileは`QBraidExecutor`を提供し、
-# qBraid対応の量子デバイスで回路を実行できます。このエグゼキューターは同じ
-# `QuantumExecutor`インターフェースを実装しているため、`sample()`、測定付き`run()`、
-# 期待値`run()`のすべてで動作します。
-#
-# ```python
-# from qamomile.qbraid import QBraidExecutor
-#
-# # オプション1: device_idを指定（保存済みのqBraid認証情報を使用）
-# executor = QBraidExecutor(device_id="qbraid_qir_simulator")
-#
-# # オプション2: device_idとAPIキーを明示的に指定
-# executor = QBraidExecutor(
-#     device_id="qbraid_qir_simulator",
-#     api_key="your-api-key",
-# )
-#
-# # オプション3: 設定済みのデバイスオブジェクトを渡す
-# from qbraid import QbraidProvider
-# provider = QbraidProvider(api_key="...")
-# device = provider.get_device("qbraid_qir_simulator")
-# executor = QBraidExecutor(device=device)
-#
-# # Qiskitエグゼキューターと同じように使用
-# result = exe_sample.sample(executor, shots=256, bindings={"theta": 0.7}).result()
-# ```
-#
-# **タイムアウトとポーリング**: `QBraidExecutor`は`wait_for_final_state()`を使用し、
-# `timeout`と`poll_interval`パラメータを設定可能です。リモートデバイスでのジョブ完了
-# ポーリングが正しく動作します。
-#
-# **期待値**: qBraidエグゼキューターはカウントベースの期待値推定をサポートします。
-# 既存の古典ビットがない回路（`num_clbits == 0`）のみで動作します。この制限は
-# qBraidのカウント正規化による誤った結果を防ぐためです。
-#
-# > **注意**: qBraidサポートは、ネイティブQiskit回路またはQASM3互換プログラムを
-# > 受け付けるデバイスで最適に動作します。QASM2のみのデバイスでは、Qamomileが
-# > 出力するすべてのQiskit制御フロー機能がサポートされない場合があります。
-
-# %% [markdown]
 # ## まとめ
 #
 # - `sample()`は測定ビットを返す量子カーネル用 — カウント付きの測定結果分布が得られます。
 # - `run()`は`expval()`で`Float`を返す量子カーネル用 — 単一の期待値が得られます。
 # - `qmc.Observable`はハンドル型、`qamomile.observable.Z(0)`等が具体的な値です。オブザーバブルはトランスパイル時にバインドします。
 # - ビット順序はビッグエンディアン：戻り値タプルの位置が量子ビットの順序に対応します。
-# - `QBraidExecutor`を使うと、同じトランスパイル済みプログラムをqBraid対応デバイスで
-#   実行できます。
 #
 # **次へ**：[古典フローパターン](05_classical_flow_patterns.ipynb) — `qmc.range`によるループ、`qmc.items`によるスパースデータ、条件分岐。

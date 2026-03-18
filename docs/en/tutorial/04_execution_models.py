@@ -172,49 +172,6 @@ print("python type:", type(run_result))
 # **Rule of thumb**: if your qkernel ends with `measure()`, use `sample()`. If it ends with `expval()`, use `run()`.
 
 # %% [markdown]
-# ## Using qBraid as an Executor
-#
-# In addition to the local Qiskit executor, Qamomile provides `QBraidExecutor`
-# for running circuits on qBraid-supported quantum devices. The executor
-# implements the same `QuantumExecutor` interface, so it works with
-# `sample()`, measured `run()`, and expectation-value `run()`.
-#
-# ```python
-# from qamomile.qbraid import QBraidExecutor
-#
-# # Option 1: Provide device_id (uses saved qBraid credentials)
-# executor = QBraidExecutor(device_id="qbraid_qir_simulator")
-#
-# # Option 2: Provide device_id with explicit API key
-# executor = QBraidExecutor(
-#     device_id="qbraid_qir_simulator",
-#     api_key="your-api-key",
-# )
-#
-# # Option 3: Provide a pre-configured device object
-# from qbraid import QbraidProvider
-# provider = QbraidProvider(api_key="...")
-# device = provider.get_device("qbraid_qir_simulator")
-# executor = QBraidExecutor(device=device)
-#
-# # Use it just like a Qiskit executor
-# result = exe_sample.sample(executor, shots=256, bindings={"theta": 0.7}).result()
-# ```
-#
-# **Timeout and polling**: `QBraidExecutor` uses `wait_for_final_state()` with
-# configurable `timeout` and `poll_interval` parameters, so job completion
-# polling works correctly for remote devices.
-#
-# **Expectation values**: The qBraid executor supports counts-based expectation
-# value estimation. It only works with circuits that have no pre-existing
-# classical bits (`num_clbits == 0`). This restriction prevents silent wrong
-# results from qBraid's counts normalization.
-#
-# > **Note**: qBraid support works best with devices that accept native Qiskit
-# > circuits or QASM3-compatible programs. Devices limited to QASM2 may not
-# > support all Qiskit control-flow features emitted by Qamomile.
-
-# %% [markdown]
 # ## Summary
 #
 # - `sample()` is for qkernels returning measured bits — you get a distribution
@@ -224,7 +181,5 @@ print("python type:", type(run_result))
 # - `qmc.Observable` is the handle type; `qamomile.observable.Z(0)` etc. are
 #   the concrete values. Bind observables at transpile time.
 # - Bit ordering is big-endian: position in the return tuple matches qubit order.
-# - `QBraidExecutor` lets you run the same transpiled programs on
-#   qBraid-supported devices.
 #
 # **Next**: [Classical Flow Patterns](05_classical_flow_patterns.ipynb) — loops with `qmc.range`, sparse data with `qmc.items`, and conditional branching.
