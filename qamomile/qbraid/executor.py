@@ -186,7 +186,45 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
             poll_interval=self.poll_interval,
         )
         result = job.result()
-        return result.data.get_counts()
+        raw_counts = result.data.get_counts()
+        return self._normalize_counts(raw_counts, circuit.num_clbits)
+
+    @staticmethod
+    def _normalize_counts(
+        raw_counts: dict[str, int], num_clbits: int
+    ) -> dict[str, int]:
+        """Normalize qBraid raw counts to canonical bitstrings.
+
+        qBraid backends may return under-width keys (leading zeros stripped)
+        or space-separated register keys. This method flattens spaces and
+        zero-pads short keys to match the expected classical bit width.
+
+        Args:
+            raw_counts: Raw counts from the qBraid job result.
+            num_clbits: Expected number of classical bits in the circuit.
+
+        Returns:
+            Normalized counts with canonical bitstring keys.
+
+        Raises:
+            ExecutionError: If a key contains non-binary characters after
+                space removal.
+        """
+        normalized: dict[str, int] = {}
+        for key, count in raw_counts.items():
+            flat = key.replace(" ", "")
+            if not flat:
+                raise ExecutionError(
+                    f"qBraid returned an empty bitstring key (raw: {key!r})."
+                )
+            if not all(c in "01" for c in flat):
+                raise ExecutionError(
+                    f"qBraid returned a non-binary bitstring key: {key!r}."
+                )
+            if len(flat) < num_clbits:
+                flat = flat.zfill(num_clbits)
+            normalized[flat] = normalized.get(flat, 0) + count
+        return normalized
 
     def execute(self, circuit: "QuantumCircuit", shots: int) -> dict[str, int]:
         """Execute circuit and return bitstring counts.
@@ -255,8 +293,10 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
             The estimated real-valued expectation value.
 
         Raises:
-            ExecutionError: If the circuit has existing classical bits or
-                if the result has a non-negligible imaginary part.
+            ExecutionError: If the circuit has existing classical bits,
+                if the Hamiltonian references qubit indices outside the
+                circuit width, or if the result has a non-negligible
+                imaginary part.
         """
         if circuit.num_clbits > 0:
             raise ExecutionError(
@@ -266,6 +306,19 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
                 "normalization removing register boundary information. "
                 "Use a circuit without pre-existing measurements or classical "
                 "registers for expectation value estimation."
+            )
+
+        # Validate Hamiltonian qubit indices are within circuit width.
+        num_qubits = circuit.num_qubits
+        max_idx = -1
+        for operators, _ in hamiltonian:
+            for op in operators:
+                if op.index > max_idx:
+                    max_idx = op.index
+        if max_idx >= num_qubits:
+            raise ExecutionError(
+                f"Hamiltonian references qubit index {max_idx} but circuit "
+                f"has only {num_qubits} qubit(s)."
             )
 
         from qamomile.observable import Pauli
