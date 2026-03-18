@@ -3217,7 +3217,9 @@ class TestControlFlowWhileStructure:
         assert inner_if_cond_clbit_idx == third_measure_clbit_idx
 
         inner_if_body_measure = inner_if_body.data[0]
-        inner_if_body_measure_clbit_idx = qc.clbits.index(inner_if_body_measure.clbits[0])
+        inner_if_body_measure_clbit_idx = qc.clbits.index(
+            inner_if_body_measure.clbits[0]
+        )
         assert inner_if_body_measure_clbit_idx == while_cond_clbit_idx
 
         # --- Execution check ---
@@ -3944,12 +3946,12 @@ class TestTranspilerConfigAndSubstitution:
         qc_std = exe_std.compiled_quantum[0].circuit
         # Standard QFT 5q: 5H + 10CP + 2SWAP + 5M = 22
         assert len(qc_std.data) == 22
-        # Verify structure: H(0) 4CP H(1) 3CP H(2) 2CP H(3) 1CP H(4) 2SWAP 5M
+        # Verify structure (stdlib high-to-low): H(4) 4CP H(3) 3CP H(2) 2CP H(1) 1CP H(0) 2SWAP 5M
         idx = 0
-        for qubit in range(5):
+        for qubit in range(4, -1, -1):
             assert isinstance(qc_std.data[idx].operation, HGate)
             idx += 1
-            for j in range(qubit + 1, 5):
+            for k in range(qubit - 1, -1, -1):
                 assert isinstance(qc_std.data[idx].operation, CPhaseGate)
                 idx += 1
         # 2 SWAP gates
@@ -3970,65 +3972,19 @@ class TestTranspilerConfigAndSubstitution:
         exe_approx = transpiler_approx.transpile(circuit)
         qc_approx = exe_approx.compiled_quantum[0].circuit
         # Approximate QFT k=2 5q: 5H + 7CP + 2SWAP + 5M = 19
-        # Each qubit gets at most k=2 CP gates after its H
+        # Each qubit gets at most k=2 CP gates after its H (stdlib high-to-low)
         assert len(qc_approx.data) == 19
-        # Verify structure: H(0) 2CP H(1) 2CP H(2) 2CP H(3) 1CP H(4) 2SWAP 5M
+        # Verify structure: H(4) 2CP H(3) 2CP H(2) 2CP H(1) 1CP H(0) 2SWAP 5M
         idx = 0
 
-        # qubit 0: H + CP(q1,q0,π/2) + CP(q2,q0,π/4)
+        # qubit 4: H + CP(4,3,π/2) + CP(4,2,π/4)
         assert isinstance(qc_approx.data[idx].operation, HGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [0]
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [4]
         idx += 1
         assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
         assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            1,
-            0,
-        ]
-        assert np.isclose(
-            float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
-        )
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            2,
-            0,
-        ]
-        assert np.isclose(
-            float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10
-        )
-        idx += 1
-
-        # qubit 1: H + CP(q2,q1,π/2) + CP(q3,q1,π/4)
-        assert isinstance(qc_approx.data[idx].operation, HGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [1]
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            2,
-            1,
-        ]
-        assert np.isclose(
-            float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
-        )
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
+            4,
             3,
-            1,
-        ]
-        assert np.isclose(
-            float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10
-        )
-        idx += 1
-
-        # qubit 2: H + CP(q3,q2,π/2) + CP(q4,q2,π/4)
-        assert isinstance(qc_approx.data[idx].operation, HGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [2]
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            3,
-            2,
         ]
         assert np.isclose(
             float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
@@ -4044,23 +4000,69 @@ class TestTranspilerConfigAndSubstitution:
         )
         idx += 1
 
-        # qubit 3: H + CP(q4,q3,π/2)
+        # qubit 3: H + CP(3,2,π/2) + CP(3,1,π/4)
         assert isinstance(qc_approx.data[idx].operation, HGate)
         assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [3]
         idx += 1
         assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
         assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            4,
             3,
+            2,
+        ]
+        assert np.isclose(
+            float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
+        )
+        idx += 1
+        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
+            3,
+            1,
+        ]
+        assert np.isclose(
+            float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10
+        )
+        idx += 1
+
+        # qubit 2: H + CP(2,1,π/2) + CP(2,0,π/4)
+        assert isinstance(qc_approx.data[idx].operation, HGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [2]
+        idx += 1
+        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
+            2,
+            1,
+        ]
+        assert np.isclose(
+            float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
+        )
+        idx += 1
+        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
+            2,
+            0,
+        ]
+        assert np.isclose(
+            float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10
+        )
+        idx += 1
+
+        # qubit 1: H + CP(1,0,π/2)
+        assert isinstance(qc_approx.data[idx].operation, HGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [1]
+        idx += 1
+        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
+            1,
+            0,
         ]
         assert np.isclose(
             float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
         )
         idx += 1
 
-        # qubit 4: H only
+        # qubit 0: H only
         assert isinstance(qc_approx.data[idx].operation, HGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [4]
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [0]
         idx += 1
 
         # 2 SWAP gates for bit reversal
@@ -4460,12 +4462,7 @@ class TestStdlibQFT:
         assert qc.num_qubits == 3
 
     def test_qft_then_iqft_transpiles(self):
-        """QFT followed by IQFT can be transpiled and simulated.
-
-        Note: The decomposed QFT/IQFT both include bit-reversal SWAPs,
-        so QFT -> IQFT != identity in general. We verify the circuit
-        transpiles and runs without error.
-        """
+        """QFT followed by IQFT is identity on the input state."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -4480,8 +4477,10 @@ class TestStdlibQFT:
         exe = transpiler.transpile(circuit)
         qc = exe.compiled_quantum[0].circuit
         sv = _run_statevector(qc)
-        # Just verify it produces a valid statevector (norm 1)
-        assert np.isclose(np.linalg.norm(sv), 1.0, atol=1e-10)
+        # QFT -> IQFT must recover the input state X(q[0]) = |01> in Qiskit
+        # convention (qubit 0 is LSB), statevector index 1 = [0, 1, 0, 0]
+        expected = np.array([0, 1, 0, 0], dtype=complex)
+        assert np.allclose(sv, expected, atol=1e-10)
 
     def test_qft_native_emission(self):
         """Native QFT emitter uses Qiskit's QFT library gate."""
@@ -4498,7 +4497,7 @@ class TestStdlibQFT:
         assert len(qc.data) > 0
 
     def test_qft_decomposed_emission(self):
-        """Decomposed QFT uses primitive gates (H, CP)."""
+        """Decomposed QFT uses primitive gates (H, CP) in stdlib high-to-low order."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -4509,17 +4508,18 @@ class TestStdlibQFT:
         transpiler = QiskitTranspiler(use_native_composite=False)
         exe = transpiler.transpile(circuit)
         qc = exe.compiled_quantum[0].circuit
-        # Decomposed QFT 3q: H(0) CP(1,0) CP(2,0) H(1) CP(2,1) H(2) SWAP(0,2) + 3M = 10
+        # Decomposed QFT 3q (stdlib high-to-low):
+        #   H(2) CP(2,1) CP(2,0) H(1) CP(1,0) H(0) SWAP(0,2) + 3M = 10
         assert len(qc.data) == 10
         assert isinstance(qc.data[0].operation, HGate)
-        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0]
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [2]
         assert isinstance(qc.data[1].operation, CPhaseGate)
         assert isinstance(qc.data[2].operation, CPhaseGate)
         assert isinstance(qc.data[3].operation, HGate)
         assert [qc.find_bit(q).index for q in qc.data[3].qubits] == [1]
         assert isinstance(qc.data[4].operation, CPhaseGate)
         assert isinstance(qc.data[5].operation, HGate)
-        assert [qc.find_bit(q).index for q in qc.data[5].qubits] == [2]
+        assert [qc.find_bit(q).index for q in qc.data[5].qubits] == [0]
         assert isinstance(qc.data[6].operation, SwapGate)
         assert [qc.find_bit(q).index for q in qc.data[6].qubits] == [0, 2]
         for i in range(3):
@@ -4551,7 +4551,7 @@ class TestStdlibQPE:
         assert qc.num_qubits == 4  # 3 counting + 1 target
 
     def test_qpe_execution(self):
-        """QPE execution returns valid float results."""
+        """QPE execution returns exact phase estimate via non-native decomposition."""
 
         @qmc.qkernel
         def phase_gate(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
@@ -4569,14 +4569,14 @@ class TestStdlibQPE:
         exe = transpiler.transpile(qpe_3bit, bindings={"phase": np.pi / 2})
         executor = transpiler.executor()
 
-        job = exe.sample(executor, bindings={}, shots=500)
+        job = exe.sample(executor, bindings={}, shots=256)
         result = job.result()
         assert result is not None
-        # QPE should return float values in [0, 1)
-        for value, count in result.results:
-            assert isinstance(value, float)
-            assert 0.0 <= value < 1.0
-            assert count > 0
+        # phase = pi/2 → phase/2π = 0.25, representable exactly in 3-bit QPE
+        assert len(result.results) == 1
+        value, count = result.results[0]
+        assert np.isclose(value, 0.25, atol=1e-9)
+        assert count == 256
 
 
 class TestControlledGate:
@@ -7667,7 +7667,9 @@ class TestLoopBackedgeIfLivenessTranspilation:
         resolved_branch_clbits = []
         if_else_clbits = [body.clbits.index(c) for c in if_inst.clbits]
         for branch_idx, block in enumerate(if_inst.operation.blocks):
-            measures = [inst for inst in block.data if isinstance(inst.operation, Measure)]
+            measures = [
+                inst for inst in block.data if isinstance(inst.operation, Measure)
+            ]
             assert len(measures) == 1, (
                 f"Expected 1 measurement in branch {branch_idx} but got "
                 f"{len(measures)}."
@@ -7721,7 +7723,9 @@ class TestLoopBackedgeIfLivenessTranspilation:
 
         _, qc = _transpile_and_get_circuit(circuit)
 
-        while_insts = [inst for inst in qc.data if isinstance(inst.operation, WhileLoopOp)]
+        while_insts = [
+            inst for inst in qc.data if isinstance(inst.operation, WhileLoopOp)
+        ]
         assert len(while_insts) == 1
         body = while_insts[0].operation.params[0]
         if_insts = [inst for inst in body.data if isinstance(inst.operation, IfElseOp)]
@@ -7731,7 +7735,9 @@ class TestLoopBackedgeIfLivenessTranspilation:
         resolved_branch_clbits = []
         if_else_clbits = [body.clbits.index(c) for c in if_inst.clbits]
         for branch_idx, block in enumerate(if_inst.operation.blocks):
-            measures = [inst for inst in block.data if isinstance(inst.operation, Measure)]
+            measures = [
+                inst for inst in block.data if isinstance(inst.operation, Measure)
+            ]
             assert len(measures) == 1, (
                 f"Expected 1 measurement in branch {branch_idx} but got "
                 f"{len(measures)}."
