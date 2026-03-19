@@ -2169,3 +2169,144 @@ class TestCompileTimeIfArrayQuantumPhi:
 
         _, qc = _transpile_and_get_circuit(circuit)
         assert qc is not None
+
+
+# ============================================================================
+# CUDA-Q helper kernel semantics contract
+# (Issue: cudaq_backend_semantics_contract_issue)
+# ============================================================================
+
+
+class TestCudaqHelperKernelSemanticsContract:
+    """Test CUDA-Q helper kernel emit with correct operand-to-target mapping.
+
+    Verifies that:
+    - Single-control helper touching second target acts on the correct qubit.
+    - Multi-control helper touching second target acts on the correct qubit.
+    - Helper body with unsupported ops raises EmitError (not silent skip).
+    - Existing CCX/CSWAP happy paths remain functional.
+    """
+
+    def test_single_control_second_target(self):
+        """Single-control helper that flips the second target only."""
+
+        @qmc.qkernel
+        def flip_second(a: qmc.Qubit, b: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
+            b = qmc.x(b)
+            return a, b
+
+        cx2 = qmc.controlled(flip_second)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            # Control ON -> should flip q[2] (second target), not q[1]
+            q[0] = qmc.x(q[0])
+            q[0], q[1], q[2] = cx2(q[0], q[1], q[2])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        # |001> with ctrl=q0=1 -> flip second target (q2) -> |101>
+        expected = computational_basis_state(3, 0b101)
+        assert statevectors_equal(sv, expected), (
+            f"Single-control second-target helper: expected |101>, "
+            f"got statevector {sv}"
+        )
+
+    def test_multi_control_second_target(self):
+        """Multi-control helper that flips the second target only."""
+
+        @qmc.qkernel
+        def flip_second(a: qmc.Qubit, b: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
+            b = qmc.x(b)
+            return a, b
+
+        cc = qmc.controlled(flip_second, num_controls=2)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            # Both controls ON -> should flip q[3] (second target)
+            q[0] = qmc.x(q[0])
+            q[1] = qmc.x(q[1])
+            q[0], q[1], q[2], q[3] = cc(q[0], q[1], q[2], q[3])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        # |0011> with both controls=1 -> flip q[3] -> |1011>
+        expected = computational_basis_state(4, 0b1011)
+        assert statevectors_equal(sv, expected), (
+            f"Multi-control second-target helper: expected |1011>, "
+            f"got statevector {sv}"
+        )
+
+    def test_helper_body_with_loop_raises_emit_error(self):
+        """Helper body containing ForOperation should raise EmitError."""
+
+        @qmc.qkernel
+        def loop_gate(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
+            for i in qmc.range(1):
+                q0 = qmc.x(q0)
+                q1 = qmc.x(q1)
+            return q0, q1
+
+        cc = qmc.controlled(loop_gate, num_controls=2)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            q[0] = qmc.x(q[0])
+            q[1] = qmc.x(q[1])
+            q[0], q[1], q[2], q[3] = cc(q[0], q[1], q[2], q[3])
+            return qmc.measure(q)
+
+        with pytest.raises(EmitError, match="Unsupported operation"):
+            _transpile_and_get_circuit(circuit)
+
+    def test_existing_ccx_happy_path_regression(self):
+        """Existing CCX (Toffoli) happy path must not regress."""
+
+        @qmc.qkernel
+        def x_gate(q: qmc.Qubit) -> qmc.Qubit:
+            return qmc.x(q)
+
+        ccx = qmc.controlled(x_gate, num_controls=2)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0] = qmc.x(q[0])
+            q[1] = qmc.x(q[1])
+            q[0], q[1], q[2] = ccx(q[0], q[1], q[2])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        expected = computational_basis_state(3, 0b111)
+        assert statevectors_equal(sv, expected)
+
+    def test_existing_cswap_happy_path_regression(self):
+        """Existing CSWAP (Fredkin) happy path must not regress."""
+
+        @qmc.qkernel
+        def swap_gate(
+            q0: qmc.Qubit, q1: qmc.Qubit
+        ) -> tuple[qmc.Qubit, qmc.Qubit]:
+            return qmc.swap(q0, q1)
+
+        cswap = qmc.controlled(swap_gate)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0] = qmc.x(q[0])
+            q[1] = qmc.x(q[1])
+            q[0], q[1], q[2] = cswap(q[0], q[1], q[2])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        expected = computational_basis_state(3, 0b101)
+        assert statevectors_equal(sv, expected)

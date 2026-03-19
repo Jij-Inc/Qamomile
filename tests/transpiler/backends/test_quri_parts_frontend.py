@@ -5538,5 +5538,87 @@ class TestCompileTimeIfArrayQuantumPhi:
 
 
 # ============================================================================
+# Compile-time if phi propagation (Issue: compile_time_constant_if_phi_propagation)
+# ============================================================================
+
+
+class TestCompileTimeIfPhiPropagation:
+    """Compile-time IfOperation lowering before SeparatePass.
+
+    Tests that compile-time resolvable IfOperations (including expression-
+    derived conditions) are lowered before separation.
+    """
+
+    def test_direct_classical_if_after_qinit(self):
+        """Direct ``if flag:`` after quantum init should not raise."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            theta = qmc.float_(0.1)
+            if flag:
+                theta = qmc.float_(1.0)
+            else:
+                theta = qmc.float_(2.0)
+            q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        _, circ = _transpile_and_get_circuit(circuit, bindings={"flag": 1})
+        assert circ is not None
+
+    def test_comparison_derived_classical_if_after_qinit(self):
+        """``if flag > 0:`` after quantum init should not raise."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            theta = qmc.float_(0.1)
+            if flag > 0:
+                theta = qmc.float_(1.0)
+            else:
+                theta = qmc.float_(2.0)
+            q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        _, circ = _transpile_and_get_circuit(circuit, bindings={"flag": 1})
+        assert circ is not None
+
+    def test_comparison_derived_classical_if_flag_zero(self):
+        """``if flag > 0:`` with flag=0 selects false branch."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            theta = qmc.float_(0.1)
+            if flag > 0:
+                theta = qmc.float_(1.0)
+            else:
+                theta = qmc.float_(2.0)
+            q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        _, circ = _transpile_and_get_circuit(circuit, bindings={"flag": 0})
+        assert circ is not None
+
+    def test_symbolic_parameter_alias_before_qinit(self):
+        """Symbolic parameter through compile-time if should be preserved."""
+        FLAG = True
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Bit:
+            angle = qmc.float_(0.5)
+            if FLAG:
+                angle = theta
+            else:
+                angle = qmc.float_(0.5)
+            q = qmc.qubit("q")
+            q = qmc.rx(q, angle)
+            return qmc.measure(q)
+
+        _, circ = _transpile_and_get_circuit(circuit, parameters=["theta"])
+        assert circ is not None
+
+
+# ============================================================================
 # 31. Portable TranspilerConfig Tests
 # ============================================================================

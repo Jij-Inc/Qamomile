@@ -11,6 +11,7 @@ from typing import Any, Sequence, TYPE_CHECKING
 
 from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
+from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.passes.emit_base import resolve_if_condition
 from qamomile.circuit.transpiler.transpiler import Transpiler
@@ -26,6 +27,67 @@ from .emitter import CudaqCircuit, CudaqGateEmitter
 
 if TYPE_CHECKING:
     import qamomile.observable as qm_o
+
+
+def _build_block_qubit_map(
+    block_value: Any,
+    target_indices: list[int],
+) -> dict[str, int]:
+    """Build a UUID-to-physical-target map for a controlled block.
+
+    Seeds the map from block quantum input_values (positionally matching
+    ``target_indices``), then propagates through all GateOperations so
+    that SSA result versions inherit the same physical target as their
+    operands.
+
+    This allows resolving which physical target an inner gate's operand
+    refers to, even across multiple SSA versions.
+    """
+    qubit_map: dict[str, int] = {}
+
+    # Seed from block inputs.
+    if hasattr(block_value, "input_values"):
+        qubit_idx = 0
+        for iv in block_value.input_values:
+            if hasattr(iv, "type") and iv.type.is_quantum():
+                if qubit_idx < len(target_indices):
+                    qubit_map[iv.uuid] = target_indices[qubit_idx]
+                qubit_idx += 1
+
+    # Propagate through operations: result inherits operand's target.
+    if hasattr(block_value, "operations"):
+        for op in block_value.operations:
+            if isinstance(op, GateOperation):
+                for i, result in enumerate(op.results):
+                    if hasattr(result, "type") and result.type.is_quantum():
+                        # Find the corresponding operand's physical target.
+                        if i < len(op.operands):
+                            operand = op.operands[i]
+                            if hasattr(operand, "uuid") and operand.uuid in qubit_map:
+                                qubit_map[result.uuid] = qubit_map[operand.uuid]
+
+    return qubit_map
+
+
+def _resolve_gate_targets(
+    op: GateOperation,
+    qubit_map: dict[str, int],
+    fallback_targets: list[int],
+) -> list[int]:
+    """Resolve physical target indices for an inner gate's operands.
+
+    For each quantum operand of the gate, looks up the corresponding
+    physical target via ``qubit_map``.  Falls back to ``fallback_targets``
+    if no mapping is found.
+    """
+    resolved: list[int] = []
+    for operand in op.operands:
+        if hasattr(operand, "type") and operand.type.is_quantum():
+            if operand.uuid in qubit_map:
+                resolved.append(qubit_map[operand.uuid])
+            elif fallback_targets:
+                resolved.append(fallback_targets[0])
+    return resolved if resolved else fallback_targets
 
 
 @dataclasses.dataclass
@@ -127,6 +189,13 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
         gate with native multi-control, falling back to the base-class
         single-control decomposition when possible.
 
+        An operand-to-target resolver maps each inner gate's operand to
+        the correct physical target index based on block input positions,
+        rather than hardcoding ``target_indices[0]``.
+
+        Non-``GateOperation`` ops (``ForOperation``, ``CompositeGateOperation``,
+        etc.) raise ``EmitError`` instead of being silently skipped.
+
         Args:
             circuit: The CUDA-Q circuit being built.
             block_value: The block value containing operations to control.
@@ -137,7 +206,8 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
             bindings: Parameter bindings.
 
         Raises:
-            EmitError: When the block body contains unsupported operations.
+            EmitError: When the block body contains unsupported operations
+                or operand-to-target resolution fails.
         """
         if not hasattr(block_value, "operations"):
             raise EmitError(
@@ -145,18 +215,34 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
                 operation="ControlledUOperation",
             )
 
+        # Build operand-to-target map from block inputs, propagated
+        # through SSA versions.
+        block_qubit_map = _build_block_qubit_map(block_value, target_indices)
+
         emitter: CudaqGateEmitter = self._emitter  # type: ignore[assignment]
 
         for _ in range(power):
             for op in block_value.operations:
-                if not isinstance(op, GateOperation):
+                # Skip terminal/no-op operations.
+                if isinstance(op, ReturnOperation):
                     continue
+                if not isinstance(op, GateOperation):
+                    raise EmitError(
+                        f"Unsupported operation {type(op).__name__} in "
+                        f"CUDA-Q controlled block body. Only GateOperation "
+                        f"is supported in helper kernels.",
+                        operation="ControlledUOperation",
+                    )
+                # Resolve target indices for this gate's operands.
+                gate_target_indices = _resolve_gate_targets(
+                    op, block_qubit_map, target_indices
+                )
                 self._emit_cudaq_multi_controlled_gate(
                     circuit,
                     op,
                     emitter,
                     control_indices,
-                    target_indices,
+                    gate_target_indices,
                     bindings,
                 )
 
@@ -182,7 +268,8 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
             op: The gate operation to emit with controls.
             emitter: The CUDA-Q gate emitter.
             control_indices: Physical indices of control qubits.
-            target_indices: Physical indices of target qubits.
+            target_indices: Physical indices of target qubits (resolved
+                per-gate by the caller).
             bindings: Parameter bindings.
 
         Raises:

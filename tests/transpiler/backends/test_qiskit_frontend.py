@@ -7995,3 +7995,193 @@ class TestCompileTimeIfArrayQuantumPhi:
         gate_names = [instr.operation.name for instr in qc.data]
         assert "x" in gate_names
         assert "measure" in gate_names
+
+
+# ============================================================================
+# Compile-time if phi propagation (Issue: compile_time_constant_if_phi_propagation)
+# ============================================================================
+
+
+class TestCompileTimeIfPhiPropagation:
+    """Compile-time IfOperation lowering before SeparatePass.
+
+    Tests that compile-time resolvable IfOperations (including expression-
+    derived conditions like ``if flag > 0:``) are lowered before separation,
+    preventing MultipleQuantumSegmentsError and ensuring phi outputs are
+    correctly propagated.
+    """
+
+    def test_direct_classical_if_after_qinit_flag_true(self):
+        """Direct ``if flag:`` after quantum init should not raise."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            theta = qmc.float_(0.1)
+            if flag:
+                theta = qmc.float_(1.0)
+            else:
+                theta = qmc.float_(2.0)
+            q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 1})
+        gate_names = [instr.operation.name for instr in qc.data]
+        assert "rx" in gate_names
+
+    def test_direct_classical_if_after_qinit_flag_false(self):
+        """Direct ``if flag:`` with flag=0 after quantum init."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            theta = qmc.float_(0.1)
+            if flag:
+                theta = qmc.float_(1.0)
+            else:
+                theta = qmc.float_(2.0)
+            q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 0})
+        gate_names = [instr.operation.name for instr in qc.data]
+        assert "rx" in gate_names
+
+    def test_comparison_derived_classical_if_after_qinit(self):
+        """``if flag > 0:`` after quantum init should not raise."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            theta = qmc.float_(0.1)
+            if flag > 0:
+                theta = qmc.float_(1.0)
+            else:
+                theta = qmc.float_(2.0)
+            q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 1})
+        gate_names = [instr.operation.name for instr in qc.data]
+        assert "rx" in gate_names
+
+    def test_comparison_derived_classical_if_flag_zero(self):
+        """``if flag > 0:`` with flag=0 selects false branch."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            theta = qmc.float_(0.1)
+            if flag > 0:
+                theta = qmc.float_(1.0)
+            else:
+                theta = qmc.float_(2.0)
+            q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 0})
+        gate_names = [instr.operation.name for instr in qc.data]
+        assert "rx" in gate_names
+
+    def test_symbolic_parameter_alias_before_qinit(self):
+        """Symbolic parameter through compile-time if should be preserved."""
+        FLAG = True
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Bit:
+            angle = qmc.float_(0.5)
+            if FLAG:
+                angle = theta
+            else:
+                angle = qmc.float_(0.5)
+            q = qmc.qubit("q")
+            q = qmc.rx(q, angle)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, parameters=["theta"])
+        # Check that the RX gate has a non-zero symbolic parameter
+        for instr in qc.data:
+            if instr.operation.name == "rx":
+                params = instr.operation.params
+                assert len(params) > 0
+                param = params[0]
+                # Should be a ParameterExpression, not 0.0
+                assert isinstance(param, ParameterExpression) or (
+                    isinstance(param, (int, float)) and param != 0.0
+                ), f"RX angle should be symbolic or non-zero, got {param}"
+                break
+        else:
+            pytest.fail("No RX gate found in circuit")
+
+    def test_bit_vector_phi_merge_flag_true(self):
+        """Branch-local measurement Vector[Bit] phi merge with flag=True."""
+        flag = True
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            alt = qmc.qubit_array(2, "alt")
+            q[0] = qmc.x(q[0])
+            alt[1] = qmc.x(alt[1])
+            if flag:
+                bits = qmc.measure(q)
+            else:
+                bits = qmc.measure(alt)
+            return bits
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+        job = exe.sample(executor, shots=20)
+        results = job.result().results
+        # flag=True selects q which has X on q[0] -> (1, 0)
+        for val, count in results:
+            assert val is not None, "Bit vector result should not be None"
+
+    def test_bit_vector_phi_merge_flag_false(self):
+        """Branch-local measurement Vector[Bit] phi merge with flag=False."""
+        flag = False
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            alt = qmc.qubit_array(2, "alt")
+            q[0] = qmc.x(q[0])
+            alt[1] = qmc.x(alt[1])
+            if flag:
+                bits = qmc.measure(q)
+            else:
+                bits = qmc.measure(alt)
+            return bits
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+        job = exe.sample(executor, shots=20)
+        results = job.result().results
+        # flag=False selects alt which has X on alt[1] -> (0, 1)
+        for val, count in results:
+            assert val is not None, "Bit vector result should not be None"
+
+    def test_array_quantum_phi_happy_path_regression(self):
+        """Existing array-quantum phi happy path must not regress."""
+        flag = True
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            if flag:
+                q[0] = qmc.x(q[0])
+            else:
+                alt = qmc.qubit_array(2, "alt")
+                alt[1] = qmc.x(alt[1])
+                q = alt
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+        job = exe.sample(executor, shots=20)
+        results = job.result().results
+        for val, count in results:
+            assert val == (1, 0), f"Expected (1, 0), got {val}"

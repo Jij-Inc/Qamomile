@@ -43,10 +43,12 @@ def float_(arg: str) -> Float: ...
 def float_(arg: float | str) -> Float:
     """Create a Float handle from a float literal or declare a named Float parameter."""
     name = str(arg) if isinstance(arg, str) else "float_const"
-    value = Value(type=ir_type.FloatType(), name=name)
     if isinstance(arg, float):
+        # Set params={"const": arg} so Value.is_constant() returns True
+        value = Value(type=ir_type.FloatType(), name=name, params={"const": arg})
         return Float(value=value, init_value=arg)
     elif isinstance(arg, str):
+        value = Value(type=ir_type.FloatType(), name=name)
         return Float(name=arg, value=value)
     else:
         raise TypeError("Argument must be of type float or str")
@@ -63,12 +65,16 @@ def bit(arg: int) -> Bit: ...
 def bit(arg: bool | str | int) -> Bit:
     """Create a Bit handle from a boolean/int literal or declare a named Bit parameter."""
     name = str(arg) if isinstance(arg, str) else "bit_const"
-    value = Value(type=ir_type.BitType(), name=name)
     if isinstance(arg, bool):
+        # Set params={"const": arg} so Value.is_constant() returns True
+        value = Value(type=ir_type.BitType(), name=name, params={"const": arg})
         return Bit(value=value, init_value=arg)
     elif isinstance(arg, str):
+        value = Value(type=ir_type.BitType(), name=name)
         return Bit(name=arg, value=value)
     elif isinstance(arg, int):
+        # Set params={"const": bool(arg)} so Value.is_constant() returns True
+        value = Value(type=ir_type.BitType(), name=name, params={"const": bool(arg)})
         return Bit(value=value, init_value=bool(arg))
     else:
         raise TypeError("Argument must be of type bool, str, or int")
