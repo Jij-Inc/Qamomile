@@ -62,22 +62,15 @@ def __getattr__(name: str) -> object:
     Raises :class:`AttributeError` for unknown names and :class:`ImportError`
     with install guidance when the ``cudaq`` package is not present.
 
-    Parameters
-    ----------
-    name:
-        Attribute name being accessed on this module.
+    Args:
+        name: Attribute name being accessed on this module.
 
-    Returns
-    -------
-    object
+    Returns:
         The requested symbol, cached into module globals for subsequent access.
 
-    Raises
-    ------
-    AttributeError
-        If *name* is not a known public symbol of this module.
-    ImportError
-        If the ``cudaq`` package is not installed.
+    Raises:
+        AttributeError: If *name* is not a known public symbol of this module.
+        ImportError: If the ``cudaq`` package is not installed.
     """
     if name not in _SYMBOL_TO_MODULE:
         raise AttributeError(f"module 'qamomile.cudaq' has no attribute {name!r}")

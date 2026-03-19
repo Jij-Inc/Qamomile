@@ -19,6 +19,7 @@ from qamomile.circuit.ir.operation.control_flow import (
 )
 from qamomile.circuit.transpiler.transpiler import Transpiler
 from qamomile.circuit.transpiler.passes.emit import EmitPass
+from qamomile.circuit.transpiler.passes.emit_base import resolve_if_condition
 from qamomile.circuit.transpiler.passes.separate import SeparatePass
 from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
 from qamomile.circuit.transpiler.executable import (
@@ -123,7 +124,7 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         condition = op.condition
 
         # Compile-time constant conditions are handled by the base class.
-        if not hasattr(condition, "uuid"):
+        if resolve_if_condition(condition, bindings) is not None:
             super()._emit_if(circuit, op, qubit_map, clbit_map, bindings)
             return
 

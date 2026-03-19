@@ -10,7 +10,9 @@ import dataclasses
 from typing import Any, Sequence, TYPE_CHECKING
 
 from qamomile.circuit.ir.operation.control_flow import IfOperation
+from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
 from qamomile.circuit.transpiler.errors import EmitError
+from qamomile.circuit.transpiler.passes.emit_base import resolve_if_condition
 from qamomile.circuit.transpiler.transpiler import Transpiler
 from qamomile.circuit.transpiler.passes.emit import EmitPass
 from qamomile.circuit.transpiler.passes.separate import SeparatePass
@@ -97,7 +99,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
         condition = op.condition
 
         # Compile-time constant conditions are handled by the base class.
-        if not hasattr(condition, "uuid"):
+        if resolve_if_condition(condition, bindings) is not None:
             super()._emit_if(circuit, op, qubit_map, clbit_map, bindings)
             return
 
@@ -105,6 +107,137 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
             "CUDA-Q 0.14.x does not support measurement-dependent conditional "
             "branching. The `c_if` builder API was removed in 0.14.0. "
             "Refactor to use static circuits without runtime conditional branching."
+        )
+
+    def _emit_controlled_fallback(
+        self,
+        circuit: CudaqCircuit,
+        block_value: Any,
+        num_controls: int,
+        control_indices: list[int],
+        target_indices: list[int],
+        power: int,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit controlled-U using CUDA-Q native multi-control.
+
+        CUDA-Q supports ``kernel.<gate>([controls], target)`` for
+        multi-controlled single-qubit gates.  This override handles
+        multi-control by iterating over the block body and emitting each
+        gate with native multi-control, falling back to the base-class
+        single-control decomposition when possible.
+
+        Args:
+            circuit: The CUDA-Q circuit being built.
+            block_value: The block value containing operations to control.
+            num_controls: Number of control qubits.
+            control_indices: Physical indices of control qubits.
+            target_indices: Physical indices of target qubits.
+            power: Number of times to repeat the controlled operation.
+            bindings: Parameter bindings.
+
+        Raises:
+            EmitError: When the block body contains unsupported operations.
+        """
+        if not hasattr(block_value, "operations"):
+            raise EmitError(
+                "Cannot emit controlled operation: block has no operations.",
+                operation="ControlledUOperation",
+            )
+
+        emitter: CudaqGateEmitter = self._emitter  # type: ignore[assignment]
+
+        for _ in range(power):
+            for op in block_value.operations:
+                if not isinstance(op, GateOperation):
+                    continue
+                self._emit_cudaq_multi_controlled_gate(
+                    circuit,
+                    op,
+                    emitter,
+                    control_indices,
+                    target_indices,
+                    bindings,
+                )
+
+    def _emit_cudaq_multi_controlled_gate(
+        self,
+        circuit: CudaqCircuit,
+        op: GateOperation,
+        emitter: CudaqGateEmitter,
+        control_indices: list[int],
+        target_indices: list[int],
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit a single multi-controlled gate via CUDA-Q native multi-control.
+
+        CUDA-Q natively supports multi-controlled X via
+        ``kernel.cx([controls], target)``.  Other gate types are
+        decomposed into multi-controlled X plus single-qubit rotations
+        using standard conjugation identities, or raise ``EmitError``
+        when no decomposition is available.
+
+        Args:
+            circuit: The CUDA-Q circuit being built.
+            op: The gate operation to emit with controls.
+            emitter: The CUDA-Q gate emitter.
+            control_indices: Physical indices of control qubits.
+            target_indices: Physical indices of target qubits.
+            bindings: Parameter bindings.
+
+        Raises:
+            EmitError: When the gate type is unsupported for multi-control.
+        """
+        if not target_indices:
+            return
+
+        target_idx = target_indices[0]
+        gate_type = op.gate_type
+
+        # Multi-controlled X: native CUDA-Q cx with list of controls
+        if gate_type == GateOperationType.X:
+            emitter.emit_multi_controlled_x(
+                circuit,
+                control_indices,
+                target_idx,
+            )
+            return
+
+        # Multi-controlled SWAP (Fredkin):
+        #   CNOT(b, a) → MC-X(ctrls + [a], b) → CNOT(b, a)
+        if gate_type == GateOperationType.SWAP:
+            if len(target_indices) < 2:
+                raise EmitError(
+                    "Controlled-SWAP requires at least 2 target qubits.",
+                    operation="ControlledGate",
+                )
+            tgt_a = target_indices[0]
+            tgt_b = target_indices[1]
+            emitter.emit_cx(circuit, tgt_b, tgt_a)
+            emitter.emit_multi_controlled_x(
+                circuit,
+                control_indices + [tgt_a],
+                tgt_b,
+            )
+            emitter.emit_cx(circuit, tgt_b, tgt_a)
+            return
+
+        # Single-control: fall back to existing controlled-gate emitters
+        if len(control_indices) == 1:
+            self._emit_controlled_gate(
+                circuit,
+                op,
+                control_indices[0],
+                target_indices,
+                bindings,
+            )
+            return
+
+        raise EmitError(
+            f"Unsupported gate type {gate_type!r} in CUDA-Q multi-controlled "
+            f"block decomposition. Only X and SWAP are natively supported "
+            f"with multiple controls.",
+            operation="ControlledGate",
         )
 
 

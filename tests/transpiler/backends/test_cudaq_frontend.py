@@ -1970,3 +1970,202 @@ class TestSamplingOrdering:
 
         result = exe.run(executor).result()
         assert result == (0, 1), f"Expected (0, 1), got {result}"
+
+
+# ============================================================================
+# Bound constant if-condition tests (Issue: bound_constant_if_misclassified)
+# ============================================================================
+
+
+class TestBoundConstantIfConditionCudaq:
+    """Test that bound parameters in if-conditions are correctly resolved
+    as compile-time constants on CUDA-Q (no measurement-dependent error)."""
+
+    def test_bound_flag_true_no_error(self):
+        """bindings={"flag": 1} should not raise measurement-dependent error."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 1})
+        assert qc.num_qubits == 1
+
+    def test_bound_flag_true_statevector(self):
+        """bindings={"flag": 1} if-X should produce |1> statevector."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 1})
+        sv = _run_statevector(qc)
+        expected = computational_basis_state(1, 1)  # |1>
+        assert statevectors_equal(sv, expected)
+
+    def test_bound_flag_false_statevector(self):
+        """bindings={"flag": 0} if-X should produce |0> statevector."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 0})
+        sv = _run_statevector(qc)
+        expected = computational_basis_state(1, 0)  # |0>
+        assert statevectors_equal(sv, expected)
+
+    def test_runtime_measurement_if_still_rejected(self):
+        """Runtime measurement-dependent if still raises EmitError."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            q0 = qmc.x(q0)
+            bit = qmc.measure(q0)
+            if bit:
+                q1 = qmc.x(q1)
+            return qmc.measure(q1)
+
+        with pytest.raises(EmitError, match="measurement-dependent"):
+            _transpile_and_get_circuit(circuit)
+
+
+# ============================================================================
+# Controlled helper kernel tests (Issue: cudaq_controlled_helper_gate_conversion)
+# ============================================================================
+
+
+class TestControlledHelperCudaq:
+    """Test qmc.controlled() helper kernels on CUDA-Q."""
+
+    def test_controlled_x_double_control_statevector(self):
+        """qmc.controlled(x_gate, num_controls=2) should act as Toffoli."""
+
+        @qmc.qkernel
+        def x_gate(q: qmc.Qubit) -> qmc.Qubit:
+            return qmc.x(q)
+
+        ccx = qmc.controlled(x_gate, num_controls=2)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            # Prepare |110>: controls ON, target OFF
+            q[0] = qmc.x(q[0])
+            q[1] = qmc.x(q[1])
+            q[0], q[1], q[2] = ccx(q[0], q[1], q[2])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        # |110> → Toffoli → |111>
+        expected = computational_basis_state(3, 0b111)
+        assert statevectors_equal(sv, expected)
+
+    def test_controlled_x_double_control_off(self):
+        """CCX with one control off should not flip target."""
+
+        @qmc.qkernel
+        def x_gate(q: qmc.Qubit) -> qmc.Qubit:
+            return qmc.x(q)
+
+        ccx = qmc.controlled(x_gate, num_controls=2)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            # Prepare |100>: only first control ON
+            q[0] = qmc.x(q[0])
+            q[0], q[1], q[2] = ccx(q[0], q[1], q[2])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        # |100> → Toffoli → |100> (no flip)
+        expected = computational_basis_state(3, 0b001)
+        assert statevectors_equal(sv, expected)
+
+    def test_controlled_swap_statevector(self):
+        """Controlled-SWAP (Fredkin) should swap targets when control is ON."""
+
+        @qmc.qkernel
+        def swap_gate(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
+            return qmc.swap(q0, q1)
+
+        cswap = qmc.controlled(swap_gate)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            # Prepare |011> (q0=1, q1=1, q2=0 in big-endian)
+            q[0] = qmc.x(q[0])
+            q[1] = qmc.x(q[1])
+            q[0], q[1], q[2] = cswap(q[0], q[1], q[2])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        # |011> with ctrl=q0=1 → swap q1,q2 → |101>
+        expected = computational_basis_state(3, 0b101)
+        assert statevectors_equal(sv, expected)
+
+    def test_controlled_swap_control_off(self):
+        """Controlled-SWAP with control OFF should not swap."""
+
+        @qmc.qkernel
+        def swap_gate(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
+            return qmc.swap(q0, q1)
+
+        cswap = qmc.controlled(swap_gate)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            # Prepare |010> (q0=0, q1=1, q2=0)
+            q[1] = qmc.x(q[1])
+            q[0], q[1], q[2] = cswap(q[0], q[1], q[2])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        # |010> with ctrl=q0=0 → no swap → |010>
+        expected = computational_basis_state(3, 0b010)
+        assert statevectors_equal(sv, expected)
+
+
+# ============================================================================
+# Compile-time constant if with array quantum phi output
+# ============================================================================
+
+
+class TestCompileTimeIfArrayQuantumPhi:
+    """Compile-time constant if with array quantum phi must not raise EmitError."""
+
+    def test_dead_branch_different_array(self):
+        """Dead branch rebinds qubit array to a different array."""
+        flag = True
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            if flag:
+                q[0] = qmc.x(q[0])
+            else:
+                alt = qmc.qubit_array(2, "alt")
+                alt[1] = qmc.x(alt[1])
+                q = alt
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc is not None

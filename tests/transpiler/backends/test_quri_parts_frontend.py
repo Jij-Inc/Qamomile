@@ -5511,5 +5511,32 @@ class TestQubitArrayPatterns:
 
 
 # ============================================================================
-# 30. Portable TranspilerConfig Tests
+# 30. Compile-time constant if with array quantum phi output
+# ============================================================================
+
+
+class TestCompileTimeIfArrayQuantumPhi:
+    """Compile-time constant if with array quantum phi must not raise EmitError."""
+
+    def test_dead_branch_different_array(self):
+        """Dead branch rebinds qubit array to a different array."""
+        flag = True
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            if flag:
+                q[0] = qmc.x(q[0])
+            else:
+                alt = qmc.qubit_array(2, "alt")
+                alt[1] = qmc.x(alt[1])
+                q = alt
+            return qmc.measure(q)
+
+        _, circ = _transpile_and_get_circuit(circuit)
+        assert circ is not None
+
+
+# ============================================================================
+# 31. Portable TranspilerConfig Tests
 # ============================================================================

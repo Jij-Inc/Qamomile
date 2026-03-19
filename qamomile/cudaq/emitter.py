@@ -347,6 +347,31 @@ class CudaqGateEmitter:
         return None
 
     # ------------------------------------------------------------------
+    # Multi-controlled gate emission
+    # ------------------------------------------------------------------
+
+    def emit_multi_controlled_x(
+        self,
+        circuit: CudaqCircuit,
+        control_indices: list[int],
+        target_idx: int,
+    ) -> None:
+        """Emit a multi-controlled X gate using CUDA-Q's native ``cx``.
+
+        CUDA-Q supports ``kernel.cx([controls], target)`` for
+        multi-controlled CNOT, which generalises to N-controlled X.
+
+        Args:
+            circuit: The CUDA-Q circuit being built.
+            control_indices: Physical indices of control qubits.
+            target_idx: Physical index of target qubit.
+        """
+        k = circuit.kernel
+        q = circuit.qubits
+        controls = [q[i] for i in control_indices]
+        k.cx(controls, q[target_idx])
+
+    # ------------------------------------------------------------------
     # Control flow support
     # ------------------------------------------------------------------
 

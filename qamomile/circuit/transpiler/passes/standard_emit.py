@@ -41,6 +41,8 @@ from qamomile.circuit.transpiler.passes.emit_base import (
     LoopAnalyzer,
     CompositeDecomposer,
     map_phi_outputs,
+    remap_static_phi_outputs,
+    resolve_if_condition,
 )
 from qamomile.circuit.transpiler.errors import (
     EmitError,
@@ -647,19 +649,24 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         Handles two condition types:
 
         1. **Compile-time constant** (plain Python ``int``/``bool`` from
-           ``@qkernel`` AST transformer closure variables): the active
+           ``@qkernel`` AST transformer closure variables, constant-folded
+           Values, or Values resolvable via ``bindings``): the active
            branch is emitted unconditionally, the inactive branch is
            discarded.  No backend ``c_if`` / ``if_test`` is needed.
-        2. **Runtime condition** (measurement ``Value`` with ``.uuid``):
-           delegates to the backend's ``emit_if_start`` /
-           ``emit_else_start`` / ``emit_if_end`` protocol.
+        2. **Runtime condition** (measurement ``Value`` that cannot be
+           resolved at compile time): delegates to the backend's
+           ``emit_if_start`` / ``emit_else_start`` / ``emit_if_end``
+           protocol.
         """
         condition = op.condition
+        resolved = resolve_if_condition(condition, bindings)
 
-        # Compile-time constant condition (plain int/bool captured by
-        # @qkernel AST transformer from closure variables).
-        if not hasattr(condition, "uuid"):
-            if condition:
+        # Compile-time constant condition: emit only the selected branch.
+        # Use remap_static_phi_outputs (not the runtime map_phi_outputs
+        # validator) so that dead-branch array quantum phi outputs are
+        # aliased from the selected branch only.
+        if resolved is not None:
+            if resolved:
                 self._emit_operations(
                     circuit, op.true_operations, qubit_map, clbit_map, bindings
                 )
@@ -667,7 +674,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 self._emit_operations(
                     circuit, op.false_operations, qubit_map, clbit_map, bindings
                 )
-            self._register_phi_outputs(op, qubit_map, clbit_map, bindings)
+            remap_static_phi_outputs(op.phi_ops, resolved, qubit_map, clbit_map)
             return
 
         condition_uuid = condition.uuid
@@ -1162,6 +1169,27 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 self._emitter.emit_cp(circuit, control_idx, target_idx, -math.pi / 2)
             case GateOperationType.TDG:
                 self._emitter.emit_cp(circuit, control_idx, target_idx, -math.pi / 4)
+            case GateOperationType.SWAP:
+                if len(target_indices) < 2:
+                    raise EmitError(
+                        "Controlled-SWAP requires at least 2 target qubits.",
+                        operation="ControlledGate",
+                    )
+                tgt_a = target_indices[0]
+                tgt_b = target_indices[1]
+                # Fredkin gate decomposition:
+                #   CNOT(tgt_b, tgt_a)
+                #   Toffoli(ctrl, tgt_a, tgt_b)
+                #   CNOT(tgt_b, tgt_a)
+                self._emitter.emit_cx(circuit, tgt_b, tgt_a)
+                self._emitter.emit_toffoli(circuit, control_idx, tgt_a, tgt_b)
+                self._emitter.emit_cx(circuit, tgt_b, tgt_a)
+            case _:
+                raise EmitError(
+                    f"Unsupported gate type {op.gate_type!r} in controlled "
+                    f"block decomposition.",
+                    operation="ControlledGate",
+                )
 
     def _resolve_power(
         self,
@@ -1395,20 +1423,15 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 circuit, controlled_gate, control_phys + target_phys
             )
         else:
-            if nc > 1:
-                raise EmitError(
-                    f"Cannot decompose multi-controlled operation (num_controls={nc}).",
-                    operation="ControlledUOperation",
-                )
-            for _ in range(power_value):
-                for ctrl_idx in control_phys:
-                    self._emit_controlled_block(
-                        circuit,
-                        block_value,
-                        ctrl_idx,
-                        target_phys,
-                        local_bindings,
-                    )
+            self._emit_controlled_fallback(
+                circuit,
+                block_value,
+                nc,
+                control_phys,
+                target_phys,
+                power_value,
+                local_bindings,
+            )
 
         # 9. Map result ArrayValue in qubit_map
         vector_result = op.results[0]
@@ -1508,28 +1531,66 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 circuit, controlled_gate, control_indices + target_indices
             )
         else:
-            if op.num_controls > 1:
-                raise EmitError(
-                    f"Cannot decompose multi-controlled operation "
-                    f"(num_controls={op.num_controls}): "
-                    f"block-to-gate conversion failed and the "
-                    f"fallback decomposition only supports single control.",
-                    operation="ControlledUOperation",
-                )
-            for _ in range(power_value):
-                for ctrl_idx in control_indices:
-                    self._emit_controlled_block(
-                        circuit,
-                        block_value,
-                        ctrl_idx,
-                        target_indices,
-                        local_bindings,
-                    )
+            self._emit_controlled_fallback(
+                circuit,
+                block_value,
+                op.num_controls,
+                control_indices,
+                target_indices,
+                power_value,
+                local_bindings,
+            )
 
         all_input_indices = control_indices + target_indices
         for i, result in enumerate(op.results):
             if i < len(all_input_indices):
                 qubit_map[result.uuid] = all_input_indices[i]
+
+    def _emit_controlled_fallback(
+        self,
+        circuit: T,
+        block_value: Any,
+        num_controls: int,
+        control_indices: list[int],
+        target_indices: list[int],
+        power: int,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Fallback emission for controlled-U when gate conversion fails.
+
+        Decomposes the block body gate-by-gate with single-control emission.
+        Subclasses may override to support multi-control natively.
+
+        Args:
+            circuit: The backend circuit being built.
+            block_value: The block value containing operations to control.
+            num_controls: Number of control qubits.
+            control_indices: Physical indices of control qubits.
+            target_indices: Physical indices of target qubits.
+            power: Number of times to repeat the controlled operation.
+            bindings: Parameter bindings.
+
+        Raises:
+            EmitError: When num_controls > 1 (multi-control not supported
+                in the default gate-by-gate decomposition).
+        """
+        if num_controls > 1:
+            raise EmitError(
+                f"Cannot decompose multi-controlled operation "
+                f"(num_controls={num_controls}): "
+                f"block-to-gate conversion failed and the "
+                f"fallback decomposition only supports single control.",
+                operation="ControlledUOperation",
+            )
+        for _ in range(power):
+            for ctrl_idx in control_indices:
+                self._emit_controlled_block(
+                    circuit,
+                    block_value,
+                    ctrl_idx,
+                    target_indices,
+                    bindings,
+                )
 
     def _emit_custom_composite(
         self,

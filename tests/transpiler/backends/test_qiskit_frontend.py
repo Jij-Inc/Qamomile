@@ -7823,3 +7823,175 @@ class TestDeadPhiTranspilation:
 
         _, qc = _transpile_and_get_circuit(circuit)
         assert qc is not None
+
+
+# ============================================================================
+# Bound constant if-condition tests (Issue: bound_constant_if_misclassified)
+# ============================================================================
+
+
+class TestBoundConstantIfCondition:
+    """Test that bound parameters in if-conditions are correctly resolved as
+    compile-time constants, not misclassified as runtime conditions."""
+
+    def test_bound_flag_true_emits_true_branch(self):
+        """bindings={"flag": 1} should statically select the true branch."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 1})
+        gate_names = [instr.operation.name for instr in qc.data]
+        assert "x" in gate_names, (
+            f"True branch (X gate) missing from circuit: {gate_names}"
+        )
+
+    def test_bound_flag_false_emits_false_branch(self):
+        """bindings={"flag": 0} should statically select the false branch."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 0})
+        gate_names = [instr.operation.name for instr in qc.data]
+        assert "x" not in gate_names, (
+            f"False branch selected but X gate still present: {gate_names}"
+        )
+
+    def test_bound_flag_true_statevector(self):
+        """Bound flag=1 if-X should produce |1> statevector."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 1})
+        from qiskit_aer import AerSimulator
+
+        backend = AerSimulator(method="statevector")
+        qc_no_meas = qc.remove_final_measurements(inplace=False)
+        qc_no_meas.save_statevector()
+        result = backend.run(qc_no_meas).result()
+        sv = np.array(result.get_statevector())
+        expected = computational_basis_state(1, 1)  # |1>
+        assert statevectors_equal(sv, expected)
+
+    def test_bound_flag_false_statevector(self):
+        """Bound flag=0 if-X should produce |0> statevector."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 0})
+        from qiskit_aer import AerSimulator
+
+        backend = AerSimulator(method="statevector")
+        qc_no_meas = qc.remove_final_measurements(inplace=False)
+        qc_no_meas.save_statevector()
+        result = backend.run(qc_no_meas).result()
+        sv = np.array(result.get_statevector())
+        expected = computational_basis_state(1, 0)  # |0>
+        assert statevectors_equal(sv, expected)
+
+    def test_closure_constant_still_works(self):
+        """Plain Python bool closure constants should still work as before."""
+        flag = True
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        gate_names = [instr.operation.name for instr in qc.data]
+        assert "x" in gate_names
+
+
+# ============================================================================
+# Compile-time constant if with array quantum phi output
+# ============================================================================
+
+
+class TestCompileTimeIfArrayQuantumPhi:
+    """Compile-time constant if with array quantum phi must not raise EmitError.
+
+    When a compile-time constant ``if`` has a dead branch that rebinds a
+    qubit array to a different array, the emit-time phi registration must
+    use selected-branch-only remap (not the runtime two-branch validator).
+    """
+
+    def test_dead_branch_different_array_true_branch(self):
+        """True branch selected: dead branch rebinds to different array."""
+        flag = True
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            if flag:
+                q[0] = qmc.x(q[0])
+            else:
+                alt = qmc.qubit_array(2, "alt")
+                alt[1] = qmc.x(alt[1])
+                q = alt
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        gate_names = [instr.operation.name for instr in qc.data]
+        assert "x" in gate_names
+        assert "measure" in gate_names
+
+    def test_dead_branch_different_array_false_branch(self):
+        """False branch selected: dead branch in true side."""
+        flag = False
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            if flag:
+                alt = qmc.qubit_array(2, "alt")
+                alt[0] = qmc.x(alt[0])
+                q = alt
+            else:
+                q[1] = qmc.x(q[1])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        gate_names = [instr.operation.name for instr in qc.data]
+        assert "x" in gate_names
+        assert "measure" in gate_names
+
+    def test_scalar_compile_time_if_still_works(self):
+        """Scalar qubit rebind in compile-time if remains functional."""
+        flag = True
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.x(q)
+            else:
+                alt = qmc.qubit("alt")
+                q = alt
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        gate_names = [instr.operation.name for instr in qc.data]
+        assert "x" in gate_names
+        assert "measure" in gate_names
