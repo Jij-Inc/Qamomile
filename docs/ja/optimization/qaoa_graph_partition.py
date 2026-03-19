@@ -5,18 +5,17 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.1
 #   kernelspec:
-#     display_name: qamomile
+#     display_name: Python 3
 #     language: python
-#     name: qamomile
+#     name: python3
 # ---
 
 # %% [markdown]
 # # QAOA によるグラフ分割
 #
-# 本チュートリアルでは、Quantum Approximate Optimization Algorithm（QAOA）を用いて
-# **グラフ分割問題**を解く方法を紹介します。
+# 本チュートリアルでは、Quantum Approximate Optimization Algorithm（QAOA）を用いて**グラフ分割問題**を解く方法を紹介します。
 #
 # ワークフロー：
 #
@@ -24,7 +23,7 @@
 # JijModeling 問題定義 → problem.eval() → QAOAConverter → transpile → sample → decode
 # ```
 #
-# 1. [JijModeling](https://www.documentation.jijzept.com/docs/jijmodeling/) で問題を定式化する。
+# 1. [JijModeling](https://jij-inc-jijmodeling-tutorials-ja.readthedocs-hosted.com/ja/latest/introduction.html) で問題を定式化する。
 # 2. 具体的なデータでインスタンスを作成する。
 # 3. `QAOAConverter` を使って QAOA 回路とハミルトニアンを構築する。
 # 4. 古典オプティマイザで変分パラメータを最適化する。
@@ -33,8 +32,7 @@
 # %% [markdown]
 # ## 問題の定式化
 #
-# 無向グラフ $G = (V, E)$ が与えられたとき、頂点を同じサイズの 2 つのグループに
-# 分割し、グループ間のエッジ数を最小化することが目標です。
+# 無向グラフ $G = (V, E)$ が与えられたとき、頂点を同じサイズの 2 つのグループに分割し、グループ間のエッジ数を最小化することが目標です。
 #
 # **目的関数：**
 #
@@ -74,7 +72,7 @@ def _(problem: jm.DecoratedProblem):
     problem += problem.Constraint("equal_partition", x.sum() == V / 2)
 
 
-print(problem)
+problem
 
 # %% [markdown]
 # ## グラフインスタンス
@@ -125,10 +123,7 @@ instance = problem.eval(instance_data)
 # 2. BINARY ドメインから SPIN ドメインへ変換。
 # 3. Pauli-Z 演算子の和としてコストハミルトニアンを構築。
 #
-# 元の問題には制約があるため、QUBO 定式化では制約が**ペナルティ項**として
-# 目的関数に組み込まれます。そのため、デコードされたサンプルのエネルギー値は
-# 元の目的関数（カットエッジ数）とは**異なり**、ペナルティを含んでいます。
-# 実行可能性の確認と真の目的関数値の計算を別途行う必要があります。
+# 元の問題には制約があるため、QUBO 定式化では制約が**ペナルティ項**として目的関数に組み込まれます。そのため、デコードされたサンプルのエネルギー値は元の目的関数（カットエッジ数）とは**異なり**、ペナルティを含んでいます。実行可能性の確認と真の目的関数値の計算を別途行う必要があります。
 
 # %%
 from qamomile.optimization.qaoa import QAOAConverter
@@ -140,9 +135,7 @@ print(hamiltonian)
 # %% [markdown]
 # ## 実行可能な回路へのトランスパイル
 #
-# `converter.transpile()` は `p` 層の QAOA アンザッツ回路を構築し、
-# `ExecutableProgram` にコンパイルします。変分パラメータ `gammas`（コスト層）と
-# `betas`（ミキサー層）はランタイムパラメータとして残ります。
+# `converter.transpile()` は `p` 層の QAOA アンザッツ回路を構築し、`ExecutableProgram` にコンパイルします。変分パラメータ `gammas`（コスト層）と `betas`（ミキサー層）はランタイムパラメータとして残ります。
 
 # %%
 from qamomile.qiskit import QiskitTranspiler
@@ -154,30 +147,13 @@ executable = converter.transpile(transpiler, p=p)
 # %% [markdown]
 # ## QAOA パラメータの最適化
 #
-# `ExecutableProgram` からパラメトリック Qiskit 回路を取り出し、
-# 測定ゲートを除去した上で `StatevectorEstimator` でコストハミルトニアンを
-# 評価します。これにより、ショットノイズなしの厳密な期待値
-# $\langle \psi(\gamma, \beta) | H_C | \psi(\gamma, \beta) \rangle$
-# を計算し、SciPy の COBYLA オプティマイザでコストを最小化する
-# `gammas` と `betas` を探索します。
+# `executable.sample()` を使って各イテレーションでコストを評価します。オプティマイザはサンプリングされたビット列の平均エネルギーを最小化する `gammas` と `betas` を探索します。
 
 # %%
 import numpy as np
 from scipy.optimize import minimize
-from qiskit.primitives import StatevectorEstimator
-from qamomile.qiskit.observable import hamiltonian_to_sparse_pauli_op
 
-# 厳密推定のため測定なしの回路を取得
-circuit = executable.quantum_circuit
-circuit_no_meas = circuit.remove_final_measurements(inplace=False)
-
-# ハミルトニアンを Qiskit SparsePauliOp に変換
-qk_hamiltonian = hamiltonian_to_sparse_pauli_op(hamiltonian)
-
-# パラメータ名から Qiskit Parameter オブジェクトへのマッピング
-param_map = {param.name: param for param in circuit_no_meas.parameters}
-
-estimator = StatevectorEstimator()
+executor = transpiler.executor()
 
 initial_params = [
     np.pi / 4, np.pi / 2, np.pi / 2,  # gammas
@@ -188,18 +164,18 @@ cost_history = []
 
 
 def cost_fn(params):
-    gammas = params[:p]
-    betas = params[p:]
-    bindings = {}
-    for i in range(p):
-        bindings[param_map[f"gammas[{i}]"]] = gammas[i]
-        bindings[param_map[f"betas[{i}]"]] = betas[i]
-    bound_circuit = circuit_no_meas.assign_parameters(bindings)
-    job = estimator.run([(bound_circuit, qk_hamiltonian)])
+    gammas = list(params[:p])
+    betas = list(params[p:])
+    job = executable.sample(
+        executor,
+        shots=512,
+        bindings={"gammas": gammas, "betas": betas},
+    )
     result = job.result()
-    cost = float(result[0].data.evs)
-    cost_history.append(cost)
-    return cost
+    decoded = converter.decode(result)
+    energy = decoded.energy_mean()
+    cost_history.append(energy)
+    return energy
 
 
 res = minimize(
@@ -209,15 +185,15 @@ res = minimize(
     options={"maxiter": 1000},
 )
 
-print(f"最適化されたコスト: {res.fun:.3f}")
-print(f"最適パラメータ:     {[round(v, 4) for v in res.x]}")
-print(f"関数評価回数:       {res.nfev}")
+print(f"Optimized cost: {res.fun:.3f}")
+print(f"Optimal params: {[round(v, 4) for v in res.x]}")
+print(f"Function evaluations: {res.nfev}")
 
 # %%
 plt.figure(figsize=(8, 4))
 plt.plot(cost_history, color="#2696EB")
 plt.xlabel("Iteration")
-plt.ylabel("Cost (exact expectation value)")
+plt.ylabel("Cost (mean energy)")
 plt.title("QAOA Optimization Progress")
 plt.show()
 
@@ -231,7 +207,7 @@ gammas_opt = list(res.x[:p])
 betas_opt = list(res.x[p:])
 
 sample_result = executable.sample(
-    transpiler.executor(),
+    executor,
     shots=1000,
     bindings={"gammas": gammas_opt, "betas": betas_opt},
 ).result()
@@ -243,15 +219,11 @@ decoded = converter.decode(sample_result)
 #
 # ### 実行可能性のチェック
 #
-# QAOA のサンプルは**候補解**であり、元の制約を満たすとは限りません。
-# 制約 $\sum x_u = |V|/2$ は QUBO のペナルティとして組み込まれているため、
-# 制約を満たさないビット列も出力に含まれる可能性があります。
+# QAOA のサンプルは**候補解**であり、元の制約を満たすとは限りません。制約 $\sum x_u = |V|/2$ は QUBO のペナルティとして組み込まれているため、制約を満たさないビット列も出力に含まれる可能性があります。
 #
 # サンプルを有効な分割として解釈する前に、実行可能性でフィルタリングする必要があります。
 
 # %%
-
-
 def is_feasible(sample: dict[int, int]) -> bool:
     """サンプルが均等分割の制約を満たすかチェック"""
     return sum(sample.values()) == num_nodes // 2
@@ -276,7 +248,7 @@ for sample, energy, occ in zip(decoded.samples, decoded.energy, decoded.num_occu
 total_feasible = sum(occ for _, _, occ in feasible_results)
 total_samples = sum(decoded.num_occurrences)
 
-print(f"実行可能なサンプル: {total_feasible} / {total_samples} "
+print(f"Feasible samples: {total_feasible} / {total_samples} "
       f"({100 * total_feasible / total_samples:.1f}%)")
 
 # %% [markdown]
@@ -288,11 +260,11 @@ print(f"実行可能なサンプル: {total_feasible} / {total_samples} "
 if feasible_results:
     feasible_results.sort(key=lambda x: x[1])
     best_sample, best_obj, best_count = feasible_results[0]
-    print(f"最良の実行可能解:   {best_sample}")
-    print(f"カットエッジ数:     {best_obj}")
-    print(f"観測回数:          {best_count}")
+    print(f"Best feasible solution: {best_sample}")
+    print(f"Cut edges:             {best_obj}")
+    print(f"Occurrences:           {best_count}")
 else:
-    print("実行可能な解が見つかりませんでした。p または maxiter を増やしてみてください。")
+    print("No feasible solution found. Try increasing p or maxiter.")
     best_sample = None
 
 # %% [markdown]

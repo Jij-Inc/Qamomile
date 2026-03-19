@@ -5,11 +5,11 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.1
 #   kernelspec:
-#     display_name: qamomile
+#     display_name: Python 3
 #     language: python
-#     name: qamomile
+#     name: python3
 # ---
 
 # %% [markdown]
@@ -24,7 +24,7 @@
 # JijModeling problem → problem.eval() → QAOAConverter → transpile → sample → decode
 # ```
 #
-# 1. Formulate the problem with [JijModeling](https://www.documentation.jijzept.com/docs/jijmodeling/).
+# 1. Formulate the problem with [JijModeling](https://jij-inc-jijmodeling-tutorials-en.readthedocs-hosted.com/en/latest/introduction.html).
 # 2. Create an instance with concrete data.
 # 3. Use `QAOAConverter` to build the QAOA circuit and Hamiltonian.
 # 4. Optimize the variational parameters with a classical optimizer.
@@ -75,7 +75,7 @@ def _(problem: jm.DecoratedProblem):
     problem += problem.Constraint("equal_partition", x.sum() == V / 2)
 
 
-print(problem)
+problem
 
 # %% [markdown]
 # ## Graph Instance
@@ -157,32 +157,15 @@ executable = converter.transpile(transpiler, p=p)
 # %% [markdown]
 # ## Optimize the QAOA Parameters
 #
-# We extract the parametric Qiskit circuit from the `ExecutableProgram`,
-# remove measurement gates, and evaluate the cost Hamiltonian with
-# `StatevectorEstimator`. This computes the exact expectation value
-# $\langle \psi(\gamma, \beta) | H_C | \psi(\gamma, \beta) \rangle$
-# without any shot noise.
-#
-# We use SciPy's COBYLA optimizer to find the `gammas` and `betas`
-# that minimize the cost.
+# We use `executable.sample()` to evaluate the cost at each iteration of the
+# classical optimizer. The optimizer explores different `gammas` and `betas`
+# to minimize the mean energy of the sampled bitstrings.
 
 # %%
 import numpy as np
 from scipy.optimize import minimize
-from qiskit.primitives import StatevectorEstimator
-from qamomile.qiskit.observable import hamiltonian_to_sparse_pauli_op
 
-# Extract circuit without measurements for exact estimation
-circuit = executable.quantum_circuit
-circuit_no_meas = circuit.remove_final_measurements(inplace=False)
-
-# Convert Hamiltonian to Qiskit SparsePauliOp
-qk_hamiltonian = hamiltonian_to_sparse_pauli_op(hamiltonian)
-
-# Map parameter names to Qiskit Parameter objects for named binding
-param_map = {param.name: param for param in circuit_no_meas.parameters}
-
-estimator = StatevectorEstimator()
+executor = transpiler.executor()
 
 initial_params = [
     np.pi / 4, np.pi / 2, np.pi / 2,  # gammas
@@ -193,18 +176,18 @@ cost_history = []
 
 
 def cost_fn(params):
-    gammas = params[:p]
-    betas = params[p:]
-    bindings = {}
-    for i in range(p):
-        bindings[param_map[f"gammas[{i}]"]] = gammas[i]
-        bindings[param_map[f"betas[{i}]"]] = betas[i]
-    bound_circuit = circuit_no_meas.assign_parameters(bindings)
-    job = estimator.run([(bound_circuit, qk_hamiltonian)])
+    gammas = list(params[:p])
+    betas = list(params[p:])
+    job = executable.sample(
+        executor,
+        shots=512,
+        bindings={"gammas": gammas, "betas": betas},
+    )
     result = job.result()
-    cost = float(result[0].data.evs)
-    cost_history.append(cost)
-    return cost
+    decoded = converter.decode(result)
+    energy = decoded.energy_mean()
+    cost_history.append(energy)
+    return energy
 
 
 res = minimize(
@@ -222,7 +205,7 @@ print(f"Function evaluations: {res.nfev}")
 plt.figure(figsize=(8, 4))
 plt.plot(cost_history, color="#2696EB")
 plt.xlabel("Iteration")
-plt.ylabel("Cost (exact expectation value)")
+plt.ylabel("Cost (mean energy)")
 plt.title("QAOA Optimization Progress")
 plt.show()
 
@@ -237,7 +220,7 @@ gammas_opt = list(res.x[:p])
 betas_opt = list(res.x[p:])
 
 sample_result = executable.sample(
-    transpiler.executor(),
+    executor,
     shots=1000,
     bindings={"gammas": gammas_opt, "betas": betas_opt},
 ).result()
@@ -258,8 +241,6 @@ decoded = converter.decode(sample_result)
 # valid partitions.
 
 # %%
-
-
 def is_feasible(sample: dict[int, int]) -> bool:
     """Check if a sample satisfies the equal partition constraint."""
     return sum(sample.values()) == num_nodes // 2
