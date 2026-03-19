@@ -54,6 +54,7 @@ project:
             - file: api/optimization/qaoa
             - file: api/optimization/qrao
             - file: api/optimization/utils
+        - file: api/qbraid
         - file: api/qiskit/index
           children:
             - file: api/qiskit/emitter
