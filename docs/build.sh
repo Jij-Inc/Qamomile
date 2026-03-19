@@ -93,7 +93,7 @@ build_en() {
     sync_en
     echo "Building English documentation..."
     cd en
-    MPLBACKEND=agg uv run jupyter-book build --html --execute
+    MPLBACKEND=agg uv run jupyter-book build --html
     cd ..
     uv run python scripts/inject_colab_launch.py en
     info "English documentation built: en/_build/html/index.html"

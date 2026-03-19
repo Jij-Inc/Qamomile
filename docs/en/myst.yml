@@ -13,6 +13,7 @@ project:
   github: https://github.com/Jij-Inc/Qamomile
   jupyter: true
   execute:
+    enabled: true
     cache: true
     exclude_patterns:
       - collaboration/qbraid_executor.ipynb
