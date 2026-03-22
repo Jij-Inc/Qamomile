@@ -431,6 +431,20 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
         if self._target:
             cudaq.set_target(self._target)
 
+    def _ensure_target(self) -> None:
+        """Reapply this executor's target before a runtime call.
+
+        CUDA-Q target selection is process-global.  If another executor (or
+        any other code) has called ``cudaq.set_target`` since this instance
+        was created, the global target may no longer match ``self._target``.
+        Calling this method before every ``cudaq.sample`` / ``cudaq.observe``
+        guarantees the correct backend is active.
+        """
+        if self._target:
+            import cudaq
+
+            cudaq.set_target(self._target)
+
     def execute(self, circuit: Any, shots: int) -> dict[str, int]:
         """Execute circuit and return canonical big-endian bitstring counts.
 
@@ -447,6 +461,8 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
         explicit ``mz`` calls are present in the kernel.
         """
         import cudaq
+
+        self._ensure_target()
 
         if isinstance(circuit, BoundCudaqCircuit):
             result = cudaq.sample(
@@ -519,6 +535,8 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
         import qamomile.observable as qm_o
 
         from qamomile.cudaq.observable import hamiltonian_to_cudaq_spin_op
+
+        self._ensure_target()
 
         if isinstance(hamiltonian, qm_o.Hamiltonian):
             spin_op = hamiltonian_to_cudaq_spin_op(hamiltonian)
