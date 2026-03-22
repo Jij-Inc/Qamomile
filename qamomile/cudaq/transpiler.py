@@ -9,7 +9,7 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Sequence, TYPE_CHECKING
 
-from qamomile.circuit.ir.operation.control_flow import IfOperation
+from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation
 from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.transpiler.errors import EmitError
@@ -186,15 +186,16 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
         CUDA-Q supports ``kernel.<gate>([controls], target)`` for
         multi-controlled single-qubit gates.  This override handles
         multi-control by iterating over the block body and emitting each
-        gate with native multi-control, falling back to the base-class
-        single-control decomposition when possible.
+        gate with native multi-control.
 
         An operand-to-target resolver maps each inner gate's operand to
         the correct physical target index based on block input positions,
         rather than hardcoding ``target_indices[0]``.
 
-        Non-``GateOperation`` ops (``ForOperation``, ``CompositeGateOperation``,
-        etc.) raise ``EmitError`` instead of being silently skipped.
+        For single-control cases, compile-time resolvable ``ForOperation``
+        loops are unrolled and their body gates emitted with correct
+        operand-to-target mapping.  Multi-control helpers with non-gate
+        operations raise ``EmitError``.
 
         Args:
             circuit: The CUDA-Q circuit being built.
@@ -222,20 +223,53 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
         emitter: CudaqGateEmitter = self._emitter  # type: ignore[assignment]
 
         for _ in range(power):
-            for op in block_value.operations:
-                # Skip terminal/no-op operations.
-                if isinstance(op, ReturnOperation):
-                    continue
-                if not isinstance(op, GateOperation):
-                    raise EmitError(
-                        f"Unsupported operation {type(op).__name__} in "
-                        f"CUDA-Q controlled block body. Only GateOperation "
-                        f"is supported in helper kernels.",
-                        operation="ControlledUOperation",
-                    )
-                # Resolve target indices for this gate's operands.
+            self._emit_cudaq_controlled_ops(
+                circuit,
+                block_value.operations,
+                num_controls,
+                control_indices,
+                target_indices,
+                block_qubit_map,
+                emitter,
+                bindings,
+            )
+
+    def _emit_cudaq_controlled_ops(
+        self,
+        circuit: CudaqCircuit,
+        operations: list[Any],
+        num_controls: int,
+        control_indices: list[int],
+        target_indices: list[int],
+        qubit_map: dict[str, int],
+        emitter: CudaqGateEmitter,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Recursively emit controlled operations with operand-to-target mapping.
+
+        Handles ``GateOperation`` via the CUDA-Q multi-control path,
+        ``ReturnOperation`` by skipping, and ``ForOperation`` by unrolling
+        compile-time resolvable loops (single-control only).
+
+        Args:
+            circuit: The CUDA-Q circuit being built.
+            operations: List of operations to process.
+            num_controls: Number of control qubits.
+            control_indices: Physical indices of control qubits.
+            target_indices: Physical indices of target qubits.
+            qubit_map: Mutable UUID-to-physical-target map for SSA tracking.
+            emitter: The CUDA-Q gate emitter.
+            bindings: Parameter bindings.
+
+        Raises:
+            EmitError: When an unsupported operation is encountered.
+        """
+        for op in operations:
+            if isinstance(op, ReturnOperation):
+                continue
+            if isinstance(op, GateOperation):
                 gate_target_indices = _resolve_gate_targets(
-                    op, block_qubit_map, target_indices
+                    op, qubit_map, target_indices
                 )
                 self._emit_cudaq_multi_controlled_gate(
                     circuit,
@@ -245,6 +279,57 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
                     gate_target_indices,
                     bindings,
                 )
+                # Propagate SSA: results inherit operand's physical target.
+                for i, result in enumerate(op.results):
+                    if hasattr(result, "type") and result.type.is_quantum():
+                        if i < len(op.operands):
+                            operand = op.operands[i]
+                            if hasattr(operand, "uuid") and operand.uuid in qubit_map:
+                                qubit_map[result.uuid] = qubit_map[operand.uuid]
+                continue
+            if isinstance(op, ForOperation) and num_controls == 1:
+                start = (
+                    self._resolver.resolve_int_value(op.operands[0], bindings)
+                    if len(op.operands) > 0
+                    else 0
+                )
+                stop = (
+                    self._resolver.resolve_int_value(op.operands[1], bindings)
+                    if len(op.operands) > 1
+                    else 1
+                )
+                step = (
+                    self._resolver.resolve_int_value(op.operands[2], bindings)
+                    if len(op.operands) > 2
+                    else 1
+                )
+                if start is not None and stop is not None and step is not None:
+                    for i in range(start, stop, step):
+                        loop_bindings = bindings.copy()
+                        loop_bindings[op.loop_var] = i
+                        self._emit_cudaq_controlled_ops(
+                            circuit,
+                            op.operations,
+                            num_controls,
+                            control_indices,
+                            target_indices,
+                            qubit_map,
+                            emitter,
+                            loop_bindings,
+                        )
+                else:
+                    raise EmitError(
+                        "Cannot resolve ForOperation bounds in CUDA-Q "
+                        "controlled block body.",
+                        operation="ControlledUOperation",
+                    )
+                continue
+            raise EmitError(
+                f"Unsupported operation {type(op).__name__} in "
+                f"CUDA-Q controlled block body. Only GateOperation "
+                f"is supported in helper kernels.",
+                operation="ControlledUOperation",
+            )
 
     def _emit_cudaq_multi_controlled_gate(
         self,

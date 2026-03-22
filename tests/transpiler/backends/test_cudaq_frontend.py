@@ -2210,8 +2210,7 @@ class TestCudaqHelperKernelSemanticsContract:
         # |001> with ctrl=q0=1 -> flip second target (q2) -> |101>
         expected = computational_basis_state(3, 0b101)
         assert statevectors_equal(sv, expected), (
-            f"Single-control second-target helper: expected |101>, "
-            f"got statevector {sv}"
+            f"Single-control second-target helper: expected |101>, got statevector {sv}"
         )
 
     def test_multi_control_second_target(self):
@@ -2238,12 +2237,11 @@ class TestCudaqHelperKernelSemanticsContract:
         # |0011> with both controls=1 -> flip q[3] -> |1011>
         expected = computational_basis_state(4, 0b1011)
         assert statevectors_equal(sv, expected), (
-            f"Multi-control second-target helper: expected |1011>, "
-            f"got statevector {sv}"
+            f"Multi-control second-target helper: expected |1011>, got statevector {sv}"
         )
 
-    def test_helper_body_with_loop_raises_emit_error(self):
-        """Helper body containing ForOperation should raise EmitError."""
+    def test_helper_body_with_loop_multi_control_raises_emit_error(self):
+        """Multi-control helper body with ForOperation should raise EmitError."""
 
         @qmc.qkernel
         def loop_gate(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
@@ -2291,9 +2289,7 @@ class TestCudaqHelperKernelSemanticsContract:
         """Existing CSWAP (Fredkin) happy path must not regress."""
 
         @qmc.qkernel
-        def swap_gate(
-            q0: qmc.Qubit, q1: qmc.Qubit
-        ) -> tuple[qmc.Qubit, qmc.Qubit]:
+        def swap_gate(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
             return qmc.swap(q0, q1)
 
         cswap = qmc.controlled(swap_gate)
@@ -2310,3 +2306,68 @@ class TestCudaqHelperKernelSemanticsContract:
         sv = _run_statevector(qc)
         expected = computational_basis_state(3, 0b101)
         assert statevectors_equal(sv, expected)
+
+    def test_single_control_helper_with_loop_succeeds(self):
+        """Single-control helper with compile-time ForOperation should succeed.
+
+        Regression: the CUDA-Q override previously rejected ForOperation
+        in all helper bodies, but single-control cases should delegate to
+        the shared fallback which supports compile-time loop unrolling.
+        """
+
+        @qmc.qkernel
+        def loop_gate(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
+            for i in qmc.range(1):
+                q0 = qmc.x(q0)
+                q1 = qmc.x(q1)
+            return q0, q1
+
+        c1 = qmc.controlled(loop_gate)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0] = qmc.x(q[0])
+            q[0], q[1], q[2] = c1(q[0], q[1], q[2])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        # |001> ctrl=q0=1 -> loop body flips q1 and q2 -> |111>
+        expected = computational_basis_state(3, 0b111)
+        assert statevectors_equal(sv, expected), (
+            f"Single-control loop helper: expected |111>, got statevector {sv}"
+        )
+
+    def test_single_control_helper_with_loop_index_spec(self):
+        """Single-control loop helper via index-spec route should succeed.
+
+        Covers the _emit_controlled_u_with_index_spec entry path to ensure
+        the same routing fix applies through both controlled-U entry paths.
+        """
+
+        @qmc.qkernel
+        def loop_gate(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
+            for i in qmc.range(1):
+                q0 = qmc.x(q0)
+                q1 = qmc.x(q1)
+            return q0, q1
+
+        c1 = qmc.controlled(loop_gate)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0] = qmc.x(q[0])
+            # Use controlled_indices to specify q[0] as the control
+            q = c1(q, controlled_indices=[0])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        # ctrl=q0=1 -> loop body flips q1 and q2 -> |111>
+        expected = computational_basis_state(3, 0b111)
+        assert statevectors_equal(sv, expected), (
+            f"Single-control loop helper (index-spec): expected |111>, "
+            f"got statevector {sv}"
+        )
