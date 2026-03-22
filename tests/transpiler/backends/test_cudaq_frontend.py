@@ -2371,3 +2371,107 @@ class TestCudaqHelperKernelSemanticsContract:
             f"Single-control loop helper (index-spec): expected |111>, "
             f"got statevector {sv}"
         )
+
+    def test_controlled_cnot_single_control(self):
+        """Positional single-control helper with inner CX should act as Toffoli."""
+
+        @qmc.qkernel
+        def cnot_gate(a: qmc.Qubit, b: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
+            return qmc.cx(a, b)
+
+        c1 = qmc.controlled(cnot_gate)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            # Prepare |011>: outer control ON, inner control ON, target OFF
+            q[0] = qmc.x(q[0])
+            q[1] = qmc.x(q[1])
+            q[0], q[1], q[2] = c1(q[0], q[1], q[2])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        # |011> -> Toffoli (outer ctrl=q0, inner ctrl=q1, target=q2) -> |111>
+        expected = computational_basis_state(3, 0b111)
+        assert statevectors_equal(sv, expected), (
+            f"Controlled CNOT (single, positional): expected |111>, got {sv}"
+        )
+
+    def test_controlled_cnot_double_control(self):
+        """Positional multi-control helper with inner CX should act as C^3X."""
+
+        @qmc.qkernel
+        def cnot_gate(a: qmc.Qubit, b: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
+            return qmc.cx(a, b)
+
+        cccx = qmc.controlled(cnot_gate, num_controls=2)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            # Prepare |0111>: all 3 controls ON, target OFF
+            q[0] = qmc.x(q[0])
+            q[1] = qmc.x(q[1])
+            q[2] = qmc.x(q[2])
+            q[0], q[1], q[2], q[3] = cccx(q[0], q[1], q[2], q[3])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        # |0111> -> C^3X -> |1111>
+        expected = computational_basis_state(4, 0b1111)
+        assert statevectors_equal(sv, expected), (
+            f"Controlled CNOT (double, positional): expected |1111>, got {sv}"
+        )
+
+    def test_controlled_cnot_single_control_index_spec(self):
+        """Index-spec single-control helper with inner CX should act as Toffoli."""
+
+        @qmc.qkernel
+        def cnot_gate(a: qmc.Qubit, b: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
+            return qmc.cx(a, b)
+
+        c1 = qmc.controlled(cnot_gate)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0] = qmc.x(q[0])
+            q[1] = qmc.x(q[1])
+            q = c1(q, controlled_indices=[0])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        # ctrl=q0, inner ctrl=q1, target=q2 -> Toffoli -> |111>
+        expected = computational_basis_state(3, 0b111)
+        assert statevectors_equal(sv, expected), (
+            f"Controlled CNOT (single, index-spec): expected |111>, got {sv}"
+        )
+
+    def test_controlled_cnot_double_control_index_spec(self):
+        """Index-spec multi-control helper with inner CX should act as C^3X."""
+
+        @qmc.qkernel
+        def cnot_gate(a: qmc.Qubit, b: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
+            return qmc.cx(a, b)
+
+        cccx = qmc.controlled(cnot_gate, num_controls=2)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            q[0] = qmc.x(q[0])
+            q[1] = qmc.x(q[1])
+            q[2] = qmc.x(q[2])
+            q = cccx(q, controlled_indices=[0, 1])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(qc)
+        # C^3X with all controls ON -> |1111>
+        expected = computational_basis_state(4, 0b1111)
+        assert statevectors_equal(sv, expected), (
+            f"Controlled CNOT (double, index-spec): expected |1111>, got {sv}"
+        )

@@ -375,6 +375,24 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
             )
             return
 
+        # Multi-controlled CX normalization: treat inner control as extra
+        # control, inner target as the final X target.
+        if gate_type == GateOperationType.CX:
+            if len(target_indices) < 2:
+                raise EmitError(
+                    "Controlled-CX requires at least 2 target qubits "
+                    "(inner control + inner target).",
+                    operation="ControlledGate",
+                )
+            inner_control = target_indices[0]
+            inner_target = target_indices[1]
+            emitter.emit_multi_controlled_x(
+                circuit,
+                control_indices + [inner_control],
+                inner_target,
+            )
+            return
+
         # Multi-controlled SWAP (Fredkin):
         #   CNOT(b, a) → MC-X(ctrls + [a], b) → CNOT(b, a)
         if gate_type == GateOperationType.SWAP:
