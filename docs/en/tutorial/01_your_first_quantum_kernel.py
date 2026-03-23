@@ -301,9 +301,9 @@ except Exception as e:
 # |---------|--------|-------|
 # | **Qiskit** | Supported | Full gate set, control flow, observables |
 # | **QuriParts** | Supported | Full gate set, observables |
-# | **CUDA-Q** | Supported | GPU-accelerated simulation. Supported: for-loops (unrolled). Unsupported: measurement-dependent conditional branching, while-loops |
+# | **CUDA-Q** | Supported | GPU-accelerated simulation. Supported: for-loops (unrolled), runtime `if`/`if-else`/`while` (via `cudaq.run()`) |
 #
-# > **Important**: Not every qkernel feature is available on every quantum SDK. For example, measurement-dependent conditional branching (`if` on a measured bit) is supported by Qiskit but not by CUDA-Q (0.14.x). Mid-circuit measurement itself is allowed, but branching on the result raises `EmitError` at transpile time. Compile-time constant conditions are statically resolved and work on all backends.
+# > **Note**: Runtime measurement-dependent control flow (`if bit:`, `if/else`, `while bit:`) is supported on both Qiskit and CUDA-Q. On CUDA-Q, these circuits are automatically compiled as `@cudaq.kernel` functions and executed via `cudaq.run()`. Static circuits without runtime control flow continue to use the builder API and `cudaq.sample()`. Compile-time constant conditions are statically resolved on all backends.
 #
 # ### CUDA-Q Platform Support
 #
