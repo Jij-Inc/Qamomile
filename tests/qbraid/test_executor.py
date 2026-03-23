@@ -251,6 +251,22 @@ class TestExecute:
 
 
 class TestCountsNormalization:
+    def test_execute_preserves_qiskit_big_endian_clbit_order(self):
+        """execute() keeps canonical Qiskit big-endian classical-bit order."""
+        device, _, _ = _mock_device({"001": 5})
+        executor = QBraidExecutor(device=device)
+
+        qc = QuantumCircuit(3, 3)
+        qc.measure(0, 0)
+        qc.measure(1, 1)
+        qc.measure(2, 2)
+
+        counts = executor.execute(qc, shots=5)
+
+        # QBraidExecutor normalizes width/spacing only. It does not reverse the
+        # bitstring, so "001" still means c2=0, c1=0, c0=1.
+        assert counts == {"001": 5}
+
     def test_short_key_padded_2bit(self):
         """Under-width key '1' is zero-padded to '01' for 2-clbit circuit."""
         device, _, _ = _mock_device({"1": 5})

@@ -165,6 +165,21 @@ class TestMultiQubitEstimate:
         assert math.isclose(result, -2.0, abs_tol=1e-10)
         assert device.run.call_count == 1
 
+    def test_estimate_uses_qiskit_big_endian_qubit_positions(self):
+        """estimate() reads count keys with rightmost bit = qubit 0."""
+        device = _mock_device_multi([{"001": 100}])
+        executor = QBraidExecutor(device=device, expval_shots=100)
+
+        qc = QuantumCircuit(3)
+        qc.x(0)  # Prepare |001> in Qiskit big-endian count notation.
+
+        hamiltonian = Z(0) + 2.0 * Z(1) + 4.0 * Z(2)
+        result = executor.estimate(qc, hamiltonian)
+
+        # Big-endian "001" means q2=0, q1=0, q0=1.
+        # Therefore Z0=-1, Z1=+1, Z2=+1, giving -1 + 2 + 4 = 5.
+        assert math.isclose(result, 5.0, abs_tol=1e-10)
+
     def test_multi_term_hamiltonian(self):
         """Test H = 0.5*Z0 + 0.3*Z1 on |00>."""
         # <00|Z0|00> = 1, <00|Z1|00> = 1
