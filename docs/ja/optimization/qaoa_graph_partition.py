@@ -120,7 +120,7 @@ instance = problem.eval(instance_data)
 #
 # `QAOAConverter` は OMMX インスタンスを受け取り、内部で以下を行います：
 # 1. 問題を QUBO（Quadratic Unconstrained Binary Optimization）形式に変換。
-# 2. BINARY ドメインから SPIN ドメインへ変換。
+# 2. BINARY 変数から SPIN 変数へ変換。
 # 3. Pauli-Z 演算子の和としてコストハミルトニアンを構築。
 #
 # 元の問題には制約があるため、QUBO 定式化では制約が**ペナルティ項**として目的関数に組み込まれます。そのため、デコードされたサンプルのエネルギー値は元の目的関数（カットエッジ数）とは**異なり**、ペナルティを含んでいます。実行可能性の確認と真の目的関数値の計算を別途行う必要があります。
@@ -129,6 +129,7 @@ instance = problem.eval(instance_data)
 from qamomile.optimization.qaoa import QAOAConverter
 
 converter = QAOAConverter(instance)
+converter.spin_model = converter.spin_model.normalize_by_abs_max()
 hamiltonian = converter.get_cost_hamiltonian()
 print(hamiltonian)
 
@@ -152,8 +153,9 @@ executable = converter.transpile(transpiler, p=p)
 # %%
 import numpy as np
 from scipy.optimize import minimize
+from qiskit_aer import AerSimulator
 
-executor = transpiler.executor()
+executor = transpiler.executor(backend=AerSimulator(seed_simulator=901))
 
 initial_params = [
     np.pi / 4, np.pi / 2, np.pi / 2,  # gammas
