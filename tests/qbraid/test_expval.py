@@ -10,7 +10,6 @@ from qamomile.circuit.transpiler.errors import ExecutionError
 from qamomile.observable import Hamiltonian, Pauli, PauliOperator, X, Y, Z
 from qamomile.qbraid.executor import QBraidExecutor
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -140,6 +139,26 @@ class TestMultiQubitEstimate:
         hamiltonian = Z(0) * Z(1)
         result = executor.estimate(qc, hamiltonian)
         assert math.isclose(result, 1.0, abs_tol=1e-10)
+
+    def test_z0_minus_z1_asymmetric(self):
+        """H = Z(0) - Z(1) on |10⟩ (qubit 0 = |1>, qubit 1 = |0>).
+
+        <10|Z(0)|10> = -1,  <10|Z(1)|10> = +1
+        Expected: -1 - 1 = -2
+
+        Big-endian "01" means qubit1=0, qubit0=1 → this is |10⟩.
+        If endianness is wrong, result would be +2 instead of -2.
+        """
+        # Z0 and Z1 share the same basis (both Z), one circuit submitted
+        device = _mock_device_multi([{"01": 100}])
+        executor = QBraidExecutor(device=device, expval_shots=100)
+
+        qc = QuantumCircuit(2)
+        qc.x(0)  # qubit 0 → |1⟩
+
+        hamiltonian = Z(0) - Z(1)
+        result = executor.estimate(qc, hamiltonian)
+        assert math.isclose(result, -2.0, abs_tol=1e-10)
 
     def test_multi_term_hamiltonian(self):
         """Test H = 0.5*Z0 + 0.3*Z1 on |00>."""
