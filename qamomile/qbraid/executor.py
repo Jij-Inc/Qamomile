@@ -35,6 +35,21 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
     ``ExecutionError`` to prevent silent wrong results caused by qBraid's
     counts normalization removing register separators.
 
+    Endian convention:
+        ``execute()`` returns canonical Qiskit-style bitstring keys after
+        normalization. Keys are big-endian classical-bit strings: the
+        leftmost character is the highest classical-bit index and the
+        rightmost character is classical bit 0. ``QBraidExecutor`` never
+        reverses or permutes the bit order; normalization only removes spaces
+        and zero-pads under-width keys.
+
+        ``estimate()`` uses the same bitstring convention when reconstructing
+        expectation values from counts. Since it applies ``measure_all()`` to a
+        circuit with no pre-existing classical bits, classical bit ``i``
+        measures qubit ``i``. Therefore, in ``estimate()`` the rightmost count
+        character corresponds to qubit 0 and the leftmost character to the
+        highest qubit index.
+
     Args:
         device: A pre-configured qBraid ``QuantumDevice``. Mutually exclusive
             with ``device_id``, ``provider``, and ``api_key``.
@@ -198,13 +213,14 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
         qBraid backends may return under-width keys (leading zeros stripped)
         or space-separated register keys. This method flattens spaces and
         zero-pads short keys to match the expected classical bit width.
+        It does not reverse or permute bit order.
 
         Args:
             raw_counts: Raw counts from the qBraid job result.
             num_clbits: Expected number of classical bits in the circuit.
 
         Returns:
-            Normalized counts with canonical bitstring keys.
+            Normalized counts with canonical big-endian classical-bit keys.
 
         Raises:
             ExecutionError: If a key contains non-binary characters after
@@ -232,12 +248,18 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
         If the circuit has no classical bits, ``measure_all()`` is added
         automatically (on a copy).
 
+        Returned keys use canonical Qiskit-style big-endian classical-bit
+        order: the leftmost character is the highest classical-bit index and
+        the rightmost character is classical bit 0. ``execute()`` does not
+        reinterpret those keys as qubit-ordered strings.
+
         Args:
             circuit: The quantum circuit to execute.
             shots: Number of measurement shots.
 
         Returns:
-            Dictionary mapping bitstrings to counts.
+            Dictionary mapping canonical big-endian classical-bit strings
+            to counts.
         """
         circuit_with_meas = self._ensure_measurements(circuit)
         return self._submit_and_wait(circuit_with_meas, shots)
@@ -282,6 +304,12 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
         pre-existing classical bits are rejected because qBraid's counts
         normalization removes register separators, making it impossible to
         reliably identify which measured bits correspond to which qubits.
+
+        Count bitstrings are interpreted using the same big-endian convention
+        as Qiskit counts: the leftmost character is the highest measured qubit
+        index and the rightmost character is qubit 0. This follows directly
+        from calling ``measure_all()`` on a circuit whose classical-bit indices
+        match its qubit indices.
 
         Args:
             circuit: The state-preparation circuit (no measurements).
