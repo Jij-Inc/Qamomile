@@ -159,12 +159,13 @@ class TestMultiQubitEstimate:
         hamiltonian = Z(0) - Z(1)
         result = executor.estimate(qc, hamiltonian)
         assert math.isclose(result, -2.0, abs_tol=1e-10)
+        assert device.run.call_count == 1
 
     def test_multi_term_hamiltonian(self):
         """Test H = 0.5*Z0 + 0.3*Z1 on |00>."""
         # <00|Z0|00> = 1, <00|Z1|00> = 1
-        # Each term has a different basis key, so two circuits are submitted.
-        device = _mock_device_multi([{"00": 100}, {"00": 100}])
+        # Both terms are measurable from the same all-Z basis circuit.
+        device = _mock_device_multi([{"00": 100}])
         executor = QBraidExecutor(device=device, expval_shots=100)
 
         qc = QuantumCircuit(2)
@@ -172,6 +173,7 @@ class TestMultiQubitEstimate:
         hamiltonian = 0.5 * Z(0) + 0.3 * Z(1)
         result = executor.estimate(qc, hamiltonian)
         assert math.isclose(result, 0.8, abs_tol=1e-10)
+        assert device.run.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -319,3 +321,72 @@ class TestWaitHelperReuse:
         executor.estimate(qc, Z(0))
 
         job.wait_for_final_state.assert_called_once_with(timeout=None, poll_interval=3)
+
+
+# ---------------------------------------------------------------------------
+# Parameter binding
+# ---------------------------------------------------------------------------
+
+
+class TestParameterBinding:
+    def test_params_are_bound_before_submission(self):
+        """Direct estimate() with params must bind before device.run()."""
+        from qiskit.circuit import Parameter
+
+        device = _mock_device_multi([{"0": 100}])
+        executor = QBraidExecutor(device=device, expval_shots=100)
+
+        theta = Parameter("theta")
+        qc = QuantumCircuit(1)
+        qc.ry(theta, 0)
+
+        executor.estimate(qc, Z(0), params=[0.5])
+
+        # The circuit submitted to device.run() must have no unbound params.
+        submitted = device.run.call_args.args[0]
+        assert len(submitted.parameters) == 0
+
+    def test_unbound_params_without_values_rejected(self):
+        """Parametric circuit + params=None must raise before submission."""
+        from qiskit.circuit import Parameter
+
+        device = MagicMock()
+        executor = QBraidExecutor(device=device, expval_shots=100)
+
+        theta = Parameter("theta")
+        qc = QuantumCircuit(1)
+        qc.ry(theta, 0)
+
+        with pytest.raises(ExecutionError, match="unbound parameter"):
+            executor.estimate(qc, Z(0))
+
+        device.run.assert_not_called()
+
+    def test_length_mismatch_raises(self):
+        """Wrong number of params must raise ValueError (from Qiskit)."""
+        from qiskit.circuit import Parameter
+
+        device = MagicMock()
+        executor = QBraidExecutor(device=device, expval_shots=100)
+
+        theta = Parameter("theta")
+        qc = QuantumCircuit(1)
+        qc.ry(theta, 0)
+
+        with pytest.raises(ValueError):
+            executor.estimate(qc, Z(0), params=[0.1, 0.2])
+
+    def test_pre_bound_circuit_no_params_works(self):
+        """Already-bound circuit with params=None should work normally."""
+        from qiskit.circuit import Parameter
+
+        device = _mock_device_multi([{"0": 100}])
+        executor = QBraidExecutor(device=device, expval_shots=100)
+
+        theta = Parameter("theta")
+        qc = QuantumCircuit(1)
+        qc.ry(theta, 0)
+        qc = qc.assign_parameters([0.5])
+
+        result = executor.estimate(qc, Z(0))
+        assert isinstance(result, float)

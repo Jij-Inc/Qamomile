@@ -286,8 +286,10 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
         Args:
             circuit: The state-preparation circuit (no measurements).
             hamiltonian: The Hamiltonian whose expectation value is computed.
-            params: Optional parameter values (currently unused; parameters
-                should be bound before calling ``estimate()``).
+            params: Optional parameter values for parametric circuits.
+                Values are bound positionally in Qiskit circuit parameter
+                order.  If ``None``, the circuit must already have all
+                parameters bound.
 
         Returns:
             The estimated real-valued expectation value.
@@ -295,7 +297,8 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
         Raises:
             ExecutionError: If the circuit has existing classical bits,
                 if the Hamiltonian references qubit indices outside the
-                circuit width, or if the result has a non-negligible
+                circuit width, if the circuit has unbound parameters
+                after binding, or if the result has a non-negligible
                 imaginary part.
         """
         if circuit.num_clbits > 0:
@@ -306,6 +309,19 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
                 "normalization removing register boundary information. "
                 "Use a circuit without pre-existing measurements or classical "
                 "registers for expectation value estimation."
+            )
+
+        # Bind parameters if provided (positional semantics, same as Qiskit).
+        if params is not None:
+            circuit = circuit.assign_parameters(list(params))
+
+        # Reject circuits with unresolved parameters before remote submission.
+        if circuit.parameters:
+            raise ExecutionError(
+                f"Circuit has {len(circuit.parameters)} unbound parameter(s) "
+                f"({', '.join(p.name for p in circuit.parameters)}). "
+                "Provide values via the `params` argument or call "
+                "`circuit.assign_parameters(...)` before `estimate()`."
             )
 
         # Validate Hamiltonian qubit indices are within circuit width.
@@ -323,32 +339,35 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
 
         from qamomile.observable import Pauli
 
-        # Group Pauli terms by measurement basis assignment.
-        # For each term, determine the basis rotation needed per qubit.
-        # basis_groups maps frozenset of (qubit, basis) -> list of (term_ops, coeff)
-        basis_groups: dict[
-            frozenset[tuple[int, Pauli]], list[tuple[tuple[Any, ...], complex]]
-        ] = {}
+        # Group Pauli terms by compatible measurement basis assignment.
+        # Terms that only differ by identities can share one measurement run.
+        basis_groups: list[
+            tuple[dict[int, Pauli], list[tuple[tuple[Any, ...], complex]]]
+        ] = []
 
         for operators, coeff in hamiltonian:
-            # Build basis assignment for this term
-            basis_assignment: set[tuple[int, Pauli]] = set()
-            for op in operators:
-                if op.pauli != Pauli.I:
-                    basis_assignment.add((op.index, op.pauli))
+            basis_assignment = {
+                op.index: op.pauli for op in operators if op.pauli != Pauli.I
+            }
 
-            key = frozenset(basis_assignment)
-            if key not in basis_groups:
-                basis_groups[key] = []
-            basis_groups[key].append((operators, coeff))
+            for group_basis, group_terms in basis_groups:
+                if all(
+                    group_basis.get(qubit_idx, pauli_type) == pauli_type
+                    for qubit_idx, pauli_type in basis_assignment.items()
+                ):
+                    group_basis.update(basis_assignment)
+                    group_terms.append((operators, coeff))
+                    break
+            else:
+                basis_groups.append((dict(basis_assignment), [(operators, coeff)]))
 
         total_expval: complex = hamiltonian.constant
 
-        for basis_key, terms in basis_groups.items():
+        for basis_assignment, terms in basis_groups:
             # Build the rotated circuit
             rotated = circuit.copy()
 
-            for qubit_idx, pauli_type in basis_key:
+            for qubit_idx, pauli_type in sorted(basis_assignment.items()):
                 if pauli_type == Pauli.X:
                     rotated.h(qubit_idx)
                 elif pauli_type == Pauli.Y:
