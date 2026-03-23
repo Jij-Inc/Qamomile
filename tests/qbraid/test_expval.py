@@ -3,12 +3,16 @@
 import math
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 from qiskit import QuantumCircuit
+from qiskit.circuit.random import random_circuit
+from qiskit.quantum_info import Statevector, random_pauli_list
 
 from qamomile.circuit.transpiler.errors import ExecutionError
 from qamomile.observable import Hamiltonian, Pauli, PauliOperator, X, Y, Z
 from qamomile.qbraid.executor import QBraidExecutor
+from qamomile.qiskit.observable import hamiltonian_to_sparse_pauli_op
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -390,3 +394,304 @@ class TestParameterBinding:
 
         result = executor.estimate(qc, Z(0))
         assert isinstance(result, float)
+
+
+# ---------------------------------------------------------------------------
+# Fake statevector device for oracle comparison
+# ---------------------------------------------------------------------------
+
+
+class _FakeResultData:
+    def __init__(self, counts):
+        self._counts = counts
+
+    def get_counts(self):
+        return self._counts
+
+
+class _FakeResult:
+    def __init__(self, counts):
+        self.data = _FakeResultData(counts)
+
+
+class _FakeJob:
+    def __init__(self, counts):
+        self._counts = counts
+
+    def wait_for_final_state(self, timeout=None, poll_interval=None):
+        return None
+
+    def result(self):
+        return _FakeResult(self._counts)
+
+
+class _FakeStatevectorDevice:
+    """Fake device that returns deterministic probability-proportional counts.
+
+    Instead of random sampling, each outcome gets ``round(prob * shots)``
+    counts. This eliminates shot noise entirely; the only error is from
+    integer rounding (at most 0.5 per outcome).
+
+    Compatible with QBraidExecutor's job contract
+    (wait_for_final_state / result().data.get_counts()).
+    """
+
+    def run(self, circuit, shots, **kwargs):
+        qc = circuit.remove_final_measurements(inplace=False)
+        probs = Statevector.from_instruction(qc).probabilities_dict()
+        counts: dict[str, int] = {}
+        for outcome, prob in probs.items():
+            c = round(prob * shots)
+            if c > 0:
+                counts[outcome] = c
+        return _FakeJob(counts)
+
+
+# ---------------------------------------------------------------------------
+# Layer 1: Deterministic arithmetic matrix regression
+# ---------------------------------------------------------------------------
+
+
+class TestArithmeticMatrix:
+    """Supported Hamiltonian arithmetic combinations with hand-crafted counts."""
+
+    def test_scalar_multiplication_sign_and_scale(self):
+        """``-0.5 * X(0)`` on |+> state: X expectation is +1, scaled to -0.5."""
+        # After X-rotation (H gate), |+> -> |0>; all counts are "0".
+        device = _mock_device_multi([{"0": 100}])
+        executor = QBraidExecutor(device=device, expval_shots=100)
+
+        qc = QuantumCircuit(1)
+        qc.h(0)
+
+        result = executor.estimate(qc, -0.5 * X(0))
+        assert result == pytest.approx(-0.5, abs=1e-9)
+
+    def test_addition_mixed_basis(self):
+        """``0.25 * X(0) + 0.75 * Z(1)`` on |+0>: single group (X on q0, Z on q1)."""
+        # X(0) and Z(1) act on different qubits so they merge into one
+        # basis group {0: X, 1: Z}. After H rotation on q0, |+0> -> |00>.
+        device = _mock_device_multi([{"00": 100}])
+        executor = QBraidExecutor(device=device, expval_shots=100)
+
+        qc = QuantumCircuit(2)
+        qc.h(0)
+
+        result = executor.estimate(qc, 0.25 * X(0) + 0.75 * Z(1))
+        assert result == pytest.approx(0.25 + 0.75, abs=1e-9)
+
+    def test_hamiltonian_mul_disjoint(self):
+        """``X(0) * Z(1)`` on |+0>: disjoint product, expectation +1."""
+        # XZ shares one basis group; after X-rotation on q0:
+        # |+0> -> measure q0 in X basis (H), q1 in Z basis
+        # q0: |+> -> H -> |0>, q1: |0>; bitstring "00" has even parity -> +1
+        device = _mock_device_multi([{"00": 100}])
+        executor = QBraidExecutor(device=device, expval_shots=100)
+
+        qc = QuantumCircuit(2)
+        qc.h(0)
+
+        result = executor.estimate(qc, X(0) * Z(1))
+        assert result == pytest.approx(1.0, abs=1e-9)
+
+    def test_hamiltonian_mul_identity_collapse(self):
+        """``X(0) * X(0)`` collapses to identity with coefficient 1."""
+        device = _mock_device_multi([{"0": 100}])
+        executor = QBraidExecutor(device=device, expval_shots=100)
+
+        qc = QuantumCircuit(1)
+
+        result = executor.estimate(qc, X(0) * X(0))
+        assert result == pytest.approx(1.0, abs=1e-9)
+
+    def test_constant_cross_term(self):
+        """``(Z(0) + 1.5) * (Z(1) - 0.5)`` on |00>.
+
+        Expands to: Z0*Z1 - 0.5*Z0 + 1.5*Z1 - 0.75.
+        On |00>: Z0=+1, Z1=+1, Z0Z1=+1 -> 1 - 0.5 + 1.5 - 0.75 = 1.25.
+        """
+        # Z0Z1 and Z0 and Z1 all share Z basis -> single group
+        device = _mock_device_multi([{"00": 100}])
+        executor = QBraidExecutor(device=device, expval_shots=100)
+
+        qc = QuantumCircuit(2)
+
+        H = (Z(0) + 1.5) * (Z(1) - 0.5)
+        result = executor.estimate(qc, H)
+        assert result == pytest.approx(1.25, abs=1e-9)
+
+    def test_unary_negation_multi_term(self):
+        """``-(Z(0) + 0.25 * X(1))`` on |0+>.
+
+        Z(0) on |0> = +1, X(1) on |+> = +1.
+        Negated: -(1 + 0.25) = -1.25.
+        """
+        # Two basis groups: Z for qubit 0, X for qubit 1
+        device = _mock_device_multi(
+            [
+                {"00": 100},  # Z(0): qubit 0 in |0> -> +1
+                {"00": 50, "01": 50},  # X(1): qubit 1 in |+>, after H -> +1
+            ]
+        )
+        executor = QBraidExecutor(device=device, expval_shots=100)
+
+        qc = QuantumCircuit(2)
+        qc.h(1)
+
+        H = -(Z(0) + 0.25 * X(1))
+        result = executor.estimate(qc, H)
+        assert result == pytest.approx(-1.25, abs=1e-9)
+
+    def test_same_qubit_mixed_pauli_product_rejected(self):
+        """``X(0) * Y(0)`` produces anti-Hermitian 1j*Z(0); estimate() rejects."""
+        device = _mock_device_multi([{"0": 100}])
+        executor = QBraidExecutor(device=device, expval_shots=100)
+
+        qc = QuantumCircuit(1)
+
+        with pytest.raises(ExecutionError, match="imaginary"):
+            executor.estimate(qc, X(0) * Y(0))
+
+
+# ---------------------------------------------------------------------------
+# Layer 2: Seeded randomized oracle comparison
+# ---------------------------------------------------------------------------
+
+
+def _from_pauli_label(label: str, coeff: float) -> Hamiltonian:
+    """Convert a Qiskit Pauli label (big-endian) to a qamomile Hamiltonian.
+
+    ``phase=False`` in ``random_pauli_list`` is required so that only
+    real-coefficient Hermitian operators are generated.
+    """
+    n = len(label)
+    h = Hamiltonian(num_qubits=n)
+    ops: list[PauliOperator] = []
+    for q, ch in enumerate(reversed(label)):
+        if ch == "I":
+            continue
+        ops.append(PauliOperator(getattr(Pauli, ch), q))
+    if ops:
+        h.add_term(tuple(ops), coeff)
+    else:
+        h.constant = coeff
+    return h
+
+
+def _deterministic_rounding_error_bound(
+    circuit: QuantumCircuit, hamiltonian: Hamiltonian, shots: int
+) -> float:
+    """Upper-bound fake-device rounding error for ``QBraidExecutor.estimate()``.
+
+    For a measurement-basis group with ``M`` non-zero outcomes,
+    ``_FakeStatevectorDevice`` rounds each ideal count independently:
+
+        c_x = round(shots * p_x) = shots * p_x + e_x,   |e_x| <= 0.5
+
+    Let ``delta = sum_x e_x`` be the total-shot drift and ``Delta`` the
+    parity-sum drift for one Pauli term. Then ``|delta| <= M / 2`` and
+    ``|Delta| <= M / 2``. Since ``QBraidExecutor.estimate()`` normalizes by
+    ``sum(counts.values()) = shots + delta``, one term's expectation-value
+    error is bounded by:
+
+        |mu_hat - mu| <= M / (shots - M / 2)
+
+    The Hamiltonian error is the sum of those per-term bounds weighted by
+    the absolute values of the coefficients in each basis group.
+
+    Rule of thumb for the test's current ``shots=2_000_000``:
+
+    - ``M = 2`` non-zero outcomes gives about ``1.0e-6`` per unit coefficient.
+    - ``M = 4`` non-zero outcomes gives about ``2.0e-6`` per unit coefficient.
+    - ``M = 8`` non-zero outcomes gives about ``4.0e-6`` per unit coefficient.
+
+    So, for example:
+
+    - one 2-qubit term with full support (``M = 4``) and ``|c| = 1`` gives a
+      bound of about ``2.0e-6``;
+    - one 3-qubit term with full support (``M = 8``) and ``|c| = 1`` gives a
+      bound of about ``4.0e-6``;
+    - three such 3-qubit unit-weight terms would give a worst-case bound of
+      about ``1.2e-5``.
+    """
+    basis_groups: list[
+        tuple[dict[int, Pauli], list[tuple[tuple[PauliOperator, ...], complex]]]
+    ] = []
+
+    for operators, coeff in hamiltonian:
+        basis_assignment = {
+            op.index: op.pauli for op in operators if op.pauli != Pauli.I
+        }
+
+        for group_basis, group_terms in basis_groups:
+            if all(
+                group_basis.get(qubit_idx, pauli_type) == pauli_type
+                for qubit_idx, pauli_type in basis_assignment.items()
+            ):
+                group_basis.update(basis_assignment)
+                group_terms.append((operators, coeff))
+                break
+        else:
+            basis_groups.append((dict(basis_assignment), [(operators, coeff)]))
+
+    total_bound = 0.0
+    for basis_assignment, terms in basis_groups:
+        rotated = circuit.copy()
+        for qubit_idx, pauli_type in sorted(basis_assignment.items()):
+            if pauli_type == Pauli.X:
+                rotated.h(qubit_idx)
+            elif pauli_type == Pauli.Y:
+                rotated.sdg(qubit_idx)
+                rotated.h(qubit_idx)
+
+        support_size = len(Statevector.from_instruction(rotated).probabilities_dict())
+        per_term_bound = support_size / (shots - support_size / 2)
+        total_bound += per_term_bound * sum(abs(complex(coeff)) for _, coeff in terms)
+
+    return total_bound
+
+
+class TestRandomOracleComparison:
+    """Seeded random circuit + random Hermitian Hamiltonian vs statevector oracle."""
+
+    @pytest.mark.parametrize("seed", [offset + 901 for offset in range(30)])
+    @pytest.mark.parametrize("num_qubits", [2, 3])
+    def test_random_circuit_random_hamiltonian_matches_statevector(
+        self, seed, num_qubits
+    ):
+        depth = 3
+        num_terms = 3
+        shots = 2_000_000
+
+        qc = random_circuit(
+            num_qubits, depth=depth, max_operands=2, measure=False, seed=seed
+        )
+
+        plist = random_pauli_list(num_qubits, size=num_terms, seed=seed, phase=False)
+        coeffs = np.random.default_rng(seed).uniform(-1.0, 1.0, size=num_terms)
+
+        H = Hamiltonian(num_qubits=num_qubits)
+        for p, c in zip(plist, coeffs):
+            H = H + _from_pauli_label(p.to_label(), float(c))
+
+        exact = float(
+            Statevector.from_instruction(qc)
+            .expectation_value(hamiltonian_to_sparse_pauli_op(H))
+            .real
+        )
+
+        device = _FakeStatevectorDevice()
+        approx = QBraidExecutor(device=device, expval_shots=shots).estimate(qc, H)
+
+        # Tolerance justification:
+        # _FakeStatevectorDevice rounds each outcome count independently, so
+        # there is no shot noise, only deterministic integer-rounding error.
+        # Because QBraidExecutor normalizes by sum(counts.values()), the error
+        # bound must account for both parity-sum rounding and total-shot drift.
+        # `_deterministic_rounding_error_bound()` computes a rigorous upper
+        # bound for this exact circuit/Hamiltonian pair.
+        tolerance = _deterministic_rounding_error_bound(qc, H, shots) + 1e-12
+        assert abs(exact - approx) < tolerance, (
+            f"seed={seed} num_qubits={num_qubits} depth={depth} shots={shots}: "
+            f"exact={exact}, approx={approx}, diff={abs(exact - approx)}"
+        )
