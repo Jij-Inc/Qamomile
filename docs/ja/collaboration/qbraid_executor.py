@@ -63,6 +63,9 @@ rng = np.random.default_rng(seed)
 device_id = "qbraid:qbraid:sim:qir-sv"
 api_key = "YOUR_API_KEY"
 
+if api_key == "YOUR_API_KEY":
+    raise ValueError("Replace 'YOUR_API_KEY' with your actual qBraid API key")
+
 with warnings.catch_warnings():
     warnings.filterwarnings(
         "ignore",
