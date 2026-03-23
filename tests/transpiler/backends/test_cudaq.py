@@ -20,9 +20,8 @@ class TestCudaqTranspiler(TranspilerTestSuite):
     """Test suite for CUDA-Q transpiler.
 
     CUDA-Q supports most standard gates but has some limitations:
-    - Measurements are not supported in circuits (no-op in emitter)
-    - Measurement-dependent conditional branching raises EmitError (0.14.x)
-    - While-loops raise EmitError
+    - Measurements are no-op in the builder emitter (auto-measured by sample)
+    - Runtime control flow uses codegen emitter + cudaq.run()
     - CP and RZZ are decomposed (no native gates)
     - CH and CY are decomposed
     """
@@ -51,14 +50,14 @@ class TestCudaqTranspiler(TranspilerTestSuite):
         return np.array(state)
 
 
-class TestCudaqControlFlowErrors:
-    """Test that unsupported control flow raises explicit errors."""
+class TestCudaqRuntimeControlFlow:
+    """Test runtime measurement-dependent control flow via cudaq.run()."""
 
-    def test_c_if_raises_emit_error(self) -> None:
-        """measurement-dependent c_if is rejected under CUDA-Q 0.14.x."""
+    def test_c_if_transpiles_to_runtime_circuit(self) -> None:
+        """Runtime if-then produces CudaqRuntimeCircuit."""
         import qamomile.circuit as qmc
-        from qamomile.circuit.transpiler.errors import EmitError
         from qamomile.cudaq import CudaqTranspiler
+        from qamomile.cudaq.emitter import CudaqRuntimeCircuit
 
         @qmc.qkernel
         def circuit_with_c_if() -> qmc.Bit:
@@ -71,14 +70,15 @@ class TestCudaqControlFlowErrors:
             return qmc.measure(q1)
 
         transpiler = CudaqTranspiler()
-        with pytest.raises(EmitError, match="measurement-dependent"):
-            transpiler.transpile(circuit_with_c_if)
+        exe = transpiler.transpile(circuit_with_c_if)
+        circuit = exe.compiled_quantum[0].circuit
+        assert isinstance(circuit, CudaqRuntimeCircuit)
 
-    def test_if_with_else_raises_emit_error(self) -> None:
-        """IfOperation with else branch on CUDA-Q must raise EmitError."""
+    def test_if_with_else_transpiles_to_runtime_circuit(self) -> None:
+        """Runtime if-else produces CudaqRuntimeCircuit."""
         import qamomile.circuit as qmc
-        from qamomile.circuit.transpiler.errors import EmitError
         from qamomile.cudaq import CudaqTranspiler
+        from qamomile.cudaq.emitter import CudaqRuntimeCircuit
 
         @qmc.qkernel
         def circuit_with_if_else() -> qmc.Bit:
@@ -93,14 +93,15 @@ class TestCudaqControlFlowErrors:
             return qmc.measure(q1)
 
         transpiler = CudaqTranspiler()
-        with pytest.raises(EmitError, match="measurement-dependent"):
-            transpiler.transpile(circuit_with_if_else)
+        exe = transpiler.transpile(circuit_with_if_else)
+        circuit = exe.compiled_quantum[0].circuit
+        assert isinstance(circuit, CudaqRuntimeCircuit)
 
-    def test_while_loop_raises_emit_error(self) -> None:
-        """WhileOperation on CUDA-Q backend must raise EmitError."""
+    def test_while_loop_transpiles_to_runtime_circuit(self) -> None:
+        """Runtime while loop produces CudaqRuntimeCircuit."""
         import qamomile.circuit as qmc
-        from qamomile.circuit.transpiler.errors import EmitError
         from qamomile.cudaq import CudaqTranspiler
+        from qamomile.cudaq.emitter import CudaqRuntimeCircuit
 
         @qmc.qkernel
         def circuit_with_while() -> qmc.Bit:
@@ -114,5 +115,6 @@ class TestCudaqControlFlowErrors:
             return bit
 
         transpiler = CudaqTranspiler()
-        with pytest.raises(EmitError, match="while loop control flow"):
-            transpiler.transpile(circuit_with_while)
+        exe = transpiler.transpile(circuit_with_while)
+        circuit = exe.compiled_quantum[0].circuit
+        assert isinstance(circuit, CudaqRuntimeCircuit)

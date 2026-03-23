@@ -9,7 +9,12 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Sequence, TYPE_CHECKING
 
-from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation
+from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation.control_flow import (
+    ForOperation,
+    IfOperation,
+    WhileOperation,
+)
 from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.transpiler.errors import EmitError
@@ -23,7 +28,12 @@ from qamomile.circuit.transpiler.executable import (
     ParameterMetadata,
 )
 
-from .emitter import CudaqCircuit, CudaqGateEmitter
+from .emitter import (
+    CudaqCircuit,
+    CudaqCodegenEmitter,
+    CudaqGateEmitter,
+    CudaqRuntimeCircuit,
+)
 
 if TYPE_CHECKING:
     import qamomile.observable as qm_o
@@ -110,13 +120,65 @@ class BoundCudaqCircuit:
     param_values: list[float]
 
 
+@dataclasses.dataclass
+class BoundCudaqRuntimeCircuit:
+    """Runtime CUDA-Q kernel with bound parameter values.
+
+    Used when a runtime-control-flow kernel has parameters that are
+    bound before execution.  The executor dispatches to
+    ``cudaq.run(kernel_func, param_values, shots_count=...)`` when it
+    receives this type.
+
+    Args:
+        kernel_func: The ``@cudaq.kernel`` decorated function.
+        num_qubits: Number of qubits in the circuit.
+        num_clbits: Number of classical bits in the circuit.
+        param_values: Bound parameter values in order.
+    """
+
+    kernel_func: Any
+    num_qubits: int
+    num_clbits: int
+    param_values: list[float]
+
+
+def _has_runtime_control_flow(
+    operations: list[Operation],
+    bindings: dict[str, Any],
+) -> bool:
+    """Check whether operations contain runtime measurement-dependent control flow.
+
+    Returns True if any ``IfOperation`` has a condition that cannot be
+    resolved at compile time, or if any ``WhileOperation`` is present.
+    """
+    for op in operations:
+        if isinstance(op, IfOperation):
+            if resolve_if_condition(op.condition, bindings) is None:
+                return True
+            # Also check inside branches
+            if _has_runtime_control_flow(op.true_operations, bindings):
+                return True
+            if _has_runtime_control_flow(op.false_operations, bindings):
+                return True
+        elif isinstance(op, WhileOperation):
+            return True
+        elif isinstance(op, ForOperation):
+            if _has_runtime_control_flow(op.operations, bindings):
+                return True
+    return False
+
+
 class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
     """CUDA-Q-specific emission pass.
 
-    Uses StandardEmitPass with CudaqGateEmitter for gate emission.
-    Measurement-dependent conditional branching (``c_if``) is not supported
-    under CUDA-Q 0.14.x and raises ``EmitError`` at emit time.
-    For-loops are unrolled and while-loops raise ``EmitError``.
+    Uses ``CudaqGateEmitter`` (builder API) for static circuits and
+    ``CudaqCodegenEmitter`` (source code generation) for circuits
+    containing runtime measurement-dependent control flow.
+
+    The emitter is selected via a pre-scan of the operations: if any
+    runtime ``IfOperation`` or ``WhileOperation`` is detected, the
+    entire quantum segment is emitted through the codegen path, producing
+    a ``CudaqRuntimeCircuit`` that is executed via ``cudaq.run()``.
     """
 
     def __init__(
@@ -129,34 +191,70 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
         composite_emitters: list[Any] = []
         super().__init__(emitter, bindings, parameters, composite_emitters)
 
+    def _emit_quantum_segment(
+        self,
+        operations: list[Operation],
+        bindings: dict[str, Any],
+    ) -> tuple[Any, dict[str, int], dict[str, int]]:
+        """Select emitter based on whether runtime control flow is present.
+
+        If operations contain runtime measurement-dependent ``IfOperation``
+        or ``WhileOperation``, switches to ``CudaqCodegenEmitter`` which
+        generates a ``@cudaq.kernel`` decorated function.  Otherwise uses
+        the default builder emitter.
+        """
+        if _has_runtime_control_flow(operations, bindings):
+            return self._emit_runtime_quantum_segment(operations, bindings)
+        return super()._emit_quantum_segment(operations, bindings)
+
+    def _emit_runtime_quantum_segment(
+        self,
+        operations: list[Operation],
+        bindings: dict[str, Any],
+    ) -> tuple[CudaqRuntimeCircuit, dict[str, int], dict[str, int]]:
+        """Emit quantum segment using the codegen emitter for cudaq.run()."""
+        # Save and swap emitter
+        original_emitter = self._emitter
+        codegen_emitter = CudaqCodegenEmitter(parametric=bool(self.parameters))
+        self._emitter = codegen_emitter  # type: ignore[assignment]
+
+        try:
+            # Allocate resources
+            qubit_map, clbit_map = self._allocator.allocate(operations, bindings)
+            qubit_count = max(qubit_map.values()) + 1 if qubit_map else 0
+            clbit_count = max(clbit_map.values()) + 1 if clbit_map else 0
+
+            # Create circuit and emit operations
+            circuit = codegen_emitter.create_circuit(qubit_count, clbit_count)
+            self._measurement_qubit_map.clear()
+            self._emit_operations(circuit, operations, qubit_map, clbit_map, bindings)
+
+            # Populate measurement_qubit_map from codegen emitter's records
+            for clbit_idx, qubit_idx in codegen_emitter._measurement_map.items():
+                self._measurement_qubit_map[clbit_idx] = qubit_idx
+
+            # Finalize: compile source into @cudaq.kernel function
+            circuit = codegen_emitter.finalize(circuit)
+
+            return circuit, qubit_map, clbit_map
+        finally:
+            self._emitter = original_emitter
+
     def _emit_if(
         self,
-        circuit: CudaqCircuit,
+        circuit: Any,
         op: IfOperation,
         qubit_map: dict[str, int],
         clbit_map: dict[str, int],
         bindings: dict[str, Any],
     ) -> None:
-        """Reject measurement-dependent conditional branching.
+        """Handle if-operations for both static and runtime paths.
 
-        CUDA-Q 0.14.x removed the builder ``c_if`` API.  Any
-        ``IfOperation`` whose condition is a runtime measurement result
-        (i.e. a Value with a UUID) is therefore unsupported and raises
-        ``EmitError``.
-
-        Compile-time constant conditions are forwarded to the base-class
-        implementation (``StandardEmitPass._emit_if``) which handles
-        them without relying on ``c_if``.
-
-        Args:
-            circuit (CudaqCircuit): The CUDA-Q circuit being built.
-            op (IfOperation): The if-operation from the IR.
-            qubit_map (dict[str, int]): UUID-to-qubit-index mapping.
-            clbit_map (dict[str, int]): UUID-to-clbit-index mapping.
-            bindings (dict[str, Any]): Parameter bindings.
-
-        Raises:
-            EmitError: When the condition is a runtime measurement result.
+        Compile-time constant conditions are always handled by the
+        base class.  Runtime measurement-dependent conditions are
+        delegated to ``StandardEmitPass._emit_if`` when the codegen
+        emitter is active (``supports_if_else() == True``), or raise
+        ``EmitError`` when the builder emitter is active.
         """
         condition = op.condition
 
@@ -165,10 +263,15 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
             super()._emit_if(circuit, op, qubit_map, clbit_map, bindings)
             return
 
+        # Runtime condition: delegate to StandardEmitPass if emitter supports it
+        if self._emitter.supports_if_else():
+            StandardEmitPass._emit_if(self, circuit, op, qubit_map, clbit_map, bindings)
+            return
+
         raise EmitError(
             "CUDA-Q 0.14.x does not support measurement-dependent conditional "
-            "branching. The `c_if` builder API was removed in 0.14.0. "
-            "Refactor to use static circuits without runtime conditional branching."
+            "branching via the builder API. Use a circuit with runtime control "
+            "flow support (automatically handled when runtime if/while is detected)."
         )
 
     def _emit_controlled_fallback(
@@ -466,18 +569,22 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
     def execute(self, circuit: Any, shots: int) -> dict[str, int]:
         """Execute circuit and return canonical big-endian bitstring counts.
 
-        CUDA-Q ``sample`` returns bitstrings in allocation order (first
-        declared qubit = leftmost bit).  The executor contract requires
-        big-endian format (highest qubit index = leftmost bit), so this
-        method reverses each bitstring before returning.
+        Dispatches based on circuit type:
 
-        For non-parametric circuits (``CudaqCircuit``), calls
-        ``cudaq.sample(kernel, shots_count=shots)``.
-        For bound circuits (``BoundCudaqCircuit``), passes parameter values.
+        - ``CudaqCircuit`` / ``BoundCudaqCircuit``: uses ``cudaq.sample()``
+          (builder path for static circuits).
+        - ``CudaqRuntimeCircuit`` / ``BoundCudaqRuntimeCircuit``: uses
+          ``cudaq.run()`` (decorator-kernel path for runtime control flow).
 
-        CUDA-Q ``sample`` automatically measures all qubits when no
-        explicit ``mz`` calls are present in the kernel.
+        Both paths return bitstrings in big-endian format (highest qubit
+        index = leftmost bit).
         """
+        if isinstance(circuit, (CudaqRuntimeCircuit, BoundCudaqRuntimeCircuit)):
+            return self._execute_runtime(circuit, shots)
+        return self._execute_sample(circuit, shots)
+
+    def _execute_sample(self, circuit: Any, shots: int) -> dict[str, int]:
+        """Execute via ``cudaq.sample()`` for static circuits."""
         import cudaq
 
         self._ensure_target()
@@ -505,18 +612,57 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
 
         return counts
 
+    def _execute_runtime(
+        self,
+        circuit: CudaqRuntimeCircuit | BoundCudaqRuntimeCircuit,
+        shots: int,
+    ) -> dict[str, int]:
+        """Execute via ``cudaq.run()`` for runtime control flow circuits.
+
+        ``cudaq.run()`` returns a list of per-shot return values.  Each
+        return value is ``list[bool]`` (from ``return mz(q)``), with one
+        bool per qubit in allocation order.
+
+        This method aggregates per-shot results into canonical big-endian
+        bitstring counts matching the ``QuantumExecutor.execute()`` contract.
+        """
+        import cudaq
+
+        self._ensure_target()
+
+        if isinstance(circuit, BoundCudaqRuntimeCircuit):
+            results = cudaq.run(
+                circuit.kernel_func, circuit.param_values, shots_count=shots
+            )
+        else:
+            results = cudaq.run(circuit.kernel_func, shots_count=shots)
+
+        num_qubits = circuit.num_qubits
+        counts: dict[str, int] = {}
+        for shot_result in results:
+            # shot_result is list[bool] in allocation order (from mz(q))
+            bits = ["1" if b else "0" for b in shot_result]
+            # Pad to num_qubits if shorter
+            while len(bits) < num_qubits:
+                bits.append("0")
+            # Reverse: allocation-order → big-endian
+            canonical = "".join(reversed(bits))
+            counts[canonical] = counts.get(canonical, 0) + 1
+
+        return counts
+
     def bind_parameters(
         self,
-        circuit: CudaqCircuit,
+        circuit: Any,
         bindings: dict[str, Any],
         parameter_metadata: ParameterMetadata,
-    ) -> BoundCudaqCircuit:
-        """Bind parameters by wrapping the kernel with parameter values.
+    ) -> BoundCudaqCircuit | BoundCudaqRuntimeCircuit:
+        """Bind parameters to a circuit for execution.
 
-        CUDA-Q does not support in-place parameter binding. Instead,
-        parameters are passed at execution time. This method creates a
-        ``BoundCudaqCircuit`` that stores the kernel and parameter values
-        together.
+        Dispatches based on circuit type:
+
+        - ``CudaqRuntimeCircuit``: returns ``BoundCudaqRuntimeCircuit``
+        - ``CudaqCircuit``: returns ``BoundCudaqCircuit``
         """
         param_values = []
         for param_info in parameter_metadata.parameters:
@@ -529,6 +675,14 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
                     f"Required parameters: "
                     f"{[p.name for p in parameter_metadata.parameters]}"
                 )
+
+        if isinstance(circuit, CudaqRuntimeCircuit):
+            return BoundCudaqRuntimeCircuit(
+                kernel_func=circuit.kernel_func,
+                num_qubits=circuit.num_qubits,
+                num_clbits=circuit.num_clbits,
+                param_values=param_values,
+            )
 
         return BoundCudaqCircuit(
             kernel=circuit.kernel,
@@ -544,15 +698,21 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
     ) -> float:
         """Estimate expectation value using ``cudaq.observe``.
 
-        Dispatches based on circuit type:
-        - ``BoundCudaqCircuit``: uses stored param_values
-        - ``CudaqCircuit`` with params: passes params to observe
-        - ``CudaqCircuit`` without params: no-parameter observe
+        Only supported for static circuits (``CudaqCircuit`` /
+        ``BoundCudaqCircuit``).  Runtime control flow circuits
+        (``CudaqRuntimeCircuit``) are not compatible with
+        ``cudaq.observe()`` and raise ``TypeError``.
         """
         import cudaq
         import qamomile.observable as qm_o
 
         from qamomile.cudaq.observable import hamiltonian_to_cudaq_spin_op
+
+        if isinstance(circuit, (CudaqRuntimeCircuit, BoundCudaqRuntimeCircuit)):
+            raise TypeError(
+                "cudaq.observe() is not supported for runtime control flow "
+                "circuits. Use sample() or run() instead."
+            )
 
         self._ensure_target()
 

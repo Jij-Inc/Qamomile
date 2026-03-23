@@ -1,12 +1,13 @@
 """Rich CUDA-Q frontend-to-backend test suite.
 
 Tests the full pipeline: @qkernel definition -> CudaqTranspiler -> execution.
-Covers every frontend gate, gate combinations, control flow (loops), stdlib,
-measurement, parametric circuits, expval, and edge cases.
+Covers every frontend gate, gate combinations, control flow (loops, if, while),
+stdlib, measurement, parametric circuits, expval, and edge cases.
 
-CUDA-Q 0.14.x does not support measurement-dependent conditional branching
-(``c_if`` was removed). Tests that rely on Qiskit-specific circuit
-introspection are replaced with statevector or sampling verification.
+Runtime measurement-dependent control flow (``if bit:``, ``if/else``,
+``while bit:``) is supported via ``@cudaq.kernel`` source code generation
+and ``cudaq.run()``.  Static circuits use the builder API and
+``cudaq.sample()``.
 
 Note: Do NOT use ``from __future__ import annotations`` in this file.
 The @qkernel AST transformer relies on resolved type annotations.
@@ -35,7 +36,7 @@ from tests.transpiler.gate_test_specs import (
 cudaq = pytest.importorskip("cudaq")
 
 from qamomile.cudaq import CudaqTranspiler  # noqa: E402
-from qamomile.cudaq.emitter import CudaqCircuit  # noqa: E402
+from qamomile.cudaq.emitter import CudaqCircuit, CudaqRuntimeCircuit  # noqa: E402
 from qamomile.circuit.transpiler.errors import EmitError  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -1836,7 +1837,7 @@ def _c_if_with_rotation(theta: qmc.Float) -> qmc.Bit:
 
 @qmc.qkernel
 def _c_if_with_else() -> qmc.Bit:
-    """c_if with else branch — should raise EmitError."""
+    """c_if with else branch."""
     q0 = qmc.qubit("q0")
     q1 = qmc.qubit("q1")
     q0 = qmc.h(q0)
@@ -1854,30 +1855,33 @@ def _c_if_with_else() -> qmc.Bit:
 
 
 class TestCIfControlFlow:
-    """Test that measurement-dependent conditional branching is rejected under CUDA-Q 0.14.x."""
+    """Test runtime measurement-dependent control flow on CUDA-Q via cudaq.run()."""
 
-    def test_c_if_basic_raises_emit_error(self) -> None:
-        """measurement-dependent c_if (if-then, no else) raises EmitError under 0.14.x."""
-        with pytest.raises(EmitError, match="measurement-dependent"):
-            _transpile_and_get_circuit(_c_if_basic)
+    def test_c_if_basic_transpiles(self) -> None:
+        """Runtime if-then transpiles to CudaqRuntimeCircuit."""
+        exe, circuit = _transpile_and_get_circuit(_c_if_basic)
+        assert isinstance(circuit, CudaqRuntimeCircuit)
+        assert circuit.kernel_func is not None
 
-    def test_c_if_false_branch_raises_emit_error(self) -> None:
-        """measurement-dependent c_if (false-branch path) raises EmitError under 0.14.x."""
-        with pytest.raises(EmitError, match="measurement-dependent"):
-            _transpile_and_get_circuit(_c_if_false_branch)
+    def test_c_if_false_branch_transpiles(self) -> None:
+        """Runtime if-then (false path) transpiles to CudaqRuntimeCircuit."""
+        exe, circuit = _transpile_and_get_circuit(_c_if_false_branch)
+        assert isinstance(circuit, CudaqRuntimeCircuit)
 
-    def test_c_if_with_rotation_raises_emit_error(self) -> None:
-        """measurement-dependent c_if with parametric body raises EmitError under 0.14.x."""
-        with pytest.raises(EmitError, match="measurement-dependent"):
-            _transpile_and_get_circuit(_c_if_with_rotation, bindings={"theta": np.pi})
+    def test_c_if_with_rotation_transpiles(self) -> None:
+        """Runtime if-then with parametric body transpiles successfully."""
+        exe, circuit = _transpile_and_get_circuit(
+            _c_if_with_rotation, bindings={"theta": np.pi}
+        )
+        assert isinstance(circuit, CudaqRuntimeCircuit)
 
-    def test_c_if_with_else_raises_emit_error(self) -> None:
-        """Measurement-dependent if-else must raise EmitError on CUDA-Q 0.14.x."""
-        with pytest.raises(EmitError, match="measurement-dependent"):
-            _transpile_and_get_circuit(_c_if_with_else)
+    def test_c_if_with_else_transpiles(self) -> None:
+        """Runtime if-else transpiles to CudaqRuntimeCircuit."""
+        exe, circuit = _transpile_and_get_circuit(_c_if_with_else)
+        assert isinstance(circuit, CudaqRuntimeCircuit)
 
     def test_measurement_without_conditional_transpiles_ok(self) -> None:
-        """Mid-circuit measurement without conditional branching must not be rejected."""
+        """Mid-circuit measurement without conditional stays on builder path."""
 
         @qmc.qkernel
         def measure_only() -> qmc.Bit:
@@ -1886,10 +1890,11 @@ class TestCIfControlFlow:
             return qmc.measure(q0)
 
         _, qc = _transpile_and_get_circuit(measure_only)
+        assert isinstance(qc, CudaqCircuit)
         assert qc.num_qubits == 1
 
-    def test_while_loop_still_raises_emit_error(self) -> None:
-        """While loops remain unsupported on CUDA-Q."""
+    def test_while_loop_transpiles(self) -> None:
+        """While loops transpile to CudaqRuntimeCircuit."""
 
         @qmc.qkernel
         def circuit_with_while() -> qmc.Bit:
@@ -1902,8 +1907,127 @@ class TestCIfControlFlow:
                 bit = qmc.measure(q)
             return bit
 
-        with pytest.raises(EmitError, match="while loop control flow"):
-            _transpile_and_get_circuit(circuit_with_while)
+        exe, circuit = _transpile_and_get_circuit(circuit_with_while)
+        assert isinstance(circuit, CudaqRuntimeCircuit)
+
+    def test_c_if_basic_sample(self) -> None:
+        """X(q0) → measure → if bit: X(q1). q0=1 always, so q1=1 always."""
+        transpiler = CudaqTranspiler()
+        exe = transpiler.transpile(_c_if_basic)
+        executor = transpiler.executor()
+        job = exe.sample(executor, shots=100)
+        result = job.result()
+        for value, _ in result.results:
+            assert value == 1, f"Expected bit=1, got {value}"
+
+    def test_c_if_basic_run(self) -> None:
+        """run() returns single shot: bit should be 1."""
+        transpiler = CudaqTranspiler()
+        exe = transpiler.transpile(_c_if_basic)
+        executor = transpiler.executor()
+        result = exe.run(executor).result()
+        assert result == 1, f"Expected 1, got {result}"
+
+    def test_c_if_false_branch_sample(self) -> None:
+        """No X on q0 → q0=0 → if-branch not taken → q1=0 always."""
+        transpiler = CudaqTranspiler()
+        exe = transpiler.transpile(_c_if_false_branch)
+        executor = transpiler.executor()
+        job = exe.sample(executor, shots=100)
+        result = job.result()
+        for value, _ in result.results:
+            assert value == 0, f"Expected bit=0, got {value}"
+
+    def test_c_if_with_rotation_sample(self) -> None:
+        """Bound theta=pi: RX(pi) ≈ X, so q1=1 always when if-branch taken."""
+        transpiler = CudaqTranspiler()
+        exe = transpiler.transpile(_c_if_with_rotation, bindings={"theta": np.pi})
+        executor = transpiler.executor()
+        job = exe.sample(executor, shots=100)
+        result = job.result()
+        for value, _ in result.results:
+            assert value == 1, f"Expected bit=1, got {value}"
+
+    def test_c_if_with_else_sample(self) -> None:
+        """H(q0) → measure → if: X(q1) else: H(q1). Both branches should occur."""
+        transpiler = CudaqTranspiler()
+        exe = transpiler.transpile(_c_if_with_else)
+        executor = transpiler.executor()
+        job = exe.sample(executor, shots=200)
+        result = job.result()
+        values = {v for v, _ in result.results}
+        # With H on q0, both branches execute; both 0 and 1 should appear in results
+        assert 0 in values and 1 in values, f"Expected both 0 and 1, got {values}"
+
+    def test_while_loop_repeat_until_zero_sample(self) -> None:
+        """Repeat-until-zero: H → measure → while bit → H → measure. Always returns 0."""
+
+        @qmc.qkernel
+        def repeat_until_zero() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q = qmc.qubit("q2")
+                q = qmc.h(q)
+                bit = qmc.measure(q)
+            return bit
+
+        transpiler = CudaqTranspiler()
+        exe = transpiler.transpile(repeat_until_zero)
+        executor = transpiler.executor()
+        job = exe.sample(executor, shots=200)
+        result = job.result()
+        for value, _ in result.results:
+            assert value == 0, f"repeat_until_zero must always return 0, got {value}"
+
+    def test_nested_if_inside_while_sample(self) -> None:
+        """while loop with if-else inside: deterministic exit via if-branch measurement."""
+
+        @qmc.qkernel
+        def nested_if_while() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.x(q0)
+            bit = qmc.measure(q0)
+
+            q1 = qmc.qubit("q1")
+            q1 = qmc.x(q1)
+            sel = qmc.measure(q1)
+
+            while bit:
+                if sel:
+                    q2 = qmc.qubit("q2")
+                    bit = qmc.measure(q2)
+                else:
+                    q3 = qmc.qubit("q3")
+                    bit = qmc.measure(q3)
+            return bit
+
+        transpiler = CudaqTranspiler()
+        exe = transpiler.transpile(nested_if_while)
+        executor = transpiler.executor()
+        job = exe.sample(executor, shots=100)
+        result = job.result()
+        for value, _ in result.results:
+            assert value == 0, f"Expected 0 (loop exit), got {value}"
+
+    def test_c_if_with_rotation_late_binding_sample(self) -> None:
+        """Parametric if-only with late binding: parameters=['theta'] + run-time bindings."""
+        transpiler = CudaqTranspiler()
+        exe = transpiler.transpile(_c_if_with_rotation, parameters=["theta"])
+        executor = transpiler.executor()
+        job = exe.sample(executor, shots=100, bindings={"theta": np.pi})
+        result = job.result()
+        for value, _ in result.results:
+            assert value == 1, f"Expected bit=1 with RX(pi), got {value}"
+
+    def test_c_if_with_rotation_late_binding_run(self) -> None:
+        """Parametric if-only with late binding via run()."""
+        transpiler = CudaqTranspiler()
+        exe = transpiler.transpile(_c_if_with_rotation, parameters=["theta"])
+        executor = transpiler.executor()
+        result = exe.run(executor, bindings={"theta": np.pi}).result()
+        assert result == 1, f"Expected 1, got {result}"
 
 
 # ============================================================================
@@ -2024,8 +2148,8 @@ class TestBoundConstantIfConditionCudaq:
         expected = computational_basis_state(1, 0)  # |0>
         assert statevectors_equal(sv, expected)
 
-    def test_runtime_measurement_if_still_rejected(self):
-        """Runtime measurement-dependent if still raises EmitError."""
+    def test_runtime_measurement_if_uses_runtime_circuit(self):
+        """Runtime measurement-dependent if produces CudaqRuntimeCircuit, not CudaqCircuit."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -2037,8 +2161,21 @@ class TestBoundConstantIfConditionCudaq:
                 q1 = qmc.x(q1)
             return qmc.measure(q1)
 
-        with pytest.raises(EmitError, match="measurement-dependent"):
-            _transpile_and_get_circuit(circuit)
+        exe, qc = _transpile_and_get_circuit(circuit)
+        assert isinstance(qc, CudaqRuntimeCircuit)
+
+    def test_bound_constant_if_uses_builder_circuit(self):
+        """Compile-time if still produces CudaqCircuit (builder path)."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 1})
+        assert isinstance(qc, CudaqCircuit)
 
 
 # ============================================================================

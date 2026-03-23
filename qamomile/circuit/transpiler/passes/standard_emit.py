@@ -689,10 +689,11 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             self._emit_operations(
                 circuit, op.true_operations, qubit_map, clbit_map, bindings
             )
-            self._emitter.emit_else_start(circuit, context)
-            self._emit_operations(
-                circuit, op.false_operations, qubit_map, clbit_map, bindings
-            )
+            if op.false_operations:
+                self._emitter.emit_else_start(circuit, context)
+                self._emit_operations(
+                    circuit, op.false_operations, qubit_map, clbit_map, bindings
+                )
             self._emitter.emit_if_end(circuit, context)
 
             # Register phi output UUIDs so subsequent operations
