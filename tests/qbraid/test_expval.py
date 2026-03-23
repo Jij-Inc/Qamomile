@@ -624,48 +624,51 @@ def _random_endian_sensitive_terms(
         return eigenvalue
 
     rng = np.random.default_rng(seed)
-    num_terms = min(2**num_qubits - 1, max(3, num_qubits + 1))
-    all_support_masks = np.arange(1, 2**num_qubits)
+    labels: list[str] = []
+    for support_mask in range(1, 2**num_qubits):
+        chars = ["I"] * num_qubits
+        for qubit in range(num_qubits):
+            if support_mask & (1 << qubit):
+                # Qiskit labels are big-endian: qubit 0 is the rightmost char.
+                chars[num_qubits - 1 - qubit] = basis_assignment[qubit].name
+        labels.append("".join(chars))
 
     for _ in range(128):
-        bitstring = "".join(str(int(bit)) for bit in rng.integers(0, 2, size=num_qubits))
+        bitstring = "".join(
+            str(int(bit)) for bit in rng.integers(0, 2, size=num_qubits)
+        )
         # Palindromic bitstrings are weak regression cases because reversing the
         # bit order leaves them unchanged.
         if bitstring == bitstring[::-1]:
             continue
 
-        # Build the random Hamiltonian in the same big-endian Pauli-label format
-        # that Qiskit uses and `_from_pauli_label()` accepts.
-        support_masks = rng.choice(all_support_masks, size=num_terms, replace=False)
-        coeffs = rng.uniform(-1.0, 1.0, size=num_terms)
+        # Re-randomize only the coefficients; the label set itself is the full
+        # non-identity basis for this per-qubit Pauli assignment.
+        coeffs = rng.uniform(-1.0, 1.0, size=len(labels))
         coeffs = np.where(
             np.abs(coeffs) < 0.2,
             np.where(coeffs < 0.0, -0.2, 0.2),
             coeffs,
         )
-        hamiltonian = Hamiltonian(num_qubits=num_qubits)
-        correct = 0.0
-        wrong = 0.0
-        for support_mask, coeff in zip(support_masks, coeffs):
-            chars = ["I"] * num_qubits
-            for qubit in range(num_qubits):
-                if int(support_mask) & (1 << qubit):
-                    # Qiskit labels are big-endian: qubit 0 is the rightmost char.
-                    chars[num_qubits - 1 - qubit] = basis_assignment[qubit].name
-            label = "".join(chars)
-            hamiltonian = hamiltonian + _from_pauli_label(label, float(coeff))
-            # `correct` is the expectation with the intended big-endian decoding.
-            correct += float(coeff) * pauli_label_eigenvalue(label, bitstring)
-            # `wrong` is what we would get if bit positions were interpreted in
-            # the opposite direction.
-            wrong += float(coeff) * pauli_label_eigenvalue(
-                label, bitstring, reverse_endian=True
-            )
+        correct = sum(
+            float(coeff) * pauli_label_eigenvalue(label, bitstring)
+            for label, coeff in zip(labels, coeffs)
+        )
+        wrong = sum(
+            float(coeff)
+            * pauli_label_eigenvalue(label, bitstring, reverse_endian=True)
+            for label, coeff in zip(labels, coeffs)
+        )
 
         # Keep only cases that would clearly fail if QBraidExecutor read the
         # measured bitstring in the wrong direction.
-        if abs(correct - wrong) > 0.5:
-            return bitstring, hamiltonian
+        if abs(correct - wrong) <= 0.5:
+            continue
+
+        hamiltonian = Hamiltonian(num_qubits=num_qubits)
+        for label, coeff in zip(labels, coeffs):
+            hamiltonian = hamiltonian + _from_pauli_label(label, float(coeff))
+        return bitstring, hamiltonian
 
     raise AssertionError(
         f"Failed to generate an endian-sensitive random case for seed={seed}, "
