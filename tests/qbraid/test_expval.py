@@ -627,6 +627,7 @@ def _random_endian_sensitive_terms(
     seed: int, num_qubits: int, *, basis_assignment: dict[int, Pauli]
 ) -> tuple[str, Hamiltonian]:
     """Generate a seeded Hamiltonian whose value changes under reversed endian."""
+
     def pauli_label_eigenvalue(
         label: str, bitstring: str, *, reverse_endian: bool = False
     ) -> float:
@@ -670,8 +671,7 @@ def _random_endian_sensitive_terms(
             for label, coeff in zip(labels, coeffs)
         )
         wrong = sum(
-            float(coeff)
-            * pauli_label_eigenvalue(label, bitstring, reverse_endian=True)
+            float(coeff) * pauli_label_eigenvalue(label, bitstring, reverse_endian=True)
             for label, coeff in zip(labels, coeffs)
         )
 
@@ -852,7 +852,7 @@ class TestRandomEndianRegression:
         assert approx == pytest.approx(exact, abs=1e-10)
         assert device.run.call_count == 1
 
-    @pytest.mark.parametrize("seed", [9, 23, 37])
+    @pytest.mark.parametrize("seed", [offset + 901 for offset in range(30)])
     @pytest.mark.parametrize("num_qubits", [2, 3, 5])
     def test_random_product_eigenstates_mixed_bases_are_endian_sensitive(
         self, seed, num_qubits
