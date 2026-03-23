@@ -24,6 +24,9 @@ project:
         - file: tutorial/04_execution_models.ipynb
         - file: tutorial/05_classical_flow_patterns.ipynb
         - file: tutorial/06_reuse_patterns.ipynb
+    - title: VQA
+      children:
+        - file: vqa/qaoa_maxcut.ipynb
 
 # --- API Reference (auto-generated) ---
     - title: API Reference
