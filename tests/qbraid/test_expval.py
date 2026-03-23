@@ -578,6 +578,101 @@ def _from_pauli_label(label: str, coeff: float) -> Hamiltonian:
     return h
 
 
+def _bit_for_qubit(bitstring: str, qubit: int, *, reverse_endian: bool = False) -> int:
+    """Return the measured bit for ``qubit`` from a big-endian bitstring."""
+    if reverse_endian:
+        return int(bitstring[qubit])
+    return int(bitstring[len(bitstring) - 1 - qubit])
+
+
+def _prepare_product_eigenstate(
+    num_qubits: int, bitstring: str, basis_assignment: dict[int, Pauli]
+) -> QuantumCircuit:
+    """Prepare a product state with prescribed X/Y/Z eigenvalues per qubit."""
+    qc = QuantumCircuit(num_qubits)
+    for qubit in range(num_qubits):
+        # bit=1 means we want the -1 eigenstate for the chosen single-qubit Pauli.
+        bit = _bit_for_qubit(bitstring, qubit)
+        if bit:
+            qc.x(qubit)
+
+        pauli = basis_assignment[qubit]
+        # Start from Z eigenstates |0> / |1> and rotate them into X/Y eigenstates
+        # when needed.
+        if pauli == Pauli.X:
+            qc.h(qubit)
+        elif pauli == Pauli.Y:
+            qc.h(qubit)
+            qc.s(qubit)
+
+    return qc
+
+
+def _random_endian_sensitive_terms(
+    seed: int, num_qubits: int, *, basis_assignment: dict[int, Pauli]
+) -> tuple[str, Hamiltonian]:
+    """Generate a seeded Hamiltonian whose value changes under reversed endian."""
+    def pauli_label_eigenvalue(
+        label: str, bitstring: str, *, reverse_endian: bool = False
+    ) -> float:
+        eigenvalue = 1.0
+        for qubit, ch in enumerate(reversed(label)):
+            if ch != "I" and _bit_for_qubit(
+                bitstring, qubit, reverse_endian=reverse_endian
+            ):
+                eigenvalue *= -1.0
+        return eigenvalue
+
+    rng = np.random.default_rng(seed)
+    num_terms = min(2**num_qubits - 1, max(3, num_qubits + 1))
+    all_support_masks = np.arange(1, 2**num_qubits)
+
+    for _ in range(128):
+        bitstring = "".join(str(int(bit)) for bit in rng.integers(0, 2, size=num_qubits))
+        # Palindromic bitstrings are weak regression cases because reversing the
+        # bit order leaves them unchanged.
+        if bitstring == bitstring[::-1]:
+            continue
+
+        # Build the random Hamiltonian in the same big-endian Pauli-label format
+        # that Qiskit uses and `_from_pauli_label()` accepts.
+        support_masks = rng.choice(all_support_masks, size=num_terms, replace=False)
+        coeffs = rng.uniform(-1.0, 1.0, size=num_terms)
+        coeffs = np.where(
+            np.abs(coeffs) < 0.2,
+            np.where(coeffs < 0.0, -0.2, 0.2),
+            coeffs,
+        )
+        hamiltonian = Hamiltonian(num_qubits=num_qubits)
+        correct = 0.0
+        wrong = 0.0
+        for support_mask, coeff in zip(support_masks, coeffs):
+            chars = ["I"] * num_qubits
+            for qubit in range(num_qubits):
+                if int(support_mask) & (1 << qubit):
+                    # Qiskit labels are big-endian: qubit 0 is the rightmost char.
+                    chars[num_qubits - 1 - qubit] = basis_assignment[qubit].name
+            label = "".join(chars)
+            hamiltonian = hamiltonian + _from_pauli_label(label, float(coeff))
+            # `correct` is the expectation with the intended big-endian decoding.
+            correct += float(coeff) * pauli_label_eigenvalue(label, bitstring)
+            # `wrong` is what we would get if bit positions were interpreted in
+            # the opposite direction.
+            wrong += float(coeff) * pauli_label_eigenvalue(
+                label, bitstring, reverse_endian=True
+            )
+
+        # Keep only cases that would clearly fail if QBraidExecutor read the
+        # measured bitstring in the wrong direction.
+        if abs(correct - wrong) > 0.5:
+            return bitstring, hamiltonian
+
+    raise AssertionError(
+        f"Failed to generate an endian-sensitive random case for seed={seed}, "
+        f"num_qubits={num_qubits}."
+    )
+
+
 def _deterministic_rounding_error_bound(
     circuit: QuantumCircuit, hamiltonian: Hamiltonian, shots: int
 ) -> float:
@@ -663,10 +758,12 @@ class TestRandomOracleComparison:
         num_terms = 3
         shots = 2_000_000
 
+        # Random state-preparation circuit under test.
         qc = random_circuit(
             num_qubits, depth=depth, max_operands=2, measure=False, seed=seed
         )
 
+        # Random Hermitian Hamiltonian built from Qiskit's big-endian Pauli labels.
         plist = random_pauli_list(num_qubits, size=num_terms, seed=seed, phase=False)
         coeffs = np.random.default_rng(seed).uniform(-1.0, 1.0, size=num_terms)
 
@@ -674,12 +771,15 @@ class TestRandomOracleComparison:
         for p, c in zip(plist, coeffs):
             H = H + _from_pauli_label(p.to_label(), float(c))
 
+        # Oracle value from Qiskit's exact statevector expectation.
         exact = float(
             Statevector.from_instruction(qc)
             .expectation_value(hamiltonian_to_sparse_pauli_op(H))
             .real
         )
 
+        # QBraidExecutor still reconstructs the expectation from counts, but this
+        # fake device removes sampling noise so only deterministic rounding remains.
         device = _FakeStatevectorDevice()
         approx = QBraidExecutor(device=device, expval_shots=shots).estimate(qc, H)
 
@@ -695,3 +795,75 @@ class TestRandomOracleComparison:
             f"seed={seed} num_qubits={num_qubits} depth={depth} shots={shots}: "
             f"exact={exact}, approx={approx}, diff={abs(exact - approx)}"
         )
+
+
+class TestRandomEndianRegression:
+    """Seeded random tests that would fail under reversed bit ordering."""
+
+    @pytest.mark.parametrize("seed", [offset + 901 for offset in range(30)])
+    @pytest.mark.parametrize("num_qubits", [2, 3, 5])
+    def test_random_raw_counts_big_endian_for_z_terms(self, seed, num_qubits):
+        # Use only Z terms so the expected value is determined directly by the
+        # reported bitstring, making endian mistakes especially easy to expose.
+        basis_assignment = {qubit: Pauli.Z for qubit in range(num_qubits)}
+        bitstring, hamiltonian = _random_endian_sensitive_terms(
+            seed, num_qubits, basis_assignment=basis_assignment
+        )
+
+        # Prepare the computational basis state corresponding to that big-endian
+        # bitstring.
+        qc = QuantumCircuit(num_qubits)
+        for qubit in range(num_qubits):
+            if _bit_for_qubit(bitstring, qubit):
+                qc.x(qubit)
+
+        # Qiskit statevector acts as the exact oracle for the same Hamiltonian.
+        exact = float(
+            Statevector.from_instruction(qc)
+            .expectation_value(hamiltonian_to_sparse_pauli_op(hamiltonian))
+            .real
+        )
+
+        # Feed the exact big-endian bitstring back as counts. If QBraidExecutor
+        # reads bit positions in the wrong order, this test should fail.
+        device = _mock_device_multi([{bitstring: 100}])
+        approx = QBraidExecutor(device=device, expval_shots=100).estimate(
+            qc, hamiltonian
+        )
+
+        assert approx == pytest.approx(exact, abs=1e-10)
+        assert device.run.call_count == 1
+
+    @pytest.mark.parametrize("seed", [9, 23, 37])
+    @pytest.mark.parametrize("num_qubits", [2, 3, 5])
+    def test_random_product_eigenstates_mixed_bases_are_endian_sensitive(
+        self, seed, num_qubits
+    ):
+        rng = np.random.default_rng(seed)
+        paulis = (Pauli.X, Pauli.Y, Pauli.Z)
+        # Pick one measurement basis per qubit, then generate a random Hamiltonian
+        # whose terms all respect that local basis assignment.
+        basis_assignment = {
+            qubit: paulis[int(rng.integers(0, len(paulis)))]
+            for qubit in range(num_qubits)
+        }
+        bitstring, hamiltonian = _random_endian_sensitive_terms(
+            seed + 10_000, num_qubits, basis_assignment=basis_assignment
+        )
+
+        # Prepare a product eigenstate for that mixed X/Y/Z basis pattern.
+        qc = _prepare_product_eigenstate(num_qubits, bitstring, basis_assignment)
+        exact = float(
+            Statevector.from_instruction(qc)
+            .expectation_value(hamiltonian_to_sparse_pauli_op(hamiltonian))
+            .real
+        )
+
+        # This variant checks the full basis-rotation path used by estimate(),
+        # not just the direct raw-count interpretation.
+        device = _FakeStatevectorDevice()
+        approx = QBraidExecutor(device=device, expval_shots=100).estimate(
+            qc, hamiltonian
+        )
+
+        assert approx == pytest.approx(exact, abs=1e-10)
