@@ -36,7 +36,7 @@ from tests.transpiler.gate_test_specs import (
 cudaq = pytest.importorskip("cudaq")
 
 from qamomile.cudaq import CudaqTranspiler  # noqa: E402
-from qamomile.cudaq.emitter import CudaqCircuit, CudaqRuntimeCircuit  # noqa: E402
+from qamomile.cudaq.emitter import CudaqKernelArtifact, ExecutionMode  # noqa: E402
 from qamomile.circuit.transpiler.errors import EmitError  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -44,18 +44,18 @@ from qamomile.circuit.transpiler.errors import EmitError  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
-def _run_statevector(circuit: CudaqCircuit) -> np.ndarray:
-    """Run a CudaqCircuit and return the statevector.
+def _run_statevector(circuit: CudaqKernelArtifact) -> np.ndarray:
+    """Run a CudaqKernelArtifact and return the statevector.
 
     Args:
-        circuit: CudaqCircuit wrapper with kernel and qubits.
+        circuit: CudaqKernelArtifact with kernel_func.
 
     Returns:
         Numpy array of complex amplitudes.
     """
     import cudaq
 
-    state = cudaq.get_state(circuit.kernel)
+    state = cudaq.get_state(circuit.kernel_func)
     return np.array(state)
 
 
@@ -63,7 +63,7 @@ def _transpile_and_get_circuit(
     kernel: Any,
     bindings: dict[str, Any] | None = None,
     parameters: list[str] | None = None,
-) -> tuple[Any, CudaqCircuit]:
+) -> tuple[Any, CudaqKernelArtifact]:
     """Transpile a qkernel and return the executable and CUDA-Q circuit.
 
     Args:
@@ -72,7 +72,7 @@ def _transpile_and_get_circuit(
         parameters: Optional list of parameter names to leave symbolic.
 
     Returns:
-        Tuple of (ExecutableProgram, CudaqCircuit).
+        Tuple of (ExecutableProgram, CudaqKernelArtifact).
     """
     transpiler = CudaqTranspiler()
     exe = transpiler.transpile(kernel, bindings=bindings, parameters=parameters)
@@ -534,7 +534,7 @@ class TestParametricGates:
         bound = executor.bind_parameters(
             qc, {"theta": np.pi}, exe.compiled_quantum[0].parameter_metadata
         )
-        sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
+        sv = np.array(cudaq.get_state(bound.kernel_func, bound.param_values))
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["RX"].matrix_fn(np.pi)
         )
@@ -561,7 +561,7 @@ class TestParametricGates:
         bound = executor.bind_parameters(
             qc, {"theta": np.pi / 2}, exe.compiled_quantum[0].parameter_metadata
         )
-        sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
+        sv = np.array(cudaq.get_state(bound.kernel_func, bound.param_values))
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["RY"].matrix_fn(np.pi / 2)
         )
@@ -588,7 +588,7 @@ class TestParametricGates:
         bound = executor.bind_parameters(
             qc, {"theta": np.pi}, exe.compiled_quantum[0].parameter_metadata
         )
-        sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
+        sv = np.array(cudaq.get_state(bound.kernel_func, bound.param_values))
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["RZ"].matrix_fn(np.pi)
         )
@@ -615,7 +615,7 @@ class TestParametricGates:
         bound = executor.bind_parameters(
             qc, {"theta": np.pi}, exe.compiled_quantum[0].parameter_metadata
         )
-        sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
+        sv = np.array(cudaq.get_state(bound.kernel_func, bound.param_values))
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["P"].matrix_fn(np.pi)
         )
@@ -644,7 +644,7 @@ class TestParametricGates:
         bound = executor.bind_parameters(
             qc, {"theta": np.pi}, exe.compiled_quantum[0].parameter_metadata
         )
-        sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
+        sv = np.array(cudaq.get_state(bound.kernel_func, bound.param_values))
         initial = computational_basis_state(2, 3)
         expected = compute_expected_statevector(
             initial, GATE_SPECS["CP"].matrix_fn(np.pi)
@@ -674,7 +674,7 @@ class TestParametricGates:
         bound = executor.bind_parameters(
             qc, {"theta": np.pi}, exe.compiled_quantum[0].parameter_metadata
         )
-        sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
+        sv = np.array(cudaq.get_state(bound.kernel_func, bound.param_values))
         initial = computational_basis_state(2, 3)
         expected = compute_expected_statevector(
             initial, GATE_SPECS["RZZ"].matrix_fn(np.pi)
@@ -706,7 +706,7 @@ class TestParametricGates:
         bound = executor.bind_parameters(
             qc, bindings_expanded, exe.compiled_quantum[0].parameter_metadata
         )
-        sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
+        sv = np.array(cudaq.get_state(bound.kernel_func, bound.param_values))
         # Each qubit: RY(pi/2)|0> = (|0>+|1>)/sqrt(2)
         # All angles are the same, so kron order does not matter.
         single = compute_expected_statevector(
@@ -1789,7 +1789,7 @@ class TestQAOAPattern:
         bound = executor.bind_parameters(
             qc, {"beta": 0.5, "gamma": 0.3}, exe.compiled_quantum[0].parameter_metadata
         )
-        sv = np.array(cudaq.get_state(bound.kernel, bound.param_values))
+        sv = np.array(cudaq.get_state(bound.kernel_func, bound.param_values))
         assert np.isclose(np.linalg.norm(sv), 1.0, atol=1e-6)
         # Verify it's not all zeros (actually computed something)
         assert not np.allclose(sv, all_zeros_state(3), atol=1e-6)
@@ -1858,30 +1858,30 @@ class TestCIfControlFlow:
     """Test runtime measurement-dependent control flow on CUDA-Q via cudaq.run()."""
 
     def test_c_if_basic_transpiles(self) -> None:
-        """Runtime if-then transpiles to CudaqRuntimeCircuit."""
+        """Runtime if-then transpiles to RUNNABLE mode."""
         exe, circuit = _transpile_and_get_circuit(_c_if_basic)
-        assert isinstance(circuit, CudaqRuntimeCircuit)
+        assert circuit.execution_mode == ExecutionMode.RUNNABLE
         assert circuit.kernel_func is not None
 
     def test_c_if_false_branch_transpiles(self) -> None:
-        """Runtime if-then (false path) transpiles to CudaqRuntimeCircuit."""
+        """Runtime if-then (false path) transpiles to RUNNABLE mode."""
         exe, circuit = _transpile_and_get_circuit(_c_if_false_branch)
-        assert isinstance(circuit, CudaqRuntimeCircuit)
+        assert circuit.execution_mode == ExecutionMode.RUNNABLE
 
     def test_c_if_with_rotation_transpiles(self) -> None:
         """Runtime if-then with parametric body transpiles successfully."""
         exe, circuit = _transpile_and_get_circuit(
             _c_if_with_rotation, bindings={"theta": np.pi}
         )
-        assert isinstance(circuit, CudaqRuntimeCircuit)
+        assert circuit.execution_mode == ExecutionMode.RUNNABLE
 
     def test_c_if_with_else_transpiles(self) -> None:
-        """Runtime if-else transpiles to CudaqRuntimeCircuit."""
+        """Runtime if-else transpiles to RUNNABLE mode."""
         exe, circuit = _transpile_and_get_circuit(_c_if_with_else)
-        assert isinstance(circuit, CudaqRuntimeCircuit)
+        assert circuit.execution_mode == ExecutionMode.RUNNABLE
 
     def test_measurement_without_conditional_transpiles_ok(self) -> None:
-        """Mid-circuit measurement without conditional stays on builder path."""
+        """Mid-circuit measurement without conditional stays on STATIC mode."""
 
         @qmc.qkernel
         def measure_only() -> qmc.Bit:
@@ -1890,11 +1890,11 @@ class TestCIfControlFlow:
             return qmc.measure(q0)
 
         _, qc = _transpile_and_get_circuit(measure_only)
-        assert isinstance(qc, CudaqCircuit)
+        assert qc.execution_mode == ExecutionMode.STATIC
         assert qc.num_qubits == 1
 
     def test_while_loop_transpiles(self) -> None:
-        """While loops transpile to CudaqRuntimeCircuit."""
+        """While loops transpile to RUNNABLE mode."""
 
         @qmc.qkernel
         def circuit_with_while() -> qmc.Bit:
@@ -1908,7 +1908,7 @@ class TestCIfControlFlow:
             return bit
 
         exe, circuit = _transpile_and_get_circuit(circuit_with_while)
-        assert isinstance(circuit, CudaqRuntimeCircuit)
+        assert circuit.execution_mode == ExecutionMode.RUNNABLE
 
     def test_c_if_basic_sample(self) -> None:
         """X(q0) → measure → if bit: X(q1). q0=1 always, so q1=1 always."""
@@ -2148,8 +2148,8 @@ class TestBoundConstantIfConditionCudaq:
         expected = computational_basis_state(1, 0)  # |0>
         assert statevectors_equal(sv, expected)
 
-    def test_runtime_measurement_if_uses_runtime_circuit(self):
-        """Runtime measurement-dependent if produces CudaqRuntimeCircuit, not CudaqCircuit."""
+    def test_runtime_measurement_if_uses_runnable_mode(self):
+        """Runtime measurement-dependent if produces RUNNABLE-mode artifact."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -2162,10 +2162,10 @@ class TestBoundConstantIfConditionCudaq:
             return qmc.measure(q1)
 
         exe, qc = _transpile_and_get_circuit(circuit)
-        assert isinstance(qc, CudaqRuntimeCircuit)
+        assert qc.execution_mode == ExecutionMode.RUNNABLE
 
-    def test_bound_constant_if_uses_builder_circuit(self):
-        """Compile-time if still produces CudaqCircuit (builder path)."""
+    def test_bound_constant_if_uses_static_mode(self):
+        """Compile-time if still produces STATIC-mode artifact."""
 
         @qmc.qkernel
         def circuit(flag: qmc.UInt) -> qmc.Bit:
@@ -2175,7 +2175,7 @@ class TestBoundConstantIfConditionCudaq:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 1})
-        assert isinstance(qc, CudaqCircuit)
+        assert qc.execution_mode == ExecutionMode.STATIC
 
 
 # ============================================================================

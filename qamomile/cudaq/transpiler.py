@@ -1,7 +1,14 @@
 """CUDA-Q backend transpiler implementation.
 
 This module provides CudaqTranspiler for converting Qamomile QKernels
-into CUDA-Q kernels, along with CudaqEmitPass and CudaqExecutor.
+into CUDA-Q decorator-kernel artifacts, along with CudaqEmitPass and
+CudaqExecutor.
+
+All circuits (static and runtime) are emitted through a single
+``CudaqKernelEmitter`` codegen path.  The emitter produces
+``CudaqKernelArtifact`` instances whose ``execution_mode`` determines
+whether ``cudaq.sample()`` / ``cudaq.observe()`` / ``cudaq.get_state()``
+(STATIC) or ``cudaq.run()`` (RUNNABLE) is used for execution.
 """
 
 from __future__ import annotations
@@ -29,10 +36,9 @@ from qamomile.circuit.transpiler.executable import (
 )
 
 from .emitter import (
-    CudaqCircuit,
-    CudaqCodegenEmitter,
-    CudaqGateEmitter,
-    CudaqRuntimeCircuit,
+    CudaqKernelArtifact,
+    CudaqKernelEmitter,
+    ExecutionMode,
 )
 
 if TYPE_CHECKING:
@@ -101,45 +107,39 @@ def _resolve_gate_targets(
 
 
 @dataclasses.dataclass
-class BoundCudaqCircuit:
-    """CUDA-Q kernel with bound parameter values.
+class BoundCudaqKernelArtifact:
+    """CUDA-Q kernel artifact with bound parameter values.
 
     Used as the return type of ``CudaqExecutor.bind_parameters``.
-    The executor dispatches to ``cudaq.sample(kernel, param_values, ...)``
-    or ``cudaq.observe(kernel, spin_op, param_values)`` when it receives
-    this type.
-
-    Args:
-        kernel (Any): The CUDA-Q kernel builder instance.
-        num_qubits (int): Number of qubits in the circuit.
-        param_values (list[float]): Bound parameter values in order.
-    """
-
-    kernel: Any
-    num_qubits: int
-    param_values: list[float]
-
-
-@dataclasses.dataclass
-class BoundCudaqRuntimeCircuit:
-    """Runtime CUDA-Q kernel with bound parameter values.
-
-    Used when a runtime-control-flow kernel has parameters that are
-    bound before execution.  The executor dispatches to
-    ``cudaq.run(kernel_func, param_values, shots_count=...)`` when it
-    receives this type.
+    The executor dispatches to the appropriate CUDA-Q runtime API
+    based on ``execution_mode``.
 
     Args:
         kernel_func: The ``@cudaq.kernel`` decorated function.
         num_qubits: Number of qubits in the circuit.
         num_clbits: Number of classical bits in the circuit.
         param_values: Bound parameter values in order.
+        execution_mode: Execution mode inherited from the source artifact.
     """
 
     kernel_func: Any
     num_qubits: int
     num_clbits: int
     param_values: list[float]
+    execution_mode: ExecutionMode = ExecutionMode.STATIC
+
+    @property
+    def kernel(self) -> Any:
+        """Backward-compatibility alias for ``kernel_func``."""
+        return self.kernel_func
+
+
+# Backward compatibility aliases
+BoundCudaqCircuit = BoundCudaqKernelArtifact
+"""Alias for backward compatibility. Use ``BoundCudaqKernelArtifact`` instead."""
+
+BoundCudaqRuntimeCircuit = BoundCudaqKernelArtifact
+"""Alias for backward compatibility. Use ``BoundCudaqKernelArtifact`` instead."""
 
 
 def _has_runtime_control_flow(
@@ -168,17 +168,13 @@ def _has_runtime_control_flow(
     return False
 
 
-class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
+class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
     """CUDA-Q-specific emission pass.
 
-    Uses ``CudaqGateEmitter`` (builder API) for static circuits and
-    ``CudaqCodegenEmitter`` (source code generation) for circuits
-    containing runtime measurement-dependent control flow.
-
-    The emitter is selected via a pre-scan of the operations: if any
-    runtime ``IfOperation`` or ``WhileOperation`` is detected, the
-    entire quantum segment is emitted through the codegen path, producing
-    a ``CudaqRuntimeCircuit`` that is executed via ``cudaq.run()``.
+    Uses a single ``CudaqKernelEmitter`` for all circuits.  The emitter
+    generates ``@cudaq.kernel`` decorated Python source for both static
+    and runtime control flow circuits.  The execution mode (STATIC or
+    RUNNABLE) is determined by a pre-scan of the operations.
     """
 
     def __init__(
@@ -187,7 +183,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
         parameters: list[str] | None = None,
     ):
         parametric = bool(parameters)
-        emitter = CudaqGateEmitter(parametric=parametric)
+        emitter = CudaqKernelEmitter(parametric=parametric)
         composite_emitters: list[Any] = []
         super().__init__(emitter, bindings, parameters, composite_emitters)
 
@@ -195,50 +191,40 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
         self,
         operations: list[Operation],
         bindings: dict[str, Any],
-    ) -> tuple[Any, dict[str, int], dict[str, int]]:
-        """Select emitter based on whether runtime control flow is present.
+    ) -> tuple[CudaqKernelArtifact, dict[str, int], dict[str, int]]:
+        """Emit a quantum segment through the unified codegen path.
 
-        If operations contain runtime measurement-dependent ``IfOperation``
-        or ``WhileOperation``, switches to ``CudaqCodegenEmitter`` which
-        generates a ``@cudaq.kernel`` decorated function.  Otherwise uses
-        the default builder emitter.
+        Determines the execution mode via ``_has_runtime_control_flow``,
+        configures the emitter accordingly, emits all operations, and
+        finalizes the artifact.
         """
-        if _has_runtime_control_flow(operations, bindings):
-            return self._emit_runtime_quantum_segment(operations, bindings)
-        return super()._emit_quantum_segment(operations, bindings)
+        emitter: CudaqKernelEmitter = self._emitter  # type: ignore[assignment]
+        is_runtime = _has_runtime_control_flow(operations, bindings)
+        mode = ExecutionMode.RUNNABLE if is_runtime else ExecutionMode.STATIC
 
-    def _emit_runtime_quantum_segment(
-        self,
-        operations: list[Operation],
-        bindings: dict[str, Any],
-    ) -> tuple[CudaqRuntimeCircuit, dict[str, int], dict[str, int]]:
-        """Emit quantum segment using the codegen emitter for cudaq.run()."""
-        # Save and swap emitter
-        original_emitter = self._emitter
-        codegen_emitter = CudaqCodegenEmitter(parametric=bool(self.parameters))
-        self._emitter = codegen_emitter  # type: ignore[assignment]
+        # Configure emitter for this segment's mode
+        emitter.noop_measurement = mode == ExecutionMode.STATIC
 
-        try:
-            # Allocate resources
-            qubit_map, clbit_map = self._allocator.allocate(operations, bindings)
-            qubit_count = max(qubit_map.values()) + 1 if qubit_map else 0
-            clbit_count = max(clbit_map.values()) + 1 if clbit_map else 0
+        # Allocate resources
+        qubit_map, clbit_map = self._allocator.allocate(operations, bindings)
+        qubit_count = max(qubit_map.values()) + 1 if qubit_map else 0
+        clbit_count = max(clbit_map.values()) + 1 if clbit_map else 0
 
-            # Create circuit and emit operations
-            circuit = codegen_emitter.create_circuit(qubit_count, clbit_count)
-            self._measurement_qubit_map.clear()
-            self._emit_operations(circuit, operations, qubit_map, clbit_map, bindings)
+        # Create circuit and emit operations
+        circuit = emitter.create_circuit(qubit_count, clbit_count)
+        self._measurement_qubit_map.clear()
+        self._emit_operations(circuit, operations, qubit_map, clbit_map, bindings)
 
-            # Populate measurement_qubit_map from codegen emitter's records
-            for clbit_idx, qubit_idx in codegen_emitter._measurement_map.items():
+        # For STATIC mode, measurement_qubit_map is populated by base class
+        # via noop_measurement flag.  For RUNNABLE mode, copy from emitter.
+        if mode == ExecutionMode.RUNNABLE:
+            for clbit_idx, qubit_idx in emitter._measurement_map.items():
                 self._measurement_qubit_map[clbit_idx] = qubit_idx
 
-            # Finalize: compile source into @cudaq.kernel function
-            circuit = codegen_emitter.finalize(circuit)
+        # Finalize: compile source into @cudaq.kernel function
+        circuit = emitter.finalize(circuit, mode)
 
-            return circuit, qubit_map, clbit_map
-        finally:
-            self._emitter = original_emitter
+        return circuit, qubit_map, clbit_map
 
     def _emit_if(
         self,
@@ -252,9 +238,9 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
 
         Compile-time constant conditions are always handled by the
         base class.  Runtime measurement-dependent conditions are
-        delegated to ``StandardEmitPass._emit_if`` when the codegen
-        emitter is active (``supports_if_else() == True``), or raise
-        ``EmitError`` when the builder emitter is active.
+        delegated to ``StandardEmitPass._emit_if`` when the emitter
+        is in RUNNABLE mode (``supports_if_else() == True``), or raise
+        ``EmitError`` when in STATIC mode.
         """
         condition = op.condition
 
@@ -276,7 +262,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
 
     def _emit_controlled_fallback(
         self,
-        circuit: CudaqCircuit,
+        circuit: CudaqKernelArtifact,
         block_value: Any,
         num_controls: int,
         control_indices: list[int],
@@ -301,7 +287,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
         operations raise ``EmitError``.
 
         Args:
-            circuit: The CUDA-Q circuit being built.
+            circuit: The CUDA-Q kernel artifact being built.
             block_value: The block value containing operations to control.
             num_controls: Number of control qubits.
             control_indices: Physical indices of control qubits.
@@ -323,7 +309,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
         # through SSA versions.
         block_qubit_map = _build_block_qubit_map(block_value, target_indices)
 
-        emitter: CudaqGateEmitter = self._emitter  # type: ignore[assignment]
+        emitter: CudaqKernelEmitter = self._emitter  # type: ignore[assignment]
 
         for _ in range(power):
             self._emit_cudaq_controlled_ops(
@@ -339,13 +325,13 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
 
     def _emit_cudaq_controlled_ops(
         self,
-        circuit: CudaqCircuit,
+        circuit: CudaqKernelArtifact,
         operations: list[Any],
         num_controls: int,
         control_indices: list[int],
         target_indices: list[int],
         qubit_map: dict[str, int],
-        emitter: CudaqGateEmitter,
+        emitter: CudaqKernelEmitter,
         bindings: dict[str, Any],
     ) -> None:
         """Recursively emit controlled operations with operand-to-target mapping.
@@ -355,13 +341,13 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
         compile-time resolvable loops (single-control only).
 
         Args:
-            circuit: The CUDA-Q circuit being built.
+            circuit: The CUDA-Q kernel artifact being built.
             operations: List of operations to process.
             num_controls: Number of control qubits.
             control_indices: Physical indices of control qubits.
             target_indices: Physical indices of target qubits.
             qubit_map: Mutable UUID-to-physical-target map for SSA tracking.
-            emitter: The CUDA-Q gate emitter.
+            emitter: The CUDA-Q kernel emitter.
             bindings: Parameter bindings.
 
         Raises:
@@ -436,9 +422,9 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
 
     def _emit_cudaq_multi_controlled_gate(
         self,
-        circuit: CudaqCircuit,
+        circuit: CudaqKernelArtifact,
         op: GateOperation,
-        emitter: CudaqGateEmitter,
+        emitter: CudaqKernelEmitter,
         control_indices: list[int],
         target_indices: list[int],
         bindings: dict[str, Any],
@@ -452,9 +438,9 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
         when no decomposition is available.
 
         Args:
-            circuit: The CUDA-Q circuit being built.
+            circuit: The CUDA-Q kernel artifact being built.
             op: The gate operation to emit with controls.
-            emitter: The CUDA-Q gate emitter.
+            emitter: The CUDA-Q kernel emitter.
             control_indices: Physical indices of control qubits.
             target_indices: Physical indices of target qubits (resolved
                 per-gate by the caller).
@@ -497,7 +483,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
             return
 
         # Multi-controlled SWAP (Fredkin):
-        #   CNOT(b, a) → MC-X(ctrls + [a], b) → CNOT(b, a)
+        #   CNOT(b, a) -> MC-X(ctrls + [a], b) -> CNOT(b, a)
         if gate_type == GateOperationType.SWAP:
             if len(target_indices) < 2:
                 raise EmitError(
@@ -534,11 +520,12 @@ class CudaqEmitPass(StandardEmitPass[CudaqCircuit]):
         )
 
 
-class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
+class CudaqExecutor(QuantumExecutor[CudaqKernelArtifact]):
     """CUDA-Q quantum executor.
 
     Supports sampling via ``cudaq.sample`` and expectation value estimation
-    via ``cudaq.observe``.
+    via ``cudaq.observe``.  Dispatches to the appropriate CUDA-Q runtime
+    API based on the artifact's ``execution_mode``.
 
     Args:
         target: CUDA-Q target name (e.g., ``"qpp-cpu"``). If None, uses
@@ -569,35 +556,33 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
     def execute(self, circuit: Any, shots: int) -> dict[str, int]:
         """Execute circuit and return canonical big-endian bitstring counts.
 
-        Dispatches based on circuit type:
+        Dispatches based on ``execution_mode``:
 
-        - ``CudaqCircuit`` / ``BoundCudaqCircuit``: uses ``cudaq.sample()``
-          (builder path for static circuits).
-        - ``CudaqRuntimeCircuit`` / ``BoundCudaqRuntimeCircuit``: uses
-          ``cudaq.run()`` (decorator-kernel path for runtime control flow).
+        - ``STATIC``: uses ``cudaq.sample()`` on the decorator kernel.
+        - ``RUNNABLE``: uses ``cudaq.run()`` on the runnable kernel.
 
         Both paths return bitstrings in big-endian format (highest qubit
         index = leftmost bit).
         """
-        if isinstance(circuit, (CudaqRuntimeCircuit, BoundCudaqRuntimeCircuit)):
+        mode = getattr(circuit, "execution_mode", ExecutionMode.STATIC)
+        if mode == ExecutionMode.RUNNABLE:
             return self._execute_runtime(circuit, shots)
         return self._execute_sample(circuit, shots)
 
     def _execute_sample(self, circuit: Any, shots: int) -> dict[str, int]:
-        """Execute via ``cudaq.sample()`` for static circuits."""
+        """Execute via ``cudaq.sample()`` for STATIC-mode kernels."""
         import cudaq
 
         self._ensure_target()
 
-        if isinstance(circuit, BoundCudaqCircuit):
+        if isinstance(circuit, BoundCudaqKernelArtifact):
             result = cudaq.sample(
-                circuit.kernel, circuit.param_values, shots_count=shots
+                circuit.kernel_func, circuit.param_values, shots_count=shots
             )
-            num_qubits = circuit.num_qubits
         else:
-            result = cudaq.sample(circuit.kernel, shots_count=shots)
-            num_qubits = circuit.num_qubits
+            result = cudaq.sample(circuit.kernel_func, shots_count=shots)
 
+        num_qubits = circuit.num_qubits
         counts: dict[str, int] = {}
         for bitstring in result:
             count = result.count(bitstring)
@@ -607,17 +592,17 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
                     f"num_qubits={num_qubits}"
                 )
             padded = bitstring.zfill(num_qubits)
-            canonical = padded[::-1]  # allocation-order → big-endian
+            canonical = padded[::-1]  # allocation-order -> big-endian
             counts[canonical] = counts.get(canonical, 0) + count
 
         return counts
 
     def _execute_runtime(
         self,
-        circuit: CudaqRuntimeCircuit | BoundCudaqRuntimeCircuit,
+        circuit: CudaqKernelArtifact | BoundCudaqKernelArtifact,
         shots: int,
     ) -> dict[str, int]:
-        """Execute via ``cudaq.run()`` for runtime control flow circuits.
+        """Execute via ``cudaq.run()`` for RUNNABLE-mode kernels.
 
         ``cudaq.run()`` returns a list of per-shot return values.  Each
         return value is ``list[bool]`` (from ``return mz(q)``), with one
@@ -630,7 +615,7 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
 
         self._ensure_target()
 
-        if isinstance(circuit, BoundCudaqRuntimeCircuit):
+        if isinstance(circuit, BoundCudaqKernelArtifact):
             results = cudaq.run(
                 circuit.kernel_func, circuit.param_values, shots_count=shots
             )
@@ -645,7 +630,7 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
             # Pad to num_qubits if shorter
             while len(bits) < num_qubits:
                 bits.append("0")
-            # Reverse: allocation-order → big-endian
+            # Reverse: allocation-order -> big-endian
             canonical = "".join(reversed(bits))
             counts[canonical] = counts.get(canonical, 0) + 1
 
@@ -656,13 +641,11 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
         circuit: Any,
         bindings: dict[str, Any],
         parameter_metadata: ParameterMetadata,
-    ) -> BoundCudaqCircuit | BoundCudaqRuntimeCircuit:
+    ) -> BoundCudaqKernelArtifact:
         """Bind parameters to a circuit for execution.
 
-        Dispatches based on circuit type:
-
-        - ``CudaqRuntimeCircuit``: returns ``BoundCudaqRuntimeCircuit``
-        - ``CudaqCircuit``: returns ``BoundCudaqCircuit``
+        Returns a ``BoundCudaqKernelArtifact`` with the execution mode
+        inherited from the source artifact.
         """
         param_values = []
         for param_info in parameter_metadata.parameters:
@@ -676,18 +659,12 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
                     f"{[p.name for p in parameter_metadata.parameters]}"
                 )
 
-        if isinstance(circuit, CudaqRuntimeCircuit):
-            return BoundCudaqRuntimeCircuit(
-                kernel_func=circuit.kernel_func,
-                num_qubits=circuit.num_qubits,
-                num_clbits=circuit.num_clbits,
-                param_values=param_values,
-            )
-
-        return BoundCudaqCircuit(
-            kernel=circuit.kernel,
+        return BoundCudaqKernelArtifact(
+            kernel_func=circuit.kernel_func,
             num_qubits=circuit.num_qubits,
+            num_clbits=circuit.num_clbits,
             param_values=param_values,
+            execution_mode=getattr(circuit, "execution_mode", ExecutionMode.STATIC),
         )
 
     def estimate(
@@ -698,17 +675,16 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
     ) -> float:
         """Estimate expectation value using ``cudaq.observe``.
 
-        Only supported for static circuits (``CudaqCircuit`` /
-        ``BoundCudaqCircuit``).  Runtime control flow circuits
-        (``CudaqRuntimeCircuit``) are not compatible with
-        ``cudaq.observe()`` and raise ``TypeError``.
+        Only supported for STATIC-mode artifacts.  RUNNABLE-mode artifacts
+        are not compatible with ``cudaq.observe()`` and raise ``TypeError``.
         """
         import cudaq
         import qamomile.observable as qm_o
 
         from qamomile.cudaq.observable import hamiltonian_to_cudaq_spin_op
 
-        if isinstance(circuit, (CudaqRuntimeCircuit, BoundCudaqRuntimeCircuit)):
+        mode = getattr(circuit, "execution_mode", ExecutionMode.STATIC)
+        if mode == ExecutionMode.RUNNABLE:
             raise TypeError(
                 "cudaq.observe() is not supported for runtime control flow "
                 "circuits. Use sample() or run() instead."
@@ -721,23 +697,21 @@ class CudaqExecutor(QuantumExecutor[CudaqCircuit]):
         else:
             spin_op = hamiltonian
 
-        if isinstance(circuit, BoundCudaqCircuit):
-            result = cudaq.observe(circuit.kernel, spin_op, circuit.param_values)
-        elif isinstance(circuit, CudaqCircuit):
-            if params is not None:
-                result = cudaq.observe(circuit.kernel, spin_op, list(params))
-            else:
-                result = cudaq.observe(circuit.kernel, spin_op)
+        if isinstance(circuit, BoundCudaqKernelArtifact):
+            result = cudaq.observe(circuit.kernel_func, spin_op, circuit.param_values)
         else:
-            raise TypeError(f"Unexpected circuit type: {type(circuit)}")
+            if params is not None:
+                result = cudaq.observe(circuit.kernel_func, spin_op, list(params))
+            else:
+                result = cudaq.observe(circuit.kernel_func, spin_op)
 
         return result.expectation()
 
 
-class CudaqTranspiler(Transpiler[CudaqCircuit]):
+class CudaqTranspiler(Transpiler[CudaqKernelArtifact]):
     """CUDA-Q transpiler for qamomile.circuit module.
 
-    Converts Qamomile QKernels into CUDA-Q kernels.
+    Converts Qamomile QKernels into CUDA-Q decorator-kernel artifacts.
 
     Example:
         from qamomile.cudaq import CudaqTranspiler
@@ -760,7 +734,7 @@ class CudaqTranspiler(Transpiler[CudaqCircuit]):
         self,
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
-    ) -> EmitPass[CudaqCircuit]:
+    ) -> EmitPass[CudaqKernelArtifact]:
         return CudaqEmitPass(bindings, parameters)
 
     def executor(

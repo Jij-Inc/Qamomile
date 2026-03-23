@@ -20,8 +20,8 @@ class TestCudaqTranspiler(TranspilerTestSuite):
     """Test suite for CUDA-Q transpiler.
 
     CUDA-Q supports most standard gates but has some limitations:
-    - Measurements are no-op in the builder emitter (auto-measured by sample)
-    - Runtime control flow uses codegen emitter + cudaq.run()
+    - Measurements are no-op in STATIC mode (auto-measured by sample)
+    - Runtime control flow uses RUNNABLE mode + cudaq.run()
     - CP and RZZ are decomposed (no native gates)
     - CH and CY are decomposed
     """
@@ -29,12 +29,16 @@ class TestCudaqTranspiler(TranspilerTestSuite):
     backend_name = "cudaq"
     unsupported_gates: set[str] = {"MEASURE"}
 
+    # Shared emitter instance for finalization in run_circuit_statevector
+    _shared_emitter: Any = None
+
     @classmethod
     def get_emitter(cls) -> Any:
-        """Get CUDA-Q GateEmitter instance."""
-        from qamomile.cudaq.emitter import CudaqGateEmitter
+        """Get CUDA-Q KernelEmitter instance."""
+        from qamomile.cudaq.emitter import CudaqKernelEmitter
 
-        return CudaqGateEmitter()
+        cls._shared_emitter = CudaqKernelEmitter()
+        return cls._shared_emitter
 
     @classmethod
     def get_simulator(cls) -> Any:
@@ -43,21 +47,29 @@ class TestCudaqTranspiler(TranspilerTestSuite):
 
     @classmethod
     def run_circuit_statevector(cls, circuit: Any) -> np.ndarray:
-        """Run circuit and extract statevector using CUDA-Q."""
+        """Run circuit and extract statevector using CUDA-Q.
+
+        Finalizes the circuit in STATIC mode before extracting state.
+        """
         import cudaq
 
-        state = cudaq.get_state(circuit.kernel)
+        from qamomile.cudaq.emitter import ExecutionMode
+
+        if cls._shared_emitter is not None and circuit.kernel_func is None:
+            cls._shared_emitter.finalize(circuit, ExecutionMode.STATIC)
+
+        state = cudaq.get_state(circuit.kernel_func)
         return np.array(state)
 
 
 class TestCudaqRuntimeControlFlow:
     """Test runtime measurement-dependent control flow via cudaq.run()."""
 
-    def test_c_if_transpiles_to_runtime_circuit(self) -> None:
-        """Runtime if-then produces CudaqRuntimeCircuit."""
+    def test_c_if_transpiles_to_runnable_mode(self) -> None:
+        """Runtime if-then produces a RUNNABLE-mode artifact."""
         import qamomile.circuit as qmc
         from qamomile.cudaq import CudaqTranspiler
-        from qamomile.cudaq.emitter import CudaqRuntimeCircuit
+        from qamomile.cudaq.emitter import ExecutionMode
 
         @qmc.qkernel
         def circuit_with_c_if() -> qmc.Bit:
@@ -72,13 +84,13 @@ class TestCudaqRuntimeControlFlow:
         transpiler = CudaqTranspiler()
         exe = transpiler.transpile(circuit_with_c_if)
         circuit = exe.compiled_quantum[0].circuit
-        assert isinstance(circuit, CudaqRuntimeCircuit)
+        assert circuit.execution_mode == ExecutionMode.RUNNABLE
 
-    def test_if_with_else_transpiles_to_runtime_circuit(self) -> None:
-        """Runtime if-else produces CudaqRuntimeCircuit."""
+    def test_if_with_else_transpiles_to_runnable_mode(self) -> None:
+        """Runtime if-else produces a RUNNABLE-mode artifact."""
         import qamomile.circuit as qmc
         from qamomile.cudaq import CudaqTranspiler
-        from qamomile.cudaq.emitter import CudaqRuntimeCircuit
+        from qamomile.cudaq.emitter import ExecutionMode
 
         @qmc.qkernel
         def circuit_with_if_else() -> qmc.Bit:
@@ -95,13 +107,13 @@ class TestCudaqRuntimeControlFlow:
         transpiler = CudaqTranspiler()
         exe = transpiler.transpile(circuit_with_if_else)
         circuit = exe.compiled_quantum[0].circuit
-        assert isinstance(circuit, CudaqRuntimeCircuit)
+        assert circuit.execution_mode == ExecutionMode.RUNNABLE
 
-    def test_while_loop_transpiles_to_runtime_circuit(self) -> None:
-        """Runtime while loop produces CudaqRuntimeCircuit."""
+    def test_while_loop_transpiles_to_runnable_mode(self) -> None:
+        """Runtime while loop produces a RUNNABLE-mode artifact."""
         import qamomile.circuit as qmc
         from qamomile.cudaq import CudaqTranspiler
-        from qamomile.cudaq.emitter import CudaqRuntimeCircuit
+        from qamomile.cudaq.emitter import ExecutionMode
 
         @qmc.qkernel
         def circuit_with_while() -> qmc.Bit:
@@ -117,4 +129,4 @@ class TestCudaqRuntimeControlFlow:
         transpiler = CudaqTranspiler()
         exe = transpiler.transpile(circuit_with_while)
         circuit = exe.compiled_quantum[0].circuit
-        assert isinstance(circuit, CudaqRuntimeCircuit)
+        assert circuit.execution_mode == ExecutionMode.RUNNABLE

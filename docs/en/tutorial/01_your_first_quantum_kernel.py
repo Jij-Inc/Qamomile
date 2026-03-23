@@ -303,7 +303,7 @@ except Exception as e:
 # | **QuriParts** | Supported | Full gate set, observables |
 # | **CUDA-Q** | Supported | GPU-accelerated simulation. Supported: for-loops (unrolled), runtime `if`/`if-else`/`while` (via `cudaq.run()`) |
 #
-# > **Note**: Runtime measurement-dependent control flow (`if bit:`, `if/else`, `while bit:`) is supported on both Qiskit and CUDA-Q. On CUDA-Q, these circuits are automatically compiled as `@cudaq.kernel` functions and executed via `cudaq.run()`. Static circuits without runtime control flow continue to use the builder API and `cudaq.sample()`. Compile-time constant conditions are statically resolved on all backends.
+# > **Note**: Runtime measurement-dependent control flow (`if bit:`, `if/else`, `while bit:`) is supported on both Qiskit and CUDA-Q. On CUDA-Q, all circuits are compiled as `@cudaq.kernel` decorated functions. Static circuits (without runtime control flow) are executed via `cudaq.sample()` / `cudaq.observe()`, while circuits with runtime measurement-dependent branching are executed via `cudaq.run()`. Compile-time constant conditions are statically resolved on all backends.
 #
 # ### CUDA-Q Platform Support
 #

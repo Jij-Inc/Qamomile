@@ -1,472 +1,93 @@
-"""CUDA-Q GateEmitter implementations.
+"""CUDA-Q emitter implementation.
 
-This module provides two emitter classes for the CUDA-Q backend:
+This module provides a unified emitter for the CUDA-Q backend:
 
-- ``CudaqGateEmitter``: Uses the builder API (``cudaq.make_kernel()``) for
-  static circuits without runtime control flow.
-- ``CudaqCodegenEmitter``: Generates ``@cudaq.kernel`` decorated Python source
-  code for circuits that require runtime measurement-dependent control flow
-  (``if bit:``, ``if/else``, ``while bit:``).
+- ``CudaqKernelEmitter``: Generates ``@cudaq.kernel`` decorated Python source
+  code for all circuits.  The emitter supports two execution modes:
 
-CUDA-Q's builder API does not support runtime conditional logic (``c_if`` was
-removed in 0.14.x).  Upstream CUDA-Q supports runtime conditionals through
-decorator kernels executed via ``cudaq.run()``.
+  - **STATIC**: Measurement-free kernels compatible with ``cudaq.sample()``,
+    ``cudaq.get_state()``, and ``cudaq.observe()``.
+  - **RUNNABLE**: Kernels with explicit mid-circuit measurements and a final
+    ``return mz(q)``, compatible with ``cudaq.run()``.
+
+The execution mode is determined by the emit pass based on whether the
+circuit contains runtime measurement-dependent control flow.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import enum
 import math
 from typing import Any
 
 
-@dataclasses.dataclass
-class CudaqCircuit:
-    """Wrapper around CUDA-Q kernel with qubit register.
+class ExecutionMode(enum.Enum):
+    """Execution mode for a CUDA-Q kernel artifact.
 
-    This serves as the circuit type ``T`` for the CUDA-Q backend.
+    Determines which CUDA-Q runtime API is used for execution:
 
-    Args:
-        kernel (Any): The CUDA-Q kernel builder instance.
-        qubits (Any): Qubit register allocated via ``kernel.qalloc(n)``.
-        num_qubits (int): Number of qubits in the circuit.
-        num_clbits (int): Number of classical bits in the circuit.
-        param_vector (Any | None): Vector parameter from
-            ``cudaq.make_kernel(list)``, or None for non-parametric kernels.
-        param_count (int): Number of parameters created so far.
+    - ``STATIC``: Compatible with ``cudaq.sample()``, ``cudaq.get_state()``,
+      and ``cudaq.observe()``.  The kernel has no explicit terminal
+      measurements and no return value.
+    - ``RUNNABLE``: Compatible with ``cudaq.run()``.  The kernel has explicit
+      mid-circuit measurements and returns ``mz(q)`` (``list[bool]``).
     """
 
-    kernel: Any
-    qubits: Any
-    num_qubits: int
-    num_clbits: int
-    param_vector: Any = None
-    param_count: int = 0
+    STATIC = "static"
+    RUNNABLE = "runnable"
 
 
 @dataclasses.dataclass
-class CudaqRuntimeCircuit:
-    """Compiled CUDA-Q decorator-kernel for runtime control flow.
+class CudaqKernelArtifact:
+    """Compiled CUDA-Q decorator-kernel artifact.
 
-    This circuit type is produced by ``CudaqCodegenEmitter`` when the
-    kernel contains measurement-dependent ``if``, ``if/else``, or
-    ``while`` operations.  It wraps a ``@cudaq.kernel`` decorated
-    function that is executed via ``cudaq.run()`` instead of
-    ``cudaq.sample()``.
+    Wraps a ``@cudaq.kernel`` decorated function produced by
+    ``CudaqKernelEmitter``.  The ``execution_mode`` field determines
+    which CUDA-Q runtime APIs are valid for this artifact.
 
     Args:
-        kernel_func: The ``@cudaq.kernel`` decorated function.
+        kernel_func: The ``@cudaq.kernel`` decorated function, or None
+            before ``finalize()`` is called.
         num_qubits: Number of qubits in the circuit.
         num_clbits: Number of classical bits in the circuit.
         source: Generated Python source code (for debugging).
+        execution_mode: Whether this is a STATIC or RUNNABLE kernel.
+        param_count: Number of variational parameters.
     """
 
     kernel_func: Any
     num_qubits: int
     num_clbits: int
     source: str = ""
+    execution_mode: ExecutionMode = ExecutionMode.STATIC
+    param_count: int = 0
 
+    @property
+    def kernel(self) -> Any:
+        """Backward-compatibility alias for ``kernel_func``."""
+        return self.kernel_func
 
-class CudaqGateEmitter:
-    """GateEmitter implementation for CUDA-Q.
 
-    Emits individual quantum gates to CUDA-Q kernels via the builder API.
+class CudaqKernelEmitter:
+    """Unified GateEmitter that generates ``@cudaq.kernel`` Python source code.
 
-    Args:
-        parametric (bool): If True, creates a parametric kernel using
-            ``cudaq.make_kernel(list)`` so that symbolic parameters
-            can be indexed from the vector.
-    """
+    Used for all CUDA-Q circuits.  Gate calls are accumulated as Python
+    source lines forming a ``@cudaq.kernel`` decorated function.  The
+    ``finalize()`` method compiles the source via ``exec()`` and populates
+    the artifact's ``kernel_func``.
 
-    noop_measurement: bool = True
+    The ``noop_measurement`` flag controls measurement behaviour:
 
-    def __init__(self, parametric: bool = False) -> None:
-        self._parametric = parametric
-        self._param_map: dict[str, int] = {}
-        self._current_circuit: CudaqCircuit | None = None
-
-    def create_circuit(self, num_qubits: int, num_clbits: int) -> CudaqCircuit:
-        """Create a new CUDA-Q kernel with allocated qubits."""
-        import cudaq
-
-        if self._parametric:
-            kernel, thetas = cudaq.make_kernel(list)
-            qubits = kernel.qalloc(num_qubits)
-            circuit = CudaqCircuit(
-                kernel=kernel,
-                qubits=qubits,
-                num_qubits=num_qubits,
-                num_clbits=num_clbits,
-                param_vector=thetas,
-                param_count=0,
-            )
-        else:
-            kernel = cudaq.make_kernel()
-            qubits = kernel.qalloc(num_qubits)
-            circuit = CudaqCircuit(
-                kernel=kernel,
-                qubits=qubits,
-                num_qubits=num_qubits,
-                num_clbits=num_clbits,
-            )
-
-        self._current_circuit = circuit
-        self._param_map = {}
-        return circuit
-
-    def create_parameter(self, name: str) -> Any:
-        """Create a parameter by indexing into the kernel's vector parameter."""
-        if self._current_circuit is None:
-            raise RuntimeError("create_circuit must be called before create_parameter")
-
-        circuit = self._current_circuit
-        if circuit.param_vector is None:
-            raise RuntimeError(
-                "Cannot create parameters on a non-parametric kernel. "
-                "Ensure CudaqGateEmitter is initialized with parametric=True."
-            )
-
-        if name not in self._param_map:
-            idx = circuit.param_count
-            self._param_map[name] = idx
-            circuit.param_count += 1
-
-        return circuit.param_vector[self._param_map[name]]
-
-    # ------------------------------------------------------------------
-    # Single-qubit gates (no parameters)
-    # ------------------------------------------------------------------
-
-    def emit_h(self, circuit: CudaqCircuit, qubit: int) -> None:
-        """Emit Hadamard gate on the specified qubit."""
-        circuit.kernel.h(circuit.qubits[qubit])
-
-    def emit_x(self, circuit: CudaqCircuit, qubit: int) -> None:
-        """Emit Pauli-X gate on the specified qubit."""
-        circuit.kernel.x(circuit.qubits[qubit])
-
-    def emit_y(self, circuit: CudaqCircuit, qubit: int) -> None:
-        """Emit Pauli-Y gate on the specified qubit."""
-        circuit.kernel.y(circuit.qubits[qubit])
-
-    def emit_z(self, circuit: CudaqCircuit, qubit: int) -> None:
-        """Emit Pauli-Z gate on the specified qubit."""
-        circuit.kernel.z(circuit.qubits[qubit])
-
-    def emit_s(self, circuit: CudaqCircuit, qubit: int) -> None:
-        """Emit S (phase) gate on the specified qubit."""
-        circuit.kernel.s(circuit.qubits[qubit])
-
-    def emit_sdg(self, circuit: CudaqCircuit, qubit: int) -> None:
-        """Emit S-dagger gate on the specified qubit."""
-        circuit.kernel.sdg(circuit.qubits[qubit])
-
-    def emit_t(self, circuit: CudaqCircuit, qubit: int) -> None:
-        """Emit T gate on the specified qubit."""
-        circuit.kernel.t(circuit.qubits[qubit])
-
-    def emit_tdg(self, circuit: CudaqCircuit, qubit: int) -> None:
-        """Emit T-dagger gate on the specified qubit."""
-        circuit.kernel.tdg(circuit.qubits[qubit])
-
-    # ------------------------------------------------------------------
-    # Single-qubit rotation gates
-    # ------------------------------------------------------------------
-
-    def emit_rx(self, circuit: CudaqCircuit, qubit: int, angle: float | Any) -> None:
-        """Emit RX rotation gate on the specified qubit."""
-        if isinstance(angle, (int, float)):
-            angle = float(angle)
-        circuit.kernel.rx(angle, circuit.qubits[qubit])
-
-    def emit_ry(self, circuit: CudaqCircuit, qubit: int, angle: float | Any) -> None:
-        """Emit RY rotation gate on the specified qubit."""
-        if isinstance(angle, (int, float)):
-            angle = float(angle)
-        circuit.kernel.ry(angle, circuit.qubits[qubit])
-
-    def emit_rz(self, circuit: CudaqCircuit, qubit: int, angle: float | Any) -> None:
-        """Emit RZ rotation gate on the specified qubit."""
-        if isinstance(angle, (int, float)):
-            angle = float(angle)
-        circuit.kernel.rz(angle, circuit.qubits[qubit])
-
-    def emit_p(self, circuit: CudaqCircuit, qubit: int, angle: float | Any) -> None:
-        """Emit phase gate (R1) on the specified qubit."""
-        if isinstance(angle, (int, float)):
-            angle = float(angle)
-        circuit.kernel.r1(angle, circuit.qubits[qubit])
-
-    # ------------------------------------------------------------------
-    # Two-qubit gates
-    # ------------------------------------------------------------------
-
-    def emit_cx(self, circuit: CudaqCircuit, control: int, target: int) -> None:
-        """Emit CNOT (controlled-X) gate."""
-        circuit.kernel.cx(circuit.qubits[control], circuit.qubits[target])
-
-    def emit_cz(self, circuit: CudaqCircuit, control: int, target: int) -> None:
-        """Emit controlled-Z gate."""
-        circuit.kernel.cz(circuit.qubits[control], circuit.qubits[target])
-
-    def emit_swap(self, circuit: CudaqCircuit, qubit1: int, qubit2: int) -> None:
-        """Emit SWAP gate between two qubits."""
-        circuit.kernel.swap(circuit.qubits[qubit1], circuit.qubits[qubit2])
-
-    # ------------------------------------------------------------------
-    # Two-qubit rotation gates
-    # ------------------------------------------------------------------
-
-    def emit_cp(
-        self, circuit: CudaqCircuit, control: int, target: int, angle: float | Any
-    ) -> None:
-        """Emit controlled-Phase gate using decomposition.
-
-        CP(ctrl, tgt, theta) =
-            RZ(tgt, theta/2)
-            CNOT(ctrl, tgt)
-            RZ(tgt, -theta/2)
-            CNOT(ctrl, tgt)
-            RZ(ctrl, theta/2)
-        """
-        k = circuit.kernel
-        q = circuit.qubits
-        if isinstance(angle, (int, float)):
-            half = angle / 2.0
-            k.rz(half, q[target])
-            k.cx(q[control], q[target])
-            k.rz(-half, q[target])
-            k.cx(q[control], q[target])
-            k.rz(half, q[control])
-        else:
-            half = angle * 0.5
-            neg_half = angle * (-0.5)
-            k.rz(half, q[target])
-            k.cx(q[control], q[target])
-            k.rz(neg_half, q[target])
-            k.cx(q[control], q[target])
-            k.rz(half, q[control])
-
-    def emit_rzz(
-        self, circuit: CudaqCircuit, qubit1: int, qubit2: int, angle: float | Any
-    ) -> None:
-        """Emit RZZ gate using CNOT + RZ decomposition.
-
-        RZZ(q1, q2, theta) =
-            CNOT(q1, q2)
-            RZ(q2, theta)
-            CNOT(q1, q2)
-        """
-        if isinstance(angle, (int, float)):
-            angle = float(angle)
-        k = circuit.kernel
-        q = circuit.qubits
-        k.cx(q[qubit1], q[qubit2])
-        k.rz(angle, q[qubit2])
-        k.cx(q[qubit1], q[qubit2])
-
-    # ------------------------------------------------------------------
-    # Three-qubit gates
-    # ------------------------------------------------------------------
-
-    def emit_toffoli(
-        self, circuit: CudaqCircuit, control1: int, control2: int, target: int
-    ) -> None:
-        """Emit Toffoli (CCX) gate via multi-control CX."""
-        q = circuit.qubits
-        circuit.kernel.cx([q[control1], q[control2]], q[target])
-
-    # ------------------------------------------------------------------
-    # Controlled single-qubit gates
-    # ------------------------------------------------------------------
-
-    def emit_ch(self, circuit: CudaqCircuit, control: int, target: int) -> None:
-        """Emit controlled-Hadamard using decomposition.
-
-        CH(ctrl, tgt) =
-            RY(tgt, pi/4)
-            CNOT(ctrl, tgt)
-            RY(tgt, -pi/4)
-        """
-        k = circuit.kernel
-        q = circuit.qubits
-        k.ry(math.pi / 4, q[target])
-        k.cx(q[control], q[target])
-        k.ry(-math.pi / 4, q[target])
-
-    def emit_cy(self, circuit: CudaqCircuit, control: int, target: int) -> None:
-        """Emit controlled-Y using decomposition.
-
-        CY(ctrl, tgt) =
-            Sdg(tgt)
-            CNOT(ctrl, tgt)
-            S(tgt)
-        """
-        k = circuit.kernel
-        q = circuit.qubits
-        k.sdg(q[target])
-        k.cx(q[control], q[target])
-        k.s(q[target])
-
-    def emit_crx(
-        self, circuit: CudaqCircuit, control: int, target: int, angle: float | Any
-    ) -> None:
-        """Emit controlled-RX gate (native CUDA-Q)."""
-        if isinstance(angle, (int, float)):
-            angle = float(angle)
-        circuit.kernel.crx(angle, circuit.qubits[control], circuit.qubits[target])
-
-    def emit_cry(
-        self, circuit: CudaqCircuit, control: int, target: int, angle: float | Any
-    ) -> None:
-        """Emit controlled-RY gate (native CUDA-Q)."""
-        if isinstance(angle, (int, float)):
-            angle = float(angle)
-        circuit.kernel.cry(angle, circuit.qubits[control], circuit.qubits[target])
-
-    def emit_crz(
-        self, circuit: CudaqCircuit, control: int, target: int, angle: float | Any
-    ) -> None:
-        """Emit controlled-RZ gate (native CUDA-Q)."""
-        if isinstance(angle, (int, float)):
-            angle = float(angle)
-        circuit.kernel.crz(angle, circuit.qubits[control], circuit.qubits[target])
-
-    # ------------------------------------------------------------------
-    # Measurement
-    # ------------------------------------------------------------------
-
-    def emit_measure(self, circuit: CudaqCircuit, qubit: int, clbit: int) -> None:
-        """No-op: ``cudaq.sample()`` auto-measures all qubits.
-
-        Explicit ``mz()`` calls are not emitted during measurement processing.
-        ``cudaq.sample()`` automatically measures all qubits when no explicit
-        ``mz()`` calls are present, keeping the state pure for
-        ``cudaq.get_state()`` in statevector tests.
-        """
-        pass
-
-    # ------------------------------------------------------------------
-    # Barrier
-    # ------------------------------------------------------------------
-
-    def emit_barrier(self, circuit: CudaqCircuit, qubits: list[int]) -> None:
-        """No-op: CUDA-Q does not support barrier instructions."""
-        pass
-
-    # ------------------------------------------------------------------
-    # Sub-circuit support
-    # ------------------------------------------------------------------
-
-    def circuit_to_gate(self, circuit: CudaqCircuit, name: str = "U") -> Any:
-        """No-op: CUDA-Q kernel builder does not support circuit-to-gate conversion."""
-        return None
-
-    def append_gate(self, circuit: CudaqCircuit, gate: Any, qubits: list[int]) -> None:
-        """No-op: not supported by CUDA-Q kernel builder."""
-        pass
-
-    def gate_power(self, gate: Any, power: int) -> Any:
-        """No-op: not supported by CUDA-Q kernel builder."""
-        return None
-
-    def gate_controlled(self, gate: Any, num_controls: int) -> Any:
-        """No-op: not supported by CUDA-Q kernel builder."""
-        return None
-
-    # ------------------------------------------------------------------
-    # Multi-controlled gate emission
-    # ------------------------------------------------------------------
-
-    def emit_multi_controlled_x(
-        self,
-        circuit: CudaqCircuit,
-        control_indices: list[int],
-        target_idx: int,
-    ) -> None:
-        """Emit a multi-controlled X gate using CUDA-Q's native ``cx``.
-
-        CUDA-Q supports ``kernel.cx([controls], target)`` for
-        multi-controlled CNOT, which generalises to N-controlled X.
-
-        Args:
-            circuit: The CUDA-Q circuit being built.
-            control_indices: Physical indices of control qubits.
-            target_idx: Physical index of target qubit.
-        """
-        k = circuit.kernel
-        q = circuit.qubits
-        controls = [q[i] for i in control_indices]
-        k.cx(controls, q[target_idx])
-
-    # ------------------------------------------------------------------
-    # Control flow support
-    # ------------------------------------------------------------------
-
-    def supports_for_loop(self) -> bool:
-        """Return False: CUDA-Q does not support native for-loop emission."""
-        return False
-
-    def supports_if_else(self) -> bool:
-        """Return False: conditional branching on measurement results is not supported.
-
-        CUDA-Q 0.14.x removed the builder ``c_if`` API.  The generic
-        ``emit_if_start`` / ``emit_else_start`` / ``emit_if_end``
-        protocol is not implemented and measurement-dependent ``IfOperation``
-        is rejected at emit time by ``CudaqEmitPass._emit_if``.
-        """
-        return False
-
-    def supports_while_loop(self) -> bool:
-        """Return False: CUDA-Q does not support native while-loop emission."""
-        return False
-
-    def emit_for_loop_start(self, circuit: CudaqCircuit, indexset: range) -> Any:
-        """Not supported: for-loops are unrolled by the transpiler."""
-        raise NotImplementedError
-
-    def emit_for_loop_end(self, circuit: CudaqCircuit, context: Any) -> None:
-        """Not supported: for-loops are unrolled by the transpiler."""
-        raise NotImplementedError
-
-    def emit_if_start(self, circuit: CudaqCircuit, clbit: int, value: int = 1) -> Any:
-        """Not used: ``CudaqEmitPass._emit_if`` handles c_if directly."""
-        raise NotImplementedError("Use CudaqEmitPass._emit_if instead")
-
-    def emit_else_start(self, circuit: CudaqCircuit, context: Any) -> None:
-        """Not used: ``CudaqEmitPass._emit_if`` handles c_if directly."""
-        raise NotImplementedError("Use CudaqEmitPass._emit_if instead")
-
-    def emit_if_end(self, circuit: CudaqCircuit, context: Any) -> None:
-        """Not used: ``CudaqEmitPass._emit_if`` handles c_if directly."""
-        raise NotImplementedError("Use CudaqEmitPass._emit_if instead")
-
-    def emit_while_start(
-        self, circuit: CudaqCircuit, clbit: int, value: int = 1
-    ) -> Any:
-        """Not supported: while-loop raises ``EmitError`` in the transpiler."""
-        raise NotImplementedError
-
-    def emit_while_end(self, circuit: CudaqCircuit, context: Any) -> None:
-        """Not supported: while-loop raises ``EmitError`` in the transpiler."""
-        raise NotImplementedError
-
-
-class CudaqCodegenEmitter:
-    """GateEmitter that generates ``@cudaq.kernel`` Python source code.
-
-    Used for circuits containing runtime measurement-dependent control flow.
-    Instead of calling builder API methods, this emitter accumulates Python
-    source lines that form a ``@cudaq.kernel`` decorated function.  The
-    generated function is compiled via ``exec()`` and executed with
-    ``cudaq.run()``.
+    - ``True`` (STATIC mode): ``emit_measure`` is a no-op; ``cudaq.sample()``
+      auto-measures all qubits.
+    - ``False`` (RUNNABLE mode): ``emit_measure`` emits explicit ``mz()``
+      calls for mid-circuit measurement variables.
 
     Args:
         parametric: If True, the generated function accepts a
             ``thetas: list[float]`` parameter for variational circuits.
     """
-
-    noop_measurement: bool = False
 
     def __init__(self, parametric: bool = False) -> None:
         self._parametric = parametric
@@ -476,6 +97,7 @@ class CudaqCodegenEmitter:
         self._indent: int = 1  # Start inside function body
         self._measurement_map: dict[int, int] = {}  # clbit -> qubit
         self._num_clbits: int = 0
+        self.noop_measurement: bool = True
 
     def _emit(self, line: str) -> None:
         """Append an indented source line."""
@@ -485,8 +107,20 @@ class CudaqCodegenEmitter:
     # Circuit lifecycle
     # ------------------------------------------------------------------
 
-    def create_circuit(self, num_qubits: int, num_clbits: int) -> CudaqRuntimeCircuit:
-        """Start building a ``@cudaq.kernel`` function."""
+    def create_circuit(self, num_qubits: int, num_clbits: int) -> CudaqKernelArtifact:
+        """Start building a ``@cudaq.kernel`` function.
+
+        Resets internal state and emits the ``q = cudaq.qvector(N)``
+        allocation line.
+
+        Args:
+            num_qubits: Number of qubits to allocate.
+            num_clbits: Number of classical bits.
+
+        Returns:
+            A new ``CudaqKernelArtifact`` with ``kernel_func=None``
+            (populated by ``finalize()``).
+        """
         self._num_clbits = num_clbits
         self._measurement_map.clear()
         self._param_map.clear()
@@ -496,32 +130,41 @@ class CudaqCodegenEmitter:
 
         self._emit(f"q = cudaq.qvector({num_qubits})")
 
-        return CudaqRuntimeCircuit(
-            kernel_func=None,  # Filled by finalize()
+        return CudaqKernelArtifact(
+            kernel_func=None,
             num_qubits=num_qubits,
             num_clbits=num_clbits,
         )
 
-    def finalize(self, circuit: CudaqRuntimeCircuit) -> CudaqRuntimeCircuit:
+    def finalize(
+        self, circuit: CudaqKernelArtifact, mode: ExecutionMode
+    ) -> CudaqKernelArtifact:
         """Compile accumulated source into a ``@cudaq.kernel`` function.
 
-        Appends a ``return mz(q)`` statement to capture all qubit
-        measurements, then wraps the body in a function definition
-        with the ``@cudaq.kernel`` decorator and compiles it.
+        For RUNNABLE mode, appends ``return mz(q)`` and generates a
+        function returning ``list[bool]``.  For STATIC mode, generates
+        a void function with no explicit terminal measurement.
+
+        Args:
+            circuit: The artifact to finalize.
+            mode: Execution mode determining the function signature.
 
         Returns:
-            The same ``CudaqRuntimeCircuit`` with ``kernel_func`` populated.
+            The same artifact with ``kernel_func`` and ``source`` populated.
         """
         import cudaq  # noqa: F811
 
-        # Append final return: measure all qubits
-        self._emit("return mz(q)")
-
-        # Build function signature
-        if self._parametric:
-            sig = "def _qamomile_runtime_kernel(thetas: list[float]) -> list[bool]:"
+        if mode == ExecutionMode.RUNNABLE:
+            self._emit("return mz(q)")
+            if self._parametric:
+                sig = "def _qamomile_kernel(thetas: list[float]) -> list[bool]:"
+            else:
+                sig = "def _qamomile_kernel() -> list[bool]:"
         else:
-            sig = "def _qamomile_runtime_kernel() -> list[bool]:"
+            if self._parametric:
+                sig = "def _qamomile_kernel(thetas: list[float]):"
+            else:
+                sig = "def _qamomile_kernel():"
 
         body = "\n".join(self._lines)
         source = f"@cudaq.kernel\n{sig}\n{body}\n"
@@ -529,43 +172,60 @@ class CudaqCodegenEmitter:
         namespace: dict[str, Any] = {"cudaq": cudaq}
         exec(source, namespace)  # noqa: S102
 
-        circuit.kernel_func = namespace["_qamomile_runtime_kernel"]
+        circuit.kernel_func = namespace["_qamomile_kernel"]
         circuit.source = source
+        circuit.execution_mode = mode
+        circuit.param_count = self._param_count
         return circuit
 
     def create_parameter(self, name: str) -> str:
-        """Return a source expression referencing ``thetas[i]``."""
+        """Return a source expression referencing ``thetas[i]``.
+
+        Args:
+            name: Symbolic parameter name.
+
+        Returns:
+            String expression like ``"thetas[0]"``.
+        """
         if name not in self._param_map:
             self._param_map[name] = self._param_count
             self._param_count += 1
         return f"thetas[{self._param_map[name]}]"
 
     # ------------------------------------------------------------------
-    # Single-qubit gates
+    # Single-qubit gates (no parameters)
     # ------------------------------------------------------------------
 
-    def emit_h(self, circuit: CudaqRuntimeCircuit, qubit: int) -> None:
+    def emit_h(self, circuit: CudaqKernelArtifact, qubit: int) -> None:
+        """Emit Hadamard gate."""
         self._emit(f"h(q[{qubit}])")
 
-    def emit_x(self, circuit: CudaqRuntimeCircuit, qubit: int) -> None:
+    def emit_x(self, circuit: CudaqKernelArtifact, qubit: int) -> None:
+        """Emit Pauli-X gate."""
         self._emit(f"x(q[{qubit}])")
 
-    def emit_y(self, circuit: CudaqRuntimeCircuit, qubit: int) -> None:
+    def emit_y(self, circuit: CudaqKernelArtifact, qubit: int) -> None:
+        """Emit Pauli-Y gate."""
         self._emit(f"y(q[{qubit}])")
 
-    def emit_z(self, circuit: CudaqRuntimeCircuit, qubit: int) -> None:
+    def emit_z(self, circuit: CudaqKernelArtifact, qubit: int) -> None:
+        """Emit Pauli-Z gate."""
         self._emit(f"z(q[{qubit}])")
 
-    def emit_s(self, circuit: CudaqRuntimeCircuit, qubit: int) -> None:
+    def emit_s(self, circuit: CudaqKernelArtifact, qubit: int) -> None:
+        """Emit S (phase) gate."""
         self._emit(f"s(q[{qubit}])")
 
-    def emit_sdg(self, circuit: CudaqRuntimeCircuit, qubit: int) -> None:
+    def emit_sdg(self, circuit: CudaqKernelArtifact, qubit: int) -> None:
+        """Emit S-dagger gate."""
         self._emit(f"sdg(q[{qubit}])")
 
-    def emit_t(self, circuit: CudaqRuntimeCircuit, qubit: int) -> None:
+    def emit_t(self, circuit: CudaqKernelArtifact, qubit: int) -> None:
+        """Emit T gate."""
         self._emit(f"t(q[{qubit}])")
 
-    def emit_tdg(self, circuit: CudaqRuntimeCircuit, qubit: int) -> None:
+    def emit_tdg(self, circuit: CudaqKernelArtifact, qubit: int) -> None:
+        """Emit T-dagger gate."""
         self._emit(f"tdg(q[{qubit}])")
 
     # ------------------------------------------------------------------
@@ -581,36 +241,43 @@ class CudaqCodegenEmitter:
         return str(angle)
 
     def emit_rx(
-        self, circuit: CudaqRuntimeCircuit, qubit: int, angle: float | Any
+        self, circuit: CudaqKernelArtifact, qubit: int, angle: float | Any
     ) -> None:
+        """Emit RX rotation gate."""
         self._emit(f"rx({self._angle_expr(angle)}, q[{qubit}])")
 
     def emit_ry(
-        self, circuit: CudaqRuntimeCircuit, qubit: int, angle: float | Any
+        self, circuit: CudaqKernelArtifact, qubit: int, angle: float | Any
     ) -> None:
+        """Emit RY rotation gate."""
         self._emit(f"ry({self._angle_expr(angle)}, q[{qubit}])")
 
     def emit_rz(
-        self, circuit: CudaqRuntimeCircuit, qubit: int, angle: float | Any
+        self, circuit: CudaqKernelArtifact, qubit: int, angle: float | Any
     ) -> None:
+        """Emit RZ rotation gate."""
         self._emit(f"rz({self._angle_expr(angle)}, q[{qubit}])")
 
     def emit_p(
-        self, circuit: CudaqRuntimeCircuit, qubit: int, angle: float | Any
+        self, circuit: CudaqKernelArtifact, qubit: int, angle: float | Any
     ) -> None:
+        """Emit phase gate (R1)."""
         self._emit(f"r1({self._angle_expr(angle)}, q[{qubit}])")
 
     # ------------------------------------------------------------------
     # Two-qubit gates
     # ------------------------------------------------------------------
 
-    def emit_cx(self, circuit: CudaqRuntimeCircuit, control: int, target: int) -> None:
+    def emit_cx(self, circuit: CudaqKernelArtifact, control: int, target: int) -> None:
+        """Emit CNOT (controlled-X) gate."""
         self._emit(f"x.ctrl(q[{control}], q[{target}])")
 
-    def emit_cz(self, circuit: CudaqRuntimeCircuit, control: int, target: int) -> None:
+    def emit_cz(self, circuit: CudaqKernelArtifact, control: int, target: int) -> None:
+        """Emit controlled-Z gate."""
         self._emit(f"z.ctrl(q[{control}], q[{target}])")
 
-    def emit_swap(self, circuit: CudaqRuntimeCircuit, qubit1: int, qubit2: int) -> None:
+    def emit_swap(self, circuit: CudaqKernelArtifact, qubit1: int, qubit2: int) -> None:
+        """Emit SWAP gate."""
         self._emit(f"swap(q[{qubit1}], q[{qubit2}])")
 
     # ------------------------------------------------------------------
@@ -619,12 +286,20 @@ class CudaqCodegenEmitter:
 
     def emit_cp(
         self,
-        circuit: CudaqRuntimeCircuit,
+        circuit: CudaqKernelArtifact,
         control: int,
         target: int,
         angle: float | Any,
     ) -> None:
-        """Emit controlled-Phase via decomposition."""
+        """Emit controlled-Phase via decomposition.
+
+        CP(ctrl, tgt, theta) =
+            RZ(tgt, theta/2)
+            CNOT(ctrl, tgt)
+            RZ(tgt, -theta/2)
+            CNOT(ctrl, tgt)
+            RZ(ctrl, theta/2)
+        """
         a = self._angle_expr(angle)
         if isinstance(angle, (int, float)):
             half = repr(angle / 2.0)
@@ -640,12 +315,18 @@ class CudaqCodegenEmitter:
 
     def emit_rzz(
         self,
-        circuit: CudaqRuntimeCircuit,
+        circuit: CudaqKernelArtifact,
         qubit1: int,
         qubit2: int,
         angle: float | Any,
     ) -> None:
-        """Emit RZZ via CNOT + RZ decomposition."""
+        """Emit RZZ via CNOT + RZ decomposition.
+
+        RZZ(q1, q2, theta) =
+            CNOT(q1, q2)
+            RZ(q2, theta)
+            CNOT(q1, q2)
+        """
         a = self._angle_expr(angle)
         self._emit(f"x.ctrl(q[{qubit1}], q[{qubit2}])")
         self._emit(f"rz({a}, q[{qubit2}])")
@@ -657,24 +338,25 @@ class CudaqCodegenEmitter:
 
     def emit_toffoli(
         self,
-        circuit: CudaqRuntimeCircuit,
+        circuit: CudaqKernelArtifact,
         control1: int,
         control2: int,
         target: int,
     ) -> None:
+        """Emit Toffoli (CCX) gate."""
         self._emit(f"x.ctrl(q[{control1}], q[{control2}], q[{target}])")
 
     # ------------------------------------------------------------------
     # Controlled single-qubit gates
     # ------------------------------------------------------------------
 
-    def emit_ch(self, circuit: CudaqRuntimeCircuit, control: int, target: int) -> None:
-        """Emit controlled-H via decomposition."""
+    def emit_ch(self, circuit: CudaqKernelArtifact, control: int, target: int) -> None:
+        """Emit controlled-Hadamard via decomposition."""
         self._emit(f"ry({math.pi / 4}, q[{target}])")
         self._emit(f"x.ctrl(q[{control}], q[{target}])")
         self._emit(f"ry({-math.pi / 4}, q[{target}])")
 
-    def emit_cy(self, circuit: CudaqRuntimeCircuit, control: int, target: int) -> None:
+    def emit_cy(self, circuit: CudaqKernelArtifact, control: int, target: int) -> None:
         """Emit controlled-Y via decomposition."""
         self._emit(f"sdg(q[{target}])")
         self._emit(f"x.ctrl(q[{control}], q[{target}])")
@@ -682,31 +364,34 @@ class CudaqCodegenEmitter:
 
     def emit_crx(
         self,
-        circuit: CudaqRuntimeCircuit,
+        circuit: CudaqKernelArtifact,
         control: int,
         target: int,
         angle: float | Any,
     ) -> None:
+        """Emit controlled-RX gate."""
         a = self._angle_expr(angle)
         self._emit(f"rx.ctrl({a}, q[{control}], q[{target}])")
 
     def emit_cry(
         self,
-        circuit: CudaqRuntimeCircuit,
+        circuit: CudaqKernelArtifact,
         control: int,
         target: int,
         angle: float | Any,
     ) -> None:
+        """Emit controlled-RY gate."""
         a = self._angle_expr(angle)
         self._emit(f"ry.ctrl({a}, q[{control}], q[{target}])")
 
     def emit_crz(
         self,
-        circuit: CudaqRuntimeCircuit,
+        circuit: CudaqKernelArtifact,
         control: int,
         target: int,
         angle: float | Any,
     ) -> None:
+        """Emit controlled-RZ gate."""
         a = self._angle_expr(angle)
         self._emit(f"rz.ctrl({a}, q[{control}], q[{target}])")
 
@@ -715,14 +400,19 @@ class CudaqCodegenEmitter:
     # ------------------------------------------------------------------
 
     def emit_measure(
-        self, circuit: CudaqRuntimeCircuit, qubit: int, clbit: int
+        self, circuit: CudaqKernelArtifact, qubit: int, clbit: int
     ) -> None:
-        """Emit explicit ``mz()`` for mid-circuit measurement.
+        """Emit measurement, respecting the current mode.
 
-        Unlike ``CudaqGateEmitter.emit_measure``, this is NOT a no-op.
-        Runtime control flow requires explicit measurement results to be
-        available as local variables for ``if`` / ``while`` conditions.
+        In STATIC mode (``noop_measurement=True``), this is a no-op:
+        ``cudaq.sample()`` auto-measures all qubits.
+
+        In RUNNABLE mode (``noop_measurement=False``), emits explicit
+        ``mz()`` to capture mid-circuit measurement results as local
+        variables for ``if`` / ``while`` conditions.
         """
+        if self.noop_measurement:
+            return
         self._emit(f"__b{clbit} = mz(q[{qubit}])")
         self._measurement_map[clbit] = qubit
 
@@ -730,25 +420,30 @@ class CudaqCodegenEmitter:
     # Barrier
     # ------------------------------------------------------------------
 
-    def emit_barrier(self, circuit: CudaqRuntimeCircuit, qubits: list[int]) -> None:
-        pass  # No-op
+    def emit_barrier(self, circuit: CudaqKernelArtifact, qubits: list[int]) -> None:
+        """No-op: CUDA-Q does not support barrier instructions."""
+        pass
 
     # ------------------------------------------------------------------
     # Sub-circuit support (not applicable for codegen)
     # ------------------------------------------------------------------
 
-    def circuit_to_gate(self, circuit: CudaqRuntimeCircuit, name: str = "U") -> Any:
+    def circuit_to_gate(self, circuit: CudaqKernelArtifact, name: str = "U") -> Any:
+        """No-op: not supported by CUDA-Q codegen path."""
         return None
 
     def append_gate(
-        self, circuit: CudaqRuntimeCircuit, gate: Any, qubits: list[int]
+        self, circuit: CudaqKernelArtifact, gate: Any, qubits: list[int]
     ) -> None:
+        """No-op: not supported by CUDA-Q codegen path."""
         pass
 
     def gate_power(self, gate: Any, power: int) -> Any:
+        """No-op: not supported by CUDA-Q codegen path."""
         return None
 
     def gate_controlled(self, gate: Any, num_controls: int) -> Any:
+        """No-op: not supported by CUDA-Q codegen path."""
         return None
 
     # ------------------------------------------------------------------
@@ -757,7 +452,7 @@ class CudaqCodegenEmitter:
 
     def emit_multi_controlled_x(
         self,
-        circuit: CudaqRuntimeCircuit,
+        circuit: CudaqKernelArtifact,
         control_indices: list[int],
         target_idx: int,
     ) -> None:
@@ -770,22 +465,27 @@ class CudaqCodegenEmitter:
     # ------------------------------------------------------------------
 
     def supports_for_loop(self) -> bool:
+        """Return False: for-loops are unrolled by the transpiler."""
         return False
 
     def supports_if_else(self) -> bool:
-        return True
+        """Return True only in RUNNABLE mode (measurement-dependent branching)."""
+        return not self.noop_measurement
 
     def supports_while_loop(self) -> bool:
-        return True
+        """Return True only in RUNNABLE mode."""
+        return not self.noop_measurement
 
-    def emit_for_loop_start(self, circuit: CudaqRuntimeCircuit, indexset: range) -> Any:
+    def emit_for_loop_start(self, circuit: CudaqKernelArtifact, indexset: range) -> Any:
+        """Not supported: for-loops are unrolled by the transpiler."""
         raise NotImplementedError
 
-    def emit_for_loop_end(self, circuit: CudaqRuntimeCircuit, context: Any) -> None:
+    def emit_for_loop_end(self, circuit: CudaqKernelArtifact, context: Any) -> None:
+        """Not supported: for-loops are unrolled by the transpiler."""
         raise NotImplementedError
 
     def emit_if_start(
-        self, circuit: CudaqRuntimeCircuit, clbit: int, value: int = 1
+        self, circuit: CudaqKernelArtifact, clbit: int, value: int = 1
     ) -> dict[str, Any]:
         """Emit ``if __b{clbit}:`` and increase indentation."""
         self._emit(f"if __b{clbit}:")
@@ -793,7 +493,7 @@ class CudaqCodegenEmitter:
         return {"clbit": clbit}
 
     def emit_else_start(
-        self, circuit: CudaqRuntimeCircuit, context: dict[str, Any]
+        self, circuit: CudaqKernelArtifact, context: dict[str, Any]
     ) -> None:
         """Emit ``else:`` block."""
         self._indent -= 1
@@ -801,13 +501,13 @@ class CudaqCodegenEmitter:
         self._indent += 1
 
     def emit_if_end(
-        self, circuit: CudaqRuntimeCircuit, context: dict[str, Any]
+        self, circuit: CudaqKernelArtifact, context: dict[str, Any]
     ) -> None:
         """Close ``if`` block by decreasing indentation."""
         self._indent -= 1
 
     def emit_while_start(
-        self, circuit: CudaqRuntimeCircuit, clbit: int, value: int = 1
+        self, circuit: CudaqKernelArtifact, clbit: int, value: int = 1
     ) -> dict[str, Any]:
         """Emit ``while __b{clbit}:`` and increase indentation."""
         self._emit(f"while __b{clbit}:")
@@ -815,7 +515,24 @@ class CudaqCodegenEmitter:
         return {"clbit": clbit}
 
     def emit_while_end(
-        self, circuit: CudaqRuntimeCircuit, context: dict[str, Any]
+        self, circuit: CudaqKernelArtifact, context: dict[str, Any]
     ) -> None:
         """Close ``while`` block by decreasing indentation."""
         self._indent -= 1
+
+
+# ------------------------------------------------------------------
+# Backward compatibility aliases
+# ------------------------------------------------------------------
+
+CudaqCircuit = CudaqKernelArtifact
+"""Alias for backward compatibility. Use ``CudaqKernelArtifact`` instead."""
+
+CudaqRuntimeCircuit = CudaqKernelArtifact
+"""Alias for backward compatibility. Use ``CudaqKernelArtifact`` instead."""
+
+CudaqGateEmitter = CudaqKernelEmitter
+"""Alias for backward compatibility. Use ``CudaqKernelEmitter`` instead."""
+
+CudaqCodegenEmitter = CudaqKernelEmitter
+"""Alias for backward compatibility. Use ``CudaqKernelEmitter`` instead."""
