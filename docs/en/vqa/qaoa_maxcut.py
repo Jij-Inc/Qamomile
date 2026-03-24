@@ -19,12 +19,11 @@
 # (QAOA) pipeline step by step, using Qamomile's low-level circuit primitives.
 # Rather than using the high-level `QAOAConverter`, we will:
 #
-# 1. Define a MaxCut problem on a small graph.
+# 1. Define a MaxCut problem for a small graph.
 # 2. Formulate it as a QUBO, then convert to an Ising model.
-# 3. Build the cost Hamiltonian as Pauli-Z operators.
-# 4. Write the QAOA circuit step by step using `@qkernel`.
-# 5. Optimize variational parameters with a classical optimizer.
-# 6. Decode and visualize the results.
+# 3. Write the QAOA circuit step by step using `@qkernel`.
+# 4. Optimize variational parameters with a classical optimizer.
+# 5. Decode and visualize the results.
 #
 # At the end, we show that `qamomile.circuit.algorithm.qaoa_state` provides
 # the same circuit in a single function call.
@@ -97,6 +96,9 @@ print(f"\nNumber of variables: {model.num_bits}")
 print(f"Variable type: {model.vartype}")
 
 # %% [markdown]
+# > **Note:** `BinaryModel` also provides `from_ising()` and `from_hubo()` constructors for other input formats. Use `change_vartype()` to convert between binary and spin representations.
+
+# %% [markdown]
 # ## From QUBO to Ising Model
 #
 # QAOA operates in the **spin domain** ($s_i \in \{+1, -1\}$), not the
@@ -117,42 +119,12 @@ print(f"Variable type: {model.vartype}")
 # $$
 
 # %%
-spin_model = model.change_vartype(VarType.SPIN)
+spin_model = model.change_vartype(VarType.SPIN).normalize_by_abs_max()
 
 print(f"Variable type: {spin_model.vartype}")
 print(f"Linear terms (h_i):     {spin_model.linear}")
 print(f"Quadratic terms (J_ij): {spin_model.quad}")
 print(f"Constant:               {spin_model.constant}")
-
-# %% [markdown]
-# ## Build the Cost Hamiltonian
-#
-# The Ising coefficients map directly to Pauli-Z operators. Each spin
-# variable $s_i$ becomes the operator $Z_i$:
-#
-# $$
-# H_C = \sum_i h_i \, Z_i + \sum_{i < j} J_{ij} \, Z_i Z_j
-# $$
-#
-# The ground state of $H_C$ encodes the optimal MaxCut partition.
-
-# %%
-import qamomile.observable as qmo
-
-hamiltonian = qmo.Hamiltonian()
-
-for i, hi in spin_model.linear.items():
-    hamiltonian.add_term((qmo.PauliOperator(qmo.Pauli.Z, i),), hi)
-
-for (i, j), Jij in spin_model.quad.items():
-    hamiltonian.add_term(
-        (qmo.PauliOperator(qmo.Pauli.Z, i),
-         qmo.PauliOperator(qmo.Pauli.Z, j)),
-        Jij,
-    )
-
-hamiltonian.constant = spin_model.constant
-print(hamiltonian)
 
 # %% [markdown]
 # ## Exact Solution (Brute Force)
@@ -298,7 +270,7 @@ def qaoa_ansatz(
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
-p = 2  # number of QAOA layers
+p = 3  # number of QAOA layers
 
 executable = transpiler.transpile(
     qaoa_ansatz,
@@ -320,7 +292,9 @@ executable = transpiler.transpile(
 import numpy as np
 from scipy.optimize import minimize
 
-executor = transpiler.executor()
+from qiskit_aer import AerSimulator
+
+executor = transpiler.executor(backend=AerSimulator(seed_simulator=7))
 cost_history: list[float] = []
 
 
@@ -329,7 +303,7 @@ def cost_fn(params):
     betas = list(params[p:])
     result = executable.sample(
         executor,
-        shots=512,
+        shots=2048,
         bindings={"gammas": gammas, "betas": betas},
     ).result()
     decoded = spin_model.decode_from_sampleresult(result)
@@ -339,10 +313,10 @@ def cost_fn(params):
 
 
 rng = np.random.default_rng(42)
-initial_params = rng.uniform(0, np.pi, 2 * p)
+initial_params = rng.uniform(-np.pi / 2, np.pi / 2, 2 * p)
 
 res = minimize(
-    cost_fn, initial_params, method="COBYLA", options={"maxiter": 300}
+    cost_fn, initial_params, method="COBYLA", options={"maxiter": 500}
 )
 
 print(f"Optimized cost: {res.fun:.4f}")
@@ -433,8 +407,8 @@ if best_qaoa_sample is not None:
 # (`gammas`, `betas`).
 #
 # Let's build the same circuit using the built-in function to confirm
-# that it implements the same structure, and observe that the mean
-# energies are close under finite shots.
+# that it implements the same structure. By using a seeded simulator,
+# we can verify that both circuits produce identical results.
 
 # %%
 from qamomile.circuit.algorithm import qaoa_state
@@ -454,12 +428,13 @@ def qaoa_builtin(
     return qmc.measure(q)
 
 # %% [markdown]
-# We can transpile and sample with the same optimized parameters.
-# Since both circuits are sampled independently, the mean energies will
-# be close but not identical due to **shot noise** — this is expected for
-# any finite number of shots.
+# We transpile and sample with the same optimized parameters.
+# Using a seeded `AerSimulator` gives deterministic results for
+# identical circuits.
 
 # %%
+from qiskit_aer import AerSimulator
+
 exe_builtin = transpiler.transpile(
     qaoa_builtin,
     bindings={
@@ -471,16 +446,29 @@ exe_builtin = transpiler.transpile(
     parameters=["gammas", "betas"],
 )
 
-result_builtin = exe_builtin.sample(
-    executor,
+seeded_executor_manual = transpiler.executor(
+    backend=AerSimulator(seed_simulator=0),
+)
+seeded_executor_builtin = transpiler.executor(
+    backend=AerSimulator(seed_simulator=0),
+)
+
+result_manual = executable.sample(
+    seeded_executor_manual,
     shots=2048,
     bindings={"gammas": gammas_opt, "betas": betas_opt},
 ).result()
 
+result_builtin = exe_builtin.sample(
+    seeded_executor_builtin,
+    shots=2048,
+    bindings={"gammas": gammas_opt, "betas": betas_opt},
+).result()
+
+decoded_manual = spin_model.decode_from_sampleresult(result_manual)
 decoded_builtin = spin_model.decode_from_sampleresult(result_builtin)
+print(f"Manual   mean energy: {decoded_manual.energy_mean():.4f}")
 print(f"Built-in mean energy: {decoded_builtin.energy_mean():.4f}")
-print(f"Manual   mean energy: {decoded.energy_mean():.4f}")
-print("(Small differences are expected due to shot noise.)")
 
 # %% [markdown]
 # ## Summary
@@ -490,11 +478,10 @@ print("(Small differences are expected due to shot noise.)")
 # 1. Defined a MaxCut problem and built its QUBO formulation from a
 #    NetworkX graph.
 # 2. Converted the QUBO to an Ising model using `BinaryModel`.
-# 3. Constructed the Pauli-Z cost Hamiltonian by hand.
-# 4. Built every component of the QAOA circuit as a `@qkernel` —
+# 3. Built every component of the QAOA circuit as a `@qkernel` —
 #    superposition, cost layer, mixer layer, and the full ansatz.
-# 5. Ran a classical optimization loop and decoded the results.
-# 6. Verified that `qamomile.circuit.algorithm.qaoa_state` provides the
+# 4. Ran a classical optimization loop and decoded the results.
+# 5. Verified that `qamomile.circuit.algorithm.qaoa_state` provides the
 #    same circuit with a single function call.
 #
 # **Next steps:**

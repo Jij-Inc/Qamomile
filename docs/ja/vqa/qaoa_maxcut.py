@@ -17,12 +17,11 @@
 #
 # このチュートリアルでは、Qamomile の低レベル回路プリミティブを使って、QAOA (Quantum Approximate Optimization Algorithm) のパイプラインをステップごとに構築します。高レベルな `QAOAConverter` は使わずに、以下の手順で進めます:
 #
-# 1. 小さなグラフ上で MaxCut 問題を定義する。
+# 1. 小さなグラフで MaxCut 問題を定義する。
 # 2. QUBO として定式化し、Ising モデルに変換する。
-# 3. コストハミルトニアンを Pauli-Z 演算子で構築する。
-# 4. `@qkernel` を使って QAOA 回路をステップごとに記述する。
-# 5. 古典オプティマイザで変分パラメータを最適化する。
-# 6. 結果をデコードして可視化する。
+# 3. `@qkernel` を使って QAOA 回路をステップごとに記述する。
+# 4. 古典オプティマイザで変分パラメータを最適化する。
+# 5. 結果をデコードして可視化する。
 #
 # 最後に、`qamomile.circuit.algorithm.qaoa_state` が同じ回路を 1 つの関数呼び出しで提供することを示します。
 
@@ -92,6 +91,9 @@ print(f"\nNumber of variables: {model.num_bits}")
 print(f"Variable type: {model.vartype}")
 
 # %% [markdown]
+# > **Note:** `BinaryModel` は QUBO 以外にも `from_ising()` や `from_hubo()` といったコンストラクタを提供しています。また、`change_vartype()` でバイナリ表現とスピン表現を相互に変換できます。
+
+# %% [markdown]
 # ## QUBO から Ising モデルへ
 #
 # QAOA はバイナリ変数 ($x_i \in \{0, 1\}$) ではなく、**スピン変数** ($s_i \in \{+1, -1\}$) で動作します。変換式は:
@@ -109,41 +111,12 @@ print(f"Variable type: {model.vartype}")
 # $$
 
 # %%
-spin_model = model.change_vartype(VarType.SPIN)
+spin_model = model.change_vartype(VarType.SPIN).normalize_by_abs_max()
 
 print(f"Variable type: {spin_model.vartype}")
 print(f"Linear terms (h_i):     {spin_model.linear}")
 print(f"Quadratic terms (J_ij): {spin_model.quad}")
 print(f"Constant:               {spin_model.constant}")
-
-# %% [markdown]
-# ## コストハミルトニアンの構築
-#
-# Ising 係数は Pauli-Z 演算子に直接対応します。各スピン変数 $s_i$ が演算子 $Z_i$ になります:
-#
-# $$
-# H_C = \sum_i h_i \, Z_i + \sum_{i < j} J_{ij} \, Z_i Z_j
-# $$
-#
-# $H_C$ の基底状態が最適な MaxCut 分割を表します。
-
-# %%
-import qamomile.observable as qmo
-
-hamiltonian = qmo.Hamiltonian()
-
-for i, hi in spin_model.linear.items():
-    hamiltonian.add_term((qmo.PauliOperator(qmo.Pauli.Z, i),), hi)
-
-for (i, j), Jij in spin_model.quad.items():
-    hamiltonian.add_term(
-        (qmo.PauliOperator(qmo.Pauli.Z, i),
-         qmo.PauliOperator(qmo.Pauli.Z, j)),
-        Jij,
-    )
-
-hamiltonian.constant = spin_model.constant
-print(hamiltonian)
 
 # %% [markdown]
 # ## 厳密解（全探索）
@@ -272,7 +245,7 @@ def qaoa_ansatz(
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
-p = 2  # QAOA レイヤー数
+p = 3  # QAOA レイヤー数
 
 executable = transpiler.transpile(
     qaoa_ansatz,
@@ -291,8 +264,9 @@ executable = transpiler.transpile(
 # %%
 import numpy as np
 from scipy.optimize import minimize
+from qiskit_aer import AerSimulator
 
-executor = transpiler.executor()
+executor = transpiler.executor(backend=AerSimulator(seed_simulator=7))
 cost_history: list[float] = []
 
 
@@ -301,7 +275,7 @@ def cost_fn(params):
     betas = list(params[p:])
     result = executable.sample(
         executor,
-        shots=512,
+        shots=2048,
         bindings={"gammas": gammas, "betas": betas},
     ).result()
     decoded = spin_model.decode_from_sampleresult(result)
@@ -311,10 +285,10 @@ def cost_fn(params):
 
 
 rng = np.random.default_rng(42)
-initial_params = rng.uniform(0, np.pi, 2 * p)
+initial_params = rng.uniform(-np.pi / 2, np.pi / 2, 2 * p)
 
 res = minimize(
-    cost_fn, initial_params, method="COBYLA", options={"maxiter": 300}
+    cost_fn, initial_params, method="COBYLA", options={"maxiter": 500}
 )
 
 print(f"Optimized cost: {res.fun:.4f}")
@@ -397,7 +371,7 @@ if best_qaoa_sample is not None:
 #
 # 上で実装したすべて — 重ね合わせ、コスト層、ミキサー層、レイヤーのループ — は `qamomile.circuit.algorithm.qaoa_state` として既に提供されています。同じ Ising 係数 (`quad`, `linear`) と変分パラメータ (`gammas`, `betas`) を受け取ります。
 #
-# 組み込み関数を使って同じ構造の回路が実装されていることを確認し、有限ショットでは平均エネルギーが近いことを見ます。
+# 組み込み関数を使って同じ構造の回路が実装されていることを確認します。シードを固定したシミュレータを使い、同一の回路から同一の結果が得られることを見ます。
 
 # %%
 from qamomile.circuit.algorithm import qaoa_state
@@ -417,9 +391,11 @@ def qaoa_builtin(
     return qmc.measure(q)
 
 # %% [markdown]
-# 同じ最適化済みパラメータでトランスパイル・サンプリングします。2 つの回路は独立にサンプリングされるため、平均エネルギーは近い値になりますが、**ショットノイズ**により完全には一致しません。これは有限ショット数では当然のことです。
+# 同じ最適化済みパラメータでトランスパイル・サンプリングします。シードを固定した `AerSimulator` を使うことで、同一の回路に対して決定的な結果が得られます。
 
 # %%
+from qiskit_aer import AerSimulator
+
 exe_builtin = transpiler.transpile(
     qaoa_builtin,
     bindings={
@@ -431,16 +407,29 @@ exe_builtin = transpiler.transpile(
     parameters=["gammas", "betas"],
 )
 
-result_builtin = exe_builtin.sample(
-    executor,
+seeded_executor_manual = transpiler.executor(
+    backend=AerSimulator(seed_simulator=0),
+)
+seeded_executor_builtin = transpiler.executor(
+    backend=AerSimulator(seed_simulator=0),
+)
+
+result_manual = executable.sample(
+    seeded_executor_manual,
     shots=2048,
     bindings={"gammas": gammas_opt, "betas": betas_opt},
 ).result()
 
+result_builtin = exe_builtin.sample(
+    seeded_executor_builtin,
+    shots=2048,
+    bindings={"gammas": gammas_opt, "betas": betas_opt},
+).result()
+
+decoded_manual = spin_model.decode_from_sampleresult(result_manual)
 decoded_builtin = spin_model.decode_from_sampleresult(result_builtin)
+print(f"Manual   mean energy: {decoded_manual.energy_mean():.4f}")
 print(f"Built-in mean energy: {decoded_builtin.energy_mean():.4f}")
-print(f"Manual   mean energy: {decoded.energy_mean():.4f}")
-print("(ショットノイズにより小さな差異は想定通りです。)")
 
 # %% [markdown]
 # ## まとめ
@@ -449,10 +438,9 @@ print("(ショットノイズにより小さな差異は想定通りです。)")
 #
 # 1. MaxCut 問題を定義し、NetworkX グラフから QUBO を構築しました。
 # 2. `BinaryModel` を使って QUBO を Ising モデルに変換しました。
-# 3. Pauli-Z のコストハミルトニアンを手動で構築しました。
-# 4. QAOA 回路の全コンポーネント — 重ね合わせ、コスト層、ミキサー層、完全なアンザッツ — を `@qkernel` として実装しました。
-# 5. 古典最適化ループを実行し、結果をデコードしました。
-# 6. `qamomile.circuit.algorithm.qaoa_state` が同じ回路を 1 つの関数呼び出しで提供することを確認しました。
+# 3. QAOA 回路の全コンポーネント — 重ね合わせ、コスト層、ミキサー層、完全なアンザッツ — を `@qkernel` として実装しました。
+# 4. 古典最適化ループを実行し、結果をデコードしました。
+# 5. `qamomile.circuit.algorithm.qaoa_state` が同じ回路を 1 つの関数呼び出しで提供することを確認しました。
 #
 # **次のステップ:**
 #
