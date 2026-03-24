@@ -1721,13 +1721,26 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         """Handle CastOperation - update qubit_map without emitting gates."""
         result = op.results[0]
 
+        resolved = 0
         for i, qubit_uuid in enumerate(op.qubit_mapping):
             if qubit_uuid in qubit_map:
                 result_element_id = f"{result.uuid}_{i}"
                 qubit_map[result_element_id] = qubit_map[qubit_uuid]
+                resolved += 1
 
         if op.qubit_mapping and op.qubit_mapping[0] in qubit_map:
             qubit_map[result.uuid] = qubit_map[op.qubit_mapping[0]]
+
+        total = len(op.qubit_mapping)
+        if total > 0 and resolved < total:
+            import warnings
+
+            warnings.warn(
+                f"CastOperation: {total - resolved}/{total} carrier qubits "
+                f"unresolved in qubit_map. "
+                f"Downstream measurements may be silently dropped.",
+                stacklevel=2,
+            )
 
     def _evaluate_binop(self, op: BinOp, bindings: dict[str, Any]) -> None:
         """Evaluate a BinOp and store the result in bindings."""

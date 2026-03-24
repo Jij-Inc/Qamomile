@@ -5620,5 +5620,56 @@ class TestCompileTimeIfPhiPropagation:
 
 
 # ============================================================================
-# 31. Portable TranspilerConfig Tests
+# 31. Direct cast -> measure (cast element carrier identity)
+# ============================================================================
+
+
+class TestDirectCastMeasure:
+    """Verify that direct Vector[Qubit] -> QFixed -> measure resolves carriers.
+
+    QURI Parts measurement is a no-op (handled by sampler), so we verify
+    the clbit_map has the expected number of entries.
+    """
+
+    def test_direct_cast_measure_resolves_carriers(self):
+        """Direct cast then measure must resolve num_bits carrier qubits."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Float:
+            q = qmc.qubit_array(2, "q")
+            qf = qmc.cast(q, qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(circuit)
+        circ = exe.compiled_quantum[0].circuit
+        clbit_map = exe.compiled_quantum[0].clbit_map
+        assert circ.qubit_count == 2
+        assert len(clbit_map) == 2, (
+            f"Expected 2 clbit_map entries, got {len(clbit_map)}"
+        )
+
+    def test_cast_after_gate_measure(self):
+        """Gate before cast must not break carrier resolution."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Float:
+            q = qmc.qubit_array(2, "q")
+            q[0] = qmc.h(q[0])
+            qf = qmc.cast(q, qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(circuit)
+        circ = exe.compiled_quantum[0].circuit
+        clbit_map = exe.compiled_quantum[0].clbit_map
+        gate_names = _gate_names(circ)
+        assert any(n.lower() == "h" for n in gate_names)
+        assert len(clbit_map) == 2, (
+            f"Expected 2 clbit_map entries, got {len(clbit_map)}"
+        )
+
+
+# ============================================================================
+# 32. Portable TranspilerConfig Tests
 # ============================================================================

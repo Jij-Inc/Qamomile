@@ -369,10 +369,14 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             )
 
         from qamomile.circuit.ir.operation.control_flow import (
+            ForItemsOperation,
             ForOperation,
             WhileOperation,
         )
-        from qamomile.circuit.ir.operation.gate import GateOperation
+        from qamomile.circuit.ir.operation.gate import (
+            ControlledUOperation,
+            GateOperation,
+        )
 
         if isinstance(op, ForOperation):
             new_body = [self._apply_substitution(o, subst) for o in op.operations]
@@ -392,6 +396,15 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 operations=new_body,
             )
 
+        if isinstance(op, ForItemsOperation):
+            new_body = [self._apply_substitution(o, subst) for o in op.operations]
+            return dataclasses.replace(
+                op,
+                operands=new_operands,
+                results=new_results,
+                operations=new_body,
+            )
+
         result_op = op
         if changed:
             result_op = dataclasses.replace(op, operands=new_operands)
@@ -402,40 +415,155 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             if new_theta is not result_op.theta and isinstance(new_theta, Value):
                 result_op = dataclasses.replace(result_op, theta=new_theta)
 
+        # Handle ControlledUOperation non-operand fields.
+        if isinstance(result_op, ControlledUOperation):
+            extra_kwargs: dict[str, Any] = {}
+            if isinstance(result_op.num_controls, Value):
+                new_nc = self._substitute_value(result_op.num_controls, subst)
+                if new_nc is not result_op.num_controls:
+                    extra_kwargs["num_controls"] = new_nc
+            if isinstance(result_op.power, Value):
+                new_power = self._substitute_value(result_op.power, subst)
+                if new_power is not result_op.power:
+                    extra_kwargs["power"] = new_power
+            if result_op.target_indices is not None:
+                new_ti = self._substitute_value_list(result_op.target_indices, subst)
+                if new_ti is not None:
+                    extra_kwargs["target_indices"] = new_ti
+            if result_op.controlled_indices is not None:
+                new_ci = self._substitute_value_list(
+                    result_op.controlled_indices, subst
+                )
+                if new_ci is not None:
+                    extra_kwargs["controlled_indices"] = new_ci
+            if extra_kwargs:
+                result_op = dataclasses.replace(result_op, **extra_kwargs)
+
+        # Handle CastOperation source provenance sync.
+        from qamomile.circuit.ir.operation.cast import CastOperation
+
+        if isinstance(result_op, CastOperation) and changed:
+            new_source = new_operands[0] if new_operands else None
+            if (
+                new_source is not None
+                and hasattr(new_source, "uuid")
+                and result_op.results
+            ):
+                result_val = result_op.results[0]
+                if hasattr(result_val, "params") and result_val.params:
+                    updated_params = dict(result_val.params)
+                    updated_params["cast_source_uuid"] = new_source.uuid
+                    updated_params["cast_source_logical_id"] = getattr(
+                        new_source, "logical_id", new_source.uuid
+                    )
+                    # Rebuild carrier keys from new source (canonical format).
+                    num_bits = updated_params.get("num_bits")
+                    if num_bits is not None:
+                        new_qubit_uuids = [
+                            f"{new_source.uuid}_{i}" for i in range(num_bits)
+                        ]
+                        new_qubit_logical_ids = [
+                            f"{getattr(new_source, 'logical_id', new_source.uuid)}_{i}"
+                            for i in range(num_bits)
+                        ]
+                        updated_params["cast_qubit_uuids"] = new_qubit_uuids
+                        updated_params["qubit_values"] = new_qubit_uuids
+                        updated_params["cast_qubit_logical_ids"] = new_qubit_logical_ids
+                    new_result = dataclasses.replace(result_val, params=updated_params)
+                    new_mapping = updated_params.get(
+                        "qubit_values", result_op.qubit_mapping
+                    )
+                    result_op = dataclasses.replace(
+                        result_op,
+                        results=[new_result],
+                        qubit_mapping=new_mapping,
+                    )
+
         return result_op
+
+    def _substitute_value_list(
+        self,
+        values: list[Value],
+        subst: dict[str, ValueBase],
+    ) -> list[Value] | None:
+        """Substitute values in a list, returning new list if changed, None otherwise."""
+        new_values: list[Value] = []
+        changed = False
+        for v in values:
+            new_v = self._substitute_value(v, subst)
+            if new_v is not v and isinstance(new_v, Value):
+                new_values.append(new_v)
+                changed = True
+            else:
+                new_values.append(v)
+        return new_values if changed else None
 
     def _substitute_value(
         self,
         v: ValueBase,
         subst: dict[str, ValueBase],
     ) -> ValueBase:
-        """Substitute a value using the phi substitution map."""
+        """Substitute a value using the phi substitution map.
+
+        Chases transitive phi chains (A -> B -> C) to terminal values.
+        For array elements, substitutes both parent_array and element_indices
+        in one pass (no early return after parent_array).
+        """
         if v.uuid in subst:
-            return subst[v.uuid]
+            result = subst[v.uuid]
+            # Chase transitive phi chains until terminal value.
+            seen: set[str] = {v.uuid}
+            while result.uuid in subst and result.uuid not in seen:
+                seen.add(result.uuid)
+                result = subst[result.uuid]
+            return result
 
-        # Handle array elements whose parent_array should be substituted.
-        if isinstance(v, Value) and v.parent_array is not None:
-            if v.parent_array.uuid in subst:
-                new_parent = subst[v.parent_array.uuid]
-                if isinstance(new_parent, ArrayValue):
-                    return dataclasses.replace(v, parent_array=new_parent)
+        # Handle array elements: substitute parent_array and element_indices.
+        if isinstance(v, Value):
+            changed = False
 
-        # Handle element_indices substitution.
-        if isinstance(v, Value) and v.element_indices:
-            new_indices = []
-            indices_changed = False
-            for idx in v.element_indices:
-                if idx.uuid in subst:
-                    sub_idx = subst[idx.uuid]
-                    if isinstance(sub_idx, Value):
-                        new_indices.append(sub_idx)
-                        indices_changed = True
+            # Substitute parent_array if applicable.
+            new_parent = v.parent_array
+            if new_parent is not None and new_parent.uuid in subst:
+                resolved = subst[new_parent.uuid]
+                seen = {new_parent.uuid}
+                while resolved.uuid in subst and resolved.uuid not in seen:
+                    seen.add(resolved.uuid)
+                    resolved = subst[resolved.uuid]
+                if isinstance(resolved, ArrayValue):
+                    new_parent = resolved
+                    changed = True
+
+            # Substitute element_indices if applicable.
+            new_indices = None
+            if v.element_indices:
+                idx_list = []
+                indices_changed = False
+                for idx in v.element_indices:
+                    if idx.uuid in subst:
+                        sub_idx = subst[idx.uuid]
+                        seen = {idx.uuid}
+                        while sub_idx.uuid in subst and sub_idx.uuid not in seen:
+                            seen.add(sub_idx.uuid)
+                            sub_idx = subst[sub_idx.uuid]
+                        if isinstance(sub_idx, Value):
+                            idx_list.append(sub_idx)
+                            indices_changed = True
+                        else:
+                            idx_list.append(idx)
                     else:
-                        new_indices.append(idx)
-                else:
-                    new_indices.append(idx)
-            if indices_changed:
-                return dataclasses.replace(v, element_indices=tuple(new_indices))
+                        idx_list.append(idx)
+                if indices_changed:
+                    new_indices = tuple(idx_list)
+                    changed = True
+
+            if changed:
+                kwargs: dict[str, Any] = {}
+                if new_parent is not v.parent_array:
+                    kwargs["parent_array"] = new_parent
+                if new_indices is not None:
+                    kwargs["element_indices"] = new_indices
+                return dataclasses.replace(v, **kwargs)
 
         return v
 
@@ -520,10 +648,26 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                     used.add(idx.uuid)
 
         # GateOperation.theta
-        from qamomile.circuit.ir.operation.gate import GateOperation
+        from qamomile.circuit.ir.operation.gate import (
+            ControlledUOperation,
+            GateOperation,
+        )
 
         if isinstance(op, GateOperation) and isinstance(op.theta, Value):
             used.add(op.theta.uuid)
+
+        # ControlledUOperation non-operand fields.
+        if isinstance(op, ControlledUOperation):
+            if isinstance(op.num_controls, Value):
+                used.add(op.num_controls.uuid)
+            if isinstance(op.power, Value):
+                used.add(op.power.uuid)
+            if op.target_indices is not None:
+                for v in op.target_indices:
+                    used.add(v.uuid)
+            if op.controlled_indices is not None:
+                for v in op.controlled_indices:
+                    used.add(v.uuid)
 
         # Recurse into control flow.
         if isinstance(op, IfOperation):
@@ -535,6 +679,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 CompileTimeIfLoweringPass._collect_used_uuids(phi, used)
 
         from qamomile.circuit.ir.operation.control_flow import (
+            ForItemsOperation,
             ForOperation,
             WhileOperation,
         )
@@ -543,6 +688,9 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             for inner in op.operations:
                 CompileTimeIfLoweringPass._collect_used_uuids(inner, used)
         if isinstance(op, WhileOperation):
+            for inner in op.operations:
+                CompileTimeIfLoweringPass._collect_used_uuids(inner, used)
+        if isinstance(op, ForItemsOperation):
             for inner in op.operations:
                 CompileTimeIfLoweringPass._collect_used_uuids(inner, used)
 

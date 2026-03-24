@@ -8185,3 +8185,49 @@ class TestCompileTimeIfPhiPropagation:
         results = job.result().results
         for val, count in results:
             assert val == (1, 0), f"Expected (1, 0), got {val}"
+
+
+# ============================================================================
+# Direct cast -> measure (cast element carrier identity)
+# ============================================================================
+
+
+class TestDirectCastMeasure:
+    """Verify that direct Vector[Qubit] -> QFixed -> measure emits measurements."""
+
+    def test_direct_cast_measure_emits_measurements(self):
+        """Direct cast then measure must produce num_bits measurement gates."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Float:
+            q = qmc.qubit_array(2, "q")
+            qf = qmc.cast(q, qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        qc = exe.compiled_quantum[0].circuit
+        measure_ops = [g for g in qc if g.operation.name == "measure"]
+        assert len(measure_ops) == 2, (
+            f"Expected 2 measurement ops, got {len(measure_ops)}"
+        )
+
+    def test_cast_after_gate_measure(self):
+        """Gate before cast must not break measurement emission."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Float:
+            q = qmc.qubit_array(2, "q")
+            q[0] = qmc.h(q[0])
+            qf = qmc.cast(q, qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        qc = exe.compiled_quantum[0].circuit
+        gate_names = [g.operation.name for g in qc]
+        assert "h" in gate_names
+        measure_ops = [n for n in gate_names if n == "measure"]
+        assert len(measure_ops) == 2, (
+            f"Expected 2 measurement ops, got {len(measure_ops)}"
+        )

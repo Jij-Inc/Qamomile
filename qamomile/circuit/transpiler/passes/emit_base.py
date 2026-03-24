@@ -836,13 +836,25 @@ class ResourceAllocator:
         op: CastOperation,
         qubit_map: dict[str, int],
     ) -> None:
-        """Allocate resources for a CastOperation (no-op)."""
+        """Allocate resources for a CastOperation (alias mapping)."""
+        resolved = 0
         for i, qubit_uuid in enumerate(op.qubit_mapping):
             if qubit_uuid in qubit_map:
                 result_element_id = f"{op.results[0].uuid}_{i}"
                 qubit_map[result_element_id] = qubit_map[qubit_uuid]
                 if op.results[0].uuid not in qubit_map:
                     qubit_map[op.results[0].uuid] = qubit_map[qubit_uuid]
+                resolved += 1
+        total = len(op.qubit_mapping)
+        if total > 0 and resolved < total:
+            import warnings
+
+            warnings.warn(
+                f"CastOperation: {total - resolved}/{total} carrier qubits "
+                f"unresolved in qubit_map. "
+                f"Downstream measurements may be silently dropped.",
+                stacklevel=2,
+            )
 
 
 class ValueResolver:

@@ -820,3 +820,435 @@ class TestElementIndicesSubstitution:
             f"element_indices should be idx_false ({idx_false.uuid}), "
             f"got {operand.element_indices[0].uuid}"
         )
+
+
+# ---------------------------------------------------------------------------
+# CC1: Nested scalar phi chain (transitive substitution)
+# ---------------------------------------------------------------------------
+
+
+class TestNestedScalarPhiChain:
+    """Nested compile-time if: phi_outer -> phi_inner -> terminal must resolve."""
+
+    def test_transitive_chain_resolves_to_terminal(self):
+        """Gate operand UUID must equal terminal qubit UUID after 2-hop chain."""
+        # Outer if: flag1=1 selects q_a
+        q_a = _qubit_val("q_a")
+        q_b = _qubit_val("q_b")
+        flag1 = _uint_val("flag1", const=1)
+        phi_inner = _qubit_val("q_phi_inner")
+        phi1 = PhiOp(operands=[flag1, q_a, q_b], results=[phi_inner])
+        if1 = IfOperation(
+            operands=[flag1],
+            results=[phi_inner],
+            true_operations=[],
+            false_operations=[],
+            phi_ops=[phi1],
+        )
+
+        # Inner if: flag2=1 selects phi_inner (which should transitively be q_a)
+        q_c = _qubit_val("q_c")
+        flag2 = _uint_val("flag2", const=1)
+        phi_outer = _qubit_val("q_phi_outer")
+        phi2 = PhiOp(operands=[flag2, phi_inner, q_c], results=[phi_outer])
+        if2 = IfOperation(
+            operands=[flag2],
+            results=[phi_outer],
+            true_operations=[],
+            false_operations=[],
+            phi_ops=[phi2],
+        )
+
+        # Downstream gate uses phi_outer
+        gate = GateOperation(
+            operands=[phi_outer],
+            results=[phi_outer.next_version()],
+            gate_type=GateOperationType.X,
+        )
+
+        block = Block(
+            name="test",
+            operations=[if1, if2, gate],
+            output_values=[],
+            kind=BlockKind.AFFINE,
+        )
+        lowered = _run_pass(block)
+
+        assert not _find_ops(lowered.operations, IfOperation)
+        x_gates = _find_gates(lowered.operations, GateOperationType.X)
+        assert len(x_gates) == 1
+        assert x_gates[0].operands[0].uuid == q_a.uuid, (
+            f"Expected terminal q_a ({q_a.uuid}), got {x_gates[0].operands[0].uuid}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# CC2: Combined parent_array + element_indices substitution
+# ---------------------------------------------------------------------------
+
+
+class TestCombinedArrayAndIndexSubstitution:
+    """PhiOp on both parent_array and element_indices must both resolve."""
+
+    def test_both_parent_and_index_substituted(self):
+        """After lowering, both parent_array and element_indices[0] are replaced."""
+        arr_true = ArrayValue(type=QubitType(), name="qa")
+        arr_false = ArrayValue(type=QubitType(), name="qb")
+        idx_true = _uint_val("idx_true", const=0)
+        idx_false = _uint_val("idx_false", const=1)
+        flag = _uint_val("flag", const=1)
+
+        # PhiOp for array
+        phi_arr = ArrayValue(type=QubitType(), name="arr_phi")
+        phi_arr_op = PhiOp(operands=[flag, arr_true, arr_false], results=[phi_arr])
+
+        # PhiOp for index
+        phi_idx = _uint_val("idx_phi")
+        phi_idx_op = PhiOp(operands=[flag, idx_true, idx_false], results=[phi_idx])
+
+        if_op = IfOperation(
+            operands=[flag],
+            results=[phi_arr, phi_idx],
+            true_operations=[],
+            false_operations=[],
+            phi_ops=[phi_arr_op, phi_idx_op],
+        )
+
+        # Downstream element uses both phi array and phi index
+        elem = Value(
+            type=QubitType(),
+            name="elem_phi",
+            parent_array=phi_arr,
+            element_indices=(phi_idx,),
+        )
+        gate = GateOperation(
+            operands=[elem],
+            results=[elem.next_version()],
+            gate_type=GateOperationType.X,
+        )
+
+        block = Block(
+            name="test",
+            operations=[if_op, gate],
+            output_values=[],
+            kind=BlockKind.AFFINE,
+        )
+        lowered = _run_pass(block)
+
+        assert not _find_ops(lowered.operations, IfOperation)
+        x_gates = _find_gates(lowered.operations, GateOperationType.X)
+        assert len(x_gates) == 1
+        operand = x_gates[0].operands[0]
+        assert isinstance(operand, Value)
+        assert operand.parent_array is not None
+        assert operand.parent_array.uuid == arr_true.uuid, (
+            f"parent_array should be arr_true ({arr_true.uuid}), "
+            f"got {operand.parent_array.uuid}"
+        )
+        assert len(operand.element_indices) == 1
+        assert operand.element_indices[0].uuid == idx_true.uuid, (
+            f"element_indices[0] should be idx_true ({idx_true.uuid}), "
+            f"got {operand.element_indices[0].uuid}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# CC3: ControlledUOperation 4-field substitution
+# ---------------------------------------------------------------------------
+
+
+class TestControlledUOperationFieldSubstitution:
+    """Phi-substituted fields on ControlledUOperation must all resolve."""
+
+    def test_four_fields_substituted(self):
+        """num_controls, power, target_indices, controlled_indices all resolve."""
+        from qamomile.circuit.ir.block_value import BlockValue
+        from qamomile.circuit.ir.operation.gate import ControlledUOperation
+        from qamomile.circuit.ir.types.primitives import BlockType
+
+        flag = _uint_val("flag", const=1)
+
+        # True branch values
+        nc_true = _uint_val("nc_true", const=2)
+        power_true = _uint_val("power_true", const=4)
+        ti_true = _uint_val("ti_true", const=0)
+        ci_true = _uint_val("ci_true", const=1)
+
+        # False branch values
+        nc_false = _uint_val("nc_false", const=1)
+        power_false = _uint_val("power_false", const=1)
+        ti_false = _uint_val("ti_false", const=2)
+        ci_false = _uint_val("ci_false", const=3)
+
+        # Phis
+        nc_phi = _uint_val("nc_phi")
+        power_phi = _uint_val("power_phi")
+        ti_phi = _uint_val("ti_phi")
+        ci_phi = _uint_val("ci_phi")
+
+        phi_nc = PhiOp(operands=[flag, nc_true, nc_false], results=[nc_phi])
+        phi_power = PhiOp(operands=[flag, power_true, power_false], results=[power_phi])
+        phi_ti = PhiOp(operands=[flag, ti_true, ti_false], results=[ti_phi])
+        phi_ci = PhiOp(operands=[flag, ci_true, ci_false], results=[ci_phi])
+
+        if_op = IfOperation(
+            operands=[flag],
+            results=[nc_phi, power_phi, ti_phi, ci_phi],
+            true_operations=[],
+            false_operations=[],
+            phi_ops=[phi_nc, phi_power, phi_ti, phi_ci],
+        )
+
+        # ControlledUOperation with phi fields
+        block_val = BlockValue(type=BlockType(), name="U")
+        ctrl_q = _qubit_val("ctrl")
+        target_q = _qubit_val("target")
+        ctrl_u = ControlledUOperation(
+            operands=[block_val, ctrl_q, target_q],
+            results=[ctrl_q.next_version(), target_q.next_version()],
+            num_controls=nc_phi,
+            power=power_phi,
+            target_indices=[ti_phi],
+            controlled_indices=[ci_phi],
+        )
+
+        block = Block(
+            name="test",
+            operations=[if_op, ctrl_u],
+            output_values=[],
+            kind=BlockKind.AFFINE,
+        )
+        lowered = _run_pass(block)
+
+        assert not _find_ops(lowered.operations, IfOperation)
+        ctrl_u_ops = [
+            op for op in lowered.operations if isinstance(op, ControlledUOperation)
+        ]
+        assert len(ctrl_u_ops) == 1
+        op = ctrl_u_ops[0]
+
+        assert isinstance(op.num_controls, Value)
+        assert op.num_controls.uuid == nc_true.uuid
+        assert isinstance(op.power, Value)
+        assert op.power.uuid == power_true.uuid
+        assert op.target_indices is not None and len(op.target_indices) == 1
+        assert op.target_indices[0].uuid == ti_true.uuid
+        assert op.controlled_indices is not None and len(op.controlled_indices) == 1
+        assert op.controlled_indices[0].uuid == ci_true.uuid
+
+
+# ---------------------------------------------------------------------------
+# CC4: ForItemsOperation body substitution
+# ---------------------------------------------------------------------------
+
+
+class TestForItemsOperationBodySubstitution:
+    """Phi output used in ForItemsOperation body must resolve after lowering."""
+
+    def test_body_operand_substituted(self):
+        """Body operand UUID equals terminal value UUID after lowering."""
+        from qamomile.circuit.ir.operation.control_flow import ForItemsOperation
+        from qamomile.circuit.ir.value import DictValue
+
+        q_true = _qubit_val("q_true")
+        q_false = _qubit_val("q_false")
+        flag = _uint_val("flag", const=1)
+
+        phi_q = _qubit_val("q_phi")
+        phi = PhiOp(operands=[flag, q_true, q_false], results=[phi_q])
+        if_op = IfOperation(
+            operands=[flag],
+            results=[phi_q],
+            true_operations=[],
+            false_operations=[],
+            phi_ops=[phi],
+        )
+
+        # ForItemsOperation body uses phi_q
+        body_gate = GateOperation(
+            operands=[phi_q],
+            results=[phi_q.next_version()],
+            gate_type=GateOperationType.X,
+        )
+        dict_val = DictValue(name="data")
+        for_items = ForItemsOperation(
+            operands=[dict_val],
+            results=[],
+            key_vars=["k"],
+            value_var="v",
+            operations=[body_gate],
+        )
+
+        block = Block(
+            name="test",
+            operations=[if_op, for_items],
+            output_values=[],
+            kind=BlockKind.AFFINE,
+        )
+        lowered = _run_pass(block)
+
+        assert not _find_ops(lowered.operations, IfOperation)
+        for_items_ops = [
+            op for op in lowered.operations if isinstance(op, ForItemsOperation)
+        ]
+        assert len(for_items_ops) == 1
+        body_ops = for_items_ops[0].operations
+        x_gates = _find_gates(body_ops, GateOperationType.X)
+        assert len(x_gates) == 1
+        assert x_gates[0].operands[0].uuid == q_true.uuid, (
+            f"Body operand should be q_true ({q_true.uuid}), "
+            f"got {x_gates[0].operands[0].uuid}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# CC5: Cast source provenance sync after compile-time if
+# ---------------------------------------------------------------------------
+
+
+class TestCastSourceProvenanceSync:
+    """cast_source_uuid/cast_source_logical_id must sync with selected branch."""
+
+    def test_cast_source_uuid_synced_after_lowering(self):
+        """After lowering, CastOperation result params match selected array."""
+        from qamomile.circuit.ir.operation.cast import CastOperation
+        from qamomile.circuit.ir.types.q_register import QFixedType
+
+        arr_true = ArrayValue(type=QubitType(), name="qa")
+        arr_false = ArrayValue(type=QubitType(), name="qb")
+        flag = _uint_val("flag", const=1)
+
+        phi_arr = ArrayValue(type=QubitType(), name="arr_phi")
+        phi = PhiOp(operands=[flag, arr_true, arr_false], results=[phi_arr])
+        if_op = IfOperation(
+            operands=[flag],
+            results=[phi_arr],
+            true_operations=[],
+            false_operations=[],
+            phi_ops=[phi],
+        )
+
+        # CastOperation with stale provenance from phi
+        result_type = QFixedType(integer_bits=0, fractional_bits=2)
+        cast_result = Value(
+            type=result_type,
+            name="qf",
+            params={
+                "cast_source_uuid": phi_arr.uuid,
+                "cast_source_logical_id": phi_arr.logical_id,
+                "cast_qubit_uuids": [f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+                "cast_qubit_logical_ids": [
+                    f"{phi_arr.logical_id}_0",
+                    f"{phi_arr.logical_id}_1",
+                ],
+                "num_bits": 2,
+                "int_bits": 0,
+                "qubit_values": [f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+            },
+        )
+        cast_op = CastOperation(
+            operands=[phi_arr],
+            results=[cast_result],
+            source_type=QubitType(),
+            target_type=result_type,
+            qubit_mapping=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+        )
+
+        block = Block(
+            name="test",
+            operations=[if_op, cast_op],
+            output_values=[],
+            kind=BlockKind.AFFINE,
+        )
+        lowered = _run_pass(block)
+
+        assert not _find_ops(lowered.operations, IfOperation)
+        cast_ops = [op for op in lowered.operations if isinstance(op, CastOperation)]
+        assert len(cast_ops) == 1
+        result = cast_ops[0].results[0]
+        assert result.params["cast_source_uuid"] == arr_true.uuid, (
+            f"cast_source_uuid should be arr_true ({arr_true.uuid}), "
+            f"got {result.params['cast_source_uuid']}"
+        )
+        assert result.params["cast_source_logical_id"] == arr_true.logical_id
+        # Carrier keys should also be rebuilt
+        assert result.params["cast_qubit_uuids"] == [
+            f"{arr_true.uuid}_0",
+            f"{arr_true.uuid}_1",
+        ]
+        assert cast_ops[0].qubit_mapping == [
+            f"{arr_true.uuid}_0",
+            f"{arr_true.uuid}_1",
+        ]
+
+
+# ---------------------------------------------------------------------------
+# CC6: Cast provenance through separate() (frontend integration)
+# ---------------------------------------------------------------------------
+
+
+class TestCastProvenanceThroughSeparate:
+    """cast_source_* must persist correctly through separate() after lowering."""
+
+    def test_separate_preserves_synced_provenance(self):
+        """CastOperation result provenance survives through separate()."""
+        from qamomile.circuit.ir.operation.cast import CastOperation
+        from qamomile.circuit.ir.types.q_register import QFixedType
+
+        # Same setup as CC5, but run through separate()
+        arr_true = ArrayValue(type=QubitType(), name="qa")
+        arr_false = ArrayValue(type=QubitType(), name="qb")
+        flag = _uint_val("flag", const=1)
+
+        phi_arr = ArrayValue(type=QubitType(), name="arr_phi")
+        phi = PhiOp(operands=[flag, arr_true, arr_false], results=[phi_arr])
+        if_op = IfOperation(
+            operands=[flag],
+            results=[phi_arr],
+            true_operations=[],
+            false_operations=[],
+            phi_ops=[phi],
+        )
+
+        result_type = QFixedType(integer_bits=0, fractional_bits=2)
+        cast_result = Value(
+            type=result_type,
+            name="qf",
+            params={
+                "cast_source_uuid": phi_arr.uuid,
+                "cast_source_logical_id": phi_arr.logical_id,
+                "cast_qubit_uuids": [f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+                "cast_qubit_logical_ids": [
+                    f"{phi_arr.logical_id}_0",
+                    f"{phi_arr.logical_id}_1",
+                ],
+                "num_bits": 2,
+                "int_bits": 0,
+                "qubit_values": [f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+            },
+        )
+        cast_op = CastOperation(
+            operands=[phi_arr],
+            results=[cast_result],
+            source_type=QubitType(),
+            target_type=result_type,
+            qubit_mapping=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+        )
+
+        block = Block(
+            name="test",
+            operations=[if_op, cast_op],
+            output_values=[],
+            kind=BlockKind.AFFINE,
+        )
+        lowered = _run_pass(block)
+
+        # Verify lowering synced the provenance
+        cast_ops = [op for op in lowered.operations if isinstance(op, CastOperation)]
+        assert len(cast_ops) == 1
+        result = cast_ops[0].results[0]
+        assert result.params["cast_source_uuid"] == arr_true.uuid
+        assert result.params["qubit_values"] == [
+            f"{arr_true.uuid}_0",
+            f"{arr_true.uuid}_1",
+        ]
