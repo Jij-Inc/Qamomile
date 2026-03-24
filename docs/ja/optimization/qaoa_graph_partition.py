@@ -142,7 +142,7 @@ print(hamiltonian)
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
-p = 3  # QAOA の層数
+p = 5  # QAOA の層数
 executable = converter.transpile(transpiler, p=p)
 
 # %% [markdown]
@@ -155,12 +155,10 @@ import numpy as np
 from scipy.optimize import minimize
 from qiskit_aer import AerSimulator
 
-executor = transpiler.executor(backend=AerSimulator(seed_simulator=901))
+executor = transpiler.executor(backend=AerSimulator(seed_simulator=900))
 
-initial_params = [
-    np.pi / 4, np.pi / 2, np.pi / 2,  # gammas
-    np.pi / 4, np.pi / 4, np.pi / 2,  # betas
-]
+rng = np.random.default_rng(900)
+initial_params = rng.uniform(0, np.pi, 2 * p)
 
 cost_history = []
 
@@ -170,7 +168,7 @@ def cost_fn(params):
     betas = list(params[p:])
     job = executable.sample(
         executor,
-        shots=512,
+        shots=2048,
         bindings={"gammas": gammas, "betas": betas},
     )
     result = job.result()
