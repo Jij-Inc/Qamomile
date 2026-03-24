@@ -216,10 +216,9 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         self._emit_operations(circuit, operations, qubit_map, clbit_map, bindings)
 
         # For STATIC mode, measurement_qubit_map is populated by base class
-        # via noop_measurement flag.  For RUNNABLE mode, copy from emitter.
-        if mode == ExecutionMode.RUNNABLE:
-            for clbit_idx, qubit_idx in emitter._measurement_map.items():
-                self._measurement_qubit_map[clbit_idx] = qubit_idx
+        # via noop_measurement flag.  For RUNNABLE mode, the kernel returns
+        # logical clbit values directly via [__b0, __b1, ...], so
+        # measurement_qubit_map is not needed (left empty).
 
         # Finalize: compile source into @cudaq.kernel function
         circuit = emitter.finalize(circuit, mode)
@@ -605,8 +604,8 @@ class CudaqExecutor(QuantumExecutor[CudaqKernelArtifact]):
         """Execute via ``cudaq.run()`` for RUNNABLE-mode kernels.
 
         ``cudaq.run()`` returns a list of per-shot return values.  Each
-        return value is ``list[bool]`` (from ``return mz(q)``), with one
-        bool per qubit in allocation order.
+        return value is ``list[bool]`` (from ``return [__b0, __b1, ...]``),
+        with one bool per logical clbit.
 
         This method aggregates per-shot results into canonical big-endian
         bitstring counts matching the ``QuantumExecutor.execute()`` contract.
@@ -622,15 +621,15 @@ class CudaqExecutor(QuantumExecutor[CudaqKernelArtifact]):
         else:
             results = cudaq.run(circuit.kernel_func, shots_count=shots)
 
-        num_qubits = circuit.num_qubits
+        num_clbits = circuit.num_clbits
         counts: dict[str, int] = {}
         for shot_result in results:
-            # shot_result is list[bool] in allocation order (from mz(q))
+            # shot_result is list[bool] in clbit order (from [__b0, __b1, ...])
             bits = ["1" if b else "0" for b in shot_result]
-            # Pad to num_qubits if shorter
-            while len(bits) < num_qubits:
+            # Pad to num_clbits if shorter
+            while len(bits) < num_clbits:
                 bits.append("0")
-            # Reverse: allocation-order -> big-endian
+            # Reverse: clbit-order -> big-endian
             canonical = "".join(reversed(bits))
             counts[canonical] = counts.get(canonical, 0) + 1
 

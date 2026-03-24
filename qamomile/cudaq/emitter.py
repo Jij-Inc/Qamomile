@@ -129,6 +129,8 @@ class CudaqKernelEmitter:
         self._indent = 1
 
         self._emit(f"q = cudaq.qvector({num_qubits})")
+        for i in range(num_clbits):
+            self._emit(f"__b{i} = False")
 
         return CudaqKernelArtifact(
             kernel_func=None,
@@ -141,9 +143,9 @@ class CudaqKernelEmitter:
     ) -> CudaqKernelArtifact:
         """Compile accumulated source into a ``@cudaq.kernel`` function.
 
-        For RUNNABLE mode, appends ``return mz(q)`` and generates a
-        function returning ``list[bool]``.  For STATIC mode, generates
-        a void function with no explicit terminal measurement.
+        For RUNNABLE mode, appends ``return [__b0, __b1, ...]`` to
+        return per-shot logical clbit values.  For STATIC mode,
+        generates a void function with no explicit terminal measurement.
 
         Args:
             circuit: The artifact to finalize.
@@ -155,7 +157,8 @@ class CudaqKernelEmitter:
         import cudaq  # noqa: F811
 
         if mode == ExecutionMode.RUNNABLE:
-            self._emit("return mz(q)")
+            clbit_list = ", ".join(f"__b{i}" for i in range(self._num_clbits))
+            self._emit(f"return [{clbit_list}]")
             if self._parametric:
                 sig = "def _qamomile_kernel(thetas: list[float]) -> list[bool]:"
             else:
@@ -343,8 +346,12 @@ class CudaqKernelEmitter:
         control2: int,
         target: int,
     ) -> None:
-        """Emit Toffoli (CCX) gate."""
-        self._emit(f"x.ctrl(q[{control1}], q[{control2}], q[{target}])")
+        """Emit Toffoli (CCX) gate.
+
+        Delegates to :meth:`emit_multi_controlled_x` so that all
+        multi-controlled X emission flows through a single canonical helper.
+        """
+        self.emit_multi_controlled_x(circuit, [control1, control2], target)
 
     # ------------------------------------------------------------------
     # Controlled single-qubit gates

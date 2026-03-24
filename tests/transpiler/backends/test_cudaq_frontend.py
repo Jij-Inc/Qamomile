@@ -2031,6 +2031,79 @@ class TestCIfControlFlow:
 
 
 # ============================================================================
+# Logical Clbit Return Contract Tests
+# ============================================================================
+
+
+class TestLogicalClbitReturnContract:
+    """Verify RUNNABLE kernels return logical clbit values, not mz(q)."""
+
+    def test_runnable_source_returns_clbit_aggregate(self) -> None:
+        """RUNNABLE source must contain 'return [__b' and not 'return mz(q)'."""
+        _, circuit = _transpile_and_get_circuit(_c_if_basic)
+        assert circuit.execution_mode == ExecutionMode.RUNNABLE
+        assert "return mz(q)" not in circuit.source
+        assert "return [__b" in circuit.source
+
+    def test_runnable_source_initializes_clbits(self) -> None:
+        """RUNNABLE source must initialize __b{i} = False for all clbits."""
+        _, circuit = _transpile_and_get_circuit(_c_if_basic)
+        for i in range(circuit.num_clbits):
+            assert f"__b{i} = False" in circuit.source
+
+    def test_runnable_measurement_qubit_map_empty(self) -> None:
+        """RUNNABLE segments must not populate measurement_qubit_map."""
+        exe, circuit = _transpile_and_get_circuit(_c_if_basic)
+        assert circuit.execution_mode == ExecutionMode.RUNNABLE
+        meas_map = exe.compiled_quantum[0].measurement_qubit_map
+        assert meas_map == {}
+
+    def test_if_else_different_qubit_sources(self) -> None:
+        """Same logical bit from different qubits in if/else branches."""
+
+        @qmc.qkernel
+        def branch_sensitive() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            q2 = qmc.qubit("q2")
+            q0 = qmc.x(q0)
+            sel = qmc.measure(q0)
+            q1 = qmc.x(q1)
+            if sel:
+                bit = qmc.measure(q1)
+            else:
+                bit = qmc.measure(q2)
+            return bit
+
+        _, circuit = _transpile_and_get_circuit(branch_sensitive)
+        assert circuit.execution_mode == ExecutionMode.RUNNABLE
+        assert "return mz(q)" not in circuit.source
+        assert "return [__b" in circuit.source
+        # measurement_qubit_map must be empty
+        exe, _ = _transpile_and_get_circuit(branch_sensitive)
+        assert exe.compiled_quantum[0].measurement_qubit_map == {}
+
+    def test_while_loop_clbit_return(self) -> None:
+        """While loop kernel uses logical clbit return."""
+
+        @qmc.qkernel
+        def repeat_until_zero() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            while bit:
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
+            return bit
+
+        _, circuit = _transpile_and_get_circuit(repeat_until_zero)
+        assert circuit.execution_mode == ExecutionMode.RUNNABLE
+        assert "return mz(q)" not in circuit.source
+        assert "return [__b" in circuit.source
+
+
+# ============================================================================
 # Sampling Ordering Regression Tests
 # ============================================================================
 
