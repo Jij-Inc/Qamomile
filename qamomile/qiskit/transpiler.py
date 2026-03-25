@@ -22,6 +22,7 @@ from qamomile.circuit.transpiler.passes.emit import EmitPass
 from qamomile.circuit.transpiler.passes.emit_base import resolve_if_condition
 from qamomile.circuit.transpiler.passes.separate import SeparatePass
 from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import (
     QuantumExecutor,
     ParameterMetadata,
@@ -131,7 +132,12 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         condition_uuid = condition.uuid
 
         if condition_uuid not in clbit_map:
-            return
+            raise EmitError(
+                "Runtime if-conditions must come from measurement results "
+                "or be bound before transpilation. The condition value was "
+                "neither resolved at compile time nor backed by a "
+                "measurement result."
+            )
 
         clbit_idx = clbit_map[condition_uuid]
 

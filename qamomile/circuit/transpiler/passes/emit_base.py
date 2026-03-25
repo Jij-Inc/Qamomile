@@ -390,12 +390,18 @@ class ResourceAllocator:
                     if result.shape:
                         size_val = result.shape[0]
                         size = self._resolve_size(size_val, bindings)
-                        if size is not None:
-                            for i in range(size):
-                                qubit_id = f"{result.uuid}_{i}"
-                                if qubit_id not in qubit_map:
-                                    qubit_map[qubit_id] = self._next_qubit_index
-                                    self._next_qubit_index += 1
+                        if size is None:
+                            from qamomile.circuit.transpiler.errors import EmitError
+
+                            raise EmitError(
+                                "Cannot resolve array size for qubit allocation. "
+                                "Structural UInt parameters must be bound at transpile time."
+                            )
+                        for i in range(size):
+                            qubit_id = f"{result.uuid}_{i}"
+                            if qubit_id not in qubit_map:
+                                qubit_map[qubit_id] = self._next_qubit_index
+                                self._next_qubit_index += 1
                     continue
                 if result.uuid not in qubit_map:
                     qubit_map[result.uuid] = self._next_qubit_index

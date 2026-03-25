@@ -680,7 +680,12 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         condition_uuid = condition.uuid
 
         if condition_uuid not in clbit_map:
-            return
+            raise EmitError(
+                "Runtime if-conditions must come from measurement results "
+                "or be bound before transpilation. The condition value was "
+                "neither resolved at compile time nor backed by a "
+                "measurement result."
+            )
 
         clbit_idx = clbit_map[condition_uuid]
 
@@ -1126,6 +1131,11 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                             target_indices,
                             loop_bindings,
                         )
+                else:
+                    raise EmitError(
+                        "Cannot resolve ForOperation bounds in controlled block. "
+                        "Loop bounds must be resolvable at transpile time."
+                    )
 
     def _emit_controlled_gate(
         self,

@@ -39,6 +39,7 @@ from .control_flow_visitor import (  # noqa: E402
     OperationCollector,
     ValueCollector,
 )
+from .validate_while import ValidateWhileContractPass  # noqa: E402
 from .value_mapping import UUIDRemapper, ValueSubstitutor  # noqa: E402
 
 # Re-export error classes for convenience
@@ -55,6 +56,7 @@ __all__ = [
     "OperationTransformer",
     "OperationCollector",
     "ValueCollector",
+    "ValidateWhileContractPass",
     "UUIDRemapper",
     "ValueSubstitutor",
 ]

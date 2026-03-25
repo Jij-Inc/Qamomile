@@ -35,9 +35,9 @@ from tests.transpiler.gate_test_specs import (
 # ---------------------------------------------------------------------------
 cudaq = pytest.importorskip("cudaq")
 
+from qamomile.circuit.transpiler.errors import EmitError  # noqa: E402
 from qamomile.cudaq import CudaqTranspiler  # noqa: E402
 from qamomile.cudaq.emitter import CudaqKernelArtifact, ExecutionMode  # noqa: E402
-from qamomile.circuit.transpiler.errors import EmitError  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -2685,3 +2685,76 @@ class TestCudaqHelperKernelSemanticsContract:
         assert statevectors_equal(sv, expected), (
             f"Controlled CNOT (double, index-spec): expected |1111>, got {sv}"
         )
+
+
+# ============================================================================
+# Unresolved non-measurement if-condition rejection
+# ============================================================================
+
+
+class TestUnresolvedNonMeasurementIfRejection:
+    """Non-measurement unresolved if-conditions must raise EmitError.
+
+    When a kernel argument is used as an if-condition and left in
+    ``parameters`` (not bound), the transpiler must raise an explicit
+    error instead of silently dropping the branch.
+    """
+
+    def test_unresolved_flag_parameter_raises(self):
+        """``if flag:`` with parameters=["flag", "theta"] must raise EmitError."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt, theta: qmc.Float) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        with pytest.raises(EmitError, match="measurement results"):
+            _transpile_and_get_circuit(circuit, parameters=["flag", "theta"])
+
+    def test_unresolved_flag_only_raises(self):
+        """``if flag:`` with parameters=["flag"] must raise EmitError."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        with pytest.raises(EmitError, match="measurement results"):
+            _transpile_and_get_circuit(circuit, parameters=["flag"])
+
+    def test_bound_flag_still_works(self):
+        """``if flag:`` with bindings={"flag": 1} must still work."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 1})
+        sv = _run_statevector(qc)
+        expected = computational_basis_state(1, 1)  # |1>
+        assert statevectors_equal(sv, expected)
+
+
+class TestUnresolvedStructuralSize:
+    """Unresolved structural UInt must raise, not produce zero-size artifact."""
+
+    def test_qubit_array_with_unresolved_size_raises(self):
+        """qubit_array(n) with parameters=["n"] must raise EmitError."""
+
+        @qmc.qkernel
+        def circuit(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            for i in qmc.range(n):
+                q[i] = qmc.h(q[i])
+            return qmc.measure(q)
+
+        transpiler = CudaqTranspiler()
+        with pytest.raises((EmitError, ValueError)):
+            transpiler.transpile(circuit, parameters=["n"])

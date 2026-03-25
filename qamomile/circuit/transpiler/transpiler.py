@@ -17,6 +17,7 @@ from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
     CompileTimeIfLoweringPass,
 )
 from qamomile.circuit.transpiler.passes.affine_validate import AffineValidationPass
+from qamomile.circuit.transpiler.passes.validate_while import ValidateWhileContractPass
 from qamomile.circuit.transpiler.passes.separate import SeparatePass
 from qamomile.circuit.transpiler.passes.emit import EmitPass
 from qamomile.circuit.transpiler.passes.substitution import (
@@ -282,6 +283,15 @@ class Transpiler(ABC, Generic[T]):
         """
         return CompileTimeIfLoweringPass(bindings).run(block)
 
+    def validate_while_contract(self, block: Block) -> Block:
+        """Pass 1.8: Validate WhileOperation conditions are measurement-backed.
+
+        Rejects while patterns whose condition is not a measurement result
+        (``Bit`` from ``qmc.measure()``).  This prevents late ``ValueError``
+        at emit time for unsupported while forms.
+        """
+        return ValidateWhileContractPass().run(block)
+
     def analyze(self, block: Block) -> Block:
         """Pass 2: Validate and analyze dependencies."""
         return self._analyze_pass.run(block)
@@ -338,6 +348,7 @@ class Transpiler(ABC, Generic[T]):
             4. affine_validate: Validate affine type semantics
             5. constant_fold: Fold constant expressions
             5.5. lower_compile_time_ifs: Lower compile-time IfOperations
+            5.8. validate_while_contract: Validate while conditions are measurement-backed
             6. analyze: Validate and analyze dependencies
             7. separate: Split into quantum/classical segments
             8. emit: Generate backend-specific code
@@ -350,7 +361,8 @@ class Transpiler(ABC, Generic[T]):
         validated = self.affine_validate(affine)
         folded = self.constant_fold(validated, bindings)
         lowered = self.lower_compile_time_ifs(folded, bindings)
-        analyzed = self.analyze(lowered)
+        validated_while = self.validate_while_contract(lowered)
+        analyzed = self.analyze(validated_while)
         separated = self.separate(analyzed)
         return self.emit(separated, bindings, parameters)
 
