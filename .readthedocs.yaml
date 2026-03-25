@@ -16,8 +16,8 @@ build:
       - UV_PROJECT_ENVIRONMENT="${READTHEDOCS_VIRTUALENV_PATH}" uv sync --frozen --no-default-groups --group dev
     build:
       html:
-        - chmod +x build.sh
-        - ./build.sh build
+        - chmod +x ./docs/build.sh
+        - ./docs/build.sh build
         # $READTHEDOCS_OUTPUT: the place where we deploy the documentation
         - mkdir -p $READTHEDOCS_OUTPUT/html/ja
         - mkdir -p $READTHEDOCS_OUTPUT/html/en
