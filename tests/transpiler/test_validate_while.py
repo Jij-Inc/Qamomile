@@ -35,6 +35,33 @@ class TestWhileContractPositive:
         result = transpiler.transpile(circuit)
         assert result is not None
 
+    def test_phi_merged_measurement_while_transpiles(self):
+        """if sel: bit = measure(q1) else: bit = measure(q2); while bit: succeeds.
+
+        A phi-merged condition where every branch leaf is measurement-backed
+        must be accepted by the validator.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            q2 = qmc.qubit("q2")
+            q0 = qmc.h(q0)
+            sel = qmc.measure(q0)
+            if sel:
+                q1 = qmc.x(q1)
+                bit = qmc.measure(q1)
+            else:
+                bit = qmc.measure(q2)
+            while bit:
+                bit = qmc.measure(q2)
+            return bit
+
+        transpiler = QiskitTranspiler()
+        result = transpiler.transpile(circuit)
+        assert result is not None
+
     def test_measurement_while_no_loop_carry_transpiles(self):
         """bit = measure(q); while bit: (body without re-measure) succeeds."""
 
@@ -86,6 +113,29 @@ class TestWhileContractNegative:
                 q = qmc.h(q)
                 flag = qmc.measure(q)
             return flag
+
+        transpiler = QiskitTranspiler()
+        with pytest.raises(ValidationError, match="measurement result"):
+            transpiler.transpile(circuit)
+
+    def test_non_measurement_loop_carried_rejected(self):
+        """bit = measure(q); while bit: bit = False is rejected.
+
+        The initial condition is measurement-backed, but the loop-carried
+        update is a boolean constant — this would leave the while-condition
+        clbit stale in emitted circuits.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q2 = qmc.qubit("q2")
+            q = qmc.x(q)
+            bit = qmc.measure(q)
+            while bit:
+                q2 = qmc.h(q2)
+                bit = False
+            return bit
 
         transpiler = QiskitTranspiler()
         with pytest.raises(ValidationError, match="measurement result"):
