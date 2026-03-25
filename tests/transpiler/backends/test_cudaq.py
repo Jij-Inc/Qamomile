@@ -130,3 +130,68 @@ class TestCudaqRuntimeControlFlow:
         exe = transpiler.transpile(circuit_with_while)
         circuit = exe.compiled_quantum[0].circuit
         assert circuit.execution_mode == ExecutionMode.RUNNABLE
+
+
+class TestCudaqSourceInspectRegression:
+    """Regression tests for generated kernel source inspect-ability.
+
+    Ensures that ``inspect.getsource()`` works on kernels produced by
+    ``CudaqKernelEmitter.finalize()`` and that multiple kernels do not
+    share source via filename collision.
+    """
+
+    def test_finalized_kernel_is_inspectable(self) -> None:
+        """inspect.getsource() succeeds on a finalized kernel."""
+        import inspect
+
+        import qamomile.circuit as qmc
+        from qamomile.cudaq import CudaqTranspiler
+
+        @qmc.qkernel
+        def single_h() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            return qmc.measure(q)
+
+        transpiler = CudaqTranspiler()
+        exe = transpiler.transpile(single_h)
+        kernel = exe.compiled_quantum[0].circuit.kernel_func
+
+        # Must not raise OSError.  The kernel is a PyKernelDecorator;
+        # inspect the underlying function via .kernelFunction.
+        source = inspect.getsource(kernel.kernelFunction)
+        assert "_qamomile_kernel" in source
+
+    def test_multiple_kernels_have_distinct_sources(self) -> None:
+        """Two consecutively generated kernels have independent sources."""
+        import inspect
+
+        import qamomile.circuit as qmc
+        from qamomile.cudaq import CudaqTranspiler
+
+        @qmc.qkernel
+        def circuit_a() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            return qmc.measure(q)
+
+        @qmc.qkernel
+        def circuit_b() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            return qmc.measure(q)
+
+        transpiler = CudaqTranspiler()
+        exe_a = transpiler.transpile(circuit_a)
+        exe_b = transpiler.transpile(circuit_b)
+
+        kernel_a = exe_a.compiled_quantum[0].circuit.kernel_func
+        kernel_b = exe_b.compiled_quantum[0].circuit.kernel_func
+
+        source_a = inspect.getsource(kernel_a.kernelFunction)
+        source_b = inspect.getsource(kernel_b.kernelFunction)
+
+        # Sources must differ: circuit_a uses h(), circuit_b uses x()
+        assert source_a != source_b
+        assert "h(" in source_a
+        assert "x(" in source_b

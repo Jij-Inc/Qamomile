@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import itertools
+import linecache
 import math
 from typing import Any
 
@@ -88,6 +90,8 @@ class CudaqKernelEmitter:
         parametric: If True, the generated function accepts a
             ``thetas: list[float]`` parameter for variational circuits.
     """
+
+    _kernel_counter = itertools.count()
 
     def __init__(self, parametric: bool = False) -> None:
         self._parametric = parametric
@@ -172,8 +176,22 @@ class CudaqKernelEmitter:
         body = "\n".join(self._lines)
         source = f"@cudaq.kernel\n{sig}\n{body}\n"
 
+        # Register source in linecache with a unique synthetic filename so
+        # that ``inspect.getsource()`` succeeds.  CUDA-Q's decorator calls
+        # ``inspect.getsourcelines()`` on the function object, which requires
+        # a resolvable filename backed by linecache.
+        kernel_id = next(self._kernel_counter)
+        filename = f"<qamomile_cudaq_kernel_{kernel_id}>"
+        linecache.cache[filename] = (
+            len(source),
+            None,
+            source.splitlines(True),
+            filename,
+        )
+        code = compile(source, filename, "exec")
+
         namespace: dict[str, Any] = {"cudaq": cudaq}
-        exec(source, namespace)  # noqa: S102
+        exec(code, namespace)  # noqa: S102
 
         circuit.kernel_func = namespace["_qamomile_kernel"]
         circuit.source = source
