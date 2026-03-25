@@ -24,6 +24,78 @@ import math
 from typing import Any
 
 
+def _to_expr(value: Any) -> str:
+    """Convert a value to a CUDA-Q source expression string.
+
+    Args:
+        value: A ``CudaqExpr``, int, or float.
+
+    Returns:
+        Source expression string suitable for embedding in codegen output.
+    """
+    if isinstance(value, CudaqExpr):
+        return value._expr
+    return repr(value)
+
+
+class CudaqExpr:
+    """Arithmetic-capable wrapper for CUDA-Q source expressions.
+
+    Enables operator-overload-based expression building in
+    ``StandardEmitPass._evaluate_binop()``.  Each arithmetic operation
+    returns a new ``CudaqExpr`` with a properly parenthesized string
+    representation.  ``str(expr)`` yields the raw source expression
+    suitable for embedding directly in generated ``@cudaq.kernel`` code.
+
+    Args:
+        expr: Source expression string (e.g. ``"thetas[0]"``).
+    """
+
+    def __init__(self, expr: str) -> None:
+        self._expr = expr
+
+    def __str__(self) -> str:
+        return self._expr
+
+    def __repr__(self) -> str:
+        return f"CudaqExpr({self._expr!r})"
+
+    # Forward arithmetic
+    def __add__(self, other: Any) -> "CudaqExpr":
+        return CudaqExpr(f"({self._expr}) + ({_to_expr(other)})")
+
+    def __sub__(self, other: Any) -> "CudaqExpr":
+        return CudaqExpr(f"({self._expr}) - ({_to_expr(other)})")
+
+    def __mul__(self, other: Any) -> "CudaqExpr":
+        return CudaqExpr(f"({self._expr}) * ({_to_expr(other)})")
+
+    def __truediv__(self, other: Any) -> "CudaqExpr":
+        return CudaqExpr(f"({self._expr}) / ({_to_expr(other)})")
+
+    def __pow__(self, other: Any) -> "CudaqExpr":
+        return CudaqExpr(f"({self._expr}) ** ({_to_expr(other)})")
+
+    # Reflected arithmetic (concrete op parameter, e.g. 2.0 * theta)
+    def __radd__(self, other: Any) -> "CudaqExpr":
+        return CudaqExpr(f"({_to_expr(other)}) + ({self._expr})")
+
+    def __rsub__(self, other: Any) -> "CudaqExpr":
+        return CudaqExpr(f"({_to_expr(other)}) - ({self._expr})")
+
+    def __rmul__(self, other: Any) -> "CudaqExpr":
+        return CudaqExpr(f"({_to_expr(other)}) * ({self._expr})")
+
+    def __rtruediv__(self, other: Any) -> "CudaqExpr":
+        return CudaqExpr(f"({_to_expr(other)}) / ({self._expr})")
+
+    def __rpow__(self, other: Any) -> "CudaqExpr":
+        return CudaqExpr(f"({_to_expr(other)}) ** ({self._expr})")
+
+    def __neg__(self) -> "CudaqExpr":
+        return CudaqExpr(f"-({self._expr})")
+
+
 class ExecutionMode(enum.Enum):
     """Execution mode for a CUDA-Q kernel artifact.
 
@@ -102,10 +174,25 @@ class CudaqKernelEmitter:
         self._measurement_map: dict[int, int] = {}  # clbit -> qubit
         self._num_clbits: int = 0
         self.noop_measurement: bool = True
+        self._boxed_clbits: set[int] = set()
 
     def _emit(self, line: str) -> None:
         """Append an indented source line."""
         self._lines.append("    " * self._indent + line)
+
+    def _clbit_ref(self, idx: int) -> str:
+        """Return the source expression to read clbit *idx*.
+
+        Boxed (loop-carried) clbits use ``__b{idx}[0]``; scalar clbits
+        use ``__b{idx}``.
+        """
+        if idx in self._boxed_clbits:
+            return f"__b{idx}[0]"
+        return f"__b{idx}"
+
+    def _clbit_store(self, idx: int, expr: str) -> str:
+        """Return a source statement that stores *expr* into clbit *idx*."""
+        return f"{self._clbit_ref(idx)} = {expr}"
 
     # ------------------------------------------------------------------
     # Circuit lifecycle
@@ -134,7 +221,10 @@ class CudaqKernelEmitter:
 
         self._emit(f"q = cudaq.qvector({num_qubits})")
         for i in range(num_clbits):
-            self._emit(f"__b{i} = False")
+            if i in self._boxed_clbits:
+                self._emit(f"__b{i} = [False]")
+            else:
+                self._emit(f"__b{i} = False")
 
         return CudaqKernelArtifact(
             kernel_func=None,
@@ -161,7 +251,7 @@ class CudaqKernelEmitter:
         import cudaq  # noqa: F811
 
         if mode == ExecutionMode.RUNNABLE:
-            clbit_list = ", ".join(f"__b{i}" for i in range(self._num_clbits))
+            clbit_list = ", ".join(self._clbit_ref(i) for i in range(self._num_clbits))
             self._emit(f"return [{clbit_list}]")
             if self._parametric:
                 sig = "def _qamomile_kernel(thetas: list[float]) -> list[bool]:"
@@ -199,19 +289,25 @@ class CudaqKernelEmitter:
         circuit.param_count = self._param_count
         return circuit
 
-    def create_parameter(self, name: str) -> str:
-        """Return a source expression referencing ``thetas[i]``.
+    def create_parameter(self, name: str) -> CudaqExpr:
+        """Return a ``CudaqExpr`` referencing ``thetas[i]``.
+
+        Returns an arithmetic-capable expression object so that
+        ``StandardEmitPass._evaluate_binop()`` can compose gate-angle
+        expressions (e.g. ``gamma * Jij``) without triggering a
+        ``TypeError`` on raw string operands.
 
         Args:
             name: Symbolic parameter name.
 
         Returns:
-            String expression like ``"thetas[0]"``.
+            ``CudaqExpr`` wrapping a source expression like
+            ``"thetas[0]"``.
         """
         if name not in self._param_map:
             self._param_map[name] = self._param_count
             self._param_count += 1
-        return f"thetas[{self._param_map[name]}]"
+        return CudaqExpr(f"thetas[{self._param_map[name]}]")
 
     # ------------------------------------------------------------------
     # Single-qubit gates (no parameters)
@@ -438,7 +534,7 @@ class CudaqKernelEmitter:
         """
         if self.noop_measurement:
             return
-        self._emit(f"__b{clbit} = mz(q[{qubit}])")
+        self._emit(self._clbit_store(clbit, f"mz(q[{qubit}])"))
         self._measurement_map[clbit] = qubit
 
     # ------------------------------------------------------------------
@@ -513,7 +609,7 @@ class CudaqKernelEmitter:
         self, circuit: CudaqKernelArtifact, clbit: int, value: int = 1
     ) -> dict[str, Any]:
         """Emit ``if __b{clbit}:`` and increase indentation."""
-        self._emit(f"if __b{clbit}:")
+        self._emit(f"if {self._clbit_ref(clbit)}:")
         self._indent += 1
         return {"clbit": clbit}
 
@@ -535,7 +631,7 @@ class CudaqKernelEmitter:
         self, circuit: CudaqKernelArtifact, clbit: int, value: int = 1
     ) -> dict[str, Any]:
         """Emit ``while __b{clbit}:`` and increase indentation."""
-        self._emit(f"while __b{clbit}:")
+        self._emit(f"while {self._clbit_ref(clbit)}:")
         self._indent += 1
         return {"clbit": clbit}
 
