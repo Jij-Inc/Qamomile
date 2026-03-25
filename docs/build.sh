@@ -4,6 +4,9 @@
 
 set -e  # Exit on error
 
+# Move to the script's directory to ensure relative paths work
+cd "$(dirname "$0")"
+
 # Color output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -93,7 +96,7 @@ build_en() {
     sync_en
     echo "Building English documentation..."
     cd en
-    MPLBACKEND=agg uv run jupyter-book build --html
+    MPLBACKEND=agg uv run jupyter-book build --html --execute
     cd ..
     uv run python scripts/inject_colab_launch.py en
     info "English documentation built: en/_build/html/index.html"
@@ -114,7 +117,6 @@ build_ja() {
 build_all() {
     generate_api
     copy_api
-    sync_all
     build_en
     build_ja
     info "Both English and Japanese documentation built successfully"
