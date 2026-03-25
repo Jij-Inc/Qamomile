@@ -15,9 +15,11 @@ build:
       - uv venv "${READTHEDOCS_VIRTUALENV_PATH}"
     install:
       - UV_PROJECT_ENVIRONMENT="${READTHEDOCS_VIRTUALENV_PATH}" uv sync --frozen --no-default-groups --group dev
+    post_install:
+      - uv run python -m ipykernel install --user --name=qamomile  # Install the kernel for Jupyter
+      - chmod +x ./docs/build.sh  # Enable execution of the build script
     build:
       html:
-        - chmod +x ./docs/build.sh
         - ./docs/build.sh build
         # $READTHEDOCS_OUTPUT: the place where we deploy the documentation
         - mkdir -p $READTHEDOCS_OUTPUT/html/ja
