@@ -9,6 +9,7 @@ import pytest
 try:
     import nbformat
     from nbclient import NotebookClient
+
     NBCLIENT_AVAILABLE = True
 except ImportError:
     NBCLIENT_AVAILABLE = False
@@ -26,6 +27,8 @@ TUTORIAL_PATTERNS = [
     "docs/ja/tutorial/**/*.ipynb",
     "docs/en/optimization/**/*.ipynb",
     "docs/ja/optimization/**/*.ipynb",
+    # We will not execute collaboration notebooks for now because
+    # they require API keys and may have side effects
 ]
 
 
