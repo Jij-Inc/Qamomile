@@ -13,7 +13,10 @@ project:
   github: https://github.com/Jij-Inc/Qamomile
   jupyter: true
   execute:
+    enabled: true
     cache: true
+    exclude_patterns:
+      - collaboration/qbraid_executor.ipynb
   toc:
     - file: index.md
     - title: Tutorials
@@ -24,6 +27,9 @@ project:
         - file: tutorial/04_execution_models.ipynb
         - file: tutorial/05_classical_flow_patterns.ipynb
         - file: tutorial/06_reuse_patterns.ipynb
+    - title: Collaboration
+      children:
+        - file: collaboration/qbraid_executor.ipynb
 
 # --- API Reference (auto-generated) ---
     - title: API Reference
@@ -49,6 +55,7 @@ project:
             - file: api/optimization/qaoa
             - file: api/optimization/qrao
             - file: api/optimization/utils
+        - file: api/qbraid
         - file: api/qiskit/index
           children:
             - file: api/qiskit/emitter
