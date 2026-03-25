@@ -168,6 +168,36 @@ def _has_runtime_control_flow(
     return False
 
 
+def _collect_loop_carried_clbits(
+    operations: list[Operation],
+    clbit_map: dict[str, int],
+) -> set[int]:
+    """Collect clbit indices used as loop-carried conditions in WhileOperations.
+
+    CUDA-Q's AST compiler rejects reassignment of parent-scope scalar
+    locals inside ``while`` bodies.  This pre-scan identifies which
+    canonical clbit indices are used as while-loop conditions so the
+    emitter can box them as singleton lists (``__b{i} = [False]``,
+    accessed via ``__b{i}[0]``).
+    """
+    result: set[int] = set()
+    for op in operations:
+        if isinstance(op, WhileOperation) and op.operands:
+            cond = op.operands[0]
+            cond_val = cond.value if hasattr(cond, "value") else cond
+            cond_uuid = cond_val.uuid if hasattr(cond_val, "uuid") else str(cond_val)
+            if cond_uuid in clbit_map:
+                result.add(clbit_map[cond_uuid])
+            # Also scan inside the while body
+            result |= _collect_loop_carried_clbits(op.operations, clbit_map)
+        elif isinstance(op, IfOperation):
+            result |= _collect_loop_carried_clbits(op.true_operations, clbit_map)
+            result |= _collect_loop_carried_clbits(op.false_operations, clbit_map)
+        elif isinstance(op, ForOperation):
+            result |= _collect_loop_carried_clbits(op.operations, clbit_map)
+    return result
+
+
 class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
     """CUDA-Q-specific emission pass.
 
@@ -209,6 +239,9 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         qubit_map, clbit_map = self._allocator.allocate(operations, bindings)
         qubit_count = max(qubit_map.values()) + 1 if qubit_map else 0
         clbit_count = max(clbit_map.values()) + 1 if clbit_map else 0
+
+        # Pre-scan: identify loop-carried clbits that need singleton-list boxing
+        emitter._boxed_clbits = _collect_loop_carried_clbits(operations, clbit_map)
 
         # Create circuit and emit operations
         circuit = emitter.create_circuit(qubit_count, clbit_count)
@@ -258,6 +291,21 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             "branching via the builder API. Use a circuit with runtime control "
             "flow support (automatically handled when runtime if/while is detected)."
         )
+
+    def _blockvalue_to_gate(
+        self,
+        block_value: Any,
+        num_qubits: int,
+        bindings: dict[str, Any],
+    ) -> None:
+        """No-op: CUDA-Q codegen does not support sub-circuit gate conversion.
+
+        The base implementation calls ``emitter.create_circuit()`` which
+        destructively resets the stateful source builder.  Since CUDA-Q's
+        ``circuit_to_gate()`` always returns ``None``, skip the probe
+        entirely to avoid corrupting the outer kernel source.
+        """
+        return None
 
     def _emit_controlled_fallback(
         self,
