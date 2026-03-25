@@ -1,0 +1,26 @@
+# This yaml is for ReadTheDocs to build the documentation for en and ja.
+version: 2
+
+build:
+  os: ubuntu-22.04
+  tools:
+    python: "3.12"
+  jobs:
+    pre_create_environment:
+      - asdf plugin add uv
+      - asdf install uv latest
+      - asdf global uv latest
+    create_environment:
+      - uv venv "${READTHEDOCS_VIRTUALENV_PATH}"
+    install:
+      - UV_PROJECT_ENVIRONMENT="${READTHEDOCS_VIRTUALENV_PATH}" uv sync --frozen --no-default-groups --group dev
+    build:
+      html:
+        - chmod +x build.sh
+        - ./build.sh build
+        # $READTHEDOCS_OUTPUT: the place where we deploy the documentation
+        - mkdir -p $READTHEDOCS_OUTPUT/html/ja
+        - mkdir -p $READTHEDOCS_OUTPUT/html/en
+        - cp -r docs/index.html $READTHEDOCS_OUTPUT/html/
+        - cp -r docs/ja/_build/html/* $READTHEDOCS_OUTPUT/html/ja/
+        - cp -r docs/en/_build/html/* $READTHEDOCS_OUTPUT/html/en/
