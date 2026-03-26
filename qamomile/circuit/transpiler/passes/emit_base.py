@@ -83,6 +83,14 @@ def resolve_if_condition(
         return bool(bindings[condition.uuid])
 
     # Bound by name
+    #
+    # NOTE:
+    # This fallback may also match frontend-generated measurement result names
+    # such as "<qubit>_measured". If a user-provided binding uses the same
+    # string key, a runtime measurement-driven if-condition can be treated as
+    # compile-time resolvable. We keep this behavior for now because it is
+    # convenient for named classical parameters, but it is intentionally
+    # narrower/less reliable than UUID-based resolution.
     if hasattr(condition, "name") and condition.name and condition.name in bindings:
         return bool(bindings[condition.name])
 
