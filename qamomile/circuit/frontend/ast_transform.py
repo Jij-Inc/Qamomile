@@ -704,12 +704,31 @@ class ControlFlowTransformer(ast.NodeTransformer):
         instead of falling back to the original function.
         """
         if self._is_items_call(node.iter):
-            # items(): must have a dict argument
-            if not (
-                node.iter.args  # type: ignore  # items(d)
-                or (isinstance(node.iter.func, ast.Attribute))
-            ):  # type: ignore  # d.items()
-                raise SyntaxError("items() requires a dict argument")
+            call = node.iter  # type: ignore
+            # from qamomile.circuit import items; items(d) form: require exactly 1 positional arg
+            if isinstance(call.func, ast.Name):
+                if len(call.args) != 1:
+                    raise SyntaxError(
+                        "items() requires exactly one dict argument: items(d)"
+                    )
+            # qmc.items(d) form: require exactly 1 positional arg
+            elif isinstance(call.func, ast.Attribute) and call.args:
+                if len(call.args) != 1:
+                    raise SyntaxError(
+                        "items() requires exactly one dict argument: qmc.items(d)"
+                    )
+            # d.items() form: receiver must be a known parameter, not a module
+            elif isinstance(call.func, ast.Attribute) and not call.args:
+                if (
+                    isinstance(call.func.value, ast.Name)
+                    and call.func.value.id not in self._param_names
+                ):
+                    raise SyntaxError(
+                        f"'{call.func.value.id}.items()' looks like a module call "
+                        f"with no dict argument. "
+                        f"Did you mean '{call.func.value.id}.items(d)' or 'd.items()'?"
+                    )
+
             # items(): target must be a 2-element tuple (key, value)
             if not (isinstance(node.target, ast.Tuple) and len(node.target.elts) == 2):
                 raise SyntaxError(

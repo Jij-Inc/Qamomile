@@ -731,6 +731,21 @@ class TestInvalidPlaceholderLoopTargets:
                         q[0] = qmc.h(q[0])
                     return q[0]
 
+    def test_items_module_call_no_args_raises(self):
+        """qmc.items() with no dict argument must raise SyntaxError."""
+        with pytest.raises(SyntaxError, match="looks like a module call"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+
+                @qmc.qkernel
+                def bad(
+                    d: qmc.Dict[qmc.UInt, qmc.Float],
+                ) -> qmc.Qubit:
+                    q = qmc.qubit_array(2, "q")
+                    for k, v in qmc.items():
+                        q[0] = qmc.h(q[0])
+                    return q[0]
+
     def test_range_list_unpack_raises(self):
         """for [i, j] in qmc.range(n) must raise SyntaxError."""
         with pytest.raises(
