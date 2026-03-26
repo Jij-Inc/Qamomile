@@ -519,3 +519,12 @@ class ValidatingCudaqTranspiler(CudaqTranspiler):
         parameters: list[str] | None = None,
     ) -> EmitPass[CudaqKernelArtifact]:
         return ValidatingCudaqEmitPass(bindings, parameters)
+
+    def transpile(self, *args: Any, **kwargs: Any) -> Any:
+        """Transpile and verify that inspectable source matches every artifact."""
+        executable = super().transpile(*args, **kwargs)
+        for compiled in getattr(executable, "compiled_quantum", []):
+            circuit = getattr(compiled, "circuit", None)
+            if isinstance(circuit, CudaqKernelArtifact):
+                assert_inspect_source_matches_artifact(circuit)
+        return executable
