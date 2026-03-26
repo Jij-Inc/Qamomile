@@ -20,8 +20,14 @@ dependencies = [
 include = ["qamomile*"]
 
 [project.optional-dependencies]
-cudaq-cu12 = ["cuda-quantum-cu12>=0.14,<0.15"]
-cudaq-cu13 = ["cuda-quantum-cu13>=0.14,<0.15"]
+cudaq-cu12 = [
+    "cuda-quantum-cu12>=0.14,<0.15; sys_platform == 'linux'",
+]
+
+cudaq-cu13 = [
+    "cuda-quantum-cu13>=0.14,<0.15; sys_platform == 'linux'",
+    "cuda-quantum-cu13>=0.14,<0.15; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
 
 quri_parts = [
     "quri-parts-core>=0.21.1",
