@@ -27,6 +27,10 @@ TUTORIAL_PATTERNS = [
     "docs/ja/tutorial/**/*.ipynb",
     "docs/en/optimization/**/*.ipynb",
     "docs/ja/optimization/**/*.ipynb",
+    "docs/en/vqa/**/*.py",
+    "docs/ja/vqa/**/*.py",
+    "docs/en/vqa/**/*.ipynb",
+    "docs/ja/vqa/**/*.ipynb",
     # We will not execute collaboration notebooks for now because
     # they require API keys and may have side effects
 ]
