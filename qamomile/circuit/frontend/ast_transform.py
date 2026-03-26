@@ -711,23 +711,35 @@ class ControlFlowTransformer(ast.NodeTransformer):
                     raise SyntaxError(
                         "items() requires exactly one dict argument: items(d)"
                     )
-            # qmc.items(d) form: require exactly 1 positional arg
-            elif isinstance(call.func, ast.Attribute) and call.args:
-                if len(call.args) != 1:
-                    raise SyntaxError(
-                        "items() requires exactly one dict argument: qmc.items(d)"
-                    )
-            # d.items() form: receiver must be a known parameter, not a module
-            elif isinstance(call.func, ast.Attribute) and not call.args:
+            # Attribute form: distinguish qmc.items(d) vs d.items() by receiver identity
+            elif isinstance(call.func, ast.Attribute):
+                func_value = call.func.value
                 if (
-                    isinstance(call.func.value, ast.Name)
-                    and call.func.value.id not in self._param_names
+                    isinstance(func_value, ast.Name)
+                    and func_value.id in self._param_names
                 ):
-                    raise SyntaxError(
-                        f"'{call.func.value.id}.items()' looks like a module call "
-                        f"with no dict argument. "
-                        f"Did you mean '{call.func.value.id}.items(d)' or 'd.items()'?"
-                    )
+                    # d.items() form: dict.items() takes no arguments
+                    if call.args or call.keywords:
+                        raise SyntaxError(
+                            "items() iteration over a dict parameter must use "
+                            "'d.items()' with no arguments."
+                        )
+                elif (
+                    isinstance(func_value, ast.Name)
+                    and func_value.id in self._global_names
+                ):
+                    # qmc.items(d) form: require exactly 1 positional arg
+                    if len(call.args) != 1:
+                        raise SyntaxError(
+                            "items() requires exactly one dict argument: qmc.items(d)"
+                        )
+                else:
+                    # Unknown receiver: default to module-call semantics for
+                    # robustness against unexpected aliases.
+                    if len(call.args) != 1:
+                        raise SyntaxError(
+                            "items() requires exactly one dict argument: qmc.items(d)"
+                        )
 
             # items(): target must be a 2-element tuple (key, value)
             if not (isinstance(node.target, ast.Tuple) and len(node.target.elts) == 2):

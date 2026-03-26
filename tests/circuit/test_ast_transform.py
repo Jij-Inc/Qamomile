@@ -733,7 +733,7 @@ class TestInvalidPlaceholderLoopTargets:
 
     def test_items_module_call_no_args_raises(self):
         """qmc.items() with no dict argument must raise SyntaxError."""
-        with pytest.raises(SyntaxError, match="looks like a module call"):
+        with pytest.raises(SyntaxError, match="requires exactly one dict argument"):
             with warnings.catch_warnings():
                 warnings.simplefilter("error")
 
@@ -743,6 +743,21 @@ class TestInvalidPlaceholderLoopTargets:
                 ) -> qmc.Qubit:
                     q = qmc.qubit_array(2, "q")
                     for k, v in qmc.items():
+                        q[0] = qmc.h(q[0])
+                    return q[0]
+
+    def test_items_method_call_with_args_raises(self):
+        """d.items(1) must raise SyntaxError (dict.items takes no arguments)."""
+        with pytest.raises(SyntaxError, match="d\\.items.*no arguments"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+
+                @qmc.qkernel
+                def bad(
+                    d: qmc.Dict[qmc.UInt, qmc.Float],
+                ) -> qmc.Qubit:
+                    q = qmc.qubit_array(2, "q")
+                    for k, v in d.items(1):
                         q[0] = qmc.h(q[0])
                     return q[0]
 
