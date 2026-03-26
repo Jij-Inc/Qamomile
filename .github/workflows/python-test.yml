@@ -36,7 +36,7 @@ jobs:
         shell: bash
         run: |
           set -eux
-          uv sync --frozen --extra cudaq
+          uv sync --frozen --all-extras
       - name: Run unit tests
         shell: bash
         run: |
