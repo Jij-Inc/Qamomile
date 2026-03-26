@@ -7,6 +7,9 @@ Hamiltonian configurations including edge cases.
 import pytest
 import numpy as np
 
+# Skip entire module if QURI Parts operator support is not installed.
+pytest.importorskip("quri_parts.core.operator")
+
 import qamomile.observable as qm_o
 from qamomile.quri_parts.observable import (
     hamiltonian_to_quri_operator,

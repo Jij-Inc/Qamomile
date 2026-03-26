@@ -2,6 +2,11 @@
 
 import math
 
+import pytest
+
+# Skip entire module if QURI Parts circuit support is not installed.
+pytest.importorskip("quri_parts.circuit")
+
 from qamomile.quri_parts import (
     QuriPartsGateEmitter,
 )
