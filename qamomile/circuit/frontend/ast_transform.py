@@ -724,6 +724,14 @@ class ControlFlowTransformer(ast.NodeTransformer):
                     "Key target in items() iteration must be a variable or tuple of variables, "
                     f"got: {ast.dump(key_target)}"
                 )
+            # reject nested tuple unpacking in key, e.g. (i, (j, k))
+            if isinstance(key_target, ast.Tuple) and not all(
+                isinstance(e, ast.Name) for e in key_target.elts
+            ):
+                raise SyntaxError(
+                    "Nested tuple unpacking in items() key is not supported. "
+                    f"Use a flat tuple like (i, j) instead, got: {ast.dump(key_target)}"
+                )
             # value must be a simple Name
             if not isinstance(value_target, ast.Name):
                 raise SyntaxError(
