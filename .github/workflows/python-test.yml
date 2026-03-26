@@ -1,5 +1,8 @@
 name: Python Test
 
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
   push:
@@ -12,7 +15,7 @@ on:
       - synchronize
 
 jobs:
-  Python-Test:
+  base-test:
     if: ${{ !contains(github.head_ref, 'dependabot/github_actions') }}
     strategy:
       fail-fast: false
@@ -24,25 +27,150 @@ jobs:
       MPLBACKEND: Agg
     steps:
       - uses: actions/checkout@v4
+
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+
       - name: Install uv
         uses: astral-sh/setup-uv@v5
-      # --frozen ensures exact versions from uv.lock are used (CI best practice)
+        with:
+          enable-cache: true
+
+      # Only base dependencies are installed in this job.
+      # Optional dependencies are tested separately.
       - name: Install dependencies
         shell: bash
         run: |
           set -eux
-          uv sync --frozen
+          uv sync --frozen --group dev
+
       - name: Run unit tests
         shell: bash
         run: |
           set -eux
           uv run pytest tests -v
+
       - name: Run docs tests
         shell: bash
         run: |
           set -eux
           uv run pytest -m docs tests/docs -v
+
+  quri-parts-test:
+    if: ${{ !contains(github.head_ref, 'dependabot/github_actions') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13']
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies with quri-parts
+        shell: bash
+        run: |
+          set -eux
+          uv sync --frozen --group dev --extra quri_parts
+
+      - name: Run quri-parts related tests
+        shell: bash
+        run: |
+          set -eux
+          uv run pytest -m quri_parts tests -v
+
+  cudaq-test-macos:
+    if: ${{ !contains(github.head_ref, 'dependabot/github_actions') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13']
+        cudaq-extra: ['cudaq-cu13']
+    runs-on: macos-latest
+    env:
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies with ${{ matrix.cudaq-extra }}
+        shell: bash
+        run: |
+          set -eux
+          uv sync --frozen --group dev --extra ${{ matrix.cudaq-extra }}
+
+      - name: Show installed CUDA-Q packages
+        shell: bash
+        run: |
+          set -eux
+          uv pip list | grep -E 'cuda|quantum' || true
+
+      - name: Run CUDA-Q related tests
+        shell: bash
+        run: |
+          set -eux
+          uv run pytest -m cudaq tests -v
+
+  cudaq-test-ubuntu:
+    if: ${{ !contains(github.head_ref, 'dependabot/github_actions') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13']
+        cudaq-extra: ['cudaq-cu12', 'cudaq-cu13']
+    runs-on: ubuntu-latest
+    env:
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies with ${{ matrix.cudaq-extra }}
+        shell: bash
+        run: |
+          set -eux
+          uv sync --frozen --group dev --extra ${{ matrix.cudaq-extra }}
+
+      - name: Show installed CUDA-Q packages
+        shell: bash
+        run: |
+          set -eux
+          uv pip list | grep -E 'cuda|quantum' || true
+
+      - name: Run CUDA-Q related tests
+        shell: bash
+        run: |
+          set -eux
+          uv run pytest -m cudaq tests -v

@@ -16,14 +16,22 @@ if typing.TYPE_CHECKING:
 class WhileOperation(Operation):
     """Represents a while loop operation.
 
-    Example:
+    Only measurement-backed conditions are supported: the condition must
+    be a ``Bit`` value produced by ``qmc.measure()``.  Non-measurement
+    conditions (classical variables, constants, comparisons) are rejected
+    by ``ValidateWhileContractPass`` before reaching backend emit.
+
+    Example::
+
+        bit = qmc.measure(q)
         while bit:
-            body
+            q = qmc.h(q)
+            bit = qmc.measure(q)
 
     Attributes:
-        operations: List of operations in the loop body
-        operands[0]: Initial condition (required, Bit type from measurement
-            or comparison checked at loop entry)
+        operations: List of operations in the loop body.
+        operands[0]: Initial condition (required). Must be a measurement
+            result (``Bit`` from ``qmc.measure()``).
         operands[1]: Loop-carried condition (optional). When the loop body
             reassigns the condition variable (e.g., ``bit = qmc.measure(q)``),
             this captures the updated handle so that the transpiler can alias

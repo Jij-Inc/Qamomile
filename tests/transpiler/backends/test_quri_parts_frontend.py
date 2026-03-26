@@ -13,6 +13,8 @@ breaks ``_create_bound_input``.
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.quri_parts
+
 import qamomile.circuit as qmc
 from tests.transpiler.gate_test_specs import (
     GATE_SPECS,
@@ -35,6 +37,7 @@ pytest.importorskip("quri_parts.qulacs")
 
 from quri_parts.circuit import gate_names
 from quri_parts.core.operator import SinglePauli
+from qamomile.circuit.transpiler.errors import EmitError
 
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.basic import (
@@ -148,6 +151,11 @@ def _get_gates(circuit, parameter_bindings=None) -> list:
         if gates:
             return gates
     return []
+
+
+def _gate_names(circuit, parameter_bindings=None) -> list[str]:
+    """Compatibility helper for tests that only care about gate names."""
+    return [gate.name for gate in _get_gates(circuit, parameter_bindings)]
 
 
 # ---------------------------------------------------------------------------
@@ -3165,7 +3173,7 @@ class TestStdlibQFT:
         assert circ.qubit_count == 3
 
     def test_qft_then_iqft_statevector(self):
-        """QFT followed by IQFT transpiles and produces valid statevector."""
+        """QFT followed by IQFT is identity on the input state."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -3177,8 +3185,10 @@ class TestStdlibQFT:
 
         _, circ = _transpile_and_get_circuit(circuit)
         sv = _run_statevector(circ)
-        # Just verify it produces a valid statevector (norm 1)
-        assert np.isclose(np.linalg.norm(sv), 1.0, atol=1e-10)
+        # QFT -> IQFT must recover the input state X(q[0]) = |01> in QURI Parts
+        # convention (qubit 0 is LSB), statevector index 1 = [0, 1, 0, 0]
+        expected = np.array([0, 1, 0, 0], dtype=complex)
+        assert np.allclose(sv, expected, atol=1e-10)
 
     def test_qft_decomposed_gate_set(self):
         """Decomposed QFT uses basic gates (H, RZ, CNOT, SWAP)."""
@@ -3198,7 +3208,7 @@ class TestStdlibQFT:
         swap_gates = [g for g in gates if g.name == gate_names.SWAP]
         assert len(h_gates) == 3
         for i, g in enumerate(h_gates):
-            assert g.target_indices == (i,)
+            assert g.target_indices == (2 - i,)
         assert len(rz_gates) == 9  # 3 CP × 3 RZ each
         assert len(cx_gates) == 6  # 3 CP × 2 CNOT each
         assert len(swap_gates) == 1
@@ -3228,7 +3238,7 @@ class TestStdlibQPE:
         assert circ.qubit_count == 4  # 3 counting + 1 target
 
     def test_qpe_execution(self):
-        """QPE execution returns valid float results via QuriParts sampling."""
+        """QPE execution returns exact phase estimate via QuriParts sampling."""
 
         @qmc.qkernel
         def phase_gate(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
@@ -3246,14 +3256,14 @@ class TestStdlibQPE:
         exe = transpiler.transpile(qpe_3bit, bindings={"phase": np.pi / 2})
         executor = transpiler.executor()
 
-        job = exe.sample(executor, bindings={}, shots=500)
+        job = exe.sample(executor, bindings={}, shots=256)
         result = job.result()
         assert result is not None
-        # QPE should return float values in [0, 1)
-        for value, count in result.results:
-            assert isinstance(value, float)
-            assert 0.0 <= value < 1.0
-            assert count > 0
+        # phase = pi/2 → phase/2π = 0.25, representable exactly in 3-bit QPE
+        assert len(result.results) == 1
+        value, count = result.results[0]
+        assert np.isclose(value, 0.25, atol=1e-9)
+        assert count == 256
 
     @pytest.mark.parametrize(
         "phase, expected_value",
@@ -6538,3 +6548,240 @@ class TestQubitArrayPatterns:
         # Both should be 3-qubit GHZ
         assert np.isclose(abs(sv_par[0]), 1.0 / np.sqrt(2), atol=1e-10)
         assert np.isclose(abs(sv_par[7]), 1.0 / np.sqrt(2), atol=1e-10)
+
+
+# ============================================================================
+# 30. Compile-time constant if with array quantum phi output
+# ============================================================================
+
+
+class TestCompileTimeIfArrayQuantumPhi:
+    """Compile-time constant if with array quantum phi must not raise EmitError."""
+
+    def test_dead_branch_different_array(self):
+        """Dead branch rebinds qubit array to a different array."""
+        flag = True
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            if flag:
+                q[0] = qmc.x(q[0])
+            else:
+                alt = qmc.qubit_array(2, "alt")
+                alt[1] = qmc.x(alt[1])
+                q = alt
+            return qmc.measure(q)
+
+        _, circ = _transpile_and_get_circuit(circuit)
+        assert circ is not None
+
+
+# ============================================================================
+# Compile-time if phi propagation (Issue: compile_time_constant_if_phi_propagation)
+# ============================================================================
+
+
+class TestCompileTimeIfPhiPropagation:
+    """Compile-time IfOperation lowering before SeparatePass.
+
+    Tests that compile-time resolvable IfOperations (including expression-
+    derived conditions) are lowered before separation.
+    """
+
+    def test_direct_classical_if_after_qinit(self):
+        """Direct ``if flag:`` after quantum init should not raise."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            theta = qmc.float_(0.1)
+            if flag:
+                theta = qmc.float_(1.0)
+            else:
+                theta = qmc.float_(2.0)
+            q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        _, circ = _transpile_and_get_circuit(circuit, bindings={"flag": 1})
+        assert circ is not None
+
+    def test_comparison_derived_classical_if_after_qinit(self):
+        """``if flag > 0:`` after quantum init should not raise."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            theta = qmc.float_(0.1)
+            if flag > 0:
+                theta = qmc.float_(1.0)
+            else:
+                theta = qmc.float_(2.0)
+            q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        _, circ = _transpile_and_get_circuit(circuit, bindings={"flag": 1})
+        assert circ is not None
+
+    def test_comparison_derived_classical_if_flag_zero(self):
+        """``if flag > 0:`` with flag=0 selects false branch."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            theta = qmc.float_(0.1)
+            if flag > 0:
+                theta = qmc.float_(1.0)
+            else:
+                theta = qmc.float_(2.0)
+            q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        _, circ = _transpile_and_get_circuit(circuit, bindings={"flag": 0})
+        assert circ is not None
+
+    def test_symbolic_parameter_alias_before_qinit(self):
+        """Symbolic parameter through compile-time if should be preserved."""
+        FLAG = True
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Bit:
+            angle = qmc.float_(0.5)
+            if FLAG:
+                angle = theta
+            else:
+                angle = qmc.float_(0.5)
+            q = qmc.qubit("q")
+            q = qmc.rx(q, angle)
+            return qmc.measure(q)
+
+        _, circ = _transpile_and_get_circuit(circuit, parameters=["theta"])
+        assert circ is not None
+
+
+# ============================================================================
+# 31. Direct cast -> measure (cast element carrier identity)
+# ============================================================================
+
+
+class TestDirectCastMeasure:
+    """Verify that direct Vector[Qubit] -> QFixed -> measure resolves carriers.
+
+    QURI Parts measurement is a no-op (handled by sampler), so we verify
+    the clbit_map has the expected number of entries.
+    """
+
+    def test_direct_cast_measure_resolves_carriers(self):
+        """Direct cast then measure must resolve num_bits carrier qubits."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Float:
+            q = qmc.qubit_array(2, "q")
+            qf = qmc.cast(q, qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(circuit)
+        circ = exe.compiled_quantum[0].circuit
+        clbit_map = exe.compiled_quantum[0].clbit_map
+        assert circ.qubit_count == 2
+        assert len(clbit_map) == 2, (
+            f"Expected 2 clbit_map entries, got {len(clbit_map)}"
+        )
+
+    def test_cast_after_gate_measure(self):
+        """Gate before cast must not break carrier resolution."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Float:
+            q = qmc.qubit_array(2, "q")
+            q[0] = qmc.h(q[0])
+            qf = qmc.cast(q, qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(circuit)
+        circ = exe.compiled_quantum[0].circuit
+        clbit_map = exe.compiled_quantum[0].clbit_map
+        gate_names_list = _gate_names(circ)
+        assert any(n.lower() == "h" for n in gate_names_list)
+        assert len(clbit_map) == 2, (
+            f"Expected 2 clbit_map entries, got {len(clbit_map)}"
+        )
+
+
+# ============================================================================
+# Unresolved non-measurement if-condition rejection
+# ============================================================================
+
+
+class TestUnresolvedNonMeasurementIfRejection:
+    """Non-measurement unresolved if-conditions must raise EmitError.
+
+    When a kernel argument is used as an if-condition and left in
+    ``parameters`` (not bound), the transpiler must raise an explicit
+    error instead of silently dropping the branch.
+    """
+
+    def test_unresolved_flag_parameter_raises(self):
+        """``if flag:`` with parameters=["flag", "theta"] must raise EmitError."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt, theta: qmc.Float) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        with pytest.raises(EmitError, match="measurement results"):
+            _transpile_and_get_circuit(circuit, parameters=["flag", "theta"])
+
+    def test_unresolved_flag_only_raises(self):
+        """``if flag:`` with parameters=["flag"] must raise EmitError."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        with pytest.raises(EmitError, match="measurement results"):
+            _transpile_and_get_circuit(circuit, parameters=["flag"])
+
+    def test_bound_flag_still_works(self):
+        """``if flag:`` with bindings={"flag": 1} must still work."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 1})
+        gate_names_list = _gate_names(qc)
+        assert "X" in gate_names_list
+
+
+class TestUnresolvedStructuralSize:
+    """Unresolved structural UInt must raise, not produce zero-size artifact."""
+
+    def test_qubit_array_with_unresolved_size_raises(self):
+        """qubit_array(n) with parameters=["n"] must raise EmitError."""
+
+        @qmc.qkernel
+        def circuit(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            for i in qmc.range(n):
+                q[i] = qmc.h(q[i])
+            return qmc.measure(q)
+
+        transpiler = QuriPartsTranspiler()
+        with pytest.raises((EmitError, ValueError)):
+            transpiler.transpile(circuit, parameters=["n"])
+
+
+# ============================================================================
+# 32. Portable TranspilerConfig Tests
+# ============================================================================

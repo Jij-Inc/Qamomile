@@ -1,6 +1,6 @@
 # Qamomileドキュメントへようこそ
 
-Qamomileは量子プログラミングSDKです。型付きPython関数で量子回路を記述し、Qiskit・QuriPartsなどのバックエンドで実行できます。また、シンボリックな代数的リソース推定やブラックボックス（オラクル）を含むような実行そのものができない回路のリソース推定も可能です。
+Qamomileは量子プログラミングSDKです。型付きPython関数で量子回路を記述し、Qiskit・CUDA-Q・QURI Parts・qBraidなどのQuantum SDKで実行できます。また、シンボリックな代数的リソース推定やブラックボックス（オラクル）を含むような実行そのものができない回路のリソース推定も可能です。
 
 > **注意**：Qamomileは現在もアクティブに開発中であり、リリース間で破壊的変更が加わる可能性があります。
 
@@ -22,6 +22,53 @@ Qamomileは量子プログラミングSDKです。型付きPython関数で量子
 ## 最適化
 
 - [QAOAによるグラフ分割](optimization/qaoa_graph_partition) — QAOAでグラフ分割問題をエンドツーエンドで解く
+
+## 対応Quantum SDK
+
+Qamomileは複数のQuantum SDKを実行バックエンドとしてサポートしています。Qiskitはデフォルトで含まれており、その他はオプションの追加パッケージです。
+
+### Qiskit（デフォルト）
+
+`pip install qamomile` に含まれています。追加のフラグは不要です。
+
+```python
+from qamomile.qiskit import QiskitTranspiler, QiskitExecutor
+```
+
+### CUDA-Q（オプション）
+
+CUDA-QはLinuxおよびmacOS ARM64（Apple Silicon）をサポートしています。使用するCUDAバージョンに合わせてインストールしてください：
+
+```bash
+pip install "qamomile[cudaq-cu12]"   # CUDA 12.x、Linux向け
+pip install "qamomile[cudaq-cu13]"   # CUDA 13.x、LinuxまたはmacOS ARM64向け
+```
+
+```python
+from qamomile.cudaq import CudaqTranspiler, CudaqExecutor
+```
+
+### QURI Parts（オプション）
+
+```bash
+pip install "qamomile[quri_parts]"
+```
+
+```python
+from qamomile.quri_parts import QuriPartsTranspiler, QuriPartsExecutor
+```
+
+### qBraid（オプション）
+
+QiskitのQuantum回路をqBraid対応のデバイスやシミュレータで実行できます。
+
+```bash
+pip install "qamomile[qbraid]"
+```
+
+```python
+from qamomile.qbraid import QBraidExecutor
+```
 
 ## インストール
 

@@ -24,27 +24,32 @@ class WhileLoop:
 
 @contextlib.contextmanager
 def while_loop(cond: typing.Callable) -> typing.Generator[WhileLoop, None, None]:
-    """Builder function to create a while loop in Qamomile frontend.
+    """Create a while loop whose condition is a measurement result.
+
+    The condition must be a ``Bit`` produced by ``qmc.measure()``.
+    Non-measurement conditions (classical variables, constants,
+    comparisons) are accepted at build time but will be rejected by
+    ``ValidateWhileContractPass`` during transpilation.
 
     Args:
-        cond (typing.Callable): A callable (lambda) that returns the loop condition expression.
+        cond: A callable (lambda) that returns the loop condition.
+            Must return a ``Bit`` handle originating from ``qmc.measure()``.
 
     Yields:
         WhileLoop: A marker object for the while loop context.
 
-    Example:
-        ```python
-        from qamomile.frontend.handle import Bit, UInt
-        from qamomile.frontend.qkernel import QKernel
-        from qamomile.frontend.operation import while_loop
+    Example::
 
-        @QKernel
-        def my_kernel(cond: Bit, x: UInt) -> UInt:
-            with while_loop(lambda: cond):
-                # Loop body operations
-                x = x + UInt(1)
-            return x
-        ```
+        @qm.qkernel
+        def repeat_until_zero() -> qm.Bit:
+            q = qm.qubit("q")
+            q = qm.h(q)
+            bit = qm.measure(q)
+            while bit:
+                q = qm.qubit("q2")
+                q = qm.h(q)
+                bit = qm.measure(q)
+            return bit
     """
     # 1. Get the PARENT tracer (the one active before entering the while loop)
     parent_tracer = get_current_tracer()

@@ -301,9 +301,21 @@ except Exception as e:
 # |---------|--------|-------|
 # | **Qiskit** | Supported | Full gate set, control flow, observables |
 # | **QuriParts** | Supported | Full gate set, observables |
-# | **CUDA-Q** | Coming soon | GPU-accelerated simulation |
+# | **CUDA-Q** | Supported | GPU-accelerated simulation. Supported: for-loops (unrolled), runtime `if`/`if-else`/`while` (via `cudaq.run()`) |
 #
-# > **Important**: Not every qkernel feature is available on every quantum SDK. For example, `if` branching inside a qkernel is supported by Qiskit but may not yet be supported by other SDKs. If a feature is not available for your chosen SDK, you will get a clear error at transpile time.
+# > **Note**: Runtime measurement-dependent control flow (`if bit:`, `if/else`, `while bit:`) is supported on both Qiskit and CUDA-Q. The `while` loop condition **must** be a measurement result (`Bit` from `qmc.measure()`); classical variables, constants, and comparisons are not supported as while conditions. On CUDA-Q, all circuits are compiled as `@cudaq.kernel` decorated functions. Static circuits (without runtime control flow) are executed via `cudaq.sample()` / `cudaq.observe()`, while circuits with runtime measurement-dependent branching are executed via `cudaq.run()`. Compile-time constant conditions for `if` statements are statically resolved on all backends.
+#
+# ### CUDA-Q Platform Support
+#
+# CUDA-Q is supported on the following environments:
+#
+# | Environment | Status | Notes |
+# |---------|--------|-------|
+# | Linux | Supported | Native path |
+# | macOS ARM64 (Apple silicon) | Supported | CPU-only simulation; Intel macOS unsupported |
+# | Windows via WSL2 | Supported | Install and run inside the WSL2 Linux environment |
+# | Native Windows | Unsupported | Use WSL2 instead |
+# | macOS x86_64 (Intel) | Unsupported | Apple silicon only |
 #
 # ## Next Chapters
 #

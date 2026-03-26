@@ -139,8 +139,8 @@ class TestRuntimeLimitations:
                     q = qm.h(q)
                 return q
 
-    def test_while_classical_condition_works(self):
-        """while condition with classical value should work."""
+    def test_while_classical_condition_builds(self):
+        """while condition with classical value builds at AST level (rejected at transpile)."""
 
         @qkernel
         def good_circuit(q: Qubit, n: qm.UInt) -> Qubit:

@@ -4,6 +4,11 @@ import os
 import runpy
 from pathlib import Path
 
+import matplotlib
+import matplotlib.pyplot as plt
+
+matplotlib.use("Agg")
+
 import pytest
 
 try:
@@ -13,8 +18,6 @@ try:
     NBCLIENT_AVAILABLE = True
 except ImportError:
     NBCLIENT_AVAILABLE = False
-
-os.environ.setdefault("MPLBACKEND", "Agg")
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
@@ -75,7 +78,7 @@ TUTORIAL_FILES = discover_tutorial_files()
 )
 def test_tutorial_executes_without_error(tutorial_file: Path, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("MPLBACKEND", "Agg")
+    monkeypatch.setattr(plt, "show", lambda *args, **kwargs: None)
 
     assert tutorial_file.exists(), f"Tutorial file not found: {tutorial_file}"
 
