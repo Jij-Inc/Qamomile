@@ -22,7 +22,6 @@ include = ["qamomile*"]
 [project.optional-dependencies]
 cudaq = [
     "cudaq>=0.14.0",
-    "cuda-quantum-cu13>=0.14.0",
 ]
 quri_parts = [
     "quri-parts-core>=0.21.1",
@@ -44,9 +43,6 @@ dev = [
     "ruff>=0.14.11",
     "zuban>=0.4.1",
     "griffe>=1.0.0",
-    "quri-parts-core>=0.21.1",
-    "quri-parts-circuit>=0.21.1",
-    "quri-parts-qulacs>=0.21.1",
     "ommx-pyscipopt-adapter>=2.3.0",
 ]
 
