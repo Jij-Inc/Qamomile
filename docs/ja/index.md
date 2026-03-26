@@ -15,6 +15,10 @@ Qamomileは量子プログラミングSDKです。型付きPython関数で量子
 5. [古典フローパターン](tutorial/05_classical_flow_patterns) — ループ、スパースデータ、条件分岐
 6. [再利用パターン](tutorial/06_reuse_patterns) — ヘルパーカーネル、コンポジットゲート、スタブ
 
+## 最適化
+
+- [QAOAによるグラフ分割](optimization/qaoa_graph_partition) — QAOAでグラフ分割問題をエンドツーエンドで解く
+
 ## インストール
 
 ```bash
