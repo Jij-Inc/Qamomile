@@ -38,8 +38,10 @@ from tests.transpiler.gate_test_specs import (
 cudaq = pytest.importorskip("cudaq")
 
 from qamomile.circuit.transpiler.errors import EmitError  # noqa: E402
-from qamomile.cudaq import CudaqTranspiler  # noqa: E402
 from qamomile.cudaq.emitter import CudaqKernelArtifact, ExecutionMode  # noqa: E402
+from tests.transpiler.backends._cudaq_source_assertions import (  # noqa: E402
+    ValidatingCudaqTranspiler as CudaqTranspiler,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -79,6 +81,7 @@ def _transpile_and_get_circuit(
     transpiler = CudaqTranspiler()
     exe = transpiler.transpile(kernel, bindings=bindings, parameters=parameters)
     circuit = exe.compiled_quantum[0].circuit
+    assert circuit.source
     return exe, circuit
 
 

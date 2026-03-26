@@ -15,6 +15,11 @@ pytestmark = pytest.mark.cudaq
 
 cudaq = pytest.importorskip("cudaq")
 
+from tests.transpiler.backends._cudaq_source_assertions import (  # noqa: E402
+    TracingCudaqKernelEmitter,
+    ValidatingCudaqTranspiler as CudaqTranspiler,
+    assert_inspect_source_matches_artifact,
+)
 from tests.transpiler.base_test import TranspilerTestSuite  # noqa: E402
 
 
@@ -37,9 +42,7 @@ class TestCudaqTranspiler(TranspilerTestSuite):
     @classmethod
     def get_emitter(cls) -> Any:
         """Get CUDA-Q KernelEmitter instance."""
-        from qamomile.cudaq.emitter import CudaqKernelEmitter
-
-        cls._shared_emitter = CudaqKernelEmitter()
+        cls._shared_emitter = TracingCudaqKernelEmitter()
         return cls._shared_emitter
 
     @classmethod
@@ -63,6 +66,17 @@ class TestCudaqTranspiler(TranspilerTestSuite):
         state = cudaq.get_state(circuit.kernel_func)
         return np.array(state)
 
+    def test_create_empty_circuit(self) -> None:
+        """Test creating an empty circuit and validating its generated source."""
+        from qamomile.cudaq.emitter import ExecutionMode
+
+        emitter = self.get_emitter()
+        circuit = emitter.create_circuit(num_qubits=2, num_clbits=1)
+        emitter.finalize(circuit, ExecutionMode.STATIC)
+
+        assert circuit is not None
+        assert circuit.source
+
 
 class TestCudaqRuntimeControlFlow:
     """Test runtime measurement-dependent control flow via cudaq.run()."""
@@ -70,7 +84,6 @@ class TestCudaqRuntimeControlFlow:
     def test_c_if_transpiles_to_runnable_mode(self) -> None:
         """Runtime if-then produces a RUNNABLE-mode artifact."""
         import qamomile.circuit as qmc
-        from qamomile.cudaq import CudaqTranspiler
         from qamomile.cudaq.emitter import ExecutionMode
 
         @qmc.qkernel
@@ -91,7 +104,6 @@ class TestCudaqRuntimeControlFlow:
     def test_if_with_else_transpiles_to_runnable_mode(self) -> None:
         """Runtime if-else produces a RUNNABLE-mode artifact."""
         import qamomile.circuit as qmc
-        from qamomile.cudaq import CudaqTranspiler
         from qamomile.cudaq.emitter import ExecutionMode
 
         @qmc.qkernel
@@ -114,7 +126,6 @@ class TestCudaqRuntimeControlFlow:
     def test_while_loop_transpiles_to_runnable_mode(self) -> None:
         """Runtime while loop produces a RUNNABLE-mode artifact."""
         import qamomile.circuit as qmc
-        from qamomile.cudaq import CudaqTranspiler
         from qamomile.cudaq.emitter import ExecutionMode
 
         @qmc.qkernel
@@ -147,7 +158,6 @@ class TestCudaqSourceInspectRegression:
         import inspect
 
         import qamomile.circuit as qmc
-        from qamomile.cudaq import CudaqTranspiler
 
         @qmc.qkernel
         def single_h() -> qmc.Bit:
@@ -163,13 +173,13 @@ class TestCudaqSourceInspectRegression:
         # inspect the underlying function via .kernelFunction.
         source = inspect.getsource(kernel.kernelFunction)
         assert "_qamomile_kernel" in source
+        assert_inspect_source_matches_artifact(exe.compiled_quantum[0].circuit)
 
     def test_multiple_kernels_have_distinct_sources(self) -> None:
         """Two consecutively generated kernels have independent sources."""
         import inspect
 
         import qamomile.circuit as qmc
-        from qamomile.cudaq import CudaqTranspiler
 
         @qmc.qkernel
         def circuit_a() -> qmc.Bit:
@@ -197,3 +207,5 @@ class TestCudaqSourceInspectRegression:
         assert source_a != source_b
         assert "h(" in source_a
         assert "x(" in source_b
+        assert_inspect_source_matches_artifact(exe_a.compiled_quantum[0].circuit)
+        assert_inspect_source_matches_artifact(exe_b.compiled_quantum[0].circuit)
