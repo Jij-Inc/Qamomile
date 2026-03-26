@@ -7,6 +7,8 @@ Hamiltonian configurations including edge cases.
 import pytest
 import numpy as np
 
+pytestmark = pytest.mark.quri_parts
+
 # Skip entire module if QURI Parts operator support is not installed.
 pytest.importorskip("quri_parts.core.operator")
 

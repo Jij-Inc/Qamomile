@@ -6,6 +6,8 @@ Covers bind_parameters (including error case) and estimate_expectation.
 import pytest
 import numpy as np
 
+pytestmark = pytest.mark.quri_parts
+
 # Skip entire module if required QURI Parts components are not installed.
 pytest.importorskip("quri_parts.circuit")
 pytest.importorskip("quri_parts.core.operator")

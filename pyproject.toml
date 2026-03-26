@@ -52,9 +52,11 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not docs'"
+addopts = "-m 'not docs and not optional quantum sdks'"
 markers = [
     "docs: marks tests that run documentation examples",
+    "quri_parts: marks tests that require quri-parts dependencies",
+    "cudaq: marks tests that require CUDA-Q dependencies",
 ]
 
 [tool.setuptools_scm]

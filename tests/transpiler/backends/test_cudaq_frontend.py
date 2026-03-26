@@ -18,6 +18,8 @@ from typing import Any
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.cudaq
+
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from tests.transpiler.gate_test_specs import (

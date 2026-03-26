@@ -11,6 +11,8 @@ from typing import Any
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.cudaq
+
 cudaq = pytest.importorskip("cudaq")
 
 from tests.transpiler.base_test import TranspilerTestSuite  # noqa: E402

@@ -13,6 +13,8 @@ breaks ``_create_bound_input``.
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.quri_parts
+
 import qamomile.circuit as qmc
 from tests.transpiler.gate_test_specs import (
     GATE_SPECS,

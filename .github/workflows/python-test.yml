@@ -90,7 +90,7 @@ jobs:
         shell: bash
         run: |
           set -eux
-          uv run pytest tests -v
+          uv run pytest -m quri_parts tests -v
 
   cudaq-test:
     if: ${{ !contains(github.head_ref, 'dependabot/github_actions') }}
@@ -131,4 +131,4 @@ jobs:
         shell: bash
         run: |
           set -eux
-          uv run pytest tests -v
+          uv run pytest -m cudaq tests -v

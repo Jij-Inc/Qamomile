@@ -10,6 +10,8 @@ from typing import Any
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.quri_parts
+
 # Skip entire module if QURI Parts with the Qulacs backend is not installed.
 pytest.importorskip("quri_parts")
 pytest.importorskip("quri_parts.qulacs")
