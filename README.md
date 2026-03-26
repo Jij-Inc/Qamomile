@@ -5,7 +5,7 @@
 > The version currently available on PyPI is not the same as this branch.
 > APIs in this branch may still change, including breaking changes, while active development continues.
 
-Qamomile is a typed quantum programming SDK for writing quantum kernels in Python, inspecting them as Qamomile IR, estimating resources symbolically, and transpiling them to concrete execution backends such as Qiskit, QURI Parts, and CUDA-Q.
+Qamomile is a typed quantum programming SDK for writing quantum kernels in Python, inspecting them as Qamomile IR, estimating resources symbolically, and transpiling them to concrete execution quantum SDK such as Qiskit, QURI Parts, CUDA-Q. Furthremore, as a backend for Qiskit, we support qBraid.
 
 The current workflow is:
 
