@@ -442,6 +442,47 @@ class TestRuntimeIfPreservation:
 
 
 # ---------------------------------------------------------------------------
+# Test: reserved measurement-result binding names
+# ---------------------------------------------------------------------------
+
+
+class TestReservedMeasurementBindingNames:
+    """Bindings matching ``<qubit>_measured`` are treated as reserved names.
+
+    The frontend generates measurement-result names like ``q_measured``.
+    By current design, ``resolve_if_condition()`` also checks bindings by
+    value name, so a user binding with the same name shadows the runtime
+    measurement result and forces compile-time resolution.  This test
+    documents that contract so callers avoid using these binding names
+    unless they intentionally want static branch selection.
+    """
+
+    def test_binding_named_like_measurement_result_forces_static_resolution(self):
+        """``q_measured`` binding shadows runtime ``measure(q)`` condition."""
+
+        @qm.qkernel
+        def kernel(q_measured: qm.UInt) -> qm.Bit:
+            q = qm.qubit("q")
+            target = qm.qubit("target")
+            q = qm.h(q)
+            bit = qm.measure(q)
+            if bit:
+                target = qm.x(target)
+            return qm.measure(target)
+
+        lowered = _lower(kernel, bindings={"q_measured": 1})
+
+        assert not _find_ops(lowered.operations, IfOperation), (
+            "Bindings named like generated measurement results are treated "
+            "as reserved and force compile-time if lowering"
+        )
+        x_gates = _find_gates(lowered.operations, GateOperationType.X)
+        assert len(x_gates) >= 1, (
+            "The reserved-name binding should select the true branch"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Test: CondOp (AND/OR) condition lowering (synthetic IR)
 # ---------------------------------------------------------------------------
 
