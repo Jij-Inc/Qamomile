@@ -705,8 +705,10 @@ class ControlFlowTransformer(ast.NodeTransformer):
         """
         if self._is_items_call(node.iter):
             # items(): must have a dict argument
-            if not (node.iter.args or  # type: ignore  # items(d)
-                    (isinstance(node.iter.func, ast.Attribute))):  # type: ignore  # d.items()
+            if not (
+                node.iter.args  # type: ignore  # items(d)
+                or (isinstance(node.iter.func, ast.Attribute))
+            ):  # type: ignore  # d.items()
                 raise SyntaxError("items() requires a dict argument")
             # items(): target must be a 2-element tuple (key, value)
             if not (isinstance(node.target, ast.Tuple) and len(node.target.elts) == 2):
@@ -740,7 +742,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             # range(): target must be a single variable
             if not isinstance(node.target, ast.Name):
                 raise SyntaxError(
-                    "qmc.range() iteration requires a single loop variable, "
+                    "range()/qmc.range() iteration requires a single loop variable, "
                     f"got: {ast.dump(node.target)}"
                 )
             binding_names = [node.target.id]
