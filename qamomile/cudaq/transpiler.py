@@ -18,6 +18,7 @@ from typing import Any, Sequence, TYPE_CHECKING
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.control_flow import (
+    ForItemsOperation,
     ForOperation,
     IfOperation,
     WhileOperation,
@@ -165,6 +166,9 @@ def _has_runtime_control_flow(
         elif isinstance(op, ForOperation):
             if _has_runtime_control_flow(op.operations, bindings):
                 return True
+        elif isinstance(op, ForItemsOperation):
+            if _has_runtime_control_flow(op.operations, bindings):
+                return True
     return False
 
 
@@ -194,6 +198,8 @@ def _collect_loop_carried_clbits(
             result |= _collect_loop_carried_clbits(op.true_operations, clbit_map)
             result |= _collect_loop_carried_clbits(op.false_operations, clbit_map)
         elif isinstance(op, ForOperation):
+            result |= _collect_loop_carried_clbits(op.operations, clbit_map)
+        elif isinstance(op, ForItemsOperation):
             result |= _collect_loop_carried_clbits(op.operations, clbit_map)
     return result
 

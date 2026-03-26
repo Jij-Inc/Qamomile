@@ -573,6 +573,11 @@ class ResourceAllocator:
         same classical bit as the initial while condition.
         """
         for op in operations:
+            if isinstance(op, (ForOperation, ForItemsOperation)):
+                self._alias_loop_carried_clbits(
+                    op.operations, target_uuid, canonical_clbit, clbit_map
+                )
+                continue
             if not isinstance(op, IfOperation):
                 continue
             for phi in op.phi_ops:
