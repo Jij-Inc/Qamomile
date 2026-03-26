@@ -201,13 +201,14 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 per_stmt_collectors[j].vars | suffix_reads[j + 1]
             )
 
-        # Build suffix-union of Load-only vars (dead-variable filtering).
-        # Seed with outer_after_loads so nested visit_If sees outer liveness.
+        # Build suffix liveness using the same statement-aware recurrence as
+        # ``_stmt_live_in`` so control-flow statements preserve values that
+        # may survive along one-sided or zero-iteration paths.
         suffix_loads: list[frozenset[str]] = [frozenset()] * (n + 1)
         suffix_loads[n] = outer_after_loads
         for j in range(n - 1, -1, -1):
             suffix_loads[j] = frozenset(
-                per_stmt_collectors[j].load_vars | suffix_loads[j + 1]
+                self._stmt_live_in(body[j], set(suffix_loads[j + 1]))
             )
 
         for i, stmt in enumerate(body):
@@ -929,7 +930,8 @@ class ControlFlowTransformer(ast.NodeTransformer):
         outer_defined = set(self._outer_defined_vars)
         has_else = bool(node.orelse)
 
-        # Existing vars re-assigned in any branch (Store-only reassignment)
+        # Existing vars re-assigned in any branch may need phi outputs even
+        # when the old value is dead and therefore should not be passed in.
         reassigned_existing = (body_assigned | orelse_assigned) & outer_defined
 
         # New locals defined in BOTH branches
@@ -950,8 +952,10 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 f"Define in both branches, or move the definition outside the if."
             )
 
-        # Ensure reassigned_existing are passed into branches
-        input_vars_set |= reassigned_existing
+        after_loads = set(self._after_stmt_load_vars)
+        live_in_vars = self._stmt_live_in(node, after_loads)
+        live_existing_inputs = outer_defined & live_in_vars
+        input_vars_set |= live_existing_inputs
 
         # Filter dead-and-modified variables from output.  A variable that is
         # stored (modified) in a branch but never loaded after the if would
@@ -959,13 +963,15 @@ class ControlFlowTransformer(ast.NodeTransformer):
         # across branches, causing EmitError at emit time.
         # Variables that are dead but NOT stored in any branch pass through
         # unchanged (their phi has identical resources) and are harmless.
-        after_loads = set(self._after_stmt_load_vars)
         stored_in_branches = collector_body.store_vars | collector_orelse.store_vars
         dead_modified = (stored_in_branches & input_vars_set) - after_loads
         live_shared = shared_new_locals & after_loads
+        live_reassigned_existing = reassigned_existing & after_loads
 
         input_vars = sorted(input_vars_set)
-        output_vars = sorted((input_vars_set - dead_modified) | live_shared)
+        output_vars = sorted(
+            (input_vars_set - dead_modified) | live_shared | live_reassigned_existing
+        )
 
         # Detect return inside for/while in if-else branches (unsupported).
         # Must run before nested control flow transformation.
@@ -981,15 +987,23 @@ class ControlFlowTransformer(ast.NodeTransformer):
         saved_after = self._after_stmt_read_vars
         saved_after_load = self._after_stmt_load_vars
         inner_scope = set(input_vars)
-        # Pass output_vars as outer_after_loads so that nested visit_If calls
-        # know which variables the enclosing if needs to return.
-        outer_loads_for_branches = frozenset(output_vars)
+        # Seed each branch with only the output vars that are actually stored
+        # in that branch, plus the real downstream liveness from the enclosing
+        # scope.  Pass-through variables (in output_vars but not stored in the
+        # branch) don't need to flow through nested control-flow merges —
+        # they're available as helper-function parameters.
+        output_vars_set = set(output_vars)
+        real_after = set(saved_after_load)
+        outer_loads_body = frozenset((output_vars_set & body_assigned) | real_after)
         node.body = self._visit_body_with_tracking(
-            node.body, inner_scope, outer_after_loads=outer_loads_for_branches
+            node.body, inner_scope, outer_after_loads=outer_loads_body
         )
         if node.orelse:
+            outer_loads_orelse = frozenset(
+                (output_vars_set & orelse_assigned) | real_after
+            )
             node.orelse = self._visit_body_with_tracking(
-                node.orelse, inner_scope, outer_after_loads=outer_loads_for_branches
+                node.orelse, inner_scope, outer_after_loads=outer_loads_orelse
             )
         self._outer_defined_vars = saved_outer
         self._after_stmt_read_vars = saved_after

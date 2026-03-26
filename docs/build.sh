@@ -4,6 +4,9 @@
 
 set -e  # Exit on error
 
+# Move to the script's directory to ensure relative paths work
+cd "$(dirname "$0")"
+
 # Color output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -55,6 +58,24 @@ generate_api() {
     info "API reference generated"
 }
 
+# Function to check if running on ReadTheDocs
+is_rtd() {
+    [ "${READTHEDOCS:-}" = "True" ] || [ -n "${READTHEDOCS_CANONICAL_URL:-}" ]
+}
+
+# Function to build documentation with optional BASE_URL for ReadTheDocs
+build_with_optional_base_url() {
+    local lang="$1"
+
+    if is_rtd; then
+        local base_url
+        info "Read the Docs detected. Using BASE_URL=${base_url}"
+        BASE_URL="${READTHEDOCS_CANONICAL_URL%/}/${lang}" MPLBACKEND=agg uv run jupyter-book build --html
+    else
+        MPLBACKEND=agg uv run jupyter-book build --html
+    fi
+}
+
 # Function to copy API reference to language directories
 copy_api() {
     echo "Copying API reference to language directories..."
@@ -93,7 +114,7 @@ build_en() {
     sync_en
     echo "Building English documentation..."
     cd en
-    MPLBACKEND=agg uv run jupyter-book build --html --execute
+    build_with_optional_base_url en
     cd ..
     uv run python scripts/inject_colab_launch.py en
     info "English documentation built: en/_build/html/index.html"
@@ -104,7 +125,7 @@ build_ja() {
     sync_ja
     echo "Building Japanese documentation..."
     cd ja
-    MPLBACKEND=agg uv run jupyter-book build --html --execute
+    build_with_optional_base_url ja
     cd ..
     uv run python scripts/inject_colab_launch.py ja
     info "Japanese documentation built: ja/_build/html/index.html"
@@ -114,7 +135,6 @@ build_ja() {
 build_all() {
     generate_api
     copy_api
-    sync_all
     build_en
     build_ja
     info "Both English and Japanese documentation built successfully"

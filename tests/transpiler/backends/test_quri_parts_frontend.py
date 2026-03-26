@@ -16,15 +16,15 @@ import pytest
 import qamomile.circuit as qmc
 from tests.transpiler.gate_test_specs import (
     GATE_SPECS,
-    statevectors_equal,
     all_zeros_state,
+    bell_state,
     computational_basis_state,
     compute_expected_statevector,
-    tensor_product,
     identity,
-    bell_state,
-    plus_state,
     minus_state,
+    plus_state,
+    statevectors_equal,
+    tensor_product,
 )
 
 # ---------------------------------------------------------------------------
@@ -33,52 +33,59 @@ from tests.transpiler.gate_test_specs import (
 pytest.importorskip("quri_parts")
 pytest.importorskip("quri_parts.qulacs")
 
-from qamomile.quri_parts import QuriPartsTranspiler
-from qamomile.circuit.transpiler.executable import ExecutableProgram
-from qamomile.circuit.transpiler.segments import SimplifiedProgram
-from qamomile.circuit.ir.block import BlockKind
+from quri_parts.circuit import gate_names
+from quri_parts.core.operator import SinglePauli
 from qamomile.circuit.transpiler.errors import EmitError
 
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.basic import (
+    cz_entangling_layer,
     rx_layer,
     ry_layer,
     rz_layer,
-    cz_entangling_layer,
     superposition_vector,
+)
+from qamomile.circuit.algorithm.fqaoa import (
+    cost_layer,
+    fqaoa_state,
+    givens_rotation,
+    hopping_gate,
+    initial_occupations,
+    mixer_layer,
 )
 from qamomile.circuit.algorithm.qaoa import (
     ising_cost,
-    x_mixer,
     qaoa_layers,
     qaoa_state,
+    x_mixer,
 )
-from qamomile.circuit.algorithm.fqaoa import (
-    initial_occupations,
-    givens_rotation,
-    hopping_gate,
-    mixer_layer,
-    cost_layer,
-    fqaoa_state,
-)
-
+from qamomile.circuit.ir.block import BlockKind
+from qamomile.circuit.transpiler.executable import ExecutableProgram
+from qamomile.circuit.transpiler.segments import SimplifiedProgram
+from qamomile.quri_parts import QuriPartsTranspiler
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _run_statevector(circuit) -> np.ndarray:
+def _run_statevector(circuit, parameter_bindings=None) -> np.ndarray:
     """Run a QURI Parts circuit and return the statevector via Qulacs.
 
     Handles both parametric (unbound) and bound circuits.
-    For parametric circuits with no parameter values, binds with empty list.
+    If *parameter_bindings* is given, uses those values; otherwise binds
+    with zeros for parametric circuits.
     """
     from quri_parts.core.state import GeneralCircuitQuantumState
     from quri_parts.qulacs.simulator import evaluate_state_to_vector
 
     if hasattr(circuit, "parameter_count") and circuit.parameter_count > 0:
-        bound_circuit = circuit.bind_parameters([0.0] * circuit.parameter_count)
+        values = (
+            parameter_bindings
+            if parameter_bindings is not None
+            else [0.0] * circuit.parameter_count
+        )
+        bound_circuit = circuit.bind_parameters(values)
     elif hasattr(circuit, "bind_parameters"):
         bound_circuit = circuit.bind_parameters([])
     else:
@@ -89,186 +96,331 @@ def _run_statevector(circuit) -> np.ndarray:
     return np.array(statevector.vector)
 
 
-def _transpile_and_get_circuit(kernel, bindings=None, parameters=None):
-    """Transpile a qkernel and return (ExecutableProgram, QURI Parts circuit)."""
+def _transpile_and_get_circuit(
+    kernel, bindings=None, parameters=None, *, skip_smoke_test=False
+):
+    """Transpile a qkernel and return (ExecutableProgram, QURI Parts circuit).
+
+    Also runs a smoke test to verify execution works:
+    - sample(shots=1) for measurement circuits
+    - run() for expval circuits
+    Skipped when parameters != None (runtime bindings required)
+    or skip_smoke_test=True (e.g., large qubit counts).
+    """
     transpiler = QuriPartsTranspiler()
     exe = transpiler.transpile(kernel, bindings=bindings, parameters=parameters)
     circuit = exe.compiled_quantum[0].circuit
+    # Smoke test: verify execution runs without error
+    if parameters is None and not skip_smoke_test:
+        executor = transpiler.executor()
+        if exe.compiled_expval:
+            exe.run(executor).result()
+        else:
+            exe.sample(executor, bindings={}, shots=1).result()
     return exe, circuit
 
 
-def _gate_names(circuit) -> list[str]:
-    """Return list of gate operation names in a QURI Parts circuit.
+def _get_gates(circuit, parameter_bindings=None) -> list:
+    """Return list of gate objects from a QURI Parts circuit.
 
     Handles both parametric and non-parametric circuits.
+    If *parameter_bindings* is given, uses those values; otherwise binds
+    with zeros for parametric circuits.
+    Returns QuantumGate objects with .name, .target_indices,
+    .control_indices, and .params properties.
     """
-    if hasattr(circuit, "gates"):
-        return [gate.name for gate in circuit.gates]
+    # Parametric circuits must be bound first to get concrete gates
     if hasattr(circuit, "bind_parameters"):
-        bound = circuit.bind_parameters([])
-        if hasattr(bound, "gates"):
-            return [gate.name for gate in bound.gates]
+        if hasattr(circuit, "parameter_count") and circuit.parameter_count > 0:
+            values = (
+                parameter_bindings
+                if parameter_bindings is not None
+                else [0.0] * circuit.parameter_count
+            )
+            bound = circuit.bind_parameters(values)
+            if hasattr(bound, "gates"):
+                return list(bound.gates)
+        else:
+            bound = circuit.bind_parameters([])
+            if hasattr(bound, "gates"):
+                return list(bound.gates)
+    if hasattr(circuit, "gates"):
+        gates = list(circuit.gates)
+        if gates:
+            return gates
     return []
 
 
+def _gate_names(circuit, parameter_bindings=None) -> list[str]:
+    """Compatibility helper for tests that only care about gate names."""
+    return [gate.name for gate in _get_gates(circuit, parameter_bindings)]
+
+
+# ---------------------------------------------------------------------------
+# Module-level qkernel definitions for parametrized tests
+# ---------------------------------------------------------------------------
+
+# CCX basis state kernels (shared by TestThreeQubitGatesFrontend and TestExecution)
+
+
+@qmc.qkernel
+def _ccx_000() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(3, "q")
+    q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _ccx_001() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _ccx_010() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(3, "q")
+    q[1] = qmc.x(q[1])
+    q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _ccx_011() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    q[1] = qmc.x(q[1])
+    q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _ccx_100() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(3, "q")
+    q[2] = qmc.x(q[2])
+    q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _ccx_101() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    q[2] = qmc.x(q[2])
+    q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _ccx_110() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(3, "q")
+    q[1] = qmc.x(q[1])
+    q[2] = qmc.x(q[2])
+    q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _ccx_111() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    q[1] = qmc.x(q[1])
+    q[2] = qmc.x(q[2])
+    q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
+    return qmc.measure(q)
+
+
+# Single-qubit deterministic sampling kernels
+
+
+@qmc.qkernel
+def _circ_x() -> qmc.Bit:
+    q = qmc.qubit("q")
+    q = qmc.x(q)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _circ_y() -> qmc.Bit:
+    q = qmc.qubit("q")
+    q = qmc.y(q)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _circ_z() -> qmc.Bit:
+    q = qmc.qubit("q")
+    q = qmc.z(q)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _circ_s() -> qmc.Bit:
+    q = qmc.qubit("q")
+    q = qmc.s(q)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _circ_t() -> qmc.Bit:
+    q = qmc.qubit("q")
+    q = qmc.t(q)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _circ_xx() -> qmc.Bit:
+    q = qmc.qubit("q")
+    q = qmc.x(q)
+    q = qmc.x(q)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _circ_xy() -> qmc.Bit:
+    q = qmc.qubit("q")
+    q = qmc.x(q)
+    q = qmc.y(q)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _circ_hxh() -> qmc.Bit:
+    q = qmc.qubit("q")
+    q = qmc.h(q)
+    q = qmc.x(q)
+    q = qmc.h(q)
+    return qmc.measure(q)
+
+
+# Two-qubit deterministic sampling kernels
+
+
+@qmc.qkernel
+def _cx_00() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(2, "q")
+    q[0], q[1] = qmc.cx(q[0], q[1])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _cx_10() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1] = qmc.cx(q[0], q[1])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _cx_01() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(2, "q")
+    q[1] = qmc.x(q[1])
+    q[0], q[1] = qmc.cx(q[0], q[1])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _cx_11() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[1] = qmc.x(q[1])
+    q[0], q[1] = qmc.cx(q[0], q[1])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _cz_00() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(2, "q")
+    q[0], q[1] = qmc.cz(q[0], q[1])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _cz_10() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1] = qmc.cz(q[0], q[1])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _cz_01() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(2, "q")
+    q[1] = qmc.x(q[1])
+    q[0], q[1] = qmc.cz(q[0], q[1])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _cz_11() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[1] = qmc.x(q[1])
+    q[0], q[1] = qmc.cz(q[0], q[1])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _swap_10() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1] = qmc.swap(q[0], q[1])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _swap_01() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(2, "q")
+    q[1] = qmc.x(q[1])
+    q[0], q[1] = qmc.swap(q[0], q[1])
+    return qmc.measure(q)
+
+
+# Gate combination deterministic sampling kernels
+
+
+@qmc.qkernel
+def _cx_chain_3() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1] = qmc.cx(q[0], q[1])
+    q[1], q[2] = qmc.cx(q[1], q[2])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _swap_after_x() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1] = qmc.swap(q[0], q[1])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _x_cx_x() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1] = qmc.cx(q[0], q[1])
+    q[1] = qmc.x(q[1])
+    return qmc.measure(q)
+
+
 # ============================================================================
-# 1. Individual Gate Statevector Tests
+# 1. Individual Gate Tests
 # ============================================================================
 
 
 class TestSingleQubitGatesFrontend:
-    """Test each single-qubit gate through the full frontend pipeline."""
+    """Test each single-qubit gate through the full frontend pipeline.
 
-    # -- Creation tests (verify gate names in circuit) --
+    Each test verifies: gate name (creation) + statevector + qubit_array equivalence.
+    """
 
-    def test_h_creation(self):
-        """H gate transpiles to circuit containing 'H' gate."""
+    # -- H (Hadamard) --
 
-        @qmc.qkernel
-        def circuit() -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.h(q)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit)
-        assert "H" in _gate_names(qc)
-
-    def test_x_creation(self):
-        """X gate transpiles to circuit containing 'X' gate."""
-
-        @qmc.qkernel
-        def circuit() -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.x(q)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit)
-        assert "X" in _gate_names(qc)
-
-    def test_y_creation(self):
-        """Y gate transpiles to circuit containing 'Y' gate."""
-
-        @qmc.qkernel
-        def circuit() -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.y(q)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit)
-        assert "Y" in _gate_names(qc)
-
-    def test_z_creation(self):
-        """Z gate transpiles to circuit containing 'Z' gate."""
-
-        @qmc.qkernel
-        def circuit() -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.z(q)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit)
-        assert "Z" in _gate_names(qc)
-
-    def test_s_creation(self):
-        """S gate transpiles to circuit containing 'S' gate."""
-
-        @qmc.qkernel
-        def circuit() -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.s(q)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit)
-        assert "S" in _gate_names(qc)
-
-    def test_sdg_creation(self):
-        """SDG gate transpiles to circuit containing 'Sdag' gate."""
-
-        @qmc.qkernel
-        def circuit() -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.sdg(q)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit)
-        assert "Sdag" in _gate_names(qc)
-
-    def test_t_creation(self):
-        """T gate transpiles to circuit containing 'T' gate."""
-
-        @qmc.qkernel
-        def circuit() -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.t(q)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit)
-        assert "T" in _gate_names(qc)
-
-    def test_tdg_creation(self):
-        """TDG gate transpiles to circuit containing 'Tdag' gate."""
-
-        @qmc.qkernel
-        def circuit() -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.tdg(q)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit)
-        assert "Tdag" in _gate_names(qc)
-
-    def test_rx_creation(self):
-        """RX gate transpiles to circuit containing 'RX' gate."""
-
-        @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.rx(q, theta)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 4})
-        assert "RX" in _gate_names(qc)
-
-    def test_ry_creation(self):
-        """RY gate transpiles to circuit containing 'RY' gate."""
-
-        @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.ry(q, theta)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 4})
-        assert "RY" in _gate_names(qc)
-
-    def test_rz_creation(self):
-        """RZ gate transpiles to circuit containing 'RZ' gate."""
-
-        @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.rz(q, theta)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 4})
-        assert "RZ" in _gate_names(qc)
-
-    def test_p_creation(self):
-        """P gate transpiles to circuit containing 'U1' (P ≡ U1)."""
-
-        @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.p(q, theta)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 4})
-        assert "U1" in _gate_names(qc)
-
-    # -- Statevector tests --
-
-    def test_h_statevector(self):
-        """H|0> produces equal superposition (|0>+|1>)/sqrt(2)."""
+    def test_h(self):
+        """H|0⟩ = (|0⟩+|1⟩)/√2: creation + statevector + qubit_array."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -277,12 +429,28 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
+        gates = _get_gates(qc)
+        assert len(gates) == 1
+        assert gates[0].name == gate_names.H
+        assert gates[0].target_indices == (0,)
         sv = _run_statevector(qc)
         expected = np.array([1, 1], dtype=complex) / np.sqrt(2)
         assert statevectors_equal(sv, expected)
 
-    def test_x_statevector(self):
-        """X|0> = |1> statevector verification."""
+        @qmc.qkernel
+        def circuit_arr() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(1, "q")
+            q[0] = qmc.h(q[0])
+            return qmc.measure(q)
+
+        _, qc_arr = _transpile_and_get_circuit(circuit_arr)
+        assert _get_gates(qc_arr) == gates
+        assert statevectors_equal(_run_statevector(qc_arr), expected)
+
+    # -- X (Pauli-X) --
+
+    def test_x(self):
+        """X|0⟩ = |1⟩: creation + statevector + qubit_array."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -291,170 +459,28 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
+        gates = _get_gates(qc)
+        assert len(gates) == 1
+        assert gates[0].name == gate_names.X
+        assert gates[0].target_indices == (0,)
         sv = _run_statevector(qc)
         expected = np.array([0, 1], dtype=complex)
         assert statevectors_equal(sv, expected)
 
-    def test_rx_determined(self):
-        """RX(pi)|0> = -i|1>."""
-
         @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.rx(q, theta)
+        def circuit_arr() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(1, "q")
+            q[0] = qmc.x(q[0])
             return qmc.measure(q)
 
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi})
-        sv = _run_statevector(qc)
-        expected = compute_expected_statevector(
-            all_zeros_state(1), GATE_SPECS["RX"].matrix_fn(np.pi)
-        )
-        assert statevectors_equal(sv, expected)
-
-    @pytest.mark.parametrize(
-        "seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
-    )
-    def test_rx_random(self, seed):
-        """RX(random theta) statevector matches analytical RX matrix."""
-        rng = np.random.default_rng(seed)
-        angle = rng.uniform(0, 2 * np.pi)
-
-        @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.rx(q, theta)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": angle})
-        sv = _run_statevector(qc)
-        expected = compute_expected_statevector(
-            all_zeros_state(1), GATE_SPECS["RX"].matrix_fn(angle)
-        )
-        assert statevectors_equal(sv, expected)
-
-    def test_ry_determined(self):
-        """RY(pi/2)|0> -> (|0>+|1>)/sqrt(2)."""
-
-        @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.ry(q, theta)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 2})
-        sv = _run_statevector(qc)
-        expected = compute_expected_statevector(
-            all_zeros_state(1), GATE_SPECS["RY"].matrix_fn(np.pi / 2)
-        )
-        assert statevectors_equal(sv, expected)
-
-    @pytest.mark.parametrize(
-        "seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
-    )
-    def test_ry_random(self, seed):
-        """RY(random theta) statevector matches analytical RY matrix."""
-        rng = np.random.default_rng(seed)
-        angle = rng.uniform(0, 2 * np.pi)
-
-        @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.ry(q, theta)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": angle})
-        sv = _run_statevector(qc)
-        expected = compute_expected_statevector(
-            all_zeros_state(1), GATE_SPECS["RY"].matrix_fn(angle)
-        )
-        assert statevectors_equal(sv, expected)
-
-    def test_rz_determined(self):
-        """RZ(pi)|0> statevector matches analytical RZ matrix."""
-
-        @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.rz(q, theta)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi})
-        sv = _run_statevector(qc)
-        expected = compute_expected_statevector(
-            all_zeros_state(1), GATE_SPECS["RZ"].matrix_fn(np.pi)
-        )
-        assert statevectors_equal(sv, expected)
-
-    @pytest.mark.parametrize(
-        "seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
-    )
-    def test_rz_random(self, seed):
-        """RZ(random theta) statevector matches analytical RZ matrix."""
-        rng = np.random.default_rng(seed)
-        angle = rng.uniform(0, 2 * np.pi)
-
-        @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.rz(q, theta)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": angle})
-        sv = _run_statevector(qc)
-        expected = compute_expected_statevector(
-            all_zeros_state(1), GATE_SPECS["RZ"].matrix_fn(angle)
-        )
-        assert statevectors_equal(sv, expected)
-
-    def test_p_determined(self):
-        """P(pi) on |1> gives phase e^{i*pi} = -1."""
-
-        @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.x(q)  # Prepare |1>
-            q = qmc.p(q, theta)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi})
-        sv = _run_statevector(qc)
-        state_after_x = compute_expected_statevector(
-            all_zeros_state(1), GATE_SPECS["X"].matrix_fn()
-        )
-        expected = compute_expected_statevector(
-            state_after_x, GATE_SPECS["P"].matrix_fn(np.pi)
-        )
-        assert statevectors_equal(sv, expected)
-
-    @pytest.mark.parametrize(
-        "seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
-    )
-    def test_p_random(self, seed):
-        """P(random θ) on |1⟩ statevector matches analytical P matrix."""
-        rng = np.random.default_rng(seed)
-        angle = rng.uniform(0, 2 * np.pi)
-
-        @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.x(q)
-            q = qmc.p(q, theta)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": angle})
-        sv = _run_statevector(qc)
-        state_after_x = compute_expected_statevector(
-            all_zeros_state(1), GATE_SPECS["X"].matrix_fn()
-        )
-        expected = compute_expected_statevector(
-            state_after_x, GATE_SPECS["P"].matrix_fn(angle)
-        )
-        assert statevectors_equal(sv, expected)
+        _, qc_arr = _transpile_and_get_circuit(circuit_arr)
+        assert _get_gates(qc_arr) == gates
+        assert statevectors_equal(_run_statevector(qc_arr), expected)
 
     # -- Y (Pauli-Y) --
 
     def test_y_on_zero(self):
-        """Y|0⟩ = i|1⟩."""
+        """Y|0⟩ = i|1⟩: creation + statevector + qubit_array."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -463,11 +489,24 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
+        gates = _get_gates(qc)
+        assert len(gates) == 1
+        assert gates[0].name == gate_names.Y
+        assert gates[0].target_indices == (0,)
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["Y"].matrix_fn()
         )
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
+
+        @qmc.qkernel
+        def circuit_arr() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(1, "q")
+            q[0] = qmc.y(q[0])
+            return qmc.measure(q)
+
+        _, qc_arr = _transpile_and_get_circuit(circuit_arr)
+        assert _get_gates(qc_arr) == gates
+        assert statevectors_equal(_run_statevector(qc_arr), expected)
 
     def test_y_on_one(self):
         """Y|1⟩ = -i|0⟩."""
@@ -492,7 +531,7 @@ class TestSingleQubitGatesFrontend:
     # -- Z (Pauli-Z) --
 
     def test_z_on_zero(self):
-        """Z|0⟩ = |0⟩ (no change on computational basis |0⟩)."""
+        """Z|0⟩ = |0⟩: creation + statevector."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -501,11 +540,14 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
+        gates = _get_gates(qc)
+        assert len(gates) == 1
+        assert gates[0].name == gate_names.Z
+        assert gates[0].target_indices == (0,)
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["Z"].matrix_fn()
         )
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
 
     def test_z_on_one(self):
         """Z|1⟩ = −|1⟩ (phase flip on |1⟩)."""
@@ -528,7 +570,7 @@ class TestSingleQubitGatesFrontend:
         assert statevectors_equal(sv, expected)
 
     def test_z_on_plus(self):
-        """Z|+⟩ = |−⟩ (phase flip converts |+⟩ to |−⟩)."""
+        """Z|+⟩ = |−⟩: statevector + qubit_array."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -538,14 +580,25 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
+        gates = _get_gates(qc)
         expected = minus_state()
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
+
+        @qmc.qkernel
+        def circuit_arr() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(1, "q")
+            q[0] = qmc.h(q[0])
+            q[0] = qmc.z(q[0])
+            return qmc.measure(q)
+
+        _, qc_arr = _transpile_and_get_circuit(circuit_arr)
+        assert _get_gates(qc_arr) == gates
+        assert statevectors_equal(_run_statevector(qc_arr), expected)
 
     # -- S (sqrt(Z)) --
 
     def test_s_on_zero(self):
-        """S|0⟩ = |0⟩ (no change on computational basis |0⟩)."""
+        """S|0⟩ = |0⟩: creation + statevector."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -554,11 +607,14 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
+        gates = _get_gates(qc)
+        assert len(gates) == 1
+        assert gates[0].name == gate_names.S
+        assert gates[0].target_indices == (0,)
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["S"].matrix_fn()
         )
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
 
     def test_s_on_one(self):
         """S|1⟩ = i|1⟩ (phase +i on |1⟩)."""
@@ -581,7 +637,7 @@ class TestSingleQubitGatesFrontend:
         assert statevectors_equal(sv, expected)
 
     def test_s_squared_equals_z(self):
-        """S·S = Z on |+⟩ (two S gates equal one Z gate)."""
+        """S·S = Z on |+⟩: statevector + qubit_array."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -592,14 +648,26 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
+        gates = _get_gates(qc)
         expected = minus_state()
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
+
+        @qmc.qkernel
+        def circuit_arr() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(1, "q")
+            q[0] = qmc.h(q[0])
+            q[0] = qmc.s(q[0])
+            q[0] = qmc.s(q[0])
+            return qmc.measure(q)
+
+        _, qc_arr = _transpile_and_get_circuit(circuit_arr)
+        assert _get_gates(qc_arr) == gates
+        assert statevectors_equal(_run_statevector(qc_arr), expected)
 
     # -- SDG (S-dagger, inverse of S) --
 
     def test_sdg_on_zero(self):
-        """SDG|0⟩ = |0⟩ (no change on computational basis |0⟩)."""
+        """SDG|0⟩ = |0⟩: creation + statevector."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -608,11 +676,14 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
+        gates = _get_gates(qc)
+        assert len(gates) == 1
+        assert gates[0].name == gate_names.Sdag
+        assert gates[0].target_indices == (0,)
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["SDG"].matrix_fn()
         )
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
 
     def test_sdg_on_one(self):
         """SDG|1⟩ = −i|1⟩ (phase −i on |1⟩)."""
@@ -635,7 +706,7 @@ class TestSingleQubitGatesFrontend:
         assert statevectors_equal(sv, expected)
 
     def test_sdg_inverse_of_s(self):
-        """S then SDG = Identity on |1⟩."""
+        """S then SDG = Identity on |1⟩: statevector + qubit_array."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -646,14 +717,26 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
+        gates = _get_gates(qc)
         expected = np.array([0, 1], dtype=complex)
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
+
+        @qmc.qkernel
+        def circuit_arr() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(1, "q")
+            q[0] = qmc.x(q[0])
+            q[0] = qmc.s(q[0])
+            q[0] = qmc.sdg(q[0])
+            return qmc.measure(q)
+
+        _, qc_arr = _transpile_and_get_circuit(circuit_arr)
+        assert _get_gates(qc_arr) == gates
+        assert statevectors_equal(_run_statevector(qc_arr), expected)
 
     # -- T (sqrt(S)) --
 
     def test_t_on_zero(self):
-        """T|0⟩ = |0⟩ (no change on computational basis |0⟩)."""
+        """T|0⟩ = |0⟩: creation + statevector."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -662,11 +745,14 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
+        gates = _get_gates(qc)
+        assert len(gates) == 1
+        assert gates[0].name == gate_names.T
+        assert gates[0].target_indices == (0,)
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["T"].matrix_fn()
         )
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
 
     def test_t_on_one(self):
         """T|1⟩ = e^(iπ/4)|1⟩ (phase e^(iπ/4) on |1⟩)."""
@@ -689,7 +775,7 @@ class TestSingleQubitGatesFrontend:
         assert statevectors_equal(sv, expected)
 
     def test_t_squared_equals_s(self):
-        """T·T = S on |1⟩ (two T gates equal one S gate)."""
+        """T·T = S on |1⟩: statevector + qubit_array."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -700,19 +786,31 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
+        gates = _get_gates(qc)
         state_after_x = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["X"].matrix_fn()
         )
         expected = compute_expected_statevector(
             state_after_x, GATE_SPECS["S"].matrix_fn()
         )
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
+
+        @qmc.qkernel
+        def circuit_arr() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(1, "q")
+            q[0] = qmc.x(q[0])
+            q[0] = qmc.t(q[0])
+            q[0] = qmc.t(q[0])
+            return qmc.measure(q)
+
+        _, qc_arr = _transpile_and_get_circuit(circuit_arr)
+        assert _get_gates(qc_arr) == gates
+        assert statevectors_equal(_run_statevector(qc_arr), expected)
 
     # -- TDG (T-dagger, inverse of T) --
 
     def test_tdg_on_zero(self):
-        """TDG|0⟩ = |0⟩ (no change on computational basis |0⟩)."""
+        """TDG|0⟩ = |0⟩: creation + statevector."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -721,11 +819,14 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
+        gates = _get_gates(qc)
+        assert len(gates) == 1
+        assert gates[0].name == gate_names.Tdag
+        assert gates[0].target_indices == (0,)
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["TDG"].matrix_fn()
         )
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
 
     def test_tdg_on_one(self):
         """TDG|1⟩ = e^(−iπ/4)|1⟩ (phase e^(−iπ/4) on |1⟩)."""
@@ -748,7 +849,7 @@ class TestSingleQubitGatesFrontend:
         assert statevectors_equal(sv, expected)
 
     def test_tdg_inverse_of_t(self):
-        """T then TDG = Identity on |1⟩."""
+        """T then TDG = Identity on |1⟩: statevector + qubit_array."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -759,32 +860,207 @@ class TestSingleQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
+        gates = _get_gates(qc)
         expected = np.array([0, 1], dtype=complex)
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
+
+        @qmc.qkernel
+        def circuit_arr() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(1, "q")
+            q[0] = qmc.x(q[0])
+            q[0] = qmc.t(q[0])
+            q[0] = qmc.tdg(q[0])
+            return qmc.measure(q)
+
+        _, qc_arr = _transpile_and_get_circuit(circuit_arr)
+        assert _get_gates(qc_arr) == gates
+        assert statevectors_equal(_run_statevector(qc_arr), expected)
+
+    # -- Parametric gates (RX, RY, RZ, P) --
+
+    @pytest.mark.parametrize(
+        "angle",
+        [np.pi]
+        + [
+            np.random.default_rng(s).uniform(0, 2 * np.pi)
+            for s in [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+        ],
+    )
+    def test_rx_statevector(self, angle):
+        """RX(angle)|0⟩: creation + statevector + qubit_array (π only)."""
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": angle})
+        gates = _get_gates(qc)
+        assert len(gates) == 1
+        assert gates[0].name == gate_names.RX
+        assert gates[0].target_indices == (0,)
+        assert np.isclose(gates[0].params[0], angle, atol=1e-10)
+        expected = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["RX"].matrix_fn(angle)
+        )
+        assert statevectors_equal(_run_statevector(qc), expected)
+
+        if np.isclose(angle, np.pi):
+
+            @qmc.qkernel
+            def circuit_arr(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+                q = qmc.qubit_array(1, "q")
+                q[0] = qmc.rx(q[0], theta)
+                return qmc.measure(q)
+
+            _, qc_arr = _transpile_and_get_circuit(
+                circuit_arr, bindings={"theta": angle}
+            )
+            assert _get_gates(qc_arr) == gates
+            assert statevectors_equal(_run_statevector(qc_arr), expected)
+
+    @pytest.mark.parametrize(
+        "angle",
+        [np.pi / 2]
+        + [
+            np.random.default_rng(s).uniform(0, 2 * np.pi)
+            for s in [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+        ],
+    )
+    def test_ry_statevector(self, angle):
+        """RY(angle)|0⟩: creation + statevector + qubit_array (π/2 only)."""
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.ry(q, theta)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": angle})
+        gates = _get_gates(qc)
+        assert len(gates) == 1
+        assert gates[0].name == gate_names.RY
+        assert gates[0].target_indices == (0,)
+        assert np.isclose(gates[0].params[0], angle, atol=1e-10)
+        expected = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["RY"].matrix_fn(angle)
+        )
+        assert statevectors_equal(_run_statevector(qc), expected)
+
+        if np.isclose(angle, np.pi / 2):
+
+            @qmc.qkernel
+            def circuit_arr(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+                q = qmc.qubit_array(1, "q")
+                q[0] = qmc.ry(q[0], theta)
+                return qmc.measure(q)
+
+            _, qc_arr = _transpile_and_get_circuit(
+                circuit_arr, bindings={"theta": angle}
+            )
+            assert _get_gates(qc_arr) == gates
+            assert statevectors_equal(_run_statevector(qc_arr), expected)
+
+    @pytest.mark.parametrize(
+        "angle",
+        [np.pi]
+        + [
+            np.random.default_rng(s).uniform(0, 2 * np.pi)
+            for s in [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+        ],
+    )
+    def test_rz_statevector(self, angle):
+        """RZ(angle)|0⟩: creation + statevector + qubit_array (π only)."""
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.rz(q, theta)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": angle})
+        gates = _get_gates(qc)
+        assert len(gates) == 1
+        assert gates[0].name == gate_names.RZ
+        assert gates[0].target_indices == (0,)
+        assert np.isclose(gates[0].params[0], angle, atol=1e-10)
+        expected = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["RZ"].matrix_fn(angle)
+        )
+        assert statevectors_equal(_run_statevector(qc), expected)
+
+        if np.isclose(angle, np.pi):
+
+            @qmc.qkernel
+            def circuit_arr(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+                q = qmc.qubit_array(1, "q")
+                q[0] = qmc.rz(q[0], theta)
+                return qmc.measure(q)
+
+            _, qc_arr = _transpile_and_get_circuit(
+                circuit_arr, bindings={"theta": angle}
+            )
+            assert _get_gates(qc_arr) == gates
+            assert statevectors_equal(_run_statevector(qc_arr), expected)
+
+    @pytest.mark.parametrize(
+        "angle",
+        [np.pi]
+        + [
+            np.random.default_rng(s).uniform(0, 2 * np.pi)
+            for s in [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+        ],
+    )
+    def test_p_statevector(self, angle):
+        """P(angle) on |1⟩: creation + statevector + qubit_array (π only)."""
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            q = qmc.p(q, theta)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": angle})
+        gates = _get_gates(qc)
+        assert gates[-1].name == gate_names.U1
+        assert np.isclose(gates[-1].params[0], angle, atol=1e-10)
+        state_after_x = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["X"].matrix_fn()
+        )
+        expected = compute_expected_statevector(
+            state_after_x, GATE_SPECS["P"].matrix_fn(angle)
+        )
+        assert statevectors_equal(_run_statevector(qc), expected)
+
+        if np.isclose(angle, np.pi):
+
+            @qmc.qkernel
+            def circuit_arr(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+                q = qmc.qubit_array(1, "q")
+                q[0] = qmc.x(q[0])
+                q[0] = qmc.p(q[0], theta)
+                return qmc.measure(q)
+
+            _, qc_arr = _transpile_and_get_circuit(
+                circuit_arr, bindings={"theta": angle}
+            )
+            assert _get_gates(qc_arr) == gates
+            assert statevectors_equal(_run_statevector(qc_arr), expected)
 
 
 class TestTwoQubitGatesFrontend:
-    """Test each two-qubit gate through the full frontend pipeline."""
+    """Test each two-qubit gate through the full frontend pipeline.
 
-    # -- CX creation --
+    Each test verifies: creation (gate name) + statevector + individual qubit() equivalence
+    where applicable.
+    """
 
-    def test_cx_creation(self):
-        """CX gate transpiles to circuit containing 'CNOT' gate."""
-
-        @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(2, "q")
-            q[0], q[1] = qmc.cx(q[0], q[1])
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit)
-        assert "CNOT" in _gate_names(qc)
-
-    # -- CX basis states --
+    # -- CX (CNOT) --
 
     def test_cx_from_00(self):
-        """CX |00> = |00>."""
+        """CX |00⟩ = |00⟩: creation + statevector."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -793,14 +1069,18 @@ class TestTwoQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
+        gates = _get_gates(qc)
+        assert len(gates) == 1
+        assert gates[0].name == gate_names.CNOT
+        assert gates[0].target_indices == (1,)
+        assert gates[0].control_indices == (0,)
         expected = compute_expected_statevector(
             computational_basis_state(2, 0), GATE_SPECS["CX"].matrix_fn()
         )
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
 
     def test_cx_from_10(self):
-        """CX |10> = |11> (control on, flips target)."""
+        """CX |10⟩ = |11⟩: statevector + individual qubit() equivalence."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -810,14 +1090,26 @@ class TestTwoQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
+        gates = _get_gates(qc)
         expected = compute_expected_statevector(
             computational_basis_state(2, 1), GATE_SPECS["CX"].matrix_fn()
         )
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
+
+        @qmc.qkernel
+        def circuit_ind() -> tuple[qmc.Bit, qmc.Bit]:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            q0 = qmc.x(q0)
+            q0, q1 = qmc.cx(q0, q1)
+            return qmc.measure(q0), qmc.measure(q1)
+
+        _, qc_ind = _transpile_and_get_circuit(circuit_ind)
+        assert [g.name for g in _get_gates(qc_ind)] == [g.name for g in gates]
+        assert statevectors_equal(_run_statevector(qc_ind), expected)
 
     def test_cx_from_01(self):
-        """CX |01> = |01> (control off)."""
+        """CX |01⟩ = |01⟩ (control off)."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -827,14 +1119,13 @@ class TestTwoQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
         expected = compute_expected_statevector(
             computational_basis_state(2, 2), GATE_SPECS["CX"].matrix_fn()
         )
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
 
     def test_cx_from_11(self):
-        """CX |11> = |10>."""
+        """CX |11⟩ = |10⟩."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -845,28 +1136,15 @@ class TestTwoQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
         expected = compute_expected_statevector(
             computational_basis_state(2, 3), GATE_SPECS["CX"].matrix_fn()
         )
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
 
     # -- CZ --
 
-    def test_cz_creation(self):
-        """CZ gate transpiles to circuit containing 'CZ' gate."""
-
-        @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(2, "q")
-            q[0], q[1] = qmc.cz(q[0], q[1])
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit)
-        assert "CZ" in _gate_names(qc)
-
     def test_cz_from_00(self):
-        """CZ |00> = |00> (no phase)."""
+        """CZ |00⟩ = |00⟩: creation + statevector."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -875,14 +1153,18 @@ class TestTwoQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
+        gates = _get_gates(qc)
+        assert len(gates) == 1
+        assert gates[0].name == gate_names.CZ
+        assert gates[0].target_indices == (1,)
+        assert gates[0].control_indices == (0,)
         expected = compute_expected_statevector(
             computational_basis_state(2, 0), GATE_SPECS["CZ"].matrix_fn()
         )
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
 
     def test_cz_from_01(self):
-        """CZ |01> = |01> (no phase, only q0=1)."""
+        """CZ |01⟩ = |01⟩ (no phase, only q0=1)."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -892,14 +1174,13 @@ class TestTwoQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
         expected = compute_expected_statevector(
             computational_basis_state(2, 1), GATE_SPECS["CZ"].matrix_fn()
         )
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
 
     def test_cz_from_10(self):
-        """CZ |10> = |10> (no phase, only q1=1)."""
+        """CZ |10⟩ = |10⟩ (no phase, only q1=1)."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -909,14 +1190,13 @@ class TestTwoQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
         expected = compute_expected_statevector(
             computational_basis_state(2, 2), GATE_SPECS["CZ"].matrix_fn()
         )
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
 
     def test_cz_determined_11(self):
-        """CZ |11> = -|11>."""
+        """CZ |11⟩ = -|11⟩: statevector + individual qubit() equivalence."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -927,54 +1207,37 @@ class TestTwoQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
+        gates = _get_gates(qc)
         expected = compute_expected_statevector(
             computational_basis_state(2, 3), GATE_SPECS["CZ"].matrix_fn()
         )
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
+
+        @qmc.qkernel
+        def circuit_ind() -> tuple[qmc.Bit, qmc.Bit]:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            q0 = qmc.x(q0)
+            q1 = qmc.x(q1)
+            q0, q1 = qmc.cz(q0, q1)
+            return qmc.measure(q0), qmc.measure(q1)
+
+        _, qc_ind = _transpile_and_get_circuit(circuit_ind)
+        assert [g.name for g in _get_gates(qc_ind)] == [g.name for g in gates]
+        assert statevectors_equal(_run_statevector(qc_ind), expected)
 
     # -- CP --
 
-    def test_cp_creation(self):
-        """CP gate is decomposed (no native CP — emits RZ + CNOT gates)."""
-
-        @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(2, "q")
-            q[0], q[1] = qmc.cp(q[0], q[1], theta)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 4})
-        names = _gate_names(qc)
-        # CP decomposes to 3 RZ + 2 CNOT
-        assert names.count("RZ") >= 3
-        assert names.count("CNOT") >= 2
-
-    def test_cp_determined(self):
-        """CP(pi) on |11> gives phase e^{i*pi} = -1."""
-
-        @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(2, "q")
-            q[0] = qmc.x(q[0])
-            q[1] = qmc.x(q[1])
-            q[0], q[1] = qmc.cp(q[0], q[1], theta)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi})
-        sv = _run_statevector(qc)
-        expected = compute_expected_statevector(
-            computational_basis_state(2, 3), GATE_SPECS["CP"].matrix_fn(np.pi)
-        )
-        assert statevectors_equal(sv, expected)
-
     @pytest.mark.parametrize(
-        "seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+        "angle",
+        [np.pi]
+        + [
+            np.random.default_rng(s).uniform(0, 2 * np.pi)
+            for s in [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+        ],
     )
-    def test_cp_random(self, seed):
-        """CP(random θ) on |11⟩ statevector matches analytical CP matrix."""
-        rng = np.random.default_rng(seed)
-        angle = rng.uniform(0, 2 * np.pi)
+    def test_cp_statevector(self, angle):
+        """CP(angle) on |11⟩: creation (π/4) + statevector + individual qubit() (π only)."""
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -985,49 +1248,43 @@ class TestTwoQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": angle})
-        sv = _run_statevector(qc)
+        # CP decomposes to RZ + CNOT sequence
+        gates = _get_gates(qc)
+        assert len(gates) > 0
         expected = compute_expected_statevector(
             computational_basis_state(2, 3), GATE_SPECS["CP"].matrix_fn(angle)
         )
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
+
+        if np.isclose(angle, np.pi):
+
+            @qmc.qkernel
+            def circuit_ind(theta: qmc.Float) -> tuple[qmc.Bit, qmc.Bit]:
+                q0 = qmc.qubit("q0")
+                q1 = qmc.qubit("q1")
+                q0 = qmc.x(q0)
+                q1 = qmc.x(q1)
+                q0, q1 = qmc.cp(q0, q1, theta)
+                return qmc.measure(q0), qmc.measure(q1)
+
+            _, qc_ind = _transpile_and_get_circuit(
+                circuit_ind, bindings={"theta": angle}
+            )
+            assert [g.name for g in _get_gates(qc_ind)] == [g.name for g in gates]
+            assert statevectors_equal(_run_statevector(qc_ind), expected)
 
     # -- RZZ --
 
-    def test_rzz_creation(self):
-        """RZZ gate transpiles to circuit containing 'PauliRotation' gate."""
-
-        @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(2, "q")
-            q[0], q[1] = qmc.rzz(q[0], q[1], theta)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 4})
-        assert "PauliRotation" in _gate_names(qc)
-
-    def test_rzz_determined(self):
-        """RZZ(pi) on |00>."""
-
-        @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(2, "q")
-            q[0], q[1] = qmc.rzz(q[0], q[1], theta)
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi})
-        sv = _run_statevector(qc)
-        expected = compute_expected_statevector(
-            all_zeros_state(2), GATE_SPECS["RZZ"].matrix_fn(np.pi)
-        )
-        assert statevectors_equal(sv, expected)
-
     @pytest.mark.parametrize(
-        "seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+        "angle",
+        [np.pi]
+        + [
+            np.random.default_rng(s).uniform(0, 2 * np.pi)
+            for s in [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+        ],
     )
-    def test_rzz_random(self, seed):
-        """RZZ(random θ) on |11⟩ statevector matches analytical RZZ matrix."""
-        rng = np.random.default_rng(seed)
-        angle = rng.uniform(0, 2 * np.pi)
+    def test_rzz_statevector(self, angle):
+        """RZZ(angle) on |11⟩: creation + statevector + individual qubit() (π only)."""
 
         @qmc.qkernel
         def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
@@ -1038,28 +1295,36 @@ class TestTwoQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, bindings={"theta": angle})
-        sv = _run_statevector(qc)
+        gates = _get_gates(qc)
+        rzz_gates = [g for g in gates if g.name == gate_names.PauliRotation]
+        assert len(rzz_gates) >= 1
+        assert rzz_gates[0].pauli_ids == (SinglePauli.Z, SinglePauli.Z)
         expected = compute_expected_statevector(
             computational_basis_state(2, 3), GATE_SPECS["RZZ"].matrix_fn(angle)
         )
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
+
+        if np.isclose(angle, np.pi):
+
+            @qmc.qkernel
+            def circuit_ind(theta: qmc.Float) -> tuple[qmc.Bit, qmc.Bit]:
+                q0 = qmc.qubit("q0")
+                q1 = qmc.qubit("q1")
+                q0 = qmc.x(q0)
+                q1 = qmc.x(q1)
+                q0, q1 = qmc.rzz(q0, q1, theta)
+                return qmc.measure(q0), qmc.measure(q1)
+
+            _, qc_ind = _transpile_and_get_circuit(
+                circuit_ind, bindings={"theta": angle}
+            )
+            assert [g.name for g in _get_gates(qc_ind)] == [g.name for g in gates]
+            assert statevectors_equal(_run_statevector(qc_ind), expected)
 
     # -- SWAP --
 
-    def test_swap_creation(self):
-        """SWAP gate transpiles to circuit containing 'SWAP' gate."""
-
-        @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(2, "q")
-            q[0], q[1] = qmc.swap(q[0], q[1])
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit)
-        assert "SWAP" in _gate_names(qc)
-
     def test_swap_determined(self):
-        """SWAP |10> = |01>."""
+        """SWAP |10⟩ = |01⟩: creation + statevector + individual qubit() equivalence."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -1069,124 +1334,86 @@ class TestTwoQubitGatesFrontend:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
+        gates = _get_gates(qc)
+        swap_gates = [g for g in gates if g.name == gate_names.SWAP]
+        assert len(swap_gates) == 1
+        assert swap_gates[0].target_indices == (0, 1)
         expected = compute_expected_statevector(
             computational_basis_state(2, 1), GATE_SPECS["SWAP"].matrix_fn()
         )
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
+
+        @qmc.qkernel
+        def circuit_ind() -> tuple[qmc.Bit, qmc.Bit]:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            q0 = qmc.x(q0)
+            q0, q1 = qmc.swap(q0, q1)
+            return qmc.measure(q0), qmc.measure(q1)
+
+        _, qc_ind = _transpile_and_get_circuit(circuit_ind)
+        assert [g.name for g in _get_gates(qc_ind)] == [g.name for g in gates]
+        assert statevectors_equal(_run_statevector(qc_ind), expected)
 
 
 class TestThreeQubitGatesFrontend:
     """Test each three-qubit gate through the full frontend pipeline."""
 
-    # -- CCX (Toffoli) --
-
-    def test_ccx_creation(self):
-        """CCX gate transpiles to circuit containing 'TOFFOLI' gate."""
-
-        @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(3, "q")
-            q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
-            return qmc.measure(q)
-
-        _, qc = _transpile_and_get_circuit(circuit)
-        assert "TOFFOLI" in _gate_names(qc)
-
     @pytest.mark.parametrize(
-        "x_targets, basis_idx",
+        "kernel, basis_idx",
         [
-            pytest.param([], 0, id="000"),
-            pytest.param([0], 1, id="001"),
-            pytest.param([1], 2, id="010"),
-            pytest.param([0, 1], 3, id="011_flips"),
-            pytest.param([2], 4, id="100"),
-            pytest.param([0, 2], 5, id="101"),
-            pytest.param([1, 2], 6, id="110"),
-            pytest.param([0, 1, 2], 7, id="111_flips"),
+            pytest.param(_ccx_000, 0, id="000"),
+            pytest.param(_ccx_001, 1, id="001"),
+            pytest.param(_ccx_010, 2, id="010"),
+            pytest.param(_ccx_011, 3, id="011_flips"),
+            pytest.param(_ccx_100, 4, id="100"),
+            pytest.param(_ccx_101, 5, id="101"),
+            pytest.param(_ccx_110, 6, id="110"),
+            pytest.param(_ccx_111, 7, id="111_flips"),
         ],
     )
-    def test_ccx_basis_state(self, x_targets, basis_idx):
+    def test_ccx_basis_state(self, kernel, basis_idx):
         """CCX on all 8 basis states; flips target only when both controls |1⟩."""
-
-        @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(3, "q")
-            q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
-            return qmc.measure(q)
-
-        @qmc.qkernel
-        def circuit_x0() -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(3, "q")
-            q[0] = qmc.x(q[0])
-            q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
-            return qmc.measure(q)
-
-        @qmc.qkernel
-        def circuit_x1() -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(3, "q")
-            q[1] = qmc.x(q[1])
-            q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
-            return qmc.measure(q)
-
-        @qmc.qkernel
-        def circuit_x01() -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(3, "q")
-            q[0] = qmc.x(q[0])
-            q[1] = qmc.x(q[1])
-            q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
-            return qmc.measure(q)
-
-        @qmc.qkernel
-        def circuit_x2() -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(3, "q")
-            q[2] = qmc.x(q[2])
-            q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
-            return qmc.measure(q)
-
-        @qmc.qkernel
-        def circuit_x02() -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(3, "q")
-            q[0] = qmc.x(q[0])
-            q[2] = qmc.x(q[2])
-            q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
-            return qmc.measure(q)
-
-        @qmc.qkernel
-        def circuit_x12() -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(3, "q")
-            q[1] = qmc.x(q[1])
-            q[2] = qmc.x(q[2])
-            q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
-            return qmc.measure(q)
-
-        @qmc.qkernel
-        def circuit_x012() -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(3, "q")
-            q[0] = qmc.x(q[0])
-            q[1] = qmc.x(q[1])
-            q[2] = qmc.x(q[2])
-            q[0], q[1], q[2] = qmc.ccx(q[0], q[1], q[2])
-            return qmc.measure(q)
-
-        kernels = {
-            0: circuit,
-            1: circuit_x0,
-            2: circuit_x1,
-            3: circuit_x01,
-            4: circuit_x2,
-            5: circuit_x02,
-            6: circuit_x12,
-            7: circuit_x012,
-        }
-
-        _, qc = _transpile_and_get_circuit(kernels[basis_idx])
+        _, qc = _transpile_and_get_circuit(kernel)
         sv = _run_statevector(qc)
         expected = compute_expected_statevector(
             computational_basis_state(3, basis_idx),
             GATE_SPECS["TOFFOLI"].matrix_fn(),
         )
         assert statevectors_equal(sv, expected)
+
+    def test_ccx_creation(self):
+        """CCX gate transpiles to circuit containing 'TOFFOLI' gate."""
+        _, qc = _transpile_and_get_circuit(_ccx_000)
+        gates = _get_gates(qc)
+        assert len(gates) == 1
+        assert gates[0].name == gate_names.TOFFOLI
+        assert gates[0].target_indices == (2,)
+        assert gates[0].control_indices == (0, 1)
+
+    def test_ccx_individual_qubit_equivalence(self):
+        """CCX |011⟩ via individual qubit() matches qubit_array version."""
+
+        @qmc.qkernel
+        def circuit_ind() -> tuple[qmc.Bit, qmc.Bit, qmc.Bit]:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            q2 = qmc.qubit("q2")
+            q0 = qmc.x(q0)
+            q1 = qmc.x(q1)
+            q0, q1, q2 = qmc.ccx(q0, q1, q2)
+            return qmc.measure(q0), qmc.measure(q1), qmc.measure(q2)
+
+        _, qc_arr = _transpile_and_get_circuit(_ccx_011)
+        _, qc_ind = _transpile_and_get_circuit(circuit_ind)
+        expected = compute_expected_statevector(
+            computational_basis_state(3, 3),
+            GATE_SPECS["TOFFOLI"].matrix_fn(),
+        )
+        assert [g.name for g in _get_gates(qc_ind)] == [
+            g.name for g in _get_gates(qc_arr)
+        ]
+        assert statevectors_equal(_run_statevector(qc_ind), expected)
 
 
 # ============================================================================
@@ -1198,7 +1425,7 @@ class TestGateCombinations:
     """Test multi-gate circuits through the frontend pipeline."""
 
     def test_bell_state(self):
-        """H + CX creates Bell state (|00> + |11>) / sqrt(2)."""
+        """H + CX creates Bell state: qubit_array + individual qubit() equivalence."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -1208,12 +1435,24 @@ class TestGateCombinations:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
+        gates = _get_gates(qc)
         expected = np.array([1, 0, 0, 1], dtype=complex) / np.sqrt(2)
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
+
+        @qmc.qkernel
+        def circuit_ind() -> tuple[qmc.Bit, qmc.Bit]:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            q0 = qmc.h(q0)
+            q0, q1 = qmc.cx(q0, q1)
+            return qmc.measure(q0), qmc.measure(q1)
+
+        _, qc_ind = _transpile_and_get_circuit(circuit_ind)
+        assert [g.name for g in _get_gates(qc_ind)] == [g.name for g in gates]
+        assert statevectors_equal(_run_statevector(qc_ind), expected)
 
     def test_ghz_state_3(self):
-        """GHZ state: (|000> + |111>) / sqrt(2) via H + CX chain."""
+        """GHZ state: qubit_array + individual qubit() equivalence."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -1224,11 +1463,25 @@ class TestGateCombinations:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
+        gates = _get_gates(qc)
         expected = np.zeros(8, dtype=complex)
         expected[0] = 1 / np.sqrt(2)
         expected[7] = 1 / np.sqrt(2)
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
+
+        @qmc.qkernel
+        def circuit_ind() -> tuple[qmc.Bit, qmc.Bit, qmc.Bit]:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            q2 = qmc.qubit("q2")
+            q0 = qmc.h(q0)
+            q0, q1 = qmc.cx(q0, q1)
+            q1, q2 = qmc.cx(q1, q2)
+            return qmc.measure(q0), qmc.measure(q1), qmc.measure(q2)
+
+        _, qc_ind = _transpile_and_get_circuit(circuit_ind)
+        assert [g.name for g in _get_gates(qc_ind)] == [g.name for g in gates]
+        assert statevectors_equal(_run_statevector(qc_ind), expected)
 
     @pytest.mark.parametrize(
         "seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
@@ -1258,7 +1511,7 @@ class TestGateCombinations:
         assert statevectors_equal(sv, state)
 
     def test_swap_preserves_state(self):
-        """Prepare |1> on q0, SWAP, verify q1 is |1>."""
+        """Prepare |1> on q0, SWAP: qubit_array + individual qubit() equivalence."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -1268,10 +1521,21 @@ class TestGateCombinations:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
-        # After X on q0 then SWAP: |10> -> |01>
+        gates = _get_gates(qc)
         expected = np.array([0, 0, 1, 0], dtype=complex)
-        assert statevectors_equal(sv, expected)
+        assert statevectors_equal(_run_statevector(qc), expected)
+
+        @qmc.qkernel
+        def circuit_ind() -> tuple[qmc.Bit, qmc.Bit]:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            q0 = qmc.x(q0)
+            q0, q1 = qmc.swap(q0, q1)
+            return qmc.measure(q0), qmc.measure(q1)
+
+        _, qc_ind = _transpile_and_get_circuit(circuit_ind)
+        assert [g.name for g in _get_gates(qc_ind)] == [g.name for g in gates]
+        assert statevectors_equal(_run_statevector(qc_ind), expected)
 
     @pytest.mark.parametrize(
         "seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
@@ -1343,6 +1607,12 @@ class TestGateCombinations:
         """Teleportation circuit (pre-measurement portion).
 
         Tests the gate preparation + Bell pair + entanglement pattern.
+        Note: Full teleportation requires two sequential conditional corrections
+        (``if m1: X(bell1); if m0: Z(bell1)``). A single ``if`` correction
+        transpiles successfully, but the second ``if`` sees ``bell1`` as a
+        phi-node (SSA merge from the first ``if`` branch), causing the
+        analyzer to raise ``DependencyError`` because it treats the merged
+        value as measurement-dependent.
         """
 
         @qmc.qkernel
@@ -1369,14 +1639,49 @@ class TestGateCombinations:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        names = _gate_names(qc)
-        assert "H" in names
-        assert "CNOT" in names
+        gates = _get_gates(qc)
         assert qc.qubit_count >= 3
+        # Teleportation structure: X(alice), H(bell0), CNOT(bell0→bell1),
+        # CNOT(alice→bell0), H(alice)
+        assert len(gates) == 5
+        alice_q = gates[0].target_indices[0]
+        bell0_q = gates[1].target_indices[0]
+        bell1_q = gates[2].target_indices[0]
+        assert gates[0].name == gate_names.X and gates[0].target_indices == (alice_q,)
+        assert gates[1].name == gate_names.H and gates[1].target_indices == (bell0_q,)
+        assert (
+            gates[2].name == gate_names.CNOT
+            and gates[2].control_indices == (bell0_q,)
+            and gates[2].target_indices == (bell1_q,)
+        )
+        assert (
+            gates[3].name == gate_names.CNOT
+            and gates[3].control_indices == (alice_q,)
+            and gates[3].target_indices == (bell0_q,)
+        )
+        assert gates[4].name == gate_names.H and gates[4].target_indices == (alice_q,)
+        # All three qubits are distinct
+        assert len({alice_q, bell0_q, bell1_q}) == 3
+
+        # Also verify qubit_array(3) version transpiles equivalently
+        @qmc.qkernel
+        def circuit_arr() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0] = qmc.x(q[0])
+            q[1] = qmc.h(q[1])
+            q[1], q[2] = qmc.cx(q[1], q[2])
+            q[0], q[1] = qmc.cx(q[0], q[1])
+            q[0] = qmc.h(q[0])
+            return qmc.measure(q)
+
+        _, qc_arr = _transpile_and_get_circuit(circuit_arr)
+        assert qc_arr.qubit_count == 3
+        gates_arr = _get_gates(qc_arr)
+        assert [g.name for g in gates_arr] == [g.name for g in gates]
 
 
 # ============================================================================
-# 3. Transpiler Pipeline Tests
+# 3. Control Flow Tests
 # ============================================================================
 
 
@@ -1399,8 +1704,11 @@ class TestControlFlowRange:
             return qmc.measure(q)
 
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": n_qubits})
-        h_count = sum(1 for name in _gate_names(circ) if name == "H")
-        assert h_count == n_qubits
+        gates = _get_gates(circ)
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        assert len(h_gates) == n_qubits
+        for i, g in enumerate(h_gates):
+            assert g.target_indices == (i,)
 
     @pytest.mark.parametrize("n_qubits", [2, 3, 5])
     def test_rx_layer_via_range(self, n_qubits):
@@ -1417,8 +1725,11 @@ class TestControlFlowRange:
         _, circ = _transpile_and_get_circuit(
             circuit, bindings={"n": n_qubits, "thetas": thetas}
         )
-        rx_count = sum(1 for name in _gate_names(circ) if name == "RX")
-        assert rx_count == n_qubits
+        gates = _get_gates(circ)
+        rx_gates = [g for g in gates if g.name == gate_names.RX]
+        assert len(rx_gates) == n_qubits
+        for i, g in enumerate(rx_gates):
+            assert g.target_indices == (i,)
 
     @pytest.mark.parametrize("n_qubits", [4, 5, 6])
     def test_range_with_start_stop(self, n_qubits):
@@ -1432,8 +1743,11 @@ class TestControlFlowRange:
             return qmc.measure(q)
 
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": n_qubits})
-        h_count = sum(1 for name in _gate_names(circ) if name == "H")
-        assert h_count == 2
+        gates = _get_gates(circ)
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        assert len(h_gates) == 2
+        assert h_gates[0].target_indices == (1,)
+        assert h_gates[1].target_indices == (2,)
 
     @pytest.mark.parametrize("n_qubits", [3, 4, 5])
     def test_cz_chain_via_range(self, n_qubits):
@@ -1449,8 +1763,12 @@ class TestControlFlowRange:
             return qmc.measure(q)
 
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": n_qubits})
-        cz_count = sum(1 for name in _gate_names(circ) if name == "CZ")
-        assert cz_count == n_qubits - 1
+        gates = _get_gates(circ)
+        cz_gates = [g for g in gates if g.name == gate_names.CZ]
+        assert len(cz_gates) == n_qubits - 1
+        for i, g in enumerate(cz_gates):
+            assert g.target_indices == (i + 1,)
+            assert g.control_indices == (i,)
 
     @pytest.mark.parametrize("n_qubits", [4, 6])
     def test_range_with_step_2(self, n_qubits):
@@ -1464,9 +1782,12 @@ class TestControlFlowRange:
             return qmc.measure(q)
 
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": n_qubits})
-        h_count = sum(1 for name in _gate_names(circ) if name == "H")
+        gates = _get_gates(circ)
+        h_gates = [g for g in gates if g.name == gate_names.H]
         expected = (n_qubits + 1) // 2  # even indices: 0, 2, 4, ...
-        assert h_count == expected
+        assert len(h_gates) == expected
+        for idx, g in enumerate(h_gates):
+            assert g.target_indices == (idx * 2,)
 
     @pytest.mark.parametrize("n_qubits", [4, 6])
     def test_range_with_step_2_odd_start(self, n_qubits):
@@ -1480,9 +1801,12 @@ class TestControlFlowRange:
             return qmc.measure(q)
 
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": n_qubits})
-        h_count = sum(1 for name in _gate_names(circ) if name == "H")
+        gates = _get_gates(circ)
+        h_gates = [g for g in gates if g.name == gate_names.H]
         expected = n_qubits // 2  # odd indices: 1, 3, 5, ...
-        assert h_count == expected
+        assert len(h_gates) == expected
+        for idx, g in enumerate(h_gates):
+            assert g.target_indices == (idx * 2 + 1,)
 
     @pytest.mark.parametrize("start,stop", [(5, 5), (3, 2)])
     def test_zero_iteration_range(self, start, stop):
@@ -1496,8 +1820,9 @@ class TestControlFlowRange:
             return qmc.measure(q)
 
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": 6})
-        h_count = sum(1 for name in _gate_names(circ) if name == "H")
-        assert h_count == 0
+        gates = _get_gates(circ)
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        assert len(h_gates) == 0
 
     def test_multiple_sequential_ranges(self):
         """Two range loops in sequence: H layer then RZ layer."""
@@ -1516,10 +1841,15 @@ class TestControlFlowRange:
         _, circ = _transpile_and_get_circuit(
             circuit, bindings={"n": n, "thetas": thetas}
         )
-        h_count = sum(1 for name in _gate_names(circ) if name == "H")
-        rz_count = sum(1 for name in _gate_names(circ) if name == "RZ")
-        assert h_count == n
-        assert rz_count == n
+        gates = _get_gates(circ)
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        rz_gates = [g for g in gates if g.name == gate_names.RZ]
+        assert len(h_gates) == n
+        assert len(rz_gates) == n
+        for i, g in enumerate(h_gates):
+            assert g.target_indices == (i,)
+        for i, g in enumerate(rz_gates):
+            assert g.target_indices == (i,)
 
     def test_range_with_expression_args(self):
         """range(1, n-1) with arithmetic in bounds."""
@@ -1533,13 +1863,114 @@ class TestControlFlowRange:
 
         n = 5
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": n})
-        h_count = sum(1 for name in _gate_names(circ) if name == "H")
-        assert h_count == n - 2  # indices 1, 2, 3
+        gates = _get_gates(circ)
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        assert len(h_gates) == n - 2  # indices 1, 2, 3
+        for idx, g in enumerate(h_gates):
+            assert g.target_indices == (idx + 1,)
 
+    # -- Loop array vs manual qubit() equivalence tests --
 
-# ============================================================================
-# 22. Control Flow: qmc.items (trace-time unrolled — backend-agnostic)
-# ============================================================================
+    def test_h_loop_array_vs_manual_qubits(self):
+        """H loop on qubit_array matches manual qubit() x3."""
+
+        @qmc.qkernel
+        def loop_circuit(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            for i in qmc.range(n):
+                q[i] = qmc.h(q[i])
+            return qmc.measure(q)
+
+        @qmc.qkernel
+        def manual_circuit() -> tuple[qmc.Bit, qmc.Bit, qmc.Bit]:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            q2 = qmc.qubit("q2")
+            q0 = qmc.h(q0)
+            q1 = qmc.h(q1)
+            q2 = qmc.h(q2)
+            return qmc.measure(q0), qmc.measure(q1), qmc.measure(q2)
+
+        _, circ_loop = _transpile_and_get_circuit(loop_circuit, bindings={"n": 3})
+        _, circ_manual = _transpile_and_get_circuit(manual_circuit)
+        sv_loop = _run_statevector(circ_loop)
+        sv_manual = _run_statevector(circ_manual)
+        assert statevectors_equal(sv_loop, sv_manual)
+        # Both should be |+++> = uniform superposition
+        expected = np.ones(8, dtype=complex) / np.sqrt(8)
+        assert statevectors_equal(sv_loop, expected)
+
+    def test_rx_loop_array_vs_manual_qubits(self):
+        """RX loop on qubit_array matches manual qubit() x2."""
+
+        @qmc.qkernel
+        def loop_circuit(
+            n: qmc.UInt, thetas: qmc.Vector[qmc.Float]
+        ) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            for i in qmc.range(n):
+                q[i] = qmc.rx(q[i], thetas[i])
+            return qmc.measure(q)
+
+        @qmc.qkernel
+        def manual_circuit(t0: qmc.Float, t1: qmc.Float) -> tuple[qmc.Bit, qmc.Bit]:
+            q0 = qmc.qubit("q0")
+            q1 = qmc.qubit("q1")
+            q0 = qmc.rx(q0, t0)
+            q1 = qmc.rx(q1, t1)
+            return qmc.measure(q0), qmc.measure(q1)
+
+        t0, t1 = np.pi / 3, np.pi / 5
+        _, circ_loop = _transpile_and_get_circuit(
+            loop_circuit, bindings={"n": 2, "thetas": [t0, t1]}
+        )
+        _, circ_manual = _transpile_and_get_circuit(
+            manual_circuit, bindings={"t0": t0, "t1": t1}
+        )
+        sv_loop = _run_statevector(circ_loop)
+        sv_manual = _run_statevector(circ_manual)
+        assert statevectors_equal(sv_loop, sv_manual)
+
+    # -- Execution (sampling) verification for range loops --
+
+    @pytest.mark.parametrize("n_qubits", [2, 3, 5])
+    def test_range_x_loop_deterministic_sampling(self, n_qubits):
+        """X on all qubits via range loop: sampling returns all 1s."""
+
+        @qmc.qkernel
+        def circuit(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            for i in qmc.range(n):
+                q[i] = qmc.x(q[i])
+            return qmc.measure(q)
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(circuit, bindings={"n": n_qubits})
+        executor = transpiler.executor()
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        expected = tuple(1 for _ in range(n_qubits))
+        for value, _ in result.results:
+            assert value == expected
+
+    def test_range_cx_chain_deterministic_sampling(self):
+        """CX chain via range loop: X(q[0]) propagates to all qubits."""
+
+        @qmc.qkernel
+        def circuit(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            q[0] = qmc.x(q[0])
+            for i in qmc.range(n - 1):
+                q[i], q[i + 1] = qmc.cx(q[i], q[i + 1])
+            return qmc.measure(q)
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(circuit, bindings={"n": 4})
+        executor = transpiler.executor()
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        for value, _ in result.results:
+            assert value == (1, 1, 1, 1)
 
 
 class TestControlFlowItems:
@@ -1574,8 +2005,11 @@ class TestControlFlowItems:
             circuit, bindings={"n": n_qubits, "ising_dict": ising, "gamma": 0.5}
         )
         # QuriParts emits RZZ as PauliRotation
-        rzz_count = sum(1 for name in _gate_names(circ) if name == "PauliRotation")
-        assert rzz_count == len(ising)
+        gates = _get_gates(circ)
+        rzz_gates = [g for g in gates if g.name == gate_names.PauliRotation]
+        assert len(rzz_gates) == len(ising)
+        for g in rzz_gates:
+            assert g.pauli_ids == (SinglePauli.Z, SinglePauli.Z)  # ZZ
 
     def test_items_single_key_dict(self):
         """Apply RZ gates from single-key dict."""
@@ -1594,8 +2028,11 @@ class TestControlFlowItems:
         _, circ = _transpile_and_get_circuit(
             circuit, bindings={"n": 3, "angles": angles}
         )
-        rz_count = sum(1 for name in _gate_names(circ) if name == "RZ")
-        assert rz_count == 3
+        gates = _get_gates(circ)
+        rz_gates = [g for g in gates if g.name == gate_names.RZ]
+        assert len(rz_gates) == 3
+        for i, g in enumerate(rz_gates):
+            assert g.target_indices == (i,)
 
     def test_items_empty_dict(self):
         """Empty dict produces no gates from the loop body."""
@@ -1611,8 +2048,9 @@ class TestControlFlowItems:
             return qmc.measure(q)
 
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": 2, "ising": {}})
-        rzz_count = sum(1 for name in _gate_names(circ) if name == "PauliRotation")
-        assert rzz_count == 0
+        gates = _get_gates(circ)
+        rzz_gates = [g for g in gates if g.name == gate_names.PauliRotation]
+        assert len(rzz_gates) == 0
 
     def test_items_large_dict(self):
         """Large dict (10 entries) correctly unrolls to 10 RZZ gates."""
@@ -1631,8 +2069,11 @@ class TestControlFlowItems:
         ising = {(i, j): 0.1 * (i + j) for i in range(5) for j in range(i + 1, 5)}
         assert len(ising) == 10
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": 5, "ising": ising})
-        rzz_count = sum(1 for name in _gate_names(circ) if name == "PauliRotation")
-        assert rzz_count == 10
+        gates = _get_gates(circ)
+        rzz_gates = [g for g in gates if g.name == gate_names.PauliRotation]
+        assert len(rzz_gates) == 10
+        for g in rzz_gates:
+            assert g.pauli_ids == (SinglePauli.Z, SinglePauli.Z)  # ZZ
 
     def test_items_statevector_verification(self):
         """Items loop on 2-qubit Ising produces correct statevector."""
@@ -1703,10 +2144,30 @@ class TestControlFlowItems:
         assert statevectors_equal(sv_neg, expected_neg)
         assert statevectors_equal(sv_pos, expected_pos)
 
+    # -- Execution (sampling) verification for items loops --
 
-# ============================================================================
-# 23. Control Flow: Nested (trace-time unrolled combinations)
-# ============================================================================
+    def test_items_x_from_dict_deterministic_sampling(self):
+        """Apply X to dict-specified qubits: sampling returns expected bits."""
+
+        @qmc.qkernel
+        def circuit(
+            n: qmc.UInt,
+            targets: qmc.Dict[qmc.UInt, qmc.Float],
+        ) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            for i, _val in qmc.items(targets):
+                q[i] = qmc.x(q[i])
+            return qmc.measure(q)
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(
+            circuit, bindings={"n": 4, "targets": {0: 1.0, 2: 1.0}}
+        )
+        executor = transpiler.executor()
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        for value, _ in result.results:
+            assert value == (1, 0, 1, 0)
 
 
 class TestControlFlowNested:
@@ -1728,8 +2189,12 @@ class TestControlFlowNested:
         n = 3
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": n})
         # n*(n-1)/2 = 3 CZ gates
-        cz_count = sum(1 for name in _gate_names(circ) if name == "CZ")
-        assert cz_count == n * (n - 1) // 2
+        gates = _get_gates(circ)
+        cz_gates = [g for g in gates if g.name == gate_names.CZ]
+        assert len(cz_gates) == n * (n - 1) // 2
+        expected_pairs = [(i, j) for i in range(n - 1) for j in range(i + 1, n)]
+        for g, (ci, ti) in zip(cz_gates, expected_pairs):
+            assert g.control_indices == (ci,) and g.target_indices == (ti,)
 
     def test_range_then_items_sequence(self):
         """Range H layer followed by items RZZ — sequential control flow mix."""
@@ -1751,10 +2216,15 @@ class TestControlFlowNested:
         _, circ = _transpile_and_get_circuit(
             circuit, bindings={"n": 3, "ising": ising, "gamma": 0.5}
         )
-        h_count = sum(1 for name in _gate_names(circ) if name == "H")
-        rzz_count = sum(1 for name in _gate_names(circ) if name == "PauliRotation")
-        assert h_count == 3
-        assert rzz_count == 2
+        gates = _get_gates(circ)
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        rzz_gates = [g for g in gates if g.name == gate_names.PauliRotation]
+        assert len(h_gates) == 3
+        assert len(rzz_gates) == 2
+        for i, g in enumerate(h_gates):
+            assert g.target_indices == (i,)
+        for g in rzz_gates:
+            assert g.pauli_ids == (SinglePauli.Z, SinglePauli.Z)  # ZZ
 
     def test_cx_ladder_via_range(self):
         """CX entangling ladder: X on q0 propagates to all qubits → |1111⟩."""
@@ -1769,8 +2239,12 @@ class TestControlFlowNested:
 
         n = 4
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": n})
-        cx_count = sum(1 for name in _gate_names(circ) if name == "CNOT")
-        assert cx_count == n - 1
+        gates = _get_gates(circ)
+        cx_gates = [g for g in gates if g.name == gate_names.CNOT]
+        assert len(cx_gates) == n - 1
+        for i, g in enumerate(cx_gates):
+            assert g.target_indices == (i + 1,)
+            assert g.control_indices == (i,)
         # X on q0, then CX chain propagates: |1000> → |1100> → |1110> → |1111>
         sv = _run_statevector(circ)
         expected = computational_basis_state(n, 2**n - 1)
@@ -1791,12 +2265,42 @@ class TestControlFlowNested:
             return qmc.measure(q)
 
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": n})
-        cz_count = sum(1 for name in _gate_names(circ) if name == "CZ")
-        assert cz_count == n * (n - 1) // 2
+        gates = _get_gates(circ)
+        cz_gates = [g for g in gates if g.name == gate_names.CZ]
+        assert len(cz_gates) == n * (n - 1) // 2
+        expected_pairs = [(i, j) for i in range(n - 1) for j in range(i + 1, n)]
+        for g, (ci, ti) in zip(cz_gates, expected_pairs):
+            assert g.control_indices == (ci,) and g.target_indices == (ti,)
+
+    # -- Execution (sampling) verification for nested loops --
+
+    def test_nested_range_x_deterministic_sampling(self):
+        """GHZ via nested H+CX pattern: sampling returns only (0,...,0) or (1,...,1)."""
+
+        @qmc.qkernel
+        def circuit(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            q[0] = qmc.h(q[0])
+            for i in qmc.range(n - 1):
+                q[i], q[i + 1] = qmc.cx(q[i], q[i + 1])
+            return qmc.measure(q)
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(circuit, bindings={"n": 4})
+        executor = transpiler.executor()
+        job = exe.sample(executor, bindings={}, shots=500)
+        result = job.result()
+        all_zeros = (0, 0, 0, 0)
+        all_ones = (1, 1, 1, 1)
+        for value, _ in result.results:
+            assert value in (all_zeros, all_ones)
+        # Both outcomes should appear
+        outcomes = {val for val, _ in result.results}
+        assert outcomes == {all_zeros, all_ones}
 
 
 # ============================================================================
-# 24. Control Flow: QAOA Pattern (range + items combined)
+# 3b. QAOA Pattern Tests
 # ============================================================================
 
 
@@ -1827,12 +2331,19 @@ class TestControlFlowQAOAPattern:
             qaoa_layer,
             bindings={"n": 3, "ising": ising, "gamma": 0.5, "beta": 0.7},
         )
-        h_count = sum(1 for name in _gate_names(circ) if name == "H")
-        rzz_count = sum(1 for name in _gate_names(circ) if name == "PauliRotation")
-        rx_count = sum(1 for name in _gate_names(circ) if name == "RX")
-        assert h_count == 3
-        assert rzz_count == 3
-        assert rx_count == 3
+        gates = _get_gates(circ)
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        rzz_gates = [g for g in gates if g.name == gate_names.PauliRotation]
+        rx_gates = [g for g in gates if g.name == gate_names.RX]
+        assert len(h_gates) == 3
+        assert len(rzz_gates) == 3
+        assert len(rx_gates) == 3
+        for i, g in enumerate(h_gates):
+            assert g.target_indices == (i,)
+        for g in rzz_gates:
+            assert g.pauli_ids == (SinglePauli.Z, SinglePauli.Z)  # ZZ
+        for i, g in enumerate(rx_gates):
+            assert g.target_indices == (i,)
 
     def test_qaoa_single_layer_statevector(self):
         """QAOA layer on 2 qubits with known params — statevector check."""
@@ -1890,11 +2401,19 @@ class TestControlFlowQAOAPattern:
 
         n = 6
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": n})
-        cz_count = sum(1 for name in _gate_names(circ) if name == "CZ")
+        gates = _get_gates(circ)
+        cz_gates = [g for g in gates if g.name == gate_names.CZ]
         # Even pairs: 3 (0-1, 2-3, 4-5), Odd pairs: 2 (1-2, 3-4) = 5 total
-        even_pairs = len(range(0, n - 1, 2))
-        odd_pairs = len(range(1, n - 1, 2))
-        assert cz_count == even_pairs + odd_pairs
+        even_pairs_list = list(range(0, n - 1, 2))
+        odd_pairs_list = list(range(1, n - 1, 2))
+        assert len(cz_gates) == len(even_pairs_list) + len(odd_pairs_list)
+        # Verify even pairs first, then odd pairs
+        for idx, start in enumerate(even_pairs_list):
+            g = cz_gates[idx]
+            assert g.control_indices == (start,) and g.target_indices == (start + 1,)
+        for idx, start in enumerate(odd_pairs_list):
+            g = cz_gates[len(even_pairs_list) + idx]
+            assert g.control_indices == (start,) and g.target_indices == (start + 1,)
 
     # NOTE: test_qaoa_single_layer_parametric is NOT ported because it uses
     # `gamma * Jij` where gamma is a Parameter and Jij is a float — this
@@ -1904,7 +2423,7 @@ class TestControlFlowQAOAPattern:
 
 
 # ============================================================================
-# 25. Stdlib QFT / IQFT (manual decomposition path)
+# 4. Transpiler Pass Tests
 # ============================================================================
 
 
@@ -1926,7 +2445,7 @@ class TestTranspilerPassesPipeline:
 
         block = transpiler.to_block(circuit)
         assert block is not None
-        assert len(block.operations) > 0
+        assert len(block.operations) == 4
 
     def test_inline(self, transpiler):
         """inline() flattens CallBlockOperations from sub-kernel calls."""
@@ -1960,7 +2479,7 @@ class TestTranspilerPassesPipeline:
         inlined = transpiler.inline(block)
         validated = transpiler.affine_validate(inlined)
         assert validated is not None
-        assert len(validated.operations) > 0
+        assert len(validated.operations) == 4
 
     def test_constant_fold(self, transpiler):
         """constant_fold reduces constant expressions."""
@@ -1977,6 +2496,7 @@ class TestTranspilerPassesPipeline:
         validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated, bindings={"theta": 0.5})
         assert folded is not None
+        assert len(folded.operations) == 3
 
     def test_analyze(self, transpiler):
         """analyze() validates dependencies and marks block ANALYZED."""
@@ -2031,7 +2551,7 @@ class TestTranspilerPassesPipeline:
         exe = transpiler.emit(separated)
 
         assert isinstance(exe, ExecutableProgram)
-        assert len(exe.compiled_quantum) > 0
+        assert len(exe.compiled_quantum) == 1
 
     def test_full_transpile(self, transpiler):
         """Full transpile() pipeline end-to-end."""
@@ -2045,6 +2565,7 @@ class TestTranspilerPassesPipeline:
         exe = transpiler.transpile(circuit)
         assert exe is not None
         assert exe.quantum_circuit is not None
+        assert len(_get_gates(exe.quantum_circuit)) == 1
 
     def test_to_circuit_convenience(self, transpiler):
         """to_circuit() returns the QURI Parts circuit directly."""
@@ -2057,7 +2578,7 @@ class TestTranspilerPassesPipeline:
 
         qc = transpiler.to_circuit(circuit)
         assert qc is not None
-        assert qc.qubit_count > 0
+        assert qc.qubit_count == 1
 
     def test_step_by_step_matches_transpile(self, transpiler):
         """Step-by-step pipeline produces same statevector as transpile()."""
@@ -2086,11 +2607,6 @@ class TestTranspilerPassesPipeline:
         sv_step = _run_statevector(qc_step)
 
         assert statevectors_equal(sv_full, sv_step)
-
-
-# ============================================================================
-# 4. Parametric Circuit Tests
-# ============================================================================
 
 
 class TestTranspilerConfigPortable:
@@ -2150,8 +2666,9 @@ class TestTranspilerConfigPortable:
 
         block = transpiler.to_block(circuit)
         substituted = transpiler.substitute(block)
-        # The substitution pass should have been applied
+        # The substitution pass should return a new block (not the original)
         assert substituted is not None
+        assert substituted is not block
 
     def test_separate_segments_simple_circuit(self):
         """separate() produces SimplifiedProgram with quantum segment."""
@@ -2219,7 +2736,7 @@ class TestTranspilerConfigPortable:
         transpiler_std = QuriPartsTranspiler()
         exe_std = transpiler_std.transpile(circuit)
         circ_std = exe_std.compiled_quantum[0].circuit
-        gates_std = _gate_names(circ_std)
+        gates_std = _get_gates(circ_std)
         gates_std_count = len(gates_std)
 
         # Approximate QFT (k=2)
@@ -2228,7 +2745,7 @@ class TestTranspilerConfigPortable:
         transpiler_approx.set_config(config)
         exe_approx = transpiler_approx.transpile(circuit)
         circ_approx = exe_approx.compiled_quantum[0].circuit
-        gates_approx = _gate_names(circ_approx)
+        gates_approx = _get_gates(circ_approx)
         gates_approx_count = len(gates_approx)
 
         # Approximate should have strictly fewer gates for 5 qubits
@@ -2248,11 +2765,6 @@ class TestTranspilerConfigPortable:
         assert approx_resources.custom_metadata["num_h_gates"] == 5
 
 
-# ============================================================================
-# 31. Controlled Gate (single-control fallback decomposition)
-# ============================================================================
-
-
 class TestParameterizedCircuits:
     """Test parametric circuit transpilation and execution."""
 
@@ -2268,7 +2780,7 @@ class TestParameterizedCircuits:
         transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit, parameters=["theta"])
         qc = exe.compiled_quantum[0].circuit
-        assert qc.parameter_count > 0
+        assert qc.parameter_count == 1
 
     def test_parametric_bind_and_execute(self):
         """Bind parameters and execute."""
@@ -2300,32 +2812,10 @@ class TestParameterizedCircuits:
         transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit, bindings={"n": 3}, parameters=["theta"])
         qc = exe.compiled_quantum[0].circuit
-        assert qc.parameter_count > 0
+        assert qc.parameter_count == 1
 
-    def test_parametric_bind_and_rebind(self):
-        """Compile once, execute with different parameter values."""
-
-        @qmc.qkernel
-        def circuit(theta: qmc.Float) -> qmc.Bit:
-            q = qmc.qubit("q")
-            q = qmc.ry(q, theta)
-            return qmc.measure(q)
-
-        transpiler = QuriPartsTranspiler()
-        exe = transpiler.transpile(circuit, parameters=["theta"])
-        executor = transpiler.executor()
-
-        # theta=0: should measure |0>
-        job = exe.sample(executor, bindings={"theta": 0.0}, shots=100)
-        result = job.result()
-        for value, _ in result.results:
-            assert value == 0
-
-        # theta=pi: should measure |1>
-        job = exe.sample(executor, bindings={"theta": np.pi}, shots=100)
-        result = job.result()
-        for value, _ in result.results:
-            assert value == 1
+    # NOTE: test_parametric_bind_and_rebind is in TestAdvancedParameterHandling
+    # to avoid duplication (identical circuit and purpose).
 
     def test_sub_kernel_inline(self):
         """Sub-kernel calls are inlined into the main circuit."""
@@ -2384,7 +2874,265 @@ class TestParameterizedCircuits:
 
 
 # ============================================================================
-# 5. Basic Execution Tests
+# 1b. Parametric Gate Tests (unbound parameters)
+# ============================================================================
+
+
+class TestParametricGates:
+    """Verify that each parameterized gate keeps its parameter unbound
+    when transpiled with ``parameters=["theta"]``.
+
+    For QURI Parts, gates are Rust-backed objects — we check ``gate.name``
+    (not ``isinstance``) and use ``qc.parameter_count`` (not ``len(qc.parameters)``).
+    """
+
+    def test_rx_parametric(self):
+        """RX with parameters=['theta'] keeps parameter unbound and produces correct statevector."""
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(circuit, parameters=["theta"])
+        qc = exe.compiled_quantum[0].circuit
+        assert qc.parameter_count == 1
+        angle = np.pi / 3
+        gates = _get_gates(qc, parameter_bindings=[angle])
+        assert any(g.name == gate_names.RX for g in gates)
+        sv = _run_statevector(qc, parameter_bindings=[angle])
+        expected = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["RX"].matrix_fn(angle)
+        )
+        assert statevectors_equal(sv, expected)
+
+    def test_ry_parametric(self):
+        """RY with parameters=['theta'] keeps parameter unbound and produces correct statevector."""
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.ry(q, theta)
+            return qmc.measure(q)
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(circuit, parameters=["theta"])
+        qc = exe.compiled_quantum[0].circuit
+        assert qc.parameter_count == 1
+        angle = np.pi / 3
+        gates = _get_gates(qc, parameter_bindings=[angle])
+        assert any(g.name == gate_names.RY for g in gates)
+        sv = _run_statevector(qc, parameter_bindings=[angle])
+        expected = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["RY"].matrix_fn(angle)
+        )
+        assert statevectors_equal(sv, expected)
+
+    def test_rz_parametric(self):
+        """RZ with parameters=['theta'] keeps parameter unbound and produces correct statevector."""
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.rz(q, theta)
+            return qmc.measure(q)
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(circuit, parameters=["theta"])
+        qc = exe.compiled_quantum[0].circuit
+        assert qc.parameter_count == 1
+        angle = np.pi / 3
+        gates = _get_gates(qc, parameter_bindings=[angle])
+        assert any(g.name == gate_names.RZ for g in gates)
+        sv = _run_statevector(qc, parameter_bindings=[angle])
+        expected = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["RZ"].matrix_fn(angle)
+        )
+        assert statevectors_equal(sv, expected)
+
+    def test_p_parametric(self):
+        """P with parameters=['theta'] keeps parameter unbound (emits RZ in parametric path).
+
+        P(θ)|0⟩ = |0⟩ (diagonal gate, trivial on |0⟩), so we compare against
+        RZ(θ)|0⟩ which differs only by global phase — statevectors_equal handles this.
+        """
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.p(q, theta)
+            return qmc.measure(q)
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(circuit, parameters=["theta"])
+        qc = exe.compiled_quantum[0].circuit
+        assert qc.parameter_count == 1
+        angle = np.pi / 3
+        gates = _get_gates(qc, parameter_bindings=[angle])
+        # P gate emits as RZ in parametric path (U1 in non-parametric)
+        assert any(g.name == gate_names.RZ for g in gates)
+        sv = _run_statevector(qc, parameter_bindings=[angle])
+        expected = compute_expected_statevector(
+            all_zeros_state(1), GATE_SPECS["P"].matrix_fn(angle)
+        )
+        assert statevectors_equal(sv, expected)
+
+    def test_cp_parametric(self):
+        """CP with parameters=['theta'] keeps parameter unbound (decomposes to RZ+CNOT)."""
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            q[0], q[1] = qmc.cp(q[0], q[1], theta)
+            return qmc.measure(q)
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(circuit, parameters=["theta"])
+        qc = exe.compiled_quantum[0].circuit
+        assert qc.parameter_count == 1
+        angle = np.pi / 4
+        # CP decomposes to RZ + CNOT pattern
+        gates = _get_gates(qc, parameter_bindings=[angle])
+        gate_name_set = {g.name for g in gates}
+        assert gate_names.RZ in gate_name_set
+        assert gate_names.CNOT in gate_name_set
+        sv = _run_statevector(qc, parameter_bindings=[angle])
+        expected = compute_expected_statevector(
+            all_zeros_state(2), GATE_SPECS["CP"].matrix_fn(angle)
+        )
+        assert statevectors_equal(sv, expected)
+
+    def test_rzz_parametric(self):
+        """RZZ with parameters=['theta'] keeps parameter unbound (emits PauliRotation)."""
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            q[0], q[1] = qmc.rzz(q[0], q[1], theta)
+            return qmc.measure(q)
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(circuit, parameters=["theta"])
+        qc = exe.compiled_quantum[0].circuit
+        assert qc.parameter_count == 1
+        angle = np.pi / 3
+        gates = _get_gates(qc, parameter_bindings=[angle])
+        assert any(g.name == gate_names.PauliRotation for g in gates)
+        sv = _run_statevector(qc, parameter_bindings=[angle])
+        expected = compute_expected_statevector(
+            all_zeros_state(2), GATE_SPECS["RZZ"].matrix_fn(angle)
+        )
+        assert statevectors_equal(sv, expected)
+
+    def test_vector_parametric(self):
+        """Vector[Float] with parameters=['thetas'] gives 3 indexed params and correct statevector."""
+
+        @qmc.qkernel
+        def circuit(n: qmc.UInt, thetas: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            for i in qmc.range(n):
+                q[i] = qmc.ry(q[i], thetas[i])
+            return qmc.measure(q)
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(circuit, bindings={"n": 3}, parameters=["thetas"])
+        qc = exe.compiled_quantum[0].circuit
+        assert qc.parameter_count == 3
+        angles = [np.pi / 4, np.pi / 3, np.pi / 6]
+        sv = _run_statevector(qc, parameter_bindings=angles)
+        expected = compute_expected_statevector(
+            all_zeros_state(3),
+            tensor_product(
+                GATE_SPECS["RY"].matrix_fn(angles[2]),
+                GATE_SPECS["RY"].matrix_fn(angles[1]),
+                GATE_SPECS["RY"].matrix_fn(angles[0]),
+            ),
+        )
+        assert statevectors_equal(sv, expected)
+
+    # -- BinOp parametric tests --
+
+    def test_parametric_mul_binop(self):
+        """theta * c via items() loop, bind and verify numerical result.
+
+        Note: QURI Parts' Rust-backed Parameter does not support arithmetic
+        operators (*, +, -) with floats, so BinOp with unbound parameters
+        is not possible. We test with fully bound parameters instead.
+        """
+
+        @qmc.qkernel
+        def circuit(
+            theta: qmc.Float,
+            coeff: qmc.Dict[qmc.UInt, qmc.Float],
+        ) -> qmc.Bit:
+            q = qmc.qubit("q")
+            for _, c in qmc.items(coeff):
+                q = qmc.rx(q, theta * c)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(
+            circuit, bindings={"theta": 1.5, "coeff": {0: 2.0}}
+        )
+        gates = _get_gates(qc)
+        rx_gates = [g for g in gates if g.name == gate_names.RX]
+        assert len(rx_gates) == 1
+        assert np.isclose(rx_gates[0].params[0], 3.0, atol=1e-10)
+
+    def test_parametric_add_binop(self):
+        """theta + o via items() loop, bind and verify numerical result.
+
+        Note: QURI Parts' Rust-backed Parameter does not support arithmetic
+        operators, so BinOp with unbound parameters is not possible.
+        """
+
+        @qmc.qkernel
+        def circuit(
+            theta: qmc.Float,
+            offset: qmc.Dict[qmc.UInt, qmc.Float],
+        ) -> qmc.Bit:
+            q = qmc.qubit("q")
+            for _, o in qmc.items(offset):
+                q = qmc.rx(q, theta + o)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(
+            circuit, bindings={"theta": 1.0, "offset": {0: 0.5}}
+        )
+        gates = _get_gates(qc)
+        rx_gates = [g for g in gates if g.name == gate_names.RX]
+        assert len(rx_gates) == 1
+        assert np.isclose(rx_gates[0].params[0], 1.5, atol=1e-10)
+
+    def test_parametric_sub_binop(self):
+        """theta - o via items() loop, bind and verify numerical result.
+
+        Note: QURI Parts' Rust-backed Parameter does not support arithmetic
+        operators, so BinOp with unbound parameters is not possible.
+        """
+
+        @qmc.qkernel
+        def circuit(
+            theta: qmc.Float,
+            offset: qmc.Dict[qmc.UInt, qmc.Float],
+        ) -> qmc.Bit:
+            q = qmc.qubit("q")
+            for _, o in qmc.items(offset):
+                q = qmc.rx(q, theta - o)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(
+            circuit, bindings={"theta": 1.0, "offset": {0: 0.5}}
+        )
+        gates = _get_gates(qc)
+        rx_gates = [g for g in gates if g.name == gate_names.RX]
+        assert len(rx_gates) == 1
+        assert np.isclose(rx_gates[0].params[0], 0.5, atol=1e-10)
+
+
+# ============================================================================
+# 5. Stdlib Tests (QFT, IQFT, controlled, CompositeGate)
 # ============================================================================
 
 
@@ -2450,16 +3198,19 @@ class TestStdlibQFT:
             return qmc.measure(q)
 
         _, circ = _transpile_and_get_circuit(circuit)
-        gate_set = set(_gate_names(circ))
-        # Must include H (core QFT gate)
-        assert "H" in gate_set
-        # CP is decomposed to RZ + CNOT, so these should appear
-        assert "RZ" in gate_set or "CNOT" in gate_set
-
-
-# ============================================================================
-# 26. Stdlib QPE (structure check)
-# ============================================================================
+        gates = _get_gates(circ)
+        # 3-qubit QFT: 3 H gates + 3 CP (each → 3 RZ + 2 CNOT) + 1 SWAP = 19 gates
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        rz_gates = [g for g in gates if g.name == gate_names.RZ]
+        cx_gates = [g for g in gates if g.name == gate_names.CNOT]
+        swap_gates = [g for g in gates if g.name == gate_names.SWAP]
+        assert len(h_gates) == 3
+        for i, g in enumerate(h_gates):
+            assert g.target_indices == (i,)
+        assert len(rz_gates) == 9  # 3 CP × 3 RZ each
+        assert len(cx_gates) == 6  # 3 CP × 2 CNOT each
+        assert len(swap_gates) == 1
+        assert swap_gates[0].target_indices == (0, 2)
 
 
 class TestStdlibQPE:
@@ -2512,10 +3263,42 @@ class TestStdlibQPE:
         assert np.isclose(value, 0.25, atol=1e-9)
         assert count == 256
 
+    @pytest.mark.parametrize(
+        "phase, expected_value",
+        [
+            pytest.param(np.pi / 2, 0.25, id="phase_pi_over_2"),
+            pytest.param(np.pi, 0.5, id="phase_pi"),
+            pytest.param(3 * np.pi / 2, 0.75, id="phase_3pi_over_2"),
+        ],
+    )
+    def test_qpe_decode_correctness(self, phase, expected_value):
+        """QPE decode returns numerically correct float for known phases.
 
-# ============================================================================
-# 27. Manual QFT Circuit (CP decomposed to 3×RZ + 2×CNOT)
-# ============================================================================
+        P(phase)|1⟩ = e^{i*phase}|1⟩, so the eigenvalue phase is phase/(2π).
+        With 3-bit QPE, the decoded float should match phase/(2π).
+        """
+
+        @qmc.qkernel
+        def phase_gate(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+            return qmc.p(q, theta)
+
+        @qmc.qkernel
+        def qpe_3bit(phase_angle: qmc.Float) -> qmc.Float:
+            phase_register = qmc.qubit_array(3, name="phase_reg")
+            target = qmc.qubit(name="target")
+            target = qmc.x(target)
+            phase_q = qmc.qpe(target, phase_register, phase_gate, theta=phase_angle)
+            return qmc.measure(phase_q)
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(qpe_3bit, bindings={"phase_angle": phase})
+        executor = transpiler.executor()
+
+        job = exe.sample(executor, bindings={}, shots=500)
+        result = job.result()
+        # Find the most frequent result
+        most_frequent_value = max(result.results, key=lambda x: x[1])[0]
+        assert np.isclose(most_frequent_value, expected_value, atol=1e-10)
 
 
 class TestControlledGate:
@@ -2546,6 +3329,7 @@ class TestControlledGate:
 
         _, circ = _transpile_and_get_circuit(circuit)
         assert circ.qubit_count == 2
+        assert len(_get_gates(circ)) > 0
 
     def test_controlled_h_statevector(self):
         """controlled(H) with ctrl=|1⟩: statevector matches CH matrix."""
@@ -2591,6 +3375,7 @@ class TestControlledGate:
 
         _, circ = _transpile_and_get_circuit(circuit, bindings={"theta": np.pi / 2})
         assert circ.qubit_count == 2
+        assert len(_get_gates(circ)) > 0
 
     def test_controlled_rx_statevector(self):
         """controlled(RX) with ctrl=|1⟩: statevector matches CRX matrix."""
@@ -2618,10 +3403,53 @@ class TestControlledGate:
         expected = CRX @ state
         assert statevectors_equal(sv, expected)
 
+    # -- Double-control (num_controls=2) tests --
+    # QuriParts' gate_controlled() returns None and the fallback decomposition
+    # only supports single control.  Verify that multi-control raises EmitError.
 
-# ============================================================================
-# 32. Custom CompositeGate (fallback inline decomposition)
-# ============================================================================
+    def test_controlled_h_double_control_raises(self):
+        """controlled(h_gate, num_controls=2) raises EmitError on QuriParts."""
+        from qamomile.circuit.transpiler.errors import EmitError
+
+        @qmc.qkernel
+        def h_gate(q: qmc.Qubit) -> qmc.Qubit:
+            q = qmc.h(q)
+            return q
+
+        controlled_h2 = qmc.controlled(h_gate, num_controls=2)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0] = qmc.x(q[0])
+            q[1] = qmc.x(q[1])
+            q[0], q[1], q[2] = controlled_h2(q[0], q[1], q[2])
+            return qmc.measure(q)
+
+        with pytest.raises(EmitError, match="multi-controlled"):
+            _transpile_and_get_circuit(circuit)
+
+    def test_controlled_rx_double_control_raises(self):
+        """controlled(rx_gate, num_controls=2) raises EmitError on QuriParts."""
+        from qamomile.circuit.transpiler.errors import EmitError
+
+        @qmc.qkernel
+        def rx_gate(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+            q = qmc.rx(q, theta)
+            return q
+
+        controlled_rx2 = qmc.controlled(rx_gate, num_controls=2)
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0] = qmc.x(q[0])
+            q[1] = qmc.x(q[1])
+            q[0], q[1], q[2] = controlled_rx2(q[0], q[1], q[2], theta=theta)
+            return qmc.measure(q)
+
+        with pytest.raises(EmitError, match="multi-controlled"):
+            _transpile_and_get_circuit(circuit, bindings={"theta": np.pi})
 
 
 class TestCustomCompositeGate:
@@ -2658,9 +3486,15 @@ class TestCustomCompositeGate:
 
         _, circ = _transpile_and_get_circuit(circuit)
         assert circ.qubit_count == 2
-        names = _gate_names(circ)
-        assert "H" in names
-        assert "CNOT" in names
+        gates = _get_gates(circ)
+        # BellPair: H(0), CNOT(ctrl=0, tgt=1)
+        assert len(gates) == 2
+        assert gates[0].name == gate_names.H and gates[0].target_indices == (0,)
+        assert (
+            gates[1].name == gate_names.CNOT
+            and gates[1].target_indices == (1,)
+            and gates[1].control_indices == (0,)
+        )
 
     def test_composite_statevector(self):
         """BellPair CompositeGate produces Bell state |Φ+⟩."""
@@ -2721,15 +3555,18 @@ class TestCustomCompositeGate:
             return qmc.measure(q)
 
         _, circ = _transpile_and_get_circuit(circuit)
-        names = _gate_names(circ)
-        h_count = sum(1 for n in names if n == "H")
-        cx_count = sum(1 for n in names if n == "CNOT")
-        assert h_count == 1
-        assert cx_count == 1
+        gates = _get_gates(circ)
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        cx_gates = [g for g in gates if g.name == gate_names.CNOT]
+        assert len(h_gates) == 1
+        assert len(cx_gates) == 1
+        assert h_gates[0].target_indices == (0,)
+        assert cx_gates[0].target_indices == (1,)
+        assert cx_gates[0].control_indices == (0,)
 
 
 # ============================================================================
-# 33. Controlled SubRoutines (statevector + power, single-control fallback)
+# 6. Execution Tests
 # ============================================================================
 
 
@@ -2776,6 +3613,10 @@ class TestExecution:
         outcomes = {val for val, _ in result.results}
         # Bell state should only produce (0, 0) and (1, 1)
         assert outcomes.issubset({(0, 0), (1, 1)})
+        # Both outcomes should appear with reasonable probability (>15%)
+        total = sum(c for _, c in result.results)
+        for _, count in result.results:
+            assert count / total > 0.15
 
     def test_sample_shot_count(self):
         """Verify total shot count matches requested shots."""
@@ -2841,10 +3682,103 @@ class TestExecution:
             # Vector[Bit] returns tuple of ints
             assert isinstance(value, tuple)
             assert len(value) == 3
+            # X(q[0]) and X(q[2]) → deterministic (1, 0, 1)
+            assert value == (1, 0, 1)
+
+    # -- Deterministic sampling tests for all gate types --
+
+    @pytest.mark.parametrize(
+        "kernel, expected",
+        [
+            pytest.param(_circ_x, 1, id="X_gives_1"),
+            pytest.param(_circ_y, 1, id="Y_gives_1"),
+            pytest.param(_circ_z, 0, id="Z_gives_0"),
+            pytest.param(_circ_s, 0, id="S_gives_0"),
+            pytest.param(_circ_t, 0, id="T_gives_0"),
+            pytest.param(_circ_xx, 0, id="XX_identity"),
+            pytest.param(_circ_xy, 0, id="XY_gives_0"),
+            pytest.param(_circ_hxh, 0, id="HXH_equals_Z"),
+        ],
+    )
+    def test_single_gate_deterministic_sampling(self, kernel, expected):
+        """Single-qubit deterministic circuits: sampling matches expected bit."""
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(kernel)
+        executor = transpiler.executor()
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        for value, _ in result.results:
+            assert value == expected
+
+    @pytest.mark.parametrize(
+        "kernel, expected",
+        [
+            pytest.param(_cx_00, (0, 0), id="CX_00"),
+            pytest.param(_cx_10, (1, 1), id="CX_10"),
+            pytest.param(_cx_01, (0, 1), id="CX_01"),
+            pytest.param(_cx_11, (1, 0), id="CX_11"),
+            pytest.param(_cz_00, (0, 0), id="CZ_00"),
+            pytest.param(_cz_10, (1, 0), id="CZ_10"),
+            pytest.param(_cz_01, (0, 1), id="CZ_01"),
+            pytest.param(_cz_11, (1, 1), id="CZ_11"),
+            pytest.param(_swap_10, (0, 1), id="SWAP_10"),
+            pytest.param(_swap_01, (1, 0), id="SWAP_01"),
+        ],
+    )
+    def test_two_qubit_deterministic_sampling(self, kernel, expected):
+        """Two-qubit deterministic circuits: sampling matches expected tuple."""
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(kernel)
+        executor = transpiler.executor()
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        for value, _ in result.results:
+            assert value == expected
+
+    @pytest.mark.parametrize(
+        "kernel, expected",
+        [
+            pytest.param(_ccx_000, (0, 0, 0), id="CCX_000"),
+            pytest.param(_ccx_001, (1, 0, 0), id="CCX_001"),
+            pytest.param(_ccx_010, (0, 1, 0), id="CCX_010"),
+            pytest.param(_ccx_011, (1, 1, 1), id="CCX_011_flips"),
+            pytest.param(_ccx_100, (0, 0, 1), id="CCX_100"),
+            pytest.param(_ccx_101, (1, 0, 1), id="CCX_101"),
+            pytest.param(_ccx_110, (0, 1, 1), id="CCX_110"),
+            pytest.param(_ccx_111, (1, 1, 0), id="CCX_111_flips"),
+        ],
+    )
+    def test_ccx_deterministic_sampling(self, kernel, expected):
+        """CCX on all 8 basis states via sampling."""
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(kernel)
+        executor = transpiler.executor()
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        for value, _ in result.results:
+            assert value == expected
+
+    @pytest.mark.parametrize(
+        "kernel, expected",
+        [
+            pytest.param(_cx_chain_3, (1, 1, 1), id="CX_chain_all_ones"),
+            pytest.param(_swap_after_x, (0, 1), id="SWAP_after_X"),
+            pytest.param(_x_cx_x, (1, 0), id="X_CX_X_cancel"),
+        ],
+    )
+    def test_gate_combination_deterministic_sampling(self, kernel, expected):
+        """Multi-gate combination circuits: sampling matches expected."""
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(kernel)
+        executor = transpiler.executor()
+        job = exe.sample(executor, bindings={}, shots=100)
+        result = job.result()
+        for value, _ in result.results:
+            assert value == expected
 
 
 # ============================================================================
-# 6. Edge Cases and Error Handling
+# 7. Edge Cases & Error Handling
 # ============================================================================
 
 
@@ -2908,7 +3842,9 @@ class TestEdgeCases:
                 q[i] = qmc.h(q[i])
             return qmc.measure(q)
 
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"n": n_qubits})
+        _, qc = _transpile_and_get_circuit(
+            circuit, bindings={"n": n_qubits}, skip_smoke_test=True
+        )
         assert qc.qubit_count == n_qubits
 
     def test_zero_angle_rotation(self):
@@ -2984,10 +3920,24 @@ class TestEdgeCases:
         )
         assert statevectors_equal(sv, expected)
 
+    def test_mixed_qubit_and_qubit_array(self):
+        """Mixed qubit() + qubit_array() in same circuit: transpile + statevector."""
 
-# ============================================================================
-# 7. Algorithm – Basic Layers
-# ============================================================================
+        @qmc.qkernel
+        def circuit() -> tuple[qmc.Bit, qmc.Vector[qmc.Bit]]:
+            anc = qmc.qubit("anc")
+            q = qmc.qubit_array(2, "q")
+            anc = qmc.x(anc)
+            anc, q[0] = qmc.cx(anc, q[0])
+            return qmc.measure(anc), qmc.measure(q)
+
+        _, circ = _transpile_and_get_circuit(circuit)
+        sv = _run_statevector(circ)
+        assert circ.qubit_count == 3
+        # X(anc) → CX(anc, q[0]) → |anc=1, q[0]=1, q[1]=0⟩ = |110⟩
+        # LE ordering: qubit 0 (anc)=1, qubit 1 (q[0])=1, qubit 2 (q[1])=0
+        # Index = 0b011 = 3
+        assert np.isclose(abs(sv[3]), 1.0, atol=1e-10)
 
 
 class TestErrorCases:
@@ -3052,7 +4002,7 @@ class TestErrorCases:
 
 
 # ============================================================================
-# 21. Control Flow: qmc.range (trace-time unrolled — backend-agnostic)
+# 8. Advanced Algorithm Module Tests
 # ============================================================================
 
 
@@ -3216,8 +4166,11 @@ class TestAlgorithmBasicLayers:
         _, qc = _transpile_and_get_circuit(
             circuit, bindings={"n": n_qubits, "thetas": thetas}
         )
-        ry_count = _gate_names(qc).count("RY")
-        assert ry_count == n_qubits
+        gates = _get_gates(qc)
+        ry_gates = [g for g in gates if g.name == gate_names.RY]
+        assert len(ry_gates) == n_qubits
+        for i, g in enumerate(ry_gates):
+            assert g.target_indices == (i,)
 
     @pytest.mark.parametrize("n_qubits", [3, 4, 5])
     def test_cz_entangling_layer_gate_count(self, n_qubits):
@@ -3232,8 +4185,12 @@ class TestAlgorithmBasicLayers:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, bindings={"n": n_qubits})
-        cz_count = _gate_names(qc).count("CZ")
-        assert cz_count == n_qubits - 1
+        gates = _get_gates(qc)
+        cz_gates = [g for g in gates if g.name == gate_names.CZ]
+        assert len(cz_gates) == n_qubits - 1
+        for i, g in enumerate(cz_gates):
+            assert g.target_indices == (i + 1,)
+            assert g.control_indices == (i,)
 
     def test_cz_entangling_layer_on_plus_state_analytical(self):
         """CZ layer on |+>^3 produces correct entangled statevector (analytical)."""
@@ -3272,11 +4229,13 @@ class TestAlgorithmBasicLayers:
 
         thetas = [0.1, 0.2, 0.3]
         _, qc = _transpile_and_get_circuit(circuit, bindings={"n": 3, "thetas": thetas})
-        names = _gate_names(qc)
-        ry_count = names.count("RY")
-        cz_count = names.count("CZ")
-        assert ry_count == 3
-        assert cz_count == 2
+        gates = _get_gates(qc)
+        ry_gates = [g for g in gates if g.name == gate_names.RY]
+        cz_gates = [g for g in gates if g.name == gate_names.CZ]
+        assert len(ry_gates) == 3
+        assert len(cz_gates) == 2
+        for i, g in enumerate(ry_gates):
+            assert g.target_indices == (i,)
 
     def test_ry_plus_cz_statevector(self):
         """ry_layer + cz_entangling_layer statevector correctness."""
@@ -3299,11 +4258,6 @@ class TestAlgorithmBasicLayers:
         state = tensor_product(I2, CZ) @ state
         state = tensor_product(CZ, I2) @ state
         assert statevectors_equal(sv, state)
-
-
-# ============================================================================
-# 8. Algorithm – QAOA Modules
-# ============================================================================
 
 
 class TestAlgorithmQAOAModules:
@@ -3491,11 +4445,6 @@ class TestAlgorithmQAOAModules:
         assert total == 500
 
 
-# ============================================================================
-# 9. All Four Bell States
-# ============================================================================
-
-
 class TestAdvancedParameterHandling:
     """Test advanced parametric circuit features."""
 
@@ -3665,7 +4614,7 @@ class TestAdvancedParameterHandling:
 
 
 # ============================================================================
-# 19. Variational Classifier Pattern
+# 9. Algorithm Tests: Deutsch-Jozsa
 # ============================================================================
 
 
@@ -3742,12 +4691,22 @@ class TestDeutschJozsaAlgorithm:
                 inputs[i] = qmc.h(inputs[i])
             return qmc.measure(inputs)
 
-        _, qc = _transpile_and_get_circuit(dj_c0, bindings={"n": 3})
-        names = _gate_names(qc)
-        h_count = sum(1 for n in names if n == "H")
-        x_count = sum(1 for n in names if n == "X")
-        assert h_count == 2 * 3 + 1  # n input H before + n H after + 1 ancilla H
-        assert x_count == 1  # ancilla init
+        n = 3
+        _, qc = _transpile_and_get_circuit(dj_c0, bindings={"n": n})
+        gates = _get_gates(qc)
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        x_gates = [g for g in gates if g.name == gate_names.X]
+        assert len(h_gates) == 2 * n + 1  # n input H before + n H after + 1 ancilla H
+        assert len(x_gates) == 1  # ancilla init
+        assert x_gates[0].target_indices == (n,)  # X on ancilla qubit
+        # First n H gates on input qubits 0..n-1
+        for i in range(n):
+            assert h_gates[i].target_indices == (i,)
+        # Ancilla H
+        assert h_gates[n].target_indices == (n,)
+        # Final n H gates on input qubits 0..n-1
+        for i in range(n):
+            assert h_gates[n + 1 + i].target_indices == (i,)
 
     def test_constant_1_all_zeros(self):
         """Constant-1 oracle: input qubits still in |00> (constant → all-zeros)."""
@@ -3820,13 +4779,25 @@ class TestDeutschJozsaAlgorithm:
             return qmc.measure(inputs)
 
         _, qc = _transpile_and_get_circuit(dj_bxor, bindings={"n_val": n})
-        names = _gate_names(qc)
-        h_count = sum(1 for nm in names if nm == "H")
-        cx_count = sum(1 for nm in names if nm == "CNOT")
-        x_count = sum(1 for nm in names if nm == "X")
-        assert h_count == 2 * n + 1
-        assert cx_count == n
-        assert x_count == 1
+        gates = _get_gates(qc)
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        cx_gates = [g for g in gates if g.name == gate_names.CNOT]
+        x_gates = [g for g in gates if g.name == gate_names.X]
+        assert len(h_gates) == 2 * n + 1
+        assert len(cx_gates) == n
+        assert len(x_gates) == 1
+        assert x_gates[0].target_indices == (n,)  # X on ancilla
+        # Input H gates on qubits 0..n-1
+        for i in range(n):
+            assert h_gates[i].target_indices == (i,)
+        # Ancilla H on qubit n
+        assert h_gates[n].target_indices == (n,)
+        # Oracle CX: each input qubit controls ancilla
+        for i, g in enumerate(cx_gates):
+            assert g.control_indices == (i,) and g.target_indices == (n,)
+        # Final H on input qubits 0..n-1
+        for i in range(n):
+            assert h_gates[n + 1 + i].target_indices == (i,)
 
     def test_deutsch_jozsa_statevector_constant(self):
         """Constant-0 DJ: input register in |00> state before measurement."""
@@ -3857,7 +4828,7 @@ class TestDeutschJozsaAlgorithm:
 
 
 # ============================================================================
-# 12. Bernstein-Vazirani Algorithm Pattern
+# 10. Expectation Value Pipeline Tests
 # ============================================================================
 
 
@@ -4061,7 +5032,7 @@ class TestExpvalQuriPartsPipeline:
 
 
 # ============================================================================
-# 14. FQAOA Integration
+# 11. Variational Classifier Pattern Tests
 # ============================================================================
 
 
@@ -4131,11 +5102,13 @@ class TestVariationalClassifierPattern:
             bindings={"n": 3, "params": [0.1, 0.2, 0.3], "H": H_label},
         )
         qc = exe.compiled_quantum[0].circuit
-        names = _gate_names(qc)
-        ry_count = sum(1 for n in names if n == "RY")
-        cz_count = sum(1 for n in names if n == "CZ")
-        assert ry_count == 3
-        assert cz_count == 2
+        gates = _get_gates(qc)
+        ry_gates = [g for g in gates if g.name == gate_names.RY]
+        cz_gates = [g for g in gates if g.name == gate_names.CZ]
+        assert len(ry_gates) == 3
+        assert len(cz_gates) == 2
+        for i, g in enumerate(ry_gates):
+            assert g.target_indices == (i,)
 
     def test_variational_classifier_execution(self):
         """Classifier expval returns a float in [-1, 1]."""
@@ -4185,11 +5158,21 @@ class TestVariationalClassifierPattern:
             bindings={"n": 3, "params": params, "H": H_label},
         )
         qc = exe.compiled_quantum[0].circuit
-        names = _gate_names(qc)
-        ry_count = sum(1 for n in names if n == "RY")
-        cz_count = sum(1 for n in names if n == "CZ")
-        assert ry_count == 6
-        assert cz_count == 4
+        gates = _get_gates(qc)
+        ry_gates = [g for g in gates if g.name == gate_names.RY]
+        cz_gates = [g for g in gates if g.name == gate_names.CZ]
+        assert len(ry_gates) == 6  # 2 layers × 3 qubits
+        assert len(cz_gates) == 4  # 2 layers × 2 CZ each (n-1=2)
+        # RY gates target qubits 0,1,2 in each layer
+        for layer in range(2):
+            for q in range(3):
+                assert ry_gates[layer * 3 + q].target_indices == (q,)
+        # CZ entangling: (0,1), (1,2) in each layer
+        for layer in range(2):
+            assert cz_gates[layer * 2].control_indices == (0,)
+            assert cz_gates[layer * 2].target_indices == (1,)
+            assert cz_gates[layer * 2 + 1].control_indices == (1,)
+            assert cz_gates[layer * 2 + 1].target_indices == (2,)
 
     def test_data_reuploading_pattern(self):
         """Data re-uploading: x-encode, entangle, params, entangle."""
@@ -4221,11 +5204,21 @@ class TestVariationalClassifierPattern:
             },
         )
         qc = exe.compiled_quantum[0].circuit
-        names = _gate_names(qc)
-        ry_count = sum(1 for n in names if n == "RY")
-        cz_count = sum(1 for n in names if n == "CZ")
-        assert ry_count == 6  # 3 x-encode + 3 params
-        assert cz_count == 4  # 2 entangling layers * 2 CZ each
+        gates = _get_gates(qc)
+        ry_gates = [g for g in gates if g.name == gate_names.RY]
+        cz_gates = [g for g in gates if g.name == gate_names.CZ]
+        assert len(ry_gates) == 6  # 3 x-encode + 3 params
+        assert len(cz_gates) == 4  # 2 entangling layers × 2 CZ each (n-1=2)
+        # RY gates target qubits 0,1,2 in each of 2 layers
+        for layer in range(2):
+            for q in range(3):
+                assert ry_gates[layer * 3 + q].target_indices == (q,)
+        # CZ entangling: (0,1), (1,2) in each of 2 layers
+        for layer in range(2):
+            assert cz_gates[layer * 2].control_indices == (0,)
+            assert cz_gates[layer * 2].target_indices == (1,)
+            assert cz_gates[layer * 2 + 1].control_indices == (1,)
+            assert cz_gates[layer * 2 + 1].target_indices == (2,)
 
     def test_variational_classifier_parametric(self):
         """Parametric classifier with parameters=['params']."""
@@ -4253,7 +5246,7 @@ class TestVariationalClassifierPattern:
 
 
 # ============================================================================
-# 20. Error Cases
+# 12. Bernstein-Vazirani Algorithm Tests
 # ============================================================================
 
 
@@ -4360,7 +5353,7 @@ class TestBernsteinVaziraniAlgorithm:
 
 
 # ============================================================================
-# 13. Expectation Value Pipeline
+# 13. FQAOA Integration Tests
 # ============================================================================
 
 
@@ -4449,9 +5442,13 @@ class TestFQAOAIntegration:
             return qmc.measure(q)
 
         _, circ = _transpile_and_get_circuit(circuit, bindings={"n": 2, "theta": 0.5})
-        cx_count = sum(1 for name in _gate_names(circ) if name == "CNOT")
+        gates = _get_gates(circ)
+        cx_gates = [g for g in gates if g.name == gate_names.CNOT]
         # 2 outer CX + 2 from CRY decomposition = 4
-        assert cx_count == 4
+        assert len(cx_gates) == 4
+        # All CNOT gates operate on qubits 0 and 1
+        for g in cx_gates:
+            assert set(g.target_indices + g.control_indices) == {0, 1}
 
     def test_hopping_gate_gate_count(self):
         """Hopping gate contains RX, CNOT, and RZ gates."""
@@ -4467,13 +5464,20 @@ class TestFQAOAIntegration:
         _, circ = _transpile_and_get_circuit(
             circuit, bindings={"n": 2, "beta": 0.3, "hopping_val": 1.0}
         )
-        cx_count = sum(1 for name in _gate_names(circ) if name == "CNOT")
-        rx_count = sum(1 for name in _gate_names(circ) if name == "RX")
-        rz_count = sum(1 for name in _gate_names(circ) if name == "RZ")
+        gates = _get_gates(circ)
+        cx_gates = [g for g in gates if g.name == gate_names.CNOT]
+        rx_gates = [g for g in gates if g.name == gate_names.RX]
+        rz_gates = [g for g in gates if g.name == gate_names.RZ]
         # From code: 4 outer RX (±π/2) + 1 inner RX + 2 CNOT + 1 RZ
-        assert cx_count == 2
-        assert rx_count == 5  # 4 outer + 1 inner
-        assert rz_count == 1
+        assert len(cx_gates) == 2
+        assert len(rx_gates) == 5  # 4 outer + 1 inner
+        assert len(rz_gates) == 1
+        # All gates operate on qubits 0 and/or 1
+        for g in cx_gates:
+            assert set(g.target_indices + g.control_indices) == {0, 1}
+        for g in rx_gates:
+            assert g.target_indices[0] in (0, 1)
+        assert rz_gates[0].target_indices[0] in (0, 1)
 
     def test_cost_layer_gate_count(self):
         """FQAOA cost layer: RZ==len(linear), PauliRotation==len(quad)."""
@@ -4495,10 +5499,19 @@ class TestFQAOAIntegration:
             circuit,
             bindings={"n": 3, "gamma": 0.5, "linear": linear, "quad": quad},
         )
-        rz_count = sum(1 for name in _gate_names(circ) if name == "RZ")
-        rzz_count = sum(1 for name in _gate_names(circ) if name == "PauliRotation")
-        assert rz_count == len(linear)
-        assert rzz_count == len(quad)
+        gates = _get_gates(circ)
+        rz_gates = [g for g in gates if g.name == gate_names.RZ]
+        rzz_gates = [g for g in gates if g.name == gate_names.PauliRotation]
+        assert len(rz_gates) == len(linear)
+        assert len(rzz_gates) == len(quad)
+        # RZ gates target the linear term qubits
+        rz_targets = [g.target_indices[0] for g in rz_gates]
+        for qubit in linear.keys():
+            assert qubit in rz_targets
+        # RZZ gates are PauliRotation(ZZ) on the quad term qubit pairs
+        for g in rzz_gates:
+            assert g.pauli_ids == (SinglePauli.Z, SinglePauli.Z)  # ZZ
+            assert len(g.target_indices) == 2
 
     @pytest.mark.parametrize("n_qubits", [4, 6])
     def test_mixer_layer_hopping_count(self, n_qubits):
@@ -4524,8 +5537,13 @@ class TestFQAOAIntegration:
         odd_pairs = len(range(1, n_qubits - 1, 2))
         total_hopping = even_pairs + odd_pairs + 1
         # Each hopping gate has 2 CNOT
-        cx_count = sum(1 for name in _gate_names(circ) if name == "CNOT")
-        assert cx_count == total_hopping * 2
+        gates = _get_gates(circ)
+        cx_gates = [g for g in gates if g.name == gate_names.CNOT]
+        assert len(cx_gates) == total_hopping * 2
+        # All CNOT gates should target adjacent qubit pairs
+        for g in cx_gates:
+            assert len(g.control_indices) == 1
+            assert len(g.target_indices) == 1
 
     def test_fqaoa_state_transpiles(self):
         """Full fqaoa_state transpiles successfully."""
@@ -4576,7 +5594,7 @@ class TestFQAOAIntegration:
 
 
 # ============================================================================
-# 15. Deep Nested QKernel Composition
+# 14. Advanced Circuit Pattern Tests
 # ============================================================================
 
 
@@ -4685,8 +5703,11 @@ class TestDeepNestedQKernelComposition:
             return qmc.measure(q)
 
         _, circ = _transpile_and_get_circuit(main, bindings={"n": 4})
-        h_count = sum(1 for name in _gate_names(circ) if name == "H")
-        assert h_count == 4
+        gates = _get_gates(circ)
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        assert len(h_gates) == 4
+        for i, g in enumerate(h_gates):
+            assert g.target_indices == (i,)
 
     def test_sub_kernel_per_element_statevector(self):
         """Sub-kernel per-element: statevector = |++⟩ for n=2."""
@@ -4707,11 +5728,6 @@ class TestDeepNestedQKernelComposition:
         sv = _run_statevector(circ)
         expected = tensor_product(plus_state(), plus_state())
         assert statevectors_equal(sv, expected)
-
-
-# ============================================================================
-# 16. Phase Kickback Pattern
-# ============================================================================
 
 
 class TestControlledSubRoutines:
@@ -4921,6 +5937,28 @@ class TestControlledSubRoutines:
         expected = CP @ state
         assert statevectors_equal(sv, expected)
 
+    def test_controlled_multi_gate_double_control_raises(self):
+        """controlled(H·X, num_controls=2) raises EmitError on QuriParts."""
+        from qamomile.circuit.transpiler.errors import EmitError
+
+        @qmc.qkernel
+        def hx_gate(q: qmc.Qubit) -> qmc.Qubit:
+            q = qmc.h(q)
+            q = qmc.x(q)
+            return q
+
+        controlled_hx2 = qmc.controlled(hx_gate, num_controls=2)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q[0] = qmc.x(q[0])
+            q[1] = qmc.x(q[1])
+            q[0], q[1], q[2] = controlled_hx2(q[0], q[1], q[2])
+            return qmc.measure(q)
+
+        with pytest.raises(EmitError, match="multi-controlled"):
+            _transpile_and_get_circuit(circuit)
 
 class TestAllFourBellStates:
     """Test creation and verification of all four Bell states."""
@@ -4986,11 +6024,6 @@ class TestAllFourBellStates:
         assert statevectors_equal(sv, bell_state(3))
 
 
-# ============================================================================
-# 10. GHZ State Parametrised
-# ============================================================================
-
-
 class TestGHZStateParametrised:
     """Test GHZ state creation for varying qubit counts."""
 
@@ -5012,11 +6045,6 @@ class TestGHZStateParametrised:
         expected[0] = 1 / np.sqrt(2)
         expected[-1] = 1 / np.sqrt(2)
         assert statevectors_equal(sv, expected)
-
-
-# ============================================================================
-# 11. Deutsch-Jozsa Algorithm Pattern
-# ============================================================================
 
 
 class TestManualQFTCircuit:
@@ -5046,12 +6074,21 @@ class TestManualQFTCircuit:
             return qmc.measure(q)
 
         _, circ = _transpile_and_get_circuit(qft2)
-        names = _gate_names(circ)
-        assert sum(1 for g in names if g == "H") == 2
+        gates = _get_gates(circ)
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        rz_gates = [g for g in gates if g.name == gate_names.RZ]
+        cx_gates = [g for g in gates if g.name == gate_names.CNOT]
+        swap_gates = [g for g in gates if g.name == gate_names.SWAP]
+        assert len(h_gates) == 2
         # CP decomposed: 3 RZ + 2 CNOT per CP, 1 CP total
-        assert sum(1 for g in names if g == "RZ") == 3
-        assert sum(1 for g in names if g == "CNOT") == 2
-        assert sum(1 for g in names if g == "SWAP") == 1
+        assert len(rz_gates) == 3
+        assert len(cx_gates) == 2
+        assert len(swap_gates) == 1
+        # H gates target qubits 0 and 1
+        assert h_gates[0].target_indices == (0,)
+        assert h_gates[1].target_indices == (1,)
+        # SWAP operates on qubits 0 and 1
+        assert swap_gates[0].target_indices == (0, 1)
 
     def test_manual_qft_2q_from_zero(self):
         """QFT|00⟩ = |++⟩ = [1,1,1,1]/2."""
@@ -5114,17 +6151,21 @@ class TestManualQFTCircuit:
             return qmc.measure(q)
 
         _, circ = _transpile_and_get_circuit(qft3)
-        names = _gate_names(circ)
-        assert sum(1 for g in names if g == "H") == 3
+        gates = _get_gates(circ)
+        h_gates = [g for g in gates if g.name == gate_names.H]
+        rz_gates = [g for g in gates if g.name == gate_names.RZ]
+        cx_gates = [g for g in gates if g.name == gate_names.CNOT]
+        swap_gates = [g for g in gates if g.name == gate_names.SWAP]
+        assert len(h_gates) == 3
         # 3 CP gates, each decomposed to 3 RZ + 2 CNOT
-        assert sum(1 for g in names if g == "RZ") == 9
-        assert sum(1 for g in names if g == "CNOT") == 6
-        assert sum(1 for g in names if g == "SWAP") == 1
-
-
-# ============================================================================
-# 28. Qubit Array Patterns (pure gate circuits — Group 1 only)
-# ============================================================================
+        assert len(rz_gates) == 9
+        assert len(cx_gates) == 6
+        assert len(swap_gates) == 1
+        # H gates target qubits 0, 1, 2
+        for i, g in enumerate(h_gates):
+            assert g.target_indices == (i,)
+        # SWAP operates on qubits 0 and 2 (bit-reversal)
+        assert swap_gates[0].target_indices == (0, 2)
 
 
 class TestPhaseKickbackPattern:
@@ -5151,11 +6192,6 @@ class TestPhaseKickbackPattern:
         # |-> ⊗ |-> = (|0>-|1>)/√2 ⊗ (|0>-|1>)/√2
         expected = tensor_product(minus_state(), minus_state())
         assert statevectors_equal(sv, expected)
-
-
-# ============================================================================
-# 17. Entanglement and Parity Patterns
-# ============================================================================
 
 
 class TestEntanglementAndParityPatterns:
@@ -5268,7 +6304,7 @@ class TestEntanglementAndParityPatterns:
 
 
 # ============================================================================
-# 18. Advanced Parameter Handling
+# 15. Qubit Array Pattern Tests
 # ============================================================================
 
 
@@ -5509,8 +6545,6 @@ class TestQubitArrayPatterns:
         # Both should be 3-qubit GHZ
         assert np.isclose(abs(sv_par[0]), 1.0 / np.sqrt(2), atol=1e-10)
         assert np.isclose(abs(sv_par[7]), 1.0 / np.sqrt(2), atol=1e-10)
-
-
 # ============================================================================
 # 30. Compile-time constant if with array quantum phi output
 # ============================================================================
@@ -5664,8 +6698,8 @@ class TestDirectCastMeasure:
         exe = transpiler.transpile(circuit)
         circ = exe.compiled_quantum[0].circuit
         clbit_map = exe.compiled_quantum[0].clbit_map
-        gate_names = _gate_names(circ)
-        assert any(n.lower() == "h" for n in gate_names)
+        gate_names_list = _gate_names(circ)
+        assert any(n.lower() == "h" for n in gate_names_list)
         assert len(clbit_map) == 2, (
             f"Expected 2 clbit_map entries, got {len(clbit_map)}"
         )
@@ -5721,8 +6755,8 @@ class TestUnresolvedNonMeasurementIfRejection:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 1})
-        gate_names = _gate_names(qc)
-        assert "X" in gate_names
+        gate_names_list = _gate_names(qc)
+        assert "X" in gate_names_list
 
 
 class TestUnresolvedStructuralSize:

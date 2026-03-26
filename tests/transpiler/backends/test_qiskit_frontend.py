@@ -7825,7 +7825,6 @@ class TestDeadPhiTranspilation:
         _, qc = _transpile_and_get_circuit(circuit)
         assert qc is not None
 
-
 # ============================================================================
 # Bound constant if-condition tests (Issue: bound_constant_if_misclassified)
 # ============================================================================
@@ -8304,3 +8303,91 @@ class TestUnresolvedStructuralSize:
         transpiler = QiskitTranspiler()
         with pytest.raises((EmitError, ValueError)):
             transpiler.transpile(circuit, parameters=["n"])
+
+
+class TestWhileIfSharedLocalPhi:
+    """While-if with quantum shared new locals: dead must transpile, live must error."""
+
+    def test_while_loop_with_if_else_same_name_dead_local_transpile(self):
+        """Both branches define q2 but it is dead after if — transpile must succeed."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.x(q0)
+            bit = qmc.measure(q0)
+
+            q1 = qmc.qubit("q1")
+            q1 = qmc.x(q1)
+            sel = qmc.measure(q1)
+
+            while bit:
+                if sel:
+                    q2 = qmc.qubit("q2_t")
+                    q2 = qmc.h(q2)
+                    bit = qmc.measure(q2)
+                else:
+                    q2 = qmc.qubit("q2_f")
+                    bit = qmc.measure(q2)
+            return bit
+
+        # Previously raised EmitError due to dead q2 generating quantum PhiOp
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_clbits >= 1
+
+    def test_while_loop_with_if_else_same_name_dead_local_reassigned_transpile(self):
+        """Dead shared local q2 reassigned after if — transpile must succeed."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.x(q0)
+            bit = qmc.measure(q0)
+
+            q1 = qmc.qubit("q1")
+            q1 = qmc.x(q1)
+            sel = qmc.measure(q1)
+
+            while bit:
+                if sel:
+                    q2 = qmc.qubit("q2_t")
+                    q2 = qmc.h(q2)
+                else:
+                    q2 = qmc.qubit("q2_f")
+                    q2 = qmc.x(q2)
+                # q2 is store-only (reassigned, not read) after if
+                q2 = qmc.qubit("q2_new")
+                bit = qmc.measure(q2)
+            return bit
+
+        # Previously raised EmitError
+        _, qc = _transpile_and_get_circuit(circuit)
+        assert qc.num_clbits >= 1
+
+    def test_while_loop_with_if_else_same_name_live_local_dependency_error(self):
+        """Live shared local q2 read after if must still fail with a compile error."""
+        from qamomile.circuit.transpiler.errors import DependencyError, EmitError
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q0 = qmc.qubit("q0")
+            q0 = qmc.x(q0)
+            bit = qmc.measure(q0)
+
+            q1 = qmc.qubit("q1")
+            q1 = qmc.x(q1)
+            sel = qmc.measure(q1)
+
+            while bit:
+                if sel:
+                    q2 = qmc.qubit("q2_t")
+                    q2 = qmc.h(q2)
+                else:
+                    q2 = qmc.qubit("q2_f")
+                    q2 = qmc.x(q2)
+                # q2 is read after if — merge required but resources differ
+                bit = qmc.measure(q2)
+            return bit
+
+        with pytest.raises((DependencyError, EmitError)):
+            _transpile_and_get_circuit(circuit)
