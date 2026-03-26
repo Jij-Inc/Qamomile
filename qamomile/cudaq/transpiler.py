@@ -254,6 +254,11 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         self._measurement_qubit_map.clear()
         self._emit_operations(circuit, operations, qubit_map, clbit_map, bindings)
 
+        # Late-bind parametricity: if all parameters were eliminated by
+        # compile-time dead branch removal, the kernel signature must be
+        # parameterless to match the runtime binding contract.
+        emitter._parametric = emitter._param_count > 0
+
         # For STATIC mode, measurement_qubit_map is populated by base class
         # via noop_measurement flag.  For RUNNABLE mode, the kernel returns
         # logical clbit values directly via [__b0, __b1, ...], so

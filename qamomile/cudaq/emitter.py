@@ -158,9 +158,16 @@ class CudaqKernelEmitter:
     - ``False`` (RUNNABLE mode): ``emit_measure`` emits explicit ``mz()``
       calls for mid-circuit measurement variables.
 
+    Note:
+        The ``_parametric`` flag is late-bound by ``CudaqEmitPass``: after
+        all operations have been emitted, the flag is updated to
+        ``_param_count > 0`` so that the kernel signature reflects the
+        actual surviving backend parameters, not the originally requested
+        parameter list.
+
     Args:
-        parametric: If True, the generated function accepts a
-            ``thetas: list[float]`` parameter for variational circuits.
+        parametric: Initial hint for parametricity.  The emit pass
+            overrides this after emission based on ``_param_count``.
     """
 
     _kernel_counter = itertools.count()

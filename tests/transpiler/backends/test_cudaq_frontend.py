@@ -1564,6 +1564,72 @@ class TestParametricErrors:
 
 
 # ============================================================================
+# 15b. Dead-branch parameter elimination regression
+# ============================================================================
+
+
+class TestDeadBranchParameterElimination:
+    """Regression tests: parameters in compile-time dead branches produce
+    parameterless CUDA-Q kernels.
+
+    When ``parameters=["theta"]`` is specified but ``theta`` only appears
+    inside a branch that is eliminated at compile time, the generated kernel
+    must NOT require a ``thetas`` argument.
+    """
+
+    def test_dead_branch_closure_constant(self):
+        """Closure constant False eliminates branch → parameterless kernel."""
+        use_rotation = False
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if use_rotation:
+                q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        transpiler = CudaqTranspiler()
+        exe = transpiler.transpile(circuit, parameters=["theta"])
+        qc = exe.compiled_quantum[0].circuit
+
+        # No surviving parameters
+        assert not exe.has_parameters
+        assert exe.parameter_names == []
+
+        # Kernel signature must be parameterless
+        assert "thetas" not in qc.source
+
+        # Execution must succeed without binding
+        result = cudaq.sample(qc.kernel_func, shots_count=10)
+        assert len(result) > 0
+
+    def test_dead_branch_binding_eliminates_param(self):
+        """Binding flag=0 eliminates branch → parameterless kernel."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.Float, theta: qmc.Float) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        transpiler = CudaqTranspiler()
+        exe = transpiler.transpile(circuit, bindings={"flag": 0}, parameters=["theta"])
+        qc = exe.compiled_quantum[0].circuit
+
+        # No surviving parameters
+        assert not exe.has_parameters
+        assert exe.parameter_names == []
+
+        # Kernel signature must be parameterless
+        assert "thetas" not in qc.source
+
+        # Execution must succeed without binding
+        result = cudaq.sample(qc.kernel_func, shots_count=10)
+        assert len(result) > 0
+
+
+# ============================================================================
 # 16. Qubit Array Patterns
 # ============================================================================
 
