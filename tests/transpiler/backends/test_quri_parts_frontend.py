@@ -3208,7 +3208,7 @@ class TestStdlibQFT:
         swap_gates = [g for g in gates if g.name == gate_names.SWAP]
         assert len(h_gates) == 3
         for i, g in enumerate(h_gates):
-            assert g.target_indices == (i,)
+            assert g.target_indices == (2 - i,)
         assert len(rz_gates) == 9  # 3 CP × 3 RZ each
         assert len(cx_gates) == 6  # 3 CP × 2 CNOT each
         assert len(swap_gates) == 1
@@ -5962,6 +5962,7 @@ class TestControlledSubRoutines:
         with pytest.raises(EmitError, match="multi-controlled"):
             _transpile_and_get_circuit(circuit)
 
+
 class TestAllFourBellStates:
     """Test creation and verification of all four Bell states."""
 
@@ -6547,6 +6548,8 @@ class TestQubitArrayPatterns:
         # Both should be 3-qubit GHZ
         assert np.isclose(abs(sv_par[0]), 1.0 / np.sqrt(2), atol=1e-10)
         assert np.isclose(abs(sv_par[7]), 1.0 / np.sqrt(2), atol=1e-10)
+
+
 # ============================================================================
 # 30. Compile-time constant if with array quantum phi output
 # ============================================================================
