@@ -662,7 +662,7 @@ class CudaqExecutor(QuantumExecutor[CudaqKernelArtifact]):
                     f"num_qubits={num_qubits}"
                 )
             padded = bitstring.zfill(num_qubits)
-            canonical = padded[::-1]  # allocation-order -> big-endian
+            canonical = padded[::-1]  # little-endian (allocation-order) -> big-endian
             counts[canonical] = counts.get(canonical, 0) + count
 
         return counts
