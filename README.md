@@ -5,7 +5,7 @@
 > The version currently available on PyPI is not the same as this branch.
 > APIs in this branch may still change, including breaking changes, while active development continues.
 
-Qamomile is a typed quantum programming SDK for writing quantum kernels in Python, inspecting them as Qamomile IR, estimating resources symbolically, and transpiling them to concrete execution backends such as Qiskit and QURI Parts.
+Qamomile is a typed quantum programming SDK for writing quantum kernels in Python, inspecting them as Qamomile IR, estimating resources symbolically, and transpiling them to concrete execution quantum SDK such as Qiskit, QURI Parts, CUDA-Q. Furthremore, as a backend for Qiskit, we support qBraid.
 
 The current workflow is:
 
@@ -69,12 +69,33 @@ Runtime-only environment from source with qBraid support:
 uv sync --no-dev --extra qbraid
 ```
 
+Runtime-only environment from source with CUDA-Q v0.14.0 support:
+
+```bash
+uv sync --no-dev --extra cudaq-cu12   # for CUDA 12.x
+uv sync --no-dev --extra cudaq-cu13   # for CUDA 13.x (or MacOS)
+```
+
+CUDA-Q v0.14.0 currently supports Linux, macOS ARM64 (Apple Silicon), and Windows via WSL2. For MacOS, please use `cudaq-cu13`.
+
+> [!NOTE]
+> **Why `cudaq-cu12` / `cudaq-cu13` instead of `cudaq`?**
+>
+> The upstream `cudaq` meta-package provides only an sdist whose `setup.py` dynamically computes `install_requires`.
+> This causes `uv pip install cudaq` to silently install the package without its dependencies on the first attempt
+> ([astral-sh/uv#12759](https://github.com/astral-sh/uv/issues/12759),
+> [NVIDIA/cuda-quantum#3616](https://github.com/NVIDIA/cuda-quantum/issues/3616)).
+> To avoid this issue, Qamomile specifies the concrete wheel packages `cuda-quantum-cu12` / `cuda-quantum-cu13` directly
+> as optional dependencies, split by CUDA version.
+
 If you prefer an explicit editable install inside your environment, this also works from the cloned repository:
 
 ```bash
 pip install -e .
-pip install -e ".[quri_parts]"  # optional
-pip install -e ".[qbraid]"      # optional
+pip install -e ".[quri_parts]"   # optional
+pip install -e ".[qbraid]"       # optional
+pip install -e ".[cudaq-cu12]"   # optional, CUDA 12.x
+pip install -e ".[cudaq-cu13]"   # optional, CUDA 13.x
 ```
 
 If you intentionally want the latest published release instead, `pip install qamomile` installs the PyPI package, not this work-in-progress branch.
@@ -123,6 +144,7 @@ If it returns a `qmc.Float` from `qmc.expval(...)`, use `run()` instead.
 - `qamomile.circuit`: the main entry point for typed quantum kernels, gates, control flow, drawing, and resource estimation
 - `qamomile.observable`: Hamiltonians and Pauli observables used with expectation-value workflows
 - `qamomile.qiskit`: Qiskit transpiler and executor support
+- `qamomile.cudaq`: optional CUDA-Q transpiler, executor, and observable conversion (supports both static sampling and runtime control-flow modes)
 - `qamomile.qbraid`: optional qBraid executor support for running Qiskit circuits on qBraid-supported devices
 - `qamomile.quri_parts`: optional QURI Parts transpiler and executor support
 - `qamomile.optimization`: optimization-oriented functionality retained for continuity with older Qamomile workflows

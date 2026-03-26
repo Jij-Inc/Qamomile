@@ -13,7 +13,11 @@ from qamomile.circuit.transpiler.errors import QamomileCompileError
 from qamomile.circuit.transpiler.passes.inline import InlinePass
 from qamomile.circuit.transpiler.passes.analyze import AnalyzePass
 from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
+from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
+    CompileTimeIfLoweringPass,
+)
 from qamomile.circuit.transpiler.passes.affine_validate import AffineValidationPass
+from qamomile.circuit.transpiler.passes.validate_while import ValidateWhileContractPass
 from qamomile.circuit.transpiler.passes.separate import SeparatePass
 from qamomile.circuit.transpiler.passes.emit import EmitPass
 from qamomile.circuit.transpiler.passes.substitution import (
@@ -262,6 +266,32 @@ class Transpiler(ABC, Generic[T]):
         """
         return ConstantFoldingPass(bindings).run(block)
 
+    def lower_compile_time_ifs(
+        self,
+        block: Block,
+        bindings: dict[str, Any] | None = None,
+    ) -> Block:
+        """Pass 1.75: Lower compile-time resolvable IfOperations.
+
+        Evaluates IfOperation conditions (including expression-derived
+        conditions via CompOp/CondOp/NotOp) and replaces resolved ones
+        with selected-branch operations.  Phi outputs are substituted
+        with selected-branch values throughout the block.
+
+        This prevents SeparatePass from seeing classical-only compile-time
+        IfOperations that would otherwise split quantum segments.
+        """
+        return CompileTimeIfLoweringPass(bindings).run(block)
+
+    def validate_while_contract(self, block: Block) -> Block:
+        """Pass 1.8: Validate WhileOperation conditions are measurement-backed.
+
+        Rejects while patterns whose condition is not a measurement result
+        (``Bit`` from ``qmc.measure()``).  This prevents late ``ValueError``
+        at emit time for unsupported while forms.
+        """
+        return ValidateWhileContractPass().run(block)
+
     def analyze(self, block: Block) -> Block:
         """Pass 2: Validate and analyze dependencies."""
         return self._analyze_pass.run(block)
@@ -317,6 +347,8 @@ class Transpiler(ABC, Generic[T]):
             3. inline: Inline CallBlockOperations
             4. affine_validate: Validate affine type semantics
             5. constant_fold: Fold constant expressions
+            5.5. lower_compile_time_ifs: Lower compile-time IfOperations
+            5.8. validate_while_contract: Validate while conditions are measurement-backed
             6. analyze: Validate and analyze dependencies
             7. separate: Split into quantum/classical segments
             8. emit: Generate backend-specific code
@@ -328,7 +360,9 @@ class Transpiler(ABC, Generic[T]):
         affine = self.inline(substituted)
         validated = self.affine_validate(affine)
         folded = self.constant_fold(validated, bindings)
-        analyzed = self.analyze(folded)
+        lowered = self.lower_compile_time_ifs(folded, bindings)
+        validated_while = self.validate_while_contract(lowered)
+        analyzed = self.analyze(validated_while)
         separated = self.separate(analyzed)
         return self.emit(separated, bindings, parameters)
 

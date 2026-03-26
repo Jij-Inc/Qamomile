@@ -41,6 +41,8 @@ from qamomile.circuit.transpiler.passes.emit_base import (
     LoopAnalyzer,
     CompositeDecomposer,
     map_phi_outputs,
+    remap_static_phi_outputs,
+    resolve_if_condition,
 )
 from qamomile.circuit.transpiler.errors import (
     EmitError,
@@ -642,11 +644,48 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         clbit_map: dict[str, int],
         bindings: dict[str, Any],
     ) -> None:
-        """Emit if/else operation."""
-        condition_uuid = op.condition.uuid
+        """Emit if/else operation.
+
+        Handles two condition types:
+
+        1. **Compile-time constant** (plain Python ``int``/``bool`` from
+           ``@qkernel`` AST transformer closure variables, constant-folded
+           Values, or Values resolvable via ``bindings``): the active
+           branch is emitted unconditionally, the inactive branch is
+           discarded.  No backend ``c_if`` / ``if_test`` is needed.
+        2. **Runtime condition** (measurement ``Value`` that cannot be
+           resolved at compile time): delegates to the backend's
+           ``emit_if_start`` / ``emit_else_start`` / ``emit_if_end``
+           protocol.
+        """
+        condition = op.condition
+        resolved = resolve_if_condition(condition, bindings)
+
+        # Compile-time constant condition: emit only the selected branch.
+        # Use remap_static_phi_outputs (not the runtime map_phi_outputs
+        # validator) so that dead-branch array quantum phi outputs are
+        # aliased from the selected branch only.
+        if resolved is not None:
+            if resolved:
+                self._emit_operations(
+                    circuit, op.true_operations, qubit_map, clbit_map, bindings
+                )
+            else:
+                self._emit_operations(
+                    circuit, op.false_operations, qubit_map, clbit_map, bindings
+                )
+            remap_static_phi_outputs(op.phi_ops, resolved, qubit_map, clbit_map)
+            return
+
+        condition_uuid = condition.uuid
 
         if condition_uuid not in clbit_map:
-            return
+            raise EmitError(
+                "Runtime if-conditions must come from measurement results "
+                "or be bound before transpilation. The condition value was "
+                "neither resolved at compile time nor backed by a "
+                "measurement result."
+            )
 
         clbit_idx = clbit_map[condition_uuid]
 
@@ -655,10 +694,11 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             self._emit_operations(
                 circuit, op.true_operations, qubit_map, clbit_map, bindings
             )
-            self._emitter.emit_else_start(circuit, context)
-            self._emit_operations(
-                circuit, op.false_operations, qubit_map, clbit_map, bindings
-            )
+            if op.false_operations:
+                self._emitter.emit_else_start(circuit, context)
+                self._emit_operations(
+                    circuit, op.false_operations, qubit_map, clbit_map, bindings
+                )
             self._emitter.emit_if_end(circuit, context)
 
             # Register phi output UUIDs so subsequent operations
@@ -835,7 +875,11 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         qubit_indices: list[int],
         truncation_depth: int,
     ) -> None:
-        """Emit approximate QFT with truncated rotations.
+        """Emit approximate QFT with truncated rotations matching stdlib convention.
+
+        Processes qubits from highest index to lowest (same as exact QFT), applying
+        H then controlled-phase rotations with lower-indexed qubits. Rotations with
+        exponent > truncation_depth are omitted. Finishes with bit-reversal SWAPs.
 
         Args:
             circuit: Target circuit
@@ -848,19 +892,18 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
 
         k = truncation_depth
 
-        for i in range(n):
-            self._emitter.emit_h(circuit, qubit_indices[i])
-            # Only apply rotations with exponent <= truncation_depth
-            for j in range(i + 1, min(i + k + 1, n)):
-                exponent = j - i
+        for j in range(n - 1, -1, -1):
+            self._emitter.emit_h(circuit, qubit_indices[j])
+            for m in range(j - 1, max(j - k - 1, -1), -1):
+                exponent = j - m
                 if exponent <= k:
                     angle = math.pi / (2**exponent)
                     self._emitter.emit_cp(
-                        circuit, qubit_indices[j], qubit_indices[i], angle
+                        circuit, qubit_indices[j], qubit_indices[m], angle
                     )
 
-        for i in range(n // 2):
-            self._emitter.emit_swap(circuit, qubit_indices[i], qubit_indices[n - 1 - i])
+        for j in range(n // 2):
+            self._emitter.emit_swap(circuit, qubit_indices[j], qubit_indices[n - 1 - j])
 
     def _emit_approximate_iqft(
         self,
@@ -868,7 +911,11 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         qubit_indices: list[int],
         truncation_depth: int,
     ) -> None:
-        """Emit approximate IQFT with truncated rotations.
+        """Emit approximate IQFT with truncated rotations matching stdlib convention.
+
+        IQFT = QFT†. SWAP comes first (undoing QFT's trailing SWAP), then for each
+        qubit j (low-to-high), applies inverse controlled-phase rotations with
+        lower-indexed qubits first (omitting exponents > truncation_depth), then H.
 
         Args:
             circuit: Target circuit
@@ -881,54 +928,64 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
 
         k = truncation_depth
 
-        for i in range(n - 1, -1, -1):
-            self._emitter.emit_h(circuit, qubit_indices[i])
-            for j in range(max(0, i - k), i):
-                exponent = i - j
+        # Bit-reversal SWAP first (inverse of QFT's trailing SWAP)
+        for j in range(n // 2):
+            self._emitter.emit_swap(circuit, qubit_indices[j], qubit_indices[n - 1 - j])
+
+        for j in range(n):
+            for m in range(max(0, j - k), j):
+                exponent = j - m
                 if exponent <= k:
                     angle = -math.pi / (2**exponent)
                     self._emitter.emit_cp(
-                        circuit, qubit_indices[j], qubit_indices[i], angle
+                        circuit, qubit_indices[j], qubit_indices[m], angle
                     )
-
-        for i in range(n // 2):
-            self._emitter.emit_swap(circuit, qubit_indices[i], qubit_indices[n - 1 - i])
+            self._emitter.emit_h(circuit, qubit_indices[j])
 
     def _emit_qft_manual(self, circuit: T, qubit_indices: list[int]) -> None:
-        """Emit QFT using decomposition."""
+        """Emit QFT using decomposition matching stdlib convention.
+
+        Processes qubits from highest index to lowest: for each qubit j, applies H
+        then controlled-phase rotations with all lower-indexed qubits k (angle =
+        π/2^(j-k)). Finishes with bit-reversal SWAPs.
+        """
         n = len(qubit_indices)
         if n == 0:
             return
 
-        for i in range(n):
-            self._emitter.emit_h(circuit, qubit_indices[i])
-            for j in range(i + 1, n):
-                k = j - i
-                angle = math.pi / (2**k)
+        for j in range(n - 1, -1, -1):
+            self._emitter.emit_h(circuit, qubit_indices[j])
+            for k in range(j - 1, -1, -1):
+                angle = math.pi / (2 ** (j - k))
                 self._emitter.emit_cp(
-                    circuit, qubit_indices[j], qubit_indices[i], angle
+                    circuit, qubit_indices[j], qubit_indices[k], angle
                 )
 
-        for i in range(n // 2):
-            self._emitter.emit_swap(circuit, qubit_indices[i], qubit_indices[n - 1 - i])
+        for j in range(n // 2):
+            self._emitter.emit_swap(circuit, qubit_indices[j], qubit_indices[n - 1 - j])
 
     def _emit_iqft_manual(self, circuit: T, qubit_indices: list[int]) -> None:
-        """Emit inverse QFT using decomposition."""
+        """Emit inverse QFT using decomposition matching stdlib convention.
+
+        IQFT = QFT†. SWAP comes first (undoing QFT's trailing SWAP), then for each
+        qubit j (low-to-high), applies inverse controlled-phase rotations with all
+        lower-indexed qubits k (angle = -π/2^(j-k)) first, then H.
+        """
         n = len(qubit_indices)
         if n == 0:
             return
 
-        for i in range(n - 1, -1, -1):
-            self._emitter.emit_h(circuit, qubit_indices[i])
-            for j in range(i - 1, -1, -1):
-                k = i - j
-                angle = -math.pi / (2**k)
-                self._emitter.emit_cp(
-                    circuit, qubit_indices[j], qubit_indices[i], angle
-                )
+        # Bit-reversal SWAP first (inverse of QFT's trailing SWAP)
+        for j in range(n // 2):
+            self._emitter.emit_swap(circuit, qubit_indices[j], qubit_indices[n - 1 - j])
 
-        for i in range(n // 2):
-            self._emitter.emit_swap(circuit, qubit_indices[i], qubit_indices[n - 1 - i])
+        for j in range(n):
+            for k in range(j):
+                angle = -math.pi / (2 ** (j - k))
+                self._emitter.emit_cp(
+                    circuit, qubit_indices[j], qubit_indices[k], angle
+                )
+            self._emitter.emit_h(circuit, qubit_indices[j])
 
     def _emit_qpe_manual(
         self,
@@ -1074,6 +1131,11 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                             target_indices,
                             loop_bindings,
                         )
+                else:
+                    raise EmitError(
+                        "Cannot resolve ForOperation bounds in controlled block. "
+                        "Loop bounds must be resolvable at transpile time."
+                    )
 
     def _emit_controlled_gate(
         self,
@@ -1118,6 +1180,27 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 self._emitter.emit_cp(circuit, control_idx, target_idx, -math.pi / 2)
             case GateOperationType.TDG:
                 self._emitter.emit_cp(circuit, control_idx, target_idx, -math.pi / 4)
+            case GateOperationType.SWAP:
+                if len(target_indices) < 2:
+                    raise EmitError(
+                        "Controlled-SWAP requires at least 2 target qubits.",
+                        operation="ControlledGate",
+                    )
+                tgt_a = target_indices[0]
+                tgt_b = target_indices[1]
+                # Fredkin gate decomposition:
+                #   CNOT(tgt_b, tgt_a)
+                #   Toffoli(ctrl, tgt_a, tgt_b)
+                #   CNOT(tgt_b, tgt_a)
+                self._emitter.emit_cx(circuit, tgt_b, tgt_a)
+                self._emitter.emit_toffoli(circuit, control_idx, tgt_a, tgt_b)
+                self._emitter.emit_cx(circuit, tgt_b, tgt_a)
+            case _:
+                raise EmitError(
+                    f"Unsupported gate type {op.gate_type!r} in controlled "
+                    f"block decomposition.",
+                    operation="ControlledGate",
+                )
 
     def _resolve_power(
         self,
@@ -1351,20 +1434,15 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 circuit, controlled_gate, control_phys + target_phys
             )
         else:
-            if nc > 1:
-                raise EmitError(
-                    f"Cannot decompose multi-controlled operation (num_controls={nc}).",
-                    operation="ControlledUOperation",
-                )
-            for _ in range(power_value):
-                for ctrl_idx in control_phys:
-                    self._emit_controlled_block(
-                        circuit,
-                        block_value,
-                        ctrl_idx,
-                        target_phys,
-                        local_bindings,
-                    )
+            self._emit_controlled_fallback(
+                circuit,
+                block_value,
+                nc,
+                control_phys,
+                target_phys,
+                power_value,
+                local_bindings,
+            )
 
         # 9. Map result ArrayValue in qubit_map
         vector_result = op.results[0]
@@ -1464,28 +1542,66 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 circuit, controlled_gate, control_indices + target_indices
             )
         else:
-            if op.num_controls > 1:
-                raise EmitError(
-                    f"Cannot decompose multi-controlled operation "
-                    f"(num_controls={op.num_controls}): "
-                    f"block-to-gate conversion failed and the "
-                    f"fallback decomposition only supports single control.",
-                    operation="ControlledUOperation",
-                )
-            for _ in range(power_value):
-                for ctrl_idx in control_indices:
-                    self._emit_controlled_block(
-                        circuit,
-                        block_value,
-                        ctrl_idx,
-                        target_indices,
-                        local_bindings,
-                    )
+            self._emit_controlled_fallback(
+                circuit,
+                block_value,
+                op.num_controls,
+                control_indices,
+                target_indices,
+                power_value,
+                local_bindings,
+            )
 
         all_input_indices = control_indices + target_indices
         for i, result in enumerate(op.results):
             if i < len(all_input_indices):
                 qubit_map[result.uuid] = all_input_indices[i]
+
+    def _emit_controlled_fallback(
+        self,
+        circuit: T,
+        block_value: Any,
+        num_controls: int,
+        control_indices: list[int],
+        target_indices: list[int],
+        power: int,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Fallback emission for controlled-U when gate conversion fails.
+
+        Decomposes the block body gate-by-gate with single-control emission.
+        Subclasses may override to support multi-control natively.
+
+        Args:
+            circuit: The backend circuit being built.
+            block_value: The block value containing operations to control.
+            num_controls: Number of control qubits.
+            control_indices: Physical indices of control qubits.
+            target_indices: Physical indices of target qubits.
+            power: Number of times to repeat the controlled operation.
+            bindings: Parameter bindings.
+
+        Raises:
+            EmitError: When num_controls > 1 (multi-control not supported
+                in the default gate-by-gate decomposition).
+        """
+        if num_controls > 1:
+            raise EmitError(
+                f"Cannot decompose multi-controlled operation "
+                f"(num_controls={num_controls}): "
+                f"block-to-gate conversion failed and the "
+                f"fallback decomposition only supports single control.",
+                operation="ControlledUOperation",
+            )
+        for _ in range(power):
+            for ctrl_idx in control_indices:
+                self._emit_controlled_block(
+                    circuit,
+                    block_value,
+                    ctrl_idx,
+                    target_indices,
+                    bindings,
+                )
 
     def _emit_custom_composite(
         self,
@@ -1615,13 +1731,26 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         """Handle CastOperation - update qubit_map without emitting gates."""
         result = op.results[0]
 
+        resolved = 0
         for i, qubit_uuid in enumerate(op.qubit_mapping):
             if qubit_uuid in qubit_map:
                 result_element_id = f"{result.uuid}_{i}"
                 qubit_map[result_element_id] = qubit_map[qubit_uuid]
+                resolved += 1
 
         if op.qubit_mapping and op.qubit_mapping[0] in qubit_map:
             qubit_map[result.uuid] = qubit_map[op.qubit_mapping[0]]
+
+        total = len(op.qubit_mapping)
+        if total > 0 and resolved < total:
+            import warnings
+
+            warnings.warn(
+                f"CastOperation: {total - resolved}/{total} carrier qubits "
+                f"unresolved in qubit_map. "
+                f"Downstream measurements may be silently dropped.",
+                stacklevel=2,
+            )
 
     def _evaluate_binop(self, op: BinOp, bindings: dict[str, Any]) -> None:
         """Evaluate a BinOp and store the result in bindings."""

@@ -19,8 +19,10 @@ from qamomile.circuit.ir.operation.control_flow import (
 )
 from qamomile.circuit.transpiler.transpiler import Transpiler
 from qamomile.circuit.transpiler.passes.emit import EmitPass
+from qamomile.circuit.transpiler.passes.emit_base import resolve_if_condition
 from qamomile.circuit.transpiler.passes.separate import SeparatePass
 from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import (
     QuantumExecutor,
     ParameterMetadata,
@@ -120,10 +122,22 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         bindings: dict[str, Any],
     ) -> None:
         """Emit if/else using Qiskit's if_test context manager."""
-        condition_uuid = op.condition.uuid
+        condition = op.condition
+
+        # Compile-time constant conditions are handled by the base class.
+        if resolve_if_condition(condition, bindings) is not None:
+            super()._emit_if(circuit, op, qubit_map, clbit_map, bindings)
+            return
+
+        condition_uuid = condition.uuid
 
         if condition_uuid not in clbit_map:
-            return
+            raise EmitError(
+                "Runtime if-conditions must come from measurement results "
+                "or be bound before transpilation. The condition value was "
+                "neither resolved at compile time nor backed by a "
+                "measurement result."
+            )
 
         clbit_idx = clbit_map[condition_uuid]
 
@@ -266,18 +280,22 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
             try:
                 # Try qiskit_aer Estimator first (supports more features)
                 from qiskit_aer.primitives import Estimator
+
                 self._estimator = Estimator()
             except ImportError:
                 try:
                     from qiskit.primitives import StatevectorEstimator
+
                     self._estimator = StatevectorEstimator()
                 except ImportError:
                     # Fallback for older Qiskit versions
                     from qiskit.primitives import Estimator
+
                     self._estimator = Estimator()
 
         # Convert Hamiltonian to SparsePauliOp
         from qamomile.qiskit.observable import hamiltonian_to_sparse_pauli_op
+
         sparse_pauli_op = hamiltonian_to_sparse_pauli_op(hamiltonian)
 
         # Run estimation
@@ -296,7 +314,9 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
             return float(result[0].data.evs)
         except (TypeError, AttributeError):
             # Fall back to V1 interface
-            job = self._estimator.run([circuit], [sparse_pauli_op], [param_values] if param_values else None)
+            job = self._estimator.run(
+                [circuit], [sparse_pauli_op], [param_values] if param_values else None
+            )
             result = job.result()
             return float(result.values[0])
 

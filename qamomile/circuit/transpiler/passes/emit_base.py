@@ -48,6 +48,126 @@ from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import ArrayValue
 
 
+def resolve_if_condition(
+    condition: Any,
+    bindings: dict[str, Any],
+) -> bool | None:
+    """Resolve an if-condition to a compile-time boolean.
+
+    Checks whether the condition can be statically evaluated at emit time.
+    Plain Python values (int/bool captured by ``@qkernel`` from closure),
+    constant-folded Values, and Values resolvable via ``bindings`` are all
+    treated as compile-time constants.
+
+    Args:
+        condition: The condition from ``IfOperation`` (plain value or
+            ``Value`` object).
+        bindings: Current variable bindings (uuid → value and/or
+            name → value).
+
+    Returns:
+        ``True``/``False`` for compile-time resolvable conditions,
+        ``None`` for runtime conditions that must be dispatched to the
+        backend's conditional branching protocol.
+    """
+    # Plain Python int/bool captured by @qkernel AST transformer
+    if not hasattr(condition, "uuid"):
+        return bool(condition)
+
+    # Value with is_constant() (e.g., from constant folding)
+    if hasattr(condition, "is_constant") and condition.is_constant():
+        return bool(condition.get_const())
+
+    # Bound by UUID
+    if condition.uuid in bindings:
+        return bool(bindings[condition.uuid])
+
+    # Bound by name
+    #
+    # NOTE:
+    # This fallback may also match frontend-generated measurement result names
+    # such as "<qubit>_measured". If a user-provided binding uses the same
+    # string key, a runtime measurement-driven if-condition can be treated as
+    # compile-time resolvable. We keep this behavior for now because it is
+    # convenient for named classical parameters, but it is intentionally
+    # narrower/less reliable than UUID-based resolution.
+    if hasattr(condition, "name") and condition.name and condition.name in bindings:
+        return bool(bindings[condition.name])
+
+    # Const in params
+    if (
+        hasattr(condition, "params")
+        and condition.params
+        and "const" in condition.params
+    ):
+        return bool(condition.params["const"])
+
+    # Runtime condition — cannot resolve at compile time
+    return None
+
+
+def remap_static_phi_outputs(
+    phi_ops: list[Operation],
+    condition_value: bool,
+    qubit_map: dict[str, int],
+    clbit_map: dict[str, int],
+) -> None:
+    """Remap phi outputs for a compile-time constant ``IfOperation``.
+
+    When the condition is statically known, the dead branch is never
+    allocated.  Phi outputs are aliased directly to the selected
+    branch's source value, bypassing the two-branch merge validation
+    in ``map_phi_outputs``.
+
+    This is the shared implementation used by both the resource allocator
+    (during allocation) and the emit pass (during emission) to ensure
+    scalar and array quantum phi outputs are handled identically.
+
+    Args:
+        phi_ops: Phi operations from the ``IfOperation``.
+        condition_value: The resolved boolean condition.
+        qubit_map: UUID-to-physical-qubit mapping (mutated in place).
+        clbit_map: UUID-to-physical-clbit mapping (mutated in place).
+    """
+    for phi in phi_ops:
+        if not isinstance(phi, PhiOp):
+            continue
+        output = phi.results[0]
+        # operands: [condition, true_val, false_val]
+        selected_val = phi.operands[1] if condition_value else phi.operands[2]
+
+        if output.uuid in qubit_map or output.uuid in clbit_map:
+            continue
+
+        if output.type.is_quantum():
+            if isinstance(output, ArrayValue):
+                # Copy composite element keys from selected branch
+                prefix = (
+                    f"{selected_val.uuid}_"
+                    if isinstance(selected_val, ArrayValue)
+                    else ""
+                )
+                for key, phys_idx in list(qubit_map.items()):
+                    if prefix and key.startswith(prefix):
+                        suffix = key[len(prefix) :]
+                        out_key = f"{output.uuid}_{suffix}"
+                        if out_key not in qubit_map:
+                            qubit_map[out_key] = phys_idx
+            else:
+                # Scalar qubit: alias to selected branch's physical qubit
+                key, _ = ResourceAllocator._resolve_qubit_key(selected_val)
+                phys = qubit_map.get(
+                    selected_val.uuid,
+                    qubit_map.get(key) if key is not None else None,
+                )
+                if phys is not None:
+                    qubit_map[output.uuid] = phys
+        else:
+            # Classical bit: alias to selected branch
+            if selected_val.uuid in clbit_map:
+                clbit_map[output.uuid] = clbit_map[selected_val.uuid]
+
+
 def map_phi_outputs(
     phi_ops: list[Operation],
     qubit_map: dict[str, int],
@@ -278,12 +398,18 @@ class ResourceAllocator:
                     if result.shape:
                         size_val = result.shape[0]
                         size = self._resolve_size(size_val, bindings)
-                        if size is not None:
-                            for i in range(size):
-                                qubit_id = f"{result.uuid}_{i}"
-                                if qubit_id not in qubit_map:
-                                    qubit_map[qubit_id] = self._next_qubit_index
-                                    self._next_qubit_index += 1
+                        if size is None:
+                            from qamomile.circuit.transpiler.errors import EmitError
+
+                            raise EmitError(
+                                "Cannot resolve array size for qubit allocation. "
+                                "Structural UInt parameters must be bound at transpile time."
+                            )
+                        for i in range(size):
+                            qubit_id = f"{result.uuid}_{i}"
+                            if qubit_id not in qubit_map:
+                                qubit_map[qubit_id] = self._next_qubit_index
+                                self._next_qubit_index += 1
                     continue
                 if result.uuid not in qubit_map:
                     qubit_map[result.uuid] = self._next_qubit_index
@@ -328,13 +454,23 @@ class ResourceAllocator:
                 self._allocate_recursive(op.operations, qubit_map, clbit_map, bindings)
 
             elif isinstance(op, IfOperation):
-                self._allocate_recursive(
-                    op.true_operations, qubit_map, clbit_map, bindings
-                )
-                self._allocate_recursive(
-                    op.false_operations, qubit_map, clbit_map, bindings
-                )
-                self._allocate_phi_ops(op.phi_ops, qubit_map, clbit_map)
+                resolved = resolve_if_condition(op.condition, bindings)
+                if resolved is not None:
+                    # Compile-time constant: only allocate the selected
+                    # branch and remap phi outputs directly.
+                    selected = op.true_operations if resolved else op.false_operations
+                    self._allocate_recursive(selected, qubit_map, clbit_map, bindings)
+                    self._remap_static_phi_outputs(
+                        op.phi_ops, resolved, qubit_map, clbit_map
+                    )
+                else:
+                    self._allocate_recursive(
+                        op.true_operations, qubit_map, clbit_map, bindings
+                    )
+                    self._allocate_recursive(
+                        op.false_operations, qubit_map, clbit_map, bindings
+                    )
+                    self._allocate_phi_ops(op.phi_ops, qubit_map, clbit_map)
 
             elif isinstance(op, WhileOperation):
                 # WhileOperation operands:
@@ -445,6 +581,11 @@ class ResourceAllocator:
         same classical bit as the initial while condition.
         """
         for op in operations:
+            if isinstance(op, (ForOperation, ForItemsOperation)):
+                self._alias_loop_carried_clbits(
+                    op.operations, target_uuid, canonical_clbit, clbit_map
+                )
+                continue
             if not isinstance(op, IfOperation):
                 continue
             for phi in op.phi_ops:
@@ -475,6 +616,28 @@ class ResourceAllocator:
     ) -> None:
         """Register phi output UUIDs via the shared ``map_phi_outputs`` utility."""
         map_phi_outputs(phi_ops, qubit_map, clbit_map)
+
+    def _remap_static_phi_outputs(
+        self,
+        phi_ops: list[Operation],
+        condition_value: bool,
+        qubit_map: dict[str, int],
+        clbit_map: dict[str, int],
+    ) -> None:
+        """Remap phi outputs for a compile-time constant ``IfOperation``.
+
+        Delegates to the module-level ``remap_static_phi_outputs`` helper,
+        which is shared with the emit pass to ensure scalar and array
+        quantum phi outputs are handled identically at both allocation
+        and emission time.
+
+        Args:
+            phi_ops: Phi operations from the ``IfOperation``.
+            condition_value: The resolved boolean condition.
+            qubit_map: UUID-to-physical-qubit mapping (mutated in place).
+            clbit_map: UUID-to-physical-clbit mapping (mutated in place).
+        """
+        remap_static_phi_outputs(phi_ops, condition_value, qubit_map, clbit_map)
 
     def _resolve_size(
         self,
@@ -692,13 +855,25 @@ class ResourceAllocator:
         op: CastOperation,
         qubit_map: dict[str, int],
     ) -> None:
-        """Allocate resources for a CastOperation (no-op)."""
+        """Allocate resources for a CastOperation (alias mapping)."""
+        resolved = 0
         for i, qubit_uuid in enumerate(op.qubit_mapping):
             if qubit_uuid in qubit_map:
                 result_element_id = f"{op.results[0].uuid}_{i}"
                 qubit_map[result_element_id] = qubit_map[qubit_uuid]
                 if op.results[0].uuid not in qubit_map:
                     qubit_map[op.results[0].uuid] = qubit_map[qubit_uuid]
+                resolved += 1
+        total = len(op.qubit_mapping)
+        if total > 0 and resolved < total:
+            import warnings
+
+            warnings.warn(
+                f"CastOperation: {total - resolved}/{total} carrier qubits "
+                f"unresolved in qubit_map. "
+                f"Downstream measurements may be silently dropped.",
+                stacklevel=2,
+            )
 
 
 class ValueResolver:

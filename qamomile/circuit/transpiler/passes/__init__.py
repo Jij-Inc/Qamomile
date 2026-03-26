@@ -31,6 +31,7 @@ class Pass(ABC, Generic[InputT, OutputT]):
 
 # Import submodule passes after Pass is defined to avoid circular imports
 from .constant_fold import ConstantFoldingPass  # noqa: E402
+from .compile_time_if_lowering import CompileTimeIfLoweringPass  # noqa: E402
 from .affine_validate import AffineValidationPass  # noqa: E402
 from .control_flow_visitor import (  # noqa: E402
     ControlFlowVisitor,
@@ -38,6 +39,7 @@ from .control_flow_visitor import (  # noqa: E402
     OperationCollector,
     ValueCollector,
 )
+from .validate_while import ValidateWhileContractPass  # noqa: E402
 from .value_mapping import UUIDRemapper, ValueSubstitutor  # noqa: E402
 
 # Re-export error classes for convenience
@@ -48,11 +50,13 @@ __all__ = [
     "DependencyError",
     "AffineTypeError",
     "ConstantFoldingPass",
+    "CompileTimeIfLoweringPass",
     "AffineValidationPass",
     "ControlFlowVisitor",
     "OperationTransformer",
     "OperationCollector",
     "ValueCollector",
+    "ValidateWhileContractPass",
     "UUIDRemapper",
     "ValueSubstitutor",
 ]

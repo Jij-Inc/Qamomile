@@ -83,6 +83,7 @@ from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.segments import SimplifiedProgram
 from qamomile.circuit.transpiler.transpiler import TranspilerConfig
 from qamomile.qiskit import QiskitTranspiler
+from qamomile.circuit.transpiler.errors import EmitError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -3946,12 +3947,12 @@ class TestTranspilerConfigAndSubstitution:
         qc_std = exe_std.compiled_quantum[0].circuit
         # Standard QFT 5q: 5H + 10CP + 2SWAP + 5M = 22
         assert len(qc_std.data) == 22
-        # Verify structure: H(0) 4CP H(1) 3CP H(2) 2CP H(3) 1CP H(4) 2SWAP 5M
+        # Verify structure (stdlib high-to-low): H(4) 4CP H(3) 3CP H(2) 2CP H(1) 1CP H(0) 2SWAP 5M
         idx = 0
-        for qubit in range(5):
+        for qubit in range(4, -1, -1):
             assert isinstance(qc_std.data[idx].operation, HGate)
             idx += 1
-            for j in range(qubit + 1, 5):
+            for k in range(qubit - 1, -1, -1):
                 assert isinstance(qc_std.data[idx].operation, CPhaseGate)
                 idx += 1
         # 2 SWAP gates
@@ -3972,65 +3973,19 @@ class TestTranspilerConfigAndSubstitution:
         exe_approx = transpiler_approx.transpile(circuit)
         qc_approx = exe_approx.compiled_quantum[0].circuit
         # Approximate QFT k=2 5q: 5H + 7CP + 2SWAP + 5M = 19
-        # Each qubit gets at most k=2 CP gates after its H
+        # Each qubit gets at most k=2 CP gates after its H (stdlib high-to-low)
         assert len(qc_approx.data) == 19
-        # Verify structure: H(0) 2CP H(1) 2CP H(2) 2CP H(3) 1CP H(4) 2SWAP 5M
+        # Verify structure: H(4) 2CP H(3) 2CP H(2) 2CP H(1) 1CP H(0) 2SWAP 5M
         idx = 0
 
-        # qubit 0: H + CP(q1,q0,π/2) + CP(q2,q0,π/4)
+        # qubit 4: H + CP(4,3,π/2) + CP(4,2,π/4)
         assert isinstance(qc_approx.data[idx].operation, HGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [0]
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [4]
         idx += 1
         assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
         assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            1,
-            0,
-        ]
-        assert np.isclose(
-            float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
-        )
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            2,
-            0,
-        ]
-        assert np.isclose(
-            float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10
-        )
-        idx += 1
-
-        # qubit 1: H + CP(q2,q1,π/2) + CP(q3,q1,π/4)
-        assert isinstance(qc_approx.data[idx].operation, HGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [1]
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            2,
-            1,
-        ]
-        assert np.isclose(
-            float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
-        )
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
+            4,
             3,
-            1,
-        ]
-        assert np.isclose(
-            float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10
-        )
-        idx += 1
-
-        # qubit 2: H + CP(q3,q2,π/2) + CP(q4,q2,π/4)
-        assert isinstance(qc_approx.data[idx].operation, HGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [2]
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            3,
-            2,
         ]
         assert np.isclose(
             float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
@@ -4046,23 +4001,69 @@ class TestTranspilerConfigAndSubstitution:
         )
         idx += 1
 
-        # qubit 3: H + CP(q4,q3,π/2)
+        # qubit 3: H + CP(3,2,π/2) + CP(3,1,π/4)
         assert isinstance(qc_approx.data[idx].operation, HGate)
         assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [3]
         idx += 1
         assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
         assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            4,
             3,
+            2,
+        ]
+        assert np.isclose(
+            float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
+        )
+        idx += 1
+        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
+            3,
+            1,
+        ]
+        assert np.isclose(
+            float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10
+        )
+        idx += 1
+
+        # qubit 2: H + CP(2,1,π/2) + CP(2,0,π/4)
+        assert isinstance(qc_approx.data[idx].operation, HGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [2]
+        idx += 1
+        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
+            2,
+            1,
+        ]
+        assert np.isclose(
+            float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
+        )
+        idx += 1
+        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
+            2,
+            0,
+        ]
+        assert np.isclose(
+            float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10
+        )
+        idx += 1
+
+        # qubit 1: H + CP(1,0,π/2)
+        assert isinstance(qc_approx.data[idx].operation, HGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [1]
+        idx += 1
+        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
+            1,
+            0,
         ]
         assert np.isclose(
             float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
         )
         idx += 1
 
-        # qubit 4: H only
+        # qubit 0: H only
         assert isinstance(qc_approx.data[idx].operation, HGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [4]
+        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [0]
         idx += 1
 
         # 2 SWAP gates for bit reversal
@@ -4462,12 +4463,7 @@ class TestStdlibQFT:
         assert qc.num_qubits == 3
 
     def test_qft_then_iqft_transpiles(self):
-        """QFT followed by IQFT can be transpiled and simulated.
-
-        Note: The decomposed QFT/IQFT both include bit-reversal SWAPs,
-        so QFT -> IQFT != identity in general. We verify the circuit
-        transpiles and runs without error.
-        """
+        """QFT followed by IQFT is identity on the input state."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -4482,8 +4478,10 @@ class TestStdlibQFT:
         exe = transpiler.transpile(circuit)
         qc = exe.compiled_quantum[0].circuit
         sv = _run_statevector(qc)
-        # Just verify it produces a valid statevector (norm 1)
-        assert np.isclose(np.linalg.norm(sv), 1.0, atol=1e-10)
+        # QFT -> IQFT must recover the input state X(q[0]) = |01> in Qiskit
+        # convention (qubit 0 is LSB), statevector index 1 = [0, 1, 0, 0]
+        expected = np.array([0, 1, 0, 0], dtype=complex)
+        assert np.allclose(sv, expected, atol=1e-10)
 
     def test_qft_native_emission(self):
         """Native QFT emitter uses Qiskit's QFT library gate."""
@@ -4500,7 +4498,7 @@ class TestStdlibQFT:
         assert len(qc.data) > 0
 
     def test_qft_decomposed_emission(self):
-        """Decomposed QFT uses primitive gates (H, CP)."""
+        """Decomposed QFT uses primitive gates (H, CP) in stdlib high-to-low order."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -4511,17 +4509,18 @@ class TestStdlibQFT:
         transpiler = QiskitTranspiler(use_native_composite=False)
         exe = transpiler.transpile(circuit)
         qc = exe.compiled_quantum[0].circuit
-        # Decomposed QFT 3q: H(0) CP(1,0) CP(2,0) H(1) CP(2,1) H(2) SWAP(0,2) + 3M = 10
+        # Decomposed QFT 3q (stdlib high-to-low):
+        #   H(2) CP(2,1) CP(2,0) H(1) CP(1,0) H(0) SWAP(0,2) + 3M = 10
         assert len(qc.data) == 10
         assert isinstance(qc.data[0].operation, HGate)
-        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0]
+        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [2]
         assert isinstance(qc.data[1].operation, CPhaseGate)
         assert isinstance(qc.data[2].operation, CPhaseGate)
         assert isinstance(qc.data[3].operation, HGate)
         assert [qc.find_bit(q).index for q in qc.data[3].qubits] == [1]
         assert isinstance(qc.data[4].operation, CPhaseGate)
         assert isinstance(qc.data[5].operation, HGate)
-        assert [qc.find_bit(q).index for q in qc.data[5].qubits] == [2]
+        assert [qc.find_bit(q).index for q in qc.data[5].qubits] == [0]
         assert isinstance(qc.data[6].operation, SwapGate)
         assert [qc.find_bit(q).index for q in qc.data[6].qubits] == [0, 2]
         for i in range(3):
@@ -4553,7 +4552,7 @@ class TestStdlibQPE:
         assert qc.num_qubits == 4  # 3 counting + 1 target
 
     def test_qpe_execution(self):
-        """QPE execution returns valid float results."""
+        """QPE execution returns exact phase estimate via non-native decomposition."""
 
         @qmc.qkernel
         def phase_gate(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
@@ -4571,14 +4570,14 @@ class TestStdlibQPE:
         exe = transpiler.transpile(qpe_3bit, bindings={"phase": np.pi / 2})
         executor = transpiler.executor()
 
-        job = exe.sample(executor, bindings={}, shots=500)
+        job = exe.sample(executor, bindings={}, shots=256)
         result = job.result()
         assert result is not None
-        # QPE should return float values in [0, 1)
-        for value, count in result.results:
-            assert isinstance(value, float)
-            assert 0.0 <= value < 1.0
-            assert count > 0
+        # phase = pi/2 → phase/2π = 0.25, representable exactly in 3-bit QPE
+        assert len(result.results) == 1
+        value, count = result.results[0]
+        assert np.isclose(value, 0.25, atol=1e-9)
+        assert count == 256
 
 
 class TestControlledGate:
@@ -7825,6 +7824,485 @@ class TestDeadPhiTranspilation:
 
         _, qc = _transpile_and_get_circuit(circuit)
         assert qc is not None
+
+# ============================================================================
+# Bound constant if-condition tests (Issue: bound_constant_if_misclassified)
+# ============================================================================
+
+
+class TestBoundConstantIfCondition:
+    """Test that bound parameters in if-conditions are correctly resolved as
+    compile-time constants, not misclassified as runtime conditions."""
+
+    def test_bound_flag_true_emits_true_branch(self):
+        """bindings={"flag": 1} should statically select the true branch."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 1})
+        gate_names = [instr.operation.name for instr in qc.data]
+        assert "x" in gate_names, (
+            f"True branch (X gate) missing from circuit: {gate_names}"
+        )
+
+    def test_bound_flag_false_emits_false_branch(self):
+        """bindings={"flag": 0} should statically select the false branch."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 0})
+        gate_names = [instr.operation.name for instr in qc.data]
+        assert "x" not in gate_names, (
+            f"False branch selected but X gate still present: {gate_names}"
+        )
+
+    def test_bound_flag_true_statevector(self):
+        """Bound flag=1 if-X should produce |1> statevector."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 1})
+        from qiskit_aer import AerSimulator
+
+        backend = AerSimulator(method="statevector")
+        qc_no_meas = qc.remove_final_measurements(inplace=False)
+        qc_no_meas.save_statevector()
+        result = backend.run(qc_no_meas).result()
+        sv = np.array(result.get_statevector())
+        expected = computational_basis_state(1, 1)  # |1>
+        assert statevectors_equal(sv, expected)
+
+    def test_bound_flag_false_statevector(self):
+        """Bound flag=0 if-X should produce |0> statevector."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 0})
+        from qiskit_aer import AerSimulator
+
+        backend = AerSimulator(method="statevector")
+        qc_no_meas = qc.remove_final_measurements(inplace=False)
+        qc_no_meas.save_statevector()
+        result = backend.run(qc_no_meas).result()
+        sv = np.array(result.get_statevector())
+        expected = computational_basis_state(1, 0)  # |0>
+        assert statevectors_equal(sv, expected)
+
+    def test_closure_constant_still_works(self):
+        """Plain Python bool closure constants should still work as before."""
+        flag = True
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        gate_names = [instr.operation.name for instr in qc.data]
+        assert "x" in gate_names
+
+
+# ============================================================================
+# Compile-time constant if with array quantum phi output
+# ============================================================================
+
+
+class TestCompileTimeIfArrayQuantumPhi:
+    """Compile-time constant if with array quantum phi must not raise EmitError.
+
+    When a compile-time constant ``if`` has a dead branch that rebinds a
+    qubit array to a different array, the emit-time phi registration must
+    use selected-branch-only remap (not the runtime two-branch validator).
+    """
+
+    def test_dead_branch_different_array_true_branch(self):
+        """True branch selected: dead branch rebinds to different array."""
+        flag = True
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            if flag:
+                q[0] = qmc.x(q[0])
+            else:
+                alt = qmc.qubit_array(2, "alt")
+                alt[1] = qmc.x(alt[1])
+                q = alt
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        gate_names = [instr.operation.name for instr in qc.data]
+        assert "x" in gate_names
+        assert "measure" in gate_names
+
+    def test_dead_branch_different_array_false_branch(self):
+        """False branch selected: dead branch in true side."""
+        flag = False
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            if flag:
+                alt = qmc.qubit_array(2, "alt")
+                alt[0] = qmc.x(alt[0])
+                q = alt
+            else:
+                q[1] = qmc.x(q[1])
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        gate_names = [instr.operation.name for instr in qc.data]
+        assert "x" in gate_names
+        assert "measure" in gate_names
+
+    def test_scalar_compile_time_if_still_works(self):
+        """Scalar qubit rebind in compile-time if remains functional."""
+        flag = True
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.x(q)
+            else:
+                alt = qmc.qubit("alt")
+                q = alt
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit)
+        gate_names = [instr.operation.name for instr in qc.data]
+        assert "x" in gate_names
+        assert "measure" in gate_names
+
+
+# ============================================================================
+# Compile-time if phi propagation (Issue: compile_time_constant_if_phi_propagation)
+# ============================================================================
+
+
+class TestCompileTimeIfPhiPropagation:
+    """Compile-time IfOperation lowering before SeparatePass.
+
+    Tests that compile-time resolvable IfOperations (including expression-
+    derived conditions like ``if flag > 0:``) are lowered before separation,
+    preventing MultipleQuantumSegmentsError and ensuring phi outputs are
+    correctly propagated.
+    """
+
+    def test_direct_classical_if_after_qinit_flag_true(self):
+        """Direct ``if flag:`` after quantum init should not raise."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            theta = qmc.float_(0.1)
+            if flag:
+                theta = qmc.float_(1.0)
+            else:
+                theta = qmc.float_(2.0)
+            q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 1})
+        gate_names = [instr.operation.name for instr in qc.data]
+        assert "rx" in gate_names
+
+    def test_direct_classical_if_after_qinit_flag_false(self):
+        """Direct ``if flag:`` with flag=0 after quantum init."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            theta = qmc.float_(0.1)
+            if flag:
+                theta = qmc.float_(1.0)
+            else:
+                theta = qmc.float_(2.0)
+            q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 0})
+        gate_names = [instr.operation.name for instr in qc.data]
+        assert "rx" in gate_names
+
+    def test_comparison_derived_classical_if_after_qinit(self):
+        """``if flag > 0:`` after quantum init should not raise."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            theta = qmc.float_(0.1)
+            if flag > 0:
+                theta = qmc.float_(1.0)
+            else:
+                theta = qmc.float_(2.0)
+            q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 1})
+        gate_names = [instr.operation.name for instr in qc.data]
+        assert "rx" in gate_names
+
+    def test_comparison_derived_classical_if_flag_zero(self):
+        """``if flag > 0:`` with flag=0 selects false branch."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            theta = qmc.float_(0.1)
+            if flag > 0:
+                theta = qmc.float_(1.0)
+            else:
+                theta = qmc.float_(2.0)
+            q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 0})
+        gate_names = [instr.operation.name for instr in qc.data]
+        assert "rx" in gate_names
+
+    def test_symbolic_parameter_alias_before_qinit(self):
+        """Symbolic parameter through compile-time if should be preserved."""
+        FLAG = True
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Bit:
+            angle = qmc.float_(0.5)
+            if FLAG:
+                angle = theta
+            else:
+                angle = qmc.float_(0.5)
+            q = qmc.qubit("q")
+            q = qmc.rx(q, angle)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, parameters=["theta"])
+        # Check that the RX gate has a non-zero symbolic parameter
+        for instr in qc.data:
+            if instr.operation.name == "rx":
+                params = instr.operation.params
+                assert len(params) > 0
+                param = params[0]
+                # Should be a ParameterExpression, not 0.0
+                assert isinstance(param, ParameterExpression) or (
+                    isinstance(param, (int, float)) and param != 0.0
+                ), f"RX angle should be symbolic or non-zero, got {param}"
+                break
+        else:
+            pytest.fail("No RX gate found in circuit")
+
+    def test_bit_vector_phi_merge_flag_true(self):
+        """Branch-local measurement Vector[Bit] phi merge with flag=True."""
+        flag = True
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            alt = qmc.qubit_array(2, "alt")
+            q[0] = qmc.x(q[0])
+            alt[1] = qmc.x(alt[1])
+            if flag:
+                bits = qmc.measure(q)
+            else:
+                bits = qmc.measure(alt)
+            return bits
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+        job = exe.sample(executor, shots=20)
+        results = job.result().results
+        # flag=True selects q which has X on q[0] -> (1, 0)
+        for val, count in results:
+            assert val is not None, "Bit vector result should not be None"
+
+    def test_bit_vector_phi_merge_flag_false(self):
+        """Branch-local measurement Vector[Bit] phi merge with flag=False."""
+        flag = False
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            alt = qmc.qubit_array(2, "alt")
+            q[0] = qmc.x(q[0])
+            alt[1] = qmc.x(alt[1])
+            if flag:
+                bits = qmc.measure(q)
+            else:
+                bits = qmc.measure(alt)
+            return bits
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+        job = exe.sample(executor, shots=20)
+        results = job.result().results
+        # flag=False selects alt which has X on alt[1] -> (0, 1)
+        for val, count in results:
+            assert val is not None, "Bit vector result should not be None"
+
+    def test_array_quantum_phi_happy_path_regression(self):
+        """Existing array-quantum phi happy path must not regress."""
+        flag = True
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            if flag:
+                q[0] = qmc.x(q[0])
+            else:
+                alt = qmc.qubit_array(2, "alt")
+                alt[1] = qmc.x(alt[1])
+                q = alt
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        executor = transpiler.executor()
+        job = exe.sample(executor, shots=20)
+        results = job.result().results
+        for val, count in results:
+            assert val == (1, 0), f"Expected (1, 0), got {val}"
+
+
+# ============================================================================
+# Direct cast -> measure (cast element carrier identity)
+# ============================================================================
+
+
+class TestDirectCastMeasure:
+    """Verify that direct Vector[Qubit] -> QFixed -> measure emits measurements."""
+
+    def test_direct_cast_measure_emits_measurements(self):
+        """Direct cast then measure must produce num_bits measurement gates."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Float:
+            q = qmc.qubit_array(2, "q")
+            qf = qmc.cast(q, qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        qc = exe.compiled_quantum[0].circuit
+        measure_ops = [g for g in qc if g.operation.name == "measure"]
+        assert len(measure_ops) == 2, (
+            f"Expected 2 measurement ops, got {len(measure_ops)}"
+        )
+
+    def test_cast_after_gate_measure(self):
+        """Gate before cast must not break measurement emission."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Float:
+            q = qmc.qubit_array(2, "q")
+            q[0] = qmc.h(q[0])
+            qf = qmc.cast(q, qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        qc = exe.compiled_quantum[0].circuit
+        gate_names = [g.operation.name for g in qc]
+        assert "h" in gate_names
+        measure_ops = [n for n in gate_names if n == "measure"]
+        assert len(measure_ops) == 2, (
+            f"Expected 2 measurement ops, got {len(measure_ops)}"
+        )
+
+
+# ============================================================================
+# Unresolved non-measurement if-condition rejection
+# ============================================================================
+
+
+class TestUnresolvedNonMeasurementIfRejection:
+    """Non-measurement unresolved if-conditions must raise EmitError.
+
+    When a kernel argument is used as an if-condition and left in
+    ``parameters`` (not bound), the transpiler must raise an explicit
+    error instead of silently dropping the branch.
+    """
+
+    def test_unresolved_flag_parameter_raises(self):
+        """``if flag:`` with parameters=["flag", "theta"] must raise EmitError."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt, theta: qmc.Float) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        with pytest.raises(EmitError, match="measurement results"):
+            _transpile_and_get_circuit(circuit, parameters=["flag", "theta"])
+
+    def test_unresolved_flag_only_raises(self):
+        """``if flag:`` with parameters=["flag"] must raise EmitError."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        with pytest.raises(EmitError, match="measurement results"):
+            _transpile_and_get_circuit(circuit, parameters=["flag"])
+
+    def test_bound_flag_still_works(self):
+        """``if flag:`` with bindings={"flag": 1} must still work."""
+
+        @qmc.qkernel
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            if flag:
+                q = qmc.x(q)
+            return qmc.measure(q)
+
+        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 1})
+        gate_names = [instr.operation.name for instr in qc.data]
+        assert "x" in gate_names
+
+
+class TestUnresolvedStructuralSize:
+    """Unresolved structural UInt must raise, not produce zero-size artifact."""
+
+    def test_qubit_array_with_unresolved_size_raises(self):
+        """qubit_array(n) with parameters=["n"] must raise EmitError."""
+
+        @qmc.qkernel
+        def circuit(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            for i in qmc.range(n):
+                q[i] = qmc.h(q[i])
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        with pytest.raises((EmitError, ValueError)):
+            transpiler.transpile(circuit, parameters=["n"])
 
 
 class TestWhileIfSharedLocalPhi:

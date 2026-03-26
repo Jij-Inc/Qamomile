@@ -119,14 +119,13 @@ def _cast_vector_qubit_to_qfixed(
 
     frac_bits = num_qubits - int_bits
 
-    # Collect qubit UUIDs and logical_ids via borrow-return cycle
+    # Use canonical composite keys matching allocator registration ({array_uuid}_{i})
+    # instead of borrowed element UUIDs which are ephemeral.
     qubit_uuids: list[str] = []
     qubit_logical_ids: list[str] = []
     for i in range(num_qubits):
-        element = source[i]  # borrow
-        qubit_uuids.append(element.value.uuid)
-        qubit_logical_ids.append(element.value.logical_id)
-        source[i] = element  # return
+        qubit_uuids.append(f"{source.value.uuid}_{i}")
+        qubit_logical_ids.append(f"{source.value.logical_id}_{i}")
 
     # Consume the source (move semantics - prevents reuse)
     source = source.consume(operation_name="cast")
