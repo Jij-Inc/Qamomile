@@ -701,6 +701,21 @@ class TestInvalidPlaceholderLoopTargets:
                         q[i] = qmc.h(q[i])
                     return q[0]
 
+    def test_items_nested_tuple_key_raises(self):
+        """for (i, (j, k)), v in qmc.items(d) must raise SyntaxError."""
+        with pytest.raises(SyntaxError, match="Nested tuple unpacking in items"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+
+                @qmc.qkernel
+                def bad(
+                    d: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.Tuple[qmc.UInt, qmc.UInt]], qmc.Float],
+                ) -> qmc.Qubit:
+                    q = qmc.qubit_array(2, "q")
+                    for (i, (j, k)), v in qmc.items(d):
+                        q[i] = qmc.h(q[i])
+                    return q[0]
+
     def test_items_dotcall_single_target_raises(self):
         """for pair in edges.items() must raise SyntaxError."""
         with pytest.raises(SyntaxError, match="items.*requires.*for key, value"):
