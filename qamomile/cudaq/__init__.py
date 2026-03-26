@@ -22,28 +22,28 @@ import importlib.util
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from qamomile.cudaq.transpiler import (
-        CudaqTranspiler,
-        CudaqExecutor,
-        CudaqEmitPass,
-        BoundCudaqKernelArtifact,
-        BoundCudaqCircuit,
-        BoundCudaqRuntimeCircuit,
-    )
     from qamomile.cudaq.emitter import (
-        ExecutionMode,
+        CudaqCircuit,
+        CudaqCodegenEmitter,
+        CudaqGateEmitter,
         CudaqKernelArtifact,
         CudaqKernelEmitter,
-        CudaqGateEmitter,
-        CudaqCodegenEmitter,
-        CudaqCircuit,
         CudaqRuntimeCircuit,
+        ExecutionMode,
     )
     from qamomile.cudaq.observable import hamiltonian_to_cudaq_spin_op
+    from qamomile.cudaq.transpiler import (
+        BoundCudaqCircuit,
+        BoundCudaqKernelArtifact,
+        BoundCudaqRuntimeCircuit,
+        CudaqEmitPass,
+        CudaqExecutor,
+        CudaqTranspiler,
+    )
 
 _CUDAQ_MISSING_MSG = """\
 CUDA-Q backend requires the `cudaq` package.
-Install with `pip install qamomile[cudaq]`.
+Install with `pip install qamomile[cudaq-cu12]` dor CUDA-12 or `pip install qamomile[cudaq-cu13]` for CUDA-13.
 CUDA-Q currently supports Linux, macOS ARM64 (Apple silicon), and Windows via WSL2.
 Native Windows is not supported.
 See: https://nvidia.github.io/cuda-quantum/latest/using/install/local_installation.html\

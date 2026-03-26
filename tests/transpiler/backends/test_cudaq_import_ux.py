@@ -41,7 +41,7 @@ class TestCudaqImportUX:
                 _ = cudaq_mod.CudaqTranspiler
 
     def test_error_message_contains_pip_extra(self):
-        """Error message must mention ``pip install qamomile[cudaq]``."""
+        """Error message must mention ``pip install qamomile[cudaq-cu12/-cu13]``."""
         with patch("importlib.util.find_spec", side_effect=_make_find_spec_missing):
             import qamomile.cudaq as cudaq_mod
 
