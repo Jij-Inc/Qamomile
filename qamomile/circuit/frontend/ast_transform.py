@@ -695,15 +695,19 @@ class ControlFlowTransformer(ast.NodeTransformer):
         else:
             raise NotImplementedError(f"Unsupported target type: {type(target)}")
 
-    def _validate_and_extract_binding_names(self, node: ast.For) -> list[str]:
-        """Validate loop target per loop-kind and return binding variable names.
+    def _validate_for_loop(self, node: ast.For) -> list[str]:
+        """Validate a for-loop node and return binding variable names.
 
-        Determines the loop kind (items / range / sequence) first, then
-        applies kind-specific target validation.  Invalid placeholder-loop
-        targets are raised as ``SyntaxError`` so that ``QKernel.__init__``
-        propagates them instead of falling back to the original function.
+        Checks both the loop target and the iterator call arguments per
+        loop kind (items / range / sequence).  Raises ``SyntaxError`` for
+        invalid patterns so that ``QKernel.__init__`` propagates them
+        instead of falling back to the original function.
         """
         if self._is_items_call(node.iter):
+            # items(): must have a dict argument
+            if not (node.iter.args or  # type: ignore  # items(d)
+                    (isinstance(node.iter.func, ast.Attribute))):  # type: ignore  # d.items()
+                raise SyntaxError("items() requires a dict argument")
             # items(): target must be a 2-element tuple (key, value)
             if not (isinstance(node.target, ast.Tuple) and len(node.target.elts) == 2):
                 raise SyntaxError(
@@ -727,6 +731,12 @@ class ControlFlowTransformer(ast.NodeTransformer):
             binding_names = self._extract_tuple_vars(node.target)
 
         elif self._is_range_call(node.iter):
+            # range(): requires 1-3 arguments
+            num_args = len(node.iter.args)  # type: ignore
+            if num_args < 1 or num_args > 3:
+                raise SyntaxError(
+                    "range() requires 1-3 arguments: range(stop), range(start, stop), or range(start, stop, step)"
+                )
             # range(): target must be a single variable
             if not isinstance(node.target, ast.Name):
                 raise SyntaxError(
@@ -736,9 +746,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             binding_names = [node.target.id]
 
         else:
-            # sequence: use existing _extract_tuple_vars (may raise NotImplementedError
-            # for unsupported targets, which is fine — direct sequence already
-            # fail-closes via TypeError at runtime)
+            # sequence: will be rejected by _transform_for_sequence
             binding_names = self._extract_tuple_vars(node.target)
 
         # Check for parameter shadowing (common to all for-loop variants)
@@ -759,7 +767,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         # This raises SyntaxError for invalid placeholder-loop targets
         # instead of generic NotImplementedError that would be swallowed
         # by QKernel.__init__'s fallback.
-        all_binding_names = self._validate_and_extract_binding_names(node)
+        all_binding_names = self._validate_for_loop(node)
 
         # ネストされた制御フローを先に変換 (with definition tracking)
         saved_outer = self._outer_defined_vars
@@ -802,13 +810,8 @@ class ControlFlowTransformer(ast.NodeTransformer):
             for i in range(start, stop, step):  ->  for_loop(start, stop, step)
         """
 
+        # range の引数を取得 (_validate_for_loop で引数数は検証済み)
         num_args = len(node.iter.args)  # type: ignore
-        if num_args < 1 or num_args > 3:
-            raise NotImplementedError(
-                "range() requires 1-3 arguments: range(stop), range(start, stop), or range(start, stop, step)"
-            )
-
-        # range の引数を取得
         # range(stop) -> for_loop(0, stop, 1)
         # range(start, stop) -> for_loop(start, stop, 1)
         # range(start, stop, step) -> for_loop(start, stop, step)
@@ -825,7 +828,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             stop_arg = node.iter.args[1]  # type: ignore
             step_arg = node.iter.args[2]  # type: ignore
 
-        # ループ変数名を取得 (_validate_and_extract_binding_names で検証済み)
+        # ループ変数名を取得 (_validate_for_loop で検証済み)
         loop_var_name = node.target.id
 
         # for_loop(start, stop, step, var_name) コールを作成
@@ -897,21 +900,20 @@ class ControlFlowTransformer(ast.NodeTransformer):
             for (i, j), value in d.items():  ->  for_items(d, ["i", "j"], "value")
         """
         # Extract the dict argument from items(d) or d.items() call
+        # (_validate_for_loop guarantees one of these patterns)
         if node.iter.args:  # type: ignore  # items(d) pattern
             dict_arg = node.iter.args[0]  # type: ignore
-        elif isinstance(node.iter.func, ast.Attribute):  # type: ignore  # d.items() pattern
+        else:  # d.items() pattern
             dict_arg = node.iter.func.value  # type: ignore
-        else:
-            raise NotImplementedError("items() requires a dict argument")
 
-        # Parse the target pattern: (key, value) — validated by _validate_and_extract_binding_names
+        # Parse the target pattern: (key, value) — validated by _validate_for_loop
         key_target = node.target.elts[0]
         value_target = node.target.elts[1]
 
         # Extract key variable names (may be tuple like (i, j))
         key_vars = self._extract_tuple_vars(key_target)
 
-        # Extract value variable name (validated by _validate_and_extract_binding_names)
+        # Extract value variable name (validated by _validate_for_loop)
         value_var = value_target.id
 
         # Create for_items(dict, key_vars, value_var) call
