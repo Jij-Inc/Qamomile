@@ -823,14 +823,8 @@ class ControlFlowTransformer(ast.NodeTransformer):
             stop_arg = node.iter.args[1]  # type: ignore
             step_arg = node.iter.args[2]  # type: ignore
 
-        # ループ変数名を取得
-        if isinstance(node.target, ast.Name):
-            loop_var_name = node.target.id
-        else:
-            raise SyntaxError(
-                "qmc.range() iteration requires a single loop variable, "
-                f"got: {ast.dump(node.target)}"
-            )
+        # ループ変数名を取得 (_validate_and_extract_binding_names で検証済み)
+        loop_var_name = node.target.id
 
         # for_loop(start, stop, step, var_name) コールを作成
         for_loop_call = ast.Call(
@@ -908,25 +902,14 @@ class ControlFlowTransformer(ast.NodeTransformer):
         else:
             raise NotImplementedError("items() requires a dict argument")
 
-        # Parse the target pattern: (key, value) or just key, value
-        if isinstance(node.target, ast.Tuple) and len(node.target.elts) == 2:
-            key_target = node.target.elts[0]
-            value_target = node.target.elts[1]
-        else:
-            raise SyntaxError(
-                "items() iteration requires 'for key, value in items(d)' pattern. "
-                f"Got: {ast.dump(node.target)}"
-            )
+        # Parse the target pattern: (key, value) — validated by _validate_and_extract_binding_names
+        key_target = node.target.elts[0]
+        value_target = node.target.elts[1]
 
         # Extract key variable names (may be tuple like (i, j))
         key_vars = self._extract_tuple_vars(key_target)
 
-        # Extract value variable name (must be a simple name)
-        if not isinstance(value_target, ast.Name):
-            raise SyntaxError(
-                "Value target in items() iteration must be a simple variable, "
-                f"got: {ast.dump(value_target)}"
-            )
+        # Extract value variable name (validated by _validate_and_extract_binding_names)
         value_var = value_target.id
 
         # Create for_items(dict, key_vars, value_var) call
