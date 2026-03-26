@@ -713,7 +713,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             # items(): target must be a 2-element tuple (key, value)
             if not (isinstance(node.target, ast.Tuple) and len(node.target.elts) == 2):
                 raise SyntaxError(
-                    "items() iteration requires 'for key, value in items(d)' pattern. "
+                    "items() iteration requires 'for key, value in items(d)' or 'for key, value in d.items()' pattern. "
                     f"Got: {ast.dump(node.target)}"
                 )
             key_target = node.target.elts[0]
