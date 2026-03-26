@@ -73,8 +73,13 @@ class QKernel(Generic[P, R]):
         self.raw_func = func
         try:
             self.func = transform_control_flow(func)
+        except SyntaxError:
+            # Syntax violations (invalid loop targets, etc.) must not be
+            # silenced — propagate so the user sees the error at decoration time.
+            raise
         except NotImplementedError as e:
-            # If transform fails, warn user and use original function
+            # Recoverable transform failures (e.g. empty closure cell) fall
+            # back to the original function with a warning.
             warnings.warn(
                 f"AST transformation failed for function '{func.__name__}': {e}. "
                 f"Using original function. Note: qm.range() may not work correctly.",

@@ -2,10 +2,12 @@
 
 import ast
 import textwrap
+import warnings
 
 import pytest
 
 import qamomile.circuit as qm
+import qamomile.circuit as qmc
 from qamomile.circuit.frontend.constructors import qubit_array
 from qamomile.circuit.frontend.ast_transform import (
     ControlFlowTransformer,
@@ -630,3 +632,139 @@ class TestLoopElseReject:
                 else:
                     x = qm.UInt(0)
                 return x
+
+
+class TestInvalidPlaceholderLoopTargets:
+    """Invalid items()/range() targets must raise SyntaxError at decoration time.
+
+    These patterns previously fell through to a warning + fallback that silently
+    dropped the loop body, producing measure-only circuits.
+    """
+
+    def test_items_value_tuple_unpack_raises(self):
+        """for _, (i, j) in qmc.items(edges) must raise SyntaxError."""
+        with pytest.raises(SyntaxError, match="Value target in items"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+
+                @qmc.qkernel
+                def bad(
+                    edges: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+                ) -> qmc.Qubit:
+                    q = qmc.qubit_array(2, "q")
+                    for _, (i, j) in qmc.items(edges):
+                        q[i] = qmc.h(q[i])
+                    return q[0]
+
+    def test_items_single_target_raises(self):
+        """for pair in qmc.items(edges) must raise SyntaxError."""
+        with pytest.raises(SyntaxError, match="items.*requires.*for key, value"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+
+                @qmc.qkernel
+                def bad(
+                    edges: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+                ) -> qmc.Qubit:
+                    q = qmc.qubit_array(2, "q")
+                    for pair in qmc.items(edges):
+                        q[0] = qmc.h(q[0])
+                    return q[0]
+
+    def test_items_wrong_arity_raises(self):
+        """for a, b, c in qmc.items(edges) must raise SyntaxError."""
+        with pytest.raises(SyntaxError, match="items.*requires.*for key, value"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+
+                @qmc.qkernel
+                def bad(
+                    edges: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+                ) -> qmc.Qubit:
+                    q = qmc.qubit_array(2, "q")
+                    for a, b, c in qmc.items(edges):
+                        q[0] = qmc.h(q[0])
+                    return q[0]
+
+    def test_items_list_key_target_raises(self):
+        """for [i, j], w in qmc.items(edges) must raise SyntaxError."""
+        with pytest.raises(SyntaxError, match="Key target in items"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+
+                @qmc.qkernel
+                def bad(
+                    edges: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+                ) -> qmc.Qubit:
+                    q = qmc.qubit_array(2, "q")
+                    for [i, j], w in qmc.items(edges):
+                        q[i] = qmc.h(q[i])
+                    return q[0]
+
+    def test_items_dotcall_single_target_raises(self):
+        """for pair in edges.items() must raise SyntaxError."""
+        with pytest.raises(SyntaxError, match="items.*requires.*for key, value"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+
+                @qmc.qkernel
+                def bad(
+                    edges: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+                ) -> qmc.Qubit:
+                    q = qmc.qubit_array(2, "q")
+                    for pair in edges.items():
+                        q[0] = qmc.h(q[0])
+                    return q[0]
+
+    def test_range_list_unpack_raises(self):
+        """for [i, j] in qmc.range(n) must raise SyntaxError."""
+        with pytest.raises(
+            SyntaxError, match="qmc.range.*requires a single loop variable"
+        ):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+
+                @qmc.qkernel
+                def bad(n: qmc.UInt) -> qmc.Qubit:
+                    q = qmc.qubit_array(2, "q")
+                    for [i, j] in qmc.range(n):
+                        q[0] = qmc.h(q[0])
+                    return q[0]
+
+    def test_items_no_warning_on_reject(self):
+        """Invalid items() target must not produce a fallback warning."""
+        with warnings.catch_warnings(record=True) as ws:
+            warnings.simplefilter("always")
+            with pytest.raises(SyntaxError):
+
+                @qmc.qkernel
+                def bad(
+                    edges: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+                ) -> qmc.Qubit:
+                    q = qmc.qubit_array(2, "q")
+                    for pair in qmc.items(edges):
+                        q[0] = qmc.h(q[0])
+                    return q[0]
+
+        fallback_warnings = [
+            w for w in ws if "AST transformation failed" in str(w.message)
+        ]
+        assert len(fallback_warnings) == 0
+
+    def test_range_no_warning_on_reject(self):
+        """Invalid range() target must not produce a fallback warning."""
+        with warnings.catch_warnings(record=True) as ws:
+            warnings.simplefilter("always")
+            with pytest.raises(SyntaxError):
+
+                @qmc.qkernel
+                def bad(n: qmc.UInt) -> qmc.Qubit:
+                    q = qmc.qubit_array(2, "q")
+                    for [i, j] in qmc.range(n):
+                        q[0] = qmc.h(q[0])
+                    return q[0]
+
+        fallback_warnings = [
+            w for w in ws if "AST transformation failed" in str(w.message)
+        ]
+        assert len(fallback_warnings) == 0

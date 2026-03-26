@@ -678,16 +678,17 @@ class ControlFlowTransformer(ast.NodeTransformer):
         return False
 
     def _extract_tuple_vars(self, target: ast.expr) -> list[str]:
-        """Extract variable names from tuple unpacking target.
+        """Extract variable names from tuple/list unpacking target.
 
         Examples:
             i -> ["i"]
             (i, j) -> ["i", "j"]
             ((i, j), k) -> ["i", "j", "k"]
+            [i, j] -> ["i", "j"]
         """
         if isinstance(target, ast.Name):
             return [target.id]
-        elif isinstance(target, ast.Tuple):
+        elif isinstance(target, (ast.Tuple, ast.List)):
             var_names = []
             for elt in target.elts:
                 var_names.extend(self._extract_tuple_vars(elt))
@@ -695,15 +696,67 @@ class ControlFlowTransformer(ast.NodeTransformer):
         else:
             raise NotImplementedError(f"Unsupported target type: {type(target)}")
 
+    def _validate_and_extract_binding_names(self, node: ast.For) -> list[str]:
+        """Validate loop target per loop-kind and return binding variable names.
+
+        Determines the loop kind (items / range / sequence) first, then
+        applies kind-specific target validation.  Invalid placeholder-loop
+        targets are raised as ``SyntaxError`` so that ``QKernel.__init__``
+        propagates them instead of falling back to the original function.
+        """
+        if self._is_items_call(node.iter):
+            # items(): target must be a 2-element tuple (key, value)
+            if not (isinstance(node.target, ast.Tuple) and len(node.target.elts) == 2):
+                raise SyntaxError(
+                    "items() iteration requires 'for key, value in items(d)' pattern. "
+                    f"Got: {ast.dump(node.target)}"
+                )
+            key_target = node.target.elts[0]
+            value_target = node.target.elts[1]
+            # key may be a tuple like (i, j) or a simple Name
+            if not isinstance(key_target, (ast.Name, ast.Tuple)):
+                raise SyntaxError(
+                    "Key target in items() iteration must be a variable or tuple of variables, "
+                    f"got: {ast.dump(key_target)}"
+                )
+            # value must be a simple Name
+            if not isinstance(value_target, ast.Name):
+                raise SyntaxError(
+                    "Value target in items() iteration must be a simple variable, "
+                    f"got: {ast.dump(value_target)}"
+                )
+            return self._extract_tuple_vars(node.target)
+
+        if self._is_range_call(node.iter):
+            # range(): target must be a single variable
+            if not isinstance(node.target, ast.Name):
+                raise SyntaxError(
+                    "qmc.range() iteration requires a single loop variable, "
+                    f"got: {ast.dump(node.target)}"
+                )
+            return [node.target.id]
+
+        # sequence: use existing _extract_tuple_vars (may raise NotImplementedError
+        # for unsupported targets, which is fine — direct sequence already
+        # fail-closes via TypeError at runtime)
+        return self._extract_tuple_vars(node.target)
+
     def visit_For(self, node: ast.For) -> Any:
         if node.orelse:
             raise SyntaxError("for ... else is not supported in @qkernel")
+
+        # Validate target per loop-kind BEFORE extracting binding names.
+        # This raises SyntaxError for invalid placeholder-loop targets
+        # instead of generic NotImplementedError that would be swallowed
+        # by QKernel.__init__'s fallback.
+        all_binding_names = self._validate_and_extract_binding_names(node)
+
         # ネストされた制御フローを先に変換 (with definition tracking)
         saved_outer = self._outer_defined_vars
         saved_after = self._after_stmt_read_vars
         saved_after_load = self._after_stmt_load_vars
         initial_defined = set(self._outer_defined_vars)
-        bound_vars = set(self._extract_tuple_vars(node.target))
+        bound_vars = set(all_binding_names)
         initial_defined.update(bound_vars)
         body_entry_live_in = self._loop_body_entry_live_in(
             node.body, set(saved_after_load), bound_vars=bound_vars
@@ -718,7 +771,6 @@ class ControlFlowTransformer(ast.NodeTransformer):
         self._after_stmt_load_vars = saved_after_load
 
         # Check for parameter shadowing (common to all for-loop variants)
-        all_binding_names = self._extract_tuple_vars(node.target)
         for var_name in all_binding_names:
             if var_name in self._param_names:
                 raise SyntaxError(
@@ -775,7 +827,10 @@ class ControlFlowTransformer(ast.NodeTransformer):
         if isinstance(node.target, ast.Name):
             loop_var_name = node.target.id
         else:
-            loop_var_name = "_loop_idx"
+            raise SyntaxError(
+                "qmc.range() iteration requires a single loop variable, "
+                f"got: {ast.dump(node.target)}"
+            )
 
         # for_loop(start, stop, step, var_name) コールを作成
         for_loop_call = ast.Call(
@@ -858,7 +913,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             key_target = node.target.elts[0]
             value_target = node.target.elts[1]
         else:
-            raise NotImplementedError(
+            raise SyntaxError(
                 "items() iteration requires 'for key, value in items(d)' pattern. "
                 f"Got: {ast.dump(node.target)}"
             )
@@ -868,7 +923,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
 
         # Extract value variable name (must be a simple name)
         if not isinstance(value_target, ast.Name):
-            raise NotImplementedError(
+            raise SyntaxError(
                 "Value target in items() iteration must be a simple variable, "
                 f"got: {ast.dump(value_target)}"
             )

@@ -55,6 +55,12 @@ def hadamard_chain(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 hadamard_chain.draw(n=5, fold_loops=False)
 
 # %% [markdown]
+# :::{note}
+# The loop variable in `qmc.range` must be a **single variable** (e.g. `for i in qmc.range(n)`).
+# Tuple or list unpacking such as `for [i, j] in qmc.range(n)` is not supported and will raise a `SyntaxError`.
+# :::
+
+# %% [markdown]
 # ## `qmc.items` for Sparse Interaction Data
 #
 # Many quantum algorithms (QAOA, VQE) apply gates only on specific pairs of qubits, determined by a graph or interaction map. Rather than looping over all pairs, you can pass a **dictionary** of interactions and iterate with `qmc.items()`.
@@ -81,6 +87,19 @@ def sparse_coupling(
 
     return qmc.measure(q)
 
+
+# %% [markdown]
+# :::{note}
+# `qmc.items` supports these loop patterns:
+#
+# - `for key, value in qmc.items(d)` — scalar key
+# - `for (i, j), value in qmc.items(d)` — tuple key
+# - `for key, value in d.items()` — method-call form
+#
+# The **value** target must be a single variable. Tuple unpacking in the value position
+# (e.g. `for _, (i, j) in qmc.items(d)`) is **not** supported and will raise a `SyntaxError`.
+# Similarly, single-target patterns like `for pair in qmc.items(d)` are not supported.
+# :::
 
 # %% [markdown]
 # ## Inspecting with `transpiler.to_circuit()`
