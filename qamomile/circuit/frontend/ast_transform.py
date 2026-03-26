@@ -5,7 +5,6 @@ import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, NoReturn
 
-
 from qamomile.circuit.frontend.operation.control_flow import (
     emit_if,
     for_items,
@@ -725,21 +724,32 @@ class ControlFlowTransformer(ast.NodeTransformer):
                     "Value target in items() iteration must be a simple variable, "
                     f"got: {ast.dump(value_target)}"
                 )
-            return self._extract_tuple_vars(node.target)
+            binding_names = self._extract_tuple_vars(node.target)
 
-        if self._is_range_call(node.iter):
+        elif self._is_range_call(node.iter):
             # range(): target must be a single variable
             if not isinstance(node.target, ast.Name):
                 raise SyntaxError(
                     "qmc.range() iteration requires a single loop variable, "
                     f"got: {ast.dump(node.target)}"
                 )
-            return [node.target.id]
+            binding_names = [node.target.id]
 
-        # sequence: use existing _extract_tuple_vars (may raise NotImplementedError
-        # for unsupported targets, which is fine — direct sequence already
-        # fail-closes via TypeError at runtime)
-        return self._extract_tuple_vars(node.target)
+        else:
+            # sequence: use existing _extract_tuple_vars (may raise NotImplementedError
+            # for unsupported targets, which is fine — direct sequence already
+            # fail-closes via TypeError at runtime)
+            binding_names = self._extract_tuple_vars(node.target)
+
+        # Check for parameter shadowing (common to all for-loop variants)
+        for var_name in binding_names:
+            if var_name in self._param_names:
+                raise SyntaxError(
+                    f"Loop variable '{var_name}' shadows a function parameter. "
+                    f"Use a different variable name to avoid silent value loss."
+                )
+
+        return binding_names
 
     def visit_For(self, node: ast.For) -> Any:
         if node.orelse:
@@ -769,14 +779,6 @@ class ControlFlowTransformer(ast.NodeTransformer):
         self._outer_defined_vars = saved_outer
         self._after_stmt_read_vars = saved_after
         self._after_stmt_load_vars = saved_after_load
-
-        # Check for parameter shadowing (common to all for-loop variants)
-        for var_name in all_binding_names:
-            if var_name in self._param_names:
-                raise SyntaxError(
-                    f"Loop variable '{var_name}' shadows a function parameter. "
-                    f"Use a different variable name to avoid silent value loss."
-                )
 
         # Check for items() iteration first
         if self._is_items_call(node.iter):
