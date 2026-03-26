@@ -46,8 +46,11 @@ class TestCudaqImportUX:
             import qamomile.cudaq as cudaq_mod
 
             cudaq_mod.__dict__.pop("CudaqTranspiler", None)
-            with pytest.raises(ImportError, match=r"pip install qamomile\[cudaq\]"):
+            with pytest.raises(ImportError) as exc_info:
                 _ = cudaq_mod.CudaqTranspiler
+            msg = str(exc_info.value)
+            assert "pip install qamomile[cudaq-cu12]" in msg
+            assert "pip install qamomile[cudaq-cu13]" in msg
 
     def test_error_message_contains_supported_platforms(self):
         """Error message must mention Linux, macOS ARM64, and WSL2."""

@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 
 _CUDAQ_MISSING_MSG = """\
 CUDA-Q backend requires the `cudaq` package.
-Install with `pip install qamomile[cudaq-cu12]` dor CUDA-12 or `pip install qamomile[cudaq-cu13]` for CUDA-13.
+Install with `pip install qamomile[cudaq-cu12]` for CUDA 12 or `pip install qamomile[cudaq-cu13]` for CUDA 13.
 CUDA-Q currently supports Linux, macOS ARM64 (Apple silicon), and Windows via WSL2.
 Native Windows is not supported.
 See: https://nvidia.github.io/cuda-quantum/latest/using/install/local_installation.html\
