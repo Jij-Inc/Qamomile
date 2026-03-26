@@ -19,6 +19,10 @@ Qamomile is a quantum programming SDK. Write quantum circuits as typed Python fu
 
 - [QAOA for MaxCut](vqa/qaoa_maxcut) — Build a QAOA circuit from scratch to solve MaxCut, then compare with the built-in `qaoa_state`
 
+## Optimization
+
+- [QAOA for Graph Partitioning](optimization/qaoa_graph_partition) — Solve graph partitioning with QAOA end-to-end
+
 ## Installation
 
 ```bash

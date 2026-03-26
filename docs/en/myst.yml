@@ -13,7 +13,10 @@ project:
   github: https://github.com/Jij-Inc/Qamomile
   jupyter: true
   execute:
+    enabled: true
     cache: true
+    exclude_patterns:
+      - collaboration/qbraid_executor.ipynb
   toc:
     - file: index.md
     - title: Tutorials
@@ -27,6 +30,12 @@ project:
     - title: VQA
       children:
         - file: vqa/qaoa_maxcut.ipynb
+    - title: Optimization
+      children:
+        - file: optimization/qaoa_graph_partition.ipynb
+    - title: Collaboration
+      children:
+        - file: collaboration/qbraid_executor.ipynb
 
 # --- API Reference (auto-generated) ---
     - title: API Reference
@@ -52,6 +61,7 @@ project:
             - file: api/optimization/qaoa
             - file: api/optimization/qrao
             - file: api/optimization/utils
+        - file: api/qbraid
         - file: api/qiskit/index
           children:
             - file: api/qiskit/emitter
