@@ -135,7 +135,7 @@ jobs:
           set -eux
           uv run pytest -m cudaq tests -v
 
-          cudaq-test-ubuntu:
+  cudaq-test-ubuntu:
     if: ${{ !contains(github.head_ref, 'dependabot/github_actions') }}
     strategy:
       fail-fast: false
