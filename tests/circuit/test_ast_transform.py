@@ -761,6 +761,19 @@ class TestInvalidPlaceholderLoopTargets:
                         q[0] = qmc.h(q[0])
                     return q[0]
 
+    def test_range_keyword_args_raises(self):
+        """qmc.range(stop=n) must raise SyntaxError (keyword args not supported)."""
+        with pytest.raises(SyntaxError, match="does not support keyword arguments"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+
+                @qmc.qkernel
+                def bad(n: qmc.UInt) -> qmc.Qubit:
+                    q = qmc.qubit_array(2, "q")
+                    for i in qmc.range(stop=n):
+                        q[0] = qmc.h(q[0])
+                    return q[0]
+
     def test_range_list_unpack_raises(self):
         """for [i, j] in qmc.range(n) must raise SyntaxError."""
         with pytest.raises(

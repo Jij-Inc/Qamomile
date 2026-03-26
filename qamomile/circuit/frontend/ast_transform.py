@@ -772,8 +772,15 @@ class ControlFlowTransformer(ast.NodeTransformer):
             binding_names = self._extract_tuple_vars(node.target)
 
         elif self._is_range_call(node.iter):
-            # range(): requires 1-3 arguments
             num_args = len(node.iter.args)  # type: ignore
+            # Keyword arguments (e.g. range(stop=n)) are not consumed by
+            # _transform_for_range; reject them explicitly to avoid silent loss.
+            if getattr(node.iter, "keywords", None):
+                raise SyntaxError(
+                    "range()/qmc.range() does not support keyword arguments in @qkernel; "
+                    "use positional arguments like range(stop) or range(start, stop, step)."
+                )
+            # range(): requires 1-3 positional arguments
             if num_args < 1 or num_args > 3:
                 raise SyntaxError(
                     "range() requires 1-3 arguments: range(stop), range(start, stop), or range(start, stop, step)"
