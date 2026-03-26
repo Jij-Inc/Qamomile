@@ -116,7 +116,7 @@ build_en() {
     cd en
     build_with_optional_base_url en
     cd ..
-    # uv run python scripts/inject_colab_launch.py en
+    uv run python scripts/inject_colab_launch.py en
     info "English documentation built: en/_build/html/index.html"
 }
 
@@ -127,7 +127,7 @@ build_ja() {
     cd ja
     build_with_optional_base_url ja
     cd ..
-    # uv run python scripts/inject_colab_launch.py ja
+    uv run python scripts/inject_colab_launch.py ja
     info "Japanese documentation built: ja/_build/html/index.html"
 }
 
