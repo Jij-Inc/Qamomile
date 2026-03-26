@@ -14,7 +14,7 @@ whether ``cudaq.sample()`` / ``cudaq.observe()`` / ``cudaq.get_state()``
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Sequence, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Sequence
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.control_flow import (
@@ -26,15 +26,15 @@ from qamomile.circuit.ir.operation.control_flow import (
 from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.transpiler.errors import EmitError
-from qamomile.circuit.transpiler.passes.emit_base import resolve_if_condition
-from qamomile.circuit.transpiler.transpiler import Transpiler
+from qamomile.circuit.transpiler.executable import (
+    ParameterMetadata,
+    QuantumExecutor,
+)
 from qamomile.circuit.transpiler.passes.emit import EmitPass
+from qamomile.circuit.transpiler.passes.emit_base import resolve_if_condition
 from qamomile.circuit.transpiler.passes.separate import SeparatePass
 from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
-from qamomile.circuit.transpiler.executable import (
-    QuantumExecutor,
-    ParameterMetadata,
-)
+from qamomile.circuit.transpiler.transpiler import Transpiler
 
 from .emitter import (
     CudaqKernelArtifact,
@@ -297,6 +297,10 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             StandardEmitPass._emit_if(self, circuit, op, qubit_map, clbit_map, bindings)
             return
 
+        # The following error should not be reachable
+        # because the mode must have be determined by _has_runtime_control_flow,
+        # which checks for unresolvable IfOperation conditions.
+        # But guard against misconfiguration to find the bug easily.
         raise EmitError(
             "CUDA-Q 0.14.x does not support measurement-dependent conditional "
             "branching via the builder API. Use a circuit with runtime control "
@@ -738,7 +742,6 @@ class CudaqExecutor(QuantumExecutor[CudaqKernelArtifact]):
         """
         import cudaq
         import qamomile.observable as qm_o
-
         from qamomile.cudaq.observable import hamiltonian_to_cudaq_spin_op
 
         mode = getattr(circuit, "execution_mode", ExecutionMode.STATIC)
