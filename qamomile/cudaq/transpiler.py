@@ -431,12 +431,20 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                     bindings,
                 )
                 # Propagate SSA: results inherit operand's physical target.
-                for i, result in enumerate(op.results):
-                    if hasattr(result, "type") and result.type.is_quantum():
-                        if i < len(op.operands):
-                            operand = op.operands[i]
-                            if hasattr(operand, "uuid") and operand.uuid in qubit_map:
-                                qubit_map[result.uuid] = qubit_map[operand.uuid]
+                assert len(op.results) == len(op.operands), (
+                    f"[For DEVELOPER] GateOperation must have equal operands/results, "
+                    f"got {len(op.operands)} operands and {len(op.results)} results."
+                    f"There must be a bug."
+                )
+                for operand, result in zip(op.operands, op.results, strict=True):
+                    assert result.type.is_quantum(), (
+                        "[For DEVELOPER] GateOperation result must be quantum. "
+                        "There must be a bug."
+                    )
+                    assert operand.uuid in qubit_map, (
+                        f"Missing qubit mapping for operand {operand.uuid} in controlled helper."
+                    )
+                    qubit_map[result.uuid] = qubit_map[operand.uuid]
                 continue
             if isinstance(op, ForOperation) and num_controls == 1:
                 start = (
