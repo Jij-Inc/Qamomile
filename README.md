@@ -69,14 +69,14 @@ Runtime-only environment from source with qBraid support:
 uv sync --no-dev --extra qbraid
 ```
 
-Runtime-only environment from source with CUDA-Q support:
+Runtime-only environment from source with CUDA-Q v0.14.0 support:
 
 ```bash
 uv sync --no-dev --extra cudaq-cu12   # for CUDA 12.x
-uv sync --no-dev --extra cudaq-cu13   # for CUDA 13.x
+uv sync --no-dev --extra cudaq-cu13   # for CUDA 13.x (or MacOS)
 ```
 
-CUDA-Q currently supports Linux, macOS ARM64 (Apple Silicon), and Windows via WSL2.
+CUDA-Q v0.14.0 currently supports Linux, macOS ARM64 (Apple Silicon), and Windows via WSL2. For MacOS, please use `cudaq-cu13`.
 
 > [!NOTE]
 > **Why `cudaq-cu12` / `cudaq-cu13` instead of `cudaq`?**
