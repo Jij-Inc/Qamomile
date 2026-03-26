@@ -20,9 +20,9 @@ dependencies = [
 include = ["qamomile*"]
 
 [project.optional-dependencies]
-cudaq = [
-    "cudaq>=0.14.0",
-]
+cudaq-cu12 = ["cuda-quantum-cu12>=0.14,<0.15"]
+cudaq-cu13 = ["cuda-quantum-cu13>=0.14,<0.15"]
+
 quri_parts = [
     "quri-parts-core>=0.21.1",
     "quri-parts-circuit>=0.21.1",
