@@ -1,6 +1,7 @@
 import ast
 import inspect
 import textwrap
+import types
 import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, NoReturn
@@ -718,18 +719,15 @@ class ControlFlowTransformer(ast.NodeTransformer):
         # Attribute form: distinguish module.items(d) vs d.items()
         elif isinstance(call.func, ast.Attribute):
             func_value = call.func.value
-            if isinstance(func_value, ast.Name) and func_value.id in self._param_names:
-                # d.items() form: dict.items() takes no arguments
-                if call.args or call.keywords:
-                    raise SyntaxError(
-                        "items() iteration over a dict parameter must use "
-                        "'d.items()' with no arguments."
-                    )
-            elif (
-                isinstance(func_value, ast.Name) and func_value.id in self._global_names
-            ):
+            # Resolve the receiver to check if it's a module object
+            receiver_obj = (
+                self._namespace.get(func_value.id)
+                if isinstance(func_value, ast.Name)
+                else None
+            )
+            if isinstance(receiver_obj, types.ModuleType):
                 # module.items(d) form: require exactly 1 positional arg, no keywords
-                alias = func_value.id
+                alias = func_value.id  # type: ignore[union-attr]
                 if call.keywords:
                     raise SyntaxError(
                         f"items() does not support keyword arguments in @qkernel; "
@@ -740,8 +738,8 @@ class ControlFlowTransformer(ast.NodeTransformer):
                         f"items() requires exactly one dict argument: {alias}.items(d)"
                     )
             else:
-                # Non-global receiver (local variable, attribute, etc.):
-                # treat as method call like d.items().
+                # d.items() form (parameter, global dict, local variable, etc.):
+                # dict.items() takes no arguments.
                 if call.args or call.keywords:
                     raise SyntaxError(
                         "items() iteration over a dict must use "
