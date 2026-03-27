@@ -95,11 +95,12 @@ Dependencies flow only downstream (left to right). Upstream (reverse) dependenci
 ### I. Documentation
 
 - **Jupytext percent format**: `.py` files are the source of truth.
-- `.ipynb` files are committed to git but must be **exactly identical** to their `.py` counterparts (generated via `jupytext --to notebook`). Any divergence is a P1 issue.
-- **Exception: `collaboration/` directory**: Files under `docs/*/collaboration/` are exempt from the `.py`/`.ipynb` sync requirement. These tutorials involve external service integrations (e.g., QBraid) that require API keys or credentials at runtime, so they cannot be mechanically executed or regenerated via `jupytext`. The `.ipynb` files in this directory may be maintained independently.
+- **ipynb existence**: Every tutorial `.py` file must have a corresponding `.ipynb` file committed to git. A missing `.ipynb` is a P1 issue.
+- **ipynb sync on update**: If a `.py` file is modified in the diff, its corresponding `.ipynb` must also be updated. A stale `.ipynb` (unchanged while its `.py` was modified) is a P1 issue.
+- **ipynb must be executed**: Committed `.ipynb` files must contain execution outputs — code cells that produce output must have their output cells populated. An `.ipynb` with empty/missing outputs is a P1 issue.
+- **Docs test coverage**: New tutorial files or directories (outside `collaboration/`) must be included in `TUTORIAL_PATTERNS` in `tests/docs/test_tutorials.py`. A new docs path not covered by tests is a P1 issue.
 - Jupyter Book 2 with MyST Markdown Engine.
 - Bilingual: English (`docs/en/`) and Japanese (`docs/ja/`).
-- Tutorials follow progressive complexity.
 
 ### J. Numerical Correctness
 
@@ -167,7 +168,7 @@ For each changed file, systematically check:
 6. **Module organization** (Section F) — Proper `__all__`? TYPE_CHECKING guards?
 7. **Python style** (Section G) — Google-style docstrings on ALL functions/classes with type hints? Modern Python syntax? No dead code?
 8. **Testing** (Section H) — Are tests parametrized? Random testing used? Clear docstrings describing what is tested? Edge cases and negative tests covered? Numerical assertions use `np.allclose`?
-9. **Documentation** (Section I) — `.py` and `.ipynb` in sync? Proper Jupytext format? (Note: `collaboration/` directories are exempt from sync requirement.)
+9. **Documentation** (Section I) — Every `.py` has a corresponding `.ipynb`? If `.py` was modified, is `.ipynb` also updated? Are `.ipynb` files executed (outputs present)? New docs paths covered in test patterns?
 10. **Numerical correctness** (Section J) — Float comparisons use `isclose`/`is_close_zero`? Tests use `np.allclose`? Tolerance assumptions documented?
 11. **Performance & memory** (Section K) — Unnecessary copies? Mutable default arguments? Large iterations use generators?
 12. **Defensive programming** (Section L) — Do `if-else`/`match` statements include `else`/default branches? Are defensive checks using `assert` for internal invariants? Are unreachable branches clearly marked?
@@ -262,7 +263,7 @@ Display a structured review report directly in the conversation.
 
 Use the following severity levels:
 - **P0 (Bug)**: Incorrect behavior, runtime error, linear type violation, silent data corruption, **breaking changes in related (unchanged) files** caused by the modifications, mutable default arguments, bare `except` swallowing errors, floating-point `==` in production code, missing exception chaining causing lost diagnostics
-- **P1 (Significant Design Issue)**: Violates core Qamomile philosophy (layer boundaries, @qkernel pattern, backend abstraction), .py/.ipynb desync, **incomplete modifications** (e.g., changed interface but callers not updated, missing `__all__` update), missing tolerance in numerical test assertions, **missing tests or documentation for new/modified features**
+- **P1 (Significant Design Issue)**: Violates core Qamomile philosophy (layer boundaries, @qkernel pattern, backend abstraction), .py/.ipynb missing or stale, unexecuted .ipynb, new docs not in test patterns, **incomplete modifications** (e.g., changed interface but callers not updated, missing `__all__` update), missing tolerance in numerical test assertions, **missing tests or documentation for new/modified features**
 - **P2 (Moderate)**: Missing docstrings, un-parametrized tests, missing random tests, inconsistencies, missing test coverage for new behavior, missing edge case or negative tests, unnecessary copies in hot paths
 - **P3 (Minor/Nit)**: Style, naming, import ordering, unfixed random seed, suboptimal generator vs list choice
 
