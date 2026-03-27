@@ -787,21 +787,25 @@ class ControlFlowTransformer(ast.NodeTransformer):
         if isinstance(range_call.func, ast.Attribute) and isinstance(
             range_call.func.value, ast.Name
         ):
-            range_label = f"{range_call.func.value.id}.range()"
+            range_callee = f"{range_call.func.value.id}.range"
         else:
-            range_label = "range()"
+            range_callee = "range"
+        range_label = f"{range_callee}()"
         num_args = len(range_call.args)
         # Keyword arguments (e.g. range(stop=n)) are not consumed by
         # _transform_for_range; reject them explicitly to avoid silent loss.
         if getattr(range_call, "keywords", None):
             raise SyntaxError(
                 f"{range_label} does not support keyword arguments in @qkernel; "
-                "use positional arguments like range(stop) or range(start, stop, step)."
+                f"use positional arguments like {range_callee}(stop) or "
+                f"{range_callee}(start, stop, step)."
             )
         # range(): requires 1-3 positional arguments
         if num_args < 1 or num_args > 3:
             raise SyntaxError(
-                f"{range_label} requires 1-3 arguments: range(stop), range(start, stop), or range(start, stop, step)"
+                f"{range_label} requires 1-3 arguments: "
+                f"{range_callee}(stop), {range_callee}(start, stop), or "
+                f"{range_callee}(start, stop, step)"
             )
         # range(): target must be a single variable
         if not isinstance(node.target, ast.Name):
