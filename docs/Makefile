@@ -43,7 +43,7 @@ generate-api:
 
 # Copy API reference to language directories
 copy-api: generate-api
-	@for lang in $(LANGS); do cp -r api/ $$lang/api/; done
+	@for lang in $(LANGS); do mkdir -p $$lang/api; cp -r api/. $$lang/api/; done
 	@echo "✓ API reference copied to language directories"
 
 # Sync .py -> .ipynb for a single language (used via sync-en, sync-ja)
@@ -159,7 +159,7 @@ fresh-ja: clean sync-build-ja
 SITE_DIR := _site
 
 # Build unified site for GitHub Pages
-build-site: sync-build
+build-site: build
 	@echo "Creating unified site structure..."
 	@rm -rf $(SITE_DIR)
 	@mkdir -p $(SITE_DIR)/en

@@ -64,7 +64,8 @@ generate_api() {
 copy_api() {
     echo "Copying API reference to language directories..."
     for lang in "${LANGS[@]}"; do
-        cp -r api/ "${lang}/api/"
+        mkdir -p "${lang}/api"
+        cp -r api/. "${lang}/api/"
     done
     info "API reference copied"
 }
