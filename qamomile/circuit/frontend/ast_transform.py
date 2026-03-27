@@ -693,7 +693,9 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 var_names.extend(self._extract_tuple_vars(elt))
             return var_names
         else:
-            raise NotImplementedError(f"Unsupported target type: {type(target)}")
+            raise SyntaxError(
+                f"Unsupported loop target type in @qkernel: {ast.dump(target)}"
+            )
 
     def _validate_for_loop(self, node: ast.For) -> list[str]:
         """Validate a for-loop node and return binding variable names.
