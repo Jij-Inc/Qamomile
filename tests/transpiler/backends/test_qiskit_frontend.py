@@ -7825,6 +7825,7 @@ class TestDeadPhiTranspilation:
         _, qc = _transpile_and_get_circuit(circuit)
         assert qc is not None
 
+
 # ============================================================================
 # Bound constant if-condition tests (Issue: bound_constant_if_misclassified)
 # ============================================================================

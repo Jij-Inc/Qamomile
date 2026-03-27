@@ -15,13 +15,10 @@ import pytest
 from .gate_test_specs import (
     GATE_SPECS,
     TEST_ANGLES,
-    GateCategory,
     all_zeros_state,
     computational_basis_state,
     compute_expected_statevector,
     statevectors_equal,
-    tensor_product,
-    identity,
 )
 
 

@@ -18,7 +18,7 @@ class TestXMixerShapePropagation:
 
     def test_x_mixer_shape_through_block(self):
         """x_mixer should preserve Vector[Qubit] shape through BlockValue.call()."""
-        from qamomile.circuit.ir.value import ArrayValue, Value
+        from qamomile.circuit.ir.value import Value
         from qamomile.circuit.ir.types.primitives import QubitType, UIntType
 
         @qmc.qkernel
@@ -54,7 +54,7 @@ class TestQAOAPatternShapePropagation:
 
     def test_qaoa_layer_shape_through_block(self):
         """QAOA layer should preserve Vector[Qubit] shape through chained calls."""
-        from qamomile.circuit.ir.value import ArrayValue, Value
+        from qamomile.circuit.ir.value import Value
         from qamomile.circuit.ir.types.primitives import QubitType, UIntType, FloatType
 
         @qmc.qkernel

@@ -11,7 +11,7 @@ from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.value import Value
 
 if TYPE_CHECKING:
-    import qamomile.observable as qm_o
+    pass
 
 
 class SegmentKind(Enum):

@@ -258,9 +258,7 @@ class QuriPartsExecutor(
             )
         else:
             # Bound or non-parametric circuit → use non-parametric estimator
-            estimate = self.non_parametric_estimator(
-                hamiltonian, circuit_state
-            )
+            estimate = self.non_parametric_estimator(hamiltonian, circuit_state)
 
         return estimate.value.real
 

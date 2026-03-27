@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Generic, TypeVar
+from typing import Generic
 import numpy as np
 
 from .expr import VarType, VT

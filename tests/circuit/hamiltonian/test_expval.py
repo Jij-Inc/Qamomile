@@ -97,7 +97,6 @@ class TestExpvalSegment:
     def test_compiled_expval_segment_fields(self):
         """Test CompiledExpvalSegment has expected fields."""
         from qamomile.circuit.transpiler.compiled_segments import CompiledExpvalSegment
-        from qamomile.circuit.transpiler.segments import ExpvalSegment
         import dataclasses
 
         fields = {f.name for f in dataclasses.fields(CompiledExpvalSegment)}
@@ -167,10 +166,7 @@ class TestExpvalTranspiler:
         transpiler = QiskitTranspiler()
 
         # Transpile with Hamiltonian in bindings
-        executable = transpiler.transpile(
-            vqe,
-            bindings={"H": H, "n": 2}
-        )
+        executable = transpiler.transpile(vqe, bindings={"H": H, "n": 2})
 
         # Should have compiled expval segment
         assert len(executable.compiled_expval) == 1

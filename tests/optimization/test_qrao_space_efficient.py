@@ -350,7 +350,9 @@ class TestSpaceEfficientEncodeIsingCoefficients:
 class TestSpaceEfficientRandomGraphs:
     """Property-based tests with random Erdős–Rényi graphs."""
 
-    @pytest.mark.parametrize("seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999])
+    @pytest.mark.parametrize(
+        "seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+    )
     def test_random_graph(self, seed):
         rng = np.random.default_rng(seed)
         n = int(rng.integers(4, 15))

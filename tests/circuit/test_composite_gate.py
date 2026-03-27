@@ -1134,9 +1134,7 @@ class TestNestedQKernelNoPhantomQubits:
         """No phantom qubits with mixed scalar Qubit and Vector parameters."""
 
         @qkernel
-        def mixed_params(
-            q: Qubit, qs: Vector[Qubit]
-        ) -> tuple[Qubit, Vector[Qubit]]:
+        def mixed_params(q: Qubit, qs: Vector[Qubit]) -> tuple[Qubit, Vector[Qubit]]:
             q, qs[0] = qmc.cx(q, qs[0])
             return q, qs
 

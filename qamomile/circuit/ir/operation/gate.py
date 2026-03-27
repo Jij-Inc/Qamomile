@@ -150,8 +150,7 @@ class ControlledUOperation(Operation):
     def signature(self) -> Signature:
         if self.has_index_spec:
             raise NotImplementedError(
-                "Cannot compute signature for ControlledUOperation with "
-                "index spec."
+                "Cannot compute signature for ControlledUOperation with index spec."
             )
         if self.is_symbolic_num_controls:
             raise NotImplementedError(

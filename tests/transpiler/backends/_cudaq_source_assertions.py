@@ -10,7 +10,11 @@ from typing import Any
 
 from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
 from qamomile.circuit.transpiler.passes.emit import EmitPass
-from qamomile.cudaq.emitter import CudaqKernelArtifact, CudaqKernelEmitter, ExecutionMode
+from qamomile.cudaq.emitter import (
+    CudaqKernelArtifact,
+    CudaqKernelEmitter,
+    ExecutionMode,
+)
 from qamomile.cudaq.transpiler import CudaqEmitPass, CudaqTranspiler
 
 _TRACE_ATTR = "_cudaq_source_trace"
@@ -359,9 +363,7 @@ class TracingCudaqKernelEmitter(CudaqKernelEmitter):
         self._record(circuit, "cz", control, target)
         super().emit_cz(circuit, control, target)
 
-    def emit_swap(
-        self, circuit: CudaqKernelArtifact, qubit1: int, qubit2: int
-    ) -> None:
+    def emit_swap(self, circuit: CudaqKernelArtifact, qubit1: int, qubit2: int) -> None:
         self._record(circuit, "swap", qubit1, qubit2)
         super().emit_swap(circuit, qubit1, qubit2)
 

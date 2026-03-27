@@ -180,8 +180,7 @@ class UUIDRemapper:
             new_element_indices: tuple[Value, ...] | None = None
             if value.element_indices:
                 new_element_indices = tuple(
-                    cast(Value, self.clone_value(idx))
-                    for idx in value.element_indices
+                    cast(Value, self.clone_value(idx)) for idx in value.element_indices
                 )
 
             # Clone shape values so sub-kernel dimension parameters
@@ -211,8 +210,7 @@ class UUIDRemapper:
             new_element_indices_v: tuple[Value, ...] | None = None
             if value.element_indices:
                 new_element_indices_v = tuple(
-                    cast(Value, self.clone_value(idx))
-                    for idx in value.element_indices
+                    cast(Value, self.clone_value(idx)) for idx in value.element_indices
                 )
 
             cloned = dataclasses.replace(
@@ -220,9 +218,7 @@ class UUIDRemapper:
                 uuid=new_uuid,
                 logical_id=new_logical_id,
                 parent_array=new_parent_array_v,
-                element_indices=new_element_indices_v
-                if new_element_indices_v
-                else (),
+                element_indices=new_element_indices_v if new_element_indices_v else (),
             )
         else:
             # Fallback for any other ValueBase type

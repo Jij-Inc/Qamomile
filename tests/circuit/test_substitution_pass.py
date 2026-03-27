@@ -4,10 +4,6 @@ import pytest
 
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.block import Block, BlockKind
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
-    CompositeGateType,
-)
 from qamomile.circuit.transpiler.passes.substitution import (
     SubstitutionPass,
     SubstitutionConfig,
@@ -16,7 +12,6 @@ from qamomile.circuit.transpiler.passes.substitution import (
     check_signature_compatibility,
     create_substitution_pass,
 )
-from qamomile.circuit.stdlib.qft import QFT
 
 
 class TestSubstitutionRule:

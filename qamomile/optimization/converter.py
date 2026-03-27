@@ -8,7 +8,6 @@ from qamomile.optimization.binary_model import BinaryModel, VarType, BinarySampl
 
 
 class MathematicalProblemConverter(abc.ABC):
-
     def __init__(
         self,
         instance: ommx.v1.Instance | BinaryModel,
@@ -21,7 +20,9 @@ class MathematicalProblemConverter(abc.ABC):
             self.instance = instance
             self.original_vartype = VarType.BINARY  # OMMX uses BINARY
             qubo, constant = instance.to_qubo()
-            self.spin_model = BinaryModel.from_qubo(qubo, constant).change_vartype(VarType.SPIN)
+            self.spin_model = BinaryModel.from_qubo(qubo, constant).change_vartype(
+                VarType.SPIN
+            )
         else:
             raise TypeError("instance must be ommx.v1.Instance or BinaryModel")
 
@@ -61,8 +62,7 @@ class MathematicalProblemConverter(abc.ABC):
             for spin_sample in spin_sampleset.samples:
                 # Convert SPIN (+/-1) to BINARY (0/1): x = (1 - s) / 2
                 binary_sample = {
-                    idx: (1 - spin_val) // 2
-                    for idx, spin_val in spin_sample.items()
+                    idx: (1 - spin_val) // 2 for idx, spin_val in spin_sample.items()
                 }
                 binary_samples.append(binary_sample)
 
@@ -75,4 +75,3 @@ class MathematicalProblemConverter(abc.ABC):
         else:
             # Already in SPIN, return as-is
             return spin_sampleset
-

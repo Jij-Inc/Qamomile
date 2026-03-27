@@ -1,6 +1,5 @@
 """Test that tutorial files execute without errors."""
 
-import os
 import runpy
 from pathlib import Path
 

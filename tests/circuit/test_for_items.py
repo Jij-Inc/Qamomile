@@ -1,7 +1,6 @@
 """Tests for for_items iteration over Dict types."""
 
 import pytest
-import numpy as np
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.operation.control_flow import ForItemsOperation
 

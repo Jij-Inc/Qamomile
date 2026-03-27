@@ -1,11 +1,9 @@
 import numpy as np
-from .expr import BinaryExpr, VarType
+from .expr import BinaryExpr
 
 
 def normalize_by_factor(
-    model: BinaryExpr,
-    factor: float,
-    replace: bool = False
+    model: BinaryExpr, factor: float, replace: bool = False
 ) -> BinaryExpr:
     """Normalize the BinaryExpr by a given factor.
 
@@ -22,7 +20,7 @@ def normalize_by_factor(
         normalized_expr = model.copy()
 
     if factor == 0:
-        return normalized_expr    
+        return normalized_expr
 
     normalized_expr.constant /= factor
     for inds in normalized_expr.coefficients:
@@ -30,10 +28,7 @@ def normalize_by_factor(
     return normalized_expr
 
 
-def normalize_by_abs_max(
-    model: BinaryExpr,
-    replace: bool = False
-) -> BinaryExpr:
+def normalize_by_abs_max(model: BinaryExpr, replace: bool = False) -> BinaryExpr:
     """Normalize the BinaryExpr by its absolute maximum coefficient.
 
     Args:
@@ -42,16 +37,11 @@ def normalize_by_abs_max(
     Returns:
         BinaryExpr: The normalized binary expression.
     """
-    max_coeff = max(
-        abs(coeff) for coeff in model.coefficients.values()
-    )
+    max_coeff = max(abs(coeff) for coeff in model.coefficients.values())
     return normalize_by_factor(model, max_coeff, replace=replace)
 
 
-def normalize_by_rms(
-    expr: BinaryExpr,
-    replace: bool = False
-) -> BinaryExpr:
+def normalize_by_rms(expr: BinaryExpr, replace: bool = False) -> BinaryExpr:
     r"""Normalize coefficients by the root mean square.
 
     The coefficients for normalized is defined as:
@@ -93,5 +83,3 @@ def normalize_by_rms(
 
     rms = np.sqrt(rms_components)
     return normalize_by_factor(expr, rms, replace)
-
-

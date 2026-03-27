@@ -10,7 +10,6 @@ These tests were added to prevent regression of bugs fixed in the emit pass.
 """
 
 import numpy as np
-import pytest
 
 import qamomile.circuit as qmc
 from qamomile.qiskit.transpiler import QiskitTranspiler

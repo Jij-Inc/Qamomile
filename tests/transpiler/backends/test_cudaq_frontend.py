@@ -115,7 +115,9 @@ def _assert_source_contains(circuit: CudaqKernelArtifact, *fragments: str) -> No
     cursor = 0
     for fragment in fragments:
         idx = circuit.source.find(fragment, cursor)
-        assert idx >= 0, f"Expected source fragment not found: {fragment}\n{circuit.source}"
+        assert idx >= 0, (
+            f"Expected source fragment not found: {fragment}\n{circuit.source}"
+        )
         cursor = idx + len(fragment)
 
 
@@ -2316,7 +2318,9 @@ class TestBoundConstantIfConditionCudaq:
                 q = qmc.x(q)
             return qmc.measure(q)
 
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 1}, smoke_test=True)
+        _, qc = _transpile_and_get_circuit(
+            circuit, bindings={"flag": 1}, smoke_test=True
+        )
         sv = _run_statevector(qc)
         expected = computational_basis_state(1, 1)  # |1>
         assert statevectors_equal(sv, expected)
@@ -2331,7 +2335,9 @@ class TestBoundConstantIfConditionCudaq:
                 q = qmc.x(q)
             return qmc.measure(q)
 
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 0}, smoke_test=True)
+        _, qc = _transpile_and_get_circuit(
+            circuit, bindings={"flag": 0}, smoke_test=True
+        )
         sv = _run_statevector(qc)
         expected = computational_basis_state(1, 0)  # |0>
         assert statevectors_equal(sv, expected)
@@ -2941,7 +2947,9 @@ class TestControlFlowNested:
         )
         assert qc.execution_mode == ExecutionMode.STATIC
         assert qc.num_qubits == n
-        _assert_source_contains(qc, "def _qamomile_kernel():", f"q = cudaq.qvector({n})")
+        _assert_source_contains(
+            qc, "def _qamomile_kernel():", f"q = cudaq.qvector({n})"
+        )
 
     def test_cx_ladder_via_range(self):
         """A loop-based CX ladder propagates |1> to every qubit."""
@@ -3379,7 +3387,9 @@ class TestCompileTimeIfPhiPropagation:
             q = qmc.rx(q, theta)
             return qmc.measure(q)
 
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 1}, smoke_test=True)
+        _, qc = _transpile_and_get_circuit(
+            circuit, bindings={"flag": 1}, smoke_test=True
+        )
         sv = _run_statevector(qc)
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["RX"].matrix_fn(1.0)
@@ -3400,7 +3410,9 @@ class TestCompileTimeIfPhiPropagation:
             q = qmc.rx(q, theta)
             return qmc.measure(q)
 
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 0}, smoke_test=True)
+        _, qc = _transpile_and_get_circuit(
+            circuit, bindings={"flag": 0}, smoke_test=True
+        )
         sv = _run_statevector(qc)
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["RX"].matrix_fn(2.0)
@@ -3421,7 +3433,9 @@ class TestCompileTimeIfPhiPropagation:
             q = qmc.rx(q, theta)
             return qmc.measure(q)
 
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 1}, smoke_test=True)
+        _, qc = _transpile_and_get_circuit(
+            circuit, bindings={"flag": 1}, smoke_test=True
+        )
         sv = _run_statevector(qc)
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["RX"].matrix_fn(1.0)
@@ -3442,7 +3456,9 @@ class TestCompileTimeIfPhiPropagation:
             q = qmc.rx(q, theta)
             return qmc.measure(q)
 
-        _, qc = _transpile_and_get_circuit(circuit, bindings={"flag": 0}, smoke_test=True)
+        _, qc = _transpile_and_get_circuit(
+            circuit, bindings={"flag": 0}, smoke_test=True
+        )
         sv = _run_statevector(qc)
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["RX"].matrix_fn(2.0)
@@ -3628,7 +3644,9 @@ class TestCustomCompositeGate:
         _, qc = _transpile_and_get_circuit(circuit, smoke_test=True)
         assert qc.execution_mode == ExecutionMode.STATIC
         assert qc.num_qubits == 2
-        _assert_source_contains(qc, "def _qamomile_kernel():", "h(q[0])", "x.ctrl(q[0], q[1])")
+        _assert_source_contains(
+            qc, "def _qamomile_kernel():", "h(q[0])", "x.ctrl(q[0], q[1])"
+        )
 
     def test_composite_statevector(self):
         """A BellPair composite gate prepares |Phi+>."""
@@ -4206,7 +4224,9 @@ class TestDeutschJozsaAlgorithm:
             dj_bxor, bindings={"n_val": n}, smoke_test=True
         )
         assert qc.num_qubits == n + 1
-        _assert_source_contains(qc, "def _qamomile_kernel():", f"q = cudaq.qvector({n + 1})")
+        _assert_source_contains(
+            qc, "def _qamomile_kernel():", f"q = cudaq.qvector({n + 1})"
+        )
 
 
 class TestBernsteinVaziraniAlgorithm:

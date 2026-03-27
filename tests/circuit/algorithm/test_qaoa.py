@@ -24,6 +24,7 @@ from qamomile.qiskit.transpiler import QiskitTranspiler
 # Helper: count gates by name in a Qiskit circuit
 # ---------------------------------------------------------------------------
 
+
 def _gate_counts(qc):
     """Return a dict of {gate_name: count} from a Qiskit QuantumCircuit."""
     counts = {}
@@ -41,6 +42,7 @@ def _gate_list(qc, name):
 # ---------------------------------------------------------------------------
 # Wrapper qkernels (needed to transpile sub-functions with concrete bindings)
 # ---------------------------------------------------------------------------
+
 
 @qmc.qkernel
 def _wrap_superposition(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:

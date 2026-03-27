@@ -7,6 +7,7 @@ This module defines the core value types used in the intermediate representation
 - TupleValue: Tuple of values (for structured data like Ising indices)
 - DictValue: Dictionary of key-value pairs (for Ising coefficients)
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -154,7 +155,9 @@ class Value(typing.Generic[T]):
 
     def is_cast_result(self) -> bool:
         """Check if this value is the result of a CastOperation."""
-        return "cast_source_logical_id" in self.params or "cast_source_uuid" in self.params
+        return (
+            "cast_source_logical_id" in self.params or "cast_source_uuid" in self.params
+        )
 
     def get_cast_source_uuid(self) -> str | None:
         """Get the source value UUID if this is a cast result."""
@@ -261,9 +264,7 @@ class TupleValue:
 
     def is_constant(self) -> bool:
         """Check if all elements are constants."""
-        return all(
-            isinstance(e, Value) and e.is_constant() for e in self.elements
-        )
+        return all(isinstance(e, Value) and e.is_constant() for e in self.elements)
 
 
 # =============================================================================
