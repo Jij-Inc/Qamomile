@@ -6,13 +6,12 @@ import warnings
 
 import pytest
 
-import qamomile.circuit as qm
 import qamomile.circuit as qmc
-from qamomile.circuit.frontend.constructors import qubit_array
 from qamomile.circuit.frontend.ast_transform import (
     ControlFlowTransformer,
     VariableCollector,
 )
+from qamomile.circuit.frontend.constructors import qubit_array
 from qamomile.circuit.frontend.handle import Qubit
 from qamomile.circuit.frontend.qkernel import qkernel
 
@@ -709,7 +708,9 @@ class TestInvalidPlaceholderLoopTargets:
 
                 @qmc.qkernel
                 def bad(
-                    d: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.Tuple[qmc.UInt, qmc.UInt]], qmc.Float],
+                    d: qmc.Dict[
+                        qmc.Tuple[qmc.UInt, qmc.Tuple[qmc.UInt, qmc.UInt]], qmc.Float
+                    ],
                 ) -> qmc.Qubit:
                     q = qmc.qubit_array(2, "q")
                     for (i, (j, k)), v in qmc.items(d):
@@ -803,7 +804,7 @@ class TestInvalidPlaceholderLoopTargets:
                 @qmc.qkernel
                 def bad(n: qmc.UInt) -> qmc.Qubit:
                     q = qmc.qubit_array(2, "q")
-                    for (i, j) in qmc.range(n):
+                    for i, j in qmc.range(n):
                         q[0] = qmc.h(q[0])
                     return q[0]
 
