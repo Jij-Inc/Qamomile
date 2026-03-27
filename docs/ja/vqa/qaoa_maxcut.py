@@ -25,6 +25,10 @@
 #
 # 最後に、`qamomile.circuit.algorithm.qaoa_state` が同じ回路を 1 つの関数呼び出しで提供することを示します。
 
+# %%
+# 最新のQamomileをpipからインストールします！
+# # !pip install qamomile
+
 # %% [markdown]
 # ## MaxCut 問題とは？
 #
@@ -42,8 +46,8 @@
 # 5 頂点、6 辺の小さなグラフを使います。全探索が可能な規模でありながら、自明でない構造を持っています。
 
 # %%
-import networkx as nx
 import matplotlib.pyplot as plt
+import networkx as nx
 
 G = nx.Graph()
 G.add_edges_from([(0, 1), (0, 2), (1, 2), (1, 3), (2, 3), (3, 4)])
@@ -52,8 +56,12 @@ num_nodes = G.number_of_nodes()
 pos = nx.spring_layout(G, seed=42)
 plt.figure(figsize=(5, 4))
 nx.draw(
-    G, pos, with_labels=True, node_color="white",
-    node_size=700, edgecolors="black",
+    G,
+    pos,
+    with_labels=True,
+    node_color="white",
+    node_size=700,
+    edgecolors="black",
 )
 plt.title(f"Graph: {num_nodes} nodes, {G.number_of_edges()} edges")
 plt.show()
@@ -178,12 +186,14 @@ def superposition(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
         q[i] = qmc.h(q[i])
     return q
 
+
 # %% [markdown]
 # ### ステップ 2: コスト層
 #
 # コストユニタリ $e^{-i \gamma H_C}$ を適用します。
 #
 # Qamomile の回転ゲートは $1/2$ の因子を含む規約を使います: $\text{RZ}(\theta) = e^{-i \theta Z / 2}$、$\text{RZZ}(\theta) = e^{-i \theta Z \otimes Z / 2}$。$e^{-i \gamma H_C}$ と厳密に一致させるには角度を $2 J_{ij} \gamma$ とすべきですが、$\gamma$ は古典オプティマイザが自由に調整する**変分パラメータ**であるため、この定数倍は最適な $\gamma$ の値に吸収されます。したがって、$J_{ij} \cdot \gamma$（および $h_i \cdot \gamma$）をそのまま渡します:
+
 
 # %%
 @qmc.qkernel
@@ -199,10 +209,12 @@ def cost_layer(
         q[i] = qmc.rz(q[i], angle=hi * gamma)
     return q
 
+
 # %% [markdown]
 # ### ステップ 3: ミキサー層
 #
 # ミキサーユニタリ $e^{-i \beta H_M}$ を適用します（$H_M = \sum_i X_i$）。$\text{RX}(\theta) = e^{-i \theta X / 2}$ なので、$e^{-i \beta X_i}$ を実装するには $\theta = 2\beta$ とします。
+
 
 # %%
 @qmc.qkernel
@@ -215,10 +227,12 @@ def mixer_layer(
         q[i] = qmc.rx(q[i], angle=2.0 * beta)
     return q
 
+
 # %% [markdown]
 # ### ステップ 4: 完全な QAOA アンザッツ
 #
 # 3 つの要素を組み合わせます: 重ね合わせ → $p$ ラウンドのコスト層 + ミキサー層 → 測定。
+
 
 # %%
 @qmc.qkernel
@@ -235,6 +249,7 @@ def qaoa_ansatz(
         q = cost_layer(quad, linear, q, gammas[layer])
         q = mixer_layer(q, betas[layer])
     return qmc.measure(q)
+
 
 # %% [markdown]
 # ## トランスパイルと最適化
@@ -263,8 +278,8 @@ executable = transpiler.transpile(
 
 # %%
 import numpy as np
-from scipy.optimize import minimize
 from qiskit_aer import AerSimulator
+from scipy.optimize import minimize
 
 executor = transpiler.executor(backend=AerSimulator(seed_simulator=7))
 cost_history: list[float] = []
@@ -287,9 +302,7 @@ def cost_fn(params):
 rng = np.random.default_rng(42)
 initial_params = rng.uniform(-np.pi / 2, np.pi / 2, 2 * p)
 
-res = minimize(
-    cost_fn, initial_params, method="COBYLA", options={"maxiter": 500}
-)
+res = minimize(cost_fn, initial_params, method="COBYLA", options={"maxiter": 500})
 
 print(f"Optimized cost: {res.fun:.4f}")
 print(f"Optimal params: {[round(v, 4) for v in res.x]}")
@@ -355,13 +368,16 @@ plt.show()
 # %%
 if best_qaoa_sample is not None:
     color_map = [
-        "#FF6B6B" if best_qaoa_sample[i] == 1 else "#4ECDC4"
-        for i in range(num_nodes)
+        "#FF6B6B" if best_qaoa_sample[i] == 1 else "#4ECDC4" for i in range(num_nodes)
     ]
     plt.figure(figsize=(5, 4))
     nx.draw(
-        G, pos, with_labels=True, node_color=color_map,
-        node_size=700, edgecolors="black",
+        G,
+        pos,
+        with_labels=True,
+        node_color=color_map,
+        node_size=700,
+        edgecolors="black",
     )
     plt.title(f"QAOA partition (cut = {best_qaoa_cut})")
     plt.show()
@@ -386,9 +402,9 @@ def qaoa_builtin(
     gammas: qmc.Vector[qmc.Float],
     betas: qmc.Vector[qmc.Float],
 ) -> qmc.Vector[qmc.Bit]:
-    q = qaoa_state(p=p, quad=quad, linear=linear, n=n,
-                   gammas=gammas, betas=betas)
+    q = qaoa_state(p=p, quad=quad, linear=linear, n=n, gammas=gammas, betas=betas)
     return qmc.measure(q)
+
 
 # %% [markdown]
 # 同じ最適化済みパラメータでトランスパイル・サンプリングします。シードを固定した `AerSimulator` を使うことで、同一の回路に対して決定的な結果が得られます。

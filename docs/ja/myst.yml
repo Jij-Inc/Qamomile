@@ -13,10 +13,8 @@ project:
   github: https://github.com/Jij-Inc/Qamomile
   jupyter: true
   execute:
-    enabled: true
+    enabled: false
     cache: true
-    exclude_patterns:
-      - collaboration/qbraid_executor.ipynb
   toc:
     - file: index.md
     - title: チュートリアル
@@ -86,3 +84,7 @@ site:
   nav:
     - title: GitHub
       url: https://github.com/Jij-Inc/Qamomile
+  actions:
+    - title: English
+      url: https://jij-inc-qamomile.readthedocs-hosted.com/latest/en/
+  

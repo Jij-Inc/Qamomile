@@ -25,6 +25,10 @@
 # - `.substitute()`によるスケーリング分析
 
 # %%
+# 最新のQamomileをpipからインストールします！
+# # !pip install qamomile
+
+# %%
 import qamomile.circuit as qmc
 
 # %% [markdown]

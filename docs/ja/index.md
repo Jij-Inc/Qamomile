@@ -2,11 +2,7 @@
 
 Qamomileは量子プログラミングSDKです。型付きPython関数で量子回路を記述し、Qiskit・CUDA-Q・QURI Parts・qBraidなどのQuantum SDKで実行できます。また、シンボリックな代数的リソース推定やブラックボックス（オラクル）を含むような実行そのものができない回路のリソース推定も可能です。
 
-> **注意**：Qamomileは現在もアクティブに開発中であり、リリース間で破壊的変更が加わる可能性があります。
-
-> **不具合報告**：不具合を見つけた場合は、[GitHub Issues](https://github.com/Jij-Inc/Qamomile/issues/new)でお知らせいただければ幸いです。
-
-## チュートリアル
+> **注意** Qamomileは現在もアクティブに開発中であり、リリース間で破壊的変更が加わる可能性があります。不具合を見つけた場合は、[GitHub Issues](https://github.com/Jij-Inc/Qamomile/issues/new)でお知らせいただければ幸いです。
 
 1. [はじめての量子カーネル](tutorial/01_your_first_quantum_kernel) — カーネルの定義・可視化・実行、アフィンルール
 2. [パラメータ付きカーネル](tutorial/02_parameterized_kernels) — 構造パラメータとランタイムパラメータ、バインド/スイープパターン

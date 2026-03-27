@@ -25,6 +25,10 @@
 # This chapter explains both methods and introduces **observables** for expectation-value computation.
 
 # %%
+# Install the latest Qamomile through pip!
+# # !pip install qamomile
+
+# %%
 import qamomile.circuit as qmc
 import qamomile.observable as qmo
 from qamomile.qiskit import QiskitTranspiler

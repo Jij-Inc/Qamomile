@@ -28,6 +28,10 @@
 # At the end, we show that `qamomile.circuit.algorithm.qaoa_state` provides
 # the same circuit in a single function call.
 
+# %%
+# Install the latest Qamomile through pip!
+# # !pip install qamomile
+
 # %% [markdown]
 # ## What is MaxCut?
 #
@@ -48,8 +52,8 @@
 # non-trivial, yet small enough to brute-force for comparison.
 
 # %%
-import networkx as nx
 import matplotlib.pyplot as plt
+import networkx as nx
 
 G = nx.Graph()
 G.add_edges_from([(0, 1), (0, 2), (1, 2), (1, 3), (2, 3), (3, 4)])
@@ -58,8 +62,12 @@ num_nodes = G.number_of_nodes()
 pos = nx.spring_layout(G, seed=42)
 plt.figure(figsize=(5, 4))
 nx.draw(
-    G, pos, with_labels=True, node_color="white",
-    node_size=700, edgecolors="black",
+    G,
+    pos,
+    with_labels=True,
+    node_color="white",
+    node_size=700,
+    edgecolors="black",
 )
 plt.title(f"Graph: {num_nodes} nodes, {G.number_of_edges()} edges")
 plt.show()
@@ -191,6 +199,7 @@ def superposition(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
         q[i] = qmc.h(q[i])
     return q
 
+
 # %% [markdown]
 # ### Step 2: Cost Layer
 #
@@ -204,6 +213,7 @@ def superposition(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
 # that the classical optimizer tunes freely, this constant factor is
 # simply absorbed into the optimal $\gamma$ values. We therefore pass
 # $J_{ij} \cdot \gamma$ (and $h_i \cdot \gamma$) directly:
+
 
 # %%
 @qmc.qkernel
@@ -219,12 +229,14 @@ def cost_layer(
         q[i] = qmc.rz(q[i], angle=hi * gamma)
     return q
 
+
 # %% [markdown]
 # ### Step 3: Mixer Layer
 #
 # Apply the mixer unitary $e^{-i \beta H_M}$ where $H_M = \sum_i X_i$.
 # Since $\text{RX}(\theta) = e^{-i \theta X / 2}$, we need $\theta = 2\beta$
 # to implement $e^{-i \beta X_i}$ on each qubit.
+
 
 # %%
 @qmc.qkernel
@@ -237,11 +249,13 @@ def mixer_layer(
         q[i] = qmc.rx(q[i], angle=2.0 * beta)
     return q
 
+
 # %% [markdown]
 # ### Step 4: Full QAOA Ansatz
 #
 # Compose the three pieces: superposition, then $p$ rounds of
 # cost + mixer, and finally measurement.
+
 
 # %%
 @qmc.qkernel
@@ -258,6 +272,7 @@ def qaoa_ansatz(
         q = cost_layer(quad, linear, q, gammas[layer])
         q = mixer_layer(q, betas[layer])
     return qmc.measure(q)
+
 
 # %% [markdown]
 # ## Transpile and Optimize
@@ -290,9 +305,8 @@ executable = transpiler.transpile(
 
 # %%
 import numpy as np
-from scipy.optimize import minimize
-
 from qiskit_aer import AerSimulator
+from scipy.optimize import minimize
 
 executor = transpiler.executor(backend=AerSimulator(seed_simulator=7))
 cost_history: list[float] = []
@@ -315,9 +329,7 @@ def cost_fn(params):
 rng = np.random.default_rng(42)
 initial_params = rng.uniform(-np.pi / 2, np.pi / 2, 2 * p)
 
-res = minimize(
-    cost_fn, initial_params, method="COBYLA", options={"maxiter": 500}
-)
+res = minimize(cost_fn, initial_params, method="COBYLA", options={"maxiter": 500})
 
 print(f"Optimized cost: {res.fun:.4f}")
 print(f"Optimal params: {[round(v, 4) for v in res.x]}")
@@ -386,13 +398,16 @@ plt.show()
 # %%
 if best_qaoa_sample is not None:
     color_map = [
-        "#FF6B6B" if best_qaoa_sample[i] == 1 else "#4ECDC4"
-        for i in range(num_nodes)
+        "#FF6B6B" if best_qaoa_sample[i] == 1 else "#4ECDC4" for i in range(num_nodes)
     ]
     plt.figure(figsize=(5, 4))
     nx.draw(
-        G, pos, with_labels=True, node_color=color_map,
-        node_size=700, edgecolors="black",
+        G,
+        pos,
+        with_labels=True,
+        node_color=color_map,
+        node_size=700,
+        edgecolors="black",
     )
     plt.title(f"QAOA partition (cut = {best_qaoa_cut})")
     plt.show()
@@ -423,9 +438,9 @@ def qaoa_builtin(
     gammas: qmc.Vector[qmc.Float],
     betas: qmc.Vector[qmc.Float],
 ) -> qmc.Vector[qmc.Bit]:
-    q = qaoa_state(p=p, quad=quad, linear=linear, n=n,
-                   gammas=gammas, betas=betas)
+    q = qaoa_state(p=p, quad=quad, linear=linear, n=n, gammas=gammas, betas=betas)
     return qmc.measure(q)
+
 
 # %% [markdown]
 # We transpile and sample with the same optimized parameters.
