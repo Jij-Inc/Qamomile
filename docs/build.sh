@@ -89,7 +89,8 @@ sync_en() {
     echo "Converting English .py files to .ipynb..."
     uv run jupytext --to ipynb en/tutorial/*.py 2>/dev/null || true
     uv run jupytext --to ipynb en/optimization/*.py 2>/dev/null || true
-    uv run jupytext --to ipynb en/transpile/*.py 2>/dev/null || true
+    uv run jupytext --to ipynb en/vqa/*.py 2>/dev/null || true
+    # We don't convert collaboration because those notebooks need API-KEYs.
     info "English notebooks synced"
 }
 
@@ -98,7 +99,8 @@ sync_ja() {
     echo "Converting Japanese .py files to .ipynb..."
     uv run jupytext --to ipynb ja/tutorial/*.py 2>/dev/null || true
     uv run jupytext --to ipynb ja/optimization/*.py 2>/dev/null || true
-    uv run jupytext --to ipynb ja/transpile/*.py 2>/dev/null || true
+    uv run jupytext --to ipynb ja/vqa/*.py 2>/dev/null || true
+    # We don't convert collaboration because those notebooks need API-KEYs.
     info "Japanese notebooks synced"
 }
 
