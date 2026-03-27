@@ -23,6 +23,10 @@
 # - パラメータ化された回路のための`qubit_array()`と`qmc.range()`
 # - **バインド/スイープパターン**：一度トランスパイルし、複数回実行する
 
+# %%
+# 最新のQamomileをpipからインストールします！
+# # !pip install qamomile
+
 # %% [markdown]
 # ## `UInt`と`Float`の役割
 #
