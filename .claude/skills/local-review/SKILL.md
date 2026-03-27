@@ -101,6 +101,7 @@ Dependencies flow only downstream (left to right). Upstream (reverse) dependenci
 - **Docs test coverage**: New tutorial files or directories (outside `collaboration/`) must be included in `TUTORIAL_PATTERNS` in `tests/docs/test_tutorials.py`. A new docs path not covered by tests is a P1 issue.
 - Jupyter Book 2 with MyST Markdown Engine.
 - Bilingual: English (`docs/en/`) and Japanese (`docs/ja/`).
+- **en/ja parity**: `docs/en/` and `docs/ja/` must have the same file structure and cover the same content — only the natural language differs. If a tutorial is added or modified in one language, the corresponding file in the other language must also be added or updated. A missing or outdated counterpart is a P1 issue.
 
 ### J. Numerical Correctness
 
@@ -168,7 +169,7 @@ For each changed file, systematically check:
 6. **Module organization** (Section F) — Proper `__all__`? TYPE_CHECKING guards?
 7. **Python style** (Section G) — Google-style docstrings on ALL functions/classes with type hints? Modern Python syntax? No dead code?
 8. **Testing** (Section H) — Are tests parametrized? Random testing used? Clear docstrings describing what is tested? Edge cases and negative tests covered? Numerical assertions use `np.allclose`?
-9. **Documentation** (Section I) — Every `.py` has a corresponding `.ipynb`? If `.py` was modified, is `.ipynb` also updated? Are `.ipynb` files executed (outputs present)? New docs paths covered in test patterns?
+9. **Documentation** (Section I) — Every `.py` has a corresponding `.ipynb`? If `.py` was modified, is `.ipynb` also updated? Are `.ipynb` files executed (outputs present)? New docs paths covered in test patterns? Do `docs/en/` and `docs/ja/` have matching file structures?
 10. **Numerical correctness** (Section J) — Float comparisons use `isclose`/`is_close_zero`? Tests use `np.allclose`? Tolerance assumptions documented?
 11. **Performance & memory** (Section K) — Unnecessary copies? Mutable default arguments? Large iterations use generators?
 12. **Defensive programming** (Section L) — Do `if-else`/`match` statements include `else`/default branches? Are defensive checks using `assert` for internal invariants? Are unreachable branches clearly marked?
