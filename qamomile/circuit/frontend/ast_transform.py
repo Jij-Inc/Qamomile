@@ -799,7 +799,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             raise SyntaxError(
                 f"{range_label} does not support keyword arguments in @qkernel; "
                 f"use positional arguments like {range_callee}(stop) or "
-                f"{range_callee}(いstart, stop, step)."
+                f"{range_callee}(start, stop, step)."
             )
         # range(): requires 1-3 positional arguments
         if num_args < 1 or num_args > 3:
