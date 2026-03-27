@@ -707,6 +707,11 @@ class ControlFlowTransformer(ast.NodeTransformer):
             call = node.iter  # type: ignore
             # from qamomile.circuit import items; items(d) form: require exactly 1 positional arg
             if isinstance(call.func, ast.Name):
+                if call.keywords:
+                    raise SyntaxError(
+                        "items() does not support keyword arguments in @qkernel; "
+                        "use items(d)."
+                    )
                 if len(call.args) != 1:
                     raise SyntaxError(
                         "items() requires exactly one dict argument: items(d)"
@@ -728,7 +733,12 @@ class ControlFlowTransformer(ast.NodeTransformer):
                     isinstance(func_value, ast.Name)
                     and func_value.id in self._global_names
                 ):
-                    # qmc.items(d) form: require exactly 1 positional arg
+                    # qmc.items(d) form: require exactly 1 positional arg, no keywords
+                    if call.keywords:
+                        raise SyntaxError(
+                            "items() does not support keyword arguments in @qkernel; "
+                            "use qmc.items(d)."
+                        )
                     if len(call.args) != 1:
                         raise SyntaxError(
                             "items() requires exactly one dict argument: qmc.items(d)"
@@ -736,9 +746,13 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 else:
                     # Unknown receiver: default to module-call semantics for
                     # robustness against unexpected aliases.
+                    if call.keywords:
+                        raise SyntaxError(
+                            "items() does not support keyword arguments in @qkernel."
+                        )
                     if len(call.args) != 1:
                         raise SyntaxError(
-                            "items() requires exactly one dict argument: qmc.items(d)"
+                            "items() requires exactly one dict argument in @qkernel."
                         )
 
             # items(): target must be a 2-element tuple (key, value)
