@@ -761,6 +761,52 @@ class TestInvalidPlaceholderLoopTargets:
                         q[0] = qmc.h(q[0])
                     return q[0]
 
+    def test_items_module_call_keyword_args_raises(self):
+        """qmc.items(d=edges) must raise SyntaxError (keyword args not supported)."""
+        with pytest.raises(SyntaxError, match="does not support keyword arguments"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+
+                @qmc.qkernel
+                def bad(
+                    edges: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+                ) -> qmc.Qubit:
+                    q = qmc.qubit_array(2, "q")
+                    for k, v in qmc.items(d=edges):
+                        q[0] = qmc.h(q[0])
+                    return q[0]
+
+    def test_items_module_call_extra_args_raises(self):
+        """qmc.items(edges, extra) must raise SyntaxError (exactly 1 arg required)."""
+        with pytest.raises(SyntaxError, match="requires exactly one dict argument"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+
+                @qmc.qkernel
+                def bad(
+                    edges: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+                    other: qmc.Dict[qmc.UInt, qmc.Float],
+                ) -> qmc.Qubit:
+                    q = qmc.qubit_array(2, "q")
+                    for k, v in qmc.items(edges, other):
+                        q[0] = qmc.h(q[0])
+                    return q[0]
+
+    def test_range_tuple_unpack_raises(self):
+        """for (i, j) in qmc.range(n) must raise SyntaxError."""
+        with pytest.raises(
+            SyntaxError, match="qmc.range.*requires a single loop variable"
+        ):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+
+                @qmc.qkernel
+                def bad(n: qmc.UInt) -> qmc.Qubit:
+                    q = qmc.qubit_array(2, "q")
+                    for (i, j) in qmc.range(n):
+                        q[0] = qmc.h(q[0])
+                    return q[0]
+
     def test_range_keyword_args_raises(self):
         """qmc.range(stop=n) must raise SyntaxError (keyword args not supported)."""
         with pytest.raises(SyntaxError, match="does not support keyword arguments"):
