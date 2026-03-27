@@ -1,7 +1,11 @@
-# Makefile for Qamomile Documentation (docs2)
+# Makefile for Qamomile Documentation
 # Uses jupytext to convert .py -> .ipynb and Jupyter Book to build
 
-.PHONY: help build build-en build-ja sync sync-en sync-ja generate-api copy-api clean clean-all serve-en serve-ja fresh-en fresh-ja build-site serve-site
+# Languages and tutorial directories (excluding collaboration/)
+LANGS := en ja
+TUTORIAL_DIRS := tutorial optimization vqa
+
+.PHONY: help build build-en build-ja sync sync-en sync-ja sync-build sync-build-en sync-build-ja generate-api copy-api clean clean-all serve-en serve-ja fresh-en fresh-ja build-site serve-site
 
 # Default target
 help:
@@ -9,20 +13,23 @@ help:
 	@echo "===================================="
 	@echo ""
 	@echo "Available targets:"
-	@echo "  make build       - Build both English and Japanese documentation"
-	@echo "  make build-en    - Build English documentation only"
-	@echo "  make build-ja    - Build Japanese documentation only"
-	@echo "  make sync        - Convert all .py files to .ipynb (both languages)"
-	@echo "  make sync-en     - Convert English .py files to .ipynb"
-	@echo "  make sync-ja     - Convert Japanese .py files to .ipynb"
-	@echo "  make clean       - Remove generated .ipynb files and build outputs"
-	@echo "  make clean-all   - Remove everything including execution cache"
-	@echo "  make serve-en    - Build (if needed) and serve English docs (port 8000)"
-	@echo "  make serve-ja    - Build (if needed) and serve Japanese docs (port 8000)"
-	@echo "  make fresh-en    - Clean, rebuild with execution, and serve English docs"
-	@echo "  make fresh-ja    - Clean, rebuild with execution, and serve Japanese docs"
-	@echo "  make build-site  - Build unified site for GitHub Pages"
-	@echo "  make serve-site  - Serve unified site locally (port 8000)"
+	@echo "  make build          - Build both languages (no sync)"
+	@echo "  make build-en       - Build English documentation only (no sync)"
+	@echo "  make build-ja       - Build Japanese documentation only (no sync)"
+	@echo "  make sync           - Convert all .py files to .ipynb (both languages)"
+	@echo "  make sync-en        - Convert English .py files to .ipynb"
+	@echo "  make sync-ja        - Convert Japanese .py files to .ipynb"
+	@echo "  make sync-build     - Sync and build both languages"
+	@echo "  make sync-build-en  - Sync and build English documentation"
+	@echo "  make sync-build-ja  - Sync and build Japanese documentation"
+	@echo "  make clean          - Remove generated .ipynb files and build outputs"
+	@echo "  make clean-all      - Remove everything including execution cache"
+	@echo "  make serve-en       - Sync, build (if needed), and serve English docs (port 8000)"
+	@echo "  make serve-ja       - Sync, build (if needed), and serve Japanese docs (port 8000)"
+	@echo "  make fresh-en       - Clean, sync, rebuild, and serve English docs"
+	@echo "  make fresh-ja       - Clean, sync, rebuild, and serve Japanese docs"
+	@echo "  make build-site     - Build unified site for GitHub Pages"
+	@echo "  make serve-site     - Serve unified site locally (port 8000)"
 	@echo ""
 
 # Generate API reference from docstrings
@@ -33,87 +40,91 @@ generate-api:
 
 # Copy API reference to language directories
 copy-api: generate-api
-	@cp -r api/ en/api/
-	@cp -r api/ ja/api/
+	@for lang in $(LANGS); do cp -r api/ $$lang/api/; done
 	@echo "✓ API reference copied to language directories"
 
-# Build both languages
-build: copy-api sync build-en build-ja
-	@echo "✓ Both English and Japanese documentation built successfully"
+# Sync .py -> .ipynb for a single language (used via sync-en, sync-ja)
+define sync-lang
+	@echo "Converting $(1) .py files to .ipynb..."
+	@for dir in $(TUTORIAL_DIRS); do \
+		uv run jupytext --to ipynb $(1)/$$dir/*.py 2>/dev/null || true; \
+	done
+	@echo "✓ $(1) notebooks synced"
+endef
 
-# Build English documentation
-build-en: copy-api sync-en
-	@echo "Building English documentation..."
-	cd en && MPLBACKEND=agg uv run jupyter-book build --execute --html
-	@uv run python scripts/inject_colab_launch.py en
-	@echo "✓ English documentation built: en/_build/html/index.html"
+# Sync targets
+sync-en:
+	$(call sync-lang,en)
 
-# Build Japanese documentation
-build-ja: copy-api sync-ja
-	@echo "Building Japanese documentation..."
-	cd ja && MPLBACKEND=agg uv run jupyter-book build --execute --html
-	@uv run python scripts/inject_colab_launch.py ja
-	@echo "✓ Japanese documentation built: ja/_build/html/index.html"
+sync-ja:
+	$(call sync-lang,ja)
 
-# Sync all .py files to .ipynb (both languages)
 sync: sync-en sync-ja
 	@echo "✓ All Python scripts converted to notebooks"
 
-# Sync English .py files to .ipynb
-sync-en:
-	@echo "Converting English .py files to .ipynb..."
-	@uv run jupytext --to ipynb en/tutorial/*.py 2>/dev/null || true
-	@uv run jupytext --to ipynb en/optimization/*.py 2>/dev/null || true
-	@echo "✓ English notebooks synced"
+# Build targets (no sync)
+build-en: copy-api
+	@echo "Building English documentation..."
+	cd en && MPLBACKEND=agg uv run jupyter-book build --html
+	@uv run python scripts/inject_colab_launch.py en
+	@echo "✓ English documentation built: en/_build/html/index.html"
 
-# Sync Japanese .py files to .ipynb
-sync-ja:
-	@echo "Converting Japanese .py files to .ipynb..."
-	@uv run jupytext --to ipynb ja/tutorial/*.py 2>/dev/null || true
-	@uv run jupytext --to ipynb ja/optimization/*.py 2>/dev/null || true
-	@echo "✓ Japanese notebooks synced"
+build-ja: copy-api
+	@echo "Building Japanese documentation..."
+	cd ja && MPLBACKEND=agg uv run jupyter-book build --html
+	@uv run python scripts/inject_colab_launch.py ja
+	@echo "✓ Japanese documentation built: ja/_build/html/index.html"
+
+build: copy-api build-en build-ja
+	@echo "✓ Both English and Japanese documentation built successfully"
+
+# Sync + build targets
+sync-build-en: sync-en build-en
+
+sync-build-ja: sync-ja build-ja
+
+sync-build: copy-api sync-build-en sync-build-ja
+	@echo "✓ Both English and Japanese documentation synced and built successfully"
 
 # Clean generated files
 clean:
 	@echo "Cleaning generated files..."
-	@rm -f en/tutorial/*.ipynb
-	@rm -f en/optimization/*.ipynb
-	@rm -f ja/tutorial/*.ipynb
-	@rm -f ja/optimization/*.ipynb
-	@rm -rf en/_build
-	@rm -rf ja/_build
-	@rm -rf en/api
-	@rm -rf ja/api
+	@for lang in $(LANGS); do \
+		for dir in $(TUTORIAL_DIRS); do \
+			rm -f $$lang/$$dir/*.ipynb; \
+		done; \
+		rm -rf $$lang/_build; \
+		rm -rf $$lang/api; \
+	done
 	@rm -rf _site
 	@echo "✓ Cleaned generated .ipynb files and build outputs"
 
 # Clean everything including cache
 clean-all: clean
 	@echo "Cleaning execution cache..."
-	@rm -rf en/_build/.jupyter_cache
-	@rm -rf ja/_build/.jupyter_cache
+	@for lang in $(LANGS); do \
+		rm -rf $$lang/_build/.jupyter_cache; \
+	done
 	@echo "✓ All generated files and cache removed"
 
-# Serve English documentation locally (builds if needed)
-serve-en: build-en
+# Serve targets (sync + build if needed)
+serve-en: sync-build-en
 	@echo "Serving English documentation at http://localhost:8000"
 	@echo "Press Ctrl+C to stop the server"
 	@cd en/_build/html && uv run python -m http.server 8000
 
-# Serve Japanese documentation locally (builds if needed)
-serve-ja: build-ja
+serve-ja: sync-build-ja
 	@echo "Serving Japanese documentation at http://localhost:8000"
 	@echo "Press Ctrl+C to stop the server"
 	@cd ja/_build/html && uv run python -m http.server 8000
 
-# Clean, rebuild with execution from scratch, and serve English documentation
-fresh-en: clean build-en
+# Fresh targets (clean + sync + build + serve)
+fresh-en: clean sync-build-en
 	@echo "Serving English documentation at http://localhost:8000"
 	@echo "Press Ctrl+C to stop the server"
 	@cd en/_build/html && uv run python -m http.server 8000
 
-# Clean, rebuild with execution from scratch, and serve Japanese documentation
-fresh-ja: clean build-ja
+fresh-ja: clean sync-build-ja
 	@echo "Serving Japanese documentation at http://localhost:8000"
 	@echo "Press Ctrl+C to stop the server"
 	@cd ja/_build/html && uv run python -m http.server 8000
@@ -122,7 +133,7 @@ fresh-ja: clean build-ja
 SITE_DIR := _site
 
 # Build unified site for GitHub Pages
-build-site: build
+build-site: sync-build
 	@echo "Creating unified site structure..."
 	@rm -rf $(SITE_DIR)
 	@mkdir -p $(SITE_DIR)/en
