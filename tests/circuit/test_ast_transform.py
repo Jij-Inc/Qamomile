@@ -20,12 +20,12 @@ class TestLoopVariableShadowing:
     """Loop variable must not shadow function parameters."""
 
     def test_loop_var_shadows_parameter_raises(self):
-        """for i in qm.range(n) where i is a parameter should raise SyntaxError."""
+        """for i in qmc.range(n) where i is a parameter should raise SyntaxError."""
         with pytest.raises(SyntaxError, match="shadows a function parameter"):
 
             @qkernel
-            def bad_circuit(i: qm.UInt) -> qm.UInt:
-                for i in qm.range(3):
+            def bad_circuit(i: qmc.UInt) -> qmc.UInt:
+                for i in qmc.range(3):
                     pass
                 return i
 
@@ -35,8 +35,8 @@ class TestLoopVariableShadowing:
         @qkernel
         def good_circuit() -> Qubit:
             qs = qubit_array(3, "qs")
-            for j in qm.range(3):
-                qs[j] = qm.h(qs[j])
+            for j in qmc.range(3):
+                qs[j] = qmc.h(qs[j])
             q = qs[0]
             return q
 
@@ -48,11 +48,11 @@ class TestLoopVariableShadowing:
         with pytest.raises(SyntaxError, match="shadows a function parameter"):
 
             @qkernel
-            def bad_items_key(i: qm.UInt) -> Qubit:
+            def bad_items_key(i: qmc.UInt) -> Qubit:
                 qs = qubit_array(3, "qs")
-                angles = qm.dict_input(qm.UInt, qm.Float, name="angles")
-                for i, theta in qm.items(angles):
-                    qs[i] = qm.rx(qs[i], theta)
+                angles = qmc.dict_input(qmc.UInt, qmc.Float, name="angles")
+                for i, theta in qmc.items(angles):
+                    qs[i] = qmc.rx(qs[i], theta)
                 return qs[0]
 
     def test_items_value_shadow_raises(self):
@@ -60,11 +60,11 @@ class TestLoopVariableShadowing:
         with pytest.raises(SyntaxError, match="shadows a function parameter"):
 
             @qkernel
-            def bad_items_value(theta: qm.Float) -> Qubit:
+            def bad_items_value(theta: qmc.Float) -> Qubit:
                 qs = qubit_array(3, "qs")
-                angles = qm.dict_input(qm.UInt, qm.Float, name="angles")
-                for i, theta in qm.items(angles):
-                    qs[i] = qm.rx(qs[i], theta)
+                angles = qmc.dict_input(qmc.UInt, qmc.Float, name="angles")
+                for i, theta in qmc.items(angles):
+                    qs[i] = qmc.rx(qs[i], theta)
                 return qs[0]
 
     def test_items_tuple_key_shadow_raises(self):
@@ -73,12 +73,12 @@ class TestLoopVariableShadowing:
 
             @qkernel
             def bad_tuple_key(
-                j: qm.UInt,
-                ising: qm.Dict[qm.Tuple[qm.UInt, qm.UInt], qm.Float],
+                j: qmc.UInt,
+                ising: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
             ) -> Qubit:
                 qs = qubit_array(3, "qs")
-                for (i, j), Jij in qm.items(ising):
-                    qs[i], qs[j] = qm.rzz(qs[i], qs[j], Jij)
+                for (i, j), Jij in qmc.items(ising):
+                    qs[i], qs[j] = qmc.rzz(qs[i], qs[j], Jij)
                 return qs[0]
 
 
@@ -89,9 +89,9 @@ class TestRuntimeLimitations:
         """Dynamically created function should give descriptive SyntaxError."""
         from qamomile.circuit.frontend.ast_transform import transform_control_flow
 
-        ns = {"qm": qm, "Qubit": Qubit}
+        ns = {"qmc": qmc, "Qubit": Qubit}
         exec(
-            "def f(q: Qubit) -> Qubit:\n    q = qm.h(q)\n    return q\n",
+            "def f(q: Qubit) -> Qubit:\n    q = qmc.h(q)\n    return q\n",
             ns,
         )
         with pytest.raises(SyntaxError, match="Cannot retrieve source code"):
@@ -136,17 +136,17 @@ class TestRuntimeLimitations:
 
             @qkernel
             def bad_circuit(q: Qubit) -> Qubit:
-                while qm.measure(q):
-                    q = qm.h(q)
+                while qmc.measure(q):
+                    q = qmc.h(q)
                 return q
 
     def test_while_classical_condition_builds(self):
         """while condition with classical value builds at AST level (rejected at transpile)."""
 
         @qkernel
-        def good_circuit(q: Qubit, n: qm.UInt) -> Qubit:
+        def good_circuit(q: Qubit, n: qmc.UInt) -> Qubit:
             while n:
-                q = qm.h(q)
+                q = qmc.h(q)
             return q
 
         graph = good_circuit.build(n=1)
@@ -156,15 +156,15 @@ class TestRuntimeLimitations:
         """while condition calling a @qkernel should raise SyntaxError."""
 
         @qkernel
-        def cond_fn(q: Qubit) -> qm.Bit:
-            return qm.measure(q)
+        def cond_fn(q: Qubit) -> qmc.Bit:
+            return qmc.measure(q)
 
         with pytest.raises(SyntaxError, match="Quantum kernel"):
 
             @qkernel
             def bad_indirect(q: Qubit) -> Qubit:
                 while cond_fn(q):
-                    q = qm.h(q)
+                    q = qmc.h(q)
                 return q
 
     def test_while_classical_callable_same_name_as_quantum_op(self):
@@ -174,12 +174,12 @@ class TestRuntimeLimitations:
             return n > 0
 
         @qkernel
-        def circuit(q: Qubit, n: qm.UInt) -> Qubit:
+        def circuit(q: Qubit, n: qmc.UInt) -> Qubit:
             while measure(n):
-                q = qm.h(q)
+                q = qmc.h(q)
             return q
 
-        # Should not raise — measure here is a classical function, not qm.measure
+        # Should not raise — measure here is a classical function, not qmc.measure
         graph = circuit.build(n=1)
         assert graph is not None
 
@@ -197,7 +197,7 @@ class TestVariableCollectorAttributeAccess:
             )
         )
 
-        collector = VariableCollector(global_names={"qm"})
+        collector = VariableCollector(global_names={"qmc"})
         collector.visit(tree)
 
         assert "qs" in collector.vars
@@ -209,16 +209,16 @@ class TestVariableCollectorAttributeAccess:
         tree = ast.parse(
             textwrap.dedent(
                 """
-                q = qm.h(q)
+                q = qmc.h(q)
                 """
             )
         )
 
-        collector = VariableCollector(global_names={"qm"})
+        collector = VariableCollector(global_names={"qmc"})
         collector.visit(tree)
 
-        assert "qm" not in collector.vars
-        assert "qm" not in collector.load_vars
+        assert "qmc" not in collector.vars
+        assert "qmc" not in collector.load_vars
         assert "q" in collector.load_vars
 
 
@@ -232,11 +232,11 @@ class TestEmptyClosureCell:
             @qkernel
             def circuit(q: Qubit) -> Qubit:
                 while helper(q):
-                    q = qm.h(q)
+                    q = qmc.h(q)
                 return q
 
-            def helper(q: Qubit) -> qm.Bit:
-                return qm.measure(q)
+            def helper(q: Qubit) -> qmc.Bit:
+                return qmc.measure(q)
 
             return circuit
 
@@ -252,11 +252,11 @@ class TestEmptyClosureCell:
             @qkernel
             def circuit(q: Qubit) -> Qubit:
                 while helper(q):
-                    q = qm.h(q)
+                    q = qmc.h(q)
                 return q
 
-            def helper(q: Qubit) -> qm.Bit:
-                return qm.measure(q)
+            def helper(q: Qubit) -> qmc.Bit:
+                return qmc.measure(q)
 
             return circuit
 
@@ -276,11 +276,11 @@ class TestEmptyClosureCell:
             @qkernel
             def circuit(q: Qubit) -> Qubit:
                 while helper(q):
-                    q = qm.h(q)
+                    q = qmc.h(q)
                 return q
 
-            def helper(q: Qubit) -> qm.Bit:
-                return qm.measure(q)
+            def helper(q: Qubit) -> qmc.Bit:
+                return qmc.measure(q)
 
             return circuit
 
@@ -611,11 +611,11 @@ class TestLoopElseReject:
         ):
 
             @qkernel
-            def bad(n: qm.UInt, x: qm.UInt) -> qm.UInt:
-                for i in qm.range(n):
+            def bad(n: qmc.UInt, x: qmc.UInt) -> qmc.UInt:
+                for i in qmc.range(n):
                     x = x + 1
                 else:
-                    x = qm.UInt(0)
+                    x = qmc.UInt(0)
                 return x
 
     def test_qkernel_while_else_raises(self):
@@ -625,11 +625,11 @@ class TestLoopElseReject:
         ):
 
             @qkernel
-            def bad(cond: qm.Bit, x: qm.UInt) -> qm.UInt:
+            def bad(cond: qmc.Bit, x: qmc.UInt) -> qmc.UInt:
                 while cond:
                     x = x + 1
                 else:
-                    x = qm.UInt(0)
+                    x = qmc.UInt(0)
                 return x
 
 
