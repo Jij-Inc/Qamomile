@@ -25,6 +25,10 @@
 # - Scaling analysis with `.substitute()`
 
 # %%
+# Install the latest Qamomile through pip!
+# # !pip install qamomile
+
+# %%
 import qamomile.circuit as qmc
 
 # %% [markdown]

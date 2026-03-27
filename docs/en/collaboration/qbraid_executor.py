@@ -17,6 +17,10 @@
 #
 # This page introduces [qBraid](https://www.qbraid.com/) support in Qamomile and shows how to run a Qamomile workflow with `QBraidExecutor`. Qamomile currently connects to qBraid through its Qiskit integration, so the usual flow is `qkernel` -> `QiskitTranspiler` -> `QBraidExecutor`.
 
+# %%
+# Install the latest Qamomile through pip!
+# # !pip install "qamomile[qbraid]"
+
 # %% [markdown]
 # ## What this notebook shows
 # This notebook is a tutorial with `QBraidExecutor` built around a MaxCut workflow. The main goal is to show how to configure `QBraidExecutor`, transpile a qkernel with `QiskitTranspiler`, reuse the same remote executor throughout the optimization loop, and inspect the final samples returned by qBraid.

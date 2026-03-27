@@ -17,6 +17,10 @@
 #
 # このページでは、Qamomileの[qBraid](https://www.qbraid.com/)サポートを紹介し、`QBraidExecutor`を使ってQamomileのワークフローを実行する方法を説明します。現状のQamomileはQiskit経由でqBraidと連携するため、基本的な流れは `qkernel` -> `QiskitTranspiler` -> `QBraidExecutor` です。
 
+# %%
+# 最新のQamomileをpipからインストールします！
+# # !pip install "qamomile[qbraid]"
+
 # %% [markdown]
 # ## このノートで扱う内容
 # このノートは、MaxCutを題材にした `QBraidExecutor`のチュートリアルです。主な目的は、`QBraidExecutor`を設定し、`QiskitTranspiler`で`qkernel`をトランスパイルし、同じexecutorを最適化ループ全体で再利用しながら、最後にqBraidから返るサンプルを確認する流れを示すことです。

@@ -24,6 +24,10 @@
 # - 測定結果に対する`if` / `while`による回路途中の分岐
 
 # %%
+# 最新のQamomileをpipからインストールします！
+# # !pip install qamomile
+
+# %%
 import qamomile.circuit as qmc
 from qamomile.qiskit import QiskitTranspiler
 
