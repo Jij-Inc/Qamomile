@@ -735,15 +735,16 @@ class ControlFlowTransformer(ast.NodeTransformer):
                     isinstance(func_value, ast.Name)
                     and func_value.id in self._global_names
                 ):
-                    # qmc.items(d) form: require exactly 1 positional arg, no keywords
+                    # module.items(d) form: require exactly 1 positional arg, no keywords
+                    alias = func_value.id
                     if call.keywords:
                         raise SyntaxError(
-                            "items() does not support keyword arguments in @qkernel; "
-                            "use qmc.items(d)."
+                            f"items() does not support keyword arguments in @qkernel; "
+                            f"use {alias}.items(d)."
                         )
                     if len(call.args) != 1:
                         raise SyntaxError(
-                            "items() requires exactly one dict argument: qmc.items(d)"
+                            f"items() requires exactly one dict argument: {alias}.items(d)"
                         )
                 else:
                     # Non-global receiver (local variable, attribute, etc.):
@@ -785,23 +786,31 @@ class ControlFlowTransformer(ast.NodeTransformer):
             binding_names = self._extract_tuple_vars(node.target)
 
         elif self._is_range_call(node.iter):
-            num_args = len(node.iter.args)  # type: ignore
+            range_call = node.iter  # type: ignore
+            # Derive the caller name from the AST for error messages
+            if isinstance(range_call.func, ast.Attribute) and isinstance(
+                range_call.func.value, ast.Name
+            ):
+                range_label = f"{range_call.func.value.id}.range()"
+            else:
+                range_label = "range()"
+            num_args = len(range_call.args)
             # Keyword arguments (e.g. range(stop=n)) are not consumed by
             # _transform_for_range; reject them explicitly to avoid silent loss.
-            if getattr(node.iter, "keywords", None):
+            if getattr(range_call, "keywords", None):
                 raise SyntaxError(
-                    "range()/qmc.range() does not support keyword arguments in @qkernel; "
+                    f"{range_label} does not support keyword arguments in @qkernel; "
                     "use positional arguments like range(stop) or range(start, stop, step)."
                 )
             # range(): requires 1-3 positional arguments
             if num_args < 1 or num_args > 3:
                 raise SyntaxError(
-                    "range() requires 1-3 arguments: range(stop), range(start, stop), or range(start, stop, step)"
+                    f"{range_label} requires 1-3 arguments: range(stop), range(start, stop), or range(start, stop, step)"
                 )
             # range(): target must be a single variable
             if not isinstance(node.target, ast.Name):
                 raise SyntaxError(
-                    "range()/qmc.range() iteration requires a single loop variable, "
+                    f"{range_label} iteration requires a single loop variable, "
                     f"got: {ast.dump(node.target)}"
                 )
             binding_names = [node.target.id]
