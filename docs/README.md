@@ -38,7 +38,7 @@ docs/
 ├── Makefile                     # Build system (make targets)
 ├── build.sh                     # Build script (shell alternative)
 ├── generate_api.py              # API reference generator entry point
-├── index.html                   # Language selector landing page
+├── index.html                   # Redirects to ./en/
 ├── myst.yml                     # Top-level MyST stub
 │
 ├── assets/                      # Shared images and resources
@@ -120,13 +120,13 @@ uv run jupytext --to ipynb target.py 2>/dev/null || true
 # 2. Execute the notebook locally.
 
 # 3. Rebuild without re-syncing (e.g., after config changes)
-./build.sh build_all
+./build.sh build
 
 # 4. Preview locally
 ./build.sh serve-en
 ```
 
-Note that, if you run `sync` commend at the first step, almost all the py files will be converted into `ipynb`, which you need to execute them again to build.
+Note that, if you run `sync` command at the first step, almost all the py files will be converted into `ipynb`, which you need to execute them again to build.
 
 ### Viewing Documentation Locally
 
