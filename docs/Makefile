@@ -5,7 +5,7 @@
 LANGS := en ja
 TUTORIAL_DIRS := tutorial optimization vqa
 
-.PHONY: help build build-en build-ja sync sync-en sync-ja sync-build sync-build-en sync-build-ja generate-api copy-api clean clean-all serve-en serve-ja fresh-en fresh-ja build-site serve-site
+.PHONY: help build build-en build-ja sync sync-en sync-ja execute execute-en execute-ja sync-build sync-build-en sync-build-ja generate-api copy-api clean clean-all serve-en serve-ja fresh-en fresh-ja build-site serve-site
 
 # Default target
 help:
@@ -19,9 +19,12 @@ help:
 	@echo "  make sync           - Convert all .py files to .ipynb (both languages)"
 	@echo "  make sync-en        - Convert English .py files to .ipynb"
 	@echo "  make sync-ja        - Convert Japanese .py files to .ipynb"
-	@echo "  make sync-build     - Sync and build both languages"
-	@echo "  make sync-build-en  - Sync and build English documentation"
-	@echo "  make sync-build-ja  - Sync and build Japanese documentation"
+	@echo "  make execute        - Execute all .ipynb notebooks (both languages)"
+	@echo "  make execute-en     - Execute English .ipynb notebooks"
+	@echo "  make execute-ja     - Execute Japanese .ipynb notebooks"
+	@echo "  make sync-build     - Sync, execute, and build both languages"
+	@echo "  make sync-build-en  - Sync, execute, and build English documentation"
+	@echo "  make sync-build-ja  - Sync, execute, and build Japanese documentation"
 	@echo "  make clean          - Remove generated .ipynb files and build outputs"
 	@echo "  make clean-all      - Remove everything including execution cache"
 	@echo "  make serve-en       - Sync, build (if needed), and serve English docs (port 8000)"
@@ -62,6 +65,29 @@ sync-ja:
 sync: sync-en sync-ja
 	@echo "✓ All Python scripts converted to notebooks"
 
+# Execute .ipynb notebooks for a single language
+define execute-lang
+	@echo "Executing $(1) notebooks..."
+	@for dir in $(TUTORIAL_DIRS); do \
+		for nb in $(1)/$$dir/*.ipynb; do \
+			[ -f "$$nb" ] || continue; \
+			echo "✓ Executing $$nb..."; \
+			MPLBACKEND=agg uv run jupyter execute "$$nb"; \
+		done; \
+	done
+	@echo "✓ $(1) notebooks executed"
+endef
+
+# Execute targets
+execute-en:
+	$(call execute-lang,en)
+
+execute-ja:
+	$(call execute-lang,ja)
+
+execute: execute-en execute-ja
+	@echo "✓ All notebooks executed"
+
 # Build targets (no sync)
 build-en: copy-api
 	@echo "Building English documentation..."
@@ -78,10 +104,10 @@ build-ja: copy-api
 build: copy-api build-en build-ja
 	@echo "✓ Both English and Japanese documentation built successfully"
 
-# Sync + build targets
-sync-build-en: sync-en build-en
+# Sync + execute + build targets
+sync-build-en: sync-en execute-en build-en
 
-sync-build-ja: sync-ja build-ja
+sync-build-ja: sync-ja execute-ja build-ja
 
 sync-build: copy-api sync-build-en sync-build-ja
 	@echo "✓ Both English and Japanese documentation synced and built successfully"

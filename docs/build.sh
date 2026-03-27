@@ -34,9 +34,12 @@ show_help() {
     echo "  sync           - Convert all .py files to .ipynb (both languages)"
     echo "  sync-en        - Convert English .py files to .ipynb"
     echo "  sync-ja        - Convert Japanese .py files to .ipynb"
-    echo "  sync-build     - Sync and build both languages"
-    echo "  sync-build-en  - Sync and build English documentation"
-    echo "  sync-build-ja  - Sync and build Japanese documentation"
+    echo "  execute        - Execute all .ipynb notebooks (both languages)"
+    echo "  execute-en     - Execute English .ipynb notebooks"
+    echo "  execute-ja     - Execute Japanese .ipynb notebooks"
+    echo "  sync-build     - Sync, execute, and build both languages"
+    echo "  sync-build-en  - Sync, execute, and build English documentation"
+    echo "  sync-build-ja  - Sync, execute, and build Japanese documentation"
     echo "  clean          - Remove generated .ipynb files and build outputs"
     echo "  clean-all      - Remove everything including execution cache"
     echo "  serve-en       - Sync, build (if needed), and serve English docs (port 8000)"
@@ -77,6 +80,20 @@ sync_lang() {
     info "${lang} notebooks synced"
 }
 
+# Execute .ipynb notebooks for a single language
+execute_lang() {
+    local lang="$1"
+    echo "Executing ${lang} notebooks..."
+    for dir in "${TUTORIAL_DIRS[@]}"; do
+        for nb in "${lang}/${dir}"/*.ipynb; do
+            [ -f "$nb" ] || continue
+            info "Executing ${nb}..."
+            MPLBACKEND=agg uv run jupyter execute "$nb"
+        done
+    done
+    info "${lang} notebooks executed"
+}
+
 # Build documentation for a single language (no sync)
 build_lang() {
     local lang="$1"
@@ -94,10 +111,11 @@ build_lang() {
     info "${lang} documentation built: ${lang}/_build/html/index.html"
 }
 
-# Sync and build documentation for a single language
+# Sync, execute, and build documentation for a single language
 sync_build_lang() {
     local lang="$1"
     sync_lang "$lang"
+    execute_lang "$lang"
     build_lang "$lang"
 }
 
@@ -175,6 +193,10 @@ case "${1:-help}" in
                 info "All Python scripts converted to notebooks" ;;
     sync-en)    sync_lang en ;;
     sync-ja)    sync_lang ja ;;
+    execute)    execute_lang en; execute_lang ja
+                info "All notebooks executed" ;;
+    execute-en) execute_lang en ;;
+    execute-ja) execute_lang ja ;;
     sync-build)     sync_build_all ;;
     sync-build-en)  sync_build_lang en ;;
     sync-build-ja)  sync_build_lang ja ;;
