@@ -19,7 +19,7 @@
 
 # %%
 # 最新のQamomileをpipからインストールします！
-# # !pip install qamomile
+# # !pip install "qamomile[qbraid]"
 
 # %% [markdown]
 # ## このノートで扱う内容

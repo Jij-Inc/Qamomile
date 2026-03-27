@@ -19,7 +19,7 @@
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install qamomile
+# # !pip install "qamomile[qbraid]"
 
 # %% [markdown]
 # ## What this notebook shows
