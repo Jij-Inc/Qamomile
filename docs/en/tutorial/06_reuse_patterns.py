@@ -32,6 +32,10 @@
 #    without the full oracle implementation.
 
 # %%
+# Install the latest Qamomile through pip!
+# # !pip install qamomile
+
+# %%
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 from qamomile.qiskit import QiskitTranspiler

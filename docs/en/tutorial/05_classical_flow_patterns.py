@@ -24,6 +24,10 @@
 # - `if` and `while` on measurement results for mid-circuit branching
 
 # %%
+# Install the latest Qamomile through pip!
+# # !pip install qamomile
+
+# %%
 import qamomile.circuit as qmc
 from qamomile.qiskit import QiskitTranspiler
 

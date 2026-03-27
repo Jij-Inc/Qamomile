@@ -23,6 +23,10 @@
 # - `qubit_array()` and `qmc.range()` for parameterized circuits
 # - The **bind/sweep** pattern: transpile once, execute many times
 
+# %%
+# Install the latest Qamomile through pip!
+# # !pip install qamomile
+
 # %% [markdown]
 # ## Typical Roles of `UInt` and `Float`
 #
