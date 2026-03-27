@@ -746,15 +746,12 @@ class ControlFlowTransformer(ast.NodeTransformer):
                             "items() requires exactly one dict argument: qmc.items(d)"
                         )
                 else:
-                    # Unknown receiver: default to module-call semantics for
-                    # robustness against unexpected aliases.
-                    if call.keywords:
+                    # Non-global receiver (local variable, attribute, etc.):
+                    # treat as method call like d.items().
+                    if call.args or call.keywords:
                         raise SyntaxError(
-                            "items() does not support keyword arguments in @qkernel."
-                        )
-                    if len(call.args) != 1:
-                        raise SyntaxError(
-                            "items() requires exactly one dict argument in @qkernel."
+                            "items() iteration over a dict must use "
+                            "'d.items()' with no arguments."
                         )
 
             # items(): target must be a 2-element tuple (key, value)
