@@ -53,7 +53,6 @@ dev = [
     "zuban>=0.4.1",
     "griffe>=1.0.0",
     "ommx-pyscipopt-adapter>=2.3.0",
-    "qbraid[qiskit]>=0.11.0",
 ]
 
 [tool.pytest.ini_options]
