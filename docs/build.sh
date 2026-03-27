@@ -75,7 +75,15 @@ sync_lang() {
     local lang="$1"
     echo "Converting ${lang} .py files to .ipynb..."
     for dir in "${TUTORIAL_DIRS[@]}"; do
-        uv run jupytext --to ipynb "${lang}/${dir}"/*.py 2>/dev/null || true
+        local py_files=()
+        shopt -s nullglob
+        py_files=("${lang}/${dir}"/*.py)
+        shopt -u nullglob
+        if [ ${#py_files[@]} -eq 0 ]; then
+            warn "No .py files in ${lang}/${dir}, skipping"
+            continue
+        fi
+        uv run jupytext --to ipynb "${py_files[@]}"
     done
     # We don't convert collaboration/ because those notebooks need API-KEYs.
     info "${lang} notebooks synced"

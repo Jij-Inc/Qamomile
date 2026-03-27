@@ -47,10 +47,16 @@ copy-api: generate-api
 	@echo "✓ API reference copied to language directories"
 
 # Sync .py -> .ipynb for a single language (used via sync-en, sync-ja)
+# We don't convert collaboration/ because those notebooks need API-KEYs.
 define sync-lang
 	@echo "Converting $(1) .py files to .ipynb..."
 	@for dir in $(TUTORIAL_DIRS); do \
-		uv run jupytext --to ipynb $(1)/$$dir/*.py 2>/dev/null || true; \
+		py_files=$$(find $(1)/$$dir -maxdepth 1 -name '*.py' 2>/dev/null); \
+		if [ -z "$$py_files" ]; then \
+			echo "! No .py files in $(1)/$$dir, skipping"; \
+			continue; \
+		fi; \
+		uv run jupytext --to ipynb $$py_files; \
 	done
 	@echo "✓ $(1) notebooks synced"
 endef
