@@ -86,3 +86,7 @@ site:
   nav:
     - title: GitHub
       url: https://github.com/Jij-Inc/Qamomile
+  actions:
+    - title: English
+      url: https://jij-inc-qamomile.readthedocs-hosted.com/latest/en/
+  
