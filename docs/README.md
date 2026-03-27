@@ -8,7 +8,6 @@ This documentation system uses a modern workflow where:
 
 - **Source files**: Python scripts (`.py`) with `# %% [markdown]` format (jupytext percent format)
 - **Build-time conversion**: Automatically converted to Jupyter Notebooks (`.ipynb`) via jupytext
-- **Execution caching**: Notebook outputs are cached for fast rebuilds
 - **API reference**: Auto-generated from docstrings using `griffe`
 - **Bilingual**: English (`en/`) and Japanese (`ja/`) documentation with identical structure
 
@@ -16,72 +15,57 @@ This documentation system uses a modern workflow where:
 
 1. **Git-friendly**: Python scripts are easier to diff, merge, and review than JSON notebooks
 2. **IDE support**: Edit with full Python IDE features (linting, type checking, refactoring)
-3. **Automatic sync**: Build process handles `.py` → `.ipynb` conversion
-4. **Performance**: Execution caching means notebooks only re-run when code changes
-5. **Jupyter Book 2.x**: Single `myst.yml` config, Python-based build (no Node.js)
+3. **Jupyter Book 2.x**: Single `myst.yml` config, Python-based build (no Node.js)
+
+### Notebook Execution Strategy
+
+ReadTheDocs has a build time limit that is too short to execute all notebooks during hosting.
+Therefore, notebooks must be **pre-executed before pushing** to the branch:
+
+```
+.py (source) → jupytext → .ipynb (notebook) → jupyter execute → .ipynb (with outputs)
+```
+
+ReadTheDocs builds with `execute.enabled: false`, assuming that executed `.ipynb` files with outputs already exist in the branch.
+
+**Future plan**: We are considering a GitHub Actions workflow that automatically detects `.py` changes on merge to `main`, converts and executes the notebooks, and commits the resulting `.ipynb` files back — eliminating the need for manual notebook management.
 
 ## Directory Structure
 
 ```
 docs/
 ├── README.md                    # This file
-├── Makefile                     # Main build system
-├── build.sh                     # Alternative build script (for non-Make environments)
+├── Makefile                     # Build system (make targets)
+├── build.sh                     # Build script (shell alternative)
 ├── generate_api.py              # API reference generator entry point
-├── index.html                   # Language selector landing page (for GitHub Pages)
+├── index.html                   # Language selector landing page
 ├── myst.yml                     # Top-level MyST stub
-├── .gitignore                   # Ignores _build/, _site/, caches
 │
 ├── assets/                      # Shared images and resources
-│   ├── qamomile_logo.png        # Project logo
-│   └── custom-theme.css         # Custom site theme
-│
 ├── api_gen/                     # API doc generation package (uses griffe)
-│   ├── __init__.py              # main() entry point
-│   ├── config.py                # ApiGenConfig dataclass
-│   ├── discovery.py             # Module discovery
-│   ├── pages.py                 # Page generation
-│   ├── toc.py                   # TOC generation
-│   └── ...                      # Other helpers
-│
 ├── api/                         # Generated API reference (shared source)
-│   ├── index.md
-│   ├── observable.md
-│   ├── circuit/                 # Circuit module API (10 pages)
-│   ├── optimization/            # Optimization module API (7 pages)
-│   ├── qiskit/                  # Qiskit backend API (5 pages)
-│   └── quri_parts/              # QuriParts backend API (6 pages)
+├── scripts/                     # Build helper scripts (e.g., inject_colab_launch.py)
+├── qamomile-lp/                 # Landing page assets
 │
 ├── en/                          # English documentation
 │   ├── myst.yml                 # Jupyter Book 2 config + TOC
 │   ├── index.md                 # Landing page
 │   ├── _build/                  # Build output (gitignored)
 │   ├── api/                     # Copied from docs/api/ at build time
-│   ├── tutorial/                # 11 tutorials (jupytext .py sources)
-│   │   ├── 01_introduction.py
-│   │   ├── 02_type_system.py
-│   │   ├── 03_gates.py
-│   │   ├── 04_superposition_entanglement.py
-│   │   ├── 05_stdlib.py
-│   │   ├── 06_composite_gate.py
-│   │   ├── 07_first_algorithm.py
-│   │   ├── 08_parametric_circuits.py
-│   │   ├── 09_resource_estimation.py
-│   │   ├── 10_transpile.py
-│   │   └── 11_custom_executor.py
-│   └── optimization/            # Optimization tutorials
-│       ├── qaoa.py
-│       ├── fqaoa.py
-│       ├── qrao31.py
-│       └── custom_converter.py
+│   ├── tutorial/                # Tutorials (.py sources + .ipynb)
+│   ├── optimization/            # Optimization guides
+│   ├── vqa/                     # VQA examples
+│   └── collaboration/           # External integration tutorials (API keys required)
 │
 └── ja/                          # Japanese documentation (mirrors en/ structure)
     ├── myst.yml
     ├── index.md
     ├── _build/
     ├── api/
-    ├── tutorial/                # Japanese translations of all 11 tutorials
-    └── optimization/            # Japanese translations of all 4 optimization tutorials
+    ├── tutorial/
+    ├── optimization/
+    ├── vqa/
+    └── collaboration/
 ```
 
 ## Quick Start
@@ -96,83 +80,61 @@ uv sync
 
 This installs `jupyter-book`, `jupytext`, `griffe`, and other required packages.
 
+If you would like to develop/execute notebooks requiring optional dependencies such as quri-parts, please install those optionals:
+
+```bash
+uv sync --extra OPTIONAL_DEPENDENCY
+```
+
+
 ### Building Documentation
 
-#### Build all languages (English + Japanese):
+We recommend using `build.sh` as the primary build tool. A `Makefile` with equivalent targets is also available (`make <command>`).
+
+#### Available commands
+
+| Command | Description |
+|---------|-------------|
+| `./build.sh build` | Build both languages (no sync) |
+| `./build.sh build-en` | Build English only (no sync) |
+| `./build.sh build-ja` | Build Japanese only (no sync) |
+| `./build.sh sync` | Convert all `.py` → `.ipynb` (both languages) |
+| `./build.sh sync-en` | Convert English `.py` → `.ipynb` |
+| `./build.sh sync-ja` | Convert Japanese `.py` → `.ipynb` |
+| `./build.sh sync-build` | Sync and build both languages |
+| `./build.sh sync-build-en` | Sync and build English |
+| `./build.sh sync-build-ja` | Sync and build Japanese |
+| `./build.sh clean` | Remove generated `.ipynb`, build outputs, and copied API docs |
+| `./build.sh clean-all` | Remove everything including execution cache |
+| `./build.sh serve-en` | Sync, build (if needed), and serve English docs (port 8000) |
+| `./build.sh serve-ja` | Sync, build (if needed), and serve Japanese docs (port 8000) |
+| `./build.sh fresh-en` | Clean, sync, rebuild, and serve English docs |
+| `./build.sh fresh-ja` | Clean, sync, rebuild, and serve Japanese docs |
+
+#### Typical workflow
 
 ```bash
-make build
+# 1. First time or after cleaning: target .py → .ipynb and build
+uv run jupytext --to ipynb target.py 2>/dev/null || true
+
+# 2. Execute the notebook locally.
+
+# 3. Rebuild without re-syncing (e.g., after config changes)
+./build.sh build_all
+
+# 4. Preview locally
+./build.sh serve-en
 ```
 
-This runs the full pipeline: generate API docs → copy to language dirs → sync `.py` → `.ipynb` → build HTML.
-
-Or using the shell script:
-
-```bash
-./build.sh build
-```
-
-#### Build only English:
-
-```bash
-make build-en
-```
-
-#### Build only Japanese:
-
-```bash
-make build-ja
-```
-
-#### Clean and rebuild from scratch:
-
-```bash
-make fresh-en   # clean + build + serve English
-make fresh-ja   # clean + build + serve Japanese
-```
-
-#### Clean generated files:
-
-```bash
-make clean
-```
-
-This removes:
-- Generated `.ipynb` files in `en/` and `ja/`
-- Build output in `en/_build/` and `ja/_build/`
-- Copied API docs in `en/api/` and `ja/api/`
-- Unified site output in `_site/`
-
-#### Clean everything including execution cache:
-
-```bash
-make clean-all
-```
-
-#### Sync notebooks without building:
-
-```bash
-make sync
-```
-
-This converts `.py` → `.ipynb` without running Jupyter Book build.
+Note that, if you run `sync` commend at the first step, almost all the py files will be converted into `ipynb`, which you need to execute them again to build.
 
 ### Viewing Documentation Locally
 
-After building, you can view the documentation in your browser:
-
-#### English version:
+After building, serve the documentation in your browser:
 
 ```bash
-make serve-en
-```
-
-Then open: http://localhost:8000
-
-#### Japanese version:
-
-```bash
-make serve-ja
+./build.sh serve-en   # English at http://localhost:8000
+./build.sh serve-ja   # Japanese at http://localhost:8000
 ```
 
 Then open: http://localhost:8000
@@ -185,41 +147,15 @@ API reference pages are auto-generated from `qamomile` docstrings.
 
 1. `generate_api.py` uses the `api_gen/` package (built on `griffe`) to introspect the `qamomile` package
 2. Generates MyST-compatible Markdown files into `docs/api/`
-3. During build, `make copy-api` copies `docs/api/` → `en/api/` and `ja/api/`
+3. During build, the generated files are copied to `en/api/` and `ja/api/`
 
-### Regenerating API docs
-
-```bash
-make generate-api   # regenerate docs/api/ from docstrings
-make copy-api       # copy to en/api/ and ja/api/ (also runs generate-api)
-```
-
-API regeneration is automatically included in `make build`, `make build-en`, and `make build-ja`.
-
-## GitHub Pages Deployment
-
-The documentation supports deployment as a unified bilingual site:
-
-```bash
-make build-site   # build unified _site/ with en/ and ja/ subdirectories
-make serve-site   # build and serve locally at http://localhost:8000
-```
-
-The `_site/` directory structure:
-```
-_site/
-├── index.html    # Language selector (redirects to en/ by default)
-├── en/           # English HTML documentation
-└── ja/           # Japanese HTML documentation
-```
+API generation and copying are automatically included in `./build.sh build`. No separate command is needed.
 
 ## Development Workflow
 
 ### Writing/Editing Documentation
 
-1. **Edit Python files** (`.py`) in the appropriate directory:
-   - English: `docs/en/tutorial/*.py` or `docs/en/optimization/*.py`
-   - Japanese: `docs/ja/tutorial/*.py` or `docs/ja/optimization/*.py`
+1. **Edit Python files** (`.py`) in the appropriate directory.
 
 2. **Use jupytext percent format**:
    ```python
@@ -233,15 +169,16 @@ _site/
    # Your Python code here
    ```
 
-3. **Build and preview**:
+3. **Build, execute and preview**:
    ```bash
-   make build-en  # or build-ja for Japanese
-   make serve-en  # or serve-ja for Japanese
+   uv run jupytext --to notebook target.py
+   # Execute the notebook manually.
+   ./build.sh serve-en       # or serve-ja for Japanese
    ```
 
-### Creating New Tutorial Pages
+### Creating New Pages
 
-1. Create a new `.py` file following the numbered convention:
+1. **Create the `.py` file** in both `en/` and `ja/` following the numbered convention:
 
    ```python
    # ---
@@ -264,75 +201,46 @@ _site/
    # Content goes here...
    ```
 
-   Place it in the appropriate directory:
-   - `en/tutorial/NN_topic_name.py` for tutorials
-   - `en/optimization/topic_name.py` for optimization guides
+   Place it in the appropriate directory.
 
-2. Add the page to the `toc:` section in the corresponding `myst.yml`:
+2. **Add to TOC** in both `en/myst.yml` and `ja/myst.yml`:
    ```yaml
    toc:
-     - title: Tutorials
+     - title: Target Section
        children:
-         - title: Section Name
-           children:
-             - file: tutorial/NN_topic_name.ipynb
+         - file: target_directory/target.ipynb
+   ```
+   The example above is 
+
+3. **Add to test patterns** if the new page is in a directory not yet covered by `tests/docs/test_tutorials.py` `TUTORIAL_PATTERNS`. Here, collaboration is explicitly not included since they could require additional settings.
+
+4. **Generate, execute and commit the `.ipynb`**: Convert to notebook and execute it so that output cells are populated:
+   ```bash
+   uv run jupytext --to notebook target.py
+   # Execute the notebook manually.
+   ```
+   Repeat for the `ja/` counterpart.
+
+5. **Build and verify**:
+   ```bash
+   ./build.sh build
+   ./build.sh serve-en
    ```
 
-3. Build and verify:
-   ```bash
-   make build-en
-   ```
+#### Checklist for new pages
+
+- [ ] `.py` file created in both `en/` and `ja/`
+- [ ] Page added to `toc:` in both `en/myst.yml` and `ja/myst.yml`
+- [ ] Page linked from both `en/index.md` and `ja/index.md`
+- [ ] `.ipynb` generated and executed (outputs present)
+- [ ] Test patterns cover the new directory (if applicable)
+- [ ] Build succeeds and page renders correctly
 
 ## Configuration Files
 
 ### `myst.yml` (Jupyter Book 2 Configuration)
 
 Each language directory has its own `myst.yml` combining configuration and table of contents. Key structure:
-
-```yaml
-version: 1
-
-project:
-  title: Qamomile Documentation
-  jupyter: true
-  execute:
-    cache: true
-
-  toc:
-    - file: index.md
-    - title: Tutorials
-      children:
-        - title: Foundations
-          children:
-            - file: tutorial/01_introduction.ipynb
-            - file: tutorial/02_type_system.ipynb
-            - file: tutorial/03_gates.ipynb
-            - file: tutorial/04_superposition_entanglement.ipynb
-        - title: Standard Library & Algorithms
-          children:
-            - file: tutorial/05_stdlib.ipynb
-            - ...
-        - title: Advanced Topics
-          children:
-            - file: tutorial/09_resource_estimation.ipynb
-            - ...
-    - title: Optimization
-      children:
-        - file: optimization/qaoa.ipynb
-        - ...
-    - title: API Reference
-      file: api/index
-      children:
-        - file: api/circuit/index
-        - file: api/optimization/index
-        - ...
-
-site:
-  template: book-theme
-  options:
-    logo: ../assets/qamomile_logo.png
-    style: ../assets/custom-theme.css
-```
 
 ## Jupytext Format
 
@@ -357,27 +265,9 @@ print("Hello, Quantum World!")
 - **Clean diffs**: Git sees normal Python file changes
 - **IDE friendly**: Full Python tooling support
 
-## All Makefile Targets
+## All Build Commands
 
-| Target | Description |
-|---|---|
-| `make help` | Print usage information |
-| `make build` | Full build (both languages) |
-| `make build-en` | Build English documentation |
-| `make build-ja` | Build Japanese documentation |
-| `make sync` | Convert all `.py` → `.ipynb` (both languages) |
-| `make sync-en` | Convert English `.py` → `.ipynb` |
-| `make sync-ja` | Convert Japanese `.py` → `.ipynb` |
-| `make generate-api` | Regenerate API reference from docstrings |
-| `make copy-api` | Copy API docs to language directories |
-| `make clean` | Remove generated files and build outputs |
-| `make clean-all` | Remove everything including execution cache |
-| `make serve-en` | Build and serve English docs (port 8000) |
-| `make serve-ja` | Build and serve Japanese docs (port 8000) |
-| `make fresh-en` | Clean, rebuild, and serve English docs |
-| `make fresh-ja` | Clean, rebuild, and serve Japanese docs |
-| `make build-site` | Build unified site for GitHub Pages |
-| `make serve-site` | Serve unified site locally (port 8000) |
+See the [Building Documentation](#building-documentation) section for the full command table. All `./build.sh <command>` targets are also available as `make <command>`.
 
 ## Troubleshooting
 
@@ -394,8 +284,8 @@ uv sync
 **Solution**: Clear the execution cache:
 
 ```bash
-make clean-all
-make build
+./build.sh clean-all
+./build.sh sync-build
 ```
 
 ### Problem: Port 8000 already in use
@@ -424,9 +314,9 @@ When contributing documentation:
 
 1. **Edit `.py` source files** — not `.ipynb` directly
 2. **Follow the numbered convention** for tutorials (`NN_topic_name.py`)
-3. **Test your changes**: Run `make build-en` or `make build-ja`
-4. **Check outputs**: Use `make serve-en` or `make serve-ja` to preview
-5. **API changes**: If you modified docstrings, run `make generate-api` to update API reference
+3. **Test your changes**: Run `./build.sh sync-build-en` or `sync-build-ja`
+4. **Check outputs**: Use `./build.sh serve-en` or `serve-ja` to preview
+5. **API changes**: API reference is auto-regenerated on every build
 
 ## Additional Resources
 
