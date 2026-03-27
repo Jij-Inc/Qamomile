@@ -101,9 +101,12 @@ We recommend using `build.sh` as the primary build tool. A `Makefile` with equiv
 | `./build.sh sync` | Convert all `.py` → `.ipynb` (both languages) |
 | `./build.sh sync-en` | Convert English `.py` → `.ipynb` |
 | `./build.sh sync-ja` | Convert Japanese `.py` → `.ipynb` |
-| `./build.sh sync-build` | Sync and build both languages |
-| `./build.sh sync-build-en` | Sync and build English |
-| `./build.sh sync-build-ja` | Sync and build Japanese |
+| `./build.sh execute` | Execute all `.ipynb` notebooks (both languages) |
+| `./build.sh execute-en` | Execute English `.ipynb` notebooks |
+| `./build.sh execute-ja` | Execute Japanese `.ipynb` notebooks |
+| `./build.sh sync-build` | Sync, execute, and build both languages |
+| `./build.sh sync-build-en` | Sync, execute, and build English |
+| `./build.sh sync-build-ja` | Sync, execute, and build Japanese |
 | `./build.sh clean` | Remove generated `.ipynb`, build outputs, and copied API docs |
 | `./build.sh clean-all` | Remove everything including execution cache |
 | `./build.sh serve-en` | Sync, build (if needed), and serve English docs (port 8000) |
@@ -117,7 +120,8 @@ We recommend using `build.sh` as the primary build tool. A `Makefile` with equiv
 # 1. First time or after cleaning: target .py → .ipynb and build
 uv run jupytext --to ipynb target.py 2>/dev/null || true
 
-# 2. Execute the notebook locally.
+# 2. Execute the notebook locally
+MPLBACKEND=agg uv run jupyter execute target.ipynb
 
 # 3. Rebuild without re-syncing (e.g., after config changes)
 ./build.sh build
@@ -126,7 +130,7 @@ uv run jupytext --to ipynb target.py 2>/dev/null || true
 ./build.sh serve-en
 ```
 
-Note that, if you run `sync` command at the first step, almost all the py files will be converted into `ipynb`, which you need to execute them again to build.
+Note that, if you run `sync` command at the first step, almost all the `.py` files will be converted into `.ipynb` without outputs. Use `sync-build` instead to sync, execute, and build in one step.
 
 ### Viewing Documentation Locally
 
@@ -172,7 +176,7 @@ API generation and copying are automatically included in `./build.sh build`. No 
 3. **Build, execute and preview**:
    ```bash
    uv run jupytext --to notebook target.py
-   # Execute the notebook manually.
+   MPLBACKEND=agg uv run jupyter execute target.ipynb
    ./build.sh serve-en       # or serve-ja for Japanese
    ```
 
@@ -217,7 +221,7 @@ API generation and copying are automatically included in `./build.sh build`. No 
 4. **Generate, execute and commit the `.ipynb`**: Convert to notebook and execute it so that output cells are populated:
    ```bash
    uv run jupytext --to notebook target.py
-   # Execute the notebook manually.
+   MPLBACKEND=agg uv run jupyter execute target.ipynb
    ```
    Repeat for the `ja/` counterpart.
 
