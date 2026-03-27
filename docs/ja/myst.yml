@@ -17,6 +17,7 @@ project:
     cache: true
     exclude_patterns:
       - collaboration/qbraid_executor.ipynb
+      - vqa/vqe_for_hydrogen.ipynb
   toc:
     - file: index.md
     - title: チュートリアル
@@ -30,6 +31,7 @@ project:
     - title: VQA
       children:
         - file: vqa/qaoa_maxcut.ipynb
+        - file: vqa/vqe_for_hydrogen.ipynb
     - title: 最適化
       children:
         - file: optimization/qaoa_graph_partition.ipynb
