@@ -118,7 +118,7 @@ We recommend using `build.sh` as the primary build tool. A `Makefile` with equiv
 
 ```bash
 # 1. First time or after cleaning: target .py → .ipynb and build
-uv run jupytext --to ipynb target.py 2>/dev/null || true
+uv run jupytext --to ipynb target.py
 
 # 2. Execute the notebook locally
 MPLBACKEND=agg uv run jupyter execute target.ipynb
