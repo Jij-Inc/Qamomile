@@ -97,6 +97,7 @@ Dependencies flow only downstream (left to right). Upstream (reverse) dependenci
 - **Jupytext percent format**: `.py` files are the source of truth.
 - **ipynb existence**: Every tutorial `.py` file must have a corresponding `.ipynb` file committed to git. A missing `.ipynb` is a P1 issue.
 - **ipynb sync on update**: If a `.py` file is modified in the diff, its corresponding `.ipynb` must also be updated. A stale `.ipynb` (unchanged while its `.py` was modified) is a P1 issue.
+- **ipynb-only change warning**: If an `.ipynb` file is modified but its corresponding `.py` file is not, this is a P2 warning — it suggests the notebook was edited directly instead of through the source `.py` file. The `.py` file is the source of truth and should be updated first.
 - **ipynb must be executed**: Committed `.ipynb` files must contain execution outputs — code cells that produce output must have their output cells populated. An `.ipynb` with empty/missing outputs is a P1 issue.
 - **Docs test coverage**: New tutorial files or directories (outside `collaboration/`) must be included in `TUTORIAL_PATTERNS` in `tests/docs/test_tutorials.py`. A new docs path not covered by tests is a P1 issue.
 - Jupyter Book 2 with MyST Markdown Engine.
