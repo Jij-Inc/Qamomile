@@ -54,6 +54,9 @@ dev = [
     "griffe>=1.0.0",
     "ommx-pyscipopt-adapter>=2.3.0",
     "qbraid[qiskit]>=0.11.0",
+    "openfermion>=1.6.0",
+    "openfermionpyscf>=0.5",
+    "pyscf>=2.5.0",
 ]
 
 [tool.pytest.ini_options]
