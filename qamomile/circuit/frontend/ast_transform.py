@@ -697,127 +697,163 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 f"Unsupported loop target type in @qkernel: {ast.dump(target)}"
             )
 
-    def _validate_for_loop(self, node: ast.For) -> list[str]:
-        """Validate a for-loop node and return binding variable names.
+    def _validate_items_loop(self, node: ast.For) -> list[str]:
+        """Validate an items() for-loop and return binding variable names.
 
-        Checks both the loop target and the iterator call arguments per
-        loop kind (items / range / sequence).  Raises ``SyntaxError`` for
-        invalid patterns so that ``QKernel.__init__`` propagates them
-        instead of falling back to the original function.
+        Checks the call-site arguments and target pattern for items() /
+        module.items() / d.items() forms.
         """
-        if self._is_items_call(node.iter):
-            call = node.iter  # type: ignore
-            # from qamomile.circuit import items; items(d) form: require exactly 1 positional arg
-            if isinstance(call.func, ast.Name):
+        call = node.iter  # type: ignore
+        # from qamomile.circuit import items; items(d) form
+        if isinstance(call.func, ast.Name):
+            if call.keywords:
+                raise SyntaxError(
+                    "items() does not support keyword arguments in @qkernel; "
+                    "use items(d)."
+                )
+            if len(call.args) != 1:
+                raise SyntaxError(
+                    "items() requires exactly one dict argument: items(d)"
+                )
+        # Attribute form: distinguish module.items(d) vs d.items()
+        elif isinstance(call.func, ast.Attribute):
+            func_value = call.func.value
+            if isinstance(func_value, ast.Name) and func_value.id in self._param_names:
+                # d.items() form: dict.items() takes no arguments
+                if call.args or call.keywords:
+                    raise SyntaxError(
+                        "items() iteration over a dict parameter must use "
+                        "'d.items()' with no arguments."
+                    )
+            elif (
+                isinstance(func_value, ast.Name) and func_value.id in self._global_names
+            ):
+                # module.items(d) form: require exactly 1 positional arg, no keywords
+                alias = func_value.id
                 if call.keywords:
                     raise SyntaxError(
-                        "items() does not support keyword arguments in @qkernel; "
-                        "use items(d)."
+                        f"items() does not support keyword arguments in @qkernel; "
+                        f"use {alias}.items(d)."
                     )
                 if len(call.args) != 1:
                     raise SyntaxError(
-                        "items() requires exactly one dict argument: items(d)"
+                        f"items() requires exactly one dict argument: {alias}.items(d)"
                     )
-            # Attribute form: distinguish qmc.items(d) vs d.items() by receiver identity
-            elif isinstance(call.func, ast.Attribute):
-                func_value = call.func.value
-                if (
-                    isinstance(func_value, ast.Name)
-                    and func_value.id in self._param_names
-                ):
-                    # d.items() form: dict.items() takes no arguments
-                    if call.args or call.keywords:
-                        raise SyntaxError(
-                            "items() iteration over a dict parameter must use "
-                            "'d.items()' with no arguments."
-                        )
-                elif (
-                    isinstance(func_value, ast.Name)
-                    and func_value.id in self._global_names
-                ):
-                    # module.items(d) form: require exactly 1 positional arg, no keywords
-                    alias = func_value.id
-                    if call.keywords:
-                        raise SyntaxError(
-                            f"items() does not support keyword arguments in @qkernel; "
-                            f"use {alias}.items(d)."
-                        )
-                    if len(call.args) != 1:
-                        raise SyntaxError(
-                            f"items() requires exactly one dict argument: {alias}.items(d)"
-                        )
-                else:
-                    # Non-global receiver (local variable, attribute, etc.):
-                    # treat as method call like d.items().
-                    if call.args or call.keywords:
-                        raise SyntaxError(
-                            "items() iteration over a dict must use "
-                            "'d.items()' with no arguments."
-                        )
-
-            # items(): target must be a 2-element tuple (key, value)
-            if not (isinstance(node.target, ast.Tuple) and len(node.target.elts) == 2):
-                raise SyntaxError(
-                    "items() iteration requires 'for key, value in items(d)' or 'for key, value in d.items()' pattern. "
-                    f"Got: {ast.dump(node.target)}"
-                )
-            key_target = node.target.elts[0]
-            value_target = node.target.elts[1]
-            # key may be a tuple like (i, j) or a simple Name
-            if not isinstance(key_target, (ast.Name, ast.Tuple)):
-                raise SyntaxError(
-                    "Key target in items() iteration must be a variable or tuple of variables, "
-                    f"got: {ast.dump(key_target)}"
-                )
-            # reject nested tuple unpacking in key, e.g. (i, (j, k))
-            if isinstance(key_target, ast.Tuple) and not all(
-                isinstance(e, ast.Name) for e in key_target.elts
-            ):
-                raise SyntaxError(
-                    "Nested tuple unpacking in items() key is not supported. "
-                    f"Use a flat tuple like (i, j) instead, got: {ast.dump(key_target)}"
-                )
-            # value must be a simple Name
-            if not isinstance(value_target, ast.Name):
-                raise SyntaxError(
-                    "Value target in items() iteration must be a simple variable, "
-                    f"got: {ast.dump(value_target)}"
-                )
-            binding_names = self._extract_tuple_vars(node.target)
-
-        elif self._is_range_call(node.iter):
-            range_call = node.iter  # type: ignore
-            # Derive the caller name from the AST for error messages
-            if isinstance(range_call.func, ast.Attribute) and isinstance(
-                range_call.func.value, ast.Name
-            ):
-                range_label = f"{range_call.func.value.id}.range()"
             else:
-                range_label = "range()"
-            num_args = len(range_call.args)
-            # Keyword arguments (e.g. range(stop=n)) are not consumed by
-            # _transform_for_range; reject them explicitly to avoid silent loss.
-            if getattr(range_call, "keywords", None):
-                raise SyntaxError(
-                    f"{range_label} does not support keyword arguments in @qkernel; "
-                    "use positional arguments like range(stop) or range(start, stop, step)."
-                )
-            # range(): requires 1-3 positional arguments
-            if num_args < 1 or num_args > 3:
-                raise SyntaxError(
-                    f"{range_label} requires 1-3 arguments: range(stop), range(start, stop), or range(start, stop, step)"
-                )
-            # range(): target must be a single variable
-            if not isinstance(node.target, ast.Name):
-                raise SyntaxError(
-                    f"{range_label} iteration requires a single loop variable, "
-                    f"got: {ast.dump(node.target)}"
-                )
-            binding_names = [node.target.id]
+                # Non-global receiver (local variable, attribute, etc.):
+                # treat as method call like d.items().
+                if call.args or call.keywords:
+                    raise SyntaxError(
+                        "items() iteration over a dict must use "
+                        "'d.items()' with no arguments."
+                    )
 
+        # items(): target must be a 2-element tuple (key, value)
+        if not (isinstance(node.target, ast.Tuple) and len(node.target.elts) == 2):
+            raise SyntaxError(
+                "items() iteration requires 'for key, value in items(d)' or 'for key, value in d.items()' pattern. "
+                f"Got: {ast.dump(node.target)}"
+            )
+        key_target = node.target.elts[0]
+        value_target = node.target.elts[1]
+        # key may be a tuple like (i, j) or a simple Name
+        if not isinstance(key_target, (ast.Name, ast.Tuple)):
+            raise SyntaxError(
+                "Key target in items() iteration must be a variable or tuple of variables, "
+                f"got: {ast.dump(key_target)}"
+            )
+        # reject nested tuple unpacking in key, e.g. (i, (j, k))
+        if isinstance(key_target, ast.Tuple) and not all(
+            isinstance(e, ast.Name) for e in key_target.elts
+        ):
+            raise SyntaxError(
+                "Nested tuple unpacking in items() key is not supported. "
+                f"Use a flat tuple like (i, j) instead, got: {ast.dump(key_target)}"
+            )
+        # value must be a simple Name
+        if not isinstance(value_target, ast.Name):
+            raise SyntaxError(
+                "Value target in items() iteration must be a simple variable, "
+                f"got: {ast.dump(value_target)}"
+            )
+        return self._extract_tuple_vars(node.target)
+
+    def _validate_range_loop(self, node: ast.For) -> list[str]:
+        """Validate a range() for-loop and return binding variable names.
+
+        Checks the call-site arguments and target for range() /
+        module.range() forms.
+        """
+        range_call = node.iter  # type: ignore
+        # Derive the caller name from the AST for error messages
+        if isinstance(range_call.func, ast.Attribute) and isinstance(
+            range_call.func.value, ast.Name
+        ):
+            range_label = f"{range_call.func.value.id}.range()"
         else:
-            # sequence: will be rejected by _transform_for_sequence
-            binding_names = self._extract_tuple_vars(node.target)
+            range_label = "range()"
+        num_args = len(range_call.args)
+        # Keyword arguments (e.g. range(stop=n)) are not consumed by
+        # _transform_for_range; reject them explicitly to avoid silent loss.
+        if getattr(range_call, "keywords", None):
+            raise SyntaxError(
+                f"{range_label} does not support keyword arguments in @qkernel; "
+                "use positional arguments like range(stop) or range(start, stop, step)."
+            )
+        # range(): requires 1-3 positional arguments
+        if num_args < 1 or num_args > 3:
+            raise SyntaxError(
+                f"{range_label} requires 1-3 arguments: range(stop), range(start, stop), or range(start, stop, step)"
+            )
+        # range(): target must be a single variable
+        if not isinstance(node.target, ast.Name):
+            raise SyntaxError(
+                f"{range_label} iteration requires a single loop variable, "
+                f"got: {ast.dump(node.target)}"
+            )
+        return [node.target.id]
+
+    def _validate_sequence_loop(self, node: ast.For) -> NoReturn:
+        """Reject direct sequence iteration in @qkernel.
+
+        Direct iteration like 'for item in vector:' doesn't support in-place
+        modification in @qkernel contexts.  Always raises ``SyntaxError``.
+        """
+        if isinstance(node.target, ast.Name):
+            item_var = node.target.id
+        else:
+            item_var = "item"
+
+        iter_str = ast.unparse(node.iter) if hasattr(ast, "unparse") else "vector"
+
+        raise SyntaxError(
+            f"Direct iteration over sequences is not supported in @qkernel functions.\n"
+            f"Line {node.lineno}: 'for {item_var} in {iter_str}:'\n\n"
+            f"Direct iteration cannot modify elements in-place, leading to silent bugs.\n"
+            f"Use explicit index-based iteration instead:\n\n"
+            f"  # Incorrect (current code):\n"
+            f"  for {item_var} in {iter_str}:\n"
+            f"      {item_var} = qmc.operation({item_var})\n\n"
+            f"  # Correct:\n"
+            f"  n = {iter_str}.shape[0]\n"
+            f"  for i in qmc.range(n):\n"
+            f"      {iter_str}[i] = qmc.operation({iter_str}[i])\n"
+        )
+
+    def _validate_for_loop(self, node: ast.For) -> list[str]:
+        """Validate a for-loop node and return binding variable names.
+
+        Dispatches to kind-specific validators and checks parameter
+        shadowing.  Raises ``SyntaxError`` for invalid patterns so that
+        ``QKernel.__init__`` propagates them instead of falling back to
+        the original function.
+        """
+        if self._is_items_call(node.iter):
+            binding_names = self._validate_items_loop(node)
+        elif self._is_range_call(node.iter):
+            binding_names = self._validate_range_loop(node)
+        else:
+            self._validate_sequence_loop(node)  # always raises
 
         # Check for parameter shadowing (common to all for-loop variants)
         for var_name in binding_names:
@@ -858,16 +894,23 @@ class ControlFlowTransformer(ast.NodeTransformer):
         self._after_stmt_read_vars = saved_after
         self._after_stmt_load_vars = saved_after_load
 
-        # Check for items() iteration first
+        # Dispatch to the appropriate transform.
+        # Sequence iteration is already rejected by _validate_for_loop.
         if self._is_items_call(node.iter):
             return self._transform_for_items(node, flattened_body)
 
-        # Check for range() iteration
         if self._is_range_call(node.iter):
             return self._transform_for_range(node, flattened_body)
 
-        # Handle direct sequence iteration (for item in seq:)
-        return self._transform_for_sequence(node, flattened_body)
+        # [FOR DEVELOPER]
+        # Since _validate_for_loop should have rejected any non-items, non-range loops,
+        # reaching this point indicates a bug in the validation logic.
+        # (sequence pattern has been explicitly rejected by _validate_sequence_loop).
+        # Raising an explicit error helps catch such issues during development.
+        raise AssertionError(
+            "Unreachable: _validate_for_loop should have rejected this loop. "
+            f"iter={ast.dump(node.iter)}"
+        )
 
     def _transform_for_range(
         self, node: ast.For, flattened_body: list[ast.stmt]
@@ -922,41 +965,6 @@ class ControlFlowTransformer(ast.NodeTransformer):
         )
 
         return with_stmt
-
-    def _transform_for_sequence(
-        self, node: ast.For, _flattened_body: list[ast.stmt]
-    ) -> NoReturn:
-        """Prohibit direct sequence iteration to prevent common bugs.
-
-        Direct iteration like 'for item in vector:' doesn't support in-place
-        modification in @qkernel contexts. This method raises an error to
-        prevent silent bugs where reassignments don't affect the original array.
-
-        Raises:
-            SyntaxError: Always raised to prevent direct iteration.
-        """
-        # Get the source code representation if possible
-        if isinstance(node.target, ast.Name):
-            item_var = node.target.id
-        else:
-            item_var = "item"
-
-        # Try to get a readable representation of the iterable
-        iter_str = ast.unparse(node.iter) if hasattr(ast, "unparse") else "vector"
-
-        raise SyntaxError(
-            f"Direct iteration over sequences is not supported in @qkernel functions.\n"
-            f"Line {node.lineno}: 'for {item_var} in {iter_str}:'\n\n"
-            f"Direct iteration cannot modify elements in-place, leading to silent bugs.\n"
-            f"Use explicit index-based iteration instead:\n\n"
-            f"  # Incorrect (current code):\n"
-            f"  for {item_var} in {iter_str}:\n"
-            f"      {item_var} = qmc.operation({item_var})\n\n"
-            f"  # Correct:\n"
-            f"  n = {iter_str}.shape[0]\n"
-            f"  for i in qmc.range(n):\n"
-            f"      {iter_str}[i] = qmc.operation({iter_str}[i])\n"
-        )
 
     def _transform_for_items(
         self, node: ast.For, flattened_body: list[ast.stmt]
