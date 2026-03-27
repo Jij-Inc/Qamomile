@@ -741,9 +741,10 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 # d.items() form (parameter, global dict, local variable, etc.):
                 # dict.items() takes no arguments.
                 if call.args or call.keywords:
+                    receiver_expr = ast.unparse(call.func.value)
                     raise SyntaxError(
                         "items() iteration over a dict must use "
-                        "'d.items()' with no arguments."
+                        f"'{receiver_expr}.items()' with no arguments."
                     )
 
         # items(): target must be a 2-element tuple (key, value)
@@ -798,7 +799,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             raise SyntaxError(
                 f"{range_label} does not support keyword arguments in @qkernel; "
                 f"use positional arguments like {range_callee}(stop) or "
-                f"{range_callee}(start, stop, step)."
+                f"{range_callee}(いstart, stop, step)."
             )
         # range(): requires 1-3 positional arguments
         if num_args < 1 or num_args > 3:
