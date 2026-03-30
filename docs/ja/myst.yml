@@ -18,6 +18,7 @@ project:
   toc:
     - file: index.md
     - title: チュートリアル
+      file: tutorial/index.md
       children:
         - file: tutorial/01_your_first_quantum_kernel.ipynb
         - file: tutorial/02_parameterized_kernels.ipynb
@@ -26,14 +27,21 @@ project:
         - file: tutorial/05_classical_flow_patterns.ipynb
         - file: tutorial/06_reuse_patterns.ipynb
     - title: VQA
+      file: vqa/index.md
       children:
         - file: vqa/qaoa_maxcut.ipynb
     - title: 最適化
+      file: optimization/index.md
       children:
         - file: optimization/qaoa_graph_partition.ipynb
     - title: コラボレーション
+      file: collaboration/index.md
       children:
         - file: collaboration/qbraid_executor.ipynb
+    - title: リリースノート
+      file: release_notes/index.md
+      children:
+        - file: release_notes/v0_10_0.ipynb
 
 # --- API Reference (auto-generated) ---
     - title: API Reference
@@ -81,6 +89,7 @@ site:
   options:
     logo: ../assets/qamomile_logo.png
     style: ../assets/custom-theme.css
+    folders: true
   nav:
     - title: GitHub
       url: https://github.com/Jij-Inc/Qamomile
