@@ -7,9 +7,13 @@ set -e  # Exit on error
 # Move to the script's directory to ensure relative paths work
 cd "$(dirname "$0")"
 
-# Languages and tutorial directories (excluding collaboration/)
+# Languages and target directories
 LANGS=(en ja)
-TUTORIAL_DIRS=(tutorial optimization vqa)
+# collaboration is excluded because those notebooks may require API keys
+# and can't be automatically synced/executed.
+# release_note is excluded because it can be quite version specific
+# and may not follow the same structure as other tutorials.
+TARGET_DIRS=(tutorial optimization vqa)
 
 # Color output
 RED='\033[0;31m'
@@ -74,7 +78,7 @@ copy_api() {
 sync_lang() {
     local lang="$1"
     echo "Converting ${lang} .py files to .ipynb..."
-    for dir in "${TUTORIAL_DIRS[@]}"; do
+    for dir in "${TARGET_DIR[@]}"; do
         local py_files=()
         shopt -s nullglob
         py_files=("${lang}/${dir}"/*.py)
@@ -93,7 +97,7 @@ sync_lang() {
 execute_lang() {
     local lang="$1"
     echo "Executing ${lang} notebooks..."
-    for dir in "${TUTORIAL_DIRS[@]}"; do
+    for dir in "${TARGET_DIR[@]}"; do
         for nb in "${lang}/${dir}"/*.ipynb; do
             [ -f "$nb" ] || continue
             info "Executing ${nb}..."
@@ -175,7 +179,7 @@ build_all() {
 clean() {
     echo "Cleaning generated files..."
     for lang in "${LANGS[@]}"; do
-        for dir in "${TUTORIAL_DIRS[@]}"; do
+        for dir in "${TARGET_DIR[@]}"; do
             rm -f "${lang}/${dir}"/*.ipynb
         done
         rm -rf "${lang}/_build"
