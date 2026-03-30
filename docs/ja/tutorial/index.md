@@ -1,5 +1,5 @@
 ---
-slug: tutorials
+slug: tutorial
 ---
 
 # チュートリアル

@@ -5,7 +5,7 @@
 LANGS := en ja
 # collaboration is excluded because those notebooks may require API keys
 # and can't be automatically synced/executed.
-# release_note is excluded because it can be quite version specific
+# release_notes is excluded because it can be quite version specific
 # and may not follow the same structure as other tutorials.
 TARGET_DIRS := tutorial optimization vqa
 
