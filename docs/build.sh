@@ -78,7 +78,7 @@ copy_api() {
 sync_lang() {
     local lang="$1"
     echo "Converting ${lang} .py files to .ipynb..."
-    for dir in "${TARGET_DIR[@]}"; do
+    for dir in "${TARGET_DIRS[@]}"; do
         local py_files=()
         shopt -s nullglob
         py_files=("${lang}/${dir}"/*.py)
@@ -97,7 +97,7 @@ sync_lang() {
 execute_lang() {
     local lang="$1"
     echo "Executing ${lang} notebooks..."
-    for dir in "${TARGET_DIR[@]}"; do
+    for dir in "${TARGET_DIRS[@]}"; do
         for nb in "${lang}/${dir}"/*.ipynb; do
             [ -f "$nb" ] || continue
             info "Executing ${nb}..."
@@ -179,7 +179,7 @@ build_all() {
 clean() {
     echo "Cleaning generated files..."
     for lang in "${LANGS[@]}"; do
-        for dir in "${TARGET_DIR[@]}"; do
+        for dir in "${TARGET_DIRS[@]}"; do
             rm -f "${lang}/${dir}"/*.ipynb
         done
         rm -rf "${lang}/_build"
