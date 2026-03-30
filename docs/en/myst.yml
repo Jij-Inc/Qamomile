@@ -28,6 +28,7 @@ project:
     - title: VQA
       children:
         - file: vqa/qaoa_maxcut.ipynb
+        - file: vqa/hybrid_qnn.ipynb
     - title: Optimization
       children:
         - file: optimization/qaoa_graph_partition.ipynb
