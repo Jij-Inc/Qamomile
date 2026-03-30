@@ -97,7 +97,7 @@ execute_lang() {
         for nb in "${lang}/${dir}"/*.ipynb; do
             [ -f "$nb" ] || continue
             info "Executing ${nb}..."
-            MPLBACKEND=agg uv run jupyter execute "$nb"
+            MPLBACKEND=agg uv run jupyter nbconvert --to notebook --execute --inplace "$nb"
         done
     done
     info "${lang} notebooks executed"
@@ -111,9 +111,9 @@ build_lang() {
     if is_rtd; then
         local base_url="${READTHEDOCS_CANONICAL_URL%/}/${lang}"
         info "Read the Docs detected. Using BASE_URL=${base_url}"
-        BASE_URL="$base_url" MPLBACKEND=agg uv run jupyter-book build --html
+        BASE_URL="$base_url" uv run jupyter-book build --html
     else
-        MPLBACKEND=agg uv run jupyter-book build --html
+        uv run jupyter-book build --html
     fi
     cd ..
     uv run python scripts/inject_colab_launch.py "$lang"

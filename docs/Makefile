@@ -78,7 +78,7 @@ define execute-lang
 		for nb in $(1)/$$dir/*.ipynb; do \
 			[ -f "$$nb" ] || continue; \
 			echo "✓ Executing $$nb..."; \
-			MPLBACKEND=agg uv run jupyter execute "$$nb"; \
+			MPLBACKEND=agg uv run jupyter nbconvert --to notebook --execute --inplace "$$nb"; \
 		done; \
 	done
 	@echo "✓ $(1) notebooks executed"
@@ -97,13 +97,13 @@ execute: execute-en execute-ja
 # Build targets (no sync)
 build-en: copy-api
 	@echo "Building English documentation..."
-	cd en && MPLBACKEND=agg uv run jupyter-book build --html
+	cd en && uv run jupyter-book build --html
 	@uv run python scripts/inject_colab_launch.py en
 	@echo "✓ English documentation built: en/_build/html/index.html"
 
 build-ja: copy-api
 	@echo "Building Japanese documentation..."
-	cd ja && MPLBACKEND=agg uv run jupyter-book build --html
+	cd ja && uv run jupyter-book build --html
 	@uv run python scripts/inject_colab_launch.py ja
 	@echo "✓ Japanese documentation built: ja/_build/html/index.html"
 
