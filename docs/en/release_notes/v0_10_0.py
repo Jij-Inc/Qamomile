@@ -21,7 +21,7 @@
 #
 # See the [tutorials](../tutorial) for hands-on guides.
 # ```
-# pip install qamomile===0.10
+# pip install qamomile==0.10.0
 # ````
 
 # %% [markdown]
@@ -30,7 +30,7 @@
 # The central API is the `@qkernel` decorator. You write a normal Python function with **type-annotated** arguments and return values, and Qamomile traces it into an intermediate representation (IR) that can be analyzed, visualized, and transpiled to any supported quantum SDK such as Qiskit. Although this IR is a key of Qamomile's architecture, you don't need to interact with it directly — just write Python code with `@qkernel` and let the transpiler handle the rest.
 
 # %% [markdown]
-# ### Rules of writing a `@qkernel`:
+# ### Rules for writing a `@qkernel`:
 #
 # - **Type hints are required.** Arguments and return types use Qamomile's symbolic types: `Qubit`, `Bit`, `Float`, `UInt`, `Vector[T]`, `Dict[K, V]`, `Tuple[...]`.
 # - **Affine typing for qubits.** A `Qubit` handle must be reassigned after every gate (`q = qmc.h(q)`), ensuring the compiler can track qubit lifetimes.
@@ -38,7 +38,7 @@
 #
 # Available gates include H, X, Y, Z, S, T, RX, RY, RZ, RZZ, CX, CZ, CCX, CP, SWAP, and more. Measurement is done with `qmc.measure()`.
 #
-# See [Your First Quantum Kernel](../tutorial/your-first-quantum-kernel), [Parametrized Quantum Kernels](../tutorial/parameterized-kernels), [Execution Models: sample() vs run()](../tutorial/execution-models) and [Reuse Patterns: QKernel Composition and Composite Gates](../tutorial/reuse-patterns) for more details.
+# See [Your First Quantum Kernel](../tutorial/your-first-quantum-kernel), [Parameterized Quantum Kernels](../tutorial/parameterized-kernels), [Execution Models: sample() vs run()](../tutorial/execution-models) and [Reuse Patterns: QKernel Composition and Composite Gates](../tutorial/reuse-patterns) for more details.
 
 # %% [markdown]
 # ### Classical Control Flow
@@ -61,10 +61,10 @@ import qamomile.circuit as qmc
 @qmc.qkernel
 def ghz_state(
     n: qmc.UInt,
-) -> qmc.Vector[qmc.Bit]:  # Write type hint for the argument and return type
+) -> qmc.Vector[qmc.Bit]:  # Type hints for arguments and return type
     q = qmc.qubit_array(
         n, name="q"
-    )  # Allocate an array of n-qubits with the given size and name
+    )  # Allocate an array of n qubits with the given size and name
 
     q[0] = qmc.h(q[0])
     for i in qmc.range(1, n):  # Iterate over qubits 1 to n-1 using qmc.range
@@ -79,9 +79,9 @@ ghz_state.draw(n=4, fold_loops=False)
 # %% [markdown]
 # ## Resource Estimation
 #
-# Qamomile provides symbolic resource estimation. Call `estimate_resources()` on any qkernel to get qubit counts and gate breakdowns **without executing** the qkernel. Those estimates are symbolic expressions in terms of the input parameters, so you can analyze how resources scale with the input parameters. You can also substitute specific values to get concrete estimates for a given input size.
+# Qamomile provides symbolic resource estimation. Call `estimate_resources()` on any qkernel to get qubit counts and gate breakdowns **without executing** the qkernel. These estimates are symbolic expressions in terms of the input parameters, so you can analyze how resources scale with problem size. You can also substitute specific values to get concrete estimates for a given input size.
 #
-# Furthermore, the estimation can be done with black-box oracles, defined by `@composite_gate` with `stub=True`. This allows you to define your qkernel without actual implementation of the oracle, and still get resource estimates that include the oracle as black-box with specified resource costs and the number of queries to it.
+# Furthermore, the estimation can be done with black-box oracles, defined by `@composite_gate` with `stub=True`. This allows you to define your qkernel without an actual implementation of the oracle, and still get resource estimates that include the oracle as a black box with specified resource costs and the number of queries to it.
 #
 # See [Resource Estimation](../tutorial/resource-estimation) and [Reuse Patterns: QKernel Composition and Composite Gates](../tutorial/reuse-patterns) for more details.
 
@@ -97,13 +97,13 @@ print("two-qubit gates at n=100:", est.substitute(n=100).gates.two_qubit)
 # %% [markdown]
 # ## Multi-Quantum SDK Transpilation
 #
-# Write your qkernel once with `@qkernel`, then transpile to any supported quantum SDK. Qamomile v0.10.0 has a preset executor for each supported quantum SDK. Just call `sample()`/`run()` on the transpiled qkernel with the preset executor. Of course, you can also write your own custom executors for controlling the detailed and accessing actual quantum hardware.
+# Define your circuit once with `@qkernel`, then transpile to any supported quantum SDK. Qamomile v0.10.0 has a preset executor for each supported quantum SDK. Just call `sample()`/`run()` on the transpiled qkernel with the preset executor. Of course, you can also write your own custom executors for finer control and accessing actual quantum hardware.
 #
 # | Backend | Module | Transpiler | Default Execution |
 # |---------|--------|-----------|-----------|
 # | Qiskit | `qamomile.qiskit` | `QiskitTranspiler` | Local simulator; qBraid for cloud devices |
 # | QURI Parts | `qamomile.quri_parts` | `QuriPartsTranspiler` | Local simulator |
-# | CUDA-Q | `qamomile.cudaq` | `CudaqTranspiler` | Local simulation |
+# | CUDA-Q | `qamomile.cudaq` | `CudaqTranspiler` | Local simulator |
 #
 # Furthermore, for Qiskit, [qBraid](https://docs.qbraid.com/) integration is available via `qamomile.qbraid.QBraidExecutor` to execute on cloud quantum devices.
 #
@@ -116,7 +116,7 @@ print("two-qubit gates at n=100:", est.substitute(n=100).gates.two_qubit)
 # pip install "qamomile[qbraid]"       # qBraid integration for Qiskit
 # ```
 #
-# See [Execution Models: sample() vs run()](../tutorial/execution-models) and [qBraid Support - QBraidExecutor](../collaboration/qbraid-executor)for more details.
+# See [Execution Models: sample() vs run()](../tutorial/execution-models) and [qBraid Support - QBraidExecutor](../collaboration/qbraid-executor) for more details.
 
 # %%
 from qamomile.qiskit import QiskitTranspiler
@@ -134,7 +134,7 @@ for outcome, count in samples.results:
 # %% [markdown]
 # ## Standard Library
 #
-# In order to help users to write their own algorithms easily, Qamomile v0.10.0 provides multiple algorithms as `qmc.stdlib` and `qmc.algorithm` modules, including Quantum Fourier Transform (QFT), Quantum Phase Estimation (QPE) and more. `qmc.stdlib` is for broadly used algorithms that are commonly used as building blocks, while `qmc.algorithm` is for more specific algorithms that are not as widely used but still useful to have as ready-to-use implementations; however, those categorizations are not strict and may change in the future.
+# To help users write algorithms easily, Qamomile v0.10.0 provides built-in algorithms in the `qmc.stdlib` and `qmc.algorithm` modules, including Quantum Fourier Transform (QFT), Quantum Phase Estimation (QPE) and more. `qmc.stdlib` is for broadly used algorithms that are commonly used as building blocks, while `qmc.algorithm` is for more specific algorithms that are not as widely used but still useful to have as ready-to-use implementations; however, those categorizations are not strict and may change in the future.
 #
 # We will keep on adding more algorithms to those modules, so stay tuned!
 
