@@ -1,6 +1,5 @@
 """Test that tutorial files execute without errors."""
 
-import os
 import runpy
 from pathlib import Path
 
@@ -34,8 +33,10 @@ TUTORIAL_PATTERNS = [
     "docs/ja/vqa/**/*.py",
     "docs/en/vqa/**/*.ipynb",
     "docs/ja/vqa/**/*.ipynb",
-    # We will not execute collaboration notebooks for now because
-    # they require API keys and may have side effects
+    # We will not execute the followings
+    # - collaboration: they may require API keys and may have side effects.
+    # - release_notes: they may be quite version specific
+    #   and may not follow the same structure as other tutorials.
 ]
 
 
