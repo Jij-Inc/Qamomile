@@ -3,7 +3,7 @@ version: 1
 project:
   id: qamomile-docs-en
   title: Qamomile Documentation
-  description: A powerful SDK for quantum optimization algorithms
+  description: A powerful SDK for quantum programs
   keywords:
     - quantum computing
     - optimization
