@@ -2,10 +2,10 @@
 
 from .basic import (
     cz_entangling_layer,
-    superposition_vector,
     rx_layer,
     ry_layer,
     rz_layer,
+    superposition_vector,
 )
 from .fqaoa import (
     cost_layer,

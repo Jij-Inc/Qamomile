@@ -3,7 +3,6 @@
 import qamomile.circuit as qm
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 
-
 # -- Helper kernels ----------------------------------------------------------
 
 
@@ -262,6 +261,7 @@ class TestControlledUTranspileIntegration:
 
 
 import pytest
+
 from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
 
 

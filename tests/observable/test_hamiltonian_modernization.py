@@ -10,6 +10,7 @@ This test suite validates:
 """
 
 import pytest
+
 from qamomile.observable.hamiltonian import (
     Hamiltonian,
     Pauli,

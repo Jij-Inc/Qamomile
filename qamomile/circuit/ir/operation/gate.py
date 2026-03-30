@@ -1,13 +1,13 @@
 import dataclasses
 import enum
 
+from qamomile.circuit.ir.types import QFixedType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
     BlockType,
     FloatType,
     QubitType,
 )
-from qamomile.circuit.ir.types import QFixedType
 from qamomile.circuit.ir.value import Value
 
 from .operation import Operation, OperationKind, ParamHint, Signature

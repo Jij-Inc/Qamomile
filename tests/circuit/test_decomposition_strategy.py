@@ -2,16 +2,16 @@
 
 import pytest
 
+from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.decomposition import (
     DecompositionConfig,
     StrategyRegistry,
 )
-from qamomile.circuit.frontend.composite_gate import CompositeGate
-from qamomile.circuit.stdlib.qft import QFT, IQFT
+from qamomile.circuit.stdlib.qft import IQFT, QFT
 from qamomile.circuit.stdlib.qft_strategies import (
-    StandardQFTStrategy,
     ApproximateQFTStrategy,
     StandardIQFTStrategy,
+    StandardQFTStrategy,
 )
 
 

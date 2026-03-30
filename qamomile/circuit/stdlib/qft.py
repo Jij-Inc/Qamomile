@@ -43,10 +43,10 @@ from qamomile.circuit.ir.operation.composite_gate import (
 
 # Import strategies
 from qamomile.circuit.stdlib.qft_strategies import (
-    StandardQFTStrategy,
+    ApproximateIQFTStrategy,
     ApproximateQFTStrategy,
     StandardIQFTStrategy,
-    ApproximateIQFTStrategy,
+    StandardQFTStrategy,
 )
 
 if TYPE_CHECKING:

@@ -1,22 +1,22 @@
-from .operation import Operation
-from .return_operation import ReturnOperation
+from .cast import CastOperation
+from .classical_ops import DecodeQFixedOperation
 from .composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
     ResourceMetadata,
 )
+from .control_flow import ForItemsOperation
+from .expval import ExpvalOp
 from .gate import (
+    ControlledUOperation,
     GateOperation,
     GateOperationType,
     MeasureOperation,
-    MeasureVectorOperation,
     MeasureQFixedOperation,
-    ControlledUOperation,
+    MeasureVectorOperation,
 )
-from .classical_ops import DecodeQFixedOperation
-from .cast import CastOperation
-from .control_flow import ForItemsOperation
-from .expval import ExpvalOp
+from .operation import Operation
+from .return_operation import ReturnOperation
 
 __all__ = [
     "Operation",

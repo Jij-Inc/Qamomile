@@ -79,11 +79,11 @@ from qamomile.circuit.algorithm.qaoa import (
     x_mixer,
 )
 from qamomile.circuit.ir.block import BlockKind
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.segments import SimplifiedProgram
 from qamomile.circuit.transpiler.transpiler import TranspilerConfig
 from qamomile.qiskit import QiskitTranspiler
-from qamomile.circuit.transpiler.errors import EmitError
 
 # ---------------------------------------------------------------------------
 # Helpers

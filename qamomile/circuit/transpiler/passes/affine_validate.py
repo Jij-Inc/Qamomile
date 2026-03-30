@@ -11,8 +11,8 @@ from qamomile.circuit.ir.operation.control_flow import (
     WhileOperation,
 )
 from qamomile.circuit.ir.value import Value
-from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.errors import AffineTypeError
+from qamomile.circuit.transpiler.passes import Pass
 
 
 class AffineValidationPass(Pass[Block, Block]):

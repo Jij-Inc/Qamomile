@@ -14,7 +14,6 @@ import numpy as np
 import qamomile.circuit as qmc
 from qamomile.qiskit.transpiler import QiskitTranspiler
 
-
 # ==============================================================================
 # Kernel definitions at module level (required for inspect.getsource to work)
 # ==============================================================================

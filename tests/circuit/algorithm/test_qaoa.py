@@ -19,7 +19,6 @@ from qamomile.circuit.algorithm.qaoa import (
 )
 from qamomile.qiskit.transpiler import QiskitTranspiler
 
-
 # ---------------------------------------------------------------------------
 # Helper: count gates by name in a Qiskit circuit
 # ---------------------------------------------------------------------------

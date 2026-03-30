@@ -13,8 +13,8 @@ from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateType,
 )
 from qamomile.circuit.ir.operation.control_flow import (
-    ForOperation,
     ForItemsOperation,
+    ForOperation,
     IfOperation,
     WhileOperation,
 )

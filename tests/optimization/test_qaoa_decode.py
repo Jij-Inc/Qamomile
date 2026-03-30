@@ -1,8 +1,10 @@
+from math import isclose
+
+import jijmodeling as jm
+
+from qamomile.optimization.binary_model import BinaryExpr, BinaryModel, binary
 from qamomile.optimization.qaoa import QAOAConverter
 from qamomile.qiskit.transpiler import QiskitTranspiler
-from qamomile.optimization.binary_model import binary, BinaryExpr, BinaryModel
-import jijmodeling as jm
-from math import isclose
 
 
 def test_simple_qaoa_decode():
@@ -136,8 +138,8 @@ def test_qaoa_decode():
     transpiler = QiskitTranspiler()
     executable = converter.transpile(transpiler, p=2)
 
-    import scipy
     import numpy as np
+    import scipy
 
     def _obj(params):
         gammas_val = [params[0], params[1]]

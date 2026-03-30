@@ -1,10 +1,9 @@
-import pytest
 import jijmodeling as jm
+import pytest
 
-from qamomile.optimization.fqaoa import FQAOAConverter
 from qamomile.optimization.binary_model import BinaryModel
+from qamomile.optimization.fqaoa import FQAOAConverter
 from qamomile.qiskit import QiskitTranspiler
-
 from tests.utils import Utils
 
 

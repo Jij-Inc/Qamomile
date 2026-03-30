@@ -1,6 +1,6 @@
-import jijmodeling as jm
 from typing import Callable, Final
 
+import jijmodeling as jm
 import numpy as np
 
 

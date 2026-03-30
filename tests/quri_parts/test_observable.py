@@ -4,8 +4,8 @@ Covers hamiltonian_to_quri_operator and to_quri_operator with various
 Hamiltonian configurations including edge cases.
 """
 
-import pytest
 import numpy as np
+import pytest
 
 pytestmark = pytest.mark.quri_parts
 

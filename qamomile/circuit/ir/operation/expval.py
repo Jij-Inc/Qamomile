@@ -7,8 +7,8 @@ respect to a quantum state.
 
 import dataclasses
 
-from qamomile.circuit.ir.types.primitives import FloatType
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
+from qamomile.circuit.ir.types.primitives import FloatType
 from qamomile.circuit.ir.value import Value
 
 from .operation import Operation, OperationKind, ParamHint, Signature

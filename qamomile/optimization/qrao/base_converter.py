@@ -5,6 +5,7 @@ shared functionality across all QRAC converter variants.
 """
 
 from __future__ import annotations
+
 import abc
 from typing import Generic, TypeVar
 

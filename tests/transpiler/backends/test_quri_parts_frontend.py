@@ -37,7 +37,6 @@ pytest.importorskip("quri_parts.qulacs")
 
 from quri_parts.circuit import gate_names
 from quri_parts.core.operator import SinglePauli
-from qamomile.circuit.transpiler.errors import EmitError
 
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.basic import (
@@ -62,6 +61,7 @@ from qamomile.circuit.algorithm.qaoa import (
     x_mixer,
 )
 from qamomile.circuit.ir.block import BlockKind
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.segments import SimplifiedProgram
 from qamomile.quri_parts import QuriPartsTranspiler

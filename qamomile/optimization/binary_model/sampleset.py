@@ -1,8 +1,9 @@
 import dataclasses
 from typing import Generic
+
 import numpy as np
 
-from .expr import VarType, VT
+from .expr import VT, VarType
 
 
 @dataclasses.dataclass

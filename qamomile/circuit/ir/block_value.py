@@ -1,10 +1,12 @@
 from __future__ import annotations
+
 import dataclasses
 from typing import TYPE_CHECKING, Any, cast
 
 from qamomile.circuit.ir.types.primitives import BlockType
-from .value import Value
+
 from .operation import Operation
+from .value import Value
 
 if TYPE_CHECKING:
     from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation

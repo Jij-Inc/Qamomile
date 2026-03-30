@@ -3,8 +3,8 @@
 Covers bind_parameters (including error case) and estimate_expectation.
 """
 
-import pytest
 import numpy as np
+import pytest
 
 pytestmark = pytest.mark.quri_parts
 
@@ -13,12 +13,12 @@ pytest.importorskip("quri_parts.circuit")
 pytest.importorskip("quri_parts.core.operator")
 pytest.importorskip("quri_parts.qulacs")
 
+from qamomile.circuit.transpiler.executable import ParameterInfo, ParameterMetadata
 from qamomile.quri_parts import (
     QuriPartsExecutor,
     QuriPartsGateEmitter,
 )
 from qamomile.quri_parts.exceptions import QamomileQuriPartsTranspileError
-from qamomile.circuit.transpiler.executable import ParameterMetadata, ParameterInfo
 
 
 class TestBindParameters:

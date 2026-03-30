@@ -6,8 +6,8 @@ import dataclasses
 from enum import Enum, auto
 from typing import TYPE_CHECKING
 
-from qamomile.circuit.ir.value import Value
 from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.value import Value
 
 if TYPE_CHECKING:
     pass

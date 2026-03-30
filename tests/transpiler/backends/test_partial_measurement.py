@@ -28,9 +28,8 @@ import qamomile.circuit as qmc
 pytest.importorskip("quri_parts")
 pytest.importorskip("quri_parts.qulacs")
 
-from qamomile.quri_parts import QuriPartsTranspiler
 from qamomile.qiskit import QiskitTranspiler
-
+from qamomile.quri_parts import QuriPartsTranspiler
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -1,7 +1,7 @@
 """Tests for Value and ArrayValue IR classes."""
 
-from qamomile.circuit.ir.value import Value, ArrayValue
 from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+from qamomile.circuit.ir.value import ArrayValue, Value
 
 
 class TestValueNextVersion:

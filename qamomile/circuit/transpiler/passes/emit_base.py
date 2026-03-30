@@ -8,7 +8,7 @@ implement the emission logic without backend-specific code.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.transpiler.errors import ResolutionFailureReason
 
@@ -27,23 +27,23 @@ class QubitResolutionResult:
 
 
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.operation import QInitOperation
-from qamomile.circuit.ir.operation.gate import (
-    GateOperation,
-    MeasureOperation,
-    MeasureVectorOperation,
-    MeasureQFixedOperation,
-    ControlledUOperation,
-)
-from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, PhiOp
 from qamomile.circuit.ir.operation.cast import CastOperation
+from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
 from qamomile.circuit.ir.operation.control_flow import (
-    ForOperation,
     ForItemsOperation,
+    ForOperation,
     IfOperation,
     WhileOperation,
 )
-from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, PhiOp
+from qamomile.circuit.ir.operation.gate import (
+    ControlledUOperation,
+    GateOperation,
+    MeasureOperation,
+    MeasureQFixedOperation,
+    MeasureVectorOperation,
+)
+from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import ArrayValue
 

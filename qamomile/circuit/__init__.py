@@ -50,14 +50,14 @@ from .frontend.qkernel import QKernel, qkernel
 from .stdlib import iqft, qft, qpe
 
 if TYPE_CHECKING:
-    from .visualization import CircuitStyle, DEFAULT_STYLE, MatplotlibDrawer
+    from .visualization import DEFAULT_STYLE, CircuitStyle, MatplotlibDrawer
 
 _VISUALIZATION_NAMES = {"MatplotlibDrawer", "CircuitStyle", "DEFAULT_STYLE"}
 
 
 def __getattr__(name: str):  # type: ignore[no-untyped-def]
     if name in _VISUALIZATION_NAMES:
-        from .visualization import CircuitStyle, DEFAULT_STYLE, MatplotlibDrawer
+        from .visualization import DEFAULT_STYLE, CircuitStyle, MatplotlibDrawer
 
         globals().update(
             {
