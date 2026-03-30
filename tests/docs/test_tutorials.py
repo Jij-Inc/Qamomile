@@ -38,6 +38,12 @@ TUTORIAL_PATTERNS = [
     # they require API keys and may have side effects
 ]
 
+# Tutorials that require optional dependency groups (e.g. chemistry)
+# and should be skipped when those dependencies are not installed.
+OPTIONAL_SKIP_MODULES = {
+    "vqe_for_hydrogen": "openfermion",
+}
+
 
 def discover_tutorial_files() -> list[Path]:
     tutorial_files = []
@@ -81,6 +87,10 @@ def test_tutorial_executes_without_error(tutorial_file: Path, tmp_path, monkeypa
     monkeypatch.setattr(plt, "show", lambda *args, **kwargs: None)
 
     assert tutorial_file.exists(), f"Tutorial file not found: {tutorial_file}"
+
+    for stem, module in OPTIONAL_SKIP_MODULES.items():
+        if stem in tutorial_file.stem:
+            pytest.importorskip(module)
 
     try:
         if tutorial_file.suffix == ".ipynb":
