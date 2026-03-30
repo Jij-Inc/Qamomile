@@ -20,7 +20,7 @@
 # See the [tutorials](../tutorial) for more details.
 # ```
 # pip install qamomile==0.10.0
-# ````
+# ```
 
 # %% [markdown]
 # ## Frontend: `@qkernel`
