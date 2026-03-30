@@ -1,4 +1,4 @@
-name: Lint
+name: Ruff
 
 permissions:
   contents: read
@@ -36,14 +36,16 @@ jobs:
           set -eux
           uv sync --frozen --group dev
 
-      - name: Check formatting with ruff
+      - name: Lint with ruff (Linter & isort)
+        shell: bash
+        run: |
+          set -eux
+          # We don't check tests because they might intentionally violate some rules
+          # for the sake of readability or simplicity.
+          uv run ruff check qamomile/
+
+      - name: Check formatting with ruff (Formatter)
         shell: bash
         run: |
           set -eux
           uv run ruff format --check qamomile/ tests/
-
-      - name: Check import sorting with ruff
-        shell: bash
-        run: |
-          set -eux
-          uv run ruff check --select I qamomile/ tests/
