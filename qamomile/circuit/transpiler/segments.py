@@ -5,13 +5,9 @@ from __future__ import annotations
 import dataclasses
 from abc import ABC, abstractmethod
 from enum import Enum, auto
-from typing import TYPE_CHECKING
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.value import Value
-
-if TYPE_CHECKING:
-    pass
 
 
 class SegmentKind(Enum):
