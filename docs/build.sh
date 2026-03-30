@@ -101,7 +101,7 @@ execute_lang() {
         for nb in "${lang}/${dir}"/*.ipynb; do
             [ -f "$nb" ] || continue
             info "Executing ${nb}..."
-            MPLBACKEND=agg uv run jupyter nbconvert --to notebook --execute --inplace "$nb"
+            uv run jupyter nbconvert --to notebook --execute --inplace "$nb"
         done
     done
     info "${lang} notebooks executed"
