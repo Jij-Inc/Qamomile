@@ -19,6 +19,10 @@ dependencies = [
 [tool.setuptools.packages.find]
 include = ["qamomile*"]
 
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]  # To ignore errors for documentations
+
 [project.optional-dependencies]
 cudaq-cu12 = [
     "cuda-quantum-cu12>=0.14,<0.15; sys_platform == 'linux'",
