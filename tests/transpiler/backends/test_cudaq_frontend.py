@@ -52,7 +52,7 @@ from tests.transpiler.gate_test_specs import (  # noqa: E402
 cudaq = pytest.importorskip("cudaq")
 
 from qamomile.cudaq.emitter import CudaqKernelArtifact, ExecutionMode  # noqa: E402
-from tests.transpiler.backends._cudaq_source_assertions import (  # noqa: E402  # noqa: E402
+from tests.transpiler.backends._cudaq_source_assertions import (  # noqa: E402
     ValidatingCudaqTranspiler as CudaqTranspiler,
     assert_inspect_source_matches_artifact,
 )

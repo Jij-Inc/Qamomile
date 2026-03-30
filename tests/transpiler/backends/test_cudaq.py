@@ -15,7 +15,7 @@ pytestmark = pytest.mark.cudaq
 
 cudaq = pytest.importorskip("cudaq")
 
-from tests.transpiler.backends._cudaq_source_assertions import (  # noqa: E402  # noqa: E402
+from tests.transpiler.backends._cudaq_source_assertions import (  # noqa: E402
     TracingCudaqKernelEmitter,
     ValidatingCudaqTranspiler as CudaqTranspiler,
     assert_inspect_source_matches_artifact,
