@@ -33,10 +33,10 @@ from tests.transpiler.gate_test_specs import (
 qiskit = pytest.importorskip("qiskit")
 pytest.importorskip("qiskit_aer")
 
-from qiskit import QuantumCircuit
-from qiskit.circuit import Barrier, Measure, ParameterExpression
-from qiskit.circuit.controlflow import ForLoopOp, IfElseOp, WhileLoopOp
-from qiskit.circuit.library import (
+from qiskit import QuantumCircuit  # noqa: E402
+from qiskit.circuit import Barrier, Measure, ParameterExpression  # noqa: E402
+from qiskit.circuit.controlflow import ForLoopOp, IfElseOp, WhileLoopOp  # noqa: E402
+from qiskit.circuit.library import (  # noqa: E402
     CCXGate,
     CPhaseGate,
     CXGate,
@@ -56,15 +56,15 @@ from qiskit.circuit.library import (
     ZGate,
 )
 
-import qamomile.observable as qm_o
-from qamomile.circuit.algorithm.basic import (
+import qamomile.observable as qm_o  # noqa: E402
+from qamomile.circuit.algorithm.basic import (  # noqa: E402
     cz_entangling_layer,
     rx_layer,
     ry_layer,
     rz_layer,
     superposition_vector,
 )
-from qamomile.circuit.algorithm.fqaoa import (
+from qamomile.circuit.algorithm.fqaoa import (  # noqa: E402
     cost_layer,
     fqaoa_state,
     givens_rotation,
@@ -72,18 +72,18 @@ from qamomile.circuit.algorithm.fqaoa import (
     initial_occupations,
     mixer_layer,
 )
-from qamomile.circuit.algorithm.qaoa import (
+from qamomile.circuit.algorithm.qaoa import (  # noqa: E402
     ising_cost,
     qaoa_layers,
     qaoa_state,
     x_mixer,
 )
-from qamomile.circuit.ir.block import BlockKind
-from qamomile.circuit.transpiler.errors import EmitError
-from qamomile.circuit.transpiler.executable import ExecutableProgram
-from qamomile.circuit.transpiler.segments import SimplifiedProgram
-from qamomile.circuit.transpiler.transpiler import TranspilerConfig
-from qamomile.qiskit import QiskitTranspiler
+from qamomile.circuit.ir.block import BlockKind  # noqa: E402
+from qamomile.circuit.transpiler.errors import EmitError  # noqa: E402
+from qamomile.circuit.transpiler.executable import ExecutableProgram  # noqa: E402
+from qamomile.circuit.transpiler.segments import SimplifiedProgram  # noqa: E402
+from qamomile.circuit.transpiler.transpiler import TranspilerConfig  # noqa: E402
+from qamomile.qiskit import QiskitTranspiler  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers

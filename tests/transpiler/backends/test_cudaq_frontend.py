@@ -20,23 +20,23 @@ import pytest
 
 pytestmark = pytest.mark.cudaq
 
-import qamomile.circuit as qmc
-import qamomile.observable as qm_o
-from qamomile.circuit.algorithm.basic import (
+import qamomile.circuit as qmc  # noqa: E402
+import qamomile.observable as qm_o  # noqa: E402
+from qamomile.circuit.algorithm.basic import (  # noqa: E402
     cz_entangling_layer,
     rx_layer,
     ry_layer,
     rz_layer,
     superposition_vector,
 )
-from qamomile.circuit.algorithm.qaoa import (
+from qamomile.circuit.algorithm.qaoa import (  # noqa: E402
     ising_cost,
     qaoa_layers,
     qaoa_state,
     x_mixer,
 )
-from qamomile.circuit.transpiler.errors import DependencyError, EmitError
-from tests.transpiler.gate_test_specs import (
+from qamomile.circuit.transpiler.errors import DependencyError, EmitError  # noqa: E402
+from tests.transpiler.gate_test_specs import (  # noqa: E402
     GATE_SPECS,
     all_zeros_state,
     computational_basis_state,
@@ -55,7 +55,7 @@ from qamomile.cudaq.emitter import CudaqKernelArtifact, ExecutionMode  # noqa: E
 from tests.transpiler.backends._cudaq_source_assertions import (  # noqa: E402
     ValidatingCudaqTranspiler as CudaqTranspiler,
 )
-from tests.transpiler.backends._cudaq_source_assertions import (
+from tests.transpiler.backends._cudaq_source_assertions import (  # noqa: E402
     assert_inspect_source_matches_artifact,
 )
 
@@ -2913,7 +2913,7 @@ class TestParameterizedCircuits:
 
         transpiler = CudaqTranspiler()
         exe = transpiler.transpile(circuit, parameters=["theta"])
-        qc = _assert_compiled_source(
+        _ = _assert_compiled_source(
             exe,
             "def _qamomile_kernel(thetas: list[float]):",
             "q = cudaq.qvector(1)",

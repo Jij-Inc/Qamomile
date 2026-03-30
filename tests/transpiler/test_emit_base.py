@@ -452,7 +452,7 @@ class TestPhiOpsAllocation:
         size_val = _make_const_value("size", array_size)
 
         q_array = _make_array_value("q", shape_vals=(size_val,))
-        qinit_op = QInitOperation(operands=[], results=[q_array])
+        _ = QInitOperation(operands=[], results=[q_array])
 
         # Measure q[0] → condition
         q0_idx = _make_const_value("idx_0", 0)
@@ -463,7 +463,7 @@ class TestPhiOpsAllocation:
             element_indices=(q0_idx,),
         )
         cond = _make_value("cond", BitType)
-        measure_cond = MeasureOperation(operands=[q0_elem], results=[cond])
+        _ = MeasureOperation(operands=[q0_elem], results=[cond])
 
         # True branch: measure into true_bits array
         true_bits = _make_array_value(

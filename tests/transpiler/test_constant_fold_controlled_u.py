@@ -260,9 +260,11 @@ class TestControlledUTranspileIntegration:
 # -- Power field strict-int-cast unit tests ----------------------------------
 
 
-import pytest
+import pytest  # noqa: E402
 
-from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
+from qamomile.circuit.transpiler.passes.constant_fold import (  # noqa: E402
+    ConstantFoldingPass,
+)
 
 
 class TestConstantFoldPowerStrictValidation:

@@ -19,7 +19,7 @@ from tests.transpiler.backends._cudaq_source_assertions import (  # noqa: E402
     TracingCudaqKernelEmitter,
     assert_inspect_source_matches_artifact,
 )
-from tests.transpiler.backends._cudaq_source_assertions import (
+from tests.transpiler.backends._cudaq_source_assertions import (  # noqa: E402
     ValidatingCudaqTranspiler as CudaqTranspiler,
 )
 from tests.transpiler.base_test import TranspilerTestSuite  # noqa: E402

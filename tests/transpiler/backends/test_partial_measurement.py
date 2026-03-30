@@ -96,8 +96,8 @@ class TestSingleQubitPartialMeasurement:
     @qmc.qkernel
     def measure_last_of_three() -> qmc.Bit:
         """3 qubits, X on q2 only, measure q2 (should be 1)."""
-        q0 = qmc.qubit("q0")
-        q1 = qmc.qubit("q1")
+        _ = qmc.qubit("q0")
+        _ = qmc.qubit("q1")
         q2 = qmc.qubit("q2")
         q2 = qmc.x(q2)
         return qmc.measure(q2)
