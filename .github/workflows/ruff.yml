@@ -40,9 +40,7 @@ jobs:
         shell: bash
         run: |
           set -eux
-          # We don't check tests because they might intentionally violate some rules
-          # for the sake of readability or simplicity.
-          uv run ruff check qamomile/
+          uv run ruff check qamomile/ tests/
 
       - name: Check formatting with ruff (Formatter)
         shell: bash
