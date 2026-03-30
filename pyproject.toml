@@ -55,6 +55,12 @@ dev = [
     "ommx-pyscipopt-adapter>=2.3.0",
 ]
 
+chemistry = [
+    "openfermion>=1.6.0",
+    "openfermionpyscf>=0.5",
+    "pyscf>=2.5.0",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-m 'not docs and not quri_parts and not cudaq'"
