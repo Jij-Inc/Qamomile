@@ -82,7 +82,7 @@ define execute-lang
 		for nb in $(1)/$$dir/*.ipynb; do \
 			[ -f "$$nb" ] || continue; \
 			echo "✓ Executing $$nb..."; \
-			MPLBACKEND=agg uv run jupyter nbconvert --to notebook --execute --inplace "$$nb"; \
+			uv run jupyter nbconvert --to notebook --execute --inplace "$$nb"; \
 		done; \
 	done
 	@echo "✓ $(1) notebooks executed"

@@ -121,7 +121,7 @@ We recommend using `build.sh` as the primary build tool. A `Makefile` with equiv
 uv run jupytext --to ipynb target.py
 
 # 2. Execute the notebook locally
-MPLBACKEND=agg uv run jupyter nbconvert --to notebook --execute --inplace target.ipynb
+uv run jupyter nbconvert --to notebook --execute --inplace target.ipynb
 
 # 3. Rebuild without re-syncing (e.g., after config changes)
 ./build.sh build
@@ -176,7 +176,7 @@ API generation and copying are automatically included in `./build.sh build`. No 
 3. **Build, execute and preview**:
    ```bash
    uv run jupytext --to notebook target.py
-   MPLBACKEND=agg uv run jupyter nbconvert --to notebook --execute --inplace target.ipynb
+   uv run jupyter nbconvert --to notebook --execute --inplace target.ipynb
    ./build.sh serve-en       # or serve-ja for Japanese
    ```
 
@@ -221,7 +221,7 @@ API generation and copying are automatically included in `./build.sh build`. No 
 4. **Generate, execute and commit the `.ipynb`**: Convert to notebook and execute it so that output cells are populated:
    ```bash
    uv run jupytext --to notebook target.py
-   MPLBACKEND=agg uv run jupyter nbconvert --to notebook --execute --inplace target.ipynb
+   uv run jupyter nbconvert --to notebook --execute --inplace target.ipynb
    ```
    Repeat for the `ja/` counterpart.
 
