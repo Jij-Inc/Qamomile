@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, TypeVar, overload
 
-from qamomile.circuit.frontend.handle.primitives import QFixed, Qubit
 from qamomile.circuit.frontend.handle.array import Vector
+from qamomile.circuit.frontend.handle.primitives import QFixed, Qubit
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.types.q_register import QFixedType

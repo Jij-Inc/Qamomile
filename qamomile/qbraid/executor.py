@@ -12,13 +12,14 @@ Example:
 
 from __future__ import annotations
 
-from typing import Any, Sequence, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Sequence
 
 from qamomile.circuit.transpiler.errors import ExecutionError
-from qamomile.circuit.transpiler.executable import QuantumExecutor, ParameterMetadata
+from qamomile.circuit.transpiler.executable import ParameterMetadata, QuantumExecutor
 
 if TYPE_CHECKING:
     from qiskit import QuantumCircuit
+
     import qamomile.observable as qm_o
 
 

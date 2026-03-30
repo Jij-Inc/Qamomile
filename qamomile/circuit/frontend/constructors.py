@@ -2,16 +2,16 @@ import typing
 
 import qamomile.circuit.ir.types as ir_type
 from qamomile.circuit.ir.operation.operation import QInitOperation
-from qamomile.circuit.ir.value import Value, ArrayValue
+from qamomile.circuit.ir.value import ArrayValue, Value
 
 from .handle import (
     Bit,
     Float,
+    Matrix,
     Qubit,
+    Tensor,
     UInt,
     Vector,
-    Matrix,
-    Tensor,
 )
 from .tracer import get_current_tracer
 

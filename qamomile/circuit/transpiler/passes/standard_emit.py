@@ -11,47 +11,46 @@ import re
 from typing import Any, Generic, TypeVar
 
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.operation import QInitOperation
-from qamomile.circuit.ir.operation.gate import (
-    GateOperation,
-    GateOperationType,
-    MeasureOperation,
-    MeasureVectorOperation,
-    MeasureQFixedOperation,
-    ControlledUOperation,
-)
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
+from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
 )
-from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import (
-    ForOperation,
     ForItemsOperation,
+    ForOperation,
     IfOperation,
     WhileOperation,
 )
-from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
+from qamomile.circuit.ir.operation.gate import (
+    ControlledUOperation,
+    GateOperation,
+    GateOperationType,
+    MeasureOperation,
+    MeasureQFixedOperation,
+    MeasureVectorOperation,
+)
+from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.value import Value
-
-from qamomile.circuit.transpiler.passes.emit import EmitPass, CompositeGateEmitter
+from qamomile.circuit.transpiler.errors import (
+    EmitError,
+    OperandResolutionInfo,
+    QubitIndexResolutionError,
+    ResolutionFailureReason,
+)
+from qamomile.circuit.transpiler.executable import ParameterInfo, ParameterMetadata
+from qamomile.circuit.transpiler.gate_emitter import GateEmitter
+from qamomile.circuit.transpiler.passes.emit import CompositeGateEmitter, EmitPass
 from qamomile.circuit.transpiler.passes.emit_base import (
+    CompositeDecomposer,
+    LoopAnalyzer,
     ResourceAllocator,
     ValueResolver,
-    LoopAnalyzer,
-    CompositeDecomposer,
     map_phi_outputs,
     remap_static_phi_outputs,
     resolve_if_condition,
 )
-from qamomile.circuit.transpiler.errors import (
-    EmitError,
-    QubitIndexResolutionError,
-    OperandResolutionInfo,
-    ResolutionFailureReason,
-)
-from qamomile.circuit.transpiler.gate_emitter import GateEmitter
-from qamomile.circuit.transpiler.executable import ParameterMetadata, ParameterInfo
 
 T = TypeVar("T")  # Backend circuit type
 

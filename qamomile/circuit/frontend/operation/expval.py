@@ -8,11 +8,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from qamomile.circuit.frontend.handle import Float, Qubit, Vector, Observable
+from qamomile.circuit.frontend.handle import Float, Observable, Qubit, Vector
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.types.primitives import FloatType
-from qamomile.circuit.ir.value import Value, ArrayValue
+from qamomile.circuit.ir.value import ArrayValue, Value
 
 if TYPE_CHECKING:
     pass

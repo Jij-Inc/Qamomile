@@ -27,10 +27,10 @@ from qamomile.circuit.transpiler.passes.value_mapping import (
     ValueSubstitutor,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _qubit(name: str = "q") -> Value:
     """Create a qubit Value."""
@@ -167,9 +167,7 @@ class TestConstantFoldingTheta:
 
     def test_theta_with_bound_parameter_is_folded(self) -> None:
         """BinOp using a bound parameter folds, and theta references the result."""
-        param = Value(
-            type=FloatType(), name="phase", params={"parameter": "phase"}
-        )
+        param = Value(type=FloatType(), name="phase", params={"parameter": "phase"})
         two = _float_val("two", const=2.0)
         binop, binop_result = _make_binop(param, two, BinOpKind.MUL)
 
@@ -343,7 +341,9 @@ class TestUUIDRemapperTheta:
 
         assert isinstance(cloned, GateOperation)
         assert isinstance(cloned.theta, Value)
-        cloned_uuids = {v.uuid for v in cloned.operands} | {v.uuid for v in cloned.results}
+        cloned_uuids = {v.uuid for v in cloned.operands} | {
+            v.uuid for v in cloned.results
+        }
         assert cloned.theta.uuid not in cloned_uuids
 
 
@@ -404,10 +404,12 @@ class TestValueSubstitutorTheta:
 
         gate = _make_gate(GateOperationType.RZ, [old_q], theta=old_theta)
 
-        sub = ValueSubstitutor({
-            old_theta.uuid: new_theta,
-            old_q.uuid: new_q,
-        })
+        sub = ValueSubstitutor(
+            {
+                old_theta.uuid: new_theta,
+                old_q.uuid: new_q,
+            }
+        )
         result = sub.substitute_operation(gate)
 
         assert isinstance(result, GateOperation)

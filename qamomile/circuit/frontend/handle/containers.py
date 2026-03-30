@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Generic, TypeVar, Iterator, Literal, overload
+from typing import Generic, Iterator, Literal, TypeVar, overload
 
-from qamomile.circuit.ir.value import Value, TupleValue, DictValue
 from qamomile.circuit.ir.types.primitives import UIntType
+from qamomile.circuit.ir.value import DictValue, TupleValue, Value
 
 from .handle import Handle
 from .primitives import UInt
-
 
 # Type variables for generic containers
 K = TypeVar("K", bound=Handle)

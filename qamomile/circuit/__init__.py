@@ -24,21 +24,40 @@ from .frontend.operation.control_flow import for_items, items, range
 from .frontend.operation.controlled import controlled
 from .frontend.operation.expval import expval
 from .frontend.operation.measurement import measure
-from .frontend.operation.qubit_gates import ccx, cp, cx, cz, h, p, rx, ry, rz, rzz, s, sdg, swap, t, tdg, x, y, z
+from .frontend.operation.qubit_gates import (
+    ccx,
+    cp,
+    cx,
+    cz,
+    h,
+    p,
+    rx,
+    ry,
+    rz,
+    rzz,
+    s,
+    sdg,
+    swap,
+    t,
+    tdg,
+    x,
+    y,
+    z,
+)
 from .frontend.qkernel import QKernel, qkernel
 
 # Standard library circuits
 from .stdlib import iqft, qft, qpe
 
 if TYPE_CHECKING:
-    from .visualization import CircuitStyle, DEFAULT_STYLE, MatplotlibDrawer
+    from .visualization import DEFAULT_STYLE, CircuitStyle, MatplotlibDrawer
 
 _VISUALIZATION_NAMES = {"MatplotlibDrawer", "CircuitStyle", "DEFAULT_STYLE"}
 
 
 def __getattr__(name: str):  # type: ignore[no-untyped-def]
     if name in _VISUALIZATION_NAMES:
-        from .visualization import CircuitStyle, DEFAULT_STYLE, MatplotlibDrawer
+        from .visualization import DEFAULT_STYLE, CircuitStyle, MatplotlibDrawer
 
         globals().update(
             {

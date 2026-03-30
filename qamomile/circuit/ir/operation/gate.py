@@ -1,13 +1,13 @@
 import dataclasses
 import enum
 
+from qamomile.circuit.ir.types import QFixedType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
     BlockType,
     FloatType,
     QubitType,
 )
-from qamomile.circuit.ir.types import QFixedType
 from qamomile.circuit.ir.value import Value
 
 from .operation import Operation, OperationKind, ParamHint, Signature
@@ -150,8 +150,7 @@ class ControlledUOperation(Operation):
     def signature(self) -> Signature:
         if self.has_index_spec:
             raise NotImplementedError(
-                "Cannot compute signature for ControlledUOperation with "
-                "index spec."
+                "Cannot compute signature for ControlledUOperation with index spec."
             )
         if self.is_symbolic_num_controls:
             raise NotImplementedError(

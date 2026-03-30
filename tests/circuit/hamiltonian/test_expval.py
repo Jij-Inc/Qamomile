@@ -1,6 +1,7 @@
 """Tests for the expval (expectation value) operation with Observable bindings."""
 
 import pytest
+
 import qamomile.circuit as qm
 import qamomile.observable as qm_o
 from qamomile.circuit.ir.operation import ExpvalOp
@@ -96,9 +97,9 @@ class TestExpvalSegment:
 
     def test_compiled_expval_segment_fields(self):
         """Test CompiledExpvalSegment has expected fields."""
-        from qamomile.circuit.transpiler.compiled_segments import CompiledExpvalSegment
-        from qamomile.circuit.transpiler.segments import ExpvalSegment
         import dataclasses
+
+        from qamomile.circuit.transpiler.compiled_segments import CompiledExpvalSegment
 
         fields = {f.name for f in dataclasses.fields(CompiledExpvalSegment)}
         assert "segment" in fields
@@ -128,8 +129,8 @@ class TestExpvalTranspiler:
     def test_separate_pass_creates_expval_segment(self):
         """Test that separate pass creates ExpvalSegment for ExpvalOp."""
         pytest.importorskip("qiskit")
-        from qamomile.qiskit import QiskitTranspiler
         from qamomile.circuit.transpiler.segments import SegmentKind
+        from qamomile.qiskit import QiskitTranspiler
 
         @qm.qkernel
         def test_kernel(q0: qm.Qubit, q1: qm.Qubit, H: qm.Observable) -> qm.Float:
@@ -167,10 +168,7 @@ class TestExpvalTranspiler:
         transpiler = QiskitTranspiler()
 
         # Transpile with Hamiltonian in bindings
-        executable = transpiler.transpile(
-            vqe,
-            bindings={"H": H, "n": 2}
-        )
+        executable = transpiler.transpile(vqe, bindings={"H": H, "n": 2})
 
         # Should have compiled expval segment
         assert len(executable.compiled_expval) == 1

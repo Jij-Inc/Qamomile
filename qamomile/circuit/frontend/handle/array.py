@@ -180,9 +180,17 @@ class ArrayBase(Handle, Generic[T]):
             return True
 
         for lhs_idx, rhs_idx in zip(lhs, rhs):
-            lhs_const = lhs_idx.value.get_const() if lhs_idx.value.is_constant() else None
-            rhs_const = rhs_idx.value.get_const() if rhs_idx.value.is_constant() else None
-            if lhs_const is not None and rhs_const is not None and lhs_const != rhs_const:
+            lhs_const = (
+                lhs_idx.value.get_const() if lhs_idx.value.is_constant() else None
+            )
+            rhs_const = (
+                rhs_idx.value.get_const() if rhs_idx.value.is_constant() else None
+            )
+            if (
+                lhs_const is not None
+                and rhs_const is not None
+                and lhs_const != rhs_const
+            ):
                 return True
         return False
 

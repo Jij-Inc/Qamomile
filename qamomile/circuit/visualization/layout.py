@@ -20,11 +20,11 @@ from .visual_ir import (
     VGate,
     VGateKind,
     VInlineBlock,
+    VisualCircuit,
+    VisualNode,
     VSkip,
     VUnfoldedKind,
     VUnfoldedSequence,
-    VisualCircuit,
-    VisualNode,
 )
 
 

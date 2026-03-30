@@ -43,7 +43,6 @@ from ._gate_count import GateCount
 from ._loop_executor import symbolic_iterations
 from ._resolver import ExprResolver
 
-
 # ------------------------------------------------------------------ #
 #  SymPy Sum helper                                                   #
 # ------------------------------------------------------------------ #

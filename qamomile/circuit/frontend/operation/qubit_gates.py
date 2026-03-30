@@ -1,7 +1,9 @@
 from qamomile.circuit.frontend.handle import Float, Qubit
 from qamomile.circuit.frontend.tracer import get_current_tracer
-from qamomile.circuit.ir.operation.gate import GateOperation as IRGateOperation
-from qamomile.circuit.ir.operation.gate import GateOperationType
+from qamomile.circuit.ir.operation.gate import (
+    GateOperation as IRGateOperation,
+    GateOperationType,
+)
 from qamomile.circuit.transpiler.errors import QubitAliasError
 
 
@@ -318,9 +320,7 @@ def swap(qubit_0: Qubit, qubit_1: Qubit) -> tuple[Qubit, Qubit]:
     return _apply_two_qubit_gate(qubit_0, qubit_1, GateOperationType.SWAP)
 
 
-def ccx(
-    control1: Qubit, control2: Qubit, target: Qubit
-) -> tuple[Qubit, Qubit, Qubit]:
+def ccx(control1: Qubit, control2: Qubit, target: Qubit) -> tuple[Qubit, Qubit, Qubit]:
     """Toffoli (CCX) gate: flips target when both controls are |1>.
 
     Args:
@@ -331,4 +331,6 @@ def ccx(
     Returns:
         Tuple of (control1_out, control2_out, target_out) after CCX.
     """
-    return _apply_three_qubit_gate(control1, control2, target, GateOperationType.TOFFOLI)
+    return _apply_three_qubit_gate(
+        control1, control2, target, GateOperationType.TOFFOLI
+    )

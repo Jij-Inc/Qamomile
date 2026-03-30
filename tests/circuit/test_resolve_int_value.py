@@ -1,7 +1,7 @@
 """Test that resolve_int_value uses UUID-based lookup for BinOp results."""
 
-from qamomile.circuit.ir.value import Value
 from qamomile.circuit.ir.types.primitives import UIntType
+from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.passes.emit_base import ValueResolver
 
 

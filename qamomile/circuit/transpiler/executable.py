@@ -13,7 +13,7 @@ from qamomile.circuit.transpiler.compiled_segments import (
 )
 from qamomile.circuit.transpiler.errors import ExecutionError
 from qamomile.circuit.transpiler.execution_context import ExecutionContext
-from qamomile.circuit.transpiler.job import RunJob, SampleJob, ExpvalJob
+from qamomile.circuit.transpiler.job import ExpvalJob, RunJob, SampleJob
 from qamomile.circuit.transpiler.parameter_binding import (
     ParameterInfo,
     ParameterMetadata,

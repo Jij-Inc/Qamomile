@@ -6,27 +6,27 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
-from qamomile.circuit.frontend.qkernel import QKernel
 from qamomile.circuit.frontend.decomposition import DecompositionConfig
+from qamomile.circuit.frontend.qkernel import QKernel
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.transpiler.errors import QamomileCompileError
-from qamomile.circuit.transpiler.passes.inline import InlinePass
+from qamomile.circuit.transpiler.executable import ExecutableProgram, QuantumExecutor
+from qamomile.circuit.transpiler.passes.affine_validate import AffineValidationPass
 from qamomile.circuit.transpiler.passes.analyze import AnalyzePass
-from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
 from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
     CompileTimeIfLoweringPass,
 )
-from qamomile.circuit.transpiler.passes.affine_validate import AffineValidationPass
-from qamomile.circuit.transpiler.passes.validate_while import ValidateWhileContractPass
-from qamomile.circuit.transpiler.passes.separate import SeparatePass
+from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
 from qamomile.circuit.transpiler.passes.emit import EmitPass
+from qamomile.circuit.transpiler.passes.inline import InlinePass
+from qamomile.circuit.transpiler.passes.separate import SeparatePass
 from qamomile.circuit.transpiler.passes.substitution import (
     SubstitutionConfig,
     SubstitutionPass,
     SubstitutionRule,
 )
+from qamomile.circuit.transpiler.passes.validate_while import ValidateWhileContractPass
 from qamomile.circuit.transpiler.segments import SimplifiedProgram
-from qamomile.circuit.transpiler.executable import ExecutableProgram, QuantumExecutor
 
 if TYPE_CHECKING:
     pass

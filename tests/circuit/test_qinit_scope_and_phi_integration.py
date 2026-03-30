@@ -22,7 +22,6 @@ breaks ``_create_bound_input``.
 
 import pytest
 
-
 # ===========================================================================
 # Bug #5: Sub-kernel QInit scope integration test
 # ===========================================================================
@@ -55,9 +54,16 @@ class TestFQAOAStateIntegration:
             betas: qmc.Vector[qmc.Float],
         ) -> qmc.Vector[qmc.Bit]:
             q = fqaoa_state(
-                p, linear, quad, n, n_f,
-                givens_ij, givens_theta, hopping_val,
-                gammas, betas,
+                p,
+                linear,
+                quad,
+                n,
+                n_f,
+                givens_ij,
+                givens_theta,
+                hopping_val,
+                gammas,
+                betas,
             )
             return qmc.measure(q)
 

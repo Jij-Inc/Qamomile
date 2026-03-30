@@ -1,16 +1,20 @@
 """Tests for Tuple and Dict types in qkernel."""
 
-import pytest
 import qamomile.circuit as qmc
-from qamomile.circuit.ir.types.primitives import TupleType, DictType, UIntType, FloatType
-from qamomile.circuit.ir.value import TupleValue, DictValue, Value
-from qamomile.circuit.frontend.handle.containers import Tuple, Dict
 from qamomile.circuit.frontend.func_to_block import (
-    handle_type_map,
-    is_tuple_type,
-    is_dict_type,
     create_dummy_input,
+    handle_type_map,
+    is_dict_type,
+    is_tuple_type,
 )
+from qamomile.circuit.frontend.handle.containers import Dict, Tuple
+from qamomile.circuit.ir.types.primitives import (
+    DictType,
+    FloatType,
+    TupleType,
+    UIntType,
+)
+from qamomile.circuit.ir.value import DictValue, TupleValue, Value
 
 
 class TestTupleType:

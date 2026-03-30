@@ -80,8 +80,8 @@ class TestExecutableProgram:
 
     def test_quantum_circuit_error_on_no_circuit(self):
         """Test that quantum_circuit raises error when no circuit exists."""
-        from qamomile.circuit.transpiler.executable import ExecutableProgram
         from qamomile.circuit.transpiler.errors import ExecutionError
+        from qamomile.circuit.transpiler.executable import ExecutableProgram
 
         # Create empty program
         empty_program = ExecutableProgram()

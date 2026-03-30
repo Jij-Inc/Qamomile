@@ -1,8 +1,8 @@
-from .handle import Handle
-from .primitives import Qubit, QFixed, UInt, Float, Bit
-from .array import Vector, Matrix, Tensor
+from .array import Matrix, Tensor, Vector
+from .containers import Dict, Tuple
 from .hamiltonian import Observable
-from .containers import Tuple, Dict
+from .handle import Handle
+from .primitives import Bit, Float, QFixed, Qubit, UInt
 
 __all__ = [
     "Handle",

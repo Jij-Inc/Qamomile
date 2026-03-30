@@ -6,22 +6,22 @@ import dataclasses
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.operation import OperationKind
+from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
 from qamomile.circuit.ir.operation.control_flow import (
-    ForOperation,
     ForItemsOperation,
+    ForOperation,
     IfOperation,
     WhileOperation,
 )
-from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.gate import (
     MeasureQFixedOperation,
     MeasureVectorOperation,
 )
-from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
-from qamomile.circuit.ir.operation.expval import ExpvalOp
-from qamomile.circuit.ir.value import Value, ArrayValue, ValueBase
+from qamomile.circuit.ir.operation.operation import OperationKind
+from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types.primitives import BitType, QubitType, UIntType
+from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowVisitor
 from qamomile.circuit.transpiler.segments import (

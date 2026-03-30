@@ -1,28 +1,17 @@
 """Tests for decomposition strategy framework."""
 
-import math
 import pytest
 
-import qamomile.circuit as qmc
+from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.decomposition import (
     DecompositionConfig,
-    DecompositionStrategy,
     StrategyRegistry,
-    get_global_registry,
-    register_strategy,
-    get_strategy,
 )
-from qamomile.circuit.frontend.composite_gate import CompositeGate
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateType,
-    ResourceMetadata,
-)
-from qamomile.circuit.stdlib.qft import QFT, IQFT
+from qamomile.circuit.stdlib.qft import IQFT, QFT
 from qamomile.circuit.stdlib.qft_strategies import (
-    StandardQFTStrategy,
     ApproximateQFTStrategy,
     StandardIQFTStrategy,
-    ApproximateIQFTStrategy,
+    StandardQFTStrategy,
 )
 
 

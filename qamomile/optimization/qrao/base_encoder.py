@@ -20,8 +20,8 @@ from typing import Literal
 import qamomile.observable as qm_o
 from qamomile.optimization.binary_model import BinaryModel, VarType
 from qamomile.optimization.utils import is_close_zero
-from .graph_coloring import greedy_graph_coloring, check_linear_term
 
+from .graph_coloring import check_linear_term, greedy_graph_coloring
 
 PauliType = Literal["X", "Y", "Z"]
 

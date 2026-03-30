@@ -1,7 +1,7 @@
 """Tests for for_items iteration over Dict types."""
 
 import pytest
-import numpy as np
+
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.operation.control_flow import ForItemsOperation
 
@@ -37,10 +37,10 @@ class TestForItemsContextManager:
 
     def test_for_items_builds_operation(self):
         """Test that for_items context manager builds ForItemsOperation."""
-        from qamomile.circuit.ir.value import DictValue
         from qamomile.circuit.frontend.handle.containers import Dict
         from qamomile.circuit.frontend.operation.control_flow import for_items
         from qamomile.circuit.frontend.tracer import Tracer, trace
+        from qamomile.circuit.ir.value import DictValue
 
         # Create a dummy Dict handle
         dv = DictValue(name="ising", entries=[], params={"parameter": "ising"})

@@ -39,19 +39,16 @@ Example:
 """
 
 # Class-based API (new)
-from .qft import QFT, IQFT
-
 # Function-based API (kept for compatibility, using new class-based impl)
-from .qft import qft, iqft
+from .qft import IQFT, QFT, iqft, qft
 
 # Strategies
 from .qft_strategies import (
-    StandardQFTStrategy,
+    ApproximateIQFTStrategy,
     ApproximateQFTStrategy,
     StandardIQFTStrategy,
-    ApproximateIQFTStrategy,
+    StandardQFTStrategy,
 )
-
 from .qpe import qpe
 
 __all__ = [

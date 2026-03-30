@@ -27,16 +27,16 @@ from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
 from qamomile.circuit.ir.operation.control_flow import (
-    ForOperation,
     ForItemsOperation,
+    ForOperation,
     IfOperation,
     WhileOperation,
 )
 from qamomile.circuit.transpiler.passes import Pass
 
 if TYPE_CHECKING:
-    from qamomile.circuit.ir.block_value import BlockValue
     from qamomile.circuit.frontend.qkernel import QKernel
+    from qamomile.circuit.ir.block_value import BlockValue
 
 
 class SignatureCompatibilityError(Exception):
@@ -276,8 +276,8 @@ class SubstitutionPass(Pass[Block, Block]):
         Returns:
             Transformed operation
         """
-        from qamomile.circuit.ir.block_value import BlockValue
         from qamomile.circuit.frontend.qkernel import QKernel
+        from qamomile.circuit.ir.block_value import BlockValue
 
         # Get the block being called
         block = op.operands[0]

@@ -33,7 +33,6 @@ from qamomile.circuit.ir.value import ArrayValue
 
 from ._resolver import ExprResolver
 
-
 # ------------------------------------------------------------------ #
 #  CompositeGate resolution                                           #
 # ------------------------------------------------------------------ #

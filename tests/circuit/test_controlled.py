@@ -183,7 +183,7 @@ class TestControlledGateCall:
         mock_idx = (MagicMock(name="idx0"),)
         ctrl = _make_qubit("ctrl", parent=mock_parent, indices=mock_idx)
         tgt = _make_qubit("tgt")
-        with trace() as tracer:
+        with trace() as tracer:  # noqa: F841
             result = cg(ctrl, tgt)
         assert result[0].parent is mock_parent
         assert result[0].indices is mock_idx
@@ -277,7 +277,7 @@ class TestControlledGateCall:
         cg = ControlledGate(_mock_qkernel(), num_controls=1)
         ctrl = _make_qubit("ctrl")
         tgt = _make_qubit("tgt")
-        with trace() as tracer:
+        with trace() as tracer:  # noqa: F841
             cg(ctrl, tgt)
             with pytest.raises(QubitConsumedError):
                 cg(ctrl, _make_qubit("tgt2"))
@@ -287,7 +287,7 @@ class TestControlledGateCall:
         cg = ControlledGate(_mock_qkernel(), num_controls=1)
         ctrl = _make_qubit("ctrl")
         tgt = _make_qubit("tgt")
-        with trace() as tracer:
+        with trace() as tracer:  # noqa: F841
             cg(ctrl, tgt)
             with pytest.raises(QubitConsumedError):
                 cg(_make_qubit("ctrl2"), tgt)
@@ -296,7 +296,7 @@ class TestControlledGateCall:
         """Same qubit as both control and target raises QubitAliasError."""
         cg = ControlledGate(_mock_qkernel(), num_controls=1)
         q = _make_qubit("q")
-        with trace() as tracer:
+        with trace() as tracer:  # noqa: F841
             with pytest.raises(QubitAliasError):
                 cg(q, q)
 
@@ -305,7 +305,7 @@ class TestControlledGateCall:
         cg = ControlledGate(_mock_qkernel(), num_controls=2)
         q = _make_qubit("q")
         tgt = _make_qubit("tgt")
-        with trace() as tracer:
+        with trace() as tracer:  # noqa: F841
             with pytest.raises(QubitAliasError):
                 cg(q, q, tgt)
 
@@ -328,7 +328,7 @@ class TestControlledValidation:
         """Passing fewer qubits than num_controls (no targets) raises ValueError."""
         cg = ControlledGate(_mock_qkernel(), num_controls=3)
         qs = [_make_qubit(f"q{i}") for i in range(3)]  # 3 controls, 0 targets
-        with trace() as tracer:
+        with trace() as tracer:  # noqa: F841
             with pytest.raises(ValueError):
                 cg(*qs)
 

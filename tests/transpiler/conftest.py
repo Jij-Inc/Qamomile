@@ -11,21 +11,13 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "single_qubit: mark test as single-qubit gate test"
     )
-    config.addinivalue_line(
-        "markers", "rotation: mark test as rotation gate test"
-    )
-    config.addinivalue_line(
-        "markers", "two_qubit: mark test as two-qubit gate test"
-    )
+    config.addinivalue_line("markers", "rotation: mark test as rotation gate test")
+    config.addinivalue_line("markers", "two_qubit: mark test as two-qubit gate test")
     config.addinivalue_line(
         "markers", "three_qubit: mark test as three-qubit gate test"
     )
-    config.addinivalue_line(
-        "markers", "controlled: mark test as controlled gate test"
-    )
-    config.addinivalue_line(
-        "markers", "measurement: mark test as measurement test"
-    )
+    config.addinivalue_line("markers", "controlled: mark test as controlled gate test")
+    config.addinivalue_line("markers", "measurement: mark test as measurement test")
     config.addinivalue_line(
         "markers", "hamiltonian: mark test as Hamiltonian transpilation test"
     )

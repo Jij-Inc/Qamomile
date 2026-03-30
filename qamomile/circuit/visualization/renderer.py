@@ -37,10 +37,10 @@ from .visual_ir import (
     VGate,
     VGateKind,
     VInlineBlock,
-    VSkip,
-    VUnfoldedSequence,
     VisualCircuit,
     VisualNode,
+    VSkip,
+    VUnfoldedSequence,
 )
 
 if TYPE_CHECKING:

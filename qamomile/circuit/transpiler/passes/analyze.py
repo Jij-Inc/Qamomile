@@ -6,12 +6,12 @@ import dataclasses
 
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.operation import OperationKind
 from qamomile.circuit.ir.operation.gate import MeasureOperation
+from qamomile.circuit.ir.operation.operation import OperationKind
 from qamomile.circuit.ir.value import Value, ValueBase
+from qamomile.circuit.transpiler.errors import DependencyError, ValidationError
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowVisitor
-from qamomile.circuit.transpiler.errors import DependencyError, ValidationError
 
 
 class AnalyzePass(Pass[Block, Block]):

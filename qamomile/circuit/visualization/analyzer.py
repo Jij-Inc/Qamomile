@@ -22,6 +22,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     IfOperation,
     WhileOperation,
 )
+from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     GateOperation,
@@ -29,7 +30,6 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureOperation,
     MeasureVectorOperation,
 )
-from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.types.primitives import QubitType
 from qamomile.circuit.ir.value import ArrayValue, Value
@@ -43,11 +43,11 @@ from .visual_ir import (
     VGate,
     VGateKind,
     VInlineBlock,
+    VisualCircuit,
+    VisualNode,
     VSkip,
     VUnfoldedKind,
     VUnfoldedSequence,
-    VisualCircuit,
-    VisualNode,
 )
 
 if TYPE_CHECKING:

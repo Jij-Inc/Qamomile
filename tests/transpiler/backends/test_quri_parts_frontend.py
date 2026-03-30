@@ -15,8 +15,8 @@ import pytest
 
 pytestmark = pytest.mark.quri_parts
 
-import qamomile.circuit as qmc
-from tests.transpiler.gate_test_specs import (
+import qamomile.circuit as qmc  # noqa: E402
+from tests.transpiler.gate_test_specs import (  # noqa: E402
     GATE_SPECS,
     all_zeros_state,
     bell_state,
@@ -35,19 +35,18 @@ from tests.transpiler.gate_test_specs import (
 pytest.importorskip("quri_parts")
 pytest.importorskip("quri_parts.qulacs")
 
-from quri_parts.circuit import gate_names
-from quri_parts.core.operator import SinglePauli
-from qamomile.circuit.transpiler.errors import EmitError
+from quri_parts.circuit import gate_names  # noqa: E402
+from quri_parts.core.operator import SinglePauli  # noqa: E402
 
-import qamomile.observable as qm_o
-from qamomile.circuit.algorithm.basic import (
+import qamomile.observable as qm_o  # noqa: E402
+from qamomile.circuit.algorithm.basic import (  # noqa: E402
     cz_entangling_layer,
     rx_layer,
     ry_layer,
     rz_layer,
     superposition_vector,
 )
-from qamomile.circuit.algorithm.fqaoa import (
+from qamomile.circuit.algorithm.fqaoa import (  # noqa: E402
     cost_layer,
     fqaoa_state,
     givens_rotation,
@@ -55,16 +54,17 @@ from qamomile.circuit.algorithm.fqaoa import (
     initial_occupations,
     mixer_layer,
 )
-from qamomile.circuit.algorithm.qaoa import (
+from qamomile.circuit.algorithm.qaoa import (  # noqa: E402
     ising_cost,
     qaoa_layers,
     qaoa_state,
     x_mixer,
 )
-from qamomile.circuit.ir.block import BlockKind
-from qamomile.circuit.transpiler.executable import ExecutableProgram
-from qamomile.circuit.transpiler.segments import SimplifiedProgram
-from qamomile.quri_parts import QuriPartsTranspiler
+from qamomile.circuit.ir.block import BlockKind  # noqa: E402
+from qamomile.circuit.transpiler.errors import EmitError  # noqa: E402
+from qamomile.circuit.transpiler.executable import ExecutableProgram  # noqa: E402
+from qamomile.circuit.transpiler.segments import SimplifiedProgram  # noqa: E402
+from qamomile.quri_parts import QuriPartsTranspiler  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -4137,7 +4137,6 @@ class TestAlgorithmBasicLayers:
     def test_variational_ansatz_pattern(self, seed):
         """Full variational ansatz: RY -> CZ -> RY -> CZ -> RY."""
         rng = np.random.default_rng(seed)
-        n_qubits = 3
 
         @qmc.qkernel
         def ansatz(thetas: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:

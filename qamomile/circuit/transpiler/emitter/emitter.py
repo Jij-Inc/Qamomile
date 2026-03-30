@@ -1,8 +1,7 @@
-import typing
 import abc
+import typing
 
 from qamomile.circuit.ir.block_value import BlockValue
-
 
 T = typing.TypeVar("T")
 

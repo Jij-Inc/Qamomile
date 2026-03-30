@@ -7,8 +7,6 @@ from qamomile.circuit.frontend.handle.array import Vector as VectorClass
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.gate import (
     MeasureOperation as IRMeasureOperation,
-)
-from qamomile.circuit.ir.operation.gate import (
     MeasureQFixedOperation,
     MeasureVectorOperation,
 )

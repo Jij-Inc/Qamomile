@@ -1134,9 +1134,7 @@ class TestNestedQKernelNoPhantomQubits:
         """No phantom qubits with mixed scalar Qubit and Vector parameters."""
 
         @qkernel
-        def mixed_params(
-            q: Qubit, qs: Vector[Qubit]
-        ) -> tuple[Qubit, Vector[Qubit]]:
+        def mixed_params(q: Qubit, qs: Vector[Qubit]) -> tuple[Qubit, Vector[Qubit]]:
             q, qs[0] = qmc.cx(q, qs[0])
             return q, qs
 
@@ -1296,7 +1294,7 @@ class TestBackwardsCompatibility:
 
     def test_stdlib_exports_classes(self):
         """stdlib exports both class and function APIs."""
-        from qamomile.circuit.stdlib import QFT, IQFT, qft, iqft, qpe
+        from qamomile.circuit.stdlib import IQFT, QFT, iqft, qft, qpe
 
         assert QFT is not None
         assert IQFT is not None
