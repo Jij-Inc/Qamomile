@@ -41,3 +41,9 @@ jobs:
         run: |
           set -eux
           uv run ruff format --check qamomile/ tests/
+
+      - name: Check import sorting with ruff
+        shell: bash
+        run: |
+          set -eux
+          uv run ruff check --select I qamomile/ tests/
