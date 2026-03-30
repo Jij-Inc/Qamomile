@@ -23,6 +23,9 @@ include = ["qamomile*"]
 select = ["E", "F", "I"]
 ignore = ["E501"]  # To ignore errors for documentations
 
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
 [project.optional-dependencies]
 cudaq-cu12 = [
     "cuda-quantum-cu12>=0.14,<0.15; sys_platform == 'linux'",

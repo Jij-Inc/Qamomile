@@ -24,20 +24,10 @@ from qamomile.circuit.transpiler.errors import (
 )
 from tests.circuit._gate_catalog import (
     ROTATION_GATES as _ROTATION_GATES,
-)
-from tests.circuit._gate_catalog import (
     SINGLE_QUBIT_GATES as _SINGLE_QUBIT_GATES,
-)
-from tests.circuit._gate_catalog import (
     STDLIB_GATES as _STDLIB_GATES,
-)
-from tests.circuit._gate_catalog import (
     THREE_QUBIT_GATES as _THREE_QUBIT_GATES,
-)
-from tests.circuit._gate_catalog import (
     TWO_QUBIT_GATES_NO_PARAM as _TWO_QUBIT_GATES_NO_PARAM,
-)
-from tests.circuit._gate_catalog import (
     TWO_QUBIT_GATES_WITH_PARAM as _TWO_QUBIT_GATES_WITH_PARAM,
 )
 

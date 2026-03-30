@@ -1,7 +1,9 @@
 from qamomile.circuit.frontend.handle import Float, Qubit
 from qamomile.circuit.frontend.tracer import get_current_tracer
-from qamomile.circuit.ir.operation.gate import GateOperation as IRGateOperation
-from qamomile.circuit.ir.operation.gate import GateOperationType
+from qamomile.circuit.ir.operation.gate import (
+    GateOperation as IRGateOperation,
+    GateOperationType,
+)
 from qamomile.circuit.transpiler.errors import QubitAliasError
 
 
