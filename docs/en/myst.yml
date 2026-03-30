@@ -38,6 +38,10 @@ project:
       file: collaboration/index.md
       children:
         - file: collaboration/qbraid_executor.ipynb
+    - title: Release Notes
+      file: release_notes/index.md
+      children:
+        - file: release_notes/v0_10_0.ipynb
 
 # --- API Reference (auto-generated) ---
     - title: API Reference
