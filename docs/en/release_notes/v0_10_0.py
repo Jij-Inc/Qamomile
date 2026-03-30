@@ -17,7 +17,7 @@
 #
 # Qamomile v0.10.0 is a ground-up rebuild of the circuit programming layer. The amount of changes from v0.9.0 is massive, so rather than listing what changed, this page describes **what v0.10.0 can do**.
 #
-# [Write what Qamomile v0.10.0 can do: write circuit with classical control flow, symbolical resource estimation with/without oracle, multi-quantum SDK transpilation.]
+# With v0.10.0, you can write quantum programs as typed Python functions with classical control flow (loops, conditionals, sparse iteration), perform symbolic resource estimation — even for circuits containing black-box oracles — and transpile the same program to multiple quantum SDKs (Qiskit, QURI Parts and CUDA-Q for now).
 #
 # See the [tutorials](../tutorial) for hands-on guides.
 # ```
@@ -38,7 +38,7 @@
 #
 # Available gates include H, X, Y, Z, S, T, RX, RY, RZ, RZZ, CX, CZ, CCX, CP, SWAP, and more. Measurement is done with `qmc.measure()`.
 #
-# See [your-first-quantum-kernel](../tutorial/Your First Quantum Kernel), [parametrized-quantum-kernels](../tutorial/Parametrized Quantum Kernels), [Execution Models: sample() vs run()](../tutorial/execution-models) and [Reuse Patterns: QKernel Composition and Composite Gates](../tutorial/reuse-patterns).
+# See [Your First Quantum Kernel](../tutorial/your-first-quantum-kernel), [Parametrized Quantum Kernels](../tutorial/parametrized-quantum-kernels), [Execution Models: sample() vs run()](../tutorial/execution-models) and [Reuse Patterns: QKernel Composition and Composite Gates](../tutorial/reuse-patterns) for more details.
 
 # %% [markdown]
 # ### Classical Control Flow
@@ -52,7 +52,7 @@
 #
 # These are not plain Python loops: the compiler traces them into IR nodes that each backend can handle (unrolling, native control flow, etc.).
 #
-# See [Classical Control Flow Patterns](../tutorial/classical-flow-patterns).
+# See [Classical Control Flow Patterns](../tutorial/classical-flow-patterns) for more details.
 
 # %%
 import qamomile.circuit as qmc
@@ -107,9 +107,16 @@ print("two-qubit gates at n=100:", est.substitute(n=100).gates.two_qubit)
 #
 # Furthermore, for Qiskit, [qBraid](https://docs.qbraid.com/) integration is available via `qamomile.qbraid.QBraidExecutor` to execute on cloud quantum devices.
 #
-# [Mention that Qiskit is a default, which means it is installed by pip install qamomile. Write how to install other optional dependencies.]
+# Qiskit is included by default with `pip install qamomile`. Other backends are optional extras:
 #
-# See [Execution Models: sample() vs run()](../tutorial/execution-models).
+# ```bash
+# pip install "qamomile[cudaq-cu12]"   # CUDA-Q with CUDA 12.x (Linux)
+# pip install "qamomile[cudaq-cu13]"   # CUDA-Q with CUDA 13.x (Linux / macOS ARM64)
+# pip install "qamomile[quri_parts]"   # QURI Parts
+# pip install "qamomile[qbraid]"       # qBraid integration for Qiskit
+# ```
+#
+# See [Execution Models: sample() vs run()](../tutorial/execution-models) for more details.
 
 # %%
 from qamomile.qiskit import QiskitTranspiler
