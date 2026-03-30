@@ -18,7 +18,7 @@ uv run pytest tests/core/test_qaoa.py
 # Run a specific test
 uv run pytest tests/core/test_qaoa.py::test_qaoa_converter -v
 
-# Lint with ruff
+# Lint and isort with ruff
 uv run ruff check qamomile/
 
 # Format with ruff
