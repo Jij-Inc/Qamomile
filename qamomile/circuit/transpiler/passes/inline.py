@@ -280,7 +280,6 @@ class InlinePass(Pass[Block, Block]):
         # Clone operations with fresh UUIDs using UUIDRemapper
         remapper = UUIDRemapper()
         cloned_ops = remapper.clone_operations(impl.operations)
-        uuid_remap = remapper.uuid_remap
 
         # Map block's input values to operation's qubit arguments
         # Since uuid is now unique per Value, we can use simple uuid mapping

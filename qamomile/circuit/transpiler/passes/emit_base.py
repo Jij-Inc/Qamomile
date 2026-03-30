@@ -10,22 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from qamomile.circuit.transpiler.errors import ResolutionFailureReason
-
-if TYPE_CHECKING:
-    from qamomile.circuit.ir.value import Value
-
-
-@dataclass
-class QubitResolutionResult:
-    """Result of attempting to resolve a qubit index."""
-
-    success: bool
-    index: int | None = None
-    failure_reason: ResolutionFailureReason | None = None
-    failure_details: str = ""
-
-
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, PhiOp
 from qamomile.circuit.ir.operation.cast import CastOperation
@@ -46,6 +30,20 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import ArrayValue
+from qamomile.circuit.transpiler.errors import ResolutionFailureReason
+
+if TYPE_CHECKING:
+    from qamomile.circuit.ir.value import Value
+
+
+@dataclass
+class QubitResolutionResult:
+    """Result of attempting to resolve a qubit index."""
+
+    success: bool
+    index: int | None = None
+    failure_reason: ResolutionFailureReason | None = None
+    failure_details: str = ""
 
 
 def resolve_if_condition(

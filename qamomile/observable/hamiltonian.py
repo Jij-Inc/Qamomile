@@ -54,7 +54,7 @@ class Pauli(enum.Enum):
     X = 0
     Y = 1
     Z = 2
-    I = 3
+    I = 3  # noqa: E741
 
 
 # Pauli multiplication table: (P1, P2) -> (Result, Phase)
