@@ -2845,6 +2845,11 @@ quri-parts = [
 ]
 
 [package.dev-dependencies]
+chemistry = [
+    { name = "openfermion" },
+    { name = "openfermionpyscf" },
+    { name = "pyscf" },
+]
 dev = [
     { name = "griffe" },
     { name = "jupyter" },
@@ -2853,14 +2858,10 @@ dev = [
     { name = "matplotlib" },
     { name = "networkx" },
     { name = "ommx-pyscipopt-adapter" },
-    { name = "openfermion" },
-    { name = "openfermionpyscf" },
     { name = "pylatexenc" },
-    { name = "pyscf" },
     { name = "pytest" },
     { name = "pytest-mock" },
     { name = "pytest-mpl" },
-    { name = "qbraid", extra = ["qiskit"] },
     { name = "ruff" },
     { name = "zuban" },
 ]
@@ -2883,6 +2884,11 @@ requires-dist = [
 provides-extras = ["cudaq-cu12", "cudaq-cu13", "quri-parts", "qbraid"]
 
 [package.metadata.requires-dev]
+chemistry = [
+    { name = "openfermion", specifier = ">=1.6.0" },
+    { name = "openfermionpyscf", specifier = ">=0.5" },
+    { name = "pyscf", specifier = ">=2.5.0" },
+]
 dev = [
     { name = "griffe", specifier = ">=1.0.0" },
     { name = "jupyter", specifier = ">=1.1.1" },
@@ -2891,14 +2897,10 @@ dev = [
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "networkx", specifier = ">=3.0" },
     { name = "ommx-pyscipopt-adapter", specifier = ">=2.3.0" },
-    { name = "openfermion", specifier = ">=1.6.0" },
-    { name = "openfermionpyscf", specifier = ">=0.5" },
     { name = "pylatexenc", specifier = ">=2.10" },
-    { name = "pyscf", specifier = ">=2.5.0" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest-mock", specifier = ">=3.14.0" },
     { name = "pytest-mpl", specifier = ">=0.17.0" },
-    { name = "qbraid", extras = ["qiskit"], specifier = ">=0.11.0" },
     { name = "ruff", specifier = ">=0.14.11" },
     { name = "zuban", specifier = ">=0.4.1" },
 ]

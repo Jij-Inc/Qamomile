@@ -1,5 +1,8 @@
 # Qamomile
 
+[![PyPI version](https://badge.fury.io/py/qamomile.svg)](https://badge.fury.io/py/qamomile)
+![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)
+
 > [!WARNING]
 > This repository tracks an actively developed version of Qamomile.
 > The version currently available on PyPI is not the same as this branch.

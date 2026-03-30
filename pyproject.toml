@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "qamomile"
 dynamic = ["version"]
-description = "Add your description here"
+description = ""
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -53,7 +53,9 @@ dev = [
     "zuban>=0.4.1",
     "griffe>=1.0.0",
     "ommx-pyscipopt-adapter>=2.3.0",
-    "qbraid[qiskit]>=0.11.0",
+]
+
+chemistry = [
     "openfermion>=1.6.0",
     "openfermionpyscf>=0.5",
     "pyscf>=2.5.0",

@@ -25,6 +25,10 @@
 # この章では両方のメソッドを説明し、期待値計算のための**オブザーバブル**を紹介します。
 
 # %%
+# 最新のQamomileをpipからインストールします！
+# # !pip install qamomile
+
+# %%
 import qamomile.circuit as qmc
 import qamomile.observable as qmo
 from qamomile.qiskit import QiskitTranspiler

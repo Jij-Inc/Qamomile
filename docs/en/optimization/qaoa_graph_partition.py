@@ -30,6 +30,10 @@
 # 4. Optimize the variational parameters with a classical optimizer.
 # 5. Sample the optimized circuit and decode the results.
 
+# %%
+# Install the latest Qamomile through pip!
+# # !pip install qamomile
+
 # %% [markdown]
 # ## Problem Formulation
 #
@@ -67,9 +71,9 @@ def _(problem: jm.DecoratedProblem):
     x = problem.BinaryVar(shape=(V,))
 
     # Objective: minimize edges cut between partitions
-    problem += E.rows().map(
-        lambda e: x[e[0]] * (1 - x[e[1]]) + x[e[1]] * (1 - x[e[0]])
-    ).sum()
+    problem += (
+        E.rows().map(lambda e: x[e[0]] * (1 - x[e[1]]) + x[e[1]] * (1 - x[e[0]])).sum()
+    )
 
     # Constraint: equal partition sizes
     problem += problem.Constraint("equal_partition", x.sum() == V / 2)
@@ -83,13 +87,27 @@ problem
 # We use a fixed 8-node graph with 16 edges for reproducibility.
 
 # %%
-import networkx as nx
 import matplotlib.pyplot as plt
+import networkx as nx
 
 num_nodes = 8
 edge_list = [
-    [0, 2], [0, 3], [0, 4], [1, 2], [1, 3], [1, 4], [1, 5], [1, 7],
-    [2, 3], [2, 6], [3, 5], [4, 5], [4, 6], [5, 6], [5, 7], [6, 7],
+    [0, 2],
+    [0, 3],
+    [0, 4],
+    [1, 2],
+    [1, 3],
+    [1, 4],
+    [1, 5],
+    [1, 7],
+    [2, 3],
+    [2, 6],
+    [3, 5],
+    [4, 5],
+    [4, 6],
+    [5, 6],
+    [5, 7],
+    [6, 7],
 ]
 
 G = nx.Graph()
@@ -164,8 +182,8 @@ executable = converter.transpile(transpiler, p=p)
 
 # %%
 import numpy as np
-from scipy.optimize import minimize
 from qiskit_aer import AerSimulator
+from scipy.optimize import minimize
 
 executor = transpiler.executor(backend=AerSimulator(seed_simulator=900))
 
@@ -240,6 +258,7 @@ decoded = converter.decode(sample_result)
 # We must filter samples by feasibility before interpreting them as
 # valid partitions.
 
+
 # %%
 def is_feasible(sample: dict[int, int]) -> bool:
     """Check if a sample satisfies the equal partition constraint."""
@@ -257,7 +276,9 @@ def count_cut_edges(sample: dict[int, int], graph: nx.Graph) -> int:
 
 # %%
 feasible_results = []
-for sample, energy, occ in zip(decoded.samples, decoded.energy, decoded.num_occurrences):
+for sample, energy, occ in zip(
+    decoded.samples, decoded.energy, decoded.num_occurrences
+):
     if is_feasible(sample):
         obj = count_cut_edges(sample, G)
         feasible_results.append((sample, obj, occ))
@@ -265,8 +286,10 @@ for sample, energy, occ in zip(decoded.samples, decoded.energy, decoded.num_occu
 total_feasible = sum(occ for _, _, occ in feasible_results)
 total_samples = sum(decoded.num_occurrences)
 
-print(f"Feasible samples: {total_feasible} / {total_samples} "
-      f"({100 * total_feasible / total_samples:.1f}%)")
+print(
+    f"Feasible samples: {total_feasible} / {total_samples} "
+    f"({100 * total_feasible / total_samples:.1f}%)"
+)
 
 # %% [markdown]
 # ### Best Feasible Solution
@@ -318,8 +341,7 @@ if feasible_results:
 # %%
 if best_sample is not None:
     color_map = [
-        "#FF6B6B" if best_sample.get(i, 0) == 1 else "#4ECDC4"
-        for i in range(num_nodes)
+        "#FF6B6B" if best_sample.get(i, 0) == 1 else "#4ECDC4" for i in range(num_nodes)
     ]
 
     plt.figure(figsize=(5, 5))

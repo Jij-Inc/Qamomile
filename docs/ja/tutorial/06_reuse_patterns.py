@@ -25,6 +25,10 @@
 # 3. **スタブゲート** — 実装本体を持たないゲートで、リソース推定に使います。例えば、グローバー探索アルゴリズムを設計しており、オラクルが約40個のTゲートを使用することはわかっているが、まだ実装していないとします。スタブゲートを使用すると、完全なオラクル実装なしでアルゴリズムの総コストを推定できます。
 
 # %%
+# 最新のQamomileをpipからインストールします！
+# # !pip install qamomile
+
+# %%
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 from qamomile.qiskit import QiskitTranspiler

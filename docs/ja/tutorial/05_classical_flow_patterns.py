@@ -24,6 +24,10 @@
 # - 測定結果に対する`if` / `while`による回路途中の分岐
 
 # %%
+# 最新のQamomileをpipからインストールします！
+# # !pip install qamomile
+
+# %%
 import qamomile.circuit as qmc
 from qamomile.qiskit import QiskitTranspiler
 
@@ -55,6 +59,12 @@ def hadamard_chain(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 hadamard_chain.draw(n=5, fold_loops=False)
 
 # %% [markdown]
+# :::{note}
+# `qmc.range`のループ変数は**単一の変数**でなければなりません（例：`for i in qmc.range(n)`）。
+# `for [i, j] in qmc.range(n)` のようなタプル・リストのアンパックはサポートされておらず、`SyntaxError`が発生します。
+# :::
+
+# %% [markdown]
 # ## `qmc.items`によるスパースな相互作用データの処理
 #
 # QAOAやVQEなど多くの量子アルゴリズムでは、グラフや相互作用マップで決まる特定の量子ビットペアにのみゲートを適用します。全ペアをループするのではなく、相互作用の**辞書**を渡して`qmc.items()`でイテレーションできます。
@@ -81,6 +91,19 @@ def sparse_coupling(
 
     return qmc.measure(q)
 
+
+# %% [markdown]
+# :::{note}
+# `qmc.items`は以下のループパターンをサポートしています：
+#
+# - `for key, value in qmc.items(d)` — スカラーキー
+# - `for (i, j), value in qmc.items(d)` — タプルキー
+# - `for key, value in d.items()` — メソッド呼び出し形式
+#
+# **value**側は単一の変数でなければなりません。value位置でのタプルアンパック
+# （例：`for _, (i, j) in qmc.items(d)`）は**サポートされておらず**、`SyntaxError`が発生します。
+# 同様に、`for pair in qmc.items(d)` のような単一ターゲットパターンもサポートされていません。
+# :::
 
 # %% [markdown]
 # ## `transpiler.to_circuit()`による確認
