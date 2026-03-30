@@ -15,9 +15,9 @@
 # %% [markdown]
 # # Qamomile v0.10.0
 #
-# Qamomile v0.10.0 is a ground-up rebuild of the circuit programming layer. The amount of changes from v0.9.0 is massive, so rather than listing what changed, this page describes **what v0.10.0 can do**.
+# Qamomile v0.10.0 is a ground-up rebuild of the quantum programming layer. The amount of changes from v0.9.0 is massive, so rather than listing what changed, this page describes **what v0.10.0 can do**.
 #
-# With v0.10.0, you can write quantum programs as typed Python functions with classical control flow (loops, conditionals, sparse iteration), perform symbolic resource estimation — even for circuits containing black-box oracles — and transpile the same program to multiple quantum SDKs (Qiskit, QURI Parts and CUDA-Q for now).
+# With v0.10.0, you can write quantum programs as typed Python functions with classical control flow (loops, conditionals, sparse iteration), perform symbolic resource estimation — even for programs containing black-box oracles — and transpile the same programs to multiple quantum SDKs (Qiskit, QURI Parts and CUDA-Q for now).
 #
 # See the [tutorials](../tutorial) for hands-on guides.
 # ```
@@ -25,7 +25,7 @@
 # ````
 
 # %% [markdown]
-# ## Circuit Frontend: `@qkernel`
+# ## Frontend: `@qkernel`
 #
 # The central API is the `@qkernel` decorator. You write a normal Python function with **type-annotated** arguments and return values, and Qamomile traces it into an intermediate representation (IR) that can be analyzed, visualized, and transpiled to any supported quantum SDK such as Qiskit. Although this IR is a key of Qamomile's architecture, you don't need to interact with it directly — just write Python code with `@qkernel` and let the transpiler handle the rest.
 
@@ -38,7 +38,7 @@
 #
 # Available gates include H, X, Y, Z, S, T, RX, RY, RZ, RZZ, CX, CZ, CCX, CP, SWAP, and more. Measurement is done with `qmc.measure()`.
 #
-# See [Your First Quantum Kernel](../tutorial/your-first-quantum-kernel), [Parametrized Quantum Kernels](../tutorial/parametrized-quantum-kernels), [Execution Models: sample() vs run()](../tutorial/execution-models) and [Reuse Patterns: QKernel Composition and Composite Gates](../tutorial/reuse-patterns) for more details.
+# See [Your First Quantum Kernel](../tutorial/your-first-quantum-kernel), [Parametrized Quantum Kernels](../tutorial/parameterized-kernels), [Execution Models: sample() vs run()](../tutorial/execution-models) and [Reuse Patterns: QKernel Composition and Composite Gates](../tutorial/reuse-patterns) for more details.
 
 # %% [markdown]
 # ### Classical Control Flow
@@ -79,9 +79,9 @@ ghz_state.draw(n=4, fold_loops=False)
 # %% [markdown]
 # ## Resource Estimation
 #
-# Qamomile provides symbolic resource estimation. Call `estimate_resources()` on any qkernel to get qubit counts and gate breakdowns **without executing** the circuit. Those estimates are symbolic expressions in terms of the input parameters, so you can analyze how resources scale with the input parameters. You can also substitute specific values to get concrete estimates for a given input size.
+# Qamomile provides symbolic resource estimation. Call `estimate_resources()` on any qkernel to get qubit counts and gate breakdowns **without executing** the qkernel. Those estimates are symbolic expressions in terms of the input parameters, so you can analyze how resources scale with the input parameters. You can also substitute specific values to get concrete estimates for a given input size.
 #
-# Furthermore, the estimation can be done with black-box oracles, defined by `@composite_gate` with `stub=True`. This allows you to define your qkernel without actual implementation of the oracle, and still get resource estimates that include the oracle as black box with specified resource costs and the number of queries to it.
+# Furthermore, the estimation can be done with black-box oracles, defined by `@composite_gate` with `stub=True`. This allows you to define your qkernel without actual implementation of the oracle, and still get resource estimates that include the oracle as black-box with specified resource costs and the number of queries to it.
 #
 # See [Resource Estimation](../tutorial/resource-estimation) and [Reuse Patterns: QKernel Composition and Composite Gates](../tutorial/reuse-patterns) for more details.
 
@@ -97,7 +97,7 @@ print("two-qubit gates at n=100:", est.substitute(n=100).gates.two_qubit)
 # %% [markdown]
 # ## Multi-Quantum SDK Transpilation
 #
-# Write your circuit once with `@qkernel`, then transpile to any supported quantum SDK. Qamomile v0.10.0 has a preset executor for each supported quantum SDK. Just call `execute()` on the transpiled circuit with the preset executor. Of course, you can also write your own custom executors for controlling the detailed or use actual quantum hardware.
+# Write your qkernel once with `@qkernel`, then transpile to any supported quantum SDK. Qamomile v0.10.0 has a preset executor for each supported quantum SDK. Just call `sample()`/`run()` on the transpiled qkernel with the preset executor. Of course, you can also write your own custom executors for controlling the detailed and accessing actual quantum hardware.
 #
 # | Backend | Module | Transpiler | Default Execution |
 # |---------|--------|-----------|-----------|
@@ -116,7 +116,7 @@ print("two-qubit gates at n=100:", est.substitute(n=100).gates.two_qubit)
 # pip install "qamomile[qbraid]"       # qBraid integration for Qiskit
 # ```
 #
-# See [Execution Models: sample() vs run()](../tutorial/execution-models) for more details.
+# See [Execution Models: sample() vs run()](../tutorial/execution-models) and [qBraid Support - QBraidExecutor](../collaboration/qbraid-executor)for more details.
 
 # %%
 from qamomile.qiskit import QiskitTranspiler
@@ -162,4 +162,3 @@ qft_example.draw(expand_composite=True)
 # ## Learn More
 # - [Tutorials](../tutorial) to introduce you to Qamomile with hands-on examples.
 # - [GitHub Repository](https://github.com/Jij-Inc/Qamomile)
-# - [Full Changelog: v0.9.0 → v0.10.0](https://github.com/Jij-Inc/Qamomile/compare/v0.9.0...v0.10.0)
