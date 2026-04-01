@@ -229,22 +229,23 @@ class QuantumFunction(torch.autograd.Function):
         ctx.save_for_backward(inputs, weights)
         # Evaluate the circuit for each sample in the batch
         batch_results = []
+        weights_np = weights.detach().cpu().numpy()
         for inp in inputs:
-            expvals = quantum_forward(inp.detach().numpy(), weights.detach().numpy())
+            expvals = quantum_forward(inp.detach().cpu().numpy(), weights_np)
             batch_results.append(expvals)
-        return torch.tensor(np.array(batch_results), dtype=torch.float32)
+        return torch.tensor(np.array(batch_results), dtype=inputs.dtype, device=inputs.device)
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         inputs, weights = ctx.saved_tensors
-        weights_np = weights.detach().numpy()
+        weights_np = weights.detach().cpu().numpy()
 
         grad_inputs = torch.zeros_like(inputs)
-        grad_weights = torch.zeros(weights.shape[0], dtype=torch.float32)
+        grad_weights = torch.zeros(weights.shape[0], dtype=weights.dtype, device=weights.device)
 
         for b, inp in enumerate(inputs):
-            inp_np = inp.detach().numpy()
-            g_out = grad_output[b].numpy()  # shape (N_QUBITS,)
+            inp_np = inp.detach().cpu().numpy()
+            g_out = grad_output[b].detach().cpu().numpy()  # shape (N_QUBITS,)
 
             # Gradient w.r.t. weights
             for k in range(len(weights_np)):
@@ -327,11 +328,17 @@ def subset_dataset(dataset, classes, n_per_class):
     """Extract a random subset from the specified classes."""
     images, labels = [], []
     rng_data = np.random.default_rng(0)
+    # Use dataset.targets to find indices without loading/transforming all images
+    targets = dataset.targets
+    if isinstance(targets, torch.Tensor):
+        targets = targets.numpy()
+    else:
+        targets = np.array(targets)
     for new_label, orig_label in enumerate(classes):
-        indices = [i for i, (_, y) in enumerate(dataset) if y == orig_label]
-        chosen = rng_data.choice(indices, size=n_per_class, replace=False)
+        class_indices = np.where(targets == orig_label)[0]
+        chosen = rng_data.choice(class_indices, size=n_per_class, replace=False)
         for idx in chosen:
-            img, _ = dataset[idx]
+            img, _ = dataset[int(idx)]
             images.append(img)
             labels.append(new_label)
     return torch.stack(images), torch.tensor(labels)
