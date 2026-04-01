@@ -30,6 +30,9 @@ project:
       file: vqa/index.md
       children:
         - file: vqa/qaoa_maxcut.ipynb
+    - title: Algorithm
+      children:
+        - file: algorithm/quantum_kernel_classification.ipynb
     - title: 最適化
       file: optimization/index.md
       children:
