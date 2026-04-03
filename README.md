@@ -160,10 +160,10 @@ This README focuses on the current circuit-first API, but optimization support r
 
 ## Learn More
 
-- Documentation: [https://jij-inc.github.io/Qamomile/](https://jij-inc.github.io/Qamomile/)
-- Tutorials: [docs/en/index.md](docs/en/index.md) and [docs/ja/index.md](docs/ja/index.md)
-- API reference: [https://jij-inc.github.io/Qamomile/api/](https://jij-inc.github.io/Qamomile/api/)
-- Repository: [https://github.com/Jij-Inc/Qamomile](https://github.com/Jij-Inc/Qamomile)
+- Documentation: https://jij-inc-qamomile.readthedocs-hosted.com/latest/en/
+- Tutorials: https://jij-inc-qamomile.readthedocs-hosted.com/latest/en/tutorial/ for En and https://jij-inc-qamomile.readthedocs-hosted.com/latest/ja/tutorial/ for JA
+- API reference: https://jij-inc-qamomile.readthedocs-hosted.com/latest/en/api/
+- Repository: https://github.com/Jij-Inc/Qamomile
 
 ## Contributing
 
