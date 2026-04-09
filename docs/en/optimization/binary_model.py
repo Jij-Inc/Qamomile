@@ -413,12 +413,12 @@ assert energy_spin == energy
 # Define the model in OMMX form.
 from ommx.v1 import DecisionVariable, Instance
 
-x_1 = DecisionVariable.binary(1, name="x_1")
-x_3 = DecisionVariable.binary(3, name="x_3")
+ommx_x_1 = DecisionVariable.binary(1, name="x_1")
+ommx_x_3 = DecisionVariable.binary(3, name="x_3")
 
 instance = Instance.from_components(
-    decision_variables=[x_1, x_3],
-    objective=x_1 + 2 * x_3 + 3 * x_1 * x_3 + 5,
+    decision_variables=[ommx_x_1, ommx_x_3],
+    objective=ommx_x_1 + 2 * ommx_x_3 + 3 * ommx_x_1 * ommx_x_3 + 5,
     constraints=[],
     sense=Instance.MINIMIZE,
 )
