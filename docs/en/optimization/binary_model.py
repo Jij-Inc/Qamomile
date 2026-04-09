@@ -461,7 +461,7 @@ for original_index1, original_index2 in qubo_from_ommx.keys():
             f"model_from_ommx.coefficients[(new_index1, new_index2)] = {model_from_ommx.coefficients[(new_index1, new_index2)]}"
         )
     print(
-        f"qubo_from_ommx[(original_index, )] = {qubo_from_ommx[(original_index1, original_index2)]}"
+        f"qubo_from_ommx[(original_index1, original_index2)] = {qubo_from_ommx[(original_index1, original_index2)]}"
     )
 
 # %% [markdown]
