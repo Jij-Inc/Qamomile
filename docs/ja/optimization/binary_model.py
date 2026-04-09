@@ -143,6 +143,7 @@ assert spin_naive_model.coefficients == {
 
 # %% [markdown]
 # spin変数とbinary変数の関係は、spin変数を$s$、binary変数を$x$とすると、$s = 1 - 2x$という関係があります。このため、
+#
 # $$
 # \begin{align*}
 # x_1 + 2 x_3 + 3 x_1 x_3 + 5
@@ -151,6 +152,7 @@ assert spin_naive_model.coefficients == {
 # &= 0.75 s_1 s_3 - 1.25 s_1 - 1.75 s_3 + 7.25
 # \end{align*}
 # $$
+#
 # が得られていることがわかります。`BinaryModel.change_vartype`では添え字は元の`BinaryModel`の添え字がそのまま使われることにも注意してください。
 
 # %% [markdown]
@@ -160,6 +162,7 @@ assert spin_naive_model.coefficients == {
 # %% [markdown]
 # ### QUBOからの`BinaryModel`の構築 (`from_qubo`)
 # `from_qubo`関数は`qubo`引数としてQUBOの係数を表す辞書形式のデータを取ります。キーは変数のインデックスのタプル、値はその変数の係数となっています。また、`constant`引数として定数項を取ります。例として以下のようなQUBO行列を考えてみましょう。
+#
 # $$
 # \begin{bmatrix}
 # 1 & 0.5 & 0 \\
@@ -167,10 +170,14 @@ assert spin_naive_model.coefficients == {
 # 0 & 0 & 3
 # \end{bmatrix}
 # $$
+#
 # このQUBO行列は、以下のような目的関数を表しています。
+#
 # $$
 # 1 x_0 + 2 x_1 + 3 x_2 + 0.5 x_0 x_1 + 1 x_1 x_2
 # $$
+#
+
 
 # %%
 qubo = {
@@ -204,11 +211,13 @@ assert qubo_model.coefficients == {
 # %% [markdown]
 # ### HUBOからの`BinaryModel`の構築 (`from_hubo`)
 # `from_hubo`関数は`hubo`引数としてHUBOの係数を表す辞書形式のデータを取ります。キーは変数のインデックスのタプル、値はその変数の係数となっています。また、`constant`引数として定数項を取ります。例として以下のようなHUBOの係数を考えてみましょう。
+#
 # $$
 # \begin{equation*}
 # 1 x_0 + 2 x_1 + 3 x_2 + 0.5 x_0 x_1 + 1 x_1 x_2 + 0.1 x_0 x_1 x_2 \\
 # \end{equation*}
 # $$
+#
 
 # %%
 hubo = {
@@ -277,9 +286,11 @@ assert ising_model.coefficients == {
 # %% [markdown]
 # ### 正規化
 # `normalize_by_abs_max`関数は、モデルの係数を絶対値の最大値で割ることで正規化します。最初に使ったモデル$x_1 + 2 x_3 + 3 x_1 x_3 + 5$ (`naive_expr`)を正規化してみましょう。係数の最大値は3であるため、正規化されたモデルは
+#
 # $$
 # \frac{1}{3} x_1 + \frac{2}{3} x_3 + 1 x_1 x_3 + \frac{5}{3}
 # $$
+#
 # となります。
 
 # %%
@@ -302,23 +313,29 @@ assert normalized_model.quad == {(0, 1): 1.0}
 
 # %% [markdown]
 # `normalize_by_rms`関数は、モデルの係数をルート平均二乗で割ることで正規化します。ルート平均二乗は以下のように計算されます。
+#
 # $$
 # W = \sqrt{\frac{1}{\lvert E_2 \rvert} \sum_{i, j} (w_{(i, j)})^2 + \frac{1}{\lvert E_1 \rvert} \sum_i (w_i)^2}
 # $$
+#
 # ここで、$w_{(i, j)}$は二次項の係数、$w_i$は線形項の係数、$E_2$は二次項の数、$E_1$は線形項の数です。最初に使ったモデル$x_1 + 2 x_3 + 3 x_1 x_3 + 5$ (`naive_expr`)をルート平均二乗で正規化してみましょう。この時、
 # - $E_1$ = 2
 # - $E_2$ = 1
 # - $\sum_i (w_i)^2$ = $1^2 + 2^2$ = 5
 # - $\sum_{i, j} (w_{(i, j)})^2$ = $3^2$ = 9
 # であるため、ルート平均二乗は
+#
 # $$
 # \sqrt{5 / 2 + 9 / 1} = \sqrt{2.5 + 9} = \sqrt{11.5} \approx 3.391
 # $$
+#
 # となります。したがって、
+#
 # $$
 # \frac{1}{3.391} x_1 + \frac{2}{3.391} x_3 + \frac{3}{3.391} x_1 x_3 + \frac{5}{3.391}
 # \approx 0.295 x_1 + 0.590 x_3 + 0.884 x_1 x_3 + 1.475
 # $$
+#
 # となります。
 
 # %%
@@ -342,9 +359,11 @@ assert normalized_model_rms.quad == {(0, 1): 3.0 / np.sqrt(11.5)}
 # %% [markdown]
 # ### 目的関数(エネルギー)計算
 # `calc_energy`関数は、与えられた変数の値に対して目的関数の値(エネルギー)を計算します。例えば、モデル$x_1 + 2 x_3 + 3 x_1 x_3 + 5$ (`naive_expr`)に対して、$x_1 = 1$、$x_3 = 0$の時のエネルギーを計算してみましょう。この時、目的関数の値は
+#
 # $$
 # x_1 + 2 x_3 + 3 x_1 x_3 + 5 = 1 + 2 \cdot 0 + 3 \cdot 1 \cdot 0 + 5 = 6
 # $$
+#
 # となります。
 # `calc_energy`関数は引数として**`BinaryModel`の変数順序での`list[int]`**を取ります。例えば、上の例では、`BinaryModel`の変数の順序は`x_1`が0番目、`x_3`が1番目であるため、`[1, 0]`のように渡す必要があります。このときに`BinaryModel.index_new_to_origin`を使うことで、機械的に`BinaryModel`の変数順序での`list[int]`を作ることができます。
 
@@ -392,7 +411,7 @@ assert energy_spin == energy
 
 # %% [markdown]
 # ## `OMMX`からの`BinaryModel`の構築
-# 最後に、`OMMX`から`BinaryModel`を構築する方法を紹介します。[`OMMX`](https://ommx-ja-book.readthedocs.io/ja/latest/introduction.html)（Open Mathematical prograMming eXchange; オミキス）とは、数理最適化を実務に応用する過程で必要となる、ソフトウェア間や人間同士のデータ交換を実現するためのオープンなデータ形式と、それを操作するためのSDKの総称です。Qamomileの最適化機能ではOMMXのデータ形式をサポートしているため、用意されている量子アルゴリズムを使う場合にあえて自身で変換を行う必要はありませんが、自身でカスタムしたアルゴリズムを使う時に便利であるため、ここでも紹介しておきます。ここでは、今までの例で使ってきたモデルをOMMXの形式で持っているとして、それを`BinaryModel`に変換してみましょう。
+# 最後に、`OMMX`から`BinaryModel`を構築する方法を紹介します。[`OMMX`](https://jij-inc.github.io/ommx/ja/introduction.html)（Open Mathematical prograMming eXchange; オミキス）とは、数理最適化を実務に応用する過程で必要となる、ソフトウェア間や人間同士のデータ交換を実現するためのオープンなデータ形式と、それを操作するためのSDKの総称です。Qamomileの最適化機能ではOMMXのデータ形式をサポートしているため、用意されている量子アルゴリズムを使う場合にあえて自身で変換を行う必要はありませんが、自身でカスタムしたアルゴリズムを使う時に便利であるため、ここでも紹介しておきます。ここでは、今までの例で使ってきたモデルをOMMXの形式で持っているとして、それを`BinaryModel`に変換してみましょう。
 #
 # まずはOMMXの形式でインスタンスを作成します。ここでは簡単なインスタンスを作るためにOMMXそのものの機能でコンポーネントからインスタンスを定義しますが、これは簡単な説明の準備であり、実際に使用する場合にはすでに用意されているパッケージあるいは[JijModeling](https://jij-inc-jijmodeling-tutorials-ja.readthedocs-hosted.com/ja/latest/introduction.html)と呼ばれるPythonコードを使用して数理モデルを記述するための数理最適化モデラーを用いて、インスタンス作成を行います。
 
@@ -437,4 +456,4 @@ assert model_from_ommx.coefficients == naive_model.coefficients
 # %% [markdown]
 # ## 関連トピック
 # - [QAOAでMaxCutを解く: 回路をゼロから構築する](./../../vqa/qaoa-maxcut): networkxから作ったランダムグラフからQUBO辞書を作成し、直接`BinaryModel`を定義した上でQAOAを適用する例
-# - [QAOAによるグラフ分割](./../qaoa-graph-partition): OMMXインスタンスからQamomileの`QAOAConverter`を用いてQAOAを適用する例 (直接`BinaryModel`を使うのは正規化の部分だけですが、実際にOMMXインスタンスを使ったend-to-endな例です。)
+# - [QAOAによるグラフ分割](./../../optimization/qaoa-graph-partition): OMMXインスタンスからQamomileの`QAOAConverter`を用いてQAOAを適用する例 (直接`BinaryModel`を使うのは正規化の部分だけですが、実際にOMMXインスタンスを使ったend-to-endな例です。)

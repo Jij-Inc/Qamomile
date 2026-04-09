@@ -140,6 +140,7 @@ assert spin_naive_model.coefficients == {
 
 # %% [markdown]
 # Binary and spin variables are related by $s = 1 - 2x$, where $s$ is the spin variable and $x$ is the binary variable. Substituting this into our expression gives:
+#
 # $$
 # \begin{align*}
 # x_1 + 2 x_3 + 3 x_1 x_3 + 5
@@ -148,6 +149,7 @@ assert spin_naive_model.coefficients == {
 # &= 0.75 s_1 s_3 - 1.25 s_1 - 1.75 s_3 + 7.25
 # \end{align*}
 # $$
+#
 # which matches the values printed above. Also note that `BinaryModel.change_vartype` keeps the (re-labeled) indices of the original `BinaryModel` unchanged.
 
 # %% [markdown]
@@ -157,6 +159,7 @@ assert spin_naive_model.coefficients == {
 # %% [markdown]
 # ### Building from QUBO (`from_qubo`)
 # `from_qubo` takes a `qubo` argument: a dictionary whose keys are tuples of variable indices and whose values are the corresponding coefficients. It also takes a `constant` argument for the constant term. As an example, consider the following QUBO matrix:
+#
 # $$
 # \begin{bmatrix}
 # 1 & 0.5 & 0 \\
@@ -164,10 +167,13 @@ assert spin_naive_model.coefficients == {
 # 0 & 0 & 3
 # \end{bmatrix}
 # $$
+#
 # which encodes the objective function
+#
 # $$
 # 1 x_0 + 2 x_1 + 3 x_2 + 0.5 x_0 x_1 + 1 x_1 x_2
 # $$
+#
 
 # %%
 qubo = {
@@ -201,11 +207,13 @@ assert qubo_model.coefficients == {
 # %% [markdown]
 # ### Building from HUBO (`from_hubo`)
 # `from_hubo` takes a `hubo` argument: a dictionary whose keys are tuples of variable indices and whose values are the corresponding coefficients, plus a `constant` argument for the constant term. As an example, consider the following HUBO:
+#
 # $$
 # \begin{equation*}
 # 1 x_0 + 2 x_1 + 3 x_2 + 0.5 x_0 x_1 + 1 x_1 x_2 + 0.1 x_0 x_1 x_2 \\
 # \end{equation*}
 # $$
+#
 
 # %%
 hubo = {
@@ -274,9 +282,11 @@ assert ising_model.coefficients == {
 # %% [markdown]
 # ### Normalization
 # `normalize_by_abs_max` rescales every coefficient by the largest absolute value. Let's normalize the first model we built, $x_1 + 2 x_3 + 3 x_1 x_3 + 5$ (`naive_expr`). The largest coefficient in absolute value is 3, so the normalized model becomes:
+#
 # $$
 # \frac{1}{3} x_1 + \frac{2}{3} x_3 + 1 x_1 x_3 + \frac{5}{3}
 # $$
+#
 
 # %%
 normalized_model = naive_model.normalize_by_abs_max(replace=False)
@@ -298,9 +308,11 @@ assert normalized_model.quad == {(0, 1): 1.0}
 
 # %% [markdown]
 # `normalize_by_rms` rescales every coefficient by the following root-mean-square value:
+#
 # $$
 # W = \sqrt{\frac{1}{\lvert E_2 \rvert} \sum_{i, j} (w_{(i, j)})^2 + \frac{1}{\lvert E_1 \rvert} \sum_i (w_i)^2}
 # $$
+#
 # where $w_{(i, j)}$ is a quadratic-term coefficient, $w_i$ is a linear-term coefficient, $E_2$ is the set of quadratic terms, and $E_1$ is the set of linear terms. Let's apply it to the same `naive_expr` model. We have
 # - $E_1$ = 2
 # - $E_2$ = 1
@@ -308,14 +320,18 @@ assert normalized_model.quad == {(0, 1): 1.0}
 # - $\sum_{i, j} (w_{(i, j)})^2$ = $3^2$ = 9
 #
 # so the RMS value is
+#
 # $$
 # \sqrt{5 / 2 + 9 / 1} = \sqrt{2.5 + 9} = \sqrt{11.5} \approx 3.391
 # $$
+#
 # and the normalized model becomes
+#
 # $$
 # \frac{1}{3.391} x_1 + \frac{2}{3.391} x_3 + \frac{3}{3.391} x_1 x_3 + \frac{5}{3.391}
 # \approx 0.295 x_1 + 0.590 x_3 + 0.884 x_1 x_3 + 1.475
 # $$
+#
 
 # %%
 normalized_model_rms = naive_model.normalize_by_rms(replace=False)
@@ -338,9 +354,11 @@ assert normalized_model_rms.quad == {(0, 1): 3.0 / np.sqrt(11.5)}
 # %% [markdown]
 # ### Objective (energy) evaluation
 # `calc_energy` evaluates the objective function (the "energy") for a given variable assignment. Let's compute the energy of $x_1 + 2 x_3 + 3 x_1 x_3 + 5$ (`naive_expr`) at $x_1 = 1$, $x_3 = 0$. The expected value is
+#
 # $$
 # x_1 + 2 x_3 + 3 x_1 x_3 + 5 = 1 + 2 \cdot 0 + 3 \cdot 1 \cdot 0 + 5 = 6
 # $$
+#
 # `calc_energy` expects a **`list[int]` in the variable order used by `BinaryModel`**. In our example, `BinaryModel` places `x_1` at index 0 and `x_3` at index 1, so we must pass `[1, 0]`. Using `BinaryModel.index_new_to_origin`, we can build that list mechanically from a solution in the original index space.
 
 # %%
@@ -387,7 +405,7 @@ assert energy_spin == energy
 
 # %% [markdown]
 # ## Building a `BinaryModel` from `OMMX`
-# Finally, let's look at how to build a `BinaryModel` from an [`OMMX`](https://ommx.readthedocs.io/en/latest/introduction.html) (Open Mathematical prograMming eXchange) instance. OMMX is an open data format — together with an SDK for manipulating it — designed to exchange mathematical optimization data between software systems and between people. Qamomile's optimization module understands OMMX directly, so if you stick to the built-in quantum algorithms you don't need to perform this conversion yourself. Still, it comes in handy when you build custom algorithms, so let's cover it here. We'll take the same model we've been using throughout this tutorial, assume it is given as an OMMX instance, and convert it into a `BinaryModel`.
+# Finally, let's look at how to build a `BinaryModel` from an [`OMMX`](https://jij-inc.github.io/ommx/en/introduction.html) (Open Mathematical prograMming eXchange) instance. OMMX is an open data format — together with an SDK for manipulating it — designed to exchange mathematical optimization data between software systems and between people. Qamomile's optimization module understands OMMX directly, so if you stick to the built-in quantum algorithms you don't need to perform this conversion yourself. Still, it comes in handy when you build custom algorithms, so let's cover it here. We'll take the same model we've been using throughout this tutorial, assume it is given as an OMMX instance, and convert it into a `BinaryModel`.
 #
 # First, let's create the OMMX instance. To keep the example self-contained we construct it from low-level OMMX components, but in real use cases you would typically rely on an existing packaged instance or on [JijModeling](https://jij-inc-jijmodeling-tutorials-en.readthedocs-hosted.com/en/latest/introduction.html), a Python-based mathematical modeler for describing optimization problems.
 
@@ -432,4 +450,4 @@ assert model_from_ommx.coefficients == naive_model.coefficients
 # %% [markdown]
 # ## Related topics
 # - [Solving MaxCut with QAOA: Building the Circuit from Scratch](./../../vqa/qaoa-maxcut): an example that creates a QUBO dictionary from a random graph built with networkx, defines a `BinaryModel` directly, and applies QAOA.
-# - [QAOA for Graph Partitioning](./../qaoa-graph-partition): an example that applies QAOA to an OMMX instance using Qamomile's `QAOAConverter`. It only touches `BinaryModel` directly for the normalization step, but it's a realistic end-to-end example based on an OMMX instance.
+# - [QAOA for Graph Partitioning](./../../optimization/qaoa-graph-partition): an example that applies QAOA to an OMMX instance using Qamomile's `QAOAConverter`. It only touches `BinaryModel` directly for the normalization step, but it's a realistic end-to-end example based on an OMMX instance.
