@@ -18,6 +18,10 @@
 # This tutorial walks through `BinaryModel`, the core class in Qamomile's optimization module for describing unconstrained optimization problems over binary variables. `BinaryModel` supports both `binary` (0/1) and `spin` (-1/1) variable types, and the two representations can be converted into each other through the `change_vartype` method.
 
 # %%
+# Install the latest Qamomile through pip!
+# # !pip install qamomile
+
+# %%
 import numpy as np
 
 from qamomile.optimization.binary_model.expr import VarType, binary

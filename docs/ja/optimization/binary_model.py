@@ -18,6 +18,10 @@
 # 本チュートリアルでは、Qamomileの最適化機能にある`BinaryModel`の使い方について説明します。Qamomileの`BinaryModel`では、二値変数を用いた制約なし最適化問題を定義することができます。特に、変数のタイプとして`binary`と`spin`の両方をサポートしており、`BinaryModel`のメンバ関数`change_vartype`を使うことで、これらのタイプを相互に変換することもできます。
 
 # %%
+# Install the latest Qamomile through pip!
+# # !pip install qamomile
+
+# %%
 import numpy as np
 
 from qamomile.optimization.binary_model.expr import VarType, binary
