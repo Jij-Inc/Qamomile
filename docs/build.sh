@@ -121,6 +121,7 @@ build_lang() {
     fi
     cd ..
     uv run python scripts/inject_colab_launch.py "$lang"
+    uv run python scripts/inject_rtd_search.py "$lang"
     info "${lang} documentation built: ${lang}/_build/html/index.html"
 }
 
