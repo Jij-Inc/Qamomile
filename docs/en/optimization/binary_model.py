@@ -458,7 +458,7 @@ for original_index1, original_index2 in qubo_from_ommx.keys():
         new_index1 = model_from_ommx.index_origin_to_new[original_index1]
         new_index2 = model_from_ommx.index_origin_to_new[original_index2]
         print(
-            f"model_from_ommx.coefficients[(original_index1, original_index2)] = {model_from_ommx.coefficients[(new_index1, new_index2)]}"
+            f"model_from_ommx.coefficients[(new_index1, new_index2)] = {model_from_ommx.coefficients[(new_index1, new_index2)]}"
         )
     print(
         f"qubo_from_ommx[(original_index, )] = {qubo_from_ommx[(original_index1, original_index2)]}"
