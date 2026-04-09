@@ -15,7 +15,7 @@
 # %% [markdown]
 # # How to use `BinaryModel`
 #
-# This tutorial walks through [`BinaryModel`](./../../qamomile/optimization/binary_model/model.py), the core class in Qamomile's optimization module for describing unconstrained optimization problems over binary variables. `BinaryModel` supports both `binary` (0/1) and `spin` (-1/1) variable types, and the two representations can be converted into each other through the `change_vartype` method.
+# This tutorial walks through `BinaryModel`, the core class in Qamomile's optimization module for describing unconstrained optimization problems over binary variables. `BinaryModel` supports both `binary` (0/1) and `spin` (-1/1) variable types, and the two representations can be converted into each other through the `change_vartype` method.
 
 # %%
 import numpy as np
