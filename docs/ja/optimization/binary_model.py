@@ -157,7 +157,7 @@ assert spin_naive_model.coefficients == {
 
 # %% [markdown]
 # ## QUBO/HUBO/Isingからの`BinaryModel`の構築
-# ここまでで、自身で`BinaryExpr`を定義して、それを元に`BinaryModel`を作る方法を紹介しました。しかし実際には、一般にQamomileの`BinaryExpr`でユーザーが数理モデルを保存していることは考えづらく、`BinaryExpr`を毎度構成するのは手間になるためです。そこで、`BinaryModel`には、QUBO/HUBO/Isingの形式から`BinaryModel`を構築するためのクラスメソッドが用意されています。ここでは、これらについて一つずつ見ていきます。
+# ここまでで、自身で`BinaryExpr`を定義して、それを元に`BinaryModel`を作る方法を紹介しました。しかし実際には、一般にQamomileの`BinaryExpr`でユーザーが数理モデルを保存していることは考えづらく、`BinaryExpr`を毎度構成するのは手間になるためです。そこで、`BinaryModel`には、QUBO/HUBO/Isingの形式から`BinaryModel`を構築するためのクラスメソッドが用意されています。ここでは、これらについて一つずつ見ていきます。なお，これらのクラスメソッドを使った場合にも内部では`BinaryExpr`を経由して`BinaryModel`が構築されていまず。簡単のためにここから変数の番号を連番で振って説明しますが、実際には変数の番号は連番である必要はなく、ここまでで見たように`BinaryModel`の初期化の際に変数の番号は0-originの連続した整数に変換されます。元の変数を取得するためには、元の変数との対応のためには`index_new_to_origin`や`index_origin_to_new`を利用してください。
 
 # %% [markdown]
 # ### QUBOからの`BinaryModel`の構築 (`from_qubo`)
@@ -447,6 +447,28 @@ print("higher:", model_from_ommx.higher)
 assert model_from_ommx.higher == naive_model.higher
 print("coefficients:", model_from_ommx.coefficients)
 assert model_from_ommx.coefficients == naive_model.coefficients
+
+# %% [markdown]
+# ここまでと同じく、変数の番号は`BinaryModel`の初期化時に0-originの連続した整数になっています。このため、正しい対応を取るためには、`index_new_to_origin`や`index_origin_to_new`を利用してください。
+
+# %%
+print("index_new_to_origin:", model_from_ommx.index_new_to_origin)
+for original_index1, original_index2 in qubo_from_ommx.keys():
+    print("---")
+    if original_index1 == original_index2:
+        new_index = model_from_ommx.index_origin_to_new[original_index1]
+        print(
+            f"model_from_ommx.coefficients[(new_index, )] = {model_from_ommx.coefficients[(new_index,)]}"
+        )
+    else:
+        new_index1 = model_from_ommx.index_origin_to_new[original_index1]
+        new_index2 = model_from_ommx.index_origin_to_new[original_index2]
+        print(
+            f"model_from_ommx.coefficients[(original_index1, original_index2)] = {model_from_ommx.coefficients[(new_index1, new_index2)]}"
+        )
+    print(
+        f"qubo_from_ommx[(original_index, )] = {qubo_from_ommx[(original_index1, original_index2)]}"
+    )
 
 
 # %% [markdown]

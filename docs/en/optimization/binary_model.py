@@ -154,7 +154,7 @@ assert spin_naive_model.coefficients == {
 
 # %% [markdown]
 # ## Building a `BinaryModel` from QUBO, HUBO, or Ising
-# So far we've built `BinaryModel` objects by hand through `BinaryExpr`. In practice, users rarely keep their models in `BinaryExpr` form, and rebuilding one every time would be tedious. To make this easier, `BinaryModel` provides class methods for constructing models directly from QUBO, HUBO, and Ising representations. Let's go through them one at a time.
+# So far we've built `BinaryModel` objects by hand through `BinaryExpr`. In practice, users rarely keep their models in `BinaryExpr` form, and rebuilding one every time would be tedious. To make this easier, `BinaryModel` provides class methods for constructing models directly from QUBO, HUBO, and Ising representations. Let's go through them one at a time. Note that these class methods internally build a `BinaryExpr` and feed it into the `BinaryModel` constructor, so although we will use 0-origin consecutive integers for variable indices in the examples below, the class methods themselves do not require that. As mentioned above, `BinaryModel` re-labels variables and `index_new_to_origin` / `index_origin_to_new` can be used to track the mapping between the original and re-labeled indices.
 
 # %% [markdown]
 # ### Building from QUBO (`from_qubo`)
@@ -442,6 +442,27 @@ assert model_from_ommx.higher == naive_model.higher
 print("coefficients:", model_from_ommx.coefficients)
 assert model_from_ommx.coefficients == naive_model.coefficients
 
+# %% [markdown]
+# As same as the previous discussion, the variable indices in `BinaryModel` are re-labeled from the original OMMX instance, so the keys in `model_from_ommx.coefficients` do not match those in `qubo_from_ommx`. However, the mapping between the original and re-labeled indices is available through `model_from_ommx.index_new_to_origin` and `model_from_ommx.index_origin_to_new`, so you can use them to verify that the coefficients match correctly.
+
+# %%
+print("index_new_to_origin:", model_from_ommx.index_new_to_origin)
+for original_index1, original_index2 in qubo_from_ommx.keys():
+    print("---")
+    if original_index1 == original_index2:
+        new_index = model_from_ommx.index_origin_to_new[original_index1]
+        print(
+            f"model_from_ommx.coefficients[(new_index, )] = {model_from_ommx.coefficients[(new_index,)]}"
+        )
+    else:
+        new_index1 = model_from_ommx.index_origin_to_new[original_index1]
+        new_index2 = model_from_ommx.index_origin_to_new[original_index2]
+        print(
+            f"model_from_ommx.coefficients[(original_index1, original_index2)] = {model_from_ommx.coefficients[(new_index1, new_index2)]}"
+        )
+    print(
+        f"qubo_from_ommx[(original_index, )] = {qubo_from_ommx[(original_index1, original_index2)]}"
+    )
 
 # %% [markdown]
 # ## Summary
