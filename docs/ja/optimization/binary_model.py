@@ -15,7 +15,7 @@
 # %% [markdown]
 # # `BinaryModel`の使い方
 #
-# 本チュートリアルでは、Qamomileの最適化機能にある[]`BinaryModel`](./../../qamomile/optimization/binary_model/model.py)の使い方について説明します。Qamomileの`BinaryModel`では、二値変数を用いた制約なし最適化問題を定義することができます。特に、変数のタイプとして`binary`と`spin`の両方をサポートしており、`BinaryModel`のメンバ関数`change_vartype`を使うことで、これらのタイプを相互に変換することもできます。
+# 本チュートリアルでは、Qamomileの最適化機能にある[`BinaryModel`](./../../qamomile/optimization/binary_model/model.py)の使い方について説明します。Qamomileの`BinaryModel`では、二値変数を用いた制約なし最適化問題を定義することができます。特に、変数のタイプとして`binary`と`spin`の両方をサポートしており、`BinaryModel`のメンバ関数`change_vartype`を使うことで、これらのタイプを相互に変換することもできます。
 
 # %%
 import numpy as np
@@ -390,7 +390,7 @@ assert energy_spin == energy
 # ## `OMMX`からの`BinaryModel`の構築
 # 最後に、`OMMX`から`BinaryModel`を構築する方法を紹介します。[`OMMX`](https://ommx-ja-book.readthedocs.io/ja/latest/introduction.html)（Open Mathematical prograMming eXchange; オミキス）とは、数理最適化を実務に応用する過程で必要となる、ソフトウェア間や人間同士のデータ交換を実現するためのオープンなデータ形式と、それを操作するためのSDKの総称です。Qamomileの最適化機能ではOMMXのデータ形式をサポートしているため、用意されている量子アルゴリズムを使う場合にあえて自身で変換を行う必要はありませんが、自身でカスタムしたアルゴリズムを使う時に便利であるため、ここでも紹介しておきます。ここでは、今までの例で使ってきたモデルをOMMXの形式で持っているとして、それを`BinaryModel`に変換してみましょう。
 #
-# まずはOMMXの形式でインスタンスを作成します。ここでは簡単なインスタンスを作るためにOMMXそのものの機能でコンポーネントからインスタンスを定義しますが、これは単に簡単な説明の準備であり、実際に使用する場合にはすでに用意されているパッケージあるいは[JijModeling](https://jij-inc-jijmodeling-tutorials-ja.readthedocs-hosted.com/ja/latest/introduction.html)と呼ばれるPython コードを使用して数理モデルを記述するための数理最適化モデラーです。 多項式などを用いて、さまざまな種類の最適化問題を記述することができるパッケージを用いてモデルを定義、インスタンス作成を行います。
+# まずはOMMXの形式でインスタンスを作成します。ここでは簡単なインスタンスを作るためにOMMXそのものの機能でコンポーネントからインスタンスを定義しますが、これは簡単な説明の準備であり、実際に使用する場合にはすでに用意されているパッケージあるいは[JijModeling](https://jij-inc-jijmodeling-tutorials-ja.readthedocs-hosted.com/ja/latest/introduction.html)と呼ばれるPythonコードを使用して数理モデルを記述するための数理最適化モデラーを用いて、インスタンス作成を行います。
 
 # %%
 # OMMXの形式でモデルを定義する。
