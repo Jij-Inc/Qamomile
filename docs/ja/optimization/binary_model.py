@@ -157,7 +157,7 @@ assert spin_naive_model.coefficients == {
 
 # %% [markdown]
 # ## QUBO/HUBO/Isingからの`BinaryModel`の構築
-# ここまでで、自身で`BinaryExpr`を定義して、それを元に`BinaryModel`を作る方法を紹介しました。しかし実際には、一般にQamomileの`BinaryExpr`でユーザーが数理モデルを保存していることは考えづらく、`BinaryExpr`を毎度構成するのは手間になるためです。そこで、`BinaryModel`には、QUBO/HUBO/Isingの形式から`BinaryModel`を構築するためのクラスメソッドが用意されています。ここでは、これらについて一つずつ見ていきます。なお，これらのクラスメソッドを使った場合にも内部では`BinaryExpr`を経由して`BinaryModel`が構築されていまず。簡単のためにここから変数の番号を連番で振って説明しますが、実際には変数の番号は連番である必要はなく、ここまでで見たように`BinaryModel`の初期化の際に変数の番号は0-originの連続した整数に変換されます。元の変数を取得するためには、元の変数との対応のためには`index_new_to_origin`や`index_origin_to_new`を利用してください。
+# ここまでで、自身で`BinaryExpr`を定義して、それを元に`BinaryModel`を作る方法を紹介しました。しかし実際には、一般にQamomileの`BinaryExpr`でユーザーが数理モデルを保存していることは考えづらく、`BinaryExpr`を毎度構成するのは手間になるためです。そこで、`BinaryModel`には、QUBO/HUBO/Isingの形式から`BinaryModel`を構築するためのクラスメソッドが用意されています。ここでは、これらについて一つずつ見ていきます。なお，これらのクラスメソッドを使った場合にも内部では`BinaryExpr`を経由して`BinaryModel`が構築されています。簡単のためにここから変数の番号を連番で振って説明しますが、実際には変数の番号は連番である必要はなく、ここまでで見たように`BinaryModel`の初期化の際に変数の番号は0-originの連続した整数に変換されます。元の変数を取得するためには、元の変数との対応のためには`index_new_to_origin`や`index_origin_to_new`を利用してください。
 
 # %% [markdown]
 # ### QUBOからの`BinaryModel`の構築 (`from_qubo`)

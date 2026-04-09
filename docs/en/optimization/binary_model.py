@@ -443,7 +443,7 @@ print("coefficients:", model_from_ommx.coefficients)
 assert model_from_ommx.coefficients == naive_model.coefficients
 
 # %% [markdown]
-# As same as the previous discussion, the variable indices in `BinaryModel` are re-labeled from the original OMMX instance, so the keys in `model_from_ommx.coefficients` do not match those in `qubo_from_ommx`. However, the mapping between the original and re-labeled indices is available through `model_from_ommx.index_new_to_origin` and `model_from_ommx.index_origin_to_new`, so you can use them to verify that the coefficients match correctly.
+# As discussion above, the variable indices in `BinaryModel` are re-labeled from the original OMMX instance, so the keys in `model_from_ommx.coefficients` do not match those in `qubo_from_ommx`. However, the mapping between the original and re-labeled indices is available through `model_from_ommx.index_new_to_origin` and `model_from_ommx.index_origin_to_new`, so you can use them to verify that the coefficients match correctly.
 
 # %%
 print("index_new_to_origin:", model_from_ommx.index_new_to_origin)
