@@ -29,7 +29,7 @@ from qamomile.optimization.binary_model.model import BinaryModel
 
 # %% [markdown]
 # ## `BinaryExpr`を使ったナイーブな`BinaryModel`の構築
-# まずは`BinaryModel`を作る一番ナイーブな方法である[`BinaryExpr`](./../../qamomile/optimization/binary_model/expr.py)を使った方法を紹介します。この方法を実際にユーザーが取ることはそう多くはないと思われますが，以降で紹介する他の方法をとる場合でも内部的には以下の`BinaryExpr`を用いた方法が実質的に行われているため、ここを簡単にでも理解しておくと、`BinaryModel`の理解が深まると思います。
+# まずは`BinaryModel`を作る一番ナイーブな方法である`BinaryExpr`を使った方法を紹介します。この方法を実際にユーザーが取ることはそう多くはないと思われますが，以降で紹介する他の方法をとる場合でも内部的には以下の`BinaryExpr`を用いた方法が実質的に行われているため、ここを簡単にでも理解しておくと、`BinaryModel`の理解が深まると思います。
 #
 # `BinaryExpr`は定数項を含めた二値変数での表現を提供するクラスです。まずは`BinaryExpr`の基本的な使い方を見ていきます。`BinaryExpr`では変数をインデックスで管理します。例えば、一つのbinary(0 or 1)変数を作りたい時には`binary`関数を使って`binary(index)`の形で`BinaryExpr`を作ります。この時、`index`は0-originである必要はありません。$x_1 + 2 x_3 + 3 x_1 x_3 + 5$のような式を作ってみましょう。
 #

@@ -29,7 +29,7 @@ from qamomile.optimization.binary_model.model import BinaryModel
 
 # %% [markdown]
 # ## Building a `BinaryModel` the low-level way with `BinaryExpr`
-# Let's start with the most direct route: building a `BinaryModel` by hand from a [`BinaryExpr`](./../../qamomile/optimization/binary_model/expr.py). In practice you probably won't reach for this path very often, but the higher-level constructors shown later all rely on `BinaryExpr` under the hood, so a quick look here will make the rest of the class much easier to understand.
+# Let's start with the most direct route: building a `BinaryModel` by hand from a `BinaryExpr`. In practice you probably won't reach for this path very often, but the higher-level constructors shown later all rely on `BinaryExpr` under the hood, so a quick look here will make the rest of the class much easier to understand.
 #
 # `BinaryExpr` represents a polynomial expression over binary variables, constant term included. Variables are tracked by integer indices — the indices do **not** need to start at zero. To create a single binary (0/1) variable, call `binary(index)`. As a running example, let's build $x_1 + 2 x_3 + 3 x_1 x_3 + 5$.
 #
