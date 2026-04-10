@@ -37,60 +37,139 @@ def binary_model() -> BinaryModel:
     )
 
 
-class TestLocalSearchSpin:
-    def test_best_improvement_converges(self, spin_model):
-        ls = LocalSearch(spin_model)
-        result = ls.run([1, -1, -1], method="best_improvement")
-        sample, energy, _ = result.lowest()
-        assert energy == -8.0
+@pytest.fixture
+def single_var_model() -> BinaryModel:
+    """Single-variable SPIN model: 3*z0. Minimum at z0=-1 with energy -3."""
+    return BinaryModel.from_ising(linear={0: 3.0}, quad={}, constant=0.0)
 
-    def test_first_improvement_converges(self, spin_model):
+
+@pytest.fixture
+def linear_only_model() -> BinaryModel:
+    """SPIN model with only linear terms: 2*z0 - 3*z1. Minimum at (-1,1), energy -5."""
+    return BinaryModel.from_ising(linear={0: 2.0, 1: -3.0}, quad={}, constant=0.0)
+
+
+@pytest.fixture
+def quad_only_model() -> BinaryModel:
+    """SPIN model with only quadratic terms: -2*z0*z1. Minimum energy -2."""
+    return BinaryModel.from_ising(linear={}, quad={(0, 1): -2.0}, constant=0.0)
+
+
+class TestLocalSearchSpin:
+    @pytest.mark.parametrize("method", ["best_improvement", "first_improvement"])
+    def test_converges_to_optimum(self, spin_model, method):
+        """Both methods reach the global optimum from the same starting state."""
         ls = LocalSearch(spin_model)
-        result = ls.run([1, -1, -1], method="first_improvement")
-        sample, energy, _ = result.lowest()
-        assert energy == -8.0
+        result = ls.run([1, -1, -1], method=method)
+        _, energy, _ = result.lowest()
+        assert np.isclose(energy, -8.0)
 
     def test_max_iter_limits_search(self, spin_model):
+        """Search stops after max_iter iterations even if not converged."""
         ls = LocalSearch(spin_model)
         result = ls.run([1, 1, -1], max_iter=1, method="best_improvement")
-        sample, energy, _ = result.lowest()
-        # After 1 iteration of best-improvement from [1,1,-1]:
-        # flipping index 0 gives delta_E = -12, which is the best flip
-        assert energy == spin_model.calc_energy([-1, 1, -1])
+        _, energy, _ = result.lowest()
+        assert np.isclose(energy, spin_model.calc_energy([-1, 1, -1]))
+
+    def test_max_iter_zero_returns_initial(self, spin_model):
+        """max_iter=0 returns the initial state unchanged."""
+        ls = LocalSearch(spin_model)
+        initial = [1, 1, -1]
+        result = ls.run(initial, max_iter=0, method="best_improvement")
+        _, energy, _ = result.lowest()
+        assert np.isclose(energy, spin_model.calc_energy(initial))
 
     def test_invalid_method_raises(self, spin_model):
+        """Unknown method name raises ValueError."""
         ls = LocalSearch(spin_model)
         with pytest.raises(ValueError, match="Invalid method"):
             ls.run([1, 1, 1], method="nonexistent")
 
+    @pytest.mark.parametrize("seed", range(10))
+    def test_random_initial_never_increases_energy(self, spin_model, seed):
+        """Local search from a random initial state never increases energy."""
+        rng = np.random.default_rng(seed)
+        n = spin_model.num_bits
+        initial = rng.choice([-1, 1], size=n).tolist()
+        ls = LocalSearch(spin_model)
+        result = ls.run(initial, method="best_improvement")
+        _, energy, _ = result.lowest()
+        assert energy <= spin_model.calc_energy(initial) + 1e-10
+
 
 class TestLocalSearchBinary:
-    def test_best_improvement_converges(self, binary_model):
+    @pytest.mark.parametrize("method", ["best_improvement", "first_improvement"])
+    def test_converges_to_optimum(self, binary_model, method):
+        """Both methods reach the global optimum from a suitable starting state."""
+        initial = [0, 0, 0] if method == "best_improvement" else [1, 1, 1]
         ls = LocalSearch(binary_model)
-        result = ls.run([0, 0, 0], method="best_improvement")
+        result = ls.run(initial, method=method)
         sample, energy, _ = result.lowest()
-        assert energy == -8.0
+        assert np.isclose(energy, -8.0)
         assert sample == {0: 1, 1: 0, 2: 1}
 
-    def test_first_improvement_converges(self, binary_model):
-        ls = LocalSearch(binary_model)
-        result = ls.run([1, 1, 1], method="first_improvement")
-        sample, energy, _ = result.lowest()
-        assert energy == -8.0
-
     def test_already_optimal_no_change(self, binary_model):
+        """Starting at the optimum returns it unchanged."""
         ls = LocalSearch(binary_model)
         result = ls.run([1, 0, 1], method="best_improvement")
         sample, energy, _ = result.lowest()
-        assert energy == -8.0
+        assert np.isclose(energy, -8.0)
         assert sample == {0: 1, 1: 0, 2: 1}
+
+    @pytest.mark.parametrize("seed", range(10))
+    def test_random_initial_never_increases_energy(self, binary_model, seed):
+        """Local search from a random BINARY initial state never increases energy."""
+        rng = np.random.default_rng(seed)
+        n = binary_model.num_bits
+        initial = rng.choice([0, 1], size=n).tolist()
+        ls = LocalSearch(binary_model)
+        result = ls.run(initial, method="best_improvement")
+        _, energy, _ = result.lowest()
+        assert energy <= binary_model.calc_energy(initial) + 1e-10
+
+
+class TestEdgeCases:
+    def test_single_variable_model(self, single_var_model):
+        """Single-variable model converges to the correct minimum."""
+        ls = LocalSearch(single_var_model)
+        result = ls.run([1], method="best_improvement")
+        _, energy, _ = result.lowest()
+        assert np.isclose(energy, -3.0)
+
+    def test_linear_only_model(self, linear_only_model):
+        """Model with no quadratic terms converges correctly."""
+        ls = LocalSearch(linear_only_model)
+        result = ls.run([1, 1], method="best_improvement")
+        _, energy, _ = result.lowest()
+        assert np.isclose(energy, -5.0)
+
+    def test_quad_only_model(self, quad_only_model):
+        """Model with no linear terms converges correctly."""
+        ls = LocalSearch(quad_only_model)
+        result = ls.run([1, -1], method="best_improvement")
+        _, energy, _ = result.lowest()
+        assert np.isclose(energy, -2.0)
 
 
 class TestCalcEDiff:
     def test_energy_diff_matches_actual(self, spin_model):
+        """Incremental energy diff equals the brute-force difference."""
         ls = LocalSearch(spin_model)
         state = np.array([1.0, 1.0, -1.0])
         delta = ls._calc_e_diff(state, ls._quad, ls._linear, 0)
         e_before = spin_model.calc_energy([1, 1, -1])
         e_after = spin_model.calc_energy([-1, 1, -1])
+        assert np.isclose(delta, e_after - e_before)
+
+    @pytest.mark.parametrize("flip_idx", [0, 1, 2])
+    def test_energy_diff_all_indices(self, spin_model, flip_idx):
+        """Energy diff is correct for every index in the model."""
+        ls = LocalSearch(spin_model)
+        state = np.array([-1.0, 1.0, 1.0])
+        delta = ls._calc_e_diff(state, ls._quad, ls._linear, flip_idx)
+        state_list = state.astype(int).tolist()
+        e_before = spin_model.calc_energy(state_list)
+        flipped = state_list.copy()
+        flipped[flip_idx] = -flipped[flip_idx]
+        e_after = spin_model.calc_energy(flipped)
         assert np.isclose(delta, e_after - e_before)

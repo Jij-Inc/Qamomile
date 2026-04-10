@@ -81,14 +81,18 @@ class LocalSearch:
     # ------------------------------------------------------------------
 
     def _to_spin(self, state: np.ndarray) -> np.ndarray:
+        """Convert state from the model's vartype to SPIN (±1)."""
         if self._model.vartype == VarType.BINARY:
             return np.where(state == 0, 1, -1).astype(float)
-        return state.astype(float)
+        else:
+            return state.astype(float)
 
     def _from_spin(self, spin_state: np.ndarray) -> list[int]:
+        """Convert SPIN (±1) state back to the model's vartype."""
         if self._model.vartype == VarType.BINARY:
             return [0 if s > 0 else 1 for s in spin_state]
-        return [int(s) for s in spin_state]
+        else:
+            return [int(s) for s in spin_state]
 
     def _search(
         self,
@@ -96,6 +100,7 @@ class LocalSearch:
         state: np.ndarray,
         max_iter: int,
     ) -> np.ndarray:
+        """Run the local search loop until convergence or max_iter."""
         counter = 0
         while max_iter == -1 or counter < max_iter:
             prev = state.copy()
@@ -109,12 +114,14 @@ class LocalSearch:
     def _calc_e_diff(
         state: np.ndarray, quad: np.ndarray, linear: np.ndarray, idx: int
     ) -> float:
+        """Calculate the energy difference when flipping bit *idx*."""
         return float(-2 * state[idx] * (quad[:, idx] @ state + linear[idx]))
 
     @staticmethod
     def _first_improvement(
         state: np.ndarray, quad: np.ndarray, linear: np.ndarray, n: int
     ) -> np.ndarray:
+        """Accept the first bit-flip that lowers energy."""
         for i in range(n):
             if LocalSearch._calc_e_diff(state, quad, linear, i) < 0:
                 state[i] = -state[i]
@@ -124,6 +131,7 @@ class LocalSearch:
     def _best_improvement(
         state: np.ndarray, quad: np.ndarray, linear: np.ndarray, n: int
     ) -> np.ndarray:
+        """Flip the single bit that gives the largest energy decrease."""
         deltas = np.array(
             [LocalSearch._calc_e_diff(state, quad, linear, i) for i in range(n)]
         )
@@ -133,6 +141,7 @@ class LocalSearch:
         return state
 
     def _to_sampleset(self, spin_state: np.ndarray) -> BinarySampleSet:
+        """Convert final SPIN state to a BinarySampleSet in the original vartype."""
         result_values = self._from_spin(spin_state)
         energy = self._model.calc_energy(result_values)
         sample = {
