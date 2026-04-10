@@ -37,20 +37,46 @@
     });
   }
 
+  function mutationAffectsSearchBar(mutations) {
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType !== Node.ELEMENT_NODE) continue;
+        if (
+          node.matches?.(".myst-search-bar") ||
+          node.querySelector?.(".myst-search-bar")
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   function activate() {
     if (rtdReady) return;
     if (!isOnReadTheDocs()) return;
     rtdReady = true;
     bindSearchButtons();
 
-    // Re-bind after SPA navigation (MyST uses client-side routing)
-    const observer = new MutationObserver(() => {
-      window.requestAnimationFrame(bindSearchButtons);
+    // Re-bind after SPA navigation (MyST uses client-side routing).
+    // Only react when added nodes actually contain a search bar, and
+    // debounce via requestAnimationFrame to coalesce bursts of mutations.
+    let rebindScheduled = false;
+    const scheduleRebind = () => {
+      if (rebindScheduled) return;
+      rebindScheduled = true;
+      window.requestAnimationFrame(() => {
+        rebindScheduled = false;
+        bindSearchButtons();
+      });
+    };
+
+    const navContainer =
+      document.querySelector(".myst-top-nav") || document.documentElement;
+    const observer = new MutationObserver((mutations) => {
+      if (mutationAffectsSearchBar(mutations)) scheduleRebind();
     });
-    observer.observe(document.documentElement, {
-      childList: true,
-      subtree: true,
-    });
+    observer.observe(navContainer, { childList: true, subtree: true });
   }
 
   // RTD addons load asynchronously — poll briefly then give up
