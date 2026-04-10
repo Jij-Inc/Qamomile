@@ -240,7 +240,7 @@ def test_cx_entangling_layer_transpiled(num_qubits):
 
 
 def test_cx_entangling_layer():
-    """Test cx_entangling_layer produces correct CX gates with concrete bindings."""
+    """Test cx_entangling_layer IR."""
 
     @qmc.qkernel
     def circuit(
