@@ -71,12 +71,14 @@
       });
     };
 
-    const navContainer =
-      document.querySelector(".myst-top-nav") || document.documentElement;
+    // Observe a stable ancestor (document.body) so the observer survives
+    // SPA navigation that may replace top-nav sub-trees. The
+    // mutationAffectsSearchBar() filter makes each mutation callback
+    // O(addedNodes), so a wider scope has negligible cost.
     const observer = new MutationObserver((mutations) => {
       if (mutationAffectsSearchBar(mutations)) scheduleRebind();
     });
-    observer.observe(navContainer, { childList: true, subtree: true });
+    observer.observe(document.body, { childList: true, subtree: true });
   }
 
   // RTD addons load asynchronously — poll briefly then give up
