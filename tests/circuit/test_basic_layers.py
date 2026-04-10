@@ -5,12 +5,21 @@ import sympy as sp
 
 import qamomile.circuit as qmc
 from qamomile.circuit.algorithm.basic import (
+    cx_entangling_layer,
     cz_entangling_layer,
     rx_layer,
     ry_layer,
     rz_layer,
 )
 from qamomile.circuit.estimator import count_gates
+from qamomile.circuit.ir.block_value import BlockValue
+from qamomile.circuit.ir.graph.graph import Graph
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
+from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+from qamomile.circuit.ir.operation.control_flow import ForOperation
+from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
+from qamomile.circuit.ir.operation.operation import QInitOperation
+from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 
 # ---------------------------------------------------------------------------
 # Symbolic gate count tests (count_gates on IR)
@@ -200,3 +209,43 @@ def test_cz_entangling_layer_transpiled(num_qubits):
     assert cz_count == num_qubits - 1, (
         f"Expected {num_qubits - 1} CZ gates, got {cz_count}"
     )
+
+
+def test_cx_entangling_layer():
+    """Test cx_entangling_layer produces correct CX gates with concrete bindings."""
+
+    @qmc.qkernel
+    def circuit(
+        n: qmc.UInt,
+    ) -> qmc.Vector[qmc.Qubit]:
+        q = qmc.qubit_array(n, "q")
+        q = cx_entangling_layer(q)
+        return q
+
+    circuit_ir = circuit.build()
+
+    # If the IR is a graph, we can count gates directly without transpilation
+    assert isinstance(circuit_ir, Graph)
+    operations = circuit_ir.operations
+    assert len(operations) == 2
+    assert isinstance(operations[0], QInitOperation)
+    assert isinstance(operations[1], CallBlockOperation)
+    block = operations[1].operands[0]
+    assert isinstance(block, BlockValue)
+    assert block.name == "cx_entangling_layer"
+    assert block.label_args == ["q"]
+    block_operations = block.operations
+    assert len(block_operations) == 3
+    assert isinstance(block_operations[0], BinOp)
+    assert isinstance(block_operations[1], ForOperation)
+    assert isinstance(block_operations[2], ReturnOperation)
+    for_operations = block_operations[1].operations
+    assert len(for_operations) == 3
+    assert isinstance(for_operations[0], BinOp)  # i+1 in RHS
+    assert isinstance(for_operations[1], GateOperation)
+    assert isinstance(for_operations[2], BinOp)  # i+1 in LHS
+    gate_op = for_operations[1]
+    assert gate_op.gate_type == GateOperationType.CX
+    # The following two assertions are for now loose.
+    assert len(block.input_values) == 1
+    assert len(block.return_values) == 1
