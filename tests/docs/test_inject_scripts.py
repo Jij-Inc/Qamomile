@@ -13,7 +13,6 @@ from docs.scripts.inject_scripts import (
     patch_language_build,
 )
 
-
 # ---------- inject_script_tag ----------
 
 
