@@ -84,8 +84,8 @@ def inject_script_tag(html_path: Path, script_src: str, tag_id: str) -> bool:
     """Inject a ``<script defer>`` tag just before ``</head>`` in an HTML file.
 
     The injection is idempotent: if the file already contains a tag with
-    ``tag_id``, the file is left untouched. If the file has no
-    ``</head>`` element, no modification occurs.
+    ``tag_id`` as an ``id`` attribute, the file is left untouched. If the
+    file has no ``</head>`` element, no modification occurs.
 
     Args:
         html_path: Absolute path to the HTML file to patch.
@@ -99,7 +99,13 @@ def inject_script_tag(html_path: Path, script_src: str, tag_id: str) -> bool:
         or has no ``</head>`` element to anchor on.
     """
     content = html_path.read_text(encoding="utf-8")
-    if tag_id in content:
+
+    # Look for the specific `id="<tag_id>"` attribute pattern rather than a
+    # raw substring match, so a stray mention of ``tag_id`` inside page body
+    # content (e.g. a code snippet in a tutorial) does not falsely block
+    # injection.
+    id_attribute = f'id="{tag_id}"'
+    if id_attribute in content:
         return False
 
     closing_head = "</head>"
@@ -107,7 +113,7 @@ def inject_script_tag(html_path: Path, script_src: str, tag_id: str) -> bool:
         return False
 
     script_tag = (
-        f'<script defer src="{script_src}" id="{tag_id}"></script>{closing_head}'
+        f'<script defer src="{script_src}" {id_attribute}></script>{closing_head}'
     )
     updated = content.replace(closing_head, script_tag, 1)
     html_path.write_text(updated, encoding="utf-8")

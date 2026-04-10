@@ -70,6 +70,26 @@ def test_inject_script_tag_injects_only_first_head(tmp_path: Path) -> None:
     assert content.count('id="qamomile-foo"') == 1
 
 
+def test_inject_script_tag_ignores_tag_id_in_body_content(tmp_path: Path) -> None:
+    """Stray mentions of the tag id in page body do not block injection."""
+    html = tmp_path / "page.html"
+    # The tag id appears in a <code> block, but NOT as an id attribute on a
+    # real script tag. The idempotency check must not treat this as
+    # "already patched".
+    html.write_text(
+        "<html><head></head><body>"
+        "<p>To customize, target <code>qamomile-foo</code> in your CSS.</p>"
+        "</body></html>"
+    )
+
+    modified = inject_script_tag(html, "build/foo.js", "qamomile-foo")
+
+    assert modified is True
+    content = html.read_text()
+    assert content.count('id="qamomile-foo"') == 1
+    assert "<code>qamomile-foo</code>" in content
+
+
 # ---------- patch_language_build ----------
 
 
