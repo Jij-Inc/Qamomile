@@ -26,8 +26,7 @@ def test_inject_script_tag_adds_tag_before_closing_head(tmp_path: Path) -> None:
     assert modified is True
     content = html.read_text()
     assert (
-        '<script defer src="build/foo.js" id="qamomile-foo"></script></head>'
-        in content
+        '<script defer src="build/foo.js" id="qamomile-foo"></script></head>' in content
     )
     # Sanity: tag is BEFORE </head>, not after.
     assert content.index("qamomile-foo") < content.index("</head>")
