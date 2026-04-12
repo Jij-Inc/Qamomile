@@ -33,6 +33,7 @@ project:
     - title: Optimization
       file: optimization/index.md
       children:
+        - file: optimization/binary_model.ipynb
         - file: optimization/qaoa_graph_partition.ipynb
     - title: Collaboration
       file: collaboration/index.md
