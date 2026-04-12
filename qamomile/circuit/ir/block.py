@@ -43,11 +43,6 @@ class Block:
     # Parameters (unbound values for circuit parameters)
     parameters: dict[str, Value] = dataclasses.field(default_factory=dict)
 
-    # Dependency information (populated after analysis pass)
-    _dependency_graph: dict[str, set[str]] | None = dataclasses.field(
-        default=None, repr=False
-    )
-
     def __post_init__(self):
         if self.label_args and len(self.label_args) != len(self.input_values):
             raise ValueError(
