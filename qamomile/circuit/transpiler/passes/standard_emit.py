@@ -228,33 +228,84 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
     # Only methods with actual overrides are kept as instance methods.
     # ------------------------------------------------------------------
 
-    def _emit_for(self, circuit: T, op: ForOperation, qubit_map: QubitMap, clbit_map: ClbitMap, bindings: dict[str, Any], force_unroll: bool = False) -> None:
+    def _emit_for(
+        self,
+        circuit: T,
+        op: ForOperation,
+        qubit_map: QubitMap,
+        clbit_map: ClbitMap,
+        bindings: dict[str, Any],
+        force_unroll: bool = False,
+    ) -> None:
         emit_for(self, circuit, op, qubit_map, clbit_map, bindings, force_unroll)
 
-    def _emit_for_unrolled(self, circuit: T, op: ForOperation, qubit_map: QubitMap, clbit_map: ClbitMap, bindings: dict[str, Any]) -> None:
+    def _emit_for_unrolled(
+        self,
+        circuit: T,
+        op: ForOperation,
+        qubit_map: QubitMap,
+        clbit_map: ClbitMap,
+        bindings: dict[str, Any],
+    ) -> None:
         from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
             emit_for_unrolled,
         )
+
         emit_for_unrolled(self, circuit, op, qubit_map, clbit_map, bindings)
 
-    def _emit_if(self, circuit: T, op: IfOperation, qubit_map: QubitMap, clbit_map: ClbitMap, bindings: dict[str, Any]) -> None:
+    def _emit_if(
+        self,
+        circuit: T,
+        op: IfOperation,
+        qubit_map: QubitMap,
+        clbit_map: ClbitMap,
+        bindings: dict[str, Any],
+    ) -> None:
         emit_if(self, circuit, op, qubit_map, clbit_map, bindings)
 
-    def _emit_while(self, circuit: T, op: WhileOperation, qubit_map: QubitMap, clbit_map: ClbitMap, bindings: dict[str, Any]) -> None:
+    def _emit_while(
+        self,
+        circuit: T,
+        op: WhileOperation,
+        qubit_map: QubitMap,
+        clbit_map: ClbitMap,
+        bindings: dict[str, Any],
+    ) -> None:
         emit_while(self, circuit, op, qubit_map, clbit_map, bindings)
 
-    def _emit_pauli_evolve(self, circuit: T, op: PauliEvolveOp, qubit_map: QubitMap, bindings: dict[str, Any]) -> None:
+    def _emit_pauli_evolve(
+        self,
+        circuit: T,
+        op: PauliEvolveOp,
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+    ) -> None:
         emit_pauli_evolve(self, circuit, op, qubit_map, bindings)
 
     def _emit_controlled_fallback(
-        self, circuit: T, block_value: Any, num_controls: int,
-        control_indices: list[int], target_indices: list[int],
-        power: int, bindings: dict[str, Any],
+        self,
+        circuit: T,
+        block_value: Any,
+        num_controls: int,
+        control_indices: list[int],
+        target_indices: list[int],
+        power: int,
+        bindings: dict[str, Any],
     ) -> None:
-        emit_controlled_fallback(self, circuit, block_value, num_controls,
-                                 control_indices, target_indices, power, bindings)
+        emit_controlled_fallback(
+            self,
+            circuit,
+            block_value,
+            num_controls,
+            control_indices,
+            target_indices,
+            power,
+            bindings,
+        )
 
-    def _blockvalue_to_gate(self, block_value: Any, num_qubits: int, bindings: dict[str, Any]) -> Any:
+    def _blockvalue_to_gate(
+        self, block_value: Any, num_qubits: int, bindings: dict[str, Any]
+    ) -> Any:
         return blockvalue_to_gate(self, block_value, num_qubits, bindings)
 
     # ------------------------------------------------------------------
@@ -265,16 +316,35 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         from qamomile.circuit.transpiler.passes.emit_support.gate_emission import (
             resolve_angle,
         )
+
         return resolve_angle(self, op, bindings)
 
-    def _emit_custom_composite(self, circuit: T, op: Any, impl: Any, qubit_indices: list[int], bindings: dict[str, Any]) -> None:
+    def _emit_custom_composite(
+        self,
+        circuit: T,
+        op: Any,
+        impl: Any,
+        qubit_indices: list[int],
+        bindings: dict[str, Any],
+    ) -> None:
         from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
             emit_custom_composite,
         )
+
         emit_custom_composite(self, circuit, op, impl, qubit_indices, bindings)
 
-    def _emit_controlled_powers(self, circuit: T, block_value: Any, counting_indices: list[int], target_indices: list[int], bindings: dict[str, Any]) -> None:
+    def _emit_controlled_powers(
+        self,
+        circuit: T,
+        block_value: Any,
+        counting_indices: list[int],
+        target_indices: list[int],
+        bindings: dict[str, Any],
+    ) -> None:
         from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
             emit_controlled_powers,
         )
-        emit_controlled_powers(self, circuit, block_value, counting_indices, target_indices, bindings)
+
+        emit_controlled_powers(
+            self, circuit, block_value, counting_indices, target_indices, bindings
+        )

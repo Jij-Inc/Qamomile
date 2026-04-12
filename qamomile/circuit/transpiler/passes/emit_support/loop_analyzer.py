@@ -67,9 +67,7 @@ class LoopAnalyzer:
                                 return True
             if isinstance(op, HasNestedOps):
                 if any(
-                    self._has_dynamic_nested_loop(
-                        op_list, bindings, parent_loop_var
-                    )
+                    self._has_dynamic_nested_loop(op_list, bindings, parent_loop_var)
                     for op_list in op.nested_op_lists()
                 ):
                     return True

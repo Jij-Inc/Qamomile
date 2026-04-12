@@ -138,9 +138,7 @@ def emit_pauli_evolve(
                     term_qubit_indices[step + 1],
                 )
             # RZ on last qubit
-            emit_pass._emitter.emit_rz(
-                circuit, term_qubit_indices[-1], angle
-            )
+            emit_pass._emitter.emit_rz(circuit, term_qubit_indices[-1], angle)
             # Reverse CNOT ladder
             for step in range(len(term_qubit_indices) - 2, -1, -1):
                 emit_pass._emitter.emit_cx(

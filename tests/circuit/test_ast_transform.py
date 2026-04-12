@@ -266,7 +266,9 @@ class TestEmptyClosureCell:
             with pytest.raises(FrontendTransformError):
                 factory()
 
-        fallback_warnings = [w for w in ws if "AST transformation failed" in str(w.message)]
+        fallback_warnings = [
+            w for w in ws if "AST transformation failed" in str(w.message)
+        ]
         assert fallback_warnings == []
 
     def test_empty_cell_never_reaches_build(self):

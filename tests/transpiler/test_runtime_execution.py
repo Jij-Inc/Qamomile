@@ -334,9 +334,7 @@ class TestExecutableProgramRuntime:
                     parameter_metadata=ParameterMetadata(),
                 )
             ],
-            compiled_classical=[
-                CompiledClassicalSegment(segment=prep_segment)
-            ],
+            compiled_classical=[CompiledClassicalSegment(segment=prep_segment)],
             output_refs=[output.uuid],
         )
 

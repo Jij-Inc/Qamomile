@@ -370,7 +370,9 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
             except ImportError:
                 try:
                     # Fallback for older Qiskit versions
-                    from qiskit.primitives import Estimator  # type: ignore[attr-defined]
+                    from qiskit.primitives import (
+                        Estimator,  # type: ignore[attr-defined]
+                    )
 
                     self._estimator = Estimator()
                 except ImportError:

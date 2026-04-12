@@ -205,7 +205,10 @@ class TestPhiOpsAllocation:
 
         # phi_output should be in qubit_map, mapped to same physical qubit
         assert QubitAddress(phi_output.uuid) in qubit_map
-        assert qubit_map[QubitAddress(phi_output.uuid)] == qubit_map[QubitAddress(q_init_out.uuid)]
+        assert (
+            qubit_map[QubitAddress(phi_output.uuid)]
+            == qubit_map[QubitAddress(q_init_out.uuid)]
+        )
 
     def test_phi_output_bit_is_allocated(self) -> None:
         """Phi output for a bit type should be registered in clbit_map."""
@@ -329,7 +332,10 @@ class TestPhiOpsAllocation:
         qubit_map, _ = allocator.allocate(operations, bindings={})
 
         assert QubitAddress(phi_output.uuid) in qubit_map
-        assert qubit_map[QubitAddress(phi_output.uuid)] == qubit_map[QubitAddress(q_out.uuid)]
+        assert (
+            qubit_map[QubitAddress(phi_output.uuid)]
+            == qubit_map[QubitAddress(q_out.uuid)]
+        )
 
     def test_phi_output_already_registered_is_skipped(self) -> None:
         """Phi output UUID already in qubit_map is not overwritten."""
@@ -400,8 +406,14 @@ class TestPhiOpsAllocation:
 
         assert QubitAddress(phi_out0.uuid) in qubit_map
         assert QubitAddress(phi_out1.uuid) in qubit_map
-        assert qubit_map[QubitAddress(phi_out0.uuid)] == qubit_map[QubitAddress(q0_out.uuid)]
-        assert qubit_map[QubitAddress(phi_out1.uuid)] == qubit_map[QubitAddress(q1_out.uuid)]
+        assert (
+            qubit_map[QubitAddress(phi_out0.uuid)]
+            == qubit_map[QubitAddress(q0_out.uuid)]
+        )
+        assert (
+            qubit_map[QubitAddress(phi_out1.uuid)]
+            == qubit_map[QubitAddress(q1_out.uuid)]
+        )
 
     def test_phi_bit_consolidates_both_branches(self) -> None:
         """Both branches' clbits must be consolidated to the same physical clbit.
@@ -444,8 +456,14 @@ class TestPhiOpsAllocation:
         _, clbit_map = allocator.allocate(operations, bindings={})
 
         # All three — true_bit, false_bit, phi_bit — must share the same physical clbit
-        assert clbit_map[QubitAddress(true_bit.uuid)] == clbit_map[QubitAddress(false_bit.uuid)]
-        assert clbit_map[QubitAddress(phi_bit.uuid)] == clbit_map[QubitAddress(true_bit.uuid)]
+        assert (
+            clbit_map[QubitAddress(true_bit.uuid)]
+            == clbit_map[QubitAddress(false_bit.uuid)]
+        )
+        assert (
+            clbit_map[QubitAddress(phi_bit.uuid)]
+            == clbit_map[QubitAddress(true_bit.uuid)]
+        )
 
     @pytest.mark.parametrize("array_size", [1, 2, 4])
     def test_phi_bit_array_consolidates_both_branches(self, array_size: int) -> None:

@@ -132,18 +132,22 @@ def _emit_iqft_and_cast_to_qfixed(qubits: Vector[Qubit]) -> QFixed:
     qubit_logical_ids = [r.logical_id for r in iqft_results]
 
     result_type = QFixedType()
-    result_value = Value(
-        type=result_type,
-        name=f"{qubits.value.name}_as_qfixed",
-    ).with_cast_metadata(
-        source_uuid=qubits.value.uuid,
-        source_logical_id=qubits.value.logical_id,
-        qubit_uuids=qubit_uuids,
-        qubit_logical_ids=qubit_logical_ids,
-    ).with_qfixed_metadata(
-        qubit_uuids=qubit_uuids,
-        num_bits=concrete_n,
-        int_bits=int_bits,
+    result_value = (
+        Value(
+            type=result_type,
+            name=f"{qubits.value.name}_as_qfixed",
+        )
+        .with_cast_metadata(
+            source_uuid=qubits.value.uuid,
+            source_logical_id=qubits.value.logical_id,
+            qubit_uuids=qubit_uuids,
+            qubit_logical_ids=qubit_logical_ids,
+        )
+        .with_qfixed_metadata(
+            qubit_uuids=qubit_uuids,
+            num_bits=concrete_n,
+            int_bits=int_bits,
+        )
     )
 
     # Create CastOperation (for IR completeness, though we've already set up UUIDs)

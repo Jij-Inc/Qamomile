@@ -41,7 +41,10 @@ def remap_static_phi_outputs(
         output = phi.results[0]
         selected_val = phi.operands[1] if condition_value else phi.operands[2]
 
-        if QubitAddress(output.uuid) in qubit_map or QubitAddress(output.uuid) in clbit_map:
+        if (
+            QubitAddress(output.uuid) in qubit_map
+            or QubitAddress(output.uuid) in clbit_map
+        ):
             continue
 
         if output.type.is_quantum():
@@ -80,7 +83,10 @@ def map_phi_outputs(
         true_val = phi.operands[1]
         false_val = phi.operands[2]
 
-        if QubitAddress(output.uuid) in qubit_map or QubitAddress(output.uuid) in clbit_map:
+        if (
+            QubitAddress(output.uuid) in qubit_map
+            or QubitAddress(output.uuid) in clbit_map
+        ):
             continue
 
         if output.type.is_quantum():
@@ -102,7 +108,11 @@ def map_phi_outputs(
                     for idx in sorted(all_indices):
                         true_idx = true_mapping.get(idx)
                         false_idx = false_mapping.get(idx)
-                        if true_idx is None or false_idx is None or true_idx != false_idx:
+                        if (
+                            true_idx is None
+                            or false_idx is None
+                            or true_idx != false_idx
+                        ):
                             from qamomile.circuit.transpiler.errors import EmitError
 
                             raise EmitError(
@@ -114,6 +124,7 @@ def map_phi_outputs(
                         if out_addr not in qubit_map:
                             qubit_map[out_addr] = true_idx
             else:
+
                 def _resolve_one(source: Any) -> int | None:
                     src_addr = QubitAddress(source.uuid)
                     if src_addr in qubit_map:
@@ -162,7 +173,9 @@ def map_phi_outputs(
                             if out_addr not in clbit_map:
                                 clbit_map[out_addr] = phys_idx
                             if secondary is not None:
-                                sec_addr = QubitAddress(secondary.uuid, addr.element_index)
+                                sec_addr = QubitAddress(
+                                    secondary.uuid, addr.element_index
+                                )
                                 if sec_addr in clbit_map:
                                     clbit_map[sec_addr] = phys_idx
             else:

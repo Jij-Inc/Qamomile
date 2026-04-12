@@ -173,6 +173,7 @@ class ProgramPlan:
     This plan enforces Qamomile's current execution model:
     all quantum operations must be in a single quantum circuit.
     """
+
     steps: list[ProgramStep] = dataclasses.field(default_factory=list)
     abi: ProgramABI = dataclasses.field(default_factory=ProgramABI)
 
@@ -181,4 +182,3 @@ class ProgramPlan:
 
     # Original parameters
     parameters: dict[str, Value] = dataclasses.field(default_factory=dict)
-

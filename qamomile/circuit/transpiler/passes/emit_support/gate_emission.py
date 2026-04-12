@@ -61,8 +61,7 @@ def emit_gate(
                 is_array_element=v.parent_array is not None,
                 parent_array_name=v.parent_array.name if v.parent_array else None,
                 element_indices_names=element_indices_names,
-                failure_reason=result.failure_reason
-                or ResolutionFailureReason.UNKNOWN,
+                failure_reason=result.failure_reason or ResolutionFailureReason.UNKNOWN,
                 failure_details=result.failure_details,
             )
             failed_operands.append(info)
@@ -174,9 +173,9 @@ def resolve_angle(
     theta = op.theta
     if theta is not None:
         # Use unified resolver for value resolution.
-        resolved = UnifiedValueResolver(
-            context=bindings, bindings=bindings
-        ).resolve(theta)
+        resolved = UnifiedValueResolver(context=bindings, bindings=bindings).resolve(
+            theta
+        )
         if resolved is not None:
             if not isinstance(resolved, (int, float)):
                 return resolved

@@ -69,10 +69,11 @@ class UUIDRemapper:
         # Handle control flow operations via HasNestedOps protocol
         if isinstance(op, HasNestedOps):
             cloned_lists = [
-                self.clone_operations(op_list)
-                for op_list in op.nested_op_lists()
+                self.clone_operations(op_list) for op_list in op.nested_op_lists()
             ]
-            base = dataclasses.replace(cast(Any, op), operands=new_operands, results=new_results)
+            base = dataclasses.replace(
+                cast(Any, op), operands=new_operands, results=new_results
+            )
             return base.rebuild_nested(cloned_lists)
         else:
             return dataclasses.replace(

@@ -68,7 +68,7 @@ class QubitAddress:
         """
         last_underscore = key.rfind("_")
         if last_underscore > 0:
-            suffix = key[last_underscore + 1:]
+            suffix = key[last_underscore + 1 :]
             if suffix.isdigit():
                 return cls(key[:last_underscore], int(suffix))
         return cls(key)

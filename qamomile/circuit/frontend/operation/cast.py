@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypeVar, overload
+from typing import TYPE_CHECKING, TypeVar
 
 from qamomile.circuit.frontend.handle.array import Vector
 from qamomile.circuit.frontend.handle.primitives import QFixed, Qubit
@@ -123,18 +123,22 @@ def _cast_vector_qubit_to_qfixed(
 
     # Create the result QFixed value
     result_type = QFixedType(integer_bits=int_bits, fractional_bits=frac_bits)
-    result_value = Value(
-        type=result_type,
-        name=f"{source.value.name}_as_qfixed",
-    ).with_cast_metadata(
-        source_uuid=source.value.uuid,
-        source_logical_id=source.value.logical_id,
-        qubit_uuids=qubit_uuids,
-        qubit_logical_ids=qubit_logical_ids,
-    ).with_qfixed_metadata(
-        qubit_uuids=qubit_uuids,
-        num_bits=num_qubits,
-        int_bits=int_bits,
+    result_value = (
+        Value(
+            type=result_type,
+            name=f"{source.value.name}_as_qfixed",
+        )
+        .with_cast_metadata(
+            source_uuid=source.value.uuid,
+            source_logical_id=source.value.logical_id,
+            qubit_uuids=qubit_uuids,
+            qubit_logical_ids=qubit_logical_ids,
+        )
+        .with_qfixed_metadata(
+            qubit_uuids=qubit_uuids,
+            num_bits=num_qubits,
+            int_bits=int_bits,
+        )
     )
 
     # Create and emit the CastOperation

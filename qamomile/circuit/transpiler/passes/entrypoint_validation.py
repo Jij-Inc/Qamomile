@@ -25,10 +25,14 @@ class EntrypointValidationPass(Pass[Block, Block]):
             )
 
         quantum_inputs = [
-            v.name for v in input.input_values if hasattr(v, "type") and v.type.is_quantum()
+            v.name
+            for v in input.input_values
+            if hasattr(v, "type") and v.type.is_quantum()
         ]
         quantum_outputs = [
-            v.name for v in input.output_values if hasattr(v, "type") and v.type.is_quantum()
+            v.name
+            for v in input.output_values
+            if hasattr(v, "type") and v.type.is_quantum()
         ]
 
         if not quantum_inputs and not quantum_outputs:

@@ -551,10 +551,14 @@ class QKernel(Generic[P, R]):
         if is_dict_type(param_type):
             # Create DictValue with parameter binding
             # The actual dict data is stored and used during emit pass unrolling
-            dict_value = DictValue(
-                name=name,
-                entries=(),  # Empty - data stored in metadata
-            ).with_parameter(name).with_dict_runtime_metadata(value)
+            dict_value = (
+                DictValue(
+                    name=name,
+                    entries=(),  # Empty - data stored in metadata
+                )
+                .with_parameter(name)
+                .with_dict_runtime_metadata(value)
+            )
             dict_handle = Dict(value=dict_value, _entries=[])
             if hasattr(param_type, "__args__") and param_type.__args__:
                 dict_handle._key_type = param_type.__args__[0]
@@ -811,7 +815,9 @@ class QKernel(Generic[P, R]):
         parameters = self._auto_detect_parameters(build_kwargs)
         self._validate_parameters(parameters)
 
-        return self._create_traced_block(parameters, build_kwargs, qubit_sizes=qubit_sizes)
+        return self._create_traced_block(
+            parameters, build_kwargs, qubit_sizes=qubit_sizes
+        )
 
     def draw(
         self,

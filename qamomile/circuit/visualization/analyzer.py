@@ -334,7 +334,9 @@ class CircuitAnalyzer:
                             block_value = op.block
                             assert isinstance(block_value, Block)
                             fresh_pv = dict(param_values) if param_values else {}
-                            for dummy, actual in zip(block_value.input_values, op.operands):
+                            for dummy, actual in zip(
+                                block_value.input_values, op.operands
+                            ):
                                 c = actual.get_const()
                                 if c is not None:
                                     fresh_pv[dummy.logical_id] = c
@@ -2310,10 +2312,7 @@ class CircuitAnalyzer:
                 return element_indices
 
         # Handle synthetic ArrayValue from expval() tuple input
-        if (
-            isinstance(operand, ArrayValue)
-            and operand.get_element_uuids()
-        ):
+        if isinstance(operand, ArrayValue) and operand.get_element_uuids():
             indices = []
             for qubit_uuid in operand.get_element_uuids():
                 idx = qubit_map.get(qubit_uuid)
@@ -3041,7 +3040,9 @@ class CircuitAnalyzer:
                     BinOpKind.FLOORDIV: "//",
                     BinOpKind.POW: "**",
                 }
-                op_symbol = _binop_symbols.get(op.kind, "?") if op.kind is not None else "?"
+                op_symbol = (
+                    _binop_symbols.get(op.kind, "?") if op.kind is not None else "?"
+                )
                 return f"{lhs_str}{op_symbol}{rhs_str}"
 
         # Array element access (e.g., edges[_e, 0])
@@ -3289,7 +3290,11 @@ class CircuitAnalyzer:
             GateOperationType.TOFFOLI: r"$CCX$",
         }
 
-        base_label = tex_labels.get(op.gate_type, str(op.gate_type)) if op.gate_type is not None else "?"
+        base_label = (
+            tex_labels.get(op.gate_type, str(op.gate_type))
+            if op.gate_type is not None
+            else "?"
+        )
 
         # Add parameter display if the gate has a theta parameter
         if op.theta is not None:

@@ -75,14 +75,20 @@ class Operation(abc.ABC):
         Handles ``operands``, ``results``, and subclass-specific Value
         fields.  Subclasses override to handle their extra fields.
         """
-        new_operands = typing.cast(list[Value], [
-            mapping.get(v.uuid, v) if isinstance(v, ValueBase) else v
-            for v in self.operands
-        ])
-        new_results = typing.cast(list[Value], [
-            mapping.get(v.uuid, v) if isinstance(v, ValueBase) else v
-            for v in self.results
-        ])
+        new_operands = typing.cast(
+            list[Value],
+            [
+                mapping.get(v.uuid, v) if isinstance(v, ValueBase) else v
+                for v in self.operands
+            ],
+        )
+        new_results = typing.cast(
+            list[Value],
+            [
+                mapping.get(v.uuid, v) if isinstance(v, ValueBase) else v
+                for v in self.results
+            ],
+        )
         return dataclasses.replace(self, operands=new_operands, results=new_results)
 
 

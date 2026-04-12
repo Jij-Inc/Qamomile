@@ -145,7 +145,6 @@ class CudaqKernelArtifact:
     param_count: int = 0
 
 
-
 class CudaqKernelEmitter:
     """Unified GateEmitter that generates ``@cudaq.kernel`` Python source code.
 

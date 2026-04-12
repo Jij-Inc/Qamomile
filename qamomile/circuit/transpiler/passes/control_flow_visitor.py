@@ -75,8 +75,7 @@ class OperationTransformer(ABC):
         """Recursively transform operations inside control flow constructs."""
         if isinstance(op, HasNestedOps):
             new_lists = [
-                self.transform_operations(op_list)
-                for op_list in op.nested_op_lists()
+                self.transform_operations(op_list) for op_list in op.nested_op_lists()
             ]
             return op.rebuild_nested(new_lists)
         return op

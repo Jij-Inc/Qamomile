@@ -205,7 +205,9 @@ class InlinePass(Pass[Block, Block]):
         # (e.g. from pauli_evolve) have their shape dimensions resolved
         # to the caller's concrete values.
         sub = ValueSubstitutor(
-            {k: v for k, v in remapped_local_map.items()},  # copy as dict[str, ValueBase]
+            {
+                k: v for k, v in remapped_local_map.items()
+            },  # copy as dict[str, ValueBase]
         )
         for block_return, call_result in zip(return_values, call_op.results):
             remapped_uuid = uuid_remap.get(block_return.uuid, block_return.uuid)

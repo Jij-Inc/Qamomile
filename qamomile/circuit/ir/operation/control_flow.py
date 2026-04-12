@@ -194,7 +194,11 @@ class IfOperation(HasNestedOps, Operation):
     phi_ops: list[PhiOp] = dataclasses.field(default_factory=list)
 
     def nested_op_lists(self) -> list[list[Operation]]:
-        return [self.true_operations, self.false_operations, cast(list[Operation], self.phi_ops)]
+        return [
+            self.true_operations,
+            self.false_operations,
+            cast(list[Operation], self.phi_ops),
+        ]
 
     def rebuild_nested(self, new_lists: list[list[Operation]]) -> Operation:
         return dataclasses.replace(

@@ -70,9 +70,7 @@ def emit_measure(
                 f"could not be resolved to a physical qubit index"
             )
         if clbit_addr not in clbit_map:
-            details.append(
-                f"clbit (uuid: {clbit_uuid[:8]}...) not found in clbit_map"
-            )
+            details.append(f"clbit (uuid: {clbit_uuid[:8]}...) not found in clbit_map")
         warnings.warn(
             f"Measurement dropped: {'; '.join(details)}.",
             stacklevel=2,
@@ -102,9 +100,7 @@ def emit_measure_vector(
             if size is not None:
                 for i in range(size):
                     if element_uuids and i < len(element_uuids):
-                        qubit_addr = QubitAddress.from_composite_key(
-                            element_uuids[i]
-                        )
+                        qubit_addr = QubitAddress.from_composite_key(element_uuids[i])
                     else:
                         qubit_addr = QubitAddress(qubits_array.uuid, i)
 
@@ -113,7 +109,10 @@ def emit_measure_vector(
                         q_idx = qubit_map[qubit_addr]
                         c_idx = clbit_map[clbit_addr]
                         emit_pass._emitter.emit_measure(circuit, q_idx, c_idx)
-                        if emit_pass._emitter.measurement_mode == MeasurementMode.STATIC:
+                        if (
+                            emit_pass._emitter.measurement_mode
+                            == MeasurementMode.STATIC
+                        ):
                             emit_pass._measurement_qubit_map[c_idx] = q_idx
 
 

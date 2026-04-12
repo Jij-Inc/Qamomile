@@ -15,25 +15,35 @@ def qiskit_transpiler():
 
 
 class TestEntrypointValidation:
-    def test_transpile_rejects_quantum_input_entrypoint(self, qiskit_transpiler) -> None:
+    def test_transpile_rejects_quantum_input_entrypoint(
+        self, qiskit_transpiler
+    ) -> None:
         @qmc.qkernel
         def kernel(q: qmc.Qubit) -> qmc.Bit:
             return qmc.measure(q)
 
-        with pytest.raises(EntrypointValidationError, match="classical inputs and outputs only"):
+        with pytest.raises(
+            EntrypointValidationError, match="classical inputs and outputs only"
+        ):
             qiskit_transpiler.transpile(kernel)
 
-    def test_transpile_rejects_quantum_output_entrypoint(self, qiskit_transpiler) -> None:
+    def test_transpile_rejects_quantum_output_entrypoint(
+        self, qiskit_transpiler
+    ) -> None:
         @qmc.qkernel
         def kernel() -> qmc.Qubit:
             q = qmc.qubit(name="q")
             q = qmc.h(q)
             return q
 
-        with pytest.raises(EntrypointValidationError, match="classical inputs and outputs only"):
+        with pytest.raises(
+            EntrypointValidationError, match="classical inputs and outputs only"
+        ):
             qiskit_transpiler.transpile(kernel)
 
-        with pytest.raises(EntrypointValidationError, match="classical inputs and outputs only"):
+        with pytest.raises(
+            EntrypointValidationError, match="classical inputs and outputs only"
+        ):
             qiskit_transpiler.to_circuit(kernel)
 
     def test_quantum_io_subroutine_can_be_used_from_classical_entrypoint(
@@ -59,7 +69,9 @@ class TestEntrypointValidation:
             q = pair[1]
             return qmc.measure(q)
 
-        with pytest.raises(EntrypointValidationError, match="classical inputs and outputs only"):
+        with pytest.raises(
+            EntrypointValidationError, match="classical inputs and outputs only"
+        ):
             qiskit_transpiler.transpile(kernel)
 
     def test_rejects_vector_qubit_input(self, qiskit_transpiler) -> None:
@@ -68,7 +80,9 @@ class TestEntrypointValidation:
             q[0] = qmc.h(q[0])
             return qmc.measure(q[0])
 
-        with pytest.raises(EntrypointValidationError, match="classical inputs and outputs only"):
+        with pytest.raises(
+            EntrypointValidationError, match="classical inputs and outputs only"
+        ):
             qiskit_transpiler.transpile(kernel)
 
     def test_accepts_classical_tuple_input(self, qiskit_transpiler) -> None:
@@ -88,15 +102,6 @@ class TestEntrypointValidation:
         # Should not raise - tuple of classical types is fine
         result = EntrypointValidationPass().run(block)
         assert result is block
-
-    def test_rejects_vector_qubit_input(self, qiskit_transpiler) -> None:
-        @qmc.qkernel
-        def kernel(q: qmc.Vector[qmc.Qubit]) -> qmc.Bit:
-            q[0] = qmc.h(q[0])
-            return qmc.measure(q[0])
-
-        with pytest.raises(EntrypointValidationError, match="classical inputs and outputs only"):
-            qiskit_transpiler.transpile(kernel)
 
     def test_accepts_vector_bit_output(self, qiskit_transpiler) -> None:
         @qmc.qkernel

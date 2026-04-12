@@ -458,7 +458,9 @@ class CircuitLayoutEngine:
         max_below = {q: 0.0 for q in range(num_qubits)}
 
         # Count overlapping borders per (topmost_qubit, position)
-        overlap_counts: defaultdict[int, defaultdict[tuple, int]] = defaultdict(lambda: defaultdict(int))
+        overlap_counts: defaultdict[int, defaultdict[tuple, int]] = defaultdict(
+            lambda: defaultdict(int)
+        )
         for br in block_ranges:
             top_q = min(br["qubit_indices"])
             pos_key = (br["start_x"], br["end_x"])

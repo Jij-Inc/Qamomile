@@ -246,8 +246,7 @@ def create_dummy_input(
 
         # Create symbolic dimension Values
         shape_values = tuple(
-            Value(type=UIntType(), name=f"{name}_dim{i}")
-            for i in range(ndim)
+            Value(type=UIntType(), name=f"{name}_dim{i}") for i in range(ndim)
         )
 
         # Create ArrayValue with symbolic shape

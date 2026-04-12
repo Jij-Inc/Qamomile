@@ -246,8 +246,7 @@ class ClassicalExecutor:
         else:
             # Legacy format: individual bit operands
             bits = [
-                self._get_value(b, context, results, scoped_locals)
-                for b in op.operands
+                self._get_value(b, context, results, scoped_locals) for b in op.operands
             ]
 
         # Decode: bits -> fixed-point float
@@ -456,7 +455,9 @@ class ClassicalExecutor:
             if iterable_value.entries:
                 return [
                     (
-                        self._resolve_structured_value(key, context, results, scoped_locals),
+                        self._resolve_structured_value(
+                            key, context, results, scoped_locals
+                        ),
                         self._get_value(val, context, results, scoped_locals),
                     )
                     for key, val in iterable_value.entries

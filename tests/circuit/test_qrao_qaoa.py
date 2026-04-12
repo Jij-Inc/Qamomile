@@ -1,6 +1,5 @@
 """Tests for pauli_evolve with QRAO QAOA as the motivating use case."""
 
-
 import pytest
 
 pytest.importorskip("qiskit")
@@ -300,15 +299,19 @@ def test_native_fallback_statevector_match():
 
     bindings = {"n": 2, "hamiltonian": H, "gamma": 0.7}
 
-    native_exe = QiskitTranspiler().transpile(
-        _wrap_pauli_evolve, bindings=bindings
-    )
+    native_exe = QiskitTranspiler().transpile(_wrap_pauli_evolve, bindings=bindings)
     fallback_exe = QiskitTranspiler(use_native_composite=False).transpile(
         _wrap_pauli_evolve, bindings=bindings
     )
 
-    sv_native = Statevector(native_exe.compiled_quantum[0].circuit.remove_final_measurements(inplace=False))
-    sv_fallback = Statevector(fallback_exe.compiled_quantum[0].circuit.remove_final_measurements(inplace=False))
+    sv_native = Statevector(
+        native_exe.compiled_quantum[0].circuit.remove_final_measurements(inplace=False)
+    )
+    sv_fallback = Statevector(
+        fallback_exe.compiled_quantum[0].circuit.remove_final_measurements(
+            inplace=False
+        )
+    )
 
     assert sv_native.equiv(sv_fallback), (
         f"Native and fallback statevectors differ.\n"

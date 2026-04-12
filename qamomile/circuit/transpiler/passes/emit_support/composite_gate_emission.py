@@ -33,7 +33,11 @@ def emit_composite_gate(
 ) -> None:
     """Emit a composite gate operation."""
     all_qubits = op.control_qubits + op.target_qubits
-    qubit_indices = [qubit_map[QubitAddress(q.uuid)] for q in all_qubits if QubitAddress(q.uuid) in qubit_map]
+    qubit_indices = [
+        qubit_map[QubitAddress(q.uuid)]
+        for q in all_qubits
+        if QubitAddress(q.uuid) in qubit_map
+    ]
 
     # Try native emitters first
     for emitter in emit_pass._composite_emitters:
@@ -165,7 +169,9 @@ def emit_approximate_qft(
                 )
 
     for j in range(n // 2):
-        emit_pass._emitter.emit_swap(circuit, qubit_indices[j], qubit_indices[n - 1 - j])
+        emit_pass._emitter.emit_swap(
+            circuit, qubit_indices[j], qubit_indices[n - 1 - j]
+        )
 
 
 def emit_approximate_iqft(
@@ -194,7 +200,9 @@ def emit_approximate_iqft(
 
     # Bit-reversal SWAP first (inverse of QFT's trailing SWAP)
     for j in range(n // 2):
-        emit_pass._emitter.emit_swap(circuit, qubit_indices[j], qubit_indices[n - 1 - j])
+        emit_pass._emitter.emit_swap(
+            circuit, qubit_indices[j], qubit_indices[n - 1 - j]
+        )
 
     for j in range(n):
         for m in range(max(0, j - k), j):
@@ -231,7 +239,9 @@ def emit_qft_manual(
             )
 
     for j in range(n // 2):
-        emit_pass._emitter.emit_swap(circuit, qubit_indices[j], qubit_indices[n - 1 - j])
+        emit_pass._emitter.emit_swap(
+            circuit, qubit_indices[j], qubit_indices[n - 1 - j]
+        )
 
 
 def emit_iqft_manual(
@@ -251,7 +261,9 @@ def emit_iqft_manual(
 
     # Bit-reversal SWAP first (inverse of QFT's trailing SWAP)
     for j in range(n // 2):
-        emit_pass._emitter.emit_swap(circuit, qubit_indices[j], qubit_indices[n - 1 - j])
+        emit_pass._emitter.emit_swap(
+            circuit, qubit_indices[j], qubit_indices[n - 1 - j]
+        )
 
     for j in range(n):
         for k in range(j):
