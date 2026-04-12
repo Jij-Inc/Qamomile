@@ -20,14 +20,9 @@ import dataclasses
 import enum
 import itertools
 import linecache
+import math
 from typing import Any
 
-from qamomile.circuit.transpiler.decompositions import (
-    CH_DECOMPOSITION,
-    CP_DECOMPOSITION,  # noqa: F401 -- recipe data referenced in emit_cp docstring
-    CY_DECOMPOSITION,
-    emit_decomposition,
-)
 from qamomile.circuit.transpiler.gate_emitter import MeasurementMode
 
 
@@ -493,18 +488,27 @@ class CudaqKernelEmitter:
     def emit_ch(self, circuit: CudaqKernelArtifact, control: int, target: int) -> None:
         """Emit controlled-Hadamard via decomposition.
 
-        Uses the shared CH_DECOMPOSITION recipe from
-        ``qamomile.circuit.transpiler.decompositions``.
+        Mirrors the ``CH_DECOMPOSITION`` recipe from
+        ``qamomile.circuit.transpiler.decompositions``.  Inlined here (rather
+        than calling :func:`emit_decomposition`) so that the string-based
+        codegen produces the exact source contract expected by the tracing
+        test emitter, without double-recording primitive gate calls.
         """
-        emit_decomposition(self, circuit, CH_DECOMPOSITION, control, target)
+        self._emit(f"ry({math.pi / 4}, q[{target}])")
+        self._emit(f"x.ctrl(q[{control}], q[{target}])")
+        self._emit(f"ry({-math.pi / 4}, q[{target}])")
 
     def emit_cy(self, circuit: CudaqKernelArtifact, control: int, target: int) -> None:
         """Emit controlled-Y via decomposition.
 
-        Uses the shared CY_DECOMPOSITION recipe from
-        ``qamomile.circuit.transpiler.decompositions``.
+        Mirrors the ``CY_DECOMPOSITION`` recipe from
+        ``qamomile.circuit.transpiler.decompositions``.  See
+        :meth:`emit_ch` for why this is inlined rather than delegating to
+        :func:`emit_decomposition`.
         """
-        emit_decomposition(self, circuit, CY_DECOMPOSITION, control, target)
+        self._emit(f"sdg(q[{target}])")
+        self._emit(f"x.ctrl(q[{control}], q[{target}])")
+        self._emit(f"s(q[{target}])")
 
     def emit_crx(
         self,
