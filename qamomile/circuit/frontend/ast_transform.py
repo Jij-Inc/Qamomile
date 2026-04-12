@@ -704,7 +704,8 @@ class ControlFlowTransformer(ast.NodeTransformer):
         Checks the call-site arguments and target pattern for items() /
         module.items() / d.items() forms.
         """
-        call = node.iter  # type: ignore
+        assert isinstance(node.iter, ast.Call)
+        call = node.iter
         # from qamomile.circuit import items; items(d) form
         if isinstance(call.func, ast.Name):
             if call.keywords:
@@ -727,7 +728,8 @@ class ControlFlowTransformer(ast.NodeTransformer):
             )
             if isinstance(receiver_obj, types.ModuleType):
                 # module.items(d) form: require exactly 1 positional arg, no keywords
-                alias = func_value.id  # type: ignore[union-attr]
+                assert isinstance(func_value, ast.Name)
+                alias = func_value.id
                 if call.keywords:
                     raise SyntaxError(
                         f"items() does not support keyword arguments in @qkernel; "
@@ -783,7 +785,8 @@ class ControlFlowTransformer(ast.NodeTransformer):
         Checks the call-site arguments and target for range() /
         module.range() forms.
         """
-        range_call = node.iter  # type: ignore
+        assert isinstance(node.iter, ast.Call)
+        range_call = node.iter
         # Derive the caller name from the AST for error messages
         if isinstance(range_call.func, ast.Attribute) and isinstance(
             range_call.func.value, ast.Name
@@ -945,6 +948,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             step_arg = node.iter.args[2]  # type: ignore
 
         # ループ変数名を取得 (_validate_for_loop で検証済み)
+        assert isinstance(node.target, ast.Name)
         loop_var_name = node.target.id
 
         # for_loop(start, stop, step, var_name) コールを作成
@@ -988,6 +992,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             dict_arg = node.iter.func.value  # type: ignore
 
         # Parse the target pattern: (key, value) — validated by _validate_for_loop
+        assert isinstance(node.target, ast.Tuple)
         key_target = node.target.elts[0]
         value_target = node.target.elts[1]
 
@@ -995,6 +1000,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         key_vars = self._extract_tuple_vars(key_target)
 
         # Extract value variable name (validated by _validate_for_loop)
+        assert isinstance(value_target, ast.Name)
         value_var = value_target.id
 
         # Create for_items(dict, key_vars, value_var) call
@@ -1177,7 +1183,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             lineno=node.lineno,
         )  # type: ignore
 
-        # True Body: params=input_vars, return=output_vars
+        # True Body: inputs=input_vars, return=output_vars
         true_def, true_name = self._create_inner_func(
             "body",
             true_body,
@@ -1186,7 +1192,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             return_var_names=output_vars,
         )
 
-        # False Body: params=input_vars, return=output_vars
+        # False Body: inputs=input_vars, return=output_vars
         false_def, false_name = self._create_inner_func(
             "body",
             false_body,
@@ -1218,9 +1224,11 @@ class ControlFlowTransformer(ast.NodeTransformer):
         result_stmts: list[ast.stmt] = [cond_def, true_def, false_def]
 
         if has_return:
+            assert ret_var_name is not None
             # _if_ret_N = None (初期化)
+            ret_name_store: ast.expr = ast.Name(id=ret_var_name, ctx=ast.Store())
             init_stmt = ast.Assign(
-                targets=[ast.Name(id=ret_var_name, ctx=ast.Store())],
+                targets=[ret_name_store],
                 value=ast.Constant(value=None),
                 lineno=node.lineno,
             )
@@ -1229,6 +1237,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         result_stmts.append(assign_node)
 
         if has_return:
+            assert ret_var_name is not None
             # return _if_ret_N
             outer_return = ast.Return(
                 value=ast.Name(id=ret_var_name, ctx=ast.Load()),

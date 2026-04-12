@@ -18,15 +18,6 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
-@overload
-def cast(
-    source: Vector[Qubit],
-    target_type: type[QFixed],
-    *,
-    int_bits: int = 0,
-) -> QFixed: ...
-
-
 def cast(
     source: Vector[Qubit],
     target_type: type,
@@ -135,17 +126,15 @@ def _cast_vector_qubit_to_qfixed(
     result_value = Value(
         type=result_type,
         name=f"{source.value.name}_as_qfixed",
-        params={
-            # Cast metadata - using logical_id for physical qubit tracking
-            "cast_source_uuid": source.value.uuid,
-            "cast_source_logical_id": source.value.logical_id,
-            "cast_qubit_uuids": qubit_uuids,
-            "cast_qubit_logical_ids": qubit_logical_ids,
-            # QFixed-specific metadata (for backward compatibility with measurement)
-            "num_bits": num_qubits,
-            "int_bits": int_bits,
-            "qubit_values": qubit_uuids,
-        },
+    ).with_cast_metadata(
+        source_uuid=source.value.uuid,
+        source_logical_id=source.value.logical_id,
+        qubit_uuids=qubit_uuids,
+        qubit_logical_ids=qubit_logical_ids,
+    ).with_qfixed_metadata(
+        qubit_uuids=qubit_uuids,
+        num_bits=num_qubits,
+        int_bits=int_bits,
     )
 
     # Create and emit the CastOperation

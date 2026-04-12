@@ -32,7 +32,7 @@ class Tuple(Handle, Generic[K, V]):
         ```
     """
 
-    value: TupleValue
+    value: TupleValue  # type: ignore[assignment]  # intentional narrowing from Value
     _elements: tuple[Handle, ...] = dataclasses.field(default_factory=tuple)
 
     @overload
@@ -97,7 +97,7 @@ class Dict(Handle, Generic[K, V]):
         ```
     """
 
-    value: DictValue
+    value: DictValue  # type: ignore[assignment]  # intentional narrowing from Value
     _entries: list[tuple[Handle, Handle]] = dataclasses.field(default_factory=list)
     _size: UInt | None = None
     _key_type: type | None = None
@@ -118,7 +118,6 @@ class Dict(Handle, Generic[K, V]):
                 value=Value(
                     type=UIntType(),
                     name=f"{self.value.name}_size",
-                    params={"const": len(self._entries)} if self._entries else {},
-                )
+                ).with_const(len(self._entries))
             )
         return self._size

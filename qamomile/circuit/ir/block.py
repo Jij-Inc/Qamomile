@@ -6,16 +6,17 @@ import dataclasses
 from enum import Enum, auto
 from typing import TYPE_CHECKING
 
-from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.value import Value
 
 if TYPE_CHECKING:
-    pass
+    from qamomile.circuit.ir.operation import Operation
+    from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 
 
 class BlockKind(Enum):
     """Classification of block structure for pipeline stages."""
 
+    TRACED = auto()  # Direct output of frontend tracing / build()
     HIERARCHICAL = auto()  # May contain CallBlockOperations
     AFFINE = auto()  # No CallBlockOperations, For/If preserved
     ANALYZED = auto()  # Validated and dependency-analyzed
@@ -25,7 +26,7 @@ class BlockKind(Enum):
 class Block:
     """Unified block representation for all pipeline stages.
 
-    Replaces both BlockValue and Graph with a single structure.
+    Replaces the older traced and callable IR wrappers with a single structure.
     The `kind` field indicates which pipeline stage this block is at.
     """
 
@@ -33,7 +34,8 @@ class Block:
     label_args: list[str] = dataclasses.field(default_factory=list)
     input_values: list[Value] = dataclasses.field(default_factory=list)
     output_values: list[Value] = dataclasses.field(default_factory=list)
-    operations: list[Operation] = dataclasses.field(default_factory=list)
+    output_names: list[str] = dataclasses.field(default_factory=list)
+    operations: list["Operation"] = dataclasses.field(default_factory=list)
 
     # Pipeline stage indicator
     kind: BlockKind = BlockKind.HIERARCHICAL
@@ -46,6 +48,13 @@ class Block:
         default=None, repr=False
     )
 
+    def __post_init__(self):
+        if self.label_args and len(self.label_args) != len(self.input_values):
+            raise ValueError(
+                f"label_args length ({len(self.label_args)}) must match "
+                f"input_values length ({len(self.input_values)})"
+            )
+
     def unbound_parameters(self) -> list[str]:
         """Return list of unbound parameter names."""
         return list(self.parameters.keys())
@@ -54,33 +63,23 @@ class Block:
         """Check if block contains no CallBlockOperations."""
         return self.kind in (BlockKind.AFFINE, BlockKind.ANALYZED)
 
-    @classmethod
-    def from_block_value(
-        cls,
-        block_value: "BlockValue",
-        parameters: dict[str, Value] | None = None,
-    ) -> "Block":
-        """Create a Block from a BlockValue.
+    def call(self, **kwargs: Value) -> "CallBlockOperation":
+        """Create a CallBlockOperation against this block."""
+        from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 
-        Args:
-            block_value: The BlockValue to convert
-            parameters: Optional parameter bindings
+        inputs = [kwargs[label] for label in self.label_args]
+        dummy_inputs = {v.logical_id: idx for idx, v in enumerate(self.input_values)}
 
-        Returns:
-            A new Block in HIERARCHICAL state
-        """
+        results = []
+        for dummy_return in self.output_values:
+            if dummy_return.logical_id in dummy_inputs:
+                input_idx = dummy_inputs[dummy_return.logical_id]
+                results.append(inputs[input_idx].next_version())
+            else:
+                results.append(dummy_return)
 
-        return cls(
-            name=block_value.name,
-            label_args=block_value.label_args,
-            input_values=block_value.input_values,
-            output_values=block_value.return_values,
-            operations=block_value.operations,
-            kind=BlockKind.HIERARCHICAL,
-            parameters=parameters or {},
+        return CallBlockOperation(
+            block=self,
+            operands=inputs,
+            results=results,
         )
-
-
-# Import BlockValue for type checking
-if TYPE_CHECKING:
-    from qamomile.circuit.ir.block_value import BlockValue

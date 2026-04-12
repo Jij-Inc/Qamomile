@@ -30,9 +30,15 @@ from qamomile.circuit.transpiler.executable import (
     ParameterMetadata,
     QuantumExecutor,
 )
+from qamomile.circuit.transpiler.gate_emitter import MeasurementMode
 from qamomile.circuit.transpiler.passes.emit import EmitPass
-from qamomile.circuit.transpiler.passes.emit_base import resolve_if_condition
-from qamomile.circuit.transpiler.passes.separate import SeparatePass
+from qamomile.circuit.transpiler.passes.emit_support import (
+    ClbitMap,
+    QubitAddress,
+    QubitMap,
+    resolve_if_condition,
+)
+from qamomile.circuit.transpiler.passes.separate import SegmentationPass
 from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
 from qamomile.circuit.transpiler.transpiler import Transpiler
 
@@ -129,19 +135,6 @@ class BoundCudaqKernelArtifact:
     param_values: list[float]
     execution_mode: ExecutionMode = ExecutionMode.STATIC
 
-    @property
-    def kernel(self) -> Any:
-        """Backward-compatibility alias for ``kernel_func``."""
-        return self.kernel_func
-
-
-# Backward compatibility aliases
-BoundCudaqCircuit = BoundCudaqKernelArtifact
-"""Alias for backward compatibility. Use ``BoundCudaqKernelArtifact`` instead."""
-
-BoundCudaqRuntimeCircuit = BoundCudaqKernelArtifact
-"""Alias for backward compatibility. Use ``BoundCudaqKernelArtifact`` instead."""
-
 
 def _has_runtime_control_flow(
     operations: list[Operation],
@@ -174,7 +167,7 @@ def _has_runtime_control_flow(
 
 def _collect_loop_carried_clbits(
     operations: list[Operation],
-    clbit_map: dict[str, int],
+    clbit_map: ClbitMap,
 ) -> set[int]:
     """Collect clbit indices used as loop-carried conditions in WhileOperations.
 
@@ -190,8 +183,9 @@ def _collect_loop_carried_clbits(
             cond = op.operands[0]
             cond_val = cond.value if hasattr(cond, "value") else cond
             cond_uuid = cond_val.uuid if hasattr(cond_val, "uuid") else str(cond_val)
-            if cond_uuid in clbit_map:
-                result.add(clbit_map[cond_uuid])
+            cond_addr = QubitAddress(cond_uuid)
+            if cond_addr in clbit_map:
+                result.add(clbit_map[cond_addr])
             # Also scan inside the while body
             result |= _collect_loop_carried_clbits(op.operations, clbit_map)
         elif isinstance(op, IfOperation):
@@ -227,7 +221,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         self,
         operations: list[Operation],
         bindings: dict[str, Any],
-    ) -> tuple[CudaqKernelArtifact, dict[str, int], dict[str, int]]:
+    ) -> tuple[CudaqKernelArtifact, QubitMap, ClbitMap]:
         """Emit a quantum segment through the unified codegen path.
 
         Determines the execution mode via ``_has_runtime_control_flow``,
@@ -239,7 +233,11 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         mode = ExecutionMode.RUNNABLE if is_runtime else ExecutionMode.STATIC
 
         # Configure emitter for this segment's mode
-        emitter.noop_measurement = mode == ExecutionMode.STATIC
+        emitter.measurement_mode = (
+            MeasurementMode.STATIC
+            if mode == ExecutionMode.STATIC
+            else MeasurementMode.RUNNABLE
+        )
 
         # Allocate resources
         qubit_map, clbit_map = self._allocator.allocate(operations, bindings)
@@ -260,7 +258,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         emitter._parametric = emitter._param_count > 0
 
         # For STATIC mode, measurement_qubit_map is populated by base class
-        # via noop_measurement flag.  For RUNNABLE mode, the kernel returns
+        # via measurement_mode property.  For RUNNABLE mode, the kernel returns
         # logical clbit values directly via [__b0, __b1, ...], so
         # measurement_qubit_map is not needed (left empty).
 
@@ -273,8 +271,8 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         self,
         circuit: Any,
         op: IfOperation,
-        qubit_map: dict[str, int],
-        clbit_map: dict[str, int],
+        qubit_map: QubitMap,
+        clbit_map: ClbitMap,
         bindings: dict[str, Any],
     ) -> None:
         """Handle if-operations for both static and runtime paths.
@@ -431,12 +429,13 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                     bindings,
                 )
                 # Propagate SSA: results inherit operand's physical target.
-                assert len(op.results) == len(op.operands), (
-                    f"[For DEVELOPER] GateOperation must have equal operands/results, "
-                    f"got {len(op.operands)} operands and {len(op.results)} results."
+                qubit_ops = op.qubit_operands
+                assert len(op.results) == len(qubit_ops), (
+                    f"[For DEVELOPER] GateOperation must have equal qubit operands/results, "
+                    f"got {len(qubit_ops)} qubit operands and {len(op.results)} results."
                     f"There must be a bug."
                 )
-                for operand, result in zip(op.operands, op.results, strict=True):
+                for operand, result in zip(qubit_ops, op.results, strict=True):
                     assert result.type.is_quantum(), (
                         "[For DEVELOPER] GateOperation result must be quantum. "
                         "There must be a bug."
@@ -447,21 +446,11 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                     qubit_map[result.uuid] = qubit_map[operand.uuid]
                 continue
             if isinstance(op, ForOperation) and num_controls == 1:
-                start = (
-                    self._resolver.resolve_int_value(op.operands[0], bindings)
-                    if len(op.operands) > 0
-                    else 0
+                from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
+                    resolve_loop_bounds,
                 )
-                stop = (
-                    self._resolver.resolve_int_value(op.operands[1], bindings)
-                    if len(op.operands) > 1
-                    else 1
-                )
-                step = (
-                    self._resolver.resolve_int_value(op.operands[2], bindings)
-                    if len(op.operands) > 2
-                    else 1
-                )
+
+                start, stop, step = resolve_loop_bounds(self._resolver, op, bindings)
                 if start is not None and stop is not None and step is not None:
                     for i in range(start, stop, step):
                         loop_bindings = bindings.copy()
@@ -573,7 +562,12 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
 
         # Single-control: fall back to existing controlled-gate emitters
         if len(control_indices) == 1:
-            self._emit_controlled_gate(
+            from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+                emit_controlled_gate,
+            )
+
+            emit_controlled_gate(
+                self,
                 circuit,
                 op,
                 control_indices[0],
@@ -607,7 +601,7 @@ class CudaqExecutor(QuantumExecutor[CudaqKernelArtifact]):
 
         self._target = target
         if self._target:
-            cudaq.set_target(self._target)
+            cudaq.set_target(self._target)  # type: ignore[operator]
 
     def _ensure_target(self) -> None:
         """Reapply this executor's target before a runtime call.
@@ -621,7 +615,7 @@ class CudaqExecutor(QuantumExecutor[CudaqKernelArtifact]):
         if self._target:
             import cudaq
 
-            cudaq.set_target(self._target)
+            cudaq.set_target(self._target)  # type: ignore[operator]
 
     def execute(self, circuit: Any, shots: int) -> dict[str, int]:
         """Execute circuit and return canonical big-endian bitstring counts.
@@ -646,11 +640,11 @@ class CudaqExecutor(QuantumExecutor[CudaqKernelArtifact]):
         self._ensure_target()
 
         if isinstance(circuit, BoundCudaqKernelArtifact):
-            result = cudaq.sample(
+            result = cudaq.sample(  # type: ignore[operator]
                 circuit.kernel_func, circuit.param_values, shots_count=shots
             )
         else:
-            result = cudaq.sample(circuit.kernel_func, shots_count=shots)
+            result = cudaq.sample(circuit.kernel_func, shots_count=shots)  # type: ignore[operator]
 
         num_qubits = circuit.num_qubits
         counts: dict[str, int] = {}
@@ -686,11 +680,11 @@ class CudaqExecutor(QuantumExecutor[CudaqKernelArtifact]):
         self._ensure_target()
 
         if isinstance(circuit, BoundCudaqKernelArtifact):
-            results = cudaq.run(
+            results = cudaq.run(  # type: ignore[operator]
                 circuit.kernel_func, circuit.param_values, shots_count=shots
             )
         else:
-            results = cudaq.run(circuit.kernel_func, shots_count=shots)
+            results = cudaq.run(circuit.kernel_func, shots_count=shots)  # type: ignore[operator]
 
         num_clbits = circuit.num_clbits
         counts: dict[str, int] = {}
@@ -706,7 +700,7 @@ class CudaqExecutor(QuantumExecutor[CudaqKernelArtifact]):
 
         return counts
 
-    def bind_parameters(
+    def bind_parameters(  # type: ignore[override]
         self,
         circuit: Any,
         bindings: dict[str, Any],
@@ -759,20 +753,20 @@ class CudaqExecutor(QuantumExecutor[CudaqKernelArtifact]):
                 "circuits. Use sample() or run() instead."
             )
 
-        self._ensure_target()
+        self._ensure_target()  # type: ignore[unreachable]
 
-        if isinstance(hamiltonian, qm_o.Hamiltonian):
+        if isinstance(hamiltonian, qm_o.Hamiltonian):  # type: ignore[unreachable]
             spin_op = hamiltonian_to_cudaq_spin_op(hamiltonian)
         else:
-            spin_op = hamiltonian
+            spin_op = hamiltonian  # type: ignore[unreachable]
 
         if isinstance(circuit, BoundCudaqKernelArtifact):
-            result = cudaq.observe(circuit.kernel_func, spin_op, circuit.param_values)
+            result = cudaq.observe(circuit.kernel_func, spin_op, circuit.param_values)  # type: ignore[operator]
         else:
             if params is not None:
-                result = cudaq.observe(circuit.kernel_func, spin_op, list(params))
+                result = cudaq.observe(circuit.kernel_func, spin_op, list(params))  # type: ignore[operator]
             else:
-                result = cudaq.observe(circuit.kernel_func, spin_op)
+                result = cudaq.observe(circuit.kernel_func, spin_op)  # type: ignore[operator]
 
         return result.expectation()
 
@@ -796,8 +790,8 @@ class CudaqTranspiler(Transpiler[CudaqKernelArtifact]):
         executable = transpiler.transpile(bell_state)
     """
 
-    def _create_separate_pass(self) -> SeparatePass:
-        return SeparatePass()
+    def _create_segmentation_pass(self) -> SegmentationPass:
+        return SegmentationPass()
 
     def _create_emit_pass(
         self,
@@ -806,7 +800,7 @@ class CudaqTranspiler(Transpiler[CudaqKernelArtifact]):
     ) -> EmitPass[CudaqKernelArtifact]:
         return CudaqEmitPass(bindings, parameters)
 
-    def executor(
+    def executor(  # type: ignore[override]
         self,
         target: str | None = None,
     ) -> CudaqExecutor:

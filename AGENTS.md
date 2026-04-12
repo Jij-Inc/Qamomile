@@ -27,16 +27,13 @@ uv run ruff format qamomile/
 # Type checking with zuban
 uv run zuban qamomile/
 
-# Build documentation (legacy - from docs/en or docs/ja directory)
-jupyter-book build .
+# Run docs tests
+uv run pytest -m docs tests/docs -v
 
-# Build docs2 documentation (recommended for new work)
-cd docs2
-make build        # Build both English and Japanese
-make build-en     # Build English only
-make build-ja     # Build Japanese only
-make serve-en     # Serve English docs locally
-make serve-ja     # Serve Japanese docs locally
+# Build documentation
+cd docs
+make build        # Build both language sites
+# or: make build-en / make build-ja
 ```
 
 ## Architecture Overview
@@ -50,9 +47,9 @@ Mathematical Model (JijModeling)
          ↓
     Core Layer (converters: QAOA, QRAO)
          ↓
-    Circuit Layer (Frontend @qkernel → IR Graph)
+    Circuit Layer (Frontend @qkernel → IR Block)
          ↓
-    Transpiler Pipeline (inline → constant_fold → analyze → separate → emit)
+    Transpiler Pipeline (inline → partial_eval → analyze → plan → emit)
          ↓
     Backend Execution (Qiskit, QuriParts, etc.)
 ```
@@ -61,8 +58,8 @@ Mathematical Model (JijModeling)
 
 **qamomile/circuit/** - Circuit abstraction layer:
 - `frontend/`: Python decorator-based API (`@qm.qkernel`) with handle types (Qubit, Float, UInt, Bit)
-- `ir/`: Intermediate representation with Value nodes, Operations, and Graph/Block structures
-- `transpiler/`: Multi-pass compilation (inline, constant fold, analyze, separate, emit)
+- `ir/`: Intermediate representation with `Block`, `Value`, and `Operation`
+- `transpiler/`: Multi-pass compilation (inline, partial-eval, analyze, plan, emit)
 - `stdlib/`: Built-in algorithms (QFT, IQFT, QPE)
 
 **qamomile/core/** - Mathematical modeling layer:
@@ -100,14 +97,13 @@ executable = transpiler.transpile(my_circuit, bindings={"theta": 0.5})
 
 ### Transpiler Pipeline Stages
 
-1. **to_block()**: QKernel → Block (HIERARCHICAL)
-2. **inline()**: Inlines CallBlockOperation → Block (LINEAR)
-3. **constant_fold()**: Evaluates constant expressions
-4. **analyze()**: Validates dependencies → Block (ANALYZED)
-5. **separate()**: Splits into quantum/classical segments → SeparatedProgram
-6. **emit()**: Backend-specific circuit generation → ExecutableProgram
+1. **to_block()**: `QKernel` → `Block`
+2. **inline()**: Inlines `CallBlockOperation` → affine `Block`
+3. **partial_eval()**: Constant folds and lowers compile-time control flow
+4. **analyze()**: Validates dependencies → analyzed `Block`
+5. **plan()**: Builds a `ProgramPlan`
+6. **emit()**: Backend-specific circuit generation → `ExecutableProgram`
 
 ## Test
 
-tests/ directory contains unit tests.
-and you have to run docs tests too.
+`tests/` contains unit tests, and docs tests under `tests/docs` must also be run for documentation-impacting changes.

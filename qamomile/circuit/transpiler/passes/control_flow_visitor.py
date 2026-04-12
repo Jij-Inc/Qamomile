@@ -6,11 +6,7 @@ from abc import ABC, abstractmethod
 from typing import Callable
 
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.control_flow import (
-    ForOperation,
-    IfOperation,
-    WhileOperation,
-)
+from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 
 
 class ControlFlowVisitor(ABC):
@@ -42,14 +38,9 @@ class ControlFlowVisitor(ABC):
 
     def _visit_control_flow(self, op: Operation) -> None:
         """Recursively visit operations inside control flow constructs."""
-        if isinstance(op, ForOperation):
-            self.visit_operations(op.operations)
-        elif isinstance(op, IfOperation):
-            self.visit_operations(op.true_operations)
-            self.visit_operations(op.false_operations)
-            self.visit_operations(op.phi_ops)
-        elif isinstance(op, WhileOperation):
-            self.visit_operations(op.operations)
+        if isinstance(op, HasNestedOps):
+            for op_list in op.nested_op_lists():
+                self.visit_operations(op_list)
 
 
 class OperationTransformer(ABC):
@@ -82,24 +73,12 @@ class OperationTransformer(ABC):
 
     def _transform_control_flow(self, op: Operation) -> Operation:
         """Recursively transform operations inside control flow constructs."""
-        import dataclasses
-
-        if isinstance(op, ForOperation):
-            new_ops = self.transform_operations(op.operations)
-            return dataclasses.replace(op, operations=new_ops)
-        elif isinstance(op, IfOperation):
-            new_true = self.transform_operations(op.true_operations)
-            new_false = self.transform_operations(op.false_operations)
-            new_phi = self.transform_operations(op.phi_ops)
-            return dataclasses.replace(
-                op,
-                true_operations=new_true,
-                false_operations=new_false,
-                phi_ops=new_phi,
-            )
-        elif isinstance(op, WhileOperation):
-            new_ops = self.transform_operations(op.operations)
-            return dataclasses.replace(op, operations=new_ops)
+        if isinstance(op, HasNestedOps):
+            new_lists = [
+                self.transform_operations(op_list)
+                for op_list in op.nested_op_lists()
+            ]
+            return op.rebuild_nested(new_lists)
         return op
 
 

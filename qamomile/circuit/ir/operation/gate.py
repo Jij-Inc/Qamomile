@@ -1,14 +1,17 @@
+from __future__ import annotations
+
 import dataclasses
 import enum
+import typing
 
+from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.types import QFixedType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
-    BlockType,
     FloatType,
     QubitType,
 )
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import Value, ValueBase
 
 from .operation import Operation, OperationKind, ParamHint, Signature
 
@@ -34,27 +37,93 @@ class GateOperationType(enum.Enum):
     TOFFOLI = enum.auto()
 
 
+_ROTATION_GATES = frozenset(
+    {
+        GateOperationType.RX,
+        GateOperationType.RY,
+        GateOperationType.RZ,
+        GateOperationType.P,
+        GateOperationType.CP,
+        GateOperationType.RZZ,
+    }
+)
+
+
 @dataclasses.dataclass
 class GateOperation(Operation):
+    """Quantum gate operation.
+
+    For rotation gates (RX, RY, RZ, P, CP, RZZ), the angle parameter is
+    stored as the **last element** of ``operands``.  Use the ``theta``
+    property for typed read access and the ``rotation`` / ``fixed`` factory
+    class-methods for type-safe construction.
+    """
+
     gate_type: GateOperationType | None = None
-    theta: float | Value | None = (
-        None  # Angle parameter for rotation gates (RX, RY, RZ, P, etc.)
-    )
 
     def __post_init__(self):
         if not self.gate_type:
             raise ValueError("gate_type must be specified for GateOperation.")
 
+    # ------------------------------------------------------------------
+    # Factory constructors
+    # ------------------------------------------------------------------
+    @classmethod
+    def fixed(
+        cls,
+        gate_type: GateOperationType,
+        qubits: list[Value],
+        results: list[Value],
+    ) -> "GateOperation":
+        """Create a fixed gate (H, X, CX, SWAP, …) with no angle parameter."""
+        return cls(gate_type=gate_type, operands=list(qubits), results=list(results))
+
+    @classmethod
+    def rotation(
+        cls,
+        gate_type: GateOperationType,
+        qubits: list[Value],
+        theta: Value,
+        results: list[Value],
+    ) -> "GateOperation":
+        """Create a rotation gate (RX, RY, RZ, P, CP, RZZ) with an angle."""
+        return cls(
+            gate_type=gate_type,
+            operands=[*qubits, theta],
+            results=list(results),
+        )
+
+    # ------------------------------------------------------------------
+    # Typed accessors
+    # ------------------------------------------------------------------
+    @property
+    def theta(self) -> Value | None:
+        """Angle parameter for rotation gates, or ``None`` for fixed gates."""
+        if self.gate_type in _ROTATION_GATES and self.operands:
+            return self.operands[-1]
+        return None
+
+    @property
+    def qubit_operands(self) -> list[Value]:
+        """Qubit operands (excluding the theta parameter if present)."""
+        if self.theta is not None:
+            return self.operands[:-1]
+        return list(self.operands)
+
     @property
     def signature(self) -> Signature:
+        qubit_ops = self.qubit_operands
+        hints: list[ParamHint | None] = [
+            ParamHint(name=f"qubit_{i}", type=QubitType())
+            for i in range(len(qubit_ops))
+        ]
+        if self.theta is not None:
+            hints.append(ParamHint(name="theta", type=FloatType()))
         return Signature(
-            operands=[
-                ParamHint(name=f"qubit_{i}", type=QubitType())
-                for i in range(len(self.operands))
-            ],
+            operands=hints,
             results=[
                 ParamHint(name=f"qubit_{i}", type=QubitType())
-                for i in range(len(self.operands))
+                for i in range(len(qubit_ops))
             ],
         )
 
@@ -79,112 +148,262 @@ class MeasureOperation(Operation):
 
 @dataclasses.dataclass
 class ControlledUOperation(Operation):
-    """Controlled-U operation that applies a unitary block conditionally.
+    """Base class for controlled-U operations.
 
-    The operands structure is:
-    - operands[0]: BlockValue (the unitary U to apply)
-    - operands[1:1+num_controls]: Control qubits
-    - operands[1+num_controls:]: Target qubits (arguments to U)
+    Three concrete subclasses handle distinct operand layouts:
 
-    The results structure is:
-    - results[0:num_controls]: Control qubits (returned)
-    - results[num_controls:]: Target qubits (returned from U)
+    - ``ConcreteControlledU``: Fixed ``num_controls: int``, individual qubit
+      operands.
+    - ``SymbolicControlledU``: Symbolic ``num_controls: Value``, vector-based
+      control operands.
+    - ``IndexSpecControlledU``: Single vector with explicit index lists
+      selecting which elements are controls/targets.
+
+    All ``isinstance(op, ControlledUOperation)`` checks match every subclass.
 
     Attributes:
-        num_controls: Number of control qubits (default: 1)
-        power: Number of times to apply U. Default is 1 (apply U once).
-               For QPE, this is 2^k where k is the counting qubit index.
-               The emitter will create Controlled(U^power), not Controlled(U)^power.
-               Must be a strictly positive integer. Symbolic values (Value) are
-               resolved during constant folding and validated at emit time.
+        power: Number of times to apply U (default 1). For QPE this is
+            ``2**k``. Symbolic ``Value`` is resolved during constant folding.
+        block: The unitary ``Block`` to apply conditionally.
     """
 
-    num_controls: int | Value = 1  # int = concrete, Value = symbolic
-    power: int | Value = 1  # int = concrete, Value = symbolic (e.g. 2**k in QPE)
+    power: int | Value = 1
+    block: Block | None = None
+
+    @property
+    def has_index_spec(self) -> bool:
+        """Whether target/control positions are specified via index lists."""
+        return False
+
+    @property
+    def is_symbolic_num_controls(self) -> bool:
+        """Whether num_controls is symbolic (Value) rather than concrete."""
+        return False
+
+    @property
+    def control_operands(self) -> list[Value]:
+        """Get the control qubit values."""
+        raise NotImplementedError  # pragma: no cover
+
+    @property
+    def target_operands(self) -> list[Value]:
+        """Get the target qubit values (arguments to U)."""
+        raise NotImplementedError  # pragma: no cover
+
+    @property
+    def param_operands(self) -> list[Value]:
+        """Get parameter operands (non-qubit, non-block)."""
+        raise NotImplementedError  # pragma: no cover
+
+    @property
+    def signature(self) -> Signature:
+        raise NotImplementedError  # pragma: no cover
+
+    @property
+    def operation_kind(self) -> OperationKind:
+        return OperationKind.QUANTUM
+
+    def all_input_values(self) -> list[ValueBase]:
+        values = super().all_input_values()
+        if isinstance(self.power, Value):
+            values.append(self.power)
+        return values
+
+    def _replace_power(
+        self, result: "ControlledUOperation", mapping: dict[str, ValueBase]
+    ) -> tuple["ControlledUOperation", bool]:
+        """Shared helper: replace power if it's a mapped Value."""
+        if isinstance(result.power, Value) and result.power.uuid in mapping:
+            mapped = mapping[result.power.uuid]
+            if isinstance(mapped, Value):
+                return dataclasses.replace(result, power=mapped), True
+        return result, False
+
+    def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
+        result = super().replace_values(mapping)
+        assert isinstance(result, ControlledUOperation)
+        result, _ = self._replace_power(result, mapping)
+        return result
+
+
+@dataclasses.dataclass
+class ConcreteControlledU(ControlledUOperation):
+    """Controlled-U with concrete (int) number of controls.
+
+    Operand layout: ``[ctrl_0, ..., ctrl_n, tgt_0, ..., tgt_m, params...]``
+    Result layout:  ``[ctrl_0', ..., ctrl_n', tgt_0', ..., tgt_m']``
+    """
+
+    num_controls: int = 1
+
+    @property
+    def control_operands(self) -> list[Value]:
+        return self.operands[: self.num_controls]
+
+    @property
+    def target_operands(self) -> list[Value]:
+        return self.operands[self.num_controls :]
+
+    @property
+    def param_operands(self) -> list[Value]:
+        return [
+            op for op in self.operands[self.num_controls :] if op.type.is_classical()
+        ]
+
+    @property
+    def signature(self) -> Signature:
+        nc = self.num_controls
+        return Signature(
+            operands=[
+                *[ParamHint(name=f"control_{i}", type=QubitType()) for i in range(nc)],
+                *[
+                    ParamHint(name=f"arg_{i}", type=op.type)
+                    for i, op in enumerate(self.operands[nc:])
+                ],
+            ],
+            results=[
+                *[ParamHint(name=f"control_{i}", type=QubitType()) for i in range(nc)],
+                *[
+                    ParamHint(name=f"target_{i}", type=r.type)
+                    for i, r in enumerate(self.results[nc:])
+                ],
+            ],
+        )
+
+
+@dataclasses.dataclass
+class SymbolicControlledU(ControlledUOperation):
+    """Controlled-U with symbolic (Value) number of controls.
+
+    Operand layout: ``[ctrl_vector, tgt_0, ..., tgt_m, params...]``
+    Result layout:  ``[ctrl_vector', tgt_0', ..., tgt_m']``
+    """
+
+    num_controls: Value = dataclasses.field(
+        default_factory=lambda: Value(type=FloatType(), name="_placeholder")
+    )  # type: ignore[assignment]
+
+    @property
+    def is_symbolic_num_controls(self) -> bool:
+        return True
+
+    @property
+    def control_operands(self) -> list[Value]:
+        return [self.operands[0]]
+
+    @property
+    def target_operands(self) -> list[Value]:
+        return self.operands[1:]
+
+    @property
+    def param_operands(self) -> list[Value]:
+        return [op for op in self.operands[1:] if op.type.is_classical()]
+
+    @property
+    def signature(self) -> Signature:
+        raise NotImplementedError("Cannot compute signature for SymbolicControlledU.")
+
+    def all_input_values(self) -> list[ValueBase]:
+        values = super().all_input_values()
+        values.append(self.num_controls)
+        return values
+
+    def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
+        result = super().replace_values(mapping)
+        assert isinstance(result, SymbolicControlledU)
+        if result.num_controls.uuid in mapping:
+            mapped = mapping[result.num_controls.uuid]
+            if isinstance(mapped, Value):
+                return dataclasses.replace(result, num_controls=mapped)
+        return result
+
+
+@dataclasses.dataclass
+class IndexSpecControlledU(ControlledUOperation):
+    """Controlled-U with explicit target/control index specification.
+
+    A single vector covers both controls and targets; the partition is
+    determined by ``target_indices`` or ``controlled_indices``.
+
+    Operand layout: ``[vector, params...]``
+    Result layout:  ``[vector']``
+    """
+
+    num_controls: int | Value = 1
     target_indices: list[Value] | None = None
     controlled_indices: list[Value] | None = None
 
     @property
     def has_index_spec(self) -> bool:
-        """Whether target/control positions are specified via index lists."""
-        return self.target_indices is not None or self.controlled_indices is not None
+        return True
 
     @property
     def is_symbolic_num_controls(self) -> bool:
-        """Whether num_controls is symbolic (Value) rather than concrete (int)."""
         return isinstance(self.num_controls, Value)
 
     @property
-    def block(self):
-        """Get the BlockValue (unitary U)."""
-        return self.operands[0]
+    def control_operands(self) -> list[Value]:
+        return [self.operands[0]]
 
     @property
-    def control_operands(self):
-        """Get the control qubit values."""
-        if self.has_index_spec:
-            return [self.operands[1]]  # Entire Vector
-        if self.is_symbolic_num_controls:
-            # Symbolic: operands[1] is the control array Value
-            return [self.operands[1]]
-        return self.operands[1 : 1 + self.num_controls]
-
-    @property
-    def target_operands(self):
-        """Get the target qubit values (arguments to U)."""
-        if self.has_index_spec:
-            return []  # Targets are implicit via index lists
-        if self.is_symbolic_num_controls:
-            # Symbolic: operands[2:] are targets (after BlockValue and control array)
-            return self.operands[2:]
-        return self.operands[1 + self.num_controls :]
-
-    @property
-    def param_operands(self):
-        """Get parameter operands (non-qubit, non-block)."""
-        if self.has_index_spec:
-            return self.operands[2:]
+    def target_operands(self) -> list[Value]:
         return []
 
     @property
-    def signature(self) -> Signature:
-        if self.has_index_spec:
-            raise NotImplementedError(
-                "Cannot compute signature for ControlledUOperation with index spec."
-            )
-        if self.is_symbolic_num_controls:
-            raise NotImplementedError(
-                "Cannot compute signature for ControlledUOperation with "
-                "symbolic num_controls."
-            )
-        num_targets = len(self.operands) - 1 - self.num_controls
-        return Signature(
-            operands=[
-                ParamHint("U", BlockType()),
-                *[
-                    ParamHint(name=f"control_{i}", type=QubitType())
-                    for i in range(self.num_controls)
-                ],
-                *[
-                    ParamHint(name=f"target_{i}", type=QubitType())
-                    for i in range(num_targets)
-                ],
-            ],
-            results=[
-                *[
-                    ParamHint(name=f"control_{i}", type=QubitType())
-                    for i in range(self.num_controls)
-                ],
-                *[
-                    ParamHint(name=f"target_{i}", type=QubitType())
-                    for i in range(num_targets)
-                ],
-            ],
-        )
+    def param_operands(self) -> list[Value]:
+        return [op for op in self.operands[1:] if op.type.is_classical()]
 
     @property
-    def operation_kind(self) -> OperationKind:
-        return OperationKind.QUANTUM
+    def signature(self) -> Signature:
+        raise NotImplementedError("Cannot compute signature for IndexSpecControlledU.")
+
+    def all_input_values(self) -> list[ValueBase]:
+        values = super().all_input_values()
+        if isinstance(self.num_controls, Value):
+            values.append(self.num_controls)
+        if self.target_indices:
+            values.extend(self.target_indices)
+        if self.controlled_indices:
+            values.extend(self.controlled_indices)
+        return values
+
+    def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
+        result = super().replace_values(mapping)
+        assert isinstance(result, IndexSpecControlledU)
+        changed = False
+        new_nc: int | Value = result.num_controls
+        new_ti = result.target_indices
+        new_ci = result.controlled_indices
+        if (
+            isinstance(result.num_controls, Value)
+            and result.num_controls.uuid in mapping
+        ):
+            mapped = mapping[result.num_controls.uuid]
+            if isinstance(mapped, Value):
+                new_nc = mapped
+                changed = True
+        if result.target_indices is not None:
+            new_ti = [
+                typing.cast(Value, mapping.get(v.uuid, v))
+                for v in result.target_indices
+            ]
+            if new_ti != result.target_indices:
+                changed = True
+        if result.controlled_indices is not None:
+            new_ci = [
+                typing.cast(Value, mapping.get(v.uuid, v))
+                for v in result.controlled_indices
+            ]
+            if new_ci != result.controlled_indices:
+                changed = True
+        if changed:
+            return dataclasses.replace(
+                result,
+                num_controls=new_nc,
+                target_indices=new_ti,
+                controlled_indices=new_ci,
+            )
+        return result
 
 
 @dataclasses.dataclass

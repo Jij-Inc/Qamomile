@@ -1,4 +1,4 @@
-"""Tests for emit_base pass — ResourceAllocator phi_ops & LoopAnalyzer.
+"""Tests for emit_support helpers — ResourceAllocator phi_ops & LoopAnalyzer.
 
 Section 1: ResourceAllocator phi_ops allocation (Bug #6).
     ResourceAllocator._allocate_recursive() calls _allocate_phi_ops()
@@ -51,8 +51,9 @@ from qamomile.circuit.ir.types.primitives import (
 )
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.errors import EmitError
-from qamomile.circuit.transpiler.passes.emit_base import (
+from qamomile.circuit.transpiler.passes.emit_support import (
     LoopAnalyzer,
+    QubitAddress,
     ResourceAllocator,
     map_phi_outputs,
 )
@@ -70,8 +71,8 @@ def _make_value(name: str, type_cls: type = UIntType) -> Value:
 def _make_const_value(
     name: str, const: int | float, type_cls: type = UIntType
 ) -> Value:
-    """Create a constant Value with a ``const`` param entry."""
-    return Value(type=type_cls(), name=name, params={"const": const})
+    """Create a constant Value."""
+    return Value(type=type_cls(), name=name).with_const(const)
 
 
 def _make_array_value(
@@ -95,18 +96,14 @@ def _qubit(name: str = "q") -> Value:
 
 def _float_val(name: str = "theta", *, const: float | None = None) -> Value:
     """Create a float Value, optionally constant."""
-    params: dict[str, object] = {}
-    if const is not None:
-        params["const"] = const
-    return Value(type=FloatType(), name=name, params=params)
+    value = Value(type=FloatType(), name=name)
+    return value.with_const(const) if const is not None else value
 
 
 def _uint_val(name: str, *, const: int | None = None) -> Value:
     """Create a UInt Value, optionally constant."""
-    params: dict[str, object] = {}
-    if const is not None:
-        params["const"] = const
-    return Value(type=UIntType(), name=name, params=params)
+    value = Value(type=UIntType(), name=name)
+    return value.with_const(const) if const is not None else value
 
 
 def _make_binop(
@@ -135,12 +132,16 @@ def _make_gate(
 ) -> GateOperation:
     """Create a GateOperation with given qubits and theta."""
     results = [q.next_version() for q in qubits]
-    return GateOperation(
-        operands=qubits,
-        results=results,
-        gate_type=gate_type,
-        theta=theta,
-    )
+    if theta is not None:
+        # Wrap float to Value for operands-based theta storage
+        if isinstance(theta, (int, float)):
+            from qamomile.circuit.ir.types.primitives import FloatType
+
+            theta = Value(type=FloatType(), name="theta").with_const(theta)
+        return GateOperation.rotation(
+            gate_type=gate_type, qubits=qubits, theta=theta, results=results
+        )
+    return GateOperation.fixed(gate_type=gate_type, qubits=qubits, results=results)
 
 
 # ===========================================================================
@@ -203,8 +204,8 @@ class TestPhiOpsAllocation:
         qubit_map, clbit_map = allocator.allocate(operations, bindings={})
 
         # phi_output should be in qubit_map, mapped to same physical qubit
-        assert phi_output.uuid in qubit_map
-        assert qubit_map[phi_output.uuid] == qubit_map[q_init_out.uuid]
+        assert QubitAddress(phi_output.uuid) in qubit_map
+        assert qubit_map[QubitAddress(phi_output.uuid)] == qubit_map[QubitAddress(q_init_out.uuid)]
 
     def test_phi_output_bit_is_allocated(self) -> None:
         """Phi output for a bit type should be registered in clbit_map."""
@@ -249,7 +250,7 @@ class TestPhiOpsAllocation:
         _, clbit_map = allocator.allocate(operations, bindings={})
 
         # phi_bit should be in clbit_map
-        assert phi_bit.uuid in clbit_map
+        assert QubitAddress(phi_bit.uuid) in clbit_map
 
     @pytest.mark.parametrize("array_size", [1, 2, 4])
     def test_phi_output_array_composite_keys_are_allocated(
@@ -293,10 +294,10 @@ class TestPhiOpsAllocation:
 
         # All composite keys for the phi output array should exist
         for i in range(array_size):
-            phi_key = f"{phi_array.uuid}_{i}"
-            src_key = f"{q_array.uuid}_{i}"
-            assert phi_key in qubit_map, f"phi array element {i} not allocated"
-            assert qubit_map[phi_key] == qubit_map[src_key]
+            phi_addr = QubitAddress(phi_array.uuid, i)
+            src_addr = QubitAddress(q_array.uuid, i)
+            assert phi_addr in qubit_map, f"phi array element {i} not allocated"
+            assert qubit_map[phi_addr] == qubit_map[src_addr]
 
     def test_identity_phi_maps_to_same_qubit(self) -> None:
         """Phi with true_val == false_val (identity) still maps correctly."""
@@ -327,8 +328,8 @@ class TestPhiOpsAllocation:
         allocator = ResourceAllocator()
         qubit_map, _ = allocator.allocate(operations, bindings={})
 
-        assert phi_output.uuid in qubit_map
-        assert qubit_map[phi_output.uuid] == qubit_map[q_out.uuid]
+        assert QubitAddress(phi_output.uuid) in qubit_map
+        assert qubit_map[QubitAddress(phi_output.uuid)] == qubit_map[QubitAddress(q_out.uuid)]
 
     def test_phi_output_already_registered_is_skipped(self) -> None:
         """Phi output UUID already in qubit_map is not overwritten."""
@@ -360,11 +361,11 @@ class TestPhiOpsAllocation:
 
         # Pre-register the phi output with a sentinel value
         sentinel_idx = 999
-        qubit_map[phi_output.uuid] = sentinel_idx
+        qubit_map[QubitAddress(phi_output.uuid)] = sentinel_idx
 
         # Re-running allocation should not overwrite it
         allocator._allocate_phi_ops(if_op.phi_ops, qubit_map, clbit_map)
-        assert qubit_map[phi_output.uuid] == sentinel_idx
+        assert qubit_map[QubitAddress(phi_output.uuid)] == sentinel_idx
 
     def test_multiple_phi_ops_all_allocated(self) -> None:
         """Multiple phi_ops in a single IfOperation are all allocated."""
@@ -397,10 +398,10 @@ class TestPhiOpsAllocation:
         allocator = ResourceAllocator()
         qubit_map, _ = allocator.allocate(operations, bindings={})
 
-        assert phi_out0.uuid in qubit_map
-        assert phi_out1.uuid in qubit_map
-        assert qubit_map[phi_out0.uuid] == qubit_map[q0_out.uuid]
-        assert qubit_map[phi_out1.uuid] == qubit_map[q1_out.uuid]
+        assert QubitAddress(phi_out0.uuid) in qubit_map
+        assert QubitAddress(phi_out1.uuid) in qubit_map
+        assert qubit_map[QubitAddress(phi_out0.uuid)] == qubit_map[QubitAddress(q0_out.uuid)]
+        assert qubit_map[QubitAddress(phi_out1.uuid)] == qubit_map[QubitAddress(q1_out.uuid)]
 
     def test_phi_bit_consolidates_both_branches(self) -> None:
         """Both branches' clbits must be consolidated to the same physical clbit.
@@ -443,8 +444,8 @@ class TestPhiOpsAllocation:
         _, clbit_map = allocator.allocate(operations, bindings={})
 
         # All three — true_bit, false_bit, phi_bit — must share the same physical clbit
-        assert clbit_map[true_bit.uuid] == clbit_map[false_bit.uuid]
-        assert clbit_map[phi_bit.uuid] == clbit_map[true_bit.uuid]
+        assert clbit_map[QubitAddress(true_bit.uuid)] == clbit_map[QubitAddress(false_bit.uuid)]
+        assert clbit_map[QubitAddress(phi_bit.uuid)] == clbit_map[QubitAddress(true_bit.uuid)]
 
     @pytest.mark.parametrize("array_size", [1, 2, 4])
     def test_phi_bit_array_consolidates_both_branches(self, array_size: int) -> None:
@@ -492,21 +493,21 @@ class TestPhiOpsAllocation:
         )
 
         # Pre-fill clbit_map with element keys for both arrays
-        clbit_map: dict[str, int] = {cond.uuid: 0}
+        clbit_map = {QubitAddress(cond.uuid): 0}
         for i in range(array_size):
-            clbit_map[f"{true_bits.uuid}_{i}"] = i + 1
-            clbit_map[f"{false_bits.uuid}_{i}"] = array_size + i + 1
+            clbit_map[QubitAddress(true_bits.uuid, i)] = i + 1
+            clbit_map[QubitAddress(false_bits.uuid, i)] = array_size + i + 1
 
         map_phi_outputs(if_op.phi_ops, {}, clbit_map)
 
         # Phi output elements should exist AND both branches consolidated
         for i in range(array_size):
-            phi_key = f"{phi_bits.uuid}_{i}"
-            true_key = f"{true_bits.uuid}_{i}"
-            false_key = f"{false_bits.uuid}_{i}"
-            assert phi_key in clbit_map, f"phi element {i} not allocated"
-            assert clbit_map[phi_key] == clbit_map[true_key]
-            assert clbit_map[false_key] == clbit_map[true_key], (
+            phi_addr = QubitAddress(phi_bits.uuid, i)
+            true_addr = QubitAddress(true_bits.uuid, i)
+            false_addr = QubitAddress(false_bits.uuid, i)
+            assert phi_addr in clbit_map, f"phi element {i} not allocated"
+            assert clbit_map[phi_addr] == clbit_map[true_addr]
+            assert clbit_map[false_addr] == clbit_map[true_addr], (
                 f"element {i}: false branch clbit not consolidated"
             )
 
@@ -523,7 +524,7 @@ class TestPhiOpsAllocation:
         phi_output = _make_value("q_phi", QubitType)
         phi = PhiOp(operands=[cond, q0_out, q1_out], results=[phi_output])
 
-        qubit_map: dict[str, int] = {q0_out.uuid: 0, q1_out.uuid: 1}
+        qubit_map = {QubitAddress(q0_out.uuid): 0, QubitAddress(q1_out.uuid): 1}
         with pytest.raises(EmitError, match="Quantum PhiOp merge requires identical"):
             map_phi_outputs([phi], qubit_map, {})
 
@@ -537,11 +538,11 @@ class TestPhiOpsAllocation:
         phi_output = _make_array_value("phi_arr", shape_vals=(size_val,))
         phi = PhiOp(operands=[cond, arr_a, arr_b], results=[phi_output])
 
-        qubit_map: dict[str, int] = {
-            f"{arr_a.uuid}_0": 0,
-            f"{arr_a.uuid}_1": 1,
-            f"{arr_b.uuid}_0": 2,
-            f"{arr_b.uuid}_1": 3,
+        qubit_map = {
+            QubitAddress(arr_a.uuid, 0): 0,
+            QubitAddress(arr_a.uuid, 1): 1,
+            QubitAddress(arr_b.uuid, 0): 2,
+            QubitAddress(arr_b.uuid, 1): 3,
         }
         with pytest.raises(EmitError, match="Quantum PhiOp merge requires identical"):
             map_phi_outputs([phi], qubit_map, {})
@@ -558,7 +559,7 @@ class TestPhiOpsAllocation:
         phi = PhiOp(operands=[cond, q0_out, q1_out], results=[phi_output])
 
         # Only q0_out is in qubit_map; q1_out is unresolved
-        qubit_map: dict[str, int] = {q0_out.uuid: 0}
+        qubit_map = {QubitAddress(q0_out.uuid): 0}
         with pytest.raises(EmitError, match="Quantum PhiOp merge requires identical"):
             map_phi_outputs([phi], qubit_map, {})
 
@@ -572,11 +573,11 @@ class TestPhiOpsAllocation:
         phi_output = _make_array_value("phi_arr", shape_vals=(size_val,))
         phi = PhiOp(operands=[cond, arr_a, arr_b], results=[phi_output])
 
-        # arr_a has both suffixes, arr_b only has _0
-        qubit_map: dict[str, int] = {
-            f"{arr_a.uuid}_0": 0,
-            f"{arr_a.uuid}_1": 1,
-            f"{arr_b.uuid}_0": 0,
+        # arr_a has both elements, arr_b only has element 0
+        qubit_map = {
+            QubitAddress(arr_a.uuid, 0): 0,
+            QubitAddress(arr_a.uuid, 1): 1,
+            QubitAddress(arr_b.uuid, 0): 0,
         }
         with pytest.raises(EmitError, match="Quantum PhiOp merge requires identical"):
             map_phi_outputs([phi], qubit_map, {})
@@ -590,10 +591,10 @@ class TestPhiOpsAllocation:
         phi_output = _make_value("q_phi", QubitType)
         phi = PhiOp(operands=[cond, q_out, q_out], results=[phi_output])
 
-        qubit_map: dict[str, int] = {q_out.uuid: 0}
+        qubit_map = {QubitAddress(q_out.uuid): 0}
         map_phi_outputs([phi], qubit_map, {})
-        assert phi_output.uuid in qubit_map
-        assert qubit_map[phi_output.uuid] == 0
+        assert QubitAddress(phi_output.uuid) in qubit_map
+        assert qubit_map[QubitAddress(phi_output.uuid)] == 0
 
     def test_quantum_phi_array_identity_still_allowed(self) -> None:
         """Identity array phi (same physical resources) must succeed."""
@@ -604,14 +605,14 @@ class TestPhiOpsAllocation:
         phi_output = _make_array_value("phi_arr", shape_vals=(size_val,))
         phi = PhiOp(operands=[cond, arr, arr], results=[phi_output])
 
-        qubit_map: dict[str, int] = {
-            f"{arr.uuid}_0": 0,
-            f"{arr.uuid}_1": 1,
-            f"{arr.uuid}_2": 2,
+        qubit_map = {
+            QubitAddress(arr.uuid, 0): 0,
+            QubitAddress(arr.uuid, 1): 1,
+            QubitAddress(arr.uuid, 2): 2,
         }
         map_phi_outputs([phi], qubit_map, {})
         for i in range(3):
-            assert qubit_map[f"{phi_output.uuid}_{i}"] == i
+            assert qubit_map[QubitAddress(phi_output.uuid, i)] == i
 
 
 # ===========================================================================

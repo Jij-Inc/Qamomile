@@ -17,7 +17,7 @@ class TestXMixerShapePropagation:
     """Test the x_mixer pattern that originally exposed the shape bug."""
 
     def test_x_mixer_shape_through_block(self):
-        """x_mixer should preserve Vector[Qubit] shape through BlockValue.call()."""
+        """x_mixer should preserve Vector[Qubit] shape through Block.call()."""
         from qamomile.circuit.ir.types.primitives import QubitType, UIntType
         from qamomile.circuit.ir.value import Value
 
@@ -35,9 +35,9 @@ class TestXMixerShapePropagation:
         block = x_mixer.block
 
         # Create an input ArrayValue with known shape
-        shape = (Value(type=UIntType(), name="n", params={"const": 5}),)
+        shape = (Value(type=UIntType(), name="n").with_const(5),)
         input_val = ArrayValue(type=QubitType(), name="q", shape=shape)
-        beta_val = Value(type=qmc.Float, name="beta", params={})
+        beta_val = Value(type=qmc.Float, name="beta")
 
         # Call the block
         call_op = block.call(q=input_val, beta=beta_val)
@@ -70,10 +70,10 @@ class TestQAOAPatternShapePropagation:
 
         # Test that ising_cost preserves shape
         block = ising_cost.block
-        shape = (Value(type=UIntType(), name="n", params={"const": 3}),)
+        shape = (Value(type=UIntType(), name="n").with_const(3),)
         q_val = ArrayValue(type=QubitType(), name="q", shape=shape)
         hi_val = ArrayValue(type=FloatType(), name="hi", shape=shape)
-        gamma_val = Value(type=FloatType(), name="gamma", params={})
+        gamma_val = Value(type=FloatType(), name="gamma")
 
         call_op = block.call(q=q_val, hi=hi_val, gamma=gamma_val)
 
@@ -81,6 +81,75 @@ class TestQAOAPatternShapePropagation:
         result_val = call_op.results[0]
         assert isinstance(result_val, ArrayValue)
         assert len(result_val.shape) == 1
+
+
+class TestNewArrayValueShapePropagation:
+    """Test that shape dims are resolved when a callee creates a new ArrayValue.
+
+    This covers the inline pass bug where return value mapping used
+    cloned-but-not-substituted values, losing concrete shape dimensions
+    for newly created ArrayValues (e.g., PauliEvolveOp results).
+    """
+
+    @pytest.fixture
+    def qiskit_transpiler(self):
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        return QiskitTranspiler(use_native_composite=False)
+
+    def test_new_array_shape_propagates_through_inline(self, qiskit_transpiler):
+        """A callee that creates a new ArrayValue and returns it should
+        preserve concrete shape dims so that a subsequent callee's
+        q.shape[0]-based for loop resolves correctly."""
+        import qamomile.observable as qm_o
+
+        @qmc.qkernel
+        def apply_evolve(
+            q: qmc.Vector[qmc.Qubit],
+            H: qmc.Observable,
+            gamma: qmc.Float,
+        ) -> qmc.Vector[qmc.Qubit]:
+            q = qmc.pauli_evolve(q, H, gamma)
+            return q
+
+        @qmc.qkernel
+        def apply_mixer(
+            q: qmc.Vector[qmc.Qubit],
+            beta: qmc.Float,
+        ) -> qmc.Vector[qmc.Qubit]:
+            n = q.shape[0]
+            for i in qmc.range(n):
+                q[i] = qmc.rx(q[i], 2.0 * beta)
+            return q
+
+        @qmc.qkernel
+        def circuit(
+            n: qmc.UInt,
+            H: qmc.Observable,
+            gamma: qmc.Float,
+            beta: qmc.Float,
+        ) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, name="q")
+            q = apply_evolve(q, H, gamma)
+            q = apply_mixer(q, beta)  # must resolve q.shape[0] after evolve
+            return qmc.measure(q)
+
+        H = qm_o.Hamiltonian()
+        H.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, 0),), 1.0)
+        H.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 1),), 0.5)
+
+        exe = qiskit_transpiler.transpile(
+            circuit,
+            bindings={"n": 2, "H": H, "gamma": 0.5, "beta": 0.3},
+        )
+        qc = exe.compiled_quantum[0].circuit
+
+        # Count gates: should have RZ (from fallback evolve) + RX (from mixer)
+        gate_names = [inst.operation.name for inst in qc.data]
+        assert "rz" in gate_names, f"Expected RZ from evolve, got {gate_names}"
+        assert "rx" in gate_names, f"Expected RX from mixer, got {gate_names}"
+        assert gate_names.count("rx") == 2  # 2 qubits × 1 RX each
 
 
 class TestShapePropagationWithTranspiler:

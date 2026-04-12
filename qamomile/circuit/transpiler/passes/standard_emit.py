@@ -2,54 +2,75 @@
 
 This module provides StandardEmitPass, a reusable emit pass implementation
 that uses the GateEmitter protocol for backend-specific gate emission.
+
+The actual emission logic is decomposed into focused modules under
+``emit_support/``. This class serves as the orchestrator with thin
+wrappers that delegate to those module functions while preserving
+subclass override points (used by QiskitEmitPass, CudaqEmitPass).
 """
 
 from __future__ import annotations
 
-import math
 import re
 from typing import Any, Generic, TypeVar
 
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
-    CompositeGateType,
-)
+from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
+    HasNestedOps,
     IfOperation,
     WhileOperation,
 )
 from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     GateOperation,
-    GateOperationType,
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
 )
 from qamomile.circuit.ir.operation.operation import QInitOperation
-from qamomile.circuit.ir.value import Value
-from qamomile.circuit.transpiler.errors import (
-    EmitError,
-    OperandResolutionInfo,
-    QubitIndexResolutionError,
-    ResolutionFailureReason,
-)
+from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.transpiler.executable import ParameterInfo, ParameterMetadata
 from qamomile.circuit.transpiler.gate_emitter import GateEmitter
 from qamomile.circuit.transpiler.passes.emit import CompositeGateEmitter, EmitPass
-from qamomile.circuit.transpiler.passes.emit_base import (
+from qamomile.circuit.transpiler.passes.emit_support import (
+    ClbitMap,
     CompositeDecomposer,
     LoopAnalyzer,
+    QubitMap,
     ResourceAllocator,
     ValueResolver,
-    map_phi_outputs,
-    remap_static_phi_outputs,
-    resolve_if_condition,
+)
+from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
+    evaluate_binop,
+    handle_cast,
+)
+from qamomile.circuit.transpiler.passes.emit_support.composite_gate_emission import (
+    emit_composite_gate,
+)
+from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
+    emit_for,
+    emit_for_items,
+    emit_if,
+    emit_while,
+)
+from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+    blockvalue_to_gate,
+    emit_controlled_fallback,
+    emit_controlled_u,
+)
+from qamomile.circuit.transpiler.passes.emit_support.gate_emission import emit_gate
+from qamomile.circuit.transpiler.passes.emit_support.measurement_emission import (
+    emit_measure,
+    emit_measure_qfixed,
+    emit_measure_vector,
+)
+from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
+    emit_pauli_evolve,
 )
 
 T = TypeVar("T")  # Backend circuit type
@@ -60,6 +81,10 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
 
     This class provides the orchestration logic for circuit emission
     while delegating backend-specific operations to a GateEmitter.
+
+    Subclasses (QiskitEmitPass, CudaqEmitPass) override specific methods
+    to provide native backend support. The thin wrappers here delegate to
+    module functions in ``emit_support/`` by default.
 
     Args:
         gate_emitter: Backend-specific gate emitter
@@ -87,11 +112,16 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
 
         # Cache for backend parameter objects
         self._parameter_map: dict[str, Any] = {}
+        self._parameter_sources: dict[str, str] = {}
 
         # Mapping from classical bit index to physical qubit index.
         # Populated during measurement emission to support backends
         # where emit_measure is a no-op (e.g., QURI Parts).
         self._measurement_qubit_map: dict[int, int] = {}
+
+    # ------------------------------------------------------------------
+    # Core orchestration (stays on this class)
+    # ------------------------------------------------------------------
 
     def _build_parameter_metadata(self) -> ParameterMetadata:
         """Build parameter metadata from created parameter objects."""
@@ -111,31 +141,38 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                     array_name=array_name,
                     index=index,
                     backend_param=backend_param,
+                    source_ref=self._parameter_sources.get(name),
                 )
             )
 
         return ParameterMetadata(parameters=params)
 
+    def _get_or_create_parameter(
+        self,
+        name: str,
+        source_ref: str | None = None,
+    ) -> Any:
+        """Get or create a backend parameter while tracking its IR source."""
+        if name not in self._parameter_map:
+            self._parameter_map[name] = self._emitter.create_parameter(name)
+        if source_ref is not None:
+            self._parameter_sources.setdefault(name, source_ref)
+        return self._parameter_map[name]
+
     def _emit_quantum_segment(
         self,
         operations: list[Operation],
         bindings: dict[str, Any],
-    ) -> tuple[T, dict[str, int], dict[str, int]]:
+    ) -> tuple[T, QubitMap, ClbitMap]:
         """Generate backend circuit from operations."""
-        # First pass: allocate resources (pass bindings for dynamic size resolution)
         qubit_map, clbit_map = self._allocator.allocate(operations, bindings)
 
-        # Count physical qubits/clbits
         qubit_count = max(qubit_map.values()) + 1 if qubit_map else 0
         clbit_count = max(clbit_map.values()) + 1 if clbit_map else 0
 
-        # Create circuit
         circuit = self._emitter.create_circuit(qubit_count, clbit_count)
-
-        # Reset measurement map before emission
         self._measurement_qubit_map.clear()
 
-        # Second pass: emit gates
         self._emit_operations(circuit, operations, qubit_map, clbit_map, bindings)
 
         return circuit, qubit_map, clbit_map
@@ -144,1702 +181,100 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         self,
         circuit: T,
         operations: list[Operation],
-        qubit_map: dict[str, int],
-        clbit_map: dict[str, int],
+        qubit_map: QubitMap,
+        clbit_map: ClbitMap,
         bindings: dict[str, Any],
         force_unroll: bool = False,
     ) -> None:
-        """Emit operations to the circuit."""
+        """Emit operations to the circuit (dispatcher)."""
         for op in operations:
             if isinstance(op, QInitOperation):
                 continue
-
             elif isinstance(op, GateOperation):
-                self._emit_gate(circuit, op, qubit_map, bindings)
-
+                emit_gate(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, MeasureOperation):
-                self._emit_measure(circuit, op, qubit_map, clbit_map, bindings)
-
+                emit_measure(self, circuit, op, qubit_map, clbit_map, bindings)
             elif isinstance(op, MeasureVectorOperation):
-                self._emit_measure_vector(circuit, op, qubit_map, clbit_map, bindings)
-
+                emit_measure_vector(self, circuit, op, qubit_map, clbit_map, bindings)
             elif isinstance(op, MeasureQFixedOperation):
-                self._emit_measure_qfixed(circuit, op, qubit_map, clbit_map)
-
+                emit_measure_qfixed(self, circuit, op, qubit_map, clbit_map)
             elif isinstance(op, ForOperation):
                 self._emit_for(
                     circuit, op, qubit_map, clbit_map, bindings, force_unroll
                 )
-
             elif isinstance(op, ForItemsOperation):
-                self._emit_for_items(circuit, op, qubit_map, clbit_map, bindings)
-
+                emit_for_items(self, circuit, op, qubit_map, clbit_map, bindings)
             elif isinstance(op, IfOperation):
                 self._emit_if(circuit, op, qubit_map, clbit_map, bindings)
-
             elif isinstance(op, WhileOperation):
                 self._emit_while(circuit, op, qubit_map, clbit_map, bindings)
-
             elif isinstance(op, CompositeGateOperation):
-                self._emit_composite_gate(circuit, op, qubit_map, bindings)
-
+                emit_composite_gate(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, ControlledUOperation):
-                self._emit_controlled_u(circuit, op, qubit_map, bindings)
-
+                emit_controlled_u(self, circuit, op, qubit_map, bindings)
+            elif isinstance(op, PauliEvolveOp):
+                self._emit_pauli_evolve(circuit, op, qubit_map, bindings)
             elif isinstance(op, CastOperation):
-                self._handle_cast(op, qubit_map)
-
+                handle_cast(self, op, qubit_map)
             elif isinstance(op, BinOp):
-                self._evaluate_binop(op, bindings)
-
-    def _emit_gate(
-        self,
-        circuit: T,
-        op: GateOperation,
-        qubit_map: dict[str, int],
-        bindings: dict[str, Any],
-    ) -> None:
-        """Emit a single gate operation."""
-        qubit_indices = []
-        failed_operands: list[OperandResolutionInfo] = []
-
-        for v in op.operands:
-            result = self._resolver.resolve_qubit_index_detailed(v, qubit_map, bindings)
-            if result.success:
-                qubit_indices.append(result.index)
-            else:
-                # Collect detailed failure info
-                element_indices_names = []
-                if v.element_indices:
-                    for idx in v.element_indices:
-                        if idx.parent_array is not None:
-                            element_indices_names.append(
-                                f"{idx.parent_array.name}[{idx.element_indices[0].name if idx.element_indices else '?'}]"
-                            )
-                        else:
-                            element_indices_names.append(idx.name)
-
-                info = OperandResolutionInfo(
-                    operand_name=v.name,
-                    operand_uuid=v.uuid,
-                    is_array_element=v.parent_array is not None,
-                    parent_array_name=v.parent_array.name if v.parent_array else None,
-                    element_indices_names=element_indices_names,
-                    failure_reason=result.failure_reason
-                    or ResolutionFailureReason.UNKNOWN,
-                    failure_details=result.failure_details,
+                evaluate_binop(self, op, bindings)
+            elif isinstance(op, HasNestedOps):
+                raise NotImplementedError(
+                    f"Unhandled control flow: {type(op).__name__}"
                 )
-                failed_operands.append(info)
 
-        if not qubit_indices or failed_operands:
-            # If we have no successful resolutions or some failed, raise detailed error
-            if not failed_operands:
-                # All operands returned None without detailed failure info
-                for v in op.operands:
-                    element_indices_names = []
-                    if v.element_indices:
-                        for idx in v.element_indices:
-                            if idx.parent_array is not None:
-                                element_indices_names.append(
-                                    f"{idx.parent_array.name}[{idx.element_indices[0].name if idx.element_indices else '?'}]"
-                                )
-                            else:
-                                element_indices_names.append(idx.name)
+    # ------------------------------------------------------------------
+    # Methods overridden by backend subclasses (QiskitEmitPass, CudaqEmitPass).
+    # Only methods with actual overrides are kept as instance methods.
+    # ------------------------------------------------------------------
 
-                    failed_operands.append(
-                        OperandResolutionInfo(
-                            operand_name=v.name,
-                            operand_uuid=v.uuid,
-                            is_array_element=v.parent_array is not None,
-                            parent_array_name=v.parent_array.name
-                            if v.parent_array
-                            else None,
-                            element_indices_names=element_indices_names,
-                            failure_reason=ResolutionFailureReason.UNKNOWN,
-                            failure_details="No indices resolved but no specific failure recorded",
-                        )
-                    )
+    def _emit_for(self, circuit: T, op: ForOperation, qubit_map: QubitMap, clbit_map: ClbitMap, bindings: dict[str, Any], force_unroll: bool = False) -> None:
+        emit_for(self, circuit, op, qubit_map, clbit_map, bindings, force_unroll)
 
-            raise QubitIndexResolutionError(
-                gate_type=op.gate_type.name,
-                operand_infos=failed_operands,
-                available_bindings_keys=list(bindings.keys()),
-                available_qubit_map_keys=list(qubit_map.keys()),
-            )
-
-        match op.gate_type:
-            case GateOperationType.H:
-                self._emitter.emit_h(circuit, qubit_indices[0])
-            case GateOperationType.X:
-                self._emitter.emit_x(circuit, qubit_indices[0])
-            case GateOperationType.Y:
-                self._emitter.emit_y(circuit, qubit_indices[0])
-            case GateOperationType.Z:
-                self._emitter.emit_z(circuit, qubit_indices[0])
-            case GateOperationType.T:
-                self._emitter.emit_t(circuit, qubit_indices[0])
-            case GateOperationType.S:
-                self._emitter.emit_s(circuit, qubit_indices[0])
-            case GateOperationType.SDG:
-                self._emitter.emit_sdg(circuit, qubit_indices[0])
-            case GateOperationType.TDG:
-                self._emitter.emit_tdg(circuit, qubit_indices[0])
-            case GateOperationType.CX:
-                self._emitter.emit_cx(circuit, qubit_indices[0], qubit_indices[1])
-            case GateOperationType.CZ:
-                self._emitter.emit_cz(circuit, qubit_indices[0], qubit_indices[1])
-            case GateOperationType.SWAP:
-                self._emitter.emit_swap(circuit, qubit_indices[0], qubit_indices[1])
-            case GateOperationType.TOFFOLI:
-                self._emitter.emit_toffoli(
-                    circuit, qubit_indices[0], qubit_indices[1], qubit_indices[2]
-                )
-            case GateOperationType.P:
-                angle = self._resolve_angle(op, bindings)
-                self._emitter.emit_p(circuit, qubit_indices[0], angle)
-            case GateOperationType.RX:
-                angle = self._resolve_angle(op, bindings)
-                self._emitter.emit_rx(circuit, qubit_indices[0], angle)
-            case GateOperationType.RY:
-                angle = self._resolve_angle(op, bindings)
-                self._emitter.emit_ry(circuit, qubit_indices[0], angle)
-            case GateOperationType.RZ:
-                angle = self._resolve_angle(op, bindings)
-                self._emitter.emit_rz(circuit, qubit_indices[0], angle)
-            case GateOperationType.CP:
-                angle = self._resolve_angle(op, bindings)
-                self._emitter.emit_cp(
-                    circuit, qubit_indices[0], qubit_indices[1], angle
-                )
-            case GateOperationType.RZZ:
-                angle = self._resolve_angle(op, bindings)
-                self._emitter.emit_rzz(
-                    circuit, qubit_indices[0], qubit_indices[1], angle
-                )
-            case _:
-                raise RuntimeError(f"Unsupported gate type: {op.gate_type}")
-
-        # Update qubit_map for new versions
-        for i, result in enumerate(op.results):
-            if i < len(qubit_indices):
-                qubit_map[result.uuid] = qubit_indices[i]
-
-    def _emit_measure(
-        self,
-        circuit: T,
-        op: MeasureOperation,
-        qubit_map: dict[str, int],
-        clbit_map: dict[str, int],
-        bindings: dict[str, Any] | None = None,
-    ) -> None:
-        """Emit a single measurement.
-
-        Resolves the qubit operand using the full resolver (handles both
-        scalar qubits and array element qubits with composite keys).
-
-        Raises:
-            warnings.warn: If the qubit or clbit cannot be resolved, a
-                warning is emitted instead of silently dropping the
-                measurement.
-        """
-        import warnings
-
-        qubit_val = op.operands[0]
-        clbit_uuid = op.results[0].uuid
-
-        # Use the resolver for proper array element handling
-        result = self._resolver.resolve_qubit_index_detailed(
-            qubit_val, qubit_map, bindings or {}
+    def _emit_for_unrolled(self, circuit: T, op: ForOperation, qubit_map: QubitMap, clbit_map: ClbitMap, bindings: dict[str, Any]) -> None:
+        from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
+            emit_for_unrolled,
         )
-        qubit_idx = result.index if result.success else None
+        emit_for_unrolled(self, circuit, op, qubit_map, clbit_map, bindings)
 
-        # Fallback to direct UUID lookup
-        if qubit_idx is None and qubit_val.uuid in qubit_map:
-            qubit_idx = qubit_map[qubit_val.uuid]
+    def _emit_if(self, circuit: T, op: IfOperation, qubit_map: QubitMap, clbit_map: ClbitMap, bindings: dict[str, Any]) -> None:
+        emit_if(self, circuit, op, qubit_map, clbit_map, bindings)
 
-        if qubit_idx is not None and clbit_uuid in clbit_map:
-            clbit_idx = clbit_map[clbit_uuid]
-            self._emitter.emit_measure(circuit, qubit_idx, clbit_idx)
-            if getattr(self._emitter, "noop_measurement", False):
-                self._measurement_qubit_map[clbit_idx] = qubit_idx
-        else:
-            details: list[str] = []
-            if qubit_idx is None:
-                details.append(
-                    f"qubit '{qubit_val.name}' (uuid: {qubit_val.uuid[:8]}...) "
-                    f"could not be resolved to a physical qubit index"
-                )
-            if clbit_uuid not in clbit_map:
-                details.append(
-                    f"clbit (uuid: {clbit_uuid[:8]}...) not found in clbit_map"
-                )
-            warnings.warn(
-                f"Measurement dropped: {'; '.join(details)}.",
-                stacklevel=2,
-            )
+    def _emit_while(self, circuit: T, op: WhileOperation, qubit_map: QubitMap, clbit_map: ClbitMap, bindings: dict[str, Any]) -> None:
+        emit_while(self, circuit, op, qubit_map, clbit_map, bindings)
 
-    def _emit_measure_vector(
-        self,
-        circuit: T,
-        op: MeasureVectorOperation,
-        qubit_map: dict[str, int],
-        clbit_map: dict[str, int],
-        bindings: dict[str, Any],
-    ) -> None:
-        """Emit vector measurement."""
-        from qamomile.circuit.ir.value import ArrayValue
-
-        qubits_array = op.operands[0]
-        bits_array = op.results[0]
-
-        if isinstance(qubits_array, ArrayValue) and isinstance(bits_array, ArrayValue):
-            element_uuids = qubits_array.params.get("element_uuids", None)
-
-            shape = qubits_array.shape
-            if shape:
-                size_val = shape[0]
-                # Use allocator's _resolve_size to handle dynamic sizes (e.g., hi_dim0)
-                size = self._allocator._resolve_size(size_val, bindings)
-                if size is not None:
-                    for i in range(size):
-                        if element_uuids and i < len(element_uuids):
-                            qubit_uuid = element_uuids[i]
-                        else:
-                            qubit_uuid = f"{qubits_array.uuid}_{i}"
-
-                        clbit_id = f"{bits_array.uuid}_{i}"
-                        if qubit_uuid in qubit_map and clbit_id in clbit_map:
-                            q_idx = qubit_map[qubit_uuid]
-                            c_idx = clbit_map[clbit_id]
-                            self._emitter.emit_measure(circuit, q_idx, c_idx)
-                            if getattr(self._emitter, "noop_measurement", False):
-                                self._measurement_qubit_map[c_idx] = q_idx
-
-    def _emit_measure_qfixed(
-        self,
-        circuit: T,
-        op: MeasureQFixedOperation,
-        qubit_map: dict[str, int],
-        clbit_map: dict[str, int],
-    ) -> None:
-        """Emit QFixed measurement."""
-        qfixed = op.operands[0]
-        qubit_uuids = qfixed.params.get("qubit_values", [])
-        result = op.results[0]
-
-        for i, qubit_uuid in enumerate(qubit_uuids):
-            clbit_id = f"{result.uuid}_{i}"
-            if qubit_uuid in qubit_map and clbit_id in clbit_map:
-                q_idx = qubit_map[qubit_uuid]
-                c_idx = clbit_map[clbit_id]
-                self._emitter.emit_measure(circuit, q_idx, c_idx)
-                if getattr(self._emitter, "noop_measurement", False):
-                    self._measurement_qubit_map[c_idx] = q_idx
-
-    def _emit_for(
-        self,
-        circuit: T,
-        op: ForOperation,
-        qubit_map: dict[str, int],
-        clbit_map: dict[str, int],
-        bindings: dict[str, Any],
-        force_unroll: bool = False,
-    ) -> None:
-        """Emit a for loop."""
-        start = (
-            self._resolver.resolve_int_value(op.operands[0], bindings)
-            if len(op.operands) > 0
-            else 0
-        )
-        stop = (
-            self._resolver.resolve_int_value(op.operands[1], bindings)
-            if len(op.operands) > 1
-            else 1
-        )
-        step = (
-            self._resolver.resolve_int_value(op.operands[2], bindings)
-            if len(op.operands) > 2
-            else 1
-        )
-
-        if start is None or stop is None or step is None:
-            self._emit_for_unrolled(circuit, op, qubit_map, clbit_map, bindings)
-            return
-
-        indexset = range(start, stop, step)
-        if len(indexset) == 0:
-            return
-
-        if force_unroll:
-            self._emit_for_unrolled(circuit, op, qubit_map, clbit_map, bindings)
-            return
-
-        if self._loop_analyzer.should_unroll(op, bindings):
-            self._emit_for_unrolled(circuit, op, qubit_map, clbit_map, bindings)
-            return
-
-        # Try native for loop
-        if self._emitter.supports_for_loop():
-            loop_context = self._emitter.emit_for_loop_start(circuit, indexset)
-            loop_bindings = bindings.copy()
-            loop_bindings[op.loop_var] = loop_context
-            self._emit_operations(
-                circuit, op.operations, qubit_map, clbit_map, loop_bindings
-            )
-            self._emitter.emit_for_loop_end(circuit, loop_context)
-        else:
-            self._emit_for_unrolled(circuit, op, qubit_map, clbit_map, bindings)
-
-    def _emit_for_unrolled(
-        self,
-        circuit: T,
-        op: ForOperation,
-        qubit_map: dict[str, int],
-        clbit_map: dict[str, int],
-        bindings: dict[str, Any],
-    ) -> None:
-        """Emit for loop by unrolling."""
-        start = (
-            self._resolver.resolve_int_value(op.operands[0], bindings)
-            if len(op.operands) > 0
-            else 0
-        )
-        stop = (
-            self._resolver.resolve_int_value(op.operands[1], bindings)
-            if len(op.operands) > 1
-            else 1
-        )
-        step = (
-            self._resolver.resolve_int_value(op.operands[2], bindings)
-            if len(op.operands) > 2
-            else 1
-        )
-
-        if start is None or stop is None or step is None:
-            raise ValueError(
-                f"Cannot unroll loop: bounds could not be resolved. "
-                f"start={start}, stop={stop}, step={step}"
-            )
-
-        for i in range(start, stop, step):
-            loop_bindings = bindings.copy()
-            loop_bindings[op.loop_var] = i
-            self._emit_operations(
-                circuit, op.operations, qubit_map, clbit_map, loop_bindings
-            )
-
-    def _emit_for_items(
-        self,
-        circuit: T,
-        op: ForItemsOperation,
-        qubit_map: dict[str, int],
-        clbit_map: dict[str, int],
-        bindings: dict[str, Any],
-    ) -> None:
-        """Emit for-items loop (always unrolled).
-
-        This handles iteration over Dict items, e.g.:
-            for (i, j), Jij in qmc.items(ising):
-                ...
-        """
-        if not op.operands:
-            return
-
-        dict_value = op.operands[0]
-        entries = self._resolve_dict_entries(dict_value, bindings)
-
-        if entries is None:
-            raise ValueError(
-                f"Cannot unroll for-items loop: dict entries could not be resolved. "
-                f"Dict value: {dict_value.name if hasattr(dict_value, 'name') else dict_value}"
-            )
-
-        for key, value in entries:
-            loop_bindings = bindings.copy()
-
-            # Bind key variables (tuple unpacking)
-            if len(op.key_vars) > 1:
-                # Key is a tuple, unpack to multiple variables
-                for i, kv_name in enumerate(op.key_vars):
-                    loop_bindings[kv_name] = (
-                        key[i] if hasattr(key, "__getitem__") else key
-                    )
-            elif len(op.key_vars) == 1:
-                # Single key variable
-                loop_bindings[op.key_vars[0]] = key
-                if op.key_is_vector:
-                    # Provide key length for Vector[UInt] shape resolution
-                    loop_bindings[f"{op.key_vars[0]}_dim0"] = len(key)
-
-            # Bind value variable
-            loop_bindings[op.value_var] = value
-
-            self._emit_operations(
-                circuit, op.operations, qubit_map, clbit_map, loop_bindings
-            )
-
-    def _resolve_dict_entries(
-        self,
-        dict_value: Any,
-        bindings: dict[str, Any],
-    ) -> list[tuple[Any, Any]] | None:
-        """Resolve DictValue to concrete (key, value) pairs.
-
-        Args:
-            dict_value: The DictValue IR node being iterated
-            bindings: Current parameter bindings
-
-        Returns:
-            List of (key, value) tuples, or None if cannot be resolved
-        """
-        # Check for bound_data in params (from _create_bound_input)
-        if hasattr(dict_value, "params") and "bound_data" in dict_value.params:
-            bound = dict_value.params["bound_data"]
-            if isinstance(bound, dict):
-                return list(bound.items())
-            elif hasattr(bound, "items"):
-                return list(bound.items())
-            return bound
-
-        # Check if dict_value is a parameter that should be bound
-        if hasattr(dict_value, "is_parameter") and dict_value.is_parameter():
-            param_name = dict_value.parameter_name()
-            if param_name and param_name in bindings:
-                bound = bindings[param_name]
-                if isinstance(bound, dict):
-                    return list(bound.items())
-                elif hasattr(bound, "items"):
-                    return list(bound.items())
-                return bound
-
-        # Check by name in bindings
-        if hasattr(dict_value, "name") and dict_value.name in bindings:
-            bound = bindings[dict_value.name]
-            if isinstance(bound, dict):
-                return list(bound.items())
-            elif hasattr(bound, "items"):
-                return list(bound.items())
-            return bound
-
-        # Check if dict_value has entries directly (from IR)
-        if hasattr(dict_value, "entries") and dict_value.entries:
-            # Resolve each entry
-            resolved_entries = []
-            for key_val, value_val in dict_value.entries:
-                key = self._resolver.resolve_classical_value(key_val, bindings)
-                value = self._resolver.resolve_classical_value(value_val, bindings)
-                if key is not None and value is not None:
-                    resolved_entries.append((key, value))
-            if resolved_entries:
-                return resolved_entries
-
-        return None
-
-    def _emit_if(
-        self,
-        circuit: T,
-        op: IfOperation,
-        qubit_map: dict[str, int],
-        clbit_map: dict[str, int],
-        bindings: dict[str, Any],
-    ) -> None:
-        """Emit if/else operation.
-
-        Handles two condition types:
-
-        1. **Compile-time constant** (plain Python ``int``/``bool`` from
-           ``@qkernel`` AST transformer closure variables, constant-folded
-           Values, or Values resolvable via ``bindings``): the active
-           branch is emitted unconditionally, the inactive branch is
-           discarded.  No backend ``c_if`` / ``if_test`` is needed.
-        2. **Runtime condition** (measurement ``Value`` that cannot be
-           resolved at compile time): delegates to the backend's
-           ``emit_if_start`` / ``emit_else_start`` / ``emit_if_end``
-           protocol.
-        """
-        condition = op.condition
-        resolved = resolve_if_condition(condition, bindings)
-
-        # Compile-time constant condition: emit only the selected branch.
-        # Use remap_static_phi_outputs (not the runtime map_phi_outputs
-        # validator) so that dead-branch array quantum phi outputs are
-        # aliased from the selected branch only.
-        if resolved is not None:
-            if resolved:
-                self._emit_operations(
-                    circuit, op.true_operations, qubit_map, clbit_map, bindings
-                )
-            else:
-                self._emit_operations(
-                    circuit, op.false_operations, qubit_map, clbit_map, bindings
-                )
-            remap_static_phi_outputs(op.phi_ops, resolved, qubit_map, clbit_map)
-            return
-
-        condition_uuid = condition.uuid
-
-        if condition_uuid not in clbit_map:
-            raise EmitError(
-                "Runtime if-conditions must come from measurement results "
-                "or be bound before transpilation. The condition value was "
-                "neither resolved at compile time nor backed by a "
-                "measurement result."
-            )
-
-        clbit_idx = clbit_map[condition_uuid]
-
-        if self._emitter.supports_if_else():
-            context = self._emitter.emit_if_start(circuit, clbit_idx, 1)
-            self._emit_operations(
-                circuit, op.true_operations, qubit_map, clbit_map, bindings
-            )
-            if op.false_operations:
-                self._emitter.emit_else_start(circuit, context)
-                self._emit_operations(
-                    circuit, op.false_operations, qubit_map, clbit_map, bindings
-                )
-            self._emitter.emit_if_end(circuit, context)
-
-            # Register phi output UUIDs so subsequent operations
-            # (e.g., measure) can resolve the merged values.
-            self._register_phi_outputs(op, qubit_map, clbit_map, bindings)
-        else:
-            raise EmitError(
-                "Backend does not support native if/else control flow. "
-                "Cannot emit IfOperation."
-            )
-
-    def _register_phi_outputs(
-        self,
-        op: IfOperation,
-        qubit_map: dict[str, int],
-        clbit_map: dict[str, int],
-        bindings: dict[str, Any] | None = None,
-    ) -> None:
-        """Register phi output UUIDs via the shared ``map_phi_outputs`` utility.
-
-        Uses the full ``ValueResolver.resolve_qubit_index_detailed`` for
-        scalar qubit resolution (handles array element operands).
-        """
-        resolver_bindings = bindings or {}
-
-        def _resolve_scalar(source: Value, qmap: dict[str, int]) -> int | None:
-            result = self._resolver.resolve_qubit_index_detailed(
-                source, qmap, resolver_bindings
-            )
-            return result.index if result.success else None
-
-        map_phi_outputs(op.phi_ops, qubit_map, clbit_map, _resolve_scalar)
-
-    def _emit_while(
-        self,
-        circuit: T,
-        op: WhileOperation,
-        qubit_map: dict[str, int],
-        clbit_map: dict[str, int],
-        bindings: dict[str, Any],
-    ) -> None:
-        """Emit while loop operation."""
-        if not op.operands:
-            raise ValueError("WhileOperation requires a condition operand")
-
-        condition = op.operands[0]
-        condition_value = condition.value if hasattr(condition, "value") else condition
-        condition_uuid = (
-            condition_value.uuid
-            if hasattr(condition_value, "uuid")
-            else str(condition_value)
-        )
-
-        if condition_uuid not in clbit_map:
-            raise ValueError("While loop condition not found in classical bit map.")
-
-        clbit_idx = clbit_map[condition_uuid]
-
-        if self._emitter.supports_while_loop():
-            context = self._emitter.emit_while_start(circuit, clbit_idx, 1)
-            self._emit_operations(
-                circuit, op.operations, qubit_map, clbit_map, bindings
-            )
-            self._emitter.emit_while_end(circuit, context)
-        else:
-            raise EmitError(
-                "Backend does not support native while loop control flow. "
-                "Cannot emit WhileOperation."
-            )
-
-    def _emit_composite_gate(
-        self,
-        circuit: T,
-        op: CompositeGateOperation,
-        qubit_map: dict[str, int],
-        bindings: dict[str, Any],
-    ) -> None:
-        """Emit a composite gate operation."""
-        all_qubits = op.control_qubits + op.target_qubits
-        qubit_indices = [qubit_map[q.uuid] for q in all_qubits if q.uuid in qubit_map]
-
-        # Try native emitters first
-        for emitter in self._composite_emitters:
-            if emitter.can_emit(op.gate_type):
-                if emitter.emit(circuit, op, qubit_indices, bindings):
-                    self._update_composite_result_mapping(op, qubit_indices, qubit_map)
-                    return
-
-        # Fall back to decomposition
-        self._emit_composite_fallback(circuit, op, qubit_indices, bindings)
-        self._update_composite_result_mapping(op, qubit_indices, qubit_map)
-
-    def _emit_composite_fallback(
-        self,
-        circuit: T,
-        op: CompositeGateOperation,
-        qubit_indices: list[int],
-        bindings: dict[str, Any],
-    ) -> None:
-        """Emit composite gate using decomposition.
-
-        If the operation has a strategy_name set, it attempts to use
-        the corresponding strategy from the CompositeGate class.
-        """
-        if op.gate_type == CompositeGateType.QPE:
-            self._emit_qpe_manual(circuit, op, qubit_indices, bindings)
-        elif op.gate_type == CompositeGateType.QFT:
-            self._emit_qft_with_strategy(circuit, op, qubit_indices)
-        elif op.gate_type == CompositeGateType.IQFT:
-            self._emit_iqft_with_strategy(circuit, op, qubit_indices)
-        elif not op.has_implementation:
-            if qubit_indices:
-                self._emitter.emit_barrier(circuit, qubit_indices)
-        elif op.has_implementation:
-            impl = op.implementation
-            if impl is not None:
-                self._emit_custom_composite(circuit, op, impl, qubit_indices, bindings)
-            elif qubit_indices:
-                self._emitter.emit_barrier(circuit, qubit_indices)
-
-    def _emit_qft_with_strategy(
-        self,
-        circuit: T,
-        op: CompositeGateOperation,
-        qubit_indices: list[int],
-    ) -> None:
-        """Emit QFT considering strategy selection.
-
-        If a strategy is specified and 'approximate', uses truncated rotations.
-        Otherwise falls back to standard QFT.
-        """
-        strategy_name = op.strategy_name
-
-        # Check if using approximate strategy
-        if strategy_name and "approximate" in strategy_name:
-            # Extract truncation depth from strategy name (e.g., "approximate_k3")
-            truncation_depth = 3  # default
-            if "_k" in strategy_name:
-                try:
-                    truncation_depth = int(strategy_name.split("_k")[1])
-                except (ValueError, IndexError):
-                    pass
-            self._emit_approximate_qft(circuit, qubit_indices, truncation_depth)
-        else:
-            self._emit_qft_manual(circuit, qubit_indices)
-
-    def _emit_iqft_with_strategy(
-        self,
-        circuit: T,
-        op: CompositeGateOperation,
-        qubit_indices: list[int],
-    ) -> None:
-        """Emit IQFT considering strategy selection.
-
-        If a strategy is specified and 'approximate', uses truncated rotations.
-        Otherwise falls back to standard IQFT.
-        """
-        strategy_name = op.strategy_name
-
-        if strategy_name and "approximate" in strategy_name:
-            truncation_depth = 3
-            if "_k" in strategy_name:
-                try:
-                    truncation_depth = int(strategy_name.split("_k")[1])
-                except (ValueError, IndexError):
-                    pass
-            self._emit_approximate_iqft(circuit, qubit_indices, truncation_depth)
-        else:
-            self._emit_iqft_manual(circuit, qubit_indices)
-
-    def _emit_approximate_qft(
-        self,
-        circuit: T,
-        qubit_indices: list[int],
-        truncation_depth: int,
-    ) -> None:
-        """Emit approximate QFT with truncated rotations matching stdlib convention.
-
-        Processes qubits from highest index to lowest (same as exact QFT), applying
-        H then controlled-phase rotations with lower-indexed qubits. Rotations with
-        exponent > truncation_depth are omitted. Finishes with bit-reversal SWAPs.
-
-        Args:
-            circuit: Target circuit
-            qubit_indices: Qubit indices
-            truncation_depth: Maximum exponent for controlled phase gates
-        """
-        n = len(qubit_indices)
-        if n == 0:
-            return
-
-        k = truncation_depth
-
-        for j in range(n - 1, -1, -1):
-            self._emitter.emit_h(circuit, qubit_indices[j])
-            for m in range(j - 1, max(j - k - 1, -1), -1):
-                exponent = j - m
-                if exponent <= k:
-                    angle = math.pi / (2**exponent)
-                    self._emitter.emit_cp(
-                        circuit, qubit_indices[j], qubit_indices[m], angle
-                    )
-
-        for j in range(n // 2):
-            self._emitter.emit_swap(circuit, qubit_indices[j], qubit_indices[n - 1 - j])
-
-    def _emit_approximate_iqft(
-        self,
-        circuit: T,
-        qubit_indices: list[int],
-        truncation_depth: int,
-    ) -> None:
-        """Emit approximate IQFT with truncated rotations matching stdlib convention.
-
-        IQFT = QFT†. SWAP comes first (undoing QFT's trailing SWAP), then for each
-        qubit j (low-to-high), applies inverse controlled-phase rotations with
-        lower-indexed qubits first (omitting exponents > truncation_depth), then H.
-
-        Args:
-            circuit: Target circuit
-            qubit_indices: Qubit indices
-            truncation_depth: Maximum exponent for controlled phase gates
-        """
-        n = len(qubit_indices)
-        if n == 0:
-            return
-
-        k = truncation_depth
-
-        # Bit-reversal SWAP first (inverse of QFT's trailing SWAP)
-        for j in range(n // 2):
-            self._emitter.emit_swap(circuit, qubit_indices[j], qubit_indices[n - 1 - j])
-
-        for j in range(n):
-            for m in range(max(0, j - k), j):
-                exponent = j - m
-                if exponent <= k:
-                    angle = -math.pi / (2**exponent)
-                    self._emitter.emit_cp(
-                        circuit, qubit_indices[j], qubit_indices[m], angle
-                    )
-            self._emitter.emit_h(circuit, qubit_indices[j])
-
-    def _emit_qft_manual(self, circuit: T, qubit_indices: list[int]) -> None:
-        """Emit QFT using decomposition matching stdlib convention.
-
-        Processes qubits from highest index to lowest: for each qubit j, applies H
-        then controlled-phase rotations with all lower-indexed qubits k (angle =
-        π/2^(j-k)). Finishes with bit-reversal SWAPs.
-        """
-        n = len(qubit_indices)
-        if n == 0:
-            return
-
-        for j in range(n - 1, -1, -1):
-            self._emitter.emit_h(circuit, qubit_indices[j])
-            for k in range(j - 1, -1, -1):
-                angle = math.pi / (2 ** (j - k))
-                self._emitter.emit_cp(
-                    circuit, qubit_indices[j], qubit_indices[k], angle
-                )
-
-        for j in range(n // 2):
-            self._emitter.emit_swap(circuit, qubit_indices[j], qubit_indices[n - 1 - j])
-
-    def _emit_iqft_manual(self, circuit: T, qubit_indices: list[int]) -> None:
-        """Emit inverse QFT using decomposition matching stdlib convention.
-
-        IQFT = QFT†. SWAP comes first (undoing QFT's trailing SWAP), then for each
-        qubit j (low-to-high), applies inverse controlled-phase rotations with all
-        lower-indexed qubits k (angle = -π/2^(j-k)) first, then H.
-        """
-        n = len(qubit_indices)
-        if n == 0:
-            return
-
-        # Bit-reversal SWAP first (inverse of QFT's trailing SWAP)
-        for j in range(n // 2):
-            self._emitter.emit_swap(circuit, qubit_indices[j], qubit_indices[n - 1 - j])
-
-        for j in range(n):
-            for k in range(j):
-                angle = -math.pi / (2 ** (j - k))
-                self._emitter.emit_cp(
-                    circuit, qubit_indices[j], qubit_indices[k], angle
-                )
-            self._emitter.emit_h(circuit, qubit_indices[j])
-
-    def _emit_qpe_manual(
-        self,
-        circuit: T,
-        op: CompositeGateOperation,
-        qubit_indices: list[int],
-        bindings: dict[str, Any],
-    ) -> None:
-        """Emit QPE using manual decomposition."""
-        num_counting = op.num_control_qubits
-        num_targets = op.num_target_qubits
-
-        if len(qubit_indices) < num_counting + num_targets:
-            return
-
-        counting_indices = qubit_indices[:num_counting]
-        target_indices = qubit_indices[num_counting : num_counting + num_targets]
-
-        # Step 1: Apply H to counting qubits
-        for idx in counting_indices:
-            self._emitter.emit_h(circuit, idx)
-
-        # Step 2: Apply controlled-U^(2^k) operations
-        if op.operands and hasattr(op.operands[0], "operations"):
-            block_value = op.operands[0]
-
-            local_bindings = bindings.copy()
-            if hasattr(block_value, "input_values"):
-                param_operands = op.parameters
-                param_inputs = [
-                    iv
-                    for iv in block_value.input_values
-                    if hasattr(iv, "type") and iv.type.is_classical()
-                ]
-
-                for param_input, param_operand in zip(param_inputs, param_operands):
-                    param_name = param_input.name
-                    if param_operand.is_constant():
-                        local_bindings[param_name] = param_operand.get_const()
-                    elif param_operand.is_parameter():
-                        outer_name = param_operand.parameter_name()
-                        if outer_name and outer_name in bindings:
-                            local_bindings[param_name] = bindings[outer_name]
-
-            self._emit_controlled_powers(
-                circuit, block_value, counting_indices, target_indices, local_bindings
-            )
-        else:
-            phase = self._extract_phase_from_params(op, bindings)
-            if phase is not None:
-                for k, ctrl_idx in enumerate(counting_indices):
-                    power = 2**k
-                    angle = phase * power
-                    for tgt_idx in target_indices:
-                        self._emitter.emit_cp(circuit, ctrl_idx, tgt_idx, angle)
-
-        # Step 3: Apply inverse QFT
-        self._emit_iqft_manual(circuit, counting_indices)
-
-    def _emit_controlled_powers(
-        self,
-        circuit: T,
-        block_value: Any,
-        counting_indices: list[int],
-        target_indices: list[int],
-        bindings: dict[str, Any],
-    ) -> None:
-        """Emit controlled-U^(2^k) operations."""
-        num_targets = len(target_indices)
-        unitary_gate = self._blockvalue_to_gate(block_value, num_targets, bindings)
-
-        if unitary_gate is not None:
-            for k, ctrl_idx in enumerate(counting_indices):
-                power = 2**k
-                powered_gate = self._emitter.gate_power(unitary_gate, power)
-                controlled_powered_gate = self._emitter.gate_controlled(powered_gate, 1)
-                self._emitter.append_gate(
-                    circuit, controlled_powered_gate, [ctrl_idx] + target_indices
-                )
-        else:
-            for k, ctrl_idx in enumerate(counting_indices):
-                power = 2**k
-                for _ in range(power):
-                    self._emit_controlled_block(
-                        circuit, block_value, ctrl_idx, target_indices, bindings
-                    )
-
-    def _emit_controlled_block(
-        self,
-        circuit: T,
-        block_value: Any,
-        control_idx: int,
-        target_indices: list[int],
-        bindings: dict[str, Any],
-    ) -> None:
-        """Emit controlled version of a block."""
-        if not hasattr(block_value, "operations"):
-            return
-
-        self._emit_controlled_operations(
-            circuit, block_value.operations, control_idx, target_indices, bindings
-        )
-
-    def _emit_controlled_operations(
-        self,
-        circuit: T,
-        operations: list[Operation],
-        control_idx: int,
-        target_indices: list[int],
-        bindings: dict[str, Any],
-    ) -> None:
-        """Emit controlled versions of operations."""
-        for op in operations:
-            if isinstance(op, GateOperation):
-                self._emit_controlled_gate(
-                    circuit, op, control_idx, target_indices, bindings
-                )
-            elif isinstance(op, ForOperation):
-                start = (
-                    self._resolver.resolve_int_value(op.operands[0], bindings)
-                    if len(op.operands) > 0
-                    else 0
-                )
-                stop = (
-                    self._resolver.resolve_int_value(op.operands[1], bindings)
-                    if len(op.operands) > 1
-                    else 1
-                )
-                step = (
-                    self._resolver.resolve_int_value(op.operands[2], bindings)
-                    if len(op.operands) > 2
-                    else 1
-                )
-
-                if start is not None and stop is not None and step is not None:
-                    for i in range(start, stop, step):
-                        loop_bindings = bindings.copy()
-                        loop_bindings[op.loop_var] = i
-                        self._emit_controlled_operations(
-                            circuit,
-                            op.operations,
-                            control_idx,
-                            target_indices,
-                            loop_bindings,
-                        )
-                else:
-                    raise EmitError(
-                        "Cannot resolve ForOperation bounds in controlled block. "
-                        "Loop bounds must be resolvable at transpile time."
-                    )
-
-    def _emit_controlled_gate(
-        self,
-        circuit: T,
-        op: GateOperation,
-        control_idx: int,
-        target_indices: list[int],
-        bindings: dict[str, Any],
-    ) -> None:
-        """Emit a controlled version of a gate."""
-        if not target_indices:
-            return
-
-        target_idx = target_indices[0]
-
-        match op.gate_type:
-            case GateOperationType.H:
-                self._emitter.emit_ch(circuit, control_idx, target_idx)
-            case GateOperationType.X:
-                self._emitter.emit_cx(circuit, control_idx, target_idx)
-            case GateOperationType.Y:
-                self._emitter.emit_cy(circuit, control_idx, target_idx)
-            case GateOperationType.Z:
-                self._emitter.emit_cz(circuit, control_idx, target_idx)
-            case GateOperationType.P:
-                angle = self._resolve_angle(op, bindings)
-                self._emitter.emit_cp(circuit, control_idx, target_idx, angle)
-            case GateOperationType.RX:
-                angle = self._resolve_angle(op, bindings)
-                self._emitter.emit_crx(circuit, control_idx, target_idx, angle)
-            case GateOperationType.RY:
-                angle = self._resolve_angle(op, bindings)
-                self._emitter.emit_cry(circuit, control_idx, target_idx, angle)
-            case GateOperationType.RZ:
-                angle = self._resolve_angle(op, bindings)
-                self._emitter.emit_crz(circuit, control_idx, target_idx, angle)
-            case GateOperationType.S:
-                self._emitter.emit_cp(circuit, control_idx, target_idx, math.pi / 2)
-            case GateOperationType.T:
-                self._emitter.emit_cp(circuit, control_idx, target_idx, math.pi / 4)
-            case GateOperationType.SDG:
-                self._emitter.emit_cp(circuit, control_idx, target_idx, -math.pi / 2)
-            case GateOperationType.TDG:
-                self._emitter.emit_cp(circuit, control_idx, target_idx, -math.pi / 4)
-            case GateOperationType.SWAP:
-                if len(target_indices) < 2:
-                    raise EmitError(
-                        "Controlled-SWAP requires at least 2 target qubits.",
-                        operation="ControlledGate",
-                    )
-                tgt_a = target_indices[0]
-                tgt_b = target_indices[1]
-                # Fredkin gate decomposition:
-                #   CNOT(tgt_b, tgt_a)
-                #   Toffoli(ctrl, tgt_a, tgt_b)
-                #   CNOT(tgt_b, tgt_a)
-                self._emitter.emit_cx(circuit, tgt_b, tgt_a)
-                self._emitter.emit_toffoli(circuit, control_idx, tgt_a, tgt_b)
-                self._emitter.emit_cx(circuit, tgt_b, tgt_a)
-            case _:
-                raise EmitError(
-                    f"Unsupported gate type {op.gate_type!r} in controlled "
-                    f"block decomposition.",
-                    operation="ControlledGate",
-                )
-
-    def _resolve_power(
-        self,
-        op: ControlledUOperation,
-        bindings: dict[str, Any],
-    ) -> int:
-        """Resolve ``ControlledUOperation.power`` to a concrete positive ``int``.
-
-        After frontend normalization and constant folding, the ``power``
-        field is either a concrete ``int`` or a symbolic ``Value``.
-        This method resolves the latter via *bindings* and validates
-        the result, ensuring both controlled-U emission paths receive
-        identical, deterministic semantics.
-
-        Args:
-            op: The ``ControlledUOperation`` whose ``power`` to resolve.
-            bindings: Current variable bindings for symbolic resolution.
-
-        Returns:
-            A validated strictly-positive ``int``.
-
-        Raises:
-            EmitError: If *power* is unresolved, non-positive, ``bool``,
-                non-integer, or of an unexpected type.
-        """
-        power = op.power
-
-        if isinstance(power, int):
-            if isinstance(power, bool):
-                raise EmitError(
-                    f"ControlledU power must be a positive integer, "
-                    f"got bool ({power}).",
-                    operation="ControlledUOperation",
-                )
-            if power <= 0:
-                raise EmitError(
-                    f"ControlledU power must be strictly positive, got {power}.",
-                    operation="ControlledUOperation",
-                )
-            return power
-
-        if isinstance(power, Value):
-            resolved = self._resolver.resolve_classical_value(power, bindings)
-            if resolved is None:
-                raise EmitError(
-                    f"Cannot resolve ControlledU power: symbolic value "
-                    f"'{power.name}' could not be resolved to a concrete "
-                    f"integer. Ensure all loop variables and parameters "
-                    f"are bound before transpilation.",
-                    operation="ControlledUOperation",
-                )
-            if isinstance(resolved, bool):
-                raise EmitError(
-                    f"ControlledU power resolved to bool ({resolved}), "
-                    f"expected a positive integer.",
-                    operation="ControlledUOperation",
-                )
-            if isinstance(resolved, float):
-                if resolved != int(resolved):
-                    raise EmitError(
-                        f"ControlledU power resolved to non-integer float {resolved}.",
-                        operation="ControlledUOperation",
-                    )
-                resolved = int(resolved)
-            if not isinstance(resolved, int):
-                raise EmitError(
-                    f"ControlledU power resolved to "
-                    f"{type(resolved).__name__}, expected int.",
-                    operation="ControlledUOperation",
-                )
-            if resolved <= 0:
-                raise EmitError(
-                    f"ControlledU power must be strictly positive, got {resolved}.",
-                    operation="ControlledUOperation",
-                )
-            return resolved
-
-        raise EmitError(
-            f"ControlledU power has unexpected type "
-            f"{type(power).__name__}. Expected int or Value.",
-            operation="ControlledUOperation",
-        )
-
-    def _emit_controlled_u_with_index_spec(
-        self,
-        circuit: T,
-        op: ControlledUOperation,
-        qubit_map: dict[str, int],
-        bindings: dict[str, Any],
-    ) -> None:
-        """Emit a ControlledUOperation with target_indices/controlled_indices."""
-        # 1. Resolve num_controls
-        if op.is_symbolic_num_controls:
-            nc = self._resolver.resolve_classical_value(op.num_controls, bindings)
-            if nc is None:
-                raise EmitError(
-                    "Cannot resolve symbolic num_controls for index_spec emit.",
-                    operation="ControlledUOperation",
-                )
-            nc = int(nc)
-        else:
-            nc = op.num_controls
-
-        # 2. Resolve index lists
-        if op.target_indices is not None:
-            resolved_ti = []
-            for v in op.target_indices:
-                val = self._resolver.resolve_classical_value(v, bindings)
-                if val is None:
-                    raise EmitError(
-                        "Cannot resolve target index.",
-                        operation="ControlledUOperation",
-                    )
-                resolved_ti.append(int(val))
-            resolved_ci = None
-        else:
-            resolved_ci = []
-            for v in op.controlled_indices:
-                val = self._resolver.resolve_classical_value(v, bindings)
-                if val is None:
-                    raise EmitError(
-                        "Cannot resolve controlled index.",
-                        operation="ControlledUOperation",
-                    )
-                resolved_ci.append(int(val))
-            resolved_ti = None
-
-        # 3. Get Vector's physical qubit indices
-        vector_value = op.operands[1]
-        size_val = vector_value.shape[0]
-        vector_size = self._resolver.resolve_int_value(size_val, bindings)
-        if vector_size is None:
-            raise EmitError(
-                "Cannot resolve Vector size for index_spec emit.",
-                operation="ControlledUOperation",
-            )
-
-        all_phys_indices = []
-        for i in range(vector_size):
-            qubit_id = f"{vector_value.uuid}_{i}"
-            if qubit_id in qubit_map:
-                all_phys_indices.append(qubit_map[qubit_id])
-            else:
-                raise EmitError(
-                    f"Qubit {qubit_id} not found in qubit_map.",
-                    operation="ControlledUOperation",
-                )
-
-        # 4. Validate resolved indices
-        resolved_indices = resolved_ti if resolved_ti is not None else resolved_ci
-        for idx in resolved_indices:
-            if not (0 <= idx < vector_size):
-                raise EmitError(
-                    f"Index {idx} out of bounds [0, {vector_size}) "
-                    f"for ControlledU vector.",
-                    operation="ControlledUOperation",
-                )
-        if len(set(resolved_indices)) != len(resolved_indices):
-            raise EmitError(
-                f"Duplicate indices in ControlledU index spec: {resolved_indices}.",
-                operation="ControlledUOperation",
-            )
-
-        # 5. Partition into control and target physical indices
-        if resolved_ti is not None:
-            target_set = set(resolved_ti)
-            target_phys = [all_phys_indices[i] for i in resolved_ti]
-            control_phys = [
-                all_phys_indices[i] for i in range(vector_size) if i not in target_set
-            ]
-        else:
-            control_set = set(resolved_ci)
-            control_phys = [all_phys_indices[i] for i in resolved_ci]
-            target_phys = [
-                all_phys_indices[i] for i in range(vector_size) if i not in control_set
-            ]
-
-        # 6. Validate num_controls consistency
-        if len(control_phys) != nc:
-            raise EmitError(
-                f"num_controls ({nc}) does not match actual control count "
-                f"({len(control_phys)}).",
-                operation="ControlledUOperation",
-            )
-
-        # 7. Bind classical parameters
-        block_value = op.block
-        param_operands = [
-            v for v in op.operands[2:] if hasattr(v, "type") and v.type.is_classical()
-        ]
-        local_bindings = bindings.copy()
-
-        if hasattr(block_value, "input_values"):
-            param_inputs = [
-                iv
-                for iv in block_value.input_values
-                if hasattr(iv, "type") and iv.type.is_classical()
-            ]
-            for i, operand in enumerate(param_operands):
-                if i >= len(param_inputs):
-                    break
-                param_name = param_inputs[i].name
-                if operand.is_constant():
-                    local_bindings[param_name] = operand.get_const()
-                elif operand.is_parameter():
-                    outer_name = operand.parameter_name()
-                    if outer_name and outer_name in bindings:
-                        local_bindings[param_name] = bindings[outer_name]
-                elif operand.name in bindings:
-                    local_bindings[param_name] = bindings[operand.name]
-                elif (
-                    hasattr(operand, "params")
-                    and operand.params
-                    and "const" in operand.params
-                ):
-                    local_bindings[param_name] = operand.params["const"]
-
-        # 8. Build and emit gate
-        num_targets = len(target_phys)
-        unitary_gate = self._blockvalue_to_gate(
-            block_value, num_targets, local_bindings
-        )
-
-        power_value = self._resolve_power(op, bindings)
-
-        if unitary_gate is not None:
-            if power_value > 1:
-                unitary_gate = self._emitter.gate_power(unitary_gate, power_value)
-            controlled_gate = self._emitter.gate_controlled(unitary_gate, nc)
-            self._emitter.append_gate(
-                circuit, controlled_gate, control_phys + target_phys
-            )
-        else:
-            self._emit_controlled_fallback(
-                circuit,
-                block_value,
-                nc,
-                control_phys,
-                target_phys,
-                power_value,
-                local_bindings,
-            )
-
-        # 9. Map result ArrayValue in qubit_map
-        vector_result = op.results[0]
-        for i in range(vector_size):
-            result_key = f"{vector_result.uuid}_{i}"
-            input_key = f"{vector_value.uuid}_{i}"
-            if input_key in qubit_map and result_key not in qubit_map:
-                qubit_map[result_key] = qubit_map[input_key]
-
-    def _emit_controlled_u(
-        self,
-        circuit: T,
-        op: ControlledUOperation,
-        qubit_map: dict[str, int],
-        bindings: dict[str, Any],
-    ) -> None:
-        """Emit a ControlledUOperation."""
-        if op.has_index_spec:
-            self._emit_controlled_u_with_index_spec(circuit, op, qubit_map, bindings)
-            return
-        if op.is_symbolic_num_controls:
-            raise EmitError(
-                "Cannot emit ControlledUOperation with symbolic num_controls. "
-                "Bind parameters to concrete values before transpilation.",
-                operation="ControlledUOperation",
-            )
-        block_value = op.block
-        control_operands = op.control_operands
-        remaining_operands = op.operands[1 + op.num_controls :]
-
-        target_qubit_operands = []
-        param_operands = []
-        for operand in remaining_operands:
-            if hasattr(operand, "type") and operand.type.is_quantum():
-                target_qubit_operands.append(operand)
-            elif hasattr(operand, "type") and operand.type.is_classical():
-                param_operands.append(operand)
-
-        control_indices = []
-        for q in control_operands:
-            idx = self._resolver.resolve_qubit_index(q, qubit_map, bindings)
-            if idx is not None:
-                control_indices.append(idx)
-
-        target_indices = []
-        for q in target_qubit_operands:
-            idx = self._resolver.resolve_qubit_index(q, qubit_map, bindings)
-            if idx is not None:
-                target_indices.append(idx)
-
-        if not control_indices or not target_indices:
-            return
-
-        local_bindings = bindings.copy()
-
-        if hasattr(block_value, "input_values"):
-            param_inputs = [
-                iv
-                for iv in block_value.input_values
-                if hasattr(iv, "type") and iv.type.is_classical()
-            ]
-            for i, operand in enumerate(param_operands):
-                if i >= len(param_inputs):
-                    break
-
-                param_name = param_inputs[i].name
-
-                if operand.is_constant():
-                    local_bindings[param_name] = operand.get_const()
-                elif operand.is_parameter():
-                    outer_name = operand.parameter_name()
-                    if outer_name and outer_name in bindings:
-                        local_bindings[param_name] = bindings[outer_name]
-                elif operand.name in bindings:
-                    local_bindings[param_name] = bindings[operand.name]
-                elif (
-                    hasattr(operand, "params")
-                    and operand.params
-                    and "const" in operand.params
-                ):
-                    local_bindings[param_name] = operand.params["const"]
-
-        num_targets = len(target_indices)
-        unitary_gate = self._blockvalue_to_gate(
-            block_value, num_targets, local_bindings
-        )
-
-        power_value = self._resolve_power(op, bindings)
-
-        if unitary_gate is not None:
-            if power_value > 1:
-                unitary_gate = self._emitter.gate_power(unitary_gate, power_value)
-            controlled_gate = self._emitter.gate_controlled(
-                unitary_gate, op.num_controls
-            )
-            self._emitter.append_gate(
-                circuit, controlled_gate, control_indices + target_indices
-            )
-        else:
-            self._emit_controlled_fallback(
-                circuit,
-                block_value,
-                op.num_controls,
-                control_indices,
-                target_indices,
-                power_value,
-                local_bindings,
-            )
-
-        all_input_indices = control_indices + target_indices
-        for i, result in enumerate(op.results):
-            if i < len(all_input_indices):
-                qubit_map[result.uuid] = all_input_indices[i]
+    def _emit_pauli_evolve(self, circuit: T, op: PauliEvolveOp, qubit_map: QubitMap, bindings: dict[str, Any]) -> None:
+        emit_pauli_evolve(self, circuit, op, qubit_map, bindings)
 
     def _emit_controlled_fallback(
-        self,
-        circuit: T,
-        block_value: Any,
-        num_controls: int,
-        control_indices: list[int],
-        target_indices: list[int],
-        power: int,
-        bindings: dict[str, Any],
+        self, circuit: T, block_value: Any, num_controls: int,
+        control_indices: list[int], target_indices: list[int],
+        power: int, bindings: dict[str, Any],
     ) -> None:
-        """Fallback emission for controlled-U when gate conversion fails.
+        emit_controlled_fallback(self, circuit, block_value, num_controls,
+                                 control_indices, target_indices, power, bindings)
 
-        Decomposes the block body gate-by-gate with single-control emission.
-        Subclasses may override to support multi-control natively.
+    def _blockvalue_to_gate(self, block_value: Any, num_qubits: int, bindings: dict[str, Any]) -> Any:
+        return blockvalue_to_gate(self, block_value, num_qubits, bindings)
 
-        Args:
-            circuit: The backend circuit being built.
-            block_value: The block value containing operations to control.
-            num_controls: Number of control qubits.
-            control_indices: Physical indices of control qubits.
-            target_indices: Physical indices of target qubits.
-            power: Number of times to repeat the controlled operation.
-            bindings: Parameter bindings.
+    # ------------------------------------------------------------------
+    # Helpers called from emit_support modules
+    # ------------------------------------------------------------------
 
-        Raises:
-            EmitError: When num_controls > 1 (multi-control not supported
-                in the default gate-by-gate decomposition).
-        """
-        if num_controls > 1:
-            raise EmitError(
-                f"Cannot decompose multi-controlled operation "
-                f"(num_controls={num_controls}): "
-                f"block-to-gate conversion failed and the "
-                f"fallback decomposition only supports single control.",
-                operation="ControlledUOperation",
-            )
-        for _ in range(power):
-            for ctrl_idx in control_indices:
-                self._emit_controlled_block(
-                    circuit,
-                    block_value,
-                    ctrl_idx,
-                    target_indices,
-                    bindings,
-                )
+    def _resolve_angle(self, op: GateOperation, bindings: dict[str, Any]) -> Any:
+        from qamomile.circuit.transpiler.passes.emit_support.gate_emission import (
+            resolve_angle,
+        )
+        return resolve_angle(self, op, bindings)
 
-    def _emit_custom_composite(
-        self,
-        circuit: T,
-        op: CompositeGateOperation,
-        impl: Any,
-        qubit_indices: list[int],
-        bindings: dict[str, Any],
-    ) -> None:
-        """Emit a custom composite gate with implementation."""
-        num_qubits = len(qubit_indices)
-        custom_gate = self._blockvalue_to_gate(impl, num_qubits, bindings)
+    def _emit_custom_composite(self, circuit: T, op: Any, impl: Any, qubit_indices: list[int], bindings: dict[str, Any]) -> None:
+        from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+            emit_custom_composite,
+        )
+        emit_custom_composite(self, circuit, op, impl, qubit_indices, bindings)
 
-        if custom_gate is not None:
-            self._emitter.append_gate(circuit, custom_gate, qubit_indices)
-        else:
-            local_qubit_map: dict[str, int] = {}
-            local_clbit_map: dict[str, int] = {}
-
-            if hasattr(impl, "input_values"):
-                for i, input_val in enumerate(impl.input_values):
-                    if i < len(qubit_indices):
-                        local_qubit_map[input_val.uuid] = qubit_indices[i]
-
-            if hasattr(impl, "operations"):
-                self._emit_operations(
-                    circuit,
-                    impl.operations,
-                    local_qubit_map,
-                    local_clbit_map,
-                    bindings,
-                    force_unroll=True,
-                )
-
-    def _blockvalue_to_gate(
-        self,
-        block_value: Any,
-        num_qubits: int,
-        bindings: dict[str, Any],
-    ) -> Any:
-        """Convert a BlockValue to a backend gate."""
-        if not hasattr(block_value, "operations"):
-            return None
-
-        try:
-            local_qubit_map: dict[str, int] = {}
-            local_clbit_map: dict[str, int] = {}
-
-            if hasattr(block_value, "input_values"):
-                qubit_idx = 0
-                for input_val in block_value.input_values:
-                    if hasattr(input_val, "type") and input_val.type.is_quantum():
-                        local_qubit_map[input_val.uuid] = qubit_idx
-                        qubit_idx += 1
-
-            local_qubit_map, local_clbit_map = self._allocator.allocate(
-                block_value.operations
-            )
-
-            # Remap to ensure input qubits come first
-            if hasattr(block_value, "input_values"):
-                for i, input_val in enumerate(block_value.input_values):
-                    if hasattr(input_val, "type") and input_val.type.is_quantum():
-                        local_qubit_map[input_val.uuid] = i
-
-            qubit_count = (
-                max(local_qubit_map.values()) + 1 if local_qubit_map else num_qubits
-            )
-            sub_circuit = self._emitter.create_circuit(qubit_count, 0)
-
-            self._emit_operations(
-                sub_circuit,
-                block_value.operations,
-                local_qubit_map,
-                local_clbit_map,
-                bindings,
-                force_unroll=True,
-            )
-
-            return self._emitter.circuit_to_gate(sub_circuit, "U")
-
-        except Exception:
-            return None
-
-    def _update_composite_result_mapping(
-        self,
-        op: CompositeGateOperation,
-        qubit_indices: list[int],
-        qubit_map: dict[str, int],
-    ) -> None:
-        """Update qubit_map for composite gate results."""
-        for i, result in enumerate(op.results):
-            if i < len(qubit_indices):
-                qubit_map[result.uuid] = qubit_indices[i]
-
-    def _extract_phase_from_params(
-        self,
-        op: CompositeGateOperation,
-        bindings: dict[str, Any],
-    ) -> float | None:
-        """Extract phase parameter from QPE operation."""
-        for i, operand in enumerate(op.operands):
-            if i < 1:
-                continue
-            if hasattr(operand, "type") and hasattr(operand.type, "is_classical"):
-                if operand.type.is_classical():
-                    if operand.is_constant():
-                        const_val = operand.get_const()
-                        if const_val is not None:
-                            return float(const_val)
-                    if operand.is_parameter():
-                        param_name = operand.parameter_name()
-                        if param_name and param_name in bindings:
-                            return float(bindings[param_name])
-                    if hasattr(operand, "name") and operand.name in bindings:
-                        return float(bindings[operand.name])
-            elif (
-                hasattr(operand, "params")
-                and operand.params
-                and "const" in operand.params
-            ):
-                return float(operand.params["const"])
-
-        return None
-
-    def _handle_cast(self, op: CastOperation, qubit_map: dict[str, int]) -> None:
-        """Handle CastOperation - update qubit_map without emitting gates."""
-        result = op.results[0]
-
-        resolved = 0
-        for i, qubit_uuid in enumerate(op.qubit_mapping):
-            if qubit_uuid in qubit_map:
-                result_element_id = f"{result.uuid}_{i}"
-                qubit_map[result_element_id] = qubit_map[qubit_uuid]
-                resolved += 1
-
-        if op.qubit_mapping and op.qubit_mapping[0] in qubit_map:
-            qubit_map[result.uuid] = qubit_map[op.qubit_mapping[0]]
-
-        total = len(op.qubit_mapping)
-        if total > 0 and resolved < total:
-            import warnings
-
-            warnings.warn(
-                f"CastOperation: {total - resolved}/{total} carrier qubits "
-                f"unresolved in qubit_map. "
-                f"Downstream measurements may be silently dropped.",
-                stacklevel=2,
-            )
-
-    def _evaluate_binop(self, op: BinOp, bindings: dict[str, Any]) -> None:
-        """Evaluate a BinOp and store the result in bindings."""
-        lhs = self._resolver.resolve_classical_value(op.lhs, bindings)
-        rhs = self._resolver.resolve_classical_value(op.rhs, bindings)
-
-        lhs_param_key = self._resolver.get_parameter_key(op.lhs, bindings)
-        rhs_param_key = self._resolver.get_parameter_key(op.rhs, bindings)
-
-        if lhs is None and lhs_param_key:
-            if lhs_param_key not in self._parameter_map:
-                self._parameter_map[lhs_param_key] = self._emitter.create_parameter(
-                    lhs_param_key
-                )
-            lhs = self._parameter_map[lhs_param_key]
-        if rhs is None and rhs_param_key:
-            if rhs_param_key not in self._parameter_map:
-                self._parameter_map[rhs_param_key] = self._emitter.create_parameter(
-                    rhs_param_key
-                )
-            rhs = self._parameter_map[rhs_param_key]
-
-        if lhs is None or rhs is None:
-            return
-
-        result = None
-        match op.kind:
-            case BinOpKind.ADD:
-                result = lhs + rhs
-            case BinOpKind.SUB:
-                result = lhs - rhs
-            case BinOpKind.MUL:
-                result = lhs * rhs
-            case BinOpKind.DIV:
-                result = (
-                    lhs / rhs
-                    if (isinstance(rhs, (int, float)) and rhs != 0)
-                    else (lhs / rhs if rhs != 0 else 0.0)
-                )
-            case BinOpKind.FLOORDIV:
-                result = (
-                    lhs // rhs if (isinstance(rhs, (int, float)) and rhs != 0) else 0
-                )
-            case BinOpKind.POW:
-                result = lhs**rhs
-
-        if result is not None and op.results:
-            output = op.results[0]
-            bindings[output.uuid] = result
-            bindings[output.name] = result
-
-    def _resolve_angle(
-        self,
-        op: GateOperation,
-        bindings: dict[str, Any],
-    ) -> float | Any:
-        """Resolve angle parameter for rotation gates."""
-        if hasattr(op, "theta") and op.theta is not None:
-            theta = op.theta
-            if isinstance(theta, (int, float)):
-                return float(theta)
-            elif isinstance(theta, Value):
-                param_key = self._resolver.get_parameter_key(theta, bindings)
-                if param_key:
-                    if param_key not in self._parameter_map:
-                        self._parameter_map[param_key] = self._emitter.create_parameter(
-                            param_key
-                        )
-                    return self._parameter_map[param_key]
-
-                resolved = self._resolver.resolve_classical_value(theta, bindings)
-                if resolved is not None:
-                    if not isinstance(resolved, (int, float)):
-                        return resolved
-                    return float(resolved)
-
-        for operand in op.operands:
-            if hasattr(operand, "type") and operand.type.is_classical():
-                param_key = self._resolver.get_parameter_key(operand, bindings)
-                if param_key:
-                    if param_key not in self._parameter_map:
-                        self._parameter_map[param_key] = self._emitter.create_parameter(
-                            param_key
-                        )
-                    return self._parameter_map[param_key]
-
-                resolved = self._resolver.resolve_classical_value(operand, bindings)
-                if resolved is not None:
-                    if not isinstance(resolved, (int, float)):
-                        return resolved
-                    return float(resolved)
-
-        return 0.0
+    def _emit_controlled_powers(self, circuit: T, block_value: Any, counting_indices: list[int], target_indices: list[int], bindings: dict[str, Any]) -> None:
+        from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+            emit_controlled_powers,
+        )
+        emit_controlled_powers(self, circuit, block_value, counting_indices, target_indices, bindings)

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Sequence
 
 if TYPE_CHECKING:
     import qamomile.observable as qm_o
+    from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
     from qiskit import QuantumCircuit
 
 from qamomile.circuit.ir.operation.control_flow import (
@@ -23,8 +24,13 @@ from qamomile.circuit.transpiler.executable import (
     QuantumExecutor,
 )
 from qamomile.circuit.transpiler.passes.emit import EmitPass
-from qamomile.circuit.transpiler.passes.emit_base import resolve_if_condition
-from qamomile.circuit.transpiler.passes.separate import SeparatePass
+from qamomile.circuit.transpiler.passes.emit_support import (
+    ClbitMap,
+    QubitAddress,
+    QubitMap,
+    resolve_if_condition,
+)
+from qamomile.circuit.transpiler.passes.separate import SegmentationPass
 from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
 from qamomile.circuit.transpiler.transpiler import Transpiler
 from qamomile.qiskit.emitter import QiskitGateEmitter
@@ -66,27 +72,17 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         self,
         circuit: "QuantumCircuit",
         op: ForOperation,
-        qubit_map: dict[str, int],
-        clbit_map: dict[str, int],
+        qubit_map: QubitMap,
+        clbit_map: ClbitMap,
         bindings: dict[str, Any],
         force_unroll: bool = False,
     ) -> None:
         """Emit a for loop using Qiskit's native for_loop context manager."""
-        start = (
-            self._resolver.resolve_int_value(op.operands[0], bindings)
-            if len(op.operands) > 0
-            else 0
+        from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
+            resolve_loop_bounds,
         )
-        stop = (
-            self._resolver.resolve_int_value(op.operands[1], bindings)
-            if len(op.operands) > 1
-            else 1
-        )
-        step = (
-            self._resolver.resolve_int_value(op.operands[2], bindings)
-            if len(op.operands) > 2
-            else 1
-        )
+
+        start, stop, step = resolve_loop_bounds(self._resolver, op, bindings)
 
         if start is None or stop is None or step is None:
             self._emit_for_unrolled(circuit, op, qubit_map, clbit_map, bindings)
@@ -105,7 +101,7 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             return
 
         # Use Qiskit's native for_loop context manager
-        with circuit.for_loop(indexset) as loop_param:
+        with circuit.for_loop(indexset) as loop_param:  # type: ignore[call-overload]
             loop_bindings = bindings.copy()
             loop_bindings[op.loop_var] = loop_param
             self._emit_operations(
@@ -116,8 +112,8 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         self,
         circuit: "QuantumCircuit",
         op: IfOperation,
-        qubit_map: dict[str, int],
-        clbit_map: dict[str, int],
+        qubit_map: QubitMap,
+        clbit_map: ClbitMap,
         bindings: dict[str, Any],
     ) -> None:
         """Emit if/else using Qiskit's if_test context manager."""
@@ -129,8 +125,9 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             return
 
         condition_uuid = condition.uuid
+        condition_addr = QubitAddress(condition_uuid)
 
-        if condition_uuid not in clbit_map:
+        if condition_addr not in clbit_map:
             raise EmitError(
                 "Runtime if-conditions must come from measurement results "
                 "or be bound before transpilation. The condition value was "
@@ -138,7 +135,7 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
                 "measurement result."
             )
 
-        clbit_idx = clbit_map[condition_uuid]
+        clbit_idx = clbit_map[condition_addr]
 
         with circuit.if_test((circuit.clbits[clbit_idx], 1)) as else_:
             self._emit_operations(
@@ -153,8 +150,8 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         self,
         circuit: "QuantumCircuit",
         op: WhileOperation,
-        qubit_map: dict[str, int],
-        clbit_map: dict[str, int],
+        qubit_map: QubitMap,
+        clbit_map: ClbitMap,
         bindings: dict[str, Any],
     ) -> None:
         """Emit while loop using Qiskit's while_loop context manager."""
@@ -169,22 +166,107 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             else str(condition_value)
         )
 
-        if condition_uuid not in clbit_map:
+        condition_addr = QubitAddress(condition_uuid)
+        if condition_addr not in clbit_map:
             raise ValueError("While loop condition not found in classical bit map.")
 
-        clbit_idx = clbit_map[condition_uuid]
+        clbit_idx = clbit_map[condition_addr]
 
-        with circuit.while_loop((circuit.clbits[clbit_idx], 1)):
+        with circuit.while_loop((circuit.clbits[clbit_idx], 1)):  # type: ignore[call-overload]
             self._emit_operations(
                 circuit, op.operations, qubit_map, clbit_map, bindings
             )
 
+    def _emit_pauli_evolve(
+        self,
+        circuit: "QuantumCircuit",
+        op: "PauliEvolveOp",
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit Pauli evolution using Qiskit's PauliEvolutionGate."""
+        import qamomile.observable as qm_o
+
+        if not self._use_native_composite:
+            super()._emit_pauli_evolve(circuit, op, qubit_map, bindings)
+            return
+
+        # Resolve Hamiltonian from bindings
+        obs_value = op.observable
+        hamiltonian = None
+        if hasattr(obs_value, "name") and obs_value.name in bindings:
+            hamiltonian = bindings[obs_value.name]
+        if hamiltonian is None and hasattr(obs_value, "uuid"):
+            hamiltonian = bindings.get(obs_value.uuid)
+        if not isinstance(hamiltonian, qm_o.Hamiltonian):
+            super()._emit_pauli_evolve(circuit, op, qubit_map, bindings)
+            return
+
+        # Resolve gamma
+        gamma = self._resolver.resolve_classical_value(op.gamma, bindings)
+        if gamma is None:
+            super()._emit_pauli_evolve(circuit, op, qubit_map, bindings)
+            return
+
+        # Validate qubit count: logical array size vs Hamiltonian
+        input_array = op.qubits
+        num_h_qubits = hamiltonian.num_qubits
+        from qamomile.circuit.ir.value import ArrayValue
+
+        if isinstance(input_array, ArrayValue) and input_array.shape:
+            n_resolved = self._resolver.resolve_int_value(
+                input_array.shape[0], bindings
+            )
+            if n_resolved is not None and n_resolved != num_h_qubits:
+                raise EmitError(
+                    f"PauliEvolveOp qubit count mismatch: "
+                    f"qubit register has {n_resolved} qubits but "
+                    f"Hamiltonian acts on {num_h_qubits} qubits.",
+                )
+
+        # Validate Hermitian (real coefficients)
+        for operators, coeff in hamiltonian:
+            if abs(coeff.imag) > 1e-10:
+                raise EmitError(
+                    f"PauliEvolveOp requires a Hermitian Hamiltonian "
+                    f"(real coefficients), but found complex coefficient "
+                    f"{coeff} on term {operators}.",
+                )
+
+        qubit_indices: list[int] = []
+        for i in range(num_h_qubits):
+            addr = QubitAddress(input_array.uuid, i)
+            if addr in qubit_map:
+                qubit_indices.append(qubit_map[addr])
+            else:
+                super()._emit_pauli_evolve(circuit, op, qubit_map, bindings)
+                return
+
+        try:
+            from qamomile.qiskit.observable import hamiltonian_to_sparse_pauli_op
+            from qiskit.circuit.library import PauliEvolutionGate
+
+            sparse_op = hamiltonian_to_sparse_pauli_op(hamiltonian)
+            evo_gate = PauliEvolutionGate(sparse_op, time=float(gamma))
+            circuit.append(evo_gate, qubit_indices)
+        except ImportError:
+            # Fallback to manual decomposition when Qiskit library unavailable
+            super()._emit_pauli_evolve(circuit, op, qubit_map, bindings)
+            return
+
+        # Map result array to same physical qubits
+        result_array = op.evolved_qubits
+        for i, phys_idx in enumerate(qubit_indices):
+            result_addr = QubitAddress(result_array.uuid, i)
+            if result_addr not in qubit_map:
+                qubit_map[result_addr] = phys_idx
+
 
 class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
-    """Qiskit quantum executor using AerSimulator or other backends.
+    """Qiskit quantum executor using a safe local simulator or other backends.
 
     Example:
-        executor = QiskitExecutor()  # Uses AerSimulator by default
+        executor = QiskitExecutor()  # Uses AerSimulator when available
         counts = executor.execute(circuit, shots=1000)
         # counts: {"00": 512, "11": 512}
 
@@ -208,9 +290,14 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
             try:
                 from qiskit_aer import AerSimulator
 
-                self.backend = AerSimulator()
+                self.backend = AerSimulator(max_parallel_threads=1)
             except ImportError:
-                pass
+                try:
+                    from qiskit.providers.basic_provider import BasicSimulator
+
+                    self.backend = BasicSimulator()
+                except ImportError:
+                    pass
 
     def execute(self, circuit: "QuantumCircuit", shots: int) -> dict[str, int]:
         """Execute circuit and return bitstring counts.
@@ -277,18 +364,17 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
         if self._estimator is None:
             # Create default Qiskit Estimator
             try:
-                # Try qiskit_aer Estimator first (supports more features)
-                from qiskit_aer.primitives import Estimator
+                from qiskit.primitives import StatevectorEstimator
 
-                self._estimator = Estimator()
+                self._estimator = StatevectorEstimator()
             except ImportError:
                 try:
-                    from qiskit.primitives import StatevectorEstimator
-
-                    self._estimator = StatevectorEstimator()
-                except ImportError:
                     # Fallback for older Qiskit versions
-                    from qiskit.primitives import Estimator
+                    from qiskit.primitives import Estimator  # type: ignore[attr-defined]
+
+                    self._estimator = Estimator()
+                except ImportError:
+                    from qiskit_aer.primitives import Estimator
 
                     self._estimator = Estimator()
 
@@ -308,16 +394,18 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
         # V1 interface (old): run(circuits, observables, parameter_values)
         try:
             # Try V2 interface first
-            job = self._estimator.run([(circuit, sparse_pauli_op, param_values)])
+            job = self._estimator.run([(circuit, sparse_pauli_op, param_values)])  # type: ignore[arg-type,call-arg,list-item]
             result = job.result()
-            return float(result[0].data.evs)
+            return float(result[0].data.evs)  # type: ignore[union-attr]
         except (TypeError, AttributeError):
             # Fall back to V1 interface
-            job = self._estimator.run(
-                [circuit], [sparse_pauli_op], [param_values] if param_values else None
+            job = self._estimator.run(  # type: ignore[call-arg,arg-type,list-item]
+                [circuit],
+                [sparse_pauli_op],
+                [param_values] if param_values else None,  # type: ignore[arg-type,list-item]
             )
             result = job.result()
-            return float(result.values[0])
+            return float(result.values[0])  # type: ignore[union-attr]
 
     def _ensure_measurements(self, circuit: "QuantumCircuit") -> "QuantumCircuit":
         """Ensure circuit has measurements, adding measure_all if needed."""
@@ -363,8 +451,8 @@ class QiskitTranspiler(Transpiler["QuantumCircuit"]):
         """
         self._use_native_composite = use_native_composite
 
-    def _create_separate_pass(self) -> SeparatePass:
-        return SeparatePass()
+    def _create_segmentation_pass(self) -> SegmentationPass:
+        return SegmentationPass()
 
     def _create_emit_pass(
         self,
@@ -375,7 +463,7 @@ class QiskitTranspiler(Transpiler["QuantumCircuit"]):
             bindings, parameters, use_native_composite=self._use_native_composite
         )
 
-    def executor(
+    def executor(  # type: ignore[override]
         self,
         backend=None,
     ) -> QiskitExecutor:

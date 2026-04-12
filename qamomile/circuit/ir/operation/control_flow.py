@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import typing
+from typing import cast
 
 from qamomile.circuit.ir.types.primitives import BitType, BlockType, UIntType
 from qamomile.circuit.ir.value import Value
@@ -12,8 +13,28 @@ if typing.TYPE_CHECKING:
     from .arithmetic_operations import PhiOp
 
 
+class HasNestedOps:
+    """Mixin for operations that contain nested operation lists.
+
+    Subclasses implement ``nested_op_lists()`` and ``rebuild_nested()``
+    so that generic passes can recurse into control flow without
+    isinstance chains.
+    """
+
+    def nested_op_lists(self) -> list[list[Operation]]:
+        """Return all nested operation lists in this control flow op."""
+        raise NotImplementedError
+
+    def rebuild_nested(self, new_lists: list[list[Operation]]) -> Operation:
+        """Return a copy with nested operation lists replaced.
+
+        ``new_lists`` must have the same length/order as ``nested_op_lists()``.
+        """
+        raise NotImplementedError
+
+
 @dataclasses.dataclass
-class WhileOperation(Operation):
+class WhileOperation(HasNestedOps, Operation):
     """Represents a while loop operation.
 
     Only measurement-backed conditions are supported: the condition must
@@ -43,6 +64,13 @@ class WhileOperation(Operation):
     """
 
     operations: list[Operation] = dataclasses.field(default_factory=list)
+    max_iterations: int | None = None
+
+    def nested_op_lists(self) -> list[list[Operation]]:
+        return [self.operations]
+
+    def rebuild_nested(self, new_lists: list[list[Operation]]) -> Operation:
+        return dataclasses.replace(self, operations=new_lists[0])
 
     @property
     def signature(self) -> Signature:
@@ -60,7 +88,7 @@ class WhileOperation(Operation):
 
 
 @dataclasses.dataclass
-class ForOperation(Operation):
+class ForOperation(HasNestedOps, Operation):
     """Represents a for loop operation.
 
     Example:
@@ -77,6 +105,12 @@ class ForOperation(Operation):
 
     loop_var: str = ""
     operations: list[Operation] = dataclasses.field(default_factory=list)
+
+    def nested_op_lists(self) -> list[list[Operation]]:
+        return [self.operations]
+
+    def rebuild_nested(self, new_lists: list[list[Operation]]) -> Operation:
+        return dataclasses.replace(self, operations=new_lists[0])
 
     @property
     def signature(self) -> Signature:
@@ -95,7 +129,7 @@ class ForOperation(Operation):
 
 
 @dataclasses.dataclass
-class ForItemsOperation(Operation):
+class ForItemsOperation(HasNestedOps, Operation):
     """Represents iteration over dict/iterable items.
 
     Example:
@@ -118,6 +152,12 @@ class ForItemsOperation(Operation):
     key_is_vector: bool = False
     operations: list[Operation] = dataclasses.field(default_factory=list)
 
+    def nested_op_lists(self) -> list[list[Operation]]:
+        return [self.operations]
+
+    def rebuild_nested(self, new_lists: list[list[Operation]]) -> Operation:
+        return dataclasses.replace(self, operations=new_lists[0])
+
     @property
     def signature(self) -> Signature:
         # Signature is flexible - operand is the dict/iterable being iterated
@@ -132,7 +172,7 @@ class ForItemsOperation(Operation):
 
 
 @dataclasses.dataclass
-class IfOperation(Operation):
+class IfOperation(HasNestedOps, Operation):
     """Represents an if-else conditional operation.
 
     Example:
@@ -152,6 +192,17 @@ class IfOperation(Operation):
     true_operations: list[Operation] = dataclasses.field(default_factory=list)
     false_operations: list[Operation] = dataclasses.field(default_factory=list)
     phi_ops: list[PhiOp] = dataclasses.field(default_factory=list)
+
+    def nested_op_lists(self) -> list[list[Operation]]:
+        return [self.true_operations, self.false_operations, cast(list[Operation], self.phi_ops)]
+
+    def rebuild_nested(self, new_lists: list[list[Operation]]) -> Operation:
+        return dataclasses.replace(
+            self,
+            true_operations=new_lists[0],
+            false_operations=new_lists[1],
+            phi_ops=cast("list[PhiOp]", new_lists[2]),
+        )
 
     @property
     def condition(self) -> Value:

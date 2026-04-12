@@ -44,44 +44,56 @@ jupyter-book build .
 
 ## Architecture Overview
 
-Qamomile is a quantum optimization SDK that converts mathematical models (JijModeling) into executable quantum circuits across multiple backends (Qiskit, QuriParts, CUDA-Q, etc.).
+Qamomile is a quantum programming language built around a circuit-first compiler core. The central abstraction is `@qkernel`: users write quantum programs in Python, and the compiler pipeline transforms them into executable circuits for multiple backends.
+
+### Design Center
+
+**`qamomile.circuit`** is the compiler core. All other modules depend on it, never the reverse.
+
+- `qamomile/optimization/` is a domain-specific helper module for quantum optimization algorithms (QAOA, QRAO, FQAOA). It consumes circuit's public transpiler and algorithm APIs.
+- `qamomile/core/` provides mathematical modeling utilities (Pauli operators, Ising/QUBO conversion).
+- `qamomile/{qiskit,quri_parts,cudaq,...}/` are backend packages implementing emit passes and executors.
+
+Dependency direction: `optimization → circuit ← backends`. No reverse dependencies.
 
 ### Core Pipeline Flow
 
 ```
-Mathematical Model (JijModeling)
+@qkernel Python function
          ↓
-    Core Layer (converters: QAOA, QRAO)
+    Frontend (AST transform → tracing → Block with operations)
          ↓
-    Circuit Layer (Frontend @qkernel → IR Graph)
+    Transpiler Pipeline (to_block → inline → partial_eval → analyze → plan → emit)
          ↓
-    Transpiler Pipeline (to_block → substitute → inline → affine_validate → constant_fold → analyze → separate → emit)
-         ↓
-    Backend Execution (Qiskit, QuriParts, etc.)
+    Backend Execution (Qiskit, QuriParts, CUDA-Q, etc.)
 ```
 
 ### Key Module Structure
 
-**qamomile/circuit/** - Circuit abstraction layer:
-- `frontend/`: Python decorator-based API (`@qm.qkernel`) with handle types (Qubit, Float, UInt, Bit)
-- `ir/`: Intermediate representation with Value nodes, Operations, and Graph/Block structures
-- `transpiler/`: Multi-pass compilation (to_block, substitute, inline, affine_validate, constant fold, analyze, separate, emit)
+**qamomile/circuit/** - Compiler core:
+- `frontend/`: Python decorator-based API (`@qm.qkernel`) with handle types (Qubit, Float, UInt, Bit), AST transformation, tracing
+- `ir/`: Intermediate representation — `Block` (staged via `BlockKind`), `Value` (SSA-like versioning), `Operation` hierarchy
+- `transpiler/`: Multi-pass compilation pipeline with `BlockKind` preconditions on each pass
+- `transpiler/decompositions.py`: Shared gate decomposition recipes for backends
+- `transpiler/value_resolver.py`: Unified value resolution for passes
 - `stdlib/`: Built-in algorithms (QFT, IQFT, QPE)
-
-**qamomile/core/** - Mathematical modeling layer:
-- `converters/`: QAOA, QRAO, FQAOA converters from JijModeling problems
-- `operator.py`: Pauli operators and Hamiltonian representation
-- `ising_qubo.py`: Ising/QUBO model conversion utilities
-
-**qamomile/{qiskit,quri_parts,cudaq,pennylane,qutip,udm}/** - Backend transpilers implementing emit passes and executors
+- `estimator/`: Symbolic resource estimation (gate count, qubit count)
 
 ### Key Design Patterns
 
-**Value Versioning (SSA-like)**: Each operation creates new Value instances with incremented versions for dependency tracking.
+**Value Versioning (SSA-like)**: Each operation creates new Value instances with incremented versions. Metadata is intentionally preserved across versions for parameter binding continuity.
 
-**Operation Classification**: Operations are classified as QUANTUM, CLASSICAL, HYBRID, or CONTROL to enable intelligent segment separation.
+**Operation.all_input_values() / replace_values()**: Generic value access protocol. Subclasses (e.g. ControlledUOperation) override to include extra Value fields. Eliminates special-case handling in passes.
 
-**Tracing Pattern**: Quantum operations are traced via context-local Tracer that collects emitted operations during kernel build.
+**HasNestedOps protocol**: Control flow operations (For, ForItems, If, While) implement `nested_op_lists()` / `rebuild_nested()`. Passes use this instead of isinstance chains, preventing missed control flow types.
+
+**GateOperation factory constructors**: `GateOperation.rotation()` / `GateOperation.fixed()` ensure theta is always in operands for rotation gates. Property accessors (`theta`, `qubit_operands`) provide typed read access.
+
+**BlockKind state machine**: `HIERARCHICAL → AFFINE → ANALYZED`. Each pass validates its expected input kind.
+
+**SegmentationStrategy**: Pluggable execution model. `NisqSegmentationStrategy` enforces single quantum segment. Future strategies (JIT, distributed) can be added without core changes.
+
+**MeasurementMode enum**: Formalizes backend measurement handling (NATIVE / STATIC / RUNNABLE) in the GateEmitter protocol.
 
 **Composite Gate Emitters**: Pluggable pattern allowing backends to provide native implementations for composite gates (QFT, QPE).
 
@@ -103,16 +115,13 @@ executable = transpiler.transpile(my_circuit, bindings={"theta": 0.5})
 
 ### Transpiler Pipeline Stages
 
-1. **to_block()**: QKernel → Block (HIERARCHICAL)
-2. **substitute()**: Applies TranspilerConfig strategy rules (optional)
-3. **inline()**: Inlines CallBlockOperation → Block (AFFINE)
-4. **affine_validate()**: Safety net for affine type violations
-5. **constant_fold()**: Evaluates constant expressions
-6. **analyze()**: Validates dependencies → Block (ANALYZED)
-7. **separate()**: Splits into quantum/classical segments → SeparatedProgram
-8. **emit()**: Backend-specific circuit generation → ExecutableProgram
+1. **to_block()**: `QKernel` → `Block`
+2. **inline()**: Inlines `CallBlockOperation` → affine `Block`
+3. **partial_eval()**: Constant folds and lowers compile-time control flow
+4. **analyze()**: Validates dependencies → analyzed `Block`
+5. **plan()**: Builds a `ProgramPlan`
+6. **emit()**: Backend-specific circuit generation → `ExecutableProgram`
 
 ## Test
 
-tests/ directory contains unit tests.
-and you have to run `docs` tests too.
+`tests/` contains unit tests, and docs tests under `tests/docs` must also be run for documentation-impacting changes.

@@ -14,6 +14,7 @@ from qamomile.circuit.frontend.ast_transform import (
 from qamomile.circuit.frontend.constructors import qubit_array
 from qamomile.circuit.frontend.handle import Qubit
 from qamomile.circuit.frontend.qkernel import qkernel
+from qamomile.circuit.transpiler.errors import FrontendTransformError
 
 
 class TestLoopVariableShadowing:
@@ -223,10 +224,10 @@ class TestVariableCollectorAttributeAccess:
 
 
 class TestEmptyClosureCell:
-    """Empty closure cells (forward references) should not crash @qkernel."""
+    """Empty closure cells should now fail closed at decoration time."""
 
-    def test_empty_cell_does_not_raise_valueerror(self):
-        """@qkernel with forward-referenced freevar should not raise ValueError."""
+    def test_empty_cell_raises_frontend_transform_error(self):
+        """Forward-referenced freevars should raise a dedicated transform error."""
 
         def factory():
             @qkernel
@@ -240,13 +241,13 @@ class TestEmptyClosureCell:
 
             return circuit
 
-        # Must not raise ValueError: Cell is empty
-        kernel = factory()
-        assert kernel is not None
+        with pytest.raises(
+            FrontendTransformError, match="Closure variable 'helper' is not yet bound"
+        ):
+            factory()
 
-    def test_empty_cell_triggers_fallback_warning(self):
-        """Empty cell should trigger AST transformation fallback warning."""
-        import warnings
+    def test_empty_cell_does_not_fallback_with_warning(self):
+        """Fail-closed mode should raise instead of warning-and-fallback."""
 
         def factory():
             @qkernel
@@ -262,15 +263,14 @@ class TestEmptyClosureCell:
 
         with warnings.catch_warnings(record=True) as ws:
             warnings.simplefilter("always")
-            factory()
+            with pytest.raises(FrontendTransformError):
+                factory()
 
-        fallback_warnings = [
-            w for w in ws if "AST transformation failed" in str(w.message)
-        ]
-        assert len(fallback_warnings) == 1
+        fallback_warnings = [w for w in ws if "AST transformation failed" in str(w.message)]
+        assert fallback_warnings == []
 
-    def test_empty_cell_fallback_no_nameerror(self):
-        """After fallback, build() must not raise NameError from missing freevars."""
+    def test_empty_cell_never_reaches_build(self):
+        """The kernel should be rejected before any build-time NameError is possible."""
 
         def factory():
             @qkernel
@@ -284,20 +284,10 @@ class TestEmptyClosureCell:
 
             return circuit
 
-        import warnings
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            kernel = factory()
-
-        # build() may fail for semantic reasons (e.g. QubitConsumedError),
-        # but must NOT fail with NameError from missing freevar injection.
-        try:
-            kernel.build()
-        except NameError:
-            pytest.fail("build() raised NameError — freevar injection regression")
-        except Exception:
-            pass  # Other exceptions (semantic) are acceptable
+        with pytest.raises(
+            FrontendTransformError, match="Closure variable 'helper' is not yet bound"
+        ):
+            factory()
 
     def test_bound_closure_still_works(self):
         """Closure with all cells bound should still work normally."""

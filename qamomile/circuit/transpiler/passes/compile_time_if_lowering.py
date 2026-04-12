@@ -1,23 +1,22 @@
 """Compile-time IfOperation lowering pass.
 
-Lowers compile-time resolvable ``IfOperation``s before the separate pass,
+Lowers compile-time resolvable ``IfOperation``s before the segmentation pass,
 replacing them with selected-branch operations and substituting phi outputs
 with selected-branch values throughout the block.
 
-This prevents ``SeparatePass`` from seeing classical-only compile-time
+This prevents ``SegmentationPass`` from seeing classical-only compile-time
 ``IfOperation``s that would otherwise split quantum segments.
 """
 
 from __future__ import annotations
 
 import dataclasses
-from typing import Any
+from typing import Any, cast
 
-from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
-    BinOpKind,
     CompOp,
     CompOpKind,
     CondOp,
@@ -25,18 +24,23 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     NotOp,
     PhiOp,
 )
-from qamomile.circuit.ir.operation.control_flow import IfOperation
-from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
+from qamomile.circuit.ir.operation.control_flow import HasNestedOps, IfOperation
+from qamomile.circuit.ir.value import Value, ValueBase
+from qamomile.circuit.transpiler.errors import ValidationError
+from qamomile.circuit.transpiler.value_resolver import (
+    ValueResolver as UnifiedValueResolver,
+)
 
 from . import Pass
-from .emit_base import resolve_if_condition
+from .emit_support import resolve_if_condition
+from .value_mapping import ValueSubstitutor
 
 
 class CompileTimeIfLoweringPass(Pass[Block, Block]):
     """Lowers compile-time resolvable IfOperations before separation.
 
     After constant folding, some ``IfOperation`` conditions are statically
-    known but remain as control-flow nodes.  ``SeparatePass`` treats them
+    known but remain as control-flow nodes.  ``SegmentationPass`` treats them
     as segment boundaries, causing ``MultipleQuantumSegmentsError`` for
     classical-only compile-time ``if`` after quantum init.
 
@@ -58,6 +62,11 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
 
     def run(self, input: Block) -> Block:
         """Run the compile-time if lowering pass."""
+        if input.kind not in (BlockKind.AFFINE,):
+            raise ValidationError(
+                f"CompileTimeIfLoweringPass expects AFFINE block, got {input.kind}",
+            )
+
         # Track concrete values produced by classical ops.
         # Maps UUID → concrete Python value (int, float, bool).
         concrete_values: dict[str, Any] = {}
@@ -122,8 +131,17 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
     ) -> None:
         """Try to evaluate a classical op and record its result.
 
-        Handles ``CompOp``, ``CondOp``, ``NotOp``, and ``BinOp``.
-        Only evaluates if all operands are resolvable.
+        Supported operation types:
+
+        - ``CompOp``  — comparison (==, !=, <, <=, >, >=)
+        - ``CondOp``  — logical connective (and, or)
+        - ``NotOp``   — logical negation
+        - ``BinOp``   — arithmetic (+, -, *, /, //, %)
+
+        Other operation types are silently ignored.  If all operands of a
+        supported op are concrete but evaluation still fails, the result
+        is not recorded and downstream IfOperations referencing it will
+        remain unresolved (emitted as runtime branches).
         """
         if isinstance(op, CompOp):
             lhs = self._resolve_operand(op.operands[0], concrete_values)
@@ -160,32 +178,9 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         concrete_values: dict[str, Any],
     ) -> Any:
         """Resolve an operand to a concrete value, or None."""
-        if not hasattr(value, "uuid"):
-            return value
-
-        # Check concrete_values map first (includes bindings by UUID).
-        if value.uuid in concrete_values:
-            return concrete_values[value.uuid]
-
-        # Check constant.
-        if hasattr(value, "is_constant") and value.is_constant():
-            return value.get_const()
-
-        # Check binding by name.
-        if hasattr(value, "name") and value.name and value.name in self._bindings:
-            return self._bindings[value.name]
-
-        # Check parameter binding.
-        if hasattr(value, "is_parameter") and value.is_parameter():
-            param_name = value.parameter_name()
-            if param_name and param_name in self._bindings:
-                return self._bindings[param_name]
-
-        # Check params["const"].
-        if hasattr(value, "params") and value.params and "const" in value.params:
-            return value.params["const"]
-
-        return None
+        return UnifiedValueResolver(
+            context=concrete_values, bindings=self._bindings
+        ).resolve(value)
 
     @staticmethod
     def _eval_comp(kind: Any, lhs: Any, rhs: Any) -> bool | None:
@@ -226,24 +221,11 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
     @staticmethod
     def _eval_binop(kind: Any, lhs: Any, rhs: Any) -> Any:
         """Evaluate a binary arithmetic operation."""
-        try:
-            match kind:
-                case BinOpKind.ADD:
-                    return lhs + rhs
-                case BinOpKind.SUB:
-                    return lhs - rhs
-                case BinOpKind.MUL:
-                    return lhs * rhs
-                case BinOpKind.DIV:
-                    return lhs / rhs if rhs != 0 else None
-                case BinOpKind.FLOORDIV:
-                    return lhs // rhs if rhs != 0 else None
-                case BinOpKind.POW:
-                    return lhs**rhs
-                case _:
-                    return None
-        except (TypeError, ValueError, OverflowError):
-            return None
+        from qamomile.circuit.transpiler.passes.eval_utils import (
+            evaluate_binop_values,
+        )
+
+        return evaluate_binop_values(kind, lhs, rhs)
 
     # ------------------------------------------------------------------
     # Operation lowering
@@ -310,9 +292,10 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 )
                 # Apply nested substitutions to phi_ops.
                 nested_subst_if = {**subst_true, **subst_false}
-                new_phi_ops = [
-                    self._apply_substitution(p, nested_subst_if) for p in op.phi_ops
-                ]
+                new_phi_ops = cast(
+                    list[PhiOp],
+                    [self._apply_substitution(p, nested_subst_if) for p in op.phi_ops],
+                )
                 op = dataclasses.replace(
                     op,
                     true_operations=lowered_true,
@@ -321,6 +304,18 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 )
                 dead_uuids.update(dead_true)
                 dead_uuids.update(dead_false)
+
+            elif isinstance(op, HasNestedOps):
+                # Generic recursion for For/ForItems/While bodies.
+                new_lists: list[list[Operation]] = []
+                for body in op.nested_op_lists():
+                    lowered_body, nested_subst, nested_dead = self._lower_operations(
+                        body, dict(concrete_values)
+                    )
+                    new_lists.append(lowered_body)
+                    phi_subst.update(nested_subst)
+                    dead_uuids.update(nested_dead)
+                op = op.rebuild_nested(new_lists)
 
             new_ops.append(op)
 
@@ -339,10 +334,15 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         if not subst:
             return op
 
-        new_operands = [
-            self._substitute_value(v, subst) if isinstance(v, ValueBase) else v
-            for v in op.operands
-        ]
+        substitutor = ValueSubstitutor(subst, transitive=True)
+
+        new_operands = cast(
+            list[Value],
+            [
+                substitutor.substitute_value(v) if isinstance(v, ValueBase) else v
+                for v in op.operands
+            ],
+        )
 
         new_results = list(op.results)
 
@@ -358,7 +358,10 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             new_false = [
                 self._apply_substitution(o, subst) for o in op.false_operations
             ]
-            new_phi = [self._apply_substitution(p, subst) for p in op.phi_ops]
+            new_phi = cast(
+                list[PhiOp],
+                [self._apply_substitution(p, subst) for p in op.phi_ops],
+            )
             return dataclasses.replace(
                 op,
                 operands=new_operands,
@@ -368,74 +371,62 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 phi_ops=new_phi,
             )
 
-        from qamomile.circuit.ir.operation.control_flow import (
-            ForItemsOperation,
-            ForOperation,
-            WhileOperation,
-        )
         from qamomile.circuit.ir.operation.gate import (
             ControlledUOperation,
-            GateOperation,
+            IndexSpecControlledU,
+            SymbolicControlledU,
         )
 
-        if isinstance(op, ForOperation):
-            new_body = [self._apply_substitution(o, subst) for o in op.operations]
+        if isinstance(op, HasNestedOps):
+            # Generic recursion for For/ForItems/While bodies.
+            new_lists = [
+                [self._apply_substitution(o, subst) for o in body]
+                for body in op.nested_op_lists()
+            ]
+            rebuilt = op.rebuild_nested(new_lists)
             return dataclasses.replace(
-                op,
+                cast(Any, rebuilt),
                 operands=new_operands,
                 results=new_results,
-                operations=new_body,
-            )
-
-        if isinstance(op, WhileOperation):
-            new_body = [self._apply_substitution(o, subst) for o in op.operations]
-            return dataclasses.replace(
-                op,
-                operands=new_operands,
-                results=new_results,
-                operations=new_body,
-            )
-
-        if isinstance(op, ForItemsOperation):
-            new_body = [self._apply_substitution(o, subst) for o in op.operations]
-            return dataclasses.replace(
-                op,
-                operands=new_operands,
-                results=new_results,
-                operations=new_body,
             )
 
         result_op = op
         if changed:
             result_op = dataclasses.replace(op, operands=new_operands)
 
-        # Handle GateOperation.theta.
-        if isinstance(result_op, GateOperation) and isinstance(result_op.theta, Value):
-            new_theta = self._substitute_value(result_op.theta, subst)
-            if new_theta is not result_op.theta and isinstance(new_theta, Value):
-                result_op = dataclasses.replace(result_op, theta=new_theta)
+        # theta is now part of operands, handled by the operands
+        # substitution above.
 
-        # Handle ControlledUOperation non-operand fields.
+        # Handle ControlledUOperation non-operand fields per subclass.
         if isinstance(result_op, ControlledUOperation):
             extra_kwargs: dict[str, Any] = {}
-            if isinstance(result_op.num_controls, Value):
-                new_nc = self._substitute_value(result_op.num_controls, subst)
-                if new_nc is not result_op.num_controls:
-                    extra_kwargs["num_controls"] = new_nc
+            # power is shared across all subclasses.
             if isinstance(result_op.power, Value):
-                new_power = self._substitute_value(result_op.power, subst)
+                new_power = substitutor.substitute_value(result_op.power)
                 if new_power is not result_op.power:
                     extra_kwargs["power"] = new_power
-            if result_op.target_indices is not None:
-                new_ti = self._substitute_value_list(result_op.target_indices, subst)
-                if new_ti is not None:
-                    extra_kwargs["target_indices"] = new_ti
-            if result_op.controlled_indices is not None:
-                new_ci = self._substitute_value_list(
-                    result_op.controlled_indices, subst
-                )
-                if new_ci is not None:
-                    extra_kwargs["controlled_indices"] = new_ci
+            if isinstance(result_op, IndexSpecControlledU):
+                if isinstance(result_op.num_controls, Value):
+                    new_nc = substitutor.substitute_value(result_op.num_controls)
+                    if new_nc is not result_op.num_controls:
+                        extra_kwargs["num_controls"] = new_nc
+                if result_op.target_indices is not None:
+                    new_ti = self._substitute_value_list(
+                        result_op.target_indices, substitutor
+                    )
+                    if new_ti is not None:
+                        extra_kwargs["target_indices"] = new_ti
+                if result_op.controlled_indices is not None:
+                    new_ci = self._substitute_value_list(
+                        result_op.controlled_indices, substitutor
+                    )
+                    if new_ci is not None:
+                        extra_kwargs["controlled_indices"] = new_ci
+            elif isinstance(result_op, SymbolicControlledU):
+                new_nc = substitutor.substitute_value(result_op.num_controls)
+                if new_nc is not result_op.num_controls:
+                    extra_kwargs["num_controls"] = new_nc
+            # ConcreteControlledU: num_controls is int, nothing to substitute.
             if extra_kwargs:
                 result_op = dataclasses.replace(result_op, **extra_kwargs)
 
@@ -450,28 +441,38 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 and result_op.results
             ):
                 result_val = result_op.results[0]
-                if hasattr(result_val, "params") and result_val.params:
-                    updated_params = dict(result_val.params)
-                    updated_params["cast_source_uuid"] = new_source.uuid
-                    updated_params["cast_source_logical_id"] = getattr(
-                        new_source, "logical_id", new_source.uuid
+                if result_val.is_cast_result():
+                    num_bits = result_val.get_qfixed_num_bits()
+                    new_result = result_val.with_cast_metadata(
+                        source_uuid=new_source.uuid,
+                        source_logical_id=getattr(
+                            new_source, "logical_id", new_source.uuid
+                        ),
+                        qubit_uuids=(
+                            [f"{new_source.uuid}_{i}" for i in range(num_bits)]
+                            if num_bits is not None
+                            else result_val.get_cast_qubit_uuids() or ()
+                        ),
+                        qubit_logical_ids=(
+                            [
+                                f"{getattr(new_source, 'logical_id', new_source.uuid)}_{i}"
+                                for i in range(num_bits)
+                            ]
+                            if num_bits is not None
+                            else result_val.get_cast_qubit_logical_ids() or ()
+                        ),
                     )
-                    # Rebuild carrier keys from new source (canonical format).
-                    num_bits = updated_params.get("num_bits")
                     if num_bits is not None:
-                        new_qubit_uuids = [
-                            f"{new_source.uuid}_{i}" for i in range(num_bits)
-                        ]
-                        new_qubit_logical_ids = [
-                            f"{getattr(new_source, 'logical_id', new_source.uuid)}_{i}"
-                            for i in range(num_bits)
-                        ]
-                        updated_params["cast_qubit_uuids"] = new_qubit_uuids
-                        updated_params["qubit_values"] = new_qubit_uuids
-                        updated_params["cast_qubit_logical_ids"] = new_qubit_logical_ids
-                    new_result = dataclasses.replace(result_val, params=updated_params)
-                    new_mapping = updated_params.get(
-                        "qubit_values", result_op.qubit_mapping
+                        new_result = new_result.with_qfixed_metadata(
+                            qubit_uuids=[
+                                f"{new_source.uuid}_{i}" for i in range(num_bits)
+                            ],
+                            num_bits=num_bits,
+                            int_bits=result_val.get_qfixed_int_bits() or 0,
+                        )
+                    new_mapping = (
+                        list(new_result.get_qfixed_qubit_uuids())
+                        or result_op.qubit_mapping
                     )
                     result_op = dataclasses.replace(
                         result_op,
@@ -484,88 +485,19 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
     def _substitute_value_list(
         self,
         values: list[Value],
-        subst: dict[str, ValueBase],
+        substitutor: ValueSubstitutor,
     ) -> list[Value] | None:
         """Substitute values in a list, returning new list if changed, None otherwise."""
         new_values: list[Value] = []
         changed = False
         for v in values:
-            new_v = self._substitute_value(v, subst)
+            new_v = substitutor.substitute_value(v)
             if new_v is not v and isinstance(new_v, Value):
                 new_values.append(new_v)
                 changed = True
             else:
                 new_values.append(v)
         return new_values if changed else None
-
-    def _substitute_value(
-        self,
-        v: ValueBase,
-        subst: dict[str, ValueBase],
-    ) -> ValueBase:
-        """Substitute a value using the phi substitution map.
-
-        Chases transitive phi chains (A -> B -> C) to terminal values.
-        For array elements, substitutes both parent_array and element_indices
-        in one pass (no early return after parent_array).
-        """
-        if v.uuid in subst:
-            result = subst[v.uuid]
-            # Chase transitive phi chains until terminal value.
-            seen: set[str] = {v.uuid}
-            while result.uuid in subst and result.uuid not in seen:
-                seen.add(result.uuid)
-                result = subst[result.uuid]
-            return result
-
-        # Handle array elements: substitute parent_array and element_indices.
-        if isinstance(v, Value):
-            changed = False
-
-            # Substitute parent_array if applicable.
-            new_parent = v.parent_array
-            if new_parent is not None and new_parent.uuid in subst:
-                resolved = subst[new_parent.uuid]
-                seen = {new_parent.uuid}
-                while resolved.uuid in subst and resolved.uuid not in seen:
-                    seen.add(resolved.uuid)
-                    resolved = subst[resolved.uuid]
-                if isinstance(resolved, ArrayValue):
-                    new_parent = resolved
-                    changed = True
-
-            # Substitute element_indices if applicable.
-            new_indices = None
-            if v.element_indices:
-                idx_list = []
-                indices_changed = False
-                for idx in v.element_indices:
-                    if idx.uuid in subst:
-                        sub_idx = subst[idx.uuid]
-                        seen = {idx.uuid}
-                        while sub_idx.uuid in subst and sub_idx.uuid not in seen:
-                            seen.add(sub_idx.uuid)
-                            sub_idx = subst[sub_idx.uuid]
-                        if isinstance(sub_idx, Value):
-                            idx_list.append(sub_idx)
-                            indices_changed = True
-                        else:
-                            idx_list.append(idx)
-                    else:
-                        idx_list.append(idx)
-                if indices_changed:
-                    new_indices = tuple(idx_list)
-                    changed = True
-
-            if changed:
-                kwargs: dict[str, Any] = {}
-                if new_parent is not v.parent_array:
-                    kwargs["parent_array"] = new_parent
-                if new_indices is not None:
-                    kwargs["element_indices"] = new_indices
-                return dataclasses.replace(v, **kwargs)
-
-        return v
 
     def _substitute_output_values(
         self,
@@ -576,9 +508,10 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         if not subst:
             return output_values
 
+        substitutor = ValueSubstitutor(subst, transitive=True)
         new_outputs = []
         for ov in output_values:
-            substituted = self._substitute_value(ov, subst)
+            substituted = substitutor.substitute_value(ov)
             if isinstance(substituted, Value):
                 new_outputs.append(substituted)
             else:
@@ -647,52 +580,35 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 for idx in operand.element_indices:
                     used.add(idx.uuid)
 
-        # GateOperation.theta
+        # theta is now part of operands — its UUID is collected above.
+
+        # ControlledUOperation non-operand fields (per subclass).
         from qamomile.circuit.ir.operation.gate import (
             ControlledUOperation,
-            GateOperation,
+            IndexSpecControlledU,
+            SymbolicControlledU,
         )
 
-        if isinstance(op, GateOperation) and isinstance(op.theta, Value):
-            used.add(op.theta.uuid)
-
-        # ControlledUOperation non-operand fields.
         if isinstance(op, ControlledUOperation):
-            if isinstance(op.num_controls, Value):
-                used.add(op.num_controls.uuid)
             if isinstance(op.power, Value):
                 used.add(op.power.uuid)
-            if op.target_indices is not None:
-                for v in op.target_indices:
-                    used.add(v.uuid)
-            if op.controlled_indices is not None:
-                for v in op.controlled_indices:
-                    used.add(v.uuid)
+            if isinstance(op, IndexSpecControlledU):
+                if isinstance(op.num_controls, Value):
+                    used.add(op.num_controls.uuid)
+                if op.target_indices is not None:
+                    for v in op.target_indices:
+                        used.add(v.uuid)
+                if op.controlled_indices is not None:
+                    for v in op.controlled_indices:
+                        used.add(v.uuid)
+            elif isinstance(op, SymbolicControlledU):
+                used.add(op.num_controls.uuid)
 
-        # Recurse into control flow.
-        if isinstance(op, IfOperation):
-            for inner in op.true_operations:
-                CompileTimeIfLoweringPass._collect_used_uuids(inner, used)
-            for inner in op.false_operations:
-                CompileTimeIfLoweringPass._collect_used_uuids(inner, used)
-            for phi in op.phi_ops:
-                CompileTimeIfLoweringPass._collect_used_uuids(phi, used)
-
-        from qamomile.circuit.ir.operation.control_flow import (
-            ForItemsOperation,
-            ForOperation,
-            WhileOperation,
-        )
-
-        if isinstance(op, ForOperation):
-            for inner in op.operations:
-                CompileTimeIfLoweringPass._collect_used_uuids(inner, used)
-        if isinstance(op, WhileOperation):
-            for inner in op.operations:
-                CompileTimeIfLoweringPass._collect_used_uuids(inner, used)
-        if isinstance(op, ForItemsOperation):
-            for inner in op.operations:
-                CompileTimeIfLoweringPass._collect_used_uuids(inner, used)
+        # Recurse into control flow (For/ForItems/While/If).
+        if isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                for inner in body:
+                    CompileTimeIfLoweringPass._collect_used_uuids(inner, used)
 
     def _try_seed_value(
         self,

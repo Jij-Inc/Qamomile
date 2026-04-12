@@ -14,7 +14,7 @@ from typing import Any
 
 import sympy as sp
 
-from qamomile.circuit.ir.block_value import BlockValue
+from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     BinOpKind,
@@ -61,7 +61,7 @@ class ExprResolver:
         """Initialise an ExprResolver.
 
         Args:
-            block (Any): The current block (BlockValue or _LocalBlock)
+            block (Any): The current block (Block or _LocalBlock)
                 whose operations are searched for BinOp/CompOp traces.
             context (dict[str, sp.Expr] | None): UUID → resolved expression
                 mapping for values passed across scope boundaries (e.g.
@@ -166,23 +166,23 @@ class ExprResolver:
         its own scope plus values propagated through ``call_context``.
 
         Args:
-            call_op (Any): A CallBlockOperation whose ``operands[0]``
-                is the called BlockValue and ``operands[1:]`` are actuals.
+            call_op (Any): A CallBlockOperation whose ``block`` field
+                is the called Block and ``operands`` are actuals.
 
         Returns:
             ExprResolver: A new resolver scoped to the callee block with
                 formal→actual bindings in context and empty parent blocks.
         """
-        called_block = call_op.operands[0]
-        if not isinstance(called_block, BlockValue):
-            # Not a BlockValue — use child_scope as fallback
+        called_block = call_op.block
+        if not isinstance(called_block, Block):
+            # Not a nested Block input — use child_scope as fallback
             return self.child_scope(called_block)
 
         extra: dict[str, sp.Expr] = {}
         for i, formal in enumerate(called_block.input_values):
-            if i + 1 >= len(call_op.operands):
+            if i >= len(call_op.operands):
                 break
-            actual = call_op.operands[i + 1]
+            actual = call_op.operands[i]
             extra[formal.uuid] = self.resolve(actual)
             # Map array shape dimension UUIDs
             if isinstance(actual, ArrayValue) and isinstance(formal, ArrayValue):
@@ -237,7 +237,7 @@ class ExprResolver:
         """
         # 1. Already SymPy
         if isinstance(v, sp.Basic):
-            return v
+            return v  # type: ignore[return-value]
 
         # 2. Primitive Python types
         if not isinstance(v, Value):
@@ -324,11 +324,13 @@ class ExprResolver:
             if isinstance(op, BinOp):
                 left = self._resolve(op.operands[0], concrete)
                 right = self._resolve(op.operands[1], concrete)
+                assert op.kind is not None
                 return _apply_binop(op.kind, left, right)
 
             if isinstance(op, CompOp):
                 left = self._resolve(op.operands[0], concrete)
                 right = self._resolve(op.operands[1], concrete)
+                assert op.kind is not None
                 return _apply_compop(op.kind, left, right)
 
         return None
@@ -385,4 +387,4 @@ def _apply_compop(kind: CompOpKind, left: sp.Expr, right: sp.Expr) -> sp.Expr:
     fn = _COMPOP_MAP.get(kind)
     if fn is None:
         raise ValueError(f"Unknown CompOpKind: {kind}")
-    return fn(left, right)
+    return fn(left, right)  # type: ignore[return-value]

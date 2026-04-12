@@ -15,12 +15,15 @@ class ParameterInfo:
         array_name: Base array name, e.g., "gammas"
         index: Array index if vector parameter, None if scalar
         backend_param: Backend-specific parameter object (e.g., qiskit.circuit.Parameter)
+        source_ref: IR value UUID whose runtime value should be bound to this
+            backend parameter.
     """
 
     name: str
     array_name: str
     index: int | None
     backend_param: Any
+    source_ref: str | None = None
 
 
 @dataclasses.dataclass

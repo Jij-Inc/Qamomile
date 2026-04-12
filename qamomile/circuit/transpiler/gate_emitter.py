@@ -15,6 +15,22 @@ from typing import Any, Protocol, TypeVar, runtime_checkable
 T = TypeVar("T")  # Backend circuit type
 
 
+class MeasurementMode(Enum):
+    """How a backend handles measurement operations.
+
+    Attributes:
+        NATIVE: Backend emits real measurement gates (e.g. Qiskit).
+        STATIC: No-op; sampler handles measurement (e.g. QURI Parts,
+            CUDA-Q static mode).
+        RUNNABLE: Emit measurement for mid-circuit use (e.g. CUDA-Q
+            runnable mode).
+    """
+
+    NATIVE = "native"
+    STATIC = "static"
+    RUNNABLE = "runnable"
+
+
 class GateKind(Enum):
     """Classification of gates for emission."""
 
@@ -119,6 +135,17 @@ class GateEmitter(Protocol[T]):
 
     Type parameter T is the backend's circuit type (e.g., QuantumCircuit).
     """
+
+    @property
+    @abstractmethod
+    def measurement_mode(self) -> MeasurementMode:
+        """Return the measurement mode for this backend.
+
+        Returns:
+            MeasurementMode indicating how this backend handles
+            measurement operations.
+        """
+        ...
 
     @abstractmethod
     def create_circuit(self, num_qubits: int, num_clbits: int) -> T:
