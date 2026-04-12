@@ -1,31 +1,41 @@
 """Shared gate decomposition recipes for backend emitters.
 
-This module defines the canonical decomposition of controlled gates (CH, CY, CP,
-CRY, CRZ) into primitive operations (RY, RZ, CNOT, S, SDG).  Each recipe is a
-sequence of ``DecompStep`` dataclass instances that encode:
+This module defines the canonical decomposition of controlled gates (CH, CY,
+CP, CRY, CRZ) into primitive operations (RY, RZ, CNOT, S, SDG).  Each recipe
+is a frozen sequence of :class:`DecompStep` instances that encode:
 
 * Which primitive gate to apply,
 * Which qubit role receives the gate (``"control"`` or ``"target"``),
 * An optional angle expression (e.g. ``"theta/2"``, ``"-pi/4"``).
 
-Backend emitters that cannot use native controlled gates should implement
-their decomposition methods so that the gate sequence follows the same
-recipe defined here.  Backends with special angle representations
-(CUDA-Q ``CudaqExpr`` strings, QURI Parts parametric dicts) may not be
-able to call ``emit_decomposition`` directly but should reference the
-recipe constants to ensure mathematical equivalence.
+The recipes are the **single source of truth** for how Qamomile decomposes
+controlled gates when a backend cannot use a native controlled-U operation.
 
-Typical usage (for backends with plain float angles)::
+## Why data-only (no shared execution helper)
 
-    emit_decomposition(emitter, circuit, CH_DECOMPOSITION, ctrl, tgt)
+Each backend has its own emission dialect:
+
+* **Qiskit** uses native ``circuit.ch()`` / ``circuit.cy()`` and never needs
+  this decomposition.
+* **QURI Parts** represents angles as parametric dicts (name -> coefficient);
+  primitive ``emit_*`` methods take those dicts, not plain floats, so a
+  generic "loop over the recipe and call ``emitter.emit_ry(angle)``" helper
+  does not compose.
+* **CUDA-Q** emits Python source as strings.  A generic helper that calls
+  ``self.emit_ry`` interacts poorly with the tracing test emitter, which
+  wraps every ``emit_*`` method and would double-record each call.
+
+Because no single helper absorbs all three styles cleanly, backends inline
+their decomposition using their own idiomatic emission, and reference the
+recipe constants below from the ``emit_ch`` / ``emit_cy`` / ... docstrings to
+document equivalence.  When changing a recipe, update the constant here and
+ensure every backend's inline implementation matches.
 """
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any
 
 
 class PrimitiveGate(Enum):
@@ -98,68 +108,3 @@ CRZ_DECOMPOSITION: list[DecompStep] = [
     DecompStep(PrimitiveGate.RZ, "target", "-theta/2"),
     DecompStep(PrimitiveGate.CNOT, "target"),
 ]
-
-
-def evaluate_angle(expr: str, theta: float = 0.0) -> float:
-    """Evaluate an angle expression.
-
-    Supported tokens: ``theta`` (bound to *theta*), ``pi`` (``math.pi``),
-    arithmetic operators ``+``, ``-``, ``*``, ``/``.
-
-    Args:
-        expr: Angle expression string, e.g. ``"theta/2"`` or ``"-pi/4"``.
-        theta: Concrete value to substitute for the ``theta`` token.
-
-    Returns:
-        Evaluated float angle in radians.
-    """
-    return eval(expr, {"theta": theta, "pi": math.pi, "__builtins__": {}})  # noqa: S307
-
-
-def emit_decomposition(
-    emitter: Any,
-    circuit: Any,
-    recipe: list[DecompStep],
-    control: int,
-    target: int,
-    theta: float = 0.0,
-) -> None:
-    """Execute a decomposition recipe using the emitter's primitive methods.
-
-    This helper is suitable for backends whose ``emit_ry``, ``emit_rz``, etc.
-    accept plain ``float`` angles.  Backends with symbolic or parametric angle
-    representations (CUDA-Q ``CudaqExpr``, QURI Parts parametric dicts) should
-    inline the recipe manually and reference the corresponding ``*_DECOMPOSITION``
-    constant in a comment.
-
-    The emitter must implement the following methods:
-    ``emit_ry(circuit, qubit, angle)``,
-    ``emit_rz(circuit, qubit, angle)``,
-    ``emit_cx(circuit, control, target)``,
-    ``emit_s(circuit, qubit)``,
-    ``emit_sdg(circuit, qubit)``.
-
-    Args:
-        emitter: A gate emitter with primitive gate methods.
-        circuit: The circuit object being built.
-        recipe: Sequence of ``DecompStep`` defining the decomposition.
-        control: Control qubit index.
-        target: Target qubit index.
-        theta: Angle parameter (used when recipe steps contain angle
-            expressions referencing ``theta``).
-    """
-    for step in recipe:
-        qubit = control if step.target == "control" else target
-        angle = evaluate_angle(step.angle, theta) if step.angle else 0.0
-
-        match step.gate:
-            case PrimitiveGate.RY:
-                emitter.emit_ry(circuit, qubit, angle)
-            case PrimitiveGate.RZ:
-                emitter.emit_rz(circuit, qubit, angle)
-            case PrimitiveGate.CNOT:
-                emitter.emit_cx(circuit, control, target)
-            case PrimitiveGate.S:
-                emitter.emit_s(circuit, qubit)
-            case PrimitiveGate.SDG:
-                emitter.emit_sdg(circuit, qubit)
