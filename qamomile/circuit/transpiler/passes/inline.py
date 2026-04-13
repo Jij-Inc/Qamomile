@@ -168,12 +168,24 @@ class InlinePass(Pass[Block, Block]):
 
             # If both are ArrayValues, also map shape dimensions
             # This ensures symbolic dimensions (e.g., qubits_dim0) are resolved
-            # to concrete values from the caller's array
+            # to concrete values from the caller's array. Chase through
+            # value_map so multi-level mappings (cloned_dim -> outer_dim ->
+            # const) collapse to the terminal value.
             if isinstance(resolved_arg, ArrayValue) and isinstance(
                 block_input, ArrayValue
             ):
                 for block_dim, arg_dim in zip(block_input.shape, resolved_arg.shape):
-                    local_map[block_dim.uuid] = arg_dim
+                    resolved_dim = value_map.get(arg_dim.uuid, arg_dim)
+                    # Multi-level chase (guard against cycles).
+                    seen = {arg_dim.uuid}
+                    while (
+                        isinstance(resolved_dim, Value)
+                        and resolved_dim.uuid in value_map
+                        and resolved_dim.uuid not in seen
+                    ):
+                        seen.add(resolved_dim.uuid)
+                        resolved_dim = value_map[resolved_dim.uuid]
+                    local_map[block_dim.uuid] = resolved_dim
 
         # Clone operations with fresh UUIDs using UUIDRemapper
         remapper = UUIDRemapper()

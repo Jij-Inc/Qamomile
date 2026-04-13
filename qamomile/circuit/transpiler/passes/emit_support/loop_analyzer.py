@@ -8,6 +8,7 @@ from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
 from qamomile.circuit.ir.operation.control_flow import ForOperation, HasNestedOps
 from qamomile.circuit.ir.operation.gate import ControlledUOperation, GateOperation
+from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 
 if TYPE_CHECKING:
     from qamomile.circuit.ir.value import Value
@@ -108,6 +109,19 @@ class LoopAnalyzer:
                             for idx in v.element_indices:
                                 if self._index_depends_on_loop_var(idx, loop_var):
                                     return True
+
+            elif isinstance(op, PauliEvolveOp):
+                # pauli_evolve gamma may be arr[loop_var], which requires
+                # unrolling to materialise each layer's backend parameter.
+                gamma = op.gamma
+                if (
+                    isinstance(gamma, _Value)
+                    and gamma.parent_array is not None
+                    and gamma.element_indices
+                ):
+                    for idx in gamma.element_indices:
+                        if self._index_depends_on_loop_var(idx, loop_var):
+                            return True
 
             if isinstance(op, HasNestedOps):
                 if any(

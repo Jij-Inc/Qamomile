@@ -399,43 +399,23 @@ class QKernel(Generic[P, R]):
             return UInt(value=value)
 
         if is_array_type(param_type):
-            # For generic aliases like Vector[Float], get element type from __args__
+            # Restrict parameter arrays to scalar element types (Float/UInt).
+            # Qubit/Bit arrays are handled through other paths (qubit_sizes etc.).
             if hasattr(param_type, "__args__") and param_type.__args__:
                 element_type = param_type.__args__[0]
             else:
                 element_type = getattr(param_type, "element_type", None)
-
-            # Determine IR type for the element
-            if element_type in (Float, float):
-                ir_element_type = FloatType()
-            elif element_type in (UInt, int):
-                ir_element_type = UIntType()
-            else:
+            if element_type not in (Float, float, UInt, int):
                 raise TypeError(
                     f"Array parameter must have Float or UInt element type, got {element_type}"
                 )
 
-            # Create placeholder ArrayValue (shape determined at runtime)
-            array_value = ArrayValue(
-                type=ir_element_type,
-                name=name,
-                shape=(),  # Empty - will be set at runtime
-            ).with_parameter(name)
-
-            # Create instance without calling __init__
-            # For generic aliases, use __origin__ to get the actual class
-            actual_class = getattr(param_type, "__origin__", param_type)
-            instance = object.__new__(actual_class)
-            instance.value = array_value
-            instance._shape = ()
-            instance._borrowed_indices = {}
-            instance.parent = None
-            instance.indices = ()
-            instance.name = name
-            instance.id = str(id(instance))
-            instance._consumed = False
-            instance.element_type = element_type
-            return instance
+            # Delegate to create_dummy_input so that parameter arrays get the
+            # same symbolic shape treatment as inner-kernel arrays. This is
+            # required for `arr.shape[i]` to return a usable symbolic Value at
+            # the top level. emit_init=False because Float/UInt arrays never
+            # emit QInitOperation regardless.
+            return create_dummy_input(param_type, name, emit_init=False)
 
         raise TypeError(f"Cannot create parameter for type {param_type}")
 
