@@ -36,9 +36,7 @@ class LocalSearch:
         n = self._spin_model.num_bits
 
         # Sparse adjacency list: neighbors[i] = [(j, coeff), ...]
-        self._neighbors: dict[int, list[tuple[int, float]]] = {
-            i: [] for i in range(n)
-        }
+        self._neighbors: dict[int, list[tuple[int, float]]] = {i: [] for i in range(n)}
         for (i, j), v in self._spin_model.quad.items():
             self._neighbors[i].append((j, v))
             self._neighbors[j].append((i, v))
@@ -157,11 +155,10 @@ class LocalSearch:
         linear: dict[int, float],
         n: int,
     ) -> np.ndarray:
-        """Sweep all bits and accept every flip that lowers energy.
+        """Flip the first bit whose flip lowers energy and return immediately.
 
-        This is a greedy-sweep variant of first-improvement: each bit is
-        examined once per call, and every improving flip is accepted
-        immediately before moving to the next bit.
+        Scans bits in index order and accepts the first improving flip.
+        If no flip improves energy, the state is returned unchanged.
         """
         for i in range(n):
             if LocalSearch._calc_e_diff(state, neighbors, linear, i) < 0:
