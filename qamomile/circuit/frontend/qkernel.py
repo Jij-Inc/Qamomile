@@ -69,7 +69,7 @@ class QKernel(Generic[P, R]):
     """Decorator class for Qamomile quantum kernels."""
 
     def __init__(self, func: Callable[P, R]) -> None:
-        # AST変換を行い、制御構文(if/while)をビルダ関数呼び出しに置換した関数を保持する
+        # Hold a function where AST transformation has replaced control flow (if/while) with builder function calls
         self.raw_func = func
         try:
             self.func = transform_control_flow(func)

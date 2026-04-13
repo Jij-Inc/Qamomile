@@ -15,46 +15,46 @@ from qamomile.circuit.frontend.operation.control_flow import (
 
 
 class VariableCollector(ast.NodeVisitor):
-    """ブロック内で使用・変更される変数を収集します。
+    """Collect variables used and mutated within a block.
 
-    以下を除外:
-    - 関数呼び出しの関数名 (func in Call)
-    - 属性アクセスのグローバルなベースオブジェクト (value in Attribute)
-    - グローバル変数（モジュール、組み込み関数など）
+    Excludes:
+    - Function names in calls (func in Call)
+    - Global base objects in attribute accesses (value in Attribute)
+    - Global variables (modules, builtins, etc.)
     """
 
     def __init__(self, global_names: set[str] | None = None):
         self.vars = set()
-        self._exclude = set()  # 除外する名前
+        self._exclude = set()  # names to exclude
         self._global_names = global_names or set()
         self._first_context: dict[str, str] = {}  # name -> "Store" | "Load"
         self._load_names: set[str] = set()
         self._store_names: set[str] = set()
 
     def visit_Call(self, node: ast.Call):
-        """関数呼び出しの関数名を除外"""
+        """Exclude the function name of a call."""
         if isinstance(node.func, ast.Name):
-            # 直接関数呼び出し: func()
+            # Direct function call: func()
             self._exclude.add(node.func.id)
-        # 引数は通常通り処理
+        # Process arguments normally
         for arg in node.args:
             self.visit(arg)
         for keyword in node.keywords:
             self.visit(keyword.value)
-        # node.func が属性アクセスの場合は visit_Attribute で処理
+        # If node.func is an attribute access, handle it in visit_Attribute
         if isinstance(node.func, ast.Attribute):
             self.visit(node.func)
 
     def visit_Attribute(self, node: ast.Attribute):
-        """属性アクセスのベース名を記録する。
+        """Record the base name of an attribute access.
 
-        モジュール名などグローバル名 (`qm.h`) は従来どおり除外し、
-        ユーザー変数 (`qs.shape`) は Load として扱う。
+        Global names such as module names (`qm.h`) are excluded as before,
+        while user variables (`qs.shape`) are treated as Load.
         """
         if isinstance(node.value, ast.Name):
             name = node.value.id
             if name in self._global_names:
-                # qm.x の qm を除外
+                # Exclude qm in qm.x
                 self._exclude.add(name)
             else:
                 self.vars.add(name)
@@ -62,24 +62,24 @@ class VariableCollector(ast.NodeVisitor):
                 if name not in self._first_context:
                     self._first_context[name] = "Load"
         else:
-            # ネストした属性アクセス (a.b.c) の場合は再帰
+            # Recurse for nested attribute accesses (a.b.c)
             self.visit(node.value)
 
     def visit_Assign(self, node: ast.Assign):
-        """右辺を先に走査し、Python の評価順序に合わせる。
+        """Visit the RHS first to match Python's evaluation order.
 
-        `q1 = qm.h(q1)` → 右辺 q1 (Load) が先 → first_context は "Load"
-        `cond2 = qm.measure(q2)` → 右辺 q2 (Load) が先、左辺 cond2 (Store) が後
+        `q1 = qm.h(q1)` → RHS q1 (Load) is first → first_context is "Load"
+        `cond2 = qm.measure(q2)` → RHS q2 (Load) first, LHS cond2 (Store) after
         """
         self.visit(node.value)
         for target in node.targets:
             self.visit(target)
 
     def visit_AugAssign(self, node: ast.AugAssign):
-        """AugAssign (e.g. x += 1) は暗黙の Read-before-Write。
+        """AugAssign (e.g. x += 1) is an implicit Read-before-Write.
 
-        右辺を先に走査し、Name ターゲットは Load + Store として記録する。
-        first_context は "Load"（既存値の読み出しが先行するため）。
+        Visit the RHS first and record Name targets as both Load and Store.
+        first_context is "Load" (the existing value is read first).
         """
         self.visit(node.value)
         target = node.target
@@ -96,11 +96,11 @@ class VariableCollector(ast.NodeVisitor):
             self.visit(target)
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
-        """内部関数定義の走査をスキップする。"""
+        """Skip traversal of inner function definitions."""
         pass
 
     def visit_Name(self, node: ast.Name):
-        """変数名を収集（除外リストにないもののみ）"""
+        """Collect variable names (only those not in the exclude list)."""
         if isinstance(node.id, str):
             if node.id not in self._exclude and node.id not in self._global_names:
                 self.vars.add(node.id)
@@ -116,22 +116,22 @@ class VariableCollector(ast.NodeVisitor):
 
     @property
     def locally_defined_vars(self) -> set[str]:
-        """このスコープ内で初めて定義（Store）される変数。"""
+        """Variables first defined (Store) within this scope."""
         return {name for name, ctx in self._first_context.items() if ctx == "Store"}
 
     @property
     def incoming_vars(self) -> set[str]:
-        """外部スコープから渡される必要がある変数（初回が Load）。"""
+        """Variables that must come from an outer scope (first use is Load)."""
         return self.vars - self.locally_defined_vars
 
     @property
     def load_vars(self) -> set[str]:
-        """Load コンテキストで参照される変数（実際に読まれる変数）。"""
+        """Variables referenced in Load context (actually read)."""
         return self._load_names & self.vars
 
     @property
     def store_vars(self) -> set[str]:
-        """Store コンテキストで代入される変数。"""
+        """Variables assigned in Store context."""
         return self._store_names & self.vars
 
 
@@ -147,15 +147,15 @@ class ControlFlowTransformer(ast.NodeTransformer):
         namespace: dict[str, Any] | None = None,
     ) -> None:
         self.counter: int = 0
-        # 変数名 -> 型注釈ノード(ast.AST) を保持する辞書
+        # Dict mapping variable name -> type annotation node (ast.AST)
         self.type_registry: dict[str, ast.AST] = {}
-        # グローバル変数名（モジュール、組み込み関数など）
+        # Global variable names (modules, builtins, etc.)
         self._global_names = global_names or set()
         # Scope tracking for visit_If input/output separation
         self._outer_defined_vars: frozenset[str] = frozenset()
         self._after_stmt_read_vars: frozenset[str] = frozenset()
         self._after_stmt_load_vars: frozenset[str] = frozenset()
-        # 関数パラメータ名（ループ変数シャドウイング検出用）
+        # Function parameter names (for loop-variable shadowing detection)
         self._param_names = param_names or set()
         # Namespace for resolving callables (used in while condition QKernel check)
         self._namespace = namespace or {}
@@ -241,9 +241,8 @@ class ControlFlowTransformer(ast.NodeTransformer):
         return node
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> Any:
-        """
-        a: int = 0 のような型注釈付き代入を検出し、型情報を登録します。
-        """
+        """Detect annotated assignments such as ``a: int = 0`` and register
+        the type information."""
         if isinstance(node.target, ast.Name):
             self.type_registry[node.target.id] = node.annotation
         return self.generic_visit(node)
@@ -255,23 +254,23 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 collector.visit(node)
         else:
             collector.visit(nodes)
-        # 登録済みの型がある変数、または出現した変数を対象とする
-        # グローバル変数（モジュール、組み込み関数など）は除外される
+        # Targets variables that have a registered type or that appear in the nodes.
+        # Global variables (modules, builtins, etc.) are excluded.
         return sorted(list(collector.vars))
 
     def _get_annotation(self, var_name: str) -> ast.AST | None:
-        """登録済みの型情報を取得します（ディープコピーして返す）"""
+        """Return the registered type annotation (returning a deep copy is preferred)."""
         if var_name in self.type_registry:
-            # ASTノードは使い回すとlocation情報などでバグりやすいためコピー推奨ですが、
-            # ここでは簡易的に参照を返します（unparse時は問題なし）
+            # Reusing AST nodes is bug-prone due to location metadata, so copying
+            # is preferred; here we return the reference directly (safe for unparse).
             return self.type_registry[var_name]
         return None
 
     def _make_arguments(self, var_names: list[str]) -> ast.arguments:
-        """型注釈付きの引数リストを作成"""
+        """Build an argument list with type annotations."""
         args_list = []
         for name in var_names:
-            # 型情報の取得
+            # Look up the annotation
             annotation = self._get_annotation(name)
             args_list.append(ast.arg(arg=name, annotation=annotation))  # type: ignore
 
@@ -286,20 +285,20 @@ class ControlFlowTransformer(ast.NodeTransformer):
         )
 
     def _create_return_annotation(self, var_names: list[str]) -> ast.AST | None:
-        """戻り値の型注釈を作成 (例: int や tuple[int, int])"""
+        """Build a return type annotation (e.g. ``int`` or ``tuple[int, int]``)."""
         if not var_names:
             return ast.Constant(value=None)
 
-        # 変数が1つならその型を返す
+        # Single variable: return its annotation
         if len(var_names) == 1:
             return self._get_annotation(var_names[0])
 
-        # 変数が複数の場合: tuple[Type1, Type2] を作成
+        # Multiple variables: build tuple[Type1, Type2]
         # ast.Subscript(value=Name(id='tuple'), slice=Tuple(elts=[...]))
         elts: list[ast.expr] = []
         for name in var_names:
             ann = self._get_annotation(name)
-            # 型情報がない場合は Any として扱うか、Noneを入れる
+            # Fall back to Any when no annotation is registered
             if ann is None:
                 elts.append(ast.Name(id="Any", ctx=ast.Load()))
             else:
@@ -357,7 +356,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         new_body = list(body_nodes)
         new_body.append(self._create_return_node(ret_vars))
 
-        # 戻り値の型注釈が指定されていなければ自動生成
+        # Auto-generate the return type annotation if not specified
         if return_type_ast is None:
             return_type_ast = self._create_return_annotation(ret_vars)
 
@@ -589,7 +588,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             raise SyntaxError("while ... else is not supported in @qkernel")
         # Check for quantum operations in while condition
         self._check_no_quantum_ops_in_condition(node.test, node.lineno)
-        # ネストされた制御フローを先に変換 (with definition tracking)
+        # Transform nested control flow first (with definition tracking)
         saved_outer = self._outer_defined_vars
         saved_after = self._after_stmt_read_vars
         saved_after_load = self._after_stmt_load_vars
@@ -615,7 +614,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         self._after_stmt_read_vars = saved_after
         self._after_stmt_load_vars = saved_after_load
 
-        # lambda: <condition> を作成
+        # Build ``lambda: <condition>``
         lambda_node = ast.Lambda(
             args=ast.arguments(
                 posonlyargs=[],
@@ -629,14 +628,14 @@ class ControlFlowTransformer(ast.NodeTransformer):
             body=node.test,
         )
 
-        # while_loop(lambda: cond) コールを作成
+        # Build the ``while_loop(lambda: cond)`` call
         while_loop_call = ast.Call(
             func=ast.Name(id="while_loop", ctx=ast.Load()),
             args=[lambda_node],
             keywords=[],
         )
 
-        # with文を作成
+        # Build the with-statement
         with_item = ast.withitem(context_expr=while_loop_call, optional_vars=None)
         with_stmt = ast.With(
             items=[with_item],
@@ -881,7 +880,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         # by QKernel.__init__'s fallback.
         all_binding_names = self._validate_for_loop(node)
 
-        # ネストされた制御フローを先に変換 (with definition tracking)
+        # Transform nested control flow first (with definition tracking)
         saved_outer = self._outer_defined_vars
         saved_after = self._after_stmt_read_vars
         saved_after_load = self._after_stmt_load_vars
@@ -929,7 +928,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             for i in range(start, stop, step):  ->  for_loop(start, stop, step)
         """
 
-        # range の引数を取得 (_validate_for_loop で引数数は検証済み)
+        # Read range() arguments (arity already validated in _validate_for_loop)
         num_args = len(node.iter.args)  # type: ignore
         # range(stop) -> for_loop(0, stop, 1)
         # range(start, stop) -> for_loop(start, stop, 1)
@@ -947,21 +946,21 @@ class ControlFlowTransformer(ast.NodeTransformer):
             stop_arg = node.iter.args[1]  # type: ignore
             step_arg = node.iter.args[2]  # type: ignore
 
-        # ループ変数名を取得 (_validate_for_loop で検証済み)
+        # Read the loop variable name (already validated in _validate_for_loop)
         assert isinstance(node.target, ast.Name)
         loop_var_name = node.target.id
 
-        # for_loop(start, stop, step, var_name) コールを作成
+        # Build the ``for_loop(start, stop, step, var_name)`` call
         for_loop_call = ast.Call(
             func=ast.Name(id="for_loop", ctx=ast.Load()),
             args=[start_arg, stop_arg, step_arg, ast.Constant(value=loop_var_name)],
             keywords=[],
         )
 
-        # ループ変数を as i として設定
+        # Bind the loop variable via ``as i``
         with_item = ast.withitem(
             context_expr=for_loop_call,
-            optional_vars=node.target,  # i をそのまま使用
+            optional_vars=node.target,  # reuse ``i`` as-is
         )
 
         with_stmt = ast.With(
@@ -1033,7 +1032,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         return with_stmt
 
     def visit_If(self, node: ast.If) -> Any:
-        # 変換前のASTから変数を収集（generic_visit 後だと生成名が混入する）
+        # Collect variables from the pre-transform AST (post generic_visit would include generated names)
         collector_test = VariableCollector(global_names=self._global_names)
         collector_test.visit(node.test)
 
@@ -1111,7 +1110,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 "'return' inside for/while in @qkernel if-else is not supported"
             )
 
-        # ネストされた制御フローを変換 (with definition tracking)
+        # Transform nested control flow (with definition tracking)
         saved_outer = self._outer_defined_vars
         saved_after = self._after_stmt_read_vars
         saved_after_load = self._after_stmt_load_vars
@@ -1138,7 +1137,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         self._after_stmt_read_vars = saved_after
         self._after_stmt_load_vars = saved_after_load
 
-        # 明示的 return の検出と変換
+        # Detect and transform explicit returns
         orelse_body = node.orelse if node.orelse else []
         body_has_return = self._has_top_level_return(node.body)
         orelse_has_return = self._has_top_level_return(orelse_body)
@@ -1225,7 +1224,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
 
         if has_return:
             assert ret_var_name is not None
-            # _if_ret_N = None (初期化)
+            # _if_ret_N = None (initialization)
             ret_name_store: ast.expr = ast.Name(id=ret_var_name, ctx=ast.Store())
             init_stmt = ast.Assign(
                 targets=[ret_name_store],
@@ -1261,11 +1260,11 @@ def transform_control_flow(func: Callable):
     src = textwrap.dedent(src)
     tree = ast.parse(src)
 
-    # グローバル変数名を取得（モジュール、組み込み関数など）
+    # Collect global names (modules, builtins, etc.)
     global_names = set(func.__globals__.keys())
 
-    # クロージャ変数も除外する（VariableCollector が target_vars に含めないようにする）
-    # クロージャの値は後で name_space に注入されるため、内部関数からアクセス可能
+    # Exclude closure variables too (so VariableCollector does not add them to target_vars).
+    # Closure values are injected into name_space later, so inner functions can still access them.
     if func.__closure__ is not None:
         global_names.update(func.__code__.co_freevars)
 
@@ -1291,14 +1290,14 @@ def transform_control_flow(func: Callable):
     )
     tree = transformer.visit(tree)
 
-    # デコレータを削除（再帰を防ぐ）
+    # Strip decorators (to prevent recursion)
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == func.__name__:
             node.decorator_list = []
 
     ast.fix_missing_locations(tree)
 
-    # 元の関数のグローバル変数を継承
+    # Inherit the original function's globals
     name_space = func.__globals__.copy()
     name_space.update(
         {
@@ -1310,7 +1309,7 @@ def transform_control_flow(func: Callable):
         }
     )
 
-    # クロージャ変数（関数内でインポートされた名前など）を追加
+    # Add closure variables (e.g. names imported inside the function).
     # Empty cells indicate forward references not yet bound at definition time.
     # Skipping them would cause NameError at runtime, so we fail-closed here
     # and let QKernel.__init__ fall back to the original function.

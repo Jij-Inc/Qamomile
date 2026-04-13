@@ -134,7 +134,7 @@ def for_loop(
     with trace(body_tracer):
         yield loop_var
 
-    # ForOperationを作成
+    # Create ForOperation
     # operands: [start, stop, step]
     for_op = ForOperation(loop_var=var_name, operations=body_tracer.operations)
     for_op.operands.append(_value_to_ir_value(start, "start"))
