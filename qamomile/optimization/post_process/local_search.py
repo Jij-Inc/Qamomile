@@ -125,6 +125,7 @@ class LocalSearch:
         for i in range(n):
             if LocalSearch._calc_e_diff(state, quad, linear, i) < 0:
                 state[i] = -state[i]
+                return state
         return state
 
     @staticmethod
