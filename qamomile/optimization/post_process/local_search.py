@@ -144,7 +144,12 @@ class LocalSearch:
     def _first_improvement(
         state: np.ndarray, quad: np.ndarray, linear: np.ndarray, n: int
     ) -> np.ndarray:
-        """Accept the first bit-flip that lowers energy."""
+        """Sweep all bits and accept every flip that lowers energy.
+
+        This is a greedy-sweep variant of first-improvement: each bit is
+        examined once per call, and every improving flip is accepted
+        immediately before moving to the next bit.
+        """
         for i in range(n):
             if LocalSearch._calc_e_diff(state, quad, linear, i) < 0:
                 state[i] = -state[i]
