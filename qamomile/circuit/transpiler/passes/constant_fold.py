@@ -136,6 +136,35 @@ class ConstantFoldingPass(Pass[Block, Block]):
 
         return evaluate_binop_values(kind, left, right)
 
+    def _substitute_in_value(
+        self,
+        v: Value,
+        folded_values: dict[str, Value],
+    ) -> Value:
+        """Recursively substitute folded constants in a Value.
+
+        Walks ``element_indices`` to arbitrary depth so that nested
+        array accesses like ``q[indices[uint_tmp]]`` have their
+        innermost symbolic index resolved when it is foldable.
+        """
+        if v.uuid in folded_values:
+            return folded_values[v.uuid]
+        if not v.element_indices:
+            return v
+        new_indices: list[Value] = []
+        changed = False
+        for idx in v.element_indices:
+            if isinstance(idx, Value):
+                new_idx = self._substitute_in_value(idx, folded_values)
+                if new_idx is not idx:
+                    changed = True
+                new_indices.append(new_idx)
+            else:
+                new_indices.append(idx)
+        if not changed:
+            return v
+        return dataclasses.replace(v, element_indices=tuple(new_indices))
+
     def _substitute_folded_operands(
         self,
         op: Operation,
@@ -144,8 +173,8 @@ class ConstantFoldingPass(Pass[Block, Block]):
         """Substitute folded constant values in operation operands.
 
         Also propagates folded values into ``element_indices`` of Value
-        operands so that gate operations referencing a folded BinOp result
-        as a qubit index are updated correctly.
+        operands (recursively, so nested array accesses like
+        ``q[indices[uint_tmp]]`` are fully resolved).
 
         For ``ControlledUOperation``, also folds ``num_controls``,
         ``target_indices``, and ``controlled_indices`` fields.
@@ -157,19 +186,10 @@ class ConstantFoldingPass(Pass[Block, Block]):
             if isinstance(operand, ValueBase) and operand.uuid in folded_values:
                 new_operands.append(folded_values[operand.uuid])
                 changed = True
-            elif isinstance(operand, Value) and operand.element_indices:
-                new_indices = []
-                indices_changed = False
-                for idx in operand.element_indices:
-                    if idx.uuid in folded_values:
-                        new_indices.append(folded_values[idx.uuid])
-                        indices_changed = True
-                    else:
-                        new_indices.append(idx)
-                if indices_changed:
-                    new_operands.append(
-                        dataclasses.replace(operand, element_indices=tuple(new_indices))
-                    )
+            elif isinstance(operand, Value):
+                new_operand = self._substitute_in_value(operand, folded_values)
+                if new_operand is not operand:
+                    new_operands.append(new_operand)
                     changed = True
                 else:
                     new_operands.append(operand)

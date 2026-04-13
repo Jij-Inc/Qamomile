@@ -239,7 +239,16 @@ class ValueResolver:
         val: Any,
         bindings: dict[str, Any],
     ) -> int | None:
-        """Resolve a value to an integer."""
+        """Resolve a value to an integer, or ``None`` when unresolvable.
+
+        Unresolvable symbolic Values **must** return ``None``. The previous
+        ``return 0`` fallback caused silent loop elision when parameter
+        shape dims (``gamma_dim0``) reached this resolver without being
+        folded into constants — downstream loop-bound resolution saw 0 and
+        quietly emitted an empty loop. Returning ``None`` propagates the
+        failure to ``emit_for_unrolled``, which converts it into a hard
+        compile error.
+        """
         from qamomile.circuit.ir.value import Value
 
         if isinstance(val, (int, float)):
@@ -264,7 +273,7 @@ class ValueResolver:
                 if idx is not None:
                     return idx
                 return None
-        return 0
+        return None
 
     def get_parameter_key(
         self,

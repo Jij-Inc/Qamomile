@@ -125,9 +125,24 @@ def emit_for_unrolled(
     start, stop, step = resolve_loop_bounds(emit_pass._resolver, op, bindings)
 
     if start is None or stop is None or step is None:
+        # Identify the unresolved operand(s) so the user can act on it.
+        labels = ("start", "stop", "step")
+        values = (start, stop, step)
+        operands = op.operands
+        unresolved_details: list[str] = []
+        for label, resolved, operand in zip(labels, values, operands):
+            if resolved is None:
+                name = getattr(operand, "name", None) or "<anonymous>"
+                unresolved_details.append(f"{label}={name!r}")
+        details = ", ".join(unresolved_details)
         raise ValueError(
-            f"Cannot unroll loop: bounds could not be resolved. "
-            f"start={start}, stop={stop}, step={step}"
+            "Cannot unroll loop: bounds could not be resolved at compile "
+            f"time ({details}). Likely causes: (1) a parameter array shape "
+            "dimension reached emit without being folded — bind the array "
+            "concretely in transpile(bindings={...}), or use a separate "
+            "compile-time loop counter (e.g. bindings={'p': p} with "
+            "qmc.range(p)); (2) a non-parameter symbolic value slipped "
+            "through the pipeline (report this as a compiler bug)."
         )
 
     for i in range(start, stop, step):
