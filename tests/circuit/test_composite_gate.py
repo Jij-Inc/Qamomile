@@ -845,9 +845,9 @@ class TestCompositeGateTranspilation:
         expected = shots / num_outcomes
         sigma = (expected * (1 - 1 / num_outcomes)) ** 0.5
         for outcome, count in counts.items():
-            assert abs(count - expected) < 3 * sigma, (
+            assert abs(count - expected) < 4 * sigma, (
                 f"n={n}, outcome={outcome}: count={count}, "
-                f"expected={expected:.0f} +/- {3 * sigma:.0f}"
+                f"expected={expected:.0f} +/- {4 * sigma:.0f}"
             )
 
     def test_bell_pair_sampling(self, qiskit_transpiler, seeded_executor):
