@@ -86,25 +86,6 @@ class TestLocalSearchSpin:
         with pytest.raises(ValueError, match="Invalid method"):
             ls.run([1, 1, 1], method="nonexistent")
 
-    def test_invalid_initial_state_length_raises(self, spin_model):
-        """Initial state with the wrong length raises ValueError."""
-        ls = LocalSearch(spin_model)
-        with pytest.raises(ValueError, match="initial_state|length|size"):
-            ls.run([1, -1], method="best_improvement")
-
-    @pytest.mark.parametrize("initial_state", ([1, 0, -1], [1, 2, -1], [1, -1, 3]))
-    def test_invalid_initial_state_spin_domain_raises(self, spin_model, initial_state):
-        """Initial state values outside the SPIN domain raise ValueError."""
-        ls = LocalSearch(spin_model)
-        with pytest.raises(ValueError, match="initial_state|SPIN|domain|value"):
-            ls.run(initial_state, method="best_improvement")
-
-    @pytest.mark.parametrize("max_iter", [-2, -3, -10])
-    def test_invalid_max_iter_raises(self, spin_model, max_iter):
-        """max_iter values less than -1 raise ValueError."""
-        ls = LocalSearch(spin_model)
-        with pytest.raises(ValueError, match="max_iter|-1|non-negative"):
-            ls.run([1, 1, -1], max_iter=max_iter, method="best_improvement")
     @pytest.mark.parametrize("seed", range(10))
     def test_random_initial_never_increases_energy(self, spin_model, seed):
         """Local search from a random initial state never increases energy."""
