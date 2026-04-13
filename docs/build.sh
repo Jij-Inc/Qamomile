@@ -125,7 +125,7 @@ build_lang() {
         BASE_URL="$base_url" uv run jupyter-book build --html
     else
         if is_rtd; then
-            warn "Read the Docs detected but READTHEDOCS_CANONICAL_URL is unset; building without BASE_URL"
+            warn "Read the Docs detected but READTHEDOCS_CANONICAL_URL is unset or empty; building without BASE_URL"
         fi
         uv run jupyter-book build --html
     fi
