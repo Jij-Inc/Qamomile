@@ -113,7 +113,10 @@ build_lang() {
     echo "Building ${lang} documentation..."
     cd "$lang"
     if is_rtd; then
-        local base_url="${READTHEDOCS_CANONICAL_URL%/}/${lang}"
+        # Strip origin, keep only path (MyST expects path-only BASE_URL)
+        local base_url
+        base_url="/$(echo "${READTHEDOCS_CANONICAL_URL}" | sed -E 's|https?://[^/]*/||')"
+        base_url="${base_url%/}/${lang}"
         info "Read the Docs detected. Using BASE_URL=${base_url}"
         BASE_URL="$base_url" uv run jupyter-book build --html
     else
