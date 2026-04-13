@@ -30,6 +30,7 @@ project:
       file: vqa/index.md
       children:
         - file: vqa/qaoa_maxcut.ipynb
+        - file: vqa/hybrid_qnn.ipynb
     - title: 最適化
       file: optimization/index.md
       children:
