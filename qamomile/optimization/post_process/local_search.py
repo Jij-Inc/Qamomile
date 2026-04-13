@@ -61,8 +61,31 @@ class LocalSearch:
             A :class:`BinarySampleSet` containing the optimized state.
 
         Raises:
-            ValueError: If *method* is not recognized.
+            ValueError: If *method* is not recognized, *initial_state* has
+                wrong length or invalid values, or *max_iter* is less than -1.
         """
+        if max_iter < -1:
+            raise ValueError(
+                f"max_iter must be -1 (unlimited) or non-negative, got {max_iter}."
+            )
+
+        if len(initial_state) != self._model.num_bits:
+            raise ValueError(
+                f"initial_state length {len(initial_state)} does not match "
+                f"model size {self._model.num_bits}."
+            )
+
+        if self._model.vartype == VarType.SPIN:
+            if not all(v in (1, -1) for v in initial_state):
+                raise ValueError(
+                    "All elements of initial_state must be +1 or -1 for SPIN models."
+                )
+        else:
+            if not all(v in (0, 1) for v in initial_state):
+                raise ValueError(
+                    "All elements of initial_state must be 0 or 1 for BINARY models."
+                )
+
         methods: dict[str, Callable[..., np.ndarray]] = {
             "best_improvement": self._best_improvement,
             "first_improvement": self._first_improvement,

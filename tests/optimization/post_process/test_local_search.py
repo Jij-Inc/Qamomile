@@ -128,6 +128,35 @@ class TestLocalSearchBinary:
         assert energy <= binary_model.calc_energy(initial) + 1e-10
 
 
+class TestInputValidation:
+    def test_initial_state_wrong_length_raises(self, spin_model):
+        """Initial state with wrong length raises ValueError."""
+        ls = LocalSearch(spin_model)
+        with pytest.raises(ValueError, match="initial_state length"):
+            ls.run([1, -1], method="best_improvement")
+
+    @pytest.mark.parametrize("state", [[1, 0, -1], [1, 2, -1], [1, -1, 3]])
+    def test_invalid_spin_values_raises(self, spin_model, state):
+        """SPIN initial state with values other than ±1 raises ValueError."""
+        ls = LocalSearch(spin_model)
+        with pytest.raises(ValueError, match="must be \\+1 or -1"):
+            ls.run(state, method="best_improvement")
+
+    @pytest.mark.parametrize("state", [[0, 2, 1], [0, -1, 1], [0, 0, 3]])
+    def test_invalid_binary_values_raises(self, binary_model, state):
+        """BINARY initial state with values other than 0/1 raises ValueError."""
+        ls = LocalSearch(binary_model)
+        with pytest.raises(ValueError, match="must be 0 or 1"):
+            ls.run(state, method="best_improvement")
+
+    @pytest.mark.parametrize("max_iter", [-2, -3, -10])
+    def test_invalid_max_iter_raises(self, spin_model, max_iter):
+        """max_iter less than -1 raises ValueError."""
+        ls = LocalSearch(spin_model)
+        with pytest.raises(ValueError, match="max_iter"):
+            ls.run([1, 1, -1], max_iter=max_iter, method="best_improvement")
+
+
 class TestEdgeCases:
     def test_single_variable_model(self, single_var_model):
         """Single-variable model converges to the correct minimum."""
