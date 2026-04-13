@@ -13,8 +13,6 @@ unresolved shape dims before they reach emit. These tests exercise
 of upstream behaviour.
 """
 
-import pytest
-
 from qamomile.circuit.ir.types.primitives import UIntType
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (

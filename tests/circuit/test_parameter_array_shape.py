@@ -103,7 +103,5 @@ class TestVectorParameterShape:
         def circuit(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
             return q
 
-        with pytest.raises(
-            TypeError, match="only float, int, UInt, and their arrays"
-        ):
+        with pytest.raises(TypeError, match="only float, int, UInt, and their arrays"):
             circuit.build(parameters=["q"])

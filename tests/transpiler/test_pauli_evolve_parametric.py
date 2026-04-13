@@ -16,7 +16,6 @@ import pytest
 pytest.importorskip("qiskit")
 
 import numpy as np
-from qiskit.circuit import Parameter
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
@@ -176,9 +175,7 @@ class TestFullQAOAExecution:
         executor = tr.executor()
         gamma = 0.3
         beta = 0.4
-        r = exe.run(
-            executor, bindings={"gamma": [gamma], "beta": [beta]}
-        ).result()
+        r = exe.run(executor, bindings={"gamma": [gamma], "beta": [beta]}).result()
 
         # For |+> ⊗ |+> → ZZ layer → X-mixer, the expval of ZZ can be
         # computed analytically. We only check that it's finite and

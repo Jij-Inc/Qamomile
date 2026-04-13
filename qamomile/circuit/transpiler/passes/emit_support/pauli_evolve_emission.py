@@ -45,10 +45,7 @@ def _resolve_gamma(
     parameters = emit_pass._resolver.parameters
 
     # Fast path: ``arr[idx]`` where ``arr`` is a declared parameter.
-    if (
-        theta.parent_array is not None
-        and theta.parent_array.name in parameters
-    ):
+    if theta.parent_array is not None and theta.parent_array.name in parameters:
         param_key = emit_pass._resolver.get_parameter_key(theta, bindings)
         if param_key:
             return emit_pass._get_or_create_parameter(param_key, theta.uuid)
