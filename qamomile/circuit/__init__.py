@@ -47,6 +47,13 @@ from .frontend.operation.qubit_gates import (
 )
 from .frontend.qkernel import QKernel, qkernel
 
+# Algorithm building blocks
+from .algorithm import (
+    amplitude_encoding,
+    compute_mottonen_amplitude_encoding_thetas,
+    compute_mottonen_thetas,
+)
+
 # Standard library circuits
 from .stdlib import iqft, qft, qpe
 
@@ -123,6 +130,10 @@ __all__ = [
     "iqft",
     "qft",
     "QKernel",
+    # Algorithm
+    "amplitude_encoding",
+    "compute_mottonen_amplitude_encoding_thetas",
+    "compute_mottonen_thetas",
     # Visualization (lazy-loaded)
     "MatplotlibDrawer",
     "CircuitStyle",
