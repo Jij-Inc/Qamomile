@@ -57,17 +57,17 @@ def _strip_nonneg_max(expr: sp.Expr) -> sp.Expr:
         sp.Expr: Expression with all ``Max(0, x)`` / ``Max(x, 0)``
             replaced by ``x``.
     """
-    if not isinstance(expr, sp.Expr):
-        return expr
+    if not isinstance(expr, sp.Expr):  # type: ignore[unreachable]
+        return expr  # type: ignore[unreachable]
     # Bottom-up: first process sub-expressions, then this node
     if expr.args:
-        new_args = [_strip_nonneg_max(a) for a in expr.args]
+        new_args = [_strip_nonneg_max(a) for a in expr.args]  # type: ignore[arg-type]
         expr = expr.func(*new_args)
     # Match Max(0, x) or Max(x, 0)
     if isinstance(expr, sp.Max) and len(expr.args) == 2:
         a, b = expr.args
         if a == 0 or a == sp.Integer(0):
-            return b
+            return b  # type: ignore[return-value]
         if b == 0 or b == sp.Integer(0):
-            return a
+            return a  # type: ignore[return-value]
     return expr

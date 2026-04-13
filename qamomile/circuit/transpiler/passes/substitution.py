@@ -22,21 +22,16 @@ import dataclasses
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
-from qamomile.circuit.ir.operation.control_flow import (
-    ForItemsOperation,
-    ForOperation,
-    IfOperation,
-    WhileOperation,
-)
+from qamomile.circuit.ir.operation.control_flow import HasNestedOps
+from qamomile.circuit.transpiler.errors import ValidationError
 from qamomile.circuit.transpiler.passes import Pass
 
 if TYPE_CHECKING:
     from qamomile.circuit.frontend.qkernel import QKernel
-    from qamomile.circuit.ir.block_value import BlockValue
 
 
 class SignatureCompatibilityError(Exception):
@@ -46,15 +41,15 @@ class SignatureCompatibilityError(Exception):
 
 
 def check_signature_compatibility(
-    source: "BlockValue",
-    target: "BlockValue",
+    source: Block,
+    target: Block,
     strict: bool = True,
 ) -> tuple[bool, str | None]:
-    """Check signature compatibility between two BlockValues.
+    """Check signature compatibility between two Blocks.
 
     Args:
-        source: The source BlockValue being replaced
-        target: The target BlockValue to replace with
+        source: The source Block being replaced
+        target: The target Block to replace with
         strict: If True, require exact type matches
 
     Returns:
@@ -79,15 +74,15 @@ def check_signature_compatibility(
             )
 
     # Check return count
-    if len(source.return_values) != len(target.return_values):
+    if len(source.output_values) != len(target.output_values):
         return False, (
-            f"Return count mismatch: source has {len(source.return_values)}, "
-            f"target has {len(target.return_values)}"
+            f"Return count mismatch: source has {len(source.output_values)}, "
+            f"target has {len(target.output_values)}"
         )
 
     # Check return types
     for i, (src_val, tgt_val) in enumerate(
-        zip(source.return_values, target.return_values)
+        zip(source.output_values, target.output_values)
     ):
         if src_val.type != tgt_val.type:
             return False, (
@@ -104,14 +99,14 @@ class SubstitutionRule:
 
     Attributes:
         source_name: Name of the target to replace (block name or gate name)
-        target: Replacement BlockValue or QKernel (for CallBlockOperation)
+        target: Replacement Block or QKernel (for CallBlockOperation)
         strategy: Strategy name (for CompositeGateOperation)
         validate_signature: If True, validate signature compatibility when
             replacing blocks. Default is True.
     """
 
     source_name: str
-    target: "BlockValue | QKernel | None" = None
+    target: "Block | QKernel | None" = None
     strategy: str | None = None
     validate_signature: bool = True
 
@@ -187,6 +182,11 @@ class SubstitutionPass(Pass[Block, Block]):
         Returns:
             Block with substitutions applied
         """
+        if input.kind not in (BlockKind.HIERARCHICAL,):
+            raise ValidationError(
+                f"SubstitutionPass expects HIERARCHICAL block, got {input.kind}",
+            )
+
         if not self._config.rules:
             # No rules, return input unchanged
             return input
@@ -239,28 +239,12 @@ class SubstitutionPass(Pass[Block, Block]):
         elif isinstance(op, CompositeGateOperation):
             return self._transform_composite_gate(op)
 
-        elif isinstance(op, ForOperation):
-            # Recursively transform loop body
-            transformed_body = self._transform_operations(op.operations)
-            return dataclasses.replace(op, operations=transformed_body)
-
-        elif isinstance(op, ForItemsOperation):
-            transformed_body = self._transform_operations(op.operations)
-            return dataclasses.replace(op, operations=transformed_body)
-
-        elif isinstance(op, IfOperation):
-            # Recursively transform both branches
-            transformed_true = self._transform_operations(op.true_operations)
-            transformed_false = self._transform_operations(op.false_operations)
-            return dataclasses.replace(
-                op,
-                true_operations=transformed_true,
-                false_operations=transformed_false,
-            )
-
-        elif isinstance(op, WhileOperation):
-            transformed_body = self._transform_operations(op.operations)
-            return dataclasses.replace(op, operations=transformed_body)
+        elif isinstance(op, HasNestedOps):
+            # Recursively transform all nested operation lists
+            new_lists = [
+                self._transform_operations(op_list) for op_list in op.nested_op_lists()
+            ]
+            return op.rebuild_nested(new_lists)
 
         # Other operations pass through unchanged
         return op
@@ -276,13 +260,10 @@ class SubstitutionPass(Pass[Block, Block]):
         Returns:
             Transformed operation
         """
-        from qamomile.circuit.frontend.qkernel import QKernel
-        from qamomile.circuit.ir.block_value import BlockValue
-
         # Get the block being called
-        block = op.operands[0]
-        if not isinstance(block, BlockValue):
-            return op
+        block = op.block
+        if block is None:  # type: ignore[unreachable]
+            return op  # type: ignore[unreachable]
 
         block_name = block.name
 
@@ -292,13 +273,15 @@ class SubstitutionPass(Pass[Block, Block]):
             return op
 
         # Get the replacement block
+        from qamomile.circuit.frontend.qkernel import QKernel
+
         if isinstance(rule.target, QKernel):
             new_block = rule.target.block
-        elif isinstance(rule.target, BlockValue):
+        elif isinstance(rule.target, Block):
             new_block = rule.target
-        else:
+        else:  # type: ignore[unreachable]
             # Unknown target type
-            return op
+            return op  # type: ignore[unreachable]
 
         # Validate signature compatibility
         if rule.validate_signature:
@@ -308,10 +291,7 @@ class SubstitutionPass(Pass[Block, Block]):
                     f"Cannot substitute '{block_name}': {error_msg}"
                 )
 
-        # Create new operands list with replaced block
-        new_operands = [new_block] + list(op.operands[1:])
-
-        return dataclasses.replace(op, operands=new_operands)
+        return dataclasses.replace(op, block=new_block)
 
     def _transform_composite_gate(
         self,
@@ -344,7 +324,7 @@ class SubstitutionPass(Pass[Block, Block]):
 
 def create_substitution_pass(
     *,
-    block_replacements: dict[str, "BlockValue | QKernel"] | None = None,
+    block_replacements: dict[str, "Block | QKernel"] | None = None,
     strategy_overrides: dict[str, str] | None = None,
     validate_signatures: bool = True,
 ) -> SubstitutionPass:

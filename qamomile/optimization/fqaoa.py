@@ -133,11 +133,11 @@ class FQAOAConverter(MathematicalProblemConverter):
         Return:
                         dict[tuple[int, int], int] : A variable map for ring driver.
         """
-        cyclic_var_map = {}
+        cyclic_var_map: dict[tuple[int, int], int] = {}
         for var in self._original_instance.decision_variables:
             # l = pos[0], d = pos[1]
             pos = var.subscripts
-            cyclic_var_map[tuple(pos)] = pos[0] + self.num_integers * pos[1]
+            cyclic_var_map[(pos[0], pos[1])] = pos[0] + self.num_integers * pos[1]
 
         return cyclic_var_map
 

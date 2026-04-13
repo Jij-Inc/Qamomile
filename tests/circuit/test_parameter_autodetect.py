@@ -17,9 +17,9 @@ class TestParameterAutoDetection:
             return q
 
         # Auto-detect (parameters=None, default)
-        graph = circuit.build()
-        assert "theta" in graph.parameters
-        assert graph.parameters["theta"].params.get("parameter") == "theta"
+        block = circuit.build()
+        assert "theta" in block.parameters
+        assert block.parameters["theta"].parameter_name() == "theta"
 
     def test_auto_detect_uint_parameter(self):
         """Test that UInt parameters are auto-detected."""
@@ -30,9 +30,9 @@ class TestParameterAutoDetection:
             return q
 
         # Auto-detect
-        graph = circuit.build()
-        assert "n" in graph.parameters
-        assert graph.parameters["n"].params.get("parameter") == "n"
+        block = circuit.build()
+        assert "n" in block.parameters
+        assert block.parameters["n"].parameter_name() == "n"
 
     def test_auto_detect_int_parameter(self):
         """Test that int parameters are auto-detected."""
@@ -43,9 +43,9 @@ class TestParameterAutoDetection:
             return q
 
         # Auto-detect
-        graph = circuit.build()
-        assert "n" in graph.parameters
-        assert graph.parameters["n"].params.get("parameter") == "n"
+        block = circuit.build()
+        assert "n" in block.parameters
+        assert block.parameters["n"].parameter_name() == "n"
 
     def test_auto_detect_multiple_parameters(self):
         """Test that multiple parameters are auto-detected."""
@@ -58,10 +58,10 @@ class TestParameterAutoDetection:
             return q
 
         # Auto-detect all
-        graph = circuit.build()
-        assert "theta" in graph.parameters
-        assert "phi" in graph.parameters
-        assert "n" in graph.parameters
+        block = circuit.build()
+        assert "theta" in block.parameters
+        assert "phi" in block.parameters
+        assert "n" in block.parameters
 
     def test_auto_detect_skips_provided_kwargs(self):
         """Test that parameters with values in kwargs are not auto-detected."""
@@ -73,9 +73,9 @@ class TestParameterAutoDetection:
             return q
 
         # Provide theta, auto-detect phi
-        graph = circuit.build(theta=0.5)
-        assert "theta" not in graph.parameters
-        assert "phi" in graph.parameters
+        block = circuit.build(theta=0.5)
+        assert "theta" not in block.parameters
+        assert "phi" in block.parameters
 
     def test_auto_detect_skips_defaults(self):
         """Test that parameters with defaults are not auto-detected."""
@@ -87,8 +87,8 @@ class TestParameterAutoDetection:
             return q
 
         # No parameters should be auto-detected (all have defaults)
-        graph = circuit.build()
-        assert len(graph.parameters) == 0
+        block = circuit.build()
+        assert len(block.parameters) == 0
 
     def test_auto_detect_skips_qubits(self):
         """Test that Qubit arguments are never auto-detected."""
@@ -99,9 +99,9 @@ class TestParameterAutoDetection:
             return q
 
         # Only theta should be detected, not q
-        graph = circuit.build()
-        assert "theta" in graph.parameters
-        assert "q" not in graph.parameters
+        block = circuit.build()
+        assert "theta" in block.parameters
+        assert "q" not in block.parameters
 
     def test_explicit_empty_list_requires_all_values(self):
         """Test that parameters=[] means no parameters allowed."""
@@ -124,8 +124,8 @@ class TestParameterAutoDetection:
             return q
 
         # Explicit empty list + theta value should work
-        graph = circuit.build(parameters=[], theta=0.5)
-        assert len(graph.parameters) == 0
+        block = circuit.build(parameters=[], theta=0.5)
+        assert len(block.parameters) == 0
 
     def test_explicit_parameter_list_still_works(self):
         """Test that explicit parameter list still works as before."""
@@ -136,8 +136,8 @@ class TestParameterAutoDetection:
             return q
 
         # Explicit parameter list
-        graph = circuit.build(parameters=["theta"])
-        assert "theta" in graph.parameters
+        block = circuit.build(parameters=["theta"])
+        assert "theta" in block.parameters
 
 
 class TestExtendedParameterTypes:
@@ -151,12 +151,12 @@ class TestExtendedParameterTypes:
             q = qm.rx(q, n)
             return q
 
-        graph = circuit.build(parameters=["n"])
-        assert "n" in graph.parameters
+        block = circuit.build(parameters=["n"])
+        assert "n" in block.parameters
         # Check that the parameter has UIntType
         from qamomile.circuit.ir.types import UIntType
 
-        assert isinstance(graph.parameters["n"].type, UIntType)
+        assert isinstance(block.parameters["n"].type, UIntType)
 
     def test_int_scalar_parameter(self):
         """Test int scalar as parameter."""
@@ -166,12 +166,12 @@ class TestExtendedParameterTypes:
             q = qm.rx(q, n)
             return q
 
-        graph = circuit.build(parameters=["n"])
-        assert "n" in graph.parameters
+        block = circuit.build(parameters=["n"])
+        assert "n" in block.parameters
         # Check that the parameter has UIntType
         from qamomile.circuit.ir.types import UIntType
 
-        assert isinstance(graph.parameters["n"].type, UIntType)
+        assert isinstance(block.parameters["n"].type, UIntType)
 
     def test_uint_bound_value(self):
         """Test UInt with bound value."""
@@ -181,8 +181,8 @@ class TestExtendedParameterTypes:
             q = qm.rx(q, n)
             return q
 
-        graph = circuit.build(n=5)
-        assert "n" not in graph.parameters
+        block = circuit.build(n=5)
+        assert "n" not in block.parameters
         # The value should be bound as a constant
 
     def test_int_bound_value(self):
@@ -193,8 +193,8 @@ class TestExtendedParameterTypes:
             q = qm.rx(q, n)
             return q
 
-        graph = circuit.build(n=5)
-        assert "n" not in graph.parameters
+        block = circuit.build(n=5)
+        assert "n" not in block.parameters
 
 
 class TestDrawAutoDetection:

@@ -60,7 +60,7 @@ class ExpvalOp(Operation):
     def signature(self) -> Signature:
         return Signature(
             operands=[
-                ParamHint(name="qubits", type=None),  # Any qubit type (Vector or tuple)
+                None,  # qubits: any qubit type (Vector or tuple)
                 ParamHint(name="observable", type=ObservableType()),
             ],
             results=[ParamHint(name="exp_val", type=FloatType())],

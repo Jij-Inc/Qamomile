@@ -6,12 +6,12 @@ import dataclasses
 import enum
 from typing import TYPE_CHECKING, Any
 
+from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.types.primitives import BlockType, QubitType
 
 from .operation import Operation, OperationKind, ParamHint, Signature
 
 if TYPE_CHECKING:
-    from qamomile.circuit.ir.block_value import BlockValue
     from qamomile.circuit.ir.value import Value
 
 
@@ -78,16 +78,10 @@ class CompositeGateOperation(Operation):
     - Backend-native conversion (e.g., Qiskit's QPE)
     - User-defined complex gates
 
-    The operands structure depends on has_implementation:
-    - If has_implementation=True:
-        - operands[0]: BlockValue (the implementation)
-        - operands[1:1+num_control_qubits]: Control qubits (if any)
-        - operands[1+num_control_qubits:1+num_control_qubits+num_target_qubits]: Target qubits
-        - operands[1+num_control_qubits+num_target_qubits:]: Parameters
-    - If has_implementation=False (stub):
-        - operands[0:num_control_qubits]: Control qubits (if any)
-        - operands[num_control_qubits:num_control_qubits+num_target_qubits]: Target qubits
-        - operands[num_control_qubits+num_target_qubits:]: Parameters
+    The operands structure is:
+    - operands[0:num_control_qubits]: Control qubits (if any)
+    - operands[num_control_qubits:num_control_qubits+num_target_qubits]: Target qubits
+    - operands[num_control_qubits+num_target_qubits:]: Parameters
 
     The results structure:
     - results[0:num_control_qubits]: Control qubits (returned)
@@ -99,7 +93,7 @@ class CompositeGateOperation(Operation):
         num_target_qubits: Number of target qubits
         custom_name: Name for CUSTOM gate types (used for identification)
         resource_metadata: Optional resource estimation metadata
-        has_implementation: Whether this operation has an implementation BlockValue
+        has_implementation: Whether this operation has an implementation Block
         composite_gate_instance: Optional reference to the CompositeGate class instance
             that created this operation (for accessing _decompose() at emit time)
         strategy_name: Optional name of the decomposition strategy to use.
@@ -112,42 +106,33 @@ class CompositeGateOperation(Operation):
     custom_name: str = ""
     resource_metadata: ResourceMetadata | None = None
     has_implementation: bool = True
+    implementation_block: Block | None = None
     composite_gate_instance: Any = None  # Reference to CompositeGate instance
     strategy_name: str | None = None  # Selected decomposition strategy
 
     @property
-    def implementation(self) -> "BlockValue | None":
-        """Get the implementation BlockValue, if any."""
-        if not self.has_implementation or not self.operands:
+    def implementation(self) -> Block | None:
+        """Get the implementation block, if any."""
+        if not self.has_implementation:
             return None
-        from qamomile.circuit.ir.block_value import BlockValue
-
-        impl = self.operands[0]
-        if isinstance(impl, BlockValue):
-            return impl
-        return None
+        return self.implementation_block
 
     @property
     def control_qubits(self) -> list["Value"]:
         """Get the control qubit operands."""
-        start = 1 if self.has_implementation else 0
-        return list(self.operands[start : start + self.num_control_qubits])
+        return list(self.operands[: self.num_control_qubits])
 
     @property
     def target_qubits(self) -> list["Value"]:
         """Get the target qubit operands."""
-        start = (1 if self.has_implementation else 0) + self.num_control_qubits
+        start = self.num_control_qubits
         end = start + self.num_target_qubits
         return list(self.operands[start:end])
 
     @property
     def parameters(self) -> list["Value"]:
         """Get the parameter operands (angles, etc.)."""
-        start = (
-            (1 if self.has_implementation else 0)
-            + self.num_control_qubits
-            + self.num_target_qubits
-        )
+        start = self.num_control_qubits + self.num_target_qubits
         return list(self.operands[start:])
 
     @property

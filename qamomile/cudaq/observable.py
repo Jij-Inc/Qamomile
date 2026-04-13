@@ -33,20 +33,20 @@ def hamiltonian_to_cudaq_spin_op(hamiltonian: qm_o.Hamiltonian) -> Any:
     from cudaq import spin
 
     pauli_fn_map = {
-        qm_o.Pauli.X: spin.x,
-        qm_o.Pauli.Y: spin.y,
-        qm_o.Pauli.Z: spin.z,
+        qm_o.Pauli.X: spin.x,  # type: ignore[attr-defined]
+        qm_o.Pauli.Y: spin.y,  # type: ignore[attr-defined]
+        qm_o.Pauli.Z: spin.z,  # type: ignore[attr-defined]
     }
 
     result = None
 
     # Add constant term
-    if not math.isclose(hamiltonian.constant, 0.0, abs_tol=1e-15):
-        result = hamiltonian.constant * spin.i(0)
+    if not math.isclose(hamiltonian.constant, 0.0, abs_tol=1e-15):  # type: ignore[arg-type]
+        result = hamiltonian.constant * spin.i(0)  # type: ignore[attr-defined]
 
     # Convert each term (skip near-zero coefficients to avoid noise)
     for operators, coeff in hamiltonian.terms.items():
-        if math.isclose(coeff, 0.0, abs_tol=1e-15):
+        if math.isclose(coeff, 0.0, abs_tol=1e-15):  # type: ignore[arg-type]
             continue
         term = None
         for op in operators:
@@ -60,7 +60,7 @@ def hamiltonian_to_cudaq_spin_op(hamiltonian: qm_o.Hamiltonian) -> Any:
 
         if term is None:
             # All-identity term
-            scaled = coeff * spin.i(0)
+            scaled = coeff * spin.i(0)  # type: ignore[attr-defined]
         else:
             scaled = coeff * term
 
@@ -70,6 +70,6 @@ def hamiltonian_to_cudaq_spin_op(hamiltonian: qm_o.Hamiltonian) -> Any:
             result = result + scaled
 
     if result is None:
-        return 0.0 * spin.i(0)
+        return 0.0 * spin.i(0)  # type: ignore[attr-defined]
 
     return result

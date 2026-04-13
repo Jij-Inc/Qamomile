@@ -61,6 +61,8 @@ class QRACConverterBase(MathematicalProblemConverter, abc.ABC, Generic[EncoderT]
         design. For the example above it is ``2 * num_qubits * depth``.
     """
 
+    _encoder: EncoderT
+
     def __post_init__(self) -> None:
         if self.spin_model.higher:
             raise ValueError(

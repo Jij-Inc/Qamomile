@@ -6,6 +6,10 @@ import dataclasses
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
+from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
+    ClbitMap,
+    QubitMap,
+)
 from qamomile.circuit.transpiler.segments import (
     ClassicalSegment,
     ExpvalSegment,
@@ -25,11 +29,11 @@ class CompiledQuantumSegment(Generic[T]):
     segment: QuantumSegment
     circuit: T
 
-    # Mapping from Value UUIDs to physical qubit indices
-    qubit_map: dict[str, int] = dataclasses.field(default_factory=dict)
+    # Mapping from QubitAddress to physical qubit indices
+    qubit_map: QubitMap = dataclasses.field(default_factory=dict)
 
-    # Mapping from Value UUIDs to classical bit indices (for measurements)
-    clbit_map: dict[str, int] = dataclasses.field(default_factory=dict)
+    # Mapping from QubitAddress to classical bit indices (for measurements)
+    clbit_map: ClbitMap = dataclasses.field(default_factory=dict)
 
     # Mapping from classical bit index to physical qubit index.
     # Used by backends where emit_measure is a no-op (e.g., QURI Parts)

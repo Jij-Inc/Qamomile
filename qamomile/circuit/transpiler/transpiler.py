@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from qamomile.circuit.frontend.decomposition import DecompositionConfig
 from qamomile.circuit.frontend.qkernel import QKernel
 from qamomile.circuit.ir.block import Block, BlockKind
-from qamomile.circuit.transpiler.errors import QamomileCompileError
+from qamomile.circuit.transpiler.errors import (
+    QamomileCompileError,
+)
 from qamomile.circuit.transpiler.executable import ExecutableProgram, QuantumExecutor
 from qamomile.circuit.transpiler.passes.affine_validate import AffineValidationPass
 from qamomile.circuit.transpiler.passes.analyze import AnalyzePass
@@ -18,15 +20,18 @@ from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
 )
 from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
 from qamomile.circuit.transpiler.passes.emit import EmitPass
+from qamomile.circuit.transpiler.passes.entrypoint_validation import (
+    EntrypointValidationPass,
+)
 from qamomile.circuit.transpiler.passes.inline import InlinePass
-from qamomile.circuit.transpiler.passes.separate import SeparatePass
+from qamomile.circuit.transpiler.passes.partial_eval import PartialEvaluationPass
+from qamomile.circuit.transpiler.passes.separate import SegmentationPass
 from qamomile.circuit.transpiler.passes.substitution import (
     SubstitutionConfig,
     SubstitutionPass,
     SubstitutionRule,
 )
-from qamomile.circuit.transpiler.passes.validate_while import ValidateWhileContractPass
-from qamomile.circuit.transpiler.segments import SimplifiedProgram
+from qamomile.circuit.transpiler.segments import ProgramPlan
 
 if TYPE_CHECKING:
     pass
@@ -121,8 +126,8 @@ class Transpiler(ABC, Generic[T]):
         validated = transpiler.affine_validate(affine)
         folded = transpiler.constant_fold(validated, bindings={"theta": 0.5})
         analyzed = transpiler.analyze(folded)
-        separated = transpiler.separate(analyzed)
-        executable = transpiler.emit(separated, bindings={"theta": 0.5})
+        plan = transpiler.plan(analyzed)
+        executable = transpiler.emit(plan, bindings={"theta": 0.5})
 
         # Option 3: Just get the circuit (no execution)
         circuit = transpiler.to_circuit(kernel, bindings={"theta": 0.5})
@@ -136,6 +141,7 @@ class Transpiler(ABC, Generic[T]):
     _inline_pass: InlinePass = InlinePass()
     _affine_validate_pass: AffineValidationPass = AffineValidationPass()
     _analyze_pass: AnalyzePass = AnalyzePass()
+    _config: TranspilerConfig | None = None
 
     @property
     def config(self) -> TranspilerConfig:
@@ -158,10 +164,10 @@ class Transpiler(ABC, Generic[T]):
         self._config = config
 
     @abstractmethod
-    def _create_separate_pass(self) -> SeparatePass:
-        """Create the backend-specific separate pass.
+    def _create_segmentation_pass(self) -> SegmentationPass:
+        """Create the backend-specific segmentation pass.
 
-        Subclasses must implement this to provide a SeparatePass
+        Subclasses must implement this to provide a SegmentationPass
         configured with the backend's capabilities.
         """
         pass
@@ -202,25 +208,19 @@ class Transpiler(ABC, Generic[T]):
 
         When bindings or parameters are provided, uses kernel.build() to properly
         resolve array shapes from the bound data. Otherwise uses the cached
-        block_value for efficiency.
+        hierarchical block for efficiency.
         """
         if bindings or parameters:
             # Use build() to properly handle bindings and parameters
             # This resolves array shapes from bound data (e.g., bias.shape[0])
-            graph = kernel.build(parameters=parameters, **(bindings or {}))
-            return Block(
-                name=graph.name,
-                label_args=[],  # build() doesn't preserve label_args
-                input_values=graph.input_values,
-                output_values=graph.output_values,
-                operations=graph.operations,
+            traced = kernel.build(parameters=parameters, **(bindings or {}))
+            return replace(
+                traced,
                 kind=BlockKind.HIERARCHICAL,
-                parameters=graph.parameters,
             )
         else:
             # Original behavior for no bindings
-            block_value = kernel.block
-            return Block.from_block_value(block_value, {})
+            return kernel.block
 
     # === Pipeline Passes ===
 
@@ -266,6 +266,14 @@ class Transpiler(ABC, Generic[T]):
         """
         return ConstantFoldingPass(bindings).run(block)
 
+    def partial_eval(
+        self,
+        block: Block,
+        bindings: dict[str, Any] | None = None,
+    ) -> Block:
+        """Pass 1.75: Fold constants and lower compile-time control flow."""
+        return PartialEvaluationPass(bindings).run(block)
+
     def lower_compile_time_ifs(
         self,
         block: Block,
@@ -278,35 +286,26 @@ class Transpiler(ABC, Generic[T]):
         with selected-branch operations.  Phi outputs are substituted
         with selected-branch values throughout the block.
 
-        This prevents SeparatePass from seeing classical-only compile-time
+        This prevents SegmentationPass from seeing classical-only compile-time
         IfOperations that would otherwise split quantum segments.
         """
         return CompileTimeIfLoweringPass(bindings).run(block)
-
-    def validate_while_contract(self, block: Block) -> Block:
-        """Pass 1.8: Validate WhileOperation conditions are measurement-backed.
-
-        Rejects while patterns whose condition is not a measurement result
-        (``Bit`` from ``qmc.measure()``).  This prevents late ``ValueError``
-        at emit time for unsupported while forms.
-        """
-        return ValidateWhileContractPass().run(block)
 
     def analyze(self, block: Block) -> Block:
         """Pass 2: Validate and analyze dependencies."""
         return self._analyze_pass.run(block)
 
-    def separate(self, block: Block) -> SimplifiedProgram:
-        """Pass 3: Lower and split into quantum and classical segments.
+    def plan(self, block: Block) -> ProgramPlan:
+        """Pass 3: Lower and split into a program plan.
 
         Validates C→Q→C pattern with single quantum segment.
         """
-        separate_pass = self._create_separate_pass()
-        return separate_pass.run(block)
+        segmentation_pass = self._create_segmentation_pass()
+        return segmentation_pass.run(block)
 
     def emit(
         self,
-        separated: SimplifiedProgram,
+        separated: ProgramPlan,
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
     ) -> ExecutableProgram[T]:
@@ -341,29 +340,33 @@ class Transpiler(ABC, Generic[T]):
         Raises:
             QamomileCompileError: If compilation fails (validation, dependency errors)
 
+        Note:
+            ``kernel`` is treated as a top-level executable entrypoint here.
+            Entry points must have classical inputs/outputs only. Quantum-I/O
+            QKernels remain valid as subroutines and for ``build()``.
+
         Pipeline:
             1. to_block: Convert QKernel to Block
             2. substitute: Apply substitutions (if configured)
             3. inline: Inline CallBlockOperations
             4. affine_validate: Validate affine type semantics
-            5. constant_fold: Fold constant expressions
-            5.5. lower_compile_time_ifs: Lower compile-time IfOperations
-            5.8. validate_while_contract: Validate while conditions are measurement-backed
+            5. partial_eval: Fold constants and lower compile-time control flow
             6. analyze: Validate and analyze dependencies
-            7. separate: Split into quantum/classical segments
+            7. plan: Build ProgramPlan (segment into C->Q->C steps)
             8. emit: Generate backend-specific code
         """
+        entrypoint_validator = EntrypointValidationPass()
+
         # Pass bindings and parameters to to_block for proper shape resolution
         block = self.to_block(kernel, bindings, parameters)
+        entrypoint_validator.run(block)
         # Apply substitutions if configured
         substituted = self.substitute(block)
         affine = self.inline(substituted)
         validated = self.affine_validate(affine)
-        folded = self.constant_fold(validated, bindings)
-        lowered = self.lower_compile_time_ifs(folded, bindings)
-        validated_while = self.validate_while_contract(lowered)
-        analyzed = self.analyze(validated_while)
-        separated = self.separate(analyzed)
+        partially_evaluated = self.partial_eval(validated, bindings)
+        analyzed = self.analyze(partially_evaluated)
+        separated = self.plan(analyzed)
         return self.emit(separated, bindings, parameters)
 
     def to_circuit(
@@ -382,6 +385,12 @@ class Transpiler(ABC, Generic[T]):
 
         Returns:
             Backend-specific quantum circuit
+
+        Note:
+            ``kernel`` is treated as a top-level executable entrypoint and
+            must therefore have classical inputs/outputs only. Use a
+            classical-I/O wrapper kernel when composing quantum-I/O
+            subroutines into an executable circuit.
 
         Note:
             Only returns the first quantum segment's circuit.

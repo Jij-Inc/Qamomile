@@ -1,10 +1,11 @@
-"""Data structures for separated quantum/classical segments."""
+"""Data structures for segmented quantum/classical execution plans."""
 
 from __future__ import annotations
 
 import dataclasses
 from abc import ABC, abstractmethod
 from enum import Enum, auto
+from typing import TypeAlias
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.value import Value
@@ -127,33 +128,57 @@ class MultipleQuantumSegmentsError(Exception):
 
 
 @dataclasses.dataclass
-class SimplifiedProgram:
-    """Enforces Classical → Quantum → Classical pattern.
+class ProgramABI:
+    """Runtime-visible ABI for a segmented program."""
+
+    public_inputs: dict[str, Value] = dataclasses.field(default_factory=dict)
+    output_refs: list[str] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass
+class ClassicalStep:
+    """A classical execution step."""
+
+    segment: ClassicalSegment
+    role: str = "classical"
+
+
+@dataclasses.dataclass
+class QuantumStep:
+    """A quantum execution step."""
+
+    segment: QuantumSegment
+
+
+@dataclasses.dataclass
+class ExpvalStep:
+    """An expectation-value execution step."""
+
+    segment: ExpvalSegment
+    quantum_step_index: int = 0
+
+
+ProgramStep: TypeAlias = ClassicalStep | QuantumStep | ExpvalStep
+
+
+@dataclasses.dataclass
+class ProgramPlan:
+    """Execution plan for a hybrid quantum/classical program.
 
     Structure:
     - [Optional] Classical preprocessing (parameter computation, etc.)
     - Single quantum segment (REQUIRED)
     - [Optional] Expval segment OR classical postprocessing
 
-    This replaces SeparatedProgram to enforce Qamomile's execution model:
+    This plan enforces Qamomile's current execution model:
     all quantum operations must be in a single quantum circuit.
     """
 
-    # Single quantum segment (REQUIRED)
-    quantum: QuantumSegment
-
-    # Optional classical preprocessing (parameter computation, etc.)
-    classical_prep: ClassicalSegment | None = None
-
-    # Optional expval computation (alternative to measurement)
-    expval: ExpvalSegment | None = None
-
-    # Optional classical postprocessing (decode measurements, etc.)
-    classical_post: ClassicalSegment | None = None
+    steps: list[ProgramStep] = dataclasses.field(default_factory=list)
+    abi: ProgramABI = dataclasses.field(default_factory=ProgramABI)
 
     # Boundaries for tracking quantum-classical transitions
     boundaries: list[HybridBoundary] = dataclasses.field(default_factory=list)
 
-    # Original parameters and outputs
+    # Original parameters
     parameters: dict[str, Value] = dataclasses.field(default_factory=dict)
-    output_refs: list[str] = dataclasses.field(default_factory=list)
