@@ -34,14 +34,16 @@ class LocalSearch:
         )
 
         n = self._spin_model.num_bits
-        self._quad = np.zeros((n, n))
-        for (i, j), v in self._spin_model.quad.items():
-            self._quad[i, j] = v
-            self._quad[j, i] = v
 
-        self._linear = np.zeros(n)
-        for i, v in self._spin_model.linear.items():
-            self._linear[i] = v
+        # Sparse adjacency list: neighbors[i] = [(j, coeff), ...]
+        self._neighbors: dict[int, list[tuple[int, float]]] = {
+            i: [] for i in range(n)
+        }
+        for (i, j), v in self._spin_model.quad.items():
+            self._neighbors[i].append((j, v))
+            self._neighbors[j].append((i, v))
+
+        self._linear_dict: dict[int, float] = dict(self._spin_model.linear)
 
     def run(
         self,
@@ -127,7 +129,7 @@ class LocalSearch:
         counter = 0
         while max_iter == -1 or counter < max_iter:
             prev = state.copy()
-            state = step(state, self._quad, self._linear, len(state))
+            state = step(state, self._neighbors, self._linear_dict, len(state))
             if np.array_equal(prev, state):
                 break
             counter += 1
@@ -135,14 +137,25 @@ class LocalSearch:
 
     @staticmethod
     def _calc_e_diff(
-        state: np.ndarray, quad: np.ndarray, linear: np.ndarray, idx: int
+        state: np.ndarray,
+        neighbors: dict[int, list[tuple[int, float]]],
+        linear: dict[int, float],
+        idx: int,
     ) -> float:
-        """Calculate the energy difference when flipping bit *idx*."""
-        return float(-2 * state[idx] * (quad[:, idx] @ state + linear[idx]))
+        """Calculate the energy difference when flipping bit *idx*.
+
+        Uses the sparse adjacency list so cost is O(degree) per flip,
+        not O(n).
+        """
+        interaction = sum(v * state[j] for j, v in neighbors[idx])
+        return float(-2 * state[idx] * (interaction + linear.get(idx, 0.0)))
 
     @staticmethod
     def _first_improvement(
-        state: np.ndarray, quad: np.ndarray, linear: np.ndarray, n: int
+        state: np.ndarray,
+        neighbors: dict[int, list[tuple[int, float]]],
+        linear: dict[int, float],
+        n: int,
     ) -> np.ndarray:
         """Sweep all bits and accept every flip that lowers energy.
 
@@ -151,18 +164,21 @@ class LocalSearch:
         immediately before moving to the next bit.
         """
         for i in range(n):
-            if LocalSearch._calc_e_diff(state, quad, linear, i) < 0:
+            if LocalSearch._calc_e_diff(state, neighbors, linear, i) < 0:
                 state[i] = -state[i]
         return state
 
     @staticmethod
     def _best_improvement(
-        state: np.ndarray, quad: np.ndarray, linear: np.ndarray, n: int
+        state: np.ndarray,
+        neighbors: dict[int, list[tuple[int, float]]],
+        linear: dict[int, float],
+        n: int,
     ) -> np.ndarray:
         """Flip the single bit that gives the largest energy decrease."""
-        deltas = np.array(
-            [LocalSearch._calc_e_diff(state, quad, linear, i) for i in range(n)]
-        )
+        deltas = [
+            LocalSearch._calc_e_diff(state, neighbors, linear, i) for i in range(n)
+        ]
         best = int(np.argmin(deltas))
         if deltas[best] < 0:
             state[best] = -state[best]

@@ -186,7 +186,7 @@ class TestCalcEDiff:
         """Incremental energy diff equals the brute-force difference."""
         ls = LocalSearch(spin_model)
         state = np.array([1.0, 1.0, -1.0])
-        delta = ls._calc_e_diff(state, ls._quad, ls._linear, 0)
+        delta = ls._calc_e_diff(state, ls._neighbors, ls._linear_dict, 0)
         e_before = spin_model.calc_energy([1, 1, -1])
         e_after = spin_model.calc_energy([-1, 1, -1])
         assert np.isclose(delta, e_after - e_before)
@@ -196,7 +196,7 @@ class TestCalcEDiff:
         """Energy diff is correct for every index in the model."""
         ls = LocalSearch(spin_model)
         state = np.array([-1.0, 1.0, 1.0])
-        delta = ls._calc_e_diff(state, ls._quad, ls._linear, flip_idx)
+        delta = ls._calc_e_diff(state, ls._neighbors, ls._linear_dict, flip_idx)
         state_list = state.astype(int).tolist()
         e_before = spin_model.calc_energy(state_list)
         flipped = state_list.copy()
