@@ -24,12 +24,18 @@ from qamomile.circuit.transpiler.passes.entrypoint_validation import (
     EntrypointValidationPass,
 )
 from qamomile.circuit.transpiler.passes.inline import InlinePass
+from qamomile.circuit.transpiler.passes.parameter_shape_resolution import (
+    ParameterShapeResolutionPass,
+)
 from qamomile.circuit.transpiler.passes.partial_eval import PartialEvaluationPass
 from qamomile.circuit.transpiler.passes.separate import SegmentationPass
 from qamomile.circuit.transpiler.passes.substitution import (
     SubstitutionConfig,
     SubstitutionPass,
     SubstitutionRule,
+)
+from qamomile.circuit.transpiler.passes.symbolic_shape_validation import (
+    SymbolicShapeValidationPass,
 )
 from qamomile.circuit.transpiler.segments import ProgramPlan
 
@@ -240,6 +246,27 @@ class Transpiler(ABC, Generic[T]):
             return block
         return SubstitutionPass(self.config.substitutions).run(block)
 
+    def resolve_parameter_shapes(
+        self,
+        block: Block,
+        bindings: dict[str, Any] | None = None,
+    ) -> Block:
+        """Pass 0.75: Resolve symbolic Vector parameter shape dims.
+
+        Qamomile circuits are compile-time fixed-structure. Parameter
+        ``Vector[Float]`` / ``Vector[UInt]`` inputs carry symbolic
+        ``{name}_dim{i}`` shape Values so frontend code like
+        ``arr.shape[0]`` returns a usable handle. This pass looks at
+        ``bindings`` and, for every parameter array that has a concrete
+        binding, substitutes those symbolic dims with constants so that
+        downstream loop-bound resolution sees fixed lengths.
+
+        Parameters without a concrete binding are left as-is; their
+        symbolic dims are harmless as long as no compile-time structure
+        decision depends on them (the library QAOA pattern).
+        """
+        return ParameterShapeResolutionPass(bindings).run(block)
+
     def inline(self, block: Block) -> Block:
         """Pass 1: Inline all CallBlockOperations."""
         return self._inline_pass.run(block)
@@ -295,6 +322,17 @@ class Transpiler(ABC, Generic[T]):
         """Pass 2: Validate and analyze dependencies."""
         return self._analyze_pass.run(block)
 
+    def validate_symbolic_shapes(self, block: Block) -> Block:
+        """Pass 2.5: Reject unresolved parameter shape dims in loop bounds.
+
+        Runs after ``analyze`` so dependency info is complete. Raises
+        ``QamomileCompileError`` with an actionable message when a
+        ``gamma_dim0``-style symbolic Value reaches a ``ForOperation``
+        bound without being folded to a constant by
+        ``ParameterShapeResolutionPass``.
+        """
+        return SymbolicShapeValidationPass().run(block)
+
     def plan(self, block: Block) -> ProgramPlan:
         """Pass 3: Lower and split into a program plan.
 
@@ -348,12 +386,14 @@ class Transpiler(ABC, Generic[T]):
         Pipeline:
             1. to_block: Convert QKernel to Block
             2. substitute: Apply substitutions (if configured)
-            3. inline: Inline CallBlockOperations
-            4. affine_validate: Validate affine type semantics
-            5. partial_eval: Fold constants and lower compile-time control flow
-            6. analyze: Validate and analyze dependencies
-            7. plan: Build ProgramPlan (segment into C->Q->C steps)
-            8. emit: Generate backend-specific code
+            3. resolve_parameter_shapes: Constant-fold symbolic Vector param dims
+            4. inline: Inline CallBlockOperations
+            5. affine_validate: Validate affine type semantics
+            6. partial_eval: Fold constants and lower compile-time control flow
+            7. analyze: Validate and analyze dependencies
+            8. validate_symbolic_shapes: Reject unresolved parameter shape dims
+            9. plan: Build ProgramPlan (segment into C->Q->C steps)
+            10. emit: Generate backend-specific code
         """
         entrypoint_validator = EntrypointValidationPass()
 
@@ -362,10 +402,12 @@ class Transpiler(ABC, Generic[T]):
         entrypoint_validator.run(block)
         # Apply substitutions if configured
         substituted = self.substitute(block)
-        affine = self.inline(substituted)
+        shape_resolved = self.resolve_parameter_shapes(substituted, bindings)
+        affine = self.inline(shape_resolved)
         validated = self.affine_validate(affine)
         partially_evaluated = self.partial_eval(validated, bindings)
         analyzed = self.analyze(partially_evaluated)
+        analyzed = self.validate_symbolic_shapes(analyzed)
         separated = self.plan(analyzed)
         return self.emit(separated, bindings, parameters)
 
