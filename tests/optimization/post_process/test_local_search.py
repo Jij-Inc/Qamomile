@@ -65,10 +65,11 @@ class TestLocalSearchSpin:
         assert np.isclose(energy, -8.0)
 
     def test_max_iter_limits_search(self, spin_model):
-        """Search stops after max_iter iterations even if not converged."""
+        """After 1 iteration only the best single flip is applied."""
         ls = LocalSearch(spin_model)
         result = ls.run([1, 1, -1], max_iter=1, method="best_improvement")
         _, energy, _ = result.lowest()
+        # From [1,1,-1] the best flip is index 0 (delta_E=-12), giving [-1,1,-1]
         assert np.isclose(energy, spin_model.calc_energy([-1, 1, -1]))
 
     def test_max_iter_zero_returns_initial(self, spin_model):
