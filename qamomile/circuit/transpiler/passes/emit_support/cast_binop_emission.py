@@ -57,14 +57,39 @@ def handle_cast(
         )
 
 
+def _is_param_array_element(operand: Any, parameters: "set[str]") -> bool:
+    """True when operand is ``arr[idx]`` and ``arr`` is in ``parameters``."""
+    if not hasattr(operand, "parent_array"):
+        return False
+    if operand.parent_array is None:
+        return False
+    return operand.parent_array.name in parameters
+
+
 def evaluate_binop(
     emit_pass: "StandardEmitPass",
     op: BinOp,
     bindings: dict[str, Any],
 ) -> None:
-    """Evaluate a BinOp and store the result in bindings."""
-    lhs = emit_pass._resolver.resolve_classical_value(op.lhs, bindings)
-    rhs = emit_pass._resolver.resolve_classical_value(op.rhs, bindings)
+    """Evaluate a BinOp and store the result in bindings.
+
+    Parameter-array elements take priority over their concrete
+    bindings: users often pass a concrete array alongside
+    ``parameters=[...]`` as a shape hint, and those elements must stay
+    symbolic so the emitted circuit carries backend parameters.
+    """
+    parameters = emit_pass._resolver.parameters
+    lhs_is_param_elem = _is_param_array_element(op.lhs, parameters)
+    rhs_is_param_elem = _is_param_array_element(op.rhs, parameters)
+
+    if lhs_is_param_elem:
+        lhs = None
+    else:
+        lhs = emit_pass._resolver.resolve_classical_value(op.lhs, bindings)
+    if rhs_is_param_elem:
+        rhs = None
+    else:
+        rhs = emit_pass._resolver.resolve_classical_value(op.rhs, bindings)
 
     lhs_param_key = emit_pass._resolver.get_parameter_key(op.lhs, bindings)
     rhs_param_key = emit_pass._resolver.get_parameter_key(op.rhs, bindings)

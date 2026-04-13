@@ -202,8 +202,14 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             super()._emit_pauli_evolve(circuit, op, qubit_map, bindings)
             return
 
-        # Resolve gamma
-        gamma = self._resolver.resolve_classical_value(op.gamma, bindings)
+        # Resolve gamma: concrete float OR backend Parameter for parametric
+        # gamma (scalar / array element). Qiskit's PauliEvolutionGate accepts
+        # a Parameter (or ParameterExpression) as ``time``.
+        from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
+            _resolve_gamma,
+        )
+
+        gamma = _resolve_gamma(self, op, bindings)
         if gamma is None:
             super()._emit_pauli_evolve(circuit, op, qubit_map, bindings)
             return
@@ -247,7 +253,11 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             from qiskit.circuit.library import PauliEvolutionGate
 
             sparse_op = hamiltonian_to_sparse_pauli_op(hamiltonian)
-            evo_gate = PauliEvolutionGate(sparse_op, time=float(gamma))
+            # ``time`` accepts both ``float`` and Qiskit ``Parameter`` /
+            # ``ParameterExpression``. For parametric gamma we pass the
+            # backend parameter through so it can be bound at run-time.
+            time_arg = float(gamma) if isinstance(gamma, (int, float)) else gamma
+            evo_gate = PauliEvolutionGate(sparse_op, time=time_arg)
             circuit.append(evo_gate, qubit_indices)
         except ImportError:
             # Fallback to manual decomposition when Qiskit library unavailable

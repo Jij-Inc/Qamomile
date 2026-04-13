@@ -160,6 +160,23 @@ def emit_gate(
             qubit_map[QubitAddress(result.uuid)] = qubit_indices[i]
 
 
+def _theta_is_param_array_element(
+    theta: Any,
+    parameters: "set[str]",
+) -> bool:
+    """True when theta is ``arr[idx]`` and ``arr`` is a declared parameter.
+
+    Used by ``resolve_angle`` to prioritise backend-parameter creation
+    over concrete binding lookup — users pass a concrete array for an
+    array parameter as a shape hint, and those elements must remain
+    symbolic for runtime binding.
+    """
+    if not hasattr(theta, "parent_array") or theta.parent_array is None:
+        return False
+    parent_name = theta.parent_array.name
+    return parent_name in parameters
+
+
 def resolve_angle(
     emit_pass: "StandardEmitPass",
     op: GateOperation,
@@ -172,6 +189,16 @@ def resolve_angle(
     """
     theta = op.theta
     if theta is not None:
+        # Shape-hint fast path: if theta is an element of a declared
+        # parameter array (``gamma[p]`` with ``parameters=['gamma']``),
+        # skip bindings lookup and go straight to backend parameter
+        # creation. Otherwise the concrete shape-hint binding would
+        # short-circuit the symbolic path.
+        if _theta_is_param_array_element(theta, emit_pass._resolver.parameters):
+            param_key = emit_pass._resolver.get_parameter_key(theta, bindings)
+            if param_key:
+                return emit_pass._get_or_create_parameter(param_key, theta.uuid)
+
         # Use unified resolver for value resolution.
         resolved = UnifiedValueResolver(context=bindings, bindings=bindings).resolve(
             theta
