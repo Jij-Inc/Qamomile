@@ -210,7 +210,7 @@ class TestConcreteEncoding:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="Requires Vector[Float] kernel parameter support from upstream")
+@pytest.mark.xfail(reason="Requires Vector[Float] kernel parameter support from upstream")
 class TestParametricEncoding:
     @pytest.mark.parametrize(
         "amplitudes",
@@ -247,7 +247,7 @@ class TestParametricEncoding:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="Requires Vector[Float] kernel parameter support from upstream")
+@pytest.mark.xfail(reason="Requires Vector[Float] kernel parameter support from upstream")
 class TestParametricUnboundEncoding:
     """Tests for parametric amplitude encoding without bindings."""
 

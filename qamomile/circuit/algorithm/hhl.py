@@ -24,11 +24,13 @@ Important limitations / conventions of this implementation:
 * The zero-eigenvalue bin cannot be inverted.  This implementation leaves
   that branch untouched, so the caller must ensure that its support is
   negligible or intentionally excluded.
-* Standard QPE convention assumes that the IQFT used inside phase estimation
-  does **not** include final bit-reversal swaps.  If your underlying
-  ``iqft()`` does include those swaps, set ``iqft_includes_swaps=True`` so
-  that the reciprocal-rotation control patterns use the correct physical
-  qubit order.
+* The ``iqft_includes_swaps`` flag controls whether the IQFT output is
+  bit-reversed relative to the logical QPE encoding.  Qamomile's stdlib
+  ``iqft()`` includes swap gates that **preserve** the original bit order
+  (i.e., ``clock[0]`` remains the LSB after IQFT), so the correct default
+  is ``iqft_includes_swaps=False`` (meaning "no net reversal happened").
+  Set ``iqft_includes_swaps=True`` only when using an IQFT that omits the
+  final swaps, leaving the output in bit-reversed order.
 * ``strict=True`` is only operationally meaningful when
   ``supported_raw_bins`` is provided.  In that case, invalid reciprocal
   rotations are rejected only on the declared populated bins.
@@ -339,10 +341,11 @@ def reciprocal_rotation(
             and the *strict* check is applied only to these bins.
             Pass ``None`` (default) to emit rotations for all
             representable nonzero bins.
-        iqft_includes_swaps: If True, the IQFT used in the preceding QPE
-            step includes bit-reversal swaps, so the physical qubit order
-            after IQFT is reversed relative to the logical order.  This
-            flag flips the endianness used for control-bit patterns.
+        iqft_includes_swaps: If True, the IQFT output is bit-reversed
+            relative to the logical QPE encoding, flipping the endianness
+            used for control-bit patterns.  Qamomile's stdlib ``iqft()``
+            preserves bit order (its swaps undo QFT's inherent reversal),
+            so the correct value is ``False`` (default).
             Standard QPE convention is ``False``.
 
     Returns:
@@ -354,9 +357,11 @@ def reciprocal_rotation(
 
     populated_bins = _normalize_supported_raw_bins(supported_raw_bins, n_clock)
 
-    # If iqft_includes_swaps, the physical qubit order after IQFT is
-    # bit-reversed relative to the logical order, so we flip endianness
-    # for the control-bit pattern.
+    # If iqft_includes_swaps=True, the IQFT output has bit-reversed order
+    # relative to the logical QPE encoding, so we flip the endianness
+    # assumed for control-bit patterns.  Qamomile's stdlib IQFT preserves
+    # bit order (swaps undo QFT's inherent reversal), so the default False
+    # is correct when using the stdlib.
     rotation_little_endian = little_endian_clock ^ iqft_includes_swaps
 
     N = 2**n_clock
@@ -487,8 +492,10 @@ def hhl(
         supported_raw_bins: Optional raw QPE bins that may actually be
             populated for the chosen toy instance.  Use this together with
             ``strict=True`` to avoid over-constraining unpopulated bins.
-        iqft_includes_swaps: Whether the underlying ``iqft()`` includes the
-            final bit-reversal swaps.  Standard QPE convention is ``False``.
+        iqft_includes_swaps: Whether the IQFT output is bit-reversed
+            relative to the logical QPE encoding.  Qamomile's stdlib
+            ``iqft()`` preserves bit order, so the correct default is
+            ``False``.
         **params: Parameters passed to unitary and inv_unitary kernels
             (e.g., evolution time, rotation angle).
 
