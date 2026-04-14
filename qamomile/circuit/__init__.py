@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-# Frontend API
 from .frontend.composite_gate import CompositeGate, composite_gate
 from .frontend.constructors import bit, float_, qubit, qubit_array, uint
 from .frontend.handle import (
@@ -46,16 +45,17 @@ from .frontend.operation.qubit_gates import (
     z,
 )
 from .frontend.qkernel import QKernel, qkernel
+from .stdlib import iqft, qft, qpe
 
-# Algorithm building blocks
-from .algorithm import (
+# isort: off
+# Algorithm imports must come after frontend/stdlib to avoid circular imports
+from .algorithm import (  # noqa: E402
     amplitude_encoding,
     compute_mottonen_amplitude_encoding_thetas,
     compute_mottonen_thetas,
 )
 
-# Standard library circuits
-from .stdlib import iqft, qft, qpe
+# isort: on
 
 if TYPE_CHECKING:
     from .visualization import DEFAULT_STYLE, CircuitStyle, MatplotlibDrawer

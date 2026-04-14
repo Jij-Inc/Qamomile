@@ -24,8 +24,6 @@ from qamomile.quri_parts.transpiler import QuriPartsTranspiler  # noqa: E402
 from tests.circuit.algorithm.test_hhl_transpile import (  # noqa: E402
     _p_u,
     _p_u_inv,
-    _rz_u,
-    _rz_u_inv,
     extract_postselected_system,
     fidelity,
     make_rz_hhl_kernel,

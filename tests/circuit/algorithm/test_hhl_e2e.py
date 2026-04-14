@@ -133,7 +133,7 @@ class TestHHLEndToEnd:
         def check() -> qmc.Bit:
             sys = qmc.qubit_array(1, name="sys")
             sys[0] = qmc.x(sys[0])  # |1⟩
-            clock = qmc.qubit_array(2, name="clock")
+            clock = qmc.qubit_array(2, name="clock")  # noqa: F841
             anc = qmc.qubit("anc")
             return qmc.measure(anc)
 

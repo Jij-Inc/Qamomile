@@ -309,6 +309,7 @@ class MottonenAmplitudeEncoding(CompositeGate):
             return super()._build_decomposition_block(target_qubits, strategy_name)
 
         from qamomile.circuit.ir.block_value import BlockValue
+
         from qamomile.circuit.ir.types.primitives import QubitType
         from qamomile.circuit.ir.value import Value
 
