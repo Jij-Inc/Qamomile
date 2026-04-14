@@ -33,6 +33,7 @@ project:
     - title: 最適化
       file: optimization/index.md
       children:
+        - file: optimization/binary_model.ipynb
         - file: optimization/qaoa_graph_partition.ipynb
     - title: コラボレーション
       file: collaboration/index.md
@@ -41,6 +42,7 @@ project:
     - title: リリースノート
       file: release_notes/index.md
       children:
+        - file: release_notes/v0_11_0.md
         - file: release_notes/v0_10_0.ipynb
 
 # --- API Reference (auto-generated) ---

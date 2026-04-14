@@ -17,7 +17,7 @@ from typing import Any, Literal
 
 import sympy as sp
 
-from qamomile.circuit.ir.block_value import BlockValue
+from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
@@ -60,7 +60,7 @@ class CompositeGateResolution:
     num_control_qubits: int = 0
 
     # implementation branch
-    impl_block: BlockValue | None = None
+    impl_block: Block | None = None
     impl_resolver: ExprResolver | None = None
 
     # qft_iqft branch
@@ -79,7 +79,7 @@ def resolve_composite_gate(
     Priority (deterministic, not fallback):
 
     1. ``resource_metadata`` — always preferred when present
-    2. ``implementation`` (has_implementation + BlockValue)
+    2. ``implementation`` (has_implementation + Block)
     3. Known formula (QFT / IQFT)
     4. Error — no resource info available
 
@@ -109,11 +109,11 @@ def resolve_composite_gate(
     # 2. implementation
     if op.has_implementation and op.implementation is not None:
         impl = op.implementation
-        if isinstance(impl, BlockValue):
+        if isinstance(impl, Block):
             extra: dict[str, sp.Expr] = {}
             for idx, formal in enumerate(impl.input_values):
-                if idx + 1 < len(op.operands):
-                    actual = op.operands[idx + 1]
+                if idx < len(op.operands):
+                    actual = op.operands[idx]
                     extra[formal.uuid] = resolver.resolve(actual)
             # Callee-style scope (fresh parent blocks)
             ctx = resolver.context
@@ -219,10 +219,10 @@ def resolve_controlled_u(
     if op.is_symbolic_num_controls:
         nc: int | sp.Expr = resolver.resolve(op.num_controls)
     else:
-        nc = op.num_controls
+        nc = op.num_controls  # type: ignore[assignment]
 
     controlled_block = op.block
-    if isinstance(controlled_block, BlockValue):
+    if isinstance(controlled_block, Block):
         num_targets = sum(
             1 for inp in controlled_block.input_values if inp.type.is_quantum()
         )

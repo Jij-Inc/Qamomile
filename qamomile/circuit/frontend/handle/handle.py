@@ -61,7 +61,7 @@ class Handle(abc.ABC):
         """
         return self.value.type.is_quantum()
 
-    def consume(self, operation_name: str = "unknown") -> "Handle":
+    def consume(self, operation_name: str = "unknown") -> typing.Self:
         """Mark this handle as consumed and return a fresh handle.
 
         Args:

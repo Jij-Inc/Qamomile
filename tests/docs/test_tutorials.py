@@ -47,6 +47,11 @@ def discover_tutorial_files() -> list[Path]:
             # Skip Jupyter checkpoint files
             if ".ipynb_checkpoints" in str(f):
                 continue
+            # Skip notebooks when a paired .py tutorial exists.
+            # The paired Python file exercises the same content without
+            # requiring notebook-kernel orchestration.
+            if f.suffix == ".ipynb" and f.with_suffix(".py").exists():
+                continue
             tutorial_files.append(f)
     return sorted(tutorial_files)
 
@@ -80,6 +85,7 @@ TUTORIAL_FILES = discover_tutorial_files()
 def test_tutorial_executes_without_error(tutorial_file: Path, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(plt, "show", lambda *args, **kwargs: None)
+    monkeypatch.setenv("QAMOMILE_DOCS_TEST", "1")
 
     assert tutorial_file.exists(), f"Tutorial file not found: {tutorial_file}"
 

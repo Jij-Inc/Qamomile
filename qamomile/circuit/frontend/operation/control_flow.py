@@ -134,7 +134,7 @@ def for_loop(
     with trace(body_tracer):
         yield loop_var
 
-    # ForOperationを作成
+    # Create ForOperation
     # operands: [start, stop, step]
     for_op = ForOperation(loop_var=var_name, operations=body_tracer.operations)
     for_op.operands.append(_value_to_ir_value(start, "start"))
@@ -156,6 +156,7 @@ def _create_handle_from_value(value: Value, template_handle: Handle) -> Handle:
         return Bit(value=value)
     elif isinstance(template_handle, ArrayBase):
         cls = type(template_handle)
+        assert isinstance(value, ArrayValue)
         return cls._create_from_value(value=value, shape=template_handle._shape)
     else:
         # Fallback: return a generic Handle
@@ -182,7 +183,7 @@ def _fresh_handle_copy_for_tracing(h: typing.Any) -> typing.Any:
     # each branch starts with an empty borrow set.  Without this,
     # shallow copy shares the same _borrowed_indices dict and borrowing
     # an element in one branch would cause QubitConsumedError in the other.
-    if hasattr(c, "_borrowed_indices"):
+    if isinstance(c, ArrayBase):
         c._borrowed_indices = {}
     return c
 
@@ -211,11 +212,11 @@ def _value_to_ir_value(val: typing.Any, name_prefix: str = "const") -> Value:
     # Convert primitive to Value
     if isinstance(val, (int, float, bool)):
         if isinstance(val, bool):
-            return Value(type=BitType(), name=name_prefix, params={"const": val})
+            return Value(type=BitType(), name=name_prefix).with_const(val)
         elif isinstance(val, float):
-            return Value(type=FloatType(), name=name_prefix, params={"const": val})
+            return Value(type=FloatType(), name=name_prefix).with_const(val)
         else:  # int
-            return Value(type=UIntType(), name=name_prefix, params={"const": val})
+            return Value(type=UIntType(), name=name_prefix).with_const(val)
 
     # Unsupported type
     raise TypeError(f"Cannot convert {type(val)} to IR Value")
@@ -499,7 +500,7 @@ def for_items(
     if _key_is_vector:
         # Create a symbolic Vector[UInt] handle for the key variable
         kv_name = key_var_names[0]
-        dim0_value = Value(type=UIntType(), name=f"{kv_name}_dim0", params={})
+        dim0_value = Value(type=UIntType(), name=f"{kv_name}_dim0")
         array_value = ArrayValue(
             type=UIntType(),
             name=kv_name,
@@ -515,7 +516,7 @@ def for_items(
         key_result.name = kv_name
         key_result.id = str(id(key_result))
         key_result._consumed = False
-        key_result.element_type = UInt
+        key_result.element_type = UInt  # type: ignore[assignment]
     else:
         # Create symbolic key handles (UInt for each key variable)
         key_handles = []
@@ -548,6 +549,6 @@ def for_items(
         key_is_vector=_key_is_vector,
         operations=body_tracer.operations,
     )
-    for_items_op.operands.append(d.value)  # The DictValue being iterated
+    for_items_op.operands.append(d.value)  # type: ignore[arg-type]  # DictValue is not Value but stored as operand
 
     parent_tracer.add_operation(for_items_op)

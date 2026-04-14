@@ -5,11 +5,20 @@ from __future__ import annotations
 import dataclasses
 from typing import Any
 
-from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
-from qamomile.circuit.ir.operation.gate import ControlledUOperation, GateOperation
+from qamomile.circuit.ir.operation.gate import (
+    ConcreteControlledU,
+    ControlledUOperation,
+    IndexSpecControlledU,
+    SymbolicControlledU,
+)
 from qamomile.circuit.ir.value import Value, ValueBase
+from qamomile.circuit.transpiler.errors import ValidationError
+from qamomile.circuit.transpiler.value_resolver import (
+    ValueResolver as UnifiedValueResolver,
+)
 
 from . import Pass
 from .control_flow_visitor import OperationTransformer
@@ -39,6 +48,11 @@ class ConstantFoldingPass(Pass[Block, Block]):
 
     def run(self, input: Block) -> Block:
         """Run constant folding on the block."""
+        if input.kind not in (BlockKind.AFFINE,):
+            raise ValidationError(
+                f"ConstantFoldingPass expects AFFINE block, got {input.kind}",
+            )
+
         # Track folded values: uuid -> constant Value
         folded_values: dict[str, Value] = {}
 
@@ -96,9 +110,8 @@ class ConstantFoldingPass(Pass[Block, Block]):
         return Value(
             type=result_type,
             name=f"folded_{op.results[0].name}",
-            params={"const": result_value},
             uuid=op.results[0].uuid,  # Keep same UUID for substitution
-        )
+        ).with_const(result_value)
 
     def _resolve_value(
         self,
@@ -106,51 +119,51 @@ class ConstantFoldingPass(Pass[Block, Block]):
         folded_values: dict[str, Value],
     ) -> float | int | None:
         """Resolve a Value to a constant, or None if not resolvable."""
-        # Check if already folded
-        if value.uuid in folded_values:
-            folded = folded_values[value.uuid]
-            return folded.get_const()
+        return UnifiedValueResolver(
+            context=folded_values, bindings=self._bindings
+        ).resolve(value)
 
-        # Check if constant
-        if value.is_constant():
-            return value.get_const()
-
-        # Check if bound parameter
-        if value.is_parameter():
-            param_name = value.parameter_name()
-            if param_name and param_name in self._bindings:
-                return self._bindings[param_name]
-
-        return None
-
+    @staticmethod
     def _evaluate_binop(
-        self,
         kind: BinOpKind | None,
         left: float | int,
         right: float | int,
     ) -> float | int | None:
         """Evaluate a binary operation on two constants."""
-        if kind is None:
-            return None
+        from qamomile.circuit.transpiler.passes.eval_utils import (
+            evaluate_binop_values,
+        )
 
-        try:
-            match kind:
-                case BinOpKind.ADD:
-                    return left + right
-                case BinOpKind.SUB:
-                    return left - right
-                case BinOpKind.MUL:
-                    return left * right
-                case BinOpKind.DIV:
-                    return left / right if right != 0 else None
-                case BinOpKind.FLOORDIV:
-                    return left // right if right != 0 else None
-                case BinOpKind.POW:
-                    return left**right
-                case _:
-                    return None
-        except (TypeError, ValueError, OverflowError):
-            return None
+        return evaluate_binop_values(kind, left, right)
+
+    def _substitute_in_value(
+        self,
+        v: Value,
+        folded_values: dict[str, Value],
+    ) -> Value:
+        """Recursively substitute folded constants in a Value.
+
+        Walks ``element_indices`` to arbitrary depth so that nested
+        array accesses like ``q[indices[uint_tmp]]`` have their
+        innermost symbolic index resolved when it is foldable.
+        """
+        if v.uuid in folded_values:
+            return folded_values[v.uuid]
+        if not v.element_indices:
+            return v
+        new_indices: list[Value] = []
+        changed = False
+        for idx in v.element_indices:
+            if isinstance(idx, Value):
+                new_idx = self._substitute_in_value(idx, folded_values)
+                if new_idx is not idx:
+                    changed = True
+                new_indices.append(new_idx)
+            else:
+                new_indices.append(idx)
+        if not changed:
+            return v
+        return dataclasses.replace(v, element_indices=tuple(new_indices))
 
     def _substitute_folded_operands(
         self,
@@ -160,8 +173,8 @@ class ConstantFoldingPass(Pass[Block, Block]):
         """Substitute folded constant values in operation operands.
 
         Also propagates folded values into ``element_indices`` of Value
-        operands so that gate operations referencing a folded BinOp result
-        as a qubit index are updated correctly.
+        operands (recursively, so nested array accesses like
+        ``q[indices[uint_tmp]]`` are fully resolved).
 
         For ``ControlledUOperation``, also folds ``num_controls``,
         ``target_indices``, and ``controlled_indices`` fields.
@@ -173,19 +186,10 @@ class ConstantFoldingPass(Pass[Block, Block]):
             if isinstance(operand, ValueBase) and operand.uuid in folded_values:
                 new_operands.append(folded_values[operand.uuid])
                 changed = True
-            elif isinstance(operand, Value) and operand.element_indices:
-                new_indices = []
-                indices_changed = False
-                for idx in operand.element_indices:
-                    if idx.uuid in folded_values:
-                        new_indices.append(folded_values[idx.uuid])
-                        indices_changed = True
-                    else:
-                        new_indices.append(idx)
-                if indices_changed:
-                    new_operands.append(
-                        dataclasses.replace(operand, element_indices=tuple(new_indices))
-                    )
+            elif isinstance(operand, Value):
+                new_operand = self._substitute_in_value(operand, folded_values)
+                if new_operand is not operand:
+                    new_operands.append(new_operand)
                     changed = True
                 else:
                     new_operands.append(operand)
@@ -194,36 +198,11 @@ class ConstantFoldingPass(Pass[Block, Block]):
 
         result_op = dataclasses.replace(op, operands=new_operands) if changed else op
 
-        # Fold ControlledUOperation-specific dataclass fields.
+        # Fold ControlledUOperation-specific dataclass fields per subclass.
         if isinstance(result_op, ControlledUOperation):
             extra_kwargs: dict[str, Any] = {}
 
-            # Fold num_controls: Value -> int if resolvable.
-            if isinstance(result_op.num_controls, Value):
-                new_nc = self._resolve_field_value(
-                    result_op.num_controls, folded_values
-                )
-                if new_nc is not result_op.num_controls:
-                    extra_kwargs["num_controls"] = new_nc
-                    changed = True
-
-            # Fold target_indices list.
-            if result_op.target_indices is not None:
-                new_ti = self._fold_value_list(result_op.target_indices, folded_values)
-                if new_ti is not None:
-                    extra_kwargs["target_indices"] = new_ti
-                    changed = True
-
-            # Fold controlled_indices list.
-            if result_op.controlled_indices is not None:
-                new_ci = self._fold_value_list(
-                    result_op.controlled_indices, folded_values
-                )
-                if new_ci is not None:
-                    extra_kwargs["controlled_indices"] = new_ci
-                    changed = True
-
-            # Fold power: Value -> int if resolvable (strict-integer-only).
+            # Fold power (shared across all subclasses).
             if isinstance(result_op.power, Value):
                 new_power = self._resolve_power_field_value(
                     result_op.power, folded_values
@@ -232,40 +211,65 @@ class ConstantFoldingPass(Pass[Block, Block]):
                     extra_kwargs["power"] = new_power
                     changed = True
 
+            if isinstance(result_op, IndexSpecControlledU):
+                # Fold num_controls if symbolic.
+                if isinstance(result_op.num_controls, Value):
+                    new_nc = self._resolve_field_value(
+                        result_op.num_controls, folded_values
+                    )
+                    if new_nc is not result_op.num_controls:
+                        extra_kwargs["num_controls"] = new_nc
+                        changed = True
+                # Fold target_indices list.
+                if result_op.target_indices is not None:
+                    new_ti = self._fold_value_list(
+                        result_op.target_indices, folded_values
+                    )
+                    if new_ti is not None:
+                        extra_kwargs["target_indices"] = new_ti
+                        changed = True
+                # Fold controlled_indices list.
+                if result_op.controlled_indices is not None:
+                    new_ci = self._fold_value_list(
+                        result_op.controlled_indices, folded_values
+                    )
+                    if new_ci is not None:
+                        extra_kwargs["controlled_indices"] = new_ci
+                        changed = True
+            elif isinstance(result_op, SymbolicControlledU):
+                # Fold num_controls: Value -> int.  If resolved to int,
+                # promote to ConcreteControlledU.
+                new_nc = self._resolve_field_value(
+                    result_op.num_controls, folded_values
+                )
+                if new_nc is not result_op.num_controls:
+                    if isinstance(new_nc, int):
+                        # Promote to ConcreteControlledU.
+                        power = extra_kwargs.get("power", result_op.power)
+                        result_op = ConcreteControlledU(
+                            operands=new_operands
+                            if changed
+                            else list(result_op.operands),
+                            results=list(result_op.results),
+                            num_controls=new_nc,
+                            power=power,
+                            block=result_op.block,
+                        )
+                        extra_kwargs = {}  # Already applied
+                        changed = True
+                    else:
+                        extra_kwargs["num_controls"] = new_nc
+                        changed = True
+            # ConcreteControlledU: num_controls is already int, nothing to fold.
+
             if extra_kwargs:
                 result_op = dataclasses.replace(result_op, **extra_kwargs)
 
-        # Substitute folded values in GateOperation.theta field
-        if isinstance(result_op, GateOperation) and isinstance(result_op.theta, Value):
-            if result_op.theta.uuid in folded_values:
-                result_op = dataclasses.replace(
-                    result_op, theta=folded_values[result_op.theta.uuid]
-                )
-                changed = True
+        # theta is now part of operands, so the operands substitution
+        # above already handles it.  No GateOperation-specific code needed.
 
-        # Also substitute GateOperation.theta if it references a folded value
-        replacements: dict[str, Any] = {}
         if changed:
-            replacements["operands"] = new_operands
-        if isinstance(result_op, GateOperation) and isinstance(result_op.theta, Value):
-            if result_op.theta.uuid in folded_values:
-                replacements["theta"] = folded_values[result_op.theta.uuid]
-            elif result_op.theta.element_indices:
-                new_indices = []
-                indices_changed = False
-                for idx in result_op.theta.element_indices:
-                    if idx.uuid in folded_values:
-                        new_indices.append(folded_values[idx.uuid])
-                        indices_changed = True
-                    else:
-                        new_indices.append(idx)
-                if indices_changed:
-                    replacements["theta"] = dataclasses.replace(
-                        result_op.theta, element_indices=tuple(new_indices)
-                    )
-
-        if replacements:
-            return dataclasses.replace(result_op, **replacements)
+            return dataclasses.replace(result_op, operands=new_operands)
         return result_op
 
     def _resolve_field_value(
@@ -385,9 +389,8 @@ class ConstantFoldingPass(Pass[Block, Block]):
                         Value(
                             type=v.type,
                             name=f"folded_{v.name}",
-                            params={"const": int(resolved)},
                             uuid=v.uuid,
-                        )
+                        ).with_const(int(resolved))
                     )
                     list_changed = True
                 else:

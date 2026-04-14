@@ -23,19 +23,13 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from qamomile.cudaq.emitter import (
-        CudaqCircuit,
-        CudaqCodegenEmitter,
-        CudaqGateEmitter,
         CudaqKernelArtifact,
         CudaqKernelEmitter,
-        CudaqRuntimeCircuit,
         ExecutionMode,
     )
     from qamomile.cudaq.observable import hamiltonian_to_cudaq_spin_op
     from qamomile.cudaq.transpiler import (
-        BoundCudaqCircuit,
         BoundCudaqKernelArtifact,
-        BoundCudaqRuntimeCircuit,
         CudaqEmitPass,
         CudaqExecutor,
         CudaqTranspiler,
@@ -62,13 +56,6 @@ _SYMBOL_TO_MODULE: dict[str, str] = {
     "CudaqEmitPass": "qamomile.cudaq.transpiler",
     # Observable
     "hamiltonian_to_cudaq_spin_op": "qamomile.cudaq.observable",
-    # Backward compatibility aliases
-    "BoundCudaqCircuit": "qamomile.cudaq.transpiler",
-    "BoundCudaqRuntimeCircuit": "qamomile.cudaq.transpiler",
-    "CudaqGateEmitter": "qamomile.cudaq.emitter",
-    "CudaqCodegenEmitter": "qamomile.cudaq.emitter",
-    "CudaqCircuit": "qamomile.cudaq.emitter",
-    "CudaqRuntimeCircuit": "qamomile.cudaq.emitter",
 }
 
 __all__ = [
@@ -83,13 +70,6 @@ __all__ = [
     "CudaqEmitPass",
     # Observable
     "hamiltonian_to_cudaq_spin_op",
-    # Backward compatibility aliases
-    "BoundCudaqCircuit",
-    "BoundCudaqRuntimeCircuit",
-    "CudaqGateEmitter",
-    "CudaqCodegenEmitter",
-    "CudaqCircuit",
-    "CudaqRuntimeCircuit",
 ]
 
 

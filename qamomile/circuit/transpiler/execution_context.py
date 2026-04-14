@@ -27,3 +27,7 @@ class ExecutionContext:
 
     def has(self, key: str) -> bool:
         return key in self._state
+
+    def copy(self) -> "ExecutionContext":
+        """Clone the execution context."""
+        return ExecutionContext(self._state)

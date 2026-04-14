@@ -79,14 +79,23 @@ class BlockType(ObjectTypeMixin, ValueType):
 
 
 @dataclass
-class TupleType(ClassicalTypeMixin, ValueType):
+class TupleType(ValueType):
     """Type representing a tuple of values.
 
     Unlike simple types, TupleType stores the types of its elements,
     so equality and hashing depend on the element types.
+
+    Quantum/classical classification is derived from element types:
+    quantum if any element is quantum, classical if all are classical.
     """
 
     element_types: tuple["ValueType", ...]
+
+    def is_quantum(self) -> bool:
+        return any(t.is_quantum() for t in self.element_types)
+
+    def is_classical(self) -> bool:
+        return all(t.is_classical() for t in self.element_types)
 
     def label(self) -> str:
         element_labels = ", ".join(t.label() for t in self.element_types)
@@ -102,16 +111,30 @@ class TupleType(ClassicalTypeMixin, ValueType):
 
 
 @dataclass
-class DictType(ClassicalTypeMixin, ValueType):
+class DictType(ValueType):
     """Type representing a dictionary mapping keys to values.
 
     Unlike simple types, DictType stores the key and value types,
     so equality and hashing depend on those types.
     When key_type and value_type are None, represents a generic Dict type.
+
+    Quantum/classical classification is derived from key/value types.
     """
 
     key_type: "ValueType | None" = None
     value_type: "ValueType | None" = None
+
+    def is_quantum(self) -> bool:
+        return (self.key_type is not None and self.key_type.is_quantum()) or (
+            self.value_type is not None and self.value_type.is_quantum()
+        )
+
+    def is_classical(self) -> bool:
+        if self.key_type is None and self.value_type is None:
+            return True
+        return (self.key_type is None or self.key_type.is_classical()) and (
+            self.value_type is None or self.value_type.is_classical()
+        )
 
     def label(self) -> str:
         if self.key_type is None or self.value_type is None:

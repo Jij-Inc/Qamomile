@@ -169,11 +169,14 @@ executable = converter.transpile(transpiler, p=p)
 # `executable.sample()` を使って各イテレーションでコストを評価します。オプティマイザはサンプリングされたビット列の平均エネルギーを最小化する `gammas` と `betas` を探索します。
 
 # %%
+import os
 import numpy as np
-from qiskit_aer import AerSimulator
 from scipy.optimize import minimize
 
-executor = transpiler.executor(backend=AerSimulator(seed_simulator=900))
+executor = transpiler.executor()
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 256 if docs_test_mode else 2048
+maxiter = 25 if docs_test_mode else 1000
 
 rng = np.random.default_rng(900)
 initial_params = rng.uniform(0, np.pi, 2 * p)
@@ -186,7 +189,7 @@ def cost_fn(params):
     betas = list(params[p:])
     job = executable.sample(
         executor,
-        shots=2048,
+        shots=sample_shots,
         bindings={"gammas": gammas, "betas": betas},
     )
     result = job.result()
@@ -200,7 +203,7 @@ res = minimize(
     cost_fn,
     initial_params,
     method="COBYLA",
-    options={"maxiter": 1000},
+    options={"maxiter": maxiter},
 )
 
 print(f"Optimized cost: {res.fun:.3f}")

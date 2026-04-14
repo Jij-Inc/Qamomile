@@ -164,7 +164,9 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
         if provider is not None:
             return provider.get_device(device_id)
 
-        from qbraid import QbraidProvider as _QbraidProvider
+        from qbraid import (
+            QbraidProvider as _QbraidProvider,  # type: ignore[attr-defined]
+        )
 
         if api_key is not None:
             p = _QbraidProvider(api_key=api_key)
