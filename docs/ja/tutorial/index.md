@@ -12,3 +12,4 @@ Qamomileを基礎から学ぶステップバイステップガイドです。
 4. [実行モデル](04_execution_models) — `sample()`と`run()`、オブザーバブル、ビット順序
 5. [古典フローパターン](05_classical_flow_patterns) — ループ、スパースデータ、条件分岐
 6. [再利用パターン](06_reuse_patterns) — ヘルパーカーネル、コンポジットゲート、スタブ
+7. [エルミート行列の分解](07_hermitian_decomposition) — 密なエルミート行列からPauli和、そして時間発展回路まで
