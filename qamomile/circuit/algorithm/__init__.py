@@ -27,6 +27,7 @@ from .qaoa import (
     qaoa_state,
     x_mixer,
 )
+from .trotter import TrotterCircuit
 
 __all__ = [
     # QAOA
@@ -53,4 +54,6 @@ __all__ = [
     "cost_layer",
     "fqaoa_layers",
     "fqaoa_state",
+    # Trotter
+    "TrotterCircuit",
 ]
