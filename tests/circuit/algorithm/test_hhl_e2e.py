@@ -170,7 +170,6 @@ class TestHHLEndToEnd:
                 phase_scale=2.0 * math.pi,
                 supported_raw_bins=(2,),
                 strict=True,
-
                 theta=theta,
             )
             return qmc.measure(anc)
@@ -182,9 +181,7 @@ class TestHHLEndToEnd:
 
         expected = np.array([0.0, 1.0])
         f = _fidelity(sys_amps, expected)
-        assert np.isclose(f, 1.0, atol=1e-6), (
-            f"fidelity={f}, sys={sys_amps / norm}"
-        )
+        assert np.isclose(f, 1.0, atol=1e-6), f"fidelity={f}, sys={sys_amps / norm}"
 
     def test_p_gate_superposition_b(self) -> None:
         """P(π) with |b⟩ = (3/5)|0⟩ + (4/5)|1⟩.
@@ -209,7 +206,6 @@ class TestHHLEndToEnd:
                 phase_scale=2.0 * math.pi,
                 supported_raw_bins=(2,),
                 strict=True,
-
                 theta=theta,
             )
             return qmc.measure(anc)
@@ -221,9 +217,7 @@ class TestHHLEndToEnd:
 
         expected = np.array([0.0, 1.0])
         f = _fidelity(sys_amps, expected)
-        assert np.isclose(f, 1.0, atol=1e-6), (
-            f"fidelity={f}, sys={sys_amps / norm}"
-        )
+        assert np.isclose(f, 1.0, atol=1e-6), f"fidelity={f}, sys={sys_amps / norm}"
 
     # -- Rz(α) tests: two invertible eigenstates --
     #
@@ -286,7 +280,6 @@ class TestHHLEndToEnd:
                 phase_scale=2.0 * math.pi,
                 supported_raw_bins=(1, 3),
                 strict=True,
-
                 alpha=alpha,
             )
             return qmc.measure(anc)
@@ -331,7 +324,6 @@ class TestHHLEndToEnd:
                 phase_scale=2.0 * math.pi,
                 supported_raw_bins=(1, 3),
                 strict=True,
-
                 alpha=alpha,
             )
             return qmc.measure(anc)

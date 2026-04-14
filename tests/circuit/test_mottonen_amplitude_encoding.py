@@ -171,7 +171,9 @@ class TestConcreteEncoding:
 
     @pytest.mark.parametrize("n_qubits", [1, 2, 3])
     @pytest.mark.parametrize("seed", [901 + i for i in range(5)])
-    def test_random_amplitudes(self, qiskit_transpiler, n_qubits: int, seed: int) -> None:
+    def test_random_amplitudes(
+        self, qiskit_transpiler, n_qubits: int, seed: int
+    ) -> None:
         """Concrete encoding produces correct statevector for random amplitudes."""
         rng = np.random.default_rng(seed)
         amplitudes = rng.standard_normal(2**n_qubits).tolist()
@@ -210,7 +212,9 @@ class TestConcreteEncoding:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(reason="Requires Vector[Float] kernel parameter support from upstream")
+@pytest.mark.xfail(
+    reason="Requires Vector[Float] kernel parameter support from upstream"
+)
 class TestParametricEncoding:
     @pytest.mark.parametrize(
         "amplitudes",
@@ -233,7 +237,9 @@ class TestParametricEncoding:
 
     @pytest.mark.parametrize("n_qubits", [1, 2, 3])
     @pytest.mark.parametrize("seed", [901 + i for i in range(3)])
-    def test_random_amplitudes(self, qiskit_transpiler, n_qubits: int, seed: int) -> None:
+    def test_random_amplitudes(
+        self, qiskit_transpiler, n_qubits: int, seed: int
+    ) -> None:
         """Parametric encoding produces correct statevector for random amplitudes."""
         rng = np.random.default_rng(seed)
         amplitudes = rng.standard_normal(2**n_qubits).tolist()
@@ -247,7 +253,9 @@ class TestParametricEncoding:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(reason="Requires Vector[Float] kernel parameter support from upstream")
+@pytest.mark.xfail(
+    reason="Requires Vector[Float] kernel parameter support from upstream"
+)
 class TestParametricUnboundEncoding:
     """Tests for parametric amplitude encoding without bindings."""
 
@@ -319,9 +327,7 @@ class TestParametricUnboundEncoding:
             thetas = compute_mottonen_amplitude_encoding_thetas(amplitudes)
             param_dict = {
                 p: thetas[i]
-                for i, p in enumerate(
-                    sorted(circuit.parameters, key=lambda p: p.name)
-                )
+                for i, p in enumerate(sorted(circuit.parameters, key=lambda p: p.name))
             }
             bound_circuit = circuit.assign_parameters(param_dict)
             _assert_amplitudes_match(bound_circuit, amplitudes)

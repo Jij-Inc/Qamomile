@@ -93,7 +93,9 @@ def _wrap_hhl_phase(theta: qmc.Float) -> qmc.Bit:
     anc = qmc.qubit("anc")
 
     sys, clock, anc = hhl(
-        sys, clock, anc,
+        sys,
+        clock,
+        anc,
         unitary=_phase_u,
         inv_unitary=_phase_u_inv,
         scaling=0.25,
@@ -112,7 +114,9 @@ def _wrap_hhl_3clock(theta: qmc.Float) -> qmc.Bit:
     anc = qmc.qubit("anc")
 
     sys, clock, anc = hhl(
-        sys, clock, anc,
+        sys,
+        clock,
+        anc,
         unitary=_phase_u,
         inv_unitary=_phase_u_inv,
         scaling=0.1,
@@ -188,9 +192,7 @@ class TestHHLCircuitBuild:
     def test_hhl_2clock_transpiles(self):
         """HHL with 2 clock qubits should transpile successfully."""
         transpiler = QiskitTranspiler()
-        exe = transpiler.transpile(
-            _wrap_hhl_phase, bindings={"theta": math.pi / 4}
-        )
+        exe = transpiler.transpile(_wrap_hhl_phase, bindings={"theta": math.pi / 4})
         qc = exe.compiled_quantum[0].circuit
         # 1 system + 2 clock + 1 ancilla = 4 qubits
         assert qc.num_qubits == 4
@@ -198,9 +200,7 @@ class TestHHLCircuitBuild:
     def test_hhl_3clock_transpiles(self):
         """HHL with 3 clock qubits should transpile successfully."""
         transpiler = QiskitTranspiler()
-        exe = transpiler.transpile(
-            _wrap_hhl_3clock, bindings={"theta": math.pi / 4}
-        )
+        exe = transpiler.transpile(_wrap_hhl_3clock, bindings={"theta": math.pi / 4})
         qc = exe.compiled_quantum[0].circuit
         # 1 system + 3 clock + 1 ancilla = 5 qubits
         assert qc.num_qubits == 5
@@ -223,7 +223,9 @@ class TestHHLCircuitBuild:
             clock = qmc.qubit_array(2, name="clock")
             anc = qmc.qubit("anc")
             sys, clock, anc = hhl(
-                sys, clock, anc,
+                sys,
+                clock,
+                anc,
                 unitary=_phase_u_2q,
                 inv_unitary=_phase_u_inv_2q,
                 scaling=0.25,
@@ -250,9 +252,7 @@ class TestHHLGateStructure:
     def test_hhl_contains_hadamard(self):
         """HHL circuit should contain Hadamard gates for QPE."""
         transpiler = QiskitTranspiler()
-        exe = transpiler.transpile(
-            _wrap_hhl_phase, bindings={"theta": math.pi / 4}
-        )
+        exe = transpiler.transpile(_wrap_hhl_phase, bindings={"theta": math.pi / 4})
         qc = exe.compiled_quantum[0].circuit
         counts = _gate_counts(qc)
         # QPE forward: 2 H, QPE inverse: 2 H => >= 4 H
@@ -261,9 +261,7 @@ class TestHHLGateStructure:
     def test_hhl_contains_x_gates_for_reciprocal(self):
         """HHL circuit should contain X gates from reciprocal rotation bit flips."""
         transpiler = QiskitTranspiler()
-        exe = transpiler.transpile(
-            _wrap_hhl_phase, bindings={"theta": math.pi / 4}
-        )
+        exe = transpiler.transpile(_wrap_hhl_phase, bindings={"theta": math.pi / 4})
         qc = exe.compiled_quantum[0].circuit
         counts = _gate_counts(qc)
         # At least 1 X for state prep + X gates from reciprocal rotation
@@ -298,8 +296,12 @@ class TestHHLParameters:
             #   lambda_hat = 1*1/4 = 0.25,  ratio = 10/0.25 = 40  (> 1)
             # strict fires only when supported_raw_bins is provided.
             clock, anc = reciprocal_rotation(
-                clock, anc, scaling=10.0, phase_scale=1.0,
-                strict=True, supported_raw_bins=(1, 2, 3),
+                clock,
+                anc,
+                scaling=10.0,
+                phase_scale=1.0,
+                strict=True,
+                supported_raw_bins=(1, 2, 3),
             )
             return qmc.measure(anc)
 
@@ -363,9 +365,7 @@ class TestHHLParameters:
         """HHL circuit should build for different theta values."""
         transpiler = QiskitTranspiler()
         for theta in [0.1, math.pi / 4, math.pi / 2, math.pi]:
-            exe = transpiler.transpile(
-                _wrap_hhl_phase, bindings={"theta": theta}
-            )
+            exe = transpiler.transpile(_wrap_hhl_phase, bindings={"theta": theta})
             qc = exe.compiled_quantum[0].circuit
             assert qc.num_qubits == 4
 
@@ -379,7 +379,9 @@ class TestHHLParameters:
             clock = qmc.qubit_array(2, name="clock")
             anc = qmc.qubit("anc")
             sys, clock, anc = hhl(
-                sys, clock, anc,
+                sys,
+                clock,
+                anc,
                 unitary=_phase_u,
                 inv_unitary=_phase_u_inv,
                 scaling=0.1,
@@ -404,7 +406,9 @@ class TestHHLParameters:
             clock = qmc.qubit_array(2, name="clock")
             anc = qmc.qubit("anc")
             sys, clock, anc = hhl(
-                sys, clock, anc,
+                sys,
+                clock,
+                anc,
                 unitary=_phase_u,
                 inv_unitary=_phase_u_inv,
                 scaling=0.25,
@@ -429,7 +433,9 @@ class TestHHLParameters:
             clock = qmc.qubit_array(2, name="clock")
             anc = qmc.qubit("anc")
             sys, clock, anc = hhl(
-                sys, clock, anc,
+                sys,
+                clock,
+                anc,
                 unitary=_phase_u,
                 inv_unitary=_phase_u_inv,
                 scaling=0.25,
@@ -454,7 +460,9 @@ class TestHHLParameters:
             clock = qmc.qubit_array(2, name="clock")
             anc = qmc.qubit("anc")
             sys, clock, anc = hhl(
-                sys, clock, anc,
+                sys,
+                clock,
+                anc,
                 unitary=_phase_u,
                 inv_unitary=_phase_u_inv,
                 scaling=0.25,
@@ -577,8 +585,7 @@ class TestHHLBlockStructure:
         h_ops = [
             op
             for op in graph.operations
-            if isinstance(op, GateOperation)
-            and op.gate_type == GateOperationType.H
+            if isinstance(op, GateOperation) and op.gate_type == GateOperationType.H
         ]
         # Forward QPE: 2 H gates, Inverse QPE: 2 H gates => at least 4
         assert len(h_ops) >= 4, f"Expected >= 4 H gates, got {len(h_ops)}"
@@ -588,11 +595,7 @@ class TestHHLBlockStructure:
         from qamomile.circuit.ir.operation.gate import ControlledUOperation
 
         graph = self._build_hhl_graph(n_clock=2)
-        cu_ops = [
-            op
-            for op in graph.operations
-            if isinstance(op, ControlledUOperation)
-        ]
+        cu_ops = [op for op in graph.operations if isinstance(op, ControlledUOperation)]
         # 2 clock qubits: 2 forward CU + 2 inverse CU + multi-controlled RY
         assert len(cu_ops) >= 4, f"Expected >= 4 CU ops, got {len(cu_ops)}"
 
@@ -605,9 +608,7 @@ class TestHHLBlockStructure:
 
         graph = self._build_hhl_graph(n_clock=2)
         composite_ops = [
-            op
-            for op in graph.operations
-            if isinstance(op, CompositeGateOperation)
+            op for op in graph.operations if isinstance(op, CompositeGateOperation)
         ]
         gate_types = {op.gate_type for op in composite_ops}
         assert CompositeGateType.IQFT in gate_types, (
@@ -623,9 +624,7 @@ class TestHHLBlockStructure:
 
         graph = self._build_hhl_graph()
         measure_ops = [
-            op
-            for op in graph.operations
-            if isinstance(op, MeasureOperation)
+            op for op in graph.operations if isinstance(op, MeasureOperation)
         ]
         assert len(measure_ops) >= 1, "Expected at least one MeasureOperation"
 
@@ -636,12 +635,9 @@ class TestHHLBlockStructure:
         for n_clock in [2, 3]:
             graph = self._build_hhl_graph(n_clock=n_clock)
             qinit_ops = [
-                op
-                for op in graph.operations
-                if isinstance(op, QInitOperation)
+                op for op in graph.operations if isinstance(op, QInitOperation)
             ]
             # 3 allocations: qubit_array(1), qubit_array(n_clock), qubit()
             assert len(qinit_ops) == 3, (
-                f"n_clock={n_clock}: expected 3 qubit allocations, "
-                f"got {len(qinit_ops)}"
+                f"n_clock={n_clock}: expected 3 qubit allocations, got {len(qinit_ops)}"
             )

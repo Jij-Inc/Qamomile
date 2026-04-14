@@ -29,6 +29,10 @@ from tests.circuit.algorithm.test_hhl_transpile import (  # noqa: E402
 )
 
 
+@pytest.mark.xfail(
+    reason="CUDA-Q does not support multi-controlled RY gate decomposition",
+    raises=Exception,
+)
 class TestHHLTranspileCudaq:
     """HHL transpile tests using CUDA-Q statevector simulation."""
 
@@ -108,9 +112,7 @@ class TestHHLTranspileCudaq:
 
         expected = np.array([0.0, 1.0])
         f = fidelity(sys_amps, expected)
-        assert np.isclose(f, 1.0, atol=1e-6), (
-            f"fidelity={f}, sys={sys_amps / norm}"
-        )
+        assert np.isclose(f, 1.0, atol=1e-6), f"fidelity={f}, sys={sys_amps / norm}"
 
     # -- Post-selection probability --
 

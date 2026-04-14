@@ -215,9 +215,7 @@ def _normalize_supported_raw_bins(
         raise TypeError("supported_raw_bins must contain integers only.")
     bins = frozenset(supported_raw_bins)
     if not bins:
-        raise ValueError(
-            "supported_raw_bins must be non-empty when provided."
-        )
+        raise ValueError("supported_raw_bins must be non-empty when provided.")
     bad = [r for r in bins if r < 0 or r >= N]
     if bad:
         raise ValueError(

@@ -172,9 +172,7 @@ def random_rz_problem(seed: int):
     supported_bins = tuple(b for b in bins if b != 0)
 
     # Choose C so that |C / lambda_hat| <= 1 for all populated eigenvalues
-    min_abs_lam = min(
-        abs(lam) for lam in eigenvalues if abs(lam) > 1e-15
-    )
+    min_abs_lam = min(abs(lam) for lam in eigenvalues if abs(lam) > 1e-15)
     C = 0.9 * min_abs_lam
 
     exact = compute_exact_ainv_b(b_raw.tolist(), eigenvalues)
@@ -310,9 +308,7 @@ class TestHHLTranspileQiskit:
 
         expected = np.array([0.0, 1.0])
         f = fidelity(sys_amps, expected)
-        assert np.isclose(f, 1.0, atol=1e-6), (
-            f"fidelity={f}, sys={sys_amps / norm}"
-        )
+        assert np.isclose(f, 1.0, atol=1e-6), f"fidelity={f}, sys={sys_amps / norm}"
 
     # -- Post-selection probability --
 
