@@ -42,6 +42,7 @@ project:
     - title: Release Notes
       file: release_notes/index.md
       children:
+        - file: release_notes/v0_11_0.ipynb
         - file: release_notes/v0_10_0.ipynb
 
 # --- API Reference (auto-generated) ---
