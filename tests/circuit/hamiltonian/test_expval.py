@@ -129,7 +129,7 @@ class TestExpvalTranspiler:
     def test_separate_pass_creates_expval_segment(self):
         """Test that separate pass creates ExpvalSegment for ExpvalOp."""
         pytest.importorskip("qiskit")
-        from qamomile.circuit.transpiler.segments import SegmentKind
+        from qamomile.circuit.transpiler.segments import ExpvalStep, SegmentKind
         from qamomile.qiskit import QiskitTranspiler
 
         @qm.qkernel
@@ -143,12 +143,12 @@ class TestExpvalTranspiler:
         # Use lower-level API to test separate pass
         block = transpiler.to_block(test_kernel)
         linear = transpiler.inline(block)
-        separated = transpiler.separate(linear)
+        separated = transpiler.plan(linear)
 
         # Should have expval segment
-        assert separated.expval is not None
-        assert separated.expval.kind == SegmentKind.EXPVAL
-        assert separated.expval.result_ref != ""
+        expval_step = next(s for s in separated.steps if isinstance(s, ExpvalStep))
+        assert expval_step.segment.kind == SegmentKind.EXPVAL
+        assert expval_step.segment.result_ref != ""
 
     def test_transpile_with_hamiltonian_binding(self):
         """Test full transpilation with Hamiltonian binding."""

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypeVar, overload
+from typing import TYPE_CHECKING, TypeVar
 
 from qamomile.circuit.frontend.handle.array import Vector
 from qamomile.circuit.frontend.handle.primitives import QFixed, Qubit
@@ -16,15 +16,6 @@ if TYPE_CHECKING:
 
 
 T = TypeVar("T")
-
-
-@overload
-def cast(
-    source: Vector[Qubit],
-    target_type: type[QFixed],
-    *,
-    int_bits: int = 0,
-) -> QFixed: ...
 
 
 def cast(
@@ -132,20 +123,22 @@ def _cast_vector_qubit_to_qfixed(
 
     # Create the result QFixed value
     result_type = QFixedType(integer_bits=int_bits, fractional_bits=frac_bits)
-    result_value = Value(
-        type=result_type,
-        name=f"{source.value.name}_as_qfixed",
-        params={
-            # Cast metadata - using logical_id for physical qubit tracking
-            "cast_source_uuid": source.value.uuid,
-            "cast_source_logical_id": source.value.logical_id,
-            "cast_qubit_uuids": qubit_uuids,
-            "cast_qubit_logical_ids": qubit_logical_ids,
-            # QFixed-specific metadata (for backward compatibility with measurement)
-            "num_bits": num_qubits,
-            "int_bits": int_bits,
-            "qubit_values": qubit_uuids,
-        },
+    result_value = (
+        Value(
+            type=result_type,
+            name=f"{source.value.name}_as_qfixed",
+        )
+        .with_cast_metadata(
+            source_uuid=source.value.uuid,
+            source_logical_id=source.value.logical_id,
+            qubit_uuids=qubit_uuids,
+            qubit_logical_ids=qubit_logical_ids,
+        )
+        .with_qfixed_metadata(
+            qubit_uuids=qubit_uuids,
+            num_bits=num_qubits,
+            int_bits=int_bits,
+        )
     )
 
     # Create and emit the CastOperation

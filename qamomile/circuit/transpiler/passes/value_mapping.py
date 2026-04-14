@@ -4,16 +4,13 @@ from __future__ import annotations
 
 import dataclasses
 import uuid as uuid_module
-from typing import cast
+from typing import Any, cast
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.control_flow import (
-    ForItemsOperation,
-    ForOperation,
+    HasNestedOps,
     IfOperation,
-    WhileOperation,
 )
-from qamomile.circuit.ir.operation.gate import GateOperation
 from qamomile.circuit.ir.value import (
     ArrayValue,
     DictValue,
@@ -53,71 +50,37 @@ class UUIDRemapper:
     def clone_operation(self, op: Operation) -> Operation:
         """Clone an operation with fresh UUIDs for all values."""
         # Clone operands (handles all ValueBase types)
-        new_operands = []
+        new_operands: list[Value] = []
         for v in op.operands:
             if isinstance(v, ValueBase):
-                new_operands.append(self.clone_value(v))
+                new_operands.append(cast(Value, self.clone_value(v)))
             else:
-                # BlockValue in CallBlockOperation - don't clone
+                # Nested Block references in CallBlockOperation are not cloned
                 new_operands.append(v)
 
         # Clone results (handles all ValueBase types)
-        new_results = []
+        new_results: list[Value] = []
         for v in op.results:
             if isinstance(v, ValueBase):
-                new_results.append(self.clone_value(v))
+                new_results.append(cast(Value, self.clone_value(v)))
             else:
                 new_results.append(v)
 
-        # Handle control flow operations
-        if isinstance(op, ForOperation):
-            cloned_body = self.clone_operations(op.operations)
-            return dataclasses.replace(
-                op,
-                operands=new_operands,
-                results=new_results,
-                operations=cloned_body,
+        # Handle control flow operations via HasNestedOps protocol
+        if isinstance(op, HasNestedOps):
+            cloned_lists = [
+                self.clone_operations(op_list) for op_list in op.nested_op_lists()
+            ]
+            base = dataclasses.replace(
+                cast(Any, op), operands=new_operands, results=new_results
             )
-        elif isinstance(op, ForItemsOperation):
-            cloned_body = self.clone_operations(op.operations)
-            return dataclasses.replace(
-                op,
-                operands=new_operands,
-                results=new_results,
-                operations=cloned_body,
-            )
-        elif isinstance(op, IfOperation):
-            cloned_true = self.clone_operations(op.true_operations)
-            cloned_false = self.clone_operations(op.false_operations)
-            cloned_phi = [self.clone_operation(p) for p in op.phi_ops]
-            return dataclasses.replace(
-                op,
-                operands=new_operands,
-                results=new_results,
-                true_operations=cloned_true,
-                false_operations=cloned_false,
-                phi_ops=cloned_phi,
-            )
-        elif isinstance(op, WhileOperation):
-            cloned_body = self.clone_operations(op.operations)
-            return dataclasses.replace(
-                op,
-                operands=new_operands,
-                results=new_results,
-                operations=cloned_body,
-            )
+            return base.rebuild_nested(cloned_lists)
         else:
-            cloned = dataclasses.replace(
+            return dataclasses.replace(
                 op,
                 operands=new_operands,
                 results=new_results,
             )
-            # Handle GateOperation.theta (a Value stored outside operands)
-            if isinstance(cloned, GateOperation) and isinstance(cloned.theta, Value):
-                cloned = dataclasses.replace(
-                    cloned, theta=cast(Value, self.clone_value(cloned.theta))
-                )
-            return cloned
 
     def clone_value(self, value: ValueBase) -> ValueBase:
         """Clone any value type with a fresh UUID and logical_id.
@@ -167,7 +130,7 @@ class UUIDRemapper:
                 value,
                 uuid=new_uuid,
                 logical_id=new_logical_id,
-                entries=new_entries,
+                entries=tuple(new_entries),
             )
         elif isinstance(value, ArrayValue):
             # ArrayValue: clone parent_array, element_indices, AND shape
@@ -223,7 +186,7 @@ class UUIDRemapper:
         else:
             # Fallback for any other ValueBase type
             cloned = dataclasses.replace(
-                value,
+                cast(Any, value),
                 uuid=new_uuid,
                 logical_id=new_logical_id,
             )
@@ -236,66 +199,69 @@ class ValueSubstitutor:
     """Substitutes values in operations using a mapping.
 
     Used during inlining to replace block parameters with caller arguments.
+
+    When ``transitive`` is True, substitute_value chases transitive chains
+    (A -> B -> C) to terminal values with cycle detection, which is needed
+    for phi substitution during compile-time if lowering.
     """
 
-    def __init__(self, value_map: dict[str, ValueBase]):
+    def __init__(self, value_map: dict[str, ValueBase], transitive: bool = False):
         self._value_map = value_map
+        self._transitive = transitive
 
     def substitute_operation(self, op: Operation) -> Operation:
         """Substitute values in an operation using the value map.
 
-        Handles control-flow operations (IfOperation, ForOperation, etc.)
-        by recursing into their nested operation lists and phi_ops.
+        Uses ``Operation.replace_values()`` to handle operands, results,
+        and any subclass-specific Value fields (e.g. ControlledUOperation.power).
+        Also handles IfOperation phi_ops recursion.
         """
-        new_operands = []
-        for v in op.operands:
-            if isinstance(v, ValueBase):
-                new_operands.append(self.substitute_value(v))
-            else:
-                new_operands.append(v)
-
-        new_results = []
+        # Build a substitution mapping (uuid -> substituted ValueBase)
+        sub_map: dict[str, ValueBase] = {}
+        for v in op.all_input_values():
+            substituted = self.substitute_value(v)
+            if substituted is not v:
+                sub_map[v.uuid] = substituted
         for v in op.results:
             if isinstance(v, ValueBase):
-                new_results.append(self.substitute_value(v))
-            else:
-                new_results.append(v)
+                substituted = self.substitute_value(v)
+                if substituted is not v:
+                    sub_map[v.uuid] = substituted
+
+        result = op.replace_values(sub_map) if sub_map else op
 
         # Handle IfOperation: also substitute inside phi_ops
-        if isinstance(op, IfOperation):
-            new_phi_ops = [self.substitute_operation(p) for p in op.phi_ops]
-            return dataclasses.replace(
-                op,
-                operands=new_operands,
-                results=new_results,
-                phi_ops=new_phi_ops,
+        if isinstance(result, IfOperation):
+            from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
+
+            new_phi_ops = cast(
+                list[PhiOp],
+                [self.substitute_operation(p) for p in result.phi_ops],
             )
+            result = dataclasses.replace(result, phi_ops=new_phi_ops)
 
-        substituted = dataclasses.replace(
-            op,
-            operands=new_operands,
-            results=new_results,
-        )
+        return result
 
-        # Handle GateOperation.theta (a Value stored outside operands)
-        if isinstance(substituted, GateOperation) and isinstance(
-            substituted.theta, Value
-        ):
-            new_theta = self.substitute_value(substituted.theta)
-            if isinstance(new_theta, Value) and new_theta is not substituted.theta:
-                substituted = dataclasses.replace(substituted, theta=new_theta)
-
-        return substituted
+    def _chase_transitive(self, v: ValueBase) -> ValueBase:
+        """Chase transitive chains in the value map with cycle detection."""
+        result = self._value_map[v.uuid]
+        if self._transitive:
+            seen: set[str] = {v.uuid}
+            while result.uuid in self._value_map and result.uuid not in seen:
+                seen.add(result.uuid)
+                result = self._value_map[result.uuid]
+        return result
 
     def substitute_value(self, v: ValueBase) -> ValueBase:
         """Substitute a single value using the value map.
 
         Handles all value types and array elements by substituting
-        their parent_array if needed.
+        their parent_array if needed.  When ``transitive`` is enabled,
+        chases transitive chains (A -> B -> C) to terminal values.
         """
         # First try direct lookup
         if v.uuid in self._value_map:
-            return self._value_map[v.uuid]
+            return self._chase_transitive(v)
 
         # Handle TupleValue - substitute elements
         if isinstance(v, TupleValue):
@@ -303,7 +269,7 @@ class ValueSubstitutor:
             changed = False
             for elem in v.elements:
                 if elem.uuid in self._value_map:
-                    substituted = self._value_map[elem.uuid]
+                    substituted = self._chase_transitive(elem)
                     if isinstance(substituted, Value):
                         new_elements.append(substituted)
                         changed = True
@@ -323,37 +289,41 @@ class ValueSubstitutor:
                 new_k = k
                 new_v = val
                 if isinstance(k, (TupleValue, Value)) and k.uuid in self._value_map:
-                    sub_k = self._value_map[k.uuid]
+                    sub_k = self._chase_transitive(k)
                     if isinstance(sub_k, (TupleValue, Value)):
                         new_k = sub_k  # type: ignore
                         changed = True
                 if val.uuid in self._value_map:
-                    sub_v = self._value_map[val.uuid]
+                    sub_v = self._chase_transitive(val)
                     if isinstance(sub_v, Value):
                         new_v = sub_v
                         changed = True
                 new_entries.append((new_k, new_v))
             if changed:
-                return dataclasses.replace(v, entries=new_entries)
+                return dataclasses.replace(v, entries=tuple(new_entries))
             return v
 
         # Handle regular Value/ArrayValue
         if isinstance(v, Value):
-            replacements: dict[str, object] = {}
+            new_parent_array = v.parent_array
+            new_element_indices = v.element_indices
+            new_shape: tuple[Value, ...] | None = None
+            changed = False
 
             # Check if this is an array element whose parent_array should be substituted
             if v.parent_array is not None and v.parent_array.uuid in self._value_map:
-                new_parent = self._value_map[v.parent_array.uuid]
+                new_parent = self._chase_transitive(v.parent_array)
                 if isinstance(new_parent, ArrayValue):
-                    replacements["parent_array"] = new_parent
+                    new_parent_array = new_parent
+                    changed = True
 
             # Also check element_indices for substitution
             if v.element_indices:
-                new_indices = []
+                new_indices: list[Value] = []
                 indices_changed = False
                 for idx in v.element_indices:
                     if idx.uuid in self._value_map:
-                        sub_idx = self._value_map[idx.uuid]
+                        sub_idx = self._chase_transitive(idx)
                         if isinstance(sub_idx, Value):
                             new_indices.append(sub_idx)
                             indices_changed = True
@@ -362,7 +332,8 @@ class ValueSubstitutor:
                     else:
                         new_indices.append(idx)
                 if indices_changed:
-                    replacements["element_indices"] = tuple(new_indices)
+                    new_element_indices = tuple(new_indices)
+                    changed = True
 
             # Substitute ArrayValue.shape dimensions so sub-kernel
             # dimension parameters are resolved to caller arguments.
@@ -371,7 +342,7 @@ class ValueSubstitutor:
                 shape_changed = False
                 for dim in v.shape:
                     if dim.uuid in self._value_map:
-                        sub_dim = self._value_map[dim.uuid]
+                        sub_dim = self._chase_transitive(dim)
                         if isinstance(sub_dim, Value):
                             new_shape_dims.append(sub_dim)
                             shape_changed = True
@@ -380,9 +351,21 @@ class ValueSubstitutor:
                     else:
                         new_shape_dims.append(dim)
                 if shape_changed:
-                    replacements["shape"] = tuple(new_shape_dims)
+                    new_shape = tuple(new_shape_dims)
+                    changed = True
 
-            if replacements:
-                return dataclasses.replace(v, **replacements)
+            if changed:
+                if isinstance(v, ArrayValue) and new_shape is not None:
+                    return dataclasses.replace(
+                        v,
+                        parent_array=new_parent_array,
+                        element_indices=new_element_indices,
+                        shape=new_shape,
+                    )
+                return dataclasses.replace(
+                    v,
+                    parent_array=new_parent_array,
+                    element_indices=new_element_indices,
+                )
 
         return v

@@ -1,6 +1,7 @@
 import dataclasses
 from typing import TYPE_CHECKING
 
+from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.types.primitives import BlockType
 
 from .operation import Operation, OperationKind, ParamHint, Signature
@@ -11,13 +12,15 @@ if TYPE_CHECKING:
 
 @dataclasses.dataclass
 class CallBlockOperation(Operation):
+    block: Block = dataclasses.field(default=None)  # type: ignore[arg-type]
+
+    def __post_init__(self):
+        if self.block is None:
+            raise ValueError("CallBlockOperation.block is required.")
+
     @property
     def signature(self) -> Signature:
-        from qamomile.circuit.ir.block_value import BlockValue
-
-        if not isinstance(self.operands[0], BlockValue):
-            raise TypeError("The first operand must be a BlockValue.")
-        block: BlockValue = self.operands[0]
+        block = self.block
         input_type = [
             ParamHint(name, value.type)
             for name, value in zip(block.label_args, block.input_values)

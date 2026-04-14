@@ -88,10 +88,11 @@ class TestWhileContractNegative:
         """while n: with UInt parameter is rejected."""
 
         @qmc.qkernel
-        def circuit(q: qmc.Qubit, n: qmc.UInt) -> qmc.Qubit:
+        def circuit(n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
             while n:
                 q = qmc.h(q)
-            return q
+            return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
         with pytest.raises(ValidationError, match="measurement result"):
@@ -145,10 +146,11 @@ class TestWhileContractNegative:
         """while flag: with unbound parameter is rejected."""
 
         @qmc.qkernel
-        def circuit(q: qmc.Qubit, flag: qmc.UInt) -> qmc.Qubit:
+        def circuit(flag: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
             while flag:
                 q = qmc.h(q)
-            return q
+            return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
         with pytest.raises(ValidationError, match="measurement result"):

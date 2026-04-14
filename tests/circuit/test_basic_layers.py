@@ -5,6 +5,7 @@ import sympy as sp
 
 import qamomile.circuit as qmc
 from qamomile.circuit.algorithm.basic import (
+    cx_entangling_layer,
     cz_entangling_layer,
     rx_layer,
     ry_layer,
@@ -48,6 +49,15 @@ def test_rz_layer_gate_count(num_qubits):
 def test_cz_entangling_layer_gate_count(num_qubits):
     """Test that cz_entangling_layer produces n-1 CZ gates."""
     counts = count_gates(cz_entangling_layer.block)
+    q_dim0 = sp.Symbol("q_dim0", integer=True, positive=True)
+    assert counts.single_qubit.subs(q_dim0, num_qubits) == 0
+    assert counts.two_qubit.subs(q_dim0, num_qubits) == num_qubits - 1
+
+
+@pytest.mark.parametrize("num_qubits", [2, 4, 6])
+def test_cx_entangling_layer_gate_count(num_qubits):
+    """Test that cx_entangling_layer produces n-1 CX gates."""
+    counts = count_gates(cx_entangling_layer.block)
     q_dim0 = sp.Symbol("q_dim0", integer=True, positive=True)
     assert counts.single_qubit.subs(q_dim0, num_qubits) == 0
     assert counts.two_qubit.subs(q_dim0, num_qubits) == num_qubits - 1
@@ -200,3 +210,22 @@ def test_cz_entangling_layer_transpiled(num_qubits):
     assert cz_count == num_qubits - 1, (
         f"Expected {num_qubits - 1} CZ gates, got {cz_count}"
     )
+
+
+@pytest.mark.parametrize("num_qubits", [2, 4, 6])
+def test_cx_entangling_layer_transpiled(num_qubits):
+    """Test cx_entangling_layer produces correct CX gates with concrete bindings."""
+    pytest.importorskip("qiskit")
+    from qamomile.qiskit import QiskitTranspiler
+
+    @qmc.qkernel
+    def circuit(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+        q = qmc.qubit_array(n, "q")
+        q = cx_entangling_layer(q)
+        return qmc.measure(q)
+
+    transpiler = QiskitTranspiler()
+    executor = transpiler.transpile(circuit, bindings={"n": num_qubits})
+    qc = executor.compiled_quantum[0].circuit
+    cx_count = sum(1 for inst in qc.data if inst.operation.name == "cx")
+    assert cx_count == num_qubits - 1

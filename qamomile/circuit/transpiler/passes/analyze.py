@@ -18,12 +18,12 @@ class AnalyzePass(Pass[Block, Block]):
     """Analyze and validate an affine block.
 
     This pass:
-    1. Builds a dependency graph between values
+    1. Builds a dependency graph between values (used locally for validation)
     2. Validates that quantum ops don't depend on non-parameter classical results
     3. Checks that block inputs/outputs are classical
 
     Input: Block with BlockKind.AFFINE
-    Output: Block with BlockKind.ANALYZED (with _dependency_graph populated)
+    Output: Block with BlockKind.ANALYZED
     """
 
     @property
@@ -54,7 +54,6 @@ class AnalyzePass(Pass[Block, Block]):
         return dataclasses.replace(
             input,
             kind=BlockKind.ANALYZED,
-            _dependency_graph=dependency_graph,
         )
 
     def _validate_io_classical(self, block: Block) -> None:

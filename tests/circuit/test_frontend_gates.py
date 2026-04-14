@@ -9,7 +9,7 @@ import pytest
 import qamomile.circuit as qm
 from qamomile.circuit.frontend.handle import Qubit
 from qamomile.circuit.frontend.qkernel import QKernel, qkernel
-from qamomile.circuit.ir.graph.graph import Graph
+from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.value import Value
@@ -36,7 +36,7 @@ def _build_random_gate_circuit(
     seed: int,
     *,
     theta: str | float | list[float] | None = None,
-) -> tuple[Graph, list[GateOperationType], int, list[float] | None]:
+) -> tuple[Block, list[GateOperationType], int, list[float] | None]:
     """Pick random gates, build a qkernel, return (graph, expected_types, num_gates).
 
     Args:
@@ -131,7 +131,7 @@ class TestSingleQubitGates:
         gate_op = graph.operations[1]
         assert gate_op.gate_type == expected_type
         assert gate_op.theta is None
-        assert len(gate_op.operands) == 1
+        assert len(gate_op.qubit_operands) == 1
         assert len(gate_op.results) == 1
 
     @pytest.mark.parametrize("seed", [901 + offset for offset in range(50)])
@@ -152,7 +152,7 @@ class TestSingleQubitGates:
             assert isinstance(op, GateOperation)
             assert op.gate_type == expected_type
             assert op.theta is None
-            assert len(op.operands) == self.N_QUBITS
+            assert len(op.qubit_operands) == self.N_QUBITS
             assert len(op.results) == self.N_QUBITS
 
     @pytest.mark.parametrize("gate_fn, expected_type", ALL_GATES, ids=IDS)
@@ -171,7 +171,7 @@ class TestSingleQubitGates:
         gate_op = graph.operations[1]
         assert gate_op.gate_type == expected_type
         assert gate_op.theta is None
-        assert len(gate_op.operands) == 1
+        assert len(gate_op.qubit_operands) == 1
         assert len(gate_op.results) == 1
 
     @pytest.mark.parametrize("gate_fn, expected_type", ALL_GATES, ids=IDS)
@@ -188,7 +188,7 @@ class TestSingleQubitGates:
         gate_op = graph.operations[1]
         assert gate_op.gate_type == expected_type
         assert gate_op.theta is None
-        assert len(gate_op.operands) == 1
+        assert len(gate_op.qubit_operands) == 1
         assert len(gate_op.results) == 1
 
 
@@ -220,8 +220,8 @@ class TestRotationGates:
         assert isinstance(graph.operations[1], GateOperation)
         gate_op = graph.operations[1]
         assert gate_op.gate_type == expected_type
-        assert gate_op.theta == 0.5
-        assert len(gate_op.operands) == 1
+        assert gate_op.theta.get_const() == pytest.approx(0.5)
+        assert len(gate_op.qubit_operands) == 1
         assert len(gate_op.results) == 1
 
     @pytest.mark.parametrize("gate_fn, expected_type", ALL_GATES, ids=IDS)
@@ -238,7 +238,7 @@ class TestRotationGates:
         gate_op = graph.operations[1]
         assert gate_op.gate_type == expected_type
         assert isinstance(gate_op.theta, Value)
-        assert len(gate_op.operands) == 1
+        assert len(gate_op.qubit_operands) == 1
         assert len(gate_op.results) == 1
 
     @pytest.mark.parametrize("seed", [901 + offset for offset in range(50)])
@@ -260,8 +260,8 @@ class TestRotationGates:
         ):
             assert isinstance(op, GateOperation)
             assert op.gate_type == expected_type
-            assert op.theta == expected_theta
-            assert len(op.operands) == self.N_QUBITS
+            assert op.theta.get_const() == pytest.approx(expected_theta)
+            assert len(op.qubit_operands) == self.N_QUBITS
             assert len(op.results) == self.N_QUBITS
 
     @pytest.mark.parametrize("seed", [901 + offset for offset in range(50)])
@@ -283,7 +283,7 @@ class TestRotationGates:
             assert isinstance(op, GateOperation)
             assert op.gate_type == expected_type
             assert isinstance(op.theta, Value)
-            assert len(op.operands) == self.N_QUBITS
+            assert len(op.qubit_operands) == self.N_QUBITS
             assert len(op.results) == self.N_QUBITS
 
     @pytest.mark.parametrize("gate_fn, expected_type", ALL_GATES, ids=IDS)
@@ -301,8 +301,8 @@ class TestRotationGates:
         assert isinstance(graph.operations[1], GateOperation)
         gate_op = graph.operations[1]
         assert gate_op.gate_type == expected_type
-        assert gate_op.theta == 0.5
-        assert len(gate_op.operands) == 1
+        assert gate_op.theta.get_const() == pytest.approx(0.5)
+        assert len(gate_op.qubit_operands) == 1
         assert len(gate_op.results) == 1
 
     @pytest.mark.parametrize("gate_fn, expected_type", ALL_GATES, ids=IDS)
@@ -318,8 +318,8 @@ class TestRotationGates:
         assert isinstance(graph.operations[1], GateOperation)
         gate_op = graph.operations[1]
         assert gate_op.gate_type == expected_type
-        assert gate_op.theta == 0.5
-        assert len(gate_op.operands) == 1
+        assert gate_op.theta.get_const() == pytest.approx(0.5)
+        assert len(gate_op.qubit_operands) == 1
         assert len(gate_op.results) == 1
 
 
@@ -352,7 +352,7 @@ class TestTwoQubitGates:
         gate_op = graph.operations[2]
         assert gate_op.gate_type == expected_type
         assert gate_op.theta is None
-        assert len(gate_op.operands) == 2
+        assert len(gate_op.qubit_operands) == 2
         assert len(gate_op.results) == 2
 
     @pytest.mark.parametrize("seed", [901 + offset for offset in range(50)])
@@ -373,7 +373,7 @@ class TestTwoQubitGates:
             assert isinstance(op, GateOperation)
             assert op.gate_type == expected_type
             assert op.theta is None
-            assert len(op.operands) == self.N_QUBITS
+            assert len(op.qubit_operands) == self.N_QUBITS
             assert len(op.results) == self.N_QUBITS
 
     @pytest.mark.parametrize("gate_fn, expected_type", ALL_GATES, ids=IDS)
@@ -392,7 +392,7 @@ class TestTwoQubitGates:
         gate_op = graph.operations[1]
         assert gate_op.gate_type == expected_type
         assert gate_op.theta is None
-        assert len(gate_op.operands) == 2
+        assert len(gate_op.qubit_operands) == 2
         assert len(gate_op.results) == 2
 
     @pytest.mark.parametrize("gate_fn, expected_type", ALL_GATES, ids=IDS)
@@ -409,7 +409,7 @@ class TestTwoQubitGates:
         gate_op = graph.operations[1]
         assert gate_op.gate_type == expected_type
         assert gate_op.theta is None
-        assert len(gate_op.operands) == 2
+        assert len(gate_op.qubit_operands) == 2
         assert len(gate_op.results) == 2
 
 
@@ -440,8 +440,8 @@ class TestTwoQubitParamGates:
         assert isinstance(graph.operations[2], GateOperation)
         gate_op = graph.operations[2]
         assert gate_op.gate_type == expected_type
-        assert gate_op.theta == 0.5
-        assert len(gate_op.operands) == 2
+        assert gate_op.theta.get_const() == pytest.approx(0.5)
+        assert len(gate_op.qubit_operands) == 2
         assert len(gate_op.results) == 2
 
     @pytest.mark.parametrize("gate_fn, expected_type", ALL_GATES, ids=IDS)
@@ -459,7 +459,7 @@ class TestTwoQubitParamGates:
         gate_op = graph.operations[2]
         assert gate_op.gate_type == expected_type
         assert isinstance(gate_op.theta, Value)
-        assert len(gate_op.operands) == 2
+        assert len(gate_op.qubit_operands) == 2
         assert len(gate_op.results) == 2
 
     @pytest.mark.parametrize("seed", [901 + offset for offset in range(50)])
@@ -481,8 +481,8 @@ class TestTwoQubitParamGates:
         ):
             assert isinstance(op, GateOperation)
             assert op.gate_type == expected_type
-            assert op.theta == expected_theta
-            assert len(op.operands) == self.N_QUBITS
+            assert op.theta.get_const() == pytest.approx(expected_theta)
+            assert len(op.qubit_operands) == self.N_QUBITS
             assert len(op.results) == self.N_QUBITS
 
     @pytest.mark.parametrize("seed", [901 + offset for offset in range(50)])
@@ -504,7 +504,7 @@ class TestTwoQubitParamGates:
             assert isinstance(op, GateOperation)
             assert op.gate_type == expected_type
             assert isinstance(op.theta, Value)
-            assert len(op.operands) == self.N_QUBITS
+            assert len(op.qubit_operands) == self.N_QUBITS
             assert len(op.results) == self.N_QUBITS
 
     @pytest.mark.parametrize("gate_fn, expected_type", ALL_GATES, ids=IDS)
@@ -522,8 +522,8 @@ class TestTwoQubitParamGates:
         assert isinstance(graph.operations[1], GateOperation)
         gate_op = graph.operations[1]
         assert gate_op.gate_type == expected_type
-        assert gate_op.theta == 0.5
-        assert len(gate_op.operands) == 2
+        assert gate_op.theta.get_const() == pytest.approx(0.5)
+        assert len(gate_op.qubit_operands) == 2
         assert len(gate_op.results) == 2
 
     @pytest.mark.parametrize("gate_fn, expected_type", ALL_GATES, ids=IDS)
@@ -539,8 +539,8 @@ class TestTwoQubitParamGates:
         assert isinstance(graph.operations[1], GateOperation)
         gate_op = graph.operations[1]
         assert gate_op.gate_type == expected_type
-        assert gate_op.theta == 0.5
-        assert len(gate_op.operands) == 2
+        assert gate_op.theta.get_const() == pytest.approx(0.5)
+        assert len(gate_op.qubit_operands) == 2
         assert len(gate_op.results) == 2
 
 
@@ -570,7 +570,7 @@ class TestThreeQubitGates:
         gate_op = graph.operations[3]
         assert gate_op.gate_type == expected_type
         assert gate_op.theta is None
-        assert len(gate_op.operands) == 3
+        assert len(gate_op.qubit_operands) == 3
         assert len(gate_op.results) == 3
 
     @pytest.mark.parametrize("seed", [901 + offset for offset in range(50)])
@@ -591,7 +591,7 @@ class TestThreeQubitGates:
             assert isinstance(op, GateOperation)
             assert op.gate_type == expected_type
             assert op.theta is None
-            assert len(op.operands) == self.N_QUBITS
+            assert len(op.qubit_operands) == self.N_QUBITS
             assert len(op.results) == self.N_QUBITS
 
     @pytest.mark.parametrize("gate_fn, expected_type", ALL_GATES, ids=IDS)
@@ -610,7 +610,7 @@ class TestThreeQubitGates:
         gate_op = graph.operations[1]
         assert gate_op.gate_type == expected_type
         assert gate_op.theta is None
-        assert len(gate_op.operands) == 3
+        assert len(gate_op.qubit_operands) == 3
         assert len(gate_op.results) == 3
 
     @pytest.mark.parametrize("gate_fn, expected_type", ALL_GATES, ids=IDS)
@@ -627,7 +627,7 @@ class TestThreeQubitGates:
         gate_op = graph.operations[1]
         assert gate_op.gate_type == expected_type
         assert gate_op.theta is None
-        assert len(gate_op.operands) == 3
+        assert len(gate_op.qubit_operands) == 3
         assert len(gate_op.results) == 3
 
 
@@ -735,4 +735,7 @@ class TestAllGates:
         ):
             assert isinstance(op, GateOperation)
             assert op.gate_type == expected_type
-            assert op.theta == expected_theta
+            if expected_theta is None:
+                assert op.theta is None
+            else:
+                assert op.theta.get_const() == pytest.approx(expected_theta)

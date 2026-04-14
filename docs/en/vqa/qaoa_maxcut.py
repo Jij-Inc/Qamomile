@@ -304,11 +304,14 @@ executable = transpiler.transpile(
 # energy.
 
 # %%
+import os
 import numpy as np
-from qiskit_aer import AerSimulator
 from scipy.optimize import minimize
 
-executor = transpiler.executor(backend=AerSimulator(seed_simulator=7))
+executor = transpiler.executor()
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 256 if docs_test_mode else 2048
+maxiter = 20 if docs_test_mode else 500
 cost_history: list[float] = []
 
 
@@ -317,7 +320,7 @@ def cost_fn(params):
     betas = list(params[p:])
     result = executable.sample(
         executor,
-        shots=2048,
+        shots=sample_shots,
         bindings={"gammas": gammas, "betas": betas},
     ).result()
     decoded = spin_model.decode_from_sampleresult(result)
@@ -329,7 +332,7 @@ def cost_fn(params):
 rng = np.random.default_rng(42)
 initial_params = rng.uniform(-np.pi / 2, np.pi / 2, 2 * p)
 
-res = minimize(cost_fn, initial_params, method="COBYLA", options={"maxiter": 500})
+res = minimize(cost_fn, initial_params, method="COBYLA", options={"maxiter": maxiter})
 
 print(f"Optimized cost: {res.fun:.4f}")
 print(f"Optimal params: {[round(v, 4) for v in res.x]}")
@@ -356,7 +359,7 @@ betas_opt = list(res.x[p:])
 
 final_result = executable.sample(
     executor,
-    shots=2048,
+    shots=sample_shots,
     bindings={"gammas": gammas_opt, "betas": betas_opt},
 ).result()
 
@@ -422,8 +425,8 @@ if best_qaoa_sample is not None:
 # (`gammas`, `betas`).
 #
 # Let's build the same circuit using the built-in function to confirm
-# that it implements the same structure. By using a seeded simulator,
-# we can verify that both circuits produce identical results.
+# that it implements the same structure. We reuse the default local
+# executor so the example remains portable across environments.
 
 # %%
 from qamomile.circuit.algorithm import qaoa_state
@@ -444,12 +447,8 @@ def qaoa_builtin(
 
 # %% [markdown]
 # We transpile and sample with the same optimized parameters.
-# Using a seeded `AerSimulator` gives deterministic results for
-# identical circuits.
 
 # %%
-from qiskit_aer import AerSimulator
-
 exe_builtin = transpiler.transpile(
     qaoa_builtin,
     bindings={
@@ -461,22 +460,18 @@ exe_builtin = transpiler.transpile(
     parameters=["gammas", "betas"],
 )
 
-seeded_executor_manual = transpiler.executor(
-    backend=AerSimulator(seed_simulator=0),
-)
-seeded_executor_builtin = transpiler.executor(
-    backend=AerSimulator(seed_simulator=0),
-)
+executor_manual = transpiler.executor()
+executor_builtin = transpiler.executor()
 
 result_manual = executable.sample(
-    seeded_executor_manual,
-    shots=2048,
+    executor_manual,
+    shots=sample_shots,
     bindings={"gammas": gammas_opt, "betas": betas_opt},
 ).result()
 
 result_builtin = exe_builtin.sample(
-    seeded_executor_builtin,
-    shots=2048,
+    executor_builtin,
+    shots=sample_shots,
     bindings={"gammas": gammas_opt, "betas": betas_opt},
 ).result()
 

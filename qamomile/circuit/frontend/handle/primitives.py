@@ -34,7 +34,7 @@ class UInt(ArithmeticMixin, Handle):
     def _make_uint(self, val: int) -> "UInt":
         """Create a UInt from an integer constant."""
         return UInt(
-            value=Value(type=UIntType(), name="uint_const", params={"const": val}),
+            value=Value(type=UIntType(), name="uint_const").with_const(val),
             init_value=val,
         )
 
@@ -56,9 +56,7 @@ class UInt(ArithmeticMixin, Handle):
             return self._make_uint(other)
         if isinstance(other, float):
             return Float(
-                value=Value(
-                    type=FloatType(), name="float_const", params={"const": other}
-                ),
+                value=Value(type=FloatType(), name="float_const").with_const(other),
                 init_value=other,
             )
         return other
@@ -93,32 +91,30 @@ class UInt(ArithmeticMixin, Handle):
 
     # Override arithmetic operations with proper type hints for UInt
     def __add__(self, other: "int | UInt") -> "UInt":
-        other = self._coerce(other)
+        coerced = self._coerce(other)
         result = self._make_result()
-        _emit_binop(self.value, other.value, result.value, BinOpKind.ADD)
+        _emit_binop(self.value, coerced.value, result.value, BinOpKind.ADD)
         return result
 
     def __radd__(self, other: "int | UInt") -> "UInt":
         return self.__add__(other)
 
     def __sub__(self, other: "int | UInt") -> "UInt":
-        other = self._coerce(other)
+        coerced = self._coerce(other)
         result = self._make_result()
-        _emit_binop(self.value, other.value, result.value, BinOpKind.SUB)
+        _emit_binop(self.value, coerced.value, result.value, BinOpKind.SUB)
         return result
 
     def __rsub__(self, other: "int | UInt") -> "UInt":
-        other = self._coerce(other)
+        coerced = self._coerce(other)
         result = self._make_result()
-        _emit_binop(other.value, self.value, result.value, BinOpKind.SUB)
+        _emit_binop(coerced.value, self.value, result.value, BinOpKind.SUB)
         return result
 
     # UInt-specific multiplication (handles float case differently)
     def __mul__(self, other) -> "UInt | Float":
         if isinstance(other, float):
-            other_value = Value(
-                type=FloatType(), name="float_const", params={"const": other}
-            )
+            other_value = Value(type=FloatType(), name="float_const").with_const(other)
             result = self._make_float_result()
             _emit_binop(self.value, other_value, result.value, BinOpKind.MUL)
             return result
@@ -131,41 +127,41 @@ class UInt(ArithmeticMixin, Handle):
 
     # UInt-specific true division (always returns Float)
     def __truediv__(self, other: "int | float | UInt | Float") -> "Float":
-        other = self._coerce(other)
+        coerced = self._coerce(other)
         result = self._make_float_result()
-        _emit_binop(self.value, other.value, result.value, BinOpKind.DIV)
+        _emit_binop(self.value, coerced.value, result.value, BinOpKind.DIV)
         return result
 
     def __rtruediv__(self, other: "int | float | UInt | Float") -> "Float":
-        other = self._coerce(other)
+        coerced = self._coerce(other)
         result = self._make_float_result()
-        _emit_binop(other.value, self.value, result.value, BinOpKind.DIV)
+        _emit_binop(coerced.value, self.value, result.value, BinOpKind.DIV)
         return result
 
     # UInt-specific floor division
     def __floordiv__(self, other: "int | UInt") -> "UInt":
-        other = self._coerce(other)
+        coerced = self._coerce(other)
         result = self._make_result()
-        _emit_binop(self.value, other.value, result.value, BinOpKind.FLOORDIV)
+        _emit_binop(self.value, coerced.value, result.value, BinOpKind.FLOORDIV)
         return result
 
     def __rfloordiv__(self, other: "int | UInt") -> "UInt":
-        other = self._coerce(other)
+        coerced = self._coerce(other)
         result = self._make_result()
-        _emit_binop(other.value, self.value, result.value, BinOpKind.FLOORDIV)
+        _emit_binop(coerced.value, self.value, result.value, BinOpKind.FLOORDIV)
         return result
 
     # UInt-specific power operation
     def __pow__(self, other: "int | UInt") -> "UInt":
-        other = self._coerce(other)
+        coerced = self._coerce(other)
         result = self._make_result()
-        _emit_binop(self.value, other.value, result.value, BinOpKind.POW)
+        _emit_binop(self.value, coerced.value, result.value, BinOpKind.POW)
         return result
 
     def __rpow__(self, other: "int | UInt") -> "UInt":
-        other = self._coerce(other)
+        coerced = self._coerce(other)
         result = self._make_result()
-        _emit_binop(other.value, self.value, result.value, BinOpKind.POW)
+        _emit_binop(coerced.value, self.value, result.value, BinOpKind.POW)
         return result
 
 
@@ -178,7 +174,7 @@ class Float(ArithmeticMixin, Handle):
     def _make_float(self, val: float) -> "Float":
         """Create a Float from a constant."""
         return Float(
-            value=Value(type=FloatType(), name="float_const", params={"const": val}),
+            value=Value(type=FloatType(), name="float_const").with_const(val),
             init_value=val,
         )
 

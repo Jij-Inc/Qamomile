@@ -1,17 +1,17 @@
-"""Tests for SimplifiedProgram validation and C→Q→C pattern enforcement."""
+"""Tests for ProgramPlan validation and C→Q→C pattern enforcement."""
 
 import pytest
 
 import qamomile.circuit as qm
-from qamomile.circuit.transpiler.segments import SimplifiedProgram
+from qamomile.circuit.transpiler.segments import ProgramPlan, QuantumStep
 from qamomile.qiskit.transpiler import QiskitTranspiler
 
 
-class TestSimplifiedProgramStructure:
-    """Test that SimplifiedProgram enforces C→Q→C pattern."""
+class TestProgramPlanStructure:
+    """Test that ProgramPlan enforces C→Q→C pattern."""
 
     def test_transpile_succeeds(self):
-        """Full transpile pipeline should work and return SimplifiedProgram internally."""
+        """Full transpile pipeline should work and return ProgramPlan internally."""
 
         @qm.qkernel
         def kernel(theta: qm.Float) -> qm.Bit:
@@ -35,7 +35,7 @@ class TestSimplifiedProgramStructure:
         assert executable.quantum_circuit is not None
 
     def test_simplified_program_structure(self):
-        """Check that separate() returns SimplifiedProgram."""
+        """Check that separate() returns ProgramPlan."""
 
         @qm.qkernel
         def kernel() -> qm.Bit:
@@ -48,11 +48,11 @@ class TestSimplifiedProgramStructure:
         block = transpiler.to_block(kernel)
         inlined = transpiler.inline(block)
         analyzed = transpiler.analyze(inlined)
-        separated = transpiler.separate(analyzed)
+        separated = transpiler.plan(analyzed)
 
-        # Should return SimplifiedProgram
-        assert isinstance(separated, SimplifiedProgram)
-        assert separated.quantum is not None
+        # Should return ProgramPlan
+        assert isinstance(separated, ProgramPlan)
+        assert any(isinstance(s, QuantumStep) for s in separated.steps)
 
 
 class TestExecutableProgram:

@@ -70,12 +70,11 @@ def expval(
             type=qubit_values[0].type,
             name="expval_qubits",
             shape=tuple(),
-            params={"qubit_values": qubit_values},
+        ).with_array_runtime_metadata(
+            element_uuids=tuple(q.uuid for q in qubit_values),
+            element_logical_ids=tuple(q.logical_id for q in qubit_values),
         )
-    elif isinstance(qubits, Vector):
-        qubits_value = qubits.value
     else:
-        # Single qubit - wrap in array-like structure
         qubits_value = qubits.value
 
     # Create result Float value
