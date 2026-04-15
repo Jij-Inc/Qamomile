@@ -115,13 +115,26 @@ def product_formula(
     evolution time.
 
     Args:
-        n_terms: Number of Hamiltonian terms (m).
-        order: Approximation order.
+        n_terms: Number of Hamiltonian terms (m).  Must be >= 2.
+        order: Approximation order — ``1`` (Lie-Trotter) or a positive
+            even integer (Suzuki).
         dt_frac: Time fraction for this step (``1/step`` at top level).
 
     Returns:
         List of ``(term_index, time_fraction)`` pairs.
+
+    Raises:
+        ValueError: If ``n_terms`` < 2 or ``order`` is not 1 or a positive
+            even integer.
     """
+    if n_terms < 2:
+        raise ValueError(
+            f"n_terms must be at least 2 for Trotter decomposition, got {n_terms}"
+        )
+    if order != 1 and (order <= 0 or order % 2 != 0):
+        raise ValueError(
+            f"order must be 1 or a positive even integer, got {order}"
+        )
     if order == 1:
         # Lie-Trotter: prod_{i=1}^{m} exp(-i dt H_i)
         return [(i, dt_frac) for i in range(n_terms)]

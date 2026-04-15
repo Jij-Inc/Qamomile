@@ -96,6 +96,38 @@ class TestValidation:
 # -----------------------------------------------------------------------
 
 
+class TestProductFormulaValidation:
+    def test_order_odd_3_raises(self):
+        with pytest.raises(ValueError, match="order must be 1 or a positive even"):
+            product_formula(n_terms=2, order=3, dt_frac=1.0)
+
+    def test_order_odd_5_raises(self):
+        with pytest.raises(ValueError, match="order must be 1 or a positive even"):
+            product_formula(n_terms=2, order=5, dt_frac=1.0)
+
+    def test_order_zero_raises(self):
+        with pytest.raises(ValueError, match="order must be 1 or a positive even"):
+            product_formula(n_terms=2, order=0, dt_frac=1.0)
+
+    def test_order_negative_raises(self):
+        with pytest.raises(ValueError, match="order must be 1 or a positive even"):
+            product_formula(n_terms=2, order=-2, dt_frac=1.0)
+
+    def test_n_terms_one_raises(self):
+        with pytest.raises(ValueError, match="n_terms must be at least 2"):
+            product_formula(n_terms=1, order=1, dt_frac=1.0)
+
+    def test_n_terms_zero_raises(self):
+        with pytest.raises(ValueError, match="n_terms must be at least 2"):
+            product_formula(n_terms=0, order=1, dt_frac=1.0)
+
+    def test_valid_order1_does_not_raise(self):
+        product_formula(n_terms=2, order=1, dt_frac=1.0)
+
+    def test_valid_order2_does_not_raise(self):
+        product_formula(n_terms=2, order=2, dt_frac=1.0)
+
+
 class TestProductFormula:
     def test_order1_sequence_length(self):
         seq = product_formula(n_terms=3, order=1, dt_frac=0.5)
