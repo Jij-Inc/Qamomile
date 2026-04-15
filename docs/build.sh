@@ -112,20 +112,13 @@ build_lang() {
     local lang="$1"
     echo "Building ${lang} documentation..."
     cd "$lang"
-    if is_rtd && [[ -n "${READTHEDOCS_CANONICAL_URL:-}" ]]; then
-        # Strip origin, keep only path (MyST expects path-only BASE_URL)
-        local base_url stripped
-        stripped="${READTHEDOCS_CANONICAL_URL#https://}"
-        stripped="${stripped#http://}"
-        base_url="/${stripped#*/}"
-        # Handle domain-only case (no path after host)
-        [[ "$base_url" == "/${stripped}" ]] && base_url=""
-        base_url="${base_url%/}/${lang}"
+    if is_rtd && [[ -n "${READTHEDOCS_VERSION:-}" ]]; then
+        local base_url="/${READTHEDOCS_VERSION}/${lang}"
         info "Read the Docs detected. Using BASE_URL=${base_url}"
         BASE_URL="$base_url" uv run jupyter-book build --html
     else
         if is_rtd; then
-            warn "Read the Docs detected but READTHEDOCS_CANONICAL_URL is unset or empty; building without BASE_URL"
+            warn "Read the Docs detected but READTHEDOCS_VERSION is unset or empty; building without BASE_URL"
         fi
         uv run jupyter-book build --html
     fi
