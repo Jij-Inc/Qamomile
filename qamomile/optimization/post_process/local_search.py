@@ -23,6 +23,9 @@ class LocalSearch:
 
     Args:
         model: The binary model to optimize.
+
+    Raises:
+        ValueError: If *model* contains higher-order (order > 2) terms.
     """
 
     def __init__(self, model: BinaryModel) -> None:
@@ -32,6 +35,13 @@ class LocalSearch:
             if model.vartype != VarType.SPIN
             else model
         )
+
+        if self._spin_model.order > 2 or self._spin_model.higher:
+            raise ValueError(
+                "LocalSearch only supports quadratic (order <= 2) models, "
+                f"got order={self._spin_model.order} with "
+                f"{len(self._spin_model.higher)} higher-order term(s)."
+            )
 
         n = self._spin_model.num_bits
 
@@ -174,6 +184,8 @@ class LocalSearch:
         n: int,
     ) -> np.ndarray:
         """Flip the single bit that gives the largest energy decrease."""
+        if n == 0:
+            return state
         deltas = [
             LocalSearch._calc_e_diff(state, neighbors, linear, i) for i in range(n)
         ]
