@@ -132,6 +132,8 @@ def product_formula(
         raise ValueError(
             f"n_terms must be at least 2 for Trotter decomposition, got {n_terms}"
         )
+    if isinstance(order, bool) or not isinstance(order, int):
+        raise ValueError(f"order must be 1 or a positive even integer, got {order}")
     if order != 1 and (order <= 0 or order % 2 != 0):
         raise ValueError(f"order must be 1 or a positive even integer, got {order}")
     if order == 1:

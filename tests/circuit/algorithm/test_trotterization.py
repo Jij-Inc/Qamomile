@@ -142,6 +142,14 @@ class TestProductFormulaValidation:
     def test_valid_order2_does_not_raise(self):
         product_formula(n_terms=2, order=2, dt_frac=1.0)
 
+    def test_order_bool_true_raises(self):
+        with pytest.raises(ValueError, match="order must be 1 or a positive even"):
+            product_formula(n_terms=2, order=True, dt_frac=1.0)
+
+    def test_order_bool_false_raises(self):
+        with pytest.raises(ValueError, match="order must be 1 or a positive even"):
+            product_formula(n_terms=2, order=False, dt_frac=1.0)
+
 
 class TestProductFormula:
     def test_order1_sequence_length(self):
@@ -218,11 +226,17 @@ class TestFullSequence:
 # Integration: trotterized_time_evolution() + transpile via Qiskit
 # -----------------------------------------------------------------------
 
-pytest.importorskip("qiskit")
+try:
+    from qamomile.qiskit.transpiler import QiskitTranspiler
 
-from qamomile.qiskit.transpiler import QiskitTranspiler  # noqa: E402
+    _has_qiskit = True
+except ImportError:
+    _has_qiskit = False
+
+_requires_qiskit = pytest.mark.skipif(not _has_qiskit, reason="Qiskit not installed")
 
 
+@_requires_qiskit
 class TestTranspileOrder1:
     def test_pauli_evolve_count(self):
         """order=1, step=1, 2 terms → 2 PauliEvolution gates."""
@@ -291,6 +305,7 @@ class TestTranspileOrder1:
         assert n2 == 2 * n1
 
 
+@_requires_qiskit
 class TestTranspileOrder2:
     def test_pauli_evolve_count_2term(self):
         """order=2, step=1, 2 terms → 4 PauliEvolution gates."""
@@ -348,6 +363,7 @@ class TestTranspileOrder2:
         assert _gate_counts(qc).get("PauliEvolution", 0) == 6
 
 
+@_requires_qiskit
 class TestTranspileHigherOrder:
     def test_order4_pauli_evolve_count(self):
         """order=4, step=1, 2 terms → 20 PauliEvolution gates."""
@@ -374,6 +390,7 @@ class TestTranspileHigherOrder:
         assert _gate_counts(qc).get("PauliEvolution", 0) == 20
 
 
+@_requires_qiskit
 class TestTranspileTimeZero:
     def test_time_zero_compiles(self):
         """time=0 should produce a valid circuit (all angles 0)."""
