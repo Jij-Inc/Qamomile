@@ -181,6 +181,27 @@ class TestEdgeCases:
         assert np.isclose(energy, -2.0)
 
 
+class TestUnsupportedModels:
+    def test_hubo_model_raises(self):
+        """Models with order > 2 (HUBO) raise ValueError in __init__."""
+        model = BinaryModel.from_ising(linear={}, quad={}, constant=0.0)
+        model._higher[(0, 1, 2)] = 1.0
+        model.order = 3
+        with pytest.raises(ValueError, match="quadratic"):
+            LocalSearch(model)
+
+
+class TestConstantOnlyModel:
+    @pytest.mark.parametrize("method", ["best_improvement", "first_improvement"])
+    def test_constant_only_model_no_crash(self, method):
+        """n == 0 constant-only model returns unchanged state without crashing."""
+        model = BinaryModel.from_ising(linear={}, quad={}, constant=5.0)
+        ls = LocalSearch(model)
+        result = ls.run([], method=method)
+        _, energy, _ = result.lowest()
+        assert np.isclose(energy, 5.0)
+
+
 class TestCalcEDiff:
     def test_energy_diff_matches_actual(self, spin_model):
         """Incremental energy diff equals the brute-force difference."""
