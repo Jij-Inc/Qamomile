@@ -269,9 +269,7 @@ class TestTranspileOrder1:
             wrapper1,
             bindings={"n": h.num_qubits, "t": 1.0, "H_0": sub_hs[0], "H_1": sub_hs[1]},
         )
-        n1 = _gate_counts(exe1.compiled_quantum[0].circuit).get(
-            "PauliEvolution", 0
-        )
+        n1 = _gate_counts(exe1.compiled_quantum[0].circuit).get("PauliEvolution", 0)
 
         @qmc.qkernel
         def wrapper2(
@@ -288,9 +286,7 @@ class TestTranspileOrder1:
             wrapper2,
             bindings={"n": h.num_qubits, "t": 1.0, "H_0": sub_hs[0], "H_1": sub_hs[1]},
         )
-        n2 = _gate_counts(exe2.compiled_quantum[0].circuit).get(
-            "PauliEvolution", 0
-        )
+        n2 = _gate_counts(exe2.compiled_quantum[0].circuit).get("PauliEvolution", 0)
 
         assert n2 == 2 * n1
 

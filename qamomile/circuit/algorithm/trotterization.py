@@ -94,13 +94,9 @@ def _validate_inputs(n_terms: int, step: int, order: int) -> None:
     if isinstance(step, bool) or not isinstance(step, int) or step <= 0:
         raise ValueError(f"step must be a positive integer, got {step}")
     if isinstance(order, bool):
-        raise ValueError(
-            f"order must be 1 or a positive even integer, got {order}"
-        )
+        raise ValueError(f"order must be 1 or a positive even integer, got {order}")
     if order != 1 and (order <= 0 or order % 2 != 0):
-        raise ValueError(
-            f"order must be 1 or a positive even integer, got {order}"
-        )
+        raise ValueError(f"order must be 1 or a positive even integer, got {order}")
     if n_terms < 2:
         raise ValueError(
             f"observables must have at least 2 terms for Trotter "
@@ -137,9 +133,7 @@ def product_formula(
             f"n_terms must be at least 2 for Trotter decomposition, got {n_terms}"
         )
     if order != 1 and (order <= 0 or order % 2 != 0):
-        raise ValueError(
-            f"order must be 1 or a positive even integer, got {order}"
-        )
+        raise ValueError(f"order must be 1 or a positive even integer, got {order}")
     if order == 1:
         # Lie-Trotter: prod_{i=1}^{m} exp(-i dt H_i)
         return [(i, dt_frac) for i in range(n_terms)]
