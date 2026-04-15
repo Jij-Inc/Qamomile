@@ -15,7 +15,7 @@
 # %% [markdown]
 # # 水素分子のための変分量子固有値ソルバー（VQE）
 #
-# このチュートリアルでは、水素分子（H₂）の基底状態エネルギーを求めるための変分量子固有値ソルバー（VQE）アルゴリズムの実装について解説します。分子ハミルトニアンの生成にはOpenFermion、量子回路の構築にはQamomile、量子シミュレーションにはQiskitなど、さまざまな量子コンピューティングフレームワークを使用します。
+# このチュートリアルでは、水素分子（H₂）の基底状態エネルギーを求めるための変分量子固有値ソルバー（VQE）アルゴリズムの実装について解説します。分子ハミルトニアンの生成には [OpenFermion](https://quantumai.google/openfermion) を使用します。
 #
 # ワークフローは以下の通りです：
 # 1. 分子ハミルトニアンを量子ビット演算子へ変換
@@ -23,7 +23,7 @@
 # 3. VQEによる最適化の実装
 # 4. 原子間距離ごとのエネルギー地形の解析
 #
-# 量子コンピューティングを用いて量子化学の問題を解く方法を示し、特にH₂分子の最小エネルギー構造の探索に焦点を当てます。
+# 量子コンピューティングを用いた量子化学問題の解法を紹介し、特にH₂分子の最小エネルギー構造の探索に焦点を当てます。
 
 # %%
 # 必要なパッケージは以下のコマンドでインストールできます
@@ -40,7 +40,7 @@ from scipy.optimize import minimize
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.circuit.algorithm.basic import ry_layer, rz_layer
+from qamomile.circuit.algorithm.basic import cx_entangling_layer, ry_layer, rz_layer
 from qamomile.qiskit import QiskitTranspiler
 from qamomile.qiskit.transpiler import QiskitExecutor
 
@@ -65,7 +65,7 @@ jw_hamiltonian = of_trans.jordan_wigner(fermionic_hamiltonian)
 # %% [markdown]
 # ## Qamomile ハミルトニアンへの変換
 #
-# このセクションでは、OpenFermionのハミルトニアンをQamomileフォーマットに変換する。 まず、Jordan-Wigner変換を適用してフェルミ粒子演算子を量子ビット演算子へ変換し、その後、カスタム変換関数を用いてQamomileに適したハミルトニアン表現を作成する。
+# このセクションでは、OpenFermionのハミルトニアンをQamomileフォーマットに変換します。Jordan-Wigner変換を適用してフェルミ粒子演算子を量子ビット演算子へ変換し、その後、カスタム変換関数を用いてQamomileに適したハミルトニアン表現を作成します。
 
 # %%
 def operator_to_qamomile(operators: tuple[tuple[int, str], ...]) -> qm_o.Hamiltonian:
@@ -73,7 +73,7 @@ def operator_to_qamomile(operators: tuple[tuple[int, str], ...]) -> qm_o.Hamilto
     H = qm_o.Hamiltonian()
     H.constant = 1.0
     for ope in operators:
-        H = H * pauli[ope[1]](ope[0])
+        H *= pauli[ope[1]](ope[0])
     return H
 
 def openfermion_to_qamomile(of_h) -> qm_o.Hamiltonian:
@@ -91,18 +91,9 @@ hamiltonian = openfermion_to_qamomile(jw_hamiltonian)
 # %% [markdown]
 # ## VQE アンザッツの作成
 #
-# このセクションでは、VQEアルゴリズムのための EfficientSU2 アンザッツを `@qkernel` デコレータを用いて作成する。 アンザッツとは、試行波動関数を準備するパラメータ付き量子回路である。 `ry_layer`、`rz_layer` および線形 CX エンタングル層を組み合わせて構築し、最後に `expval` でハミルトニアンの期待値を計算する。
+# このセクションでは、VQEアルゴリズムのための EfficientSU2 アンザッツを `@qkernel` デコレータを用いて作成します。アンザッツとは、試行波動関数を準備するパラメータ付き量子回路です。`ry_layer`、`rz_layer` および線形 CX エンタングル層を組み合わせて構築し、最後に `expval` でハミルトニアンの期待値を計算します。
 
 # %%
-@qmc.qkernel
-def cx_entangling_layer(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-    """Linear CX entangling layer."""
-    n = q.shape[0]
-    for i in qmc.range(n - 1):
-        q[i], q[i + 1] = qmc.cx(q[i], q[i + 1])
-    return q
-
-
 @qmc.qkernel
 def vqe_ansatz(
     n: qmc.UInt,
@@ -126,7 +117,7 @@ def vqe_ansatz(
 # %% [markdown]
 # ## Qiskitを用いたVQEの実行
 #
-# このセクションでは、`QiskitTranspiler` を使って VQE カーネルをトランスパイルし、Qiskit Aer シミュレータ上で実行する。`expval` による期待値計算はトランスパイラが自動的に処理するため、ユーザーは最適化ループのみ実装すればよい。もちろん、他の量子コンピューティングフレームワークを使用することも可能である。
+# このセクションでは、`QiskitTranspiler` を使って VQE カーネルを実行可能オブジェクトにトランスパイルします。デフォルトの executor がこのオブジェクトを実行し、qkernel で定義した `expval` による期待値を返します。そのため、ユーザーは最適化ループのみ実装すれば問題ありません。
 
 # %%
 transpiler = QiskitTranspiler()
@@ -156,9 +147,10 @@ def cost_callback(param_values):
 
 
 num_params = len(executable.parameter_names)
-initial_params = np.random.uniform(0, np.pi, num_params)
+rng = np.random.default_rng(42)
+initial_params = rng.uniform(0, np.pi, num_params)
 
-# VQE 最適化を実行する
+# VQE 最適化を実行します
 result = minimize(
     cost_fn,
     initial_params,
@@ -211,7 +203,7 @@ for bond_length in bond_lengths:
     )
 
     num_params = len(executable.parameter_names)
-    initial_params = np.random.uniform(0, np.pi, num_params)
+    initial_params = rng.uniform(0, np.pi, num_params)
     result = minimize(
         cost_fn,
         initial_params,

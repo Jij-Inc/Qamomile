@@ -60,9 +60,6 @@ dev = [
     "zuban>=0.4.1",
     "griffe>=1.0.0",
     "ommx-pyscipopt-adapter>=2.3.0",
-]
-
-chemistry = [
     "openfermion>=1.6.0",
     "openfermionpyscf>=0.5",
     "pyscf>=2.5.0",

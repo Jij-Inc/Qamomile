@@ -15,7 +15,7 @@
 # %% [markdown]
 # # Variational Quantum Eigensolver (VQE) for the Hydrogen Molecule
 #
-# This tutorial demonstrates how to implement the Variational Quantum Eigensolver (VQE) algorithm to find the ground state energy of the hydrogen molecule (H₂). We use several quantum computing frameworks: OpenFermion for generating molecular Hamiltonians, Qamomile for quantum circuit construction, and Qiskit for quantum simulation.
+# This tutorial demonstrates how to implement the Variational Quantum Eigensolver (VQE) algorithm to find the ground state energy of the hydrogen molecule (H₂). We use [OpenFermion](https://quantumai.google/openfermion) for generating molecular Hamiltonians.
 #
 # The workflow is as follows:
 # 1. Convert the molecular Hamiltonian to qubit operators
@@ -40,7 +40,7 @@ from scipy.optimize import minimize
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.circuit.algorithm.basic import ry_layer, rz_layer
+from qamomile.circuit.algorithm.basic import cx_entangling_layer, ry_layer, rz_layer
 from qamomile.qiskit import QiskitTranspiler
 from qamomile.qiskit.transpiler import QiskitExecutor
 
@@ -73,7 +73,7 @@ def operator_to_qamomile(operators: tuple[tuple[int, str], ...]) -> qm_o.Hamilto
     H = qm_o.Hamiltonian()
     H.constant = 1.0
     for ope in operators:
-        H = H * pauli[ope[1]](ope[0])
+        H *= pauli[ope[1]](ope[0])
     return H
 
 def openfermion_to_qamomile(of_h) -> qm_o.Hamiltonian:
@@ -94,15 +94,6 @@ hamiltonian = openfermion_to_qamomile(jw_hamiltonian)
 # In this section, we create an EfficientSU2 ansatz for the VQE algorithm using the `@qkernel` decorator. An ansatz is a parametrized quantum circuit that prepares a trial wavefunction. We build it by combining `ry_layer`, `rz_layer`, and a linear CX entangling layer, and finally compute the expectation value of the Hamiltonian using `expval`.
 
 # %%
-@qmc.qkernel
-def cx_entangling_layer(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-    """Linear CX entangling layer."""
-    n = q.shape[0]
-    for i in qmc.range(n - 1):
-        q[i], q[i + 1] = qmc.cx(q[i], q[i + 1])
-    return q
-
-
 @qmc.qkernel
 def vqe_ansatz(
     n: qmc.UInt,
@@ -126,7 +117,7 @@ def vqe_ansatz(
 # %% [markdown]
 # ## Running VQE with Qiskit
 #
-# In this section, we use `QiskitTranspiler` to transpile the VQE kernel and execute it on the Qiskit Aer simulator. The transpiler automatically handles the expectation value computation via `expval`, so the user only needs to implement the optimization loop. Of course, other quantum computing frameworks can be used as well.
+# In this section, we transpile the VQE kernel to an executable object using `QiskitTranspiler`. The default executor runs this object and returns the expectation value, which the defined qkernel computes using `expval`. Thus, the user only needs to implement the optimisation loop.
 
 # %%
 transpiler = QiskitTranspiler()
@@ -156,7 +147,8 @@ def cost_callback(param_values):
 
 
 num_params = len(executable.parameter_names)
-initial_params = np.random.uniform(0, np.pi, num_params)
+rng = np.random.default_rng(42)
+initial_params = rng.uniform(0, np.pi, num_params)
 
 # Run VQE optimization
 result = minimize(
@@ -211,7 +203,7 @@ for bond_length in bond_lengths:
     )
 
     num_params = len(executable.parameter_names)
-    initial_params = np.random.uniform(0, np.pi, num_params)
+    initial_params = rng.uniform(0, np.pi, num_params)
     result = minimize(
         cost_fn,
         initial_params,
