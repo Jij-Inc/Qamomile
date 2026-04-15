@@ -52,27 +52,6 @@ def _naive_decompose(matrix: np.ndarray) -> np.ndarray:
     return coeffs
 
 
-def _reconstruct_from_hamiltonian(h: qmo.Hamiltonian) -> np.ndarray:
-    n = h.num_qubits
-    dim = 1 << n
-    result = np.asarray(h.constant, dtype=complex) * np.eye(dim, dtype=complex)
-    for ops, coeff in h.terms.items():
-        mat = np.eye(dim, dtype=complex)
-        factors = [I2] * n
-        for op in ops:
-            factors[op.index] = {
-                qmo.Pauli.X: X,
-                qmo.Pauli.Y: Y,
-                qmo.Pauli.Z: Z,
-            }[op.pauli]
-        term = factors[n - 1]
-        for f in reversed(factors[: n - 1]):
-            term = np.kron(term, f)
-        mat = term
-        result = result + complex(coeff) * mat
-    return result
-
-
 def _random_hermitian(n: int, seed: int) -> np.ndarray:
     rng = np.random.default_rng(seed)
     dim = 1 << n
@@ -189,7 +168,7 @@ class TestRoundTrip:
     def test_decompose_then_reconstruct(self, n):
         matrix = _random_hermitian(n, seed=100 + n)
         ham = HermitianMatrix(matrix).to_hamiltonian(tol=0.0)
-        rebuilt = _reconstruct_from_hamiltonian(ham)
+        rebuilt = ham.to_numpy()
         np.testing.assert_allclose(rebuilt, matrix, atol=1e-12)
 
 

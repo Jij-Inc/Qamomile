@@ -39,6 +39,8 @@ import enum
 import math
 from typing import Iterator
 
+import numpy as np
+
 
 class Pauli(enum.Enum):
     """
@@ -359,6 +361,40 @@ class Hamiltonian:
             h.add_term(remapped_ops, coeff)
 
         return h
+
+    def to_numpy(self) -> np.ndarray:
+        """Convert the Hamiltonian to a dense NumPy matrix.
+
+        Qubit 0 is mapped to the least-significant bit of computational-basis
+        indices, matching :meth:`qamomile.linalg.HermitianMatrix.to_hamiltonian`.
+        The returned array has shape ``(2**n, 2**n)`` where ``n`` is
+        :attr:`num_qubits`.
+        """
+        pauli_matrices = {
+            Pauli.I: np.eye(2, dtype=np.complex128),
+            Pauli.X: np.array([[0, 1], [1, 0]], dtype=np.complex128),
+            Pauli.Y: np.array([[0, -1j], [1j, 0]], dtype=np.complex128),
+            Pauli.Z: np.array([[1, 0], [0, -1]], dtype=np.complex128),
+        }
+
+        num_qubits = self.num_qubits
+        dim = 1 << num_qubits
+        result = np.asarray(self.constant, dtype=np.complex128) * np.eye(
+            dim, dtype=np.complex128
+        )
+
+        for operators, coeff in self._terms.items():
+            factors = [pauli_matrices[Pauli.I]] * num_qubits
+            for op in operators:
+                factors[op.index] = pauli_matrices[op.pauli]
+
+            term = np.array([[1.0 + 0.0j]], dtype=np.complex128)
+            for factor in reversed(factors):
+                term = np.kron(term, factor)
+
+            result = result + np.asarray(coeff, dtype=np.complex128) * term
+
+        return result
 
     def __add__(self, other):
         if isinstance(other, Hamiltonian):
