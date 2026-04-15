@@ -1,6 +1,5 @@
 """Test that tutorial files execute without errors."""
 
-import os
 import runpy
 from pathlib import Path
 
@@ -34,8 +33,10 @@ TUTORIAL_PATTERNS = [
     "docs/ja/vqa/**/*.py",
     "docs/en/vqa/**/*.ipynb",
     "docs/ja/vqa/**/*.ipynb",
-    # We will not execute collaboration notebooks for now because
-    # they require API keys and may have side effects
+    # We will not execute the following directories:
+    # - collaboration: they may require API keys and may have side effects.
+    # - release_notes: they may be quite version specific
+    #   and may not follow the same structure as other tutorials.
 ]
 
 # Tutorials that require optional dependency groups (e.g. chemistry)
@@ -51,6 +52,11 @@ def discover_tutorial_files() -> list[Path]:
         for f in PROJECT_ROOT.glob(pattern):
             # Skip Jupyter checkpoint files
             if ".ipynb_checkpoints" in str(f):
+                continue
+            # Skip notebooks when a paired .py tutorial exists.
+            # The paired Python file exercises the same content without
+            # requiring notebook-kernel orchestration.
+            if f.suffix == ".ipynb" and f.with_suffix(".py").exists():
                 continue
             tutorial_files.append(f)
     return sorted(tutorial_files)
@@ -85,6 +91,7 @@ TUTORIAL_FILES = discover_tutorial_files()
 def test_tutorial_executes_without_error(tutorial_file: Path, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(plt, "show", lambda *args, **kwargs: None)
+    monkeypatch.setenv("QAMOMILE_DOCS_TEST", "1")
 
     assert tutorial_file.exists(), f"Tutorial file not found: {tutorial_file}"
 

@@ -277,11 +277,14 @@ executable = transpiler.transpile(
 # `scipy.optimize.minimize` の COBYLA 法を使います。各反復で回路をサンプリングし、平均エネルギーを評価します。
 
 # %%
+import os
 import numpy as np
-from qiskit_aer import AerSimulator
 from scipy.optimize import minimize
 
-executor = transpiler.executor(backend=AerSimulator(seed_simulator=7))
+executor = transpiler.executor()
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 256 if docs_test_mode else 2048
+maxiter = 20 if docs_test_mode else 500
 cost_history: list[float] = []
 
 
@@ -290,7 +293,7 @@ def cost_fn(params):
     betas = list(params[p:])
     result = executable.sample(
         executor,
-        shots=2048,
+        shots=sample_shots,
         bindings={"gammas": gammas, "betas": betas},
     ).result()
     decoded = spin_model.decode_from_sampleresult(result)
@@ -302,7 +305,7 @@ def cost_fn(params):
 rng = np.random.default_rng(42)
 initial_params = rng.uniform(-np.pi / 2, np.pi / 2, 2 * p)
 
-res = minimize(cost_fn, initial_params, method="COBYLA", options={"maxiter": 500})
+res = minimize(cost_fn, initial_params, method="COBYLA", options={"maxiter": maxiter})
 
 print(f"Optimized cost: {res.fun:.4f}")
 print(f"Optimal params: {[round(v, 4) for v in res.x]}")
@@ -326,7 +329,7 @@ betas_opt = list(res.x[p:])
 
 final_result = executable.sample(
     executor,
-    shots=2048,
+    shots=sample_shots,
     bindings={"gammas": gammas_opt, "betas": betas_opt},
 ).result()
 
@@ -387,7 +390,7 @@ if best_qaoa_sample is not None:
 #
 # 上で実装したすべて — 重ね合わせ、コスト層、ミキサー層、レイヤーのループ — は `qamomile.circuit.algorithm.qaoa_state` として既に提供されています。同じ Ising 係数 (`quad`, `linear`) と変分パラメータ (`gammas`, `betas`) を受け取ります。
 #
-# 組み込み関数を使って同じ構造の回路が実装されていることを確認します。シードを固定したシミュレータを使い、同一の回路から同一の結果が得られることを見ます。
+# 組み込み関数を使って同じ構造の回路が実装されていることを確認します。環境依存を避けるため、ここでも既定のローカル executor を使います。
 
 # %%
 from qamomile.circuit.algorithm import qaoa_state
@@ -407,11 +410,9 @@ def qaoa_builtin(
 
 
 # %% [markdown]
-# 同じ最適化済みパラメータでトランスパイル・サンプリングします。シードを固定した `AerSimulator` を使うことで、同一の回路に対して決定的な結果が得られます。
+# 同じ最適化済みパラメータでトランスパイル・サンプリングします。
 
 # %%
-from qiskit_aer import AerSimulator
-
 exe_builtin = transpiler.transpile(
     qaoa_builtin,
     bindings={
@@ -423,22 +424,18 @@ exe_builtin = transpiler.transpile(
     parameters=["gammas", "betas"],
 )
 
-seeded_executor_manual = transpiler.executor(
-    backend=AerSimulator(seed_simulator=0),
-)
-seeded_executor_builtin = transpiler.executor(
-    backend=AerSimulator(seed_simulator=0),
-)
+executor_manual = transpiler.executor()
+executor_builtin = transpiler.executor()
 
 result_manual = executable.sample(
-    seeded_executor_manual,
-    shots=2048,
+    executor_manual,
+    shots=sample_shots,
     bindings={"gammas": gammas_opt, "betas": betas_opt},
 ).result()
 
 result_builtin = exe_builtin.sample(
-    seeded_executor_builtin,
-    shots=2048,
+    executor_builtin,
+    shots=sample_shots,
     bindings={"gammas": gammas_opt, "betas": betas_opt},
 ).result()
 

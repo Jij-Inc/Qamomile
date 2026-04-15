@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass, field
+
 from qamomile.circuit.ir.operation.gate import GateOperationType
 
 __all__ = [

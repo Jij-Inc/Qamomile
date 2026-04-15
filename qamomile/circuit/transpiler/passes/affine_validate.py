@@ -2,17 +2,12 @@
 
 from __future__ import annotations
 
-from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.control_flow import (
-    ForItemsOperation,
-    ForOperation,
-    IfOperation,
-    WhileOperation,
-)
+from qamomile.circuit.ir.operation.control_flow import HasNestedOps, IfOperation
 from qamomile.circuit.ir.value import Value
+from qamomile.circuit.transpiler.errors import AffineTypeError, ValidationError
 from qamomile.circuit.transpiler.passes import Pass
-from qamomile.circuit.transpiler.errors import AffineTypeError
 
 
 class AffineValidationPass(Pass[Block, Block]):
@@ -35,8 +30,14 @@ class AffineValidationPass(Pass[Block, Block]):
         """Validate affine type semantics in the block.
 
         Raises:
+            ValidationError: If the block kind is not AFFINE.
             AffineTypeError: If a quantum value is consumed multiple times.
         """
+        if input.kind not in (BlockKind.AFFINE,):
+            raise ValidationError(
+                f"AffineValidationPass expects AFFINE block, got {input.kind}",
+            )
+
         # Track which quantum values have been consumed
         # Maps uuid -> operation name that consumed it
         consumed: dict[str, str] = {}
@@ -64,30 +65,27 @@ class AffineValidationPass(Pass[Block, Block]):
                     self._check_and_mark_consumed(operand, op_name, consumed)
 
             # Handle control flow with scope management
-            if isinstance(op, ForOperation):
-                # For loops: values may be consumed multiple times
-                # Create a new scope for the loop body
-                loop_consumed: dict[str, str] = consumed.copy()
-                self._validate_operations(op.operations, loop_consumed)
-                # Values consumed in loop may or may not be consumed after
-                # depending on loop execution - conservative: don't propagate
-            elif isinstance(op, ForItemsOperation):
-                # ForItems loops: same semantics as ForOperation
-                loop_consumed = consumed.copy()
-                self._validate_operations(op.operations, loop_consumed)
-            elif isinstance(op, IfOperation):
-                # If: values consumed in either branch are consumed
-                true_consumed = consumed.copy()
-                false_consumed = consumed.copy()
-                self._validate_operations(op.true_operations, true_consumed)
-                self._validate_operations(op.false_operations, false_consumed)
-                # Merge: anything consumed in either branch is consumed
-                consumed.update(true_consumed)
-                consumed.update(false_consumed)
-            elif isinstance(op, WhileOperation):
-                # While loops: similar to for loops
-                loop_consumed = consumed.copy()
-                self._validate_operations(op.operations, loop_consumed)
+            if isinstance(op, HasNestedOps):
+                nested_lists = op.nested_op_lists()
+                # For IfOperation, skip phi_ops (last list) - they are
+                # merge operations referencing values from both branches
+                # and should not be independently validated.
+                if isinstance(op, IfOperation) and len(nested_lists) > 2:
+                    validate_lists = nested_lists[:2]
+                else:
+                    validate_lists = nested_lists
+                scoped_sets: list[dict[str, str]] = []
+                for op_list in validate_lists:
+                    scoped = consumed.copy()
+                    self._validate_operations(op_list, scoped)
+                    scoped_sets.append(scoped)
+                # For IfOperation, merge all scoped consumed back:
+                # anything consumed in either branch is considered consumed.
+                # For loops (For/ForItems/While), don't propagate - values
+                # consumed in loop may or may not be consumed after.
+                if isinstance(op, IfOperation):
+                    for scoped in scoped_sets:
+                        consumed.update(scoped)
 
     def _check_and_mark_consumed(
         self,

@@ -7,9 +7,13 @@ set -e  # Exit on error
 # Move to the script's directory to ensure relative paths work
 cd "$(dirname "$0")"
 
-# Languages and tutorial directories (excluding collaboration/)
+# Languages and target directories
 LANGS=(en ja)
-TUTORIAL_DIRS=(tutorial optimization vqa)
+# collaboration is excluded because those notebooks may require API keys
+# and can't be automatically synced/executed.
+# release_notes is excluded because it can be quite version specific
+# and may not follow the same structure as other tutorials.
+TARGET_DIRS=(tutorial optimization vqa)
 
 # Color output
 RED='\033[0;31m'
@@ -74,7 +78,7 @@ copy_api() {
 sync_lang() {
     local lang="$1"
     echo "Converting ${lang} .py files to .ipynb..."
-    for dir in "${TUTORIAL_DIRS[@]}"; do
+    for dir in "${TARGET_DIRS[@]}"; do
         local py_files=()
         shopt -s nullglob
         py_files=("${lang}/${dir}"/*.py)
@@ -93,11 +97,11 @@ sync_lang() {
 execute_lang() {
     local lang="$1"
     echo "Executing ${lang} notebooks..."
-    for dir in "${TUTORIAL_DIRS[@]}"; do
+    for dir in "${TARGET_DIRS[@]}"; do
         for nb in "${lang}/${dir}"/*.ipynb; do
             [ -f "$nb" ] || continue
             info "Executing ${nb}..."
-            MPLBACKEND=agg uv run jupyter execute "$nb"
+            uv run jupyter nbconvert --to notebook --execute --inplace "$nb"
         done
     done
     info "${lang} notebooks executed"
@@ -111,9 +115,9 @@ build_lang() {
     if is_rtd; then
         local base_url="${READTHEDOCS_CANONICAL_URL%/}/${lang}"
         info "Read the Docs detected. Using BASE_URL=${base_url}"
-        BASE_URL="$base_url" MPLBACKEND=agg uv run jupyter-book build --html
+        BASE_URL="$base_url" uv run jupyter-book build --html
     else
-        MPLBACKEND=agg uv run jupyter-book build --html
+        uv run jupyter-book build --html
     fi
     cd ..
     uv run python scripts/inject_colab_launch.py "$lang"
@@ -175,7 +179,7 @@ build_all() {
 clean() {
     echo "Cleaning generated files..."
     for lang in "${LANGS[@]}"; do
-        for dir in "${TUTORIAL_DIRS[@]}"; do
+        for dir in "${TARGET_DIRS[@]}"; do
             rm -f "${lang}/${dir}"/*.ipynb
         done
         rm -rf "${lang}/_build"

@@ -19,7 +19,6 @@ from qamomile.circuit.transpiler.passes.control_flow_visitor import (
     OperationTransformer,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

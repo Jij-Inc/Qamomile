@@ -33,10 +33,10 @@ from tests.transpiler.gate_test_specs import (
 qiskit = pytest.importorskip("qiskit")
 pytest.importorskip("qiskit_aer")
 
-from qiskit import QuantumCircuit
-from qiskit.circuit import Barrier, Measure, ParameterExpression
-from qiskit.circuit.controlflow import ForLoopOp, IfElseOp, WhileLoopOp
-from qiskit.circuit.library import (
+from qiskit import QuantumCircuit  # noqa: E402
+from qiskit.circuit import Barrier, Measure, ParameterExpression  # noqa: E402
+from qiskit.circuit.controlflow import ForLoopOp, IfElseOp, WhileLoopOp  # noqa: E402
+from qiskit.circuit.library import (  # noqa: E402
     CCXGate,
     CPhaseGate,
     CXGate,
@@ -56,15 +56,15 @@ from qiskit.circuit.library import (
     ZGate,
 )
 
-import qamomile.observable as qm_o
-from qamomile.circuit.algorithm.basic import (
+import qamomile.observable as qm_o  # noqa: E402
+from qamomile.circuit.algorithm.basic import (  # noqa: E402
     cz_entangling_layer,
     rx_layer,
     ry_layer,
     rz_layer,
     superposition_vector,
 )
-from qamomile.circuit.algorithm.fqaoa import (
+from qamomile.circuit.algorithm.fqaoa import (  # noqa: E402
     cost_layer,
     fqaoa_state,
     givens_rotation,
@@ -72,18 +72,22 @@ from qamomile.circuit.algorithm.fqaoa import (
     initial_occupations,
     mixer_layer,
 )
-from qamomile.circuit.algorithm.qaoa import (
+from qamomile.circuit.algorithm.qaoa import (  # noqa: E402
     ising_cost,
     qaoa_layers,
     qaoa_state,
     x_mixer,
 )
-from qamomile.circuit.ir.block import BlockKind
-from qamomile.circuit.transpiler.executable import ExecutableProgram
-from qamomile.circuit.transpiler.segments import SimplifiedProgram
-from qamomile.circuit.transpiler.transpiler import TranspilerConfig
-from qamomile.qiskit import QiskitTranspiler
-from qamomile.circuit.transpiler.errors import EmitError
+from qamomile.circuit.ir.block import BlockKind  # noqa: E402
+from qamomile.circuit.transpiler.errors import EmitError  # noqa: E402
+from qamomile.circuit.transpiler.executable import ExecutableProgram  # noqa: E402
+from qamomile.circuit.transpiler.segments import (  # noqa: E402
+    ClassicalStep,
+    ProgramPlan,
+    QuantumStep,
+)
+from qamomile.circuit.transpiler.transpiler import TranspilerConfig  # noqa: E402
+from qamomile.qiskit import QiskitTranspiler  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -3843,10 +3847,10 @@ class TestTranspilerPassesPipeline:
         validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated)
         analyzed = transpiler.analyze(folded)
-        separated = transpiler.separate(analyzed)
+        separated = transpiler.plan(analyzed)
 
-        assert isinstance(separated, SimplifiedProgram)
-        assert separated.quantum is not None
+        assert isinstance(separated, ProgramPlan)
+        assert any(isinstance(s, QuantumStep) for s in separated.steps)
 
     def test_emit(self, transpiler):
         """emit() generates backend-specific circuit."""
@@ -3862,7 +3866,7 @@ class TestTranspilerPassesPipeline:
         validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated)
         analyzed = transpiler.analyze(folded)
-        separated = transpiler.separate(analyzed)
+        separated = transpiler.plan(analyzed)
         exe = transpiler.emit(separated)
 
         assert isinstance(exe, ExecutableProgram)
@@ -4151,7 +4155,7 @@ class TestTranspilerConfigAndSubstitution:
         assert substituted is block
 
     def test_separate_segments_simple_circuit(self):
-        """separate() produces SimplifiedProgram with quantum segment, no classical prep/post."""
+        """separate() produces ProgramPlan with quantum segment, no classical prep/post."""
 
         transpiler = QiskitTranspiler()
 
@@ -4166,13 +4170,13 @@ class TestTranspilerConfigAndSubstitution:
         validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated)
         analyzed = transpiler.analyze(folded)
-        separated = transpiler.separate(analyzed)
+        separated = transpiler.plan(analyzed)
 
-        assert isinstance(separated, SimplifiedProgram)
-        assert separated.quantum is not None
-        assert len(separated.quantum.operations) > 0
+        assert isinstance(separated, ProgramPlan)
+        quantum_step = next(s for s in separated.steps if isinstance(s, QuantumStep))
+        assert len(quantum_step.segment.operations) > 0
         # Simple H+measure circuit should have no classical prep
-        assert separated.classical_prep is None
+        assert not isinstance(separated.steps[0], ClassicalStep)
 
     def test_separate_segments_with_classical_post(self):
         """QPE produces classical_post segment for QFixed decoding."""
@@ -4196,12 +4200,19 @@ class TestTranspilerConfigAndSubstitution:
         validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated, bindings={"phase": np.pi / 2})
         analyzed = transpiler.analyze(folded)
-        separated = transpiler.separate(analyzed)
+        separated = transpiler.plan(analyzed)
 
-        assert isinstance(separated, SimplifiedProgram)
-        assert separated.quantum is not None
-        # QPE returns QFixed → Float, so classical_post should handle the decode
-        assert separated.classical_post is not None
+        assert isinstance(separated, ProgramPlan)
+        assert any(isinstance(s, QuantumStep) for s in separated.steps)
+        # QPE returns QFixed -> Float, so classical_post should handle the decode
+        seen_quantum = False
+        has_classical_post = False
+        for s in separated.steps:
+            if isinstance(s, QuantumStep):
+                seen_quantum = True
+            elif seen_quantum and isinstance(s, ClassicalStep):
+                has_classical_post = True
+        assert has_classical_post
 
     def test_get_first_circuit(self):
         """ExecutableProgram.get_first_circuit() returns the quantum circuit."""
@@ -4286,7 +4297,7 @@ class TestTranspilerConfigAndSubstitution:
         validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated)
         analyzed = transpiler.analyze(folded)
-        separated = transpiler.separate(analyzed)
+        separated = transpiler.plan(analyzed)
         exe_step = transpiler.emit(separated)
         qc_step = exe_step.compiled_quantum[0].circuit
 
@@ -7825,6 +7836,7 @@ class TestDeadPhiTranspilation:
         _, qc = _transpile_and_get_circuit(circuit)
         assert qc is not None
 
+
 # ============================================================================
 # Bound constant if-condition tests (Issue: bound_constant_if_misclassified)
 # ============================================================================
@@ -8003,7 +8015,7 @@ class TestCompileTimeIfArrayQuantumPhi:
 
 
 class TestCompileTimeIfPhiPropagation:
-    """Compile-time IfOperation lowering before SeparatePass.
+    """Compile-time IfOperation lowering before SegmentationPass.
 
     Tests that compile-time resolvable IfOperations (including expression-
     derived conditions like ``if flag > 0:``) are lowered before separation,

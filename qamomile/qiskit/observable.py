@@ -66,7 +66,7 @@ def hamiltonian_to_sparse_pauli_op(hamiltonian: qm_o.Hamiltonian) -> "SparsePaul
         # Qiskit uses little-endian: rightmost character is qubit 0
         # So we need to reverse the order
         pauli_str = "".join(reversed(paulis))
-        pauli_list.append((pauli_str, coeff))
+        pauli_list.append((pauli_str, coeff))  # type: ignore[arg-type]
 
     if not pauli_list:
         # Empty Hamiltonian (zero operator)

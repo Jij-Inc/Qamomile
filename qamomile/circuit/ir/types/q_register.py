@@ -2,7 +2,7 @@ import dataclasses
 
 from qamomile.circuit.ir.value import Value
 
-from .primitives import ValueType, UIntType, QuantumTypeMixin
+from .primitives import QuantumTypeMixin, UIntType, ValueType
 
 
 @dataclasses.dataclass

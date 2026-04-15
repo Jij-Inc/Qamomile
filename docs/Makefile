@@ -1,9 +1,13 @@
 # Makefile for Qamomile Documentation
 # Uses jupytext to convert .py -> .ipynb and Jupyter Book to build
 
-# Languages and tutorial directories (excluding collaboration/)
+# Languages and tutorial directories
 LANGS := en ja
-TUTORIAL_DIRS := tutorial optimization vqa
+# collaboration is excluded because those notebooks may require API keys
+# and can't be automatically synced/executed.
+# release_notes is excluded because it can be quite version specific
+# and may not follow the same structure as other tutorials.
+TARGET_DIRS := tutorial optimization vqa
 
 .PHONY: help build build-en build-ja sync sync-en sync-ja execute execute-en execute-ja sync-build sync-build-en sync-build-ja generate-api copy-api clean clean-all serve-en serve-ja fresh-en fresh-ja build-site serve-site
 
@@ -50,7 +54,7 @@ copy-api: generate-api
 # We don't convert collaboration/ because those notebooks need API-KEYs.
 define sync-lang
 	@echo "Converting $(1) .py files to .ipynb..."
-	@for dir in $(TUTORIAL_DIRS); do \
+	@for dir in $(TARGET_DIRS); do \
 		py_files=$$(find $(1)/$$dir -maxdepth 1 -name '*.py' 2>/dev/null); \
 		if [ -z "$$py_files" ]; then \
 			echo "! No .py files in $(1)/$$dir, skipping"; \
@@ -74,11 +78,11 @@ sync: sync-en sync-ja
 # Execute .ipynb notebooks for a single language
 define execute-lang
 	@echo "Executing $(1) notebooks..."
-	@for dir in $(TUTORIAL_DIRS); do \
+	@for dir in $(TARGET_DIRS); do \
 		for nb in $(1)/$$dir/*.ipynb; do \
 			[ -f "$$nb" ] || continue; \
 			echo "✓ Executing $$nb..."; \
-			MPLBACKEND=agg uv run jupyter execute "$$nb"; \
+			uv run jupyter nbconvert --to notebook --execute --inplace "$$nb"; \
 		done; \
 	done
 	@echo "✓ $(1) notebooks executed"
@@ -97,13 +101,13 @@ execute: execute-en execute-ja
 # Build targets (no sync)
 build-en: copy-api
 	@echo "Building English documentation..."
-	cd en && MPLBACKEND=agg uv run jupyter-book build --html
+	cd en && uv run jupyter-book build --html
 	@uv run python scripts/inject_colab_launch.py en
 	@echo "✓ English documentation built: en/_build/html/index.html"
 
 build-ja: copy-api
 	@echo "Building Japanese documentation..."
-	cd ja && MPLBACKEND=agg uv run jupyter-book build --html
+	cd ja && uv run jupyter-book build --html
 	@uv run python scripts/inject_colab_launch.py ja
 	@echo "✓ Japanese documentation built: ja/_build/html/index.html"
 
@@ -122,7 +126,7 @@ sync-build: copy-api sync-build-en sync-build-ja
 clean:
 	@echo "Cleaning generated files..."
 	@for lang in $(LANGS); do \
-		for dir in $(TUTORIAL_DIRS); do \
+		for dir in $(TARGET_DIRS); do \
 			rm -f $$lang/$$dir/*.ipynb; \
 		done; \
 		rm -rf $$lang/_build; \

@@ -62,7 +62,7 @@ class ArrayBase(Handle, Generic[T]):
     ) -> "ArrayBase[T]":
         """Create an ArrayValue for the given shape and name."""
         shape_values = tuple(
-            Value(type=UIntType(), name=f"dim_{i}", params={"const": dim})
+            Value(type=UIntType(), name=f"dim_{i}").with_const(dim)
             if isinstance(dim, int)
             else dim.value
             for i, dim in enumerate(shape)
@@ -88,7 +88,7 @@ class ArrayBase(Handle, Generic[T]):
         value: ArrayValue,
         shape: tuple[int | UInt, ...],
         name: str | None = None,
-    ) -> "ArrayBase[T]":
+    ) -> typing.Self:
         """Factory method to create an array instance without calling __init__.
 
         This is used internally when creating output arrays from operations
@@ -117,10 +117,10 @@ class ArrayBase(Handle, Generic[T]):
         instance.name = name
         instance.id = str(uuid.uuid4())
         instance._consumed = False
-        instance.element_type = type_map[value.type]
+        instance.element_type = type_map[value.type]  # type: ignore[assignment]
         return instance
 
-    def consume(self, operation_name: str = "unknown") -> "ArrayBase[T]":
+    def consume(self, operation_name: str = "unknown") -> typing.Self:
         """Consume the array, enforcing borrow-return contract for quantum arrays.
 
         For quantum arrays, all borrowed elements must be returned before the
@@ -138,7 +138,7 @@ class ArrayBase(Handle, Generic[T]):
     def _make_uint_index(self, idx: int) -> UInt:
         """Create a UInt from an integer index."""
         return UInt(
-            value=Value(type=UIntType(), name=f"idx_{idx}", params={"const": idx}),
+            value=Value(type=UIntType(), name=f"idx_{idx}").with_const(idx),
             init_value=idx,
         )
 
@@ -147,7 +147,7 @@ class ArrayBase(Handle, Generic[T]):
         parts = []
         for idx in indices:
             if idx.value.is_constant():
-                parts.append(str(int(idx.value.params["const"])))
+                parts.append(str(int(idx.value.get_const())))
             else:
                 parts.append(idx.value.name)
         return ",".join(parts)
@@ -161,7 +161,7 @@ class ArrayBase(Handle, Generic[T]):
         for idx in indices:
             if idx.value.is_constant():
                 # Use the constant value as the key
-                key_parts.append(f"const:{idx.value.params['const']}")
+                key_parts.append(f"const:{idx.value.get_const()}")
             else:
                 # Use the value's uuid for symbolic indices
                 key_parts.append(f"sym:{idx.value.uuid}")
@@ -180,9 +180,17 @@ class ArrayBase(Handle, Generic[T]):
             return True
 
         for lhs_idx, rhs_idx in zip(lhs, rhs):
-            lhs_const = lhs_idx.value.get_const() if lhs_idx.value.is_constant() else None
-            rhs_const = rhs_idx.value.get_const() if rhs_idx.value.is_constant() else None
-            if lhs_const is not None and rhs_const is not None and lhs_const != rhs_const:
+            lhs_const = (
+                lhs_idx.value.get_const() if lhs_idx.value.is_constant() else None
+            )
+            rhs_const = (
+                rhs_idx.value.get_const() if rhs_idx.value.is_constant() else None
+            )
+            if (
+                lhs_const is not None
+                and rhs_const is not None
+                and lhs_const != rhs_const
+            ):
                 return True
         return False
 
@@ -222,19 +230,16 @@ class ArrayBase(Handle, Generic[T]):
 
         self._borrowed_indices[indices_key] = indices
 
-        params: dict[str, int | float] = {}
-        if self.value.is_parameter():
-            param_name = self.value.parameter_name()
-            element_param_name = f"{param_name}[{index_str}]"
-            params = {"parameter": element_param_name}  # type: ignore
-
         element_value = Value(
             type=self.value.type,
             name=f"{self.value.name}[{index_str}]",
             parent_array=self.value,
             element_indices=tuple(idx.value for idx in indices),
-            params=params,
         )
+        if self.value.is_parameter():
+            param_name = self.value.parameter_name()
+            element_param_name = f"{param_name}[{index_str}]"
+            element_value = element_value.with_parameter(element_param_name)
         return self.element_type(value=element_value, parent=self, indices=indices)
 
     def _return_element(self, indices: tuple[UInt, ...], value: T) -> None:
@@ -350,8 +355,9 @@ class ArrayBase(Handle, Generic[T]):
             # Classical types are freely copyable — no linear enforcement needed
             pass
 
-    def _copy_subclass_state_to(self, new_handle: "ArrayBase") -> None:
+    def _copy_subclass_state_to(self, new_handle: Handle) -> None:
         """Copy ArrayBase-specific state to a new handle created by consume()."""
+        assert isinstance(new_handle, ArrayBase)
         new_handle._shape = self._shape
         new_handle._borrowed_indices = dict(self._borrowed_indices)
         new_handle.element_type = self.element_type

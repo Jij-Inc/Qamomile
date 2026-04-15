@@ -1,8 +1,10 @@
 """Test that resolve_int_value uses UUID-based lookup for BinOp results."""
 
-from qamomile.circuit.ir.value import Value
+import numpy as np
+
 from qamomile.circuit.ir.types.primitives import UIntType
-from qamomile.circuit.transpiler.passes.emit_base import ValueResolver
+from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.transpiler.passes.emit_support import ValueResolver
 
 
 class TestResolveIntValueUuidLookup:
@@ -46,8 +48,45 @@ class TestResolveIntValueUuidLookup:
         """Constant Values resolve correctly regardless of UUID/name lookup."""
         resolver = ValueResolver()
 
-        val = Value(type=UIntType(), name="const", params={"const": 7})
+        val = Value(type=UIntType(), name="const").with_const(7)
         bindings: dict[str, int] = {}
 
         result = resolver.resolve_int_value(val, bindings)
         assert result == 7
+
+    def test_numpy_integer_binding_is_accepted(self):
+        """NumPy integer scalars should resolve like built-in ints."""
+        resolver = ValueResolver()
+
+        val = Value(type=UIntType(), name="some_var")
+        bindings = {"some_var": np.uint64(42)}
+
+        result = resolver.resolve_int_value(val, bindings)
+        assert result == 42
+
+
+class TestResolveArrayElementValue:
+    """Tests for resolving bound array elements."""
+
+    def test_numpy_integer_array_element_is_accepted(self):
+        """Nested array lookups should normalize NumPy integer results."""
+        resolver = ValueResolver()
+
+        edges = ArrayValue(type=UIntType(), name="edges")
+        loop_idx = Value(type=UIntType(), name="e")
+        col_idx = Value(type=UIntType(), name="idx_0").with_const(0)
+        nested = Value(
+            type=UIntType(),
+            name="edges[e,0]",
+            parent_array=edges,
+            element_indices=(loop_idx, col_idx),
+        )
+        bindings = {
+            "edges": np.array([[0, 1], [1, 2]], dtype=np.uint64),
+            "e": 1,
+        }
+
+        result = resolver._resolve_array_element_value(nested, bindings)
+
+        assert result == 1
+        assert isinstance(result, int)

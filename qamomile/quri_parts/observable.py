@@ -6,7 +6,7 @@ to QURI Parts Operator for use with QURI Parts estimator primitives.
 
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 # qamomile.observable is a core module, always available (not optional).
 import qamomile.observable as qm_o
@@ -37,7 +37,7 @@ def hamiltonian_to_quri_operator(hamiltonian: qm_o.Hamiltonian) -> "Operator":
         operator = hamiltonian_to_quri_operator(H)
         ```
     """
-    from quri_parts.core.operator import Operator, pauli_label, PAULI_IDENTITY
+    from quri_parts.core.operator import PAULI_IDENTITY, Operator, pauli_label
 
     pauli_id_map = {
         qm_o.Pauli.X: 1,

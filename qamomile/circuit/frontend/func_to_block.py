@@ -2,20 +2,8 @@ import inspect
 import typing
 
 import qamomile.circuit.ir.types as ir_types
-from qamomile.circuit.ir.operation.operation import QInitOperation
-from qamomile.circuit.ir.operation.return_operation import ReturnOperation
-from qamomile.circuit.ir.block_value import BlockValue
-from qamomile.circuit.ir.types.primitives import (
-    BitType,
-    FloatType,
-    UIntType,
-    ValueType,
-    TupleType,
-    DictType,
-)
-from qamomile.circuit.ir.types.hamiltonian import ObservableType
-from qamomile.circuit.ir.value import ArrayValue, Value, TupleValue, DictValue
-
+from qamomile.circuit.frontend.handle.containers import Dict, Tuple
+from qamomile.circuit.frontend.handle.hamiltonian import Observable
 from qamomile.circuit.frontend.handle.primitives import (
     Bit,
     Float,
@@ -23,10 +11,20 @@ from qamomile.circuit.frontend.handle.primitives import (
     Qubit,
     UInt,
 )
-from qamomile.circuit.frontend.handle.hamiltonian import Observable
-from qamomile.circuit.frontend.handle.containers import Tuple, Dict
-from qamomile.circuit.frontend.tracer import Tracer, trace, get_current_tracer
-
+from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
+from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.operation.operation import QInitOperation
+from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.types.hamiltonian import ObservableType
+from qamomile.circuit.ir.types.primitives import (
+    BitType,
+    DictType,
+    FloatType,
+    TupleType,
+    UIntType,
+    ValueType,
+)
+from qamomile.circuit.ir.value import ArrayValue, DictValue, TupleValue, Value
 
 TYPE_MAPPING: dict[typing.Any, typing.Any] = {
     int: UIntType,
@@ -147,12 +145,10 @@ def create_dummy_handle(
     """
     if isinstance(value_type, ir_types.UIntType):
         # Mark as parameter so it can be bound at emit time
-        return UInt(value=Value(type=value_type, name=name, params={"parameter": name}))
+        return UInt(value=Value(type=value_type, name=name).with_parameter(name))
     elif isinstance(value_type, ir_types.FloatType):
         # Mark as parameter so it can be bound at emit time
-        return Float(
-            value=Value(type=value_type, name=name, params={"parameter": name})
-        )
+        return Float(value=Value(type=value_type, name=name).with_parameter(name))
     elif isinstance(value_type, ir_types.BitType):
         return Bit(value=Value(type=value_type, name=name))
     elif isinstance(value_type, ir_types.QubitType):
@@ -164,9 +160,7 @@ def create_dummy_handle(
         return Qubit(value=value)
     elif isinstance(value_type, ObservableType):
         # Observable parameters are provided via bindings
-        return Observable(
-            value=Value(type=value_type, name=name, params={"parameter": name})
-        )
+        return Observable(value=Value(type=value_type, name=name).with_parameter(name))
     else:
         raise TypeError(f"Unsupported ValueType '{value_type}'")
 
@@ -180,7 +174,7 @@ def create_dummy_input(
         param_type: The type annotation for the parameter.
         name: Name for the value.
         emit_init: If True, emit QInitOperation for qubit arrays (default: True).
-                   Set to False when creating BlockValue's internal dummy inputs.
+                   Set to False when creating a nested Block's internal dummy inputs.
 
     This creates input Handles for function parameters.
     """
@@ -198,8 +192,7 @@ def create_dummy_input(
             tuple_value = TupleValue(
                 name=name,
                 elements=tuple(element_values),
-                params={"parameter": name},
-            )
+            ).with_parameter(name)
 
             # Create Tuple handle
             tuple_handle = object.__new__(Tuple)
@@ -218,9 +211,8 @@ def create_dummy_input(
         if hasattr(param_type, "__args__") and len(param_type.__args__) == 2:
             dict_value = DictValue(
                 name=name,
-                entries=[],  # Entries will be bound at transpile time
-                params={"parameter": name},
-            )
+                entries=(),  # Entries will be bound at transpile time
+            ).with_parameter(name)
 
             # Create Dict handle
             dict_handle = object.__new__(Dict)
@@ -252,10 +244,9 @@ def create_dummy_input(
         # Determine number of dimensions (Vector=1, Matrix=2, Tensor=3)
         ndim = _get_ndim(param_type)
 
-        # Create symbolic dimension Values (empty params = symbolic)
+        # Create symbolic dimension Values
         shape_values = tuple(
-            Value(type=UIntType(), name=f"{name}_dim{i}", params={})
-            for i in range(ndim)
+            Value(type=UIntType(), name=f"{name}_dim{i}") for i in range(ndim)
         )
 
         # Create ArrayValue with symbolic shape
@@ -278,7 +269,7 @@ def create_dummy_input(
         # For generic aliases like Vector[Qubit], use __origin__ to get the actual class
         actual_class = getattr(param_type, "__origin__", param_type)
         instance = object.__new__(actual_class)
-        instance.value = array_value
+        instance.value = array_value.with_parameter(name)
         instance._shape = shape_handles  # Tuple of symbolic UInt
         instance._borrowed_indices = {}
         instance.parent = None
@@ -294,8 +285,8 @@ def create_dummy_input(
     return create_dummy_handle(value_type, name, emit_init)
 
 
-def func_to_block(func: typing.Callable) -> BlockValue:
-    """Convert a function to a BlockValue.
+def func_to_block(func: typing.Callable) -> Block:
+    """Convert a function to a hierarchical Block.
 
     Example:
         ```python
@@ -303,7 +294,7 @@ def func_to_block(func: typing.Callable) -> BlockValue:
             c = a + b
             return (c, )
 
-        block_value = func_to_block(my_func)
+        block = func_to_block(my_func)
         ```
     """
     signature = inspect.signature(func)
@@ -349,7 +340,7 @@ def func_to_block(func: typing.Callable) -> BlockValue:
     # ======================= Check Input Types
 
     # Create dummy inputs from resolved type hints (preserving Array types)
-    # Use emit_init=False to avoid emitting QInitOperation for BlockValue's internal inputs
+    # Use emit_init=False to avoid emitting QInitOperation for nested Block inputs
     dummy_inputs = {
         name: create_dummy_input(
             type_hints.get(name, param.annotation), name, emit_init=False
@@ -388,10 +379,11 @@ def func_to_block(func: typing.Callable) -> BlockValue:
     # Re-fetch operations after adding ReturnOperation
     operations = tracer.operations
 
-    return BlockValue(
+    return Block(
         name=func.__name__,
         label_args=label_args,
         input_values=input_values,
-        return_values=return_values,
+        output_values=return_values,
         operations=operations,
+        kind=BlockKind.HIERARCHICAL,
     )

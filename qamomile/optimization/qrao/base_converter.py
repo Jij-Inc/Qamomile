@@ -5,6 +5,7 @@ shared functionality across all QRAC converter variants.
 """
 
 from __future__ import annotations
+
 import abc
 from typing import Generic, TypeVar
 
@@ -59,6 +60,8 @@ class QRACConverterBase(MathematicalProblemConverter, abc.ABC, Generic[EncoderT]
         The total number of variational parameters depends on the ansatz
         design. For the example above it is ``2 * num_qubits * depth``.
     """
+
+    _encoder: EncoderT
 
     def __post_init__(self) -> None:
         if self.spin_model.higher:

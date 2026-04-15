@@ -3870,7 +3870,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(n, name="ancilla")
+            ancilla = qmc.qubit_array(n, name="ancilla")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -3889,7 +3889,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit) -> qmc.Qubit:
-            extra = qmc.qubit_array(m, name="extra")
+            extra = qmc.qubit_array(m, name="extra")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -3907,7 +3907,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit, n: qmc.UInt) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(n, name="ancilla")
+            ancilla = qmc.qubit_array(n, name="ancilla")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -3944,7 +3944,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner(qs: qmc.Vector[qmc.Qubit], m: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
-            extra = qmc.qubit_array(m, name="extra")
+            extra = qmc.qubit_array(m, name="extra")  # noqa: F841
             qs[0] = qmc.h(qs[0])
             return qs
 
@@ -3965,7 +3965,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit, n: qmc.UInt) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(n + a, name="ancilla")
+            ancilla = qmc.qubit_array(n + a, name="ancilla")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -3984,7 +3984,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit, n: qmc.UInt, m: qmc.UInt) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(n + m, name="ancilla")
+            ancilla = qmc.qubit_array(n + m, name="ancilla")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -4005,7 +4005,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit, n: qmc.UInt) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(a + n, name="ancilla")
+            ancilla = qmc.qubit_array(a + n, name="ancilla")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -4025,7 +4025,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit, n: qmc.UInt) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(n - a, name="ancilla")
+            ancilla = qmc.qubit_array(n - a, name="ancilla")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -4044,7 +4044,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit, n: qmc.UInt, m: qmc.UInt) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(n - m, name="ancilla")
+            ancilla = qmc.qubit_array(n - m, name="ancilla")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -4065,7 +4065,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit, n: qmc.UInt) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(a - n, name="ancilla")
+            ancilla = qmc.qubit_array(a - n, name="ancilla")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -4085,7 +4085,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit, n: qmc.UInt) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(n * a, name="ancilla")
+            ancilla = qmc.qubit_array(n * a, name="ancilla")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -4104,7 +4104,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit, n: qmc.UInt, m: qmc.UInt) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(n * m, name="ancilla")
+            ancilla = qmc.qubit_array(n * m, name="ancilla")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -4125,7 +4125,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit, n: qmc.UInt) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(a * n, name="ancilla")
+            ancilla = qmc.qubit_array(a * n, name="ancilla")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -4145,7 +4145,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit, n: qmc.UInt) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(n // a, name="ancilla")
+            ancilla = qmc.qubit_array(n // a, name="ancilla")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -4164,7 +4164,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit, n: qmc.UInt, m: qmc.UInt) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(n // m, name="ancilla")
+            ancilla = qmc.qubit_array(n // m, name="ancilla")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -4185,7 +4185,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit, n: qmc.UInt) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(a // n, name="ancilla")
+            ancilla = qmc.qubit_array(a // n, name="ancilla")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -4205,7 +4205,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit, n: qmc.UInt) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(n**a, name="ancilla")
+            ancilla = qmc.qubit_array(n**a, name="ancilla")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -4224,7 +4224,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit, n: qmc.UInt, m: qmc.UInt) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(n**m, name="ancilla")
+            ancilla = qmc.qubit_array(n**m, name="ancilla")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -4245,7 +4245,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit, n: qmc.UInt) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(a**n, name="ancilla")
+            ancilla = qmc.qubit_array(a**n, name="ancilla")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -4283,7 +4283,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-            extra = qmc.qubit_array(m, name="extra")
+            extra = qmc.qubit_array(m, name="extra")  # noqa: F841
             qs[0] = qmc.h(qs[0])
             return qs
 
@@ -4322,7 +4322,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit) -> qmc.Qubit:
-            extra = qmc.qubit_array(m, name="extra")
+            extra = qmc.qubit_array(m, name="extra")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -4342,7 +4342,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit, n: qmc.UInt) -> qmc.Qubit:
-            extra = qmc.qubit_array(n, name="extra")
+            extra = qmc.qubit_array(n, name="extra")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -4386,7 +4386,7 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner_inner(q: qmc.Qubit) -> qmc.Qubit:
-            extra = qmc.qubit_array(m, name="deep_extra")
+            extra = qmc.qubit_array(m, name="deep_extra")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -4409,13 +4409,13 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner_inner(q: qmc.Qubit) -> qmc.Qubit:
-            extra = qmc.qubit(name="deep_extra")
+            extra = qmc.qubit(name="deep_extra")  # noqa: F841
             q = qmc.h(q)
             return q
 
         @qmc.qkernel
         def inner(q: qmc.Qubit) -> qmc.Qubit:
-            extra = qmc.qubit(name="mid_extra")
+            extra = qmc.qubit(name="mid_extra")  # noqa: F841
             q = inner_inner(q)
             return q
 
@@ -4433,13 +4433,13 @@ class TestCallBlockOperation:
 
         @qmc.qkernel
         def inner_inner(q: qmc.Qubit, k: qmc.UInt) -> qmc.Qubit:
-            extra = qmc.qubit_array(k, name="deep_extra")
+            extra = qmc.qubit_array(k, name="deep_extra")  # noqa: F841
             q = qmc.h(q)
             return q
 
         @qmc.qkernel
         def inner(q: qmc.Qubit, m: qmc.UInt, k: qmc.UInt) -> qmc.Qubit:
-            extra = qmc.qubit_array(m, name="mid_extra")
+            extra = qmc.qubit_array(m, name="mid_extra")  # noqa: F841
             q = inner_inner(q, k)
             return q
 
@@ -5184,7 +5184,7 @@ class TestCallBlockInForOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(3, name="ancilla")
+            ancilla = qmc.qubit_array(3, name="ancilla")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -5204,7 +5204,7 @@ class TestCallBlockInForOperation:
         @qmc.qkernel
         def inner(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
             n = qs.shape[0]
-            ancilla = qmc.qubit_array(n - 2, name="ancilla")
+            ancilla = qmc.qubit_array(n - 2, name="ancilla")  # noqa: F841
             qs[0] = qmc.h(qs[0])
             return qs
 
@@ -5241,7 +5241,7 @@ class TestCallBlockInForOperation:
 
         @qmc.qkernel
         def clean_inner(q: qmc.Qubit) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(2, name="ancilla")
+            ancilla = qmc.qubit_array(2, name="ancilla")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -5250,7 +5250,7 @@ class TestCallBlockInForOperation:
             q = qmc.qubit(name="q")
             for _ in qmc.range(4):
                 q = clean_inner(q)
-                extra = qmc.qubit(name="extra")
+                extra = qmc.qubit(name="extra")  # noqa: F841
             return q
 
         resource = qubits_counter(circuit.block)
@@ -5262,7 +5262,7 @@ class TestCallBlockInForOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(3, name="ancilla")
+            ancilla = qmc.qubit_array(3, name="ancilla")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -5281,13 +5281,13 @@ class TestCallBlockInForOperation:
 
         @qmc.qkernel
         def small_inner(q: qmc.Qubit) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(2, name="small_anc")
+            ancilla = qmc.qubit_array(2, name="small_anc")  # noqa: F841
             q = qmc.h(q)
             return q
 
         @qmc.qkernel
         def large_inner(q: qmc.Qubit) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(5, name="large_anc")
+            ancilla = qmc.qubit_array(5, name="large_anc")  # noqa: F841
             q = qmc.h(q)
             return q
 
@@ -5308,7 +5308,7 @@ class TestCallBlockInForOperation:
 
         @qmc.qkernel
         def inner(q: qmc.Qubit) -> qmc.Qubit:
-            ancilla = qmc.qubit_array(3, name="ancilla")
+            ancilla = qmc.qubit_array(3, name="ancilla")  # noqa: F841
             q = qmc.h(q)
             return q
 

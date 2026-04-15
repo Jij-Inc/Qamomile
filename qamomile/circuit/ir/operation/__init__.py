@@ -1,22 +1,25 @@
-from .operation import Operation
-from .return_operation import ReturnOperation
+from .cast import CastOperation
+from .classical_ops import DecodeQFixedOperation
 from .composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
     ResourceMetadata,
 )
+from .control_flow import ForItemsOperation, HasNestedOps
+from .expval import ExpvalOp
 from .gate import (
+    ConcreteControlledU,
+    ControlledUOperation,
     GateOperation,
     GateOperationType,
+    IndexSpecControlledU,
     MeasureOperation,
-    MeasureVectorOperation,
     MeasureQFixedOperation,
-    ControlledUOperation,
+    MeasureVectorOperation,
+    SymbolicControlledU,
 )
-from .classical_ops import DecodeQFixedOperation
-from .cast import CastOperation
-from .control_flow import ForItemsOperation
-from .expval import ExpvalOp
+from .operation import Operation
+from .return_operation import ReturnOperation
 
 __all__ = [
     "Operation",
@@ -30,10 +33,14 @@ __all__ = [
     "MeasureVectorOperation",
     "MeasureQFixedOperation",
     "ControlledUOperation",
+    "ConcreteControlledU",
+    "SymbolicControlledU",
+    "IndexSpecControlledU",
     "DecodeQFixedOperation",
     "CastOperation",
     # Control flow operations
     "ForItemsOperation",
+    "HasNestedOps",
     # Expectation value operation
     "ExpvalOp",
 ]

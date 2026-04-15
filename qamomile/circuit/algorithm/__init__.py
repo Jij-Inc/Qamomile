@@ -1,11 +1,12 @@
 """Algorithm building blocks for quantum circuits."""
 
 from .basic import (
+    cx_entangling_layer,
     cz_entangling_layer,
-    superposition_vector,
     rx_layer,
     ry_layer,
     rz_layer,
+    superposition_vector,
 )
 from .fqaoa import (
     cost_layer,
@@ -41,6 +42,7 @@ __all__ = [
     "ry_layer",
     "rz_layer",
     "cz_entangling_layer",
+    "cx_entangling_layer",
     "superposition_vector",
     # FQAOA
     "initial_occupations",

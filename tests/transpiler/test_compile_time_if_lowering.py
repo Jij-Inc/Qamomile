@@ -25,7 +25,6 @@ from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
     CompileTimeIfLoweringPass,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -62,8 +61,8 @@ def _find_gates(ops, gate_type=None):
 
 
 def _uint_val(name, *, const=None):
-    params = {"const": const} if const is not None else {}
-    return Value(type=UIntType(), name=name, params=params)
+    value = Value(type=UIntType(), name=name)
+    return value.with_const(const) if const is not None else value
 
 
 def _bit_val(name):
@@ -71,8 +70,8 @@ def _bit_val(name):
 
 
 def _float_val(name, *, const=None):
-    params = {"const": const} if const is not None else {}
-    return Value(type=FloatType(), name=name, params=params)
+    value = Value(type=FloatType(), name=name)
+    return value.with_const(const) if const is not None else value
 
 
 def _qubit_val(name="q"):
@@ -1003,9 +1002,11 @@ class TestControlledUOperationFieldSubstitution:
 
     def test_four_fields_substituted(self):
         """num_controls, power, target_indices, controlled_indices all resolve."""
-        from qamomile.circuit.ir.block_value import BlockValue
-        from qamomile.circuit.ir.operation.gate import ControlledUOperation
-        from qamomile.circuit.ir.types.primitives import BlockType
+        from qamomile.circuit.ir.block import Block
+        from qamomile.circuit.ir.operation.gate import (
+            ControlledUOperation,
+            IndexSpecControlledU,
+        )
 
         flag = _uint_val("flag", const=1)
 
@@ -1041,16 +1042,17 @@ class TestControlledUOperationFieldSubstitution:
         )
 
         # ControlledUOperation with phi fields
-        block_val = BlockValue(type=BlockType(), name="U")
+        unitary_block = Block(name="U")
         ctrl_q = _qubit_val("ctrl")
         target_q = _qubit_val("target")
-        ctrl_u = ControlledUOperation(
-            operands=[block_val, ctrl_q, target_q],
+        ctrl_u = IndexSpecControlledU(
+            operands=[ctrl_q, target_q],
             results=[ctrl_q.next_version(), target_q.next_version()],
             num_controls=nc_phi,
             power=power_phi,
             target_indices=[ti_phi],
             controlled_indices=[ci_phi],
+            block=unitary_block,
         )
 
         block = Block(
@@ -1171,21 +1173,22 @@ class TestCastSourceProvenanceSync:
 
         # CastOperation with stale provenance from phi
         result_type = QFixedType(integer_bits=0, fractional_bits=2)
-        cast_result = Value(
-            type=result_type,
-            name="qf",
-            params={
-                "cast_source_uuid": phi_arr.uuid,
-                "cast_source_logical_id": phi_arr.logical_id,
-                "cast_qubit_uuids": [f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
-                "cast_qubit_logical_ids": [
+        cast_result = (
+            Value(type=result_type, name="qf")
+            .with_cast_metadata(
+                source_uuid=phi_arr.uuid,
+                source_logical_id=phi_arr.logical_id,
+                qubit_uuids=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+                qubit_logical_ids=[
                     f"{phi_arr.logical_id}_0",
                     f"{phi_arr.logical_id}_1",
                 ],
-                "num_bits": 2,
-                "int_bits": 0,
-                "qubit_values": [f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
-            },
+            )
+            .with_qfixed_metadata(
+                qubit_uuids=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+                num_bits=2,
+                int_bits=0,
+            )
         )
         cast_op = CastOperation(
             operands=[phi_arr],
@@ -1207,13 +1210,13 @@ class TestCastSourceProvenanceSync:
         cast_ops = [op for op in lowered.operations if isinstance(op, CastOperation)]
         assert len(cast_ops) == 1
         result = cast_ops[0].results[0]
-        assert result.params["cast_source_uuid"] == arr_true.uuid, (
+        assert result.get_cast_source_uuid() == arr_true.uuid, (
             f"cast_source_uuid should be arr_true ({arr_true.uuid}), "
-            f"got {result.params['cast_source_uuid']}"
+            f"got {result.get_cast_source_uuid()}"
         )
-        assert result.params["cast_source_logical_id"] == arr_true.logical_id
+        assert result.get_cast_source_logical_id() == arr_true.logical_id
         # Carrier keys should also be rebuilt
-        assert result.params["cast_qubit_uuids"] == [
+        assert list(result.get_cast_qubit_uuids() or ()) == [
             f"{arr_true.uuid}_0",
             f"{arr_true.uuid}_1",
         ]
@@ -1252,21 +1255,22 @@ class TestCastProvenanceThroughSeparate:
         )
 
         result_type = QFixedType(integer_bits=0, fractional_bits=2)
-        cast_result = Value(
-            type=result_type,
-            name="qf",
-            params={
-                "cast_source_uuid": phi_arr.uuid,
-                "cast_source_logical_id": phi_arr.logical_id,
-                "cast_qubit_uuids": [f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
-                "cast_qubit_logical_ids": [
+        cast_result = (
+            Value(type=result_type, name="qf")
+            .with_cast_metadata(
+                source_uuid=phi_arr.uuid,
+                source_logical_id=phi_arr.logical_id,
+                qubit_uuids=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+                qubit_logical_ids=[
                     f"{phi_arr.logical_id}_0",
                     f"{phi_arr.logical_id}_1",
                 ],
-                "num_bits": 2,
-                "int_bits": 0,
-                "qubit_values": [f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
-            },
+            )
+            .with_qfixed_metadata(
+                qubit_uuids=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+                num_bits=2,
+                int_bits=0,
+            )
         )
         cast_op = CastOperation(
             operands=[phi_arr],
@@ -1288,8 +1292,8 @@ class TestCastProvenanceThroughSeparate:
         cast_ops = [op for op in lowered.operations if isinstance(op, CastOperation)]
         assert len(cast_ops) == 1
         result = cast_ops[0].results[0]
-        assert result.params["cast_source_uuid"] == arr_true.uuid
-        assert result.params["qubit_values"] == [
+        assert result.get_cast_source_uuid() == arr_true.uuid
+        assert list(result.get_qfixed_qubit_uuids()) == [
             f"{arr_true.uuid}_0",
             f"{arr_true.uuid}_1",
         ]

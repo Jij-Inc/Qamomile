@@ -23,6 +23,8 @@ import linecache
 import math
 from typing import Any
 
+from qamomile.circuit.transpiler.gate_emitter import MeasurementMode
+
 
 def _to_expr(value: Any) -> str:
     """Convert a value to a CUDA-Q source expression string.
@@ -137,11 +139,6 @@ class CudaqKernelArtifact:
     execution_mode: ExecutionMode = ExecutionMode.STATIC
     param_count: int = 0
 
-    @property
-    def kernel(self) -> Any:
-        """Backward-compatibility alias for ``kernel_func``."""
-        return self.kernel_func
-
 
 class CudaqKernelEmitter:
     """Unified GateEmitter that generates ``@cudaq.kernel`` Python source code.
@@ -151,11 +148,11 @@ class CudaqKernelEmitter:
     ``finalize()`` method compiles the source via ``exec()`` and populates
     the artifact's ``kernel_func``.
 
-    The ``noop_measurement`` flag controls measurement behaviour:
+    The ``measurement_mode`` property controls measurement behaviour:
 
-    - ``True`` (STATIC mode): ``emit_measure`` is a no-op; ``cudaq.sample()``
-      auto-measures all qubits.
-    - ``False`` (RUNNABLE mode): ``emit_measure`` emits explicit ``mz()``
+    - ``MeasurementMode.STATIC``: ``emit_measure`` is a no-op;
+      ``cudaq.sample()`` auto-measures all qubits.
+    - ``MeasurementMode.RUNNABLE``: ``emit_measure`` emits explicit ``mz()``
       calls for mid-circuit measurement variables.
 
     Note:
@@ -180,8 +177,21 @@ class CudaqKernelEmitter:
         self._indent: int = 1  # Start inside function body
         self._measurement_map: dict[int, int] = {}  # clbit -> qubit
         self._num_clbits: int = 0
-        self.noop_measurement: bool = True
+        self._measurement_mode: MeasurementMode = MeasurementMode.STATIC
         self._boxed_clbits: set[int] = set()
+
+    @property
+    def measurement_mode(self) -> MeasurementMode:
+        """Return the current measurement mode.
+
+        Mutable: set via the ``measurement_mode`` setter by the emit
+        pass based on whether the circuit requires runtime control flow.
+        """
+        return self._measurement_mode
+
+    @measurement_mode.setter
+    def measurement_mode(self, value: MeasurementMode) -> None:
+        self._measurement_mode = value
 
     def _emit(self, line: str) -> None:
         """Append an indented source line."""
@@ -417,12 +427,9 @@ class CudaqKernelEmitter:
     ) -> None:
         """Emit controlled-Phase via decomposition.
 
-        CP(ctrl, tgt, theta) =
-            RZ(tgt, theta/2)
-            CNOT(ctrl, tgt)
-            RZ(tgt, -theta/2)
-            CNOT(ctrl, tgt)
-            RZ(ctrl, theta/2)
+        Follows the shared CP_DECOMPOSITION recipe from
+        ``qamomile.circuit.transpiler.decompositions``.
+        Inlined here because CudaqExpr angles require string-based codegen.
         """
         a = self._angle_expr(angle)
         if isinstance(angle, (int, float)):
@@ -479,13 +486,26 @@ class CudaqKernelEmitter:
     # ------------------------------------------------------------------
 
     def emit_ch(self, circuit: CudaqKernelArtifact, control: int, target: int) -> None:
-        """Emit controlled-Hadamard via decomposition."""
+        """Emit controlled-Hadamard via decomposition.
+
+        Mirrors the ``CH_DECOMPOSITION`` recipe from
+        ``qamomile.circuit.transpiler.decompositions``.  Inlined here (rather
+        than calling :func:`emit_decomposition`) so that the string-based
+        codegen produces the exact source contract expected by the tracing
+        test emitter, without double-recording primitive gate calls.
+        """
         self._emit(f"ry({math.pi / 4}, q[{target}])")
         self._emit(f"x.ctrl(q[{control}], q[{target}])")
         self._emit(f"ry({-math.pi / 4}, q[{target}])")
 
     def emit_cy(self, circuit: CudaqKernelArtifact, control: int, target: int) -> None:
-        """Emit controlled-Y via decomposition."""
+        """Emit controlled-Y via decomposition.
+
+        Mirrors the ``CY_DECOMPOSITION`` recipe from
+        ``qamomile.circuit.transpiler.decompositions``.  See
+        :meth:`emit_ch` for why this is inlined rather than delegating to
+        :func:`emit_decomposition`.
+        """
         self._emit(f"sdg(q[{target}])")
         self._emit(f"x.ctrl(q[{control}], q[{target}])")
         self._emit(f"s(q[{target}])")
@@ -532,14 +552,14 @@ class CudaqKernelEmitter:
     ) -> None:
         """Emit measurement, respecting the current mode.
 
-        In STATIC mode (``noop_measurement=True``), this is a no-op:
-        ``cudaq.sample()`` auto-measures all qubits.
+        In STATIC mode (``measurement_mode == STATIC``), this is a
+        no-op: ``cudaq.sample()`` auto-measures all qubits.
 
-        In RUNNABLE mode (``noop_measurement=False``), emits explicit
-        ``mz()`` to capture mid-circuit measurement results as local
-        variables for ``if`` / ``while`` conditions.
+        In RUNNABLE mode (``measurement_mode == RUNNABLE``), emits
+        explicit ``mz()`` to capture mid-circuit measurement results as
+        local variables for ``if`` / ``while`` conditions.
         """
-        if self.noop_measurement:
+        if self.measurement_mode == MeasurementMode.STATIC:
             return
         self._emit(self._clbit_store(clbit, f"mz(q[{qubit}])"))
         self._measurement_map[clbit] = qubit
@@ -598,11 +618,11 @@ class CudaqKernelEmitter:
 
     def supports_if_else(self) -> bool:
         """Return True only in RUNNABLE mode (measurement-dependent branching)."""
-        return not self.noop_measurement
+        return self.measurement_mode == MeasurementMode.RUNNABLE
 
     def supports_while_loop(self) -> bool:
         """Return True only in RUNNABLE mode."""
-        return not self.noop_measurement
+        return self.measurement_mode == MeasurementMode.RUNNABLE
 
     def emit_for_loop_start(self, circuit: CudaqKernelArtifact, indexset: range) -> Any:
         """Not supported: for-loops are unrolled by the transpiler."""
@@ -647,20 +667,3 @@ class CudaqKernelEmitter:
     ) -> None:
         """Close ``while`` block by decreasing indentation."""
         self._indent -= 1
-
-
-# ------------------------------------------------------------------
-# Backward compatibility aliases
-# ------------------------------------------------------------------
-
-CudaqCircuit = CudaqKernelArtifact
-"""Alias for backward compatibility. Use ``CudaqKernelArtifact`` instead."""
-
-CudaqRuntimeCircuit = CudaqKernelArtifact
-"""Alias for backward compatibility. Use ``CudaqKernelArtifact`` instead."""
-
-CudaqGateEmitter = CudaqKernelEmitter
-"""Alias for backward compatibility. Use ``CudaqKernelEmitter`` instead."""
-
-CudaqCodegenEmitter = CudaqKernelEmitter
-"""Alias for backward compatibility. Use ``CudaqKernelEmitter`` instead."""

@@ -6,7 +6,7 @@ constant folding, UUID remapping, and value substitution.
 These tests verify that theta is correctly propagated through each pass.
 
 LoopAnalyzer tests (BinOp dependency detection and theta array-element
-access) live in ``test_emit_base.py``.
+access) live in ``test_emit_support.py``.
 """
 
 from __future__ import annotations
@@ -27,10 +27,10 @@ from qamomile.circuit.transpiler.passes.value_mapping import (
     ValueSubstitutor,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _qubit(name: str = "q") -> Value:
     """Create a qubit Value."""
@@ -39,18 +39,14 @@ def _qubit(name: str = "q") -> Value:
 
 def _float_val(name: str = "theta", *, const: float | None = None) -> Value:
     """Create a float Value, optionally constant."""
-    params: dict[str, object] = {}
-    if const is not None:
-        params["const"] = const
-    return Value(type=FloatType(), name=name, params=params)
+    value = Value(type=FloatType(), name=name)
+    return value.with_const(const) if const is not None else value
 
 
 def _uint_val(name: str, *, const: int | None = None) -> Value:
     """Create a UInt Value, optionally constant."""
-    params: dict[str, object] = {}
-    if const is not None:
-        params["const"] = const
-    return Value(type=UIntType(), name=name, params=params)
+    value = Value(type=UIntType(), name=name)
+    return value.with_const(const) if const is not None else value
 
 
 def _make_binop(
@@ -80,12 +76,15 @@ def _make_gate(
 ) -> GateOperation:
     """Create a GateOperation with given qubits and theta."""
     results = [q.next_version() for q in qubits]
-    return GateOperation(
-        operands=qubits,
-        results=results,
-        gate_type=gate_type,
-        theta=theta,
-    )
+    if theta is not None:
+        if isinstance(theta, (int, float)):
+            from qamomile.circuit.ir.types.primitives import FloatType
+
+            theta = Value(type=FloatType(), name="theta").with_const(theta)
+        return GateOperation.rotation(
+            gate_type=gate_type, qubits=qubits, theta=theta, results=results
+        )
+    return GateOperation.fixed(gate_type=gate_type, qubits=qubits, results=results)
 
 
 def _make_block(operations: list) -> Block:
@@ -129,8 +128,8 @@ class TestConstantFoldingTheta:
         assert folded_gate.theta.is_constant()
         assert folded_gate.theta.get_const() == pytest.approx(1.0)
 
-    def test_theta_float_is_unchanged(self) -> None:
-        """Theta stored as a plain float should not be affected by folding."""
+    def test_theta_const_value_is_unchanged(self) -> None:
+        """Theta stored as a constant Value should not be affected by folding."""
         q = _qubit()
         gate = _make_gate(GateOperationType.RX, [q], theta=0.42)
         block = _make_block([gate])
@@ -139,7 +138,8 @@ class TestConstantFoldingTheta:
         assert len(folded_block.operations) == 1
         folded_gate = folded_block.operations[0]
         assert isinstance(folded_gate, GateOperation)
-        assert folded_gate.theta == 0.42
+        assert isinstance(folded_gate.theta, Value)
+        assert folded_gate.theta.get_const() == pytest.approx(0.42)
 
     def test_theta_none_is_unchanged(self) -> None:
         """Gate with no theta (e.g. H gate) should pass through unchanged."""
@@ -167,9 +167,7 @@ class TestConstantFoldingTheta:
 
     def test_theta_with_bound_parameter_is_folded(self) -> None:
         """BinOp using a bound parameter folds, and theta references the result."""
-        param = Value(
-            type=FloatType(), name="phase", params={"parameter": "phase"}
-        )
+        param = Value(type=FloatType(), name="phase").with_parameter("phase")
         two = _float_val("two", const=2.0)
         binop, binop_result = _make_binop(param, two, BinOpKind.MUL)
 
@@ -296,8 +294,8 @@ class TestUUIDRemapperTheta:
         assert cloned.theta.uuid != theta_val.uuid
         assert cloned.theta.name == theta_val.name
 
-    def test_theta_float_is_preserved(self) -> None:
-        """Cloning should preserve theta when it's a plain float."""
+    def test_theta_const_value_is_preserved(self) -> None:
+        """Cloning should preserve theta when it's a constant Value."""
         q = _qubit()
         gate = _make_gate(GateOperationType.RX, [q], theta=1.57)
 
@@ -305,7 +303,8 @@ class TestUUIDRemapperTheta:
         cloned = remapper.clone_operation(gate)
 
         assert isinstance(cloned, GateOperation)
-        assert cloned.theta == 1.57
+        assert isinstance(cloned.theta, Value)
+        assert cloned.theta.get_const() == pytest.approx(1.57)
 
     def test_theta_none_is_preserved(self) -> None:
         """Cloning should preserve theta=None."""
@@ -332,8 +331,8 @@ class TestUUIDRemapperTheta:
         assert isinstance(cloned.theta, Value)
         assert remapper.uuid_remap[theta_val.uuid] == cloned.theta.uuid
 
-    def test_operands_and_theta_get_independent_uuids(self) -> None:
-        """Operand UUIDs and theta UUID should all be distinct after cloning."""
+    def test_theta_is_part_of_operands_after_cloning(self) -> None:
+        """After cloning, theta should be in operands (last element)."""
         theta_val = _float_val("angle")
         q = _qubit()
         gate = _make_gate(GateOperationType.RZ, [q], theta=theta_val)
@@ -343,8 +342,11 @@ class TestUUIDRemapperTheta:
 
         assert isinstance(cloned, GateOperation)
         assert isinstance(cloned.theta, Value)
-        cloned_uuids = {v.uuid for v in cloned.operands} | {v.uuid for v in cloned.results}
-        assert cloned.theta.uuid not in cloned_uuids
+        # theta is the last operand
+        assert cloned.theta is cloned.operands[-1]
+        # theta UUID should be in operands (it IS an operand now)
+        cloned_operand_uuids = {v.uuid for v in cloned.operands}
+        assert cloned.theta.uuid in cloned_operand_uuids
 
 
 # ===========================================================================
@@ -384,8 +386,8 @@ class TestValueSubstitutorTheta:
         assert isinstance(result.theta, Value)
         assert result.theta.uuid == theta_val.uuid
 
-    def test_theta_float_is_unchanged(self) -> None:
-        """Plain float theta should not be affected by substitution."""
+    def test_theta_const_value_is_unchanged(self) -> None:
+        """Constant Value theta should not be affected by substitution."""
         q = _qubit()
         gate = _make_gate(GateOperationType.RY, [q], theta=2.71)
 
@@ -393,7 +395,8 @@ class TestValueSubstitutorTheta:
         result = sub.substitute_operation(gate)
 
         assert isinstance(result, GateOperation)
-        assert result.theta == 2.71
+        assert isinstance(result.theta, Value)
+        assert result.theta.get_const() == pytest.approx(2.71)
 
     def test_theta_and_operands_both_substituted(self) -> None:
         """Both operands and theta can be substituted in the same operation."""
@@ -404,10 +407,12 @@ class TestValueSubstitutorTheta:
 
         gate = _make_gate(GateOperationType.RZ, [old_q], theta=old_theta)
 
-        sub = ValueSubstitutor({
-            old_theta.uuid: new_theta,
-            old_q.uuid: new_q,
-        })
+        sub = ValueSubstitutor(
+            {
+                old_theta.uuid: new_theta,
+                old_q.uuid: new_q,
+            }
+        )
         result = sub.substitute_operation(gate)
 
         assert isinstance(result, GateOperation)

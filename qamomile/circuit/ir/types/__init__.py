@@ -4,17 +4,17 @@
 
 """
 
-from .primitives import (
-    ValueType,
-    UIntType,
-    QubitType,
-    FloatType,
-    BitType,
-    TupleType,
-    DictType,
-)
-from .q_register import QUIntType, QFixedType
 from .hamiltonian import ObservableType
+from .primitives import (
+    BitType,
+    DictType,
+    FloatType,
+    QubitType,
+    TupleType,
+    UIntType,
+    ValueType,
+)
+from .q_register import QFixedType, QUIntType
 
 __all__ = [
     "ValueType",

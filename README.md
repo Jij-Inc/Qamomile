@@ -33,7 +33,7 @@ If you want this version, install from source.
 
 Requirements:
 
-- Python 3.12+
+- Python 3.11+
 - `uv`
 
 Clone the repository:
@@ -52,7 +52,8 @@ uv sync
 ```
 
 This installs the default development dependency group.
-In the current `pyproject.toml`, that means you get the Qiskit stack, documentation and test tooling, and QURI Parts-related packages as well.
+In the current `pyproject.toml`, that gives you the core Qiskit-based environment together with documentation and test tooling.
+Optional backend integrations such as QURI Parts, qBraid, and CUDA-Q still need their corresponding extras.
 
 Runtime-only environment from source:
 
@@ -160,9 +161,9 @@ This README focuses on the current circuit-first API, but optimization support r
 
 ## Learn More
 
-- Documentation: [https://jij-inc.github.io/Qamomile/](https://jij-inc.github.io/Qamomile/)
-- Tutorials: [docs/en/index.md](docs/en/index.md) and [docs/ja/index.md](docs/ja/index.md)
-- API reference: [https://jij-inc.github.io/Qamomile/api/](https://jij-inc.github.io/Qamomile/api/)
+- Documentation: [English](https://jij-inc-qamomile.readthedocs-hosted.com/latest/en/) and [Japanese](https://jij-inc-qamomile.readthedocs-hosted.com/latest/ja/)
+- Tutorials: [English](https://jij-inc-qamomile.readthedocs-hosted.com/latest/en/tutorial/) and [Japanese](https://jij-inc-qamomile.readthedocs-hosted.com/latest/ja/tutorial/)
+- API reference: https://jij-inc-qamomile.readthedocs-hosted.com/latest/en/api/
 - Repository: [https://github.com/Jij-Inc/Qamomile](https://github.com/Jij-Inc/Qamomile)
 
 ## Contributing

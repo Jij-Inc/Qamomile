@@ -34,9 +34,9 @@ Features:
 
 from __future__ import annotations
 
-import math
 import dataclasses
 import enum
+import math
 from typing import Iterator
 
 
@@ -54,7 +54,7 @@ class Pauli(enum.Enum):
     X = 0
     Y = 1
     Z = 2
-    I = 3
+    I = 3  # noqa: E741
 
 
 # Pauli multiplication table: (P1, P2) -> (Result, Phase)
@@ -162,7 +162,9 @@ class Hamiltonian:
         return cls(num_qubits=num_qubits)
 
     @classmethod
-    def identity(cls, coeff: float | complex = 1.0, num_qubits: int | None = None) -> Hamiltonian:
+    def identity(
+        cls, coeff: float | complex = 1.0, num_qubits: int | None = None
+    ) -> Hamiltonian:
         """Create a scalar times identity Hamiltonian."""
         h = cls(num_qubits=num_qubits)
         h.constant = coeff
@@ -170,19 +172,14 @@ class Hamiltonian:
 
     @classmethod
     def single_pauli(
-        cls,
-        pauli: Pauli,
-        index: int,
-        coeff: float | complex = 1.0
+        cls, pauli: Pauli, index: int, coeff: float | complex = 1.0
     ) -> Hamiltonian:
         """Create a single Pauli term Hamiltonian."""
         h = cls()
         h.add_term((PauliOperator(pauli, index),), coeff)
         return h
 
-    def add_term(
-        self, operators: tuple[PauliOperator, ...], coeff: float | complex
-    ):
+    def add_term(self, operators: tuple[PauliOperator, ...], coeff: float | complex):
         """
         Adds a term to the Hamiltonian.
 
@@ -294,7 +291,9 @@ class Hamiltonian:
                     h_str += "+" + term_str if coeff.real > 0 else "-" + term_str
                 else:
                     h_str += (
-                        f"+{coeff}" + term_str if coeff.real > 0 else f"{coeff}" + term_str
+                        f"+{coeff}" + term_str
+                        if coeff.real > 0
+                        else f"{coeff}" + term_str
                     )
 
             counter += 1

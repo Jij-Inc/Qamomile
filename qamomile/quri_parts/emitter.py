@@ -11,7 +11,16 @@ from __future__ import annotations
 
 import math
 import warnings
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from qamomile.circuit.transpiler.decompositions import (  # noqa: F401 -- recipe data
+    CH_DECOMPOSITION,
+    CP_DECOMPOSITION,
+    CRY_DECOMPOSITION,
+    CRZ_DECOMPOSITION,
+    CY_DECOMPOSITION,
+)
+from qamomile.circuit.transpiler.gate_emitter import MeasurementMode
 
 if TYPE_CHECKING:
     from quri_parts.circuit import (
@@ -28,6 +37,11 @@ class QuriPartsGateEmitter:
     QURI Parts parametric circuits accept angles in dictionary form:
     {parameter: coefficient, CONST: constant_offset}
     """
+
+    @property
+    def measurement_mode(self) -> MeasurementMode:
+        """QURI Parts always uses STATIC measurement (sampler handles it)."""
+        return MeasurementMode.STATIC
 
     def __init__(self) -> None:
         """Initialize the emitter."""
@@ -62,7 +76,7 @@ class QuriPartsGateEmitter:
             self._param_map[name] = param
         return self._param_map[name]
 
-    def _make_angle_dict(self, angle: float | Any) -> dict[Any, float] | float:
+    def _make_angle_dict(self, angle: float | Any) -> "dict[Parameter, float] | float":
         """Convert angle to QURI Parts format.
 
         If angle is a float, return it directly.
@@ -131,7 +145,7 @@ class QuriPartsGateEmitter:
     ) -> None:
         """Emit RX rotation gate."""
         angle_dict = self._make_angle_dict(angle)
-        if isinstance(angle_dict, float):
+        if isinstance(angle_dict, (int, float)):
             circuit.add_RX_gate(qubit, angle_dict)
         else:
             circuit.add_ParametricRX_gate(qubit, angle_dict)
@@ -144,7 +158,7 @@ class QuriPartsGateEmitter:
     ) -> None:
         """Emit RY rotation gate."""
         angle_dict = self._make_angle_dict(angle)
-        if isinstance(angle_dict, float):
+        if isinstance(angle_dict, (int, float)):
             circuit.add_RY_gate(qubit, angle_dict)
         else:
             circuit.add_ParametricRY_gate(qubit, angle_dict)
@@ -157,7 +171,7 @@ class QuriPartsGateEmitter:
     ) -> None:
         """Emit RZ rotation gate."""
         angle_dict = self._make_angle_dict(angle)
-        if isinstance(angle_dict, float):
+        if isinstance(angle_dict, (int, float)):
             circuit.add_RZ_gate(qubit, angle_dict)
         else:
             circuit.add_ParametricRZ_gate(qubit, angle_dict)
@@ -180,7 +194,7 @@ class QuriPartsGateEmitter:
         and does not go through this path.
         """
         angle_dict = self._make_angle_dict(angle)
-        if isinstance(angle_dict, float):
+        if isinstance(angle_dict, (int, float)):
             circuit.add_U1_gate(qubit, angle_dict)
         else:
             circuit.add_ParametricRZ_gate(qubit, angle_dict)
@@ -223,15 +237,12 @@ class QuriPartsGateEmitter:
     ) -> None:
         """Emit controlled-Phase gate using decomposition.
 
-        CP(ctrl, tgt, θ) =
-            RZ(tgt, θ/2)
-            CNOT(ctrl, tgt)
-            RZ(tgt, -θ/2)
-            CNOT(ctrl, tgt)
-            RZ(ctrl, θ/2)
+        Follows the shared CP_DECOMPOSITION recipe from
+        ``qamomile.circuit.transpiler.decompositions``.
+        Inlined here because QURI Parts parametric angles use dict representation.
         """
         angle_dict = self._make_angle_dict(angle)
-        if isinstance(angle_dict, float):
+        if isinstance(angle_dict, (int, float)):
             half_angle = angle_dict / 2
             circuit.add_RZ_gate(target, half_angle)
             circuit.add_CNOT_gate(control, target)
@@ -258,7 +269,7 @@ class QuriPartsGateEmitter:
         """Emit RZZ gate using ParametricPauliRotation."""
         # QURI Parts pauli_ids: 1=X, 2=Y, 3=Z
         angle_dict = self._make_angle_dict(angle)
-        if isinstance(angle_dict, float):
+        if isinstance(angle_dict, (int, float)):
             circuit.add_PauliRotation_gate([qubit1, qubit2], [3, 3], angle_dict)
         else:
             circuit.add_ParametricPauliRotation_gate(
@@ -285,10 +296,8 @@ class QuriPartsGateEmitter:
     ) -> None:
         """Emit controlled-Hadamard gate using decomposition.
 
-        CH(ctrl, tgt) =
-            RY(tgt, π/4)
-            CNOT(ctrl, tgt)
-            RY(tgt, -π/4)
+        Follows the shared CH_DECOMPOSITION recipe from
+        ``qamomile.circuit.transpiler.decompositions``.
         """
         circuit.add_RY_gate(target, math.pi / 4)
         circuit.add_CNOT_gate(control, target)
@@ -302,10 +311,8 @@ class QuriPartsGateEmitter:
     ) -> None:
         """Emit controlled-Y gate using decomposition.
 
-        CY(ctrl, tgt) =
-            S†(tgt)
-            CNOT(ctrl, tgt)
-            S(tgt)
+        Follows the shared CY_DECOMPOSITION recipe from
+        ``qamomile.circuit.transpiler.decompositions``.
         """
         circuit.add_Sdag_gate(target)
         circuit.add_CNOT_gate(control, target)
@@ -329,7 +336,7 @@ class QuriPartsGateEmitter:
             RZ(tgt, -π/2)
         """
         angle_dict = self._make_angle_dict(angle)
-        if isinstance(angle_dict, float):
+        if isinstance(angle_dict, (int, float)):
             half_angle = angle_dict / 2
             circuit.add_RZ_gate(target, math.pi / 2)
             circuit.add_CNOT_gate(control, target)
@@ -356,14 +363,12 @@ class QuriPartsGateEmitter:
     ) -> None:
         """Emit controlled-RY gate using decomposition.
 
-        CRY(ctrl, tgt, θ) =
-            RY(tgt, θ/2)
-            CNOT(ctrl, tgt)
-            RY(tgt, -θ/2)
-            CNOT(ctrl, tgt)
+        Follows the shared CRY_DECOMPOSITION recipe from
+        ``qamomile.circuit.transpiler.decompositions``.
+        Inlined here because QURI Parts parametric angles use dict representation.
         """
         angle_dict = self._make_angle_dict(angle)
-        if isinstance(angle_dict, float):
+        if isinstance(angle_dict, (int, float)):
             half_angle = angle_dict / 2
             circuit.add_RY_gate(target, half_angle)
             circuit.add_CNOT_gate(control, target)
@@ -386,14 +391,12 @@ class QuriPartsGateEmitter:
     ) -> None:
         """Emit controlled-RZ gate using decomposition.
 
-        CRZ(ctrl, tgt, θ) =
-            RZ(tgt, θ/2)
-            CNOT(ctrl, tgt)
-            RZ(tgt, -θ/2)
-            CNOT(ctrl, tgt)
+        Follows the shared CRZ_DECOMPOSITION recipe from
+        ``qamomile.circuit.transpiler.decompositions``.
+        Inlined here because QURI Parts parametric angles use dict representation.
         """
         angle_dict = self._make_angle_dict(angle)
-        if isinstance(angle_dict, float):
+        if isinstance(angle_dict, (int, float)):
             half_angle = angle_dict / 2
             circuit.add_RZ_gate(target, half_angle)
             circuit.add_CNOT_gate(control, target)
@@ -409,12 +412,11 @@ class QuriPartsGateEmitter:
 
     # Measurement - QURI Parts doesn't support mid-circuit measurements
     #
-    # When emit_measure is a no-op, the sampler returns an all-qubit
+    # When measurement_mode is STATIC, the sampler returns an all-qubit
     # bitstring indexed by qubit position.  The transpiler pipeline
-    # needs a clbit→qubit mapping to decode partial measurements
-    # correctly.  Setting this flag causes StandardEmitPass to build
-    # that mapping.
-    noop_measurement: bool = True
+    # needs a clbit->qubit mapping to decode partial measurements
+    # correctly.  The measurement_mode property (defined above) tells
+    # StandardEmitPass to build that mapping.
 
     def emit_measure(
         self,

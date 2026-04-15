@@ -360,7 +360,7 @@ class TestQAOARangeAliasDisplay:
         analyzer.graph = None
 
         # Simulate an unbound array shape value (e.g., edges_dim0)
-        value = Value(type=UIntType(), name="edges_dim0", params={})
+        value = Value(type=UIntType(), name="edges_dim0")
         result = analyzer._format_value_as_expression(value, set())
         assert result == "edges_dim0", f"Expected 'edges_dim0', got '{result}'"
         assert "?" not in result
@@ -373,7 +373,7 @@ class TestQAOARangeAliasDisplay:
         analyzer = object.__new__(CircuitAnalyzer)
         analyzer.graph = None
 
-        value = Value(type=UIntType(), name="", params={})
+        value = Value(type=UIntType(), name="")
         result = analyzer._format_value_as_expression(value, set())
         assert result == "?"
 

@@ -10,7 +10,7 @@ import math
 import re
 from typing import TYPE_CHECKING
 
-from qamomile.circuit.ir.block_value import BlockValue
+from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
@@ -22,6 +22,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     IfOperation,
     WhileOperation,
 )
+from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     GateOperation,
@@ -29,7 +30,6 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureOperation,
     MeasureVectorOperation,
 )
-from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.types.primitives import QubitType
 from qamomile.circuit.ir.value import ArrayValue, Value
@@ -43,19 +43,19 @@ from .visual_ir import (
     VGate,
     VGateKind,
     VInlineBlock,
+    VisualCircuit,
+    VisualNode,
     VSkip,
     VUnfoldedKind,
     VUnfoldedSequence,
-    VisualCircuit,
-    VisualNode,
 )
 
 if TYPE_CHECKING:
-    from qamomile.circuit.ir.graph import Graph
+    from qamomile.circuit.ir.block import Block
 
 
 class CircuitAnalyzer:
-    """Analyzes IR graphs for circuit visualization.
+    """Analyzes IR blocks for circuit visualization.
 
     Handles qubit mapping, value resolution, label generation,
     and width estimation. Has no matplotlib dependency.
@@ -63,7 +63,7 @@ class CircuitAnalyzer:
 
     def __init__(
         self,
-        graph: Graph,
+        graph: "Block",
         style: CircuitStyle,
         inline: bool = False,
         fold_loops: bool = True,
@@ -82,7 +82,7 @@ class CircuitAnalyzer:
         return self.inline and (self.inline_depth is None or depth < self.inline_depth)
 
     def build_qubit_map(
-        self, graph: Graph
+        self, graph: "Block"
     ) -> tuple[dict[str, int], dict[int, str], int]:
         """Build mapping from qubit logical_id to wire indices.
 
@@ -91,7 +91,7 @@ class CircuitAnalyzer:
         the same logical_id, so we only need logical_id-based tracking.
 
         Args:
-            graph: Computation graph.
+            graph: Computation block.
 
         Returns:
             Tuple of (qubit_map, qubit_names, num_qubits).
@@ -245,17 +245,10 @@ class CircuitAnalyzer:
 
                 elif isinstance(op, CallBlockOperation):
                     if self._should_inline_at_depth(depth):
-                        block_value = op.operands[0]
-                        # The IR guarantees that operands[0] of CallBlockOperation is always a BlockValue,
-                        # so this assertion should always pass.
-                        # If it fails, there is a bug in the IR construction.
-                        assertion_message = (
-                            "[FOR DEVELOPER] CallBlockOperation.operands[0] must be a BlockValue. "
-                            "If this assertion fails, there is a bug in the IR construction."
-                        )
-                        assert isinstance(block_value, BlockValue), assertion_message
+                        block_value = op.block
+                        assert isinstance(block_value, Block)
                         new_remap = dict(logical_id_remap)
-                        actual_inputs = op.operands[1:]
+                        actual_inputs = op.operands
 
                         for dummy_input, actual_input in zip(
                             block_value.input_values, actual_inputs, strict=True
@@ -323,7 +316,7 @@ class CircuitAnalyzer:
                         )
 
                     qubit_operands = [
-                        v for v in op.operands[1:] if isinstance(v.type, QubitType)
+                        v for v in op.operands if isinstance(v.type, QubitType)
                     ]
                     qubit_results = [
                         v for v in op.results if isinstance(v.type, QubitType)
@@ -338,10 +331,11 @@ class CircuitAnalyzer:
                             continue
                         if isinstance(fresh_result, ArrayValue):
                             # Resolve array shape using block param mapping
-                            block_value = op.operands[0]
+                            block_value = op.block
+                            assert isinstance(block_value, Block)
                             fresh_pv = dict(param_values) if param_values else {}
                             for dummy, actual in zip(
-                                block_value.input_values, op.operands[1:]
+                                block_value.input_values, op.operands
                             ):
                                 c = actual.get_const()
                                 if c is not None:
@@ -409,7 +403,7 @@ class CircuitAnalyzer:
                     op, ControlledUOperation
                 ) and self._should_inline_at_depth(depth):
                     block_value = op.block
-                    if isinstance(block_value, BlockValue):
+                    if isinstance(block_value, Block):
                         new_remap = dict(logical_id_remap)
                         for dummy_input, actual_input in zip(
                             block_value.input_values, op.target_operands
@@ -466,7 +460,7 @@ class CircuitAnalyzer:
                     and op.has_implementation
                 ):
                     block_value = op.implementation
-                    if isinstance(block_value, BlockValue):
+                    if isinstance(block_value, Block):
                         new_remap = dict(logical_id_remap)
                         for dummy_input, actual_input in zip(
                             block_value.input_values, op.target_qubits
@@ -600,19 +594,19 @@ class CircuitAnalyzer:
 
     def build_visual_ir(
         self,
-        graph: Graph,
+        graph: "Block",
         qubit_map: dict[str, int],
         qubit_names: dict[int, str],
         num_qubits: int,
     ) -> VisualCircuit:
-        """Build a Visual IR tree from the IR graph.
+        """Build a Visual IR tree from the IR block.
 
         Walks all operations, resolving labels, qubit indices, and widths
         into pre-computed VisualNode dataclasses. The resulting VisualCircuit
         can be consumed by Layout and Renderer without any Analyzer access.
 
         Args:
-            graph: IR computation graph.
+            graph: IR computation block.
             qubit_map: Mapping from logical_id to wire index.
             qubit_names: Mapping from wire index to display name.
             num_qubits: Total number of qubit wires.
@@ -838,7 +832,7 @@ class CircuitAnalyzer:
             label = self._get_block_label(op, qubit_map, param_values=param_values)
             box_width = self._estimate_block_label_box_width(label)
             qubit_indices = []
-            for operand in op.operands[1:]:  # Skip BlockValue
+            for operand in op.operands:
                 qubit_indices.extend(
                     self._resolve_operand_to_qubit_indices(
                         operand, qubit_map, logical_id_remap, param_values
@@ -953,20 +947,20 @@ class CircuitAnalyzer:
         """Build a VInlineBlock node for an inlined block operation."""
         # Extract block_value, affected_qubits, and actual_inputs based on op type
         if isinstance(op, CallBlockOperation):
-            block_value = op.operands[0]
-            assert isinstance(block_value, BlockValue)
+            block_value = op.block
+            assert isinstance(block_value, Block)
             affected_qubits: list[int] = []
-            for operand in op.operands[1:]:
+            for operand in op.operands:
                 affected_qubits.extend(
                     self._resolve_operand_to_qubit_indices(
                         operand, qubit_map, logical_id_remap, param_values
                     )
                 )
-            actual_inputs = op.operands[1:]
+            actual_inputs = op.operands
             block_name = block_value.name or "block"
         elif isinstance(op, ControlledUOperation):
             block_value = op.block
-            assert isinstance(block_value, BlockValue)
+            assert isinstance(block_value, Block)
             control_qubit_indices: list[int] = []
             for operand in op.control_operands:
                 idx = self._resolve_operand_to_qubit_index(
@@ -986,7 +980,7 @@ class CircuitAnalyzer:
             block_name = u_name
         elif isinstance(op, CompositeGateOperation):
             block_value = op.implementation
-            assert isinstance(block_value, BlockValue)
+            assert isinstance(block_value, Block)
             affected_qubits = []
             for operand in list(op.control_qubits) + list(op.target_qubits):
                 idx = self._resolve_operand_to_qubit_index(
@@ -1529,15 +1523,15 @@ class CircuitAnalyzer:
 
     def _analyze_loop_affected_qubits(
         self,
-        op: ForOperation,
+        op: ForOperation | WhileOperation | ForItemsOperation,
         qubit_map: dict[str, int],
         logical_id_remap: dict[str, str] | None = None,
         param_values: dict | None = None,
     ) -> list[int]:
-        """Analyze which qubits are affected by a ForOperation.
+        """Analyze which qubits are affected by a loop operation.
 
         Args:
-            op: ForOperation to analyze.
+            op: Loop operation (ForOperation, WhileOperation, or ForItemsOperation).
             qubit_map: Mapping from logical_id to qubit index.
             logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
             param_values: Parameter values for resolving loop range and indices.
@@ -1577,9 +1571,9 @@ class CircuitAnalyzer:
                             if isinstance(inner_op, GateOperation):
                                 operands = list(inner_op.operands)
                             elif isinstance(inner_op, CallBlockOperation):
-                                operands = list(inner_op.operands[1:])
+                                operands = list(inner_op.operands)
                             elif isinstance(inner_op, ControlledUOperation):
-                                operands = list(inner_op.operands[1:])
+                                operands = list(inner_op.operands)
                             elif isinstance(inner_op, CompositeGateOperation):
                                 operands = list(inner_op.control_qubits) + list(
                                     inner_op.target_qubits
@@ -1609,6 +1603,7 @@ class CircuitAnalyzer:
                 hasattr(operand, "parent_array") and operand.parent_array is not None
             )
             if is_array_element:
+                assert operand.parent_array is not None
                 parent_lid = operand.parent_array.logical_id
                 parent_lid = logical_id_remap.get(parent_lid, parent_lid)
                 if parent_lid in qubit_map:
@@ -1654,12 +1649,12 @@ class CircuitAnalyzer:
                         if idx is not None:
                             affected.add(idx)
                 elif isinstance(inner_op, CallBlockOperation):
-                    for operand in inner_op.operands[1:]:  # Skip BlockValue
+                    for operand in inner_op.operands:
                         idx = get_qubit_index_or_expand(operand)
                         if idx is not None:
                             affected.add(idx)
                 elif isinstance(inner_op, ControlledUOperation):
-                    for operand in inner_op.operands[1:]:  # Skip BlockValue
+                    for operand in inner_op.operands:
                         idx = get_qubit_index_or_expand(operand)
                         if idx is not None:
                             affected.add(idx)
@@ -1732,9 +1727,9 @@ class CircuitAnalyzer:
                 if isinstance(inner_op, GateOperation):
                     operands = list(inner_op.operands)
                 elif isinstance(inner_op, CallBlockOperation):
-                    operands = list(inner_op.operands[1:])
+                    operands = list(inner_op.operands)
                 elif isinstance(inner_op, ControlledUOperation):
-                    operands = list(inner_op.operands[1:])
+                    operands = list(inner_op.operands)
                 elif isinstance(inner_op, CompositeGateOperation):
                     operands = list(inner_op.control_qubits) + list(
                         inner_op.target_qubits
@@ -1849,9 +1844,7 @@ class CircuitAnalyzer:
         # 3.6. Array element access (e.g. edges[idx, 0])
         if hasattr(value, "parent_array") and value.parent_array is not None:
             parent = value.parent_array
-            const_array = None
-            if hasattr(parent, "params") and "const_array" in parent.params:
-                const_array = parent.params["const_array"]
+            const_array = parent.get_const_array()
             if const_array is None:
                 const_array = param_values.get(f"_array_data_{parent.logical_id}")
             if (
@@ -2094,10 +2087,11 @@ class CircuitAnalyzer:
                 return lhs_str
             return f"{lhs_str}/{rhs_str}"
         else:
-            op_sym = {
+            _extra_ops: dict[BinOpKind, str] = {
                 BinOpKind.FLOORDIV: "//",
                 BinOpKind.POW: "**",
-            }.get(binop.kind, "?")
+            }
+            op_sym = _extra_ops.get(binop.kind, "?") if binop.kind is not None else "?"
             return f"{lhs_str}{op_sym}{rhs_str}"
 
     def _evaluate_loop_body_intermediates(
@@ -2144,9 +2138,7 @@ class CircuitAnalyzer:
                 ),
             ):
                 continue
-            operand_list = (
-                op.operands if isinstance(op, GateOperation) else op.operands[1:]
-            )
+            operand_list = op.operands
             for operand in operand_list:
                 if hasattr(operand, "element_indices") and operand.element_indices:
                     for idx_val in operand.element_indices:
@@ -2320,16 +2312,10 @@ class CircuitAnalyzer:
                 return element_indices
 
         # Handle synthetic ArrayValue from expval() tuple input
-        if (
-            isinstance(operand, ArrayValue)
-            and hasattr(operand, "params")
-            and "qubit_values" in operand.params
-        ):
+        if isinstance(operand, ArrayValue) and operand.get_element_uuids():
             indices = []
-            for qv in operand.params["qubit_values"]:
-                idx = self._resolve_operand_to_qubit_index(
-                    qv, qubit_map, logical_id_remap, param_values
-                )
+            for qubit_uuid in operand.get_element_uuids():
+                idx = qubit_map.get(qubit_uuid)
                 if idx is not None:
                     indices.append(idx)
             if indices:
@@ -2411,13 +2397,13 @@ class CircuitAnalyzer:
         param_values: dict,
         qubit_map: dict[str, int] | None = None,
     ) -> tuple[dict[str, str], dict]:
-        """Build logical_id_remap and child_param_values for a BlockValue.
+        """Build logical_id_remap and child_param_values for a nested Block.
 
         Maps dummy block input logical_ids to actual input logical_ids,
         building the mappings needed for recursive processing.
 
         Args:
-            block_value: BlockValue whose input mappings to build.
+            block_value: Block whose input mappings to build.
             actual_inputs: Actual input Values passed to the block.
             logical_id_remap: Current logical_id remapping (copied, not mutated).
             param_values: Current parameter values (copied, not mutated).
@@ -2524,12 +2510,10 @@ class CircuitAnalyzer:
                             child_param_values[dummy_dim.logical_id] = param_values[
                                 actual_dim.logical_id
                             ]
-                if (
-                    hasattr(actual_input, "params")
-                    and "const_array" in actual_input.params
-                ):
+                const_array = actual_input.get_const_array()
+                if const_array is not None:
                     child_param_values[f"_array_data_{dummy_input.logical_id}"] = (
-                        actual_input.params["const_array"]
+                        const_array
                     )
 
         return new_logical_id_remap, child_param_values
@@ -2639,10 +2623,10 @@ class CircuitAnalyzer:
     def _materialize_dict_entries(
         dict_value: Value,
     ) -> list[tuple] | None:
-        """Extract entries from DictValue, including bound_data in params.
+        """Extract entries from DictValue, including bound_data in metadata.
 
         DictValue.entries is typically empty when data is bound at build
-        time; the actual data lives in params["bound_data"]. This helper
+        time; the actual data lives in typed runtime metadata. This helper
         materializes those entries into a plain list of (key, value) tuples
         where keys and values are raw Python objects (not IR Values).
 
@@ -2652,11 +2636,9 @@ class CircuitAnalyzer:
         if hasattr(dict_value, "entries") and dict_value.entries:
             return dict_value.entries
 
-        # Try params["bound_data"]
-        if hasattr(dict_value, "params") and "bound_data" in dict_value.params:
-            bound = dict_value.params["bound_data"]
-            if isinstance(bound, dict):
-                return list(bound.items())
+        bound_items = dict_value.get_bound_data_items()
+        if bound_items:
+            return list(bound_items)
 
         return None
 
@@ -2786,6 +2768,8 @@ class CircuitAnalyzer:
         prefix = "  " * indent
 
         if isinstance(op, GateOperation):
+            if op.gate_type is None:
+                return None
             gate_name = op.gate_type.name.lower()
 
             if not op.operands:
@@ -2834,17 +2818,13 @@ class CircuitAnalyzer:
             return f"{prefix}measure(...)"
 
         elif isinstance(op, CallBlockOperation):
-            block_value = op.operands[0]
-            assertion_message = (
-                "[FOR DEVELOPER] CallBlockOperation.operands[0] must be a BlockValue. "
-                "If this assertion fails, there is a bug in the IR construction."
-            )
-            assert isinstance(block_value, BlockValue), assertion_message
+            block_value = op.block
+            assert isinstance(block_value, Block)
             block_name = block_value.name or "block"
 
             qubit_parts: list[str] = []
             param_parts: list[str] = []
-            for operand in op.operands[1:]:
+            for operand in op.operands:
                 if isinstance(operand.type, QubitType):
                     s = None
                     if (
@@ -2876,7 +2856,7 @@ class CircuitAnalyzer:
         elif isinstance(op, ControlledUOperation):
             block_value = op.block
             block_name = (
-                block_value.name if isinstance(block_value, BlockValue) else "U"
+                block_value.name if isinstance(block_value, Block) else "U"
             ) or "U"
 
             def _qubit_str(v: Value) -> str | None:
@@ -3053,13 +3033,16 @@ class CircuitAnalyzer:
                 rhs_str = self._format_value_as_expression(
                     op.rhs, loop_vars, operations
                 )
-                op_symbol = {
+                _binop_symbols: dict[BinOpKind, str] = {
                     BinOpKind.ADD: "+",
                     BinOpKind.SUB: "-",
                     BinOpKind.MUL: "*",
                     BinOpKind.FLOORDIV: "//",
                     BinOpKind.POW: "**",
-                }.get(op.kind, "?")
+                }
+                op_symbol = (
+                    _binop_symbols.get(op.kind, "?") if op.kind is not None else "?"
+                )
                 return f"{lhs_str}{op_symbol}{rhs_str}"
 
         # Array element access (e.g., edges[_e, 0])
@@ -3227,21 +3210,14 @@ class CircuitAnalyzer:
         Returns:
             Display label string, e.g. "block(0.5)" or "my_kernel".
         """
-        block_value = op.operands[0]
-        # The IR guarantees that operands[0] of CallBlockOperation is always a BlockValue,
-        # so this assertion should always pass.
-        # If it fails, there is a bug in the IR construction.
-        assertion_message = (
-            "[FOR DEVELOPER] CallBlockOperation.operands[0] must be a BlockValue. "
-            "If this assertion fails, there is a bug in the IR construction."
-        )
-        assert isinstance(block_value, BlockValue), assertion_message
+        block_value = op.block
+        assert isinstance(block_value, Block)
 
         label = block_value.name or "block"
 
         # Collect non-qubit parameter values
         params = []
-        for arg_name, actual_input in zip(block_value.label_args, op.operands[1:]):
+        for arg_name, actual_input in zip(block_value.label_args, op.operands):
             if not (
                 hasattr(actual_input, "logical_id")
                 and actual_input.logical_id in qubit_map
@@ -3314,29 +3290,34 @@ class CircuitAnalyzer:
             GateOperationType.TOFFOLI: r"$CCX$",
         }
 
-        base_label = tex_labels.get(op.gate_type, str(op.gate_type))
+        base_label = (
+            tex_labels.get(op.gate_type, str(op.gate_type))
+            if op.gate_type is not None
+            else "?"
+        )
 
         # Add parameter display if the gate has a theta parameter
         if op.theta is not None:
-            if isinstance(op.theta, (int, float)):
-                param_str = self._format_parameter(op.theta)
-            elif isinstance(op.theta, Value):
+            theta = op.theta
+            if isinstance(theta, (int, float)):
+                param_str = self._format_parameter(theta)
+            elif isinstance(theta, Value):
                 # Check if the Value has a bound constant
-                const_val = op.theta.get_const()
+                const_val = theta.get_const()
                 if const_val is not None:
                     # Use the bound constant value
                     param_str = self._format_parameter(const_val)
-                elif op.theta.is_parameter():
+                elif theta.is_parameter():
                     # Check if resolved through param_values (inline block expansion)
-                    if param_values and op.theta.logical_id in param_values:
-                        resolved = param_values[op.theta.logical_id]
+                    if param_values and theta.logical_id in param_values:
+                        resolved = param_values[theta.logical_id]
                         if isinstance(resolved, (int, float)):
                             param_str = self._format_parameter(resolved)
                         else:
                             param_str = self._format_symbolic_param(str(resolved))
                     else:
                         # Try evaluating (handles array element access like phis[i])
-                        evaluated = self._evaluate_value(op.theta, param_values or {})
+                        evaluated = self._evaluate_value(theta, param_values or {})
                         if evaluated is not None and isinstance(
                             evaluated, (int, float)
                         ):
@@ -3344,45 +3325,45 @@ class CircuitAnalyzer:
                         else:
                             # Try resolving array indices (e.g., phis[i] → phis[0])
                             resolved_name = self._resolve_symbolic_array_name(
-                                op.theta, param_values or {}
+                                theta, param_values or {}
                             )
                             if resolved_name is not None:
                                 param_str = self._format_symbolic_param(resolved_name)
                             else:
-                                name = op.theta.parameter_name() or op.theta.name
+                                name = theta.parameter_name() or theta.name
                                 param_str = self._format_symbolic_param(name)
                 else:
                     # Generic Value — try evaluating (handles array elements, BinOps)
-                    evaluated = self._evaluate_value(op.theta, param_values or {})
+                    evaluated = self._evaluate_value(theta, param_values or {})
                     if evaluated is not None and isinstance(evaluated, (int, float)):
                         param_str = self._format_parameter(evaluated)
                     elif (
                         param_values
-                        and op.theta.logical_id in param_values
-                        and isinstance(param_values[op.theta.logical_id], str)
+                        and theta.logical_id in param_values
+                        and isinstance(param_values[theta.logical_id], str)
                     ):
                         param_str = self._format_symbolic_param(
-                            param_values[op.theta.logical_id]
+                            param_values[theta.logical_id]
                         )
                     else:
                         resolved_name = self._resolve_symbolic_array_name(
-                            op.theta, param_values or {}
+                            theta, param_values or {}
                         )
                         if resolved_name is not None:
                             param_str = self._format_symbolic_param(resolved_name)
                         else:
                             symbolic = self._resolve_binop_as_symbolic(
-                                op.theta, param_values or {}
+                                theta, param_values or {}
                             )
                             if symbolic is not None:
                                 param_str = self._format_symbolic_expression(symbolic)
                             else:
                                 param_str = self._format_symbolic_param(
-                                    op.theta.name or "?"
+                                    theta.name or "?"
                                 )
             else:
-                # Unknown type, convert to string
-                param_str = str(op.theta)
+                # Unknown type, convert to string (defensive fallback)
+                param_str = str(theta)  # type: ignore[unreachable]
 
             return f"{base_label}({param_str})", True
 

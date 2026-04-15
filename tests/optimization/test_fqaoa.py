@@ -1,10 +1,9 @@
-import pytest
 import jijmodeling as jm
+import pytest
 
-from qamomile.optimization.fqaoa import FQAOAConverter
 from qamomile.optimization.binary_model import BinaryModel
+from qamomile.optimization.fqaoa import FQAOAConverter
 from qamomile.qiskit import QiskitTranspiler
-
 from tests.utils import Utils
 
 
@@ -20,9 +19,11 @@ def simple_problem():
         x = problem.BinaryVar(shape=(n, D))
 
         # Quadratic objective
-        problem += J.ndenumerate().map(
-            lambda ij_v: ij_v[1] * x[ij_v[0][0]].sum() * x[ij_v[0][1]].sum()
-        ).sum()
+        problem += (
+            J.ndenumerate()
+            .map(lambda ij_v: ij_v[1] * x[ij_v[0][0]].sum() * x[ij_v[0][1]].sum())
+            .sum()
+        )
 
         # Equality constraint
         problem += problem.Constraint("constraint", x.sum() == 4)

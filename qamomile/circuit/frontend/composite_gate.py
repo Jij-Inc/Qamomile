@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import abc
 import dataclasses
-from typing import TYPE_CHECKING, Callable, ClassVar, Sequence, Any, overload
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, Sequence, overload
 
 from qamomile.circuit.frontend.handle.primitives import Qubit
-from qamomile.circuit.frontend.tracer import get_current_tracer, trace, Tracer
+from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
+from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
@@ -16,9 +17,8 @@ from qamomile.circuit.ir.operation.composite_gate import (
 from qamomile.circuit.ir.value import Value
 
 if TYPE_CHECKING:
-    from qamomile.circuit.ir.block_value import BlockValue
-    from qamomile.circuit.frontend.handle.array import Vector
     from qamomile.circuit.frontend.decomposition import DecompositionStrategy
+    from qamomile.circuit.frontend.handle.array import Vector
 
 
 class CompositeGate(abc.ABC):
@@ -53,7 +53,7 @@ class CompositeGate(abc.ABC):
        ```
 
     2. **Using get_implementation() (advanced)**:
-       Return a pre-built BlockValue directly.
+       Return a pre-built Block directly.
 
     Example usage:
         ```python
@@ -154,7 +154,7 @@ class CompositeGate(abc.ABC):
         """Define the gate decomposition using frontend syntax.
 
         Override this method to provide a decomposition. The decomposition
-        is traced and converted to a BlockValue automatically.
+        is traced and converted to a Block automatically.
 
         Args:
             qubits: Input qubits as Vector[Qubit] or tuple of Qubits
@@ -233,8 +233,8 @@ class CompositeGate(abc.ABC):
             return strategy.resources(self.num_target_qubits)
         return self._resources()
 
-    def get_implementation(self) -> "BlockValue | None":
-        """Get the implementation BlockValue, if any.
+    def get_implementation(self) -> Block | None:
+        """Get the implementation Block, if any.
 
         Return None for stub gates (used in resource estimation).
         Override in subclasses to provide implementation.
@@ -255,11 +255,11 @@ class CompositeGate(abc.ABC):
         self,
         *qubits: Qubit,
         **params: Any,
-    ) -> "BlockValue | None":
+    ) -> Block | None:
         """Build the decomposition circuit dynamically.
 
         Override this method to provide a decomposition that depends on
-        runtime arguments (e.g., QPE needs the unitary BlockValue).
+        runtime arguments (e.g., QPE needs the unitary Block).
 
         This method is called by InlinePass when inlining composite gates
         that have dynamic implementations.
@@ -269,7 +269,7 @@ class CompositeGate(abc.ABC):
             **params: Additional parameters (e.g., unitary for QPE)
 
         Returns:
-            BlockValue containing the decomposition, or None if not available.
+            Block containing the decomposition, or None if not available.
 
         Example:
             class QPE(CompositeGate):
@@ -285,10 +285,10 @@ class CompositeGate(abc.ABC):
         self,
         target_qubits: "tuple[Qubit, ...] | Vector[Qubit]",
         strategy_name: str | None = None,
-    ) -> "BlockValue | None":
-        """Build a BlockValue by tracing _decompose() or a strategy.
+    ) -> Block | None:
+        """Build a Block by tracing _decompose() or a strategy.
 
-        This method creates a BlockValue from the decomposition implementation
+        This method creates a Block from the decomposition implementation
         by running it in a tracing context. If a strategy is specified and
         registered, it uses the strategy's decompose method.
 
@@ -297,12 +297,11 @@ class CompositeGate(abc.ABC):
             strategy_name: Optional strategy name to use for decomposition
 
         Returns:
-            BlockValue containing the traced operations, or None
+            Block containing the traced operations, or None
         """
-        from qamomile.circuit.ir.block_value import BlockValue
         from qamomile.circuit.frontend.handle.array import Vector
-        from qamomile.circuit.ir.value import Value
         from qamomile.circuit.ir.types.primitives import QubitType
+        from qamomile.circuit.ir.value import Value
 
         # Determine which decomposition method to use
         strategy = self.get_strategy(strategy_name) if strategy_name else None
@@ -367,6 +366,7 @@ class CompositeGate(abc.ABC):
             return None
 
         # Collect return values
+        return_values: list[Value]
         if isinstance(result, Vector):
             return_values = [result.value]
         elif isinstance(result, tuple):
@@ -374,12 +374,13 @@ class CompositeGate(abc.ABC):
         else:
             return_values = [result.value]
 
-        # Create BlockValue from traced operations (no QInitOperations)
-        block = BlockValue(
+        # Create Block from traced operations (no QInitOperations)
+        block = Block(
             operations=decomp_tracer.operations,
             input_values=input_values,
-            return_values=return_values,
+            output_values=return_values,
             name=self.custom_name or self.gate_type.value,
+            kind=BlockKind.HIERARCHICAL,
         )
 
         return block
@@ -430,8 +431,6 @@ class CompositeGate(abc.ABC):
 
         # Build operands
         operands: list[Any] = []
-        if has_impl:
-            operands.append(impl)
 
         for c in consumed_controls:
             operands.append(c.value)
@@ -459,6 +458,7 @@ class CompositeGate(abc.ABC):
             custom_name=self.custom_name,
             resource_metadata=resource_meta,
             has_implementation=has_impl,
+            implementation_block=impl,
             composite_gate_instance=self,  # Store reference for emit pass
             strategy_name=strategy,  # Pass strategy name to operation
         )
@@ -517,7 +517,7 @@ class _WrappedCompositeGate(CompositeGate):
     def num_control_qubits(self) -> int:
         return self._num_controls
 
-    def get_implementation(self) -> "BlockValue | None":
+    def get_implementation(self) -> Block | None:
         if self._qkernel is None:
             return None
         return self._qkernel.block
@@ -644,8 +644,8 @@ def composite_gate(
     Returns:
         A CompositeGate instance that can be called like a gate function.
     """
-    from qamomile.circuit.frontend.qkernel import QKernel
     from qamomile.circuit.frontend.handle import Qubit
+    from qamomile.circuit.frontend.qkernel import QKernel
 
     def decorator(
         kernel_or_func: Callable,

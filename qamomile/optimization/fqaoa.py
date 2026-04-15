@@ -32,20 +32,21 @@ Note:
 
 """
 
-import numpy as np
 import typing as typ
+
+import numpy as np
 import ommx.v1
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.circuit.transpiler.executable import ExecutableProgram
-from qamomile.circuit.transpiler.transpiler import Transpiler
 from qamomile.circuit.algorithm.fqaoa import (
     fqaoa_state,
 )
+from qamomile.circuit.transpiler.executable import ExecutableProgram
+from qamomile.circuit.transpiler.transpiler import Transpiler
 from qamomile.optimization.binary_model import BinaryModel
-from qamomile.optimization.utils import is_close_zero
 from qamomile.optimization.converter import MathematicalProblemConverter
+from qamomile.optimization.utils import is_close_zero
 
 
 class FQAOAConverter(MathematicalProblemConverter):
@@ -132,11 +133,11 @@ class FQAOAConverter(MathematicalProblemConverter):
         Return:
                         dict[tuple[int, int], int] : A variable map for ring driver.
         """
-        cyclic_var_map = {}
+        cyclic_var_map: dict[tuple[int, int], int] = {}
         for var in self._original_instance.decision_variables:
             # l = pos[0], d = pos[1]
             pos = var.subscripts
-            cyclic_var_map[tuple(pos)] = pos[0] + self.num_integers * pos[1]
+            cyclic_var_map[(pos[0], pos[1])] = pos[0] + self.num_integers * pos[1]
 
         return cyclic_var_map
 

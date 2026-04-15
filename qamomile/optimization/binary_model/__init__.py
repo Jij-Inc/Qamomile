@@ -1,6 +1,6 @@
-from .expr import binary, spin, BinaryExpr, VarType
-from .sampleset import BinarySampleSet
+from .expr import BinaryExpr, VarType, binary, spin
 from .model import BinaryModel
+from .sampleset import BinarySampleSet
 
 __all__ = [
     "BinaryModel",

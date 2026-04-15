@@ -7,6 +7,7 @@ metadata extraction, and QFT/IQFT formulas used by all estimators.
 from __future__ import annotations
 
 import warnings
+from typing import Any, cast
 
 import sympy as sp
 
@@ -157,10 +158,10 @@ def _classify_controlled(
     return GateCount(
         total=_ONE,
         single_qubit=_ZERO,  # controlled gates are never single-qubit
-        two_qubit=two,
-        multi_qubit=multi,
+        two_qubit=cast(sp.Expr, two),
+        multi_qubit=cast(sp.Expr, multi),
         t_gates=t_count,
-        clifford_gates=clifford,
+        clifford_gates=cast(sp.Expr, clifford),
         rotation_gates=rotation,
     )
 
@@ -200,8 +201,8 @@ def classify_controlled_u(
     return GateCount(
         total=_ONE,
         single_qubit=_ZERO,
-        two_qubit=two,
-        multi_qubit=multi,
+        two_qubit=cast(sp.Expr, two),
+        multi_qubit=cast(sp.Expr, multi),
         t_gates=_ZERO,
         clifford_gates=_ZERO,
         rotation_gates=_ZERO,
@@ -300,4 +301,74 @@ def qft_iqft_gate_count(n: sp.Expr) -> GateCount:
         t_gates=_ZERO,
         clifford_gates=h + swap,  # H and SWAP are Clifford
         rotation_gates=cp,  # CP gates are rotation
+    )
+
+
+# ------------------------------------------------------------------ #
+#  PauliEvolve gate count                                            #
+# ------------------------------------------------------------------ #
+
+
+def classify_pauli_evolve(hamiltonian: Any) -> GateCount:
+    """Gate count for PauliEvolve decomposition (Pauli gadget method).
+
+    For each Hamiltonian term with *k* qubits (x_count X, y_count Y):
+      - Basis change (pre):  x_count H + y_count (Sdg + H) = x_count + 2*y_count single-qubit
+      - CNOT ladder:         2*(k-1) CX gates (k >= 2)
+      - RZ gate:             1 rotation gate
+      - Basis undo (post):   x_count H + y_count (H + S) = x_count + 2*y_count single-qubit
+      Total single-qubit per term: 2*x_count + 4*y_count + 1 (RZ)
+      Total two-qubit per term:    2*max(0, k-1) (CX ladder)
+
+    Args:
+        hamiltonian: A concrete Hamiltonian with known terms.
+
+    Returns:
+        GateCount: Total gate counts for the full Pauli evolution.
+    """
+    import qamomile.observable as qm_o
+
+    total_single = _ZERO
+    total_two = _ZERO
+    total_clifford = _ZERO
+    total_rotation = _ZERO
+    total_total = _ZERO
+
+    for operators, coeff in hamiltonian:
+        if abs(complex(coeff)) < 1e-15:
+            continue
+        if not operators:
+            continue
+
+        k = len(operators)
+        x_count = sum(1 for op in operators if op.pauli == qm_o.Pauli.X)
+        y_count = sum(1 for op in operators if op.pauli == qm_o.Pauli.Y)
+
+        # Basis change gates (Clifford): H for X, Sdg+H for Y (pre), H+S for Y (post)
+        basis_change_single = sp.Integer(2 * x_count + 4 * y_count)
+        # RZ rotation (1 per term)
+        rz_count = _ONE
+        # CNOT ladder (2*(k-1) for k >= 2, all Clifford)
+        cx_count = sp.Integer(2 * max(0, k - 1))
+
+        term_single = basis_change_single + rz_count
+        term_two = cx_count
+        term_clifford = basis_change_single + cx_count
+        term_rotation = rz_count
+        term_total = term_single + term_two
+
+        total_single += term_single
+        total_two += term_two
+        total_clifford += term_clifford
+        total_rotation += term_rotation
+        total_total += term_total
+
+    return GateCount(
+        total=total_total,
+        single_qubit=total_single,
+        two_qubit=total_two,
+        multi_qubit=_ZERO,
+        t_gates=_ZERO,
+        clifford_gates=total_clifford,
+        rotation_gates=total_rotation,
     )

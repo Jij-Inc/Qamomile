@@ -5,7 +5,6 @@ from __future__ import annotations
 import dataclasses
 
 from qamomile.circuit.ir.block import Block, BlockKind
-from qamomile.circuit.ir.block_value import BlockValue
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.composite_gate import (
@@ -13,13 +12,12 @@ from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateType,
 )
 from qamomile.circuit.ir.operation.control_flow import (
-    ForOperation,
-    ForItemsOperation,
+    HasNestedOps,
     IfOperation,
-    WhileOperation,
 )
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
+from qamomile.circuit.transpiler.errors import InliningError
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.value_mapping import (
     UUIDRemapper,
@@ -87,29 +85,13 @@ class InlinePass(Pass[Block, Block]):
         for op in operations:
             if isinstance(op, ReturnOperation):
                 # Skip ReturnOperation during inlining - the caller handles
-                # return value mapping via block.return_values / call_op.results
+                # return value mapping via block.output_values / call_op.results
                 continue
 
             elif isinstance(op, CallBlockOperation):
                 # Inline the called block
                 inlined = self._inline_call(op, value_map)
                 result.extend(inlined)
-
-            elif isinstance(op, ForOperation):
-                # Recurse into loop body, preserve the For structure
-                serialized_body = self._serialize_operations(op.operations, value_map)
-                new_op = dataclasses.replace(op, operations=serialized_body)
-                # Apply value substitutions to operands
-                new_op = self._substitute_values(new_op, value_map)
-                result.append(new_op)
-
-            elif isinstance(op, ForItemsOperation):
-                # Recurse into loop body, preserve the ForItems structure
-                serialized_body = self._serialize_operations(op.operations, value_map)
-                new_op = dataclasses.replace(op, operations=serialized_body)
-                # Apply value substitutions to operands (the dict being iterated)
-                new_op = self._substitute_values(new_op, value_map)
-                result.append(new_op)
 
             elif isinstance(op, IfOperation):
                 # Recurse into both branches, preserve the If structure
@@ -128,10 +110,14 @@ class InlinePass(Pass[Block, Block]):
                 new_op = self._substitute_values(new_op, value_map)
                 result.append(new_op)
 
-            elif isinstance(op, WhileOperation):
-                # Recurse into loop body, preserve the While structure
-                serialized_body = self._serialize_operations(op.operations, value_map)
-                new_op = dataclasses.replace(op, operations=serialized_body)
+            elif isinstance(op, HasNestedOps):
+                # Generic recursion for For/ForItems/While: recurse into
+                # nested bodies, rebuild, then substitute values.
+                new_lists = [
+                    self._serialize_operations(body, value_map)
+                    for body in op.nested_op_lists()
+                ]
+                new_op = op.rebuild_nested(new_lists)
                 new_op = self._substitute_values(new_op, value_map)
                 result.append(new_op)
 
@@ -168,8 +154,10 @@ class InlinePass(Pass[Block, Block]):
         Creates a fresh value_map for the called block's scope,
         mapping block inputs to call arguments.
         """
-        block: BlockValue = call_op.operands[0]  # type: ignore
-        call_args = call_op.operands[1:]  # Arguments passed to the call
+        if call_op.block is None:
+            raise InliningError("CallBlockOperation.block must be set")
+        block = call_op.block
+        call_args = call_op.operands  # Arguments passed to the call
 
         # Map block's input values to call's argument values
         local_map = value_map.copy()
@@ -180,12 +168,24 @@ class InlinePass(Pass[Block, Block]):
 
             # If both are ArrayValues, also map shape dimensions
             # This ensures symbolic dimensions (e.g., qubits_dim0) are resolved
-            # to concrete values from the caller's array
+            # to concrete values from the caller's array. Chase through
+            # value_map so multi-level mappings (cloned_dim -> outer_dim ->
+            # const) collapse to the terminal value.
             if isinstance(resolved_arg, ArrayValue) and isinstance(
                 block_input, ArrayValue
             ):
                 for block_dim, arg_dim in zip(block_input.shape, resolved_arg.shape):
-                    local_map[block_dim.uuid] = arg_dim
+                    resolved_dim = value_map.get(arg_dim.uuid, arg_dim)
+                    # Multi-level chase (guard against cycles).
+                    seen = {arg_dim.uuid}
+                    while (
+                        isinstance(resolved_dim, Value)
+                        and resolved_dim.uuid in value_map
+                        and resolved_dim.uuid not in seen
+                    ):
+                        seen.add(resolved_dim.uuid)
+                        resolved_dim = value_map[resolved_dim.uuid]
+                    local_map[block_dim.uuid] = resolved_dim
 
         # Clone operations with fresh UUIDs using UUIDRemapper
         remapper = UUIDRemapper()
@@ -210,19 +210,30 @@ class InlinePass(Pass[Block, Block]):
 
         # Get return values from ReturnOperation (source of truth)
         return_op = find_return_operation(cloned_ops)
-        return_values = list(return_op.operands) if return_op else block.return_values
+        return_values = list(return_op.operands) if return_op else block.output_values
 
-        # Map block's return values to call's result values
+        # Map block's return values to call's result values.
+        # Always apply ValueSubstitutor so that newly-created ArrayValues
+        # (e.g. from pauli_evolve) have their shape dimensions resolved
+        # to the caller's concrete values.
+        sub = ValueSubstitutor(
+            {
+                k: v for k, v in remapped_local_map.items()
+            },  # copy as dict[str, ValueBase]
+        )
         for block_return, call_result in zip(return_values, call_op.results):
             remapped_uuid = uuid_remap.get(block_return.uuid, block_return.uuid)
             if remapped_uuid in remapped_local_map:
                 # The return value was mapped during inlining (modified input)
                 value_map[call_result.uuid] = remapped_local_map[remapped_uuid]
             else:
-                # The return value is a newly created value (not a modified input)
-                # Use the cloned return value directly, which is what the inlined
-                # operations reference in their results
-                value_map[call_result.uuid] = block_return
+                # The return value is a newly created value (not a modified input).
+                # Substitute to resolve shape dims, parent_array, etc.
+                substituted = sub.substitute_value(block_return)
+                if isinstance(substituted, Value):
+                    value_map[call_result.uuid] = substituted
+                else:
+                    value_map[call_result.uuid] = call_result
 
         return inlined
 
@@ -232,14 +243,16 @@ class InlinePass(Pass[Block, Block]):
         value_map: dict[str, Value],
     ) -> Operation:
         """Substitute values in an operation using the value map."""
-        substitutor = ValueSubstitutor(value_map)
+        substitutor = ValueSubstitutor(
+            {k: v for k, v in value_map.items()},  # copy as dict[str, ValueBase]
+        )
         return substitutor.substitute_operation(op)
 
     def _should_inline_composite(self, op: CompositeGateOperation) -> bool:
         """Determine if a composite gate should be inlined.
 
         Known composite gate types (QPE, QFT, IQFT) are NOT inlined because:
-        - Their BlockValue represents the unitary reference, not the full circuit
+        - Their Block represents the unitary reference, not the full circuit
         - They are emitted natively by the EmitPass
 
         Custom composite gates WITH implementations are inlined.
@@ -280,7 +293,6 @@ class InlinePass(Pass[Block, Block]):
         # Clone operations with fresh UUIDs using UUIDRemapper
         remapper = UUIDRemapper()
         cloned_ops = remapper.clone_operations(impl.operations)
-        uuid_remap = remapper.uuid_remap
 
         # Map block's input values to operation's qubit arguments
         # Since uuid is now unique per Value, we can use simple uuid mapping
@@ -300,11 +312,11 @@ class InlinePass(Pass[Block, Block]):
 
         # Get return values from ReturnOperation (source of truth)
         return_op = find_return_operation(cloned_ops)
-        return_values = list(return_op.operands) if return_op else []
+        return_values: list[ValueBase] = list(return_op.operands) if return_op else []
 
         # Clone return values if not already cloned
         if not return_values:
-            return_values = [remapper.clone_value(v) for v in impl.return_values]
+            return_values = [remapper.clone_value(v) for v in impl.output_values]
 
         # Map block's return values to operation's result values
         for block_return, op_result in zip(return_values, op.results):

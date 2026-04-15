@@ -2170,7 +2170,9 @@ class TestQuantumRebindDetectionTwoQubit:
         _TWO_QUBIT_GATES_NO_PARAM,
         ids=[g[0] for g in _TWO_QUBIT_GATES_NO_PARAM],
     )
-    def test_vector_element_tuple_overwrite_from_other_vector_rejected(self, name, gate):
+    def test_vector_element_tuple_overwrite_from_other_vector_rejected(
+        self, name, gate
+    ):
         @qkernel
         def bad() -> tuple[qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
             qs1 = qubit_array(2, "qs1")
@@ -2567,9 +2569,7 @@ class TestQuantumRebindDetectionViaQKernel:
         """Overwriting an existing scalar qubit from qs[i] should raise rebind error."""
 
         @qkernel
-        def bad(
-            a: qm.Qubit, qs: qm.Vector[qm.Qubit], i: qm.UInt
-        ) -> qm.Qubit:
+        def bad(a: qm.Qubit, qs: qm.Vector[qm.Qubit], i: qm.UInt) -> qm.Qubit:
             a = qs[i]
             return a
 
@@ -2630,7 +2630,9 @@ class TestQuantumRebindDetectionViaQKernel:
 class TestQuantumRebindDetectionStdlib:
     """Rebind behavior through stdlib APIs (qft/iqft) and element-level patterns."""
 
-    @pytest.mark.parametrize("name,gate", _STDLIB_GATES, ids=[g[0] for g in _STDLIB_GATES])
+    @pytest.mark.parametrize(
+        "name,gate", _STDLIB_GATES, ids=[g[0] for g in _STDLIB_GATES]
+    )
     def test_vector_whole_overwrite_rejected(self, name, gate):
         @qkernel
         def bad(
@@ -2642,7 +2644,9 @@ class TestQuantumRebindDetectionStdlib:
         with pytest.raises(QubitRebindError):
             bad.build()
 
-    @pytest.mark.parametrize("name,gate", _STDLIB_GATES, ids=[g[0] for g in _STDLIB_GATES])
+    @pytest.mark.parametrize(
+        "name,gate", _STDLIB_GATES, ids=[g[0] for g in _STDLIB_GATES]
+    )
     def test_vector_whole_self_update_allowed(self, name, gate):
         @qkernel
         def ok(qs1: qm.Vector[qm.Qubit]) -> qm.Vector[qm.Qubit]:
@@ -2652,7 +2656,9 @@ class TestQuantumRebindDetectionStdlib:
         graph = ok.build()
         assert graph is not None
 
-    @pytest.mark.parametrize("name,gate", _STDLIB_GATES, ids=[g[0] for g in _STDLIB_GATES])
+    @pytest.mark.parametrize(
+        "name,gate", _STDLIB_GATES, ids=[g[0] for g in _STDLIB_GATES]
+    )
     def test_vector_whole_new_binding_allowed(self, name, gate):
         @qkernel
         def ok(

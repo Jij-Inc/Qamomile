@@ -7,8 +7,6 @@ from qamomile.circuit.frontend.handle.array import Vector as VectorClass
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.gate import (
     MeasureOperation as IRMeasureOperation,
-)
-from qamomile.circuit.ir.operation.gate import (
     MeasureQFixedOperation,
     MeasureVectorOperation,
 )
@@ -60,7 +58,7 @@ def measure(
     """
     if isinstance(target, QFixed):
         return _measure_qfixed(target)
-    elif hasattr(target, "element_type") and target.element_type == Qubit:
+    elif isinstance(target, VectorClass) and target.element_type == Qubit:
         return _measure_vector_qubit(target)
     elif isinstance(target, Qubit):
         return _measure_qubit(target)
@@ -119,9 +117,9 @@ def _measure_qfixed(qfixed: QFixed) -> Float:
     float_out = Float(value=float_out_value)
 
     # Extract QFixed parameters
-    qubit_values = qfixed.value.params.get("qubit_values", [])
-    num_bits = qfixed.value.params.get("num_bits", len(qubit_values))
-    int_bits = qfixed.value.params.get("int_bits", 0)
+    qubit_values = qfixed.value.get_qfixed_qubit_uuids()
+    num_bits = qfixed.value.get_qfixed_num_bits() or len(qubit_values)
+    int_bits = qfixed.value.get_qfixed_int_bits() or 0
 
     # Create MeasureQFixedOperation
     measure_op = MeasureQFixedOperation(
@@ -158,7 +156,7 @@ def _measure_vector_qubit(qubits: Vector[Qubit]) -> Vector[Bit]:
     else:
         # Convert frontend shape to IR shape values
         shape_values = tuple(
-            Value(type=UIntType(), name=f"dim_{i}", params={"const": dim})
+            Value(type=UIntType(), name=f"dim_{i}").with_const(dim)
             if isinstance(dim, int)
             else dim.value
             for i, dim in enumerate(qubits.shape)

@@ -15,8 +15,8 @@ import pytest
 
 pytestmark = pytest.mark.quri_parts
 
-import qamomile.circuit as qmc
-from tests.transpiler.gate_test_specs import (
+import qamomile.circuit as qmc  # noqa: E402
+from tests.transpiler.gate_test_specs import (  # noqa: E402
     GATE_SPECS,
     all_zeros_state,
     bell_state,
@@ -35,19 +35,18 @@ from tests.transpiler.gate_test_specs import (
 pytest.importorskip("quri_parts")
 pytest.importorskip("quri_parts.qulacs")
 
-from quri_parts.circuit import gate_names
-from quri_parts.core.operator import SinglePauli
-from qamomile.circuit.transpiler.errors import EmitError
+from quri_parts.circuit import gate_names  # noqa: E402
+from quri_parts.core.operator import SinglePauli  # noqa: E402
 
-import qamomile.observable as qm_o
-from qamomile.circuit.algorithm.basic import (
+import qamomile.observable as qm_o  # noqa: E402
+from qamomile.circuit.algorithm.basic import (  # noqa: E402
     cz_entangling_layer,
     rx_layer,
     ry_layer,
     rz_layer,
     superposition_vector,
 )
-from qamomile.circuit.algorithm.fqaoa import (
+from qamomile.circuit.algorithm.fqaoa import (  # noqa: E402
     cost_layer,
     fqaoa_state,
     givens_rotation,
@@ -55,16 +54,21 @@ from qamomile.circuit.algorithm.fqaoa import (
     initial_occupations,
     mixer_layer,
 )
-from qamomile.circuit.algorithm.qaoa import (
+from qamomile.circuit.algorithm.qaoa import (  # noqa: E402
     ising_cost,
     qaoa_layers,
     qaoa_state,
     x_mixer,
 )
-from qamomile.circuit.ir.block import BlockKind
-from qamomile.circuit.transpiler.executable import ExecutableProgram
-from qamomile.circuit.transpiler.segments import SimplifiedProgram
-from qamomile.quri_parts import QuriPartsTranspiler
+from qamomile.circuit.ir.block import BlockKind  # noqa: E402
+from qamomile.circuit.transpiler.errors import EmitError  # noqa: E402
+from qamomile.circuit.transpiler.executable import ExecutableProgram  # noqa: E402
+from qamomile.circuit.transpiler.segments import (  # noqa: E402
+    ClassicalStep,
+    ProgramPlan,
+    QuantumStep,
+)
+from qamomile.quri_parts import QuriPartsTranspiler  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -2530,10 +2534,10 @@ class TestTranspilerPassesPipeline:
         validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated)
         analyzed = transpiler.analyze(folded)
-        separated = transpiler.separate(analyzed)
+        separated = transpiler.plan(analyzed)
 
-        assert isinstance(separated, SimplifiedProgram)
-        assert separated.quantum is not None
+        assert isinstance(separated, ProgramPlan)
+        assert any(isinstance(s, QuantumStep) for s in separated.steps)
 
     def test_emit(self, transpiler):
         """emit() generates backend-specific circuit."""
@@ -2549,7 +2553,7 @@ class TestTranspilerPassesPipeline:
         validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated)
         analyzed = transpiler.analyze(folded)
-        separated = transpiler.separate(analyzed)
+        separated = transpiler.plan(analyzed)
         exe = transpiler.emit(separated)
 
         assert isinstance(exe, ExecutableProgram)
@@ -2603,7 +2607,7 @@ class TestTranspilerPassesPipeline:
         validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated)
         analyzed = transpiler.analyze(folded)
-        separated = transpiler.separate(analyzed)
+        separated = transpiler.plan(analyzed)
         exe_step = transpiler.emit(separated)
         qc_step = exe_step.compiled_quantum[0].circuit
         sv_step = _run_statevector(qc_step)
@@ -2673,7 +2677,7 @@ class TestTranspilerConfigPortable:
         assert substituted is not block
 
     def test_separate_segments_simple_circuit(self):
-        """separate() produces SimplifiedProgram with quantum segment."""
+        """separate() produces ProgramPlan with quantum segment."""
         transpiler = QuriPartsTranspiler()
 
         @qmc.qkernel
@@ -2687,13 +2691,13 @@ class TestTranspilerConfigPortable:
         validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated)
         analyzed = transpiler.analyze(folded)
-        separated = transpiler.separate(analyzed)
+        separated = transpiler.plan(analyzed)
 
-        assert isinstance(separated, SimplifiedProgram)
-        assert separated.quantum is not None
-        assert len(separated.quantum.operations) > 0
+        assert isinstance(separated, ProgramPlan)
+        quantum_step = next(s for s in separated.steps if isinstance(s, QuantumStep))
+        assert len(quantum_step.segment.operations) > 0
         # Simple H+measure circuit should have no classical prep
-        assert separated.classical_prep is None
+        assert not isinstance(separated.steps[0], ClassicalStep)
 
     def test_separate_segments_with_classical_post(self):
         """QPE produces classical_post segment for QFixed decoding."""
@@ -2717,12 +2721,19 @@ class TestTranspilerConfigPortable:
         validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated, bindings={"phase": np.pi / 2})
         analyzed = transpiler.analyze(folded)
-        separated = transpiler.separate(analyzed)
+        separated = transpiler.plan(analyzed)
 
-        assert isinstance(separated, SimplifiedProgram)
-        assert separated.quantum is not None
-        # QPE returns QFixed → Float, so classical_post should handle the decode
-        assert separated.classical_post is not None
+        assert isinstance(separated, ProgramPlan)
+        assert any(isinstance(s, QuantumStep) for s in separated.steps)
+        # QPE returns QFixed -> Float, so classical_post should handle the decode
+        seen_quantum = False
+        has_classical_post = False
+        for s in separated.steps:
+            if isinstance(s, QuantumStep):
+                seen_quantum = True
+            elif seen_quantum and isinstance(s, ClassicalStep):
+                has_classical_post = True
+        assert has_classical_post
 
     def test_approximate_qft_fewer_gates(self):
         """Approximate QFT strategy produces fewer gates than standard."""
@@ -4137,7 +4148,6 @@ class TestAlgorithmBasicLayers:
     def test_variational_ansatz_pattern(self, seed):
         """Full variational ansatz: RY -> CZ -> RY -> CZ -> RY."""
         rng = np.random.default_rng(seed)
-        n_qubits = 3
 
         @qmc.qkernel
         def ansatz(thetas: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
@@ -6583,7 +6593,7 @@ class TestCompileTimeIfArrayQuantumPhi:
 
 
 class TestCompileTimeIfPhiPropagation:
-    """Compile-time IfOperation lowering before SeparatePass.
+    """Compile-time IfOperation lowering before SegmentationPass.
 
     Tests that compile-time resolvable IfOperations (including expression-
     derived conditions) are lowered before separation.

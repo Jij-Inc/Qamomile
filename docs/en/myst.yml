@@ -3,7 +3,7 @@ version: 1
 project:
   id: qamomile-docs-en
   title: Qamomile Documentation
-  description: A powerful SDK for quantum optimization algorithms
+  description: A powerful SDK for quantum programs
   keywords:
     - quantum computing
     - optimization
@@ -18,6 +18,7 @@ project:
   toc:
     - file: index.md
     - title: Tutorials
+      file: tutorial/index.md
       children:
         - file: tutorial/01_your_first_quantum_kernel.ipynb
         - file: tutorial/02_parameterized_kernels.ipynb
@@ -26,15 +27,24 @@ project:
         - file: tutorial/05_classical_flow_patterns.ipynb
         - file: tutorial/06_reuse_patterns.ipynb
     - title: VQA
+      file: vqa/index.md
       children:
         - file: vqa/qaoa_maxcut.ipynb
         - file: vqa/vqe_for_hydrogen.ipynb
     - title: Optimization
+      file: optimization/index.md
       children:
+        - file: optimization/binary_model.ipynb
         - file: optimization/qaoa_graph_partition.ipynb
     - title: Collaboration
+      file: collaboration/index.md
       children:
         - file: collaboration/qbraid_executor.ipynb
+    - title: Release Notes
+      file: release_notes/index.md
+      children:
+        - file: release_notes/v0_11_0.md
+        - file: release_notes/v0_10_0.ipynb
 
 # --- API Reference (auto-generated) ---
     - title: API Reference
@@ -82,6 +92,7 @@ site:
   options:
     logo: ../assets/qamomile_logo.png
     style: ../assets/custom-theme.css
+    folders: true
   nav:
     - title: GitHub
       url: https://github.com/Jij-Inc/Qamomile

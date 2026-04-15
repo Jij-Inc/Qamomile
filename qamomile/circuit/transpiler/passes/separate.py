@@ -1,195 +1,158 @@
-"""Separate pass: Split a block into quantum and classical segments."""
+"""Segmentation pass: Split a block into executable program steps."""
 
 from __future__ import annotations
 
 import dataclasses
+from abc import ABC, abstractmethod
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.operation import OperationKind
+from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
 from qamomile.circuit.ir.operation.control_flow import (
-    ForOperation,
-    ForItemsOperation,
-    IfOperation,
-    WhileOperation,
+    HasNestedOps,
 )
-from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.gate import (
     MeasureQFixedOperation,
     MeasureVectorOperation,
 )
-from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
-from qamomile.circuit.ir.operation.expval import ExpvalOp
-from qamomile.circuit.ir.value import Value, ArrayValue, ValueBase
+from qamomile.circuit.ir.operation.operation import OperationKind
+from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types.primitives import BitType, QubitType, UIntType
+from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowVisitor
+from qamomile.circuit.transpiler.passes.validate_while import ValidateWhileContractPass
 from qamomile.circuit.transpiler.segments import (
     ClassicalSegment,
+    ClassicalStep,
     ExpvalSegment,
+    ExpvalStep,
     HybridBoundary,
     MultipleQuantumSegmentsError,
+    ProgramABI,
+    ProgramPlan,
     QuantumSegment,
+    QuantumStep,
     Segment,
-    SimplifiedProgram,
 )
 
+# =========================================================================
+# Pre-segmentation transformations (called by SegmentationPass.run)
+# =========================================================================
 
-class SeparatePass(Pass[Block, SimplifiedProgram]):
-    """Separate a block into quantum and classical segments.
 
-    This pass:
-    1. Materializes return operations (syncs output_values from ReturnOperation)
-    2. Splits the operation list into quantum and classical segments
-    3. Validates single quantum segment (enforces C→Q→C pattern)
+def materialize_return(block: Block) -> Block:
+    """Synchronize output_values from ReturnOperation.
 
-    Input: Block (typically ANALYZED or AFFINE)
-    Output: SimplifiedProgram with single quantum segment and optional prep/post
+    Uses ReturnOperation.operands as the source of truth for return values,
+    ensuring consistency between the operation stream and block metadata.
     """
+    for op in reversed(block.operations):
+        if isinstance(op, ReturnOperation):
+            return dataclasses.replace(block, output_values=list(op.operands))
+    return block
 
-    @property
-    def name(self) -> str:
-        return "separate"
 
-    def run(self, input: Block) -> SimplifiedProgram:
-        """Separate the block into segments."""
-        # Phase 1: Materialize return operations
-        block = self._materialize_return(input)
+def lower_measure_qfixed(op: MeasureQFixedOperation) -> list[Operation]:
+    """Lower MeasureQFixedOperation to MeasureVectorOperation + decode.
 
-        # Phase 2: Lower high-level operations (MeasureQFixedOperation)
-        block = self._lower_operations(block)
+    Returns:
+        List of operations: [MeasureVectorOperation, DecodeQFixedOperation]
+    """
+    qfixed = op.operands[0]
 
-        # Phase 3: Separate into segments
-        return self._separate_segments(block)
+    qubit_uuids = qfixed.get_cast_qubit_uuids() or qfixed.get_qfixed_qubit_uuids()
+    num_bits = op.num_bits or len(qubit_uuids)
+    int_bits = op.int_bits
 
-    # =========================================================================
-    # Phase 1: Materialize return
-    # =========================================================================
+    size_value = Value(
+        type=UIntType(),
+        name="qfixed_size",
+    ).with_const(num_bits)
 
-    def _materialize_return(self, block: Block) -> Block:
-        """Synchronize output_values from ReturnOperation.
+    qubits_array = ArrayValue(
+        type=QubitType(),
+        name="qfixed_qubits",
+        shape=(size_value,),
+    ).with_array_runtime_metadata(
+        element_uuids=qubit_uuids,
+        element_logical_ids=qfixed.get_cast_qubit_logical_ids() or (),
+    )
+    cast_source_uuid = qfixed.get_cast_source_uuid()
+    if cast_source_uuid:
+        qubits_array = qubits_array.with_cast_metadata(
+            source_uuid=cast_source_uuid,
+            source_logical_id=qfixed.get_cast_source_logical_id(),
+            qubit_uuids=qubit_uuids,
+            qubit_logical_ids=qfixed.get_cast_qubit_logical_ids() or (),
+        )
 
-        Uses ReturnOperation.operands as the source of truth for return values,
-        ensuring consistency between the operation stream and block metadata.
-        """
-        # Find ReturnOperation in operations (expected at the end)
-        return_op = None
-        for op in reversed(block.operations):
-            if isinstance(op, ReturnOperation):
-                return_op = op
-                break
+    bits_array = ArrayValue(
+        type=BitType(),
+        name="qfixed_bits",
+        shape=(size_value,),
+    )
 
-        if return_op is not None:
-            # Use ReturnOperation.operands as source of truth
-            return dataclasses.replace(
-                block,
-                output_values=list(return_op.operands),
-            )
+    measure_vec_op = MeasureVectorOperation(
+        operands=[qubits_array],
+        results=[bits_array],
+    )
 
-        # No ReturnOperation found, keep existing output_values
-        return block
+    decode_op = DecodeQFixedOperation(
+        num_bits=num_bits,
+        int_bits=int_bits,
+        operands=[bits_array],
+        results=list(op.results),
+    )
 
-    # =========================================================================
-    # Phase 2: Lower high-level operations
-    # =========================================================================
+    return [measure_vec_op, decode_op]
 
-    def _lower_operations(self, block: Block) -> Block:
-        """Lower high-level operations like MeasureQFixedOperation.
 
-        MeasureQFixedOperation is lowered to:
-        1. Individual MeasureOperations for each qubit (HYBRID → QUANTUM segment)
-        2. DecodeQFixedOperation to convert bits to float (CLASSICAL segment)
-        """
-        lowered_ops: list[Operation] = []
+def lower_operations(block: Block) -> Block:
+    """Lower high-level operations like MeasureQFixedOperation.
 
-        for op in block.operations:
-            if isinstance(op, MeasureQFixedOperation):
-                lowered_ops.extend(self._lower_measure_qfixed(op))
-            else:
-                lowered_ops.append(op)
+    MeasureQFixedOperation is lowered to:
+    1. MeasureVectorOperation for each qubit (HYBRID -> QUANTUM segment)
+    2. DecodeQFixedOperation to convert bits to float (CLASSICAL segment)
+    """
+    lowered_ops: list[Operation] = []
+    for op in block.operations:
+        if isinstance(op, MeasureQFixedOperation):
+            lowered_ops.extend(lower_measure_qfixed(op))
+        else:
+            lowered_ops.append(op)
+    return dataclasses.replace(block, operations=lowered_ops)
 
-        return dataclasses.replace(block, operations=lowered_ops)
 
-    def _lower_measure_qfixed(
+# =========================================================================
+# Segmentation strategy and pass
+# =========================================================================
+
+
+class SegmentationStrategy(ABC):
+    """Execution-model-specific strategy for building a ProgramPlan."""
+
+    @abstractmethod
+    def create_plan(
         self,
-        op: MeasureQFixedOperation,
-    ) -> list[Operation]:
-        """Lower MeasureQFixedOperation to MeasureVectorOperation + decode.
+        segments: list[Segment],
+        block: Block,
+        boundaries: list[HybridBoundary],
+    ) -> ProgramPlan:
+        """Build a ProgramPlan from segmented operations."""
+        raise NotImplementedError
 
-        Returns:
-            List of operations: [MeasureVectorOperation, DecodeQFixedOperation]
-        """
-        qfixed = op.operands[0]
 
-        # Prefer cast metadata for qubit UUIDs (tracks the actual physical qubits)
-        # Fall back to qubit_values for backward compatibility
-        qubit_uuids = qfixed.get_cast_qubit_uuids() or qfixed.params.get(
-            "qubit_values", []
-        )
-        num_bits = op.num_bits or len(qubit_uuids)
-        int_bits = op.int_bits
+class NisqSegmentationStrategy(SegmentationStrategy):
+    """Single-quantum-segment planning strategy for current Qamomile runtimes."""
 
-        # Create size value for array shape
-        size_value = Value(
-            type=UIntType(),
-            name="qfixed_size",
-            params={"const": num_bits},
-        )
-
-        # Create ArrayValue for qubits (store element UUIDs/logical_ids for emit pass)
-        # Also store cast metadata if available for proper resource tracking
-        array_params = {"element_uuids": qubit_uuids}
-        if qfixed.get_cast_source_uuid():
-            array_params["cast_source_uuid"] = qfixed.get_cast_source_uuid()
-        if qfixed.get_cast_source_logical_id():
-            array_params["cast_source_logical_id"] = qfixed.get_cast_source_logical_id()
-        if qfixed.get_cast_qubit_logical_ids():
-            array_params["element_logical_ids"] = qfixed.get_cast_qubit_logical_ids()
-
-        qubits_array = ArrayValue(
-            type=QubitType(),
-            name="qfixed_qubits",
-            shape=(size_value,),
-            params=array_params,
-        )
-
-        # Create ArrayValue for bits (result)
-        bits_array = ArrayValue(
-            type=BitType(),
-            name="qfixed_bits",
-            shape=(size_value,),
-        )
-
-        # Create single MeasureVectorOperation
-        measure_vec_op = MeasureVectorOperation(
-            operands=[qubits_array],
-            results=[bits_array],
-        )
-
-        # Create DecodeQFixedOperation with bits ArrayValue
-        decode_op = DecodeQFixedOperation(
-            num_bits=num_bits,
-            int_bits=int_bits,
-            operands=[bits_array],
-            results=list(op.results),  # Original Float result
-        )
-
-        return [measure_vec_op, decode_op]
-
-    # =========================================================================
-    # Phase 3: Separate into segments
-    # =========================================================================
-
-    def _separate_segments(self, block: Block) -> SimplifiedProgram:
-        """Separate the block into quantum and classical segments.
-
-        Validates single quantum segment and returns SimplifiedProgram
-        with enforced C→Q→C pattern.
-        """
-        # Step 1: Build segments using existing logic
-        segments = self._build_segments_list(block)
-
-        # Step 2: VALIDATE single quantum segment
+    def create_plan(
+        self,
+        segments: list[Segment],
+        block: Block,
+        boundaries: list[HybridBoundary],
+    ) -> ProgramPlan:
         quantum_segs = [s for s in segments if isinstance(s, QuantumSegment)]
         if len(quantum_segs) == 0:
             from qamomile.circuit.transpiler.errors import SeparationError
@@ -203,43 +166,65 @@ class SeparatePass(Pass[Block, SimplifiedProgram]):
                 f"measurement results (JIT compilation not supported)."
             )
 
-        # Step 3: Extract segments by position relative to quantum
         quantum = quantum_segs[0]
         quantum_idx = segments.index(quantum)
 
-        classical_segs = [s for s in segments if isinstance(s, ClassicalSegment)]
-        expval_segs = [s for s in segments if isinstance(s, ExpvalSegment)]
+        steps: list[ClassicalStep | QuantumStep | ExpvalStep] = []
+        for i, segment in enumerate(segments):
+            if isinstance(segment, ClassicalSegment):
+                role = "prep" if i < quantum_idx else "post"
+                steps.append(ClassicalStep(segment=segment, role=role))
+            elif isinstance(segment, QuantumSegment):
+                steps.append(QuantumStep(segment=segment))
+            elif isinstance(segment, ExpvalSegment):
+                steps.append(ExpvalStep(segment=segment, quantum_step_index=0))
 
-        # Classical before quantum = prep
-        classical_prep = None
-        for seg in classical_segs:
-            if segments.index(seg) < quantum_idx:
-                classical_prep = seg
-                break  # Should only be one prep segment
-
-        # Classical after quantum = post
-        classical_post = None
-        for seg in classical_segs:
-            if segments.index(seg) > quantum_idx:
-                classical_post = seg
-                break  # Should only be one post segment
-
-        # Expval (should be after quantum)
-        expval = expval_segs[0] if expval_segs else None
-
-        # Get boundaries from segment building
-        boundaries = self._boundaries
-
-        # Step 4: Build SimplifiedProgram
-        return SimplifiedProgram(
-            quantum=quantum,
-            classical_prep=classical_prep,
-            expval=expval,
-            classical_post=classical_post,
-            boundaries=boundaries,
-            parameters=block.parameters,
+        abi = ProgramABI(
+            public_inputs={name: value for name, value in block.parameters.items()},
             output_refs=[v.uuid for v in block.output_values],
         )
+
+        return ProgramPlan(
+            steps=steps,
+            abi=abi,
+            boundaries=boundaries,
+            parameters=block.parameters,
+        )
+
+
+class SegmentationPass(Pass[Block, ProgramPlan]):
+    """Segment a block into a strategy-specific executable program plan.
+
+    This pass:
+    1. Materializes return operations (syncs output_values from ReturnOperation)
+    2. Splits the operation list into quantum and classical segments
+    3. Builds a ProgramPlan via the configured segmentation strategy
+
+    Input: Block (typically ANALYZED or AFFINE)
+    Output: ProgramPlan
+    """
+
+    def __init__(
+        self,
+        strategy: SegmentationStrategy | None = None,
+    ) -> None:
+        self._strategy = strategy or NisqSegmentationStrategy()
+
+    @property
+    def name(self) -> str:
+        return "segment"
+
+    def run(self, input: Block) -> ProgramPlan:
+        """Segment the block into a ProgramPlan."""
+        input = ValidateWhileContractPass().run(input)
+        block = materialize_return(input)
+        block = lower_operations(block)
+        return self._segment(block)
+
+    def _segment(self, block: Block) -> ProgramPlan:
+        """Build a ProgramPlan from a lowered block."""
+        segments = self._build_segments_list(block)
+        return self._strategy.create_plan(segments, block, self._boundaries)
 
     def _build_segments_list(self, block: Block) -> list[Segment]:
         """Build list of segments from block operations.
@@ -349,17 +334,10 @@ class SeparatePass(Pass[Block, SimplifiedProgram]):
             return kind
 
         # Control flow - determine by inner operations
-        if isinstance(op, ForOperation):
-            inner_kinds = {self._effective_kind(inner) for inner in op.operations}
-        elif isinstance(op, ForItemsOperation):
-            inner_kinds = {self._effective_kind(inner) for inner in op.operations}
-        elif isinstance(op, IfOperation):
-            inner_kinds = {self._effective_kind(inner) for inner in op.true_operations}
-            inner_kinds.update(
-                self._effective_kind(inner) for inner in op.false_operations
-            )
-        elif isinstance(op, WhileOperation):
-            inner_kinds = {self._effective_kind(inner) for inner in op.operations}
+        if isinstance(op, HasNestedOps):
+            inner_kinds: set[OperationKind] = set()
+            for body in op.nested_op_lists():
+                inner_kinds.update(self._effective_kind(inner) for inner in body)
         else:
             # Other control - treat as classical for now
             return OperationKind.CLASSICAL

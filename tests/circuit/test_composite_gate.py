@@ -328,15 +328,14 @@ class TestCompositeGate:
         assert isinstance(ops[0], QInitOperation)
         assert isinstance(ops[1], CompositeGateOperation)
         op = ops[1]
-        # Target operand is the last operand (after BlockValue)
+        # Target operand is the last operand.
         target_operand = op.operands[-1]
         target_result = op.results[-1]
         assert target_result.version == target_operand.version + 1
         assert target_result.logical_id == target_operand.logical_id
 
     def test_operands_order_in_ir(self):
-        """Operands are ordered: [BlockValue, ...controls, ...targets]."""
-        from qamomile.circuit.ir.block_value import BlockValue
+        """Operands are ordered: [...controls, ...targets]."""
 
         class ControlledGate(CompositeGate):
             custom_name = "ctrl_gate"
@@ -369,13 +368,12 @@ class TestCompositeGate:
         assert isinstance(ops[1], QInitOperation)
         assert isinstance(ops[2], CompositeGateOperation)
         op = ops[2]
-        # operands[0] = BlockValue (implementation)
-        assert isinstance(op.operands[0], BlockValue)
-        # operands[1] = control qubit value, operands[2] = target qubit value
+        assert op.implementation is not None
+        # operands[0] = control qubit value, operands[1] = target qubit value
         ctrl_value = ops[0].results[0]
         tgt_value = ops[1].results[0]
-        assert op.operands[1].logical_id == ctrl_value.logical_id
-        assert op.operands[2].logical_id == tgt_value.logical_id
+        assert op.operands[0].logical_id == ctrl_value.logical_id
+        assert op.operands[1].logical_id == tgt_value.logical_id
         assert op.num_control_qubits == 1
         assert op.num_target_qubits == 1
 
@@ -543,7 +541,7 @@ class TestCompositeGate:
             assert isinstance(r.parent_array, ArrayValue)
             assert len(r.element_indices) == 1
             assert isinstance(r.element_indices[0], Value)
-            assert r.element_indices[0].params["const"] == index
+            assert r.element_indices[0].get_const() == index
 
 
 class TestQFTAndIQFTClasses:
@@ -1134,9 +1132,7 @@ class TestNestedQKernelNoPhantomQubits:
         """No phantom qubits with mixed scalar Qubit and Vector parameters."""
 
         @qkernel
-        def mixed_params(
-            q: Qubit, qs: Vector[Qubit]
-        ) -> tuple[Qubit, Vector[Qubit]]:
+        def mixed_params(q: Qubit, qs: Vector[Qubit]) -> tuple[Qubit, Vector[Qubit]]:
             q, qs[0] = qmc.cx(q, qs[0])
             return q, qs
 
@@ -1250,19 +1246,15 @@ class TestAllocateGateInvariant:
             GateOperationType,
         )
         from qamomile.circuit.ir.types.primitives import QubitType, UIntType
-        from qamomile.circuit.transpiler.passes.emit_base import ResourceAllocator
+        from qamomile.circuit.transpiler.passes.emit_support import ResourceAllocator
 
         parent_array = ArrayValue(
             type=QubitType(),
             name="q_array",
-            shape=(Value(type=UIntType(), name="dim0", params={"const": 3}),),
+            shape=(Value(type=UIntType(), name="dim0").with_const(3),),
         )
 
-        idx_value = Value(
-            type=UIntType(),
-            name="idx",
-            params={"const": 0},
-        )
+        idx_value = Value(type=UIntType(), name="idx").with_const(0)
 
         element_qubit = Value(
             type=QubitType(),
@@ -1296,7 +1288,7 @@ class TestBackwardsCompatibility:
 
     def test_stdlib_exports_classes(self):
         """stdlib exports both class and function APIs."""
-        from qamomile.circuit.stdlib import QFT, IQFT, qft, iqft, qpe
+        from qamomile.circuit.stdlib import IQFT, QFT, iqft, qft, qpe
 
         assert QFT is not None
         assert IQFT is not None

@@ -1,6 +1,6 @@
 """Compilation error classes for Qamomile transpiler."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
 
@@ -22,6 +22,18 @@ class ValidationError(QamomileCompileError):
     def __init__(self, message: str, value_name: str | None = None):
         self.value_name = value_name
         super().__init__(message)
+
+
+class EntrypointValidationError(ValidationError):
+    """Error when a top-level transpilation entrypoint has unsupported I/O."""
+
+    pass
+
+
+class FrontendTransformError(QamomileCompileError):
+    """Error during frontend AST-to-builder lowering."""
+
+    pass
 
 
 class DependencyError(QamomileCompileError):
@@ -123,16 +135,12 @@ class QubitIndexResolutionError(EmitError):
         bindings_sample = self.available_bindings_keys[:10]
         lines.append(f"  Bindings keys (sample): {bindings_sample}")
         if len(self.available_bindings_keys) > 10:
-            lines.append(
-                f"    ... and {len(self.available_bindings_keys) - 10} more"
-            )
+            lines.append(f"    ... and {len(self.available_bindings_keys) - 10} more")
 
         qubit_map_sample = self.available_qubit_map_keys[:10]
         lines.append(f"  Qubit map keys (sample): {qubit_map_sample}")
         if len(self.available_qubit_map_keys) > 10:
-            lines.append(
-                f"    ... and {len(self.available_qubit_map_keys) - 10} more"
-            )
+            lines.append(f"    ... and {len(self.available_qubit_map_keys) - 10} more")
         lines.append("")
 
         lines.append("=== Suggested Fixes ===")
@@ -149,8 +157,8 @@ class QubitIndexResolutionError(EmitError):
         for info in self.operand_infos:
             if info.failure_reason == ResolutionFailureReason.SYMBOLIC_INDEX_NOT_BOUND:
                 suggestions.append(
-                    f"Bind the index variable by passing it in bindings "
-                    f"or ensure the loop variable is properly propagated."
+                    "Bind the index variable by passing it in bindings "
+                    "or ensure the loop variable is properly propagated."
                 )
             elif (
                 info.failure_reason
@@ -165,12 +173,12 @@ class QubitIndexResolutionError(EmitError):
                 == ResolutionFailureReason.NESTED_ARRAY_RESOLUTION_FAILED
             ):
                 suggestions.append(
-                    f"The index expression involves nested array access. "
-                    f"Ensure all intermediate arrays are bound in the bindings dict."
+                    "The index expression involves nested array access. "
+                    "Ensure all intermediate arrays are bound in the bindings dict."
                 )
                 suggestions.append(
-                    f"Example: transpiler.transpile(kernel, "
-                    f"bindings={{'edges': np.array([[0,1],[1,2]]), ...}})"
+                    "Example: transpiler.transpile(kernel, "
+                    "bindings={'edges': np.array([[0,1],[1,2]]), ...})"
                 )
             elif info.failure_reason == ResolutionFailureReason.INDEX_NOT_NUMERIC:
                 suggestions.append(

@@ -6,12 +6,12 @@ Bug #5: Sub-kernel QInit scope — ArrayValue.shape was not cloned/substituted
 
 Bug #6: IfOperation phi_ops — phi outputs were never allocated or emitted,
     causing phi output UUIDs to be missing from qubit_map.  Fixed in
-    emit_base.py (ResourceAllocator), standard_emit.py (_register_phi_outputs,
+    emit_support/resource_allocator.py (ResourceAllocator), standard_emit.py (_register_phi_outputs,
     _emit_measure), and control_flow_visitor.py (visit/transform phi_ops).
 
 Unit tests for the individual passes live in ``tests/transpiler/``:
     - ``test_value_mapping.py``  (shape cloning/substitution, phi_ops cloning)
-    - ``test_emit_base.py``      (phi output allocation)
+    - ``test_emit_support.py``   (phi output allocation)
     - ``test_control_flow_visitor.py`` (phi_ops visitor/transformer traversal)
 
 Note: Do NOT use ``from __future__ import annotations`` in this file.
@@ -21,7 +21,6 @@ breaks ``_create_bound_input``.
 """
 
 import pytest
-
 
 # ===========================================================================
 # Bug #5: Sub-kernel QInit scope integration test
@@ -55,9 +54,16 @@ class TestFQAOAStateIntegration:
             betas: qmc.Vector[qmc.Float],
         ) -> qmc.Vector[qmc.Bit]:
             q = fqaoa_state(
-                p, linear, quad, n, n_f,
-                givens_ij, givens_theta, hopping_val,
-                gammas, betas,
+                p,
+                linear,
+                quad,
+                n,
+                n_f,
+                givens_ij,
+                givens_theta,
+                hopping_val,
+                gammas,
+                betas,
             )
             return qmc.measure(q)
 
