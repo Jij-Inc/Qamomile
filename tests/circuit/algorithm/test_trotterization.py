@@ -77,7 +77,7 @@ class TestValidation:
             _validate_inputs(n_terms=2, step=1, order=-2)
 
     def test_single_term_raises(self):
-        with pytest.raises(ValueError, match="at least 2 terms"):
+        with pytest.raises(ValueError, match="n_terms must be at least 2"):
             _validate_inputs(n_terms=1, step=1, order=1)
 
     def test_order_1_allowed(self):
@@ -114,96 +114,96 @@ class TestValidation:
 class TestProductFormulaValidation:
     def test_order_odd_3_raises(self):
         with pytest.raises(ValueError, match="order must be 1 or a positive even"):
-            product_formula(n_terms=2, order=3, dt_frac=1.0)
+            product_formula(n_terms=2, dt_frac=1.0, order=3)
 
     def test_order_odd_5_raises(self):
         with pytest.raises(ValueError, match="order must be 1 or a positive even"):
-            product_formula(n_terms=2, order=5, dt_frac=1.0)
+            product_formula(n_terms=2, dt_frac=1.0, order=5)
 
     def test_order_zero_raises(self):
         with pytest.raises(ValueError, match="order must be 1 or a positive even"):
-            product_formula(n_terms=2, order=0, dt_frac=1.0)
+            product_formula(n_terms=2, dt_frac=1.0, order=0)
 
     def test_order_negative_raises(self):
         with pytest.raises(ValueError, match="order must be 1 or a positive even"):
-            product_formula(n_terms=2, order=-2, dt_frac=1.0)
+            product_formula(n_terms=2, dt_frac=1.0, order=-2)
 
     def test_n_terms_one_raises(self):
         with pytest.raises(ValueError, match="n_terms must be at least 2"):
-            product_formula(n_terms=1, order=1, dt_frac=1.0)
+            product_formula(n_terms=1, dt_frac=1.0, order=1)
 
     def test_n_terms_zero_raises(self):
         with pytest.raises(ValueError, match="n_terms must be at least 2"):
-            product_formula(n_terms=0, order=1, dt_frac=1.0)
+            product_formula(n_terms=0, dt_frac=1.0, order=1)
 
     def test_valid_order1_does_not_raise(self):
-        product_formula(n_terms=2, order=1, dt_frac=1.0)
+        product_formula(n_terms=2, dt_frac=1.0, order=1)
 
     def test_valid_order2_does_not_raise(self):
-        product_formula(n_terms=2, order=2, dt_frac=1.0)
+        product_formula(n_terms=2, dt_frac=1.0, order=2)
 
     def test_order_bool_true_raises(self):
         with pytest.raises(ValueError, match="order must be 1 or a positive even"):
-            product_formula(n_terms=2, order=True, dt_frac=1.0)
+            product_formula(n_terms=2, dt_frac=1.0, order=True)
 
     def test_order_bool_false_raises(self):
         with pytest.raises(ValueError, match="order must be 1 or a positive even"):
-            product_formula(n_terms=2, order=False, dt_frac=1.0)
+            product_formula(n_terms=2, dt_frac=1.0, order=False)
 
 
 class TestProductFormula:
     def test_order1_sequence_length(self):
-        seq = product_formula(n_terms=3, order=1, dt_frac=0.5)
+        seq = product_formula(n_terms=3, dt_frac=0.5, order=1)
         assert len(seq) == 3
 
     def test_order1_term_order(self):
-        seq = product_formula(n_terms=3, order=1, dt_frac=0.5)
+        seq = product_formula(n_terms=3, dt_frac=0.5, order=1)
         assert [idx for idx, _ in seq] == [0, 1, 2]
 
     def test_order1_coefficients(self):
-        seq = product_formula(n_terms=2, order=1, dt_frac=0.25)
+        seq = product_formula(n_terms=2, dt_frac=0.25, order=1)
         for _, frac in seq:
             assert abs(frac - 0.25) < 1e-15
 
     def test_order2_sequence_length(self):
-        seq = product_formula(n_terms=3, order=2, dt_frac=0.5)
+        seq = product_formula(n_terms=3, dt_frac=0.5, order=2)
         assert len(seq) == 6
 
     def test_order2_palindrome_structure(self):
-        seq = product_formula(n_terms=3, order=2, dt_frac=0.5)
+        seq = product_formula(n_terms=3, dt_frac=0.5, order=2)
         indices = [idx for idx, _ in seq]
         assert indices == [0, 1, 2, 2, 1, 0]
 
     def test_order2_coefficients_half_dt(self):
-        seq = product_formula(n_terms=2, order=2, dt_frac=0.5)
+        seq = product_formula(n_terms=2, dt_frac=0.5, order=2)
         for _, frac in seq:
             assert abs(frac - 0.25) < 1e-15
 
     def test_order4_structure(self):
         """order=4: 5 blocks of order=2, each with 2*m operations."""
-        seq = product_formula(n_terms=2, order=4, dt_frac=1.0)
+        seq = product_formula(n_terms=2, dt_frac=1.0, order=4)
         assert len(seq) == 20
 
     def test_order4_coefficient_sum(self):
-        seq = product_formula(n_terms=2, order=4, dt_frac=1.0)
+        seq = product_formula(n_terms=2, dt_frac=1.0, order=4)
         for term_idx in range(2):
             total = sum(frac for idx, frac in seq if idx == term_idx)
             assert abs(total - 1.0) < 1e-12
 
     def test_order2_coefficient_sum(self):
-        seq = product_formula(n_terms=3, order=2, dt_frac=0.5)
+        seq = product_formula(n_terms=3, dt_frac=0.5, order=2)
         for term_idx in range(3):
             total = sum(frac for idx, frac in seq if idx == term_idx)
             assert abs(total - 0.5) < 1e-15
 
     def test_order1_coefficient_sum(self):
-        seq = product_formula(n_terms=3, order=1, dt_frac=0.5)
+        seq = product_formula(n_terms=3, dt_frac=0.5, order=1)
         for term_idx in range(3):
             total = sum(frac for idx, frac in seq if idx == term_idx)
             assert abs(total - 0.5) < 1e-15
 
     def test_order6_coefficient_sum(self):
-        seq = product_formula(n_terms=2, order=6, dt_frac=1.0)
+        seq = product_formula(n_terms=2, dt_frac=1.0, order=6)
         for term_idx in range(2):
             total = sum(frac for idx, frac in seq if idx == term_idx)
             assert abs(total - 1.0) < 1e-10
@@ -211,12 +211,12 @@ class TestProductFormula:
 
 class TestFullSequence:
     def test_steps_multiply_length(self):
-        one = product_formula(n_terms=2, order=1, dt_frac=1.0)
-        full = list(_full_sequence(n_terms=2, order=1, step=3))
+        one = product_formula(n_terms=2, dt_frac=1.0, order=1)
+        full = list(_full_sequence(n_terms=2, step=3, order=1))
         assert len(full) == len(one) * 3
 
     def test_full_coefficient_sum(self):
-        full = list(_full_sequence(n_terms=3, order=2, step=4))
+        full = list(_full_sequence(n_terms=3, step=4, order=2))
         for term_idx in range(3):
             total = sum(frac for idx, frac in full if idx == term_idx)
             assert abs(total - 1.0) < 1e-12
@@ -226,17 +226,11 @@ class TestFullSequence:
 # Integration: trotterized_time_evolution() + transpile via Qiskit
 # -----------------------------------------------------------------------
 
-try:
-    from qamomile.qiskit.transpiler import QiskitTranspiler
+pytest.importorskip("qiskit")
 
-    _has_qiskit = True
-except ImportError:
-    _has_qiskit = False
-
-_requires_qiskit = pytest.mark.skipif(not _has_qiskit, reason="Qiskit not installed")
+from qamomile.qiskit.transpiler import QiskitTranspiler  # noqa: E402
 
 
-@_requires_qiskit
 class TestTranspileOrder1:
     def test_pauli_evolve_count(self):
         """order=1, step=1, 2 terms → 2 PauliEvolution gates."""
@@ -305,7 +299,6 @@ class TestTranspileOrder1:
         assert n2 == 2 * n1
 
 
-@_requires_qiskit
 class TestTranspileOrder2:
     def test_pauli_evolve_count_2term(self):
         """order=2, step=1, 2 terms → 4 PauliEvolution gates."""
@@ -363,7 +356,6 @@ class TestTranspileOrder2:
         assert _gate_counts(qc).get("PauliEvolution", 0) == 6
 
 
-@_requires_qiskit
 class TestTranspileHigherOrder:
     def test_order4_pauli_evolve_count(self):
         """order=4, step=1, 2 terms → 20 PauliEvolution gates."""
@@ -390,7 +382,6 @@ class TestTranspileHigherOrder:
         assert _gate_counts(qc).get("PauliEvolution", 0) == 20
 
 
-@_requires_qiskit
 class TestTranspileTimeZero:
     def test_time_zero_compiles(self):
         """time=0 should produce a valid circuit (all angles 0)."""

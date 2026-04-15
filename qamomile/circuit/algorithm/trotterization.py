@@ -36,21 +36,18 @@ Example::
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import TYPE_CHECKING
 
+import qamomile.circuit as qmc
 from qamomile.circuit.frontend.operation.pauli_evolve import pauli_evolve
-
-if TYPE_CHECKING:
-    from qamomile.circuit.frontend.handle import Float, Observable, Qubit, Vector
 
 
 def trotterized_time_evolution(
-    q: Vector[Qubit],
-    observables: list[Observable],
-    time: Float,
+    q: qmc.Vector[qmc.Qubit],
+    observables: list[qmc.Observable],
+    time: qmc.Float,
     step: int,
     order: int,
-) -> Vector[Qubit]:
+) -> qmc.Vector[qmc.Qubit]:
     """Apply Suzuki-Trotter decomposed time evolution to a qubit register.
 
     This is a regular function (not a ``@qkernel``) that operates on
@@ -89,26 +86,36 @@ def trotterized_time_evolution(
 # ======================================================================
 
 
-def _validate_inputs(n_terms: int, step: int, order: int) -> None:
-    """Validate arguments for trotterized time evolution."""
-    if isinstance(step, bool) or not isinstance(step, int) or step <= 0:
-        raise ValueError(f"step must be a positive integer, got {step}")
-    if isinstance(order, bool):
+def _validate_order(order: int) -> None:
+    """Validate the approximation order."""
+    if isinstance(order, bool) or not isinstance(order, int):
         raise ValueError(f"order must be 1 or a positive even integer, got {order}")
     if order != 1 and (order <= 0 or order % 2 != 0):
         raise ValueError(f"order must be 1 or a positive even integer, got {order}")
+
+
+def _validate_n_terms(n_terms: int) -> None:
+    """Validate the number of Hamiltonian terms."""
     if n_terms < 2:
         raise ValueError(
-            f"observables must have at least 2 terms for Trotter "
+            f"n_terms must be at least 2 for Trotter "
             f"decomposition, got {n_terms}. "
             f"For a single-term Hamiltonian, use pauli_evolve directly."
         )
 
 
+def _validate_inputs(n_terms: int, step: int, order: int) -> None:
+    """Validate arguments for trotterized time evolution."""
+    if isinstance(step, bool) or not isinstance(step, int) or step <= 0:
+        raise ValueError(f"step must be a positive integer, got {step}")
+    _validate_order(order)
+    _validate_n_terms(n_terms)
+
+
 def product_formula(
     n_terms: int,
-    order: int,
     dt_frac: float,
+    order: int,
 ) -> list[tuple[int, float]]:
     """Compute decomposition sequence for one Trotter step.
 
@@ -117,9 +124,9 @@ def product_formula(
 
     Args:
         n_terms: Number of Hamiltonian terms (m).  Must be >= 2.
+        dt_frac: Time fraction for this step (``1/step`` at top level).
         order: Approximation order — ``1`` (Lie-Trotter) or a positive
             even integer (Suzuki).
-        dt_frac: Time fraction for this step (``1/step`` at top level).
 
     Returns:
         List of ``(term_index, time_fraction)`` pairs.
@@ -128,14 +135,8 @@ def product_formula(
         ValueError: If ``n_terms`` < 2 or ``order`` is not 1 or a positive
             even integer.
     """
-    if n_terms < 2:
-        raise ValueError(
-            f"n_terms must be at least 2 for Trotter decomposition, got {n_terms}"
-        )
-    if isinstance(order, bool) or not isinstance(order, int):
-        raise ValueError(f"order must be 1 or a positive even integer, got {order}")
-    if order != 1 and (order <= 0 or order % 2 != 0):
-        raise ValueError(f"order must be 1 or a positive even integer, got {order}")
+    _validate_n_terms(n_terms)
+    _validate_order(order)
     if order == 1:
         # Lie-Trotter: prod_{i=1}^{m} exp(-i dt H_i)
         return [(i, dt_frac) for i in range(n_terms)]
@@ -153,8 +154,8 @@ def product_formula(
     k = order // 2
     p_k = 1.0 / (4.0 - 4.0 ** (1.0 / (2 * k - 1)))
 
-    inner = product_formula(n_terms, order - 2, p_k * dt_frac)
-    center = product_formula(n_terms, order - 2, (1.0 - 4.0 * p_k) * dt_frac)
+    inner = product_formula(n_terms, p_k * dt_frac, order - 2)
+    center = product_formula(n_terms, (1.0 - 4.0 * p_k) * dt_frac, order - 2)
 
     return inner + inner + center + inner + inner
 
@@ -170,6 +171,6 @@ def _full_sequence(
     ``time_fraction`` is relative to the total evolution time.
     """
     dt_frac = 1.0 / step
-    one_step = product_formula(n_terms, order, dt_frac)
+    one_step = product_formula(n_terms, dt_frac, order)
     for _ in range(step):
         yield from one_step
