@@ -75,6 +75,8 @@ def trotterized_time_evolution(
             the constraints.
     """
     _validate_inputs(len(observables), step, order)
+    # Not a @qkernel: iterates over a precomputed concrete sequence
+    # (int/float pairs), not IR-captured control flow.
     seq = _full_sequence(len(observables), step, order)
     for term_idx, frac in seq:
         q = pauli_evolve(q, observables[term_idx], frac * time)
@@ -87,7 +89,15 @@ def trotterized_time_evolution(
 
 
 def _validate_order(order: int) -> None:
-    """Validate the approximation order."""
+    """Validate the approximation order.
+
+    Args:
+        order (int): Approximation order to validate.
+
+    Raises:
+        ValueError: If ``order`` is not 1 or a positive even integer,
+            or if ``order`` is a ``bool``.
+    """
     if isinstance(order, bool) or not isinstance(order, int):
         raise ValueError(f"order must be 1 or a positive even integer, got {order}")
     if order != 1 and (order <= 0 or order % 2 != 0):
@@ -95,7 +105,14 @@ def _validate_order(order: int) -> None:
 
 
 def _validate_n_terms(n_terms: int) -> None:
-    """Validate the number of Hamiltonian terms."""
+    """Validate the number of Hamiltonian terms.
+
+    Args:
+        n_terms (int): Number of sub-Hamiltonian terms.
+
+    Raises:
+        ValueError: If ``n_terms`` is less than 2.
+    """
     if n_terms < 2:
         raise ValueError(
             f"n_terms must be at least 2 for Trotter "
@@ -140,8 +157,7 @@ def product_formula(
     if order == 1:
         # Lie-Trotter: prod_{i=1}^{m} exp(-i dt H_i)
         return [(i, dt_frac) for i in range(n_terms)]
-
-    if order == 2:
+    elif order == 2:
         # Suzuki 2nd order:
         #   prod_{i=1}^{m} exp(-i dt/2 H_i)
         #   * prod_{i=m}^{1} exp(-i dt/2 H_i)
@@ -149,15 +165,16 @@ def product_formula(
         forward = [(i, half) for i in range(n_terms)]
         backward = [(i, half) for i in range(n_terms - 1, -1, -1)]
         return forward + backward
+    else:
+        # Recursive even-order: order = 2k, k >= 2
+        assert order >= 4 and order % 2 == 0, f"unreachable: order={order}"
+        k = order // 2
+        p_k = 1.0 / (4.0 - 4.0 ** (1.0 / (2 * k - 1)))
 
-    # Recursive even-order: order = 2k, k >= 2
-    k = order // 2
-    p_k = 1.0 / (4.0 - 4.0 ** (1.0 / (2 * k - 1)))
+        inner = product_formula(n_terms, p_k * dt_frac, order - 2)
+        center = product_formula(n_terms, (1.0 - 4.0 * p_k) * dt_frac, order - 2)
 
-    inner = product_formula(n_terms, p_k * dt_frac, order - 2)
-    center = product_formula(n_terms, (1.0 - 4.0 * p_k) * dt_frac, order - 2)
-
-    return inner + inner + center + inner + inner
+        return inner + inner + center + inner + inner
 
 
 def _full_sequence(
