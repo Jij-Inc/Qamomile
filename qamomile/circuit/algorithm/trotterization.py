@@ -35,6 +35,7 @@ Example::
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 from qamomile.circuit.frontend.operation.pauli_evolve import pauli_evolve
@@ -77,7 +78,7 @@ def trotterized_time_evolution(
             the constraints.
     """
     _validate_inputs(len(observables), step, order)
-    seq = _full_sequence(len(observables), order, step)
+    seq = _full_sequence(len(observables), step, order)
     for term_idx, frac in seq:
         q = pauli_evolve(q, observables[term_idx], frac * time)
     return q
@@ -90,8 +91,12 @@ def trotterized_time_evolution(
 
 def _validate_inputs(n_terms: int, step: int, order: int) -> None:
     """Validate arguments for trotterized time evolution."""
-    if not isinstance(step, int) or step <= 0:
+    if isinstance(step, bool) or not isinstance(step, int) or step <= 0:
         raise ValueError(f"step must be a positive integer, got {step}")
+    if isinstance(order, bool):
+        raise ValueError(
+            f"order must be 1 or a positive even integer, got {order}"
+        )
     if order != 1 and (order <= 0 or order % 2 != 0):
         raise ValueError(
             f"order must be 1 or a positive even integer, got {order}"
@@ -160,14 +165,15 @@ def product_formula(
 
 def _full_sequence(
     n_terms: int,
-    order: int,
     step: int,
-) -> list[tuple[int, float]]:
-    """Compute the full Trotter sequence for all steps.
+    order: int,
+) -> Iterator[tuple[int, float]]:
+    """Iterate over the full Trotter sequence for all steps.
 
-    Returns ``(term_index, time_fraction)`` pairs where each
+    Yields ``(term_index, time_fraction)`` pairs where each
     ``time_fraction`` is relative to the total evolution time.
     """
     dt_frac = 1.0 / step
     one_step = product_formula(n_terms, order, dt_frac)
-    return one_step * step
+    for _ in range(step):
+        yield from one_step

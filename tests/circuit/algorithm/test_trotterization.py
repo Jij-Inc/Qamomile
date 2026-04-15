@@ -5,13 +5,12 @@ import pytest
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.trotterization import (
-    _validate_inputs,
     _full_sequence,
+    _validate_inputs,
     product_formula,
     trotterized_time_evolution,
 )
 from qamomile.observable.hamiltonian import Hamiltonian
-
 
 # -----------------------------------------------------------------------
 # Helper: build common Hamiltonians and split them
@@ -89,6 +88,22 @@ class TestValidation:
 
     def test_order_4_allowed(self):
         _validate_inputs(n_terms=2, step=1, order=4)
+
+    def test_step_bool_true_raises(self):
+        with pytest.raises(ValueError, match="step must be a positive integer"):
+            _validate_inputs(n_terms=2, step=True, order=1)
+
+    def test_step_bool_false_raises(self):
+        with pytest.raises(ValueError, match="step must be a positive integer"):
+            _validate_inputs(n_terms=2, step=False, order=1)
+
+    def test_order_bool_true_raises(self):
+        with pytest.raises(ValueError, match="order must be 1 or a positive even"):
+            _validate_inputs(n_terms=2, step=1, order=True)
+
+    def test_order_bool_false_raises(self):
+        with pytest.raises(ValueError, match="order must be 1 or a positive even"):
+            _validate_inputs(n_terms=2, step=1, order=False)
 
 
 # -----------------------------------------------------------------------
@@ -189,11 +204,11 @@ class TestProductFormula:
 class TestFullSequence:
     def test_steps_multiply_length(self):
         one = product_formula(n_terms=2, order=1, dt_frac=1.0)
-        full = _full_sequence(n_terms=2, order=1, step=3)
+        full = list(_full_sequence(n_terms=2, order=1, step=3))
         assert len(full) == len(one) * 3
 
     def test_full_coefficient_sum(self):
-        full = _full_sequence(n_terms=3, order=2, step=4)
+        full = list(_full_sequence(n_terms=3, order=2, step=4))
         for term_idx in range(3):
             total = sum(frac for idx, frac in full if idx == term_idx)
             assert abs(total - 1.0) < 1e-12
