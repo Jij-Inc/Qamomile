@@ -67,6 +67,14 @@
   background-color: #A87430 !important;
 }
 
+/* Search hits use text-blue-* on top of the selected result background.
+ * Our blue->amber remap uses !important, so we need an explicit selected-state
+ * override to preserve contrast inside the active search result card.
+ */
+.group[aria-selected=true] .group-aria-selected\:text-white {
+  color: #FDF8F0 !important;
+}
+
 /* === Dark mode === */
 .dark\:border-blue-500\/60:is(.dark *) { border-color: rgba(192, 138, 64, 0.6) !important; }
 .dark\:border-blue-800:is(.dark *) { border-color: #6E4A1C !important; }
