@@ -67,9 +67,10 @@
   background-color: #A87430 !important;
 }
 
-/* Search hits use text-blue-* on top of the selected result background.
- * Our blue->amber remap uses !important, so we need an explicit selected-state
- * override to preserve contrast inside the active search result card.
+/* Search hits add text-blue-* classes, while the selected result also applies
+ * group-aria-selected:text-white. Our blue->amber remap uses !important on the
+ * text-blue-* utilities, so it overrides that selected-state white text unless
+ * we restate the group-aria-selected:text-white rule with !important here.
  */
 .group[aria-selected=true] .group-aria-selected\:text-white {
   color: #FDF8F0 !important;
