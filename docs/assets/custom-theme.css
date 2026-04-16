@@ -67,6 +67,15 @@
   background-color: #A87430 !important;
 }
 
+/* Search hits add text-blue-* classes, while the selected result also applies
+ * group-aria-selected:text-white. Our blue->amber remap uses !important on the
+ * text-blue-* utilities, so it overrides that selected-state white text unless
+ * we restate the group-aria-selected:text-white rule with !important here.
+ */
+.group[aria-selected=true] .group-aria-selected\:text-white {
+  color: #FDF8F0 !important;
+}
+
 /* === Dark mode === */
 .dark\:border-blue-500\/60:is(.dark *) { border-color: rgba(192, 138, 64, 0.6) !important; }
 .dark\:border-blue-800:is(.dark *) { border-color: #6E4A1C !important; }
