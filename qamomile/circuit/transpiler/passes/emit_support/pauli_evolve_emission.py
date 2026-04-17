@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
 
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.value import ArrayValue
 from qamomile.circuit.transpiler.errors import EmitError
 
 from .qubit_address import QubitAddress, QubitMap
@@ -64,47 +64,6 @@ def _resolve_gamma(
     return None
 
 
-def _resolve_observable(
-    emit_pass: "StandardEmitPass",
-    obs_value: Value,
-    bindings: dict[str, Any],
-) -> Any:
-    """Resolve an observable operand to a concrete Hamiltonian.
-
-    Handles direct binding lookup by name/uuid, and Vector[Observable]
-    element access via parent_array + element_indices (indices must be
-    resolvable to ints against ``bindings``, e.g. after loop unroll).
-    """
-    # Kernel-parameter observable: user passes ``bindings={"H": ...}``.
-    if obs_value.name in bindings:
-        return bindings[obs_value.name]
-    # Observable constructed inside the qkernel: tracked by uuid,
-    # same convention as other emit-time intermediates.
-    if obs_value.uuid in bindings:
-        return bindings[obs_value.uuid]
-
-    parent = obs_value.parent_array
-    if parent is None or not obs_value.element_indices:
-        return None
-
-    # Parent Vector[Observable]: same name-then-uuid lookup.
-    container = bindings.get(parent.name)
-    if container is None:
-        container = bindings.get(parent.uuid)
-    if container is None:
-        return None
-
-    for idx in obs_value.element_indices:
-        idx_val = emit_pass._resolver.resolve_int_value(idx, bindings)
-        if idx_val is None:
-            return None
-        try:
-            container = container[idx_val]
-        except (IndexError, KeyError, TypeError):
-            return None
-    return container
-
-
 def emit_pauli_evolve(
     emit_pass: "StandardEmitPass",
     circuit: Any,
@@ -125,14 +84,13 @@ def emit_pauli_evolve(
     """
     import qamomile.observable as qm_o
 
-    # Resolve Hamiltonian from bindings
+    # Resolve Hamiltonian from bindings via the shared resolver.
     obs_value = op.observable
-    hamiltonian = _resolve_observable(emit_pass, obs_value, bindings)
+    hamiltonian = emit_pass._resolver.resolve_bound_value(obs_value, bindings)
     if not isinstance(hamiltonian, qm_o.Hamiltonian):
         raise EmitError(
             f"PauliEvolveOp requires a Hamiltonian binding. "
-            f"Observable '{getattr(obs_value, 'name', '?')}' not found or "
-            f"not a Hamiltonian.",
+            f"Observable '{obs_value.name}' not found or not a Hamiltonian.",
             operation="PauliEvolveOp",
         )
 

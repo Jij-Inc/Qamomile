@@ -86,7 +86,7 @@ class TestResolveArrayElementValue:
             "e": 1,
         }
 
-        result = resolver._resolve_array_element_value(nested, bindings)
+        result = resolver.resolve_classical_value(nested, bindings)
 
         assert result == 1
         assert isinstance(result, int)
