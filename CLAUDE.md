@@ -130,7 +130,7 @@ executable = transpiler.transpile(my_circuit, bindings={"theta": 0.5})
 
 To translate English docs (`docs/en/`) into Japanese (`docs/ja/`), use the `/translate` skill:
 
-```
+```bash
 /translate docs/en/tutorial/01_your_first_quantum_kernel.py
 ```
 

@@ -68,12 +68,12 @@ description: docs/en/配下の英語ドキュメント(.py jupytext形式)をdoc
 - **英語版のMarkdownテキスト行内の改行（soft line break）は、日本語版では結合して1行にする。**
   - jupytextでnotebookに変換すると改行が半角スペースになるため、日本語では不自然な空白が生じる。
   - 英語版:
-    ```
+    ```python
     # Hello, this is
     # me
     ```
   - 日本語版:
-    ```
+    ```python
     # こんにちは，わたしです
     ```
   - コードブロック内の改行はこのルールの対象外（ルール6に従う）。
