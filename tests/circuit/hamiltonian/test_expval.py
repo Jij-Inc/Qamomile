@@ -239,6 +239,32 @@ class TestExpvalTranspiler:
         assert dim0.is_constant()
         assert dim0.get_const() == 3
 
+    def test_vector_observable_allowed_unbound(self):
+        """Vector[Observable] can be left unbound at build() time."""
+
+        @qm.qkernel
+        def vqe(Hs: qm.Vector[qm.Observable]) -> qm.Float:
+            q = qm.qubit_array(1, "q")
+            return qm.expval(q, Hs[0])
+
+        # Should not raise during build; shape stays symbolic.
+        block = vqe.build()
+        hs_input = next(v for v in block.input_values if v.name == "Hs")
+        assert not hs_input.shape[0].is_constant()
+
+    def test_matrix_observable_rejected(self):
+        """Matrix/Tensor[Observable] is explicitly unsupported."""
+
+        @qm.qkernel
+        def bad(Hs: qm.Matrix[qm.Observable]) -> qm.Float:
+            q = qm.qubit_array(1, "q")
+            return qm.expval(q, Hs[0, 0])
+
+        with pytest.raises(TypeError, match="Only Vector\\[Observable\\]"):
+            bad.build()
+        with pytest.raises(TypeError, match="Only Vector\\[Observable\\]"):
+            bad.build(Hs=[[qm_o.Z(0)]])
+
 
 class TestHamiltonianRemapQubits:
     """Test Hamiltonian.remap_qubits method."""

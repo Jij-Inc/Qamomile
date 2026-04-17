@@ -29,7 +29,7 @@ from qamomile.circuit.frontend.func_to_block import (
     is_tuple_type,
 )
 from qamomile.circuit.frontend.handle import Observable, Qubit
-from qamomile.circuit.frontend.handle.array import ArrayBase
+from qamomile.circuit.frontend.handle.array import ArrayBase, Vector
 from qamomile.circuit.frontend.handle.containers import Dict
 from qamomile.circuit.frontend.handle.primitives import Float, Handle, UInt
 from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
@@ -367,6 +367,9 @@ class QKernel(Generic[P, R]):
                     element_type = getattr(param_type, "element_type", None)
                 if element_type is Qubit:
                     continue
+                # Vector[Observable] may be left unbound (resolved at emit).
+                if element_type is Observable:
+                    continue
 
             # Observable types are provided via bindings
             if param_type is Observable:
@@ -410,6 +413,12 @@ class QKernel(Generic[P, R]):
                 raise TypeError(
                     f"Array parameter must have Float, UInt, or Observable "
                     f"element type, got {element_type}"
+                )
+            if element_type is Observable and (
+                getattr(param_type, "__origin__", param_type) is not Vector
+            ):
+                raise TypeError(
+                    f"Only Vector[Observable] is supported; got {param_type}"
                 )
 
             # Delegate to create_dummy_input so that parameter arrays get the
@@ -502,6 +511,11 @@ class QKernel(Generic[P, R]):
                 shape = arr.shape
                 const_data = arr.tolist()
             elif element_type is Observable:
+                if getattr(param_type, "__origin__", param_type) is not Vector:
+                    raise TypeError(
+                        f"Only Vector[Observable] bindings are supported; "
+                        f"got {param_type}"
+                    )
                 ir_element_type = ObservableType()
                 shape = (len(value),)
                 const_data = list(value)
