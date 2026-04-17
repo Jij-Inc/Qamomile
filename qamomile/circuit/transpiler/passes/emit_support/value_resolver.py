@@ -222,16 +222,19 @@ class ValueResolver:
     ) -> Any:
         """Resolve a classical Value to a concrete Python value.
 
-        Array-element lookups often return a numpy scalar; this
-        variant normalizes to a Python scalar. Non-array bindings are
-        passed through as-is.
+        Numeric bindings are normalized to native Python scalars
+        regardless of whether they come from a direct binding or from
+        array-element indexing, so downstream ``isinstance(x, (int,
+        float))`` checks are stable when callers bind ``np.pi/4`` or
+        the like. ``bool`` is preserved (not coerced to ``int``).
+        Non-numeric values (Hamiltonians, strings, dict values, …)
+        pass through unchanged.
         """
         raw = self.resolve_bound_value(value, bindings)
-        if raw is None:
-            return None
-        if value.parent_array is not None and value.element_indices:
-            return self._resolve_numeric_value(raw)
-        return raw
+        if raw is None or isinstance(raw, bool):
+            return raw
+        coerced = self._resolve_numeric_value(raw)
+        return coerced if coerced is not None else raw
 
     def _index_into_array(
         self,

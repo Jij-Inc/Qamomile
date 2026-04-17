@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from qamomile.circuit.ir.types.primitives import UIntType
+from qamomile.circuit.ir.types.primitives import FloatType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.passes.emit_support import ValueResolver
 
@@ -90,3 +90,48 @@ class TestResolveArrayElementValue:
 
         assert result == 1
         assert isinstance(result, int)
+
+
+class TestResolveClassicalScalarNormalization:
+    """Scalar bindings should be normalized the same as array elements."""
+
+    def test_numpy_float_scalar_binding_normalized(self):
+        """np.float64 binding resolves to native Python float."""
+        resolver = ValueResolver()
+        theta = Value(type=FloatType(), name="theta")
+        bindings = {"theta": np.float64(np.pi / 4)}
+
+        result = resolver.resolve_classical_value(theta, bindings)
+
+        assert type(result) is float
+        assert result == np.pi / 4
+
+    def test_numpy_int_scalar_binding_normalized(self):
+        """np.int64 binding resolves to native Python int."""
+        resolver = ValueResolver()
+        n = Value(type=UIntType(), name="n")
+        bindings = {"n": np.int64(7)}
+
+        result = resolver.resolve_classical_value(n, bindings)
+
+        assert type(result) is int
+        assert result == 7
+
+    def test_bool_binding_preserved(self):
+        """bool bindings must not be coerced to int."""
+        resolver = ValueResolver()
+        flag = Value(type=UIntType(), name="flag")
+        bindings = {"flag": True}
+
+        result = resolver.resolve_classical_value(flag, bindings)
+
+        assert result is True
+
+    def test_non_numeric_binding_passes_through(self):
+        """Non-numeric bindings (e.g. Hamiltonian-like) are returned as-is."""
+        resolver = ValueResolver()
+        obs = Value(type=UIntType(), name="obs")
+        marker = object()
+        bindings = {"obs": marker}
+
+        assert resolver.resolve_classical_value(obs, bindings) is marker
