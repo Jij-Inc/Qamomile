@@ -30,6 +30,9 @@
 # # !pip install openfermion pyscf openfermionpyscf
 
 # %%
+import os
+import warnings
+
 import matplotlib.pyplot as plt
 import numpy as np
 import openfermion.chem as of_chem
@@ -43,6 +46,8 @@ import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.basic import cx_entangling_layer, ry_layer, rz_layer
 from qamomile.qiskit import QiskitTranspiler
 from qamomile.qiskit.transpiler import QiskitExecutor
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 # %% [markdown]
 # ## Creating the Hamiltonian of the Hydrogen Molecule
@@ -151,11 +156,13 @@ rng = np.random.default_rng(42)
 initial_params = rng.uniform(0, np.pi, num_params)
 
 # Run VQE optimization
+maxiter = 1 if docs_test_mode else 50
+warnings.filterwarnings("ignore", message="Maximum number of iterations")
 result = minimize(
     cost_fn,
     initial_params,
     method="BFGS",
-    options={"disp": True, "maxiter": 50, "gtol": 1e-6},
+    options={"disp": True, "maxiter": maxiter, "gtol": 1e-6},
     callback=cost_callback,
 )
 print(result)
@@ -191,7 +198,8 @@ def hydrogen_molecule(bond_length):
     jw_hamiltonian = of_trans.jordan_wigner(fermionic_hamiltonian)
     return openfermion_to_qamomile(jw_hamiltonian), molecule.fci_energy
 
-bond_lengths = np.linspace(0.2, 1.5, 15)
+n_points = 3 if docs_test_mode else 15
+bond_lengths = np.linspace(0.2, 1.5, n_points)
 energies = []
 for bond_length in bond_lengths:
     hamiltonian, fci_energy = hydrogen_molecule(bond_length)
@@ -208,7 +216,7 @@ for bond_length in bond_lengths:
         cost_fn,
         initial_params,
         method="BFGS",
-        options={"maxiter": 50, "gtol": 1e-6},
+        options={"maxiter": maxiter, "gtol": 1e-6},
     )
 
     energies.append(result.fun)
