@@ -229,13 +229,7 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
         if observable_value is None:
             raise RuntimeError("ExpvalSegment has no hamiltonian_value set.")
 
-        if observable_value.name not in self.bindings:
-            raise RuntimeError(
-                f"Observable '{observable_value.name}' not found in bindings. "
-                f"Hamiltonians must be provided as bindings."
-            )
-
-        hamiltonian = self.bindings[observable_value.name]
+        hamiltonian = self._resolve_observable_binding(observable_value)
 
         # Validate type
         if not isinstance(hamiltonian, qm_o.Hamiltonian):
@@ -261,6 +255,33 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
             quantum_segment_index=quantum_segment_index,
             result_ref=segment.result_ref,
             qubit_map=qubit_map,
+        )
+
+    def _resolve_observable_binding(self, observable_value: Value) -> Any:
+        """Resolve an observable Value to its bound Hamiltonian.
+
+        Handles both scalar Observable parameters (looked up by name) and
+        elements of Vector/Matrix/Tensor[Observable] parameters (looked up
+        via parent_array + constant element_indices).
+        """
+        if observable_value.name in self.bindings:
+            return self.bindings[observable_value.name]
+
+        parent = observable_value.parent_array
+        if parent is not None and parent.name in self.bindings:
+            container = self.bindings[parent.name]
+            for idx_value in observable_value.element_indices:
+                if not idx_value.is_constant():
+                    raise RuntimeError(
+                        f"Observable element '{observable_value.name}' has "
+                        f"non-constant index; indices must be resolved before emit."
+                    )
+                container = container[int(idx_value.get_const())]
+            return container
+
+        raise RuntimeError(
+            f"Observable '{observable_value.name}' not found in bindings. "
+            f"Hamiltonians must be provided as bindings."
         )
 
     def _build_qubit_map(

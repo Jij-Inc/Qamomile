@@ -399,15 +399,17 @@ class QKernel(Generic[P, R]):
             return UInt(value=value)
 
         if is_array_type(param_type):
-            # Restrict parameter arrays to scalar element types (Float/UInt).
-            # Qubit/Bit arrays are handled through other paths (qubit_sizes etc.).
+            # Restrict parameter arrays to scalar element types (Float/UInt)
+            # and Observable. Qubit/Bit arrays are handled through other paths
+            # (qubit_sizes etc.).
             if hasattr(param_type, "__args__") and param_type.__args__:
                 element_type = param_type.__args__[0]
             else:
                 element_type = getattr(param_type, "element_type", None)
-            if element_type not in (Float, float, UInt, int):
+            if element_type not in (Float, float, UInt, int, Observable):
                 raise TypeError(
-                    f"Array parameter must have Float or UInt element type, got {element_type}"
+                    f"Array parameter must have Float, UInt, or Observable "
+                    f"element type, got {element_type}"
                 )
 
             # Delegate to create_dummy_input so that parameter arrays get the
@@ -614,8 +616,12 @@ class QKernel(Generic[P, R]):
             for name, param in self.signature.parameters.items():
                 param_type = param.annotation
 
-                # Observable types are always treated as parameters (resolved during emit)
-                if param_type is Observable:
+                # Observable types are always treated as parameters (resolved during emit).
+                # This applies to scalar Observable and Vector/Matrix/Tensor[Observable].
+                if param_type is Observable or (
+                    is_array_type(param_type)
+                    and _get_array_element_type(param_type) is Observable
+                ):
                     handle = self._create_parameter_input(param_type, name)
                     tracked_parameters[name] = handle.value
                 elif name in parameters:

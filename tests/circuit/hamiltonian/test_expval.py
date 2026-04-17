@@ -193,6 +193,39 @@ class TestExpvalTranspiler:
         with pytest.raises(RuntimeError, match="Observable.*not found in bindings"):
             transpiler.transpile(vqe, bindings={"n": 2})
 
+    def test_transpile_with_observable_vector_binding(self):
+        """Vector[Observable] binding resolves element-wise via parent_array."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        H0 = qm_o.Z(0) * qm_o.Z(1)
+        H1 = qm_o.X(0)
+
+        @qm.qkernel
+        def vqe(Hs: qm.Vector[qm.Observable]) -> qm.Float:
+            q = qm.qubit_array(2, "q")
+            q[0] = qm.h(q[0])
+            q[0], q[1] = qm.cx(q[0], q[1])
+            return qm.expval(q, Hs[1])
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(vqe, bindings={"Hs": [H0, H1]})
+
+        assert len(executable.compiled_expval) == 1
+        assert executable.compiled_expval[0].hamiltonian == H1
+
+    def test_vector_observable_builds_block(self):
+        """Vector[Observable] annotation produces a well-formed Block."""
+
+        @qm.qkernel
+        def vqe(Hs: qm.Vector[qm.Observable]) -> qm.Float:
+            q = qm.qubit_array(2, "q")
+            return qm.expval(q, Hs[0])
+
+        block = vqe.build(Hs=[qm_o.Z(0), qm_o.X(0)])
+        has_expval = any(isinstance(op, ExpvalOp) for op in block.operations)
+        assert has_expval
+
 
 class TestHamiltonianRemapQubits:
     """Test Hamiltonian.remap_qubits method."""
