@@ -131,7 +131,7 @@ executable = transpiler.transpile(my_circuit, bindings={"theta": 0.5})
 To translate English docs (`docs/en/`) into Japanese (`docs/ja/`), use the `/translate` skill:
 
 ```
-/translate docs/en/tutorial/qaoa.py
+/translate docs/en/tutorial/01_your_first_quantum_kernel.py
 ```
 
 Translation rules (tone, spacing, terminology, soft line breaks, etc.) are defined in `.claude/skills/translate/SKILL.md`. Always use this skill when translating documentation.
