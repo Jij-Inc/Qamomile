@@ -261,8 +261,8 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
         """Resolve an observable Value to its bound Hamiltonian.
 
         Handles both scalar Observable parameters (looked up by name) and
-        elements of Vector/Matrix/Tensor[Observable] parameters (looked up
-        via parent_array + constant element_indices).
+        elements of ``Vector[Observable]`` parameters (looked up via
+        parent_array + constant element_indices).
         """
         if observable_value.name in self.bindings:
             return self.bindings[observable_value.name]

@@ -637,17 +637,17 @@ class QKernel(Generic[P, R]):
             for name, param in self.signature.parameters.items():
                 param_type = param.annotation
 
-                # Observable types are always treated as parameters (resolved during emit)
-                if param_type is Observable:
-                    handle = self._create_parameter_input(param_type, name)
-                    tracked_parameters[name] = handle.value
-                # Unbound Vector[Observable]: keep as parameter so shape stays symbolic.
-                # Bound case falls through to _create_bound_input, which resolves shape.
-                elif (
+                # Scalar Observable is always a parameter; unbound
+                # Vector[Observable] is too so its shape stays symbolic
+                # (bound Vector[Observable] falls through to the kwargs
+                # branch below, which resolves the shape from the value).
+                is_scalar_observable = param_type is Observable
+                is_unbound_observable_array = (
                     is_array_type(param_type)
                     and _get_array_element_type(param_type) is Observable
                     and name not in kwargs
-                ):
+                )
+                if is_scalar_observable or is_unbound_observable_array:
                     handle = self._create_parameter_input(param_type, name)
                     tracked_parameters[name] = handle.value
                 elif name in parameters:
