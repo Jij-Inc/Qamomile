@@ -48,9 +48,7 @@ def _statevector(circuit) -> np.ndarray:
 
 
 @qmc.qkernel
-def _trotter(
-    Hs: qmc.Vector[qmc.Observable], gamma: qmc.Float
-) -> qmc.Vector[qmc.Qubit]:
+def _trotter(Hs: qmc.Vector[qmc.Observable], gamma: qmc.Float) -> qmc.Vector[qmc.Qubit]:
     q = qmc.qubit_array(2, "q")
     q[0] = qmc.h(q[0])
     q[1] = qmc.h(q[1])
@@ -98,9 +96,7 @@ class TestTrotterViaVectorObservable:
         H3 = _pad_to(2, qm_o.X(0))
 
         tr = QiskitTranspiler()
-        exe = tr.transpile(
-            _trotter_meas, bindings={"Hs": [H1, H2, H3], "gamma": 0.4}
-        )
+        exe = tr.transpile(_trotter_meas, bindings={"Hs": [H1, H2, H3], "gamma": 0.4})
         circuit = exe.compiled_quantum[0].circuit
         gate_names = [inst.operation.name for inst in circuit.data]
         assert "for_loop" not in gate_names
@@ -118,9 +114,7 @@ class TestTrotterViaVectorObservable:
         exe_trotter = tr.transpile(
             _trotter_meas, bindings={"Hs": [H1, H2], "gamma": gamma}
         )
-        exe_direct = tr.transpile(
-            _direct_meas, bindings={"H": H1 + H2, "gamma": gamma}
-        )
+        exe_direct = tr.transpile(_direct_meas, bindings={"H": H1 + H2, "gamma": gamma})
 
         sv_trotter = _statevector(exe_trotter.compiled_quantum[0].circuit)
         sv_direct = _statevector(exe_direct.compiled_quantum[0].circuit)
