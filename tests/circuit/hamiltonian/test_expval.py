@@ -226,6 +226,19 @@ class TestExpvalTranspiler:
         has_expval = any(isinstance(op, ExpvalOp) for op in block.operations)
         assert has_expval
 
+    def test_vector_observable_binding_resolves_shape(self):
+        """Binding Vector[Observable] must resolve .shape[i] to a constant."""
+
+        @qm.qkernel
+        def vqe(Hs: qm.Vector[qm.Observable]) -> qm.UInt:
+            return Hs.shape[0]
+
+        block = vqe.build(Hs=[qm_o.Z(0), qm_o.X(0), qm_o.Y(0)])
+        hs_input = next(v for v in block.input_values if v.name == "Hs")
+        dim0 = hs_input.shape[0]
+        assert dim0.is_constant()
+        assert dim0.get_const() == 3
+
 
 class TestHamiltonianRemapQubits:
     """Test Hamiltonian.remap_qubits method."""

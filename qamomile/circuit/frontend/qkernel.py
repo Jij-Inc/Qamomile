@@ -488,21 +488,28 @@ class QKernel(Generic[P, R]):
             else:
                 element_type = getattr(param_type, "element_type", None)
 
-            # Determine IR type for the element
+            # Determine IR type and extract shape/data. Observable is an
+            # arbitrary Python object so we avoid numpy (dtype=object arrays
+            # are fragile); Float/UInt go through numpy for multi-dim support.
             if element_type in (Float, float):
                 ir_element_type = FloatType()
+                arr = np.asarray(value)
+                shape = arr.shape
+                const_data: Any = arr.tolist()
             elif element_type in (UInt, int):
                 ir_element_type = UIntType()
+                arr = np.asarray(value)
+                shape = arr.shape
+                const_data = arr.tolist()
+            elif element_type is Observable:
+                ir_element_type = ObservableType()
+                shape = (len(value),)
+                const_data = list(value)
             else:
                 raise TypeError(
                     f"Unsupported element type for array binding: {element_type}"
                 )
 
-            # Convert to numpy array to handle multi-dimensional arrays
-            arr = np.asarray(value)
-
-            # Infer shape from the array
-            shape = arr.shape
             shape_values = tuple(
                 Value(type=UIntType(), name=f"dim_{i}").with_const(dim)
                 for i, dim in enumerate(shape)
@@ -512,7 +519,7 @@ class QKernel(Generic[P, R]):
                 type=ir_element_type,
                 name=name,
                 shape=shape_values,
-            ).with_array_runtime_metadata(const_array=arr.tolist())
+            ).with_array_runtime_metadata(const_array=const_data)
 
             # Create instance without calling __init__
             # For generic aliases, use __origin__ to get the actual class
@@ -616,11 +623,16 @@ class QKernel(Generic[P, R]):
             for name, param in self.signature.parameters.items():
                 param_type = param.annotation
 
-                # Observable types are always treated as parameters (resolved during emit).
-                # This applies to scalar Observable and Vector/Matrix/Tensor[Observable].
-                if param_type is Observable or (
+                # Observable types are always treated as parameters (resolved during emit)
+                if param_type is Observable:
+                    handle = self._create_parameter_input(param_type, name)
+                    tracked_parameters[name] = handle.value
+                # Unbound Vector[Observable]: keep as parameter so shape stays symbolic.
+                # Bound case falls through to _create_bound_input, which resolves shape.
+                elif (
                     is_array_type(param_type)
                     and _get_array_element_type(param_type) is Observable
+                    and name not in kwargs
                 ):
                     handle = self._create_parameter_input(param_type, name)
                     tracked_parameters[name] = handle.value
