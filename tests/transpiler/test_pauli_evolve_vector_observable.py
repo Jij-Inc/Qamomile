@@ -10,6 +10,7 @@ match a direct ``pauli_evolve(q, sum(Hs), gamma)`` for commuting terms.
 import pytest
 
 pytest.importorskip("qiskit")
+pytest.importorskip("qiskit_aer")
 
 import numpy as np
 from qiskit_aer import AerSimulator

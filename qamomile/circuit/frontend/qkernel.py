@@ -516,9 +516,22 @@ class QKernel(Generic[P, R]):
                         f"Only Vector[Observable] bindings are supported; "
                         f"got {param_type}"
                     )
+                if isinstance(value, np.ndarray) and value.ndim != 1:
+                    raise TypeError(
+                        f"Vector[Observable] binding '{name}' must be 1-D; "
+                        f"got ndarray with shape {value.shape}."
+                    )
+                items = list(value)
+                for i, item in enumerate(items):
+                    if isinstance(item, (list, tuple, np.ndarray)):
+                        raise TypeError(
+                            f"Vector[Observable] binding '{name}' must be a "
+                            f"flat sequence of Hamiltonians; element {i} is "
+                            f"{type(item).__name__}."
+                        )
                 ir_element_type = ObservableType()
-                shape = (len(value),)
-                const_data = list(value)
+                shape = (len(items),)
+                const_data = items
             else:
                 raise TypeError(
                     f"Unsupported element type for array binding: {element_type}"

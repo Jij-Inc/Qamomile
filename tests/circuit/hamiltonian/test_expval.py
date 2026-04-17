@@ -265,6 +265,24 @@ class TestExpvalTranspiler:
         with pytest.raises(TypeError, match="Only Vector\\[Observable\\]"):
             bad.build(Hs=[[qm_o.Z(0)]])
 
+    def test_nested_vector_observable_binding_rejected(self):
+        """A nested sequence bound to Vector[Observable] must raise.
+
+        Without this guard, ``len([[H]])`` silently reports 1 and
+        ``Hs[0]`` resolves to a list instead of a Hamiltonian.
+        """
+        import numpy as np
+
+        @qm.qkernel
+        def k(Hs: qm.Vector[qm.Observable]) -> qm.Float:
+            q = qm.qubit_array(1, "q")
+            return qm.expval(q, Hs[0])
+
+        with pytest.raises(TypeError, match="flat sequence of Hamiltonians"):
+            k.build(Hs=[[qm_o.Z(0)]])
+        with pytest.raises(TypeError, match="must be 1-D"):
+            k.build(Hs=np.array([[qm_o.Z(0)]], dtype=object))
+
 
 class TestHamiltonianRemapQubits:
     """Test Hamiltonian.remap_qubits method."""
