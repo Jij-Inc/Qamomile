@@ -64,6 +64,42 @@ def _resolve_gamma(
     return None
 
 
+def _resolve_observable(
+    emit_pass: "StandardEmitPass",
+    obs_value: Any,
+    bindings: dict[str, Any],
+) -> Any:
+    """Resolve an observable operand to a concrete Hamiltonian.
+
+    Handles direct binding lookup by name/uuid, and Vector[Observable]
+    element access via parent_array + element_indices (indices must be
+    resolvable to ints against ``bindings``, e.g. after loop unroll).
+    """
+    if hasattr(obs_value, "name") and obs_value.name in bindings:
+        return bindings[obs_value.name]
+    if hasattr(obs_value, "uuid") and obs_value.uuid in bindings:
+        return bindings[obs_value.uuid]
+
+    parent = getattr(obs_value, "parent_array", None)
+    element_indices = getattr(obs_value, "element_indices", ())
+    if parent is not None and element_indices:
+        container = bindings.get(parent.name)
+        if container is None and parent.uuid in bindings:
+            container = bindings[parent.uuid]
+        if container is None:
+            return None
+        for idx in element_indices:
+            idx_val = emit_pass._resolver.resolve_int_value(idx, bindings)
+            if idx_val is None:
+                return None
+            try:
+                container = container[idx_val]
+            except (IndexError, KeyError, TypeError):
+                return None
+        return container
+    return None
+
+
 def emit_pauli_evolve(
     emit_pass: "StandardEmitPass",
     circuit: Any,
@@ -86,11 +122,7 @@ def emit_pauli_evolve(
 
     # Resolve Hamiltonian from bindings
     obs_value = op.observable
-    hamiltonian = None
-    if hasattr(obs_value, "name") and obs_value.name in bindings:
-        hamiltonian = bindings[obs_value.name]
-    if hamiltonian is None and hasattr(obs_value, "uuid"):
-        hamiltonian = bindings.get(obs_value.uuid)
+    hamiltonian = _resolve_observable(emit_pass, obs_value, bindings)
     if not isinstance(hamiltonian, qm_o.Hamiltonian):
         raise EmitError(
             f"PauliEvolveOp requires a Hamiltonian binding. "
