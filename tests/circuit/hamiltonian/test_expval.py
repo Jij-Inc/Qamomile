@@ -193,6 +193,96 @@ class TestExpvalTranspiler:
         with pytest.raises(RuntimeError, match="Observable.*not found in bindings"):
             transpiler.transpile(vqe, bindings={"n": 2})
 
+    def test_transpile_with_observable_vector_binding(self):
+        """Vector[Observable] binding resolves element-wise via parent_array."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        H0 = qm_o.Z(0) * qm_o.Z(1)
+        H1 = qm_o.X(0)
+
+        @qm.qkernel
+        def vqe(Hs: qm.Vector[qm.Observable]) -> qm.Float:
+            q = qm.qubit_array(2, "q")
+            q[0] = qm.h(q[0])
+            q[0], q[1] = qm.cx(q[0], q[1])
+            return qm.expval(q, Hs[1])
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(vqe, bindings={"Hs": [H0, H1]})
+
+        assert len(executable.compiled_expval) == 1
+        assert executable.compiled_expval[0].hamiltonian == H1
+
+    def test_vector_observable_builds_block(self):
+        """Vector[Observable] annotation produces a well-formed Block."""
+
+        @qm.qkernel
+        def vqe(Hs: qm.Vector[qm.Observable]) -> qm.Float:
+            q = qm.qubit_array(2, "q")
+            return qm.expval(q, Hs[0])
+
+        block = vqe.build(Hs=[qm_o.Z(0), qm_o.X(0)])
+        has_expval = any(isinstance(op, ExpvalOp) for op in block.operations)
+        assert has_expval
+
+    def test_vector_observable_binding_resolves_shape(self):
+        """Binding Vector[Observable] must resolve .shape[i] to a constant."""
+
+        @qm.qkernel
+        def vqe(Hs: qm.Vector[qm.Observable]) -> qm.UInt:
+            return Hs.shape[0]
+
+        block = vqe.build(Hs=[qm_o.Z(0), qm_o.X(0), qm_o.Y(0)])
+        hs_input = next(v for v in block.input_values if v.name == "Hs")
+        dim0 = hs_input.shape[0]
+        assert dim0.is_constant()
+        assert dim0.get_const() == 3
+
+    def test_vector_observable_allowed_unbound(self):
+        """Vector[Observable] can be left unbound at build() time."""
+
+        @qm.qkernel
+        def vqe(Hs: qm.Vector[qm.Observable]) -> qm.Float:
+            q = qm.qubit_array(1, "q")
+            return qm.expval(q, Hs[0])
+
+        # Should not raise during build; shape stays symbolic.
+        block = vqe.build()
+        hs_input = next(v for v in block.input_values if v.name == "Hs")
+        assert not hs_input.shape[0].is_constant()
+
+    def test_matrix_observable_rejected(self):
+        """Matrix/Tensor[Observable] is explicitly unsupported."""
+
+        @qm.qkernel
+        def bad(Hs: qm.Matrix[qm.Observable]) -> qm.Float:
+            q = qm.qubit_array(1, "q")
+            return qm.expval(q, Hs[0, 0])
+
+        with pytest.raises(TypeError, match="Only Vector\\[Observable\\]"):
+            bad.build()
+        with pytest.raises(TypeError, match="Only Vector\\[Observable\\]"):
+            bad.build(Hs=[[qm_o.Z(0)]])
+
+    def test_nested_vector_observable_binding_rejected(self):
+        """A nested sequence bound to Vector[Observable] must raise.
+
+        Without this guard, ``len([[H]])`` silently reports 1 and
+        ``Hs[0]`` resolves to a list instead of a Hamiltonian.
+        """
+        import numpy as np
+
+        @qm.qkernel
+        def k(Hs: qm.Vector[qm.Observable]) -> qm.Float:
+            q = qm.qubit_array(1, "q")
+            return qm.expval(q, Hs[0])
+
+        with pytest.raises(TypeError, match="flat sequence of Hamiltonians"):
+            k.build(Hs=[[qm_o.Z(0)]])
+        with pytest.raises(TypeError, match="must be 1-D"):
+            k.build(Hs=np.array([[qm_o.Z(0)]], dtype=object))
+
 
 class TestHamiltonianRemapQubits:
     """Test Hamiltonian.remap_qubits method."""

@@ -84,18 +84,13 @@ def emit_pauli_evolve(
     """
     import qamomile.observable as qm_o
 
-    # Resolve Hamiltonian from bindings
+    # Resolve Hamiltonian from bindings via the shared resolver.
     obs_value = op.observable
-    hamiltonian = None
-    if hasattr(obs_value, "name") and obs_value.name in bindings:
-        hamiltonian = bindings[obs_value.name]
-    if hamiltonian is None and hasattr(obs_value, "uuid"):
-        hamiltonian = bindings.get(obs_value.uuid)
+    hamiltonian = emit_pass._resolver.resolve_bound_value(obs_value, bindings)
     if not isinstance(hamiltonian, qm_o.Hamiltonian):
         raise EmitError(
             f"PauliEvolveOp requires a Hamiltonian binding. "
-            f"Observable '{getattr(obs_value, 'name', '?')}' not found or "
-            f"not a Hamiltonian.",
+            f"Observable '{obs_value.name}' not found or not a Hamiltonian.",
             operation="PauliEvolveOp",
         )
 

@@ -29,7 +29,7 @@ from qamomile.circuit.frontend.func_to_block import (
     is_tuple_type,
 )
 from qamomile.circuit.frontend.handle import Observable, Qubit
-from qamomile.circuit.frontend.handle.array import ArrayBase
+from qamomile.circuit.frontend.handle.array import ArrayBase, Vector
 from qamomile.circuit.frontend.handle.containers import Dict
 from qamomile.circuit.frontend.handle.primitives import Float, Handle, UInt
 from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
@@ -367,6 +367,9 @@ class QKernel(Generic[P, R]):
                     element_type = getattr(param_type, "element_type", None)
                 if element_type is Qubit:
                     continue
+                # Vector[Observable] may be left unbound (resolved at emit).
+                if element_type is Observable:
+                    continue
 
             # Observable types are provided via bindings
             if param_type is Observable:
@@ -399,15 +402,23 @@ class QKernel(Generic[P, R]):
             return UInt(value=value)
 
         if is_array_type(param_type):
-            # Restrict parameter arrays to scalar element types (Float/UInt).
-            # Qubit/Bit arrays are handled through other paths (qubit_sizes etc.).
+            # Restrict parameter arrays to scalar element types (Float/UInt)
+            # and Observable. Qubit/Bit arrays are handled through other paths
+            # (qubit_sizes etc.).
             if hasattr(param_type, "__args__") and param_type.__args__:
                 element_type = param_type.__args__[0]
             else:
                 element_type = getattr(param_type, "element_type", None)
-            if element_type not in (Float, float, UInt, int):
+            if element_type not in (Float, float, UInt, int, Observable):
                 raise TypeError(
-                    f"Array parameter must have Float or UInt element type, got {element_type}"
+                    f"Array parameter must have Float, UInt, or Observable "
+                    f"element type, got {element_type}"
+                )
+            if element_type is Observable and (
+                getattr(param_type, "__origin__", param_type) is not Vector
+            ):
+                raise TypeError(
+                    f"Only Vector[Observable] is supported; got {param_type}"
                 )
 
             # Delegate to create_dummy_input so that parameter arrays get the
@@ -486,21 +497,46 @@ class QKernel(Generic[P, R]):
             else:
                 element_type = getattr(param_type, "element_type", None)
 
-            # Determine IR type for the element
+            # Determine IR type and extract shape/data. Observable is an
+            # arbitrary Python object so we avoid numpy (dtype=object arrays
+            # are fragile); Float/UInt go through numpy for multi-dim support.
             if element_type in (Float, float):
                 ir_element_type = FloatType()
+                arr = np.asarray(value)
+                shape = arr.shape
+                const_data: Any = arr.tolist()
             elif element_type in (UInt, int):
                 ir_element_type = UIntType()
+                arr = np.asarray(value)
+                shape = arr.shape
+                const_data = arr.tolist()
+            elif element_type is Observable:
+                if getattr(param_type, "__origin__", param_type) is not Vector:
+                    raise TypeError(
+                        f"Only Vector[Observable] bindings are supported; "
+                        f"got {param_type}"
+                    )
+                if isinstance(value, np.ndarray) and value.ndim != 1:
+                    raise TypeError(
+                        f"Vector[Observable] binding '{name}' must be 1-D; "
+                        f"got ndarray with shape {value.shape}."
+                    )
+                items = list(value)
+                for i, item in enumerate(items):
+                    if isinstance(item, (list, tuple, np.ndarray)):
+                        raise TypeError(
+                            f"Vector[Observable] binding '{name}' must be a "
+                            f"flat sequence of Hamiltonians; element {i} is "
+                            f"{type(item).__name__}."
+                        )
+                ir_element_type = ObservableType()
+                shape = (len(items),)
+                const_data = items
             else:
                 raise TypeError(
                     f"Unsupported element type for array binding: {element_type}"
                 )
 
-            # Convert to numpy array to handle multi-dimensional arrays
-            arr = np.asarray(value)
-
-            # Infer shape from the array
-            shape = arr.shape
             shape_values = tuple(
                 Value(type=UIntType(), name=f"dim_{i}").with_const(dim)
                 for i, dim in enumerate(shape)
@@ -510,7 +546,7 @@ class QKernel(Generic[P, R]):
                 type=ir_element_type,
                 name=name,
                 shape=shape_values,
-            ).with_array_runtime_metadata(const_array=arr.tolist())
+            ).with_array_runtime_metadata(const_array=const_data)
 
             # Create instance without calling __init__
             # For generic aliases, use __origin__ to get the actual class
@@ -614,8 +650,17 @@ class QKernel(Generic[P, R]):
             for name, param in self.signature.parameters.items():
                 param_type = param.annotation
 
-                # Observable types are always treated as parameters (resolved during emit)
-                if param_type is Observable:
+                # Scalar Observable is always a parameter; unbound
+                # Vector[Observable] is too so its shape stays symbolic
+                # (bound Vector[Observable] falls through to the kwargs
+                # branch below, which resolves the shape from the value).
+                is_scalar_observable = param_type is Observable
+                is_unbound_observable_array = (
+                    is_array_type(param_type)
+                    and _get_array_element_type(param_type) is Observable
+                    and name not in kwargs
+                )
+                if is_scalar_observable or is_unbound_observable_array:
                     handle = self._create_parameter_input(param_type, name)
                     tracked_parameters[name] = handle.value
                 elif name in parameters:
