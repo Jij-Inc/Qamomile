@@ -9,7 +9,7 @@
 #   kernelspec:
 #     display_name: qamomile
 #     language: python
-#     name: qamomile
+#     name: python3
 # ---
 
 # %% [markdown]
