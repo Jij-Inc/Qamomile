@@ -82,6 +82,17 @@ class QKernel(Generic[P, R]):
                 f"AST transformation failed for function '{func.__name__}': {e}"
             )
 
+        # transform_control_flow's exec namespace binds `func.__name__` to
+        # the raw AST-transformed DSL function.  If the user body contains
+        # a self-reference (e.g. for a recursive kernel), letting that name
+        # resolve to the DSL function bypasses __call__ entirely: argument
+        # validation, affine-type consumption, and CallBlockOperation emission
+        # are all skipped, and the call becomes a direct in-place trace that
+        # re-enters the same body forever.  Rebinding to the QKernel so that
+        # self-calls always go through __call__ — where __call__ accesses
+        # self.block, which then detects in-flight construction — fixes this.
+        self.func.__globals__[func.__name__] = self
+
         self.name = func.__name__
         self.signature = inspect.signature(func)
 
@@ -124,6 +135,7 @@ class QKernel(Generic[P, R]):
 
         # Lazy initialization for hierarchical Block
         self._block: Block | None = None
+        self._block_building: bool = False
 
         # AST-level quantum rebind analysis (deferred raise until build/block)
         quantum_params = _get_quantum_param_names(input_types)
@@ -166,9 +178,37 @@ class QKernel(Generic[P, R]):
         """Compile the function to a hierarchical Block if not already compiled."""
         self._check_rebind_violations()
         if self._block is None:
-            # Use self.func (AST-transformed) so that qm.range() is properly
-            # converted to for_loop() context manager
-            self._block = func_to_block(self.func)
+            if self._block_building:
+                # The frontend traces both branches of an ``if`` on a
+                # UInt before the UInt is bound to a value, so a self
+                # call in one branch keeps rebuilding the same kernel
+                # forever.  Surface this as an actionable error instead
+                # of a RecursionError from the Python stack.
+                from qamomile.circuit.transpiler.errors import (
+                    FrontendTransformError,
+                )
+
+                raise FrontendTransformError(
+                    f"Self-recursive @qkernel '{self.name}' is not "
+                    f"supported: the frontend traces both branches of an "
+                    f"`if` over a UInt parameter at build time, so a "
+                    f"self-call in one branch recurses without a "
+                    f"terminating base case.\n\n"
+                    f"To express arbitrary-depth recursion (e.g. the "
+                    f"Suzuki–Trotter fractal), build the kernel at Python "
+                    f"level using ordinary recursion on a Python int and "
+                    f"decorate the finished composition with @qkernel; "
+                    f"each @qkernel call is inlined by the transpiler, so "
+                    f"the emitted circuit is flat regardless of how many "
+                    f"Python-level levels were involved."
+                )
+            self._block_building = True
+            try:
+                # Use self.func (AST-transformed) so that qm.range() is
+                # properly converted to for_loop() context manager
+                self._block = func_to_block(self.func)
+            finally:
+                self._block_building = False
         return self._block
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> R:
