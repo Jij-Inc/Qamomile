@@ -107,3 +107,13 @@ executable = transpiler.transpile(my_circuit, bindings={"theta": 0.5})
 ## Test
 
 `tests/` contains unit tests, and docs tests under `tests/docs` must also be run for documentation-impacting changes.
+
+## Documentation Translation
+
+To translate English docs (`docs/en/`) into Japanese (`docs/ja/`), use the `/translate` skill:
+
+```bash
+/translate docs/en/tutorial/01_your_first_quantum_kernel.py
+```
+
+Translation rules (tone, spacing, terminology, soft line breaks, etc.) are defined in `.claude/skills/translate/SKILL.md`. Always use this skill when translating documentation.

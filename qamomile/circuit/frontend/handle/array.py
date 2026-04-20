@@ -102,6 +102,12 @@ class ArrayBase(Handle, Generic[T]):
         Returns:
             A new ArrayBase instance of the appropriate type.
         """
+        # ObservableType is a ``@dataclass``; its auto-generated
+        # ``__hash__`` is ``None``, so it cannot be a dict key.  Handle
+        # it via isinstance before the dict lookup.
+        from qamomile.circuit.frontend.handle.hamiltonian import Observable
+        from qamomile.circuit.ir.types.hamiltonian import ObservableType
+
         type_map: dict[ValueType, typing.Type[Handle]] = {
             QubitType(): Qubit,
             UIntType(): UInt,
@@ -117,7 +123,10 @@ class ArrayBase(Handle, Generic[T]):
         instance.name = name
         instance.id = str(uuid.uuid4())
         instance._consumed = False
-        instance.element_type = type_map[value.type]  # type: ignore[assignment]
+        if isinstance(value.type, ObservableType):
+            instance.element_type = Observable  # type: ignore[assignment]
+        else:
+            instance.element_type = type_map[value.type]  # type: ignore[assignment]
         return instance
 
     def consume(self, operation_name: str = "unknown") -> typing.Self:

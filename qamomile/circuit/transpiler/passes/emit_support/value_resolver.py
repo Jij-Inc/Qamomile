@@ -95,7 +95,7 @@ class ValueResolver:
                         ),
                     )
             elif idx_value.parent_array is not None:
-                nested_result = self._resolve_array_element_value(idx_value, bindings)
+                nested_result = self.resolve_classical_value(idx_value, bindings)
                 if nested_result is None:
                     array_name = idx_value.parent_array.name
                     return QubitResolutionResult(
@@ -190,12 +190,21 @@ class ValueResolver:
                 local_bindings[param_inputs[i].name] = resolved
         return local_bindings
 
-    def resolve_classical_value(
+    def resolve_bound_value(
         self,
         value: "Value",
         bindings: dict[str, Any],
     ) -> Any:
-        """Resolve a classical Value to a concrete Python value."""
+        """Resolve a Value to its raw bound Python object.
+
+        Looks up in order: scalar constant, ``bindings[uuid]``
+        (emit-time intermediates such as BinOp results and in-kernel
+        Observables), ``bindings[name]`` (kernel parameters), then
+        parent-array element access when ``value`` is ``arr[i]``.
+        Returns ``None`` when no binding matches. Does **not** coerce
+        the result — callers that need a numeric scalar should go
+        through :meth:`resolve_classical_value`.
+        """
         if value.is_constant():
             return value.get_const()
         if value.uuid in bindings:
@@ -203,36 +212,53 @@ class ValueResolver:
         if value.name in bindings:
             return bindings[value.name]
         if value.parent_array is not None and value.element_indices:
-            return self._resolve_array_element_value(value, bindings)
+            return self._index_into_array(value, bindings)
         return None
 
-    def _resolve_array_element_value(
+    def resolve_classical_value(
+        self,
+        value: "Value",
+        bindings: dict[str, Any],
+    ) -> Any:
+        """Resolve a classical Value to a concrete Python value.
+
+        Numeric bindings are normalized to native Python scalars
+        regardless of whether they come from a direct binding or from
+        array-element indexing, so downstream ``isinstance(x, (int,
+        float))`` checks are stable when callers bind ``np.pi/4`` or
+        the like. ``bool`` is preserved (not coerced to ``int``).
+        Non-numeric values (Hamiltonians, strings, dict values, …)
+        pass through unchanged.
+        """
+        raw = self.resolve_bound_value(value, bindings)
+        if raw is None or isinstance(raw, bool):
+            return raw
+        coerced = self._resolve_numeric_value(raw)
+        return coerced if coerced is not None else raw
+
+    def _index_into_array(
         self,
         v: "Value",
         bindings: dict[str, Any],
-    ) -> int | float | None:
-        if v.parent_array is None or not v.element_indices:
+    ) -> Any:
+        parent = v.parent_array
+        if parent is None:
+            return None
+        container = bindings.get(parent.name)
+        if container is None:
+            container = bindings.get(parent.uuid)
+        if container is None:
             return None
 
-        array_name = v.parent_array.name
-        if array_name not in bindings:
-            return None
-
-        array_data = bindings[array_name]
-        indices = []
         for idx in v.element_indices:
-            idx_val = self.resolve_int_value(idx, bindings)
-            if idx_val is None:
+            i = self.resolve_int_value(idx, bindings)
+            if i is None:
                 return None
-            indices.append(idx_val)
-
-        try:
-            result = array_data
-            for idx in indices:
-                result = result[idx]
-            return self._resolve_numeric_value(result)
-        except (IndexError, TypeError, KeyError):
-            return None
+            try:
+                container = container[i]
+            except (IndexError, KeyError, TypeError):
+                return None
+        return container
 
     def resolve_int_value(
         self,

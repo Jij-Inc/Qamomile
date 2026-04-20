@@ -112,11 +112,14 @@ build_lang() {
     local lang="$1"
     echo "Building ${lang} documentation..."
     cd "$lang"
-    if is_rtd; then
-        local base_url="${READTHEDOCS_CANONICAL_URL%/}/${lang}"
+    if is_rtd && [[ -n "${READTHEDOCS_VERSION:-}" ]]; then
+        local base_url="/${READTHEDOCS_VERSION}/${lang}"
         info "Read the Docs detected. Using BASE_URL=${base_url}"
         BASE_URL="$base_url" uv run jupyter-book build --html
     else
+        if is_rtd; then
+            warn "Read the Docs detected but READTHEDOCS_VERSION is unset or empty; building without BASE_URL"
+        fi
         uv run jupyter-book build --html
     fi
     cd ..
