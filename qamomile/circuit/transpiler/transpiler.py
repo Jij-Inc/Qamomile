@@ -10,6 +10,7 @@ from qamomile.circuit.frontend.decomposition import DecompositionConfig
 from qamomile.circuit.frontend.qkernel import QKernel
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.transpiler.errors import (
+    FrontendTransformError,
     QamomileCompileError,
 )
 from qamomile.circuit.transpiler.executable import ExecutableProgram, QuantumExecutor
@@ -23,7 +24,10 @@ from qamomile.circuit.transpiler.passes.emit import EmitPass
 from qamomile.circuit.transpiler.passes.entrypoint_validation import (
     EntrypointValidationPass,
 )
-from qamomile.circuit.transpiler.passes.inline import InlinePass
+from qamomile.circuit.transpiler.passes.inline import (
+    InlinePass,
+    count_call_blocks,
+)
 from qamomile.circuit.transpiler.passes.parameter_shape_resolution import (
     ParameterShapeResolutionPass,
 )
@@ -267,9 +271,51 @@ class Transpiler(ABC, Generic[T]):
         """
         return ParameterShapeResolutionPass(bindings).run(block)
 
+    # Upper bound on unroll iterations for self-recursive @qkernels.
+    # 64 covers Suzuki–Trotter up to order 130 (64 levels at 2-per-level).
+    MAX_UNROLL_DEPTH: int = 64
+
     def inline(self, block: Block) -> Block:
         """Pass 1: Inline all CallBlockOperations."""
         return self._inline_pass.run(block)
+
+    def unroll_recursion(
+        self,
+        block: Block,
+        bindings: dict[str, Any] | None = None,
+    ) -> Block:
+        """Fixed-point loop of inline ↔ partial_eval for self-recursive kernels.
+
+        Each iteration unrolls one layer of self-referential
+        ``CallBlockOperation`` and then folds the base-case
+        ``IfOperation`` via ``partial_eval``.  Terminates when no
+        ``CallBlockOperation`` remains (success), when the call count
+        stops decreasing (symbolic driver — self-calls are left in the
+        IR and handled by downstream passes), or when ``MAX_UNROLL_DEPTH``
+        is reached (non-terminating recursion — raises).
+        """
+        if count_call_blocks(block.operations) == 0:
+            return block
+
+        for _ in range(self.MAX_UNROLL_DEPTH):
+            block = self.inline(block)
+            block = self.partial_eval(block, bindings)
+            if count_call_blocks(block.operations) == 0:
+                # ``partial_eval`` keeps ``block.kind`` from the input,
+                # which stays HIERARCHICAL even after the last
+                # CallBlockOperation was folded away.  Re-run ``inline``
+                # to refresh the kind to AFFINE so downstream
+                # ``affine_validate`` is happy.
+                return self.inline(block)
+
+        raise FrontendTransformError(
+            f"Recursive @qkernel did not terminate after "
+            f"{self.MAX_UNROLL_DEPTH} unroll iterations.  Either the "
+            f"recursion does not terminate under the provided bindings, "
+            f"or the parameter driving the base-case condition was not "
+            f"bound to a compile-time constant so partial_eval could "
+            f"not fold the base case."
+        )
 
     def affine_validate(self, block: Block) -> Block:
         """Pass 1.5: Validate affine type semantics.
@@ -404,6 +450,10 @@ class Transpiler(ABC, Generic[T]):
         substituted = self.substitute(block)
         shape_resolved = self.resolve_parameter_shapes(substituted, bindings)
         affine = self.inline(shape_resolved)
+        # Self-recursive @qkernels need iterated inline ↔ partial_eval so
+        # each unroll step can have its base-case `if` folded before the
+        # next unroll.  No-op when the block is already affine.
+        affine = self.unroll_recursion(affine, bindings)
         validated = self.affine_validate(affine)
         partially_evaluated = self.partial_eval(validated, bindings)
         analyzed = self.analyze(partially_evaluated)
