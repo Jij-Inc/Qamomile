@@ -26,7 +26,8 @@ project:
         - file: tutorial/04_execution_models.ipynb
         - file: tutorial/05_classical_flow_patterns.ipynb
         - file: tutorial/06_reuse_patterns.ipynb
-        - file: tutorial/07_hermitian_decomposition.ipynb
+        - file: tutorial/07_hamiltonian_simulation.ipynb
+        - file: tutorial/08_hermitian_decomposition.ipynb
     - title: VQA
       file: vqa/index.md
       children:
