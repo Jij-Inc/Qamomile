@@ -24,6 +24,7 @@ from qamomile.circuit.frontend.constructors import qubit_array
 from qamomile.circuit.frontend.func_to_block import (
     create_dummy_input,
     func_to_block,
+    handle_type_map,
     is_array_type,
     is_dict_type,
     is_tuple_type,
@@ -34,6 +35,7 @@ from qamomile.circuit.frontend.handle.containers import Dict
 from qamomile.circuit.frontend.handle.primitives import Float, Handle, UInt
 from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
 from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.types import FloatType, ObservableType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
 from qamomile.circuit.transpiler.errors import FrontendTransformError
@@ -50,6 +52,31 @@ def _get_array_element_type(pt: Any) -> type | None:
     if hasattr(pt, "__args__") and pt.__args__:
         return pt.__args__[0]
     return getattr(pt, "element_type", None)
+
+
+def _handle_types_equal(a: Any, b: Any) -> bool:
+    """Compare two Handle type annotations, including generic aliases."""
+    a_cls = getattr(a, "__origin__", a)
+    b_cls = getattr(b, "__origin__", b)
+    if a_cls is not b_cls:
+        return False
+    return getattr(a, "__args__", ()) == getattr(b, "__args__", ())
+
+
+def _match_output_to_input(
+    out_type: Any,
+    input_types_list: list[Any],
+    claimed: list[bool],
+) -> int | None:
+    """Return the position of the first unclaimed input whose Handle type
+    matches ``out_type``; mutates the caller's ``claimed`` list is the
+    caller's responsibility."""
+    for idx, in_type in enumerate(input_types_list):
+        if claimed[idx]:
+            continue
+        if _handle_types_equal(in_type, out_type):
+            return idx
+    return None
 
 
 def _get_quantum_param_names(input_types: dict[str, type]) -> set[str]:
@@ -136,6 +163,10 @@ class QKernel(Generic[P, R]):
         # Lazy initialization for hierarchical Block
         self._block: Block | None = None
         self._block_building: bool = False
+        # CallBlockOperations emitted by self-recursive calls during the
+        # build get their ``block`` reference back-patched to ``self._block``
+        # once ``func_to_block`` returns.  See _finalize_pending_self_calls.
+        self._pending_self_calls: list[CallBlockOperation] = []
 
         # AST-level quantum rebind analysis (deferred raise until build/block)
         quantum_params = _get_quantum_param_names(input_types)
@@ -179,37 +210,98 @@ class QKernel(Generic[P, R]):
         self._check_rebind_violations()
         if self._block is None:
             if self._block_building:
-                # The frontend traces both branches of an ``if`` on a
-                # UInt before the UInt is bound to a value, so a self
-                # call in one branch keeps rebuilding the same kernel
-                # forever.  Surface this as an actionable error instead
-                # of a RecursionError from the Python stack.
-                from qamomile.circuit.transpiler.errors import (
-                    FrontendTransformError,
-                )
-
+                # Re-entry from outside ``__call__``'s forward-ref branch.
+                # The self-recursive path in ``__call__`` avoids touching
+                # ``.block`` during its own build; hitting this branch
+                # means someone bypassed that routing (e.g. direct
+                # ``self._block.call`` from the body), which would cause
+                # unbounded re-tracing.
                 raise FrontendTransformError(
-                    f"Self-recursive @qkernel '{self.name}' is not "
-                    f"supported: the frontend traces both branches of an "
-                    f"`if` over a UInt parameter at build time, so a "
-                    f"self-call in one branch recurses without a "
-                    f"terminating base case.\n\n"
-                    f"To express arbitrary-depth recursion (e.g. the "
-                    f"Suzuki–Trotter fractal), build the kernel at Python "
-                    f"level using ordinary recursion on a Python int and "
-                    f"decorate the finished composition with @qkernel; "
-                    f"each @qkernel call is inlined by the transpiler, so "
-                    f"the emitted circuit is flat regardless of how many "
-                    f"Python-level levels were involved."
+                    f"Self-recursive @qkernel '{self.name}' accessed "
+                    f".block during its own build.  Self-calls in a "
+                    f"@qkernel body must use the plain call syntax "
+                    f"(`{self.name}(args)`); direct `.block` access "
+                    f"from inside the body is not supported."
                 )
             self._block_building = True
             try:
                 # Use self.func (AST-transformed) so that qm.range() is
                 # properly converted to for_loop() context manager
                 self._block = func_to_block(self.func)
+                self._finalize_pending_self_calls()
             finally:
                 self._block_building = False
         return self._block
+
+    def _emit_self_call_forward_ref(
+        self,
+        inputs_map: dict[str, Value],
+    ) -> CallBlockOperation:
+        """Emit a CallBlockOperation for a self-call during build.
+
+        The enclosing ``Block`` does not yet exist, so ``op.block`` stays
+        ``None`` until ``_finalize_pending_self_calls`` back-patches it
+        after ``func_to_block`` returns.  Result Values are position-matched
+        to input Values by Handle type so quantum ``logical_id`` continuity
+        (affine typing) is preserved across the call.
+        """
+        label_args = list(self.signature.parameters)
+        operands = [inputs_map[label] for label in label_args]
+        input_types_list = [self.input_types[label] for label in label_args]
+
+        claimed = [False] * len(operands)
+        results: list[Value] = []
+        for i, out_type in enumerate(self.output_types):
+            matched_idx = _match_output_to_input(
+                out_type, input_types_list, claimed
+            )
+            if matched_idx is not None:
+                claimed[matched_idx] = True
+                results.append(operands[matched_idx].next_version())
+            else:
+                ir_type = handle_type_map(out_type)
+                if is_array_type(out_type):
+                    raise FrontendTransformError(
+                        f"Self-recursive @qkernel '{self.name}' has an "
+                        f"array output at position {i} with no matching "
+                        f"array input of the same type.  Forward-ref "
+                        f"emission cannot synthesize a symbolic shape "
+                        f"without a matching input; restructure the "
+                        f"signature so the quantum register is both "
+                        f"input and output, or remove the self-recursion."
+                    )
+                results.append(
+                    Value(type=ir_type, name=f"{self.name}_result_{i}")
+                )
+
+        op = CallBlockOperation(
+            block=None,  # type: ignore[arg-type]
+            operands=operands,
+            results=results,
+        )
+        self._pending_self_calls.append(op)
+        return op
+
+    def _finalize_pending_self_calls(self) -> None:
+        """Back-patch each forward-ref self-call's ``block`` reference.
+
+        Operands and results stay as produced by
+        ``_emit_self_call_forward_ref`` — the result Values there already
+        use ``input.next_version()`` for position-matched quantum outputs,
+        which preserves ``logical_id`` continuity through the chain of
+        sequential self-calls.  Replacing them with values from
+        ``self._block.call`` would collapse both calls' results onto the
+        block's ``phi_output`` (which has a fresh ``logical_id``), breaking
+        the qubit-map lookup during backend emit.
+        """
+        if not self._pending_self_calls:
+            return
+        assert self._block is not None
+
+        for op in self._pending_self_calls:
+            op.block = self._block
+
+        self._pending_self_calls = []
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> R:
         """
@@ -269,11 +361,18 @@ class QKernel(Generic[P, R]):
                 handle = handle.consume(operation_name=f"QKernel[{self.name}]")
             inputs_map[name] = handle.value
 
-        # Ensure the block IR is compiled
-        block_ir = self.block
+        # Self-recursive call: the enclosing Block is under construction,
+        # so emit a forward-ref CallBlockOperation that gets back-patched
+        # once the build completes.  Skipping ``self.block`` here is what
+        # breaks the otherwise-infinite re-trace loop.
+        if self._block_building:
+            call_op = self._emit_self_call_forward_ref(inputs_map)
+        else:
+            # Ensure the block IR is compiled
+            block_ir = self.block
 
-        # Create the Call operation
-        call_op = block_ir.call(**inputs_map)
+            # Create the Call operation
+            call_op = block_ir.call(**inputs_map)
 
         # Add the operation to the current tracer
         tracer.add_operation(call_op)

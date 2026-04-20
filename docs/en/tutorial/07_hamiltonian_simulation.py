@@ -27,15 +27,10 @@
 # This tutorial is deliberately written *from scratch*: we build $S_1$, $S_2$,
 # and the higher-order Suzuki formulas as ordinary `@qkernel`s, derive the
 # coefficients we need, and verify the convergence orders empirically against
-# the exact propagator.  Two ways of expressing the recursion are compared:
-#
-# - **Self-recursive `@qkernel`** — the natural mathematical translation, but
-#   the current Qamomile frontend rejects it with a clear error and tells you
-#   why.  We trigger the error on purpose to look at the message.
-# - **Python-level recursion** — define a Python function that returns a
-#   freshly built `@qkernel`, and let Python's normal recursion bottom out at
-#   `S_2`.  This is the supported pattern and the one to reach for whenever a
-#   formula is "recursive in some integer order".
+# the exact propagator.  The Suzuki fractal recursion is written directly as a
+# **self-recursive `@qkernel`** that takes the order as a ``UInt`` parameter —
+# the transpiler resolves the recursion by iterating inline ↔ partial-eval
+# under the concrete ``order`` binding, so the emitted circuit is flat.
 
 # %%
 # Install the latest Qamomile through pip!
@@ -192,218 +187,111 @@ def rabi_s2(
 # Masuo Suzuki showed that an arbitrary even-order approximation can be built
 # **recursively** from $S_2$ by nesting five rescaled copies at each level:
 #
-# $$ S_{2k}(x) = S_{2k-2}(p_k x)^2 \,
-#                S_{2k-2}\bigl((1 - 4 p_k) x\bigr) \,
-#                S_{2k-2}(p_k x)^2, $$
+# $$ S_{2k}(\Delta t) = S_{2k-2}(p_k \Delta t)^2 \,
+#                S_{2k-2}\bigl((1 - 4 p_k)\Delta t\bigr) \,
+#                S_{2k-2}(p_k \Delta t)^2, $$
 #
 # with the level-specific coefficient
 #
 # $$ p_k = \frac{1}{4 - 4^{1/(2k-1)}}. $$
 #
 # $p_k$ is chosen so that the $(2k-1)$-th-order error of the lower formula
-# cancels, leaving a local error of $O(x^{2k+1})$ per step.  **The
+# cancels, leaving a local error of $O(\Delta t^{2k+1})$ per step.  **The
 # coefficient depends on $k$** — a single constant reused at every level
 # does *not* give the Suzuki fractal.  Concretely,
 #
 # - $k=2$ (4th order): $p_2 = 1/(4 - 4^{1/3}) \approx 0.4145$,
 # - $k=3$ (6th order): $p_3 = 1/(4 - 4^{1/5}) \approx 0.3731$,
 # - $k=4$ (8th order): $p_4 = 1/(4 - 4^{1/7}) \approx 0.3596$.
-#
-# We will build $S_4$ explicitly first, then write a Python function that
-# applies the recursion for any even order.
 
 # %% [markdown]
-# ### $S_4$ written out
+# ### Self-recursive `@qkernel`
 #
-# Setting $k = 2$ in the recursion gives the standard 4th-order formula:
+# The mathematical recursion translates directly into a `@qkernel` that
+# takes the target order as a ``UInt`` parameter and calls itself with
+# ``order - 2`` in the recursive branch.  The base case at ``order == 2``
+# hands off to ``s2_step``; everything else produces five nested calls
+# with the step-size factors from Suzuki's formula.
 #
-# $$ S_4(\Delta t) = S_2(p_2 \Delta t)^2 \, S_2((1 - 4 p_2)\Delta t) \,
-#    S_2(p_2 \Delta t)^2. $$
-#
-# In Qamomile, "squared" just means two back-to-back calls: the formula
-# becomes five `s2_step` calls with carefully chosen step sizes.  The
-# coefficients are plain Python floats, so we evaluate them once and let
-# them flow into the kernel as constants.
-
-# %%
-P2 = 1.0 / (4.0 - 4.0 ** (1.0 / 3.0))
-W2 = 1.0 - 4.0 * P2
-
-
-@qmc.qkernel
-def s4_step(
-    q: qmc.Vector[qmc.Qubit], Hs: qmc.Vector[qmc.Observable], dt: qmc.Float
-) -> qmc.Vector[qmc.Qubit]:
-    q = s2_step(q, Hs, P2 * dt)
-    q = s2_step(q, Hs, P2 * dt)
-    q = s2_step(q, Hs, W2 * dt)
-    q = s2_step(q, Hs, P2 * dt)
-    q = s2_step(q, Hs, P2 * dt)
-    return q
-
-
-@qmc.qkernel
-def rabi_s4(
-    Hs: qmc.Vector[qmc.Observable], dt: qmc.Float, n_steps: qmc.UInt
-) -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(1, "q")
-    for _ in qmc.range(n_steps):
-        q = s4_step(q, Hs, dt)
-    return qmc.measure(q)
-
-
-# %% [markdown]
-# ## Two ways to write the recursion
-#
-# Writing $S_6$, $S_8$, … by hand is tedious and easy to get wrong (the most
-# common slip is reusing $p_2$ at every level).  A natural impulse is to
-# express the recursion *inside* a `@qkernel`:
-#
-# ```python
-# @qmc.qkernel
-# def suzuki(
-#     k: qmc.UInt, q: qmc.Vector[qmc.Qubit],
-#     Hs: qmc.Vector[qmc.Observable], dt: qmc.Float,
-# ) -> qmc.Vector[qmc.Qubit]:
-#     if k == 0:
-#         q = s2_step(q, Hs, dt)
-#     else:
-#         q = suzuki(k - 1, q, Hs, p_k * dt)
-#         ...
-#     return q
-# ```
-#
-# This pattern is rejected by the current frontend.  The reason is mechanical:
-# `if` over a `UInt` is lowered as an `IfOperation` with both branches traced
-# at build time (so that constant folding in a later pass can pick the right
-# one).  The `else` branch contains a self-call, which would re-enter the same
-# kernel's tracer without ever bottoming out.  We can confirm this by
-# attempting the construction inside a `try/except`:
+# When this kernel is transpiled, each call to ``transpile`` binds a
+# concrete ``order``; the transpiler then runs a fixed-point loop of
+# inline + partial-evaluation that unrolls one layer of ``CallBlockOp``
+# per iteration and folds the base-case ``if`` under the current
+# binding.  The emitted circuit is fully flat regardless of how many
+# recursive levels were involved.
 
 # %%
 
 
 @qmc.qkernel
-def _suzuki_self_recursive(
-    k: qmc.UInt,
+def suzuki(
+    order: qmc.UInt,
     q: qmc.Vector[qmc.Qubit],
     Hs: qmc.Vector[qmc.Observable],
     dt: qmc.Float,
 ) -> qmc.Vector[qmc.Qubit]:
-    if k == 0:
+    if order == 2:
         q = s2_step(q, Hs, dt)
     else:
-        q = _suzuki_self_recursive(k - 1, q, Hs, P2 * dt)
-        q = _suzuki_self_recursive(k - 1, q, Hs, P2 * dt)
-        q = _suzuki_self_recursive(k - 1, q, Hs, W2 * dt)
-        q = _suzuki_self_recursive(k - 1, q, Hs, P2 * dt)
-        q = _suzuki_self_recursive(k - 1, q, Hs, P2 * dt)
+        p = 1.0 / (4.0 - 4.0 ** (1.0 / (order - 1)))
+        w = 1.0 - 4.0 * p
+        q = suzuki(order - 2, q, Hs, p * dt)
+        q = suzuki(order - 2, q, Hs, p * dt)
+        q = suzuki(order - 2, q, Hs, w * dt)
+        q = suzuki(order - 2, q, Hs, p * dt)
+        q = suzuki(order - 2, q, Hs, p * dt)
     return q
 
 
 @qmc.qkernel
-def _outer_suzuki(
-    k: qmc.UInt, Hs: qmc.Vector[qmc.Observable], dt: qmc.Float
-) -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(1, "q")
-    q = _suzuki_self_recursive(k, q, Hs, dt)
-    return qmc.measure(q)
-
-
-try:
-    _outer_suzuki.build(k=1, Hs=Hs, dt=T / 4)
-except Exception as e:  # FrontendTransformError
-    print(f"{type(e).__name__}:")
-    print(str(e))
-
-
-# %% [markdown]
-# The frontend bails out with an actionable
-# `FrontendTransformError("Self-recursive @qkernel ... is not supported …")`
-# rather than a Python `RecursionError`, and the message points at the
-# supported alternative: **build the recursion at Python level**.  Each
-# call to a `@qkernel` from inside another is inlined by the transpiler, so
-# Python-level composition produces a flat circuit at the end.
-
-# %% [markdown]
-# ### Python-level recursive builder
-#
-# A short Python function that returns a `@qkernel` does the job.  At each
-# call it computes the level-specific $p_k$, fetches the lower-order kernel
-# by recursing on a Python `int`, and decorates a closure that calls the
-# lower kernel five times with the rescaled step.  When the recursion bottoms
-# out at order 2 we just return `s2_step`.
-
-# %%
-
-
-def make_suzuki_step(order: int) -> qmc.QKernel:
-    """Return a ``@qkernel`` implementing :math:`S_{\\text{order}}`.
-
-    ``order`` must be an even integer >= 2.  The construction recurses on
-    a Python ``int``, so the base case is reached at Python time and the
-    decorator is applied to a fully expanded closure.
-    """
-    if order == 2:
-        return s2_step
-
-    lower = make_suzuki_step(order - 2)
-    p = 1.0 / (4.0 - 4.0 ** (1.0 / (order - 1)))
-    w = 1.0 - 4.0 * p
-
-    @qmc.qkernel
-    def step(
-        q: qmc.Vector[qmc.Qubit],
-        Hs: qmc.Vector[qmc.Observable],
-        dt: qmc.Float,
-    ) -> qmc.Vector[qmc.Qubit]:
-        q = lower(q, Hs, p * dt)
-        q = lower(q, Hs, p * dt)
-        q = lower(q, Hs, w * dt)
-        q = lower(q, Hs, p * dt)
-        q = lower(q, Hs, p * dt)
-        return q
-
-    return step
-
-
-# %% [markdown]
-# `make_suzuki_step(4)` should agree with the hand-written `s4_step`, and
-# `make_suzuki_step(6)` gives us $S_6$ for free with the correct $p_3$.
-
-# %%
-s4_from_helper = make_suzuki_step(4)
-s6_from_helper = make_suzuki_step(6)
-
-
-@qmc.qkernel
-def rabi_s6(
-    Hs: qmc.Vector[qmc.Observable], dt: qmc.Float, n_steps: qmc.UInt
+def rabi_suzuki(
+    order: qmc.UInt,
+    Hs: qmc.Vector[qmc.Observable],
+    dt: qmc.Float,
+    n_steps: qmc.UInt,
 ) -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(1, "q")
     for _ in qmc.range(n_steps):
-        q = s6_from_helper(q, Hs, dt)
+        q = suzuki(order, q, Hs, dt)
     return qmc.measure(q)
+
+
+# %% [markdown]
+# ``rabi_suzuki`` is a single kernel that generates $S_2$, $S_4$, $S_6$,
+# etc. depending only on how the ``order`` binding is set at transpile
+# time.  Without a binding the recursion driver stays symbolic and the
+# transpile call errors — the ``order`` must be concrete for the unroll
+# loop to fold the base-case ``if``.  Recursion that never terminates
+# (e.g. a user-written kernel that passes ``order + 2`` instead of
+# ``order - 2``) raises ``FrontendTransformError`` after the unroll loop
+# exhausts its depth budget.
 
 
 # %% [markdown]
 # ## Quick sanity check at $N = 8$
 #
 # Before the convergence sweep, transpile each kernel once and confirm the
-# statevectors land in the right ball park.
+# statevectors land in the right ball park.  $S_1$ and $S_2$ have their own
+# one-shot kernels; $S_4$ and $S_6$ come from ``rabi_suzuki`` with
+# different ``order`` bindings.
 
 # %%
 tr = QiskitTranspiler()
 N_demo = 8
-kernels = {
-    "S1": rabi_s1,
-    "S2": rabi_s2,
-    "S4": rabi_s4,
-    "S6": rabi_s6,
-}
+s1_s2_kernels = {"S1": rabi_s1, "S2": rabi_s2}
+suzuki_orders = {"S4": 4, "S6": 6}
 
-for name, ker in kernels.items():
+for name, ker in s1_s2_kernels.items():
     exe = tr.transpile(ker, bindings={"Hs": Hs, "dt": T / N_demo, "n_steps": N_demo})
+    sv = statevector(exe.compiled_quantum[0].circuit)
+    err = 1.0 - abs(np.vdot(sv_exact, sv))
+    print(f"{name} at N={N_demo}: fidelity error = {err:.3e}")
+
+for name, order in suzuki_orders.items():
+    exe = tr.transpile(
+        rabi_suzuki,
+        bindings={"order": order, "Hs": Hs, "dt": T / N_demo, "n_steps": N_demo},
+    )
     sv = statevector(exe.compiled_quantum[0].circuit)
     err = 1.0 - abs(np.vdot(sv_exact, sv))
     print(f"{name} at N={N_demo}: fidelity error = {err:.3e}")
@@ -429,12 +317,25 @@ for name, ker in kernels.items():
 
 # %%
 Ns = np.array([2, 4, 8, 16, 32, 64])
+all_names = ["S1", "S2", "S4", "S6"]
+errors = {name: [] for name in all_names}
 
-errors = {name: [] for name in kernels}
-for name, ker in kernels.items():
-    for N in Ns:
+for N in Ns:
+    for name, ker in s1_s2_kernels.items():
         exe = tr.transpile(
             ker, bindings={"Hs": Hs, "dt": T / int(N), "n_steps": int(N)}
+        )
+        sv = statevector(exe.compiled_quantum[0].circuit)
+        errors[name].append(1.0 - abs(np.vdot(sv_exact, sv)))
+    for name, order in suzuki_orders.items():
+        exe = tr.transpile(
+            rabi_suzuki,
+            bindings={
+                "order": order,
+                "Hs": Hs,
+                "dt": T / int(N),
+                "n_steps": int(N),
+            },
         )
         sv = statevector(exe.compiled_quantum[0].circuit)
         errors[name].append(1.0 - abs(np.vdot(sv_exact, sv)))
@@ -465,7 +366,7 @@ assert abs(errors["S6"][0]) < 1e-10, errors["S6"][0]
 # %%
 fig, ax = plt.subplots(figsize=(6, 4))
 markers = {"S1": "o", "S2": "s", "S4": "^", "S6": "D"}
-for name in ("S1", "S2", "S4", "S6"):
+for name in all_names:
     ax.loglog(dts, errors[name], marker=markers[name], label=name)
 ax.axhline(1e-15, color="grey", linestyle=":", linewidth=0.8, label="float64 floor")
 ax.set_xlabel(r"step size $\Delta t = T / N$")
@@ -494,8 +395,8 @@ plt.show()
 # behind Suzuki's construction picks $p_k$ specifically to kill the
 # $(2k-1)$-th-order error of $S_{2k-2}$, so reusing $p_2$ when stacking on
 # top of $S_4$ leaves a non-zero error term at order $5$, and the resulting
-# formula is no better than $S_4$.  `make_suzuki_step` recomputes $p_k$ at
-# every level via ``p = 1.0 / (4.0 - 4.0 ** (1.0 / (order - 1)))``.
+# formula is no better than $S_4$.  ``suzuki`` above recomputes $p$ at every
+# level via ``p = 1.0 / (4.0 - 4.0 ** (1.0 / (order - 1)))``.
 
 # %% [markdown]
 # ## Summary
@@ -509,10 +410,12 @@ plt.show()
 #   $S_{2k-2}$, using the level-specific coefficient
 #   $p_k = 1/(4 - 4^{1/(2k-1)})$; reusing one constant across levels is
 #   wrong.
-# - **Recursion idiom**: write the recursion at Python level (a function
-#   that returns a fresh `@qkernel` per order).  A self-recursive
-#   `@qkernel` is rejected by the frontend with a clear
-#   `FrontendTransformError` that points at this same pattern.
+# - **Recursion**: write the mathematical recursion directly as a
+#   self-recursive `@qkernel` with the order as a `UInt` parameter.  The
+#   transpiler iterates inline ↔ partial-eval under a concrete ``order``
+#   binding and emits a flat circuit.  Non-terminating recursion raises
+#   ``FrontendTransformError``; symbolic ``order`` without a binding is
+#   rejected at emit.
 # - **Convergence**: fidelity-error slopes of 2, 4, 8 on log-log match
 #   textbook Trotter orders, and the symbolic `dt` / `n_steps` parameters
 #   let you sweep step sizes without rebuilding the circuit structure.
