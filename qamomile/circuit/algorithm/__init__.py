@@ -27,10 +27,7 @@ from .qaoa import (
     qaoa_state,
     x_mixer,
 )
-from .trotterization import (
-    product_formula,
-    trotterized_time_evolution,
-)
+from .trotter import trotterized_time_evolution
 
 __all__ = [
     # QAOA
@@ -59,5 +56,4 @@ __all__ = [
     "fqaoa_state",
     # Trotterization
     "trotterized_time_evolution",
-    "product_formula",
 ]
