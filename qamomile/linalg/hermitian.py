@@ -144,6 +144,17 @@ class HermitianMatrix:
 
     __rmul__ = __mul__
 
+    def __truediv__(self, scalar: int | float | complex) -> HermitianMatrix:
+        if isinstance(scalar, bool) or not isinstance(scalar, (int, float, complex)):
+            return NotImplemented
+        if isinstance(scalar, complex) and scalar.imag != 0.0:
+            raise TypeError(
+                "HermitianMatrix only supports division by real scalars "
+                "(a nonzero imaginary scalar would break the Hermitian property)."
+            )
+        real_scalar = float(scalar.real if isinstance(scalar, complex) else scalar)
+        return HermitianMatrix(self._matrix / real_scalar, validate=False)
+
     def __neg__(self) -> HermitianMatrix:
         return HermitianMatrix(-self._matrix, validate=False)
 

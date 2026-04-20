@@ -15,13 +15,10 @@
 # %% [markdown]
 # # From a Hermitian Matrix to a Quantum Circuit
 #
-# In many quantum algorithms you start from a **Hermitian matrix** — a Hamiltonian
-# given as a dense $2^n \times 2^n$ numpy array — and you want to simulate its
-# time evolution $e^{-iHt}$ on a quantum computer. The standard path is:
+# In many quantum algorithms you start from a **Hermitian matrix** — a Hamiltonian given as a dense $2^n \times 2^n$ numpy array — and you want to simulate its time evolution $e^{-iHt}$ on a quantum computer. The standard path is:
 #
 # 1. Decompose $H$ into a weighted sum of Pauli strings.
-# 2. Feed that sum into `pauli_evolve`, which emits the corresponding quantum
-#    circuit.
+# 2. Feed that sum into `pauli_evolve`, which emits the corresponding quantum circuit.
 #
 # Qamomile exposes this as a tiny, type-safe pipeline:
 #
@@ -36,8 +33,7 @@
 # - Use the resulting `Hamiltonian` inside a `@qkernel` with `pauli_evolve`,
 # - Verify the final statevector against an exact matrix exponential.
 #
-# The decomposition uses the **Fast Walsh-Hadamard Transform** internally and
-# runs in $O(n \cdot 4^n)$ time with only NumPy — no Qiskit dependency.
+# The decomposition uses the **Fast Walsh-Hadamard Transform** internally and runs in $O(n \cdot 4^n)$ time with only NumPy — no Qiskit dependency.
 
 # %%
 import numpy as np
@@ -58,8 +54,7 @@ transpiler = QiskitTranspiler()
 # M \;=\; -Z_0 Z_1 \;-\; h \, (X_0 + X_1),
 # $$
 #
-# with transverse field $h = 0.7$. Nothing here is Qamomile-specific — we just
-# build an ordinary $4 \times 4$ numpy array with `np.kron`.
+# with transverse field $h = 0.7$. Nothing here is Qamomile-specific — we just build an ordinary $4 \times 4$ numpy array with `np.kron`.
 
 # %%
 X = np.array([[0, 1], [1, 0]], dtype=complex)
@@ -74,15 +69,9 @@ print("Hermitian:", np.allclose(M, M.conj().T))
 # %% [markdown]
 # ## Wrap and Decompose
 #
-# `HermitianMatrix` is a thin wrapper that validates the array on construction
-# (2D, square, power-of-two dimension, Hermitian) and exposes
-# `to_hamiltonian()`. The resulting `Hamiltonian` lives in
-# `qamomile.observable` — the same type consumed by `pauli_evolve`, `expval`,
-# and the optimization helpers.
+# `HermitianMatrix` is a thin wrapper that validates the array on construction (2D, square, power-of-two dimension, Hermitian) and exposes `to_hamiltonian()`. The resulting `Hamiltonian` lives in `qamomile.observable` — the same type consumed by `pauli_evolve`, `expval`, and the optimization helpers.
 #
-# In Qamomile's decomposition convention, **qubit 0 corresponds to the
-# least-significant bit** of the matrix's computational-basis indices, which
-# matches Qiskit's internal ordering.
+# In Qamomile's decomposition convention, **qubit 0 corresponds to the least-significant bit** of the matrix's computational-basis indices, which matches Qiskit's internal ordering.
 
 # %%
 H_mat = HermitianMatrix(M)
@@ -94,9 +83,7 @@ for ops, coeff in H_op.terms.items():
     print(f"  {ops}: {coeff:+.3f}")
 
 # %% [markdown]
-# For a two-site transverse-field Ising model we expect exactly three non-zero
-# terms: one $Z_0 Z_1$ with coefficient $-1$ and two single-qubit $X$ terms
-# with coefficient $-h$.
+# For a two-site transverse-field Ising model we expect exactly three non-zero terms: one $Z_0 Z_1$ with coefficient $-1$ and two single-qubit $X$ terms with coefficient $-h$.
 
 # %%
 expected_zz = (
@@ -115,14 +102,9 @@ assert H_op.constant == 0.0
 # %% [markdown]
 # ## Time Evolution in a `@qkernel`
 #
-# `pauli_evolve(q, H, t)` applies $e^{-iHt}$ to a qubit register. `H` is
-# declared with the `qmc.Observable` handle type and supplied via bindings at
-# transpile time; `t` can be bound or left as a sweepable parameter.
+# `pauli_evolve(q, H, t)` applies $e^{-iHt}$ to a qubit register. `H` is declared with the `qmc.Observable` handle type and supplied via bindings at transpile time; `t` can be bound or left as a sweepable parameter.
 #
-# We start from $\lvert 00\rangle$, put qubit 0 into a superposition with a
-# Hadamard, apply the time-evolution step, and measure so the top-level
-# kernel has a classical output (a requirement for entry points passed to
-# `transpile()` / `to_circuit()`).
+# We start from $\lvert 00\rangle$, put qubit 0 into a superposition with a Hadamard, apply the time-evolution step, and measure so the top-level kernel has a classical output (a requirement for entry points passed to `transpile()` / `to_circuit()`).
 
 
 # %%
@@ -139,8 +121,7 @@ def time_evolution(
 
 
 # %% [markdown]
-# Transpile with all three bindings fixed. The Qiskit circuit comes back as a
-# plain `QuantumCircuit` via `transpiler.to_circuit()`.
+# Transpile with all three bindings fixed. The Qiskit circuit comes back as a plain `QuantumCircuit` via `transpiler.to_circuit()`.
 
 # %%
 t_value = 0.8
@@ -158,10 +139,7 @@ print(qiskit_circuit)
 # %% [markdown]
 # ## Verify Against the Exact Exponential
 #
-# For small Hermitian matrices we can build $U = e^{-iMt}$ directly from an
-# eigendecomposition with numpy, apply it to the same initial state, and check
-# that the Qamomile-generated circuit produces the same final state up to a
-# global phase.
+# For small Hermitian matrices we can build $U = e^{-iMt}$ directly from an eigendecomposition with numpy, apply it to the same initial state, and check that the Qamomile-generated circuit produces the same final state up to a global phase.
 
 # %%
 from qiskit.quantum_info import Statevector
@@ -182,22 +160,12 @@ print(f"fidelity (|<exact|qamomile>|): {fidelity:.12f}")
 assert abs(fidelity - 1.0) < 1e-8
 
 # %% [markdown]
-# The fidelity is numerically indistinguishable from $1$: the circuit Qamomile
-# built from the Pauli decomposition realises the same unitary as the direct
-# matrix exponential.
+# The fidelity is numerically indistinguishable from $1$: the circuit Qamomile built from the Pauli decomposition realises the same unitary as the direct matrix exponential.
 #
 # ## Recap
 #
-# - `HermitianMatrix` validates a dense Hermitian numpy array and owns the
-#   conversion to a Pauli sum via an FWHT-based decomposition.
-# - `to_hamiltonian()` returns a `qamomile.observable.Hamiltonian`, which is
-#   the same type consumed by `pauli_evolve`, `expval`, and the rest of the
-#   quantum algorithms toolbox.
-# - Together this gives a direct `np.ndarray → Hamiltonian → circuit` path for
-#   algorithms that start from a Hermitian matrix, such as Hamiltonian
-#   simulation, VQE, and the Hermitian side of block-encoding / LCU workflows.
+# - `HermitianMatrix` validates a dense Hermitian numpy array and owns the conversion to a Pauli sum via an FWHT-based decomposition.
+# - `to_hamiltonian()` returns a `qamomile.observable.Hamiltonian`, which is the same type consumed by `pauli_evolve`, `expval`, and the rest of the quantum algorithms toolbox.
+# - Together this gives a direct `np.ndarray → Hamiltonian → circuit` path for algorithms that start from a Hermitian matrix, such as Hamiltonian simulation, VQE, and the Hermitian side of block-encoding / LCU workflows.
 #
-# **Support for non-self-adjoint operators** (e.g. advection stencils that
-# appear in numerical fluid simulations) is a natural follow-up and will be
-# revisited once the right integration point for non-Hermitian matrices has
-# been decided.
+# **Support for non-self-adjoint operators** (e.g. advection stencils that appear in numerical fluid simulations) is a natural follow-up and will be revisited once the right integration point for non-Hermitian matrices has been decided.

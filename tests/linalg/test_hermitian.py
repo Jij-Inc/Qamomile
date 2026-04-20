@@ -214,6 +214,16 @@ class TestArithmetic:
         with pytest.raises(TypeError, match="real scalars"):
             (1 + 1j) * a
 
+    def test_real_scalar_div(self):
+        a = HermitianMatrix(np.kron(X, Z))
+        b = a / 2
+        np.testing.assert_allclose(b.matrix, 0.5 * np.kron(X, Z), atol=1e-12)
+
+    def test_complex_scalar_div_rejected(self):
+        a = HermitianMatrix(X)
+        with pytest.raises(TypeError, match="real scalars"):
+            a / (1 + 1j)
+
     def test_neg(self):
         a = HermitianMatrix(np.kron(X, Z))
         assert (-a) == (-1) * a

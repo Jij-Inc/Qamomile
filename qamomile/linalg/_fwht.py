@@ -80,6 +80,11 @@ def fwht_pauli_coefficients(
     for r in range(dim):
         v = m[idx ^ r, idx].astype(np.complex128, copy=True)
         fwht_inplace(v)
+        # TODO(perf): this Python-level generator runs dim times per row, so
+        # the total cost is O(4**n) Python iterations — the dominant
+        # bottleneck when scaling up. Replace with a vectorized popcount
+        # (e.g. a precomputed table or ``np.unpackbits``-based reduction) if
+        # larger ``n`` becomes a target.
         popcounts = np.fromiter(
             ((r & s).bit_count() for s in range(dim)),
             dtype=np.int64,
