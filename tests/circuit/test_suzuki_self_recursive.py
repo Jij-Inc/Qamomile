@@ -6,8 +6,7 @@ circuit whose fidelity error scales as the expected textbook order
 
 import numpy as np
 import pytest
-from qiskit import QuantumCircuit
-from qiskit import transpile as qk_transpile
+from qiskit import QuantumCircuit, transpile as qk_transpile
 from qiskit_aer import AerSimulator
 from scipy.linalg import expm
 
