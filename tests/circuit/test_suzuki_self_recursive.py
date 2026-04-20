@@ -34,7 +34,7 @@ def s2_step(
 
 
 @qmc.qkernel
-def suzuki(
+def suzuki_trotter(
     order: qmc.UInt,
     q: qmc.Vector[qmc.Qubit],
     Hs: qmc.Vector[qmc.Observable],
@@ -45,11 +45,11 @@ def suzuki(
     else:
         p = 1.0 / (4.0 - 4.0 ** (1.0 / (order - 1)))
         w = 1.0 - 4.0 * p
-        q = suzuki(order - 2, q, Hs, p * dt)
-        q = suzuki(order - 2, q, Hs, p * dt)
-        q = suzuki(order - 2, q, Hs, w * dt)
-        q = suzuki(order - 2, q, Hs, p * dt)
-        q = suzuki(order - 2, q, Hs, p * dt)
+        q = suzuki_trotter(order - 2, q, Hs, p * dt)
+        q = suzuki_trotter(order - 2, q, Hs, p * dt)
+        q = suzuki_trotter(order - 2, q, Hs, w * dt)
+        q = suzuki_trotter(order - 2, q, Hs, p * dt)
+        q = suzuki_trotter(order - 2, q, Hs, p * dt)
     return q
 
 
@@ -62,7 +62,7 @@ def rabi_suzuki(
 ) -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(1, "q")
     for _ in qmc.range(n_steps):
-        q = suzuki(order, q, Hs, dt)
+        q = suzuki_trotter(order, q, Hs, dt)
     return qmc.measure(q)
 
 
