@@ -67,35 +67,6 @@ def count_call_blocks(operations: list[Operation]) -> int:
     return count
 
 
-def call_block_signature(operations: list[Operation]) -> tuple:
-    """Snapshot of all CallBlockOperations' (block_id, operand_uuids).
-
-    Used by the unroll loop to detect no-progress iterations: when two
-    consecutive passes produce the same signature, further unrolling
-    will not fold any more CallBlockOperations (either the driver is
-    symbolic, or the recursion does not terminate under the provided
-    bindings).
-    """
-    entries: list[tuple] = []
-    _collect_call_block_entries(operations, entries)
-    return tuple(entries)
-
-
-def _collect_call_block_entries(
-    operations: list[Operation], entries: list[tuple]
-) -> None:
-    for op in operations:
-        if isinstance(op, CallBlockOperation) and op.block is not None:
-            operand_ids = tuple(getattr(v, "uuid", id(v)) for v in op.operands)
-            entries.append((id(op.block), operand_ids))
-        if isinstance(op, IfOperation):
-            _collect_call_block_entries(op.true_operations, entries)
-            _collect_call_block_entries(op.false_operations, entries)
-        elif isinstance(op, HasNestedOps):
-            for body in op.nested_op_lists():
-                _collect_call_block_entries(body, entries)
-
-
 class InlinePass(Pass[Block, Block]):
     """Inline all CallBlockOperations to create an affine block.
 

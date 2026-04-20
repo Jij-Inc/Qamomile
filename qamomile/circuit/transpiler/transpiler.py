@@ -26,7 +26,6 @@ from qamomile.circuit.transpiler.passes.entrypoint_validation import (
 )
 from qamomile.circuit.transpiler.passes.inline import (
     InlinePass,
-    call_block_signature,
     count_call_blocks,
 )
 from qamomile.circuit.transpiler.passes.parameter_shape_resolution import (
@@ -298,7 +297,6 @@ class Transpiler(ABC, Generic[T]):
         if count_call_blocks(block.operations) == 0:
             return block
 
-        prev_signature = call_block_signature(block.operations)
         for _ in range(self.MAX_UNROLL_DEPTH):
             block = self.inline(block)
             block = self.partial_eval(block, bindings)
@@ -309,24 +307,14 @@ class Transpiler(ABC, Generic[T]):
                 # to refresh the kind to AFFINE so downstream
                 # ``affine_validate`` is happy.
                 return self.inline(block)
-            curr_signature = call_block_signature(block.operations)
-            if curr_signature == prev_signature:
-                # No structural change since the last iteration — either
-                # the driver is symbolic (bindings don't concretize it
-                # enough for partial_eval to fold the base-case `if`) or
-                # the recursion is genuinely non-terminating on the
-                # provided values.  Leave the IR as-is and let
-                # downstream passes / backend emit reject the surviving
-                # CallBlockOperation if they cannot handle it.
-                return block
-            prev_signature = curr_signature
 
         raise FrontendTransformError(
             f"Recursive @qkernel did not terminate after "
-            f"{self.MAX_UNROLL_DEPTH} unroll steps.  Make sure the "
-            f"parameter driving the base-case condition becomes "
-            f"constant under the provided bindings, or reduce the "
-            f"recursion depth."
+            f"{self.MAX_UNROLL_DEPTH} unroll iterations.  Either the "
+            f"recursion does not terminate under the provided bindings, "
+            f"or the parameter driving the base-case condition was not "
+            f"bound to a compile-time constant so partial_eval could "
+            f"not fold the base case."
         )
 
     def affine_validate(self, block: Block) -> Block:
