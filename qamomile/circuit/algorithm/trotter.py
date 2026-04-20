@@ -195,21 +195,15 @@ def trotterized_time_evolution(
     # ``bool`` is a subclass of ``int``; reject it before numeric checks
     # so ``order=True`` does not silently satisfy ``order == 1``.
     if isinstance(order, bool):
-        raise ValueError(
-            f"order must be int or qmc.UInt, got bool ({order})"
-        )
+        raise ValueError(f"order must be int or qmc.UInt, got bool ({order})")
 
     o = _resolve_order(order)
     if o is not None and not (o == 1 or (o >= 2 and o % 2 == 0)):
-        raise ValueError(
-            f"order must be 1 or a positive even integer, got {o}"
-        )
+        raise ValueError(f"order must be 1 or a positive even integer, got {o}")
 
     n = _resolve_hamiltonian_len(hamiltonian)
     if n is not None and n < 2:
-        raise ValueError(
-            f"hamiltonian must contain at least 2 terms, got {n}"
-        )
+        raise ValueError(f"hamiltonian must contain at least 2 terms, got {n}")
 
     return _trotter_evolve(q, hamiltonian, order, gamma, step)
 

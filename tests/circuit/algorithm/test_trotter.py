@@ -276,9 +276,7 @@ class TestOrder2Multiterm:
         Z_mat = np.array([[1, 0], [0, -1]], dtype=complex)
         Y_mat = np.array([[0, -1j], [1j, 0]], dtype=complex)
         H_mat = 0.5 * Z_mat + 0.4 * X_mat + 0.3 * Y_mat
-        sv_exact = expm(-1j * T_EVOLVE * H_mat) @ np.array(
-            [1.0, 0.0], dtype=complex
-        )
+        sv_exact = expm(-1j * T_EVOLVE * H_mat) @ np.array([1.0, 0.0], dtype=complex)
 
         tr = QiskitTranspiler()
         errs: list[float] = []
