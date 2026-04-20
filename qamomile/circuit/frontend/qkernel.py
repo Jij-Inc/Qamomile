@@ -252,9 +252,7 @@ class QKernel(Generic[P, R]):
         claimed = [False] * len(operands)
         results: list[Value] = []
         for i, out_type in enumerate(self.output_types):
-            matched_idx = _match_output_to_input(
-                out_type, input_types_list, claimed
-            )
+            matched_idx = _match_output_to_input(out_type, input_types_list, claimed)
             if matched_idx is not None:
                 claimed[matched_idx] = True
                 results.append(operands[matched_idx].next_version())
@@ -270,9 +268,7 @@ class QKernel(Generic[P, R]):
                         f"signature so the quantum register is both "
                         f"input and output, or remove the self-recursion."
                     )
-                results.append(
-                    Value(type=ir_type, name=f"{self.name}_result_{i}")
-                )
+                results.append(Value(type=ir_type, name=f"{self.name}_result_{i}"))
 
         op = CallBlockOperation(block=None, operands=operands, results=results)
         self._pending_self_calls.append(op)

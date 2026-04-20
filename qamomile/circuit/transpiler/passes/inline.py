@@ -86,9 +86,7 @@ def _collect_call_block_entries(
 ) -> None:
     for op in operations:
         if isinstance(op, CallBlockOperation) and op.block is not None:
-            operand_ids = tuple(
-                getattr(v, "uuid", id(v)) for v in op.operands
-            )
+            operand_ids = tuple(getattr(v, "uuid", id(v)) for v in op.operands)
             entries.append((id(op.block), operand_ids))
         if isinstance(op, IfOperation):
             _collect_call_block_entries(op.true_operations, entries)
@@ -215,9 +213,7 @@ class InlinePass(Pass[Block, Block]):
                 if self._should_inline_composite(op):
                     # Inline the implementation if available
                     if op.has_implementation and op.implementation is not None:
-                        inlined = self._inline_composite(
-                            op, value_map, visiting_blocks
-                        )
+                        inlined = self._inline_composite(op, value_map, visiting_blocks)
                         result.extend(inlined)
                     else:
                         # Stub operation - keep as-is with value substitutions
