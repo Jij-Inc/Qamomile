@@ -43,7 +43,6 @@ from qamomile.circuit.transpiler.passes.emit_support import (
     LoopAnalyzer,
     QubitMap,
     ResourceAllocator,
-    ValueResolver,
 )
 from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
     evaluate_binop,
@@ -104,9 +103,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         self._emitter = gate_emitter
         self._composite_emitters = composite_emitters or []
 
-        # Helper classes
+        # Helper classes (``_resolver`` is built by ``EmitPass.__init__``).
         self._allocator = ResourceAllocator()
-        self._resolver = ValueResolver(self.parameters)
         self._loop_analyzer = LoopAnalyzer()
         self._decomposer = CompositeDecomposer()
 

@@ -122,6 +122,17 @@ class LoopAnalyzer:
                     for idx in gamma.element_indices:
                         if self._index_depends_on_loop_var(idx, loop_var):
                             return True
+                # The observable operand may be Hs[loop_var] — a concrete
+                # Hamiltonian is required at emit, so unroll too.
+                observable = op.observable
+                if (
+                    isinstance(observable, _Value)
+                    and observable.parent_array is not None
+                    and observable.element_indices
+                ):
+                    for idx in observable.element_indices:
+                        if self._index_depends_on_loop_var(idx, loop_var):
+                            return True
 
             if isinstance(op, HasNestedOps):
                 if any(

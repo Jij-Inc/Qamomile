@@ -33,7 +33,7 @@ If you want this version, install from source.
 
 Requirements:
 
-- Python 3.12+
+- Python 3.11+
 - `uv`
 
 Clone the repository:

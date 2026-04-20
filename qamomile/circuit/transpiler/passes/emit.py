@@ -25,6 +25,9 @@ from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
     QubitAddress,
     QubitMap,
 )
+from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
+    ValueResolver,
+)
 from qamomile.circuit.transpiler.segments import (
     ClassicalSegment,
     ClassicalStep,
@@ -123,6 +126,7 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
         """
         self.bindings = bindings or {}
         self.parameters = set(parameters) if parameters else set()
+        self._resolver = ValueResolver(self.parameters)
 
     def run(self, input: ProgramPlan) -> ExecutableProgram[T]:
         """Emit backend code from a program plan."""
@@ -229,13 +233,7 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
         if observable_value is None:
             raise RuntimeError("ExpvalSegment has no hamiltonian_value set.")
 
-        if observable_value.name not in self.bindings:
-            raise RuntimeError(
-                f"Observable '{observable_value.name}' not found in bindings. "
-                f"Hamiltonians must be provided as bindings."
-            )
-
-        hamiltonian = self.bindings[observable_value.name]
+        hamiltonian = self._resolve_observable_binding(observable_value)
 
         # Validate type
         if not isinstance(hamiltonian, qm_o.Hamiltonian):
@@ -262,6 +260,18 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
             result_ref=segment.result_ref,
             qubit_map=qubit_map,
         )
+
+    def _resolve_observable_binding(self, observable_value: Value) -> Any:
+        """Resolve an observable Value to its bound Hamiltonian."""
+        hamiltonian = self._resolver.resolve_bound_value(
+            observable_value, self.bindings
+        )
+        if hamiltonian is None:
+            raise RuntimeError(
+                f"Observable '{observable_value.name}' not found in bindings. "
+                f"Hamiltonians must be provided as bindings."
+            )
+        return hamiltonian
 
     def _build_qubit_map(
         self,
