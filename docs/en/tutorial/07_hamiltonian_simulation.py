@@ -27,7 +27,7 @@
 # This tutorial builds these approximations end-to-end in Qamomile on a
 # one-qubit Rabi Hamiltonian so the Trotter error is measurable. We start
 # with $S_1$ and $S_2$, then write the full Suzuki fractal recursion as a
-# **self-recursive `@qkernel`** that takes the target order as a `UInt`
+# **self-recursive** `@qkernel` that takes the target order as a `UInt`
 # parameter — the transpiler resolves the recursion by iterating
 # inline + partial-evaluation under a concrete `order` binding, so the emitted
 # circuit is flat regardless of how deep the recursion went. Finally, we
@@ -89,6 +89,7 @@ H_mat = 0.5 * omega * Z_mat + 0.5 * Omega * X_mat
 sv_exact = expm(-1j * T * H_mat) @ np.array([1.0, 0.0], dtype=complex)
 
 
+# %%
 def statevector(circuit) -> np.ndarray:
     """Strip measurements, lower PauliEvolutionGate, and read out the state.
 
@@ -114,7 +115,7 @@ def statevector(circuit) -> np.ndarray:
 #
 # The simplest split is
 #
-# $$ S_1(\Delta t) = e^{-i H_z \Delta t}\, e^{-i H_x \Delta t}, $$
+# $$ S_1(\Delta t) = e^{-i H_x \Delta t}\, e^{-i H_z \Delta t}, $$
 #
 # applied $N$ times for a total evolution time $T = N \Delta t$. Per step the
 # local error is $O(\Delta t^2)$; integrated over $N = T/\Delta t$ steps the
@@ -126,8 +127,6 @@ def statevector(circuit) -> np.ndarray:
 # same kernel transpiles for any $N$ at bind-time.
 
 # %%
-
-
 @qmc.qkernel
 def s1_step(
     q: qmc.Vector[qmc.Qubit], Hs: qmc.Vector[qmc.Observable], dt: qmc.Float
@@ -137,6 +136,7 @@ def s1_step(
     return q
 
 
+# %%
 @qmc.qkernel
 def rabi_s1(
     Hs: qmc.Vector[qmc.Observable], dt: qmc.Float, n_steps: qmc.UInt
@@ -158,8 +158,6 @@ def rabi_s1(
 # $O(\Delta t^2)$. The step kernel is just three `pauli_evolve` calls.
 
 # %%
-
-
 @qmc.qkernel
 def s2_step(
     q: qmc.Vector[qmc.Qubit], Hs: qmc.Vector[qmc.Observable], dt: qmc.Float
@@ -170,6 +168,7 @@ def s2_step(
     return q
 
 
+# %%
 @qmc.qkernel
 def rabi_s2(
     Hs: qmc.Vector[qmc.Observable], dt: qmc.Float, n_steps: qmc.UInt
@@ -233,8 +232,6 @@ def rabi_s2(
 #   budget (the classical `RecursionError` analogue).
 
 # %%
-
-
 @qmc.qkernel
 def suzuki_trotter(
     order: qmc.UInt,
@@ -255,6 +252,7 @@ def suzuki_trotter(
     return q
 
 
+# %%
 @qmc.qkernel
 def rabi_suzuki(
     order: qmc.UInt,
@@ -348,6 +346,7 @@ def fit_slope(dts, errs, n_points):
     return np.polyfit(np.log(dts[:n_points]), np.log(errs[:n_points]), 1)[0]
 
 
+# %%
 slope_s1 = fit_slope(dts, errors["S1"], len(Ns))
 slope_s2 = fit_slope(dts, errors["S2"], len(Ns))
 slope_s4 = fit_slope(dts, errors["S4"], 3)

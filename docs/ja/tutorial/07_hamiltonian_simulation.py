@@ -17,7 +17,7 @@
 #
 # 量子系の時間発展$e^{-iHt}$をシミュレーションすることは、量子コンピュータの代表的な応用の1つです。ハミルトニアンが非可換な部分に分割されるとき、つまり$H = A + B$かつ$[A, B] \neq 0$のとき、素朴な分解$e^{-i(A+B)t} = e^{-iAt}\,e^{-iBt}$は成立しません。標準的な対処法が**Trotter–Suzuki積公式**で、各項の短時間発展を交互に並べます。誤差は、ステップ幅を小さくすれば減り(Lie–Trotter、1次)、ステップを対称化すれば減り(Strang、2次)、対称ステップをSuzukiの構成で再帰的に入れ子にすればさらに減ります(任意の偶数次)。
 #
-# このチュートリアルでは、Trotter誤差が測定しやすい1量子ビットのRabiハミルトニアンを題材に、これらの近似をQamomileで最初から組み立てます。まず$S_1$と$S_2$を書き、続いて**自己再帰`@qkernel`**としてSuzukiフラクタル再帰全体を記述します。目標次数を`UInt`パラメータで受け取れば、トランスパイラは具体値が結び付いた`order`の下でinline + partial-evaluationの固定点ループにより再帰を解決します。再帰が何層であっても、生成される回路はフラットです。最後に、教科書通りの収束次数($S_k$のフィデリティ誤差が$\Delta t^{2k}$でスケールすること)を、2x2のプロパゲータの厳密解と照合して確認します。
+# このチュートリアルでは、Trotter誤差が測定しやすい1量子ビットのRabiハミルトニアンを題材に、これらの近似をQamomileで最初から組み立てます。まず$S_1$と$S_2$を書き、続いて**自己再帰**な`@qkernel`としてSuzukiフラクタル再帰全体を記述します。目標次数を`UInt`パラメータで受け取れば、トランスパイラは具体値が結び付いた`order`の下でinline + partial-evaluationの固定点ループにより再帰を解決します。再帰が何層であっても、生成される回路はフラットです。最後に、教科書通りの収束次数($S_k$のフィデリティ誤差が$\Delta t^{2k}$でスケールすること)を、2x2のプロパゲータの厳密解と照合して確認します。
 
 # %%
 # 最新のQamomileをpipからインストールします！
@@ -66,6 +66,7 @@ H_mat = 0.5 * omega * Z_mat + 0.5 * Omega * X_mat
 sv_exact = expm(-1j * T * H_mat) @ np.array([1.0, 0.0], dtype=complex)
 
 
+# %%
 def statevector(circuit) -> np.ndarray:
     """測定を取り除き、PauliEvolutionGateを展開して状態ベクトルを読み出します。
 
@@ -91,15 +92,13 @@ def statevector(circuit) -> np.ndarray:
 #
 # もっとも単純な分解は
 #
-# $$ S_1(\Delta t) = e^{-i H_z \Delta t}\, e^{-i H_x \Delta t} $$
+# $$ S_1(\Delta t) = e^{-i H_x \Delta t}\, e^{-i H_z \Delta t} $$
 #
 # で、これを$N$回適用して全発展時間$T = N \Delta t$をシミュレーションします。1ステップあたりの局所誤差は$O(\Delta t^2)$、$N = T/\Delta t$ステップにわたる大域的な状態ノルム誤差は$O(\Delta t)$です。
 #
 # 1ステップを小さな補助`@qkernel`として書きます。量子ビットレジスタを$H_z$、続いて$H_x$で発展させるだけです。外側のカーネル`rabi_s1`はそのステップを$N$回繰り返します。`n_steps`は`UInt`パラメータなので、同じカーネルが任意の$N$についてバインド時にトランスパイルできます。
 
 # %%
-
-
 @qmc.qkernel
 def s1_step(
     q: qmc.Vector[qmc.Qubit], Hs: qmc.Vector[qmc.Observable], dt: qmc.Float
@@ -109,6 +108,7 @@ def s1_step(
     return q
 
 
+# %%
 @qmc.qkernel
 def rabi_s1(
     Hs: qmc.Vector[qmc.Observable], dt: qmc.Float, n_steps: qmc.UInt
@@ -129,8 +129,6 @@ def rabi_s1(
 # 局所誤差は$O(\Delta t^3)$、大域的な状態ノルム誤差は$O(\Delta t^2)$になります。ステップカーネルは`pauli_evolve`を3回呼ぶだけです。
 
 # %%
-
-
 @qmc.qkernel
 def s2_step(
     q: qmc.Vector[qmc.Qubit], Hs: qmc.Vector[qmc.Observable], dt: qmc.Float
@@ -141,6 +139,7 @@ def s2_step(
     return q
 
 
+# %%
 @qmc.qkernel
 def rabi_s2(
     Hs: qmc.Vector[qmc.Observable], dt: qmc.Float, n_steps: qmc.UInt
@@ -183,8 +182,6 @@ def rabi_s2(
 # - **停止しない再帰は検出されます。** ボディが`order - 2`ではなく`order + 2`で自分を呼んでいる場合など、基底ケースに到達しない再帰は、展開ループが深さ上限を使い切った時点で`FrontendTransformError`を送出します(古典的な`RecursionError`に相当します)。
 
 # %%
-
-
 @qmc.qkernel
 def suzuki_trotter(
     order: qmc.UInt,
@@ -205,6 +202,7 @@ def suzuki_trotter(
     return q
 
 
+# %%
 @qmc.qkernel
 def rabi_suzuki(
     order: qmc.UInt,
@@ -288,6 +286,7 @@ def fit_slope(dts, errs, n_points):
     return np.polyfit(np.log(dts[:n_points]), np.log(errs[:n_points]), 1)[0]
 
 
+# %%
 slope_s1 = fit_slope(dts, errors["S1"], len(Ns))
 slope_s2 = fit_slope(dts, errors["S2"], len(Ns))
 slope_s4 = fit_slope(dts, errors["S4"], 3)
