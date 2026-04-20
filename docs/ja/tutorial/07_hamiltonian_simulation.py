@@ -87,7 +87,7 @@ def statevector(circuit) -> np.ndarray:
 
 
 # %% [markdown]
-# ## $S_1$: 1次のLie–Trotter
+# ## $S_1$: 1次Suzuki–Trotter分解 (Lie–Trotter)
 #
 # もっとも単純な分解は
 #
@@ -120,7 +120,7 @@ def rabi_s1(
 
 
 # %% [markdown]
-# ## $S_2$: 対称化分解 (Strang)
+# ## $S_2$: 2次Suzuki–Trotter分解 (Strang分解)
 #
 # 中央の項を中心にステップを対称化すると先頭の誤差項が消えます:
 #
@@ -152,7 +152,7 @@ def rabi_s2(
 
 
 # %% [markdown]
-# ## 高次:Suzuki–Trotterフラクタル再帰
+# ## 高次のSuzuki–Trotter分解:フラクタル再帰
 #
 # 鈴木増雄氏は、任意の偶数次Trotter近似を$S_2$から**再帰的に**構築できることを示しました。各段で5つのリスケーリングされたコピーを入れ子にします:
 #

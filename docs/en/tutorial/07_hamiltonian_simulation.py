@@ -110,7 +110,7 @@ def statevector(circuit) -> np.ndarray:
 
 
 # %% [markdown]
-# ## $S_1$: first-order Lie–Trotter
+# ## $S_1$: First-order Suzuki–Trotter decomposition (Lie–Trotter)
 #
 # The simplest split is
 #
@@ -148,7 +148,7 @@ def rabi_s1(
 
 
 # %% [markdown]
-# ## $S_2$: symmetric (Strang) splitting
+# ## $S_2$: Second-order Suzuki–Trotter decomposition (Strang splitting)
 #
 # Symmetrising the step around the middle term cancels the leading error:
 #
@@ -181,7 +181,7 @@ def rabi_s2(
 
 
 # %% [markdown]
-# ## Higher orders: the Suzuki–Trotter fractal recursion
+# ## Higher-order Suzuki–Trotter decomposition: the fractal recursion
 #
 # Masuo Suzuki showed that an arbitrary even-order Trotter approximation can
 # be built **recursively** from $S_2$ by nesting five rescaled copies at each
