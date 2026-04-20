@@ -69,7 +69,7 @@ def _match_output_to_input(
     claimed: list[bool],
 ) -> int | None:
     """Return the position of the first unclaimed input whose Handle type
-    matches ``out_type``; mutates the caller's ``claimed`` list is the
+    matches ``out_type``; mutating the caller's ``claimed`` list is the
     caller's responsibility."""
     for idx, in_type in enumerate(input_types_list):
         if claimed[idx]:
