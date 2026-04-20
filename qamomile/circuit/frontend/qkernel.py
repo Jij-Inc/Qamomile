@@ -274,11 +274,7 @@ class QKernel(Generic[P, R]):
                     Value(type=ir_type, name=f"{self.name}_result_{i}")
                 )
 
-        op = CallBlockOperation(
-            block=None,  # type: ignore[arg-type]
-            operands=operands,
-            results=results,
-        )
+        op = CallBlockOperation(block=None, operands=operands, results=results)
         self._pending_self_calls.append(op)
         return op
 
