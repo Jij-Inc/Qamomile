@@ -33,6 +33,40 @@ def find_return_operation(operations: list[Operation]) -> ReturnOperation | None
     return None
 
 
+def _has_any_call_block(operations: list[Operation]) -> bool:
+    """True if any op (or nested op) is a CallBlockOperation."""
+    for op in operations:
+        if isinstance(op, CallBlockOperation):
+            return True
+        if isinstance(op, IfOperation):
+            if _has_any_call_block(op.true_operations) or _has_any_call_block(
+                op.false_operations
+            ):
+                return True
+        elif isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                if _has_any_call_block(body):
+                    return True
+    return False
+
+
+def count_call_blocks(operations: list[Operation]) -> int:
+    """Count CallBlockOperations, including those nested inside IfOps and
+    HasNestedOps.  Used by the unroll loop as the primary termination
+    signal (count==0 means the block is fully inlined)."""
+    count = 0
+    for op in operations:
+        if isinstance(op, CallBlockOperation) and op.block is not None:
+            count += 1
+        if isinstance(op, IfOperation):
+            count += count_call_blocks(op.true_operations)
+            count += count_call_blocks(op.false_operations)
+        elif isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                count += count_call_blocks(body)
+    return count
+
+
 class InlinePass(Pass[Block, Block]):
     """Inline all CallBlockOperations to create an affine block.
 
@@ -48,8 +82,17 @@ class InlinePass(Pass[Block, Block]):
         return "inline"
 
     def run(self, input: Block) -> Block:
-        """Inline all CallBlockOperations."""
-        if input.kind != BlockKind.HIERARCHICAL:
+        """Inline all CallBlockOperations.
+
+        Self-recursive CallBlockOperations (ones whose ``.block`` is the
+        block currently being expanded) are unrolled **one level per
+        call**: the inner self-call is substituted but left intact so
+        that the outer fixed-point loop (inline ↔ partial_eval in
+        ``Transpiler.transpile``) can fold the base-case ``if`` between
+        iterations.  The output kind is ``AFFINE`` when no
+        CallBlockOperations remain, otherwise ``HIERARCHICAL``.
+        """
+        if input.kind not in (BlockKind.HIERARCHICAL, BlockKind.TRACED):
             # Already inlined, return as-is
             return input
 
@@ -59,10 +102,17 @@ class InlinePass(Pass[Block, Block]):
         serialized_ops = self._serialize_operations(
             input.operations,
             value_map,
+            visiting_blocks=set(),
         )
 
         # Map output values through the value_map
         output_values = [value_map.get(v.uuid, v) for v in input.output_values]
+
+        out_kind = (
+            BlockKind.HIERARCHICAL
+            if _has_any_call_block(serialized_ops)
+            else BlockKind.AFFINE
+        )
 
         return Block(
             name=input.name,
@@ -70,7 +120,7 @@ class InlinePass(Pass[Block, Block]):
             input_values=input.input_values,
             output_values=output_values,
             operations=serialized_ops,
-            kind=BlockKind.AFFINE,
+            kind=out_kind,
             parameters=input.parameters,
         )
 
@@ -78,6 +128,7 @@ class InlinePass(Pass[Block, Block]):
         self,
         operations: list[Operation],
         value_map: dict[str, Value],
+        visiting_blocks: set[int],
     ) -> list[Operation]:
         """Recursively serialize a list of operations."""
         result: list[Operation] = []
@@ -89,17 +140,24 @@ class InlinePass(Pass[Block, Block]):
                 continue
 
             elif isinstance(op, CallBlockOperation):
-                # Inline the called block
-                inlined = self._inline_call(op, value_map)
-                result.extend(inlined)
+                if op.block is not None and id(op.block) in visiting_blocks:
+                    # Self-recursive cycle.  Keep the call as-is (with
+                    # value substitutions) so the outer fixed-point loop
+                    # can unroll one more layer after partial_eval folds
+                    # the base-case condition.
+                    substituted = self._substitute_values(op, value_map)
+                    result.append(substituted)
+                else:
+                    inlined = self._inline_call(op, value_map, visiting_blocks)
+                    result.extend(inlined)
 
             elif isinstance(op, IfOperation):
                 # Recurse into both branches, preserve the If structure
                 serialized_true = self._serialize_operations(
-                    op.true_operations, value_map
+                    op.true_operations, value_map, visiting_blocks
                 )
                 serialized_false = self._serialize_operations(
-                    op.false_operations, value_map
+                    op.false_operations, value_map, visiting_blocks
                 )
                 new_op = dataclasses.replace(
                     op,
@@ -114,7 +172,7 @@ class InlinePass(Pass[Block, Block]):
                 # Generic recursion for For/ForItems/While: recurse into
                 # nested bodies, rebuild, then substitute values.
                 new_lists = [
-                    self._serialize_operations(body, value_map)
+                    self._serialize_operations(body, value_map, visiting_blocks)
                     for body in op.nested_op_lists()
                 ]
                 new_op = op.rebuild_nested(new_lists)
@@ -126,7 +184,7 @@ class InlinePass(Pass[Block, Block]):
                 if self._should_inline_composite(op):
                     # Inline the implementation if available
                     if op.has_implementation and op.implementation is not None:
-                        inlined = self._inline_composite(op, value_map)
+                        inlined = self._inline_composite(op, value_map, visiting_blocks)
                         result.extend(inlined)
                     else:
                         # Stub operation - keep as-is with value substitutions
@@ -148,6 +206,7 @@ class InlinePass(Pass[Block, Block]):
         self,
         call_op: CallBlockOperation,
         value_map: dict[str, Value],
+        visiting_blocks: set[int],
     ) -> list[Operation]:
         """Inline a CallBlockOperation.
 
@@ -205,8 +264,13 @@ class InlinePass(Pass[Block, Block]):
             if old_uuid in local_map and new_uuid not in remapped_local_map:
                 remapped_local_map[new_uuid] = local_map[old_uuid]
 
-        # Recursively serialize the cloned operations
-        inlined = self._serialize_operations(cloned_ops, remapped_local_map)
+        # Recursively serialize the cloned operations, marking this block
+        # as currently-being-expanded so self-recursive calls inside it
+        # are left intact for the outer unroll loop.
+        inner_visiting = visiting_blocks | {id(block)}
+        inlined = self._serialize_operations(
+            cloned_ops, remapped_local_map, inner_visiting
+        )
 
         # Get return values from ReturnOperation (source of truth)
         return_op = find_return_operation(cloned_ops)
@@ -273,6 +337,7 @@ class InlinePass(Pass[Block, Block]):
         self,
         op: CompositeGateOperation,
         value_map: dict[str, Value],
+        visiting_blocks: set[int] | None = None,
     ) -> list[Operation]:
         """Inline a CompositeGateOperation's implementation.
 
@@ -308,7 +373,9 @@ class InlinePass(Pass[Block, Block]):
             local_map[cloned_input.uuid] = resolved_arg
 
         # Recursively serialize the cloned operations using standard method
-        inlined = self._serialize_operations(cloned_ops, local_map)
+        inlined = self._serialize_operations(
+            cloned_ops, local_map, visiting_blocks or set()
+        )
 
         # Get return values from ReturnOperation (source of truth)
         return_op = find_return_operation(cloned_ops)

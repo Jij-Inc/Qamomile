@@ -12,15 +12,26 @@ if TYPE_CHECKING:
 
 @dataclasses.dataclass
 class CallBlockOperation(Operation):
-    block: Block = dataclasses.field(default=None)  # type: ignore[arg-type]
+    # ``block`` is ``None`` only transiently: the self-recursive @qkernel
+    # path emits a forward-ref call before its enclosing Block exists, and
+    # ``QKernel.block`` back-patches it to a real Block before the property
+    # returns.  Every pass outside that back-patch window sees a non-None
+    # block; readers check explicitly (``if op.block is None: raise``) to
+    # surface the invariant rather than silently dereferencing ``None``.
+    block: Block | None = None
 
-    def __post_init__(self):
-        if self.block is None:
-            raise ValueError("CallBlockOperation.block is required.")
+    def is_self_reference_to(self, block: "Block") -> bool:
+        """Return True if this call points to the given block (self-ref)."""
+        return self.block is block
 
     @property
     def signature(self) -> Signature:
         block = self.block
+        if block is None:
+            raise ValueError(
+                "CallBlockOperation.block is not set; cannot build signature "
+                "while the call is still a forward reference."
+            )
         input_type = [
             ParamHint(name, value.type)
             for name, value in zip(block.label_args, block.input_values)

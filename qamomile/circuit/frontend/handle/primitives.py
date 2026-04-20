@@ -89,6 +89,33 @@ class UInt(ArithmeticMixin, Handle):
         _emit_compop(self.value, other.value, result.value, CompOpKind.GE)
         return result
 
+    def __eq__(self, other) -> "Bit":  # type: ignore[override]
+        if isinstance(other, bool):
+            other = self._make_uint(int(other))
+        elif isinstance(other, int):
+            other = self._make_uint(other)
+        elif not isinstance(other, UInt):
+            return NotImplemented  # type: ignore[return-value]
+        result = self._make_bit()
+        _emit_compop(self.value, other.value, result.value, CompOpKind.EQ)
+        return result
+
+    def __ne__(self, other) -> "Bit":  # type: ignore[override]
+        if isinstance(other, bool):
+            other = self._make_uint(int(other))
+        elif isinstance(other, int):
+            other = self._make_uint(other)
+        elif not isinstance(other, UInt):
+            return NotImplemented  # type: ignore[return-value]
+        result = self._make_bit()
+        _emit_compop(self.value, other.value, result.value, CompOpKind.NEQ)
+        return result
+
+    # Override __eq__ above returns Bit (for DSL semantics), so we have to
+    # restore a hashable object identity or dataclass equality-based
+    # hashing would break anything that puts UInt handles into dicts/sets.
+    __hash__ = object.__hash__  # type: ignore[assignment]
+
     # Override arithmetic operations with proper type hints for UInt
     def __add__(self, other: "int | UInt") -> "UInt":
         coerced = self._coerce(other)
@@ -234,6 +261,66 @@ class Float(ArithmeticMixin, Handle):
         result = self._make_float_result()
         _emit_binop(other.value, self.value, result.value, BinOpKind.DIV)
         return result
+
+    def __pow__(self, other: "int | float | Float") -> "Float":
+        other = self._coerce(other)
+        result = self._make_result()
+        _emit_binop(self.value, other.value, result.value, BinOpKind.POW)
+        return result
+
+    def __rpow__(self, other: "int | float | Float") -> "Float":
+        other = self._coerce(other)
+        result = self._make_result()
+        _emit_binop(other.value, self.value, result.value, BinOpKind.POW)
+        return result
+
+    def _make_bit(self) -> "Bit":
+        """Create a Bit result for a comparison."""
+        return Bit(value=Value(type=BitType(), name="bit_tmp"))
+
+    def __lt__(self, other) -> "Bit":
+        other = self._coerce(other)
+        result = self._make_bit()
+        _emit_compop(self.value, other.value, result.value, CompOpKind.LT)
+        return result
+
+    def __gt__(self, other) -> "Bit":
+        other = self._coerce(other)
+        result = self._make_bit()
+        _emit_compop(self.value, other.value, result.value, CompOpKind.GT)
+        return result
+
+    def __le__(self, other) -> "Bit":
+        other = self._coerce(other)
+        result = self._make_bit()
+        _emit_compop(self.value, other.value, result.value, CompOpKind.LE)
+        return result
+
+    def __ge__(self, other) -> "Bit":
+        other = self._coerce(other)
+        result = self._make_bit()
+        _emit_compop(self.value, other.value, result.value, CompOpKind.GE)
+        return result
+
+    def __eq__(self, other) -> "Bit":  # type: ignore[override]
+        if isinstance(other, (int, float, bool)) and not isinstance(other, Float):
+            other = self._make_float(float(other))
+        elif not isinstance(other, Float):
+            return NotImplemented  # type: ignore[return-value]
+        result = self._make_bit()
+        _emit_compop(self.value, other.value, result.value, CompOpKind.EQ)
+        return result
+
+    def __ne__(self, other) -> "Bit":  # type: ignore[override]
+        if isinstance(other, (int, float, bool)) and not isinstance(other, Float):
+            other = self._make_float(float(other))
+        elif not isinstance(other, Float):
+            return NotImplemented  # type: ignore[return-value]
+        result = self._make_bit()
+        _emit_compop(self.value, other.value, result.value, CompOpKind.NEQ)
+        return result
+
+    __hash__ = object.__hash__  # type: ignore[assignment]
 
 
 @dataclasses.dataclass
