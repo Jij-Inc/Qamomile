@@ -99,7 +99,8 @@ def test_suzuki_recursive_convergence_slope(order, expected_slope):
             bindings={"order": order, "Hs": HS, "dt": T / N, "n_steps": N},
         )
         sv = _statevector(exe.compiled_quantum[0].circuit)
-        err = 1.0 - abs(np.vdot(sv_exact, sv))
+        overlap = np.clip(abs(np.vdot(sv_exact, sv)), 0.0, 1.0)
+        err = max(1.0 - overlap, np.finfo(float).tiny)
         dts.append(T / N)
         errs.append(err)
     # float64 floor may flatten the slope at small dt for S4; fit only
