@@ -74,7 +74,7 @@ Dependencies flow only downstream (left to right). Upstream (reverse) dependenci
 - **Python 3.12+** features and syntax.
 - `X | None` instead of `Optional[X]`.
 - Extensive type annotations on all parameters, return types, and generics.
-- **All functions and classes MUST have Google-style docstrings** with `Args`, `Returns`, `Raises`, and `Example` sections as appropriate. Type hints should be included in the docstring. Missing docstrings are a P2+ issue.
+- **All public functions, methods, and classes MUST have Google-style docstrings** with `Args`, `Returns`, and `Raises` sections (omitting only sections that genuinely do not apply), plus an `Example` where helpful. Type hints should be included in the docstring. Private helpers (`_foo`, `__bar`) need a docstring only when their purpose is not obvious from the name; a one-line summary is acceptable. Tests are exempt from `Args`/`Returns` — a clear 1–2 line description of what the test verifies suffices (see Section H). Missing docstrings on public API surfaces are a P2+ issue. See the `## Docstring Convention (MANDATORY)` section of `CLAUDE.md` for the authoritative convention and a full example.
 - No stale imports or dead code.
 - Consistent import style (`import qamomile.circuit as qmc`).
 
@@ -219,7 +219,7 @@ For each changed file, systematically check:
 4. **Backend pattern** (Section D) — If a backend file: does it follow the Transpiler/Emitter/Executor pattern?
 5. **Error handling & exception safety** (Section E) — Are errors in the `QamomileCompileError` hierarchy? Do they provide diagnostic info? Exception chaining with `from`? No bare `except`? Fallback patterns use `warnings.warn`?
 6. **Module organization** (Section F) — Proper `__all__`? TYPE_CHECKING guards?
-7. **Python style** (Section G) — Google-style docstrings on ALL functions/classes with type hints? Modern Python syntax? No dead code?
+7. **Python style** (Section G) — Google-style docstrings on all **public** functions, methods, and classes (with `Args`/`Returns`/`Raises` as applicable and type hints)? Private helpers have at least a one-line docstring when their purpose is not obvious? Modern Python syntax? No dead code?
 8. **Testing** (Section H) — Are tests parametrized? Random testing used? Clear docstrings describing what is tested? Edge cases and negative tests covered? Numerical assertions use `np.allclose`?
 8-bis. **Algorithm/Stdlib cross-backend execution (Section H-bis)** — If the diff adds or materially changes a file under `qamomile/circuit/algorithm/` or `qamomile/circuit/stdlib/`, are there tests that **transpile AND execute** the new kernel on every supported SDK (Qiskit, QuriParts, CUDA-Q) with `importorskip` guards? (qBraid is out of scope — it is an executor-only wrapper around Qiskit and needs an API key.) Are inputs randomized over seeded `np.random.default_rng` across multiple register sizes and angles? Flag as **P1** if cross-backend execution coverage is missing, **P2** if only fixed inputs are used.
 9. **Documentation** (Section I) — Every `.py` has a corresponding `.ipynb`? If `.py` was modified, is `.ipynb` also updated? Are `.ipynb` files executed (outputs present)? New docs paths covered in test patterns? Do `docs/en/` and `docs/ja/` have matching file structures?
