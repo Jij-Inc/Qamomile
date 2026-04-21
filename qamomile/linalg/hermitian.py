@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from qamomile._utils import is_close_zero
 from qamomile.linalg._fwht import fwht_pauli_coefficients, is_power_of_two
 
 if TYPE_CHECKING:
@@ -134,7 +135,7 @@ class HermitianMatrix:
     def __mul__(self, scalar: int | float | complex) -> HermitianMatrix:
         if isinstance(scalar, bool) or not isinstance(scalar, (int, float, complex)):
             return NotImplemented
-        if isinstance(scalar, complex) and scalar.imag != 0.0:
+        if isinstance(scalar, complex) and not is_close_zero(scalar.imag):
             raise TypeError(
                 "HermitianMatrix only supports multiplication by real scalars "
                 "(a nonzero imaginary scalar would break the Hermitian property)."
@@ -147,7 +148,7 @@ class HermitianMatrix:
     def __truediv__(self, scalar: int | float | complex) -> HermitianMatrix:
         if isinstance(scalar, bool) or not isinstance(scalar, (int, float, complex)):
             return NotImplemented
-        if isinstance(scalar, complex) and scalar.imag != 0.0:
+        if isinstance(scalar, complex) and not is_close_zero(scalar.imag):
             raise TypeError(
                 "HermitianMatrix only supports division by real scalars "
                 "(a nonzero imaginary scalar would break the Hermitian property)."
