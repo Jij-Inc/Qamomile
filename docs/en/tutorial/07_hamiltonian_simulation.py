@@ -47,6 +47,7 @@ from scipy.linalg import expm
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
+from qamomile.circuit.algorithm import trotterized_time_evolution
 from qamomile.qiskit import QiskitTranspiler
 
 # %% [markdown]
@@ -126,6 +127,7 @@ def statevector(circuit) -> np.ndarray:
 # repeats that step $N$ times, where `n_steps` is a `UInt` parameter so the
 # same kernel transpiles for any $N$ at bind-time.
 
+
 # %%
 @qmc.qkernel
 def s1_step(
@@ -156,6 +158,7 @@ def rabi_s1(
 #
 # The local error drops to $O(\Delta t^3)$ and the global state-norm error to
 # $O(\Delta t^2)$. The step kernel is just three `pauli_evolve` calls.
+
 
 # %%
 @qmc.qkernel
@@ -231,6 +234,7 @@ def rabi_s2(
 #   unroll loop raises `FrontendTransformError` after it runs out of depth
 #   budget (the classical `RecursionError` analogue).
 
+
 # %%
 @qmc.qkernel
 def suzuki_trotter(
@@ -270,6 +274,36 @@ def rabi_suzuki(
 # `rabi_suzuki` is a single kernel that produces $S_2$, $S_4$, $S_6$, $S_8$, …
 # just by choosing the `order` binding at transpile time — there is no
 # separate kernel per order.
+
+# %% [markdown]
+# ### Shortcut: `trotterized_time_evolution` in `qamomile.circuit.algorithm`
+#
+# Writing out `s1_step` / `s2_step` / `suzuki_trotter` and the outer step loop
+# by hand was useful for seeing the recursion in action, but for day-to-day
+# use Qamomile ships the same construction as a ready-made helper in
+# [`qamomile.circuit.algorithm.trotter`](../../../qamomile/circuit/algorithm/trotter.py):
+
+
+# %%
+@qmc.qkernel
+def rabi_from_algorithm(
+    Hs: qmc.Vector[qmc.Observable],
+    gamma: qmc.Float,
+    order: qmc.UInt,
+    step: qmc.UInt,
+) -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(1, name="q")
+    q = trotterized_time_evolution(q, Hs, order, gamma, step)
+    return qmc.measure(q)
+
+
+# %% [markdown]
+# The helper accepts `order = 1` or any positive even integer and applies
+# `step` Trotter slices of size `gamma / step`, so the rest of this tutorial's
+# plots could be reproduced by binding `order` and `step` on this single
+# kernel. Use it when you do not need to customise the splitting and fall
+# back to the explicit form above when you want to see (or tweak) the
+# per-term gate schedule.
 
 # %% [markdown]
 # ## Quick sanity check at $N = 8$
@@ -326,7 +360,9 @@ errors = {name: [] for name in all_names}
 
 for N in Ns:
     for name, ker in s1_s2_kernels.items():
-        exe = tr.transpile(ker, bindings={"Hs": Hs, "dt": T / int(N), "n_steps": int(N)})
+        exe = tr.transpile(
+            ker, bindings={"Hs": Hs, "dt": T / int(N), "n_steps": int(N)}
+        )
         sv = statevector(exe.compiled_quantum[0].circuit)
         errors[name].append(1.0 - abs(np.vdot(sv_exact, sv)))
     for name, order in suzuki_orders.items():
@@ -368,7 +404,9 @@ for name in all_names:
     ax.loglog(dts, errors[name], marker=markers[name], label=name)
 ax.axhline(1e-15, color="grey", linestyle=":", linewidth=0.8, label="float64 floor")
 ax.set_xlabel(r"step size $\Delta t = T / N$")
-ax.set_ylabel(r"fidelity error $1 - |\langle \psi_{\rm exact} | \psi_{\rm trotter} \rangle|$")
+ax.set_ylabel(
+    r"fidelity error $1 - |\langle \psi_{\rm exact} | \psi_{\rm trotter} \rangle|$"
+)
 ax.set_title("Trotter convergence on Rabi oscillation")
 ax.grid(True, which="both", linewidth=0.3)
 ax.legend()

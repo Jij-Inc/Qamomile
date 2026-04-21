@@ -60,6 +60,24 @@ def _statevector(circuit) -> np.ndarray:
     return np.asarray(sim.run(stripped).result().get_statevector())
 
 
+def _fidelity_err(sv_a: np.ndarray, sv_b: np.ndarray) -> float:
+    """Fidelity error ``1 - |<a|b>|``, clipped and floored at float64 tiny.
+
+    The clip/floor guard log-log slope fits and monotonic-improvement
+    checks against float drift that can push ``|<a|b>|`` slightly above 1.
+    """
+    overlap = np.clip(abs(np.vdot(sv_a, sv_b)), 0.0, 1.0)
+    return max(1.0 - overlap, np.finfo(float).tiny)
+
+
+def _quri_parts_transpiler():
+    """Return a ``QuriPartsTranspiler`` or skip the test if unavailable."""
+    pytest.importorskip("quri_parts.qulacs")
+    from qamomile.quri_parts import QuriPartsTranspiler
+
+    return QuriPartsTranspiler()
+
+
 @qmc.qkernel
 def _rabi_trotter(
     order: qmc.UInt,
@@ -122,8 +140,7 @@ class TestOrder1Correctness:
                 },
             )
             sv = _statevector(exe.compiled_quantum[0].circuit)
-            overlap = np.clip(abs(np.vdot(sv_exact, sv)), 0.0, 1.0)
-            errors.append(max(1.0 - overlap, np.finfo(float).tiny))
+            errors.append(_fidelity_err(sv_exact, sv))
 
         # Strictly monotone improvement (first-order Trotter error is O(dt)).
         assert errors[0] > errors[1] > errors[2]
@@ -149,8 +166,7 @@ class TestOrder2Correctness:
                 },
             )
             sv = _statevector(exe.compiled_quantum[0].circuit)
-            overlap = np.clip(abs(np.vdot(sv_exact, sv)), 0.0, 1.0)
-            return max(1.0 - overlap, np.finfo(float).tiny)
+            return _fidelity_err(sv_exact, sv)
 
         step = 8
         assert _err(2, step) < _err(1, step)
@@ -173,9 +189,8 @@ class TestOrder2Correctness:
                 },
             )
             sv = _statevector(exe.compiled_quantum[0].circuit)
-            overlap = np.clip(abs(np.vdot(sv_exact, sv)), 0.0, 1.0)
             dts.append(T_EVOLVE / step)
-            errs.append(max(1.0 - overlap, np.finfo(float).tiny))
+            errs.append(_fidelity_err(sv_exact, sv))
 
         slope = np.polyfit(np.log(dts), np.log(errs), 1)[0]
         # Strang ``|<ψ_exact|ψ̃>|`` fidelity error ~ O(dt^4) (state-norm
@@ -209,9 +224,8 @@ class TestHigherOrderRecursion:
                 },
             )
             sv = _statevector(exe.compiled_quantum[0].circuit)
-            overlap = np.clip(abs(np.vdot(sv_exact, sv)), 0.0, 1.0)
             dts.append(T_EVOLVE / step)
-            errs.append(max(1.0 - overlap, np.finfo(float).tiny))
+            errs.append(_fidelity_err(sv_exact, sv))
 
         slope = np.polyfit(np.log(dts), np.log(errs), 1)[0]
         # Textbook Suzuki S_4 fidelity-error slope is 8; tolerance
@@ -259,8 +273,7 @@ class TestHigherOrderRecursion:
                 },
             )
             sv = _statevector(exe.compiled_quantum[0].circuit)
-            overlap = np.clip(abs(np.vdot(sv_exact, sv)), 0.0, 1.0)
-            return max(1.0 - overlap, np.finfo(float).tiny)
+            return _fidelity_err(sv_exact, sv)
 
         assert _err(4) < _err(2)
 
@@ -291,8 +304,7 @@ class TestOrder2Multiterm:
                 },
             )
             sv = _statevector(exe.compiled_quantum[0].circuit)
-            overlap = np.clip(abs(np.vdot(sv_exact, sv)), 0.0, 1.0)
-            errs.append(max(1.0 - overlap, np.finfo(float).tiny))
+            errs.append(_fidelity_err(sv_exact, sv))
 
         assert errs[0] > errs[1] > errs[2]
         assert errs[-1] < 1e-3
@@ -426,3 +438,494 @@ class TestValidation:
                 "step": 1,
             },
         )
+
+
+# -----------------------------------------------------------------------
+# Cross-SDK coverage
+#
+# The Suzuki-Trotter sequencing lives in the @qkernel and is lowered by
+# the standard ``pauli_evolve`` emitter (CNOT ladder + RZ phase gadget)
+# that every backend inherits.  The tests below pin down that the same
+# kernel produces physically identical circuits across supported SDKs:
+#
+#   * Qiskit       — native ``pauli_evolve`` backend.
+#   * QURI Parts   — consumes the default decomposition.
+#   * CUDA-Q       — emits a Python ``@cudaq.kernel`` source artifact.
+#
+# CUDA-Q and QURI Parts blocks use ``importorskip`` so the file still
+# runs against a qiskit-only environment.
+# -----------------------------------------------------------------------
+
+
+def _qulacs_statevector_from_quri_parts(qp_circuit) -> np.ndarray:
+    """Bind parameters (empty) and simulate on Qulacs."""
+    from quri_parts.core.state import GeneralCircuitQuantumState
+    from quri_parts.qulacs.simulator import evaluate_state_to_vector
+
+    if hasattr(qp_circuit, "parameter_count") and qp_circuit.parameter_count > 0:
+        bound = qp_circuit.bind_parameters([0.0] * qp_circuit.parameter_count)
+    elif hasattr(qp_circuit, "bind_parameters"):
+        bound = qp_circuit.bind_parameters([])
+    else:
+        bound = qp_circuit
+    state = GeneralCircuitQuantumState(bound.qubit_count, bound)
+    return np.array(evaluate_state_to_vector(state).vector)
+
+
+def _cudaq_transpiler():
+    """Return a ``CudaqTranspiler`` or skip the test if unavailable."""
+    pytest.importorskip("cudaq")
+    from qamomile.cudaq import CudaqTranspiler
+
+    return CudaqTranspiler()
+
+
+def _cudaq_statevector(cudaq_circuit) -> np.ndarray:
+    """Simulate a fully-bound CUDA-Q STATIC artifact via ``cudaq.get_state``."""
+    import cudaq
+
+    return np.array(cudaq.get_state(cudaq_circuit.kernel_func))
+
+
+def _rz_count_qiskit(qc) -> int:
+    """Count RZ gates inside Qiskit ``for_loop`` bodies (plus top-level)."""
+    count = 0
+    for inst in qc.data:
+        if inst.operation.name == "for_loop":
+            count += _rz_count_qiskit(inst.operation.blocks[0])
+        elif inst.operation.name == "rz":
+            count += 1
+    return count
+
+
+def _rz_count_quri_parts(qp_circuit) -> int:
+    """Count RZ gates in a (bound) QURI Parts circuit."""
+    if hasattr(qp_circuit, "parameter_count") and qp_circuit.parameter_count > 0:
+        bound = qp_circuit.bind_parameters([0.0] * qp_circuit.parameter_count)
+    elif hasattr(qp_circuit, "bind_parameters"):
+        bound = qp_circuit.bind_parameters([])
+    else:
+        bound = qp_circuit
+    return sum(1 for g in bound.gates if g.name == "RZ")
+
+
+def _rz_count_cudaq(cudaq_circuit) -> int:
+    """Count ``rz(`` call sites in the CUDA-Q kernel source."""
+    return cudaq_circuit.source.count("rz(")
+
+
+class TestCrossBackendCompilation:
+    """Trotter kernel transpiles across every available SDK.
+
+    Per-step RZ count is formula-dependent and must agree between
+    backends: order=1 emits one RZ per term, order=2 uses the merged
+    palindrome (three RZs for two terms), and higher orders unfold
+    recursively via the standard ``pauli_evolve`` decomposition.
+    """
+
+    # Expected RZ counts for a single Trotter step on HS_2TERM.
+    _EXPECTED_RZ_PER_STEP = {1: 2, 2: 3, 4: 15}
+
+    @pytest.mark.parametrize("order", [1, 2, 4])
+    def test_qiskit_rz_count(self, order: int) -> None:
+        tr = QiskitTranspiler()
+        exe = tr.transpile(
+            _rabi_trotter,
+            bindings={
+                "order": order,
+                "Hs": HS_2TERM,
+                "gamma": T_EVOLVE,
+                "step": 1,
+            },
+        )
+        qc = exe.compiled_quantum[0].circuit
+        assert _rz_count_qiskit(qc) == self._EXPECTED_RZ_PER_STEP[order]
+
+    @pytest.mark.parametrize("order", [1, 2, 4])
+    def test_quri_parts_rz_count_matches_qiskit(self, order: int) -> None:
+        """Default ``pauli_evolve`` emission must emit the same RZ count."""
+        tr = _quri_parts_transpiler()
+        exe = tr.transpile(
+            _rabi_trotter,
+            bindings={
+                "order": order,
+                "Hs": HS_2TERM,
+                "gamma": T_EVOLVE,
+                "step": 1,
+            },
+        )
+        qp_circuit = exe.compiled_quantum[0].circuit
+        assert qp_circuit.qubit_count == 1
+        assert _rz_count_quri_parts(qp_circuit) == self._EXPECTED_RZ_PER_STEP[order]
+
+    @pytest.mark.parametrize("order", [1, 2, 4])
+    def test_cudaq_rz_count_matches_qiskit(self, order: int) -> None:
+        """CUDA-Q emits the same per-step RZ count as Qiskit / QURI Parts."""
+        tr = _cudaq_transpiler()
+        exe = tr.transpile(
+            _rabi_trotter,
+            bindings={
+                "order": order,
+                "Hs": HS_2TERM,
+                "gamma": T_EVOLVE,
+                "step": 1,
+            },
+        )
+        cq_circuit = exe.compiled_quantum[0].circuit
+        assert cq_circuit.num_qubits == 1
+        assert _rz_count_cudaq(cq_circuit) == self._EXPECTED_RZ_PER_STEP[order]
+
+
+class TestCrossBackendStatevector:
+    """Every SDK must reproduce the exact state to within Trotter error.
+
+    For a symmetric S_4 step with 8 Trotter slices on the Rabi
+    Hamiltonian, the fidelity error drops below 1e-10 in double
+    precision — deep enough that any SDK-specific rotation-sign or
+    gate-ordering bug surfaces as a cross-backend mismatch.
+    """
+
+    _STEP = 8
+    _TOLERANCE = 1e-10
+
+    def test_qiskit_matches_exact_propagator(self) -> None:
+        tr = QiskitTranspiler()
+        exe = tr.transpile(
+            _rabi_trotter,
+            bindings={
+                "order": 4,
+                "Hs": HS_2TERM,
+                "gamma": T_EVOLVE,
+                "step": self._STEP,
+            },
+        )
+        sv = _statevector(exe.compiled_quantum[0].circuit)
+        overlap = abs(np.vdot(_exact_state(), sv))
+        assert overlap > 1.0 - self._TOLERANCE
+
+    def test_quri_parts_matches_exact_propagator(self) -> None:
+        tr = _quri_parts_transpiler()
+        exe = tr.transpile(
+            _rabi_trotter,
+            bindings={
+                "order": 4,
+                "Hs": HS_2TERM,
+                "gamma": T_EVOLVE,
+                "step": self._STEP,
+            },
+        )
+        sv = _qulacs_statevector_from_quri_parts(exe.compiled_quantum[0].circuit)
+        overlap = abs(np.vdot(_exact_state(), sv))
+        assert overlap > 1.0 - self._TOLERANCE
+
+    def test_quri_parts_statevector_matches_qiskit(self) -> None:
+        """Same kernel + same bindings → same state on both backends."""
+        quri_parts_tr = _quri_parts_transpiler()
+        bindings = {
+            "order": 4,
+            "Hs": HS_2TERM,
+            "gamma": T_EVOLVE,
+            "step": self._STEP,
+        }
+        sv_qiskit = _statevector(
+            QiskitTranspiler()
+            .transpile(_rabi_trotter, bindings=bindings)
+            .compiled_quantum[0]
+            .circuit
+        )
+        sv_quri_parts = _qulacs_statevector_from_quri_parts(
+            quri_parts_tr.transpile(_rabi_trotter, bindings=bindings)
+            .compiled_quantum[0]
+            .circuit
+        )
+        # Fidelity — statevectors may differ by a global phase.
+        overlap = abs(np.vdot(sv_qiskit, sv_quri_parts))
+        assert overlap > 1.0 - 1e-10
+
+    def test_cudaq_matches_exact_propagator(self) -> None:
+        tr = _cudaq_transpiler()
+        exe = tr.transpile(
+            _rabi_trotter,
+            bindings={
+                "order": 4,
+                "Hs": HS_2TERM,
+                "gamma": T_EVOLVE,
+                "step": self._STEP,
+            },
+        )
+        sv = _cudaq_statevector(exe.compiled_quantum[0].circuit)
+        overlap = abs(np.vdot(_exact_state(), sv))
+        assert overlap > 1.0 - self._TOLERANCE
+
+    def test_cudaq_statevector_matches_qiskit(self) -> None:
+        """Same kernel + same bindings → same state on both backends."""
+        cudaq_tr = _cudaq_transpiler()
+        bindings = {
+            "order": 4,
+            "Hs": HS_2TERM,
+            "gamma": T_EVOLVE,
+            "step": self._STEP,
+        }
+        sv_qiskit = _statevector(
+            QiskitTranspiler()
+            .transpile(_rabi_trotter, bindings=bindings)
+            .compiled_quantum[0]
+            .circuit
+        )
+        sv_cudaq = _cudaq_statevector(
+            cudaq_tr.transpile(_rabi_trotter, bindings=bindings)
+            .compiled_quantum[0]
+            .circuit
+        )
+        # Fidelity — statevectors may differ by a global phase.
+        overlap = abs(np.vdot(sv_qiskit, sv_cudaq))
+        assert overlap > 1.0 - 1e-10
+
+
+# -----------------------------------------------------------------------
+# Sampling distribution check
+#
+# ``sample()`` counts are the end-to-end observable: a mistake anywhere
+# in the pipeline (parameter binding, emitter sign, classical readout)
+# shifts the observed |0> / |1> ratio.  We use a scalar-Bit wrapper so
+# that the sampling backend reports concrete 0/1 values (measuring a
+# one-element ``Vector[Qubit]`` currently yields ``value=None`` in the
+# sample result, independent of this module).
+# -----------------------------------------------------------------------
+
+
+@qmc.qkernel
+def _rabi_trotter_scalar_bit(
+    order: qmc.UInt,
+    Hs: qmc.Vector[qmc.Observable],
+    gamma: qmc.Float,
+    step: qmc.UInt,
+) -> qmc.Bit:
+    """Scalar-Bit variant of ``_rabi_trotter`` for sampling tests."""
+    q = qmc.qubit_array(1, name="q")
+    q = trotterized_time_evolution(q, Hs, order, gamma, step)
+    return qmc.measure(q[0])
+
+
+class TestCrossBackendDistribution:
+    """Observed sample distribution matches the exact Born probabilities.
+
+    A well-converged Trotter circuit on a single qubit must reproduce
+    ``|<1|psi>|^2`` within a few standard deviations of the binomial
+    error.  ``STD_TOLERANCE`` is deliberately wide (5 sigma) so the
+    test does not flake in CI; a genuine backend bug moves the mean by
+    orders of magnitude, not by fractions of a sigma.
+    """
+
+    _SHOTS = 20_000
+    _STD_TOLERANCE = 5.0
+    _ORDER = 4
+    _STEP = 8
+
+    def _exact_p_one(self) -> float:
+        return float(abs(_exact_state()[1]) ** 2)
+
+    def _sample(self, transpiler) -> tuple[int, int]:
+        exe = transpiler.transpile(
+            _rabi_trotter_scalar_bit,
+            bindings={
+                "order": self._ORDER,
+                "Hs": HS_2TERM,
+                "gamma": T_EVOLVE,
+                "step": self._STEP,
+            },
+        )
+        job = exe.sample(transpiler.executor(), bindings={}, shots=self._SHOTS)
+        counts = {0: 0, 1: 0}
+        for value, count in job.result().results:
+            counts[int(value)] += count
+        return counts[0], counts[1]
+
+    def _assert_matches_exact(self, n_zero: int, n_one: int) -> None:
+        total = n_zero + n_one
+        assert total == self._SHOTS
+        p_one_exact = self._exact_p_one()
+        p_one_obs = n_one / total
+        std = np.sqrt(p_one_exact * (1.0 - p_one_exact) / total)
+        assert abs(p_one_obs - p_one_exact) < self._STD_TOLERANCE * std, (
+            f"observed p(|1>) = {p_one_obs:.4f}, exact = {p_one_exact:.4f}, "
+            f"std = {std:.4f}"
+        )
+
+    def test_qiskit(self) -> None:
+        n0, n1 = self._sample(QiskitTranspiler())
+        self._assert_matches_exact(n0, n1)
+
+    def test_quri_parts(self) -> None:
+        n0, n1 = self._sample(_quri_parts_transpiler())
+        self._assert_matches_exact(n0, n1)
+
+    def test_cudaq(self) -> None:
+        n0, n1 = self._sample(_cudaq_transpiler())
+        self._assert_matches_exact(n0, n1)
+
+
+# -----------------------------------------------------------------------
+# Random Hamiltonian convergence
+#
+# The handcrafted 1-qubit Rabi problem has enough symmetry that some
+# emit bugs cancel.  Drawing a random 2-qubit Hamiltonian (fixed seed)
+# with mixed Pauli weights exercises non-diagonal basis changes, CNOT
+# ladders, and multi-term commutators that the Suzuki recursion must
+# interleave correctly.
+# -----------------------------------------------------------------------
+
+_RANDOM_SEED = 42
+_RANDOM_N_QUBITS = 2
+_RANDOM_T = 0.3
+
+
+def _random_two_part_hamiltonian(
+    seed: int = _RANDOM_SEED,
+) -> tuple[list, np.ndarray]:
+    """Draw a 2-qubit Hamiltonian split into two non-commuting halves.
+
+    Returns the ``[H_a, H_b]`` list (for use as a ``Vector[Observable]``
+    binding) and the exact 4x4 matrix of the full Hamiltonian.
+    """
+    rng = np.random.default_rng(seed)
+    pauli_factories = {
+        "X": qm_o.X,
+        "Y": qm_o.Y,
+        "Z": qm_o.Z,
+    }
+    pauli_mats = {
+        "I": np.eye(2, dtype=complex),
+        "X": np.array([[0, 1], [1, 0]], dtype=complex),
+        "Y": np.array([[0, -1j], [1j, 0]], dtype=complex),
+        "Z": np.array([[1, 0], [0, -1]], dtype=complex),
+    }
+
+    # H_a: single-qubit terms per qubit (deliberately diagonal-free).
+    # H_b: two-qubit XX / YY / ZZ couplings between qubits 0 and 1.
+    single_letters = ["X", "Y", "Z"]
+    pair_letters = ["X", "Y", "Z"]
+
+    h_a = 0 * qm_o.Z(0)  # start from zero Hamiltonian
+    h_b = 0 * qm_o.Z(0)
+    mat = np.zeros((4, 4), dtype=complex)
+
+    for q in range(_RANDOM_N_QUBITS):
+        letter = single_letters[rng.integers(3)]
+        coeff = float(rng.uniform(-1.0, 1.0))
+        h_a = h_a + coeff * pauli_factories[letter](q)
+        # build matrix term: tensor product over both qubits
+        term = np.array([[1.0]], dtype=complex)
+        for qq in range(_RANDOM_N_QUBITS):
+            term = np.kron(term, pauli_mats[letter if qq == q else "I"])
+        mat += coeff * term
+
+    letter = pair_letters[rng.integers(3)]
+    coeff = float(rng.uniform(-1.0, 1.0))
+    h_b = h_b + coeff * pauli_factories[letter](0) * pauli_factories[letter](1)
+    mat += coeff * np.kron(pauli_mats[letter], pauli_mats[letter])
+
+    return [h_a, h_b], mat
+
+
+@qmc.qkernel
+def _rabi_trotter_2q(
+    order: qmc.UInt,
+    Hs: qmc.Vector[qmc.Observable],
+    gamma: qmc.Float,
+    step: qmc.UInt,
+) -> qmc.Vector[qmc.Bit]:
+    """Two-qubit variant of the trotter wrapper kernel."""
+    q = qmc.qubit_array(_RANDOM_N_QUBITS, name="q")
+    q = trotterized_time_evolution(q, Hs, order, gamma, step)
+    return qmc.measure(q)
+
+
+class TestRandomHamiltonianConvergence:
+    """Fidelity against the exact propagator on a random 2-qubit Hamiltonian."""
+
+    @pytest.mark.parametrize(
+        "order, step, max_err",
+        [
+            (2, 32, 1e-3),
+            (4, 16, 1e-7),
+            (6, 8, 1e-10),
+        ],
+    )
+    def test_qiskit_converges(self, order: int, step: int, max_err: float) -> None:
+        hs, mat = _random_two_part_hamiltonian()
+        sv_exact = expm(-1j * _RANDOM_T * mat) @ np.array(
+            [1.0, 0.0, 0.0, 0.0], dtype=complex
+        )
+
+        tr = QiskitTranspiler()
+        exe = tr.transpile(
+            _rabi_trotter_2q,
+            bindings={
+                "order": order,
+                "Hs": hs,
+                "gamma": _RANDOM_T,
+                "step": step,
+            },
+        )
+        sv = _statevector(exe.compiled_quantum[0].circuit)
+        # Qiskit bit ordering is reversed relative to the tensor-product
+        # convention used to build ``mat``.
+        sv = sv.reshape((2,) * _RANDOM_N_QUBITS).transpose().reshape(-1)
+        overlap = abs(np.vdot(sv_exact, sv))
+        assert 1.0 - overlap < max_err, f"S_{order} step={step} overlap={overlap:.12f}"
+
+    def test_quri_parts_matches_qiskit(self) -> None:
+        """Same Hamiltonian + order 4 + step 16 → matching states."""
+        quri_parts_tr = _quri_parts_transpiler()
+        hs, _ = _random_two_part_hamiltonian()
+        bindings = {
+            "order": 4,
+            "Hs": hs,
+            "gamma": _RANDOM_T,
+            "step": 16,
+        }
+
+        # Qiskit and Qulacs agree on the little-endian basis-index
+        # convention (``|q_{n-1} ... q_0>``), so the raw statevectors
+        # are directly comparable up to a global phase.
+        sv_qk = _statevector(
+            QiskitTranspiler()
+            .transpile(_rabi_trotter_2q, bindings=bindings)
+            .compiled_quantum[0]
+            .circuit
+        )
+        sv_qp = _qulacs_statevector_from_quri_parts(
+            quri_parts_tr.transpile(_rabi_trotter_2q, bindings=bindings)
+            .compiled_quantum[0]
+            .circuit
+        )
+        overlap = abs(np.vdot(sv_qk, sv_qp))
+        assert overlap > 1.0 - 1e-10, f"cross-backend overlap {overlap:.15f}"
+
+    def test_cudaq_matches_qiskit(self) -> None:
+        """Same Hamiltonian + order 4 + step 16 → matching states."""
+        cudaq_tr = _cudaq_transpiler()
+        hs, _ = _random_two_part_hamiltonian()
+        bindings = {
+            "order": 4,
+            "Hs": hs,
+            "gamma": _RANDOM_T,
+            "step": 16,
+        }
+
+        # Both backends use the same little-endian basis-index ordering,
+        # so the raw statevectors are directly comparable up to a phase.
+        sv_qk = _statevector(
+            QiskitTranspiler()
+            .transpile(_rabi_trotter_2q, bindings=bindings)
+            .compiled_quantum[0]
+            .circuit
+        )
+        sv_cq = _cudaq_statevector(
+            cudaq_tr.transpile(_rabi_trotter_2q, bindings=bindings)
+            .compiled_quantum[0]
+            .circuit
+        )
+        overlap = abs(np.vdot(sv_qk, sv_cq))
+        assert overlap > 1.0 - 1e-10, f"cross-backend overlap {overlap:.15f}"

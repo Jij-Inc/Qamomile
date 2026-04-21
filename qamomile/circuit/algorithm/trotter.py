@@ -180,7 +180,7 @@ def trotterized_time_evolution(
         order: Approximation order — ``1`` or a positive even integer
             (``2``, ``4``, ``6``, …).  Must be a compile-time constant.
         gamma: Total evolution time.
-        step: Number of Trotter slices.
+        step: Number of Trotter steps.
 
     Returns:
         The evolved qubit register.
