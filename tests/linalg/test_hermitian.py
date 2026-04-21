@@ -228,6 +228,54 @@ class TestArithmetic:
         a = HermitianMatrix(np.kron(X, Z))
         assert (-a) == (-1) * a
 
+    def test_add_sub_identity_1q(self):
+        a = HermitianMatrix(I2)
+        b = HermitianMatrix(I2)
+        np.testing.assert_allclose((a + b).matrix, 2 * I2, atol=1e-12)
+        np.testing.assert_allclose(
+            (a - b).matrix, np.zeros((2, 2), dtype=complex), atol=1e-12
+        )
+        assert (a + b).num_qubits == 1
+        assert (a - b).num_qubits == 1
+
+    def test_div_by_zero_raises(self):
+        a = HermitianMatrix(X)
+        with pytest.raises(ZeroDivisionError):
+            a / 0
+        with pytest.raises(ZeroDivisionError):
+            a / 0.0
+        with pytest.raises(ZeroDivisionError):
+            a / 1e-16
+
+    def test_eq_non_hermitian_returns_notimplemented(self):
+        a = HermitianMatrix(X)
+        assert a.__eq__(5) is NotImplemented
+        assert a.__eq__("not a matrix") is NotImplemented
+        assert a.__eq__(np.array([[0, 1], [1, 0]], dtype=complex)) is NotImplemented
+        assert (a == 5) is False
+
+    @pytest.mark.parametrize("seed", [offset + 901 for offset in range(30)])
+    @pytest.mark.parametrize("n", [1, 2, 3])
+    def test_random_add_matches_hamiltonian_add(self, n, seed):
+        rng = np.random.default_rng(seed)
+        seed_a, seed_b = (int(x) for x in rng.integers(0, 2**31, size=2))
+        a = HermitianMatrix(_random_hermitian(n, seed=seed_a))
+        b = HermitianMatrix(_random_hermitian(n, seed=seed_b))
+        lhs = (a + b).to_hamiltonian(tol=0.0).to_numpy()
+        rhs = (a.to_hamiltonian(tol=0.0) + b.to_hamiltonian(tol=0.0)).to_numpy()
+        np.testing.assert_allclose(lhs, rhs, atol=1e-12)
+
+    @pytest.mark.parametrize("seed", [offset + 901 for offset in range(30)])
+    @pytest.mark.parametrize("n", [1, 2, 3])
+    def test_random_sub_matches_hamiltonian_sub(self, n, seed):
+        rng = np.random.default_rng(seed)
+        seed_a, seed_b = (int(x) for x in rng.integers(0, 2**31, size=2))
+        a = HermitianMatrix(_random_hermitian(n, seed=seed_a))
+        b = HermitianMatrix(_random_hermitian(n, seed=seed_b))
+        lhs = (a - b).to_hamiltonian(tol=0.0).to_numpy()
+        rhs = (a.to_hamiltonian(tol=0.0) - b.to_hamiltonian(tol=0.0)).to_numpy()
+        np.testing.assert_allclose(lhs, rhs, atol=1e-12)
+
 
 class TestProperties:
     def test_num_qubits_and_shape(self):
