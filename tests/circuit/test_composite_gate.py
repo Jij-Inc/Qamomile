@@ -847,12 +847,13 @@ class TestCompositeGateTranspilation:
         # of the multinomial sampling distribution, so the 4 + 8 + 16 = 28
         # checks aggregated across n in {2, 3, 4} are not independent -- but
         # Bonferroni (union bound) is still a valid upper bound. A naive
-        # 3-sigma tolerance gives an aggregate flake rate of about
-        # 28 * 2 * (1 - Phi(3)) ~= 7.6% per CI run, matching the reported
-        # flakes. At k_sigma = 5, summing the *exact* binomial two-sided
-        # tails over all 28 outcomes gives an aggregate bound of ~2.2e-5 per
-        # CI run. The simulator RNG is still pinned in `seeded_executor`
-        # (see conftest.py) so any failure is reproducible.
+        # 3-sigma tolerance has a two-sided Gaussian tail of ~0.27% per
+        # outcome; multiplied by 28 outcomes this gives an aggregate flake
+        # rate of ~7.6% per CI run, which matches the reported flakes. At
+        # k_sigma = 5, summing the *exact* binomial two-sided tails over
+        # all 28 outcomes gives an aggregate bound of ~2.2e-5 per CI run.
+        # The simulator RNG is still pinned in `seeded_executor` (see
+        # conftest.py) so any failure is reproducible.
         expected = shots / num_outcomes
         sigma = (expected * (1 - 1 / num_outcomes)) ** 0.5
         k_sigma = 5
