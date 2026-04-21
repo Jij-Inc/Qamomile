@@ -98,9 +98,7 @@ class TestConstructorValidation:
         """
         magnitude = 1e6
         asymmetry = 10.0  # ≫ atol=1e-10 but ≤ rtol * magnitude with default rtol
-        bad = np.array(
-            [[0.0, magnitude + asymmetry], [magnitude, 0.0]], dtype=complex
-        )
+        bad = np.array([[0.0, magnitude + asymmetry], [magnitude, 0.0]], dtype=complex)
         h = HermitianMatrix(bad)
         with pytest.raises(ValueError, match="imaginary"):
             h.to_hamiltonian()
