@@ -13,3 +13,4 @@ Step-by-step guides to learn Qamomile.
 5. [Classical Flow Patterns](05_classical_flow_patterns) — Loops, sparse data, conditional branching
 6. [Reuse Patterns](06_reuse_patterns) — Helper kernels, composite gates, stubs
 7. [Hamiltonian Simulation](07_hamiltonian_simulation) — Suzuki–Trotter on the Rabi model, convergence orders
+8. [Compilation and Transpilation](08_compilation_and_transpilation) — The 10-stage pipeline, IR walkthrough, backend emission
