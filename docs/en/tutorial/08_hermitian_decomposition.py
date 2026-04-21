@@ -142,10 +142,22 @@ print(qiskit_circuit)
 # For small Hermitian matrices we can build $U = e^{-iMt}$ directly from an eigendecomposition with numpy, apply it to the same initial state, and check that the Qamomile-generated circuit produces the same final state up to a global phase.
 
 # %%
-from qiskit.quantum_info import Statevector
+import warnings
 
+from qiskit.quantum_info import Statevector
+from scipy.sparse import SparseEfficiencyWarning
+
+# Qiskit's `PauliEvolutionGate.to_matrix()` — called by `Statevector` to turn
+# the gate emitted by `pauli_evolve` into an exact unitary — uses
+# `scipy.sparse.linalg.expm` on a non-CSC Hamiltonian and emits noisy
+# `SparseEfficiencyWarning`s. We suppress them locally so the executed
+# notebook stays path-free. (Decomposing the circuit first would avoid the
+# warning but replace the exact evolution with its Trotter approximation,
+# which would break the fidelity check below.)
 qiskit_unitary_circuit = qiskit_circuit.remove_final_measurements(inplace=False)
-psi_qm = np.array(Statevector.from_instruction(qiskit_unitary_circuit).data)
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", category=SparseEfficiencyWarning)
+    psi_qm = np.array(Statevector.from_instruction(qiskit_unitary_circuit).data)
 
 psi0 = np.zeros(4, dtype=complex)
 psi0[0] = 1.0 / np.sqrt(2.0)

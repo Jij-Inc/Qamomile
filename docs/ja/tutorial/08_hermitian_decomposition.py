@@ -142,10 +142,21 @@ print(qiskit_circuit)
 # 小さなエルミート行列であれば、numpyの固有値分解から直接$U = e^{-iMt}$を組み、同じ初期状態に作用させたうえで、Qamomileが生成した回路が同じ最終状態を（グローバル位相を除いて）与えることを確認できます。
 
 # %%
-from qiskit.quantum_info import Statevector
+import warnings
 
+from qiskit.quantum_info import Statevector
+from scipy.sparse import SparseEfficiencyWarning
+
+# Qiskit の `PauliEvolutionGate.to_matrix()` — `pauli_evolve` が生成するゲートを
+# 厳密なユニタリに変換するために `Statevector` から呼ばれます — は、CSC 形式で
+# ない Hamiltonian に対して `scipy.sparse.linalg.expm` を使うため、ノイジーな
+# `SparseEfficiencyWarning` を発生させます。実行済み notebook に絶対パスが
+# 残らないよう、ここだけ抑制しています。(回路を decompose しても警告は消えます
+# が、厳密な発展が Trotter 近似に置き換わり下のフィデリティチェックが破綻します。)
 qiskit_unitary_circuit = qiskit_circuit.remove_final_measurements(inplace=False)
-psi_qm = np.array(Statevector.from_instruction(qiskit_unitary_circuit).data)
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", category=SparseEfficiencyWarning)
+    psi_qm = np.array(Statevector.from_instruction(qiskit_unitary_circuit).data)
 
 psi0 = np.zeros(4, dtype=complex)
 psi0[0] = 1.0 / np.sqrt(2.0)
