@@ -182,8 +182,9 @@ class HermitianMatrix:
         """Multiply by a real scalar.
 
         Args:
-            scalar: A real number. A ``complex`` value whose imaginary
-                part is close to zero is also accepted.
+            scalar: A real number (including NumPy numeric scalars such as
+                ``np.float64`` and ``np.int64``). A ``complex`` value whose
+                imaginary part is close to zero is also accepted.
 
         Returns:
             A new ``HermitianMatrix`` scaled by *scalar*.
@@ -191,14 +192,16 @@ class HermitianMatrix:
         Raises:
             TypeError: If *scalar* has a nonzero imaginary part.
         """
-        if isinstance(scalar, bool) or not isinstance(scalar, (int, float, complex)):
+        if isinstance(scalar, (bool, np.bool_)):
             return NotImplemented
-        if isinstance(scalar, complex) and not is_close_zero(scalar.imag):
+        if not isinstance(scalar, (int, float, complex, np.number)):
+            return NotImplemented
+        if not is_close_zero(float(scalar.imag)):
             raise TypeError(
                 "HermitianMatrix only supports multiplication by real scalars "
                 "(a nonzero imaginary scalar would break the Hermitian property)."
             )
-        real_scalar = float(scalar.real if isinstance(scalar, complex) else scalar)
+        real_scalar = float(scalar.real)
         return HermitianMatrix(self._matrix * real_scalar, validate=False)
 
     __rmul__ = __mul__
@@ -207,8 +210,9 @@ class HermitianMatrix:
         """Divide by a real scalar.
 
         Args:
-            scalar: A real number. A ``complex`` value whose imaginary
-                part is close to zero is also accepted.
+            scalar: A real number (including NumPy numeric scalars such as
+                ``np.float64`` and ``np.int64``). A ``complex`` value whose
+                imaginary part is close to zero is also accepted.
 
         Returns:
             A new ``HermitianMatrix`` divided by *scalar*.
@@ -218,14 +222,16 @@ class HermitianMatrix:
             ZeroDivisionError: If *scalar* is zero or within the
                 :func:`~qamomile._utils.is_close_zero` tolerance of zero.
         """
-        if isinstance(scalar, bool) or not isinstance(scalar, (int, float, complex)):
+        if isinstance(scalar, (bool, np.bool_)):
             return NotImplemented
-        if isinstance(scalar, complex) and not is_close_zero(scalar.imag):
+        if not isinstance(scalar, (int, float, complex, np.number)):
+            return NotImplemented
+        if not is_close_zero(float(scalar.imag)):
             raise TypeError(
                 "HermitianMatrix only supports division by real scalars "
                 "(a nonzero imaginary scalar would break the Hermitian property)."
             )
-        real_scalar = float(scalar.real if isinstance(scalar, complex) else scalar)
+        real_scalar = float(scalar.real)
         if is_close_zero(real_scalar):
             raise ZeroDivisionError(
                 "HermitianMatrix division by a scalar too close to zero."

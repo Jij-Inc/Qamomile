@@ -237,6 +237,22 @@ class TestArithmetic:
         with pytest.raises(TypeError, match="real scalars"):
             (1 + 1j) * a
 
+    def test_numpy_scalar_types_accepted_mul(self):
+        """NumPy numeric scalars (``np.float64``, ``np.int64``) should be
+        accepted the same way as their Python counterparts."""
+        a = HermitianMatrix(np.kron(X, Z))
+        np.testing.assert_allclose(
+            (np.float64(1.5) * a).matrix, 1.5 * np.kron(X, Z), atol=1e-12
+        )
+        np.testing.assert_allclose(
+            (a * np.int64(3)).matrix, 3.0 * np.kron(X, Z), atol=1e-12
+        )
+        np.testing.assert_allclose(
+            (np.complex128(2.0 + 0j) * a).matrix,
+            2.0 * np.kron(X, Z),
+            atol=1e-12,
+        )
+
     def test_real_scalar_div(self):
         a = HermitianMatrix(np.kron(X, Z))
         b = a / 2
@@ -246,6 +262,15 @@ class TestArithmetic:
         a = HermitianMatrix(X)
         with pytest.raises(TypeError, match="real scalars"):
             a / (1 + 1j)
+
+    def test_numpy_scalar_types_accepted_div(self):
+        a = HermitianMatrix(np.kron(X, Z))
+        np.testing.assert_allclose(
+            (a / np.float64(2.0)).matrix, 0.5 * np.kron(X, Z), atol=1e-12
+        )
+        np.testing.assert_allclose(
+            (a / np.int64(4)).matrix, 0.25 * np.kron(X, Z), atol=1e-12
+        )
 
     def test_neg(self):
         a = HermitianMatrix(np.kron(X, Z))
