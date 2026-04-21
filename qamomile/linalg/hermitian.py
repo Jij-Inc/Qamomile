@@ -209,6 +209,8 @@ class HermitianMatrix:
 
         Raises:
             TypeError: If *scalar* has a nonzero imaginary part.
+            ZeroDivisionError: If *scalar* is zero or within the
+                :func:`~qamomile._utils.is_close_zero` tolerance of zero.
         """
         if isinstance(scalar, bool) or not isinstance(scalar, (int, float, complex)):
             return NotImplemented
@@ -218,6 +220,10 @@ class HermitianMatrix:
                 "(a nonzero imaginary scalar would break the Hermitian property)."
             )
         real_scalar = float(scalar.real if isinstance(scalar, complex) else scalar)
+        if is_close_zero(real_scalar):
+            raise ZeroDivisionError(
+                "HermitianMatrix division by a scalar too close to zero."
+            )
         return HermitianMatrix(self._matrix / real_scalar, validate=False)
 
     def __neg__(self) -> HermitianMatrix:
