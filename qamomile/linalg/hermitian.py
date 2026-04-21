@@ -68,10 +68,20 @@ class HermitianMatrix:
 
     @property
     def num_qubits(self) -> int:
+        """Number of qubits (``log2`` of the matrix dimension).
+
+        Returns:
+            The qubit count ``n`` such that the matrix is ``2**n x 2**n``.
+        """
         return self._num_qubits
 
     @property
     def shape(self) -> tuple[int, int]:
+        """Shape of the underlying matrix as ``(2**n, 2**n)``.
+
+        Returns:
+            A 2-tuple of equal integers.
+        """
         return self._matrix.shape
 
     def to_hamiltonian(self, *, tol: float = 1e-12) -> Hamiltonian:
@@ -82,6 +92,14 @@ class HermitianMatrix:
         :attr:`qamomile.observable.Hamiltonian.constant`. Qubit 0
         corresponds to the least-significant bit of the matrix's
         computational-basis indices.
+
+        Args:
+            tol: Absolute tolerance below which a Pauli coefficient is
+                treated as zero and omitted from the result.
+
+        Returns:
+            A :class:`~qamomile.observable.Hamiltonian` containing the
+            Pauli decomposition.
         """
         from qamomile.observable import Hamiltonian, Pauli, PauliOperator
 
@@ -115,6 +133,17 @@ class HermitianMatrix:
         return h
 
     def __add__(self, other: object) -> HermitianMatrix:
+        """Element-wise addition of two Hermitian matrices.
+
+        Args:
+            other: Another ``HermitianMatrix`` of the same shape.
+
+        Returns:
+            A new ``HermitianMatrix`` equal to ``self + other``.
+
+        Raises:
+            ValueError: If the shapes do not match.
+        """
         if not isinstance(other, HermitianMatrix):
             return NotImplemented
         if self._matrix.shape != other._matrix.shape:
@@ -124,6 +153,17 @@ class HermitianMatrix:
         return HermitianMatrix(self._matrix + other._matrix, validate=False)
 
     def __sub__(self, other: object) -> HermitianMatrix:
+        """Element-wise subtraction of two Hermitian matrices.
+
+        Args:
+            other: Another ``HermitianMatrix`` of the same shape.
+
+        Returns:
+            A new ``HermitianMatrix`` equal to ``self - other``.
+
+        Raises:
+            ValueError: If the shapes do not match.
+        """
         if not isinstance(other, HermitianMatrix):
             return NotImplemented
         if self._matrix.shape != other._matrix.shape:
@@ -133,6 +173,18 @@ class HermitianMatrix:
         return HermitianMatrix(self._matrix - other._matrix, validate=False)
 
     def __mul__(self, scalar: int | float | complex) -> HermitianMatrix:
+        """Multiply by a real scalar.
+
+        Args:
+            scalar: A real number. A ``complex`` value whose imaginary
+                part is close to zero is also accepted.
+
+        Returns:
+            A new ``HermitianMatrix`` scaled by *scalar*.
+
+        Raises:
+            TypeError: If *scalar* has a nonzero imaginary part.
+        """
         if isinstance(scalar, bool) or not isinstance(scalar, (int, float, complex)):
             return NotImplemented
         if isinstance(scalar, complex) and not is_close_zero(scalar.imag):
@@ -146,6 +198,18 @@ class HermitianMatrix:
     __rmul__ = __mul__
 
     def __truediv__(self, scalar: int | float | complex) -> HermitianMatrix:
+        """Divide by a real scalar.
+
+        Args:
+            scalar: A real number. A ``complex`` value whose imaginary
+                part is close to zero is also accepted.
+
+        Returns:
+            A new ``HermitianMatrix`` divided by *scalar*.
+
+        Raises:
+            TypeError: If *scalar* has a nonzero imaginary part.
+        """
         if isinstance(scalar, bool) or not isinstance(scalar, (int, float, complex)):
             return NotImplemented
         if isinstance(scalar, complex) and not is_close_zero(scalar.imag):
@@ -157,9 +221,22 @@ class HermitianMatrix:
         return HermitianMatrix(self._matrix / real_scalar, validate=False)
 
     def __neg__(self) -> HermitianMatrix:
+        """Negate the matrix element-wise.
+
+        Returns:
+            A new ``HermitianMatrix`` equal to ``-self``.
+        """
         return HermitianMatrix(-self._matrix, validate=False)
 
     def __eq__(self, other: object) -> bool:
+        """Element-wise exact equality.
+
+        Args:
+            other: Another ``HermitianMatrix``.
+
+        Returns:
+            ``True`` if both matrices are element-wise identical.
+        """
         if not isinstance(other, HermitianMatrix):
             return NotImplemented
         return np.array_equal(self._matrix, other._matrix)

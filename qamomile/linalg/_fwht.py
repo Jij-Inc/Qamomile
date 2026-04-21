@@ -18,6 +18,14 @@ _PHASE_TABLE = np.array([1.0, -1j, -1.0, 1j], dtype=np.complex128)
 
 
 def is_power_of_two(n: int) -> bool:
+    """Check whether ``n`` is a positive power of two.
+
+    Args:
+        n: Integer to test.
+
+    Returns:
+        ``True`` if ``n`` is a power of two, ``False`` otherwise.
+    """
     return n > 0 and (n & (n - 1)) == 0
 
 
