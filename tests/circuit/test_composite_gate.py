@@ -831,6 +831,9 @@ class TestCompositeGateTranspilation:
         job = executable.sample(seeded_executor, shots=shots)
         result = job.result()
 
+        # num_outcomes = number of distinct measurement bitstrings, i.e. 2**n.
+        # Under H^⊗n on |0...0> all outcomes are equally likely (probability
+        # 1/num_outcomes each), independent of `shots` (the number of shots).
         num_outcomes = 2**n
         counts = {i: 0 for i in range(num_outcomes)}
         for bits, count in result.results:
@@ -943,6 +946,9 @@ class TestCompositeGateTranspilation:
         job = executable.sample(seeded_executor, shots=shots)
         result = job.result()
 
+        # num_outcomes = number of distinct measurement bitstrings, i.e. 2**n.
+        # Under H^⊗n on |0...0> all outcomes are equally likely (probability
+        # 1/num_outcomes each), independent of `shots` (the number of shots).
         num_outcomes = 2**n
         counts = {i: 0 for i in range(num_outcomes)}
         for bits, count in result.results:
