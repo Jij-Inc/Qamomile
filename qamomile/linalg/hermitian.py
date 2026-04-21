@@ -54,6 +54,12 @@ class HermitianMatrix:
             raise ValueError(
                 f"HermitianMatrix dimension must be a power of 2; got {m.shape[0]}."
             )
+        # Known gap: np.allclose uses default rtol=1e-5, so for large-magnitude
+        # matrices the effective tolerance becomes rtol * |b| and can greatly
+        # exceed the advertised atol. A barely-non-Hermitian matrix with entries
+        # of order 1e6 can silently pass this check; the FWHT imaginary-residue
+        # guard in _fwht.py catches egregious cases at to_hamiltonian() time.
+        # Consider passing rtol=0.0 here if absolute-tolerance-only is required.
         if validate and not np.allclose(m, m.conj().T, atol=atol):
             raise ValueError(f"Input matrix is not Hermitian (atol={atol}).")
         self._matrix = m

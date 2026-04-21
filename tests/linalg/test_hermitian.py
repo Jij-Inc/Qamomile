@@ -82,6 +82,29 @@ class TestConstructorValidation:
         h = HermitianMatrix(bad, validate=False)
         assert h.num_qubits == 1
 
+    def test_large_magnitude_non_hermitian_is_deferred_to_fwht_guard(self):
+        """Document the known ``rtol`` gap in the constructor check.
+
+        ``np.allclose`` in :class:`HermitianMatrix` uses the default
+        ``rtol=1e-5``, so a non-Hermitian input whose per-entry deviation is
+        small relative to magnitude but much larger than ``atol`` slips past
+        the constructor check and is only caught later by the FWHT
+        imaginary-residue guard inside :meth:`to_hamiltonian`.
+
+        Effective tolerance at the constructor is
+        ``atol + rtol * |b| = 1e-10 + 1e-5 * 1e6 = 10``, so a 10-unit
+        off-diagonal asymmetry at magnitude 1e6 is accepted. Fixing this
+        means passing ``rtol=0.0`` to ``np.allclose`` in the constructor.
+        """
+        magnitude = 1e6
+        asymmetry = 10.0  # ≫ atol=1e-10 but ≤ rtol * magnitude with default rtol
+        bad = np.array(
+            [[0.0, magnitude + asymmetry], [magnitude, 0.0]], dtype=complex
+        )
+        h = HermitianMatrix(bad)
+        with pytest.raises(ValueError, match="imaginary"):
+            h.to_hamiltonian()
+
 
 class TestSingleQubitSanity:
     @pytest.mark.parametrize(
