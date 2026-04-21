@@ -34,7 +34,18 @@ def fwht_inplace(vec: np.ndarray) -> None:
 
     Length must be a power of two. After calling,
     ``vec[s] == sum_q original_vec[q] * (-1)**popcount(q & s)``.
+
+    Args:
+        vec: 1D ``np.ndarray`` whose length is a power of two. Modified in place.
+
+    Returns:
+        ``None``. The transform is applied to ``vec`` in place.
     """
+    # TODO(perf): each butterfly allocates two temporary halves via `.copy()`.
+    # A reshape-based vectorization (operating on
+    # ``vec.reshape(-1, 2 * step)`` blocks) would eliminate the per-iteration
+    # copies. Fine for the current O(n*4**n) callers; revisit if this becomes
+    # a hot path.
     length = vec.shape[0]
     step = 1
     while step < length:
