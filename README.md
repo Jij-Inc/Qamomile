@@ -172,7 +172,7 @@ Contributions, bug reports, and feedback are welcome via [GitHub Issues](https:/
 
 ### Notes for Windows developers
 
-This repository uses git symlinks (e.g., `AGENTS.md` → `CLAUDE.md`). On Windows, git for Windows does not create real symlinks by default, and a symlinked file will be checked out as a plain text file containing the target path. To get real symlinks, enable `core.symlinks` before cloning and make sure your environment allows symlink creation (either run in Developer Mode, available since Windows 10 Creators Update, or run as administrator):
+This repository uses git symlinks (e.g., `AGENTS.md` → `CLAUDE.md`). On Windows, Git for Windows does not create real symlinks by default, and a symlinked file will be checked out as a plain text file containing the target path. To get real symlinks, enable `core.symlinks` before cloning and make sure your environment allows symlink creation (either run in Developer Mode, available since Windows 10 Creators Update, or run as administrator):
 
 ```bash
 git config --global core.symlinks true

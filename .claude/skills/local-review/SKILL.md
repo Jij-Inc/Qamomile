@@ -123,7 +123,7 @@ Any addition or non-trivial modification under `qamomile/circuit/algorithm/` or 
 - Parametrize over random seeds (`@pytest.mark.parametrize("seed", [0, 1, 2, 42])`) and use `np.random.default_rng(seed)` inside.
 - Randomize every input degree of freedom the algorithm/gate exposes: rotation angles, phase parameters, initial bitstrings, control/target wiring, Hamiltonian coefficients, register sizes (across a small set like `n ∈ {1, 2, 3, 5}` — NOT only a single `n`).
 - Seeds must be fixed. Never use a bare `np.random.rand()` — always go through a seeded `Generator`.
-- Include boundary seeds alongside random ones: angles `0`, `π`, `2π`; empty/single-qubit registers where the algorithm allows.
+- Include boundary inputs alongside random ones: angles `0`, `π`, `2π`; empty/single-qubit registers where the algorithm allows.
 
 **What counts as "algorithm or stdlib"**:
 
