@@ -7,6 +7,8 @@ def is_close_zero(value: float, abs_tol: float = 1e-15) -> bool:
 
     Args:
         value (float): The floating-point value to check.
+        abs_tol (float): Absolute tolerance passed to :func:`math.isclose`.
+            Defaults to ``1e-15``.
 
     Returns:
         bool: True if the value is close to zero, False otherwise.
