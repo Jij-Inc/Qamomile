@@ -840,14 +840,16 @@ class TestCompositeGateTranspilation:
         assert sum(counts.values()) == shots
         assert len([c for c in counts.values() if c > 0]) == num_outcomes
 
-        # The per-outcome count follows Binomial(shots, 1/num_outcomes). With
-        # 28 per-outcome checks aggregated across n in {2,3,4}, a naive 3-sigma
-        # bound flakes at ~7% per CI run. Bonferroni correction for aggregate
-        # P_fail <= 1e-5 requires ~5.09 sigma; 5 sigma gives aggregate flake
-        # probability ~1.6e-5 and empirically covered every seed tested in a
-        # 10000-run Monte Carlo (max observed 4.52 sigma). The simulator RNG is
-        # still pinned in `seeded_executor` (see conftest) so a failure is
-        # always reproducible.
+        # Each per-outcome count is a Binomial(shots, 1/num_outcomes) marginal
+        # of the multinomial sampling distribution, so the 4 + 8 + 16 = 28
+        # checks aggregated across n in {2, 3, 4} are not independent -- but
+        # Bonferroni (union bound) is still a valid upper bound. A naive
+        # 3-sigma tolerance gives an aggregate flake rate of about
+        # 28 * 2 * (1 - Phi(3)) ~= 7.6% per CI run, matching the reported
+        # flakes. At k_sigma = 5, summing the *exact* binomial two-sided
+        # tails over all 28 outcomes gives an aggregate bound of ~2.2e-5 per
+        # CI run. The simulator RNG is still pinned in `seeded_executor`
+        # (see conftest.py) so any failure is reproducible.
         expected = shots / num_outcomes
         sigma = (expected * (1 - 1 / num_outcomes)) ** 0.5
         k_sigma = 5
