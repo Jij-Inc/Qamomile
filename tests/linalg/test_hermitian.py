@@ -237,6 +237,13 @@ class TestArithmetic:
         with pytest.raises(TypeError, match="real scalars"):
             (1 + 1j) * a
 
+    def test_complex_scalar_with_near_zero_imag_accepted_mul(self):
+        """Complex scalars whose imaginary part is within ``is_close_zero``
+        tolerance are treated as real."""
+        a = HermitianMatrix(X)
+        b = (2.0 + 1e-18j) * a
+        np.testing.assert_allclose(b.matrix, 2.0 * X, atol=1e-12)
+
     def test_numpy_scalar_types_accepted_mul(self):
         """NumPy numeric scalars (``np.float64``, ``np.int64``) should be
         accepted the same way as their Python counterparts."""
@@ -262,6 +269,11 @@ class TestArithmetic:
         a = HermitianMatrix(X)
         with pytest.raises(TypeError, match="real scalars"):
             a / (1 + 1j)
+
+    def test_complex_scalar_with_near_zero_imag_accepted_div(self):
+        a = HermitianMatrix(X)
+        b = a / (2.0 + 1e-18j)
+        np.testing.assert_allclose(b.matrix, 0.5 * X, atol=1e-12)
 
     def test_numpy_scalar_types_accepted_div(self):
         a = HermitianMatrix(np.kron(X, Z))
@@ -301,6 +313,16 @@ class TestArithmetic:
         assert a.__eq__("not a matrix") is NotImplemented
         assert a.__eq__(np.array([[0, 1], [1, 0]], dtype=complex)) is NotImplemented
         assert (a == 5) is False
+
+    def test_eq_equal_instances(self):
+        """Two ``HermitianMatrix`` objects built from identical arrays compare equal."""
+        assert HermitianMatrix(X) == HermitianMatrix(X)
+        zz = np.kron(Z, Z)
+        assert HermitianMatrix(zz) == HermitianMatrix(zz.copy())
+
+    def test_eq_unequal_instances(self):
+        assert not (HermitianMatrix(X) == HermitianMatrix(Z))
+        assert not (HermitianMatrix(X) == HermitianMatrix(np.kron(X, I2)))
 
     @pytest.mark.parametrize("seed", [offset + 901 for offset in range(30)])
     @pytest.mark.parametrize("n", [1, 2, 3])
