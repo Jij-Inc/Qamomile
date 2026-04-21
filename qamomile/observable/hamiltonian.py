@@ -59,6 +59,16 @@ class Pauli(enum.Enum):
     I = 3  # noqa: E741
 
 
+# Dense 2x2 matrices for each single-qubit Pauli. Hoisted to module level
+# so ``Hamiltonian.to_numpy()`` does not rebuild them on every call.
+_PAULI_MATRICES: dict[Pauli, np.ndarray] = {
+    Pauli.I: np.eye(2, dtype=np.complex128),
+    Pauli.X: np.array([[0, 1], [1, 0]], dtype=np.complex128),
+    Pauli.Y: np.array([[0, -1j], [1j, 0]], dtype=np.complex128),
+    Pauli.Z: np.array([[1, 0], [0, -1]], dtype=np.complex128),
+}
+
+
 # Pauli multiplication table: (P1, P2) -> (Result, Phase)
 # Used for efficient Pauli operator multiplication
 _PAULI_MUL_TABLE: dict[tuple[Pauli, Pauli], tuple[Pauli, complex]] = {
@@ -370,13 +380,6 @@ class Hamiltonian:
         The returned array has shape ``(2**n, 2**n)`` where ``n`` is
         :attr:`num_qubits`.
         """
-        pauli_matrices = {
-            Pauli.I: np.eye(2, dtype=np.complex128),
-            Pauli.X: np.array([[0, 1], [1, 0]], dtype=np.complex128),
-            Pauli.Y: np.array([[0, -1j], [1j, 0]], dtype=np.complex128),
-            Pauli.Z: np.array([[1, 0], [0, -1]], dtype=np.complex128),
-        }
-
         num_qubits = self.num_qubits
         dim = 1 << num_qubits
         result = np.asarray(self.constant, dtype=np.complex128) * np.eye(
@@ -384,9 +387,9 @@ class Hamiltonian:
         )
 
         for operators, coeff in self._terms.items():
-            factors = [pauli_matrices[Pauli.I]] * num_qubits
+            factors = [_PAULI_MATRICES[Pauli.I]] * num_qubits
             for op in operators:
-                factors[op.index] = pauli_matrices[op.pauli]
+                factors[op.index] = _PAULI_MATRICES[op.pauli]
 
             term = np.array([[1.0 + 0.0j]], dtype=np.complex128)
             for factor in reversed(factors):
