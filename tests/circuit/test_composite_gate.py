@@ -840,6 +840,11 @@ class TestCompositeGateTranspilation:
         assert sum(counts.values()) == shots
         assert len([c for c in counts.values() if c > 0]) == num_outcomes
 
+        # The per-outcome count follows Binomial(shots, 1/num_outcomes). The
+        # 3-sigma bound would still flake at ~7% per CI run when summed over all
+        # outcomes and all n, so `seeded_executor` pins the simulator RNG (see
+        # conftest) for reproducibility while the 3-sigma check guards against
+        # real regressions.
         expected = shots / num_outcomes
         sigma = (expected * (1 - 1 / num_outcomes)) ** 0.5
         for outcome, count in counts.items():
