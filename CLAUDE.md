@@ -124,7 +124,7 @@ executable = transpiler.transpile(my_circuit, bindings={"theta": 0.5})
 
 ## Docstring Convention (MANDATORY)
 
-All **public** functions, methods, and classes in `qamomile/` MUST carry a **Google-style docstring** with the appropriate sections filled in — not just a one-line summary. This is enforced by `/local-review` (missing docstrings are P2+).
+All functions, methods, and classes in `qamomile/` — **public and private alike** — MUST carry a **Google-style docstring** with the appropriate sections filled in, not just a one-line summary. This is enforced by `/local-review` (missing docstrings are P2+).
 
 Required sections, in this order:
 
@@ -186,7 +186,7 @@ def transpile(
 
 Additional rules:
 
-- **Private helpers** (`_foo`, `__bar`) should have a docstring when their purpose is not obvious from the name; a one-line summary is acceptable.
+- **Private helpers** (`_foo`, `__bar`) follow the same rule — a Google-style docstring with `Args`/`Returns`/`Raises` as applicable. The sections may be compact, but they must be present whenever they apply.
 - **Tests** do NOT need `Args`/`Returns` sections — a clear 1–2 line description of **what the test verifies** is sufficient (see test philosophy).
 - **`X | None` syntax** is the project standard in both signatures and docstrings — no `Optional[X]`.
 - **Error-class docstrings** must include both a correct-usage example and an incorrect example that triggers the error.
