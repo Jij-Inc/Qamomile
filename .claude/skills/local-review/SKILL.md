@@ -67,7 +67,7 @@ Dependencies flow only downstream (left to right). Upstream (reverse) dependenci
 - `__all__` lists only public symbols. No private names (`_` prefix) unless specifically justified.
 - `TYPE_CHECKING` guards to break circular import dependencies.
 - `__init__.py` provides curated public API via selective re-exports.
-- Use `@dataclass` for data-holding types, not plain classes.
+- Use `@dataclass` for simple state-oriented types where field-wise equality is appropriate; use a regular class when initialization has substantial logic, invariants or encapsulation are important, or equality needs custom semantics.
 
 ### G. Python Style
 
@@ -91,6 +91,57 @@ Dependencies flow only downstream (left to right). Upstream (reverse) dependenci
 - **Negative testing**: Tests MUST verify that invalid inputs raise the correct exception types (use `pytest.raises`).
 - **Test isolation**: No shared mutable state between tests. Use `@pytest.fixture` for setup.
 - **Numerical assertions**: Use `np.allclose()` or `np.testing.assert_allclose()` with explicit `atol`/`rtol` — never `==` for floating-point arrays.
+
+### H-bis. Algorithm & Stdlib Cross-Backend Execution Tests (MANDATORY)
+
+Any addition or non-trivial modification under `qamomile/circuit/algorithm/` or `qamomile/circuit/stdlib/` MUST ship with tests that **transpile the new/changed qkernel to every supported quantum SDK backend and actually execute it** — not just build the IR. This guards against silent emitter regressions and ensures algorithms remain portable across the backend matrix.
+
+**Supported backends (the full matrix)**:
+
+| Backend | Transpiler | Typical executor |
+|---|---|---|
+| Qiskit | `qamomile.qiskit.QiskitTranspiler` | `BasicSimulator` / `qiskit_aer.AerSimulator` |
+| QuriParts | `qamomile.quri_parts.QuriPartsTranspiler` | QuriParts state-vector sampler/estimator |
+| CUDA-Q | `qamomile.cudaq.CudaqTranspiler` | `cudaq` state-vector simulator |
+
+> **Note on qBraid**: `qamomile.qbraid` provides only `QBraidExecutor` (no transpiler of its own — it wraps Qiskit circuits) and requires a qBraid API key / `QbraidProvider` to actually execute. It is **out of scope** for this mandatory cross-backend matrix. Coverage for qBraid is optional and, if added, should gate on `QBRAID_API_KEY` env var with a skip.
+
+**Required test shape** (one test per backend, or a parametrized suite over backends):
+
+1. **Transpile**: `transpiler.transpile(my_algo_kernel, bindings=...)` succeeds and returns an `ExecutableProgram` / backend circuit.
+2. **Execute both sampling AND expectation-value**: Actually run the program on that backend's simulator in **both** execution modes:
+   - **Sampling**: `executable.sample(shots=...)` / equivalent — verifies measurement / counts path.
+   - **Expectation value**: `executable.run(observable=...)` / `estimate()` — verifies the expval / estimator path.
+   Dry-builds without execution do NOT satisfy this rule. Both modes must be exercised because sampling and expval go through different backend code paths (sampler vs estimator primitives) and regress independently.
+3. **Verify**: Compare the backend result against a reference (either an analytic expected value, or a cross-backend equivalence check where backend A's result ≈ backend B's result within `np.allclose` tolerance for expval, or a statistical tolerance for shot-based sampling).
+4. **Guard missing deps**: Use `pytest.importorskip("<sdk>")` at the top so the test is skipped (not errored) on environments without that SDK installed.
+
+**Large-problem escape hatch**: If the algorithm intrinsically requires a problem size that cannot be locally simulated (e.g., 30+ qubit circuits, dense Hamiltonians that blow up statevector memory), the cross-backend **execution** requirement is relaxed — in that case it is sufficient to verify that `transpile()` succeeds on every backend and that the emitted circuit has the expected structure (gate count, qubit count, shape). Document the reason in the test docstring (e.g., `"Skipping execution: statevector simulation infeasible for n=30"`). This exception applies **only** when local simulation is genuinely infeasible, not as a shortcut to avoid writing execution tests. Prefer adding a small-scale parametrization (e.g., `n ∈ {2, 3, 4}`) that IS simulatable, and reserve the "transpile-only" check for the large scale.
+
+**Randomized inputs are MANDATORY where applicable**. Do not rely solely on fixed inputs:
+
+- Parametrize over random seeds (`@pytest.mark.parametrize("seed", [0, 1, 2, 42])`) and use `np.random.default_rng(seed)` inside.
+- Randomize every input degree of freedom the algorithm/gate exposes: rotation angles, phase parameters, initial bitstrings, control/target wiring, Hamiltonian coefficients, register sizes (across a small set like `n ∈ {1, 2, 3, 5}` — NOT only a single `n`).
+- Seeds must be fixed. Never use a bare `np.random.rand()` — always go through a seeded `Generator`.
+- Include boundary seeds alongside random ones: angles `0`, `π`, `2π`; empty/single-qubit registers where the algorithm allows.
+
+**What counts as "algorithm or stdlib"**:
+
+- New file under `qamomile/circuit/algorithm/` (e.g., a new variational ansatz, VQE component, new QAOA variant).
+- New file under `qamomile/circuit/stdlib/` (e.g., QFT, QPE, IQFT, future additions).
+- Any change to an existing algorithm/stdlib qkernel that alters its IR shape, parameter interface, or gate sequence.
+
+**What does NOT count**: pure refactors that provably preserve IR output (still advisable, but not enforced by this rule).
+
+**Reverse direction — new backend SDK added**: Symmetrically, when a new quantum SDK / backend is introduced (a new directory under `qamomile/` with its own `Transpiler` implementation), the existing algorithm and stdlib test suites MUST be extended to cover the new backend. Adding a new `Transpiler` without wiring it into the cross-backend algorithm/stdlib tests leaves the backend silently unvalidated against real quantum programs. Concretely:
+
+- Every existing test under `tests/circuit/algorithm/` and the stdlib tests (`tests/circuit/test_qft.py`, `test_qpe.py`, etc.) that parametrizes over backends MUST include the new backend in its `@pytest.mark.parametrize` list (with `importorskip` guard).
+- If the test is not yet parametrized over backends, that is a signal the existing tests need to be refactored first — do the refactor as part of the SDK-addition PR.
+- Same randomization and sampling+expval execution requirements apply.
+
+Missing this reverse-direction extension is a **P1** finding in a new-backend PR.
+
+**Severity**: Missing cross-backend execution tests for a new algorithm/stdlib is a **P1** finding. Missing randomized coverage (only fixed inputs tested) is a **P2** finding. Testing only sampling but not expval (or vice versa) when the problem is simulatable is a **P2** finding.
 
 ### I. Documentation
 
@@ -170,6 +221,7 @@ For each changed file, systematically check:
 6. **Module organization** (Section F) — Proper `__all__`? TYPE_CHECKING guards?
 7. **Python style** (Section G) — Google-style docstrings on ALL functions/classes with type hints? Modern Python syntax? No dead code?
 8. **Testing** (Section H) — Are tests parametrized? Random testing used? Clear docstrings describing what is tested? Edge cases and negative tests covered? Numerical assertions use `np.allclose`?
+8-bis. **Algorithm/Stdlib cross-backend execution (Section H-bis)** — If the diff adds or materially changes a file under `qamomile/circuit/algorithm/` or `qamomile/circuit/stdlib/`, are there tests that **transpile AND execute** the new kernel on every supported SDK (Qiskit, QuriParts, CUDA-Q) with `importorskip` guards? (qBraid is out of scope — it is an executor-only wrapper around Qiskit and needs an API key.) Are inputs randomized over seeded `np.random.default_rng` across multiple register sizes and angles? Flag as **P1** if cross-backend execution coverage is missing, **P2** if only fixed inputs are used.
 9. **Documentation** (Section I) — Every `.py` has a corresponding `.ipynb`? If `.py` was modified, is `.ipynb` also updated? Are `.ipynb` files executed (outputs present)? New docs paths covered in test patterns? Do `docs/en/` and `docs/ja/` have matching file structures?
 10. **Numerical correctness** (Section J) — Float comparisons use `isclose`/`is_close_zero`? Tests use `np.allclose`? Tolerance assumptions documented?
 11. **Performance & memory** (Section K) — Unnecessary copies? Mutable default arguments? Large iterations use generators?
