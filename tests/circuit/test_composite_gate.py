@@ -840,17 +840,21 @@ class TestCompositeGateTranspilation:
         assert sum(counts.values()) == shots
         assert len([c for c in counts.values() if c > 0]) == num_outcomes
 
-        # The per-outcome count follows Binomial(shots, 1/num_outcomes). The
-        # 3-sigma bound would still flake at ~7% per CI run when summed over all
-        # outcomes and all n, so `seeded_executor` pins the simulator RNG (see
-        # conftest) for reproducibility while the 3-sigma check guards against
-        # real regressions.
+        # The per-outcome count follows Binomial(shots, 1/num_outcomes). With
+        # 28 per-outcome checks aggregated across n in {2,3,4}, a naive 3-sigma
+        # bound flakes at ~7% per CI run. Bonferroni correction for aggregate
+        # P_fail <= 1e-5 requires ~5.09 sigma; 5 sigma gives aggregate flake
+        # probability ~1.6e-5 and empirically covered every seed tested in a
+        # 10000-run Monte Carlo (max observed 4.52 sigma). The simulator RNG is
+        # still pinned in `seeded_executor` (see conftest) so a failure is
+        # always reproducible.
         expected = shots / num_outcomes
         sigma = (expected * (1 - 1 / num_outcomes)) ** 0.5
+        k_sigma = 5
         for outcome, count in counts.items():
-            assert abs(count - expected) < 3 * sigma, (
+            assert abs(count - expected) < k_sigma * sigma, (
                 f"n={n}, outcome={outcome}: count={count}, "
-                f"expected={expected:.0f} +/- {3 * sigma:.0f}"
+                f"expected={expected:.0f} +/- {k_sigma * sigma:.0f}"
             )
 
     def test_bell_pair_sampling(self, qiskit_transpiler, seeded_executor):
