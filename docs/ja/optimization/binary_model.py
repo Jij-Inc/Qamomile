@@ -477,5 +477,5 @@ for original_index1, original_index2 in qubo_from_ommx.keys():
 
 # %% [markdown]
 # ## 関連トピック
-# - [QAOAでMaxCutを解く: 回路をゼロから構築する](./../../vqa/qaoa-maxcut): networkxから作ったランダムグラフからQUBO辞書を作成し、直接`BinaryModel`を定義した上でQAOAを適用する例
-# - [QAOAによるグラフ分割](./../../optimization/qaoa-graph-partition): OMMXインスタンスからQamomileの`QAOAConverter`を用いてQAOAを適用する例 (直接`BinaryModel`を使うのは正規化の部分だけですが、実際にOMMXインスタンスを使ったend-to-endな例です。)
+# - [QAOAでMaxCutを解く: 回路をゼロから構築する](../algorithm/qaoa_maxcut): networkxから作ったランダムグラフからQUBO辞書を作成し、直接`BinaryModel`を定義した上でQAOAを適用する例
+# - [QAOAによるグラフ分割](../algorithm/qaoa_graph_partition): OMMXインスタンスからQamomileの`QAOAConverter`を用いてQAOAを適用する例 (直接`BinaryModel`を使うのは正規化の部分だけですが、実際にOMMXインスタンスを使ったend-to-endな例です。)

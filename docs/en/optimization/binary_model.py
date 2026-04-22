@@ -470,5 +470,5 @@ for original_index1, original_index2 in qubo_from_ommx.keys():
 
 # %% [markdown]
 # ## Related topics
-# - [Solving MaxCut with QAOA: Building the Circuit from Scratch](./../../vqa/qaoa-maxcut): an example that creates a QUBO dictionary from a random graph built with networkx, defines a `BinaryModel` directly, and applies QAOA.
-# - [QAOA for Graph Partitioning](./../../optimization/qaoa-graph-partition): an example that applies QAOA to an OMMX instance using Qamomile's `QAOAConverter`. It only touches `BinaryModel` directly for the normalization step, but it's a realistic end-to-end example based on an OMMX instance.
+# - [Solving MaxCut with QAOA: Building the Circuit from Scratch](../algorithm/qaoa_maxcut): an example that creates a QUBO dictionary from a random graph built with networkx, defines a `BinaryModel` directly, and applies QAOA.
+# - [QAOA for Graph Partitioning](../algorithm/qaoa_graph_partition): an example that applies QAOA to an OMMX instance using Qamomile's `QAOAConverter`. It only touches `BinaryModel` directly for the normalization step, but it's a realistic end-to-end example based on an OMMX instance.

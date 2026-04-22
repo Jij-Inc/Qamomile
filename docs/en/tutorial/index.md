@@ -12,5 +12,5 @@ Step-by-step guides to learn Qamomile.
 4. [Execution Models](04_execution_models) — `sample()` vs `run()`, observables, bit ordering
 5. [Classical Flow Patterns](05_classical_flow_patterns) — Loops, sparse data, conditional branching
 6. [Reuse Patterns](06_reuse_patterns) — Helper kernels, composite gates, stubs
-7. [Hamiltonian Simulation](07_hamiltonian_simulation) — Suzuki–Trotter on the Rabi model, convergence orders
-8. [Hermitian Matrix Decomposition](08_hermitian_decomposition) — From a dense Hermitian matrix to a Pauli sum and a time-evolution circuit
+
+Ready for concrete algorithms? Head over to [Algorithms](../algorithm/index.md) — browse by tag to jump to QAOA, Hamiltonian simulation, and more.

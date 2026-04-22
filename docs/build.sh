@@ -13,7 +13,7 @@ LANGS=(en ja)
 # and can't be automatically synced/executed.
 # release_notes is excluded because it can be quite version specific
 # and may not follow the same structure as other tutorials.
-TARGET_DIRS=(tutorial optimization vqa)
+TARGET_DIRS=(tutorial algorithm optimization)
 
 # Color output
 RED='\033[0;31m'
@@ -65,6 +65,12 @@ generate_api() {
     info "API reference generated"
 }
 
+generate_algorithm_tags() {
+    echo "Generating algorithm tag index and per-tag pages..."
+    uv run python scripts/build_algorithm_tag_pages.py
+    info "Algorithm tag pages generated"
+}
+
 copy_api() {
     echo "Copying API reference to language directories..."
     for lang in "${LANGS[@]}"; do
@@ -110,6 +116,8 @@ execute_lang() {
 # Build documentation for a single language (no sync)
 build_lang() {
     local lang="$1"
+    # Regenerate algorithm index + tag pages from frontmatter before build.
+    generate_algorithm_tags
     echo "Building ${lang} documentation..."
     cd "$lang"
     if is_rtd && [[ -n "${READTHEDOCS_VERSION:-}" ]]; then

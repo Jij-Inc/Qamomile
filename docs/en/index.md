@@ -13,13 +13,18 @@ Qamomile is a quantum programming SDK. Write quantum circuits as typed Python fu
 5. [Classical Flow Patterns](tutorial/05_classical_flow_patterns) — Loops, sparse data, conditional branching
 6. [Reuse Patterns](tutorial/06_reuse_patterns) — Helper kernels, composite gates, stubs
 
-## VQA
+## Algorithms
 
-- [QAOA for MaxCut](vqa/qaoa_maxcut) — Build a QAOA circuit from scratch to solve MaxCut, then compare with the built-in `qaoa_state`
+Concrete algorithm examples — [browse by tag](algorithm/index.md):
+
+- [QAOA for MaxCut](algorithm/qaoa_maxcut) — Build QAOA from scratch to solve MaxCut
+- [QAOA for Graph Partitioning](algorithm/qaoa_graph_partition) — End-to-end with JijModeling and `QAOAConverter`
+- [Hamiltonian Simulation with Suzuki–Trotter](algorithm/hamiltonian_simulation) — Rabi oscillation and convergence orders
+- [From a Hermitian Matrix to a Quantum Circuit](algorithm/hermitian_decomposition) — Dense Hermitian matrix to a Pauli sum and time-evolution circuit
 
 ## Optimization
 
-- [QAOA for Graph Partitioning](optimization/qaoa_graph_partition) — Solve graph partitioning with QAOA end-to-end
+- [How to use `BinaryModel`](optimization/binary_model) — Build unconstrained binary/spin models from BinaryExpr, QUBO/HUBO/Ising, or OMMX
 
 ## Supported Quantum SDKs
 

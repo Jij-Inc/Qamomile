@@ -23,16 +23,16 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 TUTORIAL_PATTERNS = [
     "docs/en/tutorial/**/*.py",
     "docs/ja/tutorial/**/*.py",
-    "docs/en/optimization/**/*.py",
-    "docs/ja/optimization/**/*.py",
     "docs/en/tutorial/**/*.ipynb",
     "docs/ja/tutorial/**/*.ipynb",
+    "docs/en/algorithm/**/*.py",
+    "docs/ja/algorithm/**/*.py",
+    "docs/en/algorithm/**/*.ipynb",
+    "docs/ja/algorithm/**/*.ipynb",
+    "docs/en/optimization/**/*.py",
+    "docs/ja/optimization/**/*.py",
     "docs/en/optimization/**/*.ipynb",
     "docs/ja/optimization/**/*.ipynb",
-    "docs/en/vqa/**/*.py",
-    "docs/ja/vqa/**/*.py",
-    "docs/en/vqa/**/*.ipynb",
-    "docs/ja/vqa/**/*.ipynb",
     # We will not execute the following directories:
     # - collaboration: they may require API keys and may have side effects.
     # - release_notes: they may be quite version specific

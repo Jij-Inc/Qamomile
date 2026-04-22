@@ -52,9 +52,9 @@ docs/
 │   ├── index.md                 # Landing page
 │   ├── _build/                  # Build output (gitignored)
 │   ├── api/                     # Copied from docs/api/ at build time
-│   ├── tutorial/                # Tutorials (.py sources + .ipynb)
-│   ├── optimization/            # Optimization guides
-│   ├── vqa/                     # VQA examples
+│   ├── tutorial/                # SDK tutorials (.py sources + .ipynb)
+│   ├── algorithm/               # Algorithm examples (flat, tag-filterable)
+│   ├── optimization/            # Optimization module usage guides
 │   └── collaboration/           # External integration tutorials (API keys required)
 │
 └── ja/                          # Japanese documentation (mirrors en/ structure)
@@ -63,8 +63,8 @@ docs/
     ├── _build/
     ├── api/
     ├── tutorial/
+    ├── algorithm/
     ├── optimization/
-    ├── vqa/
     └── collaboration/
 ```
 
@@ -231,11 +231,35 @@ API generation and copying are automatically included in `./build.sh build`. No 
    ./build.sh serve-en
    ```
 
+#### Algorithm pages & tags
+
+Pages under `en/algorithm/` and `ja/algorithm/` are tag-filterable. Give each new algorithm `.py` a MyST frontmatter block at the top of its first markdown cell, e.g.:
+
+```python
+# %% [markdown]
+# ---
+# title: My New Algorithm
+# tags: [qaoa, optimization, intermediate]
+# ---
+#
+# # My New Algorithm
+# ...
+```
+
+The landing page (`algorithm/index.md`), per-tag pages (`algorithm/tags/<tag>.md`), and the `Tags` block inside each `myst.yml` are all regenerated automatically from these frontmatter blocks by:
+
+```bash
+uv run python docs/scripts/build_algorithm_tag_pages.py
+```
+
+`./build.sh build-en` / `build-ja` run this step for you before the MyST build, so you usually don't need to invoke it directly. The auto-managed block in `myst.yml` lives between the sentinels `# --- BEGIN algorithm tags (auto-generated) ---` and `# --- END algorithm tags (auto-generated) ---` — do not hand-edit that region.
+
 #### Checklist for new pages
 
 - [ ] `.py` file created in both `en/` and `ja/`
-- [ ] Page added to `toc:` in both `en/myst.yml` and `ja/myst.yml`
+- [ ] Page added to `toc:` in both `en/myst.yml` and `ja/myst.yml` (not needed for algorithm tag pages — auto-generated)
 - [ ] Page linked from both `en/index.md` and `ja/index.md`
+- [ ] For new algorithm pages: `tags:` added in frontmatter (EN + JA) and the tag-page generator re-run
 - [ ] `.ipynb` generated and executed (outputs present)
 - [ ] Test patterns cover the new directory (if applicable)
 - [ ] Build succeeds and page renders correctly

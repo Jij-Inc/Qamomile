@@ -11,13 +11,18 @@ Qamomileは量子プログラミングSDKです。型付きPython関数で量子
 5. [古典フローパターン](tutorial/05_classical_flow_patterns) — ループ、スパースデータ、条件分岐
 6. [再利用パターン](tutorial/06_reuse_patterns) — ヘルパーカーネル、コンポジットゲート、スタブ
 
-## VQA
+## アルゴリズム
 
-- [QAOAでMaxCutを解く](vqa/qaoa_maxcut) — QAOA回路をゼロから構築してMaxCutを解き、組み込みの`qaoa_state`と比較する
+具体的なアルゴリズム例 — [タグから探す](algorithm/index.md):
+
+- [QAOAでMaxCutを解く](algorithm/qaoa_maxcut) — QAOA回路をゼロから構築してMaxCutを解き、組み込みの`qaoa_state`と比較する
+- [QAOAによるグラフ分割](algorithm/qaoa_graph_partition) — JijModelingと`QAOAConverter`でエンドツーエンド
+- [Suzuki–Trotterによるハミルトニアンシミュレーション](algorithm/hamiltonian_simulation) — Rabi振動と収束次数
+- [エルミート行列から量子回路へ](algorithm/hermitian_decomposition) — 密なエルミート行列からPauli和、そして時間発展回路まで
 
 ## 最適化
 
-- [QAOAによるグラフ分割](optimization/qaoa_graph_partition) — QAOAでグラフ分割問題をエンドツーエンドで解く
+- [`BinaryModel`の使い方](optimization/binary_model) — BinaryExpr、QUBO/HUBO/Ising、OMMXから制約なしバイナリ/スピンモデルを構築する
 
 ## 対応Quantum SDK
 

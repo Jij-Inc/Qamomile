@@ -26,17 +26,41 @@ project:
         - file: tutorial/04_execution_models.ipynb
         - file: tutorial/05_classical_flow_patterns.ipynb
         - file: tutorial/06_reuse_patterns.ipynb
-        - file: tutorial/07_hamiltonian_simulation.ipynb
-        - file: tutorial/08_hermitian_decomposition.ipynb
-    - title: VQA
-      file: vqa/index.md
+    - title: Algorithms
+      file: algorithm/index.md
       children:
-        - file: vqa/qaoa_maxcut.ipynb
+        - file: algorithm/qaoa_maxcut.ipynb
+        - file: algorithm/qaoa_graph_partition.ipynb
+        - file: algorithm/hamiltonian_simulation.ipynb
+        - file: algorithm/hermitian_decomposition.ipynb
+# --- BEGIN algorithm tags (auto-generated) ---
+        - title: Tags
+          hidden: true
+          children:
+            - file: algorithm/tags/advanced.md
+            - file: algorithm/tags/built-in.md
+            - file: algorithm/tags/decomposition.md
+            - file: algorithm/tags/from-scratch.md
+            - file: algorithm/tags/graph.md
+            - file: algorithm/tags/graph-partition.md
+            - file: algorithm/tags/hamiltonian-simulation.md
+            - file: algorithm/tags/intermediate.md
+            - file: algorithm/tags/jijmodeling.md
+            - file: algorithm/tags/linalg.md
+            - file: algorithm/tags/maxcut.md
+            - file: algorithm/tags/optimization.md
+            - file: algorithm/tags/pauli.md
+            - file: algorithm/tags/qaoa.md
+            - file: algorithm/tags/simulation.md
+            - file: algorithm/tags/suzuki.md
+            - file: algorithm/tags/time-evolution.md
+            - file: algorithm/tags/trotter.md
+            - file: algorithm/tags/variational.md
+        # --- END algorithm tags (auto-generated) ---
     - title: Optimization
       file: optimization/index.md
       children:
         - file: optimization/binary_model.ipynb
-        - file: optimization/qaoa_graph_partition.ipynb
     - title: Collaboration
       file: collaboration/index.md
       children:
