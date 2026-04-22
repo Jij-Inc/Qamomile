@@ -6,13 +6,31 @@ that operate on :class:`BinaryModel` instances (both SPIN and BINARY).
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Protocol
 
 import numpy as np
 
 from qamomile.optimization.binary_model.expr import VarType
 from qamomile.optimization.binary_model.model import BinaryModel
 from qamomile.optimization.binary_model.sampleset import BinarySampleSet
+
+
+class _StepFn(Protocol):
+    """Callable protocol for a single local-search step.
+
+    A step mutates *state* in place if an improving flip is found and
+    returns ``True``; otherwise it leaves *state* unchanged and returns
+    ``False``. The boolean return lets the driver detect convergence
+    without copying *state*.
+    """
+
+    def __call__(
+        self,
+        state: np.ndarray,
+        neighbors: dict[int, list[tuple[int, float]]],
+        linear: dict[int, float],
+        n: int,
+    ) -> bool: ...
 
 
 class LocalSearch:
@@ -96,7 +114,7 @@ class LocalSearch:
                     "All elements of initial_state must be 0 or 1 for BINARY models."
                 )
 
-        methods: dict[str, Callable[..., np.ndarray]] = {
+        methods: dict[str, _StepFn] = {
             "best_improvement": self._best_improvement,
             "first_improvement": self._first_improvement,
         }
@@ -129,16 +147,20 @@ class LocalSearch:
 
     def _search(
         self,
-        step: Callable[..., np.ndarray],
+        step: _StepFn,
         state: np.ndarray,
         max_iter: int,
     ) -> np.ndarray:
-        """Run the local search loop until convergence or max_iter."""
+        """Run the local search loop until convergence or max_iter.
+
+        The step function mutates *state* in place and reports whether a
+        flip occurred via its boolean return, avoiding a per-iteration
+        array copy for the convergence check.
+        """
         counter = 0
         while max_iter == -1 or counter < max_iter:
-            prev = state.copy()
-            state = step(state, self._neighbors, self._linear_dict, len(state))
-            if np.array_equal(prev, state):
+            flipped = step(state, self._neighbors, self._linear_dict, len(state))
+            if not flipped:
                 break
             counter += 1
         return state
@@ -164,17 +186,18 @@ class LocalSearch:
         neighbors: dict[int, list[tuple[int, float]]],
         linear: dict[int, float],
         n: int,
-    ) -> np.ndarray:
-        """Flip the first bit whose flip lowers energy and return immediately.
+    ) -> bool:
+        """Flip the first bit whose flip lowers energy.
 
-        Scans bits in index order and accepts the first improving flip.
-        If no flip improves energy, the state is returned unchanged.
+        Scans bits in index order, flips the first one with a negative
+        energy delta in place, and reports ``True``. If no flip improves
+        energy, *state* is left unchanged and ``False`` is returned.
         """
         for i in range(n):
             if LocalSearch._calc_e_diff(state, neighbors, linear, i) < 0:
                 state[i] = -state[i]
-                return state
-        return state
+                return True
+        return False
 
     @staticmethod
     def _best_improvement(
@@ -182,17 +205,23 @@ class LocalSearch:
         neighbors: dict[int, list[tuple[int, float]]],
         linear: dict[int, float],
         n: int,
-    ) -> np.ndarray:
-        """Flip the single bit that gives the largest energy decrease."""
+    ) -> bool:
+        """Flip the single bit giving the largest energy decrease.
+
+        Mutates *state* in place and returns ``True`` if a flip was
+        applied; returns ``False`` (leaving *state* unchanged) when no
+        single-bit flip lowers energy, including the ``n == 0`` case.
+        """
         if n == 0:
-            return state
+            return False
         deltas = [
             LocalSearch._calc_e_diff(state, neighbors, linear, i) for i in range(n)
         ]
         best = int(np.argmin(deltas))
         if deltas[best] < 0:
             state[best] = -state[best]
-        return state
+            return True
+        return False
 
     def _to_sampleset(self, spin_state: np.ndarray) -> BinarySampleSet:
         """Convert final SPIN state to a BinarySampleSet in the original vartype."""

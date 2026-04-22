@@ -184,9 +184,7 @@ class TestEdgeCases:
 class TestUnsupportedModels:
     def test_hubo_model_raises(self):
         """Models with order > 2 (HUBO) raise ValueError in __init__."""
-        model = BinaryModel.from_ising(linear={}, quad={}, constant=0.0)
-        model._higher[(0, 1, 2)] = 1.0
-        model.order = 3
+        model = BinaryModel.from_hubo({(0, 1, 2): 1.0}, constant=0.0)
         with pytest.raises(ValueError, match="quadratic"):
             LocalSearch(model)
 
