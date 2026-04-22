@@ -611,7 +611,11 @@ class QKernel(Generic[P, R]):
                 init_value=float(value),
             )
 
-        # Scalar bool/Bit (must precede int because bool is a subclass of int)
+        # Scalar bool/Bit. Placed before the int/UInt branch for explicit
+        # intent; exact-type matching via ``param_type in (...)`` means bool
+        # would not fall into the int branch regardless of ordering, but
+        # keeping bool first stays future-proof if matching ever changes to
+        # isinstance/issubclass semantics.
         if param_type in (bool, Bit):
             return Bit(
                 value=Value(
