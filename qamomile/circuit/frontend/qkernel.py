@@ -32,11 +32,11 @@ from qamomile.circuit.frontend.func_to_block import (
 from qamomile.circuit.frontend.handle import Observable, Qubit
 from qamomile.circuit.frontend.handle.array import ArrayBase, Vector
 from qamomile.circuit.frontend.handle.containers import Dict
-from qamomile.circuit.frontend.handle.primitives import Float, Handle, UInt
+from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, UInt
 from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
-from qamomile.circuit.ir.types import FloatType, ObservableType, UIntType
+from qamomile.circuit.ir.types import BitType, FloatType, ObservableType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
 from qamomile.circuit.transpiler.errors import FrontendTransformError
 
@@ -609,6 +609,20 @@ class QKernel(Generic[P, R]):
                     name=name,
                 ).with_const(float(value)),
                 init_value=float(value),
+            )
+
+        # Scalar bool/Bit. Placed before the int/UInt branch for explicit
+        # intent; exact-type matching via ``param_type in (...)`` means bool
+        # would not fall into the int branch regardless of ordering, but
+        # keeping bool first stays future-proof if matching ever changes to
+        # isinstance/issubclass semantics.
+        if param_type in (bool, Bit):
+            return Bit(
+                value=Value(
+                    type=BitType(),
+                    name=name,
+                ).with_const(bool(value)),
+                init_value=bool(value),
             )
 
         # Scalar int/UInt
