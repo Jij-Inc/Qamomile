@@ -1581,15 +1581,20 @@ class CircuitAnalyzer:
                             elif isinstance(inner_op, MeasureOperation):
                                 operands = list(inner_op.operands[:1])
                             for operand in operands:
-                                idx = self._resolve_operand_to_qubit_index(
+                                # Use _resolve_operand_to_qubit_indices to handle
+                                # array operands (e.g., passing entire array to CallBlock)
+                                indices = self._resolve_operand_to_qubit_indices(
                                     operand,
                                     qubit_map,
                                     logical_id_remap,
                                     iter_params,
                                 )
-                                if idx is not None:
-                                    precise_affected.add(idx)
-                                else:
+                                if indices:
+                                    precise_affected.update(indices)
+                                elif isinstance(operand.type, QubitType):
+                                    # Only mark unresolved for qubit operands
+                                    # Non-qubit operands (Float, UInt, etc.) are expected
+                                    # to return empty indices
                                     all_resolved = False
                     if all_resolved and precise_affected:
                         return list(precise_affected)
