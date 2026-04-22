@@ -60,6 +60,7 @@ dev = [
     "zuban>=0.4.1",
     "griffe>=1.0.0",
     "ommx-pyscipopt-adapter>=2.3.0",
+    "scikit-learn>=1.6.0",
 ]
 
 [tool.pytest.ini_options]

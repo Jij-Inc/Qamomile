@@ -15,6 +15,10 @@ Qamomileは量子プログラミングSDKです。型付きPython関数で量子
 
 - [QAOAでMaxCutを解く](vqa/qaoa_maxcut) — QAOA回路をゼロから構築してMaxCutを解き、組み込みの`qaoa_state`と比較する
 
+## Algorithm
+
+- [量子カーネル分類](algorithm/quantum_kernel_classification) — Qamomileの`@qkernel`とリソース推定を使って量子カーネルSVM分類器を構築する
+
 ## 最適化
 
 - [QAOAによるグラフ分割](optimization/qaoa_graph_partition) — QAOAでグラフ分割問題をエンドツーエンドで解く

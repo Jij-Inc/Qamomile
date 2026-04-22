@@ -13,7 +13,7 @@ LANGS=(en ja)
 # and can't be automatically synced/executed.
 # release_notes is excluded because it can be quite version specific
 # and may not follow the same structure as other tutorials.
-TARGET_DIRS=(tutorial optimization vqa)
+TARGET_DIRS=(tutorial algorithm optimization vqa)
 
 # Color output
 RED='\033[0;31m'

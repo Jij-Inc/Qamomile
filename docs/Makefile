@@ -7,7 +7,7 @@ LANGS := en ja
 # and can't be automatically synced/executed.
 # release_notes is excluded because it can be quite version specific
 # and may not follow the same structure as other tutorials.
-TARGET_DIRS := tutorial optimization vqa
+TARGET_DIRS := tutorial algorithm optimization vqa
 
 .PHONY: help build build-en build-ja sync sync-en sync-ja execute execute-en execute-ja sync-build sync-build-en sync-build-ja generate-api copy-api clean clean-all serve-en serve-ja fresh-en fresh-ja build-site serve-site
 
