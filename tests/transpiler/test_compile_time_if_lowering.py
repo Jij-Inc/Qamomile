@@ -1297,3 +1297,67 @@ class TestCastProvenanceThroughSeparate:
             f"{arr_true.uuid}_0",
             f"{arr_true.uuid}_1",
         ]
+
+
+# ---------------------------------------------------------------------------
+# Test: bool parameter binding
+# ---------------------------------------------------------------------------
+
+
+class TestBoolBinding:
+    """Compile-time binding of ``bool`` parameters folds `if flag:` branches."""
+
+    def test_bool_true_selects_true_branch(self):
+        """flag=True: IfOperation removed, H gate from true branch present."""
+
+        @qm.qkernel
+        def kernel(flag: bool) -> qm.Vector[qm.Bit]:
+            q = qm.qubit_array(1, "q")
+            if flag:
+                q[0] = qm.h(q[0])
+            else:
+                q[0] = qm.x(q[0])
+            return qm.measure(q)
+
+        lowered = _lower(kernel, bindings={"flag": True})
+
+        assert not _find_ops(lowered.operations, IfOperation), (
+            "IfOperation should be removed after lowering"
+        )
+        h_gates = _find_gates(lowered.operations, GateOperationType.H)
+        x_gates = _find_gates(lowered.operations, GateOperationType.X)
+        assert len(h_gates) >= 1, "H gate from true branch should be present"
+        assert len(x_gates) == 0, "X gate from false branch must be dropped"
+
+    def test_bool_false_selects_false_branch(self):
+        """flag=False: IfOperation removed, X gate from false branch present."""
+
+        @qm.qkernel
+        def kernel(flag: bool) -> qm.Vector[qm.Bit]:
+            q = qm.qubit_array(1, "q")
+            if flag:
+                q[0] = qm.h(q[0])
+            else:
+                q[0] = qm.x(q[0])
+            return qm.measure(q)
+
+        lowered = _lower(kernel, bindings={"flag": False})
+
+        assert not _find_ops(lowered.operations, IfOperation)
+        h_gates = _find_gates(lowered.operations, GateOperationType.H)
+        x_gates = _find_gates(lowered.operations, GateOperationType.X)
+        assert len(h_gates) == 0, "H gate from true branch must be dropped"
+        assert len(x_gates) >= 1, "X gate from false branch should be present"
+
+    def test_bool_build_only_no_bindings_error(self):
+        """``kernel.build(flag=True)`` must accept a Python bool without error."""
+
+        @qm.qkernel
+        def kernel(flag: bool) -> qm.Vector[qm.Bit]:
+            q = qm.qubit_array(1, "q")
+            if flag:
+                q[0] = qm.h(q[0])
+            return qm.measure(q)
+
+        kernel.build(flag=True)
+        kernel.build(flag=False)
