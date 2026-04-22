@@ -11,6 +11,9 @@ if TYPE_CHECKING:
     from qiskit.circuit import QuantumCircuit
 
 
+_SIMULATOR_SEED = 901
+
+
 @pytest.fixture
 def qiskit_transpiler():
     """Get Qiskit transpiler."""
@@ -25,7 +28,9 @@ def seeded_executor(qiskit_transpiler):
     """Executor with fixed seed for reproducible sampling."""
     from qiskit.providers.basic_provider import BasicSimulator
 
-    return qiskit_transpiler.executor(backend=BasicSimulator())
+    backend = BasicSimulator()
+    backend.set_options(seed_simulator=_SIMULATOR_SEED)
+    return qiskit_transpiler.executor(backend=backend)
 
 
 def run_statevector(qc: "QuantumCircuit") -> np.ndarray:

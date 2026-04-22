@@ -33,7 +33,7 @@ If you want this version, install from source.
 
 Requirements:
 
-- Python 3.12+
+- Python 3.11+
 - `uv`
 
 Clone the repository:
@@ -169,6 +169,24 @@ This README focuses on the current circuit-first API, but optimization support r
 ## Contributing
 
 Contributions, bug reports, and feedback are welcome via [GitHub Issues](https://github.com/Jij-Inc/Qamomile/issues) and pull requests.
+
+### Notes for Windows developers
+
+This repository uses git symlinks (e.g., `AGENTS.md` → `CLAUDE.md`). On Windows, Git for Windows does not create real symlinks by default, and a symlinked file will be checked out as a plain text file containing the target path. To get real symlinks, enable `core.symlinks` before cloning and make sure your environment allows symlink creation (either run in Developer Mode, available since Windows 10 Creators Update, or run as administrator):
+
+```bash
+git config --global core.symlinks true
+git clone https://github.com/Jij-Inc/Qamomile.git
+```
+
+If you already cloned without this setting, you can re-checkout the affected paths after enabling it:
+
+```bash
+git config core.symlinks true
+git checkout -- AGENTS.md
+```
+
+On macOS, Linux, and WSL2 this is handled automatically — no action needed.
 
 ## License
 

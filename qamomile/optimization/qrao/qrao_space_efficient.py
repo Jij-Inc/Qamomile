@@ -15,8 +15,8 @@ import typing
 import numpy as np
 
 import qamomile.observable as qm_o
+from qamomile._utils import is_close_zero
 from qamomile.optimization.binary_model import BinaryModel, VarType
-from qamomile.optimization.utils import is_close_zero
 
 from .base_converter import QRACConverterBase
 from .base_encoder import BaseQRACEncoder, PauliType

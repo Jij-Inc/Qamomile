@@ -62,9 +62,12 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
 
     def run(self, input: Block) -> Block:
         """Run the compile-time if lowering pass."""
-        if input.kind not in (BlockKind.AFFINE,):
+        # HIERARCHICAL is accepted during the self-recursion unroll loop;
+        # surviving CallBlockOperations are passed through untouched.
+        if input.kind not in (BlockKind.AFFINE, BlockKind.HIERARCHICAL):
             raise ValidationError(
-                f"CompileTimeIfLoweringPass expects AFFINE block, got {input.kind}",
+                f"CompileTimeIfLoweringPass expects AFFINE or "
+                f"HIERARCHICAL block, got {input.kind}",
             )
 
         # Track concrete values produced by classical ops.
