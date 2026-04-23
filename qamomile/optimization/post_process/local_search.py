@@ -40,13 +40,7 @@ class _StepFn(Protocol):
     without copying *state*.
     """
 
-    def __call__(
-        self,
-        state: np.ndarray,
-        neighbors: dict[int, list[tuple[int, float]]],
-        linear: dict[int, float],
-        n: int,
-    ) -> bool: ...
+    def __call__(self, state: np.ndarray) -> bool: ...
 
 
 class LocalSearch:
@@ -143,9 +137,7 @@ class LocalSearch:
             method = LocalSearchMethod(method)
         except ValueError as e:
             valid = [m.value for m in LocalSearchMethod]
-            raise ValueError(
-                f"Invalid method: {method!r}. Choose from {valid}."
-            ) from e
+            raise ValueError(f"Invalid method: {method!r}. Choose from {valid}.") from e
 
         match method:
             case LocalSearchMethod.BEST:
@@ -191,7 +183,7 @@ class LocalSearch:
         """
         counter = 0
         while max_iter == -1 or counter < max_iter:
-            flipped = step_fn(state, self._neighbors, self._linear_dict, len(state))
+            flipped = step_fn(state)
             if not flipped:
                 break
             counter += 1
@@ -212,42 +204,32 @@ class LocalSearch:
         interaction = sum(v * state[j] for j, v in neighbors[idx])
         return float(-2 * state[idx] * (interaction + linear.get(idx, 0.0)))
 
-    @staticmethod
-    def _first_improvement(
-        state: np.ndarray,
-        neighbors: dict[int, list[tuple[int, float]]],
-        linear: dict[int, float],
-        n: int,
-    ) -> bool:
+    def _first_improvement(self, state: np.ndarray) -> bool:
         """Flip the first bit whose flip lowers energy.
 
         Scans bits in index order, flips the first one with a negative
         energy delta in place, and reports ``True``. If no flip improves
         energy, *state* is left unchanged and ``False`` is returned.
         """
-        for i in range(n):
-            if LocalSearch._calc_e_diff(state, neighbors, linear, i) < 0:
+        for i in range(len(state)):
+            if self._calc_e_diff(state, self._neighbors, self._linear_dict, i) < 0:
                 state[i] = -state[i]
                 return True
         return False
 
-    @staticmethod
-    def _best_improvement(
-        state: np.ndarray,
-        neighbors: dict[int, list[tuple[int, float]]],
-        linear: dict[int, float],
-        n: int,
-    ) -> bool:
+    def _best_improvement(self, state: np.ndarray) -> bool:
         """Flip the single bit giving the largest energy decrease.
 
         Mutates *state* in place and returns ``True`` if a flip was
         applied; returns ``False`` (leaving *state* unchanged) when no
-        single-bit flip lowers energy, including the ``n == 0`` case.
+        single-bit flip lowers energy, including the empty-state case.
         """
+        n = len(state)
         if n == 0:
             return False
         deltas = [
-            LocalSearch._calc_e_diff(state, neighbors, linear, i) for i in range(n)
+            self._calc_e_diff(state, self._neighbors, self._linear_dict, i)
+            for i in range(n)
         ]
         best = int(np.argmin(deltas))
         if deltas[best] < 0:
