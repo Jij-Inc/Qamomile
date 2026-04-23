@@ -77,6 +77,7 @@ Dependencies flow only downstream (left to right). Upstream (reverse) dependenci
 - **All functions, methods, and classes — public and private alike — MUST have Google-style docstrings** with `Args`, `Returns`, and `Raises` sections (omitting only sections that genuinely do not apply), plus an `Example` where helpful. Type hints should be included in the docstring. Private helpers (`_foo`, `__bar`) may have compact sections but must still follow the Google-style structure. Tests are exempt from `Args`/`Returns` — a clear 1–2 line description of what the test verifies suffices (see Section H). Missing docstrings are a P2+ issue. See the `## Docstring Convention (MANDATORY)` section of `CLAUDE.md` for the authoritative convention and a full example.
 - No stale imports or dead code.
 - Consistent import style (`import qamomile.circuit as qmc`).
+- **Closed-set parameters as Enum**: When a public parameter accepts a closed set of valid strings (mode selectors, method names, algorithm variants, backend keys, etc.), define the valid values as an `enum.StrEnum` and compare/dispatch using the Enum internally. The signature should accept `str | MyEnum` for ergonomics, and normalize to the Enum at the entry point (e.g., `method = MyEnum(method)`, catching `ValueError` to raise a clear message listing valid values). Internal dispatch should use `match` over the Enum (see Section L "exhaustive branching") when the set is small, or a `ClassVar[dict[MyEnum, ...]]` mapping when 8+ variants make `match` hard to read. **Do not** build a `dict[str, callable]` inside the hot-path method every call — it's both wasteful and loses static exhaustiveness. Raw string comparison (`if method == "foo"`) for closed sets is a P2 issue; per-call dict construction in a method body is a P3 issue.
 
 ### H. Testing Philosophy
 
@@ -91,6 +92,8 @@ Dependencies flow only downstream (left to right). Upstream (reverse) dependenci
 - **Negative testing**: Tests MUST verify that invalid inputs raise the correct exception types (use `pytest.raises`).
 - **Test isolation**: No shared mutable state between tests. Use `@pytest.fixture` for setup.
 - **Numerical assertions**: Use `np.allclose()` or `np.testing.assert_allclose()` with explicit `atol`/`rtol` — never `==` for floating-point arrays.
+- **Deterministic-test justification**: For tests whose expected value is computed (not trivially observable from the fixture), the docstring or an adjacent comment MUST explain WHY that value is correct. For asserted numbers that require non-trivial derivation (energy formulas, hand-rolled reference outputs, expected optimal states of a specific Hamiltonian, etc.), include the derivation — formula + intermediate values — either in the test docstring or as a comment block above the assertions. A bare `assert np.isclose(energy, -8.0)` with no justification forces every future reader to re-derive the number; missing justification for a non-trivial asserted value is a **P2** issue. Trivial cases (e.g., `f(0) == 0`, `identity(x) == x`) are exempt.
+- **Deterministic-test completeness**: When a test exercises a fully deterministic code path (no randomness, no floating-point beyond reference-level precision), it MUST assert on every deterministic output the function produces — not just one. If a function returns `(sample, energy, count)` and only `energy` is asserted, `sample` and `count` are silently untested; any regression that changes them slips through. Assert all deterministic return components (and any invariants they imply) unless a component is explicitly documented as non-deterministic or out of scope. Missing assertions on other deterministic outputs are a **P2** issue. For parametrized tests, if a specific case has additional deterministic properties beyond the shared ones (e.g., a specific initial state has a known final bitstring), assert those too — do not collapse all cases to the weakest common assertion.
 
 ### H-bis. Algorithm & Stdlib Cross-Backend Execution Tests (MANDATORY)
 
@@ -174,6 +177,19 @@ Missing this reverse-direction extension is a **P1** finding in a new-backend PR
 - **Defensive assertions**: When guarding against cases that should never occur according to Qamomile's specification but are added "just in case", prefer `assert` over `raise`. This clearly communicates the intent: "this is a specification invariant, not an expected error path."
 - **`assert` vs `raise`**: Use `assert` for internal invariants that indicate programmer error if violated. Use `raise` (with proper exception types from `QamomileCompileError` hierarchy) for conditions that could be triggered by user input or external data.
 
+### M. Optimization Module Conventions
+
+Applies to changes under `qamomile/optimization/`.
+
+- **OMMX interoperability for `BinaryModel`-touching changes**: When a change introduces or modifies code that produces, consumes, or factory-constructs a `BinaryModel` (new constructors, new algorithms returning `BinarySampleSet`, new converters, etc.), verify that the OMMX input/output path is preserved or extended correspondingly. Specifically:
+  - If a new way to **build** a `BinaryModel` is added, check whether an OMMX `Instance` (or equivalent) can be ingested through the same surface, or whether the change breaks parity with existing OMMX ingestion. A new constructor that silently diverges from the OMMX path is a **P1** issue.
+  - If a new post-processor or algorithm **emits** results, check that its output can be round-tripped into an OMMX `Solution` / `SampleSet` (directly or via `BinarySampleSet` / `decode_from_sampleresult`). A terminal output that cannot be represented in OMMX breaks the documented interop contract and is a **P1** issue.
+  - When OMMX coverage is intentionally out of scope for a diff, the PR description or the code comment MUST state why. Silent omission is not acceptable.
+- **HUBO/QUBO restriction audit**: When code rejects higher-order terms (e.g., `if model.order > 2: raise ValueError(...)`) or otherwise restricts itself to QUBO / quadratic Ising, reviewers MUST verify whether the restriction is **fundamental** or **incidental**:
+  - *Fundamental*: the underlying formula/algorithm genuinely cannot be generalized (e.g., a closed-form quadratic solver, a method that relies on 2-local structure). Keep the guard, but the code or docstring must state *why* higher-order cannot be supported.
+  - *Incidental*: the core computation (energy evaluation via `calc_energy`, single-flip ΔE via `−2·s_k·Σ_inds coeff·Π s_i`, etc.) generalizes in one line of code, and the restriction is only there because the author wrote a quadratic-specific helper (e.g., sparse adjacency over `model.quad`). In this case, flag the restriction with a proposed generalization. An unjustified quadratic-only guard on code whose math generalizes trivially is a **P2** issue (it forces users who have higher-order problems to carry their own local search). At minimum, the docstring must explain the restriction is a convenience, not a mathematical limit.
+  - Corresponding test coverage: if the guard is kept, there MUST be a negative test that asserts the correct exception is raised on a HUBO input (existing: `pytest.raises(ValueError)`). If the guard is lifted, randomized HUBO coverage is expected per Section H.
+
 ---
 
 ## Review Process
@@ -226,6 +242,7 @@ For each changed file, systematically check:
 10. **Numerical correctness** (Section J) — Float comparisons use `isclose`/`is_close_zero`? Tests use `np.allclose`? Tolerance assumptions documented?
 11. **Performance & memory** (Section K) — Unnecessary copies? Mutable default arguments? Large iterations use generators?
 12. **Defensive programming** (Section L) — Do `if-else`/`match` statements include `else`/default branches? Are defensive checks using `assert` for internal invariants? Are unreachable branches clearly marked?
+13. **Optimization module conventions** (Section M) — If the diff touches `qamomile/optimization/`: does every change that builds or consumes a `BinaryModel` preserve OMMX ingest/emit parity? For any HUBO/QUBO-order guard (`order > 2` rejection, quadratic-only helpers), is the restriction genuinely fundamental, or did the author just write a quadratic-specific helper whose math generalizes in one line? Is the restriction justified in the docstring and covered by a negative test?
 
 ### Step 5: Impact Analysis and Potential Bug Detection
 
