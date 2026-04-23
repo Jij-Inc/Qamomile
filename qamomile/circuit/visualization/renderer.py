@@ -906,26 +906,26 @@ class MatplotlibRenderer:
 
         # Participation markers: when the analyzer precisely determined
         # which wires the loop touches, draw a small control-style dot
-        # on each affected wire at the box's left edge so viewers can
+        # straddling the box's left and right edges on each affected
+        # wire — half inside the box, half outside — so viewers can
         # tell which wires participate vs. which are passthrough.
-        # Matches the gate-drawing convention (single dot per wire, no
-        # vertical repetition), but placed at the edge rather than the
-        # gate column so it does not collide with body text inside the
-        # wider box. Skip when the analyzer fell back — the affected
-        # set may over-approximate and drawing dots would misleadingly
-        # imply certainty.
+        # Skip when the analyzer fell back to conservative analysis —
+        # the affected set may over-approximate and dots would
+        # misleadingly imply certainty.
         if node.affected_qubits_precise:
             x_left = x_pos - width / 2
+            x_right = x_pos + width / 2
             for q in affected_qubits:
                 y = self.qubit_y[q]
-                circle = mpatches.Circle(
-                    (x_left, y),
-                    radius=0.05,
-                    facecolor=self.style.wire_color,
-                    edgecolor=self.style.wire_color,
-                    zorder=PORDER_GATE,
-                )
-                ax.add_patch(circle)
+                for x in (x_left, x_right):
+                    circle = mpatches.Circle(
+                        (x, y),
+                        radius=0.05,
+                        facecolor=self.style.wire_color,
+                        edgecolor=self.style.wire_color,
+                        zorder=PORDER_GATE,
+                    )
+                    ax.add_patch(circle)
 
     def _add_jupyter_display_support(self, fig: Figure) -> None:
         """Add Jupyter display support to the figure.
