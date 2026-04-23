@@ -2663,8 +2663,19 @@ class CircuitAnalyzer:
                 else:
                     # Fall back to a symbolic expression so downstream
                     # renders e.g. "reps*2*n" instead of "uint_tmp".
+                    # `_format_value_as_expression` is called with empty
+                    # `loop_vars` and `operations=None` here, so it may
+                    # legitimately return its unresolved sentinel "?"
+                    # for values that a richer downstream context could
+                    # still resolve. Treat "?" the same as a temp-name
+                    # miss and forward the logical_id so the downstream
+                    # renderer gets a second chance with its own context.
                     expr = self._format_value_as_expression(actual_input, set(), None)
-                    if expr and not self._is_internal_temp_name(expr):
+                    if (
+                        expr
+                        and expr != "?"
+                        and not self._is_internal_temp_name(expr)
+                    ):
                         child_param_values[dummy_input.logical_id] = expr
                     else:
                         # Last resort: forward the logical_id so
