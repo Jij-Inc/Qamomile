@@ -34,7 +34,7 @@ Dependencies flow only downstream. The practical rules:
 
 - **IR** depends on nothing — it is the shared data model.
 - **Frontend** depends only on IR. It MUST NOT import from Transpiler or Backend.
-- **Transpiler passes** are IR-centric: each pass reads / writes IR and should not reach into Frontend internals. The `Transpiler` orchestrator class at the compile-entry boundary may reference Frontend types such as `QKernel` and `DecompositionConfig` (that is the expected compile-entry surface), but the individual passes under `qamomile/circuit/transpiler/passes/` should stay on IR.
+- **Transpiler passes** are IR-centric: each pass primarily reads / writes IR and must not depend on Frontend **implementation details** (AST machinery, tracer internals, frontend-only helpers). Passes at the compile-entry / config boundary may legitimately accept or type-reference Frontend surface types such as `QKernel` and `DecompositionConfig` as configuration inputs — e.g., `SubstitutionPass` takes `QKernel` as a substitution target and imports it under `TYPE_CHECKING` + runtime-late import (see `qamomile/circuit/transpiler/passes/substitution.py:34,276`). That pattern is NOT a layer violation. Flag only passes that reach into Frontend behavior or non-boundary internals.
 - **Backend** depends on IR and Transpiler public APIs. Backend MUST NOT import from Frontend.
 
 ### C. @qkernel & Converter Pattern
