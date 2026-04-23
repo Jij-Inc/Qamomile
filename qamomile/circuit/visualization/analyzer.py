@@ -2671,11 +2671,7 @@ class CircuitAnalyzer:
                     # miss and forward the logical_id so the downstream
                     # renderer gets a second chance with its own context.
                     expr = self._format_value_as_expression(actual_input, set(), None)
-                    if (
-                        expr
-                        and expr != "?"
-                        and not self._is_internal_temp_name(expr)
-                    ):
+                    if expr and expr != "?" and not self._is_internal_temp_name(expr):
                         child_param_values[dummy_input.logical_id] = expr
                     else:
                         # Last resort: forward the logical_id so
