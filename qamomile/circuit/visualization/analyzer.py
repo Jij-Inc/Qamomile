@@ -1585,6 +1585,33 @@ class CircuitAnalyzer:
                                 )
                             elif isinstance(inner_op, MeasureOperation):
                                 operands = list(inner_op.operands[:1])
+                            elif isinstance(inner_op, MeasureVectorOperation):
+                                operands = list(inner_op.operands[:1])
+                            elif isinstance(
+                                inner_op,
+                                (ForOperation, WhileOperation, ForItemsOperation),
+                            ):
+                                nested = self._analyze_loop_affected_qubits(
+                                    inner_op,
+                                    qubit_map,
+                                    logical_id_remap,
+                                    iter_params,
+                                )
+                                precise_affected.update(nested)
+                                continue
+                            elif isinstance(inner_op, IfOperation):
+                                nested = self._collect_if_affected_qubits(
+                                    inner_op,
+                                    qubit_map,
+                                    logical_id_remap,
+                                    iter_params,
+                                )
+                                precise_affected.update(nested)
+                                continue
+                            else:
+                                # Unknown op type — degrade to the recursive
+                                # fallback to avoid silently dropping qubits.
+                                all_resolved = False
                             for operand in operands:
                                 indices = self._resolve_operand_to_affected_qubits(
                                     operand,
@@ -1658,10 +1685,6 @@ class CircuitAnalyzer:
 
         Recursively walks both true and false branches to collect all
         qubit indices that are operands of any operation.
-
-        Note: This method is implemented for future use but currently not called,
-        because it is only invoked by ``_build_vif``, which itself is not yet
-        connected to the dispatcher.
 
         Args:
             op: IfOperation to analyze.

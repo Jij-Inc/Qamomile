@@ -568,3 +568,57 @@ class TestDeutschPassthroughNoRegression:
         all_h_blocks = [b for b in inline_blocks if "all_h" in b.label.lower()]
         assert len(all_h_blocks) >= 1, "Expected _all_h inline block"
         assert sorted(all_h_blocks[0].affected_qubits) == [0, 1]
+
+
+class TestNestedLoopAffectedQubits:
+    """Regression (bug_002): nested control-flow qubits must not be dropped by precise walk."""
+
+    def test_mixed_rotation_plus_nested_entangling_loop(self):
+        """Outer loop with parameterized rotation + nested entangling For covers all touched qubits."""
+
+        @qm.qkernel
+        def circuit(theta: qm.Float) -> qm.Vector[qm.Bit]:
+            ancilla = qm.qubit_array(2, name="ancilla")
+            data = qm.qubit_array(4, name="data")
+            for i in qm.range(2):
+                ancilla[i] = qm.rx(ancilla[i], theta)
+                for j in qm.range(4):
+                    ancilla[i], data[j] = qm.cx(ancilla[i], data[j])
+            return qm.measure(data)
+
+        graph = circuit._build_graph_for_visualization(theta=0.5)
+        analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=False, fold_loops=True)
+        qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+        vc = analyzer.build_visual_ir(graph, qm_map, qm_names, num_q)
+
+        folded_blocks = [n for n in vc.children if isinstance(n, VFoldedBlock)]
+        assert len(folded_blocks) >= 1, "Expected at least one folded for-block"
+        outer = folded_blocks[0]
+        # Outer loop must span both ancilla (indices 0, 1) and data (2, 3, 4, 5).
+        assert sorted(outer.affected_qubits) == [0, 1, 2, 3, 4, 5]
+
+    def test_nested_for_precision_over_fallback(self):
+        """Hybrid precise recursion beats fallback: box should span only touched wires."""
+
+        @qm.qkernel
+        def circuit() -> qm.Vector[qm.Bit]:
+            q = qm.qubit_array(10, name="q")
+            data = qm.qubit_array(10, name="data")
+            for i in qm.range(2):
+                for j in qm.range(3):
+                    q[i], data[j] = qm.cx(q[i], data[j])
+            return qm.measure(data)
+
+        graph = circuit._build_graph_for_visualization()
+        analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=False, fold_loops=True)
+        qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+        vc = analyzer.build_visual_ir(graph, qm_map, qm_names, num_q)
+
+        folded_blocks = [n for n in vc.children if isinstance(n, VFoldedBlock)]
+        assert len(folded_blocks) >= 1
+        outer = folded_blocks[0]
+        # q has base index 0, data has base index 10. Loop touches q[0], q[1],
+        # data[0], data[1], data[2] — precise recursion should return exactly
+        # those 5 wires, not the 20-wire over-approximation a pure fallback
+        # would yield.
+        assert sorted(outer.affected_qubits) == [0, 1, 10, 11, 12]
