@@ -7,6 +7,7 @@ that operate on :class:`BinaryModel` instances (both SPIN and BINARY).
 from __future__ import annotations
 
 import enum
+from collections.abc import Sequence
 from typing import Protocol
 
 import numpy as np
@@ -116,7 +117,7 @@ class LocalSearch:
 
     def run(
         self,
-        initial_state: list[int],
+        initial_state: Sequence[int] | np.ndarray,
         max_iter: int = -1,
         method: str | LocalSearchMethod = LocalSearchMethod.BEST,
     ) -> BinarySampleSet | ommx.v1.Solution:
@@ -128,7 +129,8 @@ class LocalSearch:
 
         Args:
             initial_state: Variable values in the model's vartype domain
-                (±1 for SPIN, 0/1 for BINARY).
+                (±1 for SPIN, 0/1 for BINARY). Accepts any int sequence
+                (list, tuple) or a 1-D :class:`numpy.ndarray`.
             max_iter: Maximum iterations (-1 for unlimited).
             method: Flip-selection strategy. Either a :class:`LocalSearchMethod`
                 member or its string value (``"best"`` / ``"first"``).
@@ -209,7 +211,13 @@ class LocalSearch:
         return state.copy()
 
     def _from_spin(self, spin_state: np.ndarray) -> list[int]:
-        """Convert SPIN (±1) state back to the model's vartype."""
+        """Convert SPIN (±1) state back to the model's vartype.
+
+        Assumes *spin_state* carries ±1 integer values end-to-end — the
+        array originates from :meth:`_to_spin` (which produces ints) and
+        the in-place flips in :meth:`_first_improvement` /
+        :meth:`_best_improvement` only negate elements, preserving dtype.
+        """
         if self._model.vartype == VarType.BINARY:
             return [0 if s > 0 else 1 for s in spin_state]
         else:
@@ -289,7 +297,14 @@ class LocalSearch:
         return False
 
     def _to_sampleset(self, spin_state: np.ndarray) -> BinarySampleSet:
-        """Convert final SPIN state to a BinarySampleSet in the original vartype."""
+        """Convert final SPIN state to a BinarySampleSet in the original vartype.
+
+        Energy is (re)computed via ``self._model.calc_energy`` — i.e., on
+        the **original** model, not ``_spin_model``. The two agree (vartype
+        is a basis change, not an energy change), so the choice is only
+        about which dict-of-coefficients to walk; using the original keeps
+        the reported energy in the units the user constructed the model with.
+        """
         result_values = self._from_spin(spin_state)
         energy = self._model.calc_energy(result_values)
         sample = {
