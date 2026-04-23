@@ -913,12 +913,19 @@ class MatplotlibRenderer:
 
         # Participation markers: when the analyzer precisely determined
         # which wires the loop touches, draw a small control-style dot
-        # straddling the box's left and right edges on each affected
-        # wire — half inside the box, half outside — so viewers can
-        # tell which wires participate vs. which are passthrough.
-        # Skip when the analyzer fell back to conservative analysis —
-        # the affected set may over-approximate and dots would
-        # misleadingly imply certainty.
+        # centered on each affected wire at the box's left and right
+        # edges so viewers can tell which wires participate vs. which
+        # are passthrough. Skip when the analyzer fell back to
+        # conservative analysis — the affected set may over-
+        # approximate and dots would misleadingly imply certainty.
+        #
+        # Intentional zorder: ``PORDER_GATE - 1`` places each dot
+        # *behind* the folded-block patch (``PORDER_GATE``), so the
+        # opaque box fill hides the half that sits inside the box and
+        # only the outer half protrudes. This mirrors the way a CX
+        # control dot appears to sit on a wire (with the wire partly
+        # hidden behind the dot). Raising the zorder would reveal the
+        # full circle stuck on each edge — not the intended look.
         if node.affected_qubits_precise:
             x_left = x_pos - width / 2
             x_right = x_pos + width / 2

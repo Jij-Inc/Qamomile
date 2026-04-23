@@ -1588,6 +1588,8 @@ class CircuitAnalyzer:
             return list(op.control_qubits) + list(op.target_qubits)
         if isinstance(op, (MeasureOperation, MeasureVectorOperation)):
             return list(op.operands[:1])
+        if isinstance(op, ExpvalOp):
+            return [op.qubits]
         return None
 
     def _analyze_loop_affected_qubits(
