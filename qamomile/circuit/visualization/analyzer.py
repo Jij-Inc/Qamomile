@@ -1134,8 +1134,10 @@ class CircuitAnalyzer:
         if self._is_zero_iteration_loop(start_val, stop_val_raw, step_val):
             return VSkip(node_key=node_key)
 
-        affected_qubits = self._analyze_loop_affected_qubits(
-            op, qubit_map, logical_id_remap, param_values
+        affected_qubits, affected_qubits_precise = (
+            self._analyze_loop_affected_qubits(
+                op, qubit_map, logical_id_remap, param_values
+            )
         )
 
         # Folded mode: fold_loops=True or symbolic stop
@@ -1150,6 +1152,7 @@ class CircuitAnalyzer:
                 affected_qubits=affected_qubits,
                 folded_width=folded_width,
                 kind=VFoldedKind.FOR,
+                affected_qubits_precise=affected_qubits_precise,
             )
 
         # Unfolded: measure each iteration
@@ -1184,6 +1187,7 @@ class CircuitAnalyzer:
             affected_qubits=affected_qubits,
             kind=VUnfoldedKind.FOR,
             iteration_widths=iteration_widths,
+            affected_qubits_precise=affected_qubits_precise,
         )
 
     def _build_vwhile(
@@ -1201,8 +1205,10 @@ class CircuitAnalyzer:
         ``WhileOperation``.  It will be connected once While-loop visualization
         is fully enabled.
         """
-        affected_qubits = self._analyze_loop_affected_qubits(
-            op, qubit_map, logical_id_remap, param_values
+        affected_qubits, affected_qubits_precise = (
+            self._analyze_loop_affected_qubits(
+                op, qubit_map, logical_id_remap, param_values
+            )
         )
         header = "while cond:"
         local_param_values = dict(param_values)
@@ -1230,6 +1236,7 @@ class CircuitAnalyzer:
             affected_qubits=affected_qubits,
             folded_width=folded_width,
             kind=VFoldedKind.WHILE,
+            affected_qubits_precise=affected_qubits_precise,
         )
 
     def _build_vif(
@@ -1249,8 +1256,10 @@ class CircuitAnalyzer:
         ``IfOperation``.  It will be connected once If-operation visualization
         is fully enabled.
         """
-        affected_qubits = self._collect_if_affected_qubits(
-            op, qubit_map, logical_id_remap, param_values
+        affected_qubits, affected_qubits_precise = (
+            self._collect_if_affected_qubits(
+                op, qubit_map, logical_id_remap, param_values
+            )
         )
 
         cond = op.condition
@@ -1286,6 +1295,7 @@ class CircuitAnalyzer:
                 affected_qubits=affected_qubits,
                 folded_width=folded_width,
                 kind=VFoldedKind.IF,
+                affected_qubits_precise=affected_qubits_precise,
             )
 
         # Unfolded: build both branches
@@ -1324,6 +1334,7 @@ class CircuitAnalyzer:
             kind=VUnfoldedKind.IF,
             iteration_widths=iteration_widths,
             condition_label=condition_label,
+            affected_qubits_precise=affected_qubits_precise,
         )
 
     def _build_vfor_items(
@@ -1337,8 +1348,10 @@ class CircuitAnalyzer:
         scope_path: tuple,
     ) -> VFoldedBlock | VUnfoldedSequence | VSkip:
         """Build a Visual IR node for a ForItemsOperation."""
-        affected_qubits = self._analyze_loop_affected_qubits(
-            op, qubit_map, logical_id_remap, param_values
+        affected_qubits, affected_qubits_precise = (
+            self._analyze_loop_affected_qubits(
+                op, qubit_map, logical_id_remap, param_values
+            )
         )
 
         # Build label
@@ -1382,6 +1395,7 @@ class CircuitAnalyzer:
                 affected_qubits=affected_qubits,
                 folded_width=folded_width,
                 kind=VFoldedKind.FOR_ITEMS,
+                affected_qubits_precise=affected_qubits_precise,
             )
 
         entries = materialized
@@ -1439,6 +1453,7 @@ class CircuitAnalyzer:
             affected_qubits=affected_qubits,
             kind=VUnfoldedKind.FOR_ITEMS,
             iteration_widths=iteration_widths,
+            affected_qubits_precise=affected_qubits_precise,
         )
 
     def _compute_folded_for_info(
@@ -1566,7 +1581,7 @@ class CircuitAnalyzer:
         qubit_map: dict[str, int],
         logical_id_remap: dict[str, str] | None = None,
         param_values: dict | None = None,
-    ) -> list[int]:
+    ) -> tuple[list[int], bool]:
         """Analyze which qubits are affected by a loop operation.
 
         Args:
@@ -1576,7 +1591,12 @@ class CircuitAnalyzer:
             param_values: Parameter values for resolving loop range and indices.
 
         Returns:
-            List of affected qubit indices.
+            Tuple ``(indices, is_precise)`` where ``indices`` is the list
+            of affected qubit wire indices and ``is_precise`` is True
+            when every operand was resolved during the precise
+            iteration walk (including any nested control-flow
+            recursion). False when the conservative fallback was used,
+            meaning the result may over-approximate.
         """
         if logical_id_remap is None:
             logical_id_remap = {}
@@ -1625,22 +1645,30 @@ class CircuitAnalyzer:
                                 inner_op,
                                 (ForOperation, WhileOperation, ForItemsOperation),
                             ):
-                                nested = self._analyze_loop_affected_qubits(
-                                    inner_op,
-                                    qubit_map,
-                                    logical_id_remap,
-                                    iter_params,
+                                nested, nested_precise = (
+                                    self._analyze_loop_affected_qubits(
+                                        inner_op,
+                                        qubit_map,
+                                        logical_id_remap,
+                                        iter_params,
+                                    )
                                 )
                                 precise_affected.update(nested)
+                                if not nested_precise:
+                                    all_resolved = False
                                 continue
                             elif isinstance(inner_op, IfOperation):
-                                nested = self._collect_if_affected_qubits(
-                                    inner_op,
-                                    qubit_map,
-                                    logical_id_remap,
-                                    iter_params,
+                                nested, nested_precise = (
+                                    self._collect_if_affected_qubits(
+                                        inner_op,
+                                        qubit_map,
+                                        logical_id_remap,
+                                        iter_params,
+                                    )
                                 )
                                 precise_affected.update(nested)
+                                if not nested_precise:
+                                    all_resolved = False
                                 continue
                             else:
                                 # Unknown op type — degrade to the recursive
@@ -1659,7 +1687,7 @@ class CircuitAnalyzer:
                                 else:
                                     precise_affected.update(indices)
                     if all_resolved and precise_affected:
-                        return list(precise_affected)
+                        return list(precise_affected), True
 
         # Fallback to conservative analysis
         affected: set[int] = set()
@@ -1706,7 +1734,7 @@ class CircuitAnalyzer:
                     collect_from_ops(inner_op.operations)
 
         collect_from_ops(op.operations)
-        return list(affected)
+        return list(affected), False
 
     def _collect_if_affected_qubits(
         self,
@@ -1714,7 +1742,7 @@ class CircuitAnalyzer:
         qubit_map: dict[str, int],
         logical_id_remap: dict[str, str] | None = None,
         param_values: dict | None = None,
-    ) -> list[int]:
+    ) -> tuple[list[int], bool]:
         """Collect qubit indices affected by an IfOperation.
 
         Recursively walks both true and false branches to collect all
@@ -1727,7 +1755,9 @@ class CircuitAnalyzer:
             param_values: Parameter values for resolving expressions.
 
         Returns:
-            List of affected qubit indices.
+            Tuple ``(indices, is_precise)``. ``is_precise`` is True
+            when every operand — including those inside nested
+            control flow — resolved cleanly.
         """
         if logical_id_remap is None:
             logical_id_remap = {}
@@ -1735,8 +1765,10 @@ class CircuitAnalyzer:
             param_values = {}
 
         affected: set[int] = set()
+        is_precise = True
 
         def collect_qubits(ops: list[Operation]) -> None:
+            nonlocal is_precise
             for inner_op in ops:
                 operands: list = []
                 if isinstance(inner_op, GateOperation):
@@ -1770,12 +1802,15 @@ class CircuitAnalyzer:
                     indices = self._resolve_operand_to_affected_qubits(
                         operand, qubit_map, logical_id_remap, param_values
                     )
-                    if indices is not None:
+                    if indices is None:
+                        if isinstance(operand.type, QubitType):
+                            is_precise = False
+                    else:
                         affected.update(indices)
 
         collect_qubits(op.true_operations)
         collect_qubits(op.false_operations)
-        return list(affected)
+        return list(affected), is_precise
 
     def _resolve_controlled_u_power(
         self,

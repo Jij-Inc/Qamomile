@@ -904,14 +904,14 @@ class MatplotlibRenderer:
                 zorder=PORDER_TEXT,
             )
 
-        # Participation markers: when the box spans qubit wires that
-        # are NOT touched by the loop body, mark each affected wire
-        # with dots at the left and right edges so the viewer can
-        # distinguish participating wires from passthrough. Skip when
-        # every spanned wire participates — the plain box already
-        # implies "all of these".
-        spanned = set(range(min(affected_qubits), max(affected_qubits) + 1))
-        if set(affected_qubits) < spanned:
+        # Participation markers: when the analyzer precisely determined
+        # which wires the loop touches, draw control-style dots on each
+        # affected wire at the left and right edges so viewers can tell
+        # at a glance which wires participate vs. which are passthrough.
+        # Skip when the analyzer fell back to conservative analysis —
+        # affected_qubits in that case may over-approximate, and dots
+        # would misleadingly imply we know for sure.
+        if node.affected_qubits_precise:
             x_left = x_pos - width / 2
             x_right = x_pos + width / 2
             for q in affected_qubits:
