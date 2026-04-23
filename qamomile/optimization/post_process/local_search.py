@@ -50,13 +50,17 @@ class _StepFn(Protocol):
 
 
 class LocalSearch:
-    """Local search optimizer for :class:`BinaryModel`.
+    """Local search **energy minimizer** for :class:`BinaryModel`.
+
+    Greedily flips single bits that strictly lower the model's energy
+    (``calc_energy``), so **lower is better** — the search terminates at a
+    local minimum where no single-bit flip further decreases energy.
 
     Internally converts the model to SPIN representation (±1) for the search,
     then converts results back to the original vartype.
 
     Args:
-        model: The binary model to optimize.
+        model: The binary model to minimize.
 
     Raises:
         ValueError: If *model* contains higher-order (order > 2) terms.
@@ -95,6 +99,10 @@ class LocalSearch:
     ) -> BinarySampleSet:
         """Run local search starting from *initial_state*.
 
+        Minimizes the model's energy: only strictly energy-decreasing flips
+        are accepted, so the returned state is a local minimum (**lower is
+        better**), not necessarily the global optimum.
+
         Args:
             initial_state: Variable values in the model's vartype domain
                 (±1 for SPIN, 0/1 for BINARY).
@@ -103,7 +111,7 @@ class LocalSearch:
                 member or its string value (``"best"`` / ``"first"``).
 
         Returns:
-            A :class:`BinarySampleSet` containing the optimized state.
+            A :class:`BinarySampleSet` containing the energy-minimized state.
 
         Raises:
             ValueError: If *method* is not recognized, *initial_state* has
