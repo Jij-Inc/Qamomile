@@ -1254,7 +1254,9 @@ class CircuitAnalyzer:
         )
 
         cond = op.condition
-        cond_name = getattr(cond, "name", None) or "cond"
+        cond_name = getattr(cond, "name", None)
+        if cond_name is None or self._is_internal_temp_name(cond_name):
+            cond_name = "cond"
         condition_label = f"if {cond_name}:"
 
         if self.fold_loops:
@@ -1344,9 +1346,12 @@ class CircuitAnalyzer:
         if len(op.key_vars) > 1:
             key_str = f"({key_str})"
         dict_value = op.operands[0] if op.operands else None
-        dict_name = (
-            getattr(dict_value, "name", "dict") if dict_value is not None else "dict"
-        )
+        if dict_value is None:
+            dict_name = "dict"
+        else:
+            dict_name = getattr(dict_value, "name", None)
+            if dict_name is None or self._is_internal_temp_name(dict_name):
+                dict_name = "dict"
         header = f"for {key_str}, {op.value_var} in {dict_name}"
 
         # Materialize entries
@@ -3478,10 +3483,35 @@ class CircuitAnalyzer:
                         resolved_name = self._resolve_symbolic_array_name(
                             actual_input, param_values or {}
                         )
+                        pv_str = (
+                            param_values.get(actual_input.logical_id)
+                            if param_values
+                            else None
+                        )
                         if resolved_name is not None:
                             params.append(self._format_symbolic_param(resolved_name))
+                        elif self._operand_is_binop_result(actual_input, None):
+                            # BinOp result: expand recursively (e.g. reps*2*n)
+                            # rather than falling through to the block's
+                            # formal parameter name.
+                            expr = self._format_value_as_expression(
+                                actual_input, set(), None
+                            )
+                            if expr and not self._is_internal_temp_name(expr):
+                                params.append(self._format_symbolic_param(expr))
+                            else:
+                                params.append(self._format_symbolic_param(arg_name))
+                        elif (
+                            isinstance(pv_str, str)
+                            and not self._is_internal_temp_name(pv_str)
+                        ):
+                            # Pre-computed symbolic string from top-level
+                            # BinOp pre-evaluation in build_visual_ir.
+                            params.append(self._format_symbolic_param(pv_str))
                         elif actual_input.is_parameter():
                             param_name = actual_input.parameter_name() or arg_name
+                            if self._is_internal_temp_name(param_name):
+                                param_name = arg_name
                             params.append(self._format_symbolic_param(param_name))
                         else:
                             params.append(self._format_symbolic_param(arg_name))
