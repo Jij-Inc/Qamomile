@@ -550,7 +550,124 @@ print(executable.quantum_circuit)
 #   backend. Switch backend, or express the kernel differently.
 
 # %% [markdown]
-# ## 6. Backend Emission: Qiskit vs QURI Parts
+# ## 6. Case Study: How `MeasureQFixed` Gets Compiled
+#
+# For cases like reading out a Quantum Phase Estimation result, Qamomile
+# exposes a one-line API for measuring a quantum register as a
+# fixed-point floating value:
+#
+# ```python
+# qf = qmc.cast(q, qmc.QFixed, int_bits=0)   # Vector[Qubit] -> QFixed
+# phase = qmc.measure(qf)                     # QFixed -> Float
+# ```
+#
+# Let's follow what happens at the IR level. `MeasureQFixedOperation`
+# enters the pipeline as a single `OperationKind.HYBRID` node — a logical
+# combination of a quantum measurement and a classical decode — and is
+# later split into the two halves just before segmentation.
+#
+# ### 6.1 A minimal demo kernel
+#
+# A 3-qubit Hadamard superposition measured as a `QFixed` is enough to
+# exercise every step.
+
+# %%
+@qmc.qkernel
+def qfixed_demo(n: qmc.UInt) -> qmc.Float:
+    q = qmc.qubit_array(n, name="q")
+    for i in qmc.range(n):
+        q[i] = qmc.h(q[i])
+    qf = qmc.cast(q, qmc.QFixed, int_bits=0)
+    return qmc.measure(qf)
+
+
+# %% [markdown]
+# Run the pipeline up through `analyze` and inspect the block.
+
+# %%
+qfixed_bindings = {"n": 3}
+qfixed_block = transpiler.to_block(qfixed_demo, bindings=qfixed_bindings)
+qfixed_block = transpiler.inline(qfixed_block)
+qfixed_block = transpiler.partial_eval(qfixed_block, bindings=qfixed_bindings)
+qfixed_block = transpiler.analyze(qfixed_block)
+print(pretty_print_block(qfixed_block))
+
+# %% [markdown]
+# The trailing operation is a single `measure_qfixed`, with the
+# `cast %q to QFixed[0.3]` immediately above it. `MeasureQFixedOperation`
+# carries `operation_kind=HYBRID`; real backends only have quantum-side
+# measurement instructions, so somewhere in the pipeline the
+# "measure N qubits" and "decode bits to float" halves must be pulled
+# apart.
+#
+# ### 6.2 Where the split happens — `plan`'s pre-segmentation lowering
+#
+# The split is done by `lower_operations()` in
+# `qamomile/circuit/transpiler/passes/separate.py`, which the `plan`
+# pass runs before segmentation. Every `MeasureQFixedOperation` is
+# replaced by:
+#
+# 1. **`MeasureVectorOperation`** — measures all qubits of the QFixed
+#    register as a `Vector[Qubit]` into a `Vector[Bit]`
+#    (`OperationKind.HYBRID`, grouped at the tail of the quantum
+#    segment).
+# 2. **`DecodeQFixedOperation`** — decodes the bit array into a Float
+#    using the fixed-point encoding (`OperationKind.CLASSICAL`).
+#
+# After this rewrite, segmentation simply places the two ops in their
+# natural homes: the measurement at the end of the quantum segment,
+# the decode in a classical segment after it.
+#
+# You can watch the rewrite yourself by calling `lower_operations`
+# directly on the analyzed block.
+
+# %%
+from qamomile.circuit.transpiler.passes.separate import lower_operations
+
+lowered = lower_operations(qfixed_block)
+print(pretty_print_block(lowered))
+
+# %% [markdown]
+# `measure_qfixed` has disappeared and been replaced by
+# `measure_vector(...)` + `decode_qfixed(...)`. The final `Float` keeps
+# the same `logical_id` because `lower_measure_qfixed` reuses the
+# original result values, so value-based analyses are unaffected by
+# the split.
+#
+# ### 6.3 What reaches `emit` and the runtime
+#
+# After lowering, the `ProgramPlan` lays out (conceptually):
+#
+# - **QuantumStep** (quantum segment): the gate sequence plus the
+#   `MeasureVectorOperation`. The backend's `emit_measure_vector` iterates
+#   the qubits and issues a normal per-qubit `emit_measure`, writing
+#   results into classical registers.
+# - **ClassicalStep (role=`post`)** (classical segment): just the
+#   `DecodeQFixedOperation`. At run time,
+#   `qamomile/circuit/transpiler/classical_executor.py` takes the
+#   measured bit string and decodes it to a Float.
+#
+# From the backend's point of view there is no "QFixed measurement"
+# instruction; the abstraction exists only in Qamomile's IR. The
+# quantum hardware only ever sees ordinary measurement instructions.
+#
+# ### 6.4 Which pass touches which IR
+#
+# | Pass | `MeasureQFixedOperation` | `MeasureVectorOperation` | `DecodeQFixedOperation` |
+# |------|------|------|------|
+# | `to_block` | created | — | — |
+# | `inline` / `partial_eval` / `analyze` | passes through | — | — |
+# | `plan` (pre-segmentation lowering) | **split and removed** | **created here** | **created here** |
+# | `emit` | — | per-qubit `emit_measure` | not touched (lives in the classical step) |
+# | runtime | — | backend runner executes measurements | `classical_executor` decodes bits to Float |
+#
+# Together with `CastOperation` (which re-labels a value's type without
+# allocating fresh qubits), this is a clean illustration of Qamomile's
+# "reinterpret the classical meaning of a quantum register without
+# disturbing the quantum resources" design pattern.
+
+# %% [markdown]
+# ## 7. Backend Emission: Qiskit vs QURI Parts
 #
 # Every backend plugs into the pipeline by implementing two protocols defined
 # in `qamomile/circuit/transpiler/`:
@@ -619,7 +736,7 @@ except ModuleNotFoundError:
 #    `TranspilerConfig.with_strategies({"qft": "approximate"})`.
 
 # %% [markdown]
-# ## 7. Pointers for Contributors
+# ## 8. Pointers for Contributors
 #
 # **Writing a custom pass.** Put it in `qamomile/circuit/transpiler/passes/`,
 # take a `Block` in and return a `Block` out, and assert your input `kind`
@@ -657,7 +774,7 @@ except ModuleNotFoundError:
 # much easier to spot where a value got disconnected or a phi got dropped.
 
 # %% [markdown]
-# ## 8. Summary
+# ## 9. Summary
 #
 # The pipeline is an SSA-style IR moving through four kinds:
 #

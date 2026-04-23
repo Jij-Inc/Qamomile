@@ -418,7 +418,88 @@ print(executable.quantum_circuit)
 # - **emit時エラー** — `MeasurementMode.STATIC`のバックエンドに実行時`if`が到達した。バックエンドを変えるか、カーネルを別の等価表現で書き直します。
 
 # %% [markdown]
-# ## 6. バックエンドemission: Qiskit vs QURI Parts
+# ## 6. ケーススタディ: `MeasureQFixed`はどうコンパイルされるか
+#
+# 量子位相推定 (QPE) の結果のように、量子ビット列を**固定小数点の数値**として読み出したい場面があります。Qamomileは`Vector[Qubit]`を`QFixed`型へ再解釈し、それを`qmc.measure`に渡すと`Float`が返る、という1行APIを提供しています:
+#
+# ```python
+# qf = qmc.cast(q, qmc.QFixed, int_bits=0)   # Vector[Qubit] -> QFixed
+# phase = qmc.measure(qf)                     # QFixed -> Float
+# ```
+#
+# これがパイプラインを通るとき、IRレベルで何が起きているのかを追います。`MeasureQFixedOperation`は`OperationKind.HYBRID`（量子測定 + 古典デコードを1つにまとめた論理操作）として登場し、後段で**量子部分と古典部分に分解**される、というのが要点です。
+#
+# ### 6.1 小さなデモカーネル
+#
+# 3量子ビット分のHadamard重ね合わせを`QFixed`として測定するだけの最小例を用意します。
+
+# %%
+@qmc.qkernel
+def qfixed_demo(n: qmc.UInt) -> qmc.Float:
+    q = qmc.qubit_array(n, name="q")
+    for i in qmc.range(n):
+        q[i] = qmc.h(q[i])
+    qf = qmc.cast(q, qmc.QFixed, int_bits=0)
+    return qmc.measure(qf)
+
+
+# %% [markdown]
+# `analyze`までパスを進めて、直後の状態を見てみます。
+
+# %%
+qfixed_bindings = {"n": 3}
+qfixed_block = transpiler.to_block(qfixed_demo, bindings=qfixed_bindings)
+qfixed_block = transpiler.inline(qfixed_block)
+qfixed_block = transpiler.partial_eval(qfixed_block, bindings=qfixed_bindings)
+qfixed_block = transpiler.analyze(qfixed_block)
+print(pretty_print_block(qfixed_block))
+
+# %% [markdown]
+# 末尾は`measure_qfixed`という1行です — `Vector[Qubit]`を`QFixed`型へ`cast`した値にそのまま`measure`が掛かっています。このOperationは`operation_kind=HYBRID`を持っていますが、**実際のバックエンドには量子測定命令しかない**ので、どこかで「量子側の測定」と「古典側のデコード」に切り分ける必要があります。
+#
+# ### 6.2 どこで切り分けるか — `plan`段の事前ローワリング
+#
+# この分解を担当するのが`plan`段が呼び出す`lower_operations()`（`qamomile/circuit/transpiler/passes/separate.py`）です。`MeasureQFixedOperation`を見つけるたびに:
+#
+# 1. **`MeasureVectorOperation`** — QFixedが持つ全量子ビットを`Vector[Qubit]`として測定し`Vector[Bit]`を得る（`OperationKind.HYBRID`だが、セグメント化の観点では量子セグメントの末尾に置かれる）
+# 2. **`DecodeQFixedOperation`** — 得られたビット列を固定小数点でデコードしてFloatにする（`OperationKind.CLASSICAL`）
+#
+# という2つのOperationに置き換えます。`plan`の本題であるセグメント化は、このローワリング結果をそのまま「量子セグメント終わりに測定、その後に古典セグメントでデコード」として並べるだけです。
+#
+# 内部挙動を目で見たいときは`lower_operations`を直接呼べます。
+
+# %%
+from qamomile.circuit.transpiler.passes.separate import lower_operations
+
+lowered = lower_operations(qfixed_block)
+print(pretty_print_block(lowered))
+
+# %% [markdown]
+# `measure_qfixed`が消え、`measure_vector(...)` → `decode_qfixed(...)`の2行に展開されています。同じ`Float`がresult側の`logical_id`で繋がったままなので、後段の依存解析や値バインドは影響を受けません。
+#
+# ### 6.3 emit と実行への反映
+#
+# ローワリング後、ProgramPlanは概念的に以下のようなステップを並べます:
+#
+# - **QuantumStep**（量子セグメント）: 回路本体のゲート列 + `MeasureVectorOperation`。バックエンドの`emit_measure_vector`が展開し、各量子ビットごとに`emit_measure`が呼ばれてビットがクラシカルレジスタに書かれます。
+# - **ClassicalStep (role=post)**（古典セグメント）: `DecodeQFixedOperation`が1つだけ。`qamomile/circuit/transpiler/classical_executor.py`のランタイムが、量子実行で得たビット列を受け取ってFloatに変換します。
+#
+# つまり量子ハードウェア側に届くのはあくまで**通常の測定命令**です。「QFixed測定」というAPIは**コンパイル時の抽象化**であって、実行時のバックエンドが何か特殊な命令を解釈するわけではありません。
+#
+# ### 6.4 どのパスがどのIRを触るかのまとめ
+#
+# | パス | `MeasureQFixedOperation` | `MeasureVectorOperation` | `DecodeQFixedOperation` |
+# |------|------|------|------|
+# | `to_block` | 生成 | — | — |
+# | `inline` / `partial_eval` / `analyze` | そのまま通過 | — | — |
+# | `plan` (pre-segmentation lowering) | **2つに分解して消える** | **ここで生成** | **ここで生成** |
+# | `emit` | — | 各量子ビットへ`emit_measure` | 触らない（古典ステップ用のIRなのでバックエンドコード生成対象外） |
+# | 実行時 | — | バックエンド実行器で測定 | `classical_executor`がFloatにデコード |
+#
+# この構図は、CastOperation（型の再解釈だけで物理量子ビット割り当てを変えない）と合わせて、「**量子リソースを触らずに古典的意味付けだけを変える**」Qamomileの型設計パターンの良い例になっています。
+
+# %% [markdown]
+# ## 7. バックエンドemission: Qiskit vs QURI Parts
 #
 # どのバックエンドも、`qamomile/circuit/transpiler/`で定義された2つのプロトコルを実装することでパイプラインに接続します:
 #
@@ -463,7 +544,7 @@ except ModuleNotFoundError:
 # 3. **複合ゲート。** カーネルが`qmc.qft(...)`を使う場合、Qiskitの`QiskitQFTEmitter`は`QFTGate`ボックスを配置しますが、QURI Partsバックエンドはライブラリパス経由で分解します。IRは同じですが、実現される回路は異なります。カーネルごとに`TranspilerConfig.with_strategies({"qft": "approximate"})`で上書きできます。
 
 # %% [markdown]
-# ## 7. コントリビュータ向けのポインタ
+# ## 8. コントリビュータ向けのポインタ
 #
 # **カスタムパスの記述。** `qamomile/circuit/transpiler/passes/`に配置し、`Block`を受け取り`Block`を返すようにして、入力`kind`の事前条件を冒頭でアサートしてください。Operationを辿るときは`isinstance(op, ForOperation)`のチェーンではなく`HasNestedOps`を使ってください。そうすれば将来の制御フローOperationも自動的に扱えます:
 #
@@ -487,7 +568,7 @@ except ModuleNotFoundError:
 # **transpileエラーのデバッグ。** パスを1つずつ実行し、その間に`summarise(block)`で件数の変化を追い、気になるところは`pretty_print_block(block)`で中身を覗きます。`BlockKind`が進まない、Operation数が爆発する、例外が送出される、というステージが最初に見るべき場所です。`pretty_print_block(block, depth=N)`で`CallBlockOperation`の展開深さを変えながら`inline`前後を比較すると、どこで値が切れたか・どのPhiが漏れたかが読み取りやすくなります。
 
 # %% [markdown]
-# ## 8. まとめ
+# ## 9. まとめ
 #
 # パイプラインは4つのkindを遷移していくSSAスタイルのIRです:
 #
