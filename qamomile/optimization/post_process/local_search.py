@@ -196,11 +196,17 @@ class LocalSearch:
     # ------------------------------------------------------------------
 
     def _to_spin(self, state: np.ndarray) -> np.ndarray:
-        """Convert state from the model's vartype to SPIN (±1)."""
+        """Convert state from the model's vartype to SPIN (±1).
+
+        Values are ±1 / 0-1 integers by the time they reach this helper
+        (``run`` validates the domain), so no float cast is needed. The
+        SPIN branch copies the array defensively so later in-place flips
+        never reach through to the caller's input.
+        """
         if self._model.vartype == VarType.BINARY:
-            return np.where(state == 0, 1, -1).astype(float)
-        else:
-            return state.astype(float)
+            # np.where produces a fresh array, so no .copy() needed here.
+            return np.where(state == 0, 1, -1)
+        return state.copy()
 
     def _from_spin(self, spin_state: np.ndarray) -> list[int]:
         """Convert SPIN (±1) state back to the model's vartype."""
