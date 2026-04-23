@@ -37,6 +37,8 @@ Dependencies flow only downstream. Upstream imports are forbidden:
 
 ### D. Backend Abstraction
 
+Applies to backend files under `qamomile/{qiskit,quri_parts,cudaq,qbraid,...}/`.
+
 - Transpiler subclass: inherit `Transpiler[T]`, implement `_create_separate_pass()`, `_create_emit_pass()`, `executor()`.
 - Emitter pattern: gate-by-gate conversion to backend primitives.
 - Composite gate emitters: pluggable strategy for native optimized implementations (e.g., QFT).
@@ -51,12 +53,13 @@ Dependencies flow only downstream. Upstream imports are forbidden:
 
 ### F. Module Organization
 
-- `__init__.py` provides the curated public API via `__all__`. `TYPE_CHECKING` guards break circular imports.
+- `__init__.py` provides the curated public API via `__all__` (no `_`-prefixed names in `__all__` without justification). `TYPE_CHECKING` guards break circular imports.
 - Use `@dataclass` for state-oriented types with field-wise equality; use a regular class when invariants, encapsulation, or custom equality matter.
 
 ### G. Python Style
 
 - **Python 3.12+**, `X | None` (not `Optional[X]`), extensive type annotations.
+- **No stale imports** left behind from a rename / refactor (dead code at function / class level is covered in Step 5.5's root-cause consolidation).
 - **Google-style docstrings on ALL functions, methods, and classes** (public and private), with `Args` / `Returns` / `Raises` as applicable and `Example` where helpful. Private helpers may use compact sections but must keep the structure. Tests are exempt from `Args` / `Returns` — a 1–2 line description of what is verified suffices. See CLAUDE.md's "Docstring Convention (MANDATORY)". Missing docstrings are P2+.
 - **Closed-set parameters as Enum**: a public parameter with a finite set of valid strings (mode, method, algorithm variant, backend key) MUST be defined as `enum.StrEnum` and dispatched via the Enum internally. Signatures accept `str | MyEnum` and normalize at the entry (`method = MyEnum(method)`; on failure `raise ValueError` listing the valid values). Internal dispatch via `match` (small sets, see Section L) or a `ClassVar[dict[MyEnum, ...]]` (8+ variants). **Never** construct a `dict[str, callable]` inside a hot-path method every call. Raw string `==` dispatch on closed sets is P2; per-call dict construction is P3.
 
@@ -73,7 +76,7 @@ Dependencies flow only downstream. Upstream imports are forbidden:
 
 ### H-bis. Algorithm / Stdlib Cross-Backend Execution Tests (MANDATORY)
 
-Any addition or non-trivial modification under `qamomile/circuit/algorithm/` or `qamomile/circuit/stdlib/` MUST ship with tests that **transpile AND execute** the new/changed qkernel on every supported backend — not just build the IR.
+Any addition or non-trivial modification under `qamomile/circuit/algorithm/` or `qamomile/circuit/stdlib/` MUST ship with tests that **transpile AND execute** the new/changed qkernel on every supported backend — not just build the IR. Pure refactors that provably preserve IR output (same gate sequence, same shapes) are exempt — still advisable to re-run but not enforced.
 
 **Backend matrix**:
 
@@ -165,7 +168,7 @@ Always: if a public symbol was added, removed, or renamed, verify `__init__.py` 
 
 ### Step 4: Evaluate Against Rules
 
-For each changed file, walk through Sections A–M and apply the ones that are relevant. Sections A–G and I–L apply broadly and should always be considered; D applies to backend files; H-bis applies to `qamomile/circuit/algorithm/` and `qamomile/circuit/stdlib/`; M applies under `qamomile/optimization/`.
+For each changed file, walk through Sections A–M and apply the ones relevant to that file. Each scoped section (D, H-bis, M) declares its scope in its opening lines; the remaining sections apply broadly.
 
 ### Step 5: Impact & Completeness
 
@@ -173,6 +176,7 @@ After rules review, look for:
 
 - **Incomplete propagation**: signature changes not reflected in every caller; `__all__` / `__init__.py` not updated; new behavior not covered by tests; `.py` / `.ipynb` / en / ja not kept in sync.
 - **Latent bugs in unchanged files**: unchanged code relying on behavior the diff silently altered (return-type change, default-value change, formerly-`None` now raises); enum / constant additions that existing `match` / `if-elif` chains don't handle; pipeline pass ordering invalidated by a new pass.
+- **Performance / compilation-time impact**: for transpiler-pass, emitter, or IR-node changes, flag any change that plausibly affects compilation time, emitted circuit size, or runtime execution — even if not a regression in correctness.
 
 ### Step 5.5: Root-Cause Consolidation
 
@@ -183,6 +187,8 @@ Mentally simulate applying all proposed fixes simultaneously and re-evaluate the
 - **Emergent**: a new issue revealed only after the simulated fixes (e.g., removed dead code leaves a stale `__all__` re-export). Add it.
 
 Severity of a consolidated finding inherits the highest severity among root cause and dependents. Three or more P3 findings under one architectural issue elevate to at least P2. If consolidation is still shifting after a second pass, stop and note it in the final report.
+
+Common root-cause patterns to watch for: **dead code** (multiple nits on code never called — root cause is deletion); **missing abstraction** (repeated logic across findings — root cause is extract into a shared helper / qkernel); **incomplete rename / refactor** (mismatched names, broken references, stale imports); **wrong layer** (one misplaced import cascading into Section B violations); **type / signature ripple** (a type change not propagated to callers).
 
 ### Step 6: Report
 
