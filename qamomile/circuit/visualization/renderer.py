@@ -550,6 +550,13 @@ class MatplotlibRenderer:
         elif node.gate_type == GateOperationType.CZ:
             for y in y_coords:
                 self._draw_control_dot(ax, x, y)
+        elif node.gate_type == GateOperationType.TOFFOLI:
+            # Operands: [control1, control2, target]. Render in the
+            # same style as CX — control dots on the two control
+            # wires, target-X on the target wire.
+            for y in y_coords[:-1]:
+                self._draw_control_dot(ax, x, y)
+            self._draw_target_x(ax, x, y_coords[-1])
         elif node.gate_type == GateOperationType.SWAP:
             for y in y_coords:
                 self._draw_swap_x(ax, x, y)
