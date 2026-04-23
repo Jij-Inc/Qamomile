@@ -6,6 +6,7 @@ that operate on :class:`BinaryModel` instances (both SPIN and BINARY).
 
 from __future__ import annotations
 
+import enum
 from typing import Protocol
 
 import numpy as np
@@ -13,6 +14,21 @@ import numpy as np
 from qamomile.optimization.binary_model.expr import VarType
 from qamomile.optimization.binary_model.model import BinaryModel
 from qamomile.optimization.binary_model.sampleset import BinarySampleSet
+
+
+class LocalSearchMethod(enum.StrEnum):
+    """Strategy for picking which bit to flip at each local-search step.
+
+    Both variants only accept strictly improving flips; the difference is
+    in how the next flip is chosen.
+
+    Attributes:
+        BEST: Flip the single bit with the largest energy decrease.
+        FIRST: Flip the first bit (in index order) whose flip lowers energy.
+    """
+
+    BEST = "best"
+    FIRST = "first"
 
 
 class _StepFn(Protocol):
@@ -75,7 +91,7 @@ class LocalSearch:
         self,
         initial_state: list[int],
         max_iter: int = -1,
-        method: str = "best_improvement",
+        method: str | LocalSearchMethod = LocalSearchMethod.BEST,
     ) -> BinarySampleSet:
         """Run local search starting from *initial_state*.
 
@@ -83,7 +99,8 @@ class LocalSearch:
             initial_state: Variable values in the model's vartype domain
                 (±1 for SPIN, 0/1 for BINARY).
             max_iter: Maximum iterations (-1 for unlimited).
-            method: ``"best_improvement"`` or ``"first_improvement"``.
+            method: Flip-selection strategy. Either a :class:`LocalSearchMethod`
+                member or its string value (``"best"`` / ``"first"``).
 
         Returns:
             A :class:`BinarySampleSet` containing the optimized state.
@@ -114,17 +131,24 @@ class LocalSearch:
                     "All elements of initial_state must be 0 or 1 for BINARY models."
                 )
 
-        methods: dict[str, _StepFn] = {
-            "best_improvement": self._best_improvement,
-            "first_improvement": self._first_improvement,
-        }
-        if method not in methods:
+        try:
+            method = LocalSearchMethod(method)
+        except ValueError as e:
+            valid = [m.value for m in LocalSearchMethod]
             raise ValueError(
-                f"Invalid method: {method}. Choose from {list(methods.keys())}."
-            )
+                f"Invalid method: {method!r}. Choose from {valid}."
+            ) from e
+
+        match method:
+            case LocalSearchMethod.BEST:
+                step: _StepFn = self._best_improvement
+            case LocalSearchMethod.FIRST:
+                step = self._first_improvement
+            case _:
+                assert False, "unreachable"
 
         spin_state = self._to_spin(np.asarray(initial_state))
-        spin_state = self._search(methods[method], spin_state, max_iter)
+        spin_state = self._search(step, spin_state, max_iter)
         return self._to_sampleset(spin_state)
 
     # ------------------------------------------------------------------

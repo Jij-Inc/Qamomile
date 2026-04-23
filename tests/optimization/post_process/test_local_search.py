@@ -56,7 +56,7 @@ def quad_only_model() -> BinaryModel:
 
 
 class TestLocalSearchSpin:
-    @pytest.mark.parametrize("method", ["best_improvement", "first_improvement"])
+    @pytest.mark.parametrize("method", ["best", "first"])
     def test_converges_to_optimum(self, spin_model, method):
         """Both methods reach the global optimum from the same starting state."""
         ls = LocalSearch(spin_model)
@@ -69,7 +69,7 @@ class TestLocalSearchSpin:
     def test_max_iter_limits_search(self, spin_model):
         """After 1 iteration only the best single flip is applied."""
         ls = LocalSearch(spin_model)
-        result = ls.run([1, 1, -1], max_iter=1, method="best_improvement")
+        result = ls.run([1, 1, -1], max_iter=1, method="best")
         sample, energy, _ = result.lowest()
         # From [1,1,-1] the best flip is index 0 (delta_E=-12), giving [-1,1,-1]
         assert np.isclose(energy, spin_model.calc_energy([-1, 1, -1]))
@@ -79,7 +79,7 @@ class TestLocalSearchSpin:
         """max_iter=0 returns the initial state unchanged."""
         ls = LocalSearch(spin_model)
         initial = [1, 1, -1]
-        result = ls.run(initial, max_iter=0, method="best_improvement")
+        result = ls.run(initial, max_iter=0, method="best")
         sample, energy, _ = result.lowest()
         assert np.isclose(energy, spin_model.calc_energy(initial))
         assert sample == {0: 1, 1: 1, 2: -1}
@@ -97,16 +97,16 @@ class TestLocalSearchSpin:
         n = spin_model.num_bits
         initial = rng.choice([-1, 1], size=n).tolist()
         ls = LocalSearch(spin_model)
-        result = ls.run(initial, method="best_improvement")
+        result = ls.run(initial, method="best")
         _, energy, _ = result.lowest()
         assert energy <= spin_model.calc_energy(initial) + 1e-10
 
 
 class TestLocalSearchBinary:
-    @pytest.mark.parametrize("method", ["best_improvement", "first_improvement"])
+    @pytest.mark.parametrize("method", ["best", "first"])
     def test_converges_to_optimum(self, binary_model, method):
         """Both methods reach the global optimum from a suitable starting state."""
-        initial = [0, 0, 0] if method == "best_improvement" else [1, 1, 1]
+        initial = [0, 0, 0] if method == "best" else [1, 1, 1]
         ls = LocalSearch(binary_model)
         result = ls.run(initial, method=method)
         sample, energy, _ = result.lowest()
@@ -116,7 +116,7 @@ class TestLocalSearchBinary:
     def test_already_optimal_no_change(self, binary_model):
         """Starting at the optimum returns it unchanged."""
         ls = LocalSearch(binary_model)
-        result = ls.run([1, 0, 1], method="best_improvement")
+        result = ls.run([1, 0, 1], method="best")
         sample, energy, _ = result.lowest()
         assert np.isclose(energy, -8.0)
         assert sample == {0: 1, 1: 0, 2: 1}
@@ -128,7 +128,7 @@ class TestLocalSearchBinary:
         n = binary_model.num_bits
         initial = rng.choice([0, 1], size=n).tolist()
         ls = LocalSearch(binary_model)
-        result = ls.run(initial, method="best_improvement")
+        result = ls.run(initial, method="best")
         _, energy, _ = result.lowest()
         assert energy <= binary_model.calc_energy(initial) + 1e-10
 
@@ -138,35 +138,35 @@ class TestInputValidation:
         """Initial state with wrong length raises ValueError."""
         ls = LocalSearch(spin_model)
         with pytest.raises(ValueError, match="initial_state length"):
-            ls.run([1, -1], method="best_improvement")
+            ls.run([1, -1], method="best")
 
     @pytest.mark.parametrize("state", [[1, 0, -1], [1, 2, -1], [1, -1, 3]])
     def test_invalid_spin_values_raises(self, spin_model, state):
         """SPIN initial state with values other than ±1 raises ValueError."""
         ls = LocalSearch(spin_model)
         with pytest.raises(ValueError, match="must be \\+1 or -1"):
-            ls.run(state, method="best_improvement")
+            ls.run(state, method="best")
 
     @pytest.mark.parametrize("state", [[0, 2, 1], [0, -1, 1], [0, 0, 3]])
     def test_invalid_binary_values_raises(self, binary_model, state):
         """BINARY initial state with values other than 0/1 raises ValueError."""
         ls = LocalSearch(binary_model)
         with pytest.raises(ValueError, match="must be 0 or 1"):
-            ls.run(state, method="best_improvement")
+            ls.run(state, method="best")
 
     @pytest.mark.parametrize("max_iter", [-2, -3, -10])
     def test_invalid_max_iter_raises(self, spin_model, max_iter):
         """max_iter less than -1 raises ValueError."""
         ls = LocalSearch(spin_model)
         with pytest.raises(ValueError, match="max_iter"):
-            ls.run([1, 1, -1], max_iter=max_iter, method="best_improvement")
+            ls.run([1, 1, -1], max_iter=max_iter, method="best")
 
 
 class TestEdgeCases:
     def test_single_variable_model(self, single_var_model):
         """Single-variable model converges to the correct minimum."""
         ls = LocalSearch(single_var_model)
-        result = ls.run([1], method="best_improvement")
+        result = ls.run([1], method="best")
         sample, energy, _ = result.lowest()
         assert np.isclose(energy, -3.0)
         assert sample == {0: -1}
@@ -174,7 +174,7 @@ class TestEdgeCases:
     def test_linear_only_model(self, linear_only_model):
         """Model with no quadratic terms converges correctly."""
         ls = LocalSearch(linear_only_model)
-        result = ls.run([1, 1], method="best_improvement")
+        result = ls.run([1, 1], method="best")
         sample, energy, _ = result.lowest()
         assert np.isclose(energy, -5.0)
         # Minimum of 2*z0 - 3*z1 is unique at z=(-1, 1).
@@ -183,7 +183,7 @@ class TestEdgeCases:
     def test_quad_only_model(self, quad_only_model):
         """Model with no linear terms converges correctly."""
         ls = LocalSearch(quad_only_model)
-        result = ls.run([1, -1], method="best_improvement")
+        result = ls.run([1, -1], method="best")
         sample, energy, _ = result.lowest()
         assert np.isclose(energy, -2.0)
         # From [1,-1] deltas tie at -4 for both indices; argmin picks i=0,
@@ -200,7 +200,7 @@ class TestUnsupportedModels:
 
 
 class TestConstantOnlyModel:
-    @pytest.mark.parametrize("method", ["best_improvement", "first_improvement"])
+    @pytest.mark.parametrize("method", ["best", "first"])
     def test_constant_only_model_no_crash(self, method):
         """n == 0 constant-only model returns unchanged state without crashing."""
         model = BinaryModel.from_ising(linear={}, quad={}, constant=5.0)
