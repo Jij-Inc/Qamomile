@@ -10,7 +10,6 @@ from qamomile.circuit.ir import format_value, pretty_print_block
 from qamomile.circuit.ir.block import BlockKind
 from qamomile.qiskit import QiskitTranspiler
 
-
 # ---------------------------------------------------------------------------
 # Fixture kernels — small and focused on one feature each.
 # ---------------------------------------------------------------------------
@@ -100,7 +99,7 @@ def test_for_body_is_indented():
     # Body operations inside the for-loop live at a strictly deeper indent.
     header_indent = len(header) - len(header.lstrip())
     idx = lines.index(header)
-    body = lines[idx + 1 : ]
+    body = lines[idx + 1 :]
     # The first non-close-brace body line should be deeper than the header.
     for ln in body:
         stripped = ln.strip()
