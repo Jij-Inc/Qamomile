@@ -54,9 +54,7 @@ if TYPE_CHECKING:
     from qamomile.circuit.ir.block import Block
 
 
-_INTERNAL_TMP_NAMES: frozenset[str] = frozenset({
-    "uint_tmp", "float_tmp", "bit_tmp"
-})
+_INTERNAL_TMP_NAMES: frozenset[str] = frozenset({"uint_tmp", "float_tmp", "bit_tmp"})
 
 
 class CircuitAnalyzer:
@@ -1134,10 +1132,8 @@ class CircuitAnalyzer:
         if self._is_zero_iteration_loop(start_val, stop_val_raw, step_val):
             return VSkip(node_key=node_key)
 
-        affected_qubits, affected_qubits_precise = (
-            self._analyze_loop_affected_qubits(
-                op, qubit_map, logical_id_remap, param_values
-            )
+        affected_qubits, affected_qubits_precise = self._analyze_loop_affected_qubits(
+            op, qubit_map, logical_id_remap, param_values
         )
 
         # Folded mode: fold_loops=True or symbolic stop
@@ -1205,10 +1201,8 @@ class CircuitAnalyzer:
         ``WhileOperation``.  It will be connected once While-loop visualization
         is fully enabled.
         """
-        affected_qubits, affected_qubits_precise = (
-            self._analyze_loop_affected_qubits(
-                op, qubit_map, logical_id_remap, param_values
-            )
+        affected_qubits, affected_qubits_precise = self._analyze_loop_affected_qubits(
+            op, qubit_map, logical_id_remap, param_values
         )
         header = "while cond:"
         local_param_values = dict(param_values)
@@ -1256,10 +1250,8 @@ class CircuitAnalyzer:
         ``IfOperation``.  It will be connected once If-operation visualization
         is fully enabled.
         """
-        affected_qubits, affected_qubits_precise = (
-            self._collect_if_affected_qubits(
-                op, qubit_map, logical_id_remap, param_values
-            )
+        affected_qubits, affected_qubits_precise = self._collect_if_affected_qubits(
+            op, qubit_map, logical_id_remap, param_values
         )
 
         cond = op.condition
@@ -1348,10 +1340,8 @@ class CircuitAnalyzer:
         scope_path: tuple,
     ) -> VFoldedBlock | VUnfoldedSequence | VSkip:
         """Build a Visual IR node for a ForItemsOperation."""
-        affected_qubits, affected_qubits_precise = (
-            self._analyze_loop_affected_qubits(
-                op, qubit_map, logical_id_remap, param_values
-            )
+        affected_qubits, affected_qubits_precise = self._analyze_loop_affected_qubits(
+            op, qubit_map, logical_id_remap, param_values
         )
 
         # Build label
@@ -1575,6 +1565,31 @@ class CircuitAnalyzer:
             return True
         return False
 
+    @staticmethod
+    def _qubit_bearing_operands(op: Operation) -> list[Value] | None:
+        """Return the operands of `op` that may reference qubits.
+
+        Used by the loop- and if-affect analyzers to pick out operands
+        to feed into ``_resolve_operand_to_affected_qubits``. Returns
+        None for control-flow operations, which the caller must handle
+        via recursion rather than operand resolution.
+
+        Args:
+            op: IR operation to inspect.
+
+        Returns:
+            A list of operand Values to resolve, or None when the op is
+            a control-flow construct (For/While/If/ForItems) that the
+            caller handles separately.
+        """
+        if isinstance(op, (GateOperation, CallBlockOperation, ControlledUOperation)):
+            return list(op.operands)
+        if isinstance(op, CompositeGateOperation):
+            return list(op.control_qubits) + list(op.target_qubits)
+        if isinstance(op, (MeasureOperation, MeasureVectorOperation)):
+            return list(op.operands[:1])
+        return None
+
     def _analyze_loop_affected_qubits(
         self,
         op: ForOperation | WhileOperation | ForItemsOperation,
@@ -1626,22 +1641,7 @@ class CircuitAnalyzer:
                             op.operations, iter_params
                         )
                         for inner_op in op.operations:
-                            operands: list = []
-                            if isinstance(inner_op, GateOperation):
-                                operands = list(inner_op.operands)
-                            elif isinstance(inner_op, CallBlockOperation):
-                                operands = list(inner_op.operands)
-                            elif isinstance(inner_op, ControlledUOperation):
-                                operands = list(inner_op.operands)
-                            elif isinstance(inner_op, CompositeGateOperation):
-                                operands = list(inner_op.control_qubits) + list(
-                                    inner_op.target_qubits
-                                )
-                            elif isinstance(inner_op, MeasureOperation):
-                                operands = list(inner_op.operands[:1])
-                            elif isinstance(inner_op, MeasureVectorOperation):
-                                operands = list(inner_op.operands[:1])
-                            elif isinstance(
+                            if isinstance(
                                 inner_op,
                                 (ForOperation, WhileOperation, ForItemsOperation),
                             ):
@@ -1657,7 +1657,7 @@ class CircuitAnalyzer:
                                 if not nested_precise:
                                     all_resolved = False
                                 continue
-                            elif isinstance(inner_op, IfOperation):
+                            if isinstance(inner_op, IfOperation):
                                 nested, nested_precise = (
                                     self._collect_if_affected_qubits(
                                         inner_op,
@@ -1670,10 +1670,12 @@ class CircuitAnalyzer:
                                 if not nested_precise:
                                     all_resolved = False
                                 continue
-                            else:
+                            operands = self._qubit_bearing_operands(inner_op)
+                            if operands is None:
                                 # Unknown op type — degrade to the recursive
                                 # fallback to avoid silently dropping qubits.
                                 all_resolved = False
+                                continue
                             for operand in operands:
                                 indices = self._resolve_operand_to_affected_qubits(
                                     operand,
@@ -1703,35 +1705,21 @@ class CircuitAnalyzer:
         def collect_from_ops(ops: list[Operation]) -> None:
             """Recursively collect qubit indices from all operations into `affected` set."""
             for inner_op in ops:
-                if isinstance(inner_op, GateOperation):
-                    for operand in inner_op.operands:
-                        add_affected(operand)
-                elif isinstance(inner_op, CallBlockOperation):
-                    for operand in inner_op.operands:
-                        add_affected(operand)
-                elif isinstance(inner_op, ControlledUOperation):
-                    for operand in inner_op.operands:
-                        add_affected(operand)
-                elif isinstance(inner_op, CompositeGateOperation):
-                    for operand in list(inner_op.control_qubits) + list(
-                        inner_op.target_qubits
-                    ):
-                        add_affected(operand)
-                elif isinstance(inner_op, MeasureOperation):
-                    if inner_op.operands:
-                        add_affected(inner_op.operands[0])
-                elif isinstance(inner_op, MeasureVectorOperation):
-                    if inner_op.operands:
-                        add_affected(inner_op.operands[0])
-                elif isinstance(inner_op, ForOperation):
+                if isinstance(
+                    inner_op,
+                    (ForOperation, WhileOperation, ForItemsOperation),
+                ):
                     collect_from_ops(inner_op.operations)
-                elif isinstance(inner_op, WhileOperation):
-                    collect_from_ops(inner_op.operations)
-                elif isinstance(inner_op, IfOperation):
+                    continue
+                if isinstance(inner_op, IfOperation):
                     collect_from_ops(inner_op.true_operations)
                     collect_from_ops(inner_op.false_operations)
-                elif isinstance(inner_op, ForItemsOperation):
-                    collect_from_ops(inner_op.operations)
+                    continue
+                operands = self._qubit_bearing_operands(inner_op)
+                if operands is None:
+                    continue
+                for operand in operands:
+                    add_affected(operand)
 
         collect_from_ops(op.operations)
         return list(affected), False
@@ -1770,33 +1758,18 @@ class CircuitAnalyzer:
         def collect_qubits(ops: list[Operation]) -> None:
             nonlocal is_precise
             for inner_op in ops:
-                operands: list = []
-                if isinstance(inner_op, GateOperation):
-                    operands = list(inner_op.operands)
-                elif isinstance(inner_op, CallBlockOperation):
-                    operands = list(inner_op.operands)
-                elif isinstance(inner_op, ControlledUOperation):
-                    operands = list(inner_op.operands)
-                elif isinstance(inner_op, CompositeGateOperation):
-                    operands = list(inner_op.control_qubits) + list(
-                        inner_op.target_qubits
-                    )
-                elif isinstance(inner_op, MeasureOperation):
-                    operands = list(inner_op.operands[:1])
-                elif isinstance(inner_op, MeasureVectorOperation):
-                    operands = list(inner_op.operands[:1])
-                elif isinstance(inner_op, ForOperation):
+                if isinstance(
+                    inner_op,
+                    (ForOperation, WhileOperation, ForItemsOperation),
+                ):
                     collect_qubits(inner_op.operations)
                     continue
-                elif isinstance(inner_op, WhileOperation):
-                    collect_qubits(inner_op.operations)
-                    continue
-                elif isinstance(inner_op, IfOperation):
+                if isinstance(inner_op, IfOperation):
                     collect_qubits(inner_op.true_operations)
                     collect_qubits(inner_op.false_operations)
                     continue
-                elif isinstance(inner_op, ForItemsOperation):
-                    collect_qubits(inner_op.operations)
+                operands = self._qubit_bearing_operands(inner_op)
+                if operands is None:
                     continue
                 for operand in operands:
                     indices = self._resolve_operand_to_affected_qubits(
@@ -2690,9 +2663,7 @@ class CircuitAnalyzer:
                 else:
                     # Fall back to a symbolic expression so downstream
                     # renders e.g. "reps*2*n" instead of "uint_tmp".
-                    expr = self._format_value_as_expression(
-                        actual_input, set(), None
-                    )
+                    expr = self._format_value_as_expression(actual_input, set(), None)
                     if expr and not self._is_internal_temp_name(expr):
                         child_param_values[dummy_input.logical_id] = expr
                     else:
@@ -2953,9 +2924,7 @@ class CircuitAnalyzer:
         # _format_value_as_expression does not consult param_values for
         # numeric folding).
         if self._operand_is_binop_result(operand, body_operations):
-            expr = self._format_value_as_expression(
-                operand, loop_vars, body_operations
-            )
+            expr = self._format_value_as_expression(operand, loop_vars, body_operations)
             if expr and not self._is_internal_temp_name(expr):
                 return self._format_symbolic_param(expr)
 
@@ -3542,10 +3511,9 @@ class CircuitAnalyzer:
                                 params.append(self._format_symbolic_param(expr))
                             else:
                                 params.append(self._format_symbolic_param(arg_name))
-                        elif (
-                            isinstance(pv_str, str)
-                            and not self._is_internal_temp_name(pv_str)
-                        ):
+                        elif isinstance(
+                            pv_str, str
+                        ) and not self._is_internal_temp_name(pv_str):
                             # Pre-computed symbolic string from top-level
                             # BinOp pre-evaluation in build_visual_ir.
                             params.append(self._format_symbolic_param(pv_str))
@@ -3674,9 +3642,8 @@ class CircuitAnalyzer:
                                 param_str = self._format_symbolic_expression(symbolic)
                             else:
                                 fallback = theta.name
-                                if (
-                                    fallback is None
-                                    or self._is_internal_temp_name(fallback)
+                                if fallback is None or self._is_internal_temp_name(
+                                    fallback
                                 ):
                                     fallback = "?"
                                 param_str = self._format_symbolic_param(fallback)
