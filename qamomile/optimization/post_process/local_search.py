@@ -50,14 +50,12 @@ class LocalSearch:
     (``calc_energy``), so **lower is better** — the search terminates at a
     local minimum where no single-bit flip further decreases energy.
 
-    Internally converts the model to SPIN representation (±1) for the search,
-    then converts results back to the original vartype.
+    Supports arbitrary-order Ising / HUBO models. Internally converts the
+    model to SPIN representation (±1) for the search, then converts the
+    result back to the original vartype.
 
     Args:
         model: The binary model to minimize.
-
-    Raises:
-        ValueError: If *model* contains higher-order (order > 2) terms.
     """
 
     def __init__(self, model: BinaryModel) -> None:
@@ -68,22 +66,26 @@ class LocalSearch:
             else model
         )
 
-        if self._spin_model.order > 2 or self._spin_model.higher:
-            raise ValueError(
-                "LocalSearch only supports quadratic (order <= 2) models, "
-                f"got order={self._spin_model.order} with "
-                f"{len(self._spin_model.higher)} higher-order term(s)."
-            )
-
         n = self._spin_model.num_bits
 
-        # Sparse adjacency list: neighbors[i] = [(j, coeff), ...]
-        self._neighbors: dict[int, list[tuple[int, float]]] = {i: [] for i in range(n)}
-        for (i, j), v in self._spin_model.quad.items():
-            self._neighbors[i].append((j, v))
-            self._neighbors[j].append((i, v))
-
-        self._linear_dict: dict[int, float] = dict(self._spin_model.linear)
+        # For each index k, record (co_indices, coeff) for every Hamiltonian
+        # term that contains k. co_indices excludes k itself (empty tuple for
+        # linear terms). This unifies linear, quadratic, and higher-order
+        # terms under one sparse per-index adjacency, so the energy-delta
+        #     ΔE_k = -2 · s_k · Σ_{T ∋ k} coeff_T · ∏_{i∈T, i≠k} s_i
+        # works at arbitrary order.
+        self._terms: dict[int, list[tuple[tuple[int, ...], float]]] = {
+            i: [] for i in range(n)
+        }
+        for i, coeff in self._spin_model.linear.items():
+            self._terms[i].append(((), coeff))
+        for (i, j), coeff in self._spin_model.quad.items():
+            self._terms[i].append(((j,), coeff))
+            self._terms[j].append(((i,), coeff))
+        for inds, coeff in self._spin_model.higher.items():
+            for k in inds:
+                co = tuple(x for x in inds if x != k)
+                self._terms[k].append((co, coeff))
 
     def run(
         self,
@@ -192,17 +194,25 @@ class LocalSearch:
     @staticmethod
     def _calc_e_diff(
         state: np.ndarray,
-        neighbors: dict[int, list[tuple[int, float]]],
-        linear: dict[int, float],
+        terms: dict[int, list[tuple[tuple[int, ...], float]]],
         idx: int,
     ) -> float:
         """Calculate the energy difference when flipping bit *idx*.
 
-        Uses the sparse adjacency list so cost is O(degree) per flip,
-        not O(n).
+        Uses the sparse per-index term list so cost is O(deg(idx)) per
+        flip, where deg(idx) is the number of Hamiltonian terms that
+        contain idx. Handles arbitrary order (linear / quadratic / HUBO)
+        uniformly: for a term ``T ∋ idx`` with coefficient ``c`` and
+        co-indices ``T \\ {idx}``, its contribution to ΔE is
+        ``-2 · s_idx · c · ∏_{j ∈ co-indices} s_j``.
         """
-        interaction = sum(v * state[j] for j, v in neighbors[idx])
-        return float(-2 * state[idx] * (interaction + linear.get(idx, 0.0)))
+        total = 0.0
+        for co_indices, coeff in terms[idx]:
+            prod = coeff
+            for j in co_indices:
+                prod *= state[j]
+            total += prod
+        return float(-2 * state[idx] * total)
 
     def _first_improvement(self, state: np.ndarray) -> bool:
         """Flip the first bit whose flip lowers energy.
@@ -212,7 +222,7 @@ class LocalSearch:
         energy, *state* is left unchanged and ``False`` is returned.
         """
         for i in range(len(state)):
-            if self._calc_e_diff(state, self._neighbors, self._linear_dict, i) < 0:
+            if self._calc_e_diff(state, self._terms, i) < 0:
                 state[i] = -state[i]
                 return True
         return False
@@ -227,10 +237,7 @@ class LocalSearch:
         n = len(state)
         if n == 0:
             return False
-        deltas = [
-            self._calc_e_diff(state, self._neighbors, self._linear_dict, i)
-            for i in range(n)
-        ]
+        deltas = [self._calc_e_diff(state, self._terms, i) for i in range(n)]
         best = int(np.argmin(deltas))
         if deltas[best] < 0:
             state[best] = -state[best]

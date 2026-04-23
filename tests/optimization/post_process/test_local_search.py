@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+from qamomile.optimization.binary_model.expr import BinaryExpr, VarType
 from qamomile.optimization.binary_model.model import BinaryModel
 from qamomile.optimization.post_process.local_search import LocalSearch
 
@@ -191,12 +192,68 @@ class TestEdgeCases:
         assert sample == {0: -1, 1: -1}
 
 
-class TestUnsupportedModels:
-    def test_hubo_model_raises(self):
-        """Models with order > 2 (HUBO) raise ValueError in __init__."""
-        model = BinaryModel.from_hubo({(0, 1, 2): 1.0}, constant=0.0)
-        with pytest.raises(ValueError, match="quadratic"):
-            LocalSearch(model)
+class TestLocalSearchHubo:
+    """Higher-order (HUBO) support: linear/quad/higher terms in one Hamiltonian."""
+
+    @pytest.fixture
+    def cubic_spin_model(self) -> BinaryModel:
+        """Cubic SPIN model: s_0*s_1*s_2 + 2*s_0.
+
+        Brute force over 8 states:
+          (+,+,+): 1+2 = 3;  (+,+,-): -1+2 = 1;
+          (+,-,+): -1+2 = 1; (+,-,-): 1+2 = 3;
+          (-,+,+): -1-2 = -3 (min); (-,+,-): 1-2 = -1;
+          (-,-,+): 1-2 = -1; (-,-,-): -1-2 = -3 (min).
+        """
+        return BinaryModel(
+            BinaryExpr(
+                vartype=VarType.SPIN,
+                constant=0.0,
+                coefficients={(0, 1, 2): 1.0, (0,): 2.0},
+            )
+        )
+
+    @pytest.fixture
+    def quartic_binary_model(self) -> BinaryModel:
+        """4th-order BINARY HUBO: 2·x0x1x2x3 + x0x1 - x2, constant=0."""
+        return BinaryModel.from_hubo(
+            hubo={(0, 1, 2, 3): 2.0, (0, 1): 1.0, (2,): -1.0},
+            constant=0.0,
+        )
+
+    @pytest.mark.parametrize("method", ["best", "first"])
+    def test_cubic_spin_converges_to_min(self, cubic_spin_model, method):
+        """LocalSearch on a cubic SPIN Hamiltonian reaches energy -3."""
+        ls = LocalSearch(cubic_spin_model)
+        # From [1,1,1] the only improving flip is i=0 (ΔE = -2·1·(1+2) = -6),
+        # giving [-1,1,1] with energy -3; from there no flip improves.
+        result = ls.run([1, 1, 1], method=method)
+        sample, energy, _ = result.lowest()
+        assert np.isclose(energy, -3.0)
+        assert sample == {0: -1, 1: 1, 2: 1}
+
+    @pytest.mark.parametrize("method", ["best", "first"])
+    def test_quartic_binary_never_increases_energy(self, quartic_binary_model, method):
+        """On 4th-order BINARY HUBO, local search never increases energy."""
+        ls = LocalSearch(quartic_binary_model)
+        initial = [0, 0, 0, 0]
+        result = ls.run(initial, method=method)
+        _, energy, _ = result.lowest()
+        assert energy <= quartic_binary_model.calc_energy(initial) + 1e-10
+
+    @pytest.mark.parametrize("seed", range(5))
+    def test_cubic_energy_diff_matches_brute_force(self, cubic_spin_model, seed):
+        """Incremental ΔE on cubic terms matches full-energy brute force."""
+        rng = np.random.default_rng(seed)
+        state = rng.choice([-1.0, 1.0], size=3)
+        ls = LocalSearch(cubic_spin_model)
+        for flip_idx in range(3):
+            delta = ls._calc_e_diff(state, ls._terms, flip_idx)
+            before = cubic_spin_model.calc_energy(state.astype(int).tolist())
+            flipped = state.copy()
+            flipped[flip_idx] = -flipped[flip_idx]
+            after = cubic_spin_model.calc_energy(flipped.astype(int).tolist())
+            assert np.isclose(delta, after - before)
 
 
 class TestConstantOnlyModel:
@@ -216,7 +273,7 @@ class TestCalcEDiff:
         """Incremental energy diff equals the brute-force difference."""
         ls = LocalSearch(spin_model)
         state = np.array([1.0, 1.0, -1.0])
-        delta = ls._calc_e_diff(state, ls._neighbors, ls._linear_dict, 0)
+        delta = ls._calc_e_diff(state, ls._terms, 0)
         e_before = spin_model.calc_energy([1, 1, -1])
         e_after = spin_model.calc_energy([-1, 1, -1])
         assert np.isclose(delta, e_after - e_before)
@@ -226,7 +283,7 @@ class TestCalcEDiff:
         """Energy diff is correct for every index in the model."""
         ls = LocalSearch(spin_model)
         state = np.array([-1.0, 1.0, 1.0])
-        delta = ls._calc_e_diff(state, ls._neighbors, ls._linear_dict, flip_idx)
+        delta = ls._calc_e_diff(state, ls._terms, flip_idx)
         state_list = state.astype(int).tolist()
         e_before = spin_model.calc_energy(state_list)
         flipped = state_list.copy()
