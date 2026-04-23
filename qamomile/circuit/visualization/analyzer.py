@@ -3044,9 +3044,15 @@ class CircuitAnalyzer:
             if not op.operands:
                 return None
 
-            # Collect all qubit operand strings
+            # Collect qubit operand strings. Rotation gates (rx/ry/rz
+            # etc.) store their angle as the last operand via
+            # GateOperation.rotation(); exclude it here by filtering on
+            # QubitType so the result LHS and argument list show only
+            # qubit operands.
             qubit_strs = []
             for operand in op.operands:
+                if not isinstance(operand.type, QubitType):
+                    continue
                 if (
                     hasattr(operand, "parent_array")
                     and operand.parent_array is not None
