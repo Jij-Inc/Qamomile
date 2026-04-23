@@ -904,6 +904,21 @@ class MatplotlibRenderer:
                 zorder=PORDER_TEXT,
             )
 
+        # Participation markers: when the box spans qubit wires that
+        # are NOT touched by the loop body, mark each affected wire
+        # with dots at the left and right edges so the viewer can
+        # distinguish participating wires from passthrough. Skip when
+        # every spanned wire participates — the plain box already
+        # implies "all of these".
+        spanned = set(range(min(affected_qubits), max(affected_qubits) + 1))
+        if set(affected_qubits) < spanned:
+            x_left = x_pos - width / 2
+            x_right = x_pos + width / 2
+            for q in affected_qubits:
+                y = self.qubit_y[q]
+                self._draw_control_dot(ax, x_left, y)
+                self._draw_control_dot(ax, x_right, y)
+
     def _add_jupyter_display_support(self, fig: Figure) -> None:
         """Add Jupyter display support to the figure.
 
