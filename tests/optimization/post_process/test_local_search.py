@@ -434,11 +434,17 @@ class TestOmmxInput:
         improving); a second flip to any other 1-bit yields E=-2 (ΔE=-1);
         a third flip to (1,1,1) yields E=-1 (ΔE=+1, rejected). So local
         search halts at two 1-bits with E=-2.
+
+        Tie-breaking is deterministic for both methods: ``argmin`` (best)
+        and index-order scan (first) both pick the smallest index on ties,
+        so the trajectory is (0,0,0) → (1,0,0) → (1,1,0) and the final
+        state is {0: 1, 1: 1, 2: 0}.
         """
         result = LocalSearch(cubic_ommx).run([0, 0, 0], method=method)
         assert isinstance(result, ommx.v1.Solution)
         assert np.isclose(result.objective, -2.0)
         assert result.feasible
+        assert dict(result.state.entries) == {0: 1.0, 1: 1.0, 2: 0.0}
 
     def test_invalid_model_type_raises(self):
         """Passing anything other than BinaryModel / ommx.v1.Instance raises TypeError."""
