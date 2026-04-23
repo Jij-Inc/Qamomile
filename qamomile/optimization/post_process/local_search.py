@@ -59,7 +59,10 @@ class LocalSearch:
     :class:`ommx.v1.Instance`, matching the other optimization converters.
     An ommx instance is lowered to a BINARY model via
     :meth:`ommx.v1.Instance.to_hubo`, preserving higher-order terms so
-    that HUBO objectives survive the handoff.
+    that HUBO objectives survive the handoff. When an ommx instance is
+    used as input, :meth:`run` returns an :class:`ommx.v1.Solution`
+    evaluated against that instance; otherwise it returns a
+    :class:`BinarySampleSet`.
 
     Args:
         model: The problem to minimize. Either a :class:`BinaryModel`
@@ -72,9 +75,12 @@ class LocalSearch:
 
     def __init__(self, model: ommx.v1.Instance | BinaryModel) -> None:
         if isinstance(model, ommx.v1.Instance):
+            self._ommx_instance: ommx.v1.Instance | None = model
             hubo, constant = model.to_hubo()
             model = BinaryModel.from_hubo(hubo, constant=constant)
-        elif not isinstance(model, BinaryModel):
+        elif isinstance(model, BinaryModel):
+            self._ommx_instance = None
+        else:
             raise TypeError(
                 "model must be an ommx.v1.Instance or BinaryModel, "
                 f"got {type(model).__name__}."
@@ -113,7 +119,7 @@ class LocalSearch:
         initial_state: list[int],
         max_iter: int = -1,
         method: str | LocalSearchMethod = LocalSearchMethod.BEST,
-    ) -> BinarySampleSet:
+    ) -> BinarySampleSet | ommx.v1.Solution:
         """Run local search starting from *initial_state*.
 
         Minimizes the model's energy: only strictly energy-decreasing flips
@@ -128,7 +134,12 @@ class LocalSearch:
                 member or its string value (``"best"`` / ``"first"``).
 
         Returns:
-            A :class:`BinarySampleSet` containing the energy-minimized state.
+            The energy-minimized state. If this ``LocalSearch`` was
+            constructed from an :class:`ommx.v1.Instance`, the return
+            value is an :class:`ommx.v1.Solution` evaluated against that
+            instance (carrying objective, feasibility, and constraint
+            values). Otherwise it is a :class:`BinarySampleSet` with a
+            single sample in the model's original vartype.
 
         Raises:
             ValueError: If *method* is not recognized, *initial_state* has
@@ -172,7 +183,13 @@ class LocalSearch:
 
         spin_state = self._to_spin(np.asarray(initial_state))
         spin_state = self._search(step_fn, spin_state, max_iter)
-        return self._to_sampleset(spin_state)
+        sample_set = self._to_sampleset(spin_state)
+        if self._ommx_instance is not None:
+            # Hand the single minimized sample back to ommx so callers
+            # receive a Solution (objective, constraints, feasibility)
+            # keyed by the original decision-variable IDs.
+            return self._ommx_instance.evaluate(sample_set.samples[0])
+        return sample_set
 
     # ------------------------------------------------------------------
     # Internal helpers

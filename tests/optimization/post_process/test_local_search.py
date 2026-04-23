@@ -4,6 +4,7 @@ import pytest
 
 from qamomile.optimization.binary_model.expr import BinaryExpr, VarType
 from qamomile.optimization.binary_model.model import BinaryModel
+from qamomile.optimization.binary_model.sampleset import BinarySampleSet
 from qamomile.optimization.post_process.local_search import LocalSearch
 
 
@@ -298,8 +299,26 @@ class TestOmmxInput:
             sense=ommx.v1.Instance.MINIMIZE,
         )
 
+    def test_ommx_input_returns_solution(self, quadratic_ommx):
+        """ommx input yields ommx.v1.Solution output (not BinarySampleSet)."""
+        result = LocalSearch(quadratic_ommx).run([0, 0], method="best")
+        assert isinstance(result, ommx.v1.Solution)
+        # Minimum of -x0 - x1 + 3*x0*x1 over binary is -1 at (1,0) or (0,1).
+        assert np.isclose(result.objective, -1.0)
+        assert result.feasible
+        state = dict(result.state.entries)
+        # Starting from (0,0) with best-improvement, ΔE is -1 for both i=0
+        # and i=1; argmin breaks ties at i=0, so x0 flips to 1 first. From
+        # (1,0), flipping x1 gives ΔE = -1 + 3 = +2, so search stops.
+        assert state == {0: 1.0, 1: 0.0}
+
+    def test_binary_model_input_still_returns_sampleset(self, spin_model):
+        """BinaryModel input keeps the pre-ommx return type (BinarySampleSet)."""
+        result = LocalSearch(spin_model).run([1, -1, -1], method="best")
+        assert isinstance(result, BinarySampleSet)
+
     def test_quadratic_ommx_matches_binary_model(self, quadratic_ommx):
-        """ommx quadratic input gives the same solution as the equivalent BinaryModel."""
+        """ommx quadratic solution agrees with the equivalent BinaryModel."""
         bm = BinaryModel.from_qubo(
             qubo={(0, 0): -1.0, (1, 1): -1.0, (0, 1): 3.0}, constant=0.0
         )
@@ -307,23 +326,22 @@ class TestOmmxInput:
         result_ommx = LocalSearch(quadratic_ommx).run([0, 0], method="best")
 
         sample_bm, energy_bm, _ = result_bm.lowest()
-        sample_ommx, energy_ommx, _ = result_ommx.lowest()
-
         assert np.isclose(energy_bm, -1.0)
-        assert np.isclose(energy_ommx, energy_bm)
-        assert sample_ommx == sample_bm
+        assert np.isclose(result_ommx.objective, energy_bm)
+        assert dict(result_ommx.state.entries) == {
+            i: float(v) for i, v in sample_bm.items()
+        }
 
     @pytest.mark.parametrize("method", ["best", "first"])
     def test_cubic_ommx_preserves_higher_order(self, cubic_ommx, method):
         """HUBO terms in ommx input survive the handoff via to_hubo."""
-        ls = LocalSearch(cubic_ommx)
         # Starting from all-zero: any single flip to 1 gives energy -1
         # (strictly improving, ΔE = -1); from there any flip to a 3rd
         # 1-bit would take us to (1,1,1) with energy -1 (ΔE = 0, no
         # improvement), so we stop at two 1-bits with energy -2.
-        result = ls.run([0, 0, 0], method=method)
-        _, energy, _ = result.lowest()
-        assert np.isclose(energy, -2.0)
+        result = LocalSearch(cubic_ommx).run([0, 0, 0], method=method)
+        assert isinstance(result, ommx.v1.Solution)
+        assert np.isclose(result.objective, -2.0)
 
     def test_invalid_model_type_raises(self):
         """Passing anything other than BinaryModel / ommx.v1.Instance raises TypeError."""
