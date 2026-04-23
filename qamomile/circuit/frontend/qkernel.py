@@ -428,7 +428,10 @@ class QKernel(Generic[P, R]):
         """Auto-detect parameters: non-Qubit arguments without value or default."""
         detected: list[str] = []
         for name, param in self.signature.parameters.items():
-            param_type = param.annotation
+            # Prefer the resolved type hint from ``self.input_types`` so that
+            # ``from __future__ import annotations`` stringified annotations
+            # (e.g. ``"qmc.Vector[qmc.Float]"``) are compared as real types.
+            param_type = self.input_types.get(name, param.annotation)
 
             # Skip Qubit types
             if param_type is Qubit:
@@ -486,7 +489,10 @@ class QKernel(Generic[P, R]):
             if name in parameters:
                 continue
 
-            param_type = param.annotation
+            # Prefer the resolved type hint from ``self.input_types`` so that
+            # ``from __future__ import annotations`` stringified annotations
+            # are compared as real types.
+            param_type = self.input_types.get(name, param.annotation)
 
             # Qubit types are created as dummy inputs
             if param_type is Qubit:
@@ -793,7 +799,10 @@ class QKernel(Generic[P, R]):
             dummy_inputs: dict[str, Handle] = {}
 
             for name, param in self.signature.parameters.items():
-                param_type = param.annotation
+                # Prefer the resolved type hint from ``self.input_types`` so
+                # that ``from __future__ import annotations`` stringified
+                # annotations are handled correctly.
+                param_type = self.input_types.get(name, param.annotation)
 
                 # Scalar Observable is always a parameter; unbound
                 # Vector[Observable] is too so its shape stays symbolic
@@ -923,8 +932,8 @@ class QKernel(Generic[P, R]):
 
     def _has_qubit_array_params(self) -> bool:
         """Check if kernel has any Qubit array parameters (Vector[Qubit], etc.)."""
-        for param in self.signature.parameters.values():
-            pt = param.annotation
+        for name, param in self.signature.parameters.items():
+            pt = self.input_types.get(name, param.annotation)
             if is_array_type(pt) and _get_array_element_type(pt) is Qubit:
                 return True
         return False
@@ -960,7 +969,9 @@ class QKernel(Generic[P, R]):
         build_kwargs: dict[str, Any] = {}
         for key, val in kwargs.items():
             if key in self.signature.parameters:
-                pt = self.signature.parameters[key].annotation
+                pt = self.input_types.get(
+                    key, self.signature.parameters[key].annotation
+                )
                 if is_array_type(pt):
                     elem = _get_array_element_type(pt)
                     if elem is Qubit and isinstance(val, int):
@@ -970,7 +981,7 @@ class QKernel(Generic[P, R]):
 
         missing = []
         for name, param in self.signature.parameters.items():
-            pt = param.annotation
+            pt = self.input_types.get(name, param.annotation)
             if is_array_type(pt):
                 elem = _get_array_element_type(pt)
                 if elem is Qubit and name not in qubit_sizes:
