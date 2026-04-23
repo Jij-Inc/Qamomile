@@ -906,18 +906,20 @@ class MatplotlibRenderer:
 
         # Participation markers: when the analyzer precisely determined
         # which wires the loop touches, draw a small control-style dot
-        # on each affected wire at the box centre so viewers can tell
-        # which wires participate vs. which are passthrough. Matches
-        # the gate-drawing convention (single dot per wire at the gate
-        # column), just with a smaller radius so it doesn't dominate
-        # the wider box. Skip when the analyzer fell back — the
-        # affected set may over-approximate and drawing dots would
-        # misleadingly imply certainty.
+        # on each affected wire at the box's left edge so viewers can
+        # tell which wires participate vs. which are passthrough.
+        # Matches the gate-drawing convention (single dot per wire, no
+        # vertical repetition), but placed at the edge rather than the
+        # gate column so it does not collide with body text inside the
+        # wider box. Skip when the analyzer fell back — the affected
+        # set may over-approximate and drawing dots would misleadingly
+        # imply certainty.
         if node.affected_qubits_precise:
+            x_left = x_pos - width / 2
             for q in affected_qubits:
                 y = self.qubit_y[q]
                 circle = mpatches.Circle(
-                    (x_pos, y),
+                    (x_left, y),
                     radius=0.05,
                     facecolor=self.style.wire_color,
                     edgecolor=self.style.wire_color,
