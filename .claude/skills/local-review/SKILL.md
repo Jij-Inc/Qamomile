@@ -58,7 +58,7 @@ Applies to backend files under `qamomile/{qiskit,quri_parts,cudaq,qbraid,...}/`.
 
 ### G. Python Style
 
-- **Python 3.12+**, `X | None` (not `Optional[X]`), extensive type annotations.
+- **Python 3.11+** (per `pyproject.toml`'s `requires-python`), `X | None` (not `Optional[X]`), extensive type annotations. `enum.StrEnum` is available from 3.11 and is the preferred pattern for closed-set parameters (see later in this section).
 - **No stale imports** left behind from a rename / refactor (dead code at function / class level is covered in Step 5.5's root-cause consolidation).
 - **Google-style docstrings on ALL functions, methods, and classes** (public and private), with `Args` / `Returns` / `Raises` as applicable and `Example` where helpful. Private helpers may use compact sections but must keep the structure. Tests are exempt from `Args` / `Returns` — a 1–2 line description of what is verified suffices. See CLAUDE.md's "Docstring Convention (MANDATORY)". Missing docstrings are P2+.
 - **Closed-set parameters as Enum**: a public parameter with a finite set of valid strings (mode, method, algorithm variant, backend key) MUST be defined as `enum.StrEnum` and dispatched via the Enum internally. Signatures accept `str | MyEnum` and normalize at the entry (`method = MyEnum(method)`; on failure `raise ValueError` listing the valid values). Internal dispatch via `match` (small sets, see Section L) or a `ClassVar[dict[MyEnum, ...]]` (8+ variants). **Never** construct a `dict[str, callable]` inside a hot-path method every call. Raw string `==` dispatch on closed sets is P2; per-call dict construction is P3.
@@ -91,7 +91,7 @@ qBraid is out of scope (executor-only wrapper around Qiskit, requires API key). 
 **Required per backend** (parametrize or one test each):
 
 1. `transpiler.transpile(kernel, bindings=...)` returns a real `ExecutableProgram`.
-2. **Exercise BOTH paths**: `executable.sample(shots=...)` AND `executable.run(observable=...)` / `estimate()`. Sampler and estimator regress independently.
+2. **Exercise BOTH paths**: a sampling path (`executable.sample(executor, shots=...)`) AND an expval path. The expval path goes through `qmc.expval(q, hamiltonian)` inside the kernel — `executable.run(executor, ...)` then returns an `ExpvalJob` — or, when working directly with the emitted circuit, the backend executor's `estimate(circuit, hamiltonian)` entry point. Sampler and estimator regress independently; exercising only one is insufficient.
 3. Verify against an analytic reference or cross-backend agreement (`np.allclose` for expval; statistical tolerance for sampling).
 4. Guard SDK deps with `pytest.importorskip("<sdk>")`.
 
