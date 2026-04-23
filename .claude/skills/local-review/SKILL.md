@@ -9,37 +9,46 @@ You are an expert code reviewer for the Qamomile quantum optimization SDK. Revie
 
 If `$ARGUMENTS` is provided, use it as the target branch. Otherwise, default to `main`.
 
+## Severity Levels
+
+Use these labels consistently when reporting findings (referenced by rules below and re-applied in Step 6):
+
+- **P0 — Bug**: incorrect behavior, runtime error, linear-type violation, silent data corruption, breaking change in unchanged files, mutable default arg, bare `except` swallowing, float `==` in production code, missing exception chaining.
+- **P1 — Significant Design Issue**: layer-boundary / `@qkernel` / backend-pattern violation; missing / stale / unexecuted `.ipynb`; new docs not in test patterns; incomplete modifications (changed interface, callers not updated, `__all__` stale); missing tolerance in numerical asserts; missing tests or docs for a new feature; OMMX parity break; missing cross-backend execution coverage for new algorithm/stdlib.
+- **P2 — Moderate**: missing docstrings, un-parametrized tests, missing randomization, missing edge / negative tests, missing deterministic-test justification or completeness, raw-string dispatch on closed sets, unnecessary copies in hot paths, unjustified incidental HUBO/QUBO guard, plain `range(...)` in a qkernel body (use `qmc.range(...)`).
+- **P3 — Minor**: style, naming, import ordering, per-call dict construction, suboptimal generator/list choice.
+
 ## Qamomile Review Rules
 
 ### A. Linear Type Safety (No-Cloning Theorem)
 
 - **Qubit reassignment**: every gate consumes the input qubit and returns a new one. The result MUST be reassigned: `q = qm.h(q)`.
 - **No aliasing**: the same qubit must never appear in multiple operand positions of one operation (e.g., `qm.cx(q, q)` is forbidden).
-- **Array element borrowing**: when borrowing `q0 = qubits[0]`, it must be returned (`qubits[0] = q0`) before borrowing another element or using the array.
+- **Array element use**: in-place forms are canonical — `qubits[i] = qm.h(qubits[i])` for single-qubit gates, `qubits[i], qubits[j] = qm.cx(qubits[i], qubits[j])` (tuple assignment) for multi-qubit gates. These are always OK. If you take an element into a local name (`q0 = qubits[0]`), you must return it (`qubits[0] = q0`) before re-borrowing the same index **into a local name** or before using the array as a whole. Flag **double-borrow** of the same element into different locals, not the tuple-assignment form.
 
 ### B. Layer Dependency Direction
 
 `Frontend (@qkernel) → IR → Transpiler Pipeline → Backend`
 
-Dependencies flow only downstream. Upstream imports are forbidden:
+Dependencies flow only downstream. The practical rules:
 
-- **IR** depends on nothing.
-- **Frontend** depends only on IR.
-- **Transpiler** depends only on IR.
-- **Backend** depends on IR and Transpiler public APIs; never on Frontend.
+- **IR** depends on nothing — it is the shared data model.
+- **Frontend** depends only on IR. It MUST NOT import from Transpiler or Backend.
+- **Transpiler passes** are IR-centric: each pass reads / writes IR and should not reach into Frontend internals. The `Transpiler` orchestrator class at the compile-entry boundary may reference Frontend types such as `QKernel` and `DecompositionConfig` (that is the expected compile-entry surface), but the individual passes under `qamomile/circuit/transpiler/passes/` should stay on IR.
+- **Backend** depends on IR and Transpiler public APIs. Backend MUST NOT import from Frontend.
 
 ### C. @qkernel & Converter Pattern
 
-- All quantum circuit building blocks MUST use `@qm.qkernel` (or `@qmc.qkernel`).
+- Quantum building blocks exposed for composition by algorithm or optimization converters (QAOA / QRAO / FQAOA ansatz pieces, stdlib algorithms like QFT / QPE / IQFT, mixer / cost-Hamiltonian prep, etc.) MUST use `@qm.qkernel` (or `@qmc.qkernel`). `CompositeGate._decompose()` methods and emitter-side decomposition strategies are separate patterns (class method / strategy protocol) and are out of scope for this rule.
 - **Type annotations are mandatory** on all parameters and return types, using Qamomile types (`qm.Qubit`, `qm.Float`, `qm.UInt`, `qm.Vector[...]`, `qm.Dict[...]`) — not Python primitives.
-- Use `qm.range()` for loops and `qm.items()` / `.items()` for Dict iteration inside qkernels. **No plain Python `for` loops over quantum operations** — they must be captured as IR ForOperations. Plain Python loops are only OK over precomputed concrete data (e.g., closures over numpy arrays).
+- Loops inside a qkernel body over quantum operations MUST use `qmc.range(...)` (project convention — the AST transformer technically also accepts plain `range(...)`, but the convention is to make quantum-side iteration explicit). Dict iteration uses `for k, v in mapping.items()`. Plain Python iteration over arbitrary iterables (`for x in some_list:`) is **not** captured as an IR `ForOperation` — restrict that form to iteration over precomputed concrete data used via closures (e.g., numpy arrays referenced from within the kernel body).
 - Converters (QAOA, QRAO, FQAOA) compose `@qkernel` building blocks; `transpile()` delegates rather than inlining circuit construction. If both a public getter (`get_xxx_ansatz`) and `transpile()` exist, `transpile()` must compose the getter.
 
 ### D. Backend Abstraction
 
 Applies to backend files under `qamomile/{qiskit,quri_parts,cudaq,qbraid,...}/`.
 
-- Transpiler subclass: inherit `Transpiler[T]`, implement `_create_separate_pass()`, `_create_emit_pass()`, `executor()`.
+- Transpiler subclass: inherit `Transpiler[T]`, implement `_create_segmentation_pass()`, `_create_emit_pass()`, `executor()`.
 - Emitter pattern: gate-by-gate conversion to backend primitives.
 - Composite gate emitters: pluggable strategy for native optimized implementations (e.g., QFT).
 
@@ -65,7 +74,7 @@ Applies to backend files under `qamomile/{qiskit,quri_parts,cudaq,qbraid,...}/`.
 
 ### H. Testing Philosophy
 
-- `pytest` with markers (`docs`, gate categories, backends); reuse base test suites (`TranspilerTestSuite`). Module-level `@qkernel` definitions are required (for `inspect.getsource`).
+- `pytest` with markers (`docs`, gate categories, backends); reuse base test suites (`TranspilerTestSuite`). Module-level `@qkernel` definitions are **recommended** for qkernels that are reused across tests or that rely on `inspect.getsource` at runtime; function-local `@qkernel` definitions (inside a test method) are acceptable for one-off test helpers.
 - **Parametrize** (`@pytest.mark.parametrize`) and **randomize** (`np.random.default_rng(seed)` with fixed seeds) wherever inputs admit it.
 - **Test docstrings**: a 1–2 line description of what is verified — not Google-style `Args` / `Returns`.
 - **Edge cases** (empty, single-element, `0` / `π` / `2π`) and **negative tests** (`pytest.raises(ExpectedType)`) are mandatory.
@@ -192,13 +201,6 @@ Common root-cause patterns to watch for: **dead code** (multiple nits on code ne
 
 ### Step 6: Report
 
-For each finding, give: severity, `file:line`, code snippet, the violated section, a short explanation, a concrete recommendation with corrected code, and — for consolidated findings — a `Root cause of:` line listing subsumed surface issues. End with a severity-grouped summary table.
-
-**Severity**:
-
-- **P0 — Bug**: incorrect behavior, runtime error, linear-type violation, silent data corruption, breaking change in unchanged files, mutable default arg, bare `except` swallowing, float `==` in production code, missing exception chaining.
-- **P1 — Significant Design Issue**: layer-boundary / `@qkernel` / backend-pattern violation; missing / stale / unexecuted `.ipynb`; new docs not in test patterns; incomplete modifications (changed interface, callers not updated, `__all__` stale); missing tolerance in numerical asserts; missing tests or docs for a new feature; OMMX parity break; missing cross-backend execution coverage for new algorithm/stdlib.
-- **P2 — Moderate**: missing docstrings, un-parametrized tests, missing randomization, missing edge / negative tests, missing deterministic-test justification or completeness, raw-string dispatch on closed sets, unnecessary copies in hot paths, unjustified incidental HUBO/QUBO guard.
-- **P3 — Minor**: style, naming, import ordering, per-call dict construction, suboptimal generator/list choice.
+For each finding, give: severity (using the **Severity Levels** rubric at the top of this document), `file:line`, code snippet, the violated section, a short explanation, a concrete recommendation with corrected code, and — for consolidated findings — a `Root cause of:` line listing subsumed surface issues. End with a severity-grouped summary table.
 
 If Step 5.5 did not stabilize, append: "Note: some findings may have deeper interdependencies warranting further investigation."
