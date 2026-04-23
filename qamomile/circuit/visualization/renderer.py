@@ -920,7 +920,7 @@ class MatplotlibRenderer:
                 for x in (x_left, x_right):
                     circle = mpatches.Circle(
                         (x, y),
-                        radius=0.1,
+                        radius=0.05,
                         facecolor=self.style.wire_color,
                         edgecolor=self.style.wire_color,
                         zorder=PORDER_GATE - 1,
