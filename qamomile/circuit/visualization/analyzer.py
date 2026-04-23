@@ -1588,8 +1588,6 @@ class CircuitAnalyzer:
             return list(op.control_qubits) + list(op.target_qubits)
         if isinstance(op, (MeasureOperation, MeasureVectorOperation)):
             return list(op.operands[:1])
-        if isinstance(op, ExpvalOp):
-            return [op.qubits]
         return None
 
     def _analyze_loop_affected_qubits(
@@ -2365,25 +2363,6 @@ class CircuitAnalyzer:
             return None
 
         if isinstance(operand, ArrayValue) and operand.get_element_uuids():
-            # Synthetic ArrayValue from an ``expval()`` tuple input
-            # (see ``qamomile/circuit/frontend/operation/expval.py``)
-            # stores both ``element_logical_ids`` and ``element_uuids``
-            # on its array_runtime metadata. ``qubit_map`` is keyed by
-            # logical_id, so prefer the logical_id lookup; only fall
-            # back to uuids in case a caller stored uuid-keyed entries
-            # (defensive).
-            array_runtime = operand.metadata.array_runtime
-            element_logical_ids = (
-                array_runtime.element_logical_ids if array_runtime else ()
-            )
-            if element_logical_ids:
-                resolved_indices = [
-                    qubit_map[logical_id_remap.get(lid, lid)]
-                    for lid in element_logical_ids
-                    if logical_id_remap.get(lid, lid) in qubit_map
-                ]
-                if resolved_indices:
-                    return resolved_indices
             return [
                 qubit_map[uuid]
                 for uuid in operand.get_element_uuids()
