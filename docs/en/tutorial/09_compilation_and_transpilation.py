@@ -340,10 +340,18 @@ print("ForOperations:    ", sum(1 for op in block.operations if isinstance(op, F
 #
 # 1. The block's inputs and outputs are classical (quantum I/O is only allowed
 #    for *subroutine* blocks, not entrypoints).
-# 2. No quantum operation depends on a classical value that was computed from
-#    a measurement. That would require JIT compilation, which Qamomile does
-#    not currently support — the `plan` stage enforces a single quantum
-#    segment.
+# 2. No **`OperationKind.QUANTUM`** operation receives a **classical-typed
+#    operand** whose value was computed from a measurement — concretely, the
+#    rotation angle in `rx(q, theta)` cannot be a classical value derived
+#    from an earlier measurement, because the backend would have to JIT a
+#    classical computation between measurement and gate.
+#
+# This rule **does not forbid dynamic quantum circuits**: `IfOperation` and
+# `WhileOperation` are `OperationKind.CONTROL`, not QUANTUM, so control flow
+# conditioned on a measurement `Bit` (`if bit: ...`, `while bit: ...`)
+# passes the check. Quantum-typed values that survive a phi merge are also
+# explicitly exempt. Section 5 walks through which dynamic patterns are
+# allowed and which are rejected, with code examples.
 #
 # On success, the block transitions to `ANALYZED`.
 
