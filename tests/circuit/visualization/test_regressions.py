@@ -570,6 +570,221 @@ class TestDeutschPassthroughNoRegression:
         assert sorted(all_h_blocks[0].affected_qubits) == [0, 1]
 
 
+_TMP_TOKENS = ("uint_tmp", "float_tmp", "bit_tmp")
+
+
+def _iter_labels(node):
+    """Yield every human-readable label string reachable from a VisualNode."""
+    if isinstance(node, VGate):
+        yield node.label
+    elif isinstance(node, VInlineBlock):
+        yield node.label
+        for child in node.children:
+            yield from _iter_labels(child)
+    elif isinstance(node, VFoldedBlock):
+        yield node.header_label
+        for line in node.body_lines:
+            yield line
+    elif isinstance(node, VUnfoldedSequence):
+        for iteration in node.iterations:
+            for child in iteration:
+                yield from _iter_labels(child)
+
+
+def _assert_no_tmp_leakage(vc, context=""):
+    """Assert no IR-internal temp name leaks into any rendered label."""
+    for child in vc.children:
+        for label in _iter_labels(child):
+            for token in _TMP_TOKENS:
+                assert token not in label, (
+                    f"{context}: internal temp '{token}' leaked into label {label!r}"
+                )
+
+
+class TestNoInternalTempLeakage:
+    """Regression: IR-internal placeholder names must not reach rendered labels."""
+
+    def _build_vqe_kernel(self):
+        """The VQE-ansatz shape the user reported."""
+
+        @qm.qkernel
+        def ry_layer(
+            q: qm.Vector[qm.Qubit], thetas: qm.Vector[qm.Float], base: qm.UInt
+        ) -> qm.Vector[qm.Qubit]:
+            for i in qm.range(2):
+                q[i] = qm.ry(q[i], thetas[base + i])
+            return q
+
+        @qm.qkernel
+        def rz_layer(
+            q: qm.Vector[qm.Qubit], thetas: qm.Vector[qm.Float], base: qm.UInt
+        ) -> qm.Vector[qm.Qubit]:
+            for i in qm.range(2):
+                q[i] = qm.rz(q[i], thetas[base + i])
+            return q
+
+        @qm.qkernel
+        def cx_entangling_layer(
+            q: qm.Vector[qm.Qubit],
+        ) -> qm.Vector[qm.Qubit]:
+            for i in qm.range(1):
+                q[i], q[i + 1] = qm.cx(q[i], q[i + 1])
+            return q
+
+        @qm.qkernel
+        def vqe_ansatz(
+            n: qm.UInt, reps: qm.UInt, thetas: qm.Vector[qm.Float]
+        ) -> qm.Vector[qm.Qubit]:
+            q = qm.qubit_array(n, name="q")
+            for r in qm.range(reps):
+                base = r * 2 * n
+                q = ry_layer(q, thetas, base)
+                q = rz_layer(q, thetas, base + n)
+                q = cx_entangling_layer(q)
+            final_base = reps * 2 * n
+            q = ry_layer(q, thetas, final_base)
+            q = rz_layer(q, thetas, final_base + n)
+            return q
+
+        return vqe_ansatz
+
+    def test_bug_a_folded_body_no_tmp(self):
+        """Folded for-body with BinOp CallBlock arg resolves symbolically."""
+        kernel = self._build_vqe_kernel()
+        graph = kernel._build_graph_for_visualization(n=2, reps=2)
+        analyzer = CircuitAnalyzer(
+            graph, DEFAULT_STYLE, inline=False, fold_loops=True
+        )
+        qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+        vc = analyzer.build_visual_ir(graph, qm_map, qm_names, num_q)
+
+        _assert_no_tmp_leakage(vc, context="bug_a folded")
+
+        # Positive check: folded body should carry a symbolic arg like "r*2*...".
+        folded = [n for n in vc.children if isinstance(n, VFoldedBlock)]
+        assert folded, "Expected at least one VFoldedBlock"
+        joined = " ".join(line for b in folded for line in b.body_lines)
+        assert "ry_layer" in joined
+        assert "r*2" in joined, (
+            f"Expected symbolic BinOp form in folded body; got {joined!r}"
+        )
+
+    def test_bug_b_inline_unfolded_no_tmp(self):
+        """Inline/unfolded top-level CallBlock resolves concrete theta indices."""
+        kernel = self._build_vqe_kernel()
+        graph = kernel._build_graph_for_visualization(n=2, reps=2)
+        analyzer = CircuitAnalyzer(
+            graph, DEFAULT_STYLE, inline=True, fold_loops=False
+        )
+        qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+        vc = analyzer.build_visual_ir(graph, qm_map, qm_names, num_q)
+
+        _assert_no_tmp_leakage(vc, context="bug_b inline unfolded")
+
+        # Positive check: some gate label should reference a concrete index
+        # like "thetas[8]" or "thetas[9]" from the post-loop ry_layer.
+        all_labels = [lbl for c in vc.children for lbl in _iter_labels(c)]
+        assert any("8" in lbl or "9" in lbl for lbl in all_labels), (
+            f"Expected concrete index in post-loop gate label; got {all_labels!r}"
+        )
+
+    def test_controlled_u_folded_binop_arg(self):
+        """ControlledU inside a folded for-body with a BinOp arg — no tmp leak."""
+
+        @qm.qkernel
+        def inner(q: qm.Qubit, phi: qm.Float) -> qm.Qubit:
+            q = qm.rz(q, phi)
+            return q
+
+        @qm.qkernel
+        def outer(n: qm.UInt, phis: qm.Vector[qm.Float]) -> qm.Vector[qm.Qubit]:
+            q = qm.qubit_array(n, name="q")
+            for i in qm.range(n):
+                shift = i * 2
+                q[i] = inner(q[i], phis[shift])
+            return q
+
+        graph = outer._build_graph_for_visualization(n=3)
+        analyzer = CircuitAnalyzer(
+            graph, DEFAULT_STYLE, inline=False, fold_loops=True
+        )
+        qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+        vc = analyzer.build_visual_ir(graph, qm_map, qm_names, num_q)
+        _assert_no_tmp_leakage(vc, context="controlled_u folded")
+
+    def test_nested_callblock_passes_binop_through(self):
+        """Outer CallBlock computes a BinOp and passes it to inner CallBlock."""
+
+        @qm.qkernel
+        def leaf(q: qm.Qubit, k: qm.UInt) -> qm.Qubit:
+            q = qm.h(q)
+            return q
+
+        @qm.qkernel
+        def middle(q: qm.Qubit, m: qm.UInt) -> qm.Qubit:
+            k = m + 1
+            q = leaf(q, k)
+            return q
+
+        @qm.qkernel
+        def top(n: qm.UInt) -> qm.Vector[qm.Qubit]:
+            q = qm.qubit_array(n, name="q")
+            for i in qm.range(n):
+                q[i] = middle(q[i], i * 2)
+            return q
+
+        graph = top._build_graph_for_visualization(n=3)
+        for fold, inline in [(True, False), (False, False), (False, True)]:
+            analyzer = CircuitAnalyzer(
+                graph, DEFAULT_STYLE, inline=inline, fold_loops=fold
+            )
+            qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+            vc = analyzer.build_visual_ir(graph, qm_map, qm_names, num_q)
+            _assert_no_tmp_leakage(
+                vc, context=f"nested callblock fold={fold} inline={inline}"
+            )
+
+    def test_catalog_sweep_no_tmp_any_mode(self):
+        """Every catalog kernel renders without tmp-name leakage in any mode."""
+        from tests.circuit.qkernel_catalog import QKERNEL_CATALOG
+
+        modes = [
+            (True, False),
+            (False, False),
+            (True, True),
+            (False, True),
+        ]
+        for entry in QKERNEL_CATALOG:
+            try:
+                graph = entry.qkernel._build_graph_for_visualization(
+                    **entry.min_params
+                )
+            except Exception:
+                # Skip kernels that can't be built with min_params
+                # (e.g., kernels requiring unsupported param types).
+                continue
+            for fold_loops, inline in modes:
+                analyzer = CircuitAnalyzer(
+                    graph,
+                    DEFAULT_STYLE,
+                    inline=inline,
+                    fold_loops=fold_loops,
+                )
+                qm_map, qm_names, num_q = analyzer.build_qubit_map(graph)
+                try:
+                    vc = analyzer.build_visual_ir(graph, qm_map, qm_names, num_q)
+                except NotImplementedError:
+                    # Some kernels use IfOperation/WhileOperation which
+                    # the visualizer does not yet support.
+                    continue
+                _assert_no_tmp_leakage(
+                    vc,
+                    context=(
+                        f"catalog[{entry.id}] fold={fold_loops} inline={inline}"
+                    ),
+                )
+
+
 class TestNestedLoopAffectedQubits:
     """Regression (bug_002): nested control-flow qubits must not be dropped by precise walk."""
 

@@ -54,12 +54,35 @@ if TYPE_CHECKING:
     from qamomile.circuit.ir.block import Block
 
 
+_INTERNAL_TMP_NAMES: frozenset[str] = frozenset({
+    "uint_tmp", "float_tmp", "bit_tmp"
+})
+
+
 class CircuitAnalyzer:
     """Analyzes IR blocks for circuit visualization.
 
     Handles qubit mapping, value resolution, label generation,
     and width estimation. Has no matplotlib dependency.
     """
+
+    @staticmethod
+    def _is_internal_temp_name(name: str | None) -> bool:
+        """Return True if `name` is an IR-internal placeholder.
+
+        These default names (``uint_tmp`` / ``float_tmp`` / ``bit_tmp``
+        from `qamomile.circuit.frontend.handle.primitives`) label
+        anonymous Values produced by BinOp and handle construction.
+        They are implementation detail and must never reach user-facing
+        rendered labels.
+
+        Args:
+            name: Candidate display string.
+
+        Returns:
+            True if `name` equals one of the reserved placeholders.
+        """
+        return name in _INTERNAL_TMP_NAMES
 
     def __init__(
         self,
@@ -614,8 +637,14 @@ class CircuitAnalyzer:
         Returns:
             VisualCircuit containing the VisualNode tree.
         """
+        # Pre-evaluate top-level intermediate BinOps so that CallBlock
+        # arguments derived from them (e.g. final_base = reps * 2 * n)
+        # resolve to numeric or symbolic strings instead of leaking the
+        # IR-internal placeholder name "uint_tmp" downstream.
+        top_param_values: dict = {}
+        self._evaluate_loop_body_intermediates(graph.operations, top_param_values)
         children = self._build_visual_nodes(
-            graph.operations, qubit_map, {}, {}, depth=0, scope_path=()
+            graph.operations, qubit_map, {}, top_param_values, depth=0, scope_path=()
         )
         return VisualCircuit(
             children=children,
@@ -1985,7 +2014,7 @@ class CircuitAnalyzer:
         # Named parameter
         if value.is_parameter():
             name = value.parameter_name() or value.name
-            if name:
+            if name and not self._is_internal_temp_name(name):
                 return name
         # Array element (e.g., weights[e])
         if hasattr(value, "parent_array") and value.parent_array is not None:
@@ -1997,8 +2026,14 @@ class CircuitAnalyzer:
                     idx_parts.append(idx)
                 return f"{array_name}[{','.join(idx_parts)}]"
 
-        # Fallback: name
-        if hasattr(value, "name") and value.name:
+        # Fallback: name (refuse IR-internal placeholders so that
+        # "uint_tmp"/"float_tmp"/"bit_tmp" never leak into rendered
+        # expressions).
+        if (
+            hasattr(value, "name")
+            and value.name
+            and not self._is_internal_temp_name(value.name)
+        ):
             return value.name
         return None
 
@@ -2603,6 +2638,30 @@ class CircuitAnalyzer:
                 child_param_values[dummy_input.logical_id] = (
                     actual_input.parameter_name() or actual_input.name
                 )
+            else:
+                # actual_input is a BinOp result (or similar unresolved
+                # non-parameter Value). Try numeric evaluation via
+                # graph.operations first — after top-level
+                # pre-evaluation in build_visual_ir this usually
+                # succeeds.
+                evaluated = self._evaluate_value(actual_input, param_values)
+                if evaluated is not None and isinstance(evaluated, (int, float)):
+                    child_param_values[dummy_input.logical_id] = evaluated
+                else:
+                    # Fall back to a symbolic expression so downstream
+                    # renders e.g. "reps*2*n" instead of "uint_tmp".
+                    expr = self._format_value_as_expression(
+                        actual_input, set(), None
+                    )
+                    if expr and not self._is_internal_temp_name(expr):
+                        child_param_values[dummy_input.logical_id] = expr
+                    else:
+                        # Last resort: forward the logical_id so
+                        # downstream lookups can still chase the
+                        # defining BinOp via logical_id_remap.
+                        new_logical_id_remap[dummy_input.logical_id] = (
+                            actual_input.logical_id
+                        )
 
         # Propagate ArrayValue shape dimensions and const_array data
         for dummy_input, actual_input in zip(block_value.input_values, actual_inputs):
@@ -2807,9 +2866,15 @@ class CircuitAnalyzer:
                     symbolic = self._resolve_binop_as_symbolic(
                         theta, param_values or {}, body_operations
                     )
-                    if symbolic is not None:
+                    if symbolic is not None and not self._is_internal_temp_name(
+                        symbolic
+                    ):
                         return self._format_symbolic_expression(symbolic)
-                    if hasattr(theta, "name") and theta.name:
+                    if (
+                        hasattr(theta, "name")
+                        and theta.name
+                        and not self._is_internal_temp_name(theta.name)
+                    ):
                         return self._format_symbolic_param(theta.name)
 
         return None
@@ -2842,17 +2907,71 @@ class CircuitAnalyzer:
             if evaluated is not None and isinstance(evaluated, (int, float)):
                 return self._format_parameter(evaluated)
 
+        # Defining BinOp in scope — expand recursively before consulting
+        # pre-computed symbolic strings. Keeps kernel parameters
+        # symbolic (renders "r*2*n" rather than "r*2*2" because
+        # _format_value_as_expression does not consult param_values for
+        # numeric folding).
+        if self._operand_is_binop_result(operand, body_operations):
+            expr = self._format_value_as_expression(
+                operand, loop_vars, body_operations
+            )
+            if expr and not self._is_internal_temp_name(expr):
+                return self._format_symbolic_param(expr)
+
+        # Symbolic string from pre-evaluation (e.g., _build_symbolic_binop
+        # storing "reps*2*n" keyed by logical_id). Reached only when the
+        # operand lacks a visible defining BinOp — typical for top-level
+        # intermediates that were pre-evaluated during build_visual_ir.
+        if param_values is not None and operand.logical_id in param_values:
+            pv = param_values[operand.logical_id]
+            if isinstance(pv, str) and not self._is_internal_temp_name(pv):
+                return self._format_symbolic_param(pv)
+
         # Array element: resolve index and apply TeX formatting
         if hasattr(operand, "parent_array") and operand.parent_array is not None:
             arr = operand.parent_array.name or "params"
             idx = self._resolve_index_expression(operand, loop_vars, body_operations)
             return self._format_symbolic_param(f"{arr}[{idx}]")
 
-        # Named parameter: apply TeX formatting
-        if hasattr(operand, "name") and operand.name:
+        # Named parameter: apply TeX formatting. Skip IR-internal
+        # placeholders to avoid leaking "uint_tmp" etc.
+        if (
+            hasattr(operand, "name")
+            and operand.name
+            and not self._is_internal_temp_name(operand.name)
+        ):
             return self._format_symbolic_param(operand.name)
 
         return None
+
+    def _operand_is_binop_result(
+        self,
+        operand: Value,
+        operations: list | None,
+    ) -> bool:
+        """Return True if `operand` is the result Value of a BinOp in scope.
+
+        Args:
+            operand: IR Value to test.
+            operations: Operations list to search. Falls back to
+                ``self.graph.operations`` when None.
+
+        Returns:
+            True if a matching BinOp is found, else False.
+        """
+        ops = operations
+        if ops is None:
+            graph = getattr(self, "graph", None)
+            ops = graph.operations if graph else []
+        for op in ops:
+            if (
+                isinstance(op, BinOp)
+                and op.results
+                and id(op.results[0]) == id(operand)
+            ):
+                return True
+        return False
 
     def _format_operation_as_expression(
         self,
@@ -3167,8 +3286,14 @@ class CircuitAnalyzer:
                 return f"{array_name}[{','.join(idx_parts)}]"
             return array_name
 
-        # Named value fallback (e.g., edges_dim0 for unbound array shapes)
-        if hasattr(value, "name") and value.name:
+        # Named value fallback (e.g., edges_dim0 for unbound array
+        # shapes). Refuse IR-internal placeholders to avoid leaking
+        # "uint_tmp" etc. to rendered labels.
+        if (
+            hasattr(value, "name")
+            and value.name
+            and not self._is_internal_temp_name(value.name)
+        ):
             return value.name
 
         return next(iter(loop_vars)) if loop_vars else "?"
@@ -3441,7 +3566,9 @@ class CircuitAnalyzer:
                                 param_str = self._format_symbolic_param(resolved_name)
                             else:
                                 name = theta.parameter_name() or theta.name
-                                param_str = self._format_symbolic_param(name)
+                                if self._is_internal_temp_name(name):
+                                    name = "?"
+                                param_str = self._format_symbolic_param(name or "?")
                 else:
                     # Generic Value — try evaluating (handles array elements, BinOps)
                     evaluated = self._evaluate_value(theta, param_values or {})
@@ -3451,6 +3578,9 @@ class CircuitAnalyzer:
                         param_values
                         and theta.logical_id in param_values
                         and isinstance(param_values[theta.logical_id], str)
+                        and not self._is_internal_temp_name(
+                            param_values[theta.logical_id]
+                        )
                     ):
                         param_str = self._format_symbolic_param(
                             param_values[theta.logical_id]
@@ -3465,12 +3595,18 @@ class CircuitAnalyzer:
                             symbolic = self._resolve_binop_as_symbolic(
                                 theta, param_values or {}
                             )
-                            if symbolic is not None:
+                            if symbolic is not None and not self._is_internal_temp_name(
+                                symbolic
+                            ):
                                 param_str = self._format_symbolic_expression(symbolic)
                             else:
-                                param_str = self._format_symbolic_param(
-                                    theta.name or "?"
-                                )
+                                fallback = theta.name
+                                if (
+                                    fallback is None
+                                    or self._is_internal_temp_name(fallback)
+                                ):
+                                    fallback = "?"
+                                param_str = self._format_symbolic_param(fallback)
             else:
                 # Unknown type, convert to string (defensive fallback)
                 param_str = str(theta)  # type: ignore[unreachable]
