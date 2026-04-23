@@ -141,14 +141,14 @@ class LocalSearch:
 
         match method:
             case LocalSearchMethod.BEST:
-                step: _StepFn = self._best_improvement
+                step_fn: _StepFn = self._best_improvement
             case LocalSearchMethod.FIRST:
-                step = self._first_improvement
+                step_fn = self._first_improvement
             case _:
                 assert False, "unreachable"
 
         spin_state = self._to_spin(np.asarray(initial_state))
-        spin_state = self._search(step, spin_state, max_iter)
+        spin_state = self._search(step_fn, spin_state, max_iter)
         return self._to_sampleset(spin_state)
 
     # ------------------------------------------------------------------
@@ -171,7 +171,7 @@ class LocalSearch:
 
     def _search(
         self,
-        step: _StepFn,
+        step_fn: _StepFn,
         state: np.ndarray,
         max_iter: int,
     ) -> np.ndarray:
@@ -183,7 +183,7 @@ class LocalSearch:
         """
         counter = 0
         while max_iter == -1 or counter < max_iter:
-            flipped = step(state, self._neighbors, self._linear_dict, len(state))
+            flipped = step_fn(state, self._neighbors, self._linear_dict, len(state))
             if not flipped:
                 break
             counter += 1
