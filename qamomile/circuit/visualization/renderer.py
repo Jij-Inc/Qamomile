@@ -918,7 +918,14 @@ class MatplotlibRenderer:
             for q in affected_qubits:
                 y = self.qubit_y[q]
                 for x in (x_left, x_right):
-                    self._draw_control_dot(ax, x, y)
+                    circle = mpatches.Circle(
+                        (x, y),
+                        radius=0.1,
+                        facecolor=self.style.wire_color,
+                        edgecolor=self.style.wire_color,
+                        zorder=PORDER_GATE - 1,
+                    )
+                    ax.add_patch(circle)
 
     def _add_jupyter_display_support(self, fig: Figure) -> None:
         """Add Jupyter display support to the figure.
