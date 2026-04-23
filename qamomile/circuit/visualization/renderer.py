@@ -905,19 +905,25 @@ class MatplotlibRenderer:
             )
 
         # Participation markers: when the analyzer precisely determined
-        # which wires the loop touches, draw control-style dots on each
-        # affected wire at the left and right edges so viewers can tell
-        # at a glance which wires participate vs. which are passthrough.
-        # Skip when the analyzer fell back to conservative analysis —
-        # affected_qubits in that case may over-approximate, and dots
-        # would misleadingly imply we know for sure.
+        # which wires the loop touches, draw a small control-style dot
+        # on each affected wire at the box centre so viewers can tell
+        # which wires participate vs. which are passthrough. Matches
+        # the gate-drawing convention (single dot per wire at the gate
+        # column), just with a smaller radius so it doesn't dominate
+        # the wider box. Skip when the analyzer fell back — the
+        # affected set may over-approximate and drawing dots would
+        # misleadingly imply certainty.
         if node.affected_qubits_precise:
-            x_left = x_pos - width / 2
-            x_right = x_pos + width / 2
             for q in affected_qubits:
                 y = self.qubit_y[q]
-                self._draw_control_dot(ax, x_left, y)
-                self._draw_control_dot(ax, x_right, y)
+                circle = mpatches.Circle(
+                    (x_pos, y),
+                    radius=0.05,
+                    facecolor=self.style.wire_color,
+                    edgecolor=self.style.wire_color,
+                    zorder=PORDER_GATE,
+                )
+                ax.add_patch(circle)
 
     def _add_jupyter_display_support(self, fig: Figure) -> None:
         """Add Jupyter display support to the figure.
