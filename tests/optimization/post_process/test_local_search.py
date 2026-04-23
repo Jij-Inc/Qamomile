@@ -1,4 +1,5 @@
 import numpy as np
+import ommx.v1
 import pytest
 
 from qamomile.optimization.binary_model.expr import BinaryExpr, VarType
@@ -254,6 +255,80 @@ class TestLocalSearchHubo:
             flipped[flip_idx] = -flipped[flip_idx]
             after = cubic_spin_model.calc_energy(flipped.astype(int).tolist())
             assert np.isclose(delta, after - before)
+
+
+class TestOmmxInput:
+    """LocalSearch accepts ommx.v1.Instance, mirroring other converters."""
+
+    @pytest.fixture
+    def quadratic_ommx(self) -> ommx.v1.Instance:
+        """Minimize ``-x0 - x1 + 3·x0·x1`` over binary {x0, x1}.
+
+        Brute force:
+          (0,0)=0, (0,1)=-1 (min), (1,0)=-1 (min), (1,1)=1.
+        Either (0,1) or (1,0) is a valid local-search landing for a
+        greedy single-flip descent starting from (0,0).
+        """
+        x0 = ommx.v1.DecisionVariable.binary(id=0, name="x0")
+        x1 = ommx.v1.DecisionVariable.binary(id=1, name="x1")
+        return ommx.v1.Instance.from_components(
+            decision_variables=[x0, x1],
+            objective=-x0 - x1 + 3 * x0 * x1,
+            constraints=[],
+            sense=ommx.v1.Instance.MINIMIZE,
+        )
+
+    @pytest.fixture
+    def cubic_ommx(self) -> ommx.v1.Instance:
+        """Minimize ``2·x0·x1·x2 - x0 - x1 - x2`` over binary {x0, x1, x2}.
+
+        Brute-forced energies (minimization sense):
+          (0,0,0)=0;  (1,0,0)=-1; (0,1,0)=-1; (0,0,1)=-1;
+          (1,1,0)=-2; (1,0,1)=-2; (0,1,1)=-2;
+          (1,1,1)=2 + (-3) = -1.
+        Minimum is -2 at any pair being 1 and the third 0.
+        """
+        x0 = ommx.v1.DecisionVariable.binary(id=0)
+        x1 = ommx.v1.DecisionVariable.binary(id=1)
+        x2 = ommx.v1.DecisionVariable.binary(id=2)
+        return ommx.v1.Instance.from_components(
+            decision_variables=[x0, x1, x2],
+            objective=2 * x0 * x1 * x2 - x0 - x1 - x2,
+            constraints=[],
+            sense=ommx.v1.Instance.MINIMIZE,
+        )
+
+    def test_quadratic_ommx_matches_binary_model(self, quadratic_ommx):
+        """ommx quadratic input gives the same solution as the equivalent BinaryModel."""
+        bm = BinaryModel.from_qubo(
+            qubo={(0, 0): -1.0, (1, 1): -1.0, (0, 1): 3.0}, constant=0.0
+        )
+        result_bm = LocalSearch(bm).run([0, 0], method="best")
+        result_ommx = LocalSearch(quadratic_ommx).run([0, 0], method="best")
+
+        sample_bm, energy_bm, _ = result_bm.lowest()
+        sample_ommx, energy_ommx, _ = result_ommx.lowest()
+
+        assert np.isclose(energy_bm, -1.0)
+        assert np.isclose(energy_ommx, energy_bm)
+        assert sample_ommx == sample_bm
+
+    @pytest.mark.parametrize("method", ["best", "first"])
+    def test_cubic_ommx_preserves_higher_order(self, cubic_ommx, method):
+        """HUBO terms in ommx input survive the handoff via to_hubo."""
+        ls = LocalSearch(cubic_ommx)
+        # Starting from all-zero: any single flip to 1 gives energy -1
+        # (strictly improving, ΔE = -1); from there any flip to a 3rd
+        # 1-bit would take us to (1,1,1) with energy -1 (ΔE = 0, no
+        # improvement), so we stop at two 1-bits with energy -2.
+        result = ls.run([0, 0, 0], method=method)
+        _, energy, _ = result.lowest()
+        assert np.isclose(energy, -2.0)
+
+    def test_invalid_model_type_raises(self):
+        """Passing anything other than BinaryModel / ommx.v1.Instance raises TypeError."""
+        with pytest.raises(TypeError, match="ommx.v1.Instance or BinaryModel"):
+            LocalSearch("not a model")  # type: ignore[arg-type]
 
 
 class TestConstantOnlyModel:

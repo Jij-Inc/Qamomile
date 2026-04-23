@@ -10,6 +10,7 @@ import enum
 from typing import Protocol
 
 import numpy as np
+import ommx.v1
 
 from qamomile.optimization.binary_model.expr import VarType
 from qamomile.optimization.binary_model.model import BinaryModel
@@ -54,11 +55,31 @@ class LocalSearch:
     model to SPIN representation (±1) for the search, then converts the
     result back to the original vartype.
 
+    Accepts either a :class:`BinaryModel` directly or an
+    :class:`ommx.v1.Instance`, matching the other optimization converters.
+    An ommx instance is lowered to a BINARY model via
+    :meth:`ommx.v1.Instance.to_hubo`, preserving higher-order terms so
+    that HUBO objectives survive the handoff.
+
     Args:
-        model: The binary model to minimize.
+        model: The problem to minimize. Either a :class:`BinaryModel`
+            (any vartype, any order) or an :class:`ommx.v1.Instance`.
+
+    Raises:
+        TypeError: If *model* is neither a BinaryModel nor an
+            ommx.v1.Instance.
     """
 
-    def __init__(self, model: BinaryModel) -> None:
+    def __init__(self, model: ommx.v1.Instance | BinaryModel) -> None:
+        if isinstance(model, ommx.v1.Instance):
+            hubo, constant = model.to_hubo()
+            model = BinaryModel.from_hubo(hubo, constant=constant)
+        elif not isinstance(model, BinaryModel):
+            raise TypeError(
+                "model must be an ommx.v1.Instance or BinaryModel, "
+                f"got {type(model).__name__}."
+            )
+
         self._model = model
         self._spin_model = (
             model.change_vartype(VarType.SPIN)
