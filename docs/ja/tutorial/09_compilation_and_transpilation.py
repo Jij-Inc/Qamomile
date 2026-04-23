@@ -585,3 +585,5 @@ except ModuleNotFoundError:
 # - `partial_eval`はコンパイル時`if`を除去するが、`for`のアンロールは`emit`の`LoopAnalyzer`が判定する
 # - `analyze`は「量子Operationが測定由来の古典値に依存しないこと」を保証する
 # - 実行時分岐を回路まで落とせるかはバックエンドの`MeasurementMode`次第（`NATIVE`か`RUNNABLE`が必要）
+
+# %%
