@@ -61,24 +61,28 @@ class TestLocalSearchSpin:
         """Both methods reach the global optimum from the same starting state."""
         ls = LocalSearch(spin_model)
         result = ls.run([1, -1, -1], method=method)
-        _, energy, _ = result.lowest()
+        sample, energy, _ = result.lowest()
         assert np.isclose(energy, -8.0)
+        # Minimum of 2*z0*z1 + 2*z1*z2 + 4*z0 is unique at z=(-1, 1, -1).
+        assert sample == {0: -1, 1: 1, 2: -1}
 
     def test_max_iter_limits_search(self, spin_model):
         """After 1 iteration only the best single flip is applied."""
         ls = LocalSearch(spin_model)
         result = ls.run([1, 1, -1], max_iter=1, method="best_improvement")
-        _, energy, _ = result.lowest()
+        sample, energy, _ = result.lowest()
         # From [1,1,-1] the best flip is index 0 (delta_E=-12), giving [-1,1,-1]
         assert np.isclose(energy, spin_model.calc_energy([-1, 1, -1]))
+        assert sample == {0: -1, 1: 1, 2: -1}
 
     def test_max_iter_zero_returns_initial(self, spin_model):
         """max_iter=0 returns the initial state unchanged."""
         ls = LocalSearch(spin_model)
         initial = [1, 1, -1]
         result = ls.run(initial, max_iter=0, method="best_improvement")
-        _, energy, _ = result.lowest()
+        sample, energy, _ = result.lowest()
         assert np.isclose(energy, spin_model.calc_energy(initial))
+        assert sample == {0: 1, 1: 1, 2: -1}
 
     def test_invalid_method_raises(self, spin_model):
         """Unknown method name raises ValueError."""
@@ -163,22 +167,28 @@ class TestEdgeCases:
         """Single-variable model converges to the correct minimum."""
         ls = LocalSearch(single_var_model)
         result = ls.run([1], method="best_improvement")
-        _, energy, _ = result.lowest()
+        sample, energy, _ = result.lowest()
         assert np.isclose(energy, -3.0)
+        assert sample == {0: -1}
 
     def test_linear_only_model(self, linear_only_model):
         """Model with no quadratic terms converges correctly."""
         ls = LocalSearch(linear_only_model)
         result = ls.run([1, 1], method="best_improvement")
-        _, energy, _ = result.lowest()
+        sample, energy, _ = result.lowest()
         assert np.isclose(energy, -5.0)
+        # Minimum of 2*z0 - 3*z1 is unique at z=(-1, 1).
+        assert sample == {0: -1, 1: 1}
 
     def test_quad_only_model(self, quad_only_model):
         """Model with no linear terms converges correctly."""
         ls = LocalSearch(quad_only_model)
         result = ls.run([1, -1], method="best_improvement")
-        _, energy, _ = result.lowest()
+        sample, energy, _ = result.lowest()
         assert np.isclose(energy, -2.0)
+        # From [1,-1] deltas tie at -4 for both indices; argmin picks i=0,
+        # flipping to [-1,-1]; the (1,1) minimum is not reachable from here.
+        assert sample == {0: -1, 1: -1}
 
 
 class TestUnsupportedModels:
@@ -196,8 +206,9 @@ class TestConstantOnlyModel:
         model = BinaryModel.from_ising(linear={}, quad={}, constant=5.0)
         ls = LocalSearch(model)
         result = ls.run([], method=method)
-        _, energy, _ = result.lowest()
+        sample, energy, _ = result.lowest()
         assert np.isclose(energy, 5.0)
+        assert sample == {}
 
 
 class TestCalcEDiff:
