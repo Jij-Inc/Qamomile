@@ -65,6 +65,21 @@ class LocalSearch:
     evaluated against that instance; otherwise it returns a
     :class:`BinarySampleSet`.
 
+    .. note::
+       ``to_hubo`` mutates the instance it is called on (appends slack
+       decision variables, absorbs constraints into the objective via the
+       penalty method). ``LocalSearch`` copies the instance before
+       lowering, so the caller's instance is left untouched — both its
+       decision variables and its constraints are preserved. The stored
+       instance used for :meth:`ommx.v1.Instance.evaluate` is the
+       original (constrained) one, so returned solutions report
+       feasibility against the user's original constraints.
+
+       For constrained instances, ``to_hubo`` introduces slack bits, so
+       :attr:`num_bits` is larger than the number of decision variables
+       the user declared. Query :attr:`num_bits` to size
+       ``initial_state`` correctly.
+
     Args:
         model: The problem to minimize. Either a :class:`BinaryModel`
             (any vartype, any order) or an :class:`ommx.v1.Instance`.
@@ -76,8 +91,15 @@ class LocalSearch:
 
     def __init__(self, model: ommx.v1.Instance | BinaryModel) -> None:
         if isinstance(model, ommx.v1.Instance):
+            # Keep the caller's original (still-constrained) instance for
+            # later `evaluate()` — feasibility must be judged against the
+            # user's original constraints, not the penalty-absorbed HUBO.
             self._ommx_instance: ommx.v1.Instance | None = model
-            hubo, constant = model.to_hubo()
+            # Round-trip into a throwaway copy so `to_hubo` can mutate
+            # freely without leaking slack variables or constraint drops
+            # back to the caller.
+            working = ommx.v1.Instance.from_bytes(model.to_bytes())
+            hubo, constant = working.to_hubo()
             model = BinaryModel.from_hubo(hubo, constant=constant)
         elif isinstance(model, BinaryModel):
             self._ommx_instance = None
@@ -115,6 +137,18 @@ class LocalSearch:
                 co = tuple(x for x in inds if x != k)
                 self._terms[k].append((co, coeff))
 
+    @property
+    def num_bits(self) -> int:
+        """Number of bits the local search flips, including any slack bits.
+
+        For a :class:`BinaryModel` input this matches the model's bit count.
+        For an :class:`ommx.v1.Instance` with constraints, ``to_hubo``
+        introduces slack bits on top of the user's decision variables, so
+        this value can exceed the number of declared variables. Use this
+        to size ``initial_state``.
+        """
+        return self._model.num_bits
+
     def run(
         self,
         initial_state: Sequence[int] | np.ndarray,
@@ -130,7 +164,10 @@ class LocalSearch:
         Args:
             initial_state: Variable values in the model's vartype domain
                 (±1 for SPIN, 0/1 for BINARY). Accepts any int sequence
-                (list, tuple) or a 1-D :class:`numpy.ndarray`.
+                (list, tuple) or a 1-D :class:`numpy.ndarray`. Its length
+                must equal :attr:`num_bits`; for constrained
+                :class:`ommx.v1.Instance` inputs this includes slack bits
+                introduced by :meth:`ommx.v1.Instance.to_hubo`.
             max_iter: Maximum iterations (-1 for unlimited).
             method: Flip-selection strategy. Either a :class:`LocalSearchMethod`
                 member or its string value (``"best"`` / ``"first"``).
@@ -187,10 +224,18 @@ class LocalSearch:
         spin_state = self._search(step_fn, spin_state, max_iter)
         sample_set = self._to_sampleset(spin_state)
         if self._ommx_instance is not None:
-            # Hand the single minimized sample back to ommx so callers
-            # receive a Solution (objective, constraints, feasibility)
-            # keyed by the original decision-variable IDs.
-            return self._ommx_instance.evaluate(sample_set.samples[0])
+            # `self._ommx_instance` is the original (still-constrained)
+            # instance, so `evaluate` reports feasibility against the
+            # user's constraints. But the sample dict includes slack
+            # decision variables introduced by `to_hubo` on the working
+            # copy — those IDs don't exist on the original instance, and
+            # passing them to `evaluate` raises. Filter to the original
+            # decision-variable IDs before handing off.
+            original_ids = {v.id for v in self._ommx_instance.decision_variables}
+            sample = {
+                k: v for k, v in sample_set.samples[0].items() if k in original_ids
+            }
+            return self._ommx_instance.evaluate(sample)
         return sample_set
 
     # ------------------------------------------------------------------

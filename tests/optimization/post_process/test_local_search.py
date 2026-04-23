@@ -451,6 +451,61 @@ class TestOmmxInput:
         with pytest.raises(TypeError, match="ommx.v1.Instance or BinaryModel"):
             LocalSearch("not a model")  # type: ignore[arg-type]
 
+    def test_constrained_instance_preserves_caller(self):
+        """Constructing LocalSearch must not mutate the caller's ommx.v1.Instance.
+
+        ``to_hubo`` normally appends slack decision variables and absorbs
+        constraints into the objective. ``LocalSearch`` copies the instance
+        before lowering, so the caller's instance keeps its original
+        decision variables and constraints. Also verifies that ``num_bits``
+        is exposed so callers can size ``initial_state`` for constrained
+        inputs (where slack bits inflate the length).
+        """
+        x0 = ommx.v1.DecisionVariable.binary(id=0)
+        x1 = ommx.v1.DecisionVariable.binary(id=1)
+        inst = ommx.v1.Instance.from_components(
+            decision_variables=[x0, x1],
+            objective=-x0 - x1,
+            constraints=[(x0 + x1 <= 1).set_id(0)],
+            sense=ommx.v1.Instance.MINIMIZE,
+        )
+        dvs_before = [v.id for v in inst.decision_variables]
+        constraints_before = len(inst.constraints)
+
+        ls = LocalSearch(inst)
+
+        assert [v.id for v in inst.decision_variables] == dvs_before
+        assert len(inst.constraints) == constraints_before
+        assert ls.num_bits >= len(dvs_before)
+
+    def test_constrained_instance_feasibility_reporting(self):
+        """Feasibility on returned Solution reflects the original constraints.
+
+        With ``x0 + x1 <= 1`` as a constraint and minimization objective
+        ``-x0 - x1``, the optimal feasible assignments are (1,0) and (0,1)
+        with objective -1. Local search on the penalized HUBO should land
+        at one of those, and the Solution must report ``feasible=True``
+        against the original constraint (the earlier bug returned True
+        unconditionally because the stored instance had been mutated to
+        zero-constraints by ``to_hubo``).
+        """
+        x0 = ommx.v1.DecisionVariable.binary(id=0)
+        x1 = ommx.v1.DecisionVariable.binary(id=1)
+        inst = ommx.v1.Instance.from_components(
+            decision_variables=[x0, x1],
+            objective=-x0 - x1,
+            constraints=[(x0 + x1 <= 1).set_id(0)],
+            sense=ommx.v1.Instance.MINIMIZE,
+        )
+        ls = LocalSearch(inst)
+        # Start with all-zero state of the correct (slack-inclusive) length.
+        result = ls.run([0] * ls.num_bits, method="best")
+        assert isinstance(result, ommx.v1.Solution)
+        assert result.feasible
+        entries = dict(result.state.entries)
+        assert entries[0] + entries[1] <= 1.0 + 1e-9
+        assert np.isclose(result.objective, -1.0)
+
 
 class TestConstantOnlyModel:
     @pytest.mark.parametrize("method", ["best", "first"])
