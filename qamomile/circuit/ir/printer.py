@@ -51,7 +51,6 @@ from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.value import ArrayValue, DictValue, TupleValue, Value
 
-
 __all__ = ["pretty_print_block", "format_value"]
 
 
@@ -155,35 +154,25 @@ class _BlockPrinter:
 
     # -- control flow ----------------------------------------------------
 
-    def _emit_for(
-        self, op: ForOperation, *, indent: int, pad: str
-    ) -> None:
+    def _emit_for(self, op: ForOperation, *, indent: int, pad: str) -> None:
         start = _format_value(op.operands[0]) if len(op.operands) > 0 else "?"
         stop = _format_value(op.operands[1]) if len(op.operands) > 1 else "?"
         step = _format_value(op.operands[2]) if len(op.operands) > 2 else "?"
         lv = op.loop_var or "_"
-        self.lines.append(
-            f"{pad}for %{lv} in range({start}, {stop}, {step}) {{"
-        )
+        self.lines.append(f"{pad}for %{lv} in range({start}, {stop}, {step}) {{")
         self._emit_ops(op.operations, indent=indent + 1)
         self.lines.append(f"{pad}}}")
 
-    def _emit_for_items(
-        self, op: ForItemsOperation, *, indent: int, pad: str
-    ) -> None:
+    def _emit_for_items(self, op: ForItemsOperation, *, indent: int, pad: str) -> None:
         keys = ", ".join(f"%{k}" for k in op.key_vars) if op.key_vars else "%k"
         val = f"%{op.value_var}" if op.value_var else "%v"
-        iterable = (
-            _format_value(op.operands[0]) if op.operands else "<iterable>"
-        )
+        iterable = _format_value(op.operands[0]) if op.operands else "<iterable>"
         header = f"{pad}for ({keys}), {val} in items({iterable}) {{"
         self.lines.append(header)
         self._emit_ops(op.operations, indent=indent + 1)
         self.lines.append(f"{pad}}}")
 
-    def _emit_if(
-        self, op: IfOperation, *, indent: int, pad: str
-    ) -> None:
+    def _emit_if(self, op: IfOperation, *, indent: int, pad: str) -> None:
         cond = _format_value(op.operands[0]) if op.operands else "<cond>"
         self.lines.append(f"{pad}if {cond} {{")
         self._emit_ops(op.true_operations, indent=indent + 1)
@@ -195,9 +184,7 @@ class _BlockPrinter:
         for phi in op.phi_ops:
             self.lines.append(pad + _format_flat_op(phi))
 
-    def _emit_while(
-        self, op: WhileOperation, *, indent: int, pad: str
-    ) -> None:
+    def _emit_while(self, op: WhileOperation, *, indent: int, pad: str) -> None:
         cond = _format_value(op.operands[0]) if op.operands else "<cond>"
         max_iter = (
             f" [max_iterations={op.max_iterations}]"
@@ -210,9 +197,7 @@ class _BlockPrinter:
 
     # -- call block ------------------------------------------------------
 
-    def _emit_call(
-        self, op: CallBlockOperation, *, indent: int, pad: str
-    ) -> None:
+    def _emit_call(self, op: CallBlockOperation, *, indent: int, pad: str) -> None:
         target = op.block
         name = target.name if target is not None and target.name else "<unresolved>"
         args = ", ".join(_format_value(v) for v in op.operands)
@@ -328,20 +313,15 @@ def _format_gate(op: GateOperation) -> str:
 
 
 def _format_controlled(op: ControlledUOperation) -> str:
-    block_name = (
-        op.block.name
-        if op.block is not None and op.block.name
-        else "<block>"
-    )
+    block_name = op.block.name if op.block is not None and op.block.name else "<block>"
     power = op.power
     power_str = (
-        f", power={_format_value(power)}" if isinstance(power, Value) else f", power={power}"
+        f", power={_format_value(power)}"
+        if isinstance(power, Value)
+        else f", power={power}"
     )
     args = ", ".join(_format_value(v) for v in op.operands)
-    return (
-        f"{_format_results(op.results)} = controlled {block_name}"
-        f"({args}{power_str})"
-    )
+    return f"{_format_results(op.results)} = controlled {block_name}({args}{power_str})"
 
 
 def _format_composite(op: CompositeGateOperation) -> str:
@@ -407,14 +387,10 @@ def _format_value(value: Any) -> str:
     if isinstance(value, Value):
         if value.parent_array is not None and value.element_indices:
             idx = ",".join(_format_value(i) for i in value.element_indices)
-            return _format_version(
-                f"{value.parent_array.name}[{idx}]", value.version
-            )
+            return _format_version(f"{value.parent_array.name}[{idx}]", value.version)
         return _format_version(value.name, value.version)
     if isinstance(value, TupleValue):
-        return (
-            "(" + ", ".join(_format_value(e) for e in value.elements) + ")"
-        )
+        return "(" + ", ".join(_format_value(e) for e in value.elements) + ")"
     if isinstance(value, DictValue):
         return f"%{value.name}@dict"
     return repr(value)
@@ -442,7 +418,5 @@ def _format_outputs(outputs: list[Value]) -> str:
     if len(outputs) == 1:
         t = outputs[0].type.label() if outputs[0].type is not None else "?"
         return f" -> {t}"
-    parts = [
-        v.type.label() if v.type is not None else "?" for v in outputs
-    ]
+    parts = [v.type.label() if v.type is not None else "?" for v in outputs]
     return " -> (" + ", ".join(parts) + ")"
