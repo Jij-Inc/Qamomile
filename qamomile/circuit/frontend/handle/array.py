@@ -32,16 +32,18 @@ class ArrayBase(Handle, Generic[T]):
     value: ArrayValue
     element_type: typing.Type[T] = dataclasses.field(init=False)
     _shape: tuple[int | UInt, ...] = dataclasses.field(default_factory=tuple)
-    _borrowed_indices: dict[tuple[str, ...], tuple[UInt, ...]] = dataclasses.field(
-        default_factory=dict
-    )
-    # Slots that have been handed out to a ``VectorView`` via slicing and
-    # therefore must not be accessed directly on the parent.  Maps a
-    # constant index key (``"const:<int>"``) to the view that owns it.
-    # Only populated for slices whose bounds are all compile-time constants;
-    # symbolic slices skip this registration (best-effort linearity).
-    _slice_borrowed_indices: dict[str, "ArrayBase[T]"] = dataclasses.field(
-        default_factory=dict
+    # Maps a borrow key to the current owner of that slot.  Both direct
+    # element borrows and slice (view) borrows live here because they
+    # encode the same invariant: "this slot has an outstanding return
+    # obligation, so the parent can't touch it directly".  The owner
+    # differs — a tuple of ``UInt`` handles for a direct borrow (used
+    # for error formatting and kept for backward compatibility), or the
+    # owning ``VectorView`` itself for a slice borrow (used by
+    # ``validate_all_returned`` to detect drained views).  For slice
+    # borrows, only constant indices are registered; symbolic slices
+    # skip registration (best-effort linearity).
+    _borrowed_indices: dict[tuple[str, ...], "tuple[UInt, ...] | ArrayBase[T]"] = (
+        dataclasses.field(default_factory=dict)
     )
 
     def __post_init__(self) -> None:
@@ -126,7 +128,6 @@ class ArrayBase(Handle, Generic[T]):
         instance.value = value
         instance._shape = shape
         instance._borrowed_indices = {}
-        instance._slice_borrowed_indices = {}
         instance.parent = None
         instance.indices = ()
         instance.name = name
@@ -217,8 +218,8 @@ class ArrayBase(Handle, Generic[T]):
 
         Raises:
             QubitConsumedError: If the array was consumed, the element is
-                already borrowed (for quantum arrays), or the constant
-                slot is currently owned by a ``VectorView`` slice.
+                already borrowed (for quantum arrays), or the slot is
+                currently owned by a ``VectorView`` slice.
         """
         indices_key = self._make_indices_key(indices)
         index_str = self._format_index(indices)
@@ -234,16 +235,13 @@ class ArrayBase(Handle, Generic[T]):
                 first_use_location=self._consumed_by,
             )
 
-        # Check if currently owned by a live slice view.  Only applies to
-        # constant indices, since symbolic indices cannot be matched
-        # against the view's bulk-borrowed constant slot set.
-        if (
-            self.value.type.is_quantum()
-            and len(indices) == 1
-            and indices[0].value.is_constant()
-        ):
-            const_key = f"const:{int(indices[0].value.get_const())}"
-            if const_key in self._slice_borrowed_indices:
+        # Check if already borrowed — same dict covers both direct
+        # element borrows and slice-held slots; the owner stored as the
+        # value tells which one it is so we can surface a tailored
+        # message.
+        if indices_key in self._borrowed_indices and self.value.type.is_quantum():
+            owner = self._borrowed_indices[indices_key]
+            if isinstance(owner, ArrayBase):
                 raise QubitConsumedError(
                     f"Parent slot '{self.value.name}[{index_str}]' is currently "
                     f"held by a VectorView slice.\n"
@@ -252,9 +250,6 @@ class ArrayBase(Handle, Generic[T]):
                     handle_name=f"{self.value.name}[{index_str}]",
                     operation_name="array element access",
                 )
-
-        # Check if already borrowed (only enforce for quantum types)
-        if indices_key in self._borrowed_indices and self.value.type.is_quantum():
             raise QubitConsumedError(
                 f"Array element '{self.value.name}[{index_str}]' is already borrowed.\n"
                 f"Return it before borrowing again.\n\n"
@@ -398,18 +393,18 @@ class ArrayBase(Handle, Generic[T]):
         assert isinstance(new_handle, ArrayBase)
         new_handle._shape = self._shape
         new_handle._borrowed_indices = dict(self._borrowed_indices)
-        new_handle._slice_borrowed_indices = dict(self._slice_borrowed_indices)
         new_handle.element_type = self.element_type
 
     def validate_all_returned(self) -> None:
         """Validate all borrowed elements have been returned.
 
-        First opportunistically releases any slice-borrows held by views
-        that are themselves drained (no outstanding element borrows); this
-        corresponds to "the view is finished using its elements" and
-        allows patterns like ``q[0::2] → loop → measure(q)`` to complete
-        without the user explicitly releasing the view.  Only after that
-        does the method raise if normal or view-held borrows remain.
+        First opportunistically releases any slice-owner entries whose
+        view is itself drained (no outstanding element borrows on the
+        view): this corresponds to "the view is finished using its
+        elements" and lets patterns like ``q[0::2] → loop → measure(q)``
+        complete without the user explicitly releasing the view.  Only
+        after that does the method raise if any borrows remain, formatting
+        direct-borrow and view-owned entries with distinct labels.
 
         Raises:
             UnreturnedBorrowError: If any elements are still borrowed,
@@ -423,32 +418,38 @@ class ArrayBase(Handle, Generic[T]):
         # no outstanding element borrows (view is drained).  ``Vector``
         # is a dataclass with ``__hash__ = None``, so deduplicate views
         # by ``id`` rather than by set membership.
-        if self._slice_borrowed_indices:
+        slice_entries = {
+            k: v for k, v in self._borrowed_indices.items() if isinstance(v, ArrayBase)
+        }
+        if slice_entries:
             unique_views: dict[int, ArrayBase[T]] = {}
-            for v in self._slice_borrowed_indices.values():
+            for v in slice_entries.values():
                 unique_views.setdefault(id(v), v)
             drained_view_ids = {
                 vid for vid, v in unique_views.items() if not v._borrowed_indices
             }
             if drained_view_ids:
                 to_remove = [
-                    k
-                    for k, v in self._slice_borrowed_indices.items()
-                    if id(v) in drained_view_ids
+                    k for k, v in slice_entries.items() if id(v) in drained_view_ids
                 ]
                 for k in to_remove:
-                    del self._slice_borrowed_indices[k]
+                    del self._borrowed_indices[k]
 
-        if not self._borrowed_indices and not self._slice_borrowed_indices:
+        if not self._borrowed_indices:
             return
 
         borrowed_strs: list[str] = []
-        for indices in self._borrowed_indices.values():
-            index_str = self._format_index(indices)
-            borrowed_strs.append(f"{self.value.name}[{index_str}]")
-        for key in self._slice_borrowed_indices:
-            idx_str = key.split(":", 1)[1]
-            borrowed_strs.append(f"{self.value.name}[{idx_str}] (held by slice view)")
+        for key, owner in self._borrowed_indices.items():
+            if isinstance(owner, ArrayBase):
+                # Slice-held slot: key is a single-element tuple like
+                # ``("const:<idx>",)``; surface the slot number directly.
+                idx_str = key[0].split(":", 1)[1]
+                borrowed_strs.append(
+                    f"{self.value.name}[{idx_str}] (held by slice view)"
+                )
+            else:
+                index_str = self._format_index(owner)
+                borrowed_strs.append(f"{self.value.name}[{index_str}]")
 
         raise UnreturnedBorrowError(
             f"Array '{self.value.name}' has unreturned borrowed elements.\n"
@@ -851,7 +852,6 @@ class VectorView(Vector[T]):
         instance.value = parent.value
         instance._shape = (length,)
         instance._borrowed_indices = {}
-        instance._slice_borrowed_indices = {}
         instance.element_type = parent.element_type
         instance.parent = None
         instance.indices = ()
@@ -866,16 +866,17 @@ class VectorView(Vector[T]):
 
         if covered_indices is not None and parent.value.type.is_quantum():
             for idx in covered_indices:
-                key = f"const:{idx}"
-                if key in parent._slice_borrowed_indices:
-                    raise QubitConsumedError(
-                        f"Parent slot '{parent.value.name}[{idx}]' is already "
-                        f"owned by another slice view; overlapping views are "
-                        f"not supported.",
-                        handle_name=f"{parent.value.name}[{idx}]",
-                        operation_name="array slicing",
-                    )
-                if (f"const:{idx}",) in parent._borrowed_indices:
+                key = (f"const:{idx}",)
+                existing = parent._borrowed_indices.get(key)
+                if existing is not None:
+                    if isinstance(existing, ArrayBase):
+                        raise QubitConsumedError(
+                            f"Parent slot '{parent.value.name}[{idx}]' is already "
+                            f"owned by another slice view; overlapping views are "
+                            f"not supported.",
+                            handle_name=f"{parent.value.name}[{idx}]",
+                            operation_name="array slicing",
+                        )
                     raise QubitConsumedError(
                         f"Cannot slice across '{parent.value.name}[{idx}]' — "
                         f"it is currently borrowed.  Return the borrowed "
@@ -883,7 +884,7 @@ class VectorView(Vector[T]):
                         handle_name=f"{parent.value.name}[{idx}]",
                         operation_name="array slicing",
                     )
-                parent._slice_borrowed_indices[key] = instance
+                parent._borrowed_indices[key] = instance
 
         return instance
 
@@ -1107,10 +1108,10 @@ class VectorView(Vector[T]):
         self.validate_all_returned()
         if self._slice_covered_indices is not None:
             for idx in self._slice_covered_indices:
-                key = f"const:{idx}"
-                owner = self._slice_parent._slice_borrowed_indices.get(key)
+                key = (f"const:{idx}",)
+                owner = self._slice_parent._borrowed_indices.get(key)
                 if owner is self:
-                    del self._slice_parent._slice_borrowed_indices[key]
+                    del self._slice_parent._borrowed_indices[key]
         new_view = super().consume(operation_name)
         new_view._slice_parent = self._slice_parent
         new_view._slice_start = self._slice_start

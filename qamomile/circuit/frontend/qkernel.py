@@ -791,7 +791,6 @@ class QKernel(Generic[P, R]):
             instance.value = array_value
             instance._shape = shape
             instance._borrowed_indices = {}
-            instance._slice_borrowed_indices = {}
             instance.parent = None
             instance.indices = ()
             instance.name = name
