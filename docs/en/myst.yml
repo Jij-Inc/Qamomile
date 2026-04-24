@@ -33,6 +33,7 @@ project:
       file: vqa/index.md
       children:
         - file: vqa/qaoa_maxcut.ipynb
+        - file: vqa/vqe_for_hydrogen.ipynb
     - title: Optimization
       file: optimization/index.md
       children:
