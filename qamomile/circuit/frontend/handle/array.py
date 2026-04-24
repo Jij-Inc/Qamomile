@@ -421,6 +421,13 @@ class Vector(ArrayBase[T]):
         n = qubits.shape[0]
         for i in qmc.range(n):
             qubits[i] = qmc.h(qubits[i])
+
+        # Slicing returns a VectorView over a subset of the parent vector.
+        # The view shares borrow tracking with the parent; element access
+        # on the view transparently indexes the parent.
+        evens = qubits[0::2]
+        for i in qmc.range(evens.shape[0]):
+            evens[i] = qmc.h(evens[i])
         ```
     """
 
@@ -434,18 +441,121 @@ class Vector(ArrayBase[T]):
     def __getitem__(self, index: int) -> T: ...
     @overload
     def __getitem__(self, index: UInt) -> T: ...
+    @overload
+    def __getitem__(self, index: slice) -> "VectorView[T]": ...
 
-    def __getitem__(self, index: int | UInt) -> T:
-        """Get element at the given index."""
+    def __getitem__(self, index: int | UInt | slice) -> "T | VectorView[T]":
+        """Get element at the given index, or return a view for a slice.
+
+        Args:
+            index: Either a concrete index (``int`` or ``UInt``) selecting
+                a single element, or a Python ``slice`` object selecting a
+                contiguous or strided subset.  Slices accept ``int``,
+                ``UInt``, or ``None`` for each of ``start``/``stop``/``step``;
+                ``step`` must be positive.
+
+        Returns:
+            A single element handle for integer/UInt indices, or a
+            ``VectorView`` that shares borrow tracking with this vector
+            for slice indices.
+
+        Raises:
+            NotImplementedError: If the slice uses a non-positive step or
+                negative start/stop values, which are not yet supported.
+        """
+        if isinstance(index, slice):
+            return self._make_slice_view(index)
         if isinstance(index, int):
             index = self._make_uint_index(index)
         return self._get_element((index,))
 
     def __setitem__(self, index: int | UInt, value: T) -> None:
-        """Set element at the given index."""
+        """Set element at the given index.
+
+        Raises:
+            TypeError: If ``index`` is a ``slice`` — slice assignment is
+                not supported; iterate over the view and assign elements
+                one at a time instead.
+        """
+        if isinstance(index, slice):
+            raise TypeError(
+                "Slice assignment is not supported on Vector. "
+                "Iterate over the view and assign elements individually:\n"
+                "  view = q[0::2]\n"
+                "  for i in qmc.range(view.shape[0]):\n"
+                "      view[i] = qmc.h(view[i])"
+            )
         if isinstance(index, int):
             index = self._make_uint_index(index)
         self._return_element((index,), value)
+
+    def _make_slice_view(self, s: slice) -> "VectorView[T]":
+        """Build a VectorView describing the slice ``s`` of this vector.
+
+        Normalizes ``None`` start/stop/step to ``0``, the parent length,
+        and ``1`` respectively, converts integer bounds to ``UInt``
+        handles, and pre-computes the view length (as a Python ``int``
+        when all bounds are compile-time constants, otherwise as a
+        symbolic ``UInt`` expression).
+
+        Args:
+            s: The Python ``slice`` object from ``vec[slice]``.
+
+        Returns:
+            A ``VectorView`` that delegates element access to this
+            vector via the affine map ``view[i] -> parent[start + step*i]``.
+
+        Raises:
+            NotImplementedError: For non-positive ``step`` or any negative
+                ``start``/``stop`` value.  Negative indices and reverse
+                strides are not yet supported.
+        """
+        parent_length = self._shape[0]
+
+        raw_start = 0 if s.start is None else s.start
+        raw_stop = parent_length if s.stop is None else s.stop
+        raw_step = 1 if s.step is None else s.step
+
+        for name, value in (("start", s.start), ("stop", s.stop), ("step", s.step)):
+            if isinstance(value, int) and value < 0:
+                raise NotImplementedError(
+                    f"Negative {name} is not supported for Vector slicing "
+                    f"(got {name}={value}).  Use a non-negative value or "
+                    f"compute the index explicitly."
+                )
+        if isinstance(raw_step, int) and raw_step <= 0:
+            raise NotImplementedError(
+                f"Vector slicing requires a positive step (got step={raw_step}). "
+                f"Reverse/zero strides are not yet supported."
+            )
+
+        start_uint = self._coerce_index(raw_start)
+        stop_uint = self._coerce_index(raw_stop)
+        step_uint = self._coerce_index(raw_step)
+        del stop_uint
+
+        length = _compute_slice_length(raw_start, raw_stop, raw_step)
+
+        return VectorView(
+            parent=self,
+            start=start_uint,
+            step=step_uint,
+            length=length,
+            element_type=self.element_type,
+        )
+
+    def _coerce_index(self, value: int | UInt) -> UInt:
+        """Coerce an int or UInt to a UInt handle.
+
+        Args:
+            value: Python integer literal or existing ``UInt`` handle.
+
+        Returns:
+            ``UInt`` handle suitable for downstream arithmetic.
+        """
+        if isinstance(value, int):
+            return self._make_uint_index(value)
+        return value
 
     def __iter__(self) -> Iterator[T]:
         """Iteration over Vector is prohibited to prevent common bugs.
@@ -562,3 +672,217 @@ class Tensor(ArrayBase[T]):
             self._make_uint_index(i) if isinstance(i, int) else i for i in index
         )
         self._return_element(converted, value)
+
+
+def _compute_slice_length(
+    start: int | UInt, stop: int | UInt, step: int | UInt
+) -> int | UInt:
+    """Compute ``max(0, ceil((stop - start) / step))`` for slice bounds.
+
+    When all three bounds are Python ``int`` constants, returns a concrete
+    ``int``.  Otherwise falls back to symbolic ``UInt`` arithmetic, which
+    emits ``BinOp`` nodes into the current tracer and relies on constant
+    folding in later passes to collapse the expression where possible.
+
+    Args:
+        start: Slice start (inclusive).
+        stop: Slice stop (exclusive).
+        step: Slice step; must be a positive value.
+
+    Returns:
+        ``int`` when all inputs are concrete integers, otherwise a ``UInt``
+        handle representing the slice length.
+    """
+    if isinstance(start, int) and isinstance(stop, int) and isinstance(step, int):
+        if stop <= start:
+            return 0
+        return (stop - start + step - 1) // step
+
+    return ((stop - start) + (step - 1)) // step
+
+
+@dataclasses.dataclass
+class VectorView(Generic[T]):
+    """Lightweight view over a strided slice of a ``Vector``.
+
+    Produced by slicing a ``Vector`` (e.g. ``q[1::2]``), a ``VectorView``
+    behaves like a ``Vector`` for indexed element access but owns no IR
+    state of its own: every element access is translated by the affine
+    map ``view[i] -> parent[start + step * i]`` and dispatched through
+    the parent's ``_get_element`` / ``_return_element``.  Borrow tracking
+    is therefore shared with the parent, so a qubit borrowed through the
+    view is tracked against the same parent slot as if it had been
+    borrowed directly.
+
+    Because the view has no standalone IR value, it cannot be passed as a
+    single argument to another ``@qkernel``; iterate over ``view[i]`` and
+    pass individual element handles instead.
+
+    Attributes:
+        parent: The backing ``Vector`` from which elements are borrowed.
+        start: Parent-space index of the first element covered.
+        step: Stride in parent-space; always a positive ``UInt`` handle.
+        length: Number of elements in the view, as a Python ``int`` when
+            it is known at trace time or as a ``UInt`` handle otherwise.
+        element_type: Element type forwarded from the parent.
+
+    Example:
+        ```python
+        @qmc.qkernel
+        def alternating_h(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            evens = q[0::2]
+            for i in qmc.range(evens.shape[0]):
+                evens[i] = qmc.h(evens[i])
+            return q
+        ```
+    """
+
+    parent: "Vector[T]"
+    start: UInt
+    step: UInt
+    length: int | UInt
+    element_type: typing.Type[T]
+
+    @property
+    def shape(self) -> tuple[int | UInt]:
+        """Return the view's shape as a one-element tuple.
+
+        Returns:
+            ``(length,)`` — matches the ``Vector.shape`` convention so the
+            view is a drop-in replacement inside ``.shape[0]`` expressions
+            and ``qmc.range(view.shape[0])`` loops.
+        """
+        return (self.length,)
+
+    def _translate(self, index: int | UInt) -> UInt:
+        """Map a view-local index to the corresponding parent index.
+
+        Args:
+            index: View-local index (``int`` or ``UInt``).
+
+        Returns:
+            ``UInt`` handle holding ``start + step * index`` suitable for
+            ``parent._get_element`` / ``parent._return_element``.
+        """
+        if isinstance(index, int):
+            idx_uint = self.parent._make_uint_index(index)
+        else:
+            idx_uint = index
+
+        offset: UInt = self.step * idx_uint
+        return self.start + offset
+
+    @overload
+    def __getitem__(self, index: int) -> T: ...
+    @overload
+    def __getitem__(self, index: UInt) -> T: ...
+    @overload
+    def __getitem__(self, index: slice) -> "VectorView[T]": ...
+
+    def __getitem__(self, index: int | UInt | slice) -> "T | VectorView[T]":
+        """Get element at the given view-local index, or nest a slice.
+
+        Args:
+            index: View-local index or ``slice``.  A nested slice is
+                composed into the parent via ``start + step * sub_start``
+                (and likewise for ``step``), so borrow tracking continues
+                to resolve against the root parent.
+
+        Returns:
+            A single element handle for integer indices, or a further
+            ``VectorView`` for slice indices.
+
+        Raises:
+            NotImplementedError: For nested slices with non-positive step
+                or negative bounds.
+        """
+        if isinstance(index, slice):
+            return self._nested_slice(index)
+        parent_index = self._translate(index)
+        return self.parent._get_element((parent_index,))
+
+    def __setitem__(self, index: int | UInt, value: T) -> None:
+        """Return a borrowed element to its parent slot via the view.
+
+        Args:
+            index: View-local index of the slot being returned.
+            value: Handle previously borrowed from the view or a fresh
+                element of the correct type.
+
+        Raises:
+            TypeError: If ``index`` is a ``slice`` — bulk slice assignment
+                is not supported.
+        """
+        if isinstance(index, slice):
+            raise TypeError(
+                "Slice assignment is not supported on VectorView. "
+                "Iterate and assign elements individually instead."
+            )
+        parent_index = self._translate(index)
+        self.parent._return_element((parent_index,), value)
+
+    def _nested_slice(self, s: slice) -> "VectorView[T]":
+        """Compose a nested slice into a single view over the same parent.
+
+        Normalizes ``None`` start/stop/step against this view's length and
+        collapses the nested affine map ``(start + step * (inner_start +
+        inner_step * j))`` back to the root parent so the result is still
+        a one-hop view.
+
+        Args:
+            s: The Python ``slice`` object applied to this view.
+
+        Returns:
+            A new ``VectorView`` whose parent is this view's parent.
+
+        Raises:
+            NotImplementedError: For non-positive step or negative bounds.
+        """
+        view_length = self.length
+
+        raw_start = 0 if s.start is None else s.start
+        raw_stop = view_length if s.stop is None else s.stop
+        raw_step = 1 if s.step is None else s.step
+
+        for name, value in (("start", s.start), ("stop", s.stop), ("step", s.step)):
+            if isinstance(value, int) and value < 0:
+                raise NotImplementedError(
+                    f"Negative {name} is not supported for VectorView slicing "
+                    f"(got {name}={value})."
+                )
+        if isinstance(raw_step, int) and raw_step <= 0:
+            raise NotImplementedError(
+                f"VectorView slicing requires a positive step (got step={raw_step})."
+            )
+
+        inner_start = self.parent._coerce_index(raw_start)
+        inner_step = self.parent._coerce_index(raw_step)
+
+        new_start: UInt = self.start + self.step * inner_start
+        new_step: UInt = self.step * inner_step
+        new_length = _compute_slice_length(raw_start, raw_stop, raw_step)
+
+        return VectorView(
+            parent=self.parent,
+            start=new_start,
+            step=new_step,
+            length=new_length,
+            element_type=self.element_type,
+        )
+
+    def __iter__(self) -> Iterator[T]:
+        """Direct iteration over VectorView is prohibited.
+
+        The rationale matches ``Vector.__iter__``: iterating the view
+        cannot propagate in-place writes back to the parent and would
+        silently drop borrows.  Use explicit index-based loops.
+
+        Raises:
+            TypeError: Always raised.
+        """
+        raise TypeError(
+            "Direct iteration over VectorView is not supported in @qkernel "
+            "functions.  Use explicit index-based iteration:\n"
+            "  for i in qmc.range(view.shape[0]):\n"
+            "      view[i] = qmc.operation(view[i])"
+        )

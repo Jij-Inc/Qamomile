@@ -70,6 +70,24 @@ class ValueResolver:
             idx = None
             if idx_value.is_constant():
                 idx = int(idx_value.get_const())
+            elif idx_value.uuid in bindings:
+                # UUID is unique; prefer it so BinOp results (which all
+                # share the generic name "uint_tmp" and therefore collide
+                # in bindings-by-name) resolve to the correct iteration
+                # value.  Falling through to name-lookup here produced
+                # "duplicate qubit" errors for patterns like
+                # ``q[2*i], q[2*i+1] = qmc.cx(...)`` inside a for loop.
+                idx = self._resolve_numeric_index(bindings[idx_value.uuid])
+                if idx is None:
+                    bound_val = bindings[idx_value.uuid]
+                    return QubitResolutionResult(
+                        success=False,
+                        failure_reason=ResolutionFailureReason.INDEX_NOT_NUMERIC,
+                        failure_details=(
+                            f"Index (uuid: {idx_value.uuid[:8]}...) resolved to "
+                            f"non-numeric type: {type(bound_val).__name__}"
+                        ),
+                    )
             elif idx_value.name in bindings:
                 idx = self._resolve_numeric_index(bindings[idx_value.name])
                 if idx is None:
@@ -80,18 +98,6 @@ class ValueResolver:
                         failure_details=(
                             f"Index '{idx_value.name}' resolved to non-numeric type: "
                             f"{type(bound_val).__name__}"
-                        ),
-                    )
-            elif idx_value.uuid in bindings:
-                idx = self._resolve_numeric_index(bindings[idx_value.uuid])
-                if idx is None:
-                    bound_val = bindings[idx_value.uuid]
-                    return QubitResolutionResult(
-                        success=False,
-                        failure_reason=ResolutionFailureReason.INDEX_NOT_NUMERIC,
-                        failure_details=(
-                            f"Index (uuid: {idx_value.uuid[:8]}...) resolved to "
-                            f"non-numeric type: {type(bound_val).__name__}"
                         ),
                     )
             elif idx_value.parent_array is not None:
