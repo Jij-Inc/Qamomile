@@ -492,17 +492,23 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
     def _is_element_of_view(v: Value, view: ArrayValue) -> bool:
         """Check whether element Value ``v`` is derived from ``view``.
 
+        Comparison is by ``uuid`` rather than object identity because
+        substitutors and ``dataclasses.replace`` in earlier passes may
+        have produced a rebuilt ArrayValue with identical fields but a
+        different Python object; they still represent the same logical
+        view.
+
         Args:
             v: Element Value candidate.
             view: A sliced ``ArrayValue`` (owner in the state dict).
 
         Returns:
             ``True`` iff ``v.parent_array`` is ``view`` or reaches
-            ``view`` via the ``slice_of`` chain.
+            ``view`` via the ``slice_of`` chain (matched by uuid).
         """
         parent = v.parent_array
         while parent is not None:
-            if parent is view:
+            if parent.uuid == view.uuid:
                 return True
             parent = parent.slice_of
         return False

@@ -426,19 +426,41 @@ class ResourceAllocator:
             operand_addr = QubitAddress(operand.uuid)
             if operand_addr not in qubit_map:
                 if operand.parent_array is not None and operand.element_indices:
-                    # Array element: resolve via parent_array key
-                    parent_uuid = operand.parent_array.uuid
+                    # Array element: resolve via parent_array key.  If the
+                    # parent is a sliced ``ArrayValue`` (slice_of chain),
+                    # walk to the root and compose the affine map so that
+                    # constant-index access on a view (e.g. ``view[0]``
+                    # with ``view = q[1:3]``) maps to the right physical
+                    # slot.  qubit_map is keyed by root parent uuid.
                     idx_value = operand.element_indices[0]
                     if idx_value.is_constant():
                         idx = int(idx_value.get_const())
-                        key = QubitAddress(parent_uuid, idx)
-                        assert key in qubit_map, (
-                            f"Array element key {str(key)!r} not found in qubit_map. "
-                            f"This indicates a bug in the transpiler pipeline: "
-                            f"QInitOperation for the parent array was not processed "
-                            f"before this GateOperation."
-                        )
-                        qubit_map[operand_addr] = qubit_map[key]
+                        parent = operand.parent_array
+                        ok = True
+                        while parent.slice_of is not None:
+                            if (
+                                parent.slice_start is None
+                                or parent.slice_step is None
+                                or not parent.slice_start.is_constant()
+                                or not parent.slice_step.is_constant()
+                            ):
+                                # Symbolic slice bound — defer to emit
+                                # resolver, skip lazy registration here.
+                                ok = False
+                                break
+                            start = int(parent.slice_start.get_const())
+                            step = int(parent.slice_step.get_const())
+                            idx = start + step * idx
+                            parent = parent.slice_of
+                        if ok:
+                            key = QubitAddress(parent.uuid, idx)
+                            assert key in qubit_map, (
+                                f"Array element key {str(key)!r} not found in qubit_map. "
+                                f"This indicates a bug in the transpiler pipeline: "
+                                f"QInitOperation for the parent array was not processed "
+                                f"before this GateOperation."
+                            )
+                            qubit_map[operand_addr] = qubit_map[key]
                     # Non-constant indices (symbolic loop vars) are resolved
                     # at emit time via ValueResolver.resolve_qubit_index_detailed.
                 else:

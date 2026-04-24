@@ -755,3 +755,57 @@ class TestBlockEndUnreturnedBorrow:
                 return q
 
             _ = kern.block
+
+
+class TestConstantIndexOnSliceView:
+    """Constant-index gate on a sliced view resolves to the correct qubit.
+
+    Targets a latent bug in ``ResourceAllocator``: its Phase-1 lazy
+    registration used ``parent_array.uuid`` directly, which for a
+    sliced ArrayValue is the view's uuid — not the root parent keyed in
+    ``qubit_map``.  Loop-indexed accesses escaped via the emit-time
+    resolver (``ValueResolver``), but constant-index accesses
+    (``view[0] = qmc.h(view[0])``) went through Phase-1 and asserted.
+    """
+
+    @pytest.mark.parametrize(
+        "slicer, expected_h, expected_x",
+        [
+            (lambda q: q[1:3], [1], [2]),
+            (lambda q: q[0::2], [0], [2]),
+            (lambda q: q[1::2], [1], [3]),
+            # Nested slice: q[0::2] covers {0,2,4,6}; then [1:3] covers
+            # view slots 1, 2 → parent slots 2, 4.
+            (lambda q: q[0::2][1:3], [2], [4]),
+        ],
+    )
+    def test_const_index_on_view_maps_to_root_slot(
+        self, slicer, expected_h, expected_x
+    ):
+        """Gates at ``view[0]`` / ``view[1]`` land on root slots via slice chain."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(num, "q")
+            view = slicer(q)
+            view[0] = qmc.h(view[0])
+            view[1] = qmc.x(view[1])
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(kern, bindings={"num": 8})
+        qc = exe.compiled_quantum[0].circuit
+        h_qubits = [
+            qc.qubits.index(inst.qubits[0])
+            for inst in qc.data
+            if inst.operation.name == "h"
+        ]
+        x_qubits = [
+            qc.qubits.index(inst.qubits[0])
+            for inst in qc.data
+            if inst.operation.name == "x"
+        ]
+        assert h_qubits == expected_h
+        assert x_qubits == expected_x
