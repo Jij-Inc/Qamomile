@@ -124,6 +124,36 @@ class ValueResolver:
                 )
 
             if idx is not None:
+                # Walk any slice_of chain attached to the parent so
+                # sliced views resolve to their root parent's physical
+                # qubit.  For ordinary (non-sliced) arrays the while
+                # loop's condition is immediately false, so the path
+                # remains a direct qubit_map lookup with the same cost
+                # as before.
+                parent = v.parent_array
+                while (
+                    parent.slice_of is not None
+                    and parent.slice_start is not None
+                    and parent.slice_step is not None
+                ):
+                    start_val = self.resolve_classical_value(
+                        parent.slice_start, bindings
+                    )
+                    step_val = self.resolve_classical_value(parent.slice_step, bindings)
+                    if start_val is None or step_val is None:
+                        return QubitResolutionResult(
+                            success=False,
+                            failure_reason=ResolutionFailureReason.SYMBOLIC_INDEX_NOT_BOUND,
+                            failure_details=(
+                                f"Slice bounds for view over '{parent.slice_of.name}' "
+                                f"could not be resolved; start={parent.slice_start.name}, "
+                                f"step={parent.slice_step.name}."
+                            ),
+                        )
+                    idx = int(start_val) + int(step_val) * idx
+                    parent = parent.slice_of
+                parent_uuid = parent.uuid
+
                 array_qubit_addr = QubitAddress(parent_uuid, idx)
                 if array_qubit_addr in qubit_map:
                     return QubitResolutionResult(

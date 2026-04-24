@@ -332,7 +332,32 @@ class Value(_MetadataValueMixin, typing.Generic[T]):
 
 @dataclasses.dataclass(frozen=True)
 class ArrayValue(Value[T]):
-    """An array of typed IR values."""
+    """An array of typed IR values.
+
+    When ``slice_of`` is set, this array is a strided view over another
+    array.  Element accesses on a sliced ``ArrayValue`` resolve to
+    physical slots on the root parent via the affine map
+    ``parent_index = slice_start + slice_step * view_local_index``,
+    applied recursively along ``slice_of`` chains.  The emit-time
+    resolver walks this chain to produce the final qubit index; passes
+    that substitute or clone values must treat ``slice_of`` /
+    ``slice_start`` / ``slice_step`` as Value references that need to
+    track through the same mapping as ``parent_array``.
+
+    Attributes:
+        type: Element type of the array.
+        name: Human-readable name for debug/error messages.
+        uuid: Stable identifier across clones.
+        logical_id: Preserved across SSA versions (``next_version``).
+        shape: Dimension sizes as Values (symbolic or constant).
+        metadata: Typed metadata (parameter binding, runtime array data).
+        slice_of: Parent array this is a strided view of, or ``None`` for
+            a non-sliced array.  For non-``None`` values,
+            ``slice_start`` and ``slice_step`` must also be non-``None``.
+        slice_start: Parent-space index of the first covered element.
+        slice_step: Parent-space stride; always a positive ``UInt`` value
+            in supported use cases.
+    """
 
     type: T
     name: str
@@ -340,6 +365,9 @@ class ArrayValue(Value[T]):
     logical_id: str = dataclasses.field(default_factory=lambda: str(uuid.uuid4()))
     shape: tuple[Value, ...] = dataclasses.field(default_factory=tuple)
     metadata: ValueMetadata = dataclasses.field(default_factory=ValueMetadata)
+    slice_of: "ArrayValue | None" = None
+    slice_start: "Value | None" = None
+    slice_step: "Value | None" = None
 
     def next_version(self) -> ArrayValue[T]:
         return ArrayValue(
@@ -350,7 +378,18 @@ class ArrayValue(Value[T]):
             uuid=str(uuid.uuid4()),
             logical_id=self.logical_id,
             shape=self.shape,
+            slice_of=self.slice_of,
+            slice_start=self.slice_start,
+            slice_step=self.slice_step,
         )
+
+    def is_slice(self) -> bool:
+        """Return True if this array is a strided view of another array.
+
+        Returns:
+            ``True`` iff ``slice_of`` is non-``None``.
+        """
+        return self.slice_of is not None
 
 
 @dataclasses.dataclass(frozen=True)

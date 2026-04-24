@@ -6,7 +6,7 @@ import dataclasses
 from typing import Any
 
 from qamomile.circuit.ir.block import Block, BlockKind
-from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation import Operation, SliceArrayOperation
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
@@ -82,6 +82,16 @@ class ConstantFoldingPass(Pass[Block, Block]):
                         folded_values[op.results[0].uuid] = folded
                         return None
 
+                # SliceArrayOperation is purely declarative: its result
+                # (a sliced ``ArrayValue``) already carries all required
+                # metadata (slice_of/slice_start/slice_step) for the
+                # emit-time resolver, and downstream ops reference that
+                # result directly.  Strip the op so segmentation sees a
+                # pure quantum-segment sequence without a classical op
+                # interleaved in the middle.
+                if isinstance(op, SliceArrayOperation):
+                    return None
+
                 # Substitute folded values in operands
                 return outer_self._substitute_folded_operands(op, folded_values)
 
@@ -148,25 +158,99 @@ class ConstantFoldingPass(Pass[Block, Block]):
 
         Walks ``element_indices`` to arbitrary depth so that nested
         array accesses like ``q[indices[uint_tmp]]`` have their
-        innermost symbolic index resolved when it is foldable.
+        innermost symbolic index resolved when it is foldable.  Also
+        propagates folded values into ArrayValue-specific fields —
+        ``parent_array`` (recursively), ``shape``, and slice metadata
+        (``slice_of`` / ``slice_start`` / ``slice_step``) — so that a
+        sliced ArrayValue whose bounds were BinOp results has those
+        bounds resolved to constants before emit.
         """
+        from qamomile.circuit.ir.value import ArrayValue
+
         if v.uuid in folded_values:
             return folded_values[v.uuid]
-        if not v.element_indices:
-            return v
-        new_indices: list[Value] = []
+
         changed = False
-        for idx in v.element_indices:
-            if isinstance(idx, Value):
-                new_idx = self._substitute_in_value(idx, folded_values)
-                if new_idx is not idx:
+
+        new_element_indices: tuple[Value, ...] = v.element_indices
+        if v.element_indices:
+            new_indices: list[Value] = []
+            for idx in v.element_indices:
+                if isinstance(idx, Value):
+                    new_idx = self._substitute_in_value(idx, folded_values)
+                    if new_idx is not idx:
+                        changed = True
+                    new_indices.append(new_idx)
+                else:
+                    new_indices.append(idx)
+            new_element_indices = tuple(new_indices)
+
+        # Chase parent_array so sliced ArrayValues reached indirectly
+        # (via element Value -> parent_array) also get their slice
+        # metadata folded.
+        new_parent_array = v.parent_array
+        if v.parent_array is not None:
+            sub_parent = self._substitute_in_value(v.parent_array, folded_values)
+            if isinstance(sub_parent, ArrayValue) and sub_parent is not v.parent_array:
+                new_parent_array = sub_parent
+                changed = True
+
+        if isinstance(v, ArrayValue):
+            new_shape: tuple[Value, ...] = v.shape
+            if v.shape:
+                new_shape_list: list[Value] = []
+                for dim in v.shape:
+                    sub_dim = self._substitute_in_value(dim, folded_values)
+                    if sub_dim is not dim:
+                        changed = True
+                    new_shape_list.append(sub_dim)
+                new_shape = tuple(new_shape_list)
+
+            new_slice_of = v.slice_of
+            if v.slice_of is not None:
+                sub_slice_of = self._substitute_in_value(v.slice_of, folded_values)
+                if (
+                    isinstance(sub_slice_of, ArrayValue)
+                    and sub_slice_of is not v.slice_of
+                ):
+                    new_slice_of = sub_slice_of
                     changed = True
-                new_indices.append(new_idx)
-            else:
-                new_indices.append(idx)
-        if not changed:
+
+            new_slice_start = v.slice_start
+            if v.slice_start is not None:
+                sub_slice_start = self._substitute_in_value(
+                    v.slice_start, folded_values
+                )
+                if sub_slice_start is not v.slice_start:
+                    new_slice_start = sub_slice_start
+                    changed = True
+
+            new_slice_step = v.slice_step
+            if v.slice_step is not None:
+                sub_slice_step = self._substitute_in_value(v.slice_step, folded_values)
+                if sub_slice_step is not v.slice_step:
+                    new_slice_step = sub_slice_step
+                    changed = True
+
+            if changed:
+                return dataclasses.replace(
+                    v,
+                    element_indices=new_element_indices,
+                    parent_array=new_parent_array,
+                    shape=new_shape,
+                    slice_of=new_slice_of,
+                    slice_start=new_slice_start,
+                    slice_step=new_slice_step,
+                )
             return v
-        return dataclasses.replace(v, element_indices=tuple(new_indices))
+
+        if changed:
+            return dataclasses.replace(
+                v,
+                element_indices=new_element_indices,
+                parent_array=new_parent_array,
+            )
+        return v
 
     def _substitute_folded_operands(
         self,

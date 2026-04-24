@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from qamomile.circuit.ir.block import Block, BlockKind
-from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation import Operation, SliceArrayOperation
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps, IfOperation
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import AffineTypeError, ValidationError
@@ -58,6 +58,16 @@ class AffineValidationPass(Pass[Block, Block]):
         """
         for op in operations:
             op_name = type(op).__name__
+
+            # SliceArrayOperation takes the parent array as an operand
+            # but does NOT consume it — it only produces metadata
+            # describing a strided view.  The parent remains live and
+            # downstream gate/measure ops on it must not be flagged as
+            # double-consume.  (ConstantFoldingPass normally strips
+            # SliceArrayOperation before this pass, but we guard
+            # defensively in case ordering changes.)
+            if isinstance(op, SliceArrayOperation):
+                continue
 
             # Check each operand
             for operand in op.operands:

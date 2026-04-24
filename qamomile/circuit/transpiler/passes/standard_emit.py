@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from typing import Any, Generic, TypeVar
 
-from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation import Operation, SliceArrayOperation
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
@@ -188,6 +188,16 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         for op in operations:
             if isinstance(op, QInitOperation):
                 continue
+            elif isinstance(op, SliceArrayOperation):
+                # ConstantFoldingPass is expected to strip this op
+                # before emit; reaching here is a compiler-internal
+                # invariant violation.  Fail loudly rather than
+                # silently emitting nothing.
+                raise RuntimeError(
+                    "SliceArrayOperation reached emit — ConstantFoldingPass "
+                    "should have stripped it.  This is a compiler bug; "
+                    "please report it."
+                )
             elif isinstance(op, GateOperation):
                 emit_gate(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, MeasureOperation):

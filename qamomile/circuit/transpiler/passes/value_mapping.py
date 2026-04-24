@@ -154,6 +154,19 @@ class UUIDRemapper:
                     cast(Value, self.clone_value(dim)) for dim in value.shape
                 )
 
+            # Clone slice metadata so sliced ArrayValues that flow
+            # through inlining keep their chain intact with fresh
+            # uuids ready to be substituted to caller-side values.
+            new_slice_of: ArrayValue | None = None
+            if value.slice_of is not None:
+                new_slice_of = cast(ArrayValue, self.clone_value(value.slice_of))
+            new_slice_start: Value | None = None
+            if value.slice_start is not None:
+                new_slice_start = cast(Value, self.clone_value(value.slice_start))
+            new_slice_step: Value | None = None
+            if value.slice_step is not None:
+                new_slice_step = cast(Value, self.clone_value(value.slice_step))
+
             cloned = dataclasses.replace(
                 value,
                 uuid=new_uuid,
@@ -161,6 +174,9 @@ class UUIDRemapper:
                 parent_array=new_parent_array,
                 element_indices=new_element_indices if new_element_indices else (),
                 shape=new_shape,
+                slice_of=new_slice_of,
+                slice_start=new_slice_start,
+                slice_step=new_slice_step,
             )
         elif isinstance(value, Value):
             # Regular Value (not ArrayValue)
@@ -252,16 +268,149 @@ class ValueSubstitutor:
                 result = self._value_map[result.uuid]
         return result
 
+    def _has_referenced_field(self, v: "Value") -> bool:
+        """Return True if ``v`` holds a field whose UUID is in the map.
+
+        Used after a direct UUID hit to decide whether the mapped
+        Value's own fields (``parent_array`` / ``element_indices`` /
+        ``slice_of`` / ``slice_start`` / ``slice_step``) still need to
+        be substituted — which happens when a callee's dummy is mapped
+        to a value produced in a prior inlining level whose parent_array
+        also points at another dummy.
+
+        Args:
+            v: The mapped Value returned by a direct lookup.
+
+        Returns:
+            ``True`` iff at least one field references a UUID present
+            in the substitution map.
+        """
+        if v.parent_array is not None and v.parent_array.uuid in self._value_map:
+            return True
+        if v.element_indices:
+            for idx in v.element_indices:
+                if idx.uuid in self._value_map:
+                    return True
+        if isinstance(v, ArrayValue):
+            for dim in v.shape:
+                if dim.uuid in self._value_map:
+                    return True
+            if v.slice_of is not None and v.slice_of.uuid in self._value_map:
+                return True
+            if v.slice_start is not None and v.slice_start.uuid in self._value_map:
+                return True
+            if v.slice_step is not None and v.slice_step.uuid in self._value_map:
+                return True
+        return False
+
+    def _resubstitute_fields(self, v: "Value") -> "Value":
+        """Rebuild ``v`` with its fields resolved through the map.
+
+        Args:
+            v: A Value returned by the direct-lookup branch whose own
+                fields still reference mappable UUIDs.
+
+        Returns:
+            A new Value with ``parent_array`` / ``element_indices`` /
+            ``shape`` / slice metadata substituted.  Non-referenced
+            fields are left unchanged.
+        """
+        new_parent_array = v.parent_array
+        if v.parent_array is not None and v.parent_array.uuid in self._value_map:
+            sub_pa = self._chase_transitive(v.parent_array)
+            if isinstance(sub_pa, ArrayValue):
+                new_parent_array = sub_pa
+
+        new_element_indices = v.element_indices
+        if v.element_indices:
+            new_indices_list: list[Value] = []
+            for idx in v.element_indices:
+                if idx.uuid in self._value_map:
+                    sub_idx = self._chase_transitive(idx)
+                    if isinstance(sub_idx, Value):
+                        new_indices_list.append(sub_idx)
+                        continue
+                new_indices_list.append(idx)
+            new_element_indices = tuple(new_indices_list)
+
+        if isinstance(v, ArrayValue):
+            new_shape: tuple[Value, ...] = v.shape
+            if v.shape:
+                new_shape_list: list[Value] = []
+                for dim in v.shape:
+                    if dim.uuid in self._value_map:
+                        sub_dim = self._chase_transitive(dim)
+                        if isinstance(sub_dim, Value):
+                            new_shape_list.append(sub_dim)
+                            continue
+                    new_shape_list.append(dim)
+                new_shape = tuple(new_shape_list)
+
+            new_slice_of = v.slice_of
+            if v.slice_of is not None and v.slice_of.uuid in self._value_map:
+                sub_slice_of = self._chase_transitive(v.slice_of)
+                if isinstance(sub_slice_of, ArrayValue):
+                    new_slice_of = sub_slice_of
+            new_slice_start = v.slice_start
+            if v.slice_start is not None and v.slice_start.uuid in self._value_map:
+                sub_slice_start = self._chase_transitive(v.slice_start)
+                if isinstance(sub_slice_start, Value):
+                    new_slice_start = sub_slice_start
+            new_slice_step = v.slice_step
+            if v.slice_step is not None and v.slice_step.uuid in self._value_map:
+                sub_slice_step = self._chase_transitive(v.slice_step)
+                if isinstance(sub_slice_step, Value):
+                    new_slice_step = sub_slice_step
+
+            return dataclasses.replace(
+                v,
+                parent_array=new_parent_array,
+                element_indices=new_element_indices,
+                shape=new_shape,
+                slice_of=new_slice_of,
+                slice_start=new_slice_start,
+                slice_step=new_slice_step,
+            )
+
+        return dataclasses.replace(
+            v,
+            parent_array=new_parent_array,
+            element_indices=new_element_indices,
+        )
+
     def substitute_value(self, v: ValueBase) -> ValueBase:
         """Substitute a single value using the value map.
 
         Handles all value types and array elements by substituting
         their parent_array if needed.  When ``transitive`` is enabled,
         chases transitive chains (A -> B -> C) to terminal values.
+
+        If the direct lookup resolves to a value whose own fields
+        (``parent_array`` / ``element_indices`` / ``shape`` / ``slice_of``)
+        may themselves be subject to further substitution — typically
+        when a callee's dummy scalar input gets mapped to a caller
+        array element whose parent_array is itself a mapped dummy —
+        the result is re-substituted field-wise so the whole transitive
+        chain is resolved in one call.  This is what allows patterns
+        like nested sub-kernels receiving ``q[i]`` from the caller's
+        array to resolve through two levels of inlining.
         """
         # First try direct lookup
         if v.uuid in self._value_map:
-            return self._chase_transitive(v)
+            mapped = self._chase_transitive(v)
+            # If the mapped value is a Value with unresolved fields
+            # (parent_array / slice metadata whose uuids are also in
+            # the map), dig in and substitute those as well.  Without
+            # this, element values forwarded across a sub-kernel call
+            # would keep the inner dummy's parent_array and fail to
+            # resolve at emit.
+            if (
+                isinstance(mapped, Value)
+                and mapped is not v
+                and self._has_referenced_field(mapped)
+            ):
+                return self._resubstitute_fields(mapped)
+            return mapped
 
         # Handle TupleValue - substitute elements
         if isinstance(v, TupleValue):
@@ -354,14 +503,55 @@ class ValueSubstitutor:
                     new_shape = tuple(new_shape_dims)
                     changed = True
 
+            # Substitute slice_of / slice_start / slice_step on sliced
+            # ArrayValues so that view metadata flows through inlining
+            # alongside parent_array.  When a callee receives a sliced
+            # argument, the dummy input's slice_of (if any) and the
+            # caller-side sliced value both need to be re-pointed to
+            # the caller's actual values.
+            new_slice_of_v: "ArrayValue | None" = None
+            new_slice_start_v: "Value | None" = None
+            new_slice_step_v: "Value | None" = None
+            slice_meta_changed = False
+            if isinstance(v, ArrayValue):
+                new_slice_of_v = v.slice_of
+                new_slice_start_v = v.slice_start
+                new_slice_step_v = v.slice_step
+
+                if v.slice_of is not None and v.slice_of.uuid in self._value_map:
+                    sub_slice_of = self._chase_transitive(v.slice_of)
+                    if isinstance(sub_slice_of, ArrayValue):
+                        new_slice_of_v = sub_slice_of
+                        slice_meta_changed = True
+
+                if v.slice_start is not None and v.slice_start.uuid in self._value_map:
+                    sub_slice_start = self._chase_transitive(v.slice_start)
+                    if isinstance(sub_slice_start, Value):
+                        new_slice_start_v = sub_slice_start
+                        slice_meta_changed = True
+
+                if v.slice_step is not None and v.slice_step.uuid in self._value_map:
+                    sub_slice_step = self._chase_transitive(v.slice_step)
+                    if isinstance(sub_slice_step, Value):
+                        new_slice_step_v = sub_slice_step
+                        slice_meta_changed = True
+
+                if slice_meta_changed:
+                    changed = True
+
             if changed:
-                if isinstance(v, ArrayValue) and new_shape is not None:
-                    return dataclasses.replace(
-                        v,
+                if isinstance(v, ArrayValue):
+                    replace_kwargs: dict[str, Any] = dict(
                         parent_array=new_parent_array,
                         element_indices=new_element_indices,
-                        shape=new_shape,
                     )
+                    if new_shape is not None:
+                        replace_kwargs["shape"] = new_shape
+                    if slice_meta_changed:
+                        replace_kwargs["slice_of"] = new_slice_of_v
+                        replace_kwargs["slice_start"] = new_slice_start_v
+                        replace_kwargs["slice_step"] = new_slice_step_v
+                    return dataclasses.replace(v, **replace_kwargs)
                 return dataclasses.replace(
                     v,
                     parent_array=new_parent_array,
