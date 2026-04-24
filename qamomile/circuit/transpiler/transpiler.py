@@ -33,6 +33,9 @@ from qamomile.circuit.transpiler.passes.parameter_shape_resolution import (
 )
 from qamomile.circuit.transpiler.passes.partial_eval import PartialEvaluationPass
 from qamomile.circuit.transpiler.passes.separate import SegmentationPass
+from qamomile.circuit.transpiler.passes.slice_linearity_check import (
+    SliceLinearityCheckPass,
+)
 from qamomile.circuit.transpiler.passes.substitution import (
     SubstitutionConfig,
     SubstitutionPass,
@@ -364,6 +367,25 @@ class Transpiler(ABC, Generic[T]):
         """
         return CompileTimeIfLoweringPass(bindings).run(block)
 
+    def slice_linearity_check(self, block: Block) -> Block:
+        """Pass 1.9: Post-fold block-wide borrow checker.
+
+        Runs after :meth:`partial_eval` has resolved slice bounds to
+        concrete values.  Catches two classes of linearity violations
+        that the trace-time frontend check cannot detect on its own:
+
+        1. Aliasing between a slice view whose bounds were symbolic at
+           trace time and a direct access to the same parent slot.
+        2. ``return q`` / ``measure(q)`` reaching the end of the block
+           with borrows still outstanding — closes the pre-existing
+           silent hole where the frontend's consume-driven validation
+           would miss un-returned element borrows.
+
+        The pass is a pass-through for the IR; it only raises on
+        violations (and leaves the block unchanged on success).
+        """
+        return SliceLinearityCheckPass().run(block)
+
     def analyze(self, block: Block) -> Block:
         """Pass 2: Validate and analyze dependencies."""
         return self._analyze_pass.run(block)
@@ -456,6 +478,7 @@ class Transpiler(ABC, Generic[T]):
         affine = self.unroll_recursion(affine, bindings)
         validated = self.affine_validate(affine)
         partially_evaluated = self.partial_eval(validated, bindings)
+        partially_evaluated = self.slice_linearity_check(partially_evaluated)
         analyzed = self.analyze(partially_evaluated)
         analyzed = self.validate_symbolic_shapes(analyzed)
         separated = self.plan(analyzed)

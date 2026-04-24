@@ -585,3 +585,173 @@ class TestVectorViewAsKernelArgument:
             return q
 
         assert circuit.block is not None
+
+
+# ---------------------------------------------------------------------------
+# V6: IR-level slice operation + SliceLinearityCheckPass
+# ---------------------------------------------------------------------------
+
+
+class TestSliceArrayOperation:
+    """The SliceArrayOperation appears in the pre-fold block and is stripped."""
+
+    def test_slice_op_present_in_hierarchical_block(self):
+        """Tracing emits a ``SliceArrayOperation`` at the slice site."""
+        from qamomile.circuit.ir.operation import SliceArrayOperation
+
+        @qmc.qkernel
+        def kern(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            evens = q[0::2]
+            for i in qmc.range(evens.shape[0]):
+                evens[i] = qmc.h(evens[i])
+            return qmc.measure(q)
+
+        ops = kern.block.operations
+        assert any(isinstance(op, SliceArrayOperation) for op in ops)
+
+    def test_slice_op_stripped_after_constant_folding(self):
+        """``ConstantFoldingPass`` removes ``SliceArrayOperation``."""
+        pytest.importorskip("qiskit")
+        from qamomile.circuit.ir.operation import SliceArrayOperation
+        from qamomile.circuit.transpiler.passes import ConstantFoldingPass
+        from qamomile.circuit.transpiler.passes.inline import InlinePass
+
+        @qmc.qkernel
+        def kern(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            evens = q[0::2]
+            for i in qmc.range(evens.shape[0]):
+                evens[i] = qmc.h(evens[i])
+            return qmc.measure(q)
+
+        block = InlinePass().run(kern.block)
+        folded = ConstantFoldingPass(bindings={"n": 4}).run(block)
+        assert not any(isinstance(op, SliceArrayOperation) for op in folded.operations)
+
+    def test_sliced_array_value_carries_metadata(self):
+        """The sliced ``ArrayValue`` carries ``slice_of`` / start / step."""
+        from qamomile.circuit.ir.value import ArrayValue
+
+        captured: dict[str, object] = {}
+
+        @qmc.qkernel
+        def kern(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            view = q[0::2]
+            captured["av"] = view.value
+            view[0] = qmc.h(view[0])
+            return q
+
+        _ = kern.block
+        av = captured["av"]
+        assert isinstance(av, ArrayValue)
+        assert av.slice_of is not None
+        assert av.slice_start is not None
+        assert av.slice_step is not None
+
+
+class TestViewAsKernelOperandViaCallBlock:
+    """View flows through ``CallBlockOperation`` (V6 removes inline-trace)."""
+
+    def test_view_arg_routes_through_callblock(self):
+        """Kernel called with a view now uses the standard call path.
+
+        Previously (V1), views forced ``_inline_trace_call`` because
+        they had no IR representation.  V6 makes the sliced
+        ``ArrayValue`` first-class, so the callee receives the view
+        through the normal ``CallBlockOperation`` operand chain.  The
+        user-facing behaviour (gates land on the right qubits) is
+        unchanged; this test pins the IR-level path.
+        """
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def apply_h(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            for i in qmc.range(q.shape[0]):
+                q[i] = qmc.h(q[i])
+            return q
+
+        @qmc.qkernel
+        def circuit(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(num, "q")
+            evens = q[0::2]
+            evens = apply_h(evens)
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit, bindings={"num": 6})
+        qc = exe.compiled_quantum[0].circuit
+        h_qubits = [
+            qc.qubits.index(inst.qubits[0])
+            for inst in qc.data
+            if inst.operation.name == "h"
+        ]
+        assert h_qubits == [0, 2, 4]
+
+
+class TestPostFoldLinearity:
+    """``SliceLinearityCheckPass`` catches post-fold aliasing."""
+
+    def test_symbolic_slice_vs_direct_access_caught_at_transpile(self):
+        """``q[lo:hi] + q[0]`` aliases when ``lo=0``; caught post-fold.
+
+        Trace time cannot enumerate the symbolic slice's coverage, so
+        V1's trace-time check lets this pass.  ``SliceLinearityCheckPass``
+        runs after ``ConstantFoldingPass`` resolves ``lo``/``hi`` to
+        concrete values and flags the aliasing at transpile time.
+        """
+        pytest.importorskip("qiskit")
+        from qamomile.circuit.transpiler.errors import SliceLinearityViolationError
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def circuit(num: qmc.UInt, lo: qmc.UInt, hi: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(num, "q")
+            region = q[lo:hi]
+            region[0] = qmc.h(region[0])
+            # Direct access to slot that the region covers when lo=0.
+            q[0] = qmc.x(q[0])
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        with pytest.raises(SliceLinearityViolationError):
+            transpiler.transpile(circuit, bindings={"num": 4, "lo": 0, "hi": 4})
+
+    def test_symbolic_slice_disjoint_from_direct_access_passes(self):
+        """When the symbolic range doesn't cover the accessed slot, no error."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def circuit(num: qmc.UInt, lo: qmc.UInt, hi: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(num, "q")
+            region = q[lo:hi]
+            for i in qmc.range(region.shape[0]):
+                region[i] = qmc.h(region[i])
+            # Slot 0 is out of [lo, hi) when lo=2, hi=4.
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        # Should succeed with lo=2, hi=4 — region covers {2, 3}, not 0.
+        exe = transpiler.transpile(circuit, bindings={"num": 4, "lo": 2, "hi": 4})
+        assert exe is not None
+
+
+class TestBlockEndUnreturnedBorrow:
+    """Frontend trace-end validation catches unreturned borrows."""
+
+    def test_return_with_outstanding_direct_borrow_raises(self):
+        """``qv = q[0]; return q`` — borrow not returned — is flagged."""
+        from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
+
+        with pytest.raises(UnreturnedBorrowError):
+
+            @qmc.qkernel
+            def kern() -> qmc.Vector[qmc.Qubit]:
+                q = qmc.qubit_array(4, "q")
+                qv = q[0]  # borrowed, never returned
+                del qv
+                return q
+
+            _ = kern.block
