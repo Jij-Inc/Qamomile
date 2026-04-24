@@ -85,19 +85,33 @@ def binary_model() -> BinaryModel:
 
 @pytest.fixture
 def single_var_model() -> BinaryModel:
-    """Single-variable SPIN model: 3*z0. Minimum at z0=-1 with energy -3."""
+    """Single-variable SPIN model: 3*z0.
+
+    Brute-forced energies over 2 states:
+      (+)=3; (-)=-3 (unique min).
+    """
     return BinaryModel.from_ising(linear={0: 3.0}, quad={}, constant=0.0)
 
 
 @pytest.fixture
 def linear_only_model() -> BinaryModel:
-    """SPIN model with only linear terms: 2*z0 - 3*z1. Minimum at (-1,1), energy -5."""
+    """SPIN model with only linear terms: 2*z0 - 3*z1.
+
+    Brute-forced energies over 4 states:
+      (+,+)=-1; (+,-)=5; (-,+)=-5 (unique min); (-,-)=1.
+    """
     return BinaryModel.from_ising(linear={0: 2.0, 1: -3.0}, quad={}, constant=0.0)
 
 
 @pytest.fixture
 def quad_only_model() -> BinaryModel:
-    """SPIN model with only quadratic terms: -2*z0*z1. Two minima at (+1,+1) and (-1,-1), energy -2."""
+    """SPIN model with only quadratic terms: -2*z0*z1.
+
+    Brute-forced energies over 4 states:
+      (+,+)=-2 (min); (+,-)=2; (-,+)=2; (-,-)=-2 (min).
+    Two degenerate minima; which one is reached depends on the initial state
+    (local search cannot cross the (+,-) / (-,+) barrier).
+    """
     return BinaryModel.from_ising(linear={}, quad={(0, 1): -2.0}, constant=0.0)
 
 
