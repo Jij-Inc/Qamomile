@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: py:percent,ipynb
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -18,7 +19,7 @@
 # このチュートリアルでは、Qamomile の低レベル回路プリミティブを使って、QAOA (Quantum Approximate Optimization Algorithm) のパイプラインをステップごとに構築します。高レベルな `QAOAConverter` は使わずに、以下の手順で進めます:
 #
 # 1. 小さなグラフで MaxCut 問題を定義する。
-# 2. QUBO として定式化し、Ising モデルに変換する。
+# 2. スピン変数上の Ising モデルとして直接定式化する。
 # 3. `@qkernel` を使って QAOA 回路をステップごとに記述する。
 # 4. 古典オプティマイザで変分パラメータを最適化する。
 # 5. 結果をデコードして可視化する。
@@ -32,13 +33,18 @@
 # %% [markdown]
 # ## MaxCut 問題とは？
 #
-# 無向グラフ $G = (V, E)$ が与えられたとき、**MaxCut** 問題は頂点を 2 つの集合 $S$ と $\bar{S}$ に分割し、2 つの集合間の辺の数を最大化する問題です:
+# 無向グラフ $G = (V, E)$ が与えられたとき、**MaxCut** 問題は頂点を 2 つの集合に分割し、2 つの集合間を横切る辺の数を最大化する問題です。
+#
+# MaxCut は本来、**スピン**変数で記述するのが自然な問題です。各頂点 $i$ にスピン $s_i \in \{+1, -1\}$ を割り当て、頂点がどちら側に属するかを表現します。辺 $(i, j)$ が「カットされる」のは $s_i \ne s_j$ のときなので、カットされる辺数は
 #
 # $$
-# \text{MaxCut}(x) = \sum_{(i,j) \in E} x_i (1 - x_j) + x_j (1 - x_i)
+# \text{MaxCut}(\boldsymbol{s})
+# = \sum_{(i,j) \in E} \frac{1 - s_i s_j}{2}
 # $$
 #
-# ここで $x_i \in \{0, 1\}$ は頂点 $i$ がどちらの集合に属するかを示します。
+# と書けます。
+#
+# MaxCut やスピングラス基底状態探索、Ising モデルベンチマークといったスピン変数で自然に定義される問題は、スピン領域で記述するのが最もクリーンです。そこで本チュートリアルでは QUBO / バイナリ変数への寄り道は挟まず、最初から最後までスピン変数で扱います。
 
 # %% [markdown]
 # ## グラフの作成
@@ -67,69 +73,46 @@ plt.title(f"Graph: {num_nodes} nodes, {G.number_of_edges()} edges")
 plt.show()
 
 # %% [markdown]
-# ## QUBO 定式化
+# ## Ising 定式化
 #
-# QAOA で最小化するために、MaxCut の目的関数を符号反転します:
+# $\sum_{(i,j) \in E} (1 - s_i s_j) / 2$ を最大化することは、定数を除いて以下の**反強磁性 Ising ハミルトニアン**を *最小化* することと等価です:
 #
 # $$
-# \min_x \sum_{(i,j) \in E} \bigl(2 x_i x_j - x_i - x_j \bigr)
+# H_C(\boldsymbol{s}) = \sum_{(i,j) \in E} s_i s_j.
 # $$
 #
-# これは QUBO 辞書に変換でき、各辺 $(i, j)$ の寄与は:
+# 一般の Ising 形式 $H = \sum_i h_i s_i + \sum_{i < j} J_{ij} s_i s_j$ と比較すると、重みなし MaxCut は以下の特徴を持ちます:
 #
-# - $Q_{ii} \mathrel{-}= 1$, $Q_{jj} \mathrel{-}= 1$（対角要素）
-# - $Q_{ij} \mathrel{+}= 2$（非対角要素）
+# - **線形項なし**: 全頂点について $h_i = 0$
+# - **一様な相互作用**: 全辺 $(i, j) \in E$ について $J_{ij} = 1$
+#
+# `BinaryModel.from_ising` は Ising 係数を直接受け取ります — QUBO を経由して変数型を変換する必要はありません。
 
 # %%
-from qamomile.optimization.binary_model import BinaryModel, VarType
+from qamomile.optimization.binary_model import BinaryModel
 
-# グラフの辺から QUBO 辞書を構築
-qubo: dict[tuple[int, int], float] = {}
-for i, j in G.edges():
-    qubo[(i, i)] = qubo.get((i, i), 0.0) - 1.0
-    qubo[(j, j)] = qubo.get((j, j), 0.0) - 1.0
-    qubo[(i, j)] = qubo.get((i, j), 0.0) + 2.0
+ising_quad: dict[tuple[int, int], float] = {
+    tuple(sorted((i, j))): 1.0 for i, j in G.edges()
+}
+ising_linear: dict[int, float] = {}
 
-print("QUBO coefficients:")
-for key, val in sorted(qubo.items()):
-    print(f"  {key}: {val}")
+spin_model = BinaryModel.from_ising(
+    linear=ising_linear,
+    quad=ising_quad,
+).normalize_by_abs_max()
 
-model = BinaryModel.from_qubo(qubo)
-print(f"\nNumber of variables: {model.num_bits}")
-print(f"Variable type: {model.vartype}")
-
-# %% [markdown]
-# > **Note:** `BinaryModel` は QUBO 以外にも `from_ising()` や `from_hubo()` といったコンストラクタを提供しています。また、`change_vartype()` でバイナリ表現とスピン表現を相互に変換できます。
-
-# %% [markdown]
-# ## QUBO から Ising モデルへ
-#
-# QAOA はバイナリ変数 ($x_i \in \{0, 1\}$) ではなく、**スピン変数** ($s_i \in \{+1, -1\}$) で動作します。変換式は:
-#
-# $$
-# x_i = \frac{1 - s_i}{2}
-# $$
-#
-# 量子力学の規約 $Z|0\rangle = |0\rangle$, $Z|1\rangle = -|1\rangle$ に対応しており、バイナリ 0 はスピン $+1$、バイナリ 1 はスピン $-1$ に写ります。
-#
-# QUBO に代入すると Ising ハミルトニアンが得られます:
-#
-# $$
-# H = \sum_i h_i \, s_i + \sum_{i < j} J_{ij} \, s_i \, s_j + \text{const}
-# $$
-
-# %%
-spin_model = model.change_vartype(VarType.SPIN).normalize_by_abs_max()
-
-print(f"Variable type: {spin_model.vartype}")
+print(f"Variable type:          {spin_model.vartype}")
 print(f"Linear terms (h_i):     {spin_model.linear}")
 print(f"Quadratic terms (J_ij): {spin_model.quad}")
 print(f"Constant:               {spin_model.constant}")
 
 # %% [markdown]
+# > **Note:** `BinaryModel` は QUBO 向けの `from_qubo()` や高次版の `from_hubo()` も提供しており、割当問題や制約（ペナルティ項）を伴う問題のようにバイナリ領域で自然に定式化される問題に利用できます。QUBO / JijModeling ベースのワークフローについては [QAOA によるグラフ分割](../optimization/qaoa_graph_partition) を参照してください。
+
+# %% [markdown]
 # ## 厳密解（全探索）
 #
-# QAOA を実行する前に、すべての $2^n = 32$ 通りの分割を試して最適解を求めておきます。QAOA の結果と比較するための基準になります。
+# QAOA を実行する前に、すべての $2^n = 32$ 通りのスピン配置を試して最適な分割を求めておきます。QAOA の結果と比較するための基準になります。
 
 # %%
 import itertools
@@ -137,13 +120,13 @@ import itertools
 best_cut = 0
 optimal_partitions: list[tuple[int, ...]] = []
 
-for bits in itertools.product([0, 1], repeat=num_nodes):
-    cut = sum(1 for i, j in G.edges() if bits[i] != bits[j])
+for spins in itertools.product([+1, -1], repeat=num_nodes):
+    cut = sum(1 for i, j in G.edges() if spins[i] != spins[j])
     if cut > best_cut:
         best_cut = cut
-        optimal_partitions = [bits]
+        optimal_partitions = [spins]
     elif cut == best_cut:
-        optimal_partitions.append(bits)
+        optimal_partitions.append(spins)
 
 print(f"Optimal MaxCut value: {best_cut}")
 print(f"Number of optimal partitions: {len(optimal_partitions)}")
@@ -163,10 +146,13 @@ for part in optimal_partitions:
 # $$
 #
 # ここで:
+#
 # - $|{+}\rangle^{\otimes n}$: 一様重ね合わせ（全量子ビットに Hadamard ゲート）
-# - $e^{-i \gamma H_C}$: **コストユニタリ** — Ising コストの場合、$\text{RZZ}$ と $\text{RZ}$ ゲートに分解されます（ゲートの規約についてはステップ 2–3 を参照）
+# - $e^{-i \gamma H_C}$: **コストユニタリ** — Ising コスト $H_C$ の場合、二次項は $\text{RZZ}$ ゲート、一次項は $\text{RZ}$ ゲートに分解されます（ゲートの規約についてはステップ 2–3 を参照）
 # - $e^{-i \beta H_M}$: **ミキサーユニタリ** — $H_M = \sum_i X_i$ の場合、各量子ビットへの $\text{RX}(2\beta)$ になります
 # - $p$: レイヤー数（アンザッツの深さ）
+#
+# スピンと計算基底の対応は量子力学の標準的な規約 $Z|0\rangle = |0\rangle$, $Z|1\rangle = -|1\rangle$ に従います。すなわち、測定結果 $0$ はスピン $+1$、測定結果 $1$ はスピン $-1$ に対応します。
 #
 # 各コンポーネントを `@qkernel` として実装していきます。
 
@@ -192,7 +178,9 @@ def superposition(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
 #
 # コストユニタリ $e^{-i \gamma H_C}$ を適用します。
 #
-# Qamomile の回転ゲートは $1/2$ の因子を含む規約を使います: $\text{RZ}(\theta) = e^{-i \theta Z / 2}$、$\text{RZZ}(\theta) = e^{-i \theta Z \otimes Z / 2}$。$e^{-i \gamma H_C}$ と厳密に一致させるには角度を $2 J_{ij} \gamma$ とすべきですが、$\gamma$ は古典オプティマイザが自由に調整する**変分パラメータ**であるため、この定数倍は最適な $\gamma$ の値に吸収されます。したがって、$J_{ij} \cdot \gamma$（および $h_i \cdot \gamma$）をそのまま渡します:
+# Qamomile の回転ゲートは $1/2$ の因子を含む規約を使います: $\text{RZ}(\theta) = e^{-i \theta Z / 2}$、$\text{RZZ}(\theta) = e^{-i \theta Z \otimes Z / 2}$。$e^{-i \gamma H_C}$ と厳密に一致させるには角度を $2 J_{ij} \gamma$ とすべきですが、$\gamma$ は古典オプティマイザが自由に調整する**変分パラメータ**であるため、この定数倍は最適な $\gamma$ の値に吸収されます。したがって、$J_{ij} \cdot \gamma$（および $h_i \cdot \gamma$）をそのまま渡します。
+#
+# 重みなし MaxCut では `linear` 引数は空ですが、そのまま引数として残しておきます。こうすることで、線形項 $h_i$ を持つ重みつき MaxCut や一般のスピングラスハミルトニアンにそのまま流用できます。
 
 
 # %%
@@ -254,7 +242,7 @@ def qaoa_ansatz(
 # %% [markdown]
 # ## トランスパイルと最適化
 #
-# カーネルをトランスパイルします。問題の構造（グラフの係数、量子ビット数、レイヤー数）はバインドし、`gammas` と `betas` はオプティマイザがチューニングするランタイムパラメータとして残します。
+# カーネルをトランスパイルします。問題の構造（Ising 係数、量子ビット数、レイヤー数）はバインドし、`gammas` と `betas` はオプティマイザがチューニングするランタイムパラメータとして残します。
 
 # %%
 from qamomile.qiskit import QiskitTranspiler
@@ -321,7 +309,7 @@ plt.show()
 # %% [markdown]
 # ## 結果のデコードと分析
 #
-# 最適化されたパラメータで回路をサンプリングし、測定結果を解釈します。MaxCut ではすべてのビット列が有効な分割なので、実行可能性のチェックは不要です。各サンプルのカット辺数を数えるだけです。
+# 最適化されたパラメータで回路をサンプリングし、測定結果を解釈します。`decode_from_sampleresult` はスピン領域（+1 / -1）のサンプルを返すので、バイナリ変換を挟まずに直接カット辺数を数えられます。
 
 # %%
 gammas_opt = list(res.x[:p])
@@ -345,17 +333,16 @@ best_qaoa_sample = None
 for sample, energy, occ in zip(
     decoded.samples, decoded.energy, decoded.num_occurrences
 ):
-    # スピン (+1/-1) をバイナリ (0/1) に変換: x = (1 - s) / 2
-    binary = {idx: (1 - s) // 2 for idx, s in sample.items()}
-    bits = [binary[i] for i in range(num_nodes)]
-    cut = sum(1 for i, j in G.edges() if bits[i] != bits[j])
+    # sample は {頂点インデックス: スピン値 (+1 or -1)} の辞書
+    spins = [sample[i] for i in range(num_nodes)]
+    cut = sum(1 for i, j in G.edges() if spins[i] != spins[j])
     cut_distribution[cut] += occ
     if cut > best_qaoa_cut:
         best_qaoa_cut = cut
-        best_qaoa_sample = bits
+        best_qaoa_sample = spins
 
 print(f"Best QAOA cut: {best_qaoa_cut}  (optimal: {best_cut})")
-print(f"Best partition: {best_qaoa_sample}")
+print(f"Best partition (spins): {best_qaoa_sample}")
 
 # %%
 cuts = sorted(cut_distribution.keys())
@@ -371,7 +358,8 @@ plt.show()
 # %%
 if best_qaoa_sample is not None:
     color_map = [
-        "#FF6B6B" if best_qaoa_sample[i] == 1 else "#4ECDC4" for i in range(num_nodes)
+        "#FF6B6B" if best_qaoa_sample[i] == +1 else "#4ECDC4"
+        for i in range(num_nodes)
     ]
     plt.figure(figsize=(5, 4))
     nx.draw(
@@ -449,12 +437,14 @@ print(f"Built-in mean energy: {decoded_builtin.energy_mean():.4f}")
 #
 # このチュートリアルでは:
 #
-# 1. MaxCut 問題を定義し、NetworkX グラフから QUBO を構築しました。
-# 2. `BinaryModel` を使って QUBO を Ising モデルに変換しました。
+# 1. MaxCut 問題を定義し、QUBO / バイナリ変数を経由せずに *直接* スピン変数上の Ising ハミルトニアンとして記述しました。
+# 2. `BinaryModel.from_ising` でスピン領域の `BinaryModel` を構築しました。
 # 3. QAOA 回路の全コンポーネント — 重ね合わせ、コスト層、ミキサー層、完全なアンザッツ — を `@qkernel` として実装しました。
-# 4. 古典最適化ループを実行し、結果をデコードしました。
+# 4. 古典最適化ループを実行し、スピン領域のまま結果をデコードしました。
 # 5. `qamomile.circuit.algorithm.qaoa_state` が同じ回路を 1 つの関数呼び出しで提供することを確認しました。
+#
+# この「スピンから始める」レシピは、スピングラス基底状態探索、重みつき MaxCut、Sherrington–Kirkpatrick モデルといった任意の Ising 型問題にそのまま適用できます。$h_i$ と $J_{ij}$ を `BinaryModel.from_ising` に渡し、上で作成した回路コンポーネントを再利用するだけです。
 #
 # **次のステップ:**
 #
-# - **制約付き最適化**問題（ペナルティ項が必要な場合）については、JijModeling と高レベルの `QAOAConverter` を使う [QAOA によるグラフ分割](../optimization/qaoa_graph_partition) を参照してください。
+# - **バイナリ変数**で自然に定式化される問題や、**制約**（ペナルティ項）が必要な問題については、JijModeling と高レベルの `QAOAConverter` を使う [QAOA によるグラフ分割](../optimization/qaoa_graph_partition) を参照してください。
