@@ -498,13 +498,13 @@ class TestOmmxInput:
 
         With ``x0 + x1 <= 1`` as a constraint and minimization objective
         ``-x0 - x1``, the optimal feasible assignments are (1,0) and (0,1)
-        with objective -1. Local search on the penalized HUBO should land
-        at one of those, and the Solution must report ``feasible=True``
-        against the original constraint (the earlier bug returned True
-        unconditionally because the stored instance had been mutated to
-        zero-constraints by ``to_hubo``). Parametrized over both methods
-        so the penalty-absorbed HUBO is exercised through the first-
-        improvement scan as well as the best-improvement argmin.
+        (both with objective -1). Starting from the all-zero state, both
+        tie-breaking strategies (``argmin`` for best, index-order scan for
+        first) pick the smaller index first and land at ``(1,0)`` — so
+        the exact state is assertable for both methods. The Solution must
+        report ``feasible=True`` against the original constraint (the
+        earlier bug returned True unconditionally because the stored
+        instance had been mutated to zero-constraints by ``to_hubo``).
         """
         x0 = ommx.v1.DecisionVariable.binary(id=0)
         x1 = ommx.v1.DecisionVariable.binary(id=1)
@@ -519,8 +519,7 @@ class TestOmmxInput:
         result = ls.run([0] * ls.num_bits, method=method)
         assert isinstance(result, ommx.v1.Solution)
         assert result.feasible
-        entries = dict(result.state.entries)
-        assert entries[0] + entries[1] <= 1.0 + 1e-9
+        assert dict(result.state.entries) == {0: 1.0, 1: 0.0}
         assert np.isclose(result.objective, -1.0)
 
 
