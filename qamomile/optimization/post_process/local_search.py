@@ -238,12 +238,12 @@ class LocalSearch:
             # user's constraints. But the sample dict includes slack
             # decision variables introduced by `to_hubo` on the working
             # copy — those IDs don't exist on the original instance, and
-            # passing them to `evaluate` raises. Filter to the original
-            # decision-variable IDs before handing off.
-            original_ids = {v.id for v in self._ommx_instance.decision_variables}
-            sample = {
-                k: v for k, v in sample_set.samples[0].items() if k in original_ids
-            }
+            # passing them to `evaluate` raises. Filter to the ids ommx
+            # actually consumes during `evaluate` — `used_decision_variable_ids`
+            # excludes fixed / unreferenced variables as well as slacks,
+            # which is exactly the set `evaluate` needs.
+            used_ids = self._ommx_instance.used_decision_variable_ids()
+            sample = {k: v for k, v in sample_set.samples[0].items() if k in used_ids}
             return self._ommx_instance.evaluate(sample)
         return sample_set
 
