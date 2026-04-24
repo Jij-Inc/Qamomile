@@ -492,7 +492,8 @@ class TestOmmxInput:
         assert len(inst.constraints) == constraints_before
         assert ls.num_bits >= len(dvs_before)
 
-    def test_constrained_instance_feasibility_reporting(self):
+    @pytest.mark.parametrize("method", ["best", "first"])
+    def test_constrained_instance_feasibility_reporting(self, method):
         """Feasibility on returned Solution reflects the original constraints.
 
         With ``x0 + x1 <= 1`` as a constraint and minimization objective
@@ -501,7 +502,9 @@ class TestOmmxInput:
         at one of those, and the Solution must report ``feasible=True``
         against the original constraint (the earlier bug returned True
         unconditionally because the stored instance had been mutated to
-        zero-constraints by ``to_hubo``).
+        zero-constraints by ``to_hubo``). Parametrized over both methods
+        so the penalty-absorbed HUBO is exercised through the first-
+        improvement scan as well as the best-improvement argmin.
         """
         x0 = ommx.v1.DecisionVariable.binary(id=0)
         x1 = ommx.v1.DecisionVariable.binary(id=1)
@@ -513,7 +516,7 @@ class TestOmmxInput:
         )
         ls = LocalSearch(inst)
         # Start with all-zero state of the correct (slack-inclusive) length.
-        result = ls.run([0] * ls.num_bits, method="best")
+        result = ls.run([0] * ls.num_bits, method=method)
         assert isinstance(result, ommx.v1.Solution)
         assert result.feasible
         entries = dict(result.state.entries)
