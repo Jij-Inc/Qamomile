@@ -356,55 +356,134 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
         if av.slice_of is None:
             return
 
-        # Concrete start / step / length required.
-        start = self._const_int(av.slice_start)
-        step = self._const_int(av.slice_step)
+        # Concrete length required.
         length = self._const_int(av.shape[0]) if av.shape else None
-        if start is None or step is None or length is None:
+        if length is None:
             return  # Symbolic — skip.
 
+        # Walk ``slice_of`` chain composing the affine map.  Start with
+        # the identity map ``(start=0, step=1)`` and apply each parent
+        # frame ``(p_start, p_step)`` on the way up:
+        #   idx_parent = p_start + p_step * idx_current
+        # so ``(start, step)`` accumulate to ``(p_start + p_step * start,
+        # p_step * step)``.  Mirrors :meth:`_collect_view_coverage`;
+        # starting from ``av.slice_start`` directly would double-apply
+        # the innermost frame.
         root = av
-        root_start = start
-        root_step = step
-        # Walk up slice_of chain, composing affine maps.
+        root_start = 0
+        root_step = 1
         while root.slice_of is not None:
             parent_start = self._const_int(root.slice_start)
             parent_step = self._const_int(root.slice_step)
             if parent_start is None or parent_step is None:
                 return
-            # root_x already represents coefficients in the *current*
-            # parent's coordinate space; compose with one more parent.
-            # For a view V with parent P: idx_P = V.start + V.step * i_V.
-            # For P's parent Q: idx_Q = P.start + P.step * idx_P =
-            #   P.start + P.step * (V.start + V.step * i_V).
-            # But here we've only tracked the innermost view's start/step;
-            # we need to re-compose: root_start_new = parent_start +
-            # parent_step * root_start (when root_start is the innermost
-            # view's start).
-            # In practice the frontend collapses chains to a single hop
-            # via _nested_slice, so slice_of usually walks exactly once.
             root_start = parent_start + parent_step * root_start
             root_step = parent_step * root_step
             root = root.slice_of
 
-        # Register each covered slot.  View identity is compared by
-        # ``uuid`` rather than object identity so that re-entering a
-        # pass (or replay after ``_substitute_in_value`` rebuilt the
-        # ArrayValue with identical fields) does not look like a fresh
-        # overlapping view.
+        # Enumerate the exact covered-slot set for this view so that
+        # "sequential same-range" slicing (``a = q[0::2]; loop(a); b =
+        # q[0::2]``) can evict the outgoing view as a whole rather than
+        # triggering a partial-overlap false positive.  Two ArrayValues
+        # whose covered sets are identical represent the same logical
+        # view — the earlier one's lifetime implicitly ended when the
+        # later one was constructed.
+        new_covered: set[int] = {
+            root_start + root_step * j for j in range(length)
+        }
+
+        # Collect distinct existing views whose slots intersect this
+        # view's coverage, then decide per-view whether to replace
+        # (identical coverage = OK), raise (genuine overlap), or treat
+        # as idempotent (same uuid).
+        touched_views: dict[str, ArrayValue] = {}
+        touched_views_coverage: dict[str, set[int]] = {}
         for j in range(length):
             idx = root_start + root_step * j
             key = (f"const:{idx}",)
             existing = state.get(key)
-            if existing is not None:
-                if isinstance(existing, ArrayValue) and existing.uuid == av.uuid:
-                    continue  # idempotent re-registration
-                if existing is not av:
-                    raise SliceLinearityViolationError(
-                        self._format_view_registration_conflict(existing, av, idx, root)
-                    )
+            if existing is None:
                 continue
+            if isinstance(existing, ArrayValue):
+                if existing.uuid == av.uuid:
+                    continue  # idempotent re-registration on same uuid
+                touched_views.setdefault(existing.uuid, existing)
+                touched_views_coverage.setdefault(existing.uuid, set()).add(idx)
+            else:
+                # Direct element borrow collides with the new view.
+                raise SliceLinearityViolationError(
+                    self._format_view_registration_conflict(
+                        existing, av, idx, root
+                    )
+                )
+
+        for other_uuid, other_view in touched_views.items():
+            other_full = self._collect_view_coverage(other_view)
+            if other_full is None:
+                # Symbolic / unresolvable bounds on the earlier view —
+                # we can't prove coverage equality, so be conservative.
+                raise SliceLinearityViolationError(
+                    self._format_view_registration_conflict(
+                        other_view, av, next(iter(touched_views_coverage[other_uuid])), root
+                    )
+                )
+            if other_full == new_covered:
+                # Same logical view — release all of the old view's
+                # registrations before installing the new one below.
+                for slot in other_full:
+                    old_key = (f"const:{slot}",)
+                    if state.get(old_key) is other_view:
+                        del state[old_key]
+            else:
+                raise SliceLinearityViolationError(
+                    self._format_view_registration_conflict(
+                        other_view,
+                        av,
+                        next(iter(touched_views_coverage[other_uuid])),
+                        root,
+                    )
+                )
+
+        for idx in new_covered:
+            key = (f"const:{idx}",)
             state[key] = av
+
+    def _collect_view_coverage(self, view: "ArrayValue") -> set[int] | None:
+        """Return the full covered-slot set of ``view`` in root coordinates.
+
+        Walks the ``slice_of`` chain composing the affine map, then
+        enumerates ``start + step * j`` for ``j`` in ``range(length)``.
+        Returns ``None`` if any component along the chain is non-constant
+        (e.g. a symbolic ``UInt`` that escaped constant folding) so
+        callers can fall back to a conservative overlap response.
+
+        Args:
+            view: A sliced ``ArrayValue``.
+
+        Returns:
+            The set of physical root-parent slot indices covered by the
+            view, or ``None`` when the coverage cannot be determined.
+        """
+        if view.slice_of is None:
+            return None
+        if not view.shape:
+            return None
+        length = self._const_int(view.shape[0])
+        if length is None:
+            return None
+
+        root = view
+        root_start = 0
+        root_step = 1
+        while root.slice_of is not None:
+            parent_start = self._const_int(root.slice_start)
+            parent_step = self._const_int(root.slice_step)
+            if parent_start is None or parent_step is None:
+                return None
+            root_start = parent_start + parent_step * root_start
+            root_step = parent_step * root_step
+            root = root.slice_of
+        return {root_start + root_step * j for j in range(length)}
 
     # ------------------------------------------------------------------
     # Helpers

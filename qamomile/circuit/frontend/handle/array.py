@@ -922,6 +922,31 @@ class VectorView(Vector[T]):
         instance._slice_covered_indices = covered_indices
 
         if covered_indices is not None and parent.value.type.is_quantum():
+            # Opportunistically drain views that already own the
+            # target slots but have no outstanding element borrows.
+            # This lets sequential same-range slicing (``a = q[0::2];
+            # loop(a); b = q[0::2]``) succeed — the first view is
+            # effectively done by the time the second is created,
+            # even though no explicit ``consume`` happened.
+            views_to_drain: list[ArrayBase] = []
+            for idx in covered_indices:
+                key = (f"const:{idx}",)
+                existing = parent._borrowed_indices.get(key)
+                if (
+                    isinstance(existing, ArrayBase)
+                    and not existing._borrowed_indices
+                    and existing not in views_to_drain
+                ):
+                    views_to_drain.append(existing)
+            for drained in views_to_drain:
+                drained_covered = getattr(drained, "_slice_covered_indices", None)
+                if drained_covered is None:
+                    continue
+                for drained_idx in drained_covered:
+                    drained_key = (f"const:{drained_idx}",)
+                    if parent._borrowed_indices.get(drained_key) is drained:
+                        del parent._borrowed_indices[drained_key]
+
             for idx in covered_indices:
                 key = (f"const:{idx}",)
                 existing = parent._borrowed_indices.get(key)

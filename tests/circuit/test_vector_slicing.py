@@ -451,14 +451,24 @@ class TestSliceBulkBorrow:
 
         assert kern.block is not None
 
-    def test_overlapping_slices_are_rejected(self):
-        """Two constant slices covering the same slot can't both be live."""
+    def test_overlapping_live_slices_are_rejected(self):
+        """Two slices with partial overlap, where the first is still live,
+        can't be created simultaneously.
+
+        A never-accessed slice is treated as drained (``a`` below would
+        have an empty ``_borrowed_indices``), so slicing ``b`` after
+        ``a`` with overlap is allowed via the opportunistic drain.
+        To force a real live overlap, ``a`` must hold an outstanding
+        element borrow at the moment ``b`` is created.
+        """
 
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Qubit]:
             q = qmc.qubit_array(4, "q")
-            _a = q[0:4:2]  # covers {0, 2}
-            _b = q[0:4:1]  # also covers {0}
+            a = q[0:4:2]  # covers {0, 2}
+            qa = a[0]  # active borrow on slot 0 via view a
+            _b = q[0:4:1]  # covers {0, 1, 2, 3} — overlaps with live a
+            a[0] = qa
             return q
 
         with pytest.raises(Exception, match="already owned by another slice view"):
