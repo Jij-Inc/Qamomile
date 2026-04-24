@@ -3,6 +3,7 @@ from .containers import Dict, Tuple
 from .hamiltonian import Observable
 from .handle import Handle
 from .primitives import Bit, Float, QFixed, Qubit, UInt
+from .utils import get_size
 
 __all__ = [
     "Handle",
@@ -17,4 +18,5 @@ __all__ = [
     "Observable",
     "Tuple",
     "Dict",
+    "get_size",
 ]

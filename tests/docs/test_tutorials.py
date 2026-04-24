@@ -33,6 +33,8 @@ TUTORIAL_PATTERNS = [
     "docs/ja/vqa/**/*.py",
     "docs/en/vqa/**/*.ipynb",
     "docs/ja/vqa/**/*.ipynb",
+    "qamomile/circuit/algorithm/docs/**/*.py",
+    "qamomile/circuit/algorithm/docs/**/*.ipynb",
     # We will not execute the following directories:
     # - collaboration: they may require API keys and may have side effects.
     # - release_notes: markdown-only; nothing to execute.
@@ -56,7 +58,7 @@ def discover_tutorial_files() -> list[Path]:
 
 
 def get_test_id(file_path: Path) -> str:
-    relative = file_path.relative_to(PROJECT_ROOT / "docs")
+    relative = file_path.relative_to(PROJECT_ROOT)
     return str(relative.with_suffix(""))
 
 
