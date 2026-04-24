@@ -151,7 +151,7 @@ class LocalSearch:
 
     def run(
         self,
-        initial_state: Sequence[int] | np.ndarray,
+        initial_state: Sequence[int] | np.ndarray | ommx.v1.Solution,
         max_iter: int = -1,
         method: str | LocalSearchMethod = LocalSearchMethod.BEST,
     ) -> BinarySampleSet | ommx.v1.Solution:
@@ -164,8 +164,14 @@ class LocalSearch:
         Args:
             initial_state: Variable values in the model's vartype domain
                 (±1 for SPIN, 0/1 for BINARY). Accepts any int sequence
-                (list, tuple) or a 1-D :class:`numpy.ndarray`. Its length
-                must equal :attr:`num_bits`; for constrained
+                (list, tuple), a 1-D :class:`numpy.ndarray`, or an
+                :class:`ommx.v1.Solution` (e.g. the output of another
+                solver — values are read from ``solution.state.entries``
+                and mapped onto the internal BinaryModel via the
+                original decision-variable IDs; slack bits introduced by
+                :meth:`ommx.v1.Instance.to_hubo` on constrained instances
+                are defaulted to 0). Sequence / ndarray length must equal
+                :attr:`num_bits`; for constrained
                 :class:`ommx.v1.Instance` inputs this includes slack bits
                 introduced by :meth:`ommx.v1.Instance.to_hubo`.
             max_iter: Maximum iterations (-1 for unlimited).
@@ -188,6 +194,9 @@ class LocalSearch:
             raise ValueError(
                 f"max_iter must be -1 (unlimited) or non-negative, got {max_iter}."
             )
+
+        if isinstance(initial_state, ommx.v1.Solution):
+            initial_state = self._initial_state_from_solution(initial_state)
 
         if len(initial_state) != self._model.num_bits:
             raise ValueError(
@@ -242,6 +251,34 @@ class LocalSearch:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _initial_state_from_solution(self, solution: ommx.v1.Solution) -> list[int]:
+        """Extract an ``initial_state`` list from an :class:`ommx.v1.Solution`.
+
+        Reads ``solution.state.entries`` (a ``dict[int, float]`` keyed by
+        original decision-variable IDs) and remaps it onto the internal
+        BinaryModel's compact-index ordering via
+        :attr:`BinaryModel.index_new_to_origin`. Values are rounded to the
+        nearest integer (ommx reports binary/integer variables as floats).
+
+        Missing keys default to ``0`` — this covers slack bits introduced
+        by :meth:`ommx.v1.Instance.to_hubo` on constrained instances,
+        which naturally aren't present on a Solution obtained from the
+        unconstrained / pre-penalty instance.
+
+        Args:
+            solution: The ommx Solution to warm-start from.
+
+        Returns:
+            A list of length :attr:`num_bits` in the internal BinaryModel's
+            vartype domain (±1 for SPIN, 0/1 for BINARY). The domain is
+            validated by :meth:`run` after this conversion.
+        """
+        entries = dict(solution.state.entries)
+        return [
+            int(round(entries.get(self._model.index_new_to_origin[i], 0)))
+            for i in range(self._model.num_bits)
+        ]
+
     def _to_spin(self, state: np.ndarray) -> np.ndarray:
         """Convert state from the model's vartype to SPIN (±1).
 
@@ -295,6 +332,14 @@ class LocalSearch:
         idx: int,
     ) -> float:
         """Calculate the energy difference when flipping bit *idx*.
+
+        Kept ``@staticmethod`` deliberately: a pure function of
+        ``(state, terms, idx)`` with no instance state — passing
+        ``terms`` explicitly keeps the inner loop allocation-free and
+        lets tests exercise the delta formula without constructing a
+        ``LocalSearch``. The step helpers (:meth:`_first_improvement`,
+        :meth:`_best_improvement`) are instance methods because they
+        reach into ``self._terms``.
 
         Uses the sparse per-index term list so cost is O(deg(idx)) per
         flip, where deg(idx) is the number of Hamiltonian terms that

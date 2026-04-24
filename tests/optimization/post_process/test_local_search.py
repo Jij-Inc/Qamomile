@@ -493,6 +493,27 @@ class TestOmmxInput:
         assert ls.num_bits >= len(dvs_before)
 
     @pytest.mark.parametrize("method", ["best", "first"])
+    def test_initial_state_accepts_ommx_solution(self, quadratic_ommx, method):
+        """`run` accepts an :class:`ommx.v1.Solution` as initial_state.
+
+        Warm-start from a Solution evaluated on the instance itself (here
+        the feasible but sub-optimal ``(0,0)``). `run` must then converge
+        to the optimum ``(1,0)`` with objective -1 regardless of method.
+        This exercises the Solution → list conversion via
+        ``_initial_state_from_solution`` and verifies the final result is
+        still an ommx.v1.Solution keyed by the original DV IDs.
+        """
+        warm_start = quadratic_ommx.evaluate({0: 0, 1: 0})
+        assert isinstance(warm_start, ommx.v1.Solution)
+
+        result = LocalSearch(quadratic_ommx).run(warm_start, method=method)
+
+        assert isinstance(result, ommx.v1.Solution)
+        assert np.isclose(result.objective, -1.0)
+        assert result.feasible
+        assert dict(result.state.entries) == {0: 1.0, 1: 0.0}
+
+    @pytest.mark.parametrize("method", ["best", "first"])
     def test_constrained_instance_feasibility_reporting(self, method):
         """Feasibility on returned Solution reflects the original constraints.
 
