@@ -312,8 +312,12 @@ class Value(_MetadataValueMixin, typing.Generic[T]):
 
         Metadata is intentionally preserved across versions so that
         parameter bindings and constant annotations remain accessible
-        after quantum gate applications.  The ``logical_id`` stays the
-        same to track physical qubit identity across SSA versions.
+        after the value is updated (e.g. by a gate application or a
+        classical operation).  The ``logical_id`` also stays the same:
+        it identifies the same logical variable across SSA versions,
+        independently of backend resource allocation.  This applies to
+        every ``Value`` regardless of its type (``Qubit``, ``Float``,
+        ``Bit``, ...) -- it is not specific to qubits.
         """
         return Value(
             type=self.type,

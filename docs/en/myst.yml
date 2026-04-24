@@ -28,6 +28,7 @@ project:
         - file: tutorial/06_reuse_patterns.ipynb
         - file: tutorial/07_hamiltonian_simulation.ipynb
         - file: tutorial/08_hermitian_decomposition.ipynb
+        - file: tutorial/09_compilation_and_transpilation.ipynb
     - title: VQA
       file: vqa/index.md
       children:

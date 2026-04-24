@@ -14,3 +14,4 @@ Step-by-step guides to learn Qamomile.
 6. [Reuse Patterns](06_reuse_patterns) — Helper kernels, composite gates, stubs
 7. [Hamiltonian Simulation](07_hamiltonian_simulation) — Suzuki–Trotter on the Rabi model, convergence orders
 8. [Hermitian Matrix Decomposition](08_hermitian_decomposition) — From a dense Hermitian matrix to a Pauli sum and a time-evolution circuit
+9. [Compilation and Transpilation](09_compilation_and_transpilation) — The 10-stage pipeline, IR walkthrough, backend emission
