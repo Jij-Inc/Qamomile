@@ -233,6 +233,73 @@ class QKernel(Generic[P, R]):
                 self._block_building = False
         return self._block
 
+    def _inline_trace_call(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        """Inline-trace the kernel body into the current tracer.
+
+        Used when at least one argument is a :class:`VectorView`.  The
+        view has no standalone IR value, so ``CallBlockOperation`` cannot
+        carry it: the view is purely a frontend affine map plus a
+        pointer to the parent ``ArrayValue``.  Instead this method
+        bypasses block assembly and runs the control-flow-transformed
+        Python function (``self.func``) directly with the consumed
+        handles, so all operations emitted inside the callee flow into
+        the caller's tracer as if the body had been written at the call
+        site.
+
+        Linear-type semantics are preserved by consuming every quantum
+        handle before the call, matching the contract of the normal
+        ``CallBlockOperation`` path: the caller's handle is invalidated,
+        and the callee receives a fresh handle with the same backing
+        state.  For views, :meth:`VectorView.consume` also releases the
+        parent's bulk slice-borrow so the parent can be touched again
+        after the callee returns.
+
+        Scalar borrows whose parent array is also in the argument list
+        are released ahead of consume so that the parent's
+        ``validate_all_returned`` — triggered by its own consume — does
+        not fail; this mirrors the logic in the CallBlockOperation path.
+
+        Args:
+            args: Positional arguments exactly as received by ``__call__``.
+            kwargs: Keyword arguments exactly as received by ``__call__``.
+
+        Returns:
+            Whatever ``self.func`` returns — already a ``Handle`` or a
+            tuple of ``Handle``, so no result rewrapping is needed.
+        """
+        bound_args = self.signature.bind(*args, **kwargs)
+        bound_args.apply_defaults()
+
+        # Pre-release scalar borrows whose parent array is also an arg,
+        # matching the existing CallBlockOperation path.
+        borrowed_scalars: list[tuple[Any, tuple]] = []
+        for handle in bound_args.arguments.values():
+            if not isinstance(handle, Handle):
+                continue
+            if (
+                handle.parent is not None
+                and not is_array_type(type(handle))
+                and handle._should_enforce_linear()
+            ):
+                borrowed_scalars.append((handle.parent, handle.indices))
+
+        array_args = {
+            id(h) for h in bound_args.arguments.values() if is_array_type(type(h))
+        }
+        for parent, indices in borrowed_scalars:
+            if id(parent) in array_args:
+                key = parent._make_indices_key(indices)
+                parent._borrowed_indices.pop(key, None)
+
+        # Consume linear handles and forward everything to self.func.
+        consumed: dict[str, Any] = {}
+        for name, handle in bound_args.arguments.items():
+            if isinstance(handle, Handle) and handle._should_enforce_linear():
+                handle = handle.consume(operation_name=f"QKernel[{self.name}]")
+            consumed[name] = handle
+
+        return self.func(**consumed)
+
     def _emit_self_call_forward_ref(
         self,
         inputs_map: dict[str, Value],
@@ -299,7 +366,25 @@ class QKernel(Generic[P, R]):
         """
         Executes the kernel.
         If called within a tracing context, it emits a CallBlockOperation.
+
+        When any argument is a :class:`VectorView`, the view cannot be
+        carried through a ``CallBlockOperation`` (it has no standalone IR
+        value — its IR identity is the parent ``ArrayValue`` plus an
+        affine map).  In that case the call is handled by inline-tracing:
+        ``self.func`` is invoked directly with the consumed view
+        arguments, and the operations emitted inside the callee flow
+        into the current tracer exactly as if the body had been written
+        at the call site.
         """
+        # Detect view arguments and dispatch to the inline-trace path.
+        # Imported lazily to avoid a circular import against ``handle``.
+        from qamomile.circuit.frontend.handle.array import VectorView
+
+        if any(isinstance(a, VectorView) for a in args) or any(
+            isinstance(v, VectorView) for v in kwargs.values()
+        ):
+            return self._inline_trace_call(args, kwargs)
+
         tracer = get_current_tracer()
 
         # Bind arguments to signature to handle positional/keyword mapping
@@ -706,6 +791,7 @@ class QKernel(Generic[P, R]):
             instance.value = array_value
             instance._shape = shape
             instance._borrowed_indices = {}
+            instance._slice_borrowed_indices = {}
             instance.parent = None
             instance.indices = ()
             instance.name = name

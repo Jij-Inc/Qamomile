@@ -35,6 +35,14 @@ class ArrayBase(Handle, Generic[T]):
     _borrowed_indices: dict[tuple[str, ...], tuple[UInt, ...]] = dataclasses.field(
         default_factory=dict
     )
+    # Slots that have been handed out to a ``VectorView`` via slicing and
+    # therefore must not be accessed directly on the parent.  Maps a
+    # constant index key (``"const:<int>"``) to the view that owns it.
+    # Only populated for slices whose bounds are all compile-time constants;
+    # symbolic slices skip this registration (best-effort linearity).
+    _slice_borrowed_indices: dict[str, "ArrayBase[T]"] = dataclasses.field(
+        default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         """Post-initialization to set up the array."""
@@ -118,6 +126,7 @@ class ArrayBase(Handle, Generic[T]):
         instance.value = value
         instance._shape = shape
         instance._borrowed_indices = {}
+        instance._slice_borrowed_indices = {}
         instance.parent = None
         instance.indices = ()
         instance.name = name
@@ -207,8 +216,9 @@ class ArrayBase(Handle, Generic[T]):
         """Get an element at the given indices.
 
         Raises:
-            QubitConsumedError: If the array was consumed or the element is
-                already borrowed (for quantum arrays).
+            QubitConsumedError: If the array was consumed, the element is
+                already borrowed (for quantum arrays), or the constant
+                slot is currently owned by a ``VectorView`` slice.
         """
         indices_key = self._make_indices_key(indices)
         index_str = self._format_index(indices)
@@ -223,6 +233,25 @@ class ArrayBase(Handle, Generic[T]):
                 operation_name="array element access",
                 first_use_location=self._consumed_by,
             )
+
+        # Check if currently owned by a live slice view.  Only applies to
+        # constant indices, since symbolic indices cannot be matched
+        # against the view's bulk-borrowed constant slot set.
+        if (
+            self.value.type.is_quantum()
+            and len(indices) == 1
+            and indices[0].value.is_constant()
+        ):
+            const_key = f"const:{int(indices[0].value.get_const())}"
+            if const_key in self._slice_borrowed_indices:
+                raise QubitConsumedError(
+                    f"Parent slot '{self.value.name}[{index_str}]' is currently "
+                    f"held by a VectorView slice.\n"
+                    f"Access it through the view, or let the view finish "
+                    f"before touching the parent directly.",
+                    handle_name=f"{self.value.name}[{index_str}]",
+                    operation_name="array element access",
+                )
 
         # Check if already borrowed (only enforce for quantum types)
         if indices_key in self._borrowed_indices and self.value.type.is_quantum():
@@ -369,26 +398,57 @@ class ArrayBase(Handle, Generic[T]):
         assert isinstance(new_handle, ArrayBase)
         new_handle._shape = self._shape
         new_handle._borrowed_indices = dict(self._borrowed_indices)
+        new_handle._slice_borrowed_indices = dict(self._slice_borrowed_indices)
         new_handle.element_type = self.element_type
 
     def validate_all_returned(self) -> None:
         """Validate all borrowed elements have been returned.
 
-        This method is useful for ensuring that all borrowed elements
-        have been properly written back before using the array in
-        operations that require the entire array.
+        First opportunistically releases any slice-borrows held by views
+        that are themselves drained (no outstanding element borrows); this
+        corresponds to "the view is finished using its elements" and
+        allows patterns like ``q[0::2] → loop → measure(q)`` to complete
+        without the user explicitly releasing the view.  Only after that
+        does the method raise if normal or view-held borrows remain.
 
         Raises:
-            UnreturnedBorrowError: If any elements are still borrowed.
+            UnreturnedBorrowError: If any elements are still borrowed,
+                either directly or by a view whose own borrows have not
+                all been returned.
         """
-        if not self._borrowed_indices or not self.value.type.is_quantum():
+        if not self.value.type.is_quantum():
             return
 
-        # Format borrowed indices for error message
-        borrowed_strs = []
+        # Opportunistically release slice-borrows whose owning view has
+        # no outstanding element borrows (view is drained).  ``Vector``
+        # is a dataclass with ``__hash__ = None``, so deduplicate views
+        # by ``id`` rather than by set membership.
+        if self._slice_borrowed_indices:
+            unique_views: dict[int, ArrayBase[T]] = {}
+            for v in self._slice_borrowed_indices.values():
+                unique_views.setdefault(id(v), v)
+            drained_view_ids = {
+                vid for vid, v in unique_views.items() if not v._borrowed_indices
+            }
+            if drained_view_ids:
+                to_remove = [
+                    k
+                    for k, v in self._slice_borrowed_indices.items()
+                    if id(v) in drained_view_ids
+                ]
+                for k in to_remove:
+                    del self._slice_borrowed_indices[k]
+
+        if not self._borrowed_indices and not self._slice_borrowed_indices:
+            return
+
+        borrowed_strs: list[str] = []
         for indices in self._borrowed_indices.values():
             index_str = self._format_index(indices)
             borrowed_strs.append(f"{self.value.name}[{index_str}]")
+        for key in self._slice_borrowed_indices:
+            idx_str = key.split(":", 1)[1]
+            borrowed_strs.append(f"{self.value.name}[{idx_str}] (held by slice view)")
 
         raise UnreturnedBorrowError(
             f"Array '{self.value.name}' has unreturned borrowed elements.\n"
@@ -530,18 +590,24 @@ class Vector(ArrayBase[T]):
             )
 
         start_uint = self._coerce_index(raw_start)
-        stop_uint = self._coerce_index(raw_stop)
         step_uint = self._coerce_index(raw_step)
-        del stop_uint
 
         length = _compute_slice_length(raw_start, raw_stop, raw_step)
 
-        return VectorView(
+        covered_indices: tuple[int, ...] | None = None
+        if (
+            isinstance(raw_start, int)
+            and isinstance(raw_step, int)
+            and isinstance(length, int)
+        ):
+            covered_indices = tuple(raw_start + j * raw_step for j in range(length))
+
+        return VectorView._create_slice(
             parent=self,
             start=start_uint,
             step=step_uint,
             length=length,
-            element_type=self.element_type,
+            covered_indices=covered_indices,
         )
 
     def _coerce_index(self, value: int | UInt) -> UInt:
@@ -701,30 +767,40 @@ def _compute_slice_length(
     return ((stop - start) + (step - 1)) // step
 
 
-@dataclasses.dataclass
-class VectorView(Generic[T]):
-    """Lightweight view over a strided slice of a ``Vector``.
+class VectorView(Vector[T]):
+    """Strided view over a contiguous parent ``Vector``.
 
-    Produced by slicing a ``Vector`` (e.g. ``q[1::2]``), a ``VectorView``
-    behaves like a ``Vector`` for indexed element access but owns no IR
-    state of its own: every element access is translated by the affine
-    map ``view[i] -> parent[start + step * i]`` and dispatched through
-    the parent's ``_get_element`` / ``_return_element``.  Borrow tracking
-    is therefore shared with the parent, so a qubit borrowed through the
-    view is tracked against the same parent slot as if it had been
-    borrowed directly.
+    A ``VectorView`` is produced by slicing a ``Vector`` (``q[1::2]``,
+    ``q[a:b]``, etc.).  It is a full ``Vector`` subclass — so it can be
+    passed as a ``Vector[Qubit]`` argument to another ``@qkernel`` via
+    trace-time inlining — but under the hood every element access
+    translates the view-local index ``i`` into a parent-local index via
+    the affine map ``parent_index = start + step * i`` before creating
+    the IR value.  The IR element's ``parent_array`` always points to
+    the parent's ``ArrayValue``, so downstream passes and backends see
+    the view's qubits as ordinary elements of the parent array.
 
-    Because the view has no standalone IR value, it cannot be passed as a
-    single argument to another ``@qkernel``; iterate over ``view[i]`` and
-    pass individual element handles instead.
+    Linearity:
+        Slicing bulk-borrows the covered parent slots whenever ``start``,
+        ``step`` and ``length`` are compile-time ``int`` constants.
+        While the view is live, accessing the corresponding parent slot
+        directly (``q[0]`` after ``evens = q[0::2]``) raises
+        ``QubitConsumedError``.  The parent's ``validate_all_returned``
+        opportunistically releases the bulk-borrow once the view has no
+        outstanding element borrows, so normal usage — slice, loop,
+        ``return q`` / ``measure(q)`` — does not require manual release.
+
+        Symbolic slices (``q[lo:hi]`` with ``lo``/``hi`` ``UInt``) cannot
+        enumerate their covered slots at trace time and therefore skip
+        the bulk-borrow; the view's own per-slot borrow tracking still
+        catches view-internal double borrows.
 
     Attributes:
-        parent: The backing ``Vector`` from which elements are borrowed.
-        start: Parent-space index of the first element covered.
-        step: Stride in parent-space; always a positive ``UInt`` handle.
-        length: Number of elements in the view, as a Python ``int`` when
-            it is known at trace time or as a ``UInt`` handle otherwise.
-        element_type: Element type forwarded from the parent.
+        _slice_parent: The backing ``Vector``; owns the bulk-borrow slots.
+        _slice_start: Parent-space index of the first covered element.
+        _slice_step: Stride in parent-space; always a positive ``UInt``.
+        _slice_covered_indices: Concrete parent indices registered as
+            slice-owned, or ``None`` for symbolic slices.
 
     Example:
         ```python
@@ -737,22 +813,90 @@ class VectorView(Generic[T]):
         ```
     """
 
-    parent: "Vector[T]"
-    start: UInt
-    step: UInt
-    length: int | UInt
-    element_type: typing.Type[T]
+    _slice_parent: "Vector[T]"
+    _slice_start: UInt
+    _slice_step: UInt
+    _slice_covered_indices: tuple[int, ...] | None
 
-    @property
-    def shape(self) -> tuple[int | UInt]:
-        """Return the view's shape as a one-element tuple.
+    @classmethod
+    def _create_slice(
+        cls,
+        parent: "Vector[T]",
+        start: UInt,
+        step: UInt,
+        length: int | UInt,
+        covered_indices: tuple[int, ...] | None,
+    ) -> "VectorView[T]":
+        """Build a view over ``parent`` without emitting a new array init.
+
+        Args:
+            parent: The ``Vector`` being sliced.
+            start: Parent-space first index, as a ``UInt``.
+            step: Parent-space stride as a positive ``UInt``.
+            length: Number of elements — a Python ``int`` when known at
+                trace time or a symbolic ``UInt`` otherwise.
+            covered_indices: Concrete parent indices the view covers
+                (for constant slices), or ``None`` for symbolic slices.
 
         Returns:
-            ``(length,)`` — matches the ``Vector.shape`` convention so the
-            view is a drop-in replacement inside ``.shape[0]`` expressions
-            and ``qmc.range(view.shape[0])`` loops.
+            A fresh ``VectorView`` sharing the parent's ``ArrayValue``.
+
+        Raises:
+            QubitConsumedError: If any covered parent slot is already
+                held by another slice view or currently borrowed.
         """
-        return (self.length,)
+        instance = object.__new__(cls)
+        # Share the parent's ArrayValue so gate operations target the
+        # parent's physical qubits directly; the IR never sees the view.
+        instance.value = parent.value
+        instance._shape = (length,)
+        instance._borrowed_indices = {}
+        instance._slice_borrowed_indices = {}
+        instance.element_type = parent.element_type
+        instance.parent = None
+        instance.indices = ()
+        instance.name = None
+        instance.id = str(uuid.uuid4())
+        instance._consumed = False
+        instance._consumed_by = None
+        instance._slice_parent = parent
+        instance._slice_start = start
+        instance._slice_step = step
+        instance._slice_covered_indices = covered_indices
+
+        if covered_indices is not None and parent.value.type.is_quantum():
+            for idx in covered_indices:
+                key = f"const:{idx}"
+                if key in parent._slice_borrowed_indices:
+                    raise QubitConsumedError(
+                        f"Parent slot '{parent.value.name}[{idx}]' is already "
+                        f"owned by another slice view; overlapping views are "
+                        f"not supported.",
+                        handle_name=f"{parent.value.name}[{idx}]",
+                        operation_name="array slicing",
+                    )
+                if (f"const:{idx}",) in parent._borrowed_indices:
+                    raise QubitConsumedError(
+                        f"Cannot slice across '{parent.value.name}[{idx}]' — "
+                        f"it is currently borrowed.  Return the borrowed "
+                        f"element before slicing.",
+                        handle_name=f"{parent.value.name}[{idx}]",
+                        operation_name="array slicing",
+                    )
+                parent._slice_borrowed_indices[key] = instance
+
+        return instance
+
+    def __post_init__(self) -> None:
+        """Skip ``ArrayBase.__post_init__``.
+
+        A view is not a fresh quantum array — it reuses the parent's
+        ``ArrayValue`` — so the parent's ``QInitOperation`` /
+        ``CInitOperation`` must not be re-emitted.  Construction goes
+        through :meth:`_create_slice` instead of the dataclass
+        ``__init__``.
+        """
+        return
 
     def _translate(self, index: int | UInt) -> UInt:
         """Map a view-local index to the corresponding parent index.
@@ -762,15 +906,15 @@ class VectorView(Generic[T]):
 
         Returns:
             ``UInt`` handle holding ``start + step * index`` suitable for
-            ``parent._get_element`` / ``parent._return_element``.
+            use as the parent-space index of an emitted element value.
         """
         if isinstance(index, int):
-            idx_uint = self.parent._make_uint_index(index)
+            idx_uint = self._slice_parent._make_uint_index(index)
         else:
             idx_uint = index
 
-        offset: UInt = self.step * idx_uint
-        return self.start + offset
+        offset: UInt = self._slice_step * idx_uint
+        return self._slice_start + offset
 
     @overload
     def __getitem__(self, index: int) -> T: ...
@@ -783,10 +927,8 @@ class VectorView(Generic[T]):
         """Get element at the given view-local index, or nest a slice.
 
         Args:
-            index: View-local index or ``slice``.  A nested slice is
-                composed into the parent via ``start + step * sub_start``
-                (and likewise for ``step``), so borrow tracking continues
-                to resolve against the root parent.
+            index: View-local index, or a ``slice`` that composes with
+                this view's affine map back to the root parent.
 
         Returns:
             A single element handle for integer indices, or a further
@@ -798,36 +940,192 @@ class VectorView(Generic[T]):
         """
         if isinstance(index, slice):
             return self._nested_slice(index)
-        parent_index = self._translate(index)
-        return self.parent._get_element((parent_index,))
+        return super().__getitem__(index)
 
     def __setitem__(self, index: int | UInt, value: T) -> None:
         """Return a borrowed element to its parent slot via the view.
 
         Args:
             index: View-local index of the slot being returned.
-            value: Handle previously borrowed from the view or a fresh
-                element of the correct type.
+            value: Handle previously borrowed from the view.
 
         Raises:
-            TypeError: If ``index`` is a ``slice`` — bulk slice assignment
-                is not supported.
+            TypeError: If ``index`` is a ``slice``.
         """
         if isinstance(index, slice):
             raise TypeError(
                 "Slice assignment is not supported on VectorView. "
                 "Iterate and assign elements individually instead."
             )
-        parent_index = self._translate(index)
-        self.parent._return_element((parent_index,), value)
+        super().__setitem__(index, value)
+
+    def _get_element(self, indices: tuple[UInt, ...]) -> T:
+        """Return a qubit handle whose IR element_indices target the parent.
+
+        The view-local index is used for borrow tracking on the view,
+        while the IR ``element_indices`` carry the parent-space index so
+        backend emission resolves the correct physical qubit.
+
+        Args:
+            indices: Single-element tuple of the view-local ``UInt``
+                index.
+
+        Returns:
+            An element handle of the view's element type, parented on
+            this view for borrow-return.
+
+        Raises:
+            QubitConsumedError: If the view slot is already borrowed or
+                the view has been consumed.
+        """
+        assert len(indices) == 1
+        view_local = indices[0]
+        parent_index = self._translate(view_local)
+
+        indices_key = self._make_indices_key(indices)
+        index_str = self._format_index(indices)
+
+        if self._consumed and self.value.type.is_quantum():
+            display_name = self.value.name or "view"
+            raise QubitConsumedError(
+                f"View over '{display_name}' was already consumed by "
+                f"'{self._consumed_by}' and cannot be accessed.",
+                handle_name=display_name,
+                operation_name="array element access",
+                first_use_location=self._consumed_by,
+            )
+
+        if indices_key in self._borrowed_indices and self.value.type.is_quantum():
+            raise QubitConsumedError(
+                f"View element '[{index_str}]' is already borrowed.\n"
+                f"Return it before borrowing again.",
+                handle_name=f"view[{index_str}]",
+                operation_name="array element access",
+            )
+
+        self._borrowed_indices[indices_key] = indices
+
+        parent_index_str = self._format_index((parent_index,))
+        element_value = Value(
+            type=self.value.type,
+            name=f"{self.value.name}[{parent_index_str}]",
+            parent_array=self.value,
+            element_indices=(parent_index.value,),
+        )
+        if self.value.is_parameter():
+            param_name = self.value.parameter_name()
+            element_param_name = f"{param_name}[{parent_index_str}]"
+            element_value = element_value.with_parameter(element_param_name)
+        return self.element_type(value=element_value, parent=self, indices=indices)
+
+    def _return_element(self, indices: tuple[UInt, ...], value: T) -> None:
+        """Release a view-local borrow without touching parent borrow state.
+
+        The parent's slice-borrow is released lazily in
+        ``validate_all_returned`` once the view has no outstanding element
+        borrows; here we only mark the view-local slot free and consume
+        the handle.
+
+        Args:
+            indices: Single-element tuple of the view-local ``UInt`` index.
+            value: Handle being written back.
+
+        Raises:
+            AffineTypeError: If ``value`` was borrowed from a different
+                array/view.
+            QubitConsumedError: If the view itself has been consumed.
+        """
+        assert len(indices) == 1
+        target_key = self._make_indices_key(indices)
+        index_str = self._format_index(indices)
+
+        if self._consumed and self.value.type.is_quantum():
+            display_name = self.value.name or "view"
+            raise QubitConsumedError(
+                f"View over '{display_name}' was already consumed by "
+                f"'{self._consumed_by}' and cannot be accessed.",
+                handle_name=display_name,
+                operation_name="array element return",
+                first_use_location=self._consumed_by,
+            )
+
+        source_key: tuple[str, ...] | None = None
+        if isinstance(value, Handle) and value.parent is self and value.indices:
+            source_key = self._make_indices_key(value.indices)
+
+        release_key = (
+            source_key
+            if source_key is not None and source_key in self._borrowed_indices
+            else target_key
+        )
+
+        if self.value.type.is_quantum():
+            if release_key in self._borrowed_indices:
+                if not isinstance(value, Handle) or value.parent is not self:
+                    raise AffineTypeError(
+                        f"Cannot return a value to view slot '[{index_str}]' "
+                        f"that was not borrowed from this view.",
+                        handle_name=self.value.name,
+                        operation_name="array element return",
+                    )
+            else:
+                if (
+                    isinstance(value, Handle)
+                    and value.parent is not None
+                    and value.parent is not self
+                    and not value.parent._consumed
+                ):
+                    raise AffineTypeError(
+                        f"Cannot assign a handle borrowed from another array "
+                        f"to view slot '[{index_str}]' — it was not borrowed "
+                        f"from this view.",
+                        handle_name=self.value.name,
+                        operation_name="array element return",
+                    )
+
+            value.consume(operation_name=f"return to view[{index_str}]")
+
+        if release_key in self._borrowed_indices:
+            del self._borrowed_indices[release_key]
+
+    def consume(self, operation_name: str = "unknown") -> typing.Self:
+        """Consume the view and release its parent slice-borrows.
+
+        Validates that every view-local borrow has been returned, then
+        releases the parent's record of the bulk-borrow so the parent
+        can be consumed/returned normally once the view is done (e.g.
+        passed to another ``@qkernel`` which consumes its argument).
+
+        Args:
+            operation_name: Name of the operation consuming this view
+                (used in error messages).
+
+        Returns:
+            A fresh view handle with the same backing state; the
+            returned view no longer holds the parent's slice-borrow.
+        """
+        self.validate_all_returned()
+        if self._slice_covered_indices is not None:
+            for idx in self._slice_covered_indices:
+                key = f"const:{idx}"
+                owner = self._slice_parent._slice_borrowed_indices.get(key)
+                if owner is self:
+                    del self._slice_parent._slice_borrowed_indices[key]
+        new_view = super().consume(operation_name)
+        new_view._slice_parent = self._slice_parent
+        new_view._slice_start = self._slice_start
+        new_view._slice_step = self._slice_step
+        new_view._slice_covered_indices = None  # parent already released
+        return new_view
 
     def _nested_slice(self, s: slice) -> "VectorView[T]":
         """Compose a nested slice into a single view over the same parent.
 
-        Normalizes ``None`` start/stop/step against this view's length and
-        collapses the nested affine map ``(start + step * (inner_start +
-        inner_step * j))`` back to the root parent so the result is still
-        a one-hop view.
+        Normalizes ``None`` start/stop/step against this view's length
+        and collapses the nested affine map back to the root parent so
+        the result is still a one-hop view.  Nested views do not
+        register additional parent slice-borrows — the outer view
+        already owns the covered range.
 
         Args:
             s: The Python ``slice`` object applied to this view.
@@ -838,7 +1136,7 @@ class VectorView(Generic[T]):
         Raises:
             NotImplementedError: For non-positive step or negative bounds.
         """
-        view_length = self.length
+        view_length = self._shape[0]
 
         raw_start = 0 if s.start is None else s.start
         raw_stop = view_length if s.stop is None else s.stop
@@ -855,34 +1153,17 @@ class VectorView(Generic[T]):
                 f"VectorView slicing requires a positive step (got step={raw_step})."
             )
 
-        inner_start = self.parent._coerce_index(raw_start)
-        inner_step = self.parent._coerce_index(raw_step)
+        inner_start = self._slice_parent._coerce_index(raw_start)
+        inner_step = self._slice_parent._coerce_index(raw_step)
 
-        new_start: UInt = self.start + self.step * inner_start
-        new_step: UInt = self.step * inner_step
+        new_start: UInt = self._slice_start + self._slice_step * inner_start
+        new_step: UInt = self._slice_step * inner_step
         new_length = _compute_slice_length(raw_start, raw_stop, raw_step)
 
-        return VectorView(
-            parent=self.parent,
+        return VectorView._create_slice(
+            parent=self._slice_parent,
             start=new_start,
             step=new_step,
             length=new_length,
-            element_type=self.element_type,
-        )
-
-    def __iter__(self) -> Iterator[T]:
-        """Direct iteration over VectorView is prohibited.
-
-        The rationale matches ``Vector.__iter__``: iterating the view
-        cannot propagate in-place writes back to the parent and would
-        silently drop borrows.  Use explicit index-based loops.
-
-        Raises:
-            TypeError: Always raised.
-        """
-        raise TypeError(
-            "Direct iteration over VectorView is not supported in @qkernel "
-            "functions.  Use explicit index-based iteration:\n"
-            "  for i in qmc.range(view.shape[0]):\n"
-            "      view[i] = qmc.operation(view[i])"
+            covered_indices=None,
         )

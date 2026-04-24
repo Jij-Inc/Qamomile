@@ -272,6 +272,7 @@ def create_dummy_input(
         instance.value = array_value.with_parameter(name)
         instance._shape = shape_handles  # Tuple of symbolic UInt
         instance._borrowed_indices = {}
+        instance._slice_borrowed_indices = {}
         instance.parent = None
         instance.indices = ()
         instance.name = name

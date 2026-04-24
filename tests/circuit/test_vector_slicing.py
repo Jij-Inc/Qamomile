@@ -397,3 +397,191 @@ def test_nested_slice_composes_through_parent():
 def test_vector_view_exported():
     """VectorView is reachable from the public ``qamomile.circuit`` API."""
     assert qmc.VectorView is VectorView
+
+
+# ---------------------------------------------------------------------------
+# Bulk-borrow linearity — parent slots covered by a live view are locked.
+# ---------------------------------------------------------------------------
+
+
+class TestSliceBulkBorrow:
+    """Slice-time bulk borrow blocks direct parent access to covered slots."""
+
+    def test_parent_access_on_covered_slot_is_rejected(self):
+        """``q[0]`` after ``q[0:4:2]`` raises because slot 0 is slice-owned."""
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Qubit]:
+            q = qmc.qubit_array(4, "q")
+            evens = q[0:4:2]
+            del evens
+            q[0] = qmc.h(q[0])
+            return q
+
+        with pytest.raises(Exception, match="held by a VectorView slice"):
+            _ = kern.block
+
+    def test_parent_access_on_non_covered_slot_is_fine(self):
+        """Non-covered slot 1 is accessible while ``q[0:4:2]`` covers 0, 2."""
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Qubit]:
+            q = qmc.qubit_array(4, "q")
+            evens = q[0:4:2]
+            q[1] = qmc.h(q[1])
+            for i in qmc.range(evens.shape[0]):
+                evens[i] = qmc.h(evens[i])
+            return q
+
+        assert kern.block is not None
+
+    def test_drained_view_releases_parent_on_consume(self):
+        """After writing all view slots back, the parent can be consumed."""
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            evens = q[0:4:2]
+            for i in qmc.range(evens.shape[0]):
+                evens[i] = qmc.h(evens[i])
+            # ``measure`` consumes ``q``; its ``validate_all_returned``
+            # must observe that the view is drained and release the
+            # slice-borrows on slots 0 and 2.
+            return qmc.measure(q)
+
+        assert kern.block is not None
+
+    def test_overlapping_slices_are_rejected(self):
+        """Two constant slices covering the same slot can't both be live."""
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Qubit]:
+            q = qmc.qubit_array(4, "q")
+            _a = q[0:4:2]  # covers {0, 2}
+            _b = q[0:4:1]  # also covers {0}
+            return q
+
+        with pytest.raises(Exception, match="already owned by another slice view"):
+            _ = kern.block
+
+    def test_symbolic_slice_skips_bulk_borrow(self):
+        """Symbolic-bound slices don't block parent access (best-effort)."""
+        # A ``lo:hi`` slice where bounds are ``UInt`` parameters can't
+        # enumerate its covered indices at trace time, so it falls back
+        # to view-local borrow tracking only.  Direct parent access to
+        # a concrete slot therefore succeeds.
+
+        @qmc.qkernel
+        def kern(n: qmc.UInt, lo: qmc.UInt, hi: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+            q = qmc.qubit_array(n, "q")
+            region = q[lo:hi]
+            del region
+            q[0] = qmc.h(q[0])  # allowed — slice is symbolic
+            return q
+
+        assert kern.block is not None
+
+
+# ---------------------------------------------------------------------------
+# View as a qkernel argument — inline-trace path.
+# ---------------------------------------------------------------------------
+
+
+class TestVectorViewAsKernelArgument:
+    """A ``VectorView`` can be handed to another ``@qkernel`` directly."""
+
+    def test_view_argument_inlines_correctly(self):
+        """Gates emitted by the callee land on the view's parent qubits."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def h_all(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            n = q.shape[0]
+            for i in qmc.range(n):
+                q[i] = qmc.h(q[i])
+            return q
+
+        @qmc.qkernel
+        def circuit(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(num, "q")
+            evens = q[0::2]
+            evens = h_all(evens)
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit, bindings={"num": 6})
+        qc = exe.compiled_quantum[0].circuit
+        applied = [
+            qc.qubits.index(inst.qubits[0])
+            for inst in qc.data
+            if inst.operation.name == "h"
+        ]
+        assert applied == [0, 2, 4]
+
+    @pytest.mark.parametrize("n", [4, 6, 8])
+    def test_two_qubit_subroutine_via_view_pair(self, n):
+        """Pair subroutine across ``q[0::2]``/``q[1::2]`` produces brick-wall CX."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def cx_pair(a: qmc.Qubit, b: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
+            return qmc.cx(a, b)
+
+        @qmc.qkernel
+        def cx_alt_layer(
+            evens: qmc.Vector[qmc.Qubit],
+            odds: qmc.Vector[qmc.Qubit],
+        ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+            n = evens.shape[0]
+            for i in qmc.range(n):
+                ea, ob = cx_pair(evens[i], odds[i])
+                evens[i] = ea
+                odds[i] = ob
+            return evens, odds
+
+        @qmc.qkernel
+        def circuit(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(num, "q")
+            evens = q[0::2]
+            odds = q[1::2]
+            evens, odds = cx_alt_layer(evens, odds)
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit, bindings={"num": n})
+        qc = exe.compiled_quantum[0].circuit
+        pairs = [
+            (qc.qubits.index(inst.qubits[0]), qc.qubits.index(inst.qubits[1]))
+            for inst in qc.data
+            if inst.operation.name == "cx"
+        ]
+        expected = [(2 * i, 2 * i + 1) for i in range(n // 2)]
+        assert pairs == expected
+
+    def test_view_consumption_releases_parent_bulk_borrow(self):
+        """Passing a view to a kernel releases the parent slice-borrow.
+
+        After the call, the parent's covered slots can be accessed
+        directly again — otherwise a subsequent ``q[0]`` would be
+        rejected as "held by a slice view".
+        """
+
+        @qmc.qkernel
+        def h_all(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            n = q.shape[0]
+            for i in qmc.range(n):
+                q[i] = qmc.h(q[i])
+            return q
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Qubit]:
+            q = qmc.qubit_array(4, "q")
+            evens = q[0:4:2]
+            evens = h_all(evens)
+            del evens
+            q[0] = qmc.x(q[0])  # must be accessible again
+            return q
+
+        assert circuit.block is not None
