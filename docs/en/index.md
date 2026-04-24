@@ -1,6 +1,6 @@
 # Welcome to Qamomile Documentation
 
-**Qamomile** (pronounced /ˈkæməmaɪl/, like "chamomile") is named after the chamomile flower — a symbol of calm and clarity. Just as the flower simplifies relaxation, Qamomile aims to simplify quantum programming.
+**Qamomile** (pronounced /ˈkæməˌmiːl/, like "chamomile") is named after the chamomile flower — a symbol of calm and clarity. Just as the flower simplifies relaxation, Qamomile aims to simplify quantum programming.
 
 Qamomile is a quantum programming SDK. Write quantum circuits as typed Python functions and run them on quantum SDKs like Qiskit, CUDA-Q, QURI Parts, and qBraid. Furthermore, Qamomile supports symbolic algebraic resource estimation and can estimate resources for circuits containing black-box oracles — even when the circuit itself cannot be executed.
 
