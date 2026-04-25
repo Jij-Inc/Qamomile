@@ -23,6 +23,36 @@ from .primitives import Bit, Float, Qubit, UInt
 T = TypeVar("T", bound=Handle)
 
 
+class _ConsumedSlotMarker:
+    """Sentinel marker indicating a physical qubit slot is destroyed.
+
+    Appears as the owner of a ``_borrowed_indices`` entry when a
+    destructive operation (``measure``, ``cast``) consumed a subset of
+    a root array's slots via a view.  Any subsequent attempt to
+    access, re-measure, or consume the same slot raises
+    ``QubitConsumedError`` — mirroring how ``ArrayBase._consumed``
+    handles whole-array consumption.
+
+    Only one instance ever exists; equality is by identity.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debug only
+        return "<ConsumedSlot>"
+
+
+_CONSUMED_SLOT: "_ConsumedSlotMarker" = _ConsumedSlotMarker()
+
+
+# Operation names whose ``consume`` call physically destroys the
+# quantum state of the target qubits (qubit handles cannot be reused,
+# and the underlying physical register is gone).  Other consumes
+# (gates, sub-kernel calls, ControlledU) only retire the SSA-style
+# handle but the physical qubits carry forward in the result handle.
+_DESTRUCTIVE_CONSUME_OPS: frozenset[str] = frozenset({"measure", "cast"})
+
+
 @dataclasses.dataclass
 class ArrayBase(Handle, Generic[T]):
     """Base class for array types (Vector, Matrix, Tensor).
@@ -140,14 +170,79 @@ class ArrayBase(Handle, Generic[T]):
             instance.element_type = type_map[value.type]  # type: ignore[assignment]
         return instance
 
+    def _check_no_consumed_slots(self, operation_name: str) -> None:
+        """Raise if any slot has been destroyed by a prior destructive view op.
+
+        Destructive view operations (``measure(q[1::2])``, etc.) install
+        ``_ConsumedSlotMarker`` sentinels in ``_borrowed_indices`` for
+        every slot they consume.  Operations that subsequently use the
+        whole array (e.g. ``expval(q, H)`` after
+        ``measure(q[1::2])``) must call this guard before emitting IR
+        so that the frontend detects the invalid reuse immediately —
+        at trace time — rather than letting the program reach the
+        backend and fail at runtime.
+
+        Args:
+            operation_name: Name of the operation being attempted, used
+                in the error message.
+
+        Raises:
+            QubitConsumedError: If any ``_ConsumedSlotMarker`` is present
+                in ``_borrowed_indices``.
+        """
+        if not self.value.type.is_quantum():
+            return
+        consumed_keys = [
+            k
+            for k, owner in self._borrowed_indices.items()
+            if isinstance(owner, _ConsumedSlotMarker)
+        ]
+        if consumed_keys:
+            slots = sorted(
+                int(k[0].split(":", 1)[1])
+                for k in consumed_keys
+                if k[0].startswith("const:")
+            )
+            raise QubitConsumedError(
+                f"Cannot use '{self.value.name}' in '{operation_name}': "
+                f"slot(s) {slots} were already destroyed by a prior "
+                f"destructive view operation (e.g. measure/cast on a view).\n\n"
+                f"Fix: Do not reuse an array whose physical qubits have been "
+                f"consumed.  Disjoint views on non-overlapping slots are "
+                f"allowed.",
+                handle_name=self.value.name or "array",
+                operation_name=operation_name,
+            )
+
     def consume(self, operation_name: str = "unknown") -> typing.Self:
         """Consume the array, enforcing borrow-return contract for quantum arrays.
 
         For quantum arrays, all borrowed elements must be returned before the
         array can be consumed. This ensures that no unreturned borrows are
         silently discarded by operations like qkernel calls or controlled gates.
+
+        When any slot of the array has already been physically consumed
+        by an earlier destructive view operation (``measure(q[1::2])``
+        then ``measure(q)``), this raises ``QubitConsumedError`` rather
+        than silently re-consuming those slots.
         """
         self.validate_all_returned()
+        if self.value.type.is_quantum():
+            consumed_slots = sorted(
+                int(k[0].split(":", 1)[1])
+                for k, owner in self._borrowed_indices.items()
+                if isinstance(owner, _ConsumedSlotMarker)
+                and len(k) == 1
+                and k[0].startswith("const:")
+            )
+            if consumed_slots:
+                raise QubitConsumedError(
+                    f"Cannot consume '{self.value.name}' via '{operation_name}': "
+                    f"slot(s) {consumed_slots} were already destroyed by a "
+                    f"prior destructive view operation.",
+                    handle_name=self.value.name or "array",
+                    operation_name=operation_name,
+                )
         return super().consume(operation_name)  # type: ignore[return-value]
 
     @property
@@ -236,12 +331,21 @@ class ArrayBase(Handle, Generic[T]):
                 first_use_location=self._consumed_by,
             )
 
-        # Check if already borrowed — same dict covers both direct
-        # element borrows and slice-held slots; the owner stored as the
-        # value tells which one it is so we can surface a tailored
-        # message.
+        # Check if already borrowed — same dict covers direct element
+        # borrows, slice-held slots, AND the "physically consumed"
+        # sentinel that destructive view operations (measure / cast
+        # on a sub-view) install.  The owner object tells us which
+        # one so we can surface a tailored message.
         if indices_key in self._borrowed_indices and self.value.type.is_quantum():
             owner = self._borrowed_indices[indices_key]
+            if isinstance(owner, _ConsumedSlotMarker):
+                raise QubitConsumedError(
+                    f"Physical qubit '{self.value.name}[{index_str}]' was already "
+                    f"consumed by a destructive operation (e.g. measure / cast) "
+                    f"on a view covering this slot.",
+                    handle_name=f"{self.value.name}[{index_str}]",
+                    operation_name="array element access",
+                )
             if isinstance(owner, ArrayBase):
                 raise QubitConsumedError(
                     f"Parent slot '{self.value.name}[{index_str}]' is currently "
@@ -436,11 +540,20 @@ class ArrayBase(Handle, Generic[T]):
                 for k in to_remove:
                     del self._borrowed_indices[k]
 
-        if not self._borrowed_indices:
+        # ``_ConsumedSlotMarker`` entries are not outstanding borrows
+        # — they record physically-destroyed slots — so they must be
+        # excluded from the "unreturned borrows" report and from the
+        # "any entries left?" check.
+        outstanding_entries = {
+            k: v
+            for k, v in self._borrowed_indices.items()
+            if not isinstance(v, _ConsumedSlotMarker)
+        }
+        if not outstanding_entries:
             return
 
         borrowed_strs: list[str] = []
-        for key, owner in self._borrowed_indices.items():
+        for key, owner in outstanding_entries.items():
             if isinstance(owner, ArrayBase):
                 # Slice-held slot: key is a single-element tuple like
                 # ``("const:<idx>",)``; surface the slot number directly.
@@ -584,18 +697,46 @@ class Vector(ArrayBase[T]):
         raw_stop = parent_length if s.stop is None else s.stop
         raw_step = 1 if s.step is None else s.step
 
+        # Validate bounds against raw ``int`` AND against ``UInt`` handles
+        # whose underlying ``Value`` is a compile-time constant — otherwise
+        # e.g. a ``UInt`` produced from ``UIntType().with_const(0)`` slips
+        # through the ``int``-only check and reaches ``_compute_slice_length``
+        # where a zero step triggers ``ZeroDivisionError``.
         for name, value in (("start", s.start), ("stop", s.stop), ("step", s.step)):
-            if isinstance(value, int) and value < 0:
+            const_val = _as_int_const(value) if value is not None else None
+            if const_val is not None and const_val < 0:
                 raise NotImplementedError(
                     f"Negative {name} is not supported for Vector slicing "
-                    f"(got {name}={value}).  Use a non-negative value or "
+                    f"(got {name}={const_val}).  Use a non-negative value or "
                     f"compute the index explicitly."
                 )
-        if isinstance(raw_step, int) and raw_step <= 0:
+        step_const_for_validate = _as_int_const(raw_step)
+        if step_const_for_validate is not None and step_const_for_validate <= 0:
             raise NotImplementedError(
-                f"Vector slicing requires a positive step (got step={raw_step}). "
+                f"Vector slicing requires a positive step "
+                f"(got step={step_const_for_validate}). "
                 f"Reverse/zero strides are not yet supported."
             )
+
+        # Clamp ``stop`` to the parent length when both are compile-time
+        # known, matching Python semantics (``s[3:10]`` with ``len(s)==4``
+        # yields ``s[3:4]``).  Without this, ``measure(q[3:10])`` above a
+        # 4-qubit register happily produces a 7-clbit result array with
+        # only one actual measurement emitted — a correctness bug.  When
+        # either bound is symbolic we defer to the existing symbolic
+        # path; the emit-time allocator rejects unresolvable lengths
+        # with ``EmitError``.
+        parent_length_const = _as_int_const(parent_length)
+        stop_const = _as_int_const(raw_stop)
+        start_const_for_clamp = _as_int_const(raw_start)
+        if parent_length_const is not None:
+            if stop_const is not None and stop_const > parent_length_const:
+                raw_stop = parent_length_const
+            if (
+                start_const_for_clamp is not None
+                and start_const_for_clamp > parent_length_const
+            ):
+                raw_start = parent_length_const
 
         start_uint = self._coerce_index(raw_start)
         step_uint = self._coerce_index(raw_step)
@@ -603,13 +744,21 @@ class Vector(ArrayBase[T]):
         length = _compute_slice_length(raw_start, raw_stop, raw_step)
         length_value = self._to_length_value(length)
 
+        # ``covered_indices`` is needed by the bulk-borrow tracker for
+        # compile-time-known slices.  Accept both raw ints and
+        # constant-wrapping ``UInt`` handles (the common case when the
+        # parent length came from ``qubit_array(4, "q")`` — the literal
+        # ``4`` is wrapped as ``UInt`` downstream so ``raw_stop`` can be
+        # a UInt even though the user passed an int).
         covered_indices: tuple[int, ...] | None = None
+        start_const = _as_int_const(raw_start)
+        step_const = _as_int_const(raw_step)
         if (
-            isinstance(raw_start, int)
-            and isinstance(raw_step, int)
+            start_const is not None
+            and step_const is not None
             and isinstance(length, int)
         ):
-            covered_indices = tuple(raw_start + j * raw_step for j in range(length))
+            covered_indices = tuple(start_const + j * step_const for j in range(length))
 
         # Build the sliced ArrayValue with slice metadata.
         sliced_av: ArrayValue = ArrayValue(
@@ -790,10 +939,14 @@ def _compute_slice_length(
 ) -> int | UInt:
     """Compute ``max(0, ceil((stop - start) / step))`` for slice bounds.
 
-    When all three bounds are Python ``int`` constants, returns a concrete
-    ``int``.  Otherwise falls back to symbolic ``UInt`` arithmetic, which
-    emits ``BinOp`` nodes into the current tracer and relies on constant
-    folding in later passes to collapse the expression where possible.
+    When all three bounds resolve to Python ``int`` constants — either
+    directly or as a ``UInt`` whose underlying value is a compile-time
+    constant (which is the common case because ``qubit_array(4, "q")``
+    wraps its literal length in a ``UInt`` handle) — returns a concrete
+    ``int``.  Otherwise falls back to symbolic ``UInt`` arithmetic,
+    which emits ``BinOp`` nodes into the current tracer and relies on
+    constant folding in later passes to collapse the expression where
+    possible.
 
     Args:
         start: Slice start (inclusive).
@@ -804,12 +957,39 @@ def _compute_slice_length(
         ``int`` when all inputs are concrete integers, otherwise a ``UInt``
         handle representing the slice length.
     """
-    if isinstance(start, int) and isinstance(stop, int) and isinstance(step, int):
-        if stop <= start:
+    start_int = _as_int_const(start)
+    stop_int = _as_int_const(stop)
+    step_int = _as_int_const(step)
+    if start_int is not None and stop_int is not None and step_int is not None:
+        if stop_int <= start_int:
             return 0
-        return (stop - start + step - 1) // step
+        return (stop_int - start_int + step_int - 1) // step_int
 
     return ((stop - start) + (step - 1)) // step
+
+
+def _as_int_const(value: int | UInt) -> int | None:
+    """Return the Python ``int`` for ``value`` if it is a compile-time constant.
+
+    Args:
+        value: Either a raw Python ``int`` or a ``UInt`` handle whose
+            backing ``Value`` may or may not carry a constant.
+
+    Returns:
+        The int when ``value`` is an ``int`` directly, or a ``UInt``
+        whose ``.value`` is constant and resolvable to an ``int``.
+        ``None`` otherwise (i.e. when ``value`` is a symbolic ``UInt``).
+    """
+    if isinstance(value, int):
+        return value
+    if isinstance(value, UInt) and value.value.is_constant():
+        const = value.value.get_const()
+        if const is not None:
+            try:
+                return int(const)
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 class VectorView(Vector[T]):
@@ -1040,12 +1220,22 @@ class VectorView(Vector[T]):
             returned view no longer holds the parent's slice-borrow.
         """
         self.validate_all_returned()
+        is_destructive = operation_name in _DESTRUCTIVE_CONSUME_OPS
         if self._slice_covered_indices is not None:
             for idx in self._slice_covered_indices:
                 key = (f"const:{idx}",)
                 owner = self._slice_parent._borrowed_indices.get(key)
                 if owner is self:
-                    del self._slice_parent._borrowed_indices[key]
+                    if is_destructive:
+                        # Replace view ownership with the consumed
+                        # sentinel so subsequent ``q[i]`` access or
+                        # ``measure(q)`` on the same slot is rejected
+                        # (the physical qubit was destroyed by this
+                        # operation — reusing it would silently re-
+                        # measure or reuse a collapsed state).
+                        self._slice_parent._borrowed_indices[key] = _CONSUMED_SLOT
+                    else:
+                        del self._slice_parent._borrowed_indices[key]
         new_view = super().consume(operation_name)
         new_view._slice_parent = self._slice_parent
         new_view._slice_start = self._slice_start
@@ -1081,16 +1271,40 @@ class VectorView(Vector[T]):
         raw_stop = view_length if s.stop is None else s.stop
         raw_step = 1 if s.step is None else s.step
 
+        # Validate bounds via the const-unwrapping helper so a
+        # ``UInt`` with const 0 / negative also trips the explicit
+        # check here rather than falling through to ``_compute_slice_length``
+        # where zero-step causes a ``ZeroDivisionError``.
         for name, value in (("start", s.start), ("stop", s.stop), ("step", s.step)):
-            if isinstance(value, int) and value < 0:
+            const_val = _as_int_const(value) if value is not None else None
+            if const_val is not None and const_val < 0:
                 raise NotImplementedError(
                     f"Negative {name} is not supported for VectorView slicing "
-                    f"(got {name}={value})."
+                    f"(got {name}={const_val})."
                 )
-        if isinstance(raw_step, int) and raw_step <= 0:
+        step_const_validate = _as_int_const(raw_step)
+        if step_const_validate is not None and step_const_validate <= 0:
             raise NotImplementedError(
-                f"VectorView slicing requires a positive step (got step={raw_step})."
+                f"VectorView slicing requires a positive step "
+                f"(got step={step_const_validate})."
             )
+
+        # Clamp ``stop`` to the view length when both are compile-time
+        # known (Python slice semantics).  Without this, a nested slice
+        # such as ``q[0::2][0:99]`` produces an out-of-bounds coverage
+        # set that later emit paths only partially resolve — the same
+        # silent-wrong failure mode as the root-level P1-A bug.
+        view_length_const = _as_int_const(view_length)
+        stop_const = _as_int_const(raw_stop)
+        start_const_clamp = _as_int_const(raw_start)
+        if view_length_const is not None:
+            if stop_const is not None and stop_const > view_length_const:
+                raw_stop = view_length_const
+            if (
+                start_const_clamp is not None
+                and start_const_clamp > view_length_const
+            ):
+                raw_start = view_length_const
 
         inner_start = self._slice_parent._coerce_index(raw_start)
         inner_step = self._slice_parent._coerce_index(raw_step)
@@ -1102,6 +1316,29 @@ class VectorView(Vector[T]):
         new_step: UInt = self._slice_step * inner_step
         new_length = _compute_slice_length(raw_start, raw_stop, raw_step)
         new_length_value = self._slice_parent._to_length_value(new_length)
+
+        # For compile-time-known nested views, enumerate the covered
+        # root-space indices so the bulk-borrow tracker can reject
+        # aliased direct parent access (e.g. ``inner = q[0::2][1:3];
+        # q[2] = x(q[2])``) at trace time.  ``None`` is preserved only
+        # when any bound in the composed chain is symbolic.
+        outer_start_const = _as_int_const(self._slice_start)
+        outer_step_const = _as_int_const(self._slice_step)
+        inner_start_const = _as_int_const(raw_start)
+        inner_step_const = _as_int_const(raw_step)
+        nested_covered: tuple[int, ...] | None = None
+        if (
+            outer_start_const is not None
+            and outer_step_const is not None
+            and inner_start_const is not None
+            and inner_step_const is not None
+            and isinstance(new_length, int)
+        ):
+            composed_start = outer_start_const + outer_step_const * inner_start_const
+            composed_step = outer_step_const * inner_step_const
+            nested_covered = tuple(
+                composed_start + j * composed_step for j in range(new_length)
+            )
 
         new_sliced_av = ArrayValue(
             type=self._slice_parent.value.type,
@@ -1123,5 +1360,5 @@ class VectorView(Vector[T]):
             length=new_length,
             start_uint=new_start,
             step_uint=new_step,
-            covered_indices=None,
+            covered_indices=nested_covered,
         )

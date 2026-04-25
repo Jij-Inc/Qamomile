@@ -52,7 +52,38 @@ from qamomile.circuit.transpiler.errors import (
 from . import Pass
 
 BorrowKey = tuple[str, ...]
-Owner = Value | ArrayValue
+
+
+class _ConsumedSlotMarker:
+    """Sentinel marking a physical qubit slot destroyed by a prior destructive op.
+
+    Installed by :meth:`SliceLinearityCheckPass._process_result_releases`
+    when a destructive operation (``MeasureOperation``,
+    ``MeasureVectorOperation``, ``CastOperation``) consumes a view's
+    covered slots.  Subsequent operand access to the same slot is
+    treated as a violation, matching the frontend's ``_CONSUMED_SLOT``
+    sentinel semantics.  ``ExpvalOp`` does not install this marker —
+    its physical qubits survive the expval (it only retires the SSA
+    handle).  Only one instance ever exists; identity is the test.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debug only
+        return "<IRConsumedSlot>"
+
+
+_CONSUMED_SLOT: "_ConsumedSlotMarker" = _ConsumedSlotMarker()
+
+
+_IR_DESTRUCTIVE_OPS: tuple[type, ...] = (
+    MeasureOperation,
+    MeasureVectorOperation,
+    CastOperation,
+)
+
+
+Owner = Value | ArrayValue | _ConsumedSlotMarker
 State = dict[BorrowKey, Owner]
 
 
@@ -72,6 +103,10 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
     silent hole where ``return q`` with an outstanding borrow went
     unnoticed.
     """
+
+    def __init__(self) -> None:
+        """Initialize per-run mutable state to safe defaults."""
+        self._used_view_uuids: set[str] = set()
 
     @property
     def name(self) -> str:
@@ -106,12 +141,32 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
             )
 
         state: State = {}
+        # ``used_view_uuids`` tracks slice-view ArrayValue uuids whose
+        # elements have been referenced in any operand since the view
+        # was registered.  It is consulted by
+        # ``_register_slice_bulk_borrow_if_new`` to decide whether an
+        # overlapping new view may opportunistically drain an older
+        # one — mirroring the frontend's ``VectorView._wrap`` logic
+        # that lets ``a = q[0:3] (unused); b = q[1:4]`` succeed when
+        # ``a`` has no outstanding element borrows.  A view moves
+        # into this set the first time its elements, or the view
+        # itself as a whole ArrayValue operand, appears in an
+        # operation.
+        self._used_view_uuids = set()
         self._walk(input.operations, state)
 
-        if state:
+        # ``_ConsumedSlotMarker`` entries are not outstanding borrows
+        # — they record physically-destroyed slots — and must be
+        # excluded from the unreturned-borrow check.
+        outstanding = {
+            k: v
+            for k, v in state.items()
+            if not isinstance(v, _ConsumedSlotMarker)
+        }
+        if outstanding:
             raise UnreturnedBorrowAtBlockEndError(
                 "Block completed with outstanding borrows:\n"
-                + self._format_outstanding(state)
+                + self._format_outstanding(outstanding)
                 + "\n\nReturn every borrowed element (via ``q[i] = ...``) or "
                 "consume the parent/view (via measure / expval / passing to "
                 "another kernel) before the block ends."
@@ -250,6 +305,38 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
             SliceLinearityViolationError: If an operand's resolved slot
                 is owned by a view that does not contain the operand.
         """
+        # Mark whole-ArrayValue operands as "used" for drain tracking.
+        # A whole-view operand (``measure(view)``, ``qft(view)``,
+        # ``pauli_evolve(view, H, γ)``) counts as using the view even
+        # though no per-element access is recorded.
+        #
+        # Additionally, for root (non-view) whole-array operands —
+        # the most common being ``expval(q, H)`` — check every concrete
+        # slot of the array against the consumed-slot markers in state.
+        # This catches ``measure(q[1::2]); expval(q, H)`` at IR level,
+        # complementing the frontend trace-time guard in ``expval()``.
+        for v in op.operands:
+            if not isinstance(v, ArrayValue):
+                continue
+            if v.slice_of is not None:
+                self._used_view_uuids.add(v.uuid)
+            else:
+                # Root array whole operand: check each concrete slot.
+                shape = v.shape
+                if shape:
+                    length = self._const_int(shape[0])
+                    if length is not None:
+                        for idx in range(length):
+                            key = (f"const:{idx}",)
+                            if isinstance(state.get(key), _ConsumedSlotMarker):
+                                raise SliceLinearityViolationError(
+                                    f"Whole-array operand '{v.name}' (slot {idx}) "
+                                    f"is accessed after it was consumed by a "
+                                    f"destructive view operation "
+                                    f"(e.g. measure / cast on a view); the "
+                                    f"physical qubit is no longer available."
+                                )
+
         for v in op.operands:
             if not isinstance(v, Value):
                 continue
@@ -258,7 +345,14 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
             if not v.type.is_quantum():
                 continue
 
-            # Register any sliced ArrayValue seen via parent_array.
+            # Register any sliced ArrayValue seen via parent_array, and
+            # mark the immediate sliced parent as "used" so subsequent
+            # overlapping slices can't opportunistically drain it.
+            if (
+                isinstance(v.parent_array, ArrayValue)
+                and v.parent_array.slice_of is not None
+            ):
+                self._used_view_uuids.add(v.parent_array.uuid)
             self._register_slice_bulk_borrow_if_new(v.parent_array, state)
 
             key = self._resolve_qubit_key(v)
@@ -268,6 +362,17 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
             existing = state.get(key)
             if existing is None:
                 continue
+
+            if isinstance(existing, _ConsumedSlotMarker):
+                # Slot's physical qubit was already destroyed by an
+                # earlier destructive view op (``measure(q[1::2])``).
+                # Any subsequent operand access — direct or via
+                # another view — is invalid.
+                raise SliceLinearityViolationError(
+                    f"Operand '{v.name}' accesses slot {key[0]} after it was "
+                    f"consumed by a destructive view operation; the physical "
+                    f"qubit is no longer available."
+                )
 
             if isinstance(existing, ArrayValue):
                 # Slot is held by a view.  The operand is OK only if
@@ -283,17 +388,34 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                 continue
 
     def _process_result_releases(self, op: Operation, state: State) -> None:
-        """Release slice-view ownership when the root array is consumed.
+        """Release slice-view ownership / install consumed markers on operand-consuming ops.
 
-        Operations that take a whole ``ArrayValue`` (not an element) as
-        an operand consume the root array — ``measure``, ``expval``,
-        ``cast`` all fall in this category.  Any slice view whose root
-        matches is released, matching the frontend's
-        :meth:`VectorView.consume` releasing the parent's bulk-borrow
-        on similar terminal operations.
+        Walks each ``ArrayValue`` operand of a consuming operation and
+        releases the corresponding state entries.  The semantics split
+        by operand shape:
+
+        * **View operand** (``slice_of`` chain is non-empty): release
+          only the slots the view covers.  Leaves other slots of the
+          same root untouched so a sibling view or direct access on a
+          non-overlapping slot remains valid.  For destructive ops
+          (``MeasureOperation``, ``MeasureVectorOperation``,
+          ``CastOperation``), install ``_CONSUMED_SLOT`` markers on
+          the covered slots so any later access — direct or via
+          another view — is rejected as use-after-destroy.
+
+        * **Root operand** (no chain): release every entry whose
+          owner root matches, matching the prior whole-array consume
+          semantics.  Destructive ops additionally install consumed
+          markers for every concrete-index slot on that root so
+          subsequent operations can't accidentally re-touch the
+          collapsed state.
+
+        ``ExpvalOp`` retires the SSA handle but does not physically
+        destroy the qubits, so it does not install consumed markers
+        (matching the frontend's ``_DESTRUCTIVE_CONSUME_OPS``).
 
         Args:
-            op: The operation potentially consuming a root array.
+            op: The operation potentially consuming operand arrays.
             state: Mutable borrow tracker.
         """
         if not isinstance(
@@ -307,23 +429,69 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
         ):
             return
 
-        consumed_root_uuids: set[str] = set()
+        is_destructive = isinstance(op, _IR_DESTRUCTIVE_OPS)
+
         for v in op.operands:
             if not isinstance(v, ArrayValue):
                 continue
-            root = v
-            while root.slice_of is not None:
-                root = root.slice_of
-            consumed_root_uuids.add(root.uuid)
 
-        if not consumed_root_uuids:
-            return
+            if v.slice_of is not None:
+                # View operand: release / consume only its covered slots.
+                covered = self._collect_view_coverage(v)
+                if covered is None:
+                    # Symbolic bounds — release anything owned by this
+                    # specific view uuid (no partial consumption
+                    # semantic possible without concrete coverage).
+                    self._release_by_owner_uuid(v.uuid, state)
+                    continue
+                for slot in covered:
+                    key = (f"const:{slot}",)
+                    if is_destructive:
+                        state[key] = _CONSUMED_SLOT
+                    elif key in state:
+                        del state[key]
+                continue
 
-        to_remove: list[BorrowKey] = []
-        for k, owner in state.items():
-            root = self._owner_root_uuid(owner)
-            if root is not None and root in consumed_root_uuids:
-                to_remove.append(k)
+            # Root operand: full release.
+            root_uuid = v.uuid
+            to_remove: list[BorrowKey] = []
+            to_consume: list[BorrowKey] = []
+            for k, owner in state.items():
+                owner_root = self._owner_root_uuid(owner)
+                if owner_root is not None and owner_root == root_uuid:
+                    to_remove.append(k)
+            for k in to_remove:
+                del state[k]
+            if is_destructive:
+                # Install consumed markers on every concrete slot of
+                # this root that we can enumerate from the operand's
+                # shape.  Leaves the root free for post-block checks
+                # to complete.
+                shape = v.shape
+                if shape:
+                    length = self._const_int(shape[0])
+                    if length is not None:
+                        for idx in range(length):
+                            to_consume.append((f"const:{idx}",))
+                for k in to_consume:
+                    state[k] = _CONSUMED_SLOT
+
+    def _release_by_owner_uuid(self, uuid: str, state: State) -> None:
+        """Drop every state entry whose direct owner has the given uuid.
+
+        Used for symbolic-bound view release when we can't enumerate
+        coverage.  Only entries whose owner ArrayValue uuid matches
+        are removed; unrelated root-space consumed markers stay put.
+
+        Args:
+            uuid: The ArrayValue uuid whose ownership should be cleared.
+            state: Mutable borrow tracker.
+        """
+        to_remove = [
+            k
+            for k, owner in state.items()
+            if isinstance(owner, ArrayValue) and owner.uuid == uuid
+        ]
         for k in to_remove:
             del state[k]
 
@@ -404,6 +572,13 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
             existing = state.get(key)
             if existing is None:
                 continue
+            if isinstance(existing, _ConsumedSlotMarker):
+                # Attempting to slice into an already-destroyed slot.
+                raise SliceLinearityViolationError(
+                    f"Slice view '{av.name}' covers slot {idx} on "
+                    f"'{root.name}', but that physical qubit was destroyed "
+                    f"by a prior destructive view operation (measure / cast)."
+                )
             if isinstance(existing, ArrayValue):
                 if existing.uuid == av.uuid:
                     continue  # idempotent re-registration on same uuid
@@ -430,6 +605,34 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
             if other_full == new_covered:
                 # Same logical view — release all of the old view's
                 # registrations before installing the new one below.
+                for slot in other_full:
+                    old_key = (f"const:{slot}",)
+                    if state.get(old_key) is other_view:
+                        del state[old_key]
+            elif new_covered.issubset(other_full):
+                # Nested slice: the new view is a strict subset of an
+                # existing outer view (``inner = q[0::2][1:3]``).  The
+                # outer view's life ends the moment a nested slice is
+                # taken from it — the frontend's ``VectorView._wrap``
+                # already drains the outer in this case.  Mirror the
+                # same semantic here: release every slot of the outer
+                # view (including those outside the new view's coverage,
+                # since the outer handle is no longer usable) before
+                # registering the inner.
+                for slot in other_full:
+                    old_key = (f"const:{slot}",)
+                    if state.get(old_key) is other_view:
+                        del state[old_key]
+            elif other_uuid not in self._used_view_uuids:
+                # Partial overlap with an outer view that was never
+                # used (no element or whole-view operand reference
+                # since its registration).  The frontend's
+                # ``VectorView._wrap`` drains such a view regardless
+                # of coverage shape; match that here so the two
+                # checkers agree on what programs are legal.  A view
+                # that HAS been used gets the strict overlap error
+                # below — the permissive drain only applies to
+                # sliced-but-never-touched placeholders.
                 for slot in other_full:
                     old_key = (f"const:{slot}",)
                     if state.get(old_key) is other_view:
