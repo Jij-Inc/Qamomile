@@ -13,6 +13,15 @@ if TYPE_CHECKING:
     from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
     from qiskit import QuantumCircuit
 
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    CompOp,
+    CompOpKind,
+    CondOp,
+    CondOpKind,
+    NotOp,
+    RuntimeClassicalExpr,
+    RuntimeOpKind,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
     IfOperation,
@@ -124,20 +133,11 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             super()._emit_if(circuit, op, qubit_map, clbit_map, bindings)
             return
 
-        condition_uuid = condition.uuid
-        condition_addr = QubitAddress(condition_uuid)
+        if_test_condition = self._resolve_runtime_condition(
+            circuit, condition, clbit_map, bindings
+        )
 
-        if condition_addr not in clbit_map:
-            raise EmitError(
-                "Runtime if-conditions must come from measurement results "
-                "or be bound before transpilation. The condition value was "
-                "neither resolved at compile time nor backed by a "
-                "measurement result."
-            )
-
-        clbit_idx = clbit_map[condition_addr]
-
-        with circuit.if_test((circuit.clbits[clbit_idx], 1)) as else_:
+        with circuit.if_test(if_test_condition) as else_:
             self._emit_operations(
                 circuit, op.true_operations, qubit_map, clbit_map, bindings
             )
@@ -160,22 +160,252 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
 
         condition = op.operands[0]
         condition_value = condition.value if hasattr(condition, "value") else condition
-        condition_uuid = (
-            condition_value.uuid
-            if hasattr(condition_value, "uuid")
-            else str(condition_value)
+        while_condition = self._resolve_runtime_condition(
+            circuit, condition_value, clbit_map, bindings
         )
 
-        condition_addr = QubitAddress(condition_uuid)
-        if condition_addr not in clbit_map:
-            raise ValueError("While loop condition not found in classical bit map.")
-
-        clbit_idx = clbit_map[condition_addr]
-
-        with circuit.while_loop((circuit.clbits[clbit_idx], 1)):  # type: ignore[call-overload]
+        with circuit.while_loop(while_condition):  # type: ignore[call-overload]
             self._emit_operations(
                 circuit, op.operations, qubit_map, clbit_map, bindings
             )
+
+    def _resolve_runtime_condition(
+        self,
+        circuit: "QuantumCircuit",
+        condition: Any,
+        clbit_map: ClbitMap,
+        bindings: dict[str, Any],
+    ) -> Any:
+        """Resolve a runtime if/while condition to a Qiskit ``if_test`` argument.
+
+        The returned value is suitable for passing to
+        ``QuantumCircuit.if_test`` / ``while_loop``: either a
+        ``(clbit, value)`` tuple for a single-bit measurement condition, or
+        a ``qiskit.circuit.classical.expr.Expr`` for a compound predicate
+        (``CondOp`` / ``NotOp`` / ``CompOp`` over measurement bits)
+        previously stored in ``bindings`` by ``_build_runtime_predicate_expr``.
+
+        Args:
+            circuit: The Qiskit circuit being emitted (for clbit lookup).
+            condition: The IR condition Value.
+            clbit_map: Map from ``QubitAddress`` to physical clbit index.
+            bindings: Current bindings; may hold a backend ``Expr`` keyed by
+                the condition's UUID.
+
+        Returns:
+            A condition object accepted by ``if_test`` / ``while_loop``.
+
+        Raises:
+            EmitError: If the condition is neither a measurement clbit nor a
+                stored runtime expression.
+        """
+        condition_uuid = (
+            condition.uuid if hasattr(condition, "uuid") else str(condition)
+        )
+
+        # Compound predicate built earlier by _build_runtime_predicate_expr.
+        stored = bindings.get(condition_uuid)
+        if stored is not None and not isinstance(stored, (bool, int, float)):
+            return stored
+
+        condition_addr = QubitAddress(condition_uuid)
+        if condition_addr in clbit_map:
+            clbit_idx = clbit_map[condition_addr]
+            return (circuit.clbits[clbit_idx], 1)
+
+        raise EmitError(
+            "Runtime if-conditions must come from measurement results "
+            "or be bound before transpilation. The condition value was "
+            "neither resolved at compile time nor backed by a "
+            "measurement result."
+        )
+
+    def _emit_runtime_classical_expr(
+        self,
+        circuit: "QuantumCircuit",
+        op: RuntimeClassicalExpr,
+        clbit_map: ClbitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Lower ``RuntimeClassicalExpr`` to a Qiskit ``expr.Expr``.
+
+        Counterpart of (and supersedes for the runtime path) the legacy
+        ``_build_runtime_predicate_expr``. The IR has already declared
+        this op runtime via ``ClassicalLoweringPass``, so we go straight
+        to expression construction without a fold attempt.
+
+        Args:
+            circuit: The Qiskit circuit being emitted.
+            op: The runtime classical expression to lower.
+            clbit_map: Map from ``QubitAddress`` → physical clbit index.
+            bindings: Current bindings; result is stored here.
+
+        Raises:
+            EmitError: If an operand cannot be resolved to a clbit /
+                sub-expression / constant — meaning the IR is malformed
+                or the lowering pass missed a case.
+        """
+        from qamomile.circuit.transpiler.errors import EmitError
+        from qiskit.circuit.classical import expr
+
+        def resolve_operand(v: Any) -> Any:
+            """Resolve an operand to a Qiskit ``Expr`` / ``Clbit`` / Python literal."""
+            if hasattr(v, "uuid"):
+                stored = bindings.get(v.uuid)
+                if stored is not None and not isinstance(stored, (bool, int)):
+                    return stored  # already-built backend expr
+                if hasattr(v, "is_constant") and v.is_constant():
+                    return bool(v.get_const())
+                addr = QubitAddress(v.uuid)
+                if addr in clbit_map:
+                    return circuit.clbits[clbit_map[addr]]
+                if isinstance(stored, (bool, int)):
+                    return bool(stored)
+            return None
+
+        kind = op.kind
+        if kind is RuntimeOpKind.NOT:
+            inner = resolve_operand(op.operands[0])
+            if inner is None:
+                raise EmitError(
+                    f"Cannot resolve operand for RuntimeClassicalExpr(NOT): "
+                    f"{op.operands[0]!r}"
+                )
+            result = expr.logic_not(inner)
+        else:
+            lhs = resolve_operand(op.operands[0])
+            rhs = resolve_operand(op.operands[1])
+            if lhs is None or rhs is None:
+                raise EmitError(
+                    f"Cannot resolve operands for RuntimeClassicalExpr({kind!r})"
+                )
+            result = self._build_qiskit_binary_expr(kind, lhs, rhs)
+            if result is None:
+                raise EmitError(
+                    f"Unsupported RuntimeClassicalExpr kind for Qiskit backend: {kind}"
+                )
+
+        # Store result so downstream ``_emit_if`` / ``_emit_while`` /
+        # nested ``RuntimeClassicalExpr`` can consume it.
+        set_runtime_expr = getattr(bindings, "set_runtime_expr", None)
+        if callable(set_runtime_expr):
+            set_runtime_expr(op.results[0].uuid, result)
+        else:
+            bindings[op.results[0].uuid] = result
+
+    @staticmethod
+    def _build_qiskit_binary_expr(kind: RuntimeOpKind, lhs: Any, rhs: Any) -> Any:
+        """Map a binary ``RuntimeOpKind`` to its Qiskit ``expr`` constructor."""
+        from qiskit.circuit.classical import expr
+
+        match kind:
+            # Logical
+            case RuntimeOpKind.AND:
+                return expr.logic_and(lhs, rhs)
+            case RuntimeOpKind.OR:
+                return expr.logic_or(lhs, rhs)
+            # Comparison
+            case RuntimeOpKind.EQ:
+                return expr.equal(lhs, rhs)
+            case RuntimeOpKind.NEQ:
+                return expr.not_equal(lhs, rhs)
+            case RuntimeOpKind.LT:
+                return expr.less(lhs, rhs)
+            case RuntimeOpKind.LE:
+                return expr.less_equal(lhs, rhs)
+            case RuntimeOpKind.GT:
+                return expr.greater(lhs, rhs)
+            case RuntimeOpKind.GE:
+                return expr.greater_equal(lhs, rhs)
+            # Arithmetic on classical bits — Qiskit ``expr`` supports a
+            # subset; map what's available, return None for the rest.
+            case RuntimeOpKind.ADD:
+                return expr.add(lhs, rhs)
+            case RuntimeOpKind.SUB:
+                return expr.sub(lhs, rhs)
+            case RuntimeOpKind.MUL:
+                return expr.mul(lhs, rhs)
+            case RuntimeOpKind.DIV:
+                return expr.div(lhs, rhs)
+            case _:
+                return None
+
+    def _build_runtime_predicate_expr(
+        self,
+        circuit: "QuantumCircuit",
+        op: "CompOp | CondOp | NotOp",
+        clbit_map: ClbitMap,
+        bindings: dict[str, Any],
+    ) -> Any:
+        """Build a Qiskit ``expr.Expr`` for a runtime classical predicate.
+
+        Recursively resolves operands to either Qiskit ``Clbit`` references
+        (via ``clbit_map``), constants, or already-built sub-expressions
+        stored in ``bindings``. Returns ``None`` when any operand cannot be
+        resolved — the caller leaves the predicate unbound, and the
+        downstream ``if`` / ``while`` falls back to its (failing) clbit
+        lookup, which raises a clear ``EmitError``.
+
+        Supported ops:
+            * ``CondOp(AND/OR)`` → ``expr.logic_and`` / ``expr.logic_or``
+            * ``NotOp`` → ``expr.logic_not``
+            * ``CompOp(EQ/NEQ)`` over Bit operands → ``expr.equal`` /
+              ``expr.not_equal``
+
+        Args:
+            circuit: The Qiskit circuit being emitted (for clbit lookup).
+            op: The unresolved classical predicate.
+            clbit_map: Map from ``QubitAddress`` → physical clbit index.
+            bindings: Current bindings; may hold sub-expression results
+                keyed by Value UUIDs.
+
+        Returns:
+            A ``qiskit.circuit.classical.expr.Expr`` object, or ``None`` if
+            the predicate cannot be expressed.
+        """
+        from qiskit.circuit.classical import expr
+
+        def resolve_operand(v: Any) -> Any:
+            """Operand → Qiskit ``Expr`` / ``Clbit`` / Python literal, or None."""
+            if hasattr(v, "uuid"):
+                stored_v = bindings.get(v.uuid)
+                if stored_v is not None and not isinstance(stored_v, (bool, int)):
+                    return stored_v
+                if hasattr(v, "is_constant") and v.is_constant():
+                    return bool(v.get_const())
+                addr = QubitAddress(v.uuid)
+                if addr in clbit_map:
+                    return circuit.clbits[clbit_map[addr]]
+                if isinstance(stored_v, (bool, int)):
+                    return bool(stored_v)
+            return None
+
+        if isinstance(op, NotOp):
+            inner = resolve_operand(op.operands[0])
+            if inner is None:
+                return None
+            return expr.logic_not(inner)
+
+        lhs = resolve_operand(op.operands[0])
+        rhs = resolve_operand(op.operands[1])
+        if lhs is None or rhs is None:
+            return None
+
+        if isinstance(op, CondOp):
+            if op.kind is CondOpKind.AND:
+                return expr.logic_and(lhs, rhs)
+            if op.kind is CondOpKind.OR:
+                return expr.logic_or(lhs, rhs)
+            return None
+
+        if isinstance(op, CompOp):
+            if op.kind is CompOpKind.EQ:
+                return expr.equal(lhs, rhs)
+            if op.kind is CompOpKind.NEQ:
+                return expr.not_equal(lhs, rhs)
+            return None
+
+        return None
 
     def _emit_pauli_evolve(
         self,

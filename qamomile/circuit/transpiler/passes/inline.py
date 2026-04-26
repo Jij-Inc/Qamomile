@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from typing import cast
 
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
@@ -220,9 +221,21 @@ class InlinePass(Pass[Block, Block]):
 
         # Map block's input values to call's argument values
         local_map = value_map.copy()
+        # Use ValueSubstitutor to resolve call_args. Beyond a direct UUID
+        # lookup, this also rewrites parent_array references on array-element
+        # values so a callee that takes an individual ``q[i]`` from a Vector[Qubit]
+        # parameter sees an element value whose ``parent_array`` points at the
+        # caller's concrete array, not at a transient cloned ArrayValue. Without
+        # this, the resource allocator at emit time fails to find the parent
+        # array's QInitOperation entry in qubit_map.
+        arg_substitutor = ValueSubstitutor(local_map, transitive=True)
         for block_input, call_arg in zip(block.input_values, call_args):
-            # Apply value_map to call_arg first
-            resolved_arg = value_map.get(call_arg.uuid, call_arg)
+            substituted_arg = arg_substitutor.substitute_value(call_arg)
+            resolved_arg: Value = (
+                cast(Value, substituted_arg)
+                if isinstance(substituted_arg, Value)
+                else call_arg
+            )
             local_map[block_input.uuid] = resolved_arg
 
             # If both are ArrayValues, also map shape dimensions

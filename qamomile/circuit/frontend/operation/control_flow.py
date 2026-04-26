@@ -380,6 +380,37 @@ def emit_if(
                     f"but false branch returned {type(false_val).__name__}. "
                     f"Both branches of an if-else must return the same variables."
                 )
+            # Phi minimization (scalar handles only): when both branches
+            # return the *same* IR Value AND neither branch consumed it,
+            # the phi would be a no-op merge. Skipping it keeps the IR
+            # SSA-minimal and avoids generating phi-versioned aliases
+            # (e.g. ``j_phi_4``) for read-only scalar loop variables,
+            # which downstream emit-time loop unrolling cannot bind.
+            #
+            # Array handles (Vector/Matrix/Tensor) are excluded from this
+            # optimization: their `.value` (ArrayValue) is not updated
+            # when elements are written via ``arr[i] = ...``, so identity
+            # of `.value` doesn't reliably indicate "unchanged". For arrays
+            # we conservatively keep the phi.
+            from qamomile.circuit.frontend.handle.array import ArrayBase
+
+            true_v = true_val.value if hasattr(true_val, "value") else true_val
+            false_v = false_val.value if hasattr(false_val, "value") else false_val
+            true_consumed = getattr(true_val, "_consumed", False)
+            false_consumed = getattr(false_val, "_consumed", False)
+            is_array_handle = isinstance(true_val, ArrayBase) or isinstance(
+                false_val, ArrayBase
+            )
+            if (
+                not is_array_handle
+                and isinstance(true_v, Value)
+                and isinstance(false_v, Value)
+                and true_v is false_v
+                and not true_consumed
+                and not false_consumed
+            ):
+                merged_results.append(true_val)
+                continue
             phi_output, merged_handle = _create_phi_for_values(
                 condition_value, true_val, false_val, if_op
             )

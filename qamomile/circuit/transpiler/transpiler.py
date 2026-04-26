@@ -368,6 +368,28 @@ class Transpiler(ABC, Generic[T]):
         """Pass 2: Validate and analyze dependencies."""
         return self._analyze_pass.run(block)
 
+    def classical_lowering(self, block: Block) -> Block:
+        """Pass 2.25: Lower measurement-derived classical ops.
+
+        Identifies ``CompOp`` / ``CondOp`` / ``NotOp`` / ``BinOp``
+        instances whose operand dataflow traces back to a measurement and
+        rewrites them to ``RuntimeClassicalExpr``. Compile-time-foldable
+        and emit-time-foldable (loop-bound, parameter-bound) classical
+        ops are left unchanged.
+
+        Runs after ``analyze`` so the measurement-taint analysis has the
+        full dependency graph available, and before
+        ``validate_symbolic_shapes`` / ``plan`` / ``emit`` so downstream
+        passes can rely on the cleaner IR (in particular: future
+        segmentation work can dispatch on ``RuntimeClassicalExpr`` type
+        instead of the BitType-only heuristic).
+        """
+        from qamomile.circuit.transpiler.passes.classical_lowering import (
+            ClassicalLoweringPass,
+        )
+
+        return ClassicalLoweringPass().run(block)
+
     def validate_symbolic_shapes(self, block: Block) -> Block:
         """Pass 2.5: Reject unresolved parameter shape dims in loop bounds.
 
@@ -457,6 +479,14 @@ class Transpiler(ABC, Generic[T]):
         validated = self.affine_validate(affine)
         partially_evaluated = self.partial_eval(validated, bindings)
         analyzed = self.analyze(partially_evaluated)
+        # Lower measurement-derived classical ops to ``RuntimeClassicalExpr``
+        # so emit can dispatch them through a dedicated backend hook
+        # instead of fold-or-translate logic over ``CompOp``/``CondOp``/
+        # ``NotOp``/``BinOp``. Non-runtime (foldable) classical ops are
+        # left untouched and continue through the existing emit-time fold
+        # path. Runs before symbolic-shape validation and segmentation
+        # so those passes see the rewritten IR.
+        analyzed = self.classical_lowering(analyzed)
         analyzed = self.validate_symbolic_shapes(analyzed)
         separated = self.plan(analyzed)
         return self.emit(separated, bindings, parameters)
