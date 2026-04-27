@@ -307,6 +307,67 @@ def test_decode_to_ommx_sampleset_constraint_feasibility(seed: int):
 
 
 @pytest.mark.parametrize("seed", [0, 1, 42])
+def test_fqaoa_decode_to_ommx_sampleset_round_trip(seed: int):
+    """FQAOAConverter.decode() round-trips into an ommx.v1.SampleSet.
+
+    Covers the wiring at FQAOAConverter.__init__ that sets ``self.instance``
+    to the post-qubo working copy after ``super().__init__(BinaryModel)``.
+    Without that wiring, the inherited polymorphic ``decode`` would fall
+    through to the BinaryModel branch and return a BinarySampleSet.
+    """
+    from qamomile.optimization.fqaoa import FQAOAConverter
+
+    rng = np.random.default_rng(seed)
+    n_sites = 2
+    n_orbitals = 2
+    dvs = []
+    for site in range(n_sites):
+        for orb in range(n_orbitals):
+            dvs.append(
+                ommx.v1.DecisionVariable.binary(
+                    site * n_orbitals + orb,
+                    name="x",
+                    subscripts=[site, orb],
+                )
+            )
+    weights = rng.uniform(-1.0, 1.0, len(dvs))
+    obj = sum(float(w) * dv for w, dv in zip(weights, dvs))
+    instance = ommx.v1.Instance.from_components(
+        decision_variables=dvs,
+        objective=obj,
+        constraints=[],
+        sense=ommx.v1.Instance.MINIMIZE,
+    )
+
+    converter = FQAOAConverter(instance, num_fermions=1)
+    transpiler = QiskitTranspiler()
+    executable = converter.transpile(transpiler, p=1)
+    bindings = {
+        "gammas": rng.uniform(0, np.pi, size=1).tolist(),
+        "betas": rng.uniform(0, np.pi / 2, size=1).tolist(),
+    }
+    result = executable.sample(
+        transpiler.executor(), shots=128, bindings=bindings
+    ).result()
+
+    sample_set = converter.decode(result)
+    assert isinstance(sample_set, ommx.v1.SampleSet)
+
+    # Every OMMX-reported objective must match a manual evaluation on the
+    # decoded bitstring — confirms FQAOA's stored self.instance is the
+    # right one for evaluate_samples and that DV indices line up.
+    summary = sample_set.summary
+    for sid in sample_set.sample_ids:
+        sol = sample_set.get(sid)
+        bits = [
+            int(round(sol.decision_variables_df.loc[i, "value"]))
+            for i in range(len(dvs))
+        ]
+        manual = sum(float(w) * b for w, b in zip(weights, bits))
+        assert summary.loc[sid, "objective"] == pytest.approx(manual, abs=1e-9)
+
+
+@pytest.mark.parametrize("seed", [0, 1, 42])
 def test_decode_to_ommx_sampleset_integer_slack_mapping(seed: int):
     """Integer decision variables are reconstructed from QUBO slack bits.
 
