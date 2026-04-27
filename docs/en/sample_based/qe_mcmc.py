@@ -15,8 +15,7 @@
 # %% [markdown]
 # # Quantum-enhanced Markov chain Monte Carlo
 #
-# This tutorial demonstrates how to implement Quantum-enhanced Markov chain
-# Monte Carlo (QeMCMC) using Qamomile.
+# This tutorial demonstrates how to implement Quantum-enhanced Markov chain Monte Carlo (QeMCMC) {https://doi.org/10.1038/s41586-023-06095-4} using Qamomile.
 
 # %%
 # Install the latest Qamomile through pip!
@@ -104,7 +103,7 @@ plt.show()
 # from probability distributions.
 # It achieves sampling from a target distribution by exploiting a stochastic
 # process called a Markov chain.
-# Here we introduce the Metropolis-Hastings (MH) algorithm, a common
+# Here we introduce the Metropolis-Hastings (MH) algorithm {https://doi.org/10.1093/biomet/57.1.97} , a common
 # implementation of MCMC.
 #
 # The MH algorithm generates a new transition $\bm{x} \rightarrow \bm{x}'$
@@ -220,7 +219,7 @@ plt.show()
 
 # %% [markdown]
 # The Quantum-enhanced MCMC algorithm is an MCMC that uses sampling from a
-# quantum circuit as its proposal distribution.
+# quantum circuit as its proposal distribution {https://doi.org/10.1038/s41586-023-06095-4}.
 # Starting from the current state $\bm{x}$, we apply a quantum circuit $U$
 # and measure in the computational basis to obtain a new state $\bm{y}$.
 # The resulting proposal distribution $Q(\bm{y}|\bm{x})$ is:
@@ -294,7 +293,7 @@ def qemcmc_circuit(
 # We transpile the kernel.
 # Running the quantum circuit requires fixed values for the Hamiltonian
 # mixing coefficient $\gamma$ and the simulation time $t$.
-# Following reference [3], we set $\gamma=0.45$, $t=12$, and
+# Following {https://doi.org/10.1103/PhysRevA.111.042615} , we set $\gamma=0.45$, $t=12$, and
 # $\Delta t = 0.8$.
 # At transpile time we bind `time` and `step`, while keeping `input` as a
 # runtime parameter.
@@ -413,14 +412,3 @@ plt.show()
 # average magnetization for classical MCMC and QeMCMC on the same Ising
 # chain, confirming that the end-to-end quantum-classical hybrid loop
 # behaves as intended.
-# %% [markdown]
-# ---
-# ## References
-#
-# [1] Layden, D., Mazzola, G., Mishmash, R.V. et al. Quantum-enhanced Markov chain Monte Carlo. Nature 619, 282–287 (2023). https://doi.org/10.1038/s41586-023-06095-4
-#
-#
-# [2] W. K. Hastings, Monte Carlo sampling methods using Markov chains and their applications, Biometrika, Volume 57, Issue 1, April 1970, Pages 97–109, https://doi.org/10.1093/biomet/57.1.97
-#
-#
-# [3] Christmann, Johannes, et al. "From quantum-enhanced to quantum-inspired Monte Carlo." Physical Review A 111.4 (2025): 042615. https://doi.org/10.1103/PhysRevA.111.042615
