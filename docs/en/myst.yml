@@ -30,6 +30,10 @@ project:
       file: vqa/index.md
       children:
         - file: vqa/qaoa_maxcut.ipynb
+    - title: Sample-based Algorithms
+      file: sample_based/index.md
+      children:
+        - file: sample_based/qe_mcmc.ipynb
     - title: Optimization
       file: optimization/index.md
       children:

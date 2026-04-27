@@ -171,3 +171,27 @@ def phase_gadget(
         right = indices[rev_next]
         q[left], q[right] = qmc.cx(q[left], q[right])
     return q
+
+
+@qmc.qkernel
+def computational_basis_state(
+    q: qmc.Vector[qmc.Qubit],
+    bits: qmc.Vector[qmc.Bit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Prepare the computational basis state labeled by ``bits``.
+
+    Applies X to ``q[i]`` iff ``bits[i] == 1``. Assumes ``q`` starts in
+    :math:`\\lvert 0 \\rangle^{\\otimes n}` and ``q.shape[0] == bits.shape[0]``.
+
+    Args:
+        q (qmc.Vector[qmc.Qubit]): Qubit register, expected to start in |0>^n.
+        bits (qmc.Vector[qmc.Bit]): Classical bit register specifying the target state.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Qubit register prepared in the |bits> state.
+    """
+    n = bits.shape[0]
+    for i in qmc.range(n):
+        if bits[i]:
+            q[i] = qmc.x(q[i])
+    return q
