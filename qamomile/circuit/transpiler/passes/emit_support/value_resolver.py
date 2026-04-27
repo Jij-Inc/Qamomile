@@ -70,7 +70,7 @@ class ValueResolver:
             idx = None
             if idx_value.is_constant():
                 idx = int(idx_value.get_const())
-            elif idx_value.name in bindings:
+            elif idx_value.name and idx_value.name in bindings:
                 idx = self._resolve_numeric_index(bindings[idx_value.name])
                 if idx is None:
                     bound_val = bindings[idx_value.name]
@@ -352,7 +352,7 @@ class ValueResolver:
                     idx = None
                     if idx_value.is_constant():
                         idx = int(idx_value.get_const())
-                    elif idx_value.name in bindings:
+                    elif idx_value.name and idx_value.name in bindings:
                         idx = self._resolve_numeric_index(bindings[idx_value.name])
                     elif idx_value.uuid in bindings:
                         idx = self._resolve_numeric_index(bindings[idx_value.uuid])

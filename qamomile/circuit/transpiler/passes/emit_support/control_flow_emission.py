@@ -254,7 +254,7 @@ def resolve_dict_entries(
             return bound
 
     # Check by name in bindings
-    if hasattr(dict_value, "name") and dict_value.name in bindings:
+    if hasattr(dict_value, "name") and dict_value.name and dict_value.name in bindings:
         bound = bindings[dict_value.name]
         if isinstance(bound, dict):
             return list(bound.items())

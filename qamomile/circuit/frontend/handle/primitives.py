@@ -45,21 +45,21 @@ class UInt(ArithmeticMixin, Handle):
     def _make_uint(self, val: int) -> "UInt":
         """Create a UInt from an integer constant."""
         return UInt(
-            value=Value(type=UIntType(), name="uint_const").with_const(val),
+            value=Value(type=UIntType(), name="").with_const(val),
             init_value=val,
         )
 
     def _make_result(self) -> "UInt":
         """Create a UInt result for an operation (required by ArithmeticMixin)."""
-        return UInt(value=Value(type=UIntType(), name="uint_tmp"), init_value=0)
+        return UInt(value=Value(type=UIntType(), name=""), init_value=0)
 
     def _make_float_result(self) -> "Float":
         """Create a Float result for division operations (required by ArithmeticMixin)."""
-        return Float(value=Value(type=FloatType(), name="float_tmp"), init_value=0.0)
+        return Float(value=Value(type=FloatType(), name=""), init_value=0.0)
 
     def _make_bit(self) -> "Bit":
         """Create a Bit result for a comparison."""
-        return Bit(value=Value(type=BitType(), name="bit_tmp"))
+        return Bit(value=Value(type=BitType(), name=""))
 
     def _coerce(self, other: int | float | UInt | Float) -> "UInt | Float":
         """Convert int/float to Handle if needed (required by ArithmeticMixin)."""
@@ -67,7 +67,7 @@ class UInt(ArithmeticMixin, Handle):
             return self._make_uint(other)
         if isinstance(other, float):
             return Float(
-                value=Value(type=FloatType(), name="float_const").with_const(other),
+                value=Value(type=FloatType(), name="").with_const(other),
                 init_value=other,
             )
         return other
@@ -152,7 +152,7 @@ class UInt(ArithmeticMixin, Handle):
     # UInt-specific multiplication (handles float case differently)
     def __mul__(self, other) -> "UInt | Float":
         if isinstance(other, float):
-            other_value = Value(type=FloatType(), name="float_const").with_const(other)
+            other_value = Value(type=FloatType(), name="").with_const(other)
             result = self._make_float_result()
             _emit_binop(self.value, other_value, result.value, BinOpKind.MUL)
             return result
@@ -212,13 +212,13 @@ class Float(ArithmeticMixin, Handle):
     def _make_float(self, val: float) -> "Float":
         """Create a Float from a constant."""
         return Float(
-            value=Value(type=FloatType(), name="float_const").with_const(val),
+            value=Value(type=FloatType(), name="").with_const(val),
             init_value=val,
         )
 
     def _make_result(self) -> "Float":
         """Create a Float result for an operation (required by ArithmeticMixin)."""
-        return Float(value=Value(type=FloatType(), name="float_tmp"), init_value=0.0)
+        return Float(value=Value(type=FloatType(), name=""), init_value=0.0)
 
     def _make_float_result(self) -> "Float":
         """Create a Float result for division (same as _make_result for Float)."""
@@ -287,7 +287,7 @@ class Float(ArithmeticMixin, Handle):
 
     def _make_bit(self) -> "Bit":
         """Create a Bit result for a comparison."""
-        return Bit(value=Value(type=BitType(), name="bit_tmp"))
+        return Bit(value=Value(type=BitType(), name=""))
 
     def __lt__(self, other) -> "Bit":
         other = self._coerce(other)
@@ -340,7 +340,7 @@ class Bit(Handle):
 
     def _make_bit(self) -> "Bit":
         """Create a fresh result Bit handle for an op."""
-        return Bit(value=Value(type=BitType(), name="bit_tmp"))
+        return Bit(value=Value(type=BitType(), name=""))
 
     def _coerce(self, other: "bool | int | Bit") -> "Bit":
         """Promote ``bool`` / ``int`` (0 or 1) to a constant Bit handle.
@@ -359,12 +359,12 @@ class Bit(Handle):
             return other
         if isinstance(other, bool):
             return Bit(
-                value=Value(type=BitType(), name="bit_const").with_const(other),
+                value=Value(type=BitType(), name="").with_const(other),
                 init_value=other,
             )
         if isinstance(other, int) and other in (0, 1):
             return Bit(
-                value=Value(type=BitType(), name="bit_const").with_const(bool(other)),
+                value=Value(type=BitType(), name="").with_const(bool(other)),
                 init_value=bool(other),
             )
         raise TypeError(

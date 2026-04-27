@@ -62,7 +62,7 @@ class LoopAnalyzer:
                     if hasattr(bound_val, "name"):
                         if bound_val.name == parent_loop_var:
                             return True
-                        if bound_val.name in bindings:
+                        if bound_val.name and bound_val.name in bindings:
                             bound = bindings[bound_val.name]
                             if not isinstance(bound, (int, float)):
                                 return True
