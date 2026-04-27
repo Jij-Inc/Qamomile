@@ -30,7 +30,9 @@ class BinarySampleSet(Generic[VT]):
 
         Each unique sample state is appended once with a list of sample IDs of
         length ``num_occurrences``, so OMMX-side aggregation reflects the
-        original shot counts without duplicating the underlying state.
+        original shot counts without duplicating the underlying state. Used
+        internally by :meth:`MathematicalProblemConverter.decode` to feed
+        bitstrings into ``Instance.evaluate_samples``.
 
         Returns:
             ommx.v1.Samples: An OMMX Samples object with ``sum(num_occurrences)``

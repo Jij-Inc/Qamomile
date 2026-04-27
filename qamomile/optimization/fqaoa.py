@@ -98,15 +98,28 @@ class FQAOAConverter(MathematicalProblemConverter):
         self.num_fermions = num_fermions
         self.normalize_ising = normalize_ising
 
+        # Deep-copy via bytes round-trip before to_qubo: to_qubo mutates the
+        # instance it is called on (absorbs constraints into the objective).
+        # Run the mutation on a throwaway copy so the caller's instance is
+        # left untouched, and store the copy for evaluate_samples — it still
+        # carries original-constraint metadata for feasibility reporting.
+        working = ommx.v1.Instance.from_bytes(instance.to_bytes())
         # FQAOA uses uniform_penalty_weight=0.0 (constraints handled by fermion number conservation)
-        qubo, constant = instance.to_qubo(uniform_penalty_weight=0.0)
+        qubo, constant = working.to_qubo(uniform_penalty_weight=0.0)
         binary_model = BinaryModel.from_qubo(qubo, constant)
 
-        # Store the original instance for cyclic_mapping and index labeling
+        # Keep the caller's original (untouched) instance for cyclic_mapping
+        # and index labeling — its decision_variables list is the user-facing
+        # one, not the post-qubo working copy.
         self._original_instance = instance
 
         # Pass the BinaryModel to the base class (which converts to SPIN internally)
         super().__init__(binary_model)
+        # Base class set self.instance = None because we passed a BinaryModel.
+        # Wire in the post-qubo working copy so decode_to_ommx_sampleset can
+        # round-trip back to ommx.v1.SampleSet (feasibility evaluated against
+        # the user's original constraints, which OMMX retains internally).
+        self.instance = working
 
     def __post_init__(self) -> None:
         last_var = self._original_instance.decision_variables[-1]
