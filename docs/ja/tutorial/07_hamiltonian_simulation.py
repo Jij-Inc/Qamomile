@@ -356,29 +356,3 @@ plt.show()
 # - **Suzuki–Trotterフラクタル**: $S_{2k}$は$S_{2k-2}$のリスケーリングされた5つのコピーを段ごとの係数$p_k = 1/(4 - 4^{1/(2k-1)})$で入れ子にして構築します。段をまたいで同じ定数を使い回すのはよくある罠で、フラクタルの構成にはなりません。
 # - **再帰**: 数学的な再帰を`order: UInt`を受け取る自己再帰`@qkernel`としてそのまま記述できます。トランスパイラが具体値の`order`バインドの下でinline + partial-evalを回し、フラットな回路を出力します。バインドがなければ自己呼び出しがIRに残り、停止しない再帰は`FrontendTransformError`で検出されます。
 # - **収束**: 両対数プロット上の傾き$2, 4, 8$は教科書通りのTrotter次数と一致します。また、`dt`と`n_steps`がシンボリックパラメータなので、回路構造を作り直さずにステップ幅を掃引できます。
-
-# %% [markdown]
-# ## 参考文献
-#
-# 1. H. F. Trotter, "On the product of semi-groups of operators,"
-#    *Proc. Amer. Math. Soc.*, **10**, 545–551 (1959).
-#    DOI: [10.2307/2033649](https://doi.org/10.2307/2033649)
-#
-# 2. G. Strang, "On the construction and comparison of difference schemes,"
-#    *SIAM J. Numer. Anal.*, **5**(3), 506–517 (1968).
-#    DOI: [10.1137/0705041](https://doi.org/10.1137/0705041)
-#
-# 3. M. Suzuki, "Fractal decomposition of exponential operators with
-#    applications to many-body theories and Monte Carlo simulations,"
-#    *Phys. Lett. A*, **146**(6), 319–323 (1990).
-#    DOI: [10.1016/0375-9601(90)90946-L](https://doi.org/10.1016/0375-9601(90)90946-L)
-#
-# 4. M. Suzuki, "General theory of fractal path integrals with applications to
-#    many-body theories and statistical physics,"
-#    *J. Math. Phys.*, **32**(2), 400–407 (1991).
-#    DOI: [10.1063/1.529425](https://doi.org/10.1063/1.529425)
-#
-# 5. N. Hatano and M. Suzuki, "Finding exponential product formulas of higher
-#    orders," in *Quantum Annealing and Other Optimization Methods*,
-#    Lecture Notes in Physics **679**, Springer (2005), pp. 37–68.
-#    DOI: [10.1007/11526216_2](https://doi.org/10.1007/11526216_2)

@@ -440,29 +440,3 @@ plt.show()
 # - **Convergence**: fidelity-error slopes of $2, 4, 8$ on log-log match
 #   textbook Trotter orders, and the symbolic `dt` / `n_steps` parameters let
 #   you sweep step sizes without rebuilding the circuit structure.
-
-# %% [markdown]
-# ## References
-#
-# 1. H. F. Trotter, "On the product of semi-groups of operators,"
-#    *Proc. Amer. Math. Soc.*, **10**, 545–551 (1959).
-#    DOI: [10.2307/2033649](https://doi.org/10.2307/2033649)
-#
-# 2. G. Strang, "On the construction and comparison of difference schemes,"
-#    *SIAM J. Numer. Anal.*, **5**(3), 506–517 (1968).
-#    DOI: [10.1137/0705041](https://doi.org/10.1137/0705041)
-#
-# 3. M. Suzuki, "Fractal decomposition of exponential operators with
-#    applications to many-body theories and Monte Carlo simulations,"
-#    *Phys. Lett. A*, **146**(6), 319–323 (1990).
-#    DOI: [10.1016/0375-9601(90)90946-L](https://doi.org/10.1016/0375-9601(90)90946-L)
-#
-# 4. M. Suzuki, "General theory of fractal path integrals with applications to
-#    many-body theories and statistical physics,"
-#    *J. Math. Phys.*, **32**(2), 400–407 (1991).
-#    DOI: [10.1063/1.529425](https://doi.org/10.1063/1.529425)
-#
-# 5. N. Hatano and M. Suzuki, "Finding exponential product formulas of higher
-#    orders," in *Quantum Annealing and Other Optimization Methods*,
-#    Lecture Notes in Physics **679**, Springer (2005), pp. 37–68.
-#    DOI: [10.1007/11526216_2](https://doi.org/10.1007/11526216_2)
