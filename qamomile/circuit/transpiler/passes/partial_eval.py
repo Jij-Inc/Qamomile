@@ -24,9 +24,15 @@ class PartialEvaluationPass(Pass[Block, Block]):
         return "partial_eval"
 
     def run(self, input: Block) -> Block:
-        if input.kind not in (BlockKind.AFFINE,):
+        # HIERARCHICAL is accepted so that the self-recursion unroll loop
+        # can interleave inline (which leaves one CallBlockOperation per
+        # self-ref per iteration) with partial_eval (which folds the
+        # base-case `if` before the next unroll).  The inner passes
+        # ignore CallBlockOperations, so this is safe.
+        if input.kind not in (BlockKind.AFFINE, BlockKind.HIERARCHICAL):
             raise ValidationError(
-                f"PartialEvaluationPass expects AFFINE block, got {input.kind}",
+                f"PartialEvaluationPass expects AFFINE or HIERARCHICAL "
+                f"block, got {input.kind}",
             )
 
         folded = ConstantFoldingPass(self._bindings).run(input)

@@ -1,5 +1,6 @@
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
+from qamomile._utils import is_close_zero
 from qamomile.circuit.algorithm.qaoa import (
     hubo_qaoa_state,
     qaoa_state,
@@ -8,7 +9,6 @@ from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.transpiler import Transpiler
 
 from .converter import MathematicalProblemConverter
-from .utils import is_close_zero
 
 
 class QAOAConverter(MathematicalProblemConverter):

@@ -831,6 +831,9 @@ class TestCompositeGateTranspilation:
         job = executable.sample(seeded_executor, shots=shots)
         result = job.result()
 
+        # num_outcomes = number of distinct measurement bitstrings, i.e. 2**n.
+        # Under H^⊗n on |0...0> all outcomes are equally likely (probability
+        # 1/num_outcomes each), independent of `shots` (the number of shots).
         num_outcomes = 2**n
         counts = {i: 0 for i in range(num_outcomes)}
         for bits, count in result.results:
@@ -840,12 +843,24 @@ class TestCompositeGateTranspilation:
         assert sum(counts.values()) == shots
         assert len([c for c in counts.values() if c > 0]) == num_outcomes
 
+        # Each per-outcome count is a Binomial(shots, 1/num_outcomes) marginal
+        # of the multinomial sampling distribution, so the 4 + 8 + 16 = 28
+        # checks aggregated across n in {2, 3, 4} are not independent -- but
+        # Bonferroni (union bound) is still a valid upper bound. A naive
+        # 3-sigma tolerance has a two-sided Gaussian tail of ~0.27% per
+        # outcome; multiplied by 28 outcomes this gives an aggregate flake
+        # rate of ~7.6% per CI run, which matches the reported flakes. At
+        # k_sigma = 5, summing the *exact* binomial two-sided tails over
+        # all 28 outcomes gives an aggregate bound of ~2.2e-5 per CI run.
+        # The simulator RNG is still pinned in `seeded_executor` (see
+        # conftest.py) so any failure is reproducible.
         expected = shots / num_outcomes
         sigma = (expected * (1 - 1 / num_outcomes)) ** 0.5
+        k_sigma = 5
         for outcome, count in counts.items():
-            assert abs(count - expected) < 3 * sigma, (
+            assert abs(count - expected) < k_sigma * sigma, (
                 f"n={n}, outcome={outcome}: count={count}, "
-                f"expected={expected:.0f} +/- {3 * sigma:.0f}"
+                f"expected={expected:.0f} +/- {k_sigma * sigma:.0f}"
             )
 
     def test_bell_pair_sampling(self, qiskit_transpiler, seeded_executor):
@@ -932,6 +947,9 @@ class TestCompositeGateTranspilation:
         job = executable.sample(seeded_executor, shots=shots)
         result = job.result()
 
+        # num_outcomes = number of distinct measurement bitstrings, i.e. 2**n.
+        # Under H^⊗n on |0...0> all outcomes are equally likely (probability
+        # 1/num_outcomes each), independent of `shots` (the number of shots).
         num_outcomes = 2**n
         counts = {i: 0 for i in range(num_outcomes)}
         for bits, count in result.results:

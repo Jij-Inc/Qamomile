@@ -107,6 +107,12 @@ class VFoldedBlock:
     """Folded control-flow block (For/While/ForItems/If).
 
     Rendered as a single box with header label and body summary text.
+
+    ``affected_qubits_precise`` is True when the analyzer determined
+    the affected-qubit set from a precise iteration walk with all
+    operands resolved; False when the conservative fallback was used
+    and the set may over-approximate. Renderers use this to decide
+    whether to mark participating wires with dots.
     """
 
     node_key: tuple
@@ -115,6 +121,7 @@ class VFoldedBlock:
     affected_qubits: list[int]
     folded_width: float
     kind: VFoldedKind
+    affected_qubits_precise: bool = True
 
 
 @dataclass
@@ -131,6 +138,7 @@ class VUnfoldedSequence:
     kind: VUnfoldedKind
     iteration_widths: list[float] = field(default_factory=list)
     condition_label: str | None = None
+    affected_qubits_precise: bool = True
 
 
 @dataclass

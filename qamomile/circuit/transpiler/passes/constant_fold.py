@@ -48,9 +48,12 @@ class ConstantFoldingPass(Pass[Block, Block]):
 
     def run(self, input: Block) -> Block:
         """Run constant folding on the block."""
-        if input.kind not in (BlockKind.AFFINE,):
+        # HIERARCHICAL is accepted during the self-recursion unroll loop;
+        # CallBlockOperations are passed through untouched.
+        if input.kind not in (BlockKind.AFFINE, BlockKind.HIERARCHICAL):
             raise ValidationError(
-                f"ConstantFoldingPass expects AFFINE block, got {input.kind}",
+                f"ConstantFoldingPass expects AFFINE or HIERARCHICAL "
+                f"block, got {input.kind}",
             )
 
         # Track folded values: uuid -> constant Value
