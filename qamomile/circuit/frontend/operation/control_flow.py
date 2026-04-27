@@ -125,9 +125,11 @@ def for_loop(
     body_tracer = Tracer()
 
     # Create a UInt to represent the loop variable (can be used as array index)
-    # Use the provided var_name so transpiler can identify this loop variable
+    # ``loop_var_value`` is the IR identity carrier (UUID); ``var_name`` is
+    # display-only and survives only for printers / error messages.
+    loop_var_value = Value(type=UIntType(), name=var_name)
     loop_var = UInt(
-        value=Value(type=UIntType(), name=var_name),
+        value=loop_var_value,
         init_value=0,  # Placeholder, actual value is symbolic during tracing
     )
 
@@ -136,7 +138,11 @@ def for_loop(
 
     # Create ForOperation
     # operands: [start, stop, step]
-    for_op = ForOperation(loop_var=var_name, operations=body_tracer.operations)
+    for_op = ForOperation(
+        loop_var=var_name,
+        loop_var_value=loop_var_value,
+        operations=body_tracer.operations,
+    )
     for_op.operands.append(_value_to_ir_value(start, "start"))
     for_op.operands.append(_value_to_ir_value(stop, "stop"))
     for_op.operands.append(_value_to_ir_value(step, "step"))
@@ -528,6 +534,11 @@ def for_items(
         key_type is not None and is_array_type(key_type) and len(key_var_names) == 1
     )
 
+    # Track the IR Values for each key/value variable so we can store them
+    # on the ForItemsOperation. Identity (for emit-time bindings + loop
+    # body refs) flows through these UUIDs; the string names are
+    # display-only.
+    key_var_values: list[Value] = []
     if _key_is_vector:
         # Create a symbolic Vector[UInt] handle for the key variable
         kv_name = key_var_names[0]
@@ -537,6 +548,7 @@ def for_items(
             name=kv_name,
             shape=(dim0_value,),
         )
+        key_var_values.append(array_value)
         dim0_handle = UInt(value=dim0_value)
         key_result = object.__new__(Vector)
         key_result.value = array_value
@@ -552,8 +564,10 @@ def for_items(
         # Create symbolic key handles (UInt for each key variable)
         key_handles = []
         for kv_name in key_var_names:
+            kv_value = Value(type=UIntType(), name=kv_name)
+            key_var_values.append(kv_value)
             key_handle = UInt(
-                value=Value(type=UIntType(), name=kv_name),
+                value=kv_value,
                 init_value=0,  # Placeholder, actual value bound at emit time
             )
             key_handles.append(key_handle)
@@ -565,8 +579,9 @@ def for_items(
             key_result = tuple(key_handles)
 
     # Create symbolic value handle (Float for Ising coefficients)
+    value_var_value = Value(type=FloatType(), name=value_var_name)
     value_handle = Float(
-        value=Value(type=FloatType(), name=value_var_name),
+        value=value_var_value,
         init_value=0.0,  # Placeholder, actual value bound at emit time
     )
 
@@ -578,6 +593,8 @@ def for_items(
         key_vars=key_var_names,
         value_var=value_var_name,
         key_is_vector=_key_is_vector,
+        key_var_values=tuple(key_var_values),
+        value_var_value=value_var_value,
         operations=body_tracer.operations,
     )
     for_items_op.operands.append(d.value)  # type: ignore[arg-type]  # DictValue is not Value but stored as operand

@@ -112,7 +112,11 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         # Use Qiskit's native for_loop context manager
         with circuit.for_loop(indexset) as loop_param:  # type: ignore[call-overload]
             loop_bindings = bindings.copy()
-            loop_bindings[op.loop_var] = loop_param
+            from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
+                _bind_loop_var,
+            )
+
+            _bind_loop_var(loop_bindings, op, loop_param)
             self._emit_operations(
                 circuit, op.operations, qubit_map, clbit_map, loop_bindings
             )

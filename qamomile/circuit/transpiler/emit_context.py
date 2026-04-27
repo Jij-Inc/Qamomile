@@ -4,7 +4,7 @@ Background — what was wrong with the bare ``dict[str, Any]``:
 
 The pre-EmitContext design used a single ``bindings: dict[str, Any]``
 threaded through every emit-pipeline function. That dict served at least
-five distinct semantic purposes simultaneously:
+seven distinct semantic purposes simultaneously:
 
 1. User-supplied kernel parameters (keyed by parameter name).
 2. Loop iteration variables (keyed by loop_var name; pushed on entry,
@@ -16,27 +16,47 @@ five distinct semantic purposes simultaneously:
    ``register_classical_phi_aliases``).
 5. Backend runtime expressions (e.g. ``qiskit.circuit.classical.expr.Expr``
    for compound runtime if-conditions).
+6. Array data (keyed by array name; bound iterables passed by user).
+7. Dict data (keyed by dict name; bound iterables passed by user).
+8. Pauli observables (keyed by observable name).
 
-This overloading was the structural cause of two bugs landed earlier in
-this session: the ``"bit_tmp"`` name-collision in chained predicates
-and the ``j_phi_4`` phi-alias that emit-time loop unrolling could not
-bind. Both were patched, but the underlying mess (one dict, five roles)
-remained.
+This overloading was the structural cause of every name-collision bug
+class seen in this codebase: ``"bit_tmp"`` chained predicates,
+``j_phi_4`` phi aliases, the inline-pass ``DictValue`` drop, and the
+type-blind ``bool(...)`` coercion in ``resolve_operand``. Each was
+patched locally; the structural overloading remained.
 
-What ``EmitContext`` does:
+What ``EmitContext`` does (root-cause fix):
 
 ``EmitContext`` is a ``dict`` subclass — flat ``[key]`` access still
-works, so existing emit-pipeline code (which expects a dict) is
-unchanged. On top of dict semantics, ``EmitContext`` keeps separate
-semantic slots (``_params``, ``_loop_vars``, ``_values``,
-``_runtime_exprs``) and exposes typed methods (``bind_param``,
-``bind_params``, ``push_loop_var``, ``set_value``,
-``set_runtime_expr``) that update both the slot and the flat view.
+works for migration compatibility. On top of dict semantics, every
+binding kind has a **separate, semantically-typed slot** with the
+appropriate identity key:
 
-Migration is incremental: new writers use the typed methods (clearer
-intent, slot-tagged data is easier to inspect when debugging); existing
-writers stay on ``ctx[key] = value`` for now and can be migrated PR by
-PR.
+- ``_params`` — user parameters, keyed by **name** (user-facing).
+- ``_loop_vars`` — loop iteration variables, keyed by **Value UUID**.
+- ``_values`` — emit-time intermediates, keyed by **UUID**.
+- ``_runtime_exprs`` — backend Expr objects, keyed by **UUID**.
+- ``_array_data`` — array bindings, keyed by ``ArrayValue.uuid``.
+- ``_dict_data`` — dict bindings, keyed by ``DictValue.uuid``.
+- ``_observables`` — Pauli observables, keyed by ``Value.uuid``.
+
+The key invariant: **after the migration, the dict-baseclass writes
+disappear**. All writers go through typed setters (``push_loop_var``,
+``set_array_data``, etc.); all readers go through typed getters.
+``EmitContext`` retains dict-protocol read-compat for legacy callers
+during migration, but new code should never touch ``ctx[key]``.
+
+Identity policy:
+
+- **UUID**: everything compiler-internal (loop vars, intermediates,
+  runtime exprs, array/dict/observable bindings).
+- **Name**: only at the user-API boundary (parameter names supplied by
+  ``transpile(bindings={...})``).
+
+This eliminates the name-collision bug class entirely: empty/duplicate
+names cannot resolve to anything because lookups never go through the
+name path.
 """
 
 from __future__ import annotations
@@ -56,16 +76,26 @@ class EmitContext(dict):
 
     Slots:
         _params: User-supplied kernel parameters, keyed by parameter
-            name. Stable across the run.
+            name. Stable across the run. **Name-keyed** because the user
+            supplies parameters by name at the public API boundary.
         _loop_vars: Currently-bound loop iteration variables, keyed by
-            ``loop_var``/``key_vars``/``value_var`` name. Pushed on
-            loop entry, restored on exit.
+            ``ForOperation.loop_var_value.uuid`` /
+            ``ForItemsOperation.value_var_value.uuid`` etc. Pushed on
+            loop entry, restored on exit. **UUID-keyed** so identical
+            user-chosen variable names in nested or sibling loops never
+            collide.
         _values: Emit-time-computed intermediate values (``BinOp``
             results, ``CompOp``/``CondOp``/``NotOp`` results, phi
             aliases), keyed by Value UUID.
         _runtime_exprs: Backend runtime-expression objects (e.g. Qiskit
             ``expr.Expr`` for compound classical conditions), keyed by
             Value UUID.
+        _array_data: Bound array data (e.g. ``Vector[Float]`` parameter
+            values), keyed by ``ArrayValue.uuid``.
+        _dict_data: Bound dict data (e.g. ``Dict[Tuple[UInt, UInt], Float]``
+            ising coefficients), keyed by ``DictValue.uuid``.
+        _observables: Bound Pauli observables (used by ``PauliEvolveOp``
+            and gate counting), keyed by observable Value UUID.
 
     Example:
         >>> ctx = EmitContext.from_user_bindings({"theta": 0.5, "n": 3})
@@ -79,7 +109,15 @@ class EmitContext(dict):
         True
     """
 
-    __slots__ = ("_params", "_loop_vars", "_values", "_runtime_exprs")
+    __slots__ = (
+        "_params",
+        "_loop_vars",
+        "_values",
+        "_runtime_exprs",
+        "_array_data",
+        "_dict_data",
+        "_observables",
+    )
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -87,6 +125,9 @@ class EmitContext(dict):
         self._loop_vars: dict[str, Any] = {}
         self._values: dict[str, Any] = {}
         self._runtime_exprs: dict[str, Any] = {}
+        self._array_data: dict[str, Any] = {}
+        self._dict_data: dict[str, Any] = {}
+        self._observables: dict[str, Any] = {}
 
     # -- Construction ------------------------------------------------------
 
@@ -118,15 +159,39 @@ class EmitContext(dict):
         for name, value in params.items():
             self.bind_param(name, value)
 
-    def push_loop_var(self, name: str, value: Any) -> None:
-        """Bind a loop iteration variable (by name).
+    def push_loop_var(
+        self,
+        uuid: str,
+        value: Any,
+        display_name: str | None = None,
+    ) -> None:
+        """Bind a loop iteration variable, keyed by Value UUID.
+
+        Args:
+            uuid: ``loop_var_value.uuid`` (or per-key/value UUID for
+                ``ForItemsOperation``). Different loops with identical
+                user-chosen names (e.g. nested ``for i``) get distinct
+                UUIDs and therefore never collide here.
+            value: The bound iteration value (int / Hamiltonian item / etc.).
+            display_name: Optional name for debug printing. Also written
+                to the flat-dict view for legacy name-fallback readers
+                during the migration period; remove once all readers
+                use UUID lookup.
 
         Note: this *adds* a binding to the existing context. Loop
         unrollers typically copy the parent context first so the binding
         is local to one iteration; this method does not copy.
         """
-        self._loop_vars[name] = value
-        self[name] = value
+        self._loop_vars[uuid] = value
+        self[uuid] = value
+        if display_name:
+            # Migration shim: legacy readers still look up by name.
+            # Remove once Phase 3 of #7 lands and all readers use UUID.
+            self[display_name] = value
+
+    def get_loop_var(self, uuid: str) -> Any:
+        """Get a loop variable binding by Value UUID, or None if absent."""
+        return self._loop_vars.get(uuid)
 
     def set_value(self, uuid: str, value: Any) -> None:
         """Bind an emit-time-computed intermediate by Value UUID.
@@ -148,6 +213,78 @@ class EmitContext(dict):
         self._runtime_exprs[uuid] = expr
         self[uuid] = expr
 
+    def get_runtime_expr(self, uuid: str) -> Any:
+        """Get a backend runtime expression by Value UUID, or None."""
+        return self._runtime_exprs.get(uuid)
+
+    def set_array_data(
+        self,
+        uuid: str,
+        data: Any,
+        display_name: str | None = None,
+    ) -> None:
+        """Bind array data by ``ArrayValue.uuid``.
+
+        Args:
+            uuid: The array Value's UUID.
+            data: The bound iterable / sequence / Vector handle.
+            display_name: Migration shim — also writes the flat-dict view
+                under the array's user-facing name. Remove once Phase 3
+                of #7 lands.
+        """
+        self._array_data[uuid] = data
+        self[uuid] = data
+        if display_name:
+            self[display_name] = data
+
+    def get_array_data(self, uuid: str) -> Any:
+        """Get array data by ``ArrayValue.uuid``, or None."""
+        return self._array_data.get(uuid)
+
+    def set_dict_data(
+        self,
+        uuid: str,
+        data: Any,
+        display_name: str | None = None,
+    ) -> None:
+        """Bind dict data by ``DictValue.uuid``.
+
+        Args:
+            uuid: The dict Value's UUID.
+            data: The bound dict / iterable.
+            display_name: Migration shim — see ``set_array_data``.
+        """
+        self._dict_data[uuid] = data
+        self[uuid] = data
+        if display_name:
+            self[display_name] = data
+
+    def get_dict_data(self, uuid: str) -> Any:
+        """Get dict data by ``DictValue.uuid``, or None."""
+        return self._dict_data.get(uuid)
+
+    def set_observable(
+        self,
+        uuid: str,
+        observable: Any,
+        display_name: str | None = None,
+    ) -> None:
+        """Bind a Pauli observable by Value UUID.
+
+        Args:
+            uuid: The observable Value's UUID.
+            observable: A ``qm_o.Hamiltonian`` (or backend-equivalent).
+            display_name: Migration shim — see ``set_array_data``.
+        """
+        self._observables[uuid] = observable
+        self[uuid] = observable
+        if display_name:
+            self[display_name] = observable
+
+    def get_observable(self, uuid: str) -> Any:
+        """Get a Pauli observable by Value UUID, or None."""
+        return self._observables.get(uuid)
+
     # -- Inspection helpers (debugging) -----------------------------------
 
     def describe(self) -> str:
@@ -156,13 +293,19 @@ class EmitContext(dict):
             f"EmitContext(params={len(self._params)}, "
             f"loop_vars={len(self._loop_vars)}, "
             f"values={len(self._values)}, "
-            f"runtime_exprs={len(self._runtime_exprs)})"
+            f"runtime_exprs={len(self._runtime_exprs)}, "
+            f"array_data={len(self._array_data)}, "
+            f"dict_data={len(self._dict_data)}, "
+            f"observables={len(self._observables)})"
         ]
         for label, slot in [
             ("params", self._params),
             ("loop_vars", self._loop_vars),
             ("values", self._values),
             ("runtime_exprs", self._runtime_exprs),
+            ("array_data", self._array_data),
+            ("dict_data", self._dict_data),
+            ("observables", self._observables),
         ]:
             for k, v in slot.items():
                 short_v = repr(v)
@@ -196,4 +339,7 @@ class EmitContext(dict):
         new._loop_vars = self._loop_vars.copy()
         new._values = self._values.copy()
         new._runtime_exprs = self._runtime_exprs.copy()
+        new._array_data = self._array_data.copy()
+        new._dict_data = self._dict_data.copy()
+        new._observables = self._observables.copy()
         return new

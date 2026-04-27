@@ -99,13 +99,39 @@ def emit_for(
     if emit_pass._emitter.supports_for_loop():
         loop_context = emit_pass._emitter.emit_for_loop_start(circuit, indexset)
         loop_bindings = bindings.copy()
-        loop_bindings[op.loop_var] = loop_context
+        _bind_loop_var(loop_bindings, op, loop_context)
         emit_pass._emit_operations(
             circuit, op.operations, qubit_map, clbit_map, loop_bindings
         )
         emit_pass._emitter.emit_for_loop_end(circuit, loop_context)
     else:
         emit_for_unrolled(emit_pass, circuit, op, qubit_map, clbit_map, bindings)
+
+
+def _bind_loop_var(
+    loop_bindings: Any,
+    op: ForOperation,
+    value: Any,
+) -> None:
+    """Push the loop variable binding into ``loop_bindings``.
+
+    Single source of truth for "how is a loop iteration variable bound
+    into the emit context". Always writes UUID-keyed (the canonical
+    identity) and additionally writes name-keyed for legacy readers
+    during the Phase-3 migration. Once name-fallback resolution is
+    removed (Phase 3 of #7), the name-keyed write also goes away.
+    """
+    uuid = op.loop_var_value.uuid if op.loop_var_value is not None else None
+    push_loop_var = getattr(loop_bindings, "push_loop_var", None)
+    if callable(push_loop_var) and uuid is not None:
+        push_loop_var(uuid, value, display_name=op.loop_var or None)
+    else:
+        # Legacy fallback: plain dict context, or IR built without
+        # loop_var_value (should not happen post-migration).
+        if uuid is not None:
+            loop_bindings[uuid] = value
+        if op.loop_var:
+            loop_bindings[op.loop_var] = value
 
 
 # ---------------------------------------------------------------------------
@@ -147,15 +173,7 @@ def emit_for_unrolled(
 
     for i in range(start, stop, step):
         loop_bindings = bindings.copy()
-        # Use the typed method when ``bindings`` is an EmitContext so the
-        # loop variable lands in the ``_loop_vars`` slot (visible when
-        # debugging). Falls back to plain dict assignment for the legacy
-        # callers that haven't migrated.
-        push_loop_var = getattr(loop_bindings, "push_loop_var", None)
-        if callable(push_loop_var):
-            push_loop_var(op.loop_var, i)
-        else:
-            loop_bindings[op.loop_var] = i
+        _bind_loop_var(loop_bindings, op, i)
         emit_pass._emit_operations(
             circuit, op.operations, qubit_map, clbit_map, loop_bindings
         )
@@ -192,26 +210,57 @@ def emit_for_items(
             f"Dict value: {dict_value.name if hasattr(dict_value, 'name') else dict_value}"
         )
 
+    key_var_values = op.key_var_values
+    value_var_value = op.value_var_value
+
     for key, value in entries:
         loop_bindings = bindings.copy()
         push = getattr(loop_bindings, "push_loop_var", None)
 
-        def _bind(name: str, v: Any, _push=push, _ctx=loop_bindings) -> None:
-            if callable(_push):
-                _push(name, v)
+        def _bind(
+            uuid: str | None,
+            display_name: str,
+            v: Any,
+            _push=push,
+            _ctx=loop_bindings,
+        ) -> None:
+            """Bind a key/value loop variable both UUID-keyed and (legacy) name-keyed."""
+            if callable(_push) and uuid is not None:
+                _push(uuid, v, display_name=display_name or None)
             else:
-                _ctx[name] = v
+                if uuid is not None:
+                    _ctx[uuid] = v
+                if display_name:
+                    _ctx[display_name] = v
 
         # Bind key variables (tuple unpacking)
         if len(op.key_vars) > 1:
             for i, kv_name in enumerate(op.key_vars):
-                _bind(kv_name, key[i] if hasattr(key, "__getitem__") else key)
+                kv_uuid = (
+                    key_var_values[i].uuid
+                    if key_var_values is not None and i < len(key_var_values)
+                    else None
+                )
+                _bind(
+                    kv_uuid,
+                    kv_name,
+                    key[i] if hasattr(key, "__getitem__") else key,
+                )
         elif len(op.key_vars) == 1:
-            _bind(op.key_vars[0], key)
+            kv_uuid = (
+                key_var_values[0].uuid
+                if key_var_values is not None and len(key_var_values) >= 1
+                else None
+            )
+            _bind(kv_uuid, op.key_vars[0], key)
             if op.key_is_vector:
-                _bind(f"{op.key_vars[0]}_dim0", len(key))
+                # The dim0 Value is a child of the ArrayValue stored in
+                # key_var_values[0]; for now bind the legacy name only
+                # (Vector key dim is rarely accessed by the loop body).
+                _bind(None, f"{op.key_vars[0]}_dim0", len(key))
 
-        _bind(op.value_var, value)
+        value_uuid = value_var_value.uuid if value_var_value is not None else None
+        _bind(value_uuid, op.value_var, value)
 
         emit_pass._emit_operations(
             circuit, op.operations, qubit_map, clbit_map, loop_bindings
