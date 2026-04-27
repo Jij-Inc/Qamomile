@@ -296,7 +296,20 @@ class _MetadataValueMixin:
 
 @dataclasses.dataclass(frozen=True)
 class Value(_MetadataValueMixin, typing.Generic[T]):
-    """A typed SSA value in the IR."""
+    """A typed SSA value in the IR.
+
+    The ``name`` field is **display-only**: it labels the value for
+    visualization and error messages and has no role in identity. Identity
+    is carried by ``uuid`` (per-version) and ``logical_id`` (across
+    versions).
+
+    An empty string (``name=""``) is the **anonymous marker** used by
+    auto-generated tmp values (arithmetic results, comparison results,
+    coerced constants). Name-based readers must guard with truthiness
+    (``if value.name and value.name in bindings: ...``) so anonymous values
+    never collide on a shared empty key. User-supplied parameter names and
+    array names continue to be non-empty.
+    """
 
     type: T
     name: str

@@ -351,7 +351,11 @@ def extract_phase_from_params(
                     param_name = operand.parameter_name()
                     if param_name and param_name in bindings:
                         return float(bindings[param_name])
-                if hasattr(operand, "name") and operand.name in bindings:
+                if (
+                    hasattr(operand, "name")
+                    and operand.name
+                    and operand.name in bindings
+                ):
                     return float(bindings[operand.name])
         elif operand.is_constant():
             const_val = operand.get_const()

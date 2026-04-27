@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import dataclasses
 
-from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind, CompOpKind
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOpKind,
+    CompOpKind,
+    CondOpKind,
+)
 from qamomile.circuit.ir.types import QFixedType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
@@ -12,7 +16,14 @@ from qamomile.circuit.ir.types.primitives import (
 )
 from qamomile.circuit.ir.value import Value
 
-from .handle import ArithmeticMixin, Handle, _emit_binop, _emit_compop
+from .handle import (
+    ArithmeticMixin,
+    Handle,
+    _emit_binop,
+    _emit_compop,
+    _emit_condop,
+    _emit_notop,
+)
 
 
 @dataclasses.dataclass
@@ -34,21 +45,21 @@ class UInt(ArithmeticMixin, Handle):
     def _make_uint(self, val: int) -> "UInt":
         """Create a UInt from an integer constant."""
         return UInt(
-            value=Value(type=UIntType(), name="uint_const").with_const(val),
+            value=Value(type=UIntType(), name="").with_const(val),
             init_value=val,
         )
 
     def _make_result(self) -> "UInt":
         """Create a UInt result for an operation (required by ArithmeticMixin)."""
-        return UInt(value=Value(type=UIntType(), name="uint_tmp"), init_value=0)
+        return UInt(value=Value(type=UIntType(), name=""), init_value=0)
 
     def _make_float_result(self) -> "Float":
         """Create a Float result for division operations (required by ArithmeticMixin)."""
-        return Float(value=Value(type=FloatType(), name="float_tmp"), init_value=0.0)
+        return Float(value=Value(type=FloatType(), name=""), init_value=0.0)
 
     def _make_bit(self) -> "Bit":
         """Create a Bit result for a comparison."""
-        return Bit(value=Value(type=BitType(), name="bit_tmp"))
+        return Bit(value=Value(type=BitType(), name=""))
 
     def _coerce(self, other: int | float | UInt | Float) -> "UInt | Float":
         """Convert int/float to Handle if needed (required by ArithmeticMixin)."""
@@ -56,7 +67,7 @@ class UInt(ArithmeticMixin, Handle):
             return self._make_uint(other)
         if isinstance(other, float):
             return Float(
-                value=Value(type=FloatType(), name="float_const").with_const(other),
+                value=Value(type=FloatType(), name="").with_const(other),
                 init_value=other,
             )
         return other
@@ -141,7 +152,7 @@ class UInt(ArithmeticMixin, Handle):
     # UInt-specific multiplication (handles float case differently)
     def __mul__(self, other) -> "UInt | Float":
         if isinstance(other, float):
-            other_value = Value(type=FloatType(), name="float_const").with_const(other)
+            other_value = Value(type=FloatType(), name="").with_const(other)
             result = self._make_float_result()
             _emit_binop(self.value, other_value, result.value, BinOpKind.MUL)
             return result
@@ -201,13 +212,13 @@ class Float(ArithmeticMixin, Handle):
     def _make_float(self, val: float) -> "Float":
         """Create a Float from a constant."""
         return Float(
-            value=Value(type=FloatType(), name="float_const").with_const(val),
+            value=Value(type=FloatType(), name="").with_const(val),
             init_value=val,
         )
 
     def _make_result(self) -> "Float":
         """Create a Float result for an operation (required by ArithmeticMixin)."""
-        return Float(value=Value(type=FloatType(), name="float_tmp"), init_value=0.0)
+        return Float(value=Value(type=FloatType(), name=""), init_value=0.0)
 
     def _make_float_result(self) -> "Float":
         """Create a Float result for division (same as _make_result for Float)."""
@@ -276,7 +287,7 @@ class Float(ArithmeticMixin, Handle):
 
     def _make_bit(self) -> "Bit":
         """Create a Bit result for a comparison."""
-        return Bit(value=Value(type=BitType(), name="bit_tmp"))
+        return Bit(value=Value(type=BitType(), name=""))
 
     def __lt__(self, other) -> "Bit":
         other = self._coerce(other)
@@ -326,3 +337,66 @@ class Float(ArithmeticMixin, Handle):
 @dataclasses.dataclass
 class Bit(Handle):
     init_value: bool = False
+
+    def _make_bit(self) -> "Bit":
+        """Create a fresh result Bit handle for an op."""
+        return Bit(value=Value(type=BitType(), name=""))
+
+    def _coerce(self, other: "bool | int | Bit") -> "Bit":
+        """Promote ``bool`` / ``int`` (0 or 1) to a constant Bit handle.
+
+        Args:
+            other: A Python ``bool``, integer ``0``/``1``, or another Bit.
+
+        Returns:
+            A Bit handle. Constants are wrapped in a Value with the
+            corresponding boolean constant baked in.
+
+        Raises:
+            TypeError: If ``other`` is not a Bit, bool, or 0/1 int.
+        """
+        if isinstance(other, Bit):
+            return other
+        if isinstance(other, bool):
+            return Bit(
+                value=Value(type=BitType(), name="").with_const(other),
+                init_value=other,
+            )
+        if isinstance(other, int) and other in (0, 1):
+            return Bit(
+                value=Value(type=BitType(), name="").with_const(bool(other)),
+                init_value=bool(other),
+            )
+        raise TypeError(
+            f"Bit logical op operand must be Bit, bool, or 0/1 int; got "
+            f"{type(other).__name__}"
+        )
+
+    def __and__(self, other: "bool | int | Bit") -> "Bit":
+        other_bit = self._coerce(other)
+        result = self._make_bit()
+        _emit_condop(self.value, other_bit.value, result.value, CondOpKind.AND)
+        return result
+
+    def __rand__(self, other: "bool | int") -> "Bit":
+        other_bit = self._coerce(other)
+        result = self._make_bit()
+        _emit_condop(other_bit.value, self.value, result.value, CondOpKind.AND)
+        return result
+
+    def __or__(self, other: "bool | int | Bit") -> "Bit":
+        other_bit = self._coerce(other)
+        result = self._make_bit()
+        _emit_condop(self.value, other_bit.value, result.value, CondOpKind.OR)
+        return result
+
+    def __ror__(self, other: "bool | int") -> "Bit":
+        other_bit = self._coerce(other)
+        result = self._make_bit()
+        _emit_condop(other_bit.value, self.value, result.value, CondOpKind.OR)
+        return result
+
+    def __invert__(self) -> "Bit":
+        result = self._make_bit()
+        _emit_notop(self.value, result.value)
+        return result

@@ -375,7 +375,7 @@ class ResourceAllocator:
                     return len(array_data)
 
         # Check by name, then uuid in bindings
-        if size_val.name in bindings:
+        if size_val.name and size_val.name in bindings:
             bound = bindings[size_val.name]
             if isinstance(bound, (int, float)):
                 return int(bound)
