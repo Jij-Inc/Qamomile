@@ -150,7 +150,7 @@ def test_fqaoa_converter_does_not_mutate_caller_instance():
 
 # --- End-to-end round-trip via Qiskit ---------------------------------------
 
-qiskit = pytest.importorskip("qiskit")
+pytest.importorskip("qiskit")
 from qamomile.qiskit.transpiler import QiskitTranspiler  # noqa: E402
 
 
