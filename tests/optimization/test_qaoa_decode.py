@@ -176,7 +176,7 @@ def test_qaoa_decode():
     best = sample_set.best_feasible
     # Optimal solution: x=0, y=1, z=1 with energy = 0*1 - 1*1 + 0 - 0.1*1 = -1.1
     assert abs(best.objective - (-1.1)) < 1e-6
-    var_value = {row.id: row.value for row in best.decision_variables}
+    var_value = {row.id: int(round(row.value)) for row in best.decision_variables}
     assert var_value[idx_x] == 0
     assert var_value[idx_y] == 1
     assert var_value[idx_z] == 1

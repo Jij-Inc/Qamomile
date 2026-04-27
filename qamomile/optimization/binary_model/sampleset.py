@@ -54,8 +54,10 @@ class BinarySampleSet(Generic[VT]):
             >>> ommx_samples.num_samples()
             4
         """
-        # Compare via the enum's str value to avoid zuban narrowing the
-        # generic VT typevar to BINARY and flagging the rest as unreachable.
+        # Compare via the enum's str value: bound TypeVar VT can be narrowed
+        # to the default (BINARY) by static type-checkers, which then flag
+        # the guard's non-BINARY branch as unreachable. The str(...) cast
+        # bypasses that narrowing without changing runtime semantics.
         if str(self.vartype) != str(VarType.BINARY):
             raise ValueError(
                 "to_ommx_samples requires vartype=BINARY; got "
