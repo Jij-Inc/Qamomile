@@ -1808,3 +1808,104 @@ class TestRound4Reviewer:
 
         with pytest.raises((ValueError, Exception)):
             kern.block
+
+    # ----- R4-D: eager BinOp folding when both operands are constants --------
+
+    def test_binop_with_two_constants_folds_eagerly_at_trace(self):
+        """``UInt(const) + 0`` collapses to a constant Value at trace, no BinOp."""
+        from qamomile.circuit.frontend.handle import UInt
+        from qamomile.circuit.frontend.tracer import Tracer, trace
+        from qamomile.circuit.ir.types.primitives import UIntType
+        from qamomile.circuit.ir.value import Value
+
+        t = Tracer()
+        with trace(t):
+            lo = UInt(
+                value=Value(type=UIntType(), name="lo").with_const(1),
+                init_value=1,
+            )
+            result = lo + 0
+
+        assert result.value.is_constant()
+        assert result.value.get_const() == 1
+        # No BinOp should have been added to the tracer for the trivial fold.
+        binop_kinds = [
+            type(op).__name__ for op in t.operations if type(op).__name__ == "BinOp"
+        ]
+        assert binop_kinds == [], f"expected no BinOp, got {binop_kinds}"
+
+    def test_binop_with_one_symbolic_operand_still_emits_binop(self):
+        """``UInt(symbolic) + 0`` keeps the BinOp — only both-const folds eagerly."""
+        from qamomile.circuit.frontend.handle import UInt
+        from qamomile.circuit.frontend.tracer import Tracer, trace
+        from qamomile.circuit.ir.types.primitives import UIntType
+        from qamomile.circuit.ir.value import Value
+
+        t = Tracer()
+        with trace(t):
+            lo = UInt(
+                value=Value(type=UIntType(), name="lo").with_parameter("lo"),
+                init_value=0,
+            )
+            result = lo + 0
+
+        # symbolic + const → BinOp must remain in trace
+        assert not result.value.is_constant()
+        binops = [op for op in t.operations if type(op).__name__ == "BinOp"]
+        assert len(binops) == 1
+
+    def test_qft_on_binop_derived_view_emits_gates(self):
+        """``qft(q[lo+0:hi+0])`` with bound parameters emits the same QFT as ``qft(q[lo:hi])``."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern_direct(lo: qmc.UInt, hi: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            view = q[lo:hi]
+            view = qmc.qft(view)
+            return qmc.measure(view)
+
+        @qmc.qkernel
+        def kern_binop(lo: qmc.UInt, hi: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            view = q[lo + 0 : hi + 0]
+            view = qmc.qft(view)
+            return qmc.measure(view)
+
+        transpiler = QiskitTranspiler()
+        bindings = {"lo": 1, "hi": 3}
+        qc_direct = transpiler.transpile(kern_direct, bindings=bindings).compiled_quantum[0].circuit
+        qc_binop = transpiler.transpile(kern_binop, bindings=bindings).compiled_quantum[0].circuit
+
+        # Same gate sequence on the same physical qubits
+        names_direct = [inst.operation.name for inst in qc_direct.data]
+        names_binop = [inst.operation.name for inst in qc_binop.data]
+        assert "qft" in names_binop, (
+            f"BinOp-derived view should emit qft; got {names_binop} "
+            f"(direct emitted {names_direct})"
+        )
+        assert names_direct == names_binop
+
+    def test_cast_on_binop_derived_view_emits_measurements(self):
+        """``cast(q[lo+0:hi+0], QFixed)`` resolves carriers with bound parameters."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern(lo: qmc.UInt, hi: qmc.UInt) -> qmc.Float:
+            q = qmc.qubit_array(8, "q")
+            view = q[(lo + 1) : (hi + 0)]
+            qf = qmc.cast(view, qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        transpiler = QiskitTranspiler()
+        # lo+1 = 2, hi+0 = 5 → view = q[2:5] → 3 carriers on physical {2,3,4}
+        exe = transpiler.transpile(kern, bindings={"lo": 1, "hi": 5})
+        qc = exe.compiled_quantum[0].circuit
+        measured_q = sorted(
+            inst.qubits[0]._index
+            for inst in qc.data
+            if inst.operation.name == "measure"
+        )
+        assert measured_q == [2, 3, 4]

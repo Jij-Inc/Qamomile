@@ -1077,7 +1077,7 @@ def _uint_min(a: int | UInt, b: int | UInt) -> int | UInt:
         init_value=int(b),
     )
     result = UInt(value=Value(type=UIntType(), name="uint_min"), init_value=0)
-    _emit_binop(a_uint.value, b_uint.value, result.value, BinOpKind.MIN)
+    _emit_binop(a_uint.value, b_uint.value, result, BinOpKind.MIN)
     return result
 
 
