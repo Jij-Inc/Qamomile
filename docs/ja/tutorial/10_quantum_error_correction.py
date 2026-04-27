@@ -109,7 +109,7 @@ def decode_3qubit_bitflip(
 
 
 # %% [markdown]
-# ### 動作検証:bit-flipエラーをすべての位置に注入
+# ### 動作検証: bit-flipエラーをすべての位置に注入
 #
 # `errors`は「X を適用すべき量子ビットインデックスの集合」を表します。Qamomile の `Dict[UInt, Bit]` で「キーが量子ビット index、value は単なるフラグ」と表現し、`for idx, _ in qmc.items(errors):` で各キーを走査します(value は使わないので `_` で受ける)。Set 相当のセマンティクスを Dict で実現する形です。
 #
@@ -245,7 +245,7 @@ def decode_3qubit_phaseflip(
 
 
 # %% [markdown]
-# ### 動作検証：phaseエラーを注入
+# ### 動作検証: phaseエラーを注入
 #
 # 単独のphase-flipエラー$Z$は、論理基底$\lvert 0\rangle$, $\lvert 1\rangle$には影響しません(これらは$Z$の固有状態だからです)。検証には**重ね合わせ状態**が必要です。ここでは$\lvert +\rangle = (\lvert 0\rangle + \lvert 1\rangle)/\sqrt{2}$をエンコードし、$Z$エラー注入後に最後に$H$をかけてから測定します。エラーが正しく訂正されていれば、結果は**常に0**になるはずです。
 
@@ -354,7 +354,7 @@ def decode_shor(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
 # %% [markdown]
 # ### 任意の単一量子ビット誤りを訂正
 #
-# Shor符号の真価は$X$, $Y$, $Z$のいずれの単一量子ビット誤りに対しても訂正できる点にあります。エラーチャネルを「量子ビットインデックス → エラー種類」の辞書で表現し、エンコード後にコンパイル時アンロールで指定位置にPauli演算子を作用させます。
+# Shor符号の真価は$X$, $Y$, $Z$のいずれの単一量子ビット誤りに対しても訂正できる点にあります。エラーチャネルを「量子ビットインデックス → エラー種類」の辞書で表現し、エンコード後に**コンパイル時アンロール**(`bindings={"errors": {...}}` で渡された辞書をもとに `for` ループが transpile 時に固定回路に展開される機構)で指定位置に Pauli 演算子を作用させます。
 
 # %%
 NO_ERROR = 0

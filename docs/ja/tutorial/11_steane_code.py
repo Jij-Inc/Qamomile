@@ -233,10 +233,10 @@ def inject_single_pauli(
 def steane_run(
     error_type: qmc.UInt, error_pos: qmc.UInt
 ) -> qmc.Vector[qmc.Bit]:
-    """`error_type` ∈ {1=X, 2=Y, 3=Z}, `error_pos` ∈ {0..6} で 1 つの誤りを指定。
+    """`error_type` ∈ {0=NO_ERROR, 1=X, 2=Y, 3=Z}, `error_pos` ∈ {0..6} で 1 つの誤りを指定。
 
     両パラメータをコンパイル時に束縛するので、`inject_single_pauli` 内のループ・if
-    は折り畳まれて 1 つのゲートに簡約される。
+    は折り畳まれて 1 つのゲート(または NO_ERROR では no-op)に簡約される。
     """
     data = qmc.qubit_array(7, name="data")
     anc = qmc.qubit_array(6, name="anc")  # 0..2: X-error syndrome, 3..5: Z-error syndrome
@@ -338,7 +338,7 @@ def steane_run(
 # %% [markdown]
 # ## 5. 動作検証: $X$, $Y$, $Z$ すべての単一量子ビット誤り
 #
-# Steane 符号は $X$, $Y$, $Z$ いずれの単一量子ビット誤りでも訂正できます。各 (誤り種類, 位置) について 1000 ショット実行し、訂正後の論理状態が **$\lvert 0_L\rangle$ のままで保たれている**ことを確認します。
+# Steane 符号は $X$, $Y$, $Z$ いずれの単一量子ビット誤りでも訂正できます。各 (誤り種類, 位置) について 400 ショット実行し、訂正後の論理状態が **$\lvert 0_L\rangle$ のままで保たれている**ことを確認します。
 #
 # 検証指標: $\lvert 0_L\rangle$ は偶重み Hamming 符号語のみで構成されるので、訂正後に全 7 量子ビットを測定したビット列の **重み(1 の個数)が偶数**であれば論理状態は保たれています。
 
