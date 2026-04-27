@@ -249,18 +249,26 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         from qiskit.circuit.classical import expr
 
         def resolve_operand(v: Any) -> Any:
-            """Resolve an operand to a Qiskit ``Expr`` / ``Clbit`` / Python literal."""
+            """Resolve an operand to a Qiskit ``Expr`` / ``Clbit`` / Python literal.
+
+            Numeric constants and scalar bindings are preserved as-is (no
+            ``bool`` coercion): Qiskit ``expr`` arithmetic (``add``/``sub``/
+            ``mul``/``div``) and comparisons (``equal``/``less``/...) need
+            the original ``int``/``float`` values. Bit-typed constants
+            already store a ``bool`` via ``Bit._coerce``, so they pass
+            through unchanged.
+            """
             if hasattr(v, "uuid"):
                 stored = bindings.get(v.uuid)
-                if stored is not None and not isinstance(stored, (bool, int)):
+                if stored is not None and not isinstance(stored, (bool, int, float)):
                     return stored  # already-built backend expr
                 if hasattr(v, "is_constant") and v.is_constant():
-                    return bool(v.get_const())
+                    return v.get_const()
                 addr = QubitAddress(v.uuid)
                 if addr in clbit_map:
                     return circuit.clbits[clbit_map[addr]]
-                if isinstance(stored, (bool, int)):
-                    return bool(stored)
+                if isinstance(stored, (bool, int, float)):
+                    return stored
             return None
 
         kind = op.kind
