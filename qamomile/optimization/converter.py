@@ -17,9 +17,17 @@ class MathematicalProblemConverter(abc.ABC):
             self.original_vartype = instance.vartype
             self.spin_model = instance.change_vartype(VarType.SPIN)
         elif isinstance(instance, ommx.v1.Instance):
-            self.instance = instance
+            # Deep-copy via bytes round-trip before to_qubo: to_qubo mutates
+            # the instance it is called on (appends slack decision variables
+            # for non-binary vars, absorbs constraints into the objective via
+            # the penalty method). Mutating the caller's instance silently is
+            # surprising; copy first so the caller keeps an untouched view.
+            # The deep copy retains original-constraint metadata internally,
+            # so evaluate_samples on it still reports feasibility against the
+            # user's original constraints.
+            self.instance = ommx.v1.Instance.from_bytes(instance.to_bytes())
             self.original_vartype = VarType.BINARY  # OMMX uses BINARY
-            qubo, constant = instance.to_qubo()
+            qubo, constant = self.instance.to_qubo()
             self.spin_model = BinaryModel.from_qubo(qubo, constant).change_vartype(
                 VarType.SPIN
             )
@@ -47,11 +55,77 @@ class MathematicalProblemConverter(abc.ABC):
     def decode(
         self,
         samples: SampleResult[list[int]],
-    ) -> BinarySampleSet:
+    ) -> BinarySampleSet | ommx.v1.SampleSet:
         """Decode quantum measurement results.
 
-        Returns results in the original vartype (BINARY or SPIN) that was
-        provided when constructing the converter.
+        The return type tracks the input that built this converter:
+
+        * Built from an :class:`ommx.v1.Instance` — returns an
+          :class:`ommx.v1.SampleSet` evaluated against the original
+          (un-penalized) instance, so feasibility, objective, and
+          per-constraint violations are available through OMMX's own
+          API (``.summary``, ``.summary_with_constraints``,
+          ``.best_feasible``, ``.feasible``, ``.objectives``).
+        * Built from a :class:`BinaryModel` — returns a
+          :class:`BinarySampleSet` with samples in the model's original
+          vartype (BINARY 0/1 or SPIN ±1), energies, and shot counts.
+
+        .. note::
+           For OMMX-backed converters, ``Instance.to_qubo`` was applied
+           to a deep copy of the caller's instance during
+           construction — it mutates the instance it is called on
+           (penalty form, slack decision variables for non-binary vars).
+           The stored copy retains original-constraint metadata
+           internally, so feasibility on the returned SampleSet is
+           reported against the user's *original* constraints, not the
+           absorbed-penalty form. Slack bits added by ``to_qubo`` are
+           reconstructed back into the original decision variables
+           (e.g., integers rebuilt from log-encoded binary slack bits)
+           by ``evaluate_samples`` automatically.
+
+        Args:
+            samples: Raw quantum measurement results from
+                ``ExecutableProgram.sample(...).result()``.
+
+        Returns:
+            BinarySampleSet | ommx.v1.SampleSet: see method description.
+
+        Example:
+            >>> # OMMX in → OMMX out
+            >>> converter = QAOAConverter(ommx_instance)
+            >>> exe = converter.transpile(QiskitTranspiler(), p=2)
+            >>> result = exe.sample(QiskitTranspiler().executor(),
+            ...                     shots=1024,
+            ...                     bindings={"gammas": gs, "betas": bs}).result()
+            >>> sample_set = converter.decode(result)
+            >>> sample_set.best_feasible.objective
+        """
+        binary_sampleset = self._decode_to_binary_sampleset(samples)
+        if self.instance is not None:
+            ommx_samples = binary_sampleset.to_ommx_samples()
+            return self.instance.evaluate_samples(ommx_samples)
+        return binary_sampleset
+
+    def _decode_to_binary_sampleset(
+        self,
+        samples: SampleResult[list[int]],
+    ) -> BinarySampleSet:
+        """Decode samples into a BinarySampleSet in the original vartype.
+
+        This is the internal stage shared by both branches of
+        :meth:`decode` — it produces a sampleset keyed by the SPIN model's
+        original variable indices (which, for OMMX-backed converters, are
+        the QUBO variable IDs). The OMMX branch of :meth:`decode` then
+        forwards this through :meth:`BinarySampleSet.to_ommx_samples` and
+        ``Instance.evaluate_samples`` to obtain an OMMX SampleSet.
+
+        Args:
+            samples: Raw quantum measurement results.
+
+        Returns:
+            BinarySampleSet: in the converter's ``original_vartype``
+            (BINARY for OMMX-backed converters, the BinaryModel's vartype
+            otherwise).
         """
         # First decode in SPIN domain
         spin_sampleset = self.spin_model.decode_from_sampleresult(samples)
@@ -75,58 +149,3 @@ class MathematicalProblemConverter(abc.ABC):
         else:
             # Already in SPIN, return as-is
             return spin_sampleset
-
-    def decode_to_ommx_sampleset(
-        self,
-        samples: SampleResult[list[int]],
-    ) -> ommx.v1.SampleSet:
-        """Decode quantum measurement results into an OMMX ``SampleSet``.
-
-        Closes the OMMX round-trip: when this converter was constructed with
-        an ``ommx.v1.Instance``, the returned ``SampleSet`` evaluates the
-        original (un-penalized) objective and constraints against the OMMX
-        instance, exposing feasibility, objective values, and per-constraint
-        violations through OMMX's own API surface.
-
-        Args:
-            samples: Raw quantum measurement results from
-                ``ExecutableProgram.sample(...).result()``. The bitstrings
-                are decoded into the QUBO variable space and forwarded to
-                ``Instance.evaluate_samples``, which performs the inverse
-                mapping (including reconstruction of integer / continuous
-                decision variables from slack bits) internally.
-
-        Returns:
-            ommx.v1.SampleSet: An OMMX SampleSet containing one sample ID per
-            shot occurrence, with objective/feasibility evaluated against the
-            original OMMX instance. Use ``.summary``,
-            ``.summary_with_constraints``, ``.best_feasible``,
-            ``.feasible``, and ``.objectives`` to inspect results.
-
-        Raises:
-            ValueError: If this converter was constructed from a
-                ``BinaryModel`` rather than an ``ommx.v1.Instance``. In that
-                case there is no OMMX instance to evaluate against; use
-                :meth:`decode` to obtain a ``BinarySampleSet`` instead.
-
-        Example:
-            >>> converter = QAOAConverter(ommx_instance)
-            >>> exe = converter.transpile(QiskitTranspiler(), p=2)
-            >>> result = exe.sample(QiskitTranspiler().executor(),
-            ...                     shots=1024,
-            ...                     bindings={"gammas": gs, "betas": bs}).result()
-            >>> sample_set = converter.decode_to_ommx_sampleset(result)
-            >>> best = sample_set.best_feasible
-            >>> best.objective, best.feasible
-        """
-        if self.instance is None:
-            raise ValueError(
-                "decode_to_ommx_sampleset requires the converter to have been "
-                "constructed with an ommx.v1.Instance; this converter was built "
-                "from a BinaryModel. Use decode() to obtain a BinarySampleSet "
-                "instead."
-            )
-
-        binary_sampleset = self.decode(samples)
-        ommx_samples = binary_sampleset.to_ommx_samples()
-        return self.instance.evaluate_samples(ommx_samples)
