@@ -305,13 +305,21 @@ executable = transpiler.transpile(
 # We use `scipy.optimize.minimize` with the COBYLA method. At each
 # iteration, the optimizer samples the circuit and evaluates the mean
 # energy.
+#
+# We also pass `seed_simulator` to `AerSimulator` and seed the NumPy
+# generator with the same value so that the optimization trajectory and
+# the final partition are reproducible across runs.
 
 # %%
 import os
 import numpy as np
+from qiskit_aer import AerSimulator
 from scipy.optimize import minimize
 
-executor = transpiler.executor()
+SEED = 42
+executor = transpiler.executor(
+    backend=AerSimulator(seed_simulator=SEED, max_parallel_threads=1)
+)
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 sample_shots = 256 if docs_test_mode else 2048
 maxiter = 20 if docs_test_mode else 500
@@ -332,7 +340,7 @@ def cost_fn(params):
     return energy
 
 
-rng = np.random.default_rng(42)
+rng = np.random.default_rng(SEED)
 initial_params = rng.uniform(-np.pi / 2, np.pi / 2, 2 * p)
 
 res = minimize(cost_fn, initial_params, method="COBYLA", options={"maxiter": maxiter})
@@ -428,8 +436,11 @@ if best_qaoa_sample is not None:
 # (`gammas`, `betas`).
 #
 # Let's build the same circuit using the built-in function to confirm
-# that it implements the same structure. We reuse the default local
-# executor so the example remains portable across environments.
+# that it implements the same structure. Each executor below is
+# instantiated with the same `seed_simulator=SEED`, so the manual and
+# built-in routes draw identical samples whenever they emit identical
+# circuits — making any printed energy difference purely a consequence
+# of (typically tiny) gate-order differences, not of sampling noise.
 
 # %%
 from qamomile.circuit.algorithm import qaoa_state
@@ -463,8 +474,12 @@ exe_builtin = transpiler.transpile(
     parameters=["gammas", "betas"],
 )
 
-executor_manual = transpiler.executor()
-executor_builtin = transpiler.executor()
+executor_manual = transpiler.executor(
+    backend=AerSimulator(seed_simulator=SEED, max_parallel_threads=1)
+)
+executor_builtin = transpiler.executor(
+    backend=AerSimulator(seed_simulator=SEED, max_parallel_threads=1)
+)
 
 result_manual = executable.sample(
     executor_manual,

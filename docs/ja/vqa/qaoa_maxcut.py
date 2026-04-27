@@ -263,13 +263,19 @@ executable = transpiler.transpile(
 
 # %% [markdown]
 # `scipy.optimize.minimize`のCOBYLA法を使います。各反復で回路をサンプリングし、平均エネルギーを評価します。
+#
+# `AerSimulator`に`seed_simulator`を渡し、NumPy乱数生成器も同じ値でシードすることで、最適化の軌跡と最終的な分割が実行ごとに再現できるようにします。
 
 # %%
 import os
 import numpy as np
+from qiskit_aer import AerSimulator
 from scipy.optimize import minimize
 
-executor = transpiler.executor()
+SEED = 42
+executor = transpiler.executor(
+    backend=AerSimulator(seed_simulator=SEED, max_parallel_threads=1)
+)
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 sample_shots = 256 if docs_test_mode else 2048
 maxiter = 20 if docs_test_mode else 500
@@ -290,7 +296,7 @@ def cost_fn(params):
     return energy
 
 
-rng = np.random.default_rng(42)
+rng = np.random.default_rng(SEED)
 initial_params = rng.uniform(-np.pi / 2, np.pi / 2, 2 * p)
 
 res = minimize(cost_fn, initial_params, method="COBYLA", options={"maxiter": maxiter})
@@ -378,7 +384,7 @@ if best_qaoa_sample is not None:
 #
 # 上で実装したすべて — 重ね合わせ、コスト層、ミキサー層、レイヤーのループ — は`qamomile.circuit.algorithm.qaoa_state`として既に提供されています。同じIsing係数（`quad`, `linear`）と変分パラメータ（`gammas`, `betas`）を受け取ります。
 #
-# 組み込み関数を使って同じ構造の回路が実装されていることを確認します。環境依存を避けるため、ここでも既定のローカルexecutorを使います。
+# 組み込み関数を使って同じ構造の回路が実装されていることを確認します。下記の各executorは同じ`seed_simulator=SEED`で初期化されているため、手動版と組み込み版が同一回路を出力する限り、両者は完全に同じサンプルを得ます。最終的に表示される平均エネルギーに差分が残る場合、それはサンプリングノイズではなく回路のゲート順序の差に起因します。
 
 # %%
 from qamomile.circuit.algorithm import qaoa_state
@@ -412,8 +418,12 @@ exe_builtin = transpiler.transpile(
     parameters=["gammas", "betas"],
 )
 
-executor_manual = transpiler.executor()
-executor_builtin = transpiler.executor()
+executor_manual = transpiler.executor(
+    backend=AerSimulator(seed_simulator=SEED, max_parallel_threads=1)
+)
+executor_builtin = transpiler.executor(
+    backend=AerSimulator(seed_simulator=SEED, max_parallel_threads=1)
+)
 
 result_manual = executable.sample(
     executor_manual,
