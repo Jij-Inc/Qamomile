@@ -201,9 +201,6 @@ def test_decode_to_ommx_sampleset_round_trip(seed: int):
     sample_set = converter.decode(result)
     assert isinstance(sample_set, ommx.v1.SampleSet)
 
-    # Per-sample objective check: every objective OMMX reports must equal a
-    # manual evaluation on one of the sampled bitstrings.
-    binary_ss = converter._decode_to_binary_sampleset(result)
     n = 3
 
     def _max_cut_value(bits: list[int]) -> float:
@@ -213,12 +210,16 @@ def test_decode_to_ommx_sampleset_round_trip(seed: int):
             for j in range(i + 1, n)
         )
 
-    manual_objectives = {
-        round(_max_cut_value([s[i] for i in range(n)]), 10) for s in binary_ss.samples
-    }
+    # Per-sample objective check via OMMX's own API: for every sample_id,
+    # the objective OMMX reports must equal a manual evaluation on the
+    # corresponding decoded bitstring.
     summary = sample_set.summary
-    ommx_objectives = {round(o, 10) for o in summary["objective"].tolist()}
-    assert ommx_objectives.issubset(manual_objectives)
+    for sid in sample_set.sample_ids:
+        sol = sample_set.get(sid)
+        bits = [int(round(sol.decision_variables_df.loc[i, "value"])) for i in range(n)]
+        assert summary.loc[sid, "objective"] == pytest.approx(
+            _max_cut_value(bits), abs=1e-9
+        )
 
     # Best-feasible's objective must be the OMMX argmin (no constraints) and
     # must not undershoot the global optimum found by exhaustive enumeration.
@@ -279,36 +280,25 @@ def test_decode_to_ommx_sampleset_constraint_feasibility(seed: int):
     sample_set = converter.decode(result)
     assert isinstance(sample_set, ommx.v1.SampleSet)
 
-    binary_ss = converter._decode_to_binary_sampleset(result)
-    expected_feasibility_per_state = []
-    for sample in binary_ss.samples:
-        bits = [sample[i] for i in range(n)]
-        expected_feasibility_per_state.append(sum(bits) == target)
-
-    # OMMX feasibility is per sample_id, but identical states yield identical
-    # feasibility, so check that every expected-feasible state has at least
-    # one feasible sample_id and every expected-infeasible state has none.
+    # For every sample_id, OMMX's reported feasibility must match a
+    # hand-computed feasibility check on the decoded bitstring.
     summary = sample_set.summary
-    feasible_ids = set(summary[summary["feasible"]].index.tolist())
-    infeasible_ids = set(summary[~summary["feasible"]].index.tolist())
-
-    next_id = 0
-    for sample, occ, expect_feasible in zip(
-        binary_ss.samples, binary_ss.num_occurrences, expected_feasibility_per_state
-    ):
-        ids_for_state = set(range(next_id, next_id + occ))
-        next_id += occ
-        if expect_feasible:
-            assert ids_for_state.issubset(feasible_ids)
-        else:
-            assert ids_for_state.issubset(infeasible_ids)
+    any_feasible = False
+    for sid in sample_set.sample_ids:
+        sol = sample_set.get(sid)
+        bits = [int(round(sol.decision_variables_df.loc[i, "value"])) for i in range(n)]
+        expected_feasible = sum(bits) == target
+        actual_feasible = bool(summary.loc[sid, "feasible"])
+        assert actual_feasible == expected_feasible
+        any_feasible = any_feasible or expected_feasible
 
     # If any sampled state was feasible, best_feasible must be feasible.
-    if any(expected_feasibility_per_state):
+    if any_feasible:
         assert sample_set.best_feasible.feasible
 
 
-def test_decode_to_ommx_sampleset_integer_slack_mapping():
+@pytest.mark.parametrize("seed", [0, 1, 42])
+def test_decode_to_ommx_sampleset_integer_slack_mapping(seed: int):
     """Integer decision variables are reconstructed from QUBO slack bits.
 
     OMMX's ``Instance.evaluate_samples`` is documented to handle the inverse
@@ -331,7 +321,7 @@ def test_decode_to_ommx_sampleset_integer_slack_mapping():
 
     transpiler = QiskitTranspiler()
     executable = converter.transpile(transpiler, p=1)
-    rng = np.random.default_rng(0)
+    rng = np.random.default_rng(seed)
     bindings = {
         "gammas": rng.uniform(0, np.pi, size=1).tolist(),
         "betas": rng.uniform(0, np.pi / 2, size=1).tolist(),
