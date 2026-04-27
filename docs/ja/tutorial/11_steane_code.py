@@ -190,12 +190,12 @@ for outcome, count in sorted(result.results, key=lambda x: -x[1]):
 #
 # 全体を 4 つのフェーズに分けて構築します:
 #
-# 1. **誤り注入**: `error_type` / `error_pos` で指定された 1 量子ビットに X/Y/Z を作用
+# 1. **誤り注入** (`inject_single_pauli`): `error_type` / `error_pos` で指定された 1 量子ビットに X/Y/Z を作用
 # 2. **Z 型スタビライザー測定** ($S_4, S_5, S_6$): X 誤りのシンドローム $(s^X_2, s^X_1, s^X_0)$ を 3 つの ancilla で取り出す
 # 3. **X 型スタビライザー測定** ($S_1, S_2, S_3$): Z 誤りのシンドローム $(s^Z_2, s^Z_1, s^Z_0)$ を 3 つの ancilla で取り出す
 # 4. **訂正** (Hamming ルックアップ): X-syndrome → X 訂正、Z-syndrome → Z 訂正
 #
-# 各フェーズは `# ---- Phase N: ... ----` のコメントで区切ります。誤り注入だけは別ヘルパーに切り出すこともできますが、コンパイル時パラメータが kernel 境界を跨ぐと現状のパイプラインでは折り畳みが効かないケースがあるため、本チュートリアルでは単一 kernel 内に展開します。
+# 誤り注入は `@qkernel` ヘルパーとして切り出します。残りのフェーズは `# ---- Phase N: ... ----` のコメントで区切って `steane_run` 内に展開します(syndrome 抽出用 ancilla の管理上、1 つの kernel に置く方が読みやすいため)。
 
 # %%
 NO_ERROR = 0
@@ -205,14 +205,35 @@ Z_ERROR = 3
 
 
 @qmc.qkernel
+def inject_single_pauli(
+    data: qmc.Vector[qmc.Qubit],
+    error_type: qmc.UInt,
+    error_pos: qmc.UInt,
+) -> qmc.Vector[qmc.Qubit]:
+    """`error_pos` 番目の量子ビットに `error_type` で指定された Pauli を作用させる。
+
+    `error_type` ∈ {1=X, 2=Y, 3=Z}; ``NO_ERROR=0`` ではどの分岐にも入らず no-op。
+    両パラメータがコンパイル時束縛されている前提なので、`for` / `if` はすべて
+    折り畳まれて単一ゲートに簡約される。
+    """
+    for j in qmc.range(7):
+        if (error_type == X_ERROR) & (error_pos == j):
+            data[j] = qmc.x(data[j])
+        if (error_type == Y_ERROR) & (error_pos == j):
+            data[j] = qmc.y(data[j])
+        if (error_type == Z_ERROR) & (error_pos == j):
+            data[j] = qmc.z(data[j])
+    return data
+
+
+@qmc.qkernel
 def steane_run(
     error_type: qmc.UInt, error_pos: qmc.UInt
 ) -> qmc.Vector[qmc.Bit]:
     """`error_type` ∈ {1=X, 2=Y, 3=Z}, `error_pos` ∈ {0..6} で 1 つの誤りを指定。
 
-    `for j in qmc.range(7)` で位置を走査し、`(error_type == X) & (error_pos == j)`
-    で該当位置にだけパウリゲートを当てる。両パラメータをコンパイル時に束縛する
-    ので、ループ・if は折り畳まれて 1 つのゲートに簡約される。
+    両パラメータをコンパイル時に束縛するので、`inject_single_pauli` 内のループ・if
+    は折り畳まれて 1 つのゲートに簡約される。
     """
     data = qmc.qubit_array(7, name="data")
     anc = qmc.qubit_array(6, name="anc")  # 0..2: X-error syndrome, 3..5: Z-error syndrome
@@ -221,13 +242,7 @@ def steane_run(
     data = encode_steane_zero(data)
 
     # ---- Phase 2: 単一量子ビット誤り注入 ----
-    for j in qmc.range(7):
-        if (error_type == X_ERROR) & (error_pos == j):
-            data[j] = qmc.x(data[j])
-        if (error_type == Y_ERROR) & (error_pos == j):
-            data[j] = qmc.y(data[j])
-        if (error_type == Z_ERROR) & (error_pos == j):
-            data[j] = qmc.z(data[j])
+    data = inject_single_pauli(data, error_type, error_pos)
 
     # ---- Phase 3: Z 型スタビライザー測定 (X 誤りのシンドローム) ----
     # S4 = Z3 Z4 Z5 Z6

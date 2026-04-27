@@ -264,6 +264,17 @@ class InlinePass(Pass[Block, Block]):
                         seen.add(resolved_dim.uuid)
                         resolved_dim = value_map[resolved_dim.uuid]
                     local_map[block_dim.uuid] = resolved_dim
+                    # Also propagate to outer ``value_map``. The callee
+                    # parameter's shape dim UUID can leak into outer Values
+                    # whenever frontend tracing inherits a Vector's shape from
+                    # a call result — most commonly ``qmc.measure(data)`` where
+                    # ``data`` is a helper return whose shape carries the
+                    # helper parameter's symbolic dim. Without this propagation
+                    # the outer op's result Vector shape stays as the inner
+                    # ``data_dim0`` Value, the resource allocator's
+                    # ``_resolve_size`` returns ``None``, and clbit allocation
+                    # silently drops the measurement entirely.
+                    value_map[block_dim.uuid] = resolved_dim
 
         # Clone operations with fresh UUIDs using UUIDRemapper
         remapper = UUIDRemapper()
@@ -308,15 +319,37 @@ class InlinePass(Pass[Block, Block]):
             remapped_uuid = uuid_remap.get(block_return.uuid, block_return.uuid)
             if remapped_uuid in remapped_local_map:
                 # The return value was mapped during inlining (modified input)
-                value_map[call_result.uuid] = remapped_local_map[remapped_uuid]
+                resolved = remapped_local_map[remapped_uuid]
+                value_map[call_result.uuid] = resolved
             else:
                 # The return value is a newly created value (not a modified input).
                 # Substitute to resolve shape dims, parent_array, etc.
                 substituted = sub.substitute_value(block_return)
                 if isinstance(substituted, Value):
                     value_map[call_result.uuid] = substituted
+                    resolved = substituted
                 else:
                     value_map[call_result.uuid] = call_result
+                    resolved = call_result
+
+            # Propagate the call_result's shape dim UUIDs to the outer
+            # value_map. The frontend creates a fresh ``ArrayValue`` for
+            # each ``CallBlockOperation.result`` with a fresh shape dim
+            # Value (derived from the callee's return type annotation,
+            # not the actual return Value's shape). Without this loop,
+            # any outer op whose result inherits the call_result's shape
+            # at frontend trace time (e.g., ``qmc.measure(call_result)``)
+            # will keep referencing the unresolved fresh shape dim
+            # forever, and downstream resource allocation drops the op.
+            if (
+                isinstance(call_result, ArrayValue)
+                and isinstance(resolved, ArrayValue)
+                and call_result.shape
+                and resolved.shape
+            ):
+                for cr_dim, resolved_dim in zip(call_result.shape, resolved.shape):
+                    if cr_dim.uuid != resolved_dim.uuid:
+                        value_map[cr_dim.uuid] = resolved_dim
 
         return inlined
 
