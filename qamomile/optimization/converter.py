@@ -75,3 +75,58 @@ class MathematicalProblemConverter(abc.ABC):
         else:
             # Already in SPIN, return as-is
             return spin_sampleset
+
+    def decode_to_ommx_sampleset(
+        self,
+        samples: SampleResult[list[int]],
+    ) -> ommx.v1.SampleSet:
+        """Decode quantum measurement results into an OMMX ``SampleSet``.
+
+        Closes the OMMX round-trip: when this converter was constructed with
+        an ``ommx.v1.Instance``, the returned ``SampleSet`` evaluates the
+        original (un-penalized) objective and constraints against the OMMX
+        instance, exposing feasibility, objective values, and per-constraint
+        violations through OMMX's own API surface.
+
+        Args:
+            samples: Raw quantum measurement results from
+                ``ExecutableProgram.sample(...).result()``. The bitstrings
+                are decoded into the QUBO variable space and forwarded to
+                ``Instance.evaluate_samples``, which performs the inverse
+                mapping (including reconstruction of integer / continuous
+                decision variables from slack bits) internally.
+
+        Returns:
+            ommx.v1.SampleSet: An OMMX SampleSet containing one sample ID per
+            shot occurrence, with objective/feasibility evaluated against the
+            original OMMX instance. Use ``.summary``,
+            ``.summary_with_constraints``, ``.best_feasible``,
+            ``.feasible``, and ``.objectives`` to inspect results.
+
+        Raises:
+            ValueError: If this converter was constructed from a
+                ``BinaryModel`` rather than an ``ommx.v1.Instance``. In that
+                case there is no OMMX instance to evaluate against; use
+                :meth:`decode` to obtain a ``BinarySampleSet`` instead.
+
+        Example:
+            >>> converter = QAOAConverter(ommx_instance)
+            >>> exe = converter.transpile(QiskitTranspiler(), p=2)
+            >>> result = exe.sample(QiskitTranspiler().executor(),
+            ...                     shots=1024,
+            ...                     bindings={"gammas": gs, "betas": bs}).result()
+            >>> sample_set = converter.decode_to_ommx_sampleset(result)
+            >>> best = sample_set.best_feasible
+            >>> best.objective, best.feasible
+        """
+        if self.instance is None:
+            raise ValueError(
+                "decode_to_ommx_sampleset requires the converter to have been "
+                "constructed with an ommx.v1.Instance; this converter was built "
+                "from a BinaryModel. Use decode() to obtain a BinarySampleSet "
+                "instead."
+            )
+
+        binary_sampleset = self.decode(samples)
+        ommx_samples = binary_sampleset.to_ommx_samples()
+        return self.instance.evaluate_samples(ommx_samples)
