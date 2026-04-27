@@ -252,27 +252,78 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         from qamomile.circuit.transpiler.errors import EmitError
         from qiskit.circuit.classical import expr
 
+        # Typed-slot lookups when bindings is an EmitContext; fall back to
+        # flat-dict access for legacy plain-dict callers (compat shim).
+        get_runtime_expr = getattr(bindings, "get_runtime_expr", None)
+        get_loop_var = getattr(bindings, "get_loop_var", None)
+        params_slot = getattr(bindings, "_params", None)
+
         def resolve_operand(v: Any) -> Any:
             """Resolve an operand to a Qiskit ``Expr`` / ``Clbit`` / Python literal.
 
-            Numeric constants and scalar bindings are preserved as-is (no
-            ``bool`` coercion): Qiskit ``expr`` arithmetic (``add``/``sub``/
-            ``mul``/``div``) and comparisons (``equal``/``less``/...) need
-            the original ``int``/``float`` values. Bit-typed constants
-            already store a ``bool`` via ``Bit._coerce``, so they pass
-            through unchanged.
+            Identity policy:
+              1. Backend ``expr.Expr`` from a prior ``RuntimeClassicalExpr``:
+                 read from the ``runtime_exprs`` typed slot via UUID.
+              2. Constants: ``v.get_const()`` returns the IR-typed value
+                 (Bit→bool, UInt→int, Float→float). No ``bool(...)``
+                 coercion — that would clobber numeric arithmetic.
+              3. Clbit references: the canonical ``QubitAddress(v.uuid)``
+                 lookup in ``clbit_map``.
+              4. User parameters: read from the ``parameters`` typed slot
+                 by parameter name (the only legitimate name path).
+              5. Loop variables: read from the ``loop_vars`` typed slot
+                 via UUID (preserved through inline by the all_input_values
+                 / replace_values protocol).
+
+            No name fallback — every step keys on UUID or an explicit
+            ``is_parameter()`` flag, never on display names.
             """
-            if hasattr(v, "uuid"):
-                stored = bindings.get(v.uuid)
+            if not hasattr(v, "uuid"):
+                return None
+
+            # 1. Backend expr already built for this Value (UUID-keyed).
+            if callable(get_runtime_expr):
+                expr_obj = get_runtime_expr(v.uuid)
+                if expr_obj is not None:
+                    return expr_obj
+            else:
+                stored = bindings.get(v.uuid) if hasattr(bindings, "get") else None
                 if stored is not None and not isinstance(stored, (bool, int, float)):
-                    return stored  # already-built backend expr
-                if hasattr(v, "is_constant") and v.is_constant():
-                    return v.get_const()
-                addr = QubitAddress(v.uuid)
-                if addr in clbit_map:
-                    return circuit.clbits[clbit_map[addr]]
+                    return stored
+
+            # 2. Constant — preserve IR type.
+            if hasattr(v, "is_constant") and v.is_constant():
+                return v.get_const()
+
+            # 3. Clbit reference.
+            addr = QubitAddress(v.uuid)
+            if addr in clbit_map:
+                return circuit.clbits[clbit_map[addr]]
+
+            # 4. User parameter (name-keyed by definition; surface from
+            #    typed slot when available).
+            if hasattr(v, "is_parameter") and v.is_parameter():
+                pname = v.parameter_name()
+                if pname:
+                    if params_slot is not None and pname in params_slot:
+                        return params_slot[pname]
+                    if hasattr(bindings, "get"):
+                        bound = bindings.get(pname)
+                        if bound is not None:
+                            return bound
+
+            # 5. Loop variable (UUID-keyed).
+            if callable(get_loop_var):
+                lv = get_loop_var(v.uuid)
+                if lv is not None:
+                    return lv
+
+            # 6. Legacy compat shim: plain-dict caller, scalar binding.
+            if hasattr(bindings, "get"):
+                stored = bindings.get(v.uuid)
                 if isinstance(stored, (bool, int, float)):
                     return stored
+
             return None
 
         kind = op.kind
@@ -307,7 +358,15 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
 
     @staticmethod
     def _build_qiskit_binary_expr(kind: RuntimeOpKind, lhs: Any, rhs: Any) -> Any:
-        """Map a binary ``RuntimeOpKind`` to its Qiskit ``expr`` constructor."""
+        """Map a binary ``RuntimeOpKind`` to its Qiskit ``expr`` constructor.
+
+        Every arm of ``RuntimeOpKind`` (except ``NOT``, which is handled
+        upstream) is dispatched here. Kinds without a Qiskit ``expr``
+        equivalent — currently ``FLOORDIV`` and ``POW`` — raise
+        ``NotImplementedError`` rather than silently returning ``None``,
+        so the contract gap is loud at emit time instead of producing a
+        misleading "Unsupported kind" error.
+        """
         from qiskit.circuit.classical import expr
 
         match kind:
@@ -329,8 +388,7 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
                 return expr.greater(lhs, rhs)
             case RuntimeOpKind.GE:
                 return expr.greater_equal(lhs, rhs)
-            # Arithmetic on classical bits — Qiskit ``expr`` supports a
-            # subset; map what's available, return None for the rest.
+            # Arithmetic
             case RuntimeOpKind.ADD:
                 return expr.add(lhs, rhs)
             case RuntimeOpKind.SUB:
@@ -339,8 +397,17 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
                 return expr.mul(lhs, rhs)
             case RuntimeOpKind.DIV:
                 return expr.div(lhs, rhs)
+            case RuntimeOpKind.FLOORDIV | RuntimeOpKind.POW:
+                raise NotImplementedError(
+                    f"RuntimeOpKind.{kind.name} is not supported by the Qiskit "
+                    f"backend (Qiskit's classical expr has no equivalent). "
+                    f"If you need this kind, fold it at compile time before "
+                    f"the runtime classical-lowering pass."
+                )
             case _:
-                return None
+                raise NotImplementedError(
+                    f"Unhandled RuntimeOpKind in _build_qiskit_binary_expr: {kind!r}"
+                )
 
     def _build_runtime_predicate_expr(
         self,

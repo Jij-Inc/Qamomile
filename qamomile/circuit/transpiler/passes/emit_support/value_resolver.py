@@ -199,16 +199,31 @@ class ValueResolver:
         # 2. IR constant.
         if hasattr(value, "is_constant") and value.is_constant():
             return value.get_const()
-        # 3. Kernel parameter — keyed by parameter name.
+        # 3. Kernel parameter — keyed by parameter name (the only
+        #    legitimate name-keyed path; user supplies parameters by name
+        #    at the public API boundary).
         if hasattr(value, "is_parameter") and value.is_parameter():
             param_name = value.parameter_name()
             if param_name and param_name in bindings:
                 return bindings[param_name]
-        # 4. UUID-keyed intermediates (BinOp results, phi aliases, etc).
+        # 4. UUID-keyed entries (intermediates, loop variables, runtime
+        #    exprs, phi aliases — every internally-created binding keys
+        #    on Value UUID).
         if value.uuid in bindings:
             return bindings[value.uuid]
-        # 5. Name-keyed entries (parameters reusing their Value name, loop
-        #    iteration variables, phi alias names).
+        # 5. User-parameter compat path: a non-empty Value name that
+        #    matches a binding entry. Reaches here for:
+        #      - kernel parameters whose ``is_parameter()`` flag was
+        #        dropped during a transform (e.g. some inline/substitute
+        #        paths) but whose ``name`` still matches the original
+        #        parameter (``theta``, ``n``, ``obs``, …);
+        #      - parameter array shape dimensions bound by name
+        #        (``indices_dim0``, ``key_dim0``).
+        #    Phase 1 anonymous tmp Values (``name=""``) skip this path
+        #    naturally — there is no remaining "name collision among
+        #    auto-generated tmps" risk. Eliminating this step entirely
+        #    requires guaranteeing ``is_parameter()`` survives all IR
+        #    transforms, which is a separate, larger refactor.
         if getattr(value, "name", None) and value.name in bindings:
             return bindings[value.name]
         # 6. Array-element access via parent_array (opt-in).
