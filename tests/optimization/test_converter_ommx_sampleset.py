@@ -13,8 +13,7 @@ import numpy as np
 import ommx.v1
 import pytest
 
-from qamomile.optimization.binary_model import VarType
-from qamomile.optimization.binary_model.sampleset import BinarySampleSet
+from qamomile.optimization.binary_model import BinarySampleSet, VarType
 from qamomile.optimization.qaoa import QAOAConverter
 
 # --- Helper unit tests (no quantum execution) -------------------------------
@@ -59,6 +58,16 @@ def test_to_ommx_samples_skips_zero_occurrences():
     )
     ommx_samples = ss.to_ommx_samples()
     assert ommx_samples.num_samples() == 2
+
+
+def test_to_ommx_samples_empty_sampleset():
+    """An empty BinarySampleSet produces an empty Samples (no sample IDs)."""
+    ss = BinarySampleSet(
+        samples=[], num_occurrences=[], energy=[], vartype=VarType.BINARY
+    )
+    ommx_samples = ss.to_ommx_samples()
+    assert ommx_samples.num_samples() == 0
+    assert list(ommx_samples.sample_ids()) == []
 
 
 def test_to_ommx_samples_rejects_spin_vartype():
