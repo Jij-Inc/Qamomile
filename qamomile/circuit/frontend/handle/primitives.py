@@ -303,7 +303,7 @@ class Float(ArithmeticMixin, Handle):
         return result
 
     def __eq__(self, other) -> "Bit":  # type: ignore[override]
-        if isinstance(other, (int, float, bool)) and not isinstance(other, Float):
+        if isinstance(other, (int, float)) and not isinstance(other, Float):
             other = self._make_float(float(other))
         elif not isinstance(other, Float):
             return NotImplemented  # type: ignore[return-value]
@@ -312,7 +312,7 @@ class Float(ArithmeticMixin, Handle):
         return result
 
     def __ne__(self, other) -> "Bit":  # type: ignore[override]
-        if isinstance(other, (int, float, bool)) and not isinstance(other, Float):
+        if isinstance(other, (int, float)) and not isinstance(other, Float):
             other = self._make_float(float(other))
         elif not isinstance(other, Float):
             return NotImplemented  # type: ignore[return-value]
