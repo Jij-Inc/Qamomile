@@ -188,14 +188,16 @@ for outcome, count in sorted(result.results, key=lambda x: -x[1]):
 #
 # 上のルックアップ表をそのまま `if (条件) & (条件):` のチェーンに翻訳します。`Bit` ハンドルの `&` / `~` オペレータがそのまま使えます。シンドロームの 7 通りの非ゼロパターンに対し、対応する量子ビットに $X$(または $Z$)を作用。
 #
-# 全体を 4 つのフェーズに分けて構築します:
+# 全体を 6 つのフェーズに分けて構築します:
 #
-# 1. **誤り注入** (`inject_single_pauli`): `error_type` / `error_pos` で指定された 1 量子ビットに X/Y/Z を作用
-# 2. **Z 型スタビライザー測定** ($S_4, S_5, S_6$): X 誤りのシンドローム $(s^X_2, s^X_1, s^X_0)$ を 3 つの ancilla で取り出す
-# 3. **X 型スタビライザー測定** ($S_1, S_2, S_3$): Z 誤りのシンドローム $(s^Z_2, s^Z_1, s^Z_0)$ を 3 つの ancilla で取り出す
-# 4. **訂正** (Hamming ルックアップ): X-syndrome → X 訂正、Z-syndrome → Z 訂正
+# 1. **エンコード** $\lvert 0_L\rangle$ — 上で定義した `encode_steane_zero` を呼ぶ
+# 2. **誤り注入** (`inject_single_pauli`): `error_type` / `error_pos` で指定された 1 量子ビットに X/Y/Z を作用
+# 3. **Z 型スタビライザー測定** ($S_4, S_5, S_6$): X 誤りのシンドローム $(s^X_2, s^X_1, s^X_0)$ を 3 つの ancilla で取り出す
+# 4. **X 型スタビライザー測定** ($S_1, S_2, S_3$): Z 誤りのシンドローム $(s^Z_2, s^Z_1, s^Z_0)$ を 3 つの ancilla で取り出す
+# 5. **X 誤り訂正** (X-syndrome → 列インデックスを X 訂正)
+# 6. **Z 誤り訂正** (Z-syndrome → 列インデックスを Z 訂正)
 #
-# 誤り注入は `@qkernel` ヘルパーとして切り出します。残りのフェーズは `# ---- Phase N: ... ----` のコメントで区切って `steane_run` 内に展開します(syndrome 抽出用 ancilla の管理上、1 つの kernel に置く方が読みやすいため)。
+# 誤り注入だけ `@qkernel` ヘルパーに切り出します(コンパイル時パラメータが 1 ヶ所に局所化されるため)。残りのフェーズはコード中の `# ---- Phase N: ... ----` コメントで区切って `steane_run` 内に展開します。`steane_run` 全体を一つの kernel に置くのは、共有 ancilla `anc[0..5]` のライフタイム管理を 1 スコープで完結させるためです(複数ヘルパーに分けると ancilla の受け渡しが煩雑になる)。
 
 # %%
 NO_ERROR = 0
@@ -295,6 +297,10 @@ def steane_run(
     sz_0 = qmc.measure(anc[5])
 
     # ---- Phase 5: X 誤り訂正 (X-syndrome → 列インデックスを X 訂正) ----
+    # Hamming パリティ検査行列の列インデックスを syndrome から逆算する 7 通りの
+    # ルックアップを 7 行の if で展開する。`for j, target_idx in enumerate(...)` の
+    # ようなループで 1 行に圧縮することもできるが、教育目的でテーブルとの 1:1
+    # 対応を可視化するため敢えて展開している。Z 訂正(Phase 6)も同じ対応で対称。
     if (~sx_2) & (~sx_1) & sx_0:
         data[0] = qmc.x(data[0])  # 列 (0,0,1) → q[0]
     if (~sx_2) & sx_1 & (~sx_0):
@@ -386,12 +392,12 @@ for ename, ecode in [("X", X_ERROR), ("Y", Y_ERROR), ("Z", Z_ERROR)]:
 # %%
 @qmc.qkernel
 def transversal_hadamard_to_plus_l() -> qmc.Vector[qmc.Bit]:
-    """|0_L⟩ → 横断的 H → |+_L⟩ を作り、X 基底で測定する。
+    r"""|0_L⟩ → 横断的 H → |+_L⟩ を作り、X 基底で測定する。
 
-    `|+_L⟩` は $\\bar{X} = X_0 X_1 X_2$ の +1 固有状態なので、
+    `|+_L⟩` は $\bar{X} = X_0 X_1 X_2$ の +1 固有状態なので、
     X 基底測定すると q[0..2] のパリティ(XOR 和)は **常に偶**になる。
     残りの q[3..6] については X-stabilizer の +1 固有値がそれぞれ
-    $q_3 \\oplus q_4 \\oplus q_5 \\oplus q_6$ などのパリティを偶に固定する。
+    $q_3 \oplus q_4 \oplus q_5 \oplus q_6$ などのパリティを偶に固定する。
     """
     data = qmc.qubit_array(7, name="data")
 
@@ -411,7 +417,7 @@ def transversal_hadamard_to_plus_l() -> qmc.Vector[qmc.Bit]:
 
 @qmc.qkernel
 def transversal_hadamard_round_trip() -> qmc.Vector[qmc.Bit]:
-    """|0_L⟩ → H → H → |0_L⟩ の round-trip。$\\bar{H}^2 = I$ の sanity check。"""
+    r"""|0_L⟩ → H → H → |0_L⟩ の round-trip。$\bar{H}^2 = I$ の sanity check。"""
     data = qmc.qubit_array(7, name="data")
     data = encode_steane_zero(data)
     for i in qmc.range(7):
