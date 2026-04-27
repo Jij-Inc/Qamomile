@@ -210,31 +210,34 @@ from qamomile.circuit.algorithm.trotter import trotterized_time_evolution
 
 @qmc.qkernel
 def qemcmc_circuit(
-    input: qmc.Vector[qmc.Bit],
+    n: qmc.UInt,
+    input: qmc.Vector[qmc.UInt],
     Hs: qmc.Vector[qmc.Observable],
+    order: qmc.UInt,
     time: qmc.Float,
     step: qmc.UInt,
 ) -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(input.shape[0], name="q")
+    q = qmc.qubit_array(n, name="q")
 
     # step 1: prepare the initial state
-    q = computational_basis_state(q, input)
+    q = computational_basis_state(n, q, input)
 
     # step 2: apply the trotterized evolution under the mixer and cost Hamiltonians
-    q = trotterized_time_evolution(q, Hs, 2, time, step)
+    q = trotterized_time_evolution(q, Hs, order, time, step)
 
     return qmc.measure(q)
 
 # %% [markdown]
 # ### 3. トランスパイル
 #
-# カーネルをトランスパイルします。量子回路を実行するには、ハミルトニアンの混合係数$\gamma$とシミュレーション時間$t$を固定する必要があります。{https://doi.org/10.1103/PhysRevA.111.042615} に従い、$\gamma=0.45$、$t=12$、$\Delta t = 0.8$と設定します。トランスパイル時に`time`と`step`をバインドし、`input`はランタイムパラメータとして残します。
+# カーネルをトランスパイルします。量子回路を実行するには、ハミルトニアンの混合係数$\gamma$とシミュレーション時間$t$を固定する必要があります。{https://doi.org/10.1103/PhysRevA.111.042615} に従い、$\gamma=0.45$、$t=12$、$\Delta t = 0.8$と設定します。トランスパイル時に`n`、`order`、`time`、`step`をバインドし、`input`はランタイムパラメータとして残します。
 # %%
 from qamomile.qiskit import QiskitTranspiler
 
 gamma = 0.45  # 混合係数
 time = 12.0   # 総発展時間
 step = 15    # Trotter ステップ数
+order = 2    # Suzuki-Trotter 近似次数
 
 Hs = [
     (1 - gamma) * mixer_hamiltonian,
@@ -246,7 +249,9 @@ transpiler = QiskitTranspiler()
 executable = transpiler.transpile(
     qemcmc_circuit,
     bindings={
+        "n": n_spins,
         "Hs": Hs,
+        "order": order,
         "time": time,
         "step": step,
     },
@@ -259,17 +264,37 @@ executable = transpiler.transpile(
 # これで量子回路シミュレーションの準備が整いました。最後に、量子計算のブロックをMCMCに組み込みましょう。回路の入力および出力はビット列$\bm{x} \in \{0,1\}^n$であるため、スピン変数$\bm{s} \in \{1, -1\}^n$との変換も準備しておきます。
 
 # %%
-def spin_binary_convert(x: np.ndarray) -> np.ndarray:
-    """スピン変数 {-1, +1} ↔ バイナリ変数 {0, 1} の相互変換。"""
+def spin_binary_convert(x: np.ndarray, *, input_kind: str = "auto") -> np.ndarray:
+    """スピン変数 {-1, +1} ↔ バイナリ変数 {0, 1} の相互変換。
+
+    ``input_kind`` で入力の表現を指定します。``"spin"`` は ``x`` を {-1, +1}
+    として扱いバイナリを返し、``"binary"`` は {0, 1} として扱いスピンを返
+    します。デフォルトの ``"auto"`` は値から推論しますが、全要素が 1 で
+    曖昧な場合は ``ValueError`` を投げます。
+    """
     x = np.asarray(x, dtype=int)
     values = np.unique(x)
+
+    if input_kind == "spin":
+        if not np.all(np.isin(values, [-1, 1])):
+            raise ValueError(f"input_kind='spin' は {{-1, 1}} の要素を要求します: {values.tolist()}")
+        return (1 - x) // 2
+    if input_kind == "binary":
+        if not np.all(np.isin(values, [0, 1])):
+            raise ValueError(f"input_kind='binary' は {{0, 1}} の要素を要求します: {values.tolist()}")
+        return 1 - 2 * x
+    if input_kind != "auto":
+        raise ValueError(f"input_kind は 'spin', 'binary', 'auto' のいずれか: {input_kind!r}")
 
     if np.any(values == -1) and np.all(np.isin(values, [-1, 1])):
         return (1 - x) // 2
     if np.any(values == 0) and np.all(np.isin(values, [0, 1])):
         return 1 - 2 * x
     if np.array_equal(values, [1]):
-        raise ValueError("入力が全て 1 のためスピン/バイナリを判別できません")
+        raise ValueError(
+            "入力が全て 1 のためスピン/バイナリを判別できません。"
+            "input_kind='spin' または input_kind='binary' を明示してください。"
+        )
     raise ValueError(
         f"要素は {{-1, 1}} または {{0, 1}} のみ許容されます: {values.tolist()}"
     )
@@ -277,14 +302,14 @@ def spin_binary_convert(x: np.ndarray) -> np.ndarray:
 
 def quantum_proposal(state: np.ndarray, executable, executor) -> np.ndarray:
     """現在のスピン状態を入力として量子回路から提案状態を得る。"""
-    binary_state = spin_binary_convert(state).tolist()
+    binary_state = spin_binary_convert(state, input_kind="spin").tolist()
     result = executable.sample(
         executor,
         shots=1,
         bindings={"input": binary_state},
     ).result()
     (proposed_bits, _count), = result.results
-    return spin_binary_convert(np.array(proposed_bits, dtype=int))
+    return spin_binary_convert(np.array(proposed_bits, dtype=int), input_kind="binary")
 
 # %% [markdown]
 # ---

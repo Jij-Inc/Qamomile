@@ -272,18 +272,20 @@ from qamomile.circuit.algorithm.trotter import trotterized_time_evolution
 
 @qmc.qkernel
 def qemcmc_circuit(
-    input: qmc.Vector[qmc.Bit],
+    n: qmc.UInt,
+    input: qmc.Vector[qmc.UInt],
     Hs: qmc.Vector[qmc.Observable],
+    order: qmc.UInt,
     time: qmc.Float,
     step: qmc.UInt,
 ) -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(input.shape[0], name="q")
+    q = qmc.qubit_array(n, name="q")
 
     # step 1: prepare the initial state
-    q = computational_basis_state(q, input)
+    q = computational_basis_state(n, q, input)
 
     # step 2: apply the trotterized evolution under the mixer and cost Hamiltonians
-    q = trotterized_time_evolution(q, Hs, 2, time, step)
+    q = trotterized_time_evolution(q, Hs, order, time, step)
 
     return qmc.measure(q)
 
@@ -295,14 +297,15 @@ def qemcmc_circuit(
 # mixing coefficient $\gamma$ and the simulation time $t$.
 # Following {https://doi.org/10.1103/PhysRevA.111.042615} , we set $\gamma=0.45$, $t=12$, and
 # $\Delta t = 0.8$.
-# At transpile time we bind `time` and `step`, while keeping `input` as a
-# runtime parameter.
+# At transpile time we bind `n`, `order`, `time`, and `step`, while keeping `input`
+# as a runtime parameter.
 # %%
 from qamomile.qiskit import QiskitTranspiler
 
 gamma = 0.45  # Mixing coefficient
 time = 12.0   # Total evolution time
 step = 15    # Number of Trotter steps
+order = 2    # Suzuki-Trotter approximation order
 
 Hs = [
     (1 - gamma) * mixer_hamiltonian,
@@ -314,7 +317,9 @@ transpiler = QiskitTranspiler()
 executable = transpiler.transpile(
     qemcmc_circuit,
     bindings={
+        "n": n_spins,
         "Hs": Hs,
+        "order": order,
         "time": time,
         "step": step,
     },
@@ -331,17 +336,37 @@ executable = transpiler.transpile(
 # and spin variables $\bm{s} \in \{1, -1\}^n$.
 
 # %%
-def spin_binary_convert(x: np.ndarray) -> np.ndarray:
-    """Convert between spin variables {-1, +1} and binary variables {0, 1}."""
+def spin_binary_convert(x: np.ndarray, *, input_kind: str = "auto") -> np.ndarray:
+    """Convert between spin variables {-1, +1} and binary variables {0, 1}.
+
+    ``input_kind`` selects the input convention: ``"spin"`` treats ``x`` as
+    {-1, +1} and returns binary, ``"binary"`` treats ``x`` as {0, 1} and
+    returns spin. The default ``"auto"`` infers the convention from the
+    values, but raises ``ValueError`` for the ambiguous all-ones input.
+    """
     x = np.asarray(x, dtype=int)
     values = np.unique(x)
+
+    if input_kind == "spin":
+        if not np.all(np.isin(values, [-1, 1])):
+            raise ValueError(f"input_kind='spin' requires elements in {{-1, 1}}, got: {values.tolist()}")
+        return (1 - x) // 2
+    if input_kind == "binary":
+        if not np.all(np.isin(values, [0, 1])):
+            raise ValueError(f"input_kind='binary' requires elements in {{0, 1}}, got: {values.tolist()}")
+        return 1 - 2 * x
+    if input_kind != "auto":
+        raise ValueError(f"input_kind must be 'spin', 'binary', or 'auto', got: {input_kind!r}")
 
     if np.any(values == -1) and np.all(np.isin(values, [-1, 1])):
         return (1 - x) // 2
     if np.any(values == 0) and np.all(np.isin(values, [0, 1])):
         return 1 - 2 * x
     if np.array_equal(values, [1]):
-        raise ValueError("Cannot determine spin/binary representation when the input is all ones")
+        raise ValueError(
+            "Cannot infer spin/binary representation when the input is all ones; "
+            "pass input_kind='spin' or input_kind='binary' explicitly."
+        )
     raise ValueError(
         f"Elements must be drawn from {{-1, 1}} or {{0, 1}}, got: {values.tolist()}"
     )
@@ -349,14 +374,14 @@ def spin_binary_convert(x: np.ndarray) -> np.ndarray:
 
 def quantum_proposal(state: np.ndarray, executable, executor) -> np.ndarray:
     """Obtain a proposed state from the quantum circuit using the current spin state as input."""
-    binary_state = spin_binary_convert(state).tolist()
+    binary_state = spin_binary_convert(state, input_kind="spin").tolist()
     result = executable.sample(
         executor,
         shots=1,
         bindings={"input": binary_state},
     ).result()
     (proposed_bits, _count), = result.results
-    return spin_binary_convert(np.array(proposed_bits, dtype=int))
+    return spin_binary_convert(np.array(proposed_bits, dtype=int), input_kind="binary")
 
 # %% [markdown]
 # ---
@@ -367,9 +392,11 @@ def quantum_proposal(state: np.ndarray, executable, executor) -> np.ndarray:
 # For comparison, we also run the classical proposal from before.
 
 # %%
+from qiskit_aer import AerSimulator
+
 T_quantum = 500  # Smaller than the classical run since quantum simulation is costlier
 
-executor = transpiler.executor()
+executor = transpiler.executor(backend=AerSimulator(seed_simulator=7))
 
 quantum_sample = np.zeros((T_quantum, n_spins), dtype=int)
 state = np.ones(n_spins, dtype=int)  # Initial state
