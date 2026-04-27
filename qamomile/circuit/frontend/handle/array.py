@@ -6,6 +6,7 @@ import uuid
 from typing import Generic, Iterator, TypeVar, overload
 
 from qamomile.circuit.frontend.tracer import get_current_tracer
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind
 from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
 from qamomile.circuit.ir.operation.slice_array import SliceArrayOperation
 from qamomile.circuit.ir.types import ValueType
@@ -17,7 +18,7 @@ from qamomile.circuit.transpiler.errors import (
     UnreturnedBorrowError,
 )
 
-from .handle import Handle
+from .handle import Handle, _emit_binop
 from .primitives import Bit, Float, Qubit, UInt
 
 T = TypeVar("T", bound=Handle)
@@ -182,13 +183,22 @@ class ArrayBase(Handle, Generic[T]):
         at trace time — rather than letting the program reach the
         backend and fail at runtime.
 
+        For a :class:`VectorView`, the consumed-slot markers live on the
+        view's *parent*'s borrow table (a destructive view consume marks
+        the parent slot, not the view's own dict).  We therefore also
+        walk the slice parent and check it against this view's
+        compile-time-known coverage indices.  This is what catches
+        "two views over the same slots; measure one, expval the other"
+        — the second view's own ``_borrowed_indices`` is empty but the
+        underlying physical slots have been destroyed.
+
         Args:
             operation_name: Name of the operation being attempted, used
                 in the error message.
 
         Raises:
             QubitConsumedError: If any ``_ConsumedSlotMarker`` is present
-                in ``_borrowed_indices``.
+                in ``_borrowed_indices`` (own or parent's, for a view).
         """
         if not self.value.type.is_quantum():
             return
@@ -213,6 +223,33 @@ class ArrayBase(Handle, Generic[T]):
                 handle_name=self.value.name or "array",
                 operation_name=operation_name,
             )
+
+        # For a view: check the parent's borrow table at this view's
+        # covered slots.  ``_slice_covered_indices`` is None for
+        # symbolic-bound views; in that case the IR-level
+        # SliceLinearityCheckPass picks up the violation post-fold.
+        slice_parent = getattr(self, "_slice_parent", None)
+        covered = getattr(self, "_slice_covered_indices", None)
+        if slice_parent is not None and covered is not None:
+            parent_consumed = sorted(
+                idx
+                for idx in covered
+                if isinstance(
+                    slice_parent._borrowed_indices.get((f"const:{idx}",)),
+                    _ConsumedSlotMarker,
+                )
+            )
+            if parent_consumed:
+                raise QubitConsumedError(
+                    f"Cannot use view of '{slice_parent.value.name}' in "
+                    f"'{operation_name}': slot(s) {parent_consumed} were "
+                    f"already destroyed by a prior destructive view operation "
+                    f"(e.g. measure/cast on an overlapping view).\n\n"
+                    f"Fix: Do not slice the same physical qubits twice when "
+                    f"one view will be consumed destructively.",
+                    handle_name=slice_parent.value.name or "array",
+                    operation_name=operation_name,
+                )
 
     def consume(self, operation_name: str = "unknown") -> typing.Self:
         """Consume the array, enforcing borrow-return contract for quantum arrays.
@@ -486,9 +523,17 @@ class ArrayBase(Handle, Generic[T]):
             # Consume the handle (prevents reuse of old handle)
             value.consume(operation_name=f"return to {self.value.name}[{index_str}]")
 
-        # Release the borrow
+        # Release the borrow.  ``_ConsumedSlotMarker`` entries are not
+        # outstanding borrows — they record physically-destroyed slots
+        # — so they must never be deleted by a non-destructive return
+        # path.  In practice ``_get_element`` already rejects access to
+        # consumed slots, so a borrow couldn't have been issued for one;
+        # the guard here is defense-in-depth against future paths that
+        # might bypass element access (e.g. computed-index returns).
         if release_key in self._borrowed_indices:
-            del self._borrowed_indices[release_key]
+            current = self._borrowed_indices[release_key]
+            if not isinstance(current, _ConsumedSlotMarker):
+                del self._borrowed_indices[release_key]
         else:
             # Classical types are freely copyable — no linear enforcement needed
             pass
@@ -718,25 +763,28 @@ class Vector(ArrayBase[T]):
                 f"Reverse/zero strides are not yet supported."
             )
 
-        # Clamp ``stop`` to the parent length when both are compile-time
-        # known, matching Python semantics (``s[3:10]`` with ``len(s)==4``
-        # yields ``s[3:4]``).  Without this, ``measure(q[3:10])`` above a
+        # Clamp ``stop`` (and ``start``) to the parent length, matching
+        # Python semantics (``s[3:10]`` with ``len(s)==4`` yields
+        # ``s[3:4]``).  Without this, ``measure(q[3:10])`` above a
         # 4-qubit register happily produces a 7-clbit result array with
-        # only one actual measurement emitted — a correctness bug.  When
-        # either bound is symbolic we defer to the existing symbolic
-        # path; the emit-time allocator rejects unresolvable lengths
-        # with ``EmitError``.
-        parent_length_const = _as_int_const(parent_length)
-        stop_const = _as_int_const(raw_stop)
-        start_const_for_clamp = _as_int_const(raw_start)
-        if parent_length_const is not None:
-            if stop_const is not None and stop_const > parent_length_const:
-                raw_stop = parent_length_const
-            if (
-                start_const_for_clamp is not None
-                and start_const_for_clamp > parent_length_const
-            ):
-                raw_start = parent_length_const
+        # only one actual measurement emitted — a correctness bug.
+        #
+        # The clamp is expressed via ``_uint_min`` so the same single
+        # construction handles both the literal-bound case (folded to a
+        # plain ``int`` immediately) and the case where ``raw_stop`` is
+        # symbolic (left as a ``BinOp(MIN)`` for ``ConstantFoldingPass``
+        # to resolve once parameter bindings are available).  We only
+        # apply the clamp when ``parent_length`` is itself a concrete
+        # constant; if the parent's length is symbolic too, the slice
+        # length must remain a free expression resolvable to whatever
+        # the parent eventually binds to.  Clamping ``start`` against
+        # the just-clamped ``stop`` additionally guarantees
+        # ``stop >= start`` so the downstream length expression
+        # ``((stop - start) + (step - 1)) // step`` cannot underflow on
+        # ``UInt`` arithmetic.
+        if _as_int_const(parent_length) is not None:
+            raw_stop = _uint_min(raw_stop, parent_length)
+            raw_start = _uint_min(raw_start, raw_stop)
 
         start_uint = self._coerce_index(raw_start)
         step_uint = self._coerce_index(raw_step)
@@ -992,6 +1040,47 @@ def _as_int_const(value: int | UInt) -> int | None:
     return None
 
 
+def _uint_min(a: int | UInt, b: int | UInt) -> int | UInt:
+    """Compute ``min(a, b)`` over int / UInt operands.
+
+    When both operands are compile-time integer constants the result is
+    folded eagerly to a Python ``int``.  Otherwise emits a
+    :class:`BinOp` of kind :attr:`BinOpKind.MIN` and returns a symbolic
+    ``UInt`` handle; :class:`ConstantFoldingPass` resolves the
+    expression once parameter bindings make both sides concrete.
+
+    The shared trace-time / fold-time path is what unifies the
+    Python-style end-bound clamp on slices (``q[3:10]`` over a 4-qubit
+    register collapses to ``q[3:4]`` whether the bounds are literals
+    or arithmetic over kernel parameters).
+
+    Args:
+        a: First operand; raw ``int`` or ``UInt`` handle.
+        b: Second operand; raw ``int`` or ``UInt`` handle.
+
+    Returns:
+        Concrete ``int`` when both inputs fold to constants, otherwise
+        a symbolic ``UInt`` whose backing ``Value`` is the result of an
+        emitted ``BinOp(MIN)``.
+    """
+    a_const = _as_int_const(a)
+    b_const = _as_int_const(b)
+    if a_const is not None and b_const is not None:
+        return a_const if a_const <= b_const else b_const
+
+    a_uint = a if isinstance(a, UInt) else UInt(
+        value=Value(type=UIntType(), name="uint_const").with_const(int(a)),
+        init_value=int(a),
+    )
+    b_uint = b if isinstance(b, UInt) else UInt(
+        value=Value(type=UIntType(), name="uint_const").with_const(int(b)),
+        init_value=int(b),
+    )
+    result = UInt(value=Value(type=UIntType(), name="uint_min"), init_value=0)
+    _emit_binop(a_uint.value, b_uint.value, result.value, BinOpKind.MIN)
+    return result
+
+
 class VectorView(Vector[T]):
     """Strided view over a parent ``Vector``, backed by a sliced ``ArrayValue``.
 
@@ -1211,6 +1300,18 @@ class VectorView(Vector[T]):
         can be consumed/returned normally once the view is done (e.g.
         passed to another ``@qkernel`` which consumes its argument).
 
+        For a destructive consume (``measure``, ``cast``) the slot
+        marker is installed on the parent's borrow table
+        *unconditionally* — even if the parent currently records
+        ownership against a *different* view of the same slots.  That
+        situation arises from the opportunistic drain when a second
+        same-range view is sliced before the first has been used; the
+        first view's slots are silently transferred to the second view
+        in the parent's table.  Without the unconditional mark a later
+        ``measure`` on the original view would walk the slot loop, see
+        ``owner is self`` is False, and silently emit nothing — leaving
+        the second view to reach the backend over destroyed qubits.
+
         Args:
             operation_name: Name of the operation consuming this view
                 (used in error messages).
@@ -1218,24 +1319,53 @@ class VectorView(Vector[T]):
         Returns:
             A fresh view handle with the same backing state; the
             returned view no longer holds the parent's slice-borrow.
+
+        Raises:
+            QubitConsumedError: If any covered slot was already
+                destroyed by a prior destructive view consume on an
+                overlapping view.
         """
         self.validate_all_returned()
         is_destructive = operation_name in _DESTRUCTIVE_CONSUME_OPS
+
+        # Reject the consume up-front when an overlapping view has
+        # already destroyed any of our covered slots.  Without this the
+        # second destructive consume would either silently no-op (if
+        # ``owner is self`` is False due to drain transfer) or quietly
+        # reinstall the marker — neither path tells the user about the
+        # double-consume.
+        if self._slice_covered_indices is not None:
+            already_destroyed = sorted(
+                idx
+                for idx in self._slice_covered_indices
+                if isinstance(
+                    self._slice_parent._borrowed_indices.get((f"const:{idx}",)),
+                    _ConsumedSlotMarker,
+                )
+            )
+            if already_destroyed:
+                raise QubitConsumedError(
+                    f"Cannot consume view of '{self._slice_parent.value.name}' "
+                    f"via '{operation_name}': slot(s) {already_destroyed} were "
+                    f"already destroyed by a prior destructive view operation "
+                    f"on overlapping slots.",
+                    handle_name=self._slice_parent.value.name or "array",
+                    operation_name=operation_name,
+                )
+
         if self._slice_covered_indices is not None:
             for idx in self._slice_covered_indices:
                 key = (f"const:{idx}",)
                 owner = self._slice_parent._borrowed_indices.get(key)
-                if owner is self:
-                    if is_destructive:
-                        # Replace view ownership with the consumed
-                        # sentinel so subsequent ``q[i]`` access or
-                        # ``measure(q)`` on the same slot is rejected
-                        # (the physical qubit was destroyed by this
-                        # operation — reusing it would silently re-
-                        # measure or reuse a collapsed state).
-                        self._slice_parent._borrowed_indices[key] = _CONSUMED_SLOT
-                    else:
-                        del self._slice_parent._borrowed_indices[key]
+                if is_destructive:
+                    # Always install the consumed sentinel — overriding
+                    # any other view that the parent currently records
+                    # as owner — so a subsequent operation on either
+                    # view sees the destroyed slot via the parent's
+                    # table.
+                    self._slice_parent._borrowed_indices[key] = _CONSUMED_SLOT
+                elif owner is self:
+                    del self._slice_parent._borrowed_indices[key]
         new_view = super().consume(operation_name)
         new_view._slice_parent = self._slice_parent
         new_view._slice_start = self._slice_start
@@ -1289,22 +1419,20 @@ class VectorView(Vector[T]):
                 f"(got step={step_const_validate})."
             )
 
-        # Clamp ``stop`` to the view length when both are compile-time
-        # known (Python slice semantics).  Without this, a nested slice
-        # such as ``q[0::2][0:99]`` produces an out-of-bounds coverage
-        # set that later emit paths only partially resolve — the same
-        # silent-wrong failure mode as the root-level P1-A bug.
-        view_length_const = _as_int_const(view_length)
-        stop_const = _as_int_const(raw_stop)
-        start_const_clamp = _as_int_const(raw_start)
-        if view_length_const is not None:
-            if stop_const is not None and stop_const > view_length_const:
-                raw_stop = view_length_const
-            if (
-                start_const_clamp is not None
-                and start_const_clamp > view_length_const
-            ):
-                raw_start = view_length_const
+        # Clamp ``stop`` (and ``start``) to the view length, matching
+        # Python slice semantics.  Without this, a nested slice such as
+        # ``q[0::2][0:99]`` produces an out-of-bounds coverage set that
+        # later emit paths only partially resolve — the same silent-wrong
+        # failure mode as the root-level slice clamp bug.  ``_uint_min``
+        # routes both literal and symbolic bounds through the same IR
+        # ``BinOp(MIN)`` so the constant folder unifies them.  We gate
+        # on ``view_length`` being a concrete constant for the same
+        # reason as the root-level clamp: if the view's own length is
+        # symbolic, the clamped length must remain free for downstream
+        # binding resolution.
+        if _as_int_const(view_length) is not None:
+            raw_stop = _uint_min(raw_stop, view_length)
+            raw_start = _uint_min(raw_start, raw_stop)
 
         inner_start = self._slice_parent._coerce_index(raw_start)
         inner_step = self._slice_parent._coerce_index(raw_step)

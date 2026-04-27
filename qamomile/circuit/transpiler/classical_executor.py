@@ -116,6 +116,8 @@ class ClassicalExecutor:
                 result_value = lhs // rhs
             case BinOpKind.POW:
                 result_value = lhs**rhs
+            case BinOpKind.MIN:
+                result_value = lhs if lhs <= rhs else rhs
             case _:
                 raise ExecutionError(f"Unknown BinOp kind: {op.kind}")
 

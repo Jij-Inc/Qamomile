@@ -1551,3 +1551,260 @@ class TestRound3Reviewer:
         with pytest.raises((QubitConsumedError, SliceLinearityViolationError)):
             kern.block
 
+
+class TestRound4Reviewer:
+    """Regression tests for Codex Round 4 adversarial review findings.
+
+    R4-A: BinOp-derived view stop bound is not clamped to the parent
+    length, so ``measure(q[0:hi+0])`` with ``hi`` greater than the parent
+    length over-reports clbits and silently drops measurements.  The fix
+    routes the clamp through a new :attr:`BinOpKind.MIN` so the same
+    construction handles eager folding (literal bounds) and deferred
+    folding (parameter-derived bounds).
+    """
+
+    def test_binop_stop_clamped_to_parent_length_from_zero(self):
+        """``q[0:hi+0]`` with ``hi`` greater than parent yields parent-many clbits."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern(hi: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            return qmc.measure(q[0 : hi + 0])
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(kern, bindings={"hi": 10})
+        qc = exe.compiled_quantum[0].circuit
+        assert qc.num_clbits == 4
+        n_meas = sum(1 for inst in qc.data if inst.operation.name == "measure")
+        assert n_meas == 4
+
+    def test_binop_stop_clamped_to_parent_length_with_offset_start(self):
+        """``q[3:hi+0]`` with ``hi`` past parent collapses to a single-qubit slice."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern(hi: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            return qmc.measure(q[3 : hi + 0])
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(kern, bindings={"hi": 10})
+        qc = exe.compiled_quantum[0].circuit
+        assert qc.num_clbits == 1
+        n_meas = sum(1 for inst in qc.data if inst.operation.name == "measure")
+        assert n_meas == 1
+
+    def test_binop_start_past_parent_collapses_to_empty(self):
+        """``q[lo+0:hi+0]`` with ``lo`` past parent end yields zero measurements."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern(lo: qmc.UInt, hi: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            return qmc.measure(q[lo + 0 : hi + 0])
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(kern, bindings={"lo": 7, "hi": 10})
+        qc = exe.compiled_quantum[0].circuit
+        n_meas = sum(1 for inst in qc.data if inst.operation.name == "measure")
+        assert n_meas == 0
+
+    def test_literal_oob_slice_still_clamps(self):
+        """Literal-bound clamp still works after symbolic-clamp unification."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            return qmc.measure(q[3:10])
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(kern, bindings={})
+        qc = exe.compiled_quantum[0].circuit
+        assert qc.num_clbits == 1
+
+    def test_nested_view_binop_stop_clamped_to_view_length(self):
+        """A nested ``view[0:hi+0]`` clamps against the outer view's length."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern(hi: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(8, "q")
+            outer = q[0::2]  # length 4 view over q
+            return qmc.measure(outer[0 : hi + 0])
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(kern, bindings={"hi": 99})
+        qc = exe.compiled_quantum[0].circuit
+        assert qc.num_clbits == 4
+
+    # ----- R4-B: separately-derived view consumed-slot check ----------------
+
+    def test_two_same_range_views_with_destructive_consume_rejected(self):
+        """``odd1=q[1::2]; odd2=q[1::2]; measure(odd1); expval(odd2,obs)`` is rejected."""
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+        @qmc.qkernel
+        def kern(obs: qmc.Observable) -> qmc.Float:
+            q = qmc.qubit_array(4, "q")
+            odd1 = q[1::2]
+            odd2 = q[1::2]
+            _ = qmc.measure(odd1)
+            return qmc.expval(odd2, obs)
+
+        with pytest.raises(QubitConsumedError):
+            kern.block
+
+    def test_drain_then_destructive_consume_marks_consumed_slots(self):
+        """After drain transferring slot ownership, destructive consume still marks."""
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+        @qmc.qkernel
+        def kern(obs: qmc.Observable) -> qmc.Float:
+            q = qmc.qubit_array(4, "q")
+            # Sequential same-range slicing triggers the opportunistic
+            # drain that transfers parent-slot ownership from view1 to
+            # view2 — the underlying R4-B bug pattern.
+            view1 = q[0::2]
+            view2 = q[0::2]
+            _ = qmc.measure(view1)
+            return qmc.expval(view2, obs)
+
+        with pytest.raises(QubitConsumedError):
+            kern.block
+
+    def test_double_destructive_consume_on_same_slots_rejected(self):
+        """``measure(q[1::2]); measure(q[1::2])`` raises rather than silently succeeding."""
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            v1 = q[1::2]
+            v2 = q[1::2]
+            _ = qmc.measure(v1)
+            return qmc.measure(v2)
+
+        with pytest.raises(QubitConsumedError):
+            kern.block
+
+    def test_disjoint_views_with_destructive_consume_each_allowed(self):
+        """``measure(q[0::2]); measure(q[1::2])`` over disjoint slots is fine."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            evens = q[0::2]
+            odds = q[1::2]
+            _ = qmc.measure(evens)
+            return qmc.measure(odds)
+
+        # Frontend trace must succeed for disjoint coverage.
+        assert kern.block is not None
+
+    def test_consumed_marker_survives_non_destructive_view_consume(self):
+        """A non-destructive consume on an overlapping view does not erase markers."""
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            v1 = q[1::2]
+            v2 = q[1::2]
+            _ = qmc.measure(v1)  # destructive, marks slots {1, 3} as consumed
+            # A subsequent measure(v2) MUST be rejected.  The fact that
+            # v2 is still alive when v1 was consumed must not let it
+            # slip past the consumed-slot check.
+            return qmc.measure(v2)
+
+        with pytest.raises(QubitConsumedError):
+            kern.block
+
+    # ----- R4-C: cast(view, ...) carrier-key root-space resolution -----------
+
+    def test_cast_view_to_qfixed_measures_root_qubits(self):
+        """``cast(q[1::2], QFixed)`` measures the root qubits the view covers."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern() -> qmc.Float:
+            q = qmc.qubit_array(8, "q")
+            view = q[1::2]
+            qf = qmc.cast(view, qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(kern, bindings={})
+        qc = exe.compiled_quantum[0].circuit
+        n_meas = sum(1 for inst in qc.data if inst.operation.name == "measure")
+        # The view covers q[1], q[3], q[5], q[7] — four physical qubits.
+        assert n_meas == 4, (
+            f"cast(q[1::2], QFixed) followed by measure must emit 4 "
+            f"measurements; got {n_meas} (R4-C carrier-key bug)"
+        )
+        # Verify the measured qubits are the root-space {1, 3, 5, 7}.
+        measured_q = sorted(
+            inst.qubits[0]._index
+            for inst in qc.data
+            if inst.operation.name == "measure"
+        )
+        assert measured_q == [1, 3, 5, 7]
+
+    def test_cast_root_vector_to_qfixed_still_measures_all(self):
+        """Non-view cast still measures every qubit (regression guard)."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern() -> qmc.Float:
+            q = qmc.qubit_array(4, "q")
+            qf = qmc.cast(q, qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(kern, bindings={})
+        qc = exe.compiled_quantum[0].circuit
+        n_meas = sum(1 for inst in qc.data if inst.operation.name == "measure")
+        assert n_meas == 4
+
+    def test_cast_nested_view_to_qfixed(self):
+        """``cast(q[0::2][1:3], QFixed)`` resolves carriers via composed slice chain."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern() -> qmc.Float:
+            q = qmc.qubit_array(8, "q")
+            outer = q[0::2]  # length 4, covers q[0], q[2], q[4], q[6]
+            inner = outer[1:3]  # length 2, covers q[2], q[4]
+            qf = qmc.cast(inner, qmc.QFixed, int_bits=0)
+            return qmc.measure(qf)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(kern, bindings={})
+        qc = exe.compiled_quantum[0].circuit
+        measured_q = sorted(
+            inst.qubits[0]._index
+            for inst in qc.data
+            if inst.operation.name == "measure"
+        )
+        assert measured_q == [2, 4]
+
+    def test_cast_symbolic_bound_view_rejected(self):
+        """``cast(q[lo:hi], QFixed)`` with UInt-symbolic bounds raises a clear error."""
+        @qmc.qkernel
+        def kern(lo: qmc.UInt, hi: qmc.UInt) -> qmc.Float:
+            q = qmc.qubit_array(4, "q")
+            return qmc.measure(qmc.cast(q[lo:hi], qmc.QFixed, int_bits=0))
+
+        with pytest.raises((ValueError, Exception)):
+            kern.block

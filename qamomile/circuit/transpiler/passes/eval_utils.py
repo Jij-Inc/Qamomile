@@ -31,6 +31,8 @@ def evaluate_binop_values(
                 return left // right if right != 0 else None
             case BinOpKind.POW:
                 return left**right
+            case BinOpKind.MIN:
+                return left if left <= right else right
             case _:
                 return None
     except (TypeError, ValueError, OverflowError):
