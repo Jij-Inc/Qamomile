@@ -48,9 +48,7 @@ class TestForRangeIfArrayIndex:
         Z_ERROR = 3
 
         @qmc.qkernel
-        def kernel(
-            error_type: qmc.UInt, error_pos: qmc.UInt
-        ) -> qmc.Vector[qmc.Bit]:
+        def kernel(error_type: qmc.UInt, error_pos: qmc.UInt) -> qmc.Vector[qmc.Bit]:
             data = qmc.qubit_array(7, name="data")
             for j in qmc.range(7):
                 if (error_type == X_ERROR) & (error_pos == j):
@@ -125,6 +123,4 @@ class TestRuntimeIfReadOnlyLoopVar:
             )
             # data measured first 3 bits. Should all be 1.
             data_bits = bits[:3]
-            assert all(b == 1 for b in data_bits), (
-                f"Expected all 1s, got {data_bits}"
-            )
+            assert all(b == 1 for b in data_bits), f"Expected all 1s, got {data_bits}"

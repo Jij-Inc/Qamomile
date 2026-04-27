@@ -245,9 +245,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                         circuit, op, clbit_map, bindings
                     )
                     if runtime_expr is not None:
-                        set_runtime_expr = getattr(
-                            bindings, "set_runtime_expr", None
-                        )
+                        set_runtime_expr = getattr(bindings, "set_runtime_expr", None)
                         if callable(set_runtime_expr):
                             set_runtime_expr(op.results[0].uuid, runtime_expr)
                         else:

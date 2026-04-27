@@ -208,19 +208,13 @@ def evaluate_classical_predicate(
     # and-suspenders guard against future code paths that might inject
     # non-scalar values into bindings by other means.
     if isinstance(op, NotOp):
-        operand = emit_pass._resolver.resolve_classical_value(
-            op.operands[0], bindings
-        )
+        operand = emit_pass._resolver.resolve_classical_value(op.operands[0], bindings)
         if not isinstance(operand, (bool, int, float)):
             return
         result = evaluate_notop_value(operand)
     else:
-        lhs = emit_pass._resolver.resolve_classical_value(
-            op.operands[0], bindings
-        )
-        rhs = emit_pass._resolver.resolve_classical_value(
-            op.operands[1], bindings
-        )
+        lhs = emit_pass._resolver.resolve_classical_value(op.operands[0], bindings)
+        rhs = emit_pass._resolver.resolve_classical_value(op.operands[1], bindings)
         if not isinstance(lhs, (bool, int, float)) or not isinstance(
             rhs, (bool, int, float)
         ):

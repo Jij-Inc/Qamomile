@@ -91,9 +91,7 @@ class EmitContext(dict):
     # -- Construction ------------------------------------------------------
 
     @classmethod
-    def from_user_bindings(
-        cls, user_bindings: dict[str, Any] | None
-    ) -> "EmitContext":
+    def from_user_bindings(cls, user_bindings: dict[str, Any] | None) -> "EmitContext":
         """Build an EmitContext seeded with user-supplied parameters.
 
         Args:

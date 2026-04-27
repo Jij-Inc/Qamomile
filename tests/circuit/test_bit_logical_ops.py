@@ -269,7 +269,9 @@ class TestRuntimePath:
         # Look for an IfElseOp whose condition is an Expr (compound).
         from qiskit.circuit.controlflow import IfElseOp
 
-        if_ops = [inst.operation for inst in qc.data if isinstance(inst.operation, IfElseOp)]
+        if_ops = [
+            inst.operation for inst in qc.data if isinstance(inst.operation, IfElseOp)
+        ]
         assert if_ops, "Expected at least one IfElseOp"
         # In Qiskit 2.x, IfElseOp.condition for a compound is an Expr.
         condition = if_ops[0].condition

@@ -42,9 +42,7 @@ def build_dependency_graph(operations: list[Operation]) -> dict[str, set[str]]:
             self.graph: dict[str, set[str]] = {}
 
         def visit_operation(self, op: Operation) -> None:
-            operand_uuids = {
-                v.uuid for v in op.operands if isinstance(v, ValueBase)
-            }
+            operand_uuids = {v.uuid for v in op.operands if isinstance(v, ValueBase)}
             for result in op.results:
                 if result.uuid not in self.graph:
                     self.graph[result.uuid] = set()

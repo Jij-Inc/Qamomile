@@ -168,5 +168,3 @@ class ClassicalLoweringPass(Pass[Block, Block]):
             results=list(op.results),
             kind=kind,
         )
-
-

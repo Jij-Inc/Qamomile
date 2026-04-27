@@ -228,14 +228,20 @@ class InlinePass(Pass[Block, Block]):
         # caller's concrete array, not at a transient cloned ArrayValue. Without
         # this, the resource allocator at emit time fails to find the parent
         # array's QInitOperation entry in qubit_map.
+        #
+        # IMPORTANT: ``substitute_value`` returns ``ValueBase`` (covering
+        # ``DictValue`` / ``TupleValue`` / ``ArrayValue``, not only the
+        # narrower ``Value``). An earlier version narrowed to ``Value`` and
+        # silently dropped non-Value substitutions, which broke kernel calls
+        # passing a ``DictValue`` parameter (e.g. ``ising_cost(quad, ...)``
+        # in QAOA): the callee's ``quad`` parameter ended up bound to the
+        # cloned ``quad_param_callee`` instead of the caller's actual
+        # ``quad_``, and ``emit_for_items`` could not find the dict in
+        # bindings. Always trust the substituted result.
         arg_substitutor = ValueSubstitutor(local_map, transitive=True)
         for block_input, call_arg in zip(block.input_values, call_args):
             substituted_arg = arg_substitutor.substitute_value(call_arg)
-            resolved_arg: Value = (
-                cast(Value, substituted_arg)
-                if isinstance(substituted_arg, Value)
-                else call_arg
-            )
+            resolved_arg = cast(Value, substituted_arg)
             local_map[block_input.uuid] = resolved_arg
 
             # If both are ArrayValues, also map shape dimensions

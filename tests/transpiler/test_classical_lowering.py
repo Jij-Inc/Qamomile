@@ -93,7 +93,9 @@ class TestClassicalLoweringIR:
         block = _lower_to_classical_lowering(kernel)
         cond_ops = _count_ops_of_type(block.operations, CondOp)
         runtime_ops = [
-            op for op in _walk_ops(block.operations) if isinstance(op, RuntimeClassicalExpr)
+            op
+            for op in _walk_ops(block.operations)
+            if isinstance(op, RuntimeClassicalExpr)
         ]
         assert cond_ops == 0, "CondOp should be lowered when operands are measurements"
         assert any(op.kind is RuntimeOpKind.AND for op in runtime_ops)
@@ -113,7 +115,9 @@ class TestClassicalLoweringIR:
         block = _lower_to_classical_lowering(kernel)
         not_ops = _count_ops_of_type(block.operations, NotOp)
         runtime_ops = [
-            op for op in _walk_ops(block.operations) if isinstance(op, RuntimeClassicalExpr)
+            op
+            for op in _walk_ops(block.operations)
+            if isinstance(op, RuntimeClassicalExpr)
         ]
         assert not_ops == 0, "NotOp should be lowered when operand is a measurement"
         assert any(op.kind is RuntimeOpKind.NOT for op in runtime_ops)
@@ -139,7 +143,9 @@ class TestClassicalLoweringIR:
         cond_ops = _count_ops_of_type(block.operations, CondOp)
         not_ops = _count_ops_of_type(block.operations, NotOp)
         runtime_ops = [
-            op for op in _walk_ops(block.operations) if isinstance(op, RuntimeClassicalExpr)
+            op
+            for op in _walk_ops(block.operations)
+            if isinstance(op, RuntimeClassicalExpr)
         ]
         # All compile-time classical ops should be lowered:
         # 2 NotOp + 2 CondOp(AND) → 4 RuntimeClassicalExpr
@@ -168,7 +174,9 @@ class TestClassicalLoweringIR:
         # Flag bound: compile_time_if_lowering folds the CompOp away.
         block = _lower_to_classical_lowering(kernel, bindings={"flag": 1})
         runtime_ops = [
-            op for op in _walk_ops(block.operations) if isinstance(op, RuntimeClassicalExpr)
+            op
+            for op in _walk_ops(block.operations)
+            if isinstance(op, RuntimeClassicalExpr)
         ]
         # No RuntimeClassicalExpr — the CompOp was folded by an earlier pass.
         assert len(runtime_ops) == 0
@@ -187,7 +195,9 @@ class TestClassicalLoweringIR:
 
         block = _lower_to_classical_lowering(kernel, bindings={"target": 2})
         runtime_ops = [
-            op for op in _walk_ops(block.operations) if isinstance(op, RuntimeClassicalExpr)
+            op
+            for op in _walk_ops(block.operations)
+            if isinstance(op, RuntimeClassicalExpr)
         ]
         # Loop-bound CompOp resolves at emit time, never measurement-derived.
         assert len(runtime_ops) == 0
@@ -270,9 +280,7 @@ class TestClassicalLoweringEndToEnd:
         )
         assert result.results == [(1, 100)]
 
-    def test_chained_runtime_expr_emits_compound_classical_condition(
-        self, transpiler
-    ):
+    def test_chained_runtime_expr_emits_compound_classical_condition(self, transpiler):
         """End-to-end equivalent of ``test_chained_taint_lowers_all_levels``:
         the resulting Qiskit circuit must carry a compound classical
         expression in its ``IfElseOp.condition``."""
@@ -296,9 +304,7 @@ class TestClassicalLoweringEndToEnd:
 
         exe = transpiler.transpile(kernel)
         qc = exe.compiled_quantum[0].circuit
-        if_ops = [
-            i.operation for i in qc.data if isinstance(i.operation, IfElseOp)
-        ]
+        if_ops = [i.operation for i in qc.data if isinstance(i.operation, IfElseOp)]
         assert if_ops, "Expected a runtime IfElseOp in the circuit"
         condition = if_ops[0].condition
         assert isinstance(condition, expr.Expr)
@@ -359,9 +365,7 @@ class TestSegmentationKeepsRuntimeExprInQuantumSegment:
         # The full quantum execution should be a single segment.
         assert len(exe.compiled_quantum) == 1
         plan = exe.plan
-        quantum_steps = [
-            s for s in plan.steps if isinstance(s.segment, QuantumSegment)
-        ]
+        quantum_steps = [s for s in plan.steps if isinstance(s.segment, QuantumSegment)]
         assert len(quantum_steps) == 1, (
             f"Expected exactly one quantum segment; got "
             f"{len(quantum_steps)}. The runtime classical predicate must be "
