@@ -116,9 +116,9 @@ class FQAOAConverter(MathematicalProblemConverter):
         # Pass the BinaryModel to the base class (which converts to SPIN internally)
         super().__init__(binary_model)
         # Base class set self.instance = None because we passed a BinaryModel.
-        # Wire in the post-qubo working copy so decode_to_ommx_sampleset can
-        # round-trip back to ommx.v1.SampleSet (feasibility evaluated against
-        # the user's original constraints, which OMMX retains internally).
+        # Wire in the post-qubo working copy so decode() can round-trip back
+        # to ommx.v1.SampleSet (feasibility evaluated against the user's
+        # original constraints, which OMMX retains internally).
         self.instance = working
 
     def __post_init__(self) -> None:
