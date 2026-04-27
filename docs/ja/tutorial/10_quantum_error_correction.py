@@ -42,7 +42,7 @@ transpiler = QiskitTranspiler()
 # %% [markdown]
 # ## 1. なぜ量子誤り訂正が必要か
 #
-# 量子計算の最大の敵は**ノイズ**です。実機の量子ビットは環境との相互作用によりデコヒーレンスを起こし、状態が乱れていきます。古典計算機ではエラー率が極めて低い($10^{-15}$程度)ため誤り訂正は補助的な役割ですが、現在の超伝導量子ビットの単一ゲート誤り率は$10^{-3} \sim 10^{-4}$程度であり、有用な量子アルゴリズムを実行するには誤り訂正が**必須**です。
+# 量子計算の最大の敵は**ノイズ**です。実機の量子ビットは環境との相互作用によりデコヒーレンスを起こし、状態が乱れていきます。古典計算機ではトランジスタ自体の誤り率は十分低く、さらに ECC 付きメモリやチェックサム等の補助的な誤り訂正で実効ビット誤り率は $10^{-15}$ 以下にまで抑えられているため、誤り訂正は通常意識されません。一方、現在の超伝導量子ビットの単一ゲート誤り率は$10^{-3} \sim 10^{-4}$程度であり、有用な量子アルゴリズムを実行するには誤り訂正が**必須**です。
 #
 # ### 古典の繰り返し符号
 #
@@ -109,15 +109,17 @@ def decode_3qubit_bitflip(
 
 
 # %% [markdown]
-# ### 動作検証：bit-flipエラーをすべての位置に注入
+# ### 動作検証:bit-flipエラーをすべての位置に注入
 #
-# `errors`を「Xを適用すべき量子ビットインデックスの集合」を表す辞書として渡し、エンコード→エラー注入→デコードの全フローを1つの`@qkernel`にまとめます。
+# `errors`は「X を適用すべき量子ビットインデックスの集合」を表します。Qamomile の `Dict[UInt, Bit]` で「キーが量子ビット index、value は単なるフラグ」と表現し、`for idx, _ in qmc.items(errors):` で各キーを走査します(value は使わないので `_` で受ける)。Set 相当のセマンティクスを Dict で実現する形です。
+#
+# §4 の Shor 符号では同じ `errors` 引数を `Dict[UInt, UInt]`(value は X/Y/Z の type code)として再利用し、value を使い分けます — 本節では使わないだけ。
 
 
 # %%
 @qmc.qkernel
 def bitflip_code_run(
-    errors: qmc.Dict[qmc.UInt, qmc.UInt],
+    errors: qmc.Dict[qmc.UInt, qmc.Bit],
     theta: qmc.Float,
 ) -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(3, name="q")
@@ -128,7 +130,7 @@ def bitflip_code_run(
     # エンコード
     q[0], q[1], q[2] = encode_3qubit_bitflip(q[0], q[1], q[2])
 
-    # bit-flipエラーを指定位置に注入
+    # bit-flipエラーを指定位置に注入(`errors` のキーに含まれる位置だけに X を作用)
     for idx, _ in qmc.items(errors):
         q[idx] = qmc.x(q[idx])
 
@@ -142,11 +144,11 @@ def bitflip_code_run(
 # 続いて、論理状態$\lvert 1\rangle$($\theta = \pi$, つまり$RY(\pi)\lvert 0\rangle = \lvert 1\rangle$)を準備し、bit-flipエラーを各位置に注入してデコード後の$q_0$を読みます。$q_0$は**常に1**を返すはずです。
 
 # %%
-scenarios = [
+scenarios: list[tuple[str, dict[int, bool]]] = [
     ("エラーなし", {}),
-    ("X on q[0]", {0: 1}),
-    ("X on q[1]", {1: 1}),
-    ("X on q[2]", {2: 1}),
+    ("X on q[0]", {0: True}),
+    ("X on q[1]", {1: True}),
+    ("X on q[2]", {2: True}),
 ]
 
 
@@ -247,7 +249,7 @@ def decode_3qubit_phaseflip(
 # %%
 @qmc.qkernel
 def phaseflip_code_run(
-    errors: qmc.Dict[qmc.UInt, qmc.UInt],
+    errors: qmc.Dict[qmc.UInt, qmc.Bit],
 ) -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(3, name="q")
 
@@ -274,9 +276,9 @@ def phaseflip_code_run(
 print("論理状態 |+⟩ にphase-flipエラーを注入してデコード(q[0]は常に0が期待値):")
 for label, err in [
     ("エラーなし", {}),
-    ("Z on q[0]", {0: 1}),
-    ("Z on q[1]", {1: 1}),
-    ("Z on q[2]", {2: 1}),
+    ("Z on q[0]", {0: True}),
+    ("Z on q[1]", {1: True}),
+    ("Z on q[2]", {2: True}),
 ]:
     exe_pz = transpiler.transpile(phaseflip_code_run, bindings={"errors": err})
     job = exe_pz.sample(transpiler.executor(), shots=256)
@@ -367,7 +369,11 @@ def shor_code_run(
 
     q = encode_shor(q)
 
-    # 各量子ビットへ指定された種類のPauliエラーを注入
+    # 各量子ビットへ指定された種類のPauliエラーを注入。
+    # `else` 分岐の `q[idx] = q[idx]` は no-op だが必要: Qamomile の affine 型システムは
+    # 「if/else どちらの分岐でも qubit ハンドルが同じシェイプで再代入される」ことを
+    # 要求するため、「何もしない」を明示的に書く。コンパイル時に etype が NO_ERROR と
+    # 確定すればこの no-op はそのまま消える。
     for idx, etype in qmc.items(errors):
         if etype == X_ERROR:
             q[idx] = qmc.x(q[idx])
@@ -376,7 +382,7 @@ def shor_code_run(
         elif etype == Z_ERROR:
             q[idx] = qmc.z(q[idx])
         else:
-            q[idx] = q[idx]
+            q[idx] = q[idx]  # NO_ERROR: identity placeholder for affine-type completeness
 
     q = decode_shor(q)
 
@@ -460,7 +466,7 @@ for etype_name, etype_code in [("X", X_ERROR), ("Y", Y_ERROR), ("Z", Z_ERROR)]:
 # %%
 @qmc.qkernel
 def syndrome_decode_bitflip(
-    errors: qmc.Dict[qmc.UInt, qmc.UInt],
+    errors: qmc.Dict[qmc.UInt, qmc.Bit],
 ) -> qmc.Vector[qmc.Bit]:
     data = qmc.qubit_array(3, name="data")
     anc = qmc.qubit_array(2, name="anc")
@@ -508,9 +514,9 @@ def syndrome_decode_bitflip(
 print("シンドローム測定による訂正(論理 |1⟩):")
 for label, err in [
     ("エラーなし", {}),
-    ("X on data[0]", {0: 1}),
-    ("X on data[1]", {1: 1}),
-    ("X on data[2]", {2: 1}),
+    ("X on data[0]", {0: True}),
+    ("X on data[1]", {1: True}),
+    ("X on data[2]", {2: True}),
 ]:
     exe_syn = transpiler.transpile(
         syndrome_decode_bitflip, bindings={"errors": err}
@@ -559,7 +565,7 @@ for label, err in [
 #
 # §5 で 3量子ビット bit-flip 符号の syndrome decoding を実装しましたが、同じ枠組みで phase-flip 符号(スタビライザーが $X_iX_j$ になる)、Shor 符号(8 つのスタビライザー)、そして表面符号(2D 格子上のローカルなスタビライザー)も記述できます。各スタビライザーごとに ancilla を 1 つ用意し、CNOT(または CNOT + H) でパリティ抽出 → 測定 → ルックアップで訂正 Pauli を決定 → 適用、という流れは共通です。
 #
-# 表面符号では数十〜数千の物理量子ビットからわずか 1 つの論理量子ビットを保護しますが、各サイクルでスタビローム測定と古典訂正を繰り返すループ自体は §5 のデモと構造的に同じです。
+# 表面符号では数十〜数千の物理量子ビットからわずか 1 つの論理量子ビットを保護しますが、各サイクルでスタビライザー測定と古典訂正を繰り返すループ自体は §5 のデモと構造的に同じです。
 
 # %% [markdown]
 # ## 7. まとめと次への展望
