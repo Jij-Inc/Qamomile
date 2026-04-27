@@ -90,6 +90,12 @@ class MathematicalProblemConverter(abc.ABC):
         Returns:
             BinarySampleSet | ommx.v1.SampleSet: see method description.
 
+        See Also:
+            :meth:`decode_to_binary_sampleset`: always returns a
+            :class:`BinarySampleSet`. Use it when you need the
+            QUBO-domain (penalty-included) ``energy`` — e.g. to drive a
+            classical optimizer that must penalize infeasibility.
+
         Example:
             >>> # OMMX in → OMMX out
             >>> converter = QAOAConverter(ommx_instance)
@@ -100,32 +106,44 @@ class MathematicalProblemConverter(abc.ABC):
             >>> sample_set = converter.decode(result)
             >>> sample_set.best_feasible.objective
         """
-        binary_sampleset = self._decode_to_binary_sampleset(samples)
+        binary_sampleset = self.decode_to_binary_sampleset(samples)
         if self.instance is not None:
             ommx_samples = binary_sampleset.to_ommx_samples()
             return self.instance.evaluate_samples(ommx_samples)
         return binary_sampleset
 
-    def _decode_to_binary_sampleset(
+    def decode_to_binary_sampleset(
         self,
         samples: SampleResult[list[int]],
     ) -> BinarySampleSet:
-        """Decode samples into a BinarySampleSet in the original vartype.
+        """Decode samples into a :class:`BinarySampleSet`.
 
-        This is the internal stage shared by both branches of
-        :meth:`decode` — it produces a sampleset keyed by the SPIN model's
-        original variable indices (which, for OMMX-backed converters, are
-        the QUBO variable IDs). The OMMX branch of :meth:`decode` then
-        forwards this through :meth:`BinarySampleSet.to_ommx_samples` and
-        ``Instance.evaluate_samples`` to obtain an OMMX SampleSet.
+        Always returns a :class:`BinarySampleSet`, regardless of whether
+        this converter was constructed with an :class:`ommx.v1.Instance`
+        or a :class:`BinaryModel`. Use this when you need:
+
+        * The QUBO-domain ``energy`` (penalty-included), e.g. as the cost
+          driving a classical optimizer like COBYLA — :meth:`decode` on
+          OMMX-backed converters returns the *un-penalized* OMMX
+          objective which won't penalize infeasibility.
+        * The per-state ``samples`` / ``num_occurrences`` /
+          ``vartype`` views from :class:`BinarySampleSet`.
+
+        For most usage — feasibility, original-objective evaluation,
+        per-constraint diagnostics — prefer the polymorphic
+        :meth:`decode`, which returns an :class:`ommx.v1.SampleSet` for
+        OMMX-backed converters.
 
         Args:
-            samples: Raw quantum measurement results.
+            samples: Raw quantum measurement results from
+                ``ExecutableProgram.sample(...).result()``.
 
         Returns:
-            BinarySampleSet: in the converter's ``original_vartype``
-            (BINARY for OMMX-backed converters, the BinaryModel's vartype
-            otherwise).
+            BinarySampleSet: keyed by the SPIN model's original variable
+            indices (the QUBO variable IDs for OMMX-backed converters)
+            in the converter's ``original_vartype`` — BINARY for
+            OMMX-backed converters, the :class:`BinaryModel`'s declared
+            vartype otherwise.
         """
         # First decode in SPIN domain
         spin_sampleset = self.spin_model.decode_from_sampleresult(samples)
