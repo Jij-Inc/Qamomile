@@ -298,9 +298,8 @@ def steane_run(
 
     # ---- Phase 5: X 誤り訂正 (X-syndrome → 列インデックスを X 訂正) ----
     # Hamming パリティ検査行列の列インデックスを syndrome から逆算する 7 通りの
-    # ルックアップを 7 行の if で展開する。`for j, target_idx in enumerate(...)` の
-    # ようなループで 1 行に圧縮することもできるが、教育目的でテーブルとの 1:1
-    # 対応を可視化するため敢えて展開している。Z 訂正(Phase 6)も同じ対応で対称。
+    # ルックアップを、Hamming テーブルとの 1:1 対応がそのまま読み取れるよう 7 行
+    # の if で展開している。Z 訂正(Phase 6)も同じ対応で対称。
     if (~sx_2) & (~sx_1) & sx_0:
         data[0] = qmc.x(data[0])  # 列 (0,0,1) → q[0]
     if (~sx_2) & sx_1 & (~sx_0):
@@ -396,8 +395,6 @@ def transversal_hadamard_to_plus_l() -> qmc.Vector[qmc.Bit]:
 
     `|+_L⟩` は $\bar{X} = X_0 X_1 X_2$ の +1 固有状態なので、
     X 基底測定すると q[0..2] のパリティ(XOR 和)は **常に偶**になる。
-    残りの q[3..6] については X-stabilizer の +1 固有値がそれぞれ
-    $q_3 \oplus q_4 \oplus q_5 \oplus q_6$ などのパリティを偶に固定する。
     """
     data = qmc.qubit_array(7, name="data")
 
