@@ -152,8 +152,12 @@ scenarios: list[tuple[str, dict[int, bool]]] = [
 ]
 
 
-def _q0_distribution(result):
-    """測定結果のリスト[(outcome, count), ...]からq[0]ビットの分布を取り出す。"""
+def _first_bit_distribution(result):
+    """測定結果のリスト [(outcome, count), ...] から最初のビットの分布を取り出す。
+
+    本チュートリアルでは `qubit_array` の最初の要素(`q[0]` または `data[0]`)を
+    論理量子ビットとして扱い、その値が訂正後に保たれているかを確認する場面で使う。
+    """
     counts = {0: 0, 1: 0}
     for outcome, count in result.results:
         if isinstance(outcome, (list, tuple)):
@@ -170,7 +174,7 @@ for label, err in scenarios:
         bitflip_code_run, bindings={"errors": err}, parameters=["theta"]
     )
     job = exe_err.sample(transpiler.executor(), shots=256, bindings={"theta": math.pi})
-    counts = _q0_distribution(job.result())
+    counts = _first_bit_distribution(job.result())
     print(f"  {label:12s}: q[0]=0が{counts[0]}回, q[0]=1が{counts[1]}回")
 
 # %% [markdown]
@@ -189,7 +193,7 @@ for label, err in scenarios:
     job = exe_err.sample(
         transpiler.executor(), shots=4000, bindings={"theta": math.pi / 3}
     )
-    counts = _q0_distribution(job.result())
+    counts = _first_bit_distribution(job.result())
     total = counts[0] + counts[1]
     print(f"  {label:12s}: P(q[0]=1) ≈ {counts[1] / total:.3f}")
 
@@ -284,7 +288,7 @@ for label, err in [
 ]:
     exe_pz = transpiler.transpile(phaseflip_code_run, bindings={"errors": err})
     job = exe_pz.sample(transpiler.executor(), shots=256)
-    counts = _q0_distribution(job.result())
+    counts = _first_bit_distribution(job.result())
     print(f"  {label:12s}: q[0]=0が{counts[0]}回, q[0]=1が{counts[1]}回")
 
 # %% [markdown]
@@ -409,7 +413,7 @@ for etype_name, etype_code in [("X", X_ERROR), ("Y", Y_ERROR), ("Z", Z_ERROR)]:
         job = exe_s.sample(
             transpiler.executor(), shots=256, bindings={"theta": math.pi}
         )
-        counts = _q0_distribution(job.result())
+        counts = _first_bit_distribution(job.result())
         total = counts[0] + counts[1]
         print(f"  {etype_name:10s} | q[{idx}] | {counts[1] / total:.3f}")
 
@@ -524,7 +528,7 @@ for label, err in [
         syndrome_decode_bitflip, bindings={"errors": err}
     )
     job = exe_syn.sample(transpiler.executor(), shots=200)
-    counts = _q0_distribution(job.result())
+    counts = _first_bit_distribution(job.result())
     total = counts[0] + counts[1]
     print(f"  {label:14s}: P(data[0]=1) = {counts[1] / total:.3f}")
 
