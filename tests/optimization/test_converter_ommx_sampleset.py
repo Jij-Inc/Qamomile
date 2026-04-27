@@ -1,11 +1,10 @@
 """Tests for the OMMX round-trip output path on MathematicalProblemConverter.
 
-These tests verify ``MathematicalProblemConverter.decode_to_ommx_sampleset``
-and the supporting ``BinarySampleSet.to_ommx_samples`` helper. The goal of
-the path under test is: when a converter is built from an ``ommx.v1.Instance``,
-quantum measurement results round-trip back into an ``ommx.v1.SampleSet`` that
-exposes feasibility, true (un-penalized) objective, and per-constraint
-evaluation through OMMX's own API.
+When a converter is built from an ``ommx.v1.Instance``, ``decode()``
+returns an ``ommx.v1.SampleSet`` so feasibility, true (un-penalized)
+objective, and per-constraint evaluation are available through OMMX's
+own API. These tests cover that polymorphic return path plus the
+supporting ``BinarySampleSet.to_ommx_samples`` helper.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ import numpy as np
 import ommx.v1
 import pytest
 
-from qamomile.optimization.binary_model import BinaryExpr, BinaryModel, VarType
+from qamomile.optimization.binary_model import VarType
 from qamomile.optimization.binary_model.sampleset import BinarySampleSet
 from qamomile.optimization.qaoa import QAOAConverter
 
@@ -74,26 +73,70 @@ def test_to_ommx_samples_rejects_spin_vartype():
         ss.to_ommx_samples()
 
 
-# --- Negative path: BinaryModel-built converter -----------------------------
+# --- Caller-instance immutability regression --------------------------------
 
 
-def test_decode_to_ommx_sampleset_rejects_binary_model_path():
-    """Calling the OMMX path on a BinaryModel-built converter must raise."""
-    from qamomile.optimization.binary_model import binary
+def test_qaoa_converter_does_not_mutate_caller_instance():
+    """QAOAConverter must not mutate the caller's ommx Instance.
 
-    x, y = binary(0), binary(1)
-    expr = BinaryExpr()
-    expr += x * y
-    expr += x
-    model = BinaryModel(expr)
-    converter = QAOAConverter(model)
+    ``Instance.to_qubo`` mutates the instance it is called on (drops
+    constraints, rewrites the objective into penalty form, may add slack
+    decision variables). The converter must run that on a deep copy so the
+    caller's instance is left exactly as they passed it in.
+    """
+    x0 = ommx.v1.DecisionVariable.binary(0, name="x0")
+    x1 = ommx.v1.DecisionVariable.binary(1, name="x1")
+    constraint = (x0 + x1 == 1).set_id(0).add_name("eq")
+    instance = ommx.v1.Instance.from_components(
+        decision_variables=[x0, x1],
+        objective=x0 * x1,
+        constraints=[constraint],
+        sense=ommx.v1.Instance.MINIMIZE,
+    )
 
-    # Build a fake SampleResult — the guard fires before any sample handling.
-    class _FakeSampleResult:
-        results: list = []
+    snapshot = instance.to_bytes()
+    QAOAConverter(instance)
 
-    with pytest.raises(ValueError, match="ommx.v1.Instance"):
-        converter.decode_to_ommx_sampleset(_FakeSampleResult())  # type: ignore[arg-type]
+    assert instance.to_bytes() == snapshot, (
+        "QAOAConverter mutated the caller's ommx.v1.Instance; "
+        "it must operate on a deep copy."
+    )
+    assert len(instance.constraints) == 1
+    assert instance.constraints[0].name == "eq"
+
+
+def test_fqaoa_converter_does_not_mutate_caller_instance():
+    """FQAOAConverter must not mutate the caller's ommx Instance either."""
+    from qamomile.optimization.fqaoa import FQAOAConverter
+
+    # FQAOA expects an OMMX instance with a fermion-counting structure.
+    # Use a minimal binary instance — FQAOA does not enforce structure at
+    # construction time beyond degree<=2.
+    n_sites = 2
+    n_orbitals = 2
+    dvs = []
+    for site in range(n_sites):
+        for orb in range(n_orbitals):
+            dv = ommx.v1.DecisionVariable.binary(
+                site * n_orbitals + orb,
+                name="x",
+                subscripts=[site, orb],
+            )
+            dvs.append(dv)
+    instance = ommx.v1.Instance.from_components(
+        decision_variables=dvs,
+        objective=sum(dvs[i] * dvs[i + 1] for i in range(len(dvs) - 1)),
+        constraints=[],
+        sense=ommx.v1.Instance.MINIMIZE,
+    )
+
+    snapshot = instance.to_bytes()
+    FQAOAConverter(instance, num_fermions=1)
+
+    assert instance.to_bytes() == snapshot, (
+        "FQAOAConverter mutated the caller's ommx.v1.Instance; "
+        "it must operate on a deep copy."
+    )
 
 
 # --- End-to-end round-trip via Qiskit ---------------------------------------
@@ -155,12 +198,12 @@ def test_decode_to_ommx_sampleset_round_trip(seed: int):
         transpiler.executor(), shots=512, bindings=bindings
     ).result()
 
-    sample_set = converter.decode_to_ommx_sampleset(result)
+    sample_set = converter.decode(result)
     assert isinstance(sample_set, ommx.v1.SampleSet)
 
     # Per-sample objective check: every objective OMMX reports must equal a
     # manual evaluation on one of the sampled bitstrings.
-    binary_ss = converter.decode(result)
+    binary_ss = converter._decode_to_binary_sampleset(result)
     n = 3
 
     def _max_cut_value(bits: list[int]) -> float:
@@ -233,10 +276,10 @@ def test_decode_to_ommx_sampleset_constraint_feasibility(seed: int):
         transpiler.executor(), shots=512, bindings=bindings
     ).result()
 
-    sample_set = converter.decode_to_ommx_sampleset(result)
+    sample_set = converter.decode(result)
     assert isinstance(sample_set, ommx.v1.SampleSet)
 
-    binary_ss = converter.decode(result)
+    binary_ss = converter._decode_to_binary_sampleset(result)
     expected_feasibility_per_state = []
     for sample in binary_ss.samples:
         bits = [sample[i] for i in range(n)]
@@ -297,7 +340,7 @@ def test_decode_to_ommx_sampleset_integer_slack_mapping():
         transpiler.executor(), shots=128, bindings=bindings
     ).result()
 
-    sample_set = converter.decode_to_ommx_sampleset(result)
+    sample_set = converter.decode(result)
     df = sample_set.best_feasible.decision_variables_df
 
     # Original DVs (id 0 binary, id 1 integer) must be in the result; their

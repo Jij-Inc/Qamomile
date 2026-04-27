@@ -148,11 +148,14 @@ def test_qaoa_decode():
         job = executable.sample(transpiler.executor(), shots=100, bindings=bindings)
         result = job.result()
 
-        sampleset = converter.decode(result)
-        argmin_index = np.argmin(sampleset.energy)
-        best_energy = sampleset.energy[argmin_index]
-        best_occurrence = sampleset.num_occurrences[argmin_index]
-        return best_energy * best_occurrence
+        # OMMX-backed converter returns ommx.v1.SampleSet from decode().
+        # Replicate the original "best_energy * best_occurrence" heuristic
+        # by counting how many sample IDs share the minimum objective.
+        sample_set = converter.decode(result)
+        objectives = list(sample_set.objectives.values())
+        min_obj = min(objectives)
+        occ = sum(1 for o in objectives if abs(o - min_obj) < 1e-12)
+        return min_obj * occ
 
     x0 = [2.6, 0.11, 0.52, 0.45]
     bounds = [(0, np.pi), (0, np.pi), (0, np.pi / 2), (0, np.pi / 2)]
@@ -168,9 +171,12 @@ def test_qaoa_decode():
     )
     result_opt = job_opt.result()
 
-    binary_result = converter.decode(result_opt)
-
+    # OMMX in → OMMX out: decode() returns ommx.v1.SampleSet here.
+    sample_set = converter.decode(result_opt)
+    best = sample_set.best_feasible
     # Optimal solution: x=0, y=1, z=1 with energy = 0*1 - 1*1 + 0 - 0.1*1 = -1.1
-    best_sample, best_energy, _ = binary_result.lowest()
-    assert best_sample == {idx_x: 0, idx_y: 1, idx_z: 1}
-    assert abs(best_energy - (-1.1)) < 1e-6
+    assert abs(best.objective - (-1.1)) < 1e-6
+    var_value = {row.id: row.value for row in best.decision_variables}
+    assert var_value[idx_x] == 0
+    assert var_value[idx_y] == 1
+    assert var_value[idx_z] == 1
