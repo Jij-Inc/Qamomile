@@ -178,7 +178,7 @@ class TestNestedArrayAccess:
     def test_nested_array_index_resolution(self):
         """Test that nested array access like q[edges[e, 0]] works correctly.
 
-        This tests the numpy integer type handling in _resolve_array_element_value().
+        This tests the numpy integer type handling in _index_into_array().
         """
         transpiler = QiskitTranspiler()
         edges = np.array([[0, 1], [1, 2]], dtype=np.uint64)
