@@ -109,10 +109,11 @@ ising_quad: dict[tuple[int, int], float] = {
 }
 ising_linear: dict[int, float] = {}
 
-spin_model = BinaryModel.from_ising(
-    linear=ising_linear,
-    quad=ising_quad,
-).normalize_by_abs_max()
+# For weighted MaxCut or spin-glass instances where the J_{ij} are not all
+# of the same magnitude, append `.normalize_by_abs_max()` here to keep the
+# cost-landscape scale comparable across runs (helps gradient-free
+# optimizers such as COBYLA converge consistently).
+spin_model = BinaryModel.from_ising(linear=ising_linear, quad=ising_quad)
 
 print(f"Variable type:          {spin_model.vartype}")
 print(f"Linear terms (h_i):     {spin_model.linear}")
@@ -374,7 +375,7 @@ cut_distribution: Counter[int] = Counter()
 best_qaoa_cut = 0
 best_qaoa_sample = None
 
-for sample, energy, occ in zip(
+for sample, _energy, occ in zip(
     decoded.samples, decoded.energy, decoded.num_occurrences
 ):
     # sample is a dict {vertex_index: spin_value (+1 or -1)}
