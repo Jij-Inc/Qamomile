@@ -72,6 +72,7 @@ project:
             - file: api/circuit/transpiler
             - file: api/circuit/visualization
         - file: api/cudaq
+        - file: api/linalg
         - file: api/observable
         - file: api/optimization/index
           children:
@@ -80,7 +81,6 @@ project:
             - file: api/optimization/fqaoa
             - file: api/optimization/qaoa
             - file: api/optimization/qrao
-            - file: api/optimization/utils
         - file: api/qbraid
         - file: api/qiskit/index
           children:

@@ -319,9 +319,11 @@ def quantum_proposal(state: np.ndarray, executable, executor) -> np.ndarray:
 # 実装したQeMCMCアルゴリズムを実行してみましょう。比較のために、先ほどの古典的な提案分布も同時に実行します。
 
 # %%
-T_quantum = 500  # 量子回路シミュレーションのコストが高いため古典より小さめに設定
+from qiskit_aer import AerSimulator
 
-executor = transpiler.executor()
+T_quantum = 1000  # 量子回路シミュレーションのコストが高いため古典より小さめに設定
+
+executor = transpiler.executor(backend=AerSimulator(seed_simulator=7))
 
 quantum_sample = np.zeros((T_quantum, n_spins), dtype=int)
 state = np.ones(n_spins, dtype=int)  # 初期状態

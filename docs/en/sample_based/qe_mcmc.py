@@ -394,7 +394,7 @@ def quantum_proposal(state: np.ndarray, executable, executor) -> np.ndarray:
 # %%
 from qiskit_aer import AerSimulator
 
-T_quantum = 500  # Smaller than the classical run since quantum simulation is costlier
+T_quantum = 1000  # Smaller than the classical run since quantum simulation is costlier
 
 executor = transpiler.executor(backend=AerSimulator(seed_simulator=7))
 
