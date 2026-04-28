@@ -310,15 +310,13 @@ def _render_algorithm_index(
     parts.append("")
     parts.append(f"## {strings['browse_by_tag']}")
     parts.append("")
-    # Only include tags that have at least one algorithm article.
-    algo_tags = sorted(
-        t for t, arts in tag_map.items()
-        if any(a.section == "algorithm" for a in arts)
-    )
-    if algo_tags:
+    # Show every tag from across the docs (not just algorithm-only tags),
+    # with the global article count, so this landing page doubles as the
+    # cross-section tag hub.
+    all_tags = sorted(tag_map)
+    if all_tags:
         chip_line = " · ".join(
-            f"{_chip_from_section(t)} ({sum(1 for a in tag_map[t] if a.section == 'algorithm')})"
-            for t in algo_tags
+            f"{_chip_from_section(t)} ({len(tag_map[t])})" for t in all_tags
         )
         parts.append(chip_line)
         parts.append("")
