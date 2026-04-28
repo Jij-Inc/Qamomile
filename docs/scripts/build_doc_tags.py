@@ -499,19 +499,19 @@ LEGACY_TAGS_TOC_END = "# --- END algorithm tags (auto-generated) ---"
 def _render_tags_toc_block(all_tags: list[str]) -> str:
     """Render the auto-managed Tags toc block for ``myst.yml``.
 
-    Includes the global ``tags/index.md`` plus every per-tag page,
-    grouped under a hidden ``Tags`` heading so they don't clutter the
-    sidebar but are still reachable by URL.
+    Emits the global ``tags/index.md`` and every per-tag page as a flat
+    list of toc entries, each marked ``hidden: true``. This keeps the
+    pages buildable (so the URLs resolve) without ever showing a
+    ``Tag: <name>`` entry in the rendered navigation. Earlier versions
+    used a parent ``Tags`` group with ``hidden: true``, but that
+    setting did not propagate to children in the rendered sidebar.
     """
-    lines = [
-        TAGS_TOC_BEGIN,
-        "    - title: Tags",
-        "      file: tags/index.md",
-        "      hidden: true",
-        "      children:",
-    ]
+    lines = [TAGS_TOC_BEGIN]
+    lines.append("    - file: tags/index.md")
+    lines.append("      hidden: true")
     for tag in all_tags:
-        lines.append(f"        - file: tags/{tag}.md")
+        lines.append(f"    - file: tags/{tag}.md")
+        lines.append("      hidden: true")
     lines.append("    " + TAGS_TOC_END)
     return "\n".join(lines)
 

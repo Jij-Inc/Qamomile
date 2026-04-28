@@ -39,49 +39,86 @@ project:
         - file: algorithm/vqe_for_hydrogen.ipynb
 
 # --- BEGIN doc tags (auto-generated) ---
-    - title: Tags
-      file: tags/index.md
+    - file: tags/index.md
       hidden: true
-      children:
-        - file: tags/advanced.md
-        - file: tags/beginner.md
-        - file: tags/binary-model.md
-        - file: tags/built-in.md
-        - file: tags/chemistry.md
-        - file: tags/control-flow.md
-        - file: tags/css.md
-        - file: tags/decomposition.md
-        - file: tags/error-correction.md
-        - file: tags/from-scratch.md
-        - file: tags/fundamentals.md
-        - file: tags/graph.md
-        - file: tags/graph-partition.md
-        - file: tags/ground-state.md
-        - file: tags/hamiltonian-simulation.md
-        - file: tags/integration.md
-        - file: tags/intermediate.md
-        - file: tags/internals.md
-        - file: tags/ising.md
-        - file: tags/jijmodeling.md
-        - file: tags/linalg.md
-        - file: tags/maxcut.md
-        - file: tags/openfermion.md
-        - file: tags/optimization.md
-        - file: tags/parameters.md
-        - file: tags/pauli.md
-        - file: tags/qaoa.md
-        - file: tags/qbraid.md
-        - file: tags/qec.md
-        - file: tags/qkernel.md
-        - file: tags/qubo.md
-        - file: tags/resource-estimation.md
-        - file: tags/simulation.md
-        - file: tags/suzuki.md
-        - file: tags/time-evolution.md
-        - file: tags/transpiler.md
-        - file: tags/trotter.md
-        - file: tags/variational.md
-        - file: tags/vqe.md
+    - file: tags/advanced.md
+      hidden: true
+    - file: tags/beginner.md
+      hidden: true
+    - file: tags/binary-model.md
+      hidden: true
+    - file: tags/built-in.md
+      hidden: true
+    - file: tags/chemistry.md
+      hidden: true
+    - file: tags/control-flow.md
+      hidden: true
+    - file: tags/css.md
+      hidden: true
+    - file: tags/decomposition.md
+      hidden: true
+    - file: tags/error-correction.md
+      hidden: true
+    - file: tags/from-scratch.md
+      hidden: true
+    - file: tags/fundamentals.md
+      hidden: true
+    - file: tags/graph.md
+      hidden: true
+    - file: tags/graph-partition.md
+      hidden: true
+    - file: tags/ground-state.md
+      hidden: true
+    - file: tags/hamiltonian-simulation.md
+      hidden: true
+    - file: tags/integration.md
+      hidden: true
+    - file: tags/intermediate.md
+      hidden: true
+    - file: tags/internals.md
+      hidden: true
+    - file: tags/ising.md
+      hidden: true
+    - file: tags/jijmodeling.md
+      hidden: true
+    - file: tags/linalg.md
+      hidden: true
+    - file: tags/maxcut.md
+      hidden: true
+    - file: tags/openfermion.md
+      hidden: true
+    - file: tags/optimization.md
+      hidden: true
+    - file: tags/parameters.md
+      hidden: true
+    - file: tags/pauli.md
+      hidden: true
+    - file: tags/qaoa.md
+      hidden: true
+    - file: tags/qbraid.md
+      hidden: true
+    - file: tags/qec.md
+      hidden: true
+    - file: tags/qkernel.md
+      hidden: true
+    - file: tags/qubo.md
+      hidden: true
+    - file: tags/resource-estimation.md
+      hidden: true
+    - file: tags/simulation.md
+      hidden: true
+    - file: tags/suzuki.md
+      hidden: true
+    - file: tags/time-evolution.md
+      hidden: true
+    - file: tags/transpiler.md
+      hidden: true
+    - file: tags/trotter.md
+      hidden: true
+    - file: tags/variational.md
+      hidden: true
+    - file: tags/vqe.md
+      hidden: true
     # --- END doc tags (auto-generated) ---
     - title: Optimization
       file: optimization/index.md
