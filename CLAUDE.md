@@ -56,6 +56,25 @@ Qamomile is a quantum programming language built around a circuit-first compiler
 
 Dependency direction: `optimization → circuit ← backends`. No reverse dependencies.
 
+### IR Abstraction Principle
+
+**Keep the IR as abstract as possible; delegate concretization to the transpile target.** The IR should express *what the program means*, not *how a particular backend realizes it*. Per-qubit instruction encoding, native composite-gate equivalents, and runtime control-flow lowering are backend concerns — push them down to the backend's emit pass / `GateEmitter`.
+
+How the codebase already follows this:
+
+- **Vector measurement** is a single `MeasureVectorOperation` ([qamomile/circuit/ir/operation/gate.py:410](qamomile/circuit/ir/operation/gate.py:410)) — never expanded into N per-qubit `MeasureOperation`s at IR level. Each backend's `emit_measure_vector` decides how to lower per-qubit.
+- **`MeasureQFixedOperation`** lives at an even higher abstraction (HYBRID quantum measurement + classical decode). At `plan`'s pre-segmentation lowering, it is split into `MeasureVectorOperation + DecodeQFixedOperation` so segmentation can route the halves into the right (quantum / classical) segment — but **each half stays abstract**: `MeasureVectorOperation` still represents "measure this whole Vector" (not per-qubit), `DecodeQFixedOperation` is a clean classical op.
+- **Composite gates** (QFT / QPE / IQFT) stay as `CompositeGateOperation` boxes; backends with a native `CompositeGateEmitter` emit a single high-level gate, others fall back to library decomposition. The IR is identical either way.
+- **Loops** (`qmc.range(...)`) stay as `ForOperation`s with symbolic bounds when possible; `LoopAnalyzer` decides unroll vs. runtime loop at emit time.
+
+When introducing a new IR op or pass:
+
+1. Prefer **a single abstract op** over expanding into multiple low-level ops at IR level.
+2. Push lowering as **late as possible** — `emit` for backend-specific concretization, `plan` only when segmentation forces a split (HYBRID → pure-quantum + pure-classical).
+3. When IR-level lowering IS needed, keep each resulting op as abstract as the next stage allows.
+
+Pre-expanding an abstract concept into per-element / per-qubit / per-step concretization at IR level — without a stated reason — is a design regression.
+
 ### Core Pipeline Flow
 
 ```
@@ -115,12 +134,61 @@ executable = transpiler.transpile(my_circuit, bindings={"theta": 0.5})
 
 ### Transpiler Pipeline Stages
 
-1. **to_block()**: `QKernel` → `Block`
-2. **inline()**: Inlines `CallBlockOperation` → affine `Block`
-3. **partial_eval()**: Constant folds and lowers compile-time control flow
-4. **analyze()**: Validates dependencies → analyzed `Block`
-5. **plan()**: Builds a `ProgramPlan`
-6. **emit()**: Backend-specific circuit generation → `ExecutableProgram`
+`Transpiler.transpile()` runs the following passes in order. `BlockKind`
+advances as preconditions are met; each pass is idempotent and exposed as a
+public method for step-by-step debugging.
+
+```
+QKernel
+   │  to_block                    (trace Python AST → IR)
+   │  entrypoint_validate         (require classical I/O on entrypoint kernels)
+   ▼
+Block [HIERARCHICAL]
+   │  substitute                  (optional rule-based block / strategy replacement)
+   │  resolve_parameter_shapes    (concretise Vector shape dims from bindings)
+   │  inline                      (remove CallBlockOperations)
+   ▼
+Block [AFFINE]
+   │  unroll_recursion            (iterated inline ↔ partial_eval for self-recursive kernels)
+   │  affine_validate             (enforce "each quantum value used at most once")
+   │  partial_eval                (constant fold + CompileTimeIfLoweringPass)
+   │  analyze                     (dependency graph + classical/quantum operand check)
+   ▼
+Block [ANALYZED]
+   │  classical_lowering          (rewrite measurement-derived classical ops to RuntimeClassicalExpr)
+   │  validate_symbolic_shapes    (reject unresolved Vector dims at ForOperation bounds)
+   │  plan                        (segment into C→Q→C; pre-segmentation lowering of MeasureQFixed etc.)
+   ▼
+ProgramPlan
+   │  emit                        (backend-specific codegen; LoopAnalyzer decides unroll vs runtime loop)
+   ▼
+ExecutableProgram[T]
+```
+
+See [docs/en/tutorial/09_compilation_and_transpilation.py](docs/en/tutorial/09_compilation_and_transpilation.py) for a step-by-step walk-through with IR dumps after each pass.
+
+### Binding vs. Parameter Contract
+
+`Transpiler.transpile(kernel, bindings=..., parameters=...)` enforces a
+**disjoint partition** of the kernel's arguments:
+
+- **Each kernel argument must appear in exactly one of `bindings` or
+  `parameters`.** Specifying the same name in both is invalid; every argument
+  must be assigned to one of them (modulo arguments with Python defaults, or
+  `Qubit` / `Observable` inputs handled implicitly by the frontend).
+  - `bindings={...}` — values resolved at compile time, substituted into the
+    IR by `resolve_parameter_shapes` / `partial_eval`.
+  - `parameters=[...]` — argument names that survive the pipeline as runtime
+    parameters in the emitted backend circuit.
+- **Arguments driving a classical-value `if` branch (one whose condition is
+  not a measurement-backed `Bit`) must always be in `bindings`.**
+  `CompileTimeIfLoweringPass` needs the value at compile time to lower the
+  branch; leaving it in `parameters` keeps the condition symbolic and the
+  compile fails. The same rule applies to any other compile-time structural
+  decision such as `qmc.range(...)` bounds. Measurement-backed `if bit:` /
+  `while bit:` (where `bit = qmc.measure(q)`) is unrelated to this rule —
+  that is runtime control flow handled at emit time by backends with a
+  supporting `MeasurementMode`.
 
 ## Docstring Convention (MANDATORY)
 
@@ -251,3 +319,40 @@ To translate English docs (`docs/en/`) into Japanese (`docs/ja/`), use the `/tra
 ```
 
 Translation rules (tone, spacing, terminology, soft line breaks, etc.) are defined in `.claude/skills/translate/SKILL.md`. Always use this skill when translating documentation.
+
+## Commits, Pull Requests, and Issues
+
+The rules below apply to any text Claude writes that lands in the project's
+permanent record — commit messages, PR titles / bodies, and issue titles /
+bodies. Consult this section **before** creating any commit, PR, or issue.
+
+### Run `/local-review` before opening a PR
+
+Before opening a pull request, run the `/local-review` skill against the
+current branch. Address every finding it reports, then re-run
+`/local-review`. Repeat the review-and-fix cycle until the skill reports
+**no remaining issues** — only then create the PR. A clean `/local-review`
+run is a precondition for PR creation, not a post-merge polish step.
+
+### No `@`-mentions
+
+Never include `@username` or `@org/team` strings in commit messages, PR
+titles / bodies, or issue titles / bodies — they trigger unintended GitHub
+notifications. This rule applies to bare Python decorators in running prose
+too: refer to them descriptively (e.g., "the qkernel decorator") instead of
+typing `@qkernel` directly in the prose. Inside fenced code blocks the
+decorator syntax is fine, since GitHub does not parse mentions there.
+
+- ✅ "Update the qkernel decorator so metadata survives `next_version`."
+- ❌ "Update @qkernel so metadata survives `next_version`."
+
+### No unsolicited external links
+
+Do not add external URLs (arXiv, blog posts, docs sites, vendor pages, etc.)
+to commits / PRs / issues unless the user has explicitly provided that URL
+in the current conversation. When in doubt, omit the link or ask the user
+to supply one. Internal references to other issues / PRs in this repo
+(e.g., `#354`) are fine when factually relevant.
+
+- ✅ "Implements the Trotter circuit (see #337 for the design discussion)."
+- ❌ "Implements the Trotter circuit (see https://arxiv.org/abs/... )."
