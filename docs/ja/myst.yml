@@ -26,6 +26,9 @@ project:
         - file: tutorial/04_execution_models.ipynb
         - file: tutorial/05_classical_flow_patterns.ipynb
         - file: tutorial/06_reuse_patterns.ipynb
+        - file: tutorial/09_compilation_and_transpilation.ipynb
+        - file: tutorial/10_quantum_error_correction.ipynb
+        - file: tutorial/11_steane_code.ipynb
     - title: アルゴリズム
       file: algorithm/index.md
       children:
@@ -33,21 +36,25 @@ project:
         - file: algorithm/qaoa_graph_partition.ipynb
         - file: algorithm/hamiltonian_simulation.ipynb
         - file: algorithm/hermitian_decomposition.ipynb
+        - file: algorithm/vqe_for_hydrogen.ipynb
 # --- BEGIN algorithm tags (auto-generated) ---
         - title: Tags
           hidden: true
           children:
             - file: algorithm/tags/advanced.md
             - file: algorithm/tags/built-in.md
+            - file: algorithm/tags/chemistry.md
             - file: algorithm/tags/decomposition.md
             - file: algorithm/tags/from-scratch.md
             - file: algorithm/tags/graph.md
             - file: algorithm/tags/graph-partition.md
+            - file: algorithm/tags/ground-state.md
             - file: algorithm/tags/hamiltonian-simulation.md
             - file: algorithm/tags/intermediate.md
             - file: algorithm/tags/jijmodeling.md
             - file: algorithm/tags/linalg.md
             - file: algorithm/tags/maxcut.md
+            - file: algorithm/tags/openfermion.md
             - file: algorithm/tags/optimization.md
             - file: algorithm/tags/pauli.md
             - file: algorithm/tags/qaoa.md
@@ -56,6 +63,7 @@ project:
             - file: algorithm/tags/time-evolution.md
             - file: algorithm/tags/trotter.md
             - file: algorithm/tags/variational.md
+            - file: algorithm/tags/vqe.md
         # --- END algorithm tags (auto-generated) ---
     - title: 最適化
       file: optimization/index.md
@@ -68,8 +76,9 @@ project:
     - title: リリースノート
       file: release_notes/index.md
       children:
+        - file: release_notes/v0_11_1.md
         - file: release_notes/v0_11_0.md
-        - file: release_notes/v0_10_0.ipynb
+        - file: release_notes/v0_10_0.md
 
 # --- API Reference (auto-generated) ---
     - title: API Reference

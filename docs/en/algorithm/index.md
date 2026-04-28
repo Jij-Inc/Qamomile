@@ -9,7 +9,7 @@ Concrete quantum algorithm examples built with Qamomile. Click a tag below to fi
 
 ## Browse by tag
 
-[`advanced`](tags/advanced.md) (1) · [`built-in`](tags/built-in.md) (1) · [`decomposition`](tags/decomposition.md) (1) · [`from-scratch`](tags/from-scratch.md) (1) · [`graph`](tags/graph.md) (2) · [`graph-partition`](tags/graph-partition.md) (1) · [`hamiltonian-simulation`](tags/hamiltonian-simulation.md) (2) · [`intermediate`](tags/intermediate.md) (3) · [`jijmodeling`](tags/jijmodeling.md) (1) · [`linalg`](tags/linalg.md) (1) · [`maxcut`](tags/maxcut.md) (1) · [`optimization`](tags/optimization.md) (2) · [`pauli`](tags/pauli.md) (2) · [`qaoa`](tags/qaoa.md) (2) · [`simulation`](tags/simulation.md) (1) · [`suzuki`](tags/suzuki.md) (1) · [`time-evolution`](tags/time-evolution.md) (2) · [`trotter`](tags/trotter.md) (1) · [`variational`](tags/variational.md) (2)
+[`advanced`](tags/advanced.md) (1) · [`built-in`](tags/built-in.md) (1) · [`chemistry`](tags/chemistry.md) (1) · [`decomposition`](tags/decomposition.md) (1) · [`from-scratch`](tags/from-scratch.md) (1) · [`graph`](tags/graph.md) (2) · [`graph-partition`](tags/graph-partition.md) (1) · [`ground-state`](tags/ground-state.md) (1) · [`hamiltonian-simulation`](tags/hamiltonian-simulation.md) (2) · [`intermediate`](tags/intermediate.md) (4) · [`jijmodeling`](tags/jijmodeling.md) (1) · [`linalg`](tags/linalg.md) (1) · [`maxcut`](tags/maxcut.md) (1) · [`openfermion`](tags/openfermion.md) (1) · [`optimization`](tags/optimization.md) (2) · [`pauli`](tags/pauli.md) (2) · [`qaoa`](tags/qaoa.md) (2) · [`simulation`](tags/simulation.md) (1) · [`suzuki`](tags/suzuki.md) (1) · [`time-evolution`](tags/time-evolution.md) (2) · [`trotter`](tags/trotter.md) (1) · [`variational`](tags/variational.md) (3) · [`vqe`](tags/vqe.md) (1)
 
 ## All algorithms
 
@@ -36,3 +36,9 @@ This tutorial demonstrates how to solve the **graph partitioning problem** using
 **Tags:** [`qaoa`](tags/qaoa.md) [`optimization`](tags/optimization.md) [`variational`](tags/variational.md) [`graph`](tags/graph.md) [`maxcut`](tags/maxcut.md) [`from-scratch`](tags/from-scratch.md) [`intermediate`](tags/intermediate.md)
 
 This tutorial walks through the Quantum Approximate Optimization Algorithm (QAOA) pipeline step by step, using Qamomile's low-level circuit primitives. Rather than using the high-level `QAOAConverter`, we will:
+
+### [VQE for the Hydrogen Molecule](vqe_for_hydrogen.ipynb)
+
+**Tags:** [`vqe`](tags/vqe.md) [`variational`](tags/variational.md) [`chemistry`](tags/chemistry.md) [`ground-state`](tags/ground-state.md) [`openfermion`](tags/openfermion.md) [`intermediate`](tags/intermediate.md)
+
+This tutorial demonstrates how to implement the Variational Quantum Eigensolver (VQE) algorithm to find the ground state energy of the hydrogen molecule (H₂). We use [OpenFermion](https://quantumai.google/openfermion) for generating molecular Hamiltonians.

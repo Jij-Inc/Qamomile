@@ -99,7 +99,8 @@ class AffineValidationPass(Pass[Block, Block]):
             AffineTypeError: If the value was already consumed.
         """
         # Skip if this is a result of the previous operation with same uuid
-        # (SSA-style versioning means the same physical qubit has different versions)
+        # (SSA-style versioning means the same logical value has different
+        # versions; physical qubit allocation happens later in emit).
         # We check by uuid which should be unique per value instance
 
         if value.uuid in consumed:

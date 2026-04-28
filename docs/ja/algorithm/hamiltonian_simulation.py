@@ -37,6 +37,7 @@ from scipy.linalg import expm
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
+from qamomile.circuit.algorithm import trotterized_time_evolution
 from qamomile.qiskit import QiskitTranspiler
 
 # %% [markdown]
@@ -103,6 +104,7 @@ def statevector(circuit) -> np.ndarray:
 #
 # 1ステップを小さな補助`@qkernel`として書きます。量子ビットレジスタを$H_z$、続いて$H_x$で発展させるだけです。外側のカーネル`rabi_s1`はそのステップを$N$回繰り返します。`n_steps`は`UInt`パラメータなので、同じカーネルが任意の$N$についてバインド時にトランスパイルできます。
 
+
 # %%
 @qmc.qkernel
 def s1_step(
@@ -132,6 +134,7 @@ def rabi_s1(
 # $$ S_2(\Delta t) = e^{-i H_z \Delta t/2}\, e^{-i H_x \Delta t}\, e^{-i H_z \Delta t/2}. $$
 #
 # 局所誤差は$O(\Delta t^3)$、大域的な状態ノルム誤差は$O(\Delta t^2)$になります。ステップカーネルは`pauli_evolve`を3回呼ぶだけです。
+
 
 # %%
 @qmc.qkernel
@@ -186,6 +189,7 @@ def rabi_s2(
 # - **`order`はトランスパイル時に具体値である必要があります。** バインドがないと基底ケースの`if`が畳み込まれず、展開ループが停止条件を得られません。トランスパイラは自己呼び出しをIRに残し、バックエンドのemitで拒否されます。
 # - **停止しない再帰は検出されます。** ボディが`order - 2`ではなく`order + 2`で自分を呼んでいる場合など、基底ケースに到達しない再帰は、展開ループが深さ上限を使い切った時点で`FrontendTransformError`を送出します(古典的な`RecursionError`に相当します)。
 
+
 # %%
 @qmc.qkernel
 def suzuki_trotter(
@@ -223,6 +227,28 @@ def rabi_suzuki(
 
 # %% [markdown]
 # `rabi_suzuki`はトランスパイル時の`order`バインドを変えるだけで$S_2$、$S_4$、$S_6$、$S_8$、……のいずれも生成できる、単一のカーネルです。次数ごとに別のカーネルを書く必要はありません。
+
+# %% [markdown]
+# ### ショートカット: `qamomile.circuit.algorithm`の`trotterized_time_evolution`
+#
+# ここまで`s1_step` / `s2_step` / `suzuki_trotter`と外側のステップループを手で書き下してきたのは、再帰の流れを追うのに役立つからです。一方で日常的な用途には、同じ構成をそのまま使える既製のヘルパーが[`qamomile.circuit.algorithm.trotter`](../../../qamomile/circuit/algorithm/trotter.py)にあります。
+
+
+# %%
+@qmc.qkernel
+def rabi_from_algorithm(
+    Hs: qmc.Vector[qmc.Observable],
+    gamma: qmc.Float,
+    order: qmc.UInt,
+    step: qmc.UInt,
+) -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(1, name="q")
+    q = trotterized_time_evolution(q, Hs, order, gamma, step)
+    return qmc.measure(q)
+
+
+# %% [markdown]
+# このヘルパーは`order = 1`または任意の正の偶数を受け付け、`gamma / step`の幅のTrotterスライスを`step`回適用します。したがってこのチュートリアル以降のプロットは、この1つのカーネルに`order`と`step`をバインドするだけで再現できます。分割をカスタマイズする必要がなければこちらを使い、項ごとのゲートスケジュールを確認したり手で調整したりしたい場合には上の明示的な形に戻してください。
 
 # %% [markdown]
 # ## $N = 8$での簡易チェック
@@ -271,7 +297,9 @@ errors = {name: [] for name in all_names}
 
 for N in Ns:
     for name, ker in s1_s2_kernels.items():
-        exe = tr.transpile(ker, bindings={"Hs": Hs, "dt": T / int(N), "n_steps": int(N)})
+        exe = tr.transpile(
+            ker, bindings={"Hs": Hs, "dt": T / int(N), "n_steps": int(N)}
+        )
         sv = statevector(exe.compiled_quantum[0].circuit)
         errors[name].append(1.0 - abs(np.vdot(sv_exact, sv)))
     for name, order in suzuki_orders.items():
@@ -313,7 +341,9 @@ for name in all_names:
     ax.loglog(dts, errors[name], marker=markers[name], label=name)
 ax.axhline(1e-15, color="grey", linestyle=":", linewidth=0.8, label="float64 floor")
 ax.set_xlabel(r"step size $\Delta t = T / N$")
-ax.set_ylabel(r"fidelity error $1 - |\langle \psi_{\rm exact} | \psi_{\rm trotter} \rangle|$")
+ax.set_ylabel(
+    r"fidelity error $1 - |\langle \psi_{\rm exact} | \psi_{\rm trotter} \rangle|$"
+)
 ax.set_title("Trotter convergence on Rabi oscillation")
 ax.grid(True, which="both", linewidth=0.3)
 ax.legend()
@@ -331,29 +361,3 @@ plt.show()
 # - **Suzuki–Trotterフラクタル**: $S_{2k}$は$S_{2k-2}$のリスケーリングされた5つのコピーを段ごとの係数$p_k = 1/(4 - 4^{1/(2k-1)})$で入れ子にして構築します。段をまたいで同じ定数を使い回すのはよくある罠で、フラクタルの構成にはなりません。
 # - **再帰**: 数学的な再帰を`order: UInt`を受け取る自己再帰`@qkernel`としてそのまま記述できます。トランスパイラが具体値の`order`バインドの下でinline + partial-evalを回し、フラットな回路を出力します。バインドがなければ自己呼び出しがIRに残り、停止しない再帰は`FrontendTransformError`で検出されます。
 # - **収束**: 両対数プロット上の傾き$2, 4, 8$は教科書通りのTrotter次数と一致します。また、`dt`と`n_steps`がシンボリックパラメータなので、回路構造を作り直さずにステップ幅を掃引できます。
-
-# %% [markdown]
-# ## 参考文献
-#
-# 1. H. F. Trotter, "On the product of semi-groups of operators,"
-#    *Proc. Amer. Math. Soc.*, **10**, 545–551 (1959).
-#    DOI: [10.2307/2033649](https://doi.org/10.2307/2033649)
-#
-# 2. G. Strang, "On the construction and comparison of difference schemes,"
-#    *SIAM J. Numer. Anal.*, **5**(3), 506–517 (1968).
-#    DOI: [10.1137/0705041](https://doi.org/10.1137/0705041)
-#
-# 3. M. Suzuki, "Fractal decomposition of exponential operators with
-#    applications to many-body theories and Monte Carlo simulations,"
-#    *Phys. Lett. A*, **146**(6), 319–323 (1990).
-#    DOI: [10.1016/0375-9601(90)90946-L](https://doi.org/10.1016/0375-9601(90)90946-L)
-#
-# 4. M. Suzuki, "General theory of fractal path integrals with applications to
-#    many-body theories and statistical physics,"
-#    *J. Math. Phys.*, **32**(2), 400–407 (1991).
-#    DOI: [10.1063/1.529425](https://doi.org/10.1063/1.529425)
-#
-# 5. N. Hatano and M. Suzuki, "Finding exponential product formulas of higher
-#    orders," in *Quantum Annealing and Other Optimization Methods*,
-#    Lecture Notes in Physics **679**, Springer (2005), pp. 37–68.
-#    DOI: [10.1007/11526216_2](https://doi.org/10.1007/11526216_2)

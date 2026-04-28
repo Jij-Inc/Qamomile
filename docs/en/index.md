@@ -1,5 +1,7 @@
 # Welcome to Qamomile Documentation
 
+**Qamomile** (pronounced /ˈkæməˌmiːl/, like "chamomile") is named after the chamomile flower — a symbol of calm and clarity.
+
 Qamomile is a quantum programming SDK. Write quantum circuits as typed Python functions and run them on quantum SDKs like Qiskit, CUDA-Q, QURI Parts, and qBraid. Furthermore, Qamomile supports symbolic algebraic resource estimation and can estimate resources for circuits containing black-box oracles — even when the circuit itself cannot be executed.
 
 > **Note** Qamomile is under active development, and breaking changes may be introduced between releases. If you find a bug, we'd really appreciate it if you could let us know via [GitHub Issues](https://github.com/Jij-Inc/Qamomile/issues/new).
@@ -21,6 +23,7 @@ Concrete algorithm examples — [browse by tag](algorithm/index.md):
 - [QAOA for Graph Partitioning](algorithm/qaoa_graph_partition) — End-to-end with JijModeling and `QAOAConverter`
 - [Hamiltonian Simulation with Suzuki–Trotter](algorithm/hamiltonian_simulation) — Rabi oscillation and convergence orders
 - [From a Hermitian Matrix to a Quantum Circuit](algorithm/hermitian_decomposition) — Dense Hermitian matrix to a Pauli sum and time-evolution circuit
+- [VQE for the Hydrogen Molecule](algorithm/vqe_for_hydrogen) — Build a molecular Hamiltonian with OpenFermion and find the ground state energy using VQE
 
 ## Optimization
 
