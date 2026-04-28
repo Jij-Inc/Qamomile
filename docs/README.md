@@ -38,6 +38,7 @@ docs/
 ├── Makefile                     # Build system (make targets)
 ├── build.sh                     # Build script (shell alternative)
 ├── generate_api.py              # API reference generator entry point
+├── index.html                   # Redirects to ./en/
 ├── myst.yml                     # Top-level MyST stub
 │
 ├── assets/                      # Shared images and resources
