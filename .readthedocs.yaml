@@ -24,6 +24,5 @@ build:
         # $READTHEDOCS_OUTPUT: the place where we deploy the documentation
         - mkdir -p $READTHEDOCS_OUTPUT/html/ja
         - mkdir -p $READTHEDOCS_OUTPUT/html/en
-        - cp -r docs/index.html $READTHEDOCS_OUTPUT/html/
         - cp -a docs/ja/_build/html/. $READTHEDOCS_OUTPUT/html/ja/
         - cp -a docs/en/_build/html/. $READTHEDOCS_OUTPUT/html/en/
