@@ -18,9 +18,7 @@ from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     CompOp,
-    CompOpKind,
     CondOp,
-    CondOpKind,
     NotOp,
     PhiOp,
 )
@@ -33,6 +31,7 @@ from qamomile.circuit.transpiler.value_resolver import (
 
 from . import Pass
 from .emit_support import resolve_if_condition
+from .eval_utils import FoldPolicy, fold_classical_op
 from .value_mapping import ValueSubstitutor
 
 
@@ -141,39 +140,29 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         - ``NotOp``   — logical negation
         - ``BinOp``   — arithmetic (+, -, *, /, //, %)
 
-        Other operation types are silently ignored.  If all operands of a
+        Delegates the actual fold to ``fold_classical_op`` under the
+        ``COMPILE_TIME`` policy, which bypasses the runtime-parameter
+        guard. At this stage there are no runtime parameters in the
+        concrete values map; everything in ``self._bindings`` is treated
+        as a real compile-time value.
+
+        Other operation types are silently ignored. If all operands of a
         supported op are concrete but evaluation still fails, the result
         is not recorded and downstream IfOperations referencing it will
         remain unresolved (emitted as runtime branches).
         """
-        if isinstance(op, CompOp):
-            lhs = self._resolve_operand(op.operands[0], concrete_values)
-            rhs = self._resolve_operand(op.operands[1], concrete_values)
-            if lhs is not None and rhs is not None and op.results:
-                result = self._eval_comp(op.kind, lhs, rhs)
-                if result is not None:
-                    concrete_values[op.results[0].uuid] = result
-
-        elif isinstance(op, CondOp):
-            lhs = self._resolve_operand(op.operands[0], concrete_values)
-            rhs = self._resolve_operand(op.operands[1], concrete_values)
-            if lhs is not None and rhs is not None and op.results:
-                result = self._eval_cond(op.kind, lhs, rhs)
-                if result is not None:
-                    concrete_values[op.results[0].uuid] = result
-
-        elif isinstance(op, NotOp):
-            operand = self._resolve_operand(op.operands[0], concrete_values)
-            if operand is not None and op.results:
-                concrete_values[op.results[0].uuid] = not operand
-
-        elif isinstance(op, BinOp):
-            lhs = self._resolve_operand(op.operands[0], concrete_values)
-            rhs = self._resolve_operand(op.operands[1], concrete_values)
-            if lhs is not None and rhs is not None and op.results:
-                result = self._eval_binop(op.kind, lhs, rhs)
-                if result is not None:
-                    concrete_values[op.results[0].uuid] = result
+        if not isinstance(op, (CompOp, CondOp, NotOp, BinOp)):
+            return
+        if not op.results:
+            return
+        result = fold_classical_op(
+            op,
+            lambda v: self._resolve_operand(v, concrete_values),
+            parameters=set(),
+            policy=FoldPolicy.COMPILE_TIME,
+        )
+        if result is not None:
+            concrete_values[op.results[0].uuid] = result
 
     def _resolve_operand(
         self,
@@ -184,51 +173,6 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         return UnifiedValueResolver(
             context=concrete_values, bindings=self._bindings
         ).resolve(value)
-
-    @staticmethod
-    def _eval_comp(kind: Any, lhs: Any, rhs: Any) -> bool | None:
-        """Evaluate a comparison operation."""
-        try:
-            match kind:
-                case CompOpKind.EQ:
-                    return lhs == rhs
-                case CompOpKind.NEQ:
-                    return lhs != rhs
-                case CompOpKind.LT:
-                    return lhs < rhs
-                case CompOpKind.LE:
-                    return lhs <= rhs
-                case CompOpKind.GT:
-                    return lhs > rhs
-                case CompOpKind.GE:
-                    return lhs >= rhs
-                case _:
-                    return None
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _eval_cond(kind: Any, lhs: Any, rhs: Any) -> bool | None:
-        """Evaluate a conditional logical operation."""
-        try:
-            match kind:
-                case CondOpKind.AND:
-                    return bool(lhs and rhs)
-                case CondOpKind.OR:
-                    return bool(lhs or rhs)
-                case _:
-                    return None
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _eval_binop(kind: Any, lhs: Any, rhs: Any) -> Any:
-        """Evaluate a binary arithmetic operation."""
-        from qamomile.circuit.transpiler.passes.eval_utils import (
-            evaluate_binop_values,
-        )
-
-        return evaluate_binop_values(kind, lhs, rhs)
 
     # ------------------------------------------------------------------
     # Operation lowering
