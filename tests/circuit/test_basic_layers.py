@@ -322,10 +322,14 @@ def _sample_compile_time(transpiler, n: int, bits: list[int], shots: int):
 
 
 def _sample_runtime_bits(transpiler, n: int, bits: list[int], shots: int):
-    """Transpile with ``bits`` left as a runtime parameter, bind at sample."""
+    """Transpile with ``bits`` left as a runtime parameter, bind at sample.
+
+    Only ``n`` is bound at compile time; the kernel's ``for i in qmc.range(n)``
+    body fixes the gate count without needing a placeholder for ``bits``.
+    """
     exe = transpiler.transpile(
         _cb_sample_kernel,
-        bindings={"n": n, "bits": [0] * n},  # shape hint
+        bindings={"n": n},
         parameters=["bits"],
     )
     job = exe.sample(transpiler.executor(), bindings={"bits": bits}, shots=shots)
