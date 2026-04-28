@@ -213,7 +213,7 @@ def _dispatch_single_qubit_gate(
         TypeError: If `target` is neither a `Qubit` nor a
             `Vector[Qubit]`.
     """
-    if isinstance(target, VectorClass) and target.element_type is Qubit:
+    if isinstance(target, VectorClass) and target.element_type == Qubit:
         return _broadcast_single_qubit_gate(target, gate_type)
     if isinstance(target, Qubit):
         return _apply_single_qubit_gate(target, gate_type)
@@ -230,8 +230,8 @@ def h(target: Vector[Qubit]) -> Vector[Qubit]: ...
 def h(target: Union[Qubit, Vector[Qubit]]) -> Union[Qubit, Vector[Qubit]]:
     """Hadamard gate.
 
-    Applied to a single `Qubit` it returns the rotated qubit. Applied to a
-    `Vector[Qubit]` it broadcasts the gate over every element via a
+    Applied to a single `Qubit` it returns the transformed qubit. Applied
+    to a `Vector[Qubit]` it broadcasts the gate over every element via a
     transpile-time loop, equivalent to
     ``for i in qmc.range(n): qs[i] = h(qs[i])``.
 
@@ -483,7 +483,7 @@ def p(
     Raises:
         TypeError: If `target` is neither a `Qubit` nor a `Vector[Qubit]`.
     """
-    if isinstance(target, VectorClass) and target.element_type is Qubit:
+    if isinstance(target, VectorClass) and target.element_type == Qubit:
         return _broadcast_phase_gate(target, theta)
     if isinstance(target, Qubit):
         return _apply_phase_gate(target, theta)
@@ -571,7 +571,7 @@ def _dispatch_rotation_gate(
         TypeError: If `target` is neither a `Qubit` nor a
             `Vector[Qubit]`.
     """
-    if isinstance(target, VectorClass) and target.element_type is Qubit:
+    if isinstance(target, VectorClass) and target.element_type == Qubit:
         return _broadcast_rotation_gate(target, angle, gate_type)
     if isinstance(target, Qubit):
         return _apply_rotation_gate(target, angle, gate_type)

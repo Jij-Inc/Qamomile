@@ -106,33 +106,59 @@ class TestBroadcastIRShape:
 
 
 # ---------------------------------------------------------------------------
-# Backend execution: Qiskit and QuriParts (sampling + expval)
+# Backend execution: Qiskit, QuriParts, and CUDA-Q (sampling + expval)
 # ---------------------------------------------------------------------------
+#
+# Each SDK is imported via a try/except so that environments missing one
+# backend can still run the IR-shape assertions above. Module-level
+# ``importorskip`` would skip the entire file — including backend-free
+# tests — which is undesirable for minimal CI environments.
 
-# QuriParts is the more permissive of the two for symbolic shapes;
-# exercise both on every test where the SDKs are available.
-pytest.importorskip("qiskit")
-pytest.importorskip("quri_parts")
-pytest.importorskip("quri_parts.qulacs")
+_HAS_QISKIT = True
+try:  # pragma: no cover - presence check, not behaviour
+    from qamomile.qiskit import QiskitTranspiler
+except ImportError:  # pragma: no cover - covered when qiskit is absent
+    _HAS_QISKIT = False
+    QiskitTranspiler = None  # type: ignore[assignment]
 
-import qamomile.observable as qm_o  # noqa: E402
-from qamomile.qiskit import QiskitTranspiler  # noqa: E402
-from qamomile.quri_parts import QuriPartsTranspiler  # noqa: E402
+_HAS_QURI_PARTS = True
+try:  # pragma: no cover - presence check, not behaviour
+    import quri_parts.qulacs  # noqa: F401
 
-# CUDA-Q is optional — gate the parametrize entry on whether the SDK is
-# present, mirroring how other cross-backend test suites handle it.
+    from qamomile.quri_parts import QuriPartsTranspiler
+except ImportError:  # pragma: no cover - covered when quri_parts is absent
+    _HAS_QURI_PARTS = False
+    QuriPartsTranspiler = None  # type: ignore[assignment]
+
 _HAS_CUDAQ = True
 try:  # pragma: no cover - presence check, not behaviour
     import cudaq  # noqa: F401
 
-    from qamomile.cudaq import CudaqTranspiler  # noqa: E402
+    from qamomile.cudaq import CudaqTranspiler
 except ImportError:  # pragma: no cover - covered when cudaq is absent
     _HAS_CUDAQ = False
     CudaqTranspiler = None  # type: ignore[assignment]
 
+_HAS_OBSERVABLE = True
+try:  # pragma: no cover - presence check, not behaviour
+    import qamomile.observable as qm_o
+except ImportError:  # pragma: no cover - never expected, defensive
+    _HAS_OBSERVABLE = False
+    qm_o = None  # type: ignore[assignment]
+
 BACKENDS = [
-    pytest.param(QiskitTranspiler, id="qiskit"),
-    pytest.param(QuriPartsTranspiler, id="quri_parts"),
+    pytest.param(
+        QiskitTranspiler,
+        id="qiskit",
+        marks=pytest.mark.skipif(not _HAS_QISKIT, reason="qiskit not installed"),
+    ),
+    pytest.param(
+        QuriPartsTranspiler,
+        id="quri_parts",
+        marks=pytest.mark.skipif(
+            not _HAS_QURI_PARTS, reason="quri_parts/qulacs not installed"
+        ),
+    ),
     pytest.param(
         CudaqTranspiler,
         id="cudaq",
@@ -176,20 +202,6 @@ def _kernel_rx_broadcast(n: int):
     def _circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
         qs = qmc.qubit_array(n, "qs")
         qs = qmc.rx(qs, theta)
-        return qmc.measure(qs)
-
-    return _circuit
-
-
-def _kernel_rx_loop(n: int):
-    """Build a kernel that applies RX(theta) via explicit ``for i in qmc.range(n)``."""
-
-    @qmc.qkernel
-    def _circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
-        qs = qmc.qubit_array(n, "qs")
-        m = qs.shape[0]
-        for i in qmc.range(m):
-            qs[i] = qmc.rx(qs[i], theta)
         return qmc.measure(qs)
 
     return _circuit
