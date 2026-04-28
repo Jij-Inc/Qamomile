@@ -328,9 +328,7 @@ def _sample_runtime_bits(transpiler, n: int, bits: list[int], shots: int):
         bindings={"n": n, "bits": [0] * n},  # shape hint
         parameters=["bits"],
     )
-    job = exe.sample(
-        transpiler.executor(), bindings={"bits": bits}, shots=shots
-    )
+    job = exe.sample(transpiler.executor(), bindings={"bits": bits}, shots=shots)
     return job.result().results
 
 
