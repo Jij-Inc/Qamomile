@@ -306,9 +306,14 @@ executable = transpiler.transpile(
 # iteration, the optimizer samples the circuit and evaluates the mean
 # energy.
 #
-# We also pass `seed_simulator` to `AerSimulator` and seed the NumPy
-# generator with the same value so that the optimization trajectory and
-# the final partition are reproducible across runs.
+# To make the tutorial reproducible we (i) pass `seed_simulator=SEED` to
+# `AerSimulator` so the per-shot pseudo-random sampling is deterministic,
+# (ii) seed the NumPy generator with the same value so initial
+# variational parameters are stable, and (iii) set
+# `max_parallel_threads=1` so the simulator does not interleave random
+# draws across threads. The single-thread setting trades a little
+# performance for fully reproducible runs; in production code you can
+# drop it (or only enable it in tests / docs builds).
 
 # %%
 import os
@@ -317,9 +322,14 @@ from qiskit_aer import AerSimulator
 from scipy.optimize import minimize
 
 SEED = 42
-executor = transpiler.executor(
-    backend=AerSimulator(seed_simulator=SEED, max_parallel_threads=1)
-)
+
+
+def make_seeded_backend() -> AerSimulator:
+    """Fresh AerSimulator with deterministic sampling for this tutorial."""
+    return AerSimulator(seed_simulator=SEED, max_parallel_threads=1)
+
+
+executor = transpiler.executor(backend=make_seeded_backend())
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 sample_shots = 256 if docs_test_mode else 2048
 maxiter = 20 if docs_test_mode else 500
@@ -437,10 +447,13 @@ if best_qaoa_sample is not None:
 #
 # Let's build the same circuit using the built-in function to confirm
 # that it implements the same structure. Each executor below is
-# instantiated with the same `seed_simulator=SEED`, so the manual and
-# built-in routes draw identical samples whenever they emit identical
-# circuits — making any printed energy difference purely a consequence
-# of (typically tiny) gate-order differences, not of sampling noise.
+# instantiated with the same `seed_simulator=SEED`. Under a fixed seed,
+# **identical circuits yield identical samples and therefore identical
+# mean energies**. With finite shots the per-circuit estimate still
+# carries shot-noise — that does not vanish under seeding — so if the
+# two printed mean energies *do* differ, it indicates that the manual
+# and built-in routes did not emit bit-identical circuits (e.g., a gate
+# ordering or compilation difference), not residual sampling noise.
 
 # %%
 from qamomile.circuit.algorithm import qaoa_state
@@ -474,12 +487,8 @@ exe_builtin = transpiler.transpile(
     parameters=["gammas", "betas"],
 )
 
-executor_manual = transpiler.executor(
-    backend=AerSimulator(seed_simulator=SEED, max_parallel_threads=1)
-)
-executor_builtin = transpiler.executor(
-    backend=AerSimulator(seed_simulator=SEED, max_parallel_threads=1)
-)
+executor_manual = transpiler.executor(backend=make_seeded_backend())
+executor_builtin = transpiler.executor(backend=make_seeded_backend())
 
 result_manual = executable.sample(
     executor_manual,

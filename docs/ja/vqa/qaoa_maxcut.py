@@ -264,7 +264,7 @@ executable = transpiler.transpile(
 # %% [markdown]
 # `scipy.optimize.minimize`のCOBYLA法を使います。各反復で回路をサンプリングし、平均エネルギーを評価します。
 #
-# `AerSimulator`に`seed_simulator`を渡し、NumPy乱数生成器も同じ値でシードすることで、最適化の軌跡と最終的な分割が実行ごとに再現できるようにします。
+# 本チュートリアルでは再現性を確保するため、(i)`AerSimulator`に`seed_simulator=SEED`を渡してショットごとの擬似乱数サンプリングを決定的にし、(ii)NumPy乱数生成器も同じ値でシードして初期変分パラメータを固定し、(iii)スレッド間で乱数ドローが交錯しないよう`max_parallel_threads=1`に設定します。シングルスレッド化は若干の性能低下と引き換えに完全な再現性を得るための設定で、実運用コードでは省略するか、テスト/ドキュメントビルド時のみ有効化する形で構いません。
 
 # %%
 import os
@@ -273,9 +273,14 @@ from qiskit_aer import AerSimulator
 from scipy.optimize import minimize
 
 SEED = 42
-executor = transpiler.executor(
-    backend=AerSimulator(seed_simulator=SEED, max_parallel_threads=1)
-)
+
+
+def make_seeded_backend() -> AerSimulator:
+    """本チュートリアル用に決定的サンプリングを行うAerSimulatorを返す。"""
+    return AerSimulator(seed_simulator=SEED, max_parallel_threads=1)
+
+
+executor = transpiler.executor(backend=make_seeded_backend())
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 sample_shots = 256 if docs_test_mode else 2048
 maxiter = 20 if docs_test_mode else 500
@@ -384,7 +389,7 @@ if best_qaoa_sample is not None:
 #
 # 上で実装したすべて — 重ね合わせ、コスト層、ミキサー層、レイヤーのループ — は`qamomile.circuit.algorithm.qaoa_state`として既に提供されています。同じIsing係数（`quad`, `linear`）と変分パラメータ（`gammas`, `betas`）を受け取ります。
 #
-# 組み込み関数を使って同じ構造の回路が実装されていることを確認します。下記の各executorは同じ`seed_simulator=SEED`で初期化されているため、手動版と組み込み版が同一回路を出力する限り、両者は完全に同じサンプルを得ます。最終的に表示される平均エネルギーに差分が残る場合、それはサンプリングノイズではなく回路のゲート順序の差に起因します。
+# 組み込み関数を使って同じ構造の回路が実装されていることを確認します。下記の各executorは同じ`seed_simulator=SEED`で初期化されているため、シードを揃えた条件下では**回路が完全一致しているならばサンプル列も平均エネルギーも完全一致**します。なお、有限ショットによる推定誤差（shot noise）はシードを揃えても消えるわけではなく、各回路に対して常に存在します。したがって両者の平均エネルギーに差分が残る場合は、shot noiseが原因ではなく手動版と組み込み版の回路が（ゲート順序やコンパイル過程の違いなどで）ビット単位では一致していないことを示します。
 
 # %%
 from qamomile.circuit.algorithm import qaoa_state
@@ -418,12 +423,8 @@ exe_builtin = transpiler.transpile(
     parameters=["gammas", "betas"],
 )
 
-executor_manual = transpiler.executor(
-    backend=AerSimulator(seed_simulator=SEED, max_parallel_threads=1)
-)
-executor_builtin = transpiler.executor(
-    backend=AerSimulator(seed_simulator=SEED, max_parallel_threads=1)
-)
+executor_manual = transpiler.executor(backend=make_seeded_backend())
+executor_builtin = transpiler.executor(backend=make_seeded_backend())
 
 result_manual = executable.sample(
     executor_manual,
