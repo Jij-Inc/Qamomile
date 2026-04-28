@@ -21,10 +21,8 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
 )
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.transpiler.passes.eval_utils import (
-    evaluate_binop_values,
-    evaluate_compop_values,
-    evaluate_condop_values,
-    evaluate_notop_value,
+    FoldPolicy,
+    fold_classical_op,
 )
 
 from .qubit_address import QubitAddress, QubitMap
@@ -99,23 +97,48 @@ def evaluate_binop(
 ) -> None:
     """Evaluate a BinOp and store the result in bindings.
 
-    Parameter-array elements take priority over their concrete
-    bindings: users often pass a concrete array alongside
-    ``parameters=[...]`` as a shape hint, and those elements must stay
-    symbolic so the emitted circuit carries backend parameters.
+    Tries the shared ``fold_classical_op`` first for a clean concrete
+    fold (which already encapsulates the runtime-parameter guard).
+    Falls back to creating backend ``Parameter`` symbols and doing
+    symbolic arithmetic when one or both operands are runtime
+    parameters — that's the path that lets ``rx(q, gamma * 2)`` produce
+    a circuit with a single ``Parameter("gamma") * 2`` expression rather
+    than baking in a placeholder.
     """
     parameters = emit_pass._resolver.parameters
-    lhs_is_param_elem = _is_param_array_element(op.lhs, parameters)
-    rhs_is_param_elem = _is_param_array_element(op.rhs, parameters)
 
-    if lhs_is_param_elem:
-        lhs = None
-    else:
-        lhs = emit_pass._resolver.resolve_classical_value(op.lhs, bindings)
-    if rhs_is_param_elem:
-        rhs = None
-    else:
-        rhs = emit_pass._resolver.resolve_classical_value(op.rhs, bindings)
+    # Phase 1: try the concrete fold path via the shared API.
+    folded = fold_classical_op(
+        op,
+        lambda v: emit_pass._resolver.resolve_classical_value(v, bindings),
+        parameters,
+        FoldPolicy.EMIT_RESPECT_PARAMS,
+    )
+    if folded is not None and op.results:
+        # Write by UUID only. Auto-generated tmp values share generic names
+        # (e.g. every UInt arithmetic result is named "uint_tmp"), so a
+        # name-keyed write would overwrite earlier tmps with the same name
+        # and cause stale-value lookups in chained expressions. UUID-keyed
+        # writes are unambiguous and the resolvers (value_resolver.py) check
+        # UUID before name, so legitimate name-based reads (parameters, loop
+        # variables) are unaffected.
+        _set_emit_value(bindings, op.results[0].uuid, folded)
+        return
+
+    # Phase 2: backend Parameter symbolic path. Operands that are either
+    # runtime-parameter array elements or top-level parameters become
+    # backend Parameter objects; the arithmetic is performed symbolically
+    # using the backend Parameter's overloaded ``__add__`` etc.
+    lhs = (
+        None
+        if _is_param_array_element(op.lhs, parameters)
+        else emit_pass._resolver.resolve_classical_value(op.lhs, bindings)
+    )
+    rhs = (
+        None
+        if _is_param_array_element(op.rhs, parameters)
+        else emit_pass._resolver.resolve_classical_value(op.rhs, bindings)
+    )
 
     lhs_param_key = emit_pass._resolver.get_parameter_key(op.lhs, bindings)
     rhs_param_key = emit_pass._resolver.get_parameter_key(op.rhs, bindings)
@@ -128,38 +151,28 @@ def evaluate_binop(
     if lhs is None or rhs is None:
         return
 
-    # For concrete numeric operands, use the shared evaluator.
-    # When operands may be symbolic backend parameters, fall back to
-    # direct arithmetic (which relies on the backend parameter type
-    # supporting __add__ etc.) and use 0-valued defaults for division.
-    if isinstance(lhs, (int, float)) and isinstance(rhs, (int, float)):
-        result = evaluate_binop_values(op.kind, lhs, rhs)
-    else:
-        result = None
-        match op.kind:
-            case BinOpKind.ADD:
-                result = lhs + rhs
-            case BinOpKind.SUB:
-                result = lhs - rhs
-            case BinOpKind.MUL:
-                result = lhs * rhs
-            case BinOpKind.DIV:
-                result = lhs / rhs if rhs != 0 else 0.0
-            case BinOpKind.FLOORDIV:
-                result = lhs // rhs if rhs != 0 else 0
-            case BinOpKind.POW:
-                result = lhs**rhs
+    # Symbolic arithmetic over backend Parameter objects. Concrete-only
+    # operands have already been handled by ``fold_classical_op`` above,
+    # so we land here only when at least one operand is a backend
+    # Parameter; ``0``-valued defaults guard against div-by-zero on the
+    # symbolic side without losing the symbolic result for the common case.
+    result = None
+    match op.kind:
+        case BinOpKind.ADD:
+            result = lhs + rhs
+        case BinOpKind.SUB:
+            result = lhs - rhs
+        case BinOpKind.MUL:
+            result = lhs * rhs
+        case BinOpKind.DIV:
+            result = lhs / rhs if rhs != 0 else 0.0
+        case BinOpKind.FLOORDIV:
+            result = lhs // rhs if rhs != 0 else 0
+        case BinOpKind.POW:
+            result = lhs**rhs
 
     if result is not None and op.results:
-        output = op.results[0]
-        # Write by UUID only. Auto-generated tmp values share generic names
-        # (e.g. every UInt arithmetic result is named "uint_tmp"), so a
-        # name-keyed write would overwrite earlier tmps with the same name
-        # and cause stale-value lookups in chained expressions. UUID-keyed
-        # writes are unambiguous and the resolvers (value_resolver.py) check
-        # UUID before name, so legitimate name-based reads (parameters, loop
-        # variables) are unaffected.
-        _set_emit_value(bindings, output.uuid, result)
+        _set_emit_value(bindings, op.results[0].uuid, result)
 
 
 def evaluate_classical_predicate(
@@ -176,12 +189,12 @@ def evaluate_classical_predicate(
     by ``emit_for_items`` / ``emit_for_unrolled`` — can still be resolved
     via ``resolve_if_condition``.
 
-    All three predicate kinds are handled together because the IR contract
-    treats them as a single family: ``CompOp`` is what the frontend
-    currently produces from ``==`` / ``<`` / ..., while ``CondOp`` and
-    ``NotOp`` are produced by other passes (and are reserved for future
-    handle overloads of ``&`` / ``|`` / ``~``). Skipping the latter would
-    leave emit as the only pass blind to those ops.
+    Delegates the actual fold (including runtime-parameter guard and
+    strict scalar typing) to ``fold_classical_op`` so that all three
+    callers of the same kind dispatch share one implementation. There
+    is no symbolic-Parameter fallback for predicates: a runtime classical
+    expression cannot be expressed as a folded scalar, so the op is left
+    unbound and downstream emit handles it as a runtime condition.
 
     Args:
         emit_pass: The active emit pass (for resolver access).
@@ -196,38 +209,15 @@ def evaluate_classical_predicate(
     if not op.results:
         return
 
-    # Defense-in-depth: only accept scalar Python values (bool / int /
-    # float) as resolved operands. A backend runtime expression
-    # (e.g. ``qiskit.circuit.classical.expr.Expr``) is a truthy Python
-    # object, and feeding it through ``bool(lhs and rhs)`` would spuriously
-    # fold the predicate to ``True``. The primary protection against this
-    # class of bug is the UUID-only binding policy (see ``evaluate_binop``
-    # comment above and the matching block at the end of this function) —
-    # without name-keyed writes, sub-predicate exprs no longer leak into
-    # bindings under colliding tmp names. This isinstance check is a belt-
-    # and-suspenders guard against future code paths that might inject
-    # non-scalar values into bindings by other means.
-    if isinstance(op, NotOp):
-        operand = emit_pass._resolver.resolve_classical_value(op.operands[0], bindings)
-        if not isinstance(operand, (bool, int, float)):
-            return
-        result = evaluate_notop_value(operand)
-    else:
-        lhs = emit_pass._resolver.resolve_classical_value(op.operands[0], bindings)
-        rhs = emit_pass._resolver.resolve_classical_value(op.operands[1], bindings)
-        if not isinstance(lhs, (bool, int, float)) or not isinstance(
-            rhs, (bool, int, float)
-        ):
-            return
-        if isinstance(op, CompOp):
-            result = evaluate_compop_values(op.kind, lhs, rhs)
-        else:  # CondOp
-            result = evaluate_condop_values(op.kind, lhs, rhs)
-
+    result = fold_classical_op(
+        op,
+        lambda v: emit_pass._resolver.resolve_classical_value(v, bindings),
+        emit_pass._resolver.parameters,
+        FoldPolicy.EMIT_RESPECT_PARAMS,
+    )
     if result is None:
         return
 
-    output = op.results[0]
     # Write by UUID only — see the matching comment in evaluate_binop above
     # for why name-keyed writes are unsafe for tmp values like "bit_tmp".
-    _set_emit_value(bindings, output.uuid, result)
+    _set_emit_value(bindings, op.results[0].uuid, result)
