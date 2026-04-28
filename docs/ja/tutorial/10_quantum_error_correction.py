@@ -43,7 +43,7 @@ transpiler = QiskitTranspiler()
 # Create a seeded backend for reproducible documentation output
 from qiskit_aer import AerSimulator
 
-_seeded_backend = AerSimulator(seed_simulator=42)
+_seeded_backend = AerSimulator(seed_simulator=42, max_parallel_threads=1)
 _seeded_executor = transpiler.executor(backend=_seeded_backend)
 
 
