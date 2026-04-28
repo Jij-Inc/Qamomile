@@ -172,7 +172,10 @@ def test_qaoa_decode():
     result_opt = job_opt.result()
 
     # OMMX in → OMMX out: decode() returns ommx.v1.SampleSet here.
+    import ommx.v1
+
     sample_set = converter.decode(result_opt)
+    assert isinstance(sample_set, ommx.v1.SampleSet)
     best = sample_set.best_feasible
     # Optimal solution: x=0, y=1, z=1 with energy = 0*1 - 1*1 + 0 - 0.1*1 = -1.1
     assert abs(best.objective - (-1.1)) < 1e-6
