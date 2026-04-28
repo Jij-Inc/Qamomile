@@ -130,8 +130,9 @@ uv run python /tmp/verify_release_snippets.py
 |---|---|
 | PR参照 | `[#NNN](https://github.com/Jij-Inc/Qamomile/pull/NNN)` — **必ずリンク化**。プレーンな`(#NNN)`は使わない |
 | チュートリアル/VQAリンク | `https://github.com/Jij-Inc/Qamomile/blob/v<X.Y.Z>/docs/en/tutorial/<file>.ipynb` 形式 — **リリースタグ付きGitHub blob URL**。ReadTheDocsホスト型URLや相対パスは使わない |
-| Tutorialsトップ | `[Tutorials](../tutorial)` (Learn Moreのみ) |
 | GitHubリポジトリ | `https://github.com/Jij-Inc/Qamomile` |
+
+`Learn More` / `さらに詳しく` セクションに Tutorials トップへのリンクは入れない — RTD ホストのサイドバー目次に常時表示されるため冗長になる。
 
 タグ`v<X.Y.Z>`はリリース前なので一時的に404するが，リリース時に解決する旨を理解しておく。
 
