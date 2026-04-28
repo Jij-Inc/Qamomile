@@ -417,3 +417,96 @@ def test_decode_to_ommx_sampleset_integer_slack_mapping(seed: int):
     assert 0.0 <= y_value <= 3.0
     # Integer variable must take an integer-valued reconstruction.
     assert y_value == pytest.approx(round(y_value))
+
+
+# --- QRAO decode(rounded_spins_list) round-trip -----------------------------
+
+
+def _build_qrao_max_cut_instance() -> ommx.v1.Instance:
+    """Tiny 3-node max-cut OMMX instance for QRAO decode tests."""
+    n = 3
+    dvs = [ommx.v1.DecisionVariable.binary(i, name=f"x{i}") for i in range(n)]
+    obj = ommx.v1.Linear(terms={}, constant=0.0)
+    for i in range(n):
+        for j in range(i + 1, n):
+            obj = obj + (-1.0) * (dvs[i] + dvs[j] - 2 * dvs[i] * dvs[j])
+    return ommx.v1.Instance.from_components(
+        decision_variables=dvs,
+        objective=obj,
+        constraints=[],
+        sense=ommx.v1.Instance.MINIMIZE,
+    )
+
+
+def test_qrao_decode_returns_ommx_sampleset_for_ommx_input():
+    """QRAC31Converter.decode(rounded_spins) returns ommx.v1.SampleSet."""
+    from qamomile.optimization.qrao import QRAC31Converter
+
+    instance = _build_qrao_max_cut_instance()
+    converter = QRAC31Converter(instance)
+
+    rounded_spins_list = [
+        [1, -1, 1],
+        [-1, 1, -1],
+        [1, 1, -1],
+    ]
+    sample_set = converter.decode(rounded_spins_list)
+
+    assert isinstance(sample_set, ommx.v1.SampleSet)
+    # Three samples in, three sample IDs out.
+    assert len(sample_set.sample_ids) == len(rounded_spins_list)
+    # Each sample's decoded variable values must match the rounding's
+    # spin → bit mapping (spin +1 → bit 0, spin -1 → bit 1).
+    for sid, spins in zip(sample_set.sample_ids, rounded_spins_list):
+        sol = sample_set.get(sid)
+        bits = [int(round(sol.decision_variables_df.loc[i, "value"])) for i in range(3)]
+        expected_bits = [(1 - s) // 2 for s in spins]
+        assert bits == expected_bits
+
+
+def test_qrao_decode_returns_binary_sampleset_for_binary_model_input():
+    """QRAC31Converter built from BinaryModel returns BinarySampleSet."""
+    from qamomile.optimization.binary_model import BinaryModel
+    from qamomile.optimization.qrao import QRAC31Converter
+
+    # Three-spin Ising: -s0 s1 - s1 s2.
+    model = BinaryModel.from_ising(linear={}, quad={(0, 1): -1.0, (1, 2): -1.0})
+    converter = QRAC31Converter(model)
+
+    rounded_spins_list = [[1, 1, 1], [-1, -1, -1]]
+    result = converter.decode(rounded_spins_list)
+
+    assert isinstance(result, BinarySampleSet)
+    assert len(result.samples) == 2
+    # The model is in SPIN vartype so decode keeps spins as-is.
+    assert result.samples[0] == {0: 1, 1: 1, 2: 1}
+    assert result.samples[1] == {0: -1, 1: -1, 2: -1}
+
+
+def test_qrao_decode_rejects_wrong_length_spins():
+    """Each rounded-spin list must match spin_model.num_bits."""
+    from qamomile.optimization.qrao import QRAC31Converter
+
+    converter = QRAC31Converter(_build_qrao_max_cut_instance())
+    with pytest.raises(ValueError, match="length 3"):
+        converter.decode([[1, -1]])  # wrong length
+
+
+def test_qrao_decode_rejects_non_spin_values():
+    """Each rounded-spin list must contain only ±1."""
+    from qamomile.optimization.qrao import QRAC31Converter
+
+    converter = QRAC31Converter(_build_qrao_max_cut_instance())
+    with pytest.raises(ValueError, match=r"\+1 or -1"):
+        converter.decode([[1, 0, -1]])  # 0 is not a valid spin
+
+
+def test_qrao_decode_empty_list_returns_empty_result():
+    """Empty rounded-spins list produces an empty SampleSet (OMMX path)."""
+    from qamomile.optimization.qrao import QRAC31Converter
+
+    converter = QRAC31Converter(_build_qrao_max_cut_instance())
+    sample_set = converter.decode([])
+
+    assert isinstance(sample_set, ommx.v1.SampleSet)
+    assert sample_set.sample_ids == []

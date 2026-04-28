@@ -9,7 +9,11 @@ from __future__ import annotations
 import abc
 from typing import Generic, TypeVar
 
+import ommx.v1
+
 import qamomile.observable as qm_o
+from qamomile.circuit.transpiler.job import SampleResult
+from qamomile.optimization.binary_model import BinarySampleSet
 from qamomile.optimization.converter import MathematicalProblemConverter
 
 EncoderT = TypeVar("EncoderT")
@@ -83,3 +87,57 @@ class QRACConverterBase(MathematicalProblemConverter, abc.ABC, Generic[EncoderT]
     def encoder(self) -> EncoderT:
         """The QRAC encoder used by this converter."""
         return self._encoder
+
+    def decode(  # type: ignore[override]
+        self,
+        rounded_spins_list: list[list[int]],
+    ) -> BinarySampleSet | ommx.v1.SampleSet:
+        """Decode rounded QRAC spin assignments.
+
+        Unlike the base ``MathematicalProblemConverter.decode``, which
+        consumes raw quantum measurement results from sampling, QRAO
+        produces problem-variable spins via Pauli expectation rounding
+        (see :class:`qamomile.optimization.qrao.SignRounder`). This
+        override accepts those spin lists, packages them into a
+        synthetic :class:`SampleResult`, and delegates to the base
+        class's polymorphic decode — so QRAO converters share the same
+        OMMX round-trip behavior as QAOA / FQAOA: an OMMX-backed
+        converter returns an :class:`ommx.v1.SampleSet`, a
+        :class:`BinaryModel`-backed converter returns a
+        :class:`BinarySampleSet`.
+
+        Args:
+            rounded_spins_list: List of rounded spin assignments. Each
+                inner list contains ±1 values, one per spin-model
+                variable, in the order matching ``self.spin_model``'s
+                variable indexing. Length per inner list must equal
+                ``self.spin_model.num_bits``.
+
+        Returns:
+            BinarySampleSet | ommx.v1.SampleSet: see method description.
+
+        Raises:
+            ValueError: If any inner list has the wrong length or
+                contains values other than +1 / -1.
+        """
+        n = self.spin_model.num_bits
+        results: list[tuple[list[int], int]] = []
+        for spins in rounded_spins_list:
+            if len(spins) != n:
+                raise ValueError(
+                    f"each spin list must have length {n} "
+                    f"(spin_model.num_bits); got {len(spins)}"
+                )
+            if not all(s in (1, -1) for s in spins):
+                raise ValueError(f"all spin values must be +1 or -1; got {spins}")
+            # Map ±1 spin → 0/1 measurement bit via bit = (1 - spin) // 2.
+            # Matches BinaryModel.decode_from_sampleresult's SPIN convention
+            # (measurement 0 → +1, measurement 1 → -1).
+            bits = [(1 - s) // 2 for s in spins]
+            results.append((bits, 1))
+
+        sample_result: SampleResult[list[int]] = SampleResult(
+            results=results,
+            shots=len(rounded_spins_list),
+        )
+        return super().decode(sample_result)
