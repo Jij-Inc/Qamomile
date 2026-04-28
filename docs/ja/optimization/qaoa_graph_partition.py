@@ -202,7 +202,12 @@ def cost_fn(params):
         bindings={"gammas": gammas, "betas": betas},
     )
     result = job.result()
-    decoded = converter.decode(result)
+    # decode_to_binary_sampleset は QUBO ドメインの BinarySampleSet を返す。
+    # その `energy` はペナルティを含む目的関数値で、COBYLA が実行不可能解の
+    # コストを認識するために必要。多態的な decode() が返す ommx.v1.SampleSet
+    # の `objective` はペナルティを含まない真の目的関数値であり、
+    # 最適化器を実行不可能な全 0/全 1 ビット列に収束させてしまう。
+    decoded = converter.decode_to_binary_sampleset(result)
     energy = decoded.energy_mean()
     cost_history.append(energy)
     return energy
@@ -242,7 +247,12 @@ sample_result = executable.sample(
     bindings={"gammas": gammas_opt, "betas": betas_opt},
 ).result()
 
-decoded = converter.decode(sample_result)
+# 以下の per-state ループ（samples / energy / num_occurrences）を
+# そのまま動かすため、QUBO ドメインの BinarySampleSet を使用する。
+# decode() がデフォルトで返す ommx.v1.SampleSet API
+# （`sample_set.feasible`, `sample_set.summary_with_constraints`,
+# `sample_set.best_feasible`）への移行は次の PR で行う。
+decoded = converter.decode_to_binary_sampleset(sample_result)
 
 # %% [markdown]
 # ## 結果の分析

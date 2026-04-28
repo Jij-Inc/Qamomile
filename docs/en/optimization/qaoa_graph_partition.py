@@ -215,7 +215,13 @@ def cost_fn(params):
         bindings={"gammas": gammas, "betas": betas},
     )
     result = job.result()
-    decoded = converter.decode(result)
+    # decode_to_binary_sampleset returns the QUBO-domain BinarySampleSet
+    # whose `energy` is the penalized objective — what COBYLA needs to
+    # see infeasibility costs. The polymorphic decode() returns an
+    # ommx.v1.SampleSet whose `objective` is the un-penalized true
+    # objective; using it here would let the optimizer settle on
+    # infeasible all-zero / all-one bitstrings.
+    decoded = converter.decode_to_binary_sampleset(result)
     energy = decoded.energy_mean()
     cost_history.append(energy)
     return energy
@@ -256,7 +262,12 @@ sample_result = executable.sample(
     bindings={"gammas": gammas_opt, "betas": betas_opt},
 ).result()
 
-decoded = converter.decode(sample_result)
+# Use the QUBO-domain BinarySampleSet so the existing per-state
+# loop below (samples / energy / num_occurrences) keeps working.
+# A follow-up PR will migrate this section to the OMMX SampleSet
+# API (`sample_set.feasible`, `sample_set.summary_with_constraints`,
+# `sample_set.best_feasible`) that decode() returns by default.
+decoded = converter.decode_to_binary_sampleset(sample_result)
 
 # %% [markdown]
 # ## Analyze the Results

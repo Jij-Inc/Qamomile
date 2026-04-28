@@ -46,6 +46,12 @@ from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
 
+# Create a seeded backend for reproducible documentation output
+from qiskit_aer import AerSimulator
+
+_seeded_backend = AerSimulator(seed_simulator=42, max_parallel_threads=1)
+_seeded_executor = transpiler.executor(backend=_seeded_backend)
+
 
 def _bits7(outcome) -> list[int]:
     """Return seven measured bits in qubit-index order."""
@@ -146,7 +152,7 @@ def encode_zero_and_measure() -> qmc.Vector[qmc.Bit]:
 # %%
 print("|0_L⟩ をエンコードして測定")
 exe = transpiler.transpile(encode_zero_and_measure)
-result = exe.sample(transpiler.executor(), shots=1024).result()
+result = exe.sample(_seeded_executor, shots=1024).result()
 valid = sum(count for outcome, count in result.results if _is_steane_zero_word(outcome))
 total = sum(count for _, count in result.results)
 print(f"  偶重み Hamming 符号語の割合: {valid / total:.3f}")
@@ -286,7 +292,7 @@ for name, error_type in [("X", 1), ("Y", 2), ("Z", 3)]:
             steane_run,
             bindings={"error_type": error_type, "error_pos": pos},
         )
-        result = exe.sample(transpiler.executor(), shots=128).result()
+        result = exe.sample(_seeded_executor, shots=128).result()
         valid = sum(
             count for outcome, count in result.results if _is_steane_zero_word(outcome)
         )
@@ -348,7 +354,7 @@ def _logical_x_parity(outcome) -> int:
 # %%
 print("横断的 H: |0_L⟩ -> |+_L⟩")
 exe_plus = transpiler.transpile(transversal_hadamard_to_plus_l)
-result_plus = exe_plus.sample(transpiler.executor(), shots=1024).result()
+result_plus = exe_plus.sample(_seeded_executor, shots=1024).result()
 parity_zero = sum(
     count for outcome, count in result_plus.results if _logical_x_parity(outcome) == 0
 )
@@ -361,7 +367,7 @@ print(f"  q[0]⊕q[1]⊕q[2] = 0 の割合: {parity_zero / total_plus:.3f}")
 # %%
 print("横断的 H の round trip: |0_L⟩ -> H -> H -> |0_L⟩")
 exe_round_trip = transpiler.transpile(transversal_hadamard_round_trip)
-result_round_trip = exe_round_trip.sample(transpiler.executor(), shots=1024).result()
+result_round_trip = exe_round_trip.sample(_seeded_executor, shots=1024).result()
 valid = sum(
     count
     for outcome, count in result_round_trip.results

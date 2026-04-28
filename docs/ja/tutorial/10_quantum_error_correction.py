@@ -49,6 +49,12 @@ from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
 
+# Create a seeded backend for reproducible documentation output
+from qiskit_aer import AerSimulator
+
+_seeded_backend = AerSimulator(seed_simulator=42, max_parallel_threads=1)
+_seeded_executor = transpiler.executor(backend=_seeded_backend)
+
 
 def _first_bit_distribution(result) -> dict[int, int]:
     """Return counts for the first measured bit."""
@@ -74,7 +80,7 @@ def _sample_first_bit(
         parameters=parameters or [],
     )
     job = executable.sample(
-        transpiler.executor(),
+        _seeded_executor,
         shots=shots,
         bindings=runtime_bindings or {},
     )
