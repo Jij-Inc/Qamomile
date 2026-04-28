@@ -15,13 +15,13 @@
 # %% [markdown]
 # ---
 # title: コンパイルとトランスパイル
-# tags: [transpiler, internals, advanced]
+# tags: [tutorial]
 # ---
 #
 # # コンパイルとトランスパイル: 内部の仕組み
 #
 # <!-- BEGIN auto-tags -->
-# **タグ:** [`transpiler`](../tags/transpiler.md) · [`internals`](../tags/internals.md) · [`advanced`](../tags/advanced.md)
+# **タグ:** [`tutorial`](../tags/tutorial.md)
 # <!-- END auto-tags -->
 #
 # このチュートリアルではQamomileの`@qkernel`がどのような処理フローを経て、Python関数から量子回路へと変換されるのかを、コンパイラの内部の視点から見ていきます。ユーザーが見るのは`@qkernel`を書き、`transpiler.transpile(...)`を呼び、executableを受け取る、という流れです。この章ではそのブラックボックスを開きます。

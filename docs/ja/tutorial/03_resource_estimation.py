@@ -15,13 +15,13 @@
 # %% [markdown]
 # ---
 # title: リソース推定
-# tags: [resource-estimation, fundamentals, intermediate]
+# tags: [resource-estimation, tutorial]
 # ---
 #
 # # リソース推定
 #
 # <!-- BEGIN auto-tags -->
-# **タグ:** [`resource-estimation`](../tags/resource-estimation.md) · [`fundamentals`](../tags/fundamentals.md) · [`intermediate`](../tags/intermediate.md)
+# **タグ:** [`resource-estimation`](../tags/resource-estimation.md) · [`tutorial`](../tags/tutorial.md)
 # <!-- END auto-tags -->
 #
 # 量子カーネルを実機で実行する前に、必要なリソース（量子ビット数、ゲート数等）を把握しておきたい場合や、そもそも定義した量子カーネルを実行するために必要なリソースを知りたい場合があります。Qamomileの`estimate_resources()`は**量子カーネルを実行せずに**リソース推定が可能です。具体的な（パラメータ固定の）量子カーネルにも、シンボリック（パラメータ付き）な量子カーネルにも対応しています。

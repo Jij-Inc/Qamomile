@@ -15,7 +15,7 @@
 # %% [markdown]
 # ---
 # title: 実行モデル: sample()とrun()
-# tags: [execution, observables, fundamentals, intermediate]
+# tags: [tutorial]
 # ---
 #
 # # 実行モデル：`sample()`と`run()`

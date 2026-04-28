@@ -15,13 +15,13 @@
 # %% [markdown]
 # ---
 # title: Classical Control Flow Patterns
-# tags: [control-flow, fundamentals, intermediate]
+# tags: [tutorial]
 # ---
 #
 # # Classical Control Flow Patterns
 #
 # <!-- BEGIN auto-tags -->
-# **Tags:** [`control-flow`](../tags/control-flow.md) · [`fundamentals`](../tags/fundamentals.md) · [`intermediate`](../tags/intermediate.md)
+# **Tags:** [`tutorial`](../tags/tutorial.md)
 # <!-- END auto-tags -->
 #
 # Quantum circuits often have structure that depends on classical control flow: iterating over qubits, applying gates based on a graph's edges, or choosing between gate sequences. Qamomile supports these patterns through `qmc.range`, `qmc.items`, `if` branching, and `while` loops.

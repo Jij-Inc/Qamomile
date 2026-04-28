@@ -15,13 +15,13 @@
 # %% [markdown]
 # ---
 # title: 量子誤り訂正入門
-# tags: [qec, error-correction, intermediate]
+# tags: [qec, tutorial]
 # ---
 #
 # # 量子誤り訂正入門
 #
 # <!-- BEGIN auto-tags -->
-# **タグ:** [`qec`](../tags/qec.md) · [`error-correction`](../tags/error-correction.md) · [`intermediate`](../tags/intermediate.md)
+# **タグ:** [`qec`](../tags/qec.md) · [`tutorial`](../tags/tutorial.md)
 # <!-- END auto-tags -->
 #
 # 量子誤り訂正(Quantum Error Correction; QEC)は、壊れやすい量子状態を複数の物理量子ビットへ分散し、状態そのものを測らずにエラーだけを検出して戻す技術です。

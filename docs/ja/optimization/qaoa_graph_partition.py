@@ -14,58 +14,55 @@
 
 # %% [markdown]
 # ---
-# title: QAOA for Graph Partitioning
-# tags: [qaoa, optimization, variational, graph, graph-partition, jijmodeling, built-in, intermediate]
+# title: QAOA によるグラフ分割
+# tags: [qaoa, qamomile-optimization, optimization, variational, algorithm]
 # ---
 #
-# # QAOA for Graph Partitioning
+# # QAOA によるグラフ分割
 #
 # <!-- BEGIN auto-tags -->
-# **Tags:** [`qaoa`](../tags/qaoa.md) · [`optimization`](../tags/optimization.md) · [`variational`](../tags/variational.md) · [`graph`](../tags/graph.md) · [`graph-partition`](../tags/graph-partition.md) · [`jijmodeling`](../tags/jijmodeling.md) · [`built-in`](../tags/built-in.md) · [`intermediate`](../tags/intermediate.md)
+# **タグ:** [`qaoa`](../tags/qaoa.md) · [`qamomile-optimization`](../tags/qamomile-optimization.md) · [`optimization`](../tags/optimization.md) · [`variational`](../tags/variational.md) · [`algorithm`](../tags/algorithm.md)
 # <!-- END auto-tags -->
 #
-# This tutorial demonstrates how to solve the **graph partitioning problem**
-# using the Quantum Approximate Optimization Algorithm (QAOA) with Qamomile.
+# 本チュートリアルでは、Quantum Approximate Optimization Algorithm（QAOA）を用いて**グラフ分割問題**を解く方法を紹介します。
 #
-# The workflow is:
+# ワークフロー：
 #
 # ```
-# JijModeling problem → problem.eval() → QAOAConverter → transpile → sample → decode
+# JijModeling 問題定義 → problem.eval() → QAOAConverter → transpile → sample → decode
 # ```
 #
-# 1. Formulate the problem with [JijModeling](https://jij-inc-jijmodeling-tutorials-en.readthedocs-hosted.com/en/latest/introduction.html).
-# 2. Create an instance with concrete data.
-# 3. Use `QAOAConverter` to build the QAOA circuit and Hamiltonian.
-# 4. Optimize the variational parameters with a classical optimizer.
-# 5. Sample the optimized circuit and decode the results.
+# 1. [JijModeling](https://jij-inc-jijmodeling-tutorials-ja.readthedocs-hosted.com/ja/latest/introduction.html) で問題を定式化する。
+# 2. 具体的なデータでインスタンスを作成する。
+# 3. `QAOAConverter` を使って QAOA 回路とハミルトニアンを構築する。
+# 4. 古典オプティマイザで変分パラメータを最適化する。
+# 5. 最適化された回路をサンプリングし、結果をデコードする。
 
 # %%
-# Install the latest Qamomile through pip!
+# 最新のQamomileをpipからインストールします！
 # # !pip install qamomile
 
 # %% [markdown]
-# ## Problem Formulation
+# ## 問題の定式化
 #
-# Given an undirected graph $G = (V, E)$, the goal is to partition the vertices
-# into two groups of equal size while minimizing the number of edges between
-# the two groups.
+# 無向グラフ $G = (V, E)$ が与えられたとき、頂点を同じサイズの 2 つのグループに分割し、グループ間のエッジ数を最小化することが目標です。
 #
-# **Objective:**
+# **目的関数：**
 #
 # $$
 # \min \sum_{(u,v) \in E} \bigl[x_u(1 - x_v) + x_v(1 - x_u)\bigr]
 # $$
 #
-# **Constraint:**
+# **制約条件：**
 #
 # $$
 # \sum_{u \in V} x_u = \frac{|V|}{2}
 # $$
 #
-# where $x_u \in \{0, 1\}$ indicates which partition vertex $u$ belongs to.
+# ここで $x_u \in \{0, 1\}$ は頂点 $u$ がどちらのグループに属するかを表します。
 
 # %% [markdown]
-# ## Define the Problem with JijModeling
+# ## JijModeling による問題定義
 
 # %%
 import jijmodeling as jm
@@ -76,24 +73,24 @@ problem = jm.Problem("Graph Partitioning")
 @problem.update
 def _(problem: jm.DecoratedProblem):
     V = problem.Dim()
-    E = problem.Natural(ndim=2)  # edge list: [[u1,v1], [u2,v2], ...]
+    E = problem.Natural(ndim=2)  # エッジリスト: [[u1,v1], [u2,v2], ...]
     x = problem.BinaryVar(shape=(V,))
 
-    # Objective: minimize edges cut between partitions
+    # 目的関数：分割間のカットエッジ数を最小化
     problem += (
         E.rows().map(lambda e: x[e[0]] * (1 - x[e[1]]) + x[e[1]] * (1 - x[e[0]])).sum()
     )
 
-    # Constraint: equal partition sizes
+    # 制約条件：均等な分割サイズ
     problem += problem.Constraint("equal_partition", x.sum() == V / 2)
 
 
 problem
 
 # %% [markdown]
-# ## Graph Instance
+# ## グラフインスタンス
 #
-# We use a fixed 8-node graph with 16 edges for reproducibility.
+# 再現性を確保するため、8 ノード 16 エッジの固定グラフを使用します。
 
 # %%
 import matplotlib.pyplot as plt
@@ -137,28 +134,23 @@ plt.title(f"Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
 plt.show()
 
 # %% [markdown]
-# ## Create the Instance
+# ## インスタンスの作成
 #
-# We extract the edge list from the graph and evaluate the JijModeling
-# problem with the concrete data.
+# グラフからエッジリストを取得し、JijModeling の問題を具体的なデータで評価します。
 
 # %%
 instance_data = {"V": num_nodes, "E": edge_list}
 instance = problem.eval(instance_data)
 
 # %% [markdown]
-# ## Set Up the QAOAConverter
+# ## QAOAConverter のセットアップ
 #
-# `QAOAConverter` takes an OMMX instance and internally:
-# 1. Converts the problem to a QUBO (Quadratic Unconstrained Binary Optimization) form.
-# 2. Transforms from BINARY variables to SPIN variables.
-# 3. Builds the cost Hamiltonian as a sum of Pauli-Z operators.
+# `QAOAConverter` は OMMX インスタンスを受け取り、内部で以下を行います：
+# 1. 問題を QUBO（Quadratic Unconstrained Binary Optimization）形式に変換。
+# 2. BINARY 変数から SPIN 変数へ変換。
+# 3. Pauli-Z 演算子の和としてコストハミルトニアンを構築。
 #
-# Because the original problem has a constraint, the QUBO formulation folds it
-# into the objective as a **penalty term**. This means the energy values from
-# the decoded samples are **not** the original objective (number of cut edges)
-# — they include the penalty. We will need to check feasibility and compute
-# the true objective separately.
+# 元の問題には制約があるため、QUBO 定式化では制約が**ペナルティ項**として目的関数に組み込まれます。そのため、デコードされたサンプルのエネルギー値は元の目的関数（カットエッジ数）とは**異なり**、ペナルティを含んでいます。実行可能性の確認と真の目的関数値の計算を別途行う必要があります。
 
 # %%
 from qamomile.optimization.qaoa import QAOAConverter
@@ -169,25 +161,21 @@ hamiltonian = converter.get_cost_hamiltonian()
 print(hamiltonian)
 
 # %% [markdown]
-# ## Transpile to an Executable Circuit
+# ## 実行可能な回路へのトランスパイル
 #
-# `converter.transpile()` builds a QAOA ansatz circuit with `p` layers and
-# compiles it into an `ExecutableProgram`. The variational parameters
-# `gammas` (cost layer) and `betas` (mixer layer) remain as runtime parameters.
+# `converter.transpile()` は `p` 層の QAOA アンザッツ回路を構築し、`ExecutableProgram` にコンパイルします。変分パラメータ `gammas`（コスト層）と `betas`（ミキサー層）はランタイムパラメータとして残ります。
 
 # %%
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
-p = 5  # number of QAOA layers
+p = 5  # QAOA の層数
 executable = converter.transpile(transpiler, p=p)
 
 # %% [markdown]
-# ## Optimize the QAOA Parameters
+# ## QAOA パラメータの最適化
 #
-# We use `executable.sample()` to evaluate the cost at each iteration of the
-# classical optimizer. The optimizer explores different `gammas` and `betas`
-# to minimize the mean energy of the sampled bitstrings.
+# `executable.sample()` を使って各イテレーションでコストを評価します。オプティマイザはサンプリングされたビット列の平均エネルギーを最小化する `gammas` と `betas` を探索します。
 
 # %%
 import os
@@ -240,10 +228,9 @@ plt.title("QAOA Optimization Progress")
 plt.show()
 
 # %% [markdown]
-# ## Sample with Optimized Parameters
+# ## 最適化されたパラメータでサンプリング
 #
-# With the optimized parameters, we sample the circuit to collect
-# candidate solutions as bitstrings.
+# 最適化されたパラメータを使い、回路をサンプリングしてビット列として候補解を取得します。
 
 # %%
 gammas_opt = list(res.x[:p])
@@ -258,27 +245,23 @@ sample_result = executable.sample(
 decoded = converter.decode(sample_result)
 
 # %% [markdown]
-# ## Analyze the Results
+# ## 結果の分析
 #
-# ### Feasibility Check
+# ### 実行可能性のチェック
 #
-# QAOA samples are **candidate solutions** — they are not guaranteed to
-# satisfy the original constraints. The constraint $\sum x_u = |V|/2$ was
-# folded into the QUBO as a penalty, so infeasible bitstrings can still
-# appear in the output.
+# QAOA のサンプルは**候補解**であり、元の制約を満たすとは限りません。制約 $\sum x_u = |V|/2$ は QUBO のペナルティとして組み込まれているため、制約を満たさないビット列も出力に含まれる可能性があります。
 #
-# We must filter samples by feasibility before interpreting them as
-# valid partitions.
+# サンプルを有効な分割として解釈する前に、実行可能性でフィルタリングする必要があります。
 
 
 # %%
 def is_feasible(sample: dict[int, int]) -> bool:
-    """Check if a sample satisfies the equal partition constraint."""
+    """サンプルが均等分割の制約を満たすかチェック"""
     return sum(sample.values()) == num_nodes // 2
 
 
 def count_cut_edges(sample: dict[int, int], graph: nx.Graph) -> int:
-    """Compute the true objective: number of edges between the two partitions."""
+    """真の目的関数値（2つの分割間のエッジ数）を計算"""
     cuts = 0
     for u, v in graph.edges():
         if sample.get(u, 0) != sample.get(v, 0):
@@ -304,10 +287,9 @@ print(
 )
 
 # %% [markdown]
-# ### Best Feasible Solution
+# ### 最良の実行可能解
 #
-# Among the feasible samples, we select the one with the fewest cut edges
-# (the true objective).
+# 実行可能なサンプルの中から、カットエッジ数（真の目的関数）が最小のものを選択します。
 
 # %%
 if feasible_results:
@@ -321,10 +303,9 @@ else:
     best_sample = None
 
 # %% [markdown]
-# ### Objective Value Distribution
+# ### 目的関数値の分布
 #
-# We plot the distribution of the true objective value (cut edges)
-# for feasible samples only.
+# 実行可能なサンプルのみについて、真の目的関数値（カットエッジ数）の分布を表示します。
 
 # %%
 from collections import Counter
@@ -345,10 +326,9 @@ if feasible_results:
     plt.show()
 
 # %% [markdown]
-# ### Visualize the Best Partition
+# ### 最良の分割の可視化
 #
-# We color the graph nodes according to the best feasible partition
-# found by QAOA.
+# QAOA が見つけた最良の実行可能な分割に基づいて、グラフのノードを色分けします。
 
 # %%
 if best_sample is not None:

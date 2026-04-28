@@ -16,13 +16,13 @@
 # %% [markdown]
 # ---
 # title: QAOA for MaxCut
-# tags: [qaoa, optimization, variational, graph, maxcut, from-scratch, intermediate]
+# tags: [qaoa, optimization, variational, algorithm, binary-model]
 # ---
 #
 # # QAOA for MaxCut: Building the Circuit from Scratch
 #
 # <!-- BEGIN auto-tags -->
-# **Tags:** [`qaoa`](../tags/qaoa.md) · [`optimization`](../tags/optimization.md) · [`variational`](../tags/variational.md) · [`graph`](../tags/graph.md) · [`maxcut`](../tags/maxcut.md) · [`from-scratch`](../tags/from-scratch.md) · [`intermediate`](../tags/intermediate.md)
+# **Tags:** [`qaoa`](../tags/qaoa.md) · [`optimization`](../tags/optimization.md) · [`variational`](../tags/variational.md) · [`algorithm`](../tags/algorithm.md) · [`binary-model`](../tags/binary-model.md)
 # <!-- END auto-tags -->
 #
 # This tutorial walks through the Quantum Approximate Optimization Algorithm
@@ -133,7 +133,7 @@ print(f"Constant:               {spin_model.constant}")
 # > **Note:** `BinaryModel` also provides `from_qubo()` and `from_hubo()` for
 # > problems that are naturally expressed in the binary domain (e.g.,
 # > assignment problems, constrained problems with penalty terms). See
-# > [QAOA for Graph Partitioning](qaoa_graph_partition) for a
+# > [QAOA for Graph Partitioning](../optimization/qaoa_graph_partition) for a
 # > QUBO / JijModeling-based workflow.
 
 # %% [markdown]
@@ -326,6 +326,7 @@ executable = transpiler.transpile(
 
 # %%
 import os
+
 import numpy as np
 from qiskit_aer import AerSimulator
 from scipy.optimize import minimize
@@ -430,8 +431,7 @@ plt.show()
 # %%
 if best_qaoa_sample is not None:
     color_map = [
-        "#FF6B6B" if best_qaoa_sample[i] == +1 else "#4ECDC4"
-        for i in range(num_nodes)
+        "#FF6B6B" if best_qaoa_sample[i] == +1 else "#4ECDC4" for i in range(num_nodes)
     ]
     plt.figure(figsize=(5, 4))
     nx.draw(
@@ -540,5 +540,5 @@ print(f"Built-in mean energy: {decoded_builtin.energy_mean():.4f}")
 #
 # - For problems that are naturally expressed with **binary variables** or
 #   that require **constraints** (penalty terms), see
-#   [QAOA for Graph Partitioning](qaoa_graph_partition),
+#   [QAOA for Graph Partitioning](../optimization/qaoa_graph_partition),
 #   which uses the higher-level `QAOAConverter` together with JijModeling.

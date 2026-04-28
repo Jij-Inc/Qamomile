@@ -15,13 +15,13 @@
 # %% [markdown]
 # ---
 # title: エルミート行列から量子回路へ
-# tags: [hamiltonian-simulation, pauli, decomposition, time-evolution, linalg, intermediate]
+# tags: [hamiltonian-simulation, pauli-decomposition, algorithm]
 # ---
 #
 # # エルミート行列から量子回路へ
 #
 # <!-- BEGIN auto-tags -->
-# **タグ:** [`hamiltonian-simulation`](../tags/hamiltonian-simulation.md) · [`pauli`](../tags/pauli.md) · [`decomposition`](../tags/decomposition.md) · [`time-evolution`](../tags/time-evolution.md) · [`linalg`](../tags/linalg.md) · [`intermediate`](../tags/intermediate.md)
+# **タグ:** [`hamiltonian-simulation`](../tags/hamiltonian-simulation.md) · [`pauli-decomposition`](../tags/pauli-decomposition.md) · [`algorithm`](../tags/algorithm.md)
 # <!-- END auto-tags -->
 #
 # 量子アルゴリズムの多くは、密な$2^n \times 2^n$のnumpy配列として与えられた**エルミート行列**（ハミルトニアン）から出発し、その時間発展$e^{-iHt}$を量子コンピュータ上でシミュレーションしたいという状況からはじまります。定石は以下の2ステップです。

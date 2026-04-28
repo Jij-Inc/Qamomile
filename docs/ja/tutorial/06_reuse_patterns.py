@@ -15,7 +15,7 @@
 # %% [markdown]
 # ---
 # title: 再利用パターン: QKernelの合成とコンポジットゲート
-# tags: [composite-gate, reuse, fundamentals, intermediate]
+# tags: [tutorial]
 # ---
 #
 # # 再利用パターン：QKernelの合成とコンポジットゲート

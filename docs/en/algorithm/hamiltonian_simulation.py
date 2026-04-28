@@ -15,13 +15,13 @@
 # %% [markdown]
 # ---
 # title: Hamiltonian Simulation with Suzuki–Trotter
-# tags: [hamiltonian-simulation, trotter, suzuki, simulation, time-evolution, pauli, advanced]
+# tags: [hamiltonian-simulation, trotterization, algorithm]
 # ---
 #
 # # Hamiltonian Simulation with Suzuki–Trotter (Rabi oscillation)
 #
 # <!-- BEGIN auto-tags -->
-# **Tags:** [`hamiltonian-simulation`](../tags/hamiltonian-simulation.md) · [`trotter`](../tags/trotter.md) · [`suzuki`](../tags/suzuki.md) · [`simulation`](../tags/simulation.md) · [`time-evolution`](../tags/time-evolution.md) · [`pauli`](../tags/pauli.md) · [`advanced`](../tags/advanced.md)
+# **Tags:** [`hamiltonian-simulation`](../tags/hamiltonian-simulation.md) · [`trotterization`](../tags/trotterization.md) · [`algorithm`](../tags/algorithm.md)
 # <!-- END auto-tags -->
 #
 # Simulating the time evolution $e^{-iHt}$ of a quantum system is one of the

@@ -15,13 +15,13 @@
 # %% [markdown]
 # ---
 # title: Compilation and Transpilation
-# tags: [transpiler, internals, advanced]
+# tags: [tutorial]
 # ---
 #
 # # Compilation and Transpilation: Under the Hood
 #
 # <!-- BEGIN auto-tags -->
-# **Tags:** [`transpiler`](../tags/transpiler.md) · [`internals`](../tags/internals.md) · [`advanced`](../tags/advanced.md)
+# **Tags:** [`tutorial`](../tags/tutorial.md)
 # <!-- END auto-tags -->
 #
 # Tutorials 01–07 used the transpiler as a black box: write a `@qkernel`, call
@@ -164,7 +164,6 @@
 # %%
 import qamomile.circuit as qmc
 from qamomile.circuit.ir import pretty_print_block
-from qamomile.circuit.ir.block import BlockKind
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.qiskit import QiskitTranspiler
@@ -251,7 +250,10 @@ parameters = ["theta"]
 block = transpiler.to_block(demo_kernel, bindings=bindings, parameters=parameters)
 print("after to_block:   ", summarise(block))
 print("parameters:       ", list(block.parameters))
-print("CallBlockOps:     ", sum(1 for op in block.operations if isinstance(op, CallBlockOperation)))
+print(
+    "CallBlockOps:     ",
+    sum(1 for op in block.operations if isinstance(op, CallBlockOperation)),
+)
 # Note: `CallBlockOperation`s may live inside a `ForOperation` body too —
 # they are not necessarily in the top-level list.
 
@@ -334,7 +336,10 @@ print(pretty_print_block(block))
 # %%
 block = transpiler.partial_eval(block, bindings=bindings)
 print("after partial_eval:", summarise(block))
-print("ForOperations:    ", sum(1 for op in block.operations if isinstance(op, ForOperation)))
+print(
+    "ForOperations:    ",
+    sum(1 for op in block.operations if isinstance(op, ForOperation)),
+)
 
 # %% [markdown]
 # If you left a `UInt` unbound and tried to use it as a loop bound, the
@@ -380,7 +385,9 @@ print("after analyze:    ", summarise(block))
 plan = transpiler.plan(block)
 for i, step in enumerate(plan.steps):
     seg = step.segment
-    print(f"  step {i}: {type(step).__name__} ({type(seg).__name__}, {len(seg.operations)} ops)")
+    print(
+        f"  step {i}: {type(step).__name__} ({type(seg).__name__}, {len(seg.operations)} ops)"
+    )
 print("total unbound parameters:", list(plan.parameters))
 
 # %% [markdown]
@@ -579,6 +586,7 @@ print(executable.quantum_circuit)
 #
 # A 3-qubit Hadamard superposition measured as a `QFixed` is enough to
 # exercise every step.
+
 
 # %%
 @qmc.qkernel
