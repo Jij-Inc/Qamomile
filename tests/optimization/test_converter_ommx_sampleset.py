@@ -4,7 +4,8 @@ When a converter is built from an ``ommx.v1.Instance``, ``decode()``
 returns an ``ommx.v1.SampleSet`` so feasibility, true (un-penalized)
 objective, and per-constraint evaluation are available through OMMX's
 own API. These tests cover that polymorphic return path plus the
-supporting ``BinarySampleSet.to_ommx_samples`` helper.
+supporting ``MathematicalProblemConverter._binary_sampleset_to_ommx_samples``
+helper.
 """
 
 from __future__ import annotations
@@ -14,13 +15,14 @@ import ommx.v1
 import pytest
 
 from qamomile.optimization.binary_model import BinarySampleSet, VarType
+from qamomile.optimization.converter import MathematicalProblemConverter
 from qamomile.optimization.qaoa import QAOAConverter
 
 # --- Helper unit tests (no quantum execution) -------------------------------
 
 
-def test_to_ommx_samples_preserves_counts_and_states():
-    """Verify ``to_ommx_samples`` flattens num_occurrences into sample IDs."""
+def test_binary_sampleset_to_ommx_samples_preserves_counts_and_states():
+    """Verify the helper flattens num_occurrences into grouped sample IDs."""
     ss = BinarySampleSet(
         samples=[{0: 1, 1: 0}, {0: 0, 1: 1}],
         num_occurrences=[3, 2],
@@ -28,7 +30,7 @@ def test_to_ommx_samples_preserves_counts_and_states():
         vartype=VarType.BINARY,
     )
 
-    ommx_samples = ss.to_ommx_samples()
+    ommx_samples = MathematicalProblemConverter._binary_sampleset_to_ommx_samples(ss)
 
     assert isinstance(ommx_samples, ommx.v1.Samples)
     assert ommx_samples.num_samples() == 5
@@ -48,7 +50,7 @@ def test_to_ommx_samples_preserves_counts_and_states():
     assert state_to_count == expected
 
 
-def test_to_ommx_samples_skips_zero_occurrences():
+def test_binary_sampleset_to_ommx_samples_skips_zero_occurrences():
     """States with num_occurrences==0 are dropped from the output."""
     ss = BinarySampleSet(
         samples=[{0: 1}, {0: 0}],
@@ -56,21 +58,21 @@ def test_to_ommx_samples_skips_zero_occurrences():
         energy=[0.0, 0.0],
         vartype=VarType.BINARY,
     )
-    ommx_samples = ss.to_ommx_samples()
+    ommx_samples = MathematicalProblemConverter._binary_sampleset_to_ommx_samples(ss)
     assert ommx_samples.num_samples() == 2
 
 
-def test_to_ommx_samples_empty_sampleset():
+def test_binary_sampleset_to_ommx_samples_empty_sampleset():
     """An empty BinarySampleSet produces an empty Samples (no sample IDs)."""
     ss = BinarySampleSet(
         samples=[], num_occurrences=[], energy=[], vartype=VarType.BINARY
     )
-    ommx_samples = ss.to_ommx_samples()
+    ommx_samples = MathematicalProblemConverter._binary_sampleset_to_ommx_samples(ss)
     assert ommx_samples.num_samples() == 0
     assert list(ommx_samples.sample_ids()) == []
 
 
-def test_to_ommx_samples_rejects_spin_vartype():
+def test_binary_sampleset_to_ommx_samples_rejects_spin_vartype():
     """SPIN vartype rejected with a clear error pointing to vartype conversion."""
     ss = BinarySampleSet(
         samples=[{0: 1, 1: -1}],
@@ -79,7 +81,7 @@ def test_to_ommx_samples_rejects_spin_vartype():
         vartype=VarType.SPIN,
     )
     with pytest.raises(ValueError, match="BINARY"):
-        ss.to_ommx_samples()
+        MathematicalProblemConverter._binary_sampleset_to_ommx_samples(ss)
 
 
 # --- Caller-instance immutability regression --------------------------------
