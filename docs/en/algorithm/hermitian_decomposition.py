@@ -20,6 +20,10 @@
 #
 # # From a Hermitian Matrix to a Quantum Circuit
 #
+# <!-- BEGIN auto-tags -->
+# **Tags:** [`hamiltonian-simulation`](../tags/hamiltonian-simulation.md) · [`pauli`](../tags/pauli.md) · [`decomposition`](../tags/decomposition.md) · [`time-evolution`](../tags/time-evolution.md) · [`linalg`](../tags/linalg.md) · [`intermediate`](../tags/intermediate.md)
+# <!-- END auto-tags -->
+#
 # In many quantum algorithms you start from a **Hermitian matrix** — a Hamiltonian given as a dense $2^n \times 2^n$ numpy array — and you want to simulate its time evolution $e^{-iHt}$ on a quantum computer. The standard path is:
 #
 # 1. Decompose $H$ into a weighted sum of Pauli strings.

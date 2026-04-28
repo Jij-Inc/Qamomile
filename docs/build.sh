@@ -64,10 +64,10 @@ generate_api() {
     info "API reference generated"
 }
 
-generate_algorithm_tags() {
-    echo "Generating algorithm tag index and per-tag pages..."
-    uv run python scripts/build_algorithm_tag_pages.py
-    info "Algorithm tag pages generated"
+generate_doc_tags() {
+    echo "Generating doc tag indexes, per-tag pages, and inline chips..."
+    uv run python scripts/build_doc_tags.py
+    info "Doc tag pages generated"
 }
 
 copy_api() {
@@ -115,8 +115,9 @@ execute_lang() {
 # Build documentation for a single language (no sync)
 build_lang() {
     local lang="$1"
-    # Regenerate algorithm index + tag pages from frontmatter before build.
-    generate_algorithm_tags
+    # Regenerate tag indexes, per-tag pages, and inline chips from
+    # frontmatter before each build.
+    generate_doc_tags
     echo "Building ${lang} documentation..."
     cd "$lang"
     if is_rtd && [[ -n "${READTHEDOCS_VERSION:-}" ]]; then

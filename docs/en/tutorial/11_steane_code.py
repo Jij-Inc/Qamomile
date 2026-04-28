@@ -13,7 +13,16 @@
 # ---
 
 # %% [markdown]
+# ---
+# title: Steane [[7,1,3]] Code
+# tags: [qec, error-correction, css, advanced]
+# ---
+#
 # # Quantum Error Correction (2): Steane [[7,1,3]] Code
+#
+# <!-- BEGIN auto-tags -->
+# **Tags:** [`qec`](../tags/qec.md) · [`error-correction`](../tags/error-correction.md) · [`css`](../tags/css.md) · [`advanced`](../tags/advanced.md)
+# <!-- END auto-tags -->
 #
 # In the [previous tutorial](10_quantum_error_correction.ipynb), we implemented the 3-qubit repetition codes and Shor's 9-qubit code. Here we move to the **Steane [[7,1,3]] code**, a cleaner and more structured code.
 #

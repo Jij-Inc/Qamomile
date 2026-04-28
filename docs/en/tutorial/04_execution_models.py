@@ -13,6 +13,11 @@
 # ---
 
 # %% [markdown]
+# ---
+# title: Execution Models: sample() vs run()
+# tags: [execution, observables, fundamentals, intermediate]
+# ---
+#
 # # Execution Models: `sample()` vs `run()`
 #
 # Qamomile provides two execution methods depending on what your qkernel returns:

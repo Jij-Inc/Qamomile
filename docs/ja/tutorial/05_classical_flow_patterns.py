@@ -13,7 +13,16 @@
 # ---
 
 # %% [markdown]
+# ---
+# title: 古典制御フローパターン
+# tags: [control-flow, fundamentals, intermediate]
+# ---
+#
 # # 古典制御フローパターン
+#
+# <!-- BEGIN auto-tags -->
+# **タグ:** [`control-flow`](../tags/control-flow.md) · [`fundamentals`](../tags/fundamentals.md) · [`intermediate`](../tags/intermediate.md)
+# <!-- END auto-tags -->
 #
 # 量子回路の構造は古典制御フローに依存することが多くあります。量子ビットのイテレーション、グラフのエッジに基づくゲート適用、ゲート列の条件分岐などです。Qamomileでは`qmc.range`、`qmc.items`、`if`分岐、`while`ループでこれらをサポートしています。
 #

@@ -13,6 +13,11 @@
 # ---
 
 # %% [markdown]
+# ---
+# title: 再利用パターン: QKernelの合成とコンポジットゲート
+# tags: [composite-gate, reuse, fundamentals, intermediate]
+# ---
+#
 # # 再利用パターン：QKernelの合成とコンポジットゲート
 #
 # 回路が大きくなると、ゲート列のコピー＆ペーストを避けたくなります。Qamomileは2つの再利用メカニズムを提供しています：

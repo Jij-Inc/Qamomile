@@ -20,6 +20,10 @@
 #
 # # Hamiltonian Simulation with Suzuki–Trotter (Rabi oscillation)
 #
+# <!-- BEGIN auto-tags -->
+# **Tags:** [`hamiltonian-simulation`](../tags/hamiltonian-simulation.md) · [`trotter`](../tags/trotter.md) · [`suzuki`](../tags/suzuki.md) · [`simulation`](../tags/simulation.md) · [`time-evolution`](../tags/time-evolution.md) · [`pauli`](../tags/pauli.md) · [`advanced`](../tags/advanced.md)
+# <!-- END auto-tags -->
+#
 # Simulating the time evolution $e^{-iHt}$ of a quantum system is one of the
 # canonical applications of a quantum computer. When the Hamiltonian splits
 # into non-commuting pieces $H = A + B$ with $[A, B] \neq 0$, the naive

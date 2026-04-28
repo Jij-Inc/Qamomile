@@ -21,6 +21,10 @@
 #
 # # QAOAでMaxCutを解く: 回路をゼロから構築する
 #
+# <!-- BEGIN auto-tags -->
+# **タグ:** [`qaoa`](../tags/qaoa.md) · [`optimization`](../tags/optimization.md) · [`variational`](../tags/variational.md) · [`graph`](../tags/graph.md) · [`maxcut`](../tags/maxcut.md) · [`from-scratch`](../tags/from-scratch.md) · [`intermediate`](../tags/intermediate.md)
+# <!-- END auto-tags -->
+#
 # このチュートリアルでは、Qamomileの低レベル回路プリミティブを使って、QAOA (Quantum Approximate Optimization Algorithm) のパイプラインをステップごとに構築します。高レベルな`QAOAConverter`は使わずに、以下の手順で進めます:
 #
 # 1. 小さなグラフでMaxCut問題を定義する。

@@ -13,7 +13,16 @@
 # ---
 
 # %% [markdown]
+# ---
+# title: Compilation and Transpilation
+# tags: [transpiler, internals, advanced]
+# ---
+#
 # # Compilation and Transpilation: Under the Hood
+#
+# <!-- BEGIN auto-tags -->
+# **Tags:** [`transpiler`](../tags/transpiler.md) · [`internals`](../tags/internals.md) · [`advanced`](../tags/advanced.md)
+# <!-- END auto-tags -->
 #
 # Tutorials 01–07 used the transpiler as a black box: write a `@qkernel`, call
 # `transpiler.transpile(...)`, get an executable. This chapter opens the box.

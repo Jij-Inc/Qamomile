@@ -1,0 +1,23 @@
+# Pre-commit hooks for Qamomile.
+#
+# Install once per clone:
+#
+#     uv sync
+#     uv run pre-commit install
+#
+# After that every `git commit` runs the hooks against staged files.
+repos:
+  - repo: local
+    hooks:
+      - id: doc-tags-regen
+        name: Regenerate doc tag pages and re-sync ipynb
+        description: >
+          When a .py source under docs/{en,ja}/{tutorial,algorithm,
+          optimization,collaboration}/ is staged, regenerate
+          tag indexes, per-tag pages, inline chip blocks, and the
+          myst.yml auto-managed Tags region; then re-sync the
+          changed .py to its .ipynb via jupytext --update.
+        entry: bash docs/scripts/precommit_regen.sh
+        language: system
+        files: ^docs/(en|ja)/(tutorial|algorithm|optimization|collaboration)/[^/]+\.py$
+        pass_filenames: true

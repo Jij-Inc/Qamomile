@@ -37,34 +37,51 @@ project:
         - file: algorithm/hamiltonian_simulation.ipynb
         - file: algorithm/hermitian_decomposition.ipynb
         - file: algorithm/vqe_for_hydrogen.ipynb
-# --- BEGIN algorithm tags (auto-generated) ---
-        - title: Tags
-          hidden: true
-          children:
-            - file: algorithm/tags/advanced.md
-            - file: algorithm/tags/built-in.md
-            - file: algorithm/tags/chemistry.md
-            - file: algorithm/tags/decomposition.md
-            - file: algorithm/tags/from-scratch.md
-            - file: algorithm/tags/graph.md
-            - file: algorithm/tags/graph-partition.md
-            - file: algorithm/tags/ground-state.md
-            - file: algorithm/tags/hamiltonian-simulation.md
-            - file: algorithm/tags/intermediate.md
-            - file: algorithm/tags/jijmodeling.md
-            - file: algorithm/tags/linalg.md
-            - file: algorithm/tags/maxcut.md
-            - file: algorithm/tags/openfermion.md
-            - file: algorithm/tags/optimization.md
-            - file: algorithm/tags/pauli.md
-            - file: algorithm/tags/qaoa.md
-            - file: algorithm/tags/simulation.md
-            - file: algorithm/tags/suzuki.md
-            - file: algorithm/tags/time-evolution.md
-            - file: algorithm/tags/trotter.md
-            - file: algorithm/tags/variational.md
-            - file: algorithm/tags/vqe.md
-        # --- END algorithm tags (auto-generated) ---
+# --- BEGIN doc tags (auto-generated) ---
+    - title: Tags
+      file: tags/index.md
+      hidden: true
+      children:
+        - file: tags/advanced.md
+        - file: tags/beginner.md
+        - file: tags/binary-model.md
+        - file: tags/built-in.md
+        - file: tags/chemistry.md
+        - file: tags/control-flow.md
+        - file: tags/css.md
+        - file: tags/decomposition.md
+        - file: tags/error-correction.md
+        - file: tags/from-scratch.md
+        - file: tags/fundamentals.md
+        - file: tags/graph.md
+        - file: tags/graph-partition.md
+        - file: tags/ground-state.md
+        - file: tags/hamiltonian-simulation.md
+        - file: tags/integration.md
+        - file: tags/intermediate.md
+        - file: tags/internals.md
+        - file: tags/ising.md
+        - file: tags/jijmodeling.md
+        - file: tags/linalg.md
+        - file: tags/maxcut.md
+        - file: tags/openfermion.md
+        - file: tags/optimization.md
+        - file: tags/parameters.md
+        - file: tags/pauli.md
+        - file: tags/qaoa.md
+        - file: tags/qbraid.md
+        - file: tags/qec.md
+        - file: tags/qkernel.md
+        - file: tags/qubo.md
+        - file: tags/resource-estimation.md
+        - file: tags/simulation.md
+        - file: tags/suzuki.md
+        - file: tags/time-evolution.md
+        - file: tags/transpiler.md
+        - file: tags/trotter.md
+        - file: tags/variational.md
+        - file: tags/vqe.md
+    # --- END doc tags (auto-generated) ---
     - title: 最適化
       file: optimization/index.md
       children:

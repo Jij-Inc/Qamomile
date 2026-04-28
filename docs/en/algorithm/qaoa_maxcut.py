@@ -21,6 +21,10 @@
 #
 # # QAOA for MaxCut: Building the Circuit from Scratch
 #
+# <!-- BEGIN auto-tags -->
+# **Tags:** [`qaoa`](../tags/qaoa.md) · [`optimization`](../tags/optimization.md) · [`variational`](../tags/variational.md) · [`graph`](../tags/graph.md) · [`maxcut`](../tags/maxcut.md) · [`from-scratch`](../tags/from-scratch.md) · [`intermediate`](../tags/intermediate.md)
+# <!-- END auto-tags -->
+#
 # This tutorial walks through the Quantum Approximate Optimization Algorithm
 # (QAOA) pipeline step by step, using Qamomile's low-level circuit primitives.
 # Rather than using the high-level `QAOAConverter`, we will:

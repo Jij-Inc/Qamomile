@@ -63,6 +63,7 @@ dev = [
     "openfermion>=1.6.0",
     "openfermionpyscf>=0.5",
     "pyscf>=2.5.0",
+    "pre-commit>=4.0",
 ]
 
 [tool.pytest.ini_options]

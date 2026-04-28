@@ -49,6 +49,12 @@ copy-api: generate-api
 	@for lang in $(LANGS); do mkdir -p $$lang/api; cp -r api/. $$lang/api/; done
 	@echo "✓ API reference copied to language directories"
 
+# Regenerate tag indexes, per-tag pages, and inline chips from frontmatter
+generate-doc-tags:
+	@echo "Generating doc tag pages..."
+	@uv run python scripts/build_doc_tags.py
+	@echo "✓ Doc tag pages generated"
+
 # Sync .py -> .ipynb for a single language (used via sync-en, sync-ja)
 # We don't convert collaboration/ because those notebooks need API-KEYs.
 define sync-lang
@@ -98,13 +104,13 @@ execute: execute-en execute-ja
 	@echo "✓ All notebooks executed"
 
 # Build targets (no sync)
-build-en: copy-api
+build-en: copy-api generate-doc-tags
 	@echo "Building English documentation..."
 	cd en && uv run jupyter-book build --html
 	@uv run python scripts/inject_colab_launch.py en
 	@echo "✓ English documentation built: en/_build/html/index.html"
 
-build-ja: copy-api
+build-ja: copy-api generate-doc-tags
 	@echo "Building Japanese documentation..."
 	cd ja && uv run jupyter-book build --html
 	@uv run python scripts/inject_colab_launch.py ja

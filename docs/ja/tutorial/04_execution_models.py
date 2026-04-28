@@ -13,6 +13,11 @@
 # ---
 
 # %% [markdown]
+# ---
+# title: 実行モデル: sample()とrun()
+# tags: [execution, observables, fundamentals, intermediate]
+# ---
+#
 # # 実行モデル：`sample()`と`run()`
 #
 # Qamomileは量子カーネルの戻り値に応じて2つの実行メソッドを提供します：

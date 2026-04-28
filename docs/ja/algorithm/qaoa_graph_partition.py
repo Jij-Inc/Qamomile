@@ -20,6 +20,10 @@
 #
 # # QAOA によるグラフ分割
 #
+# <!-- BEGIN auto-tags -->
+# **タグ:** [`qaoa`](../tags/qaoa.md) · [`optimization`](../tags/optimization.md) · [`variational`](../tags/variational.md) · [`graph`](../tags/graph.md) · [`graph-partition`](../tags/graph-partition.md) · [`jijmodeling`](../tags/jijmodeling.md) · [`built-in`](../tags/built-in.md) · [`intermediate`](../tags/intermediate.md)
+# <!-- END auto-tags -->
+#
 # 本チュートリアルでは、Quantum Approximate Optimization Algorithm（QAOA）を用いて**グラフ分割問題**を解く方法を紹介します。
 #
 # ワークフロー：

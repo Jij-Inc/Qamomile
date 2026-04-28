@@ -13,6 +13,11 @@
 # ---
 
 # %% [markdown]
+# ---
+# title: Reuse Patterns: QKernel Composition and Composite Gates
+# tags: [composite-gate, reuse, fundamentals, intermediate]
+# ---
+#
 # # Reuse Patterns: QKernel Composition and Composite Gates
 #
 # As circuits grow, you want to avoid copy-pasting gate sequences. Qamomile offers two complementary reuse mechanisms:

@@ -20,6 +20,10 @@
 #
 # # QAOA for Graph Partitioning
 #
+# <!-- BEGIN auto-tags -->
+# **Tags:** [`qaoa`](../tags/qaoa.md) · [`optimization`](../tags/optimization.md) · [`variational`](../tags/variational.md) · [`graph`](../tags/graph.md) · [`graph-partition`](../tags/graph-partition.md) · [`jijmodeling`](../tags/jijmodeling.md) · [`built-in`](../tags/built-in.md) · [`intermediate`](../tags/intermediate.md)
+# <!-- END auto-tags -->
+#
 # This tutorial demonstrates how to solve the **graph partitioning problem**
 # using the Quantum Approximate Optimization Algorithm (QAOA) with Qamomile.
 #

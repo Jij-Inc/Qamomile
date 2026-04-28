@@ -13,7 +13,16 @@
 # ---
 
 # %% [markdown]
+# ---
+# title: Your First Quantum Kernel
+# tags: [qkernel, fundamentals, beginner]
+# ---
+#
 # # Your First Quantum Kernel
+#
+# <!-- BEGIN auto-tags -->
+# **Tags:** [`qkernel`](../tags/qkernel.md) · [`fundamentals`](../tags/fundamentals.md) · [`beginner`](../tags/beginner.md)
+# <!-- END auto-tags -->
 #
 # This chapter introduces the basic workflow for a first-time Qamomile user to define and run a quantum kernel. Note that this chapter does not dive into quantum computing fundamentals or quantum algorithm details.
 #

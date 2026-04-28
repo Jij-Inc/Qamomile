@@ -231,9 +231,11 @@ API generation and copying are automatically included in `./build.sh build`. No 
    ./build.sh serve-en
    ```
 
-#### Algorithm pages & tags
+#### Tags on documentation pages
 
-Pages under `en/algorithm/` and `ja/algorithm/` are tag-filterable. Give each new algorithm `.py` a MyST frontmatter block at the top of its first markdown cell, e.g.:
+Articles under `en/{tutorial,algorithm,optimization,collaboration}/` and
+their `ja/` counterparts are tag-filterable. Give each `.py` a MyST
+frontmatter block at the top of its first markdown cell, e.g.:
 
 ```python
 # %% [markdown]
@@ -246,13 +248,55 @@ Pages under `en/algorithm/` and `ja/algorithm/` are tag-filterable. Give each ne
 # ...
 ```
 
-The landing page (`algorithm/index.md`), per-tag pages (`algorithm/tags/<tag>.md`), and the `Tags` block inside each `myst.yml` are all regenerated automatically from these frontmatter blocks by:
+Tags are language-agnostic (the same string for `en` and `ja`); only
+`title` differs per locale.
+
+From these frontmatter blocks, `docs/scripts/build_doc_tags.py` regenerates:
+
+| Output | Path | In git? |
+|---|---|---|
+| Tag landing page | `docs/<lang>/tags/index.md` | gitignored |
+| Per-tag pages | `docs/<lang>/tags/<tag>.md` | gitignored |
+| Algorithm landing | `docs/<lang>/algorithm/index.md` | gitignored |
+| Inline tag chips | sentinel block inside each tagged `.py` | committed |
+| `Tags` toc block | sentinel region inside each `myst.yml` | committed |
+
+The auto-generated outputs are gitignored because they regenerate on
+every docs build, so contributors never edit them by hand. Sentinels:
+
+- In `.py` source: `# <!-- BEGIN auto-tags -->` / `# <!-- END auto-tags -->`
+- In `myst.yml`: `# --- BEGIN doc tags (auto-generated) ---` / `# --- END doc tags (auto-generated) ---`
+
+`./build.sh build-{en,ja}` (and `make build-{en,ja}`) run the generator
+before the MyST build, so RTD and local builds stay in sync without any
+manual step.
+
+##### Pre-commit hook (recommended)
+
+A pre-commit hook (`.pre-commit-config.yaml`) runs the generator and
+`jupytext --to ipynb --update` whenever a tagged `.py` is staged, so the
+chip blocks, `myst.yml`, and `.ipynb` shadow stay current automatically.
+
+Set it up once per clone:
 
 ```bash
-uv run python docs/scripts/build_algorithm_tag_pages.py
+uv sync
+uv run pre-commit install
 ```
 
-`./build.sh build-en` / `build-ja` run this step for you before the MyST build, so you usually don't need to invoke it directly. The auto-managed block in `myst.yml` lives between the sentinels `# --- BEGIN algorithm tags (auto-generated) ---` and `# --- END algorithm tags (auto-generated) ---` — do not hand-edit that region.
+After that every `git commit` runs the hook on staged docs sources. If
+the hook modifies any tracked files, pre-commit asks you to re-stage
+and commit again.
+
+To run the generator manually (e.g. after editing tags without
+committing yet):
+
+```bash
+uv run python docs/scripts/build_doc_tags.py
+```
+
+Release notes (`release_notes/`) are intentionally out of scope and
+never tagged.
 
 #### Checklist for new pages
 

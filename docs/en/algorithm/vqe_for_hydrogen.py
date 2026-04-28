@@ -20,6 +20,10 @@
 #
 # # Variational Quantum Eigensolver (VQE) for the Hydrogen Molecule
 #
+# <!-- BEGIN auto-tags -->
+# **Tags:** [`vqe`](../tags/vqe.md) · [`variational`](../tags/variational.md) · [`chemistry`](../tags/chemistry.md) · [`ground-state`](../tags/ground-state.md) · [`openfermion`](../tags/openfermion.md) · [`intermediate`](../tags/intermediate.md)
+# <!-- END auto-tags -->
+#
 # This tutorial demonstrates how to implement the Variational Quantum Eigensolver (VQE) algorithm to find the ground state energy of the hydrogen molecule (H₂). We use [OpenFermion](https://quantumai.google/openfermion) for generating molecular Hamiltonians.
 #
 # The workflow is as follows:
