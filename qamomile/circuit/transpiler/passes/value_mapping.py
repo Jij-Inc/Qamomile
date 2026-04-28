@@ -48,39 +48,41 @@ class UUIDRemapper:
         return [self.clone_operation(op) for op in operations]
 
     def clone_operation(self, op: Operation) -> Operation:
-        """Clone an operation with fresh UUIDs for all values."""
-        # Clone operands (handles all ValueBase types)
-        new_operands: list[Value] = []
-        for v in op.operands:
-            if isinstance(v, ValueBase):
-                new_operands.append(cast(Value, self.clone_value(v)))
-            else:
-                # Nested Block references in CallBlockOperation are not cloned
-                new_operands.append(v)
+        """Clone an operation with fresh UUIDs for all values.
 
-        # Clone results (handles all ValueBase types)
-        new_results: list[Value] = []
+        Cloning goes through the ``Operation.all_input_values()`` /
+        ``Operation.replace_values()`` protocol so every Value-typed
+        field — including subclass extras (``ControlledUOperation.power``,
+        ``ForOperation.loop_var_value``, ``ForItemsOperation.key_var_values``
+        etc.) — is cloned consistently with the body references that
+        point to it. Without this, a subclass field could keep an old
+        UUID while body operands referencing the same logical Value got
+        fresh UUIDs, breaking identity-by-UUID lookups at emit time.
+        """
+        # Build a uuid -> cloned_value substitution map covering every
+        # Value the operation owns (operands, results, plus subclass
+        # extras exposed via all_input_values).
+        sub_map: dict[str, ValueBase] = {}
+        for v in op.all_input_values():
+            sub_map[v.uuid] = self.clone_value(v)
         for v in op.results:
-            if isinstance(v, ValueBase):
-                new_results.append(cast(Value, self.clone_value(v)))
-            else:
-                new_results.append(v)
+            if isinstance(v, ValueBase) and v.uuid not in sub_map:
+                sub_map[v.uuid] = self.clone_value(v)
 
-        # Handle control flow operations via HasNestedOps protocol
-        if isinstance(op, HasNestedOps):
+        new_op = op.replace_values(sub_map) if sub_map else op
+
+        # Recursively clone nested ops for control flow ops. Nested
+        # bodies see the same UUIDRemapper, so their references to a
+        # cloned outer Value (e.g. a parent ForOperation's loop_var_value)
+        # resolve through ``self._value_cache`` and stay consistent with
+        # the parent op's field.
+        if isinstance(new_op, HasNestedOps):
             cloned_lists = [
-                self.clone_operations(op_list) for op_list in op.nested_op_lists()
+                self.clone_operations(op_list) for op_list in new_op.nested_op_lists()
             ]
-            base = dataclasses.replace(
-                cast(Any, op), operands=new_operands, results=new_results
-            )
-            return base.rebuild_nested(cloned_lists)
-        else:
-            return dataclasses.replace(
-                op,
-                operands=new_operands,
-                results=new_results,
-            )
+            new_op = new_op.rebuild_nested(cloned_lists)
+
+        return new_op
 
     def clone_value(self, value: ValueBase) -> ValueBase:
         """Clone any value type with a fresh UUID and logical_id.

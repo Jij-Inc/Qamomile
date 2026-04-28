@@ -15,3 +15,5 @@ Step-by-step guides to learn Qamomile.
 7. [Hamiltonian Simulation](07_hamiltonian_simulation) — Suzuki–Trotter on the Rabi model, convergence orders
 8. [Hermitian Matrix Decomposition](08_hermitian_decomposition) — From a dense Hermitian matrix to a Pauli sum and a time-evolution circuit
 9. [Compilation and Transpilation](09_compilation_and_transpilation) — The 10-stage pipeline, IR walkthrough, backend emission
+10. [Introduction to Quantum Error Correction](10_quantum_error_correction) — 3-qubit bit-flip/phase-flip codes, Shor's 9-qubit code, and stabilizers
+11. [Steane [[7,1,3]] Code](11_steane_code) — CSS construction, syndrome decoding, and transversal Hadamard

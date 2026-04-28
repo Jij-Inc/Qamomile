@@ -29,6 +29,8 @@ project:
         - file: tutorial/07_hamiltonian_simulation.ipynb
         - file: tutorial/08_hermitian_decomposition.ipynb
         - file: tutorial/09_compilation_and_transpilation.ipynb
+        - file: tutorial/10_quantum_error_correction.ipynb
+        - file: tutorial/11_steane_code.ipynb
     - title: VQA
       file: vqa/index.md
       children:

@@ -1361,3 +1361,318 @@ class TestBoolBinding:
 
         kernel.build(flag=True)
         kernel.build(flag=False)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end emission tests for compile-time if folded inside unrolled loops
+# ---------------------------------------------------------------------------
+
+
+class TestCompileTimeIfInsideLoops:
+    """End-to-end checks that ``if`` conditions derived from loop-iterated
+    classical values are folded at emit time when the iterable is bound.
+
+    These exercise the emit-time evaluation of ``CompOp``/``CondOp``/``NotOp``
+    in ``StandardEmitPass._emit_operations``: ``emit_for_unrolled`` and
+    ``emit_for_items`` bind the loop variable in ``loop_bindings`` by name,
+    and then the predicate that branches on it must be evaluated so that
+    ``resolve_if_condition`` can fold the surrounding ``IfOperation``.
+
+    Without this, a kernel like ``for _, e in qmc.items(d): if e == K: ...``
+    would fail at emit time with ``Runtime if-conditions must come from
+    measurement results``.
+    """
+
+    def test_if_on_items_loop_value(self):
+        """``if etype == K`` inside a ``qmc.items`` loop should fold per
+        iteration based on the dict's bound values."""
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qm.qkernel
+        def kernel(errors: qm.Dict[qm.UInt, qm.UInt]) -> qm.Vector[qm.Bit]:
+            q = qm.qubit_array(3, name="q")
+            for idx, etype in qm.items(errors):
+                if etype == 1:
+                    q[idx] = qm.x(q[idx])
+                elif etype == 2:
+                    q[idx] = qm.y(q[idx])
+                elif etype == 3:
+                    q[idx] = qm.z(q[idx])
+            return qm.measure(q)
+
+        tp = QiskitTranspiler()
+        bindings = {"errors": {0: 1, 1: 3, 2: 2}}
+        exe = tp.transpile(kernel, bindings=bindings)
+        qc = exe.compiled_quantum[0].circuit
+
+        gate_names = [inst.operation.name for inst in qc.data]
+        # Each error type should match its qubit position deterministically.
+        assert gate_names.count("x") == 1
+        assert gate_names.count("y") == 1
+        assert gate_names.count("z") == 1
+        # No surviving runtime if/else
+        assert "if_else" not in gate_names
+
+    def test_if_on_range_loop_value(self):
+        """``if i == k`` inside a ``qmc.range`` loop should fold to the
+        appropriate gate per iteration."""
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qm.qkernel
+        def kernel(n: qm.UInt) -> qm.Vector[qm.Bit]:
+            q = qm.qubit_array(n, name="q")
+            for i in qm.range(n):
+                if i == 1:
+                    q[i] = qm.x(q[i])
+                else:
+                    q[i] = qm.h(q[i])
+            return qm.measure(q)
+
+        tp = QiskitTranspiler()
+        exe = tp.transpile(kernel, bindings={"n": 3})
+        qc = exe.compiled_quantum[0].circuit
+
+        gate_names = [inst.operation.name for inst in qc.data]
+        # i=0 → H, i=1 → X, i=2 → H
+        assert gate_names.count("h") == 2
+        assert gate_names.count("x") == 1
+
+    def test_inequality_predicate_in_items_loop(self):
+        """An ``!=`` comparison on a loop value should also fold."""
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qm.qkernel
+        def kernel(spec: qm.Dict[qm.UInt, qm.UInt]) -> qm.Vector[qm.Bit]:
+            q = qm.qubit_array(3, name="q")
+            for idx, flag in qm.items(spec):
+                if flag != 0:
+                    q[idx] = qm.x(q[idx])
+            return qm.measure(q)
+
+        tp = QiskitTranspiler()
+        exe = tp.transpile(kernel, bindings={"spec": {0: 1, 1: 0, 2: 5}})
+        qc = exe.compiled_quantum[0].circuit
+        gate_names = [inst.operation.name for inst in qc.data]
+        # Only entries with non-zero flag (idx 0 and 2) emit X.
+        assert gate_names.count("x") == 2
+
+    def test_runtime_if_on_measurement_still_works(self):
+        """A runtime if backed by a measurement must NOT be folded — the
+        emit-time predicate evaluation must skip when operands are unbound."""
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qm.qkernel
+        def kernel() -> qm.Bit:
+            q0 = qm.qubit("q0")
+            q1 = qm.qubit("q1")
+            q0 = qm.x(q0)
+            bit = qm.measure(q0)
+            if bit:
+                q1 = qm.x(q1)
+            return qm.measure(q1)
+
+        tp = QiskitTranspiler()
+        # Should compile without raising — the runtime if-test is preserved.
+        exe = tp.transpile(kernel)
+        assert exe is not None
+
+
+class TestEvaluateClassicalPredicate:
+    """Unit tests for the emit-time predicate evaluator.
+
+    The frontend currently produces only ``CompOp``, but ``CondOp`` and
+    ``NotOp`` are part of the IR contract — emitted by other passes and
+    reserved for future ``&`` / ``|`` / ``~`` handle overloads.
+    ``compile_time_if_lowering`` and ``classical_executor`` already handle
+    all three; the emit pass must too, otherwise a partially-resolvable
+    ``CondOp`` / ``NotOp`` reaching emit would fail to fold.
+    """
+
+    def _bindings_after_eval(self, op):
+        """Run evaluate_classical_predicate against a stub emit_pass and
+        return the populated bindings dict."""
+        from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
+            evaluate_classical_predicate,
+        )
+        from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
+            ValueResolver as EmitResolver,
+        )
+
+        class _StubEmitPass:
+            def __init__(self):
+                self._resolver = EmitResolver(parameters=set())
+
+        bindings = {op.operands[0].name: 5}
+        if len(op.operands) > 1 and hasattr(op.operands[1], "name"):
+            bindings[op.operands[1].name] = 3
+        evaluate_classical_predicate(_StubEmitPass(), op, bindings)
+        return bindings
+
+    def test_compop_lt_folds(self):
+        lhs = Value(type=UIntType(), name="lhs")
+        rhs = Value(type=UIntType(), name="rhs")
+        out = Value(type=BitType(), name="out")
+        op = CompOp(operands=[lhs, rhs], results=[out], kind=CompOpKind.LT)
+        bindings = self._bindings_after_eval(op)
+        # 5 < 3 is False
+        assert bindings[out.uuid] is False
+        # Name-keyed write is intentionally NOT performed — tmp values share
+        # generic names ("bit_tmp" etc.) which would collide across tmps.
+        assert out.name not in bindings
+
+    def test_condop_and_folds(self):
+        lhs = Value(type=BitType(), name="lhs")
+        rhs = Value(type=BitType(), name="rhs")
+        out = Value(type=BitType(), name="out")
+        op = CondOp(operands=[lhs, rhs], results=[out], kind=CondOpKind.AND)
+        bindings = self._bindings_after_eval(op)
+        # bool(5 and 3) is True
+        assert bindings[out.uuid] is True
+
+    def test_condop_or_folds(self):
+        lhs = Value(type=BitType(), name="lhs")
+        rhs = Value(type=BitType(), name="rhs")
+        out = Value(type=BitType(), name="out")
+        op = CondOp(operands=[lhs, rhs], results=[out], kind=CondOpKind.OR)
+        bindings = self._bindings_after_eval(op)
+        assert bindings[out.uuid] is True
+
+    def test_notop_folds(self):
+        operand = Value(type=BitType(), name="lhs")
+        out = Value(type=BitType(), name="out")
+        op = NotOp(operands=[operand], results=[out])
+        bindings = self._bindings_after_eval(op)
+        # not bool(5) is False
+        assert bindings[out.uuid] is False
+
+    def test_unresolved_operand_is_noop(self):
+        """If an operand is not in bindings, evaluate is a no-op so the
+        downstream IfOperation falls through to its runtime path."""
+        lhs = Value(type=UIntType(), name="lhs")
+        rhs = Value(type=UIntType(), name="rhs")
+        out = Value(type=BitType(), name="out")
+        op = CompOp(operands=[lhs, rhs], results=[out], kind=CompOpKind.EQ)
+
+        from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
+            evaluate_classical_predicate,
+        )
+        from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
+            ValueResolver as EmitResolver,
+        )
+
+        class _StubEmitPass:
+            def __init__(self):
+                self._resolver = EmitResolver(parameters=set())
+
+        bindings: dict = {}  # neither lhs nor rhs bound
+        evaluate_classical_predicate(_StubEmitPass(), op, bindings)
+        assert out.uuid not in bindings
+        assert out.name not in bindings
+
+
+# ---------------------------------------------------------------------------
+# Fix B regression tests: name-keyed writes for tmp values must be skipped.
+# ---------------------------------------------------------------------------
+
+
+class TestNoNameCollisionInTmpWrites:
+    """Auto-generated tmp values (``"bit_tmp"``, ``"uint_tmp"``, etc.) must
+    not be written to ``bindings`` by name. ``evaluate_binop`` /
+    ``evaluate_classical_predicate`` previously did so, causing chained
+    expressions with multiple tmps of the same name to overwrite each other
+    and mis-resolve. The fix writes by UUID only.
+
+    Manifesting bug: a runtime ``(~a) & (~b) & c`` Steane decoder branch
+    folded the inner ``(~a) & (~b)`` to literal ``true`` because the second
+    NotOp's bool result clobbered the first NotOp's expr value under the
+    shared name ``"bit_tmp"``.
+    """
+
+    def test_chained_runtime_predicate_emits_full_expr(self):
+        """End-to-end: ``(~a) & (~b) & c`` over three measurement bits emits
+        a compound classical-expression condition, not a folded literal."""
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qm.qkernel
+        def kernel() -> qm.Bit:
+            q0 = qm.qubit("q0")
+            q1 = qm.qubit("q1")
+            q2 = qm.qubit("q2")
+            q3 = qm.qubit("q3")
+            # Measurements with a, b → 0 and c → 1.
+            a = qm.measure(q0)
+            b = qm.measure(q1)
+            q2 = qm.x(q2)
+            c = qm.measure(q2)
+            if (~a) & (~b) & c:
+                q3 = qm.x(q3)
+            return qm.measure(q3)
+
+        from qiskit.circuit.classical import expr
+        from qiskit.circuit.controlflow import IfElseOp
+
+        tp = QiskitTranspiler()
+        exe = tp.transpile(kernel)
+        qc = exe.compiled_quantum[0].circuit
+        if_ops = [i.operation for i in qc.data if isinstance(i.operation, IfElseOp)]
+        assert if_ops, "Expected an IfElseOp in the runtime circuit"
+        condition = if_ops[0].condition
+        # The whole compound expression must be present — not a literal True.
+        assert isinstance(condition, expr.Expr)
+        # And it must reference the measurement clbits (not be a constant).
+        identifiers = list(expr.iter_identifiers(condition))
+        # The compound contains both the c bit and the negated a, b bits.
+        assert len(identifiers) >= 3, (
+            f"Expected ≥3 clbit refs in compound condition; got {len(identifiers)}. "
+            f"Likely the inner (~a) & (~b) collapsed due to a name-collision."
+        )
+
+    def test_evaluate_binop_writes_only_by_uuid(self):
+        """White-box: a successful BinOp evaluation must NOT write
+        ``bindings[output.name]`` — only ``bindings[output.uuid]``."""
+        from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
+        from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
+            evaluate_binop,
+        )
+        from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
+            ValueResolver as EmitResolver,
+        )
+
+        lhs = Value(type=UIntType(), name="lhs")
+        rhs = Value(type=UIntType(), name="rhs")
+        out = Value(type=UIntType(), name="uint_tmp")  # generic tmp name
+        op = BinOp(operands=[lhs, rhs], results=[out], kind=BinOpKind.ADD)
+
+        class _StubEmitPass:
+            def __init__(self):
+                self._resolver = EmitResolver(parameters=set())
+
+        bindings = {"lhs": 5, "rhs": 3}
+        evaluate_binop(_StubEmitPass(), op, bindings)
+        assert bindings[out.uuid] == 8
+        # The tmp name "uint_tmp" must NOT have been written — that would
+        # collide with any other UInt tmp produced earlier in the program.
+        assert out.name not in bindings
+
+    def test_evaluate_classical_predicate_writes_only_by_uuid(self):
+        """White-box analog for predicate evaluation."""
+        from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
+            evaluate_classical_predicate,
+        )
+        from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
+            ValueResolver as EmitResolver,
+        )
+
+        lhs = Value(type=UIntType(), name="lhs")
+        rhs = Value(type=UIntType(), name="rhs")
+        out = Value(type=BitType(), name="bit_tmp")
+        op = CompOp(operands=[lhs, rhs], results=[out], kind=CompOpKind.LT)
+
+        class _StubEmitPass:
+            def __init__(self):
+                self._resolver = EmitResolver(parameters=set())
+
+        bindings = {"lhs": 5, "rhs": 3}
+        evaluate_classical_predicate(_StubEmitPass(), op, bindings)
+        assert bindings[out.uuid] is False
+        assert out.name not in bindings

@@ -677,22 +677,29 @@ def composite_gate(
 
         qkernel_instance = kernel_or_func
 
-        # Infer num_target_qubits from qkernel signature
-        num_targets = sum(
-            1
-            for t in qkernel_instance.input_types.values()
-            if t is Qubit or (hasattr(t, "__origin__") and t.__origin__ is tuple)
-        )
+        # CompositeGateOperation operands are a flat list of Qubit values, so
+        # qkernels that take an array of qubits (Vector[Qubit] etc.) cannot be
+        # wrapped by the function-form decorator without IR-level changes.
+        # Reject such qkernels with a clear pointer to the supported alternatives.
+        from qamomile.circuit.frontend.func_to_block import is_array_type
 
-        # Count Qubit inputs more precisely
         num_targets = 0
         for param_type in qkernel_instance.input_types.values():
             if param_type is Qubit:
                 num_targets += 1
-            # Handle tuple types like tuple[Qubit, Qubit]
             elif hasattr(param_type, "__origin__") and param_type.__origin__ is tuple:
                 args = getattr(param_type, "__args__", ())
                 num_targets += sum(1 for arg in args if arg is Qubit)
+            elif is_array_type(param_type):
+                args = getattr(param_type, "__args__", ())
+                if args and args[0] is Qubit:
+                    raise TypeError(
+                        "@composite_gate does not support qkernels with "
+                        "array-of-qubit parameters (Vector[Qubit] etc.) yet. "
+                        "Use the @qkernel directly without @composite_gate, "
+                        "or subclass CompositeGate "
+                        "(see qamomile/circuit/stdlib/qft.py)."
+                    )
 
         gate_name = name or qkernel_instance.name
 

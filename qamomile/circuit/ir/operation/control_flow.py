@@ -5,7 +5,7 @@ import typing
 from typing import cast
 
 from qamomile.circuit.ir.types.primitives import BitType, BlockType, UIntType
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import Value, ValueBase
 
 from .operation import Operation, OperationKind, ParamHint, Signature
 
@@ -96,7 +96,18 @@ class ForOperation(HasNestedOps, Operation):
             body
 
     Attributes:
-        loop_var: Name of the loop variable (e.g., "i")
+        loop_var: Display name of the loop variable (e.g., "i"). After
+            the UUID-keyed migration this is **display-only**: it appears
+            in IR printers, error messages, and the legacy name-fallback
+            ``bindings`` view, but never participates in identity or
+            lookup. Identity is carried by ``loop_var_value.uuid``.
+        loop_var_value: The loop variable's IR ``Value`` (typically a
+            ``UInt``). Carries the UUID that identifies this loop
+            variable across the IR — the binding written by the emit
+            pass and the binding read inside the loop body both key on
+            ``loop_var_value.uuid``. ``None`` only for legacy IR
+            constructed before the migration; new construction must
+            always provide it.
         operations: List of operations in the loop body
         operands[0]: start (UInt type)
         operands[1]: stop (UInt type)
@@ -104,6 +115,7 @@ class ForOperation(HasNestedOps, Operation):
     """
 
     loop_var: str = ""
+    loop_var_value: Value | None = None
     operations: list[Operation] = dataclasses.field(default_factory=list)
 
     def nested_op_lists(self) -> list[list[Operation]]:
@@ -111,6 +123,28 @@ class ForOperation(HasNestedOps, Operation):
 
     def rebuild_nested(self, new_lists: list[list[Operation]]) -> Operation:
         return dataclasses.replace(self, operations=new_lists[0])
+
+    def all_input_values(self) -> list[ValueBase]:
+        """Include ``loop_var_value`` so cloning/substitution stays consistent.
+
+        Without this override, ``UUIDRemapper`` would clone every body
+        reference to the loop variable to a fresh UUID, but leave
+        ``loop_var_value`` pointing at the un-cloned original — emit-time
+        UUID-keyed lookups for the loop variable would then miss.
+        """
+        values = super().all_input_values()
+        if self.loop_var_value is not None:
+            values.append(self.loop_var_value)
+        return values
+
+    def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
+        result = super().replace_values(mapping)
+        assert isinstance(result, ForOperation)
+        if result.loop_var_value is not None and result.loop_var_value.uuid in mapping:
+            mapped = mapping[result.loop_var_value.uuid]
+            if isinstance(mapped, Value):
+                result = dataclasses.replace(result, loop_var_value=mapped)
+        return result
 
     @property
     def signature(self) -> Signature:
@@ -137,10 +171,19 @@ class ForItemsOperation(HasNestedOps, Operation):
             body
 
     Attributes:
-        key_vars: Names of key unpacking variables (e.g., ["i", "j"] for tuple keys)
-        value_var: Name of value variable (e.g., "Jij")
-        operations: List of operations in the loop body
-        operands[0]: The dict/iterable value (DictValue type)
+        key_vars: Display names of key unpacking variables (e.g.,
+            ``["i", "j"]``). Display-only; identity comes from
+            ``key_var_values``.
+        value_var: Display name of value variable. Display-only.
+        key_var_values: IR ``Value`` objects for the key variables. For
+            scalar keys, one entry per ``key_vars`` entry. For
+            ``key_is_vector=True`` (Vector keys), a single
+            ``ArrayValue``-typed entry. Carries the UUIDs used to bind
+            keys at emit time. ``None`` only for legacy IR.
+        value_var_value: IR ``Value`` for the value variable. ``None``
+            only for legacy IR.
+        operations: List of operations in the loop body.
+        operands[0]: The dict/iterable value (DictValue type).
 
     Note:
         This operation is always unrolled at transpile time since quantum
@@ -150,6 +193,8 @@ class ForItemsOperation(HasNestedOps, Operation):
     key_vars: list[str] = dataclasses.field(default_factory=list)
     value_var: str = ""
     key_is_vector: bool = False
+    key_var_values: tuple[Value, ...] | None = None
+    value_var_value: Value | None = None
     operations: list[Operation] = dataclasses.field(default_factory=list)
 
     def nested_op_lists(self) -> list[list[Operation]]:
@@ -157,6 +202,47 @@ class ForItemsOperation(HasNestedOps, Operation):
 
     def rebuild_nested(self, new_lists: list[list[Operation]]) -> Operation:
         return dataclasses.replace(self, operations=new_lists[0])
+
+    def all_input_values(self) -> list[ValueBase]:
+        """Include the per-key/value ``Value`` fields for cloning/substitution.
+
+        Same rationale as ``ForOperation.all_input_values``: keep the IR
+        identity fields in lockstep with body references so UUID-keyed
+        lookups stay valid after inline cloning.
+        """
+        values = super().all_input_values()
+        if self.key_var_values is not None:
+            values.extend(self.key_var_values)
+        if self.value_var_value is not None:
+            values.append(self.value_var_value)
+        return values
+
+    def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
+        result = super().replace_values(mapping)
+        assert isinstance(result, ForItemsOperation)
+        # Substitute key_var_values element-wise.
+        if result.key_var_values is not None:
+            new_keys: list[Value] = []
+            keys_changed = False
+            for kv in result.key_var_values:
+                if kv.uuid in mapping:
+                    mapped = mapping[kv.uuid]
+                    if isinstance(mapped, Value):
+                        new_keys.append(mapped)
+                        keys_changed = True
+                        continue
+                new_keys.append(kv)
+            if keys_changed:
+                result = dataclasses.replace(result, key_var_values=tuple(new_keys))
+        # Substitute value_var_value.
+        if (
+            result.value_var_value is not None
+            and result.value_var_value.uuid in mapping
+        ):
+            mapped = mapping[result.value_var_value.uuid]
+            if isinstance(mapped, Value):
+                result = dataclasses.replace(result, value_var_value=mapped)
+        return result
 
     @property
     def signature(self) -> Signature:

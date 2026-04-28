@@ -12,19 +12,41 @@ from .qubit_address import ClbitMap, QubitAddress, QubitMap
 from .value_resolver import resolve_qubit_key
 
 
+def _coerce_to_bool(value: Any) -> bool | None:
+    """Coerce a Python scalar to bool; return None for non-scalar values.
+
+    A backend-specific runtime expression (e.g. ``qiskit.circuit.classical.expr.Expr``)
+    may be stored in ``bindings`` for the same UUID slot as a compile-time
+    Python bool. This guard ensures we don't accidentally call ``bool()`` on
+    such an object — that would either raise or return a misleading truthy
+    value.
+
+    Args:
+        value: The value found in bindings (or the condition's constant).
+
+    Returns:
+        ``True`` / ``False`` for ``bool``/``int`` inputs, ``None`` otherwise.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return bool(value)
+    return None
+
+
 def resolve_if_condition(
     condition: Any,
     bindings: dict[str, Any],
 ) -> bool | None:
     """Resolve an if-condition to a compile-time boolean."""
     if not hasattr(condition, "uuid"):
-        return bool(condition)
+        return _coerce_to_bool(condition)
     if hasattr(condition, "is_constant") and condition.is_constant():
-        return bool(condition.get_const())
+        return _coerce_to_bool(condition.get_const())
     if condition.uuid in bindings:
-        return bool(bindings[condition.uuid])
+        return _coerce_to_bool(bindings[condition.uuid])
     if hasattr(condition, "name") and condition.name and condition.name in bindings:
-        return bool(bindings[condition.name])
+        return _coerce_to_bool(bindings[condition.name])
     return None
 
 
