@@ -27,6 +27,13 @@ from .qaoa import (
     qaoa_state,
     x_mixer,
 )
+from .aoa import(
+    aoa_layers,
+    aoa_state,
+    hubo_aoa_layers,
+    hubo_aoa_state,
+    xy_mixer,
+)
 from .trotter import trotterized_time_evolution
 
 __all__ = [
@@ -38,6 +45,12 @@ __all__ = [
     "hubo_ising_cost",
     "hubo_qaoa_layers",
     "hubo_qaoa_state",
+    # AOA
+    "aoa_layers",
+    "aoa_state",
+    "hubo_aoa_layers",
+    "hubo_aoa_state",
+    "xy_mixer",
     # Basic layers
     "rx_layer",
     "ry_layer",
