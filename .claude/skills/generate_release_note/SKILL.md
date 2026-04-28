@@ -35,7 +35,7 @@ description: 前バージョンタグから現在のmainまでの変更をもと
 
 セクションは**この順番**で並べる。
 
-```
+````markdown
 # Qamomile vX.Y.Z
 
 <1段落の概要 — このリリースの「大きな話」を1〜2文で>
@@ -50,7 +50,7 @@ pip install qamomile==X.Y.Z
 ## Bug Fixes               # 4. バグ修正
 ## Documentation           # 5. ドキュメント
 ## Learn More              # 6. リンク
-```
+````
 
 破壊的変更がない場合は`## Breaking Changes`セクション自体を省略する。`## DX / Tooling`を出すかは判断 — 大抵は出さない。
 
@@ -60,7 +60,7 @@ pip install qamomile==X.Y.Z
 
 各機能ごとに `### <機能名>` で見出しを付け，以下を含める:
 
-1. **1〜2段落の説明** — 何ができるか，どう動くかをユーザー視点で。最後にPRリンクをまとめる(`(#NNN)`)
+1. **1〜2段落の説明** — 何ができるか，どう動くかをユーザー視点で。最後にPRリンクをまとめる（必ず`[#NNN](https://github.com/Jij-Inc/Qamomile/pull/NNN)`形式でリンク化する。プレーンな`(#NNN)`は不可 — 詳細はPhase 6参照）
 2. **使用例コード** — Phase 5で検証済みのもののみ
 3. **期待される出力** — `print`系の出力がある場合は ` ```text` ブロックで，実際の出力に**完全一致**するもの
 4. **チュートリアルへの導線** — 該当チュートリアルがあれば末尾に「See [Tutorial NN](...)」
@@ -129,7 +129,7 @@ uv run python /tmp/verify_release_snippets.py
 | 種類 | 形式 |
 |---|---|
 | PR参照 | `[#NNN](https://github.com/Jij-Inc/Qamomile/pull/NNN)` — **必ずリンク化**。プレーンな`(#NNN)`は使わない |
-| チュートリアル/VQAリンク | `https://github.com/Jij-Inc/Qamomile/blob/v<X.Y.Z>/docs/en/tutorial/<file>.ipynb` 形式 — **リリースタグ付きGitHub blob URL**。ReadTheDocsホスト型URLや相対パスは使わない |
+| チュートリアル/最適化/VQAノートリンク | `https://github.com/Jij-Inc/Qamomile/blob/v<X.Y.Z>/docs/en/<section>/<file>.ipynb` 形式 — **リリースタグ付きGitHub blob URL**。`<section>`は`tutorial` / `optimization` / `vqa`など。ReadTheDocsホスト型URLや相対パスは使わない |
 | GitHubリポジトリ | `https://github.com/Jij-Inc/Qamomile` |
 
 `Learn More` / `さらに詳しく` セクションに Tutorials トップへのリンクは入れない — RTD ホストのサイドバー目次に常時表示されるため冗長になる。
