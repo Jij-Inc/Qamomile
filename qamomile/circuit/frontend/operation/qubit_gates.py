@@ -89,7 +89,9 @@ def _broadcast_single_qubit_gate(
 
     qubits.validate_all_returned()
     n = qubits.shape[0]
-    with for_loop(0, n, var_name=f"_bcast_{gate_type.name.lower()}_idx") as i:
+    # ``var_name`` is display-only — the IR uses UUIDs for identity. Use ``i``
+    # so the visualization matches a hand-written ``for i in qmc.range(n)``.
+    with for_loop(0, n, var_name="i") as i:
         qubits[i] = _apply_single_qubit_gate(qubits[i], gate_type)
     return qubits
 
@@ -123,7 +125,7 @@ def _broadcast_rotation_gate(
 
     qubits.validate_all_returned()
     n = qubits.shape[0]
-    with for_loop(0, n, var_name=f"_bcast_{gate_type.name.lower()}_idx") as i:
+    with for_loop(0, n, var_name="i") as i:
         qubits[i] = _apply_rotation_gate(qubits[i], angle, gate_type)
     return qubits
 
@@ -456,7 +458,7 @@ def _broadcast_phase_gate(qubits: Vector[Qubit], theta: float | Float) -> Vector
 
     qubits.validate_all_returned()
     n = qubits.shape[0]
-    with for_loop(0, n, var_name="_bcast_p_idx") as i:
+    with for_loop(0, n, var_name="i") as i:
         qubits[i] = _apply_phase_gate(qubits[i], theta)
     return qubits
 

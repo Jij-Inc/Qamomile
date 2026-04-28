@@ -97,6 +97,17 @@ class TestBroadcastIRShape:
             if bc_v.is_constant():
                 assert bc_v.get_const() == ex_v.get_const()
 
+    def test_broadcast_loop_var_renders_as_i(self):
+        """Broadcast must use the display name ``i`` so the folded-loop
+        rendering matches a hand-written ``for i in qmc.range(n)``.
+        """
+        for kernel in (self.h_broadcast, self.rx_broadcast):
+            for_op = self._find_for_op(kernel.block)
+            assert for_op.loop_var == "i", (
+                f"Expected broadcast loop_var='i' (matching explicit-loop "
+                f"display), got {for_op.loop_var!r}"
+            )
+
     def test_rx_broadcast_emits_for_operation_with_rx_gate(self):
         block = self.rx_broadcast.block
         for_op = self._find_for_op(block)
