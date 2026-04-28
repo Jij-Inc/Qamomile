@@ -424,6 +424,15 @@ class TestComputationalBasisStateRuntimeBits:
         results = _sample_runtime_bits(_quri_parts_transpiler(), n, bits, shots)
         _assert_deterministic_sample(results, bits, shots)
 
+    @pytest.mark.parametrize("n", _SIZES)
+    @pytest.mark.parametrize("seed", _SEEDS)
+    def test_cudaq(self, n: int, seed: int) -> None:
+        rng = np.random.default_rng(seed)
+        bits = _random_bits(rng, n)
+        shots = 64
+        results = _sample_runtime_bits(_cudaq_transpiler(), n, bits, shots)
+        _assert_deterministic_sample(results, bits, shots)
+
 
 class TestComputationalBasisStateExpval:
     """Expectation values: ``<bits | sum c_i Z_i | bits> = sum c_i (1 - 2 b_i)``."""

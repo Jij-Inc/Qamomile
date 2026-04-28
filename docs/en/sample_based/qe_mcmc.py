@@ -273,7 +273,7 @@ from qamomile.circuit.algorithm.trotter import trotterized_time_evolution
 @qmc.qkernel
 def qemcmc_circuit(
     n: qmc.UInt,
-    input: qmc.Vector[qmc.UInt],
+    input_bits: qmc.Vector[qmc.UInt],
     Hs: qmc.Vector[qmc.Observable],
     order: qmc.UInt,
     time: qmc.Float,
@@ -282,7 +282,7 @@ def qemcmc_circuit(
     q = qmc.qubit_array(n, name="q")
 
     # step 1: prepare the initial state
-    q = computational_basis_state(n, q, input)
+    q = computational_basis_state(n, q, input_bits)
 
     # step 2: apply the trotterized evolution under the mixer and cost Hamiltonians
     q = trotterized_time_evolution(q, Hs, order, time, step)
@@ -297,7 +297,7 @@ def qemcmc_circuit(
 # mixing coefficient $\gamma$ and the simulation time $t$.
 # Following {https://doi.org/10.1103/PhysRevA.111.042615} , we set $\gamma=0.45$, $t=12$, and
 # $\Delta t = 0.8$.
-# At transpile time we bind `n`, `order`, `time`, and `step`, while keeping `input`
+# At transpile time we bind `n`, `order`, `time`, and `step`, while keeping `input_bits`
 # as a runtime parameter.
 # %%
 from qamomile.qiskit import QiskitTranspiler
@@ -323,7 +323,7 @@ executable = transpiler.transpile(
         "time": time,
         "step": step,
     },
-    parameters=["input"],
+    parameters=["input_bits"],
 )
 
 # %% [markdown]
@@ -378,7 +378,7 @@ def quantum_proposal(state: np.ndarray, executable, executor) -> np.ndarray:
     result = executable.sample(
         executor,
         shots=1,
-        bindings={"input": binary_state},
+        bindings={"input_bits": binary_state},
     ).result()
     (proposed_bits, _count), = result.results
     return spin_binary_convert(np.array(proposed_bits, dtype=int), input_kind="binary")
