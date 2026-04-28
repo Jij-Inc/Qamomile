@@ -33,6 +33,10 @@ TUTORIAL_PATTERNS = [
     "docs/ja/vqa/**/*.py",
     "docs/en/vqa/**/*.ipynb",
     "docs/ja/vqa/**/*.ipynb",
+    "docs/en/sample_based/**/*.py",
+    "docs/ja/sample_based/**/*.py",
+    "docs/en/sample_based/**/*.ipynb",
+    "docs/ja/sample_based/**/*.ipynb",
     # We will not execute the following directories:
     # - collaboration: they may require API keys and may have side effects.
     # - release_notes: markdown-only; nothing to execute.
