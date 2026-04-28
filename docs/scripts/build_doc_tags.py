@@ -222,9 +222,15 @@ def _load_article(py_path: Path, section: str) -> Article | None:
     )
 
 
-def _walk_articles(lang: str) -> list[Article]:
-    """Walk every section under ``docs/<lang>/`` and collect articles."""
-    out: list[Article] = []
+def _walk_articles(lang: str) -> tuple[list[Article], list[Path]]:
+    """Walk every section under ``docs/<lang>/``.
+
+    Returns ``(tagged_articles, untagged_py_paths)``. The untagged list
+    is used to strip stale chip blocks from files whose ``tags:``
+    frontmatter has been removed.
+    """
+    tagged: list[Article] = []
+    untagged: list[Path] = []
     for section in SECTIONS:
         sec_dir = DOCS_ROOT / lang / section
         if not sec_dir.is_dir():
@@ -232,8 +238,10 @@ def _walk_articles(lang: str) -> list[Article]:
         for py in sorted(sec_dir.glob("*.py")):
             art = _load_article(py, section)
             if art is not None:
-                out.append(art)
-    return out
+                tagged.append(art)
+            else:
+                untagged.append(py)
+    return tagged, untagged
 
 
 def _tag_map(articles: Iterable[Article]) -> dict[str, list[Article]]:
@@ -484,6 +492,26 @@ def _inject_tag_chips(article: Article, strings: dict[str, object]) -> Path | No
     return article.py_path
 
 
+def _strip_chip_block(py_path: Path) -> Path | None:
+    """Remove a leftover auto-tags chip block when an article is untagged.
+
+    When a contributor removes the ``tags:`` frontmatter from a ``.py``
+    source, the article no longer needs an inline chip line. This
+    routine detects an existing sentinel block (with its surrounding
+    canonical blank ``#`` lines) and collapses it down to a single
+    blank ``#`` line so the file lands in a clean state. Returns the
+    path if the file was modified, otherwise ``None``.
+    """
+    text = py_path.read_text(encoding="utf-8")
+    if not CHIP_BLOCK_RE.search(text):
+        return None
+    new_text = CHIP_BLOCK_RE.sub("#\n", text, count=1)
+    if new_text == text:
+        return None
+    py_path.write_text(new_text, encoding="utf-8")
+    return py_path
+
+
 # --------------------------------------------------------------------- #
 # myst.yml auto-managed Tags region                                     #
 # --------------------------------------------------------------------- #
@@ -581,18 +609,26 @@ def _build_for_locale(lang: str) -> tuple[list[Path], list[Path]]:
         raise ValueError(f"unknown locale {lang!r}")
     strings = STRINGS[lang]
 
-    articles = _walk_articles(lang)
+    articles, untagged_paths = _walk_articles(lang)
     tag_map = _tag_map(articles)
     all_tags = sorted(tag_map)
 
     written: list[Path] = []
     removed: list[Path] = []
 
-    # 1. Inject / refresh inline chip blocks in each tagged .py source.
+    # 1a. Inject / refresh inline chip blocks in each tagged .py source.
     for art in articles:
         modified = _inject_tag_chips(art, strings)
         if modified is not None:
             written.append(modified)
+
+    # 1b. Strip stale chip blocks from .py sources that no longer carry
+    # ``tags:`` frontmatter — otherwise an old chip line would survive
+    # the un-tagging.
+    for py in untagged_paths:
+        stripped = _strip_chip_block(py)
+        if stripped is not None:
+            written.append(stripped)
 
     # 2. Generate global tags/ pages.
     tags_dir = DOCS_ROOT / lang / "tags"
