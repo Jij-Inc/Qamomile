@@ -311,8 +311,23 @@ class ValueResolver:
         v: "Value",
         bindings: dict[str, Any],
     ) -> Any:
+        """Index into a bound array container at the operand's element indices.
+
+        Refuses to index when the parent array's name is in
+        ``self.parameters``. That short-circuit is the same invariant
+        ``fold_classical_op(... EMIT_RESPECT_PARAMS)`` enforces at the
+        op level: a runtime parameter array's "value" is symbolic, and
+        any concrete data the user supplied alongside is a placeholder
+        — silently indexing into the placeholder is exactly what
+        produced the silent miscompilation in Issue #354 B-series. This
+        guard is defense-in-depth: even if a future caller forgets the
+        op-level guard, array indexing for runtime parameters returns
+        ``None`` here.
+        """
         parent = v.parent_array
         if parent is None:
+            return None
+        if parent.name in self.parameters:
             return None
         container = bindings.get(parent.name)
         if container is None:

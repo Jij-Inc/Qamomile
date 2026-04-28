@@ -437,13 +437,22 @@ class Transpiler(ABC, Generic[T]):
 
         Args:
             kernel: The QKernel to compile
-            bindings: Parameter values to bind (also resolves array shapes)
+            bindings: Parameter values to bind (also resolves array shapes).
+                Names in ``bindings`` and ``parameters`` must be disjoint —
+                a name is either compile-time bound or runtime symbolic,
+                never both.
             parameters: Parameter names to preserve as backend parameters
 
         Returns:
             ExecutableProgram ready for execution
 
         Raises:
+            ValueError: If a name appears in both ``bindings`` and
+                ``parameters``. A name being in both is ambiguous (placeholder
+                value vs runtime symbol) and used to silently miscompile
+                control-flow predicates that depended on parameter-array
+                elements; rejecting the overlap up front keeps the contract
+                unambiguous.
             QamomileCompileError: If compilation fails (validation, dependency errors)
 
         Note:
@@ -463,6 +472,19 @@ class Transpiler(ABC, Generic[T]):
             9. plan: Build ProgramPlan (segment into C->Q->C steps)
             10. emit: Generate backend-specific code
         """
+        if bindings and parameters:
+            overlap = set(parameters) & set(bindings.keys())
+            if overlap:
+                raise ValueError(
+                    f"Parameter name(s) {sorted(overlap)} appear in both "
+                    f"`parameters` and `bindings`. A name must be either "
+                    f"compile-time bound (in `bindings`) or runtime symbolic "
+                    f"(in `parameters`), not both. "
+                    f"If you want this value baked into the circuit, remove "
+                    f"it from `parameters`. If you want it as a runtime "
+                    f"parameter, remove it from `bindings`."
+                )
+
         entrypoint_validator = EntrypointValidationPass()
 
         # Pass bindings and parameters to to_block for proper shape resolution

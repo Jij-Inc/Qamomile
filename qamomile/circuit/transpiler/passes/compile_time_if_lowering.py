@@ -31,6 +31,7 @@ from qamomile.circuit.transpiler.value_resolver import (
 
 from . import Pass
 from .emit_support import resolve_if_condition
+from .eval_utils import FoldPolicy, fold_classical_op
 from .value_mapping import ValueSubstitutor
 
 
@@ -139,45 +140,29 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         - ``NotOp``   — logical negation
         - ``BinOp``   — arithmetic (+, -, *, /, //, %)
 
-        Other operation types are silently ignored.  If all operands of a
+        Delegates the actual fold to ``fold_classical_op`` under the
+        ``COMPILE_TIME`` policy, which bypasses the runtime-parameter
+        guard. At this stage there are no runtime parameters in the
+        concrete values map; everything in ``self._bindings`` is treated
+        as a real compile-time value.
+
+        Other operation types are silently ignored. If all operands of a
         supported op are concrete but evaluation still fails, the result
         is not recorded and downstream IfOperations referencing it will
         remain unresolved (emitted as runtime branches).
         """
-        if isinstance(op, CompOp):
-            lhs = self._resolve_operand(op.operands[0], concrete_values)
-            rhs = self._resolve_operand(op.operands[1], concrete_values)
-            if lhs is not None and rhs is not None and op.results:
-                result = self._eval_comp(op.kind, lhs, rhs)
-                if result is not None:
-                    concrete_values[op.results[0].uuid] = result
-
-        elif isinstance(op, CondOp):
-            lhs = self._resolve_operand(op.operands[0], concrete_values)
-            rhs = self._resolve_operand(op.operands[1], concrete_values)
-            if lhs is not None and rhs is not None and op.results:
-                result = self._eval_cond(op.kind, lhs, rhs)
-                if result is not None:
-                    concrete_values[op.results[0].uuid] = result
-
-        elif isinstance(op, NotOp):
-            operand = self._resolve_operand(op.operands[0], concrete_values)
-            if operand is not None and op.results:
-                from qamomile.circuit.transpiler.passes.eval_utils import (
-                    evaluate_notop_value,
-                )
-
-                result = evaluate_notop_value(operand)
-                if result is not None:
-                    concrete_values[op.results[0].uuid] = result
-
-        elif isinstance(op, BinOp):
-            lhs = self._resolve_operand(op.operands[0], concrete_values)
-            rhs = self._resolve_operand(op.operands[1], concrete_values)
-            if lhs is not None and rhs is not None and op.results:
-                result = self._eval_binop(op.kind, lhs, rhs)
-                if result is not None:
-                    concrete_values[op.results[0].uuid] = result
+        if not isinstance(op, (CompOp, CondOp, NotOp, BinOp)):
+            return
+        if not op.results:
+            return
+        result = fold_classical_op(
+            op,
+            lambda v: self._resolve_operand(v, concrete_values),
+            parameters=set(),
+            policy=FoldPolicy.COMPILE_TIME,
+        )
+        if result is not None:
+            concrete_values[op.results[0].uuid] = result
 
     def _resolve_operand(
         self,
@@ -188,32 +173,6 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         return UnifiedValueResolver(
             context=concrete_values, bindings=self._bindings
         ).resolve(value)
-
-    # Kind dispatch is delegated to ``eval_utils`` so all three transpiler
-    # passes that evaluate classical ops share one source of truth.
-    @staticmethod
-    def _eval_comp(kind: Any, lhs: Any, rhs: Any) -> bool | None:
-        from qamomile.circuit.transpiler.passes.eval_utils import (
-            evaluate_compop_values,
-        )
-
-        return evaluate_compop_values(kind, lhs, rhs)
-
-    @staticmethod
-    def _eval_cond(kind: Any, lhs: Any, rhs: Any) -> bool | None:
-        from qamomile.circuit.transpiler.passes.eval_utils import (
-            evaluate_condop_values,
-        )
-
-        return evaluate_condop_values(kind, lhs, rhs)
-
-    @staticmethod
-    def _eval_binop(kind: Any, lhs: Any, rhs: Any) -> Any:
-        from qamomile.circuit.transpiler.passes.eval_utils import (
-            evaluate_binop_values,
-        )
-
-        return evaluate_binop_values(kind, lhs, rhs)
 
     # ------------------------------------------------------------------
     # Operation lowering
