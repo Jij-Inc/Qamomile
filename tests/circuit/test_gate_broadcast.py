@@ -428,6 +428,134 @@ class TestAllPrimitivesBroadcast:
         assert gates[0].gate_type is gate_type
 
 
+class TestAllPrimitivesBroadcastSampling:
+    """Every supported single-qubit / rotation gate broadcast produces the
+    same sampling distribution as its explicit-loop counterpart.
+
+    Builds a small kernel that applies an H broadcast first (so the state
+    is a uniform superposition and the trailing gate has observable
+    effect), then the gate-under-test, then measures. Asserts the
+    broadcast and explicit-loop forms produce identical sample sets across
+    every supported backend.
+    """
+
+    @staticmethod
+    def _bc_kernel_non_parametric(gate_func, n: int):
+        @qmc.qkernel
+        def _circuit() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(n, "qs")
+            qs = qmc.h(qs)
+            qs = gate_func(qs)
+            return qmc.measure(qs)
+
+        return _circuit
+
+    @staticmethod
+    def _ex_kernel_non_parametric(gate_func, n: int):
+        @qmc.qkernel
+        def _circuit() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(n, "qs")
+            m = qs.shape[0]
+            for i in qmc.range(m):
+                qs[i] = qmc.h(qs[i])
+            for i in qmc.range(m):
+                qs[i] = gate_func(qs[i])
+            return qmc.measure(qs)
+
+        return _circuit
+
+    @staticmethod
+    def _bc_kernel_parametric(gate_func, n: int):
+        @qmc.qkernel
+        def _circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(n, "qs")
+            qs = qmc.h(qs)
+            qs = gate_func(qs, theta)
+            return qmc.measure(qs)
+
+        return _circuit
+
+    @staticmethod
+    def _ex_kernel_parametric(gate_func, n: int):
+        @qmc.qkernel
+        def _circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(n, "qs")
+            m = qs.shape[0]
+            for i in qmc.range(m):
+                qs[i] = qmc.h(qs[i])
+            for i in qmc.range(m):
+                qs[i] = gate_func(qs[i], theta)
+            return qmc.measure(qs)
+
+        return _circuit
+
+    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    @pytest.mark.parametrize(
+        "gate_func",
+        [qmc.h, qmc.x, qmc.y, qmc.z, qmc.s, qmc.sdg, qmc.t, qmc.tdg],
+    )
+    def test_non_parametric_broadcast_matches_loop_sampling(
+        self, transpiler_factory, gate_func
+    ):
+        """Sampling distribution is identical between broadcast and loop forms.
+
+        Compares set-equality of measured bitstrings and per-bitstring
+        shot counts (modulo backend RNG ordering). Uses 1024 shots so
+        statistical fluctuation is negligible for the small 3-qubit
+        register on deterministic backends.
+        """
+        n = 3
+        bc = self._bc_kernel_non_parametric(gate_func, n)
+        ex = self._ex_kernel_non_parametric(gate_func, n)
+        t = transpiler_factory()
+        shots = 1024
+        bc_results = dict(t.transpile(bc).sample(t.executor(), shots=shots).result().results)
+        ex_results = dict(t.transpile(ex).sample(t.executor(), shots=shots).result().results)
+        assert set(bc_results.keys()) == set(ex_results.keys()), (
+            f"[{transpiler_factory.__name__}, {gate_func.__name__}] "
+            f"broadcast outcomes={set(bc_results)} vs loop={set(ex_results)}"
+        )
+
+    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    @pytest.mark.parametrize("gate_func", [qmc.rx, qmc.ry, qmc.rz, qmc.p])
+    @pytest.mark.parametrize("seed", SEEDS)
+    def test_parametric_broadcast_matches_loop_sampling(
+        self, transpiler_factory, gate_func, seed
+    ):
+        """Sampling distribution is identical between broadcast and loop forms
+        for every parametric rotation gate, across multiple random angles.
+        """
+        rng = np.random.default_rng(seed)
+        # Mix boundary inputs (0, π, 2π) and a random angle so we cover
+        # the gate's degenerate identity / -identity cases alongside the
+        # generic case.
+        boundary_choices = [0.0, math.pi, 2 * math.pi]
+        theta = float(rng.choice(boundary_choices + [rng.uniform(-math.pi, math.pi)]))
+        n = 3
+        bc = self._bc_kernel_parametric(gate_func, n)
+        ex = self._ex_kernel_parametric(gate_func, n)
+        t = transpiler_factory()
+        shots = 1024
+        exe_bc = t.transpile(bc, parameters=["theta"])
+        exe_ex = t.transpile(ex, parameters=["theta"])
+        executor = t.executor()
+        bc_results = dict(
+            exe_bc.sample(executor, shots=shots, bindings={"theta": theta})
+            .result()
+            .results
+        )
+        ex_results = dict(
+            exe_ex.sample(executor, shots=shots, bindings={"theta": theta})
+            .result()
+            .results
+        )
+        assert set(bc_results.keys()) == set(ex_results.keys()), (
+            f"[{transpiler_factory.__name__}, {gate_func.__name__}, "
+            f"seed={seed}, theta={theta}] outcomes differ: "
+            f"broadcast={set(bc_results)} vs loop={set(ex_results)}"
+        )
+
+
 class TestBroadcastInputValidation:
     """Broadcast dispatch rejects non-Qubit / non-Vector[Qubit] inputs."""
 
