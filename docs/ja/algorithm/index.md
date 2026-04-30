@@ -1,10 +1,11 @@
 ---
-slug: collaboration
+slug: algorithm
+title: Algorithms
 ---
 
-# コラボレーション
+# アルゴリズム
 
-外部量子プラットフォームやサービスとの連携についてのドキュメントページです。
+Qamomileで実装した具体的な量子アルゴリズム例です。
 
 ## タグで探す
 
@@ -14,4 +15,7 @@ slug: collaboration
 
 ## すべての記事
 
-- [qBraid Executor](qbraid_executor) — qBraid対応デバイスでのQiskit回路実行
+- [QAOAでMaxCutを解く](qaoa_maxcut) — QAOA回路をゼロから構築してMaxCutを解き、組み込みの`qaoa_state`と比較する
+- [Suzuki–Trotterによるハミルトニアンシミュレーション](hamiltonian_simulation) — RabiモデルでのTrotter–Suzuki積公式と収束次数の実験
+- [エルミート行列から量子回路へ](hermitian_decomposition) — 密なエルミート行列をPauli和に分解して時間発展回路を構築する
+- [水素分子のためのVQE](vqe_for_hydrogen) — OpenFermionで分子ハミルトニアンを構築し、VQEで基底状態エネルギーを求める

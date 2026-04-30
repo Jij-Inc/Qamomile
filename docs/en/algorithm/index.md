@@ -1,10 +1,11 @@
 ---
-slug: optimization
+slug: algorithm
+title: Algorithms
 ---
 
-# Optimization
+# Algorithms
 
-Usage guides for Qamomile's optimization module.
+Concrete quantum algorithm examples built with Qamomile.
 
 ## Browse by tag
 
@@ -14,5 +15,7 @@ Usage guides for Qamomile's optimization module.
 
 ## All articles
 
-- [How to use BinaryModel](binary_model) — Build unconstrained binary/spin models from BinaryExpr, QUBO/HUBO/Ising, or OMMX
-- [QAOA for Graph Partitioning](qaoa_graph_partition) — End-to-end optimization example using OMMX, JijModeling, and `QAOAConverter`
+- [QAOA for MaxCut](qaoa_maxcut) — Build a QAOA circuit from scratch to solve MaxCut, then compare with the built-in `qaoa_state`
+- [Hamiltonian Simulation with Suzuki–Trotter](hamiltonian_simulation) — Trotter–Suzuki product formulas on the Rabi model with empirical convergence orders
+- [From a Hermitian Matrix to a Quantum Circuit](hermitian_decomposition) — Convert a dense Hermitian matrix to a Pauli sum and a time-evolution circuit
+- [VQE for the Hydrogen Molecule](vqe_for_hydrogen) — Build a molecular Hamiltonian with OpenFermion and find the ground state energy via VQE

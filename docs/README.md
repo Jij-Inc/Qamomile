@@ -296,15 +296,28 @@ From these frontmatter blocks, `docs/scripts/build_doc_tags.py` regenerates:
 |---|---|---|
 | Tag landing page | `docs/<lang>/tags/index.md` | gitignored |
 | Per-tag pages | `docs/<lang>/tags/<tag>.md` | gitignored |
-| Algorithm landing | `docs/<lang>/algorithm/index.md` | gitignored |
 | Inline tag chips | sentinel block inside each tagged `.py` | committed |
+| Browse-by-tag chip cloud | sentinel block inside each section's `index.md` | committed |
 | `Tags` toc block | sentinel region inside each `myst.yml` | committed |
 
-The auto-generated outputs are gitignored because they regenerate on
-every docs build, so contributors never edit them by hand. Sentinels:
+Section index pages (`tutorial/index.md`, `algorithm/index.md`, …) are
+hand-written and tracked in git. The script only refreshes the chip
+line *inside* the sentinel block; it never touches the surrounding
+prose. To opt a section into the chip cloud, drop the sentinel pair in
+the right place:
 
-- In `.py` source: `# <!-- BEGIN auto-tags -->` / `# <!-- END auto-tags -->`
-- In `myst.yml`: `# --- BEGIN doc tags (auto-generated) ---` / `# --- END doc tags (auto-generated) ---`
+```markdown
+## Browse by tag
+
+<!-- BEGIN browse-by-tag -->
+<!-- END browse-by-tag -->
+```
+
+Sentinels:
+
+- Inline chip block in `.py`: `# <!-- BEGIN auto-tags -->` / `# <!-- END auto-tags -->`
+- Browse-by-tag block in `index.md`: `<!-- BEGIN browse-by-tag -->` / `<!-- END browse-by-tag -->`
+- `Tags` toc block in `myst.yml`: `# --- BEGIN doc tags (auto-generated) ---` / `# --- END doc tags (auto-generated) ---`
 
 `./build.sh build-{en,ja}` (and `make build-{en,ja}`) run the generator
 before the MyST build, so RTD and local builds stay in sync without any

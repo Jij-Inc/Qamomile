@@ -49,21 +49,10 @@ SECTIONS: tuple[str, ...] = (
     "collaboration",
 )
 
-# Sections that get an auto-generated index.md (tag-first landing page).
-# Other sections keep their hand-written index.md (with custom intro
-# text), and contributors are expected to maintain those manually.
-AUTO_INDEX_SECTIONS: tuple[str, ...] = ("algorithm",)
-
 # Locale-aware copy. Keep the taxonomy identical across locales; only
 # display strings differ. Adding a locale = adding an entry here.
 STRINGS: dict[str, dict[str, object]] = {
     "en": {
-        "algorithm_title": "Algorithms",
-        "algorithm_slug": "algorithm",
-        "algorithm_lead": (
-            "Concrete quantum algorithm examples built with Qamomile. "
-            "Click a tag below to filter, or browse all algorithms."
-        ),
         "tags_index_title": "Tags",
         "tags_index_slug": "tags",
         "tags_index_lead": (
@@ -71,7 +60,6 @@ STRINGS: dict[str, dict[str, object]] = {
             "article that carries it."
         ),
         "browse_by_tag": "Browse by tag",
-        "all_in_section": "All articles",
         "tags_label": "Tags",
         "tag_page_lead": "Articles tagged **`{tag}`** ({count}).",
         "tag_page_back": "← Back to all tags",
@@ -85,12 +73,6 @@ STRINGS: dict[str, dict[str, object]] = {
         },
     },
     "ja": {
-        "algorithm_title": "アルゴリズム",
-        "algorithm_slug": "algorithm",
-        "algorithm_lead": (
-            "Qamomileで実装した具体的な量子アルゴリズム例です。"
-            "下のタグをクリックして絞り込むか、全アルゴリズムから選んでください。"
-        ),
         "tags_index_title": "タグ",
         "tags_index_slug": "tags",
         "tags_index_lead": (
@@ -98,7 +80,6 @@ STRINGS: dict[str, dict[str, object]] = {
             "タグをクリックすると、そのタグが付いた全記事が表示されます。"
         ),
         "browse_by_tag": "タグで探す",
-        "all_in_section": "すべての記事",
         "tags_label": "タグ",
         "tag_page_lead": "**`{tag}`** タグが付いた記事 ({count} 件)。",
         "tag_page_back": "← タグ一覧へ戻る",
@@ -122,7 +103,6 @@ class Article:
     slug: str  # filename stem, e.g. "qaoa_maxcut"
     title: str
     tags: tuple[str, ...]
-    summary: str
     py_path: Path  # absolute path to the source .py
 
 
@@ -179,47 +159,6 @@ def _parse_article_frontmatter(cell_md: str) -> tuple[dict, str]:
     return fm, rest
 
 
-def _extract_summary(body_md: str) -> str:
-    """Return the first real prose paragraph after the H1.
-
-    Skips both blank lines *and* the inline ``<!-- BEGIN auto-tags --> ...
-    <!-- END auto-tags -->`` chip block injected by this very script — the
-    chip block is presentational and would otherwise leak into the article
-    cards on tag/index pages, producing duplicate "Tags:" lines.
-    """
-    # Sentinel strings live at module scope but reproduce the visible form
-    # here (the .py-comment prefix has already been stripped by the caller).
-    chip_begin = "<!-- BEGIN auto-tags -->"
-    chip_end = "<!-- END auto-tags -->"
-
-    lines = body_md.splitlines()
-    i = 0
-    while i < len(lines) and not lines[i].startswith("# "):
-        i += 1
-    if i < len(lines):
-        i += 1  # past H1
-    # Skip blanks and any chip block(s) that sit between the H1 and the
-    # first real paragraph.
-    while i < len(lines):
-        stripped = lines[i].strip()
-        if not stripped:
-            i += 1
-            continue
-        if stripped == chip_begin:
-            i += 1
-            while i < len(lines) and lines[i].strip() != chip_end:
-                i += 1
-            if i < len(lines):
-                i += 1  # past END
-            continue
-        break
-    buf: list[str] = []
-    while i < len(lines) and lines[i].strip():
-        buf.append(lines[i].strip())
-        i += 1
-    return " ".join(buf)
-
-
 def _load_article(py_path: Path, section: str) -> Article | None:
     """Read ``py_path`` and return an :class:`Article`, or ``None``.
 
@@ -227,7 +166,7 @@ def _load_article(py_path: Path, section: str) -> Article | None:
     """
     text = py_path.read_text(encoding="utf-8")
     _, _, cell = _extract_first_markdown_cell(text)
-    fm, body = _parse_article_frontmatter(cell)
+    fm, _body = _parse_article_frontmatter(cell)
     if not fm or not fm.get("tags"):
         return None
     title = str(fm.get("title") or py_path.stem.replace("_", " ").title())
@@ -235,13 +174,11 @@ def _load_article(py_path: Path, section: str) -> Article | None:
     if not isinstance(raw_tags, list):
         return None
     tags = tuple(str(t) for t in raw_tags)
-    summary = _extract_summary(body)
     return Article(
         section=section,
         slug=py_path.stem,
         title=title,
         tags=tags,
-        summary=summary,
         py_path=py_path,
     )
 
@@ -298,57 +235,6 @@ def _chip_from_tags_dir(tag: str) -> str:
 def _chip_from_article(tag: str) -> str:
     """Render a tag chip linking from a section article (sibling of section dir)."""
     return f"[`{tag}`](../tags/{tag}.md)"
-
-
-def _render_article_card(
-    article: Article,
-    strings: dict[str, object],
-    chip_renderer,
-    href_prefix: str,
-) -> str:
-    chips = " ".join(chip_renderer(t) for t in article.tags)
-    summary = article.summary or ""
-    return (
-        f"### [{article.title}]({href_prefix}{article.slug}.ipynb)\n"
-        f"\n"
-        f"**{strings['tags_label']}:** {chips}\n"
-        f"\n"
-        f"{summary}\n"
-    )
-
-
-def _render_algorithm_index(
-    articles: list[Article],
-    tag_map: dict[str, list[Article]],
-    strings: dict[str, object],
-) -> str:
-    """Render ``docs/<lang>/algorithm/index.md`` (algorithm-only listing)."""
-    parts: list[str] = ["---"]
-    parts.append(f"slug: {strings['algorithm_slug']}")
-    parts.append(f"title: {strings['algorithm_title']}")
-    parts.append("---")
-    parts.append("")
-    parts.append(f"# {strings['algorithm_title']}")
-    parts.append("")
-    parts.append(str(strings["algorithm_lead"]))
-    parts.append("")
-    parts.append(f"## {strings['browse_by_tag']}")
-    parts.append("")
-    # Show every tag from across the docs (not just algorithm-only tags),
-    # with the global article count, so this landing page doubles as the
-    # cross-section tag hub.
-    all_tags = sorted(tag_map)
-    if all_tags:
-        chip_line = " · ".join(
-            f"{_chip_from_section(t)} ({len(tag_map[t])})" for t in all_tags
-        )
-        parts.append(chip_line)
-        parts.append("")
-    parts.append(f"## {strings['all_in_section']}")
-    parts.append("")
-    for a in articles:
-        parts.append(_render_article_card(a, strings, _chip_from_section, ""))
-    return "\n".join(parts).rstrip() + "\n"
 
 
 def _render_tags_index(
@@ -427,9 +313,6 @@ def _render_tag_page(
             parts.append("")
             if chips:
                 parts.append(f"**{strings['tags_label']}:** {chips}")
-                parts.append("")
-            if a.summary:
-                parts.append(a.summary)
                 parts.append("")
     return "\n".join(parts).rstrip() + "\n"
 
@@ -601,6 +484,57 @@ def _update_myst_yml(lang: str, all_tags: list[str]) -> Path | None:
 
 
 # --------------------------------------------------------------------- #
+# Section index.md browse-by-tag injection                              #
+# --------------------------------------------------------------------- #
+
+BROWSE_BEGIN = "<!-- BEGIN browse-by-tag -->"
+BROWSE_END = "<!-- END browse-by-tag -->"
+
+BROWSE_BLOCK_RE = re.compile(
+    re.escape(BROWSE_BEGIN) + r"[\s\S]*?" + re.escape(BROWSE_END),
+)
+
+
+def _inject_browse_by_tag(
+    index_path: Path,
+    tag_map: dict[str, list[Article]],
+) -> Path | None:
+    """Refresh the auto-managed browse-by-tag chip line in a section index.
+
+    Looks for a sentinel block::
+
+        <!-- BEGIN browse-by-tag -->
+        ...
+        <!-- END browse-by-tag -->
+
+    inside ``index_path`` and rewrites its body with the current global
+    tag-cloud chip line. Sections whose ``index.md`` does not contain
+    the sentinels are left alone — that's how a section opts out of the
+    injected block.
+
+    Returns the path if the file was modified, otherwise ``None``.
+    """
+    if not index_path.is_file():
+        return None
+    text = index_path.read_text(encoding="utf-8")
+    if not BROWSE_BLOCK_RE.search(text):
+        return None
+    if tag_map:
+        chip_line = " · ".join(
+            f"{_chip_from_section(t)} ({len(tag_map[t])})"
+            for t in sorted(tag_map)
+        )
+    else:
+        chip_line = ""
+    canonical = f"{BROWSE_BEGIN}\n{chip_line}\n{BROWSE_END}"
+    new_text = BROWSE_BLOCK_RE.sub(canonical, text, count=1)
+    if new_text == text:
+        return None
+    index_path.write_text(new_text, encoding="utf-8")
+    return index_path
+
+
+# --------------------------------------------------------------------- #
 # Stale-file cleanup                                                    #
 # --------------------------------------------------------------------- #
 
@@ -670,20 +604,14 @@ def _build_for_locale(lang: str) -> tuple[list[Path], list[Path]]:
         )
         written.append(page)
 
-    # 3. Generate algorithm/index.md (only this section is auto-indexed).
-    if "algorithm" in AUTO_INDEX_SECTIONS:
-        algo_dir = DOCS_ROOT / lang / "algorithm"
-        if algo_dir.is_dir():
-            algo_articles = sorted(
-                (a for a in articles if a.section == "algorithm"),
-                key=lambda a: a.title,
-            )
-            index_path = algo_dir / "index.md"
-            index_path.write_text(
-                _render_algorithm_index(algo_articles, tag_map, strings),
-                encoding="utf-8",
-            )
-            written.append(index_path)
+    # 3. Refresh the auto-managed browse-by-tag chip line inside each
+    # section's hand-written index.md. Sections that haven't opted in
+    # (no sentinel block in their index.md) are silently skipped.
+    for section in SECTIONS:
+        index_path = DOCS_ROOT / lang / section / "index.md"
+        modified = _inject_browse_by_tag(index_path, tag_map)
+        if modified is not None:
+            written.append(modified)
 
     # 4. Remove any leftover docs/<lang>/algorithm/tags/ from the old
     # layout so the build doesn't pick them up alongside the new path.
