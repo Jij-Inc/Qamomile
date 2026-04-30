@@ -85,8 +85,6 @@ ALLOWED_TAGS: frozenset[str] = frozenset({
     "encoding",
     # Other
     "resource-estimation",
-    # Section
-    "integration",
 })
 
 # Locale-aware copy. Keep the taxonomy identical across locales; only

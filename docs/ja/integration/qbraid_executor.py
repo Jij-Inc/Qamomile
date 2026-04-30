@@ -14,7 +14,7 @@
 
 # %% [markdown]
 # ---
-# tags: [integration, optimization]
+# tags: [optimization]
 # ---
 #
 # # qBraidサポート - QBraidExecutor
