@@ -51,10 +51,12 @@ SECTIONS: tuple[str, ...] = (
     "collaboration",
 )
 
-# Whitelist of tags every article is allowed to carry. Anything outside
-# this set is rejected with a hard error so the taxonomy stays small
-# and contributor-controlled. Adding a new tag is a deliberate two-line
-# patch: extend this set, then use the tag in the article's frontmatter.
+# Whitelist of tags every article is allowed to carry. The taxonomy is
+# deliberately small and contributor-controlled; expanding it is a
+# maintainer decision, not something a docs PR should do as a side
+# effect. CI enforces the whitelist via tests/docs/test_tag_whitelist.py
+# — this script itself does not validate, so a stray tag does not crash
+# the build, only the test fails on the PR.
 ALLOWED_TAGS: frozenset[str] = frozenset({
     "collaboration",
     "hamiltonian-simulation",
@@ -68,13 +70,6 @@ ALLOWED_TAGS: frozenset[str] = frozenset({
     "variational",
     "vqe",
 })
-
-
-class UnknownTagError(ValueError):
-    """Raised when an article's frontmatter carries a tag that is not in
-    :data:`ALLOWED_TAGS`. Surfacing this as a hard error in the build
-    pipeline forces taxonomy decisions through code review rather than
-    letting tag soup accumulate silently."""
 
 # Locale-aware copy. Keep the taxonomy identical across locales; only
 # display strings differ. Adding a locale = adding an entry here.
@@ -209,15 +204,6 @@ def _load_article(py_path: Path, section: str) -> Article | None:
     if not isinstance(raw_tags, list):
         return None
     tags = tuple(str(t) for t in raw_tags)
-    unknown = sorted(set(tags) - ALLOWED_TAGS)
-    if unknown:
-        raise UnknownTagError(
-            f"{py_path}: unknown tag(s) {unknown}. "
-            f"Allowed: {sorted(ALLOWED_TAGS)}. "
-            "If this tag should be permitted, add it to ALLOWED_TAGS in "
-            "docs/scripts/build_doc_tags.py and commit that change "
-            "alongside the article."
-        )
     return Article(
         section=section,
         slug=py_path.stem,

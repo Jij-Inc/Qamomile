@@ -242,6 +242,26 @@ Pure refactors that provably preserve IR output are exempt but still encouraged 
 
 Shipping a new backend without retro-actively extending algorithm/stdlib coverage leaves the backend silently unvalidated against real quantum programs.
 
+## Documentation Tags (Whitelist)
+
+The doc-tag taxonomy is intentionally small and is enforced by a
+whitelist in `docs/scripts/build_doc_tags.py` (`ALLOWED_TAGS`). The
+whitelist is checked in CI by `tests/docs/test_tag_whitelist.py`, so
+any article with an out-of-whitelist tag fails on every PR.
+
+**Do NOT modify `ALLOWED_TAGS` unless the user has explicitly asked
+to add/remove a tag in this conversation.** A new tag is a deliberate
+taxonomy decision that the maintainer wants to make consciously, not a
+side-effect of writing an article. If a contributor needs a tag that
+doesn't exist:
+
+- Stop and ask the user whether the tag should be admitted, *before*
+  editing `ALLOWED_TAGS`.
+- If approved, the same commit must add the tag to `ALLOWED_TAGS` and
+  use it in the article frontmatter.
+- Don't reach for "it would be nice to also add `<tag>`" rationales.
+  Suggest staying within the existing set unless the user disagrees.
+
 ## Documentation Translation
 
 To translate English docs (`docs/en/`) into Japanese (`docs/ja/`), use the `/translate` skill:

@@ -1,11 +1,10 @@
 """Verify every documentation article only uses tags in the whitelist.
 
 The whitelist lives in ``docs/scripts/build_doc_tags.py`` as
-``ALLOWED_TAGS``. The same script enforces it at build / pre-commit
-time by raising ``UnknownTagError`` from ``_load_article``. This test
-re-runs that loader against every ``.py`` source under the tagged
-sections so a stray tag is caught in CI even when a contributor has
-not installed the pre-commit hook locally.
+``ALLOWED_TAGS``. This test is the *only* enforcement point: the
+script itself no longer validates (so a stray tag during local
+development does not crash the build), and there is no pre-commit
+hook. CI catches the tag drift before merge, which is sufficient.
 
 Runs in the default unit-test step (no ``docs`` marker) — it only
 parses frontmatter, not executes notebooks, so it stays cheap.
@@ -60,12 +59,20 @@ _ARTICLE_PATHS = _all_article_paths()
 def test_article_tags_are_in_whitelist(py_path: Path, section: str) -> None:
     """Each article's frontmatter tags must be a subset of ALLOWED_TAGS.
 
-    ``_load_article`` raises ``UnknownTagError`` for any out-of-whitelist
-    tag, so simply calling it (and letting it return) is the assertion.
-    Untagged articles return ``None`` and that is accepted — empty tag
-    lists do not pollute the taxonomy.
+    Untagged articles (``_load_article`` returns ``None``) are accepted —
+    an empty tag list does not pollute the taxonomy.
     """
-    _btags._load_article(py_path, section)
+    article = _btags._load_article(py_path, section)
+    if article is None:
+        return
+    unknown = sorted(set(article.tags) - _btags.ALLOWED_TAGS)
+    assert not unknown, (
+        f"{py_path.relative_to(PROJECT_ROOT)} uses unknown tag(s) {unknown}. "
+        f"Allowed: {sorted(_btags.ALLOWED_TAGS)}. "
+        "Adding a new tag to ALLOWED_TAGS is a deliberate maintainer "
+        "decision — please confirm with the project owner before extending "
+        "the whitelist."
+    )
 
 
 def test_allowed_tags_is_nonempty() -> None:
