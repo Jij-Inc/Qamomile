@@ -14,7 +14,6 @@
 
 # %% [markdown]
 # ---
-# title: 水素分子のためのVQE
 # tags: [chemistry, variational]
 # ---
 #

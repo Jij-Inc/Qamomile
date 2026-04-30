@@ -14,7 +14,6 @@
 
 # %% [markdown]
 # ---
-# title: Compilation and Transpilation
 # tags: []
 # ---
 #

@@ -14,7 +14,6 @@
 
 # %% [markdown]
 # ---
-# title: Steane [[7,1,3]] Code
 # tags: [error-correction]
 # ---
 #

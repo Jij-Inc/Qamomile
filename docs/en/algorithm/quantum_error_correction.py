@@ -14,7 +14,6 @@
 
 # %% [markdown]
 # ---
-# title: Introduction to Quantum Error Correction
 # tags: [error-correction]
 # ---
 #

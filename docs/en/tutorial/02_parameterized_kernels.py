@@ -14,7 +14,6 @@
 
 # %% [markdown]
 # ---
-# title: Parameterized Quantum Kernels
 # tags: []
 # ---
 #

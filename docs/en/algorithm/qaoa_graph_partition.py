@@ -14,7 +14,6 @@
 
 # %% [markdown]
 # ---
-# title: QAOA for Graph Partitioning
 # tags: [optimization, variational]
 # ---
 #

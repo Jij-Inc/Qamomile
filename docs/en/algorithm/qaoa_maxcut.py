@@ -15,7 +15,6 @@
 
 # %% [markdown]
 # ---
-# title: QAOA for MaxCut
 # tags: [optimization, variational]
 # ---
 #

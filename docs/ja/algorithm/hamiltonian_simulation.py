@@ -14,7 +14,6 @@
 
 # %% [markdown]
 # ---
-# title: Suzuki–Trotter によるハミルトニアンシミュレーション
 # tags: [primitives, simulation]
 # ---
 #

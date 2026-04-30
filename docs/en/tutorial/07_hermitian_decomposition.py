@@ -14,7 +14,6 @@
 
 # %% [markdown]
 # ---
-# title: From a Hermitian Matrix to a Quantum Circuit
 # tags: [primitives, encoding, simulation]
 # ---
 #

@@ -14,7 +14,6 @@
 
 # %% [markdown]
 # ---
-# title: Hamiltonian Simulation with Suzuki–Trotter
 # tags: [primitives, simulation]
 # ---
 #

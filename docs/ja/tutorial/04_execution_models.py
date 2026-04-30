@@ -14,7 +14,6 @@
 
 # %% [markdown]
 # ---
-# title: 実行モデル: sample()とrun()
 # tags: []
 # ---
 #

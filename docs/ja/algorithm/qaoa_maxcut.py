@@ -15,7 +15,6 @@
 
 # %% [markdown]
 # ---
-# title: QAOAでMaxCutを解く
 # tags: [optimization, variational]
 # ---
 #

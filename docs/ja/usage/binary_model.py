@@ -14,7 +14,6 @@
 
 # %% [markdown]
 # ---
-# title: BinaryModelの使い方
 # tags: [optimization]
 # ---
 #

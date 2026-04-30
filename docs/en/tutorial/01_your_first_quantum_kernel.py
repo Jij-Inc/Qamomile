@@ -14,7 +14,6 @@
 
 # %% [markdown]
 # ---
-# title: Your First Quantum Kernel
 # tags: []
 # ---
 #

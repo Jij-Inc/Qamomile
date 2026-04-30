@@ -14,7 +14,6 @@
 
 # %% [markdown]
 # ---
-# title: 量子誤り訂正入門
 # tags: [error-correction]
 # ---
 #

@@ -14,7 +14,6 @@
 
 # %% [markdown]
 # ---
-# title: Resource Estimation
 # tags: [resource-estimation]
 # ---
 #

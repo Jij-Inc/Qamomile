@@ -14,7 +14,6 @@
 
 # %% [markdown]
 # ---
-# title: VQE for the Hydrogen Molecule
 # tags: [chemistry, variational]
 # ---
 #

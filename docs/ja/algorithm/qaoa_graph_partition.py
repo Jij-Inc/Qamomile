@@ -14,7 +14,6 @@
 
 # %% [markdown]
 # ---
-# title: QAOA によるグラフ分割
 # tags: [optimization, variational]
 # ---
 #
