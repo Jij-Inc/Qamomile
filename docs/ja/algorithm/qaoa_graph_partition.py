@@ -15,13 +15,13 @@
 # %% [markdown]
 # ---
 # title: QAOA によるグラフ分割
-# tags: [qaoa, qamomile-optimization, optimization, variational, algorithm]
+# tags: [qaoa, optimization, variational, algorithm]
 # ---
 #
 # # QAOA によるグラフ分割
 #
 # <!-- BEGIN auto-tags -->
-# **タグ:** <a class="tag-chip" href="../tags/qaoa.md">qaoa</a> <a class="tag-chip" href="../tags/qamomile-optimization.md">qamomile-optimization</a> <a class="tag-chip" href="../tags/optimization.md">optimization</a> <a class="tag-chip" href="../tags/variational.md">variational</a> <a class="tag-chip" href="../tags/algorithm.md">algorithm</a>
+# **タグ:** <a class="tag-chip" href="../tags/qaoa.md">qaoa</a> <a class="tag-chip" href="../tags/optimization.md">optimization</a> <a class="tag-chip" href="../tags/variational.md">variational</a> <a class="tag-chip" href="../tags/algorithm.md">algorithm</a>
 # <!-- END auto-tags -->
 #
 # 本チュートリアルでは、Quantum Approximate Optimization Algorithm（QAOA）を用いて**グラフ分割問題**を解く方法を紹介します。

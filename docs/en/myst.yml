@@ -53,8 +53,6 @@ project:
       hidden: true
     - file: tags/pauli-decomposition.md
       hidden: true
-    - file: tags/qamomile-optimization.md
-      hidden: true
     - file: tags/qaoa.md
       hidden: true
     - file: tags/qbraid.md
