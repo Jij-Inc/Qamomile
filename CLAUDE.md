@@ -242,6 +242,18 @@ Pure refactors that provably preserve IR output are exempt but still encouraged 
 
 Shipping a new backend without retro-actively extending algorithm/stdlib coverage leaves the backend silently unvalidated against real quantum programs.
 
+## Documentation Editing
+
+When making any change under `docs/` (article `.py`/`.ipynb`,
+section landing pages, build scripts, tag taxonomy, etc.), **read
+`docs/README.md` first**. It is the source-of-truth for the docs
+build pipeline (`.py` → jupytext → `.ipynb`, then `build.sh`), the
+auto-managed sentinel regions (article chip blocks, section
+browse-by-tag clouds, `myst.yml` Tags toc), and the conventions
+for adding or editing pages. Skipping this means you'll likely
+hand-edit auto-managed regions, regenerate artifacts incorrectly,
+or miss the steps required to keep `.py` and `.ipynb` in sync.
+
 ## Documentation Tags (Whitelist)
 
 The doc-tag taxonomy is intentionally small and is enforced by a
