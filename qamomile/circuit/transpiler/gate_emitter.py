@@ -10,7 +10,10 @@ from __future__ import annotations
 from abc import abstractmethod
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
+
+if TYPE_CHECKING:
+    from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind
 
 T = TypeVar("T")  # Backend circuit type
 
@@ -171,6 +174,16 @@ class GateEmitter(Protocol[T]):
             Backend-specific parameter object
         """
         ...
+
+    # ``combine_symbolic`` is an *optional* hook. Backends whose
+    # ``Parameter`` type already supports Python arithmetic (Qiskit
+    # ``ParameterExpression``, CUDA-Q parameters) need not implement it
+    # — ``evaluate_binop`` falls back to ``default_combine_symbolic``
+    # below via a ``getattr`` lookup. Backends whose ``Parameter`` does
+    # NOT support Python operators (e.g. QURI Parts' Rust-backed
+    # ``Parameter``) MUST define ``combine_symbolic`` on their emitter
+    # class and return a backend-native symbolic angle representation
+    # (e.g. a linear-combination dict).
 
     # Single-qubit gates (no parameters)
     @abstractmethod
@@ -439,3 +452,50 @@ class GateEmitter(Protocol[T]):
     def emit_while_end(self, circuit: T, context: Any) -> None:
         """End the while loop context."""
         raise NotImplementedError("Backend does not support native while loops")
+
+
+def default_combine_symbolic(
+    kind: "BinOpKind",
+    lhs: Any,
+    rhs: Any,
+) -> Any:
+    """Default ``combine_symbolic`` for backends with arithmetic-capable Parameters.
+
+    Performs Python operator dispatch on the operands. Used by
+    ``evaluate_binop`` whenever the active emitter does not define its
+    own ``combine_symbolic`` method — the typical case for Qiskit
+    (``ParameterExpression`` overloads ``__add__`` etc.) and CUDA-Q
+    parameters. Backends whose Parameter type lacks Python operators
+    (e.g. QURI Parts) define their own ``combine_symbolic`` on the
+    emitter class to return a backend-native symbolic representation
+    instead.
+
+    Args:
+        kind: The ``BinOpKind`` to apply.
+        lhs: Left operand (numeric or backend Parameter / expression).
+        rhs: Right operand (same shape).
+
+    Returns:
+        ``lhs OP rhs`` for the matching operator. ``0.0`` / ``0`` for
+        division-by-zero in the symbolic path so the caller can finish
+        emission without aborting on a numerically degenerate case.
+        ``None`` for unrecognised ``kind`` values, which the caller
+        treats as a no-op.
+    """
+    from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind
+
+    match kind:
+        case BinOpKind.ADD:
+            return lhs + rhs
+        case BinOpKind.SUB:
+            return lhs - rhs
+        case BinOpKind.MUL:
+            return lhs * rhs
+        case BinOpKind.DIV:
+            return lhs / rhs if rhs != 0 else 0.0
+        case BinOpKind.FLOORDIV:
+            return lhs // rhs if rhs != 0 else 0
+        case BinOpKind.POW:
+            return lhs**rhs
+        case _:
+            return None
