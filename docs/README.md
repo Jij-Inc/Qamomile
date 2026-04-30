@@ -78,6 +78,20 @@ uv sync --extra OPTIONAL_DEPENDENCY    # e.g. quri_parts, cudaq-cu13
 
 `build.sh` is the primary entry point; an equivalent `Makefile` is also available (`make <command>`).
 
+#### Typical workflow
+
+After editing a single `.py` file, re-sync the paired notebook, execute it, and serve the docs locally:
+
+```bash
+uv run jupytext --to ipynb --update docs/en/<section>/foo.py
+uv run jupyter nbconvert --to notebook --execute --inplace docs/en/<section>/foo.ipynb
+./build.sh serve-en    # browse at http://localhost:8000
+```
+
+That's the day-to-day loop. `build.sh` handles tag-page regeneration and API-reference generation/copy as part of `build`, so you don't need to run those steps yourself.
+
+#### All `build.sh` commands
+
 | Command | Description |
 |---------|-------------|
 | `./build.sh build` | Build both languages (no sync) |
@@ -99,30 +113,17 @@ uv sync --extra OPTIONAL_DEPENDENCY    # e.g. quri_parts, cudaq-cu13
 | `./build.sh fresh-en` | Clean, sync, rebuild, and serve English docs |
 | `./build.sh fresh-ja` | Clean, sync, rebuild, and serve Japanese docs |
 
-`build-{en,ja}` automatically runs `docs/scripts/build_doc_tags.py` first, so the chip blocks, tag pages, and `myst.yml` auto-tags region are always up to date in the rendered output.
-
-#### Typical workflow
-
-```bash
-# Edit one file → preview just that one
-uv run jupytext --to ipynb --update docs/en/<section>/foo.py
-uv run jupyter nbconvert --to notebook --execute --inplace docs/en/<section>/foo.ipynb
-./build.sh build       # picks up the change
-
-./build.sh serve-en    # browse at http://localhost:8000
-```
-
 `./build.sh sync` alone produces `.ipynb` without outputs. Use `sync-build` (or run `execute` after `sync`) when you actually need executed notebooks.
 
 ## API Reference Generation
 
-API reference pages are auto-generated from `qamomile` docstrings.
+API generation and copying are automatically included in `./build.sh build` — no separate command is needed under normal use.
+
+For reference, the underlying flow:
 
 1. `generate_api.py` uses the `api_gen/` package (built on `griffe`) to introspect the `qamomile` package
 2. Generates MyST-compatible Markdown files into `docs/api/`
 3. During build, the generated files are copied to `en/api/` and `ja/api/`
-
-API generation and copying are automatically included in `./build.sh build`. No separate command is needed.
 
 ## Development Workflow
 
@@ -139,8 +140,8 @@ API generation and copying are automatically included in `./build.sh build`. No 
 ### Creating a new page
 
 1. **Create the `.py` file** in both `en/` and `ja/` with the standard
-   jupytext header, a frontmatter block carrying `title` and `tags`,
-   then the H1 and content:
+   jupytext header, a frontmatter block carrying `tags`, then the H1
+   and content:
 
    ```python
    # ---
@@ -159,7 +160,6 @@ API generation and copying are automatically included in `./build.sh build`. No 
 
    # %% [markdown]
    # ---
-   # title: Your Page Title
    # tags: [optimization, variational]
    # ---
    #
@@ -168,8 +168,8 @@ API generation and copying are automatically included in `./build.sh build`. No 
    ```
 
    `tags:` values are language-agnostic — keep them identical between
-   `en/` and `ja/`. Only `title` differs. Tags must be in
-   `ALLOWED_TAGS` (see [Tags](#tags) below).
+   `en/` and `ja/`. Tags must be in `ALLOWED_TAGS` (see
+   [Tags](#tags) below).
 
 2. **Add the page to the main `toc:` in both `en/myst.yml` and
    `ja/myst.yml`**, under the matching section:
@@ -218,22 +218,6 @@ API generation and copying are automatically included in `./build.sh build`. No 
    ./build.sh serve-en
    ```
 
-#### Checklist for new pages
-
-- [ ] `.py` file created in both `en/` and `ja/`, with frontmatter
-      (`title`, `tags`) at the top of the first markdown cell
-- [ ] All tags are in `ALLOWED_TAGS` (otherwise CI's
-      `test_tag_whitelist` fails)
-- [ ] Page added to the main `toc:` in both `en/myst.yml` and
-      `ja/myst.yml`
-- [ ] Page linked from `<section>/index.md`, and from the top-level
-      `en/index.md` / `ja/index.md` if appropriate
-- [ ] `uv run python docs/scripts/build_doc_tags.py` re-run so chip
-      blocks / tag pages / `myst.yml` auto-tags region are current
-- [ ] `.ipynb` generated and executed (outputs present)
-- [ ] Test patterns cover the new directory (if applicable)
-- [ ] Build succeeds and page renders correctly
-
 ### Tags
 
 Articles under `{tutorial,algorithm,usage,integration}/` (in both
@@ -243,7 +227,6 @@ the frontmatter at the top of its first markdown cell:
 ```python
 # %% [markdown]
 # ---
-# title: My Article
 # tags: [optimization, variational]
 # ---
 #
