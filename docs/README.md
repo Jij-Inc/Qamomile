@@ -280,7 +280,7 @@ frontmatter block at the top of its first markdown cell, e.g.:
 # %% [markdown]
 # ---
 # title: My New Algorithm
-# tags: [qaoa, optimization, intermediate]
+# tags: [qaoa, optimization, variational]
 # ---
 #
 # # My New Algorithm
@@ -289,6 +289,20 @@ frontmatter block at the top of its first markdown cell, e.g.:
 
 Tags are language-agnostic (the same string for `en` and `ja`); only
 `title` differs per locale.
+
+##### Allowed tags (whitelist)
+
+The script enforces a whitelist of allowed tags — anything outside it
+fails the build with an `UnknownTagError` pointing at the offending
+file. The current set lives in `ALLOWED_TAGS` inside
+`docs/scripts/build_doc_tags.py`. The taxonomy is intentionally small;
+adding a new tag is a deliberate two-line patch:
+
+1. Append the tag to `ALLOWED_TAGS`.
+2. Use it in the article's `tags:` frontmatter.
+
+Both go in the same commit. We avoid free-form tagging because tag
+soup makes the cloud noisy and makes navigation worse than no tags.
 
 From these frontmatter blocks, `docs/scripts/build_doc_tags.py` regenerates:
 
