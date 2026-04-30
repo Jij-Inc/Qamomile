@@ -83,6 +83,30 @@ def test_binary_sampleset_to_ommx_samples_rejects_spin_vartype():
         binary_sampleset_to_ommx_samples(ss)
 
 
+def test_binary_sampleset_to_ommx_samples_rejects_mismatched_num_occurrences():
+    """Length mismatch between samples and num_occurrences raises ValueError."""
+    ss = BinarySampleSet(
+        samples=[{0: 1}, {0: 0}],
+        num_occurrences=[1],  # length 1, but 2 samples
+        energy=[0.0, 0.0],
+        vartype=VarType.BINARY,
+    )
+    with pytest.raises(ValueError, match="num_occurrences"):
+        binary_sampleset_to_ommx_samples(ss)
+
+
+def test_binary_sampleset_to_ommx_samples_rejects_mismatched_energy():
+    """Length mismatch between samples and energy raises ValueError."""
+    ss = BinarySampleSet(
+        samples=[{0: 1}, {0: 0}],
+        num_occurrences=[1, 1],
+        energy=[0.0],  # length 1, but 2 samples
+        vartype=VarType.BINARY,
+    )
+    with pytest.raises(ValueError, match="energy"):
+        binary_sampleset_to_ommx_samples(ss)
+
+
 # --- Caller-instance immutability regression --------------------------------
 
 

@@ -40,6 +40,9 @@ def binary_sampleset_to_ommx_samples(
     Raises:
         ValueError: If ``binary_sampleset.vartype`` is not
             ``VarType.BINARY``. SPIN sample sets must be converted first.
+        ValueError: If the lengths of ``binary_sampleset.samples`` and
+            ``binary_sampleset.num_occurrences`` are inconsistent (and,
+            when present, ``binary_sampleset.energy`` as well).
     """
     # Compare via the enum's str value: bound TypeVar VT can be narrowed
     # to the default (BINARY) by static type-checkers, which then flag
@@ -50,6 +53,23 @@ def binary_sampleset_to_ommx_samples(
             "binary_sampleset_to_ommx_samples requires vartype=BINARY; "
             f"got {binary_sampleset.vartype}. Convert to BINARY first."
         )
+
+    n_samples = len(binary_sampleset.samples)
+    n_occ = len(binary_sampleset.num_occurrences)
+    if n_samples != n_occ:
+        raise ValueError(
+            "binary_sampleset.samples and binary_sampleset.num_occurrences "
+            f"must have the same length; got {n_samples} samples and "
+            f"{n_occ} num_occurrences."
+        )
+    if hasattr(binary_sampleset, "energy") and binary_sampleset.energy is not None:
+        n_energies = len(binary_sampleset.energy)
+        if n_samples != n_energies:
+            raise ValueError(
+                "binary_sampleset.samples and binary_sampleset.energy "
+                f"must have the same length; got {n_samples} samples and "
+                f"{n_energies} energies."
+            )
 
     ommx_samples = ommx.v1.Samples({})
     next_id = 0
