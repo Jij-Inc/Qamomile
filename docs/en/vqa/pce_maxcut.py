@@ -7,7 +7,7 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.19.1
 #   kernelspec:
-#     display_name: Python 3
+#     display_name: qamomile
 #     language: python
 #     name: python3
 # ---
@@ -48,24 +48,42 @@
 #
 # Given an undirected graph $G = (V, E)$, the **MaxCut** problem asks us
 # to partition the vertices into two sets $S$ and $\bar{S}$ so that the
-# number of edges between the two sets is maximized:
+# number of edges between the two sets is maximized. We assign each
+# vertex a **spin variable** $s_i \in \{+1, -1\}$ — $s_i = +1$ places
+# vertex $i$ in $S$, $s_i = -1$ places it in $\bar{S}$ — and write the
+# cut value directly in terms of the spins:
 #
 # $$
-# \text{MaxCut}(x) = \sum_{(i,j) \in E} \bigl[\,x_i (1 - x_j) + x_j (1 - x_i)\,\bigr]
+# \text{MaxCut}(\mathbf{s})
+# \;=\; \frac{1}{2} \sum_{(i,j) \in E} \bigl(\,1 - s_i s_j\,\bigr).
 # $$
 #
-# where $x_i \in \{0, 1\}$ indicates which set vertex $i$ belongs to.
+# Each edge contributes $1$ when its endpoints sit on opposite sides
+# ($s_i s_j = -1$) and $0$ when they sit on the same side
+# ($s_i s_j = +1$). Maximizing the cut is therefore equivalent to
+# **minimizing** the Ising energy
+#
+# $$
+# E(\mathbf{s}) \;=\; \frac{1}{2} \sum_{(i,j) \in E} s_i s_j
+#     \;-\; \frac{|E|}{2}, \qquad E(\mathbf{s}) = -\,\text{MaxCut}(\mathbf{s}),
+# $$
+#
+# i.e. an Ising model with $h_i = 0$, $J_{ij} = \tfrac{1}{2}$ on every
+# edge, and a constant offset $-|E|/2$. This is exactly the form PCE
+# consumes — no $x \in \{0, 1\}$ ↔ $s \in \{+1, -1\}$ rewrite required.
 
 # %% [markdown]
 # ### Create the Graph
 #
-# We use a 20-node random graph with 30 edges (density $\approx 0.16$).
-# This is large enough that the PCE compression is meaningful — 20
-# variables encoded into 3 qubits — and small enough that brute force
-# still gives us a ground truth.
+# We use a 20-node **3-regular** random graph (every vertex has exactly
+# three neighbors, giving $|E| = 3 \cdot 20 / 2 = 30$ edges). 3-regular
+# MaxCut is the canonical benchmark in the PCE paper because the
+# uniform-degree structure yields a clean Edwards–Erdős regularizer
+# scale, and the size is small enough that brute force still gives us a
+# ground truth.
 #
-# `nx.gnm_random_graph` can produce disconnected graphs (an isolated
-# vertex contributes a free spin and degenerates the optimization
+# `nx.random_regular_graph` can produce disconnected graphs (an isolated
+# component contributes a free spin and degenerates the optimization
 # landscape), so we bump the seed until we land on a connected graph.
 
 # %%
@@ -74,7 +92,7 @@ import networkx as nx
 
 seed = 42
 while True:
-    G = nx.gnm_random_graph(20, 30, seed=seed)
+    G = nx.random_regular_graph(3, 20, seed=seed)
     if nx.is_connected(G):
         break
     seed += 1
@@ -99,10 +117,13 @@ plt.show()
 # %% [markdown]
 # ### Exact Solution (Brute Force)
 #
-# Enumerating all $2^{20} = 1{,}048{,}576$ partitions is just over a
-# million bitstrings — too many for a Python loop, but a single pass of
-# vectorised NumPy bit arithmetic finishes in a fraction of a second.
-# This gives us a ground truth to compare PCE against in §5.
+# Enumerating all $2^{20} = 1{,}048{,}576$ spin configurations is just
+# over a million assignments — too many for a Python loop, but a single
+# pass of vectorised NumPy finishes in a fraction of a second. We label
+# each configuration by an integer whose bit $i$ encodes
+# $s_i = +1$ (bit $0$) or $s_i = -1$ (bit $1$), then count edges with
+# $s_i \neq s_j$. This gives us a ground truth to compare PCE against
+# in §5.
 
 # %%
 import numpy as np
@@ -110,10 +131,9 @@ import numpy as np
 assignments = np.arange(2**num_nodes, dtype=np.int64)
 cuts = np.zeros(2**num_nodes, dtype=np.int32)
 for i, j in G.edges():
-    cuts += np.bitwise_xor(
-        np.right_shift(assignments, i) & 1,
-        np.right_shift(assignments, j) & 1,
-    ).astype(np.int32)
+    s_i = 1 - 2 * ((assignments >> i) & 1)  # bit 0 → +1, bit 1 → -1
+    s_j = 1 - 2 * ((assignments >> j) & 1)
+    cuts += (s_i != s_j).astype(np.int32)
 
 best_cut = int(cuts.max())
 optimal_assignment_ints = np.flatnonzero(cuts == best_cut)
@@ -184,11 +204,12 @@ print(f"Number of optimal partitions : {len(optimal_assignment_ints)}")
 # correlator domain instead of locking onto a poor candidate bitstring
 # early.
 #
-# Hyperparameters, following https://doi.org/10.48550/arXiv.2401.09421:
+# Hyperparameters, following (https://doi.org/10.48550/arXiv.2401.09421):
 #
 # - **$\alpha$** (tanh sharpness): scaled as
-#   $\alpha \approx n^{\lfloor k/2 \rfloor}$. For $k = 2$ this is
-#   $\alpha \approx n$, so we use $\alpha = n = 3$ for our 3-qubit run.
+#   $\alpha \sim N^{k/2}$, where $N$ is the number of graph nodes (i.e.
+#   the number of spin variables) and $k$ is the PCE compression rate.
+#   For our 20-node, $k = 2$ run this is $\alpha = 20^{1} = 20$.
 # - **$\beta = 1/2$** (regularizer strength): a fixed value the paper
 #   tunes once on random graphs and reuses across experiments.
 # - **$\nu$** (overall scale): not a free hyperparameter — it is the
@@ -238,29 +259,26 @@ print(f"Number of optimal partitions : {len(optimal_assignment_ints)}")
 # ## Implementation
 
 # %% [markdown]
-# ### Build the BinaryModel and PCEConverter
+# ### Step 1: Build the BinaryModel and PCEConverter
 #
-# We map MaxCut to a QUBO and wrap it in a `BinaryModel`, then hand the
-# model and the chosen compression rate $k = 2$ to `PCEConverter`. The
-# converter immediately builds its `PCEEncoder`, internally rewrites
-# the model to spin form (using $x_i = (1 - s_i) / 2$), and computes
-# the qubit count.
+# We instantiate the Ising form derived in §1 — $h_i = 0$,
+# $J_{ij} = 1/2$ on every edge, constant $-|E|/2$ — directly via
+# `BinaryModel.from_ising`, hand the SPIN-typed model and compression
+# rate $k = 2$ to `PCEConverter`, and let it build the `PCEEncoder` and
+# qubit count. With this scaling, the spin-model energy equals
+# **minus the cut value**, so a higher cut means a lower energy.
 
 # %%
 from qamomile.optimization.binary_model import BinaryModel
 from qamomile.optimization.pce import PCEConverter
 
-# Build QUBO: minimize -MaxCut. Pre-seed every node with a zero diagonal
-# entry so BinaryModel.from_qubo registers all N variables even if the
-# generator ever produces an isolated vertex.
-qubo: dict[tuple[int, int], float] = {(v, v): 0.0 for v in G.nodes()}
-for i, j in G.edges():
-    qubo[(i, i)] -= 1.0
-    qubo[(j, j)] -= 1.0
-    qubo[(i, j)] = qubo.get((i, j), 0.0) + 2.0
-
-binary_model = BinaryModel.from_qubo(qubo)
-converter = PCEConverter(binary_model, k=2)
+quad = {(i, j): 0.5 for i, j in G.edges()}
+ising_model = BinaryModel.from_ising(
+    linear={v: 0.0 for v in G.nodes()},
+    quad=quad,
+    constant=-num_edges / 2,
+)
+converter = PCEConverter(ising_model, k=2)
 
 spin_model = converter.spin_model
 print(f"Number of variables  : {spin_model.num_bits}")
@@ -269,7 +287,7 @@ print(f"Compression rate     : k = {converter.k}")
 print(f"Compression factor   : {spin_model.num_bits / converter.num_qubits:.1f}x")
 
 # %% [markdown]
-# ### Inspect the Per-Variable Pauli Observables
+# ### Step 2: Inspect the Per-Variable Pauli Observables
 #
 # `get_encoded_pauli_list()` returns one Hamiltonian per variable, each
 # containing exactly one $k$-body Pauli string with coefficient $1$.
@@ -286,7 +304,7 @@ for i, P_i in enumerate(observables):
     print(f"  P_{i:2d}: {P_i}")
 
 # %% [markdown]
-# ### Define the Hardware-Efficient Ansatz
+# ### Step 3: Define the Hardware-Efficient Ansatz
 #
 # The ansatz starts in the uniform superposition and applies `depth`
 # brickwork layers of `ry_layer` + `rz_layer` + `cz_entangling_layer`.
@@ -322,7 +340,7 @@ def pce_ansatz(
 
 
 # %% [markdown]
-# ### Transpile One Executable per Observable
+# ### Step 4: Transpile One Executable per Observable
 #
 # Each $P_i$ produces a different expectation-value path through the
 # transpiler, so we transpile the kernel once per observable and cache
@@ -353,15 +371,13 @@ print(f"Executables cached : {len(executables)}")
 print(f"Variational params : {num_thetas} (= 2 * n * depth)")
 
 # %% [markdown]
-# ### Optimize the Variational Parameters
+# ### Step 5: Optimize the Variational Parameters
 #
 # The classical loop evaluates $\langle P_i \rangle$ for every
 # observable at the current `thetas`, plugs the values into the
 # tanh-relaxed loss from §3 (data term + regularizer), and asks
 # `scipy.optimize.minimize` for an update. We track the loss history
 # so the reader can see the optimizer converge.
-#
-# `QAMOMILE_DOCS_TEST` keeps `maxiter` small for the CI doc build.
 
 # %%
 import os
@@ -370,14 +386,15 @@ from scipy.optimize import minimize
 
 executor = transpiler.executor()
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-maxiter = 30 if docs_test_mode else 300
+maxiter = 10 if docs_test_mode else 100
 
 # Hyperparameters from https://doi.org/10.48550/arXiv.2401.09421:
-#   alpha = n^floor(k/2) — for k=2 this is alpha = n = num_qubits
+#   alpha = N^(k/2) (N = number of nodes, k = PCE compression rate)
 #   beta  = 1/2 (fixed, paper tunes once on random graphs)
 #   nu    = |E| / 2 + (N - 1) / 4 (Edwards-Erdős unweighted MaxCut bound)
 N = spin_model.num_bits
-alpha = float(n)
+k = converter.k
+alpha = float(N ** (k / 2))
 beta = 0.5
 nu = num_edges / 2 + (N - 1) / 4
 print(f"alpha = {alpha}, beta = {beta}, nu = {nu}")
@@ -417,7 +434,7 @@ rng = np.random.default_rng(42)
 initial_params = rng.uniform(-np.pi, np.pi, num_thetas)
 
 res = minimize(
-    loss, initial_params, method="COBYLA", options={"maxiter": maxiter}
+    loss, initial_params, method="BFGS", options={"maxiter": maxiter}
 )
 
 print(f"Final loss: {res.fun:+.4f}")
@@ -426,17 +443,20 @@ print(f"Final loss: {res.fun:+.4f}")
 plt.figure(figsize=(8, 4))
 plt.plot(cost_history, color="#2696EB")
 plt.xlabel("Iteration")
-plt.ylabel("Tanh-relaxed loss")
+plt.ylabel("Loss")
 plt.title("PCE Optimization Progress")
 plt.show()
 
 # %% [markdown]
-# ### Decode the Optimized Expectations
+# ### Step 6: Decode the Optimized Expectations
 #
 # `PCEConverter.decode(expectations)` consumes the per-variable
 # expectation values, sign-rounds each one to a spin, and returns a
-# single-sample `BinarySampleSet` already converted back to the
-# original vartype (BINARY, since we built `binary_model` from a QUBO).
+# single-sample `BinarySampleSet` in the **same vartype as the input
+# model** (SPIN here, since `ising_model` was built with
+# `BinaryModel.from_ising`). The reported energy uses the same
+# convention we set up in §1 — energy = $-\,\text{cut}$ — so the
+# decoded energy doubles as a signed cut value.
 
 # %%
 final_expectations = measure_expectations(list(res.x))
@@ -458,15 +478,17 @@ print(f"Decoded energy  : {sampleset.energy[0]:+.4f}")
 # %% [markdown]
 # #### Best Cut
 #
-# Convert the decoded bitstring into a graph partition and compare its
-# cut value against the brute-force optimum from §2.
+# Convert the decoded spin assignment into a graph partition and
+# compare its cut value against the brute-force optimum from §2. As a
+# consistency check, the cut value should equal $-1$ times the spin
+# energy reported above.
 
 # %%
 sample = sampleset.samples[0]
-bits = [sample[i] for i in range(num_nodes)]
-pce_cut = sum(1 for i, j in G.edges() if bits[i] != bits[j])
+spins = [sample[i] for i in range(num_nodes)]
+pce_cut = sum(1 for i, j in G.edges() if spins[i] != spins[j])
 
-print(f"PCE bitstring       : {bits}")
+print(f"PCE spin assignment : {spins}")
 print(f"PCE cut value       : {pce_cut}")
 print(f"Brute-force optimum : {best_cut}")
 print(f"Approximation ratio : {pce_cut / best_cut:.3f}")
@@ -478,7 +500,7 @@ print(f"Approximation ratio : {pce_cut / best_cut:.3f}")
 # of different colours sit on opposite sides of the cut.
 
 # %%
-color_map = ["#FF6B6B" if bits[i] == 1 else "#4ECDC4" for i in range(num_nodes)]
+color_map = ["#FF6B6B" if spins[i] == 1 else "#4ECDC4" for i in range(num_nodes)]
 plt.figure(figsize=(6, 5))
 nx.draw(
     G,
@@ -496,18 +518,21 @@ plt.show()
 #
 # In this tutorial we:
 #
-# 1. Defined a 20-node MaxCut instance and brute-forced its optimum
-#    over all $2^{20}$ partitions with vectorised NumPy.
+# 1. Wrote MaxCut directly as a spin Ising problem
+#    ($s_i \in \{+1, -1\}$, $J_{ij} = 1/2$ on every edge,
+#    constant $-|E|/2$) so the spin energy equals $-\text{cut}$, and
+#    brute-forced its optimum over all $2^{20}$ spin configurations
+#    with vectorised NumPy.
 # 2. Encoded the 20 spin variables into 2-body Pauli correlators on
 #    just **3 qubits** — a roughly 7× compression — with
-#    `PCEConverter(binary_model, k=2)` and read the per-variable
+#    `PCEConverter(ising_model, k=2)` and read the per-variable
 #    observables from `get_encoded_pauli_list()`.
 # 3. Built a hardware-efficient `@qkernel` ansatz that returns
 #    $\langle P \rangle$ via `qm.expval`, transpiled it once per
 #    observable, and trained it against the tanh-relaxed MaxCut loss
 #    plus the paper's quartic regularizer
-#    ($\alpha = n$, $\beta = 1/2$, $\nu = |E|/2 + (N-1)/4$).
-# 4. Recovered a discrete bitstring by feeding the optimized
+#    ($\alpha = N^{k/2}$, $\beta = 1/2$, $\nu = |E|/2 + (N-1)/4$).
+# 4. Recovered a discrete spin assignment by feeding the optimized
 #    expectations into `PCEConverter.decode(...)` and verified the
 #    approximation ratio against the brute-force optimum.
 #

@@ -19,7 +19,7 @@ The rendered tutorial has a **strict** heading hierarchy:
   5. **`## Conclusion`**
 
   The Abstract does **not** get its own H2 heading — it is the body of the first markdown cell under the H1 title.
-- **H3** (`### <name>`) — natural topic names under each H2. This is where `### What is MaxCut?`, `### Create the Graph`, `### QAOA Ansatz`, `### Step 1: Uniform Superposition`, `### Transpile to an Executable Circuit`, `### Decode and Analyze Results`, etc. live.
+- **H3** (`### <name>`) — natural topic names under each H2. This is where `### What is MaxCut?`, `### Create the Graph`, `### QAOA Ansatz`, `### Decode and Analyze Results`, etc. live. **Implementation exception:** every H3 directly under `## Implementation` MUST be prefixed with `Step N:` (numbered sequentially from `Step 1:`), e.g. `### Step 1: Build the BinaryModel and PCEConverter`, `### Step 2: Transpile to an Executable Circuit`. This `Step N:` prefix appears under `## Implementation` only — never under any other H2.
 - **H4** (`#### <name>`) — finer subsections inside an H3 when needed (e.g. `#### Feasibility Check` under `### Decode and Analyze Results`).
 
 Other conventions:
@@ -176,17 +176,17 @@ This is the runnable example of Qamomile's public API. **Import and call the rea
 
 ### Format: H3 steps in pipeline order
 
-Structure the section as a sequence of H3-headed steps, each a (markdown cell, code cell) pair, matching the order in which a Qamomile user goes from problem to sample:
+Structure the section as a sequence of H3-headed steps, each a (markdown cell, code cell) pair, matching the order in which a Qamomile user goes from problem to sample. **Every H3 in this section MUST start with `Step N:`** (numbered sequentially from `Step 1:`), so the reader can follow the pipeline at a glance. The example titles below show the convention; reuse them verbatim where the algorithm matches, or coin a similar name with the same `Step N:` prefix:
 
-1. **`### QUBO to Ising`** — convert the problem to the form the quantum layer expects. For hand-wired VQA: `BinaryModel.change_vartype(VarType.SPIN)` + optional `.normalize_by_abs_max()`. For converter-based: instantiate the converter (`QAOAConverter(instance)`, `PCEConverter(instance)`, …) and call `get_cost_hamiltonian()` / `encode_hamiltonian(k=...)`. Print the resulting Hamiltonian so the reader sees the coefficients.
+1. **`### Step 1: QUBO to Ising`** — convert the problem to the form the quantum layer expects. For hand-wired VQA: `BinaryModel.change_vartype(VarType.SPIN)` + optional `.normalize_by_abs_max()`. For converter-based: instantiate the converter (`QAOAConverter(instance)`, `PCEConverter(instance)`, …) and call `get_cost_hamiltonian()` / `encode_hamiltonian(k=...)`. Print the resulting Hamiltonian so the reader sees the coefficients.
 
    Include the $x_i = (1 - s_i) / 2$ map in prose (one line of math), matching how §3 introduced the notation. Do not re-derive it — §3 already did.
 
-2. **`### Circuit Definition`** — build the `@qkernel`. For hand-wired VQA, this is the largest subsection and is itself split by H4 sub-steps like `#### Step 1: Uniform Superposition`, `#### Step 2: Cost Layer`, `#### Step 3: Mixer Layer`, `#### Step 4: Full Ansatz`, one kernel per step. For converter-based tutorials, this step shrinks to a single code cell — `converter.transpile(transpiler, p=...)` builds the kernel under the hood — and is often merged with the next step.
+2. **`### Step 2: Circuit Definition`** — build the `@qkernel`. For hand-wired VQA, this is the largest subsection and is itself split by H4 sub-steps like `#### Step 1: Uniform Superposition`, `#### Step 2: Cost Layer`, `#### Step 3: Mixer Layer`, `#### Step 4: Full Ansatz`, one kernel per step. For converter-based tutorials, this step shrinks to a single code cell — `converter.transpile(transpiler, p=...)` builds the kernel under the hood — and is often merged with the next step.
 
-3. **`### Transpile to an Executable Circuit`** — call `transpiler.transpile(kernel, bindings=..., parameters=...)` using `qamomile.qiskit.QiskitTranspiler` as the default backend. **Always explain the `bindings=` vs `parameters=` distinction in prose**: `bindings` are fixed at compile time (problem structure — coefficients, `n`, `p`); `parameters` stay as runtime parameters the optimizer will vary each call. Readers unfamiliar with this split will otherwise guess wrong.
+3. **`### Step 3: Transpile to an Executable Circuit`** — call `transpiler.transpile(kernel, bindings=..., parameters=...)` using `qamomile.qiskit.QiskitTranspiler` as the default backend. **Always explain the `bindings=` vs `parameters=` distinction in prose**: `bindings` are fixed at compile time (problem structure — coefficients, `n`, `p`); `parameters` stay as runtime parameters the optimizer will vary each call. Readers unfamiliar with this split will otherwise guess wrong.
 
-4. **`### Optimize the Variational Parameters`** — wrap the circuit in a `scipy.optimize.minimize` cost function that samples, decodes, and returns `energy_mean()`. Gate shot count and `maxiter` behind `QAMOMILE_DOCS_TEST`:
+4. **`### Step 4: Optimize the Variational Parameters`** — wrap the circuit in a `scipy.optimize.minimize` cost function that samples, decodes, and returns `energy_mean()`. Gate shot count and `maxiter` behind `QAMOMILE_DOCS_TEST`:
 
    ```python
    import os
@@ -197,9 +197,9 @@ Structure the section as a sequence of H3-headed steps, each a (markdown cell, c
 
    Copy this pattern verbatim — do not invent a new environment variable name or ad-hoc `if/else`. Seed the initial parameters with `np.random.default_rng(<seed>)`. After the optimizer returns, plot `cost_history` with matplotlib; a flat or monotonically-decreasing curve is how the reader confirms the loop worked.
 
-5. **`### Sample with Optimized Parameters`** — one short cell. Reuses the optimized `gammas`, `betas` and calls `executable.sample(executor, shots=sample_shots, bindings={...}).result()`, then decodes once. Kept separate from step 4 because the optimizer's per-iteration sample sets are discarded — this is the one §5 will analyse.
+5. **`### Step 5: Sample with Optimized Parameters`** — one short cell. Reuses the optimized `gammas`, `betas` and calls `executable.sample(executor, shots=sample_shots, bindings={...}).result()`, then decodes once. Kept separate from step 4 because the optimizer's per-iteration sample sets are discarded — this is the one §5 will analyse.
 
-6. **`### Decode`** — state explicitly which decode path is in use, because the two behave differently:
+6. **`### Step 6: Decode`** — state explicitly which decode path is in use, because the two behave differently:
 
    - Hand-wired VQA → `spin_model.decode_from_sampleresult(result)`. Works when you own the `BinaryModel` directly.
    - Converter-based → `converter.decode(result)`. Folds in SPIN → BINARY conversion automatically when the input problem was BINARY.

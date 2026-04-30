@@ -151,7 +151,7 @@ for part in optimal_partitions:
 # ## Implementation
 
 # %% [markdown]
-# ### QUBO to Ising
+# ### Step 1: QUBO to Ising
 #
 # We build a `BinaryModel` from the MaxCut QUBO. Each edge $(i, j)$
 # contributes $-x_i - x_j + 2 x_i x_j$ (this is the MaxCut objective
@@ -175,7 +175,7 @@ hamiltonian = converter.get_cost_hamiltonian()
 print(hamiltonian)
 
 # %% [markdown]
-# ### Transpile to an Executable Circuit
+# ### Step 2: Transpile to an Executable Circuit
 #
 # `converter.transpile(transpiler, p=p)` builds a $p$-layer QAOA
 # `@qkernel` and hands it to the backend transpiler — here
@@ -192,7 +192,7 @@ p = 2  # number of QAOA layers
 executable = converter.transpile(transpiler, p=p)
 
 # %% [markdown]
-# ### Optimize the Variational Parameters
+# ### Step 3: Optimize the Variational Parameters
 #
 # We minimise the mean energy with COBYLA. Heavy compute is gated on
 # `QAMOMILE_DOCS_TEST` so CI builds stay fast; when running the notebook
@@ -240,7 +240,7 @@ plt.title("QAOA Optimisation Progress")
 plt.show()
 
 # %% [markdown]
-# ### Sample with Optimized Parameters
+# ### Step 4: Sample with Optimized Parameters
 #
 # One final sample draw at the optimum is what §5 will analyse. The
 # earlier per-iteration samples were consumed inside `cost_fn` and
@@ -256,7 +256,7 @@ final_result = executable.sample(
 ).result()
 
 # %% [markdown]
-# ### Decode
+# ### Step 5: Decode
 #
 # `converter.decode(result)` converts the bitstring sample set back to
 # the problem's original vartype (here `BINARY`, because we built

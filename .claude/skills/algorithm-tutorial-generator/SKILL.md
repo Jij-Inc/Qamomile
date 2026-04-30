@@ -153,7 +153,7 @@ This is the pattern used in [docs/en/vqa/qaoa_maxcut.py](../../../docs/en/vqa/qa
 - Heading hierarchy is **strict**:
   - H1 (`# <title>`) — the tutorial title, once, inside the Abstract cell.
   - H2 — exactly these five labels, in order, and nothing else: `## Backgrounds`, `## Algorithm`, `## Implementation`, `## Run example`, `## Conclusion`. The Abstract has no H2 heading — it is the body of the first markdown cell under the H1 title.
-  - H3 — natural topic names (`### What is MaxCut?`, `### Create the Graph`, `### QAOA Ansatz`, `### Transpile to an Executable Circuit`, `### Decode and Analyze Results`, …).
+  - H3 — natural topic names (`### What is MaxCut?`, `### Create the Graph`, `### QAOA Ansatz`, `### Decode and Analyze Results`, …). **Exception:** every H3 directly under `## Implementation` MUST be prefixed with `Step N:` (numbered sequentially from `Step 1:`), e.g. `### Step 1: Build the BinaryModel and PCEConverter`, `### Step 2: Transpile to an Executable Circuit`, … This signals the reader is following a fixed pipeline; the `Step N:` prefix does not appear under any other H2.
   - H4 — finer subsections inside an H3 when needed (`#### Step 1: …`, `#### Feasibility Check`, …).
 
 **Paper citation conventions (MyST):**
@@ -185,7 +185,7 @@ The six sections, in order, with their fixed H2 titles:
 1. **Abstract** — no H2 heading. The Abstract cell contains the H1 title, a 2–4-sentence paragraph, and a numbered step list. Immediately followed by the install stub code cell.
 2. **`## Backgrounds`** — the background of the *problem the algorithm solves* (e.g. MaxCut definition + concrete graph instance + optional brute-force reference). Not the algorithm itself.
 3. **`## Algorithm`** — the paper-style conceptual walkthrough of the algorithm (ansatz, encoding, cost function, math, pseudocode). No Qamomile API calls in this section.
-4. **`## Implementation`** — the Qamomile pipeline, step by step in H3s: QUBO → Ising, circuit definition, transpile, optimize, sample, decode. The target function must appear by name in a code cell here.
+4. **`## Implementation`** — the Qamomile pipeline, step by step in H3s: QUBO → Ising, circuit definition, transpile, optimize, sample, decode. **Every H3 here MUST start with `Step N:`** (numbered from `Step 1:`) — see the heading hierarchy rule above. The target function must appear by name in a code cell here.
 5. **`## Run example`** — analyse the final sample set: feasibility check, best solution, distribution, visualisation, and the "built-in equivalent" reveal when applicable.
 6. **`## Conclusion`** — one markdown cell: recap (matching the Abstract's step list), 1–2 limitations, 1–2 next-step links.
 

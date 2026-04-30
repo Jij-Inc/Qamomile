@@ -7,7 +7,7 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.19.1
 #   kernelspec:
-#     display_name: Python 3
+#     display_name: qamomile
 #     language: python
 #     name: python3
 # ---
@@ -23,7 +23,7 @@
 # 2. `PCEConverter(instance, k=2)`でPCE符号化を構築し、`get_encoded_pauli_list()`で変数ごとのPauliオブザーバブルを取り出します。
 # 3. ハードウェア効率の良い`@qkernel`アンザッツを記述し、各相関子の期待値を`qm.expval(q, P)`で読み出します。
 # 4. MaxCut目的関数のtanh緩和した代理損失に対し、`scipy.optimize.minimize`でアンザッツを学習します。
-# 5. 最適化済みの期待値を`converter.decode(expectations)`でビット列にデコードし、分割を可視化します。
+# 5. 最適化済みの期待値を`converter.decode(expectations)`でスピン列にデコードし、分割を可視化します。
 
 # %%
 # 最新のQamomileをpipからインストールします！
@@ -35,20 +35,28 @@
 # %% [markdown]
 # ### MaxCut問題とは？
 #
-# 無向グラフ$G = (V, E)$が与えられたとき、**MaxCut**問題は頂点を2つの集合$S$と$\bar{S}$に分割し、2つの集合間の辺の数を最大化する問題です。
+# 無向グラフ$G = (V, E)$が与えられたとき、**MaxCut**問題は頂点を2つの集合$S$と$\bar{S}$に分割し、2つの集合間の辺の数を最大化する問題です。各頂点に**スピン変数**$s_i \in \{+1, -1\}$を割り当て、$s_i = +1$なら頂点$i$は$S$に、$s_i = -1$なら$\bar{S}$に入るとすると、カット値はスピンを使って次のように直接書けます。
 #
 # $$
-# \text{MaxCut}(x) = \sum_{(i,j) \in E} \bigl[\,x_i (1 - x_j) + x_j (1 - x_i)\,\bigr]
+# \text{MaxCut}(\mathbf{s})
+# \;=\; \frac{1}{2} \sum_{(i,j) \in E} \bigl(\,1 - s_i s_j\,\bigr).
 # $$
 #
-# ここで$x_i \in \{0, 1\}$は頂点$i$がどちらの集合に属するかを表します。
+# 各辺は両端のスピンが反対側にあるとき（$s_i s_j = -1$）に$1$、同じ側にあるとき（$s_i s_j = +1$）に$0$を寄与します。したがってカットを最大化することは、Isingエネルギー
+#
+# $$
+# E(\mathbf{s}) \;=\; \frac{1}{2} \sum_{(i,j) \in E} s_i s_j
+#     \;-\; \frac{|E|}{2}, \qquad E(\mathbf{s}) = -\,\text{MaxCut}(\mathbf{s}),
+# $$
+#
+# を**最小化**することと等価です。すなわち$h_i = 0$、各辺で$J_{ij} = \tfrac{1}{2}$、定数項$-|E|/2$を持つIsingモデルです。これがまさにPCEが受け取る形式であり、$x \in \{0, 1\}$ ↔ $s \in \{+1, -1\}$の書き換えは不要です。
 
 # %% [markdown]
 # ### グラフの作成
 #
-# 20頂点・30辺（密度$\approx 0.16$）のランダムグラフを使用します。PCEによる圧縮（20変数→3量子ビット）が意味を持つだけの規模でありながら、全探索で厳密解を求められる程度の大きさです。
+# 20頂点の**3-正則**ランダムグラフを使用します（各頂点はちょうど3つの隣接頂点を持つので、$|E| = 3 \cdot 20 / 2 = 30$辺となります）。3-正則MaxCutはPCE論文における代表的なベンチマークです。次数が一様であることでEdwards-Erdős正規化項のスケールがクリーンに定まり、かつ全探索で厳密解を求められる程度の規模に収まります。
 #
-# `nx.gnm_random_graph`は非連結なグラフを生成することがあります（孤立頂点があると自由なスピンが残り、最適化のランドスケープが退化します）。そこで連結なグラフが得られるまでseedをずらします。
+# `nx.random_regular_graph`は非連結なグラフを生成することがあります（孤立した連結成分は自由なスピンを残し、最適化のランドスケープを退化させます）。そこで連結なグラフが得られるまでseedをずらします。
 
 # %%
 import matplotlib.pyplot as plt
@@ -56,7 +64,7 @@ import networkx as nx
 
 seed = 42
 while True:
-    G = nx.gnm_random_graph(20, 30, seed=seed)
+    G = nx.random_regular_graph(3, 20, seed=seed)
     if nx.is_connected(G):
         break
     seed += 1
@@ -81,7 +89,7 @@ plt.show()
 # %% [markdown]
 # ### 厳密解（全探索）
 #
-# $2^{20} = 1{,}048{,}576$個すべての分割を列挙すると100万強のビット列となり、Pythonのループでは多すぎますが、ベクトル化したNumPyのビット演算を一回流すだけで1秒未満で完了します。これで§5でPCEの結果と比較するための厳密解が得られます。
+# $2^{20} = 1{,}048{,}576$通りすべてのスピン配置を列挙すると100万強の割り当てになります。Pythonのループでは多すぎますが、ベクトル化したNumPyを一回流すだけで1秒未満で完了します。各配置は整数でラベル付けし、ビット$i$が$0$なら$s_i = +1$、$1$なら$s_i = -1$と対応付けたうえで、$s_i \neq s_j$となる辺の数を数えます。これで§5でPCEの結果と比較するための厳密解が得られます。
 
 # %%
 import numpy as np
@@ -89,10 +97,9 @@ import numpy as np
 assignments = np.arange(2**num_nodes, dtype=np.int64)
 cuts = np.zeros(2**num_nodes, dtype=np.int32)
 for i, j in G.edges():
-    cuts += np.bitwise_xor(
-        np.right_shift(assignments, i) & 1,
-        np.right_shift(assignments, j) & 1,
-    ).astype(np.int32)
+    s_i = 1 - 2 * ((assignments >> i) & 1)  # bit 0 → +1, bit 1 → -1
+    s_j = 1 - 2 * ((assignments >> j) & 1)
+    cuts += (s_i != s_j).astype(np.int32)
 
 best_cut = int(cuts.max())
 optimal_assignment_ints = np.flatnonzero(cuts == best_cut)
@@ -138,7 +145,7 @@ print(f"Number of optimal partitions : {len(optimal_assignment_ints)}")
 #
 # ハイパーパラメータは https://doi.org/10.48550/arXiv.2401.09421 に従います。
 #
-# - **$\alpha$**（tanhの鋭さ）: $\alpha \approx n^{\lfloor k/2 \rfloor}$でスケールします。$k = 2$では$\alpha \approx n$なので、本チュートリアルの3量子ビットでは$\alpha = n = 3$を使います。
+# - **$\alpha$**（tanhの鋭さ）: $\alpha \sim N^{k/2}$でスケールします。ここで$N$はグラフのノード数（つまりスピン変数の数）、$k$はPCEの圧縮率です。本チュートリアルの20ノード・$k = 2$では$\alpha = 20^{1} = 20$となります。
 # - **$\beta = 1/2$**（正規化項の強さ）: 論文がランダムグラフ上で一度だけ調整し、全実験で固定の値です。
 # - **$\nu$**（全体スケール）: 自由なハイパーパラメータではなく、グラフから直接計算されるEdwards-ErdősのMaxCut下界$\nu = |E|/2 + (N - 1)/4$です。
 #
@@ -170,25 +177,21 @@ print(f"Number of optimal partitions : {len(optimal_assignment_ints)}")
 # ## Implementation
 
 # %% [markdown]
-# ### BinaryModelとPCEConverterの構築
+# ### Step 1: BinaryModelとPCEConverterの構築
 #
-# MaxCutをQUBOへ写してから`BinaryModel`に包み、モデルと選んだ圧縮率$k = 2$を`PCEConverter`に渡します。コンバータは即座に`PCEEncoder`を構築し、内部でモデルを（$x_i = (1 - s_i) / 2$により）スピン形式に書き換え、量子ビット数を計算します。
+# §1で導出したIsing形式——$h_i = 0$、各辺で$J_{ij} = 1/2$、定数項$-|E|/2$——を`BinaryModel.from_ising`で直接構築し、得られたSPINモデルと圧縮率$k = 2$を`PCEConverter`に渡します。コンバータは内部で`PCEEncoder`を構築し、必要な量子ビット数を計算します。このスケーリングではスピンモデルのエネルギーが**カット値の符号反転**に等しくなるので、カットが大きいほどエネルギーが低くなります。
 
 # %%
 from qamomile.optimization.binary_model import BinaryModel
 from qamomile.optimization.pce import PCEConverter
 
-# QUBOを構築: -MaxCutを最小化。生成器が孤立頂点を返した場合でも
-# BinaryModel.from_quboがN個の変数すべてを認識するよう、各頂点に
-# 0の対角項を事前にセットしておく。
-qubo: dict[tuple[int, int], float] = {(v, v): 0.0 for v in G.nodes()}
-for i, j in G.edges():
-    qubo[(i, i)] -= 1.0
-    qubo[(j, j)] -= 1.0
-    qubo[(i, j)] = qubo.get((i, j), 0.0) + 2.0
-
-binary_model = BinaryModel.from_qubo(qubo)
-converter = PCEConverter(binary_model, k=2)
+quad = {(i, j): 0.5 for i, j in G.edges()}
+ising_model = BinaryModel.from_ising(
+    linear={v: 0.0 for v in G.nodes()},
+    quad=quad,
+    constant=-num_edges / 2,
+)
+converter = PCEConverter(ising_model, k=2)
 
 spin_model = converter.spin_model
 print(f"Number of variables  : {spin_model.num_bits}")
@@ -197,7 +200,7 @@ print(f"Compression rate     : k = {converter.k}")
 print(f"Compression factor   : {spin_model.num_bits / converter.num_qubits:.1f}x")
 
 # %% [markdown]
-# ### 変数ごとのPauliオブザーバブルを確認する
+# ### Step 2: 変数ごとのPauliオブザーバブルを確認する
 #
 # `get_encoded_pauli_list()`は変数ごとに1つのHamiltonianを返します。各Hamiltonianは係数1の$k$体Pauli文字列をちょうど1つ含みます。これらが§3で言及した$P_i$オブザーバブルで、最適化ループはアンザッツカーネル内で`qm.expval`を通してこれらを読み出します。同じ列挙はベースとなる`PCEEncoder` (`converter.encoder`) にも残っており、コンバータを介さずに確認することも可能です。
 
@@ -209,7 +212,7 @@ for i, P_i in enumerate(observables):
     print(f"  P_{i:2d}: {P_i}")
 
 # %% [markdown]
-# ### ハードウェア効率の良いアンザッツの定義
+# ### Step 3: ハードウェア効率の良いアンザッツの定義
 #
 # アンザッツは一様重ね合わせから出発し、`ry_layer` + `rz_layer` + `cz_entangling_layer`のブリックワーク層を`depth`回適用します。カーネルは$\langle P \rangle$を返しますが、`P`はbindingsで渡される特定のオブザーバブルで、同じカーネルが$P_i$ごとに1回ずつトランスパイルされます。
 
@@ -241,7 +244,7 @@ def pce_ansatz(
 
 
 # %% [markdown]
-# ### オブザーバブルごとに1つのExecutableをトランスパイルする
+# ### Step 4: オブザーバブルごとに1つのExecutableをトランスパイルする
 #
 # 各$P_i$はトランスパイラで異なる期待値計算経路を生み出すため、オブザーバブルごとに1回トランスパイルし、得られた`ExecutableProgram`をキャッシュします。コンパイル時の`bindings`は構造的な入力（`n`、`depth`、`P`）を固定し、`parameters=["thetas"]`は変分角度をオプティマイザが呼び出しのたびに設定するランタイムパラメータとして残します。
 
@@ -267,11 +270,9 @@ print(f"Executables cached : {len(executables)}")
 print(f"Variational params : {num_thetas} (= 2 * n * depth)")
 
 # %% [markdown]
-# ### 変分パラメータの最適化
+# ### Step 5: 変分パラメータの最適化
 #
 # 古典側のループは現在の`thetas`に対して各オブザーバブルの$\langle P_i \rangle$を評価し、§3のtanh緩和損失（データ項+正規化項）に値を代入してから、`scipy.optimize.minimize`に更新を依頼します。読者がオプティマイザの収束を確認できるよう損失履歴を記録します。
-#
-# `QAMOMILE_DOCS_TEST`はCIのドキュメントビルドのために`maxiter`を小さく抑えます。
 
 # %%
 import os
@@ -280,14 +281,15 @@ from scipy.optimize import minimize
 
 executor = transpiler.executor()
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-maxiter = 30 if docs_test_mode else 300
+maxiter = 10 if docs_test_mode else 100
 
 # https://doi.org/10.48550/arXiv.2401.09421 に従ったハイパーパラメータ:
-#   alpha = n^floor(k/2) — k=2では alpha = n = num_qubits
+#   alpha = N^(k/2)（N = ノード数、k = PCEの圧縮率）
 #   beta  = 1/2（固定。論文ではランダムグラフ上で一度だけチューニング）
 #   nu    = |E| / 2 + (N - 1) / 4（無向MaxCutに対するEdwards-Erdős下界）
 N = spin_model.num_bits
-alpha = float(n)
+k = converter.k
+alpha = float(N ** (k / 2))
 beta = 0.5
 nu = num_edges / 2 + (N - 1) / 4
 print(f"alpha = {alpha}, beta = {beta}, nu = {nu}")
@@ -327,7 +329,7 @@ rng = np.random.default_rng(42)
 initial_params = rng.uniform(-np.pi, np.pi, num_thetas)
 
 res = minimize(
-    loss, initial_params, method="COBYLA", options={"maxiter": maxiter}
+    loss, initial_params, method="BFGS", options={"maxiter": maxiter}
 )
 
 print(f"Final loss: {res.fun:+.4f}")
@@ -336,14 +338,14 @@ print(f"Final loss: {res.fun:+.4f}")
 plt.figure(figsize=(8, 4))
 plt.plot(cost_history, color="#2696EB")
 plt.xlabel("Iteration")
-plt.ylabel("Tanh-relaxed loss")
+plt.ylabel("Loss")
 plt.title("PCE Optimization Progress")
 plt.show()
 
 # %% [markdown]
-# ### 最適化された期待値のデコード
+# ### Step 6: 最適化された期待値のデコード
 #
-# `PCEConverter.decode(expectations)`は変数ごとの期待値を受け取り、それぞれを符号丸めしてスピンに変換し、入力問題の元の値型（今回は`binary_model`をQUBOから構築したのでBINARY）に戻された1サンプルの`BinarySampleSet`を返します。
+# `PCEConverter.decode(expectations)`は変数ごとの期待値を受け取り、それぞれを符号丸めしてスピンに変換し、**入力モデルと同じvartype**（今回は`ising_model`を`BinaryModel.from_ising`で構築したのでSPIN）で1サンプルの`BinarySampleSet`を返します。報告されるエネルギーは§1で設定した規約——エネルギー$= -\,\text{cut}$——に従うので、デコード時のエネルギーは符号付きカット値としてもそのまま読めます。
 
 # %%
 final_expectations = measure_expectations(list(res.x))
@@ -365,14 +367,14 @@ print(f"Decoded energy  : {sampleset.energy[0]:+.4f}")
 # %% [markdown]
 # #### 最良のカット
 #
-# デコードされたビット列をグラフ分割に変換し、§2で得た全探索による厳密解とカット値を比較します。
+# デコードされたスピン割り当てをグラフ分割に変換し、§2で得た全探索による厳密解とカット値を比較します。整合性チェックとして、カット値は上記のスピンエネルギーの符号反転に等しくなるはずです。
 
 # %%
 sample = sampleset.samples[0]
-bits = [sample[i] for i in range(num_nodes)]
-pce_cut = sum(1 for i, j in G.edges() if bits[i] != bits[j])
+spins = [sample[i] for i in range(num_nodes)]
+pce_cut = sum(1 for i, j in G.edges() if spins[i] != spins[j])
 
-print(f"PCE bitstring       : {bits}")
+print(f"PCE spin assignment : {spins}")
 print(f"PCE cut value       : {pce_cut}")
 print(f"Brute-force optimum : {best_cut}")
 print(f"Approximation ratio : {pce_cut / best_cut:.3f}")
@@ -383,7 +385,7 @@ print(f"Approximation ratio : {pce_cut / best_cut:.3f}")
 # 各頂点を分割のどちら側に入ったかで色分けします。色が異なる頂点はカットの反対側に位置します。
 
 # %%
-color_map = ["#FF6B6B" if bits[i] == 1 else "#4ECDC4" for i in range(num_nodes)]
+color_map = ["#FF6B6B" if spins[i] == 1 else "#4ECDC4" for i in range(num_nodes)]
 plt.figure(figsize=(6, 5))
 nx.draw(
     G,
@@ -401,10 +403,10 @@ plt.show()
 #
 # このチュートリアルでは以下を行いました。
 #
-# 1. 20頂点のMaxCut問題を定義し、ベクトル化したNumPyで$2^{20}$通りすべての分割を全探索して厳密解を求めました。
-# 2. 20個のスピン変数を2体Pauli相関子に符号化し、`PCEConverter(binary_model, k=2)`で**わずか3量子ビット**——およそ7倍の圧縮——に押し込み、`get_encoded_pauli_list()`から変数ごとのオブザーバブルを取り出しました。
-# 3. ハードウェア効率の良い`@qkernel`アンザッツを構築して`qm.expval`で$\langle P \rangle$を返すようにし、オブザーバブルごとに1回トランスパイルしてtanh緩和したMaxCut損失と論文の4次正規化項（$\alpha = n$、$\beta = 1/2$、$\nu = |E|/2 + (N-1)/4$）で学習しました。
-# 4. 最適化された期待値を`PCEConverter.decode(...)`に与えて離散ビット列を復元し、全探索による厳密解と近似比を比較しました。
+# 1. MaxCutを最初からスピンIsing問題（$s_i \in \{+1, -1\}$、各辺で$J_{ij} = 1/2$、定数項$-|E|/2$）として書き、スピンエネルギーが$-\text{cut}$と一致するように整えたうえで、ベクトル化したNumPyで$2^{20}$通りすべてのスピン配置を全探索して厳密解を求めました。
+# 2. 20個のスピン変数を2体Pauli相関子に符号化し、`PCEConverter(ising_model, k=2)`で**わずか3量子ビット**——およそ7倍の圧縮——に押し込み、`get_encoded_pauli_list()`から変数ごとのオブザーバブルを取り出しました。
+# 3. ハードウェア効率の良い`@qkernel`アンザッツを構築して`qm.expval`で$\langle P \rangle$を返すようにし、オブザーバブルごとに1回トランスパイルしてtanh緩和したMaxCut損失と論文の4次正規化項（$\alpha = N^{k/2}$、$\beta = 1/2$、$\nu = |E|/2 + (N-1)/4$）で学習しました。
+# 4. 最適化された期待値を`PCEConverter.decode(...)`に与えて離散的なスピン割り当てを復元し、全探索による厳密解と近似比を比較しました。
 #
 # **限界事項:**
 #
