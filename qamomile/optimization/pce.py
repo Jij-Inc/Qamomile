@@ -28,7 +28,6 @@ without going through the converter.
 
 from __future__ import annotations
 
-import abc
 import itertools
 import math
 from typing import Any
@@ -170,7 +169,7 @@ class PCEEncoder:
         return self._pauli_encoding
 
 
-class PCEConverter(abc.ABC):
+class PCEConverter:
     """Converter for Pauli Correlation Encoding (PCE).
 
     PCE compresses :math:`N` optimization variables into the expectation
