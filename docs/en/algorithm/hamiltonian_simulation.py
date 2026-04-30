@@ -14,7 +14,7 @@
 
 # %% [markdown]
 # ---
-# tags: [primitives, simulation]
+# tags: [primitive, simulation]
 # ---
 #
 # # Hamiltonian Simulation with Suzuki–Trotter (Rabi oscillation)

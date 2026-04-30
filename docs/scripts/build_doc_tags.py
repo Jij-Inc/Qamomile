@@ -79,7 +79,7 @@ ALLOWED_TAGS: frozenset[str] = frozenset({
     "simulation",
     "variational",
     # Article type
-    "primitives",
+    "primitive",
     # Technique
     "circuit-compilation",
     "encoding",

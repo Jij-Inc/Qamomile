@@ -14,7 +14,7 @@
 
 # %% [markdown]
 # ---
-# tags: [primitives, encoding, simulation]
+# tags: [primitive, encoding, simulation]
 # ---
 #
 # # エルミート行列から量子回路へ
