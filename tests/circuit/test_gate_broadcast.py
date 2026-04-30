@@ -509,8 +509,12 @@ class TestAllPrimitivesBroadcastSampling:
         ex = self._ex_kernel_non_parametric(gate_func, n)
         t = transpiler_factory()
         shots = 1024
-        bc_results = dict(t.transpile(bc).sample(t.executor(), shots=shots).result().results)
-        ex_results = dict(t.transpile(ex).sample(t.executor(), shots=shots).result().results)
+        bc_results = dict(
+            t.transpile(bc).sample(t.executor(), shots=shots).result().results
+        )
+        ex_results = dict(
+            t.transpile(ex).sample(t.executor(), shots=shots).result().results
+        )
         assert set(bc_results.keys()) == set(ex_results.keys()), (
             f"[{transpiler_factory.__name__}, {gate_func.__name__}] "
             f"broadcast outcomes={set(bc_results)} vs loop={set(ex_results)}"
