@@ -97,7 +97,12 @@ class PCEEncoder:
 
     @staticmethod
     def min_num_qubits(num_vars: int, k: int) -> int:
-        """Return the smallest ``n`` with ``C(n, k) * 3**k >= num_vars``.
+        """Return the smallest ``n >= k`` with ``C(n, k) * 3**k >= num_vars``.
+
+        The result is always at least ``k`` because a :math:`k`-body
+        correlator requires at least ``k`` qubits (``C(n, k) = 0`` for
+        ``n < k``).  When ``num_vars == 0`` the method returns ``k``
+        directly.
 
         Args:
             num_vars (int): Number of variables to encode. Must be
@@ -106,8 +111,9 @@ class PCEEncoder:
                 correlator). Must be a positive integer.
 
         Returns:
-            int: The minimum number of qubits required to host
-            ``num_vars`` distinct :math:`k`-body Pauli correlators.
+            int: The minimum number of qubits ``n`` (with ``n >= k``)
+            required to host ``num_vars`` distinct :math:`k`-body Pauli
+            correlators.
 
         Raises:
             ValueError: If ``k`` is not a positive integer or ``num_vars``
@@ -115,6 +121,9 @@ class PCEEncoder:
 
         Example:
             >>> PCEEncoder.min_num_qubits(num_vars=10, k=2)
+            3
+            >>> # Lower bound: result is always >= k
+            >>> PCEEncoder.min_num_qubits(num_vars=0, k=3)
             3
         """
         if k < 1:
