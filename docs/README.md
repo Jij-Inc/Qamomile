@@ -228,6 +228,107 @@ For reference, the underlying flow:
    blocks / browse-by-tag clouds / per-tag pages there, and build from
    that scratch tree — your committed source stays clean.
 
+### Adding a new section directory
+
+The four sections currently registered (`tutorial/`, `algorithm/`,
+`usage/`, `integration/`) live at the top level under
+`docs/<lang>/`. Adding a new one — at the same level — is supported
+and only needs config changes. Adding a nested subsection (a
+section inside another section) is **not** currently supported and
+would require code changes; details below.
+
+#### Adding a sibling section (e.g. a new `theory/`)
+
+Update each of the following:
+
+1. **Create the section directories**: `docs/en/<new>/` and
+   `docs/ja/<new>/`. Drop the first article's `.py` in.
+2. **Create `<new>/index.md`** in both en/ja with the standard
+   landing-page shape. Just intro paragraph + `## All articles` (or
+   localised equivalent) — **do not** add a `## Browse by tag`
+   heading; the build pipeline synthesises it from `tags:`
+   frontmatter:
+   ```markdown
+   ---
+   slug: <new>
+   ---
+
+   # <Section Title>
+
+   One-line description of the section.
+
+   ## All articles
+
+   - [First Article Title](first_article) — short description
+   ```
+3. **Register the section in `docs/scripts/build_doc_tags.py`**:
+   - Append `"<new>"` to `SECTIONS`.
+   - Add `"<new>": "<English title>"` to `STRINGS["en"]["section_titles"]`
+     and `"<new>": "<Japanese title>"` to `STRINGS["ja"]["section_titles"]`
+     so the section's name renders correctly on tag pages.
+4. **Add the section to each `myst.yml` toc** (en/ja), under the
+   hand-written part:
+   ```yaml
+   - title: <English title>
+     file: <new>/index.md
+     children:
+       - file: <new>/first_article.ipynb
+   ```
+5. **Add a top-level link in `docs/{en,ja}/index.md`** alongside
+   the other section bullets.
+6. **Decide whether `build.sh` should auto-sync / auto-execute the
+   notebooks under this section**:
+   - *Yes* (default — articles are runnable in CI without external
+     resources): append `"<new>"` to `TARGET_DIRS` in both
+     `docs/build.sh` and `docs/Makefile`.
+   - *No* (notebooks need API keys, network, or other side effects
+     — like `integration/`): leave `TARGET_DIRS` alone. Update the
+     comment block above `TARGET_DIRS` in both files to mention
+     `<new>` as another excluded directory. Also list `<new>/` in
+     the "We will not execute the following directories" comment in
+     `tests/docs/test_tutorials.py`.
+7. **Update `tests/docs/test_tutorials.py`'s `TUTORIAL_PATTERNS`**
+   if the section's notebooks should be exercised by the docs
+   tests (mirrors the `TARGET_DIRS` decision above):
+   ```python
+   "docs/en/<new>/**/*.py",
+   "docs/ja/<new>/**/*.py",
+   "docs/en/<new>/**/*.ipynb",
+   "docs/ja/<new>/**/*.ipynb",
+   ```
+8. **Update the `Directory Structure` section of this README** to
+   mention the new directory.
+
+After step 4, run `./build.sh build` to verify the new section
+appears in the rendered nav and that auto-managed content (chip
+blocks on articles, browse-by-tag cloud on the new index.md, Tags
+toc in `myst.yml`) shows up correctly inside `_build_src/`.
+
+#### Adding a nested subsection (currently unsupported)
+
+The script's section model is flat:
+`docs/scripts/build_doc_tags.py` walks `<lang>/<section>/*.py` only
+at the top level — no recursion. The browse-by-tag classifier in
+`_classify_for_index` returns `same` or `cousin`; the legacy
+`descendant` / `ancestor` buckets were dropped when the layout
+flattened, but the comment notes "this is the place to teach the
+classifier about descendant and ancestor again".
+
+To enable nested sections you would need at least:
+
+1. Make `_walk_articles` recurse (`rglob("*.py")` instead of
+   `glob("*.py")`), and represent `Article.section` as a path-like
+   breadcrumb instead of a single string.
+2. Restore `descendant` / `ancestor` buckets in
+   `_classify_for_index` and `_BUCKET_ORDER`, plus the matching
+   localised labels in `STRINGS["en"]["bucket_labels"]` /
+   `STRINGS["ja"]["bucket_labels"]`.
+3. Update `myst.yml` toc to be nested (mystmd already supports
+   nested children).
+
+If you genuinely need nested sections, treat it as a small feature
+on `build_doc_tags.py` rather than a pure docs change.
+
 ### Tags
 
 Articles under `{tutorial,algorithm,usage,integration}/` (in both
