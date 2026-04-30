@@ -42,8 +42,8 @@ docs/
 ├── api_gen/                     # API doc generation package (uses griffe)
 ├── api/                         # Generated API reference (shared source)
 ├── scripts/                     # Build helper scripts
-│                                #   - build_doc_tags.py: regenerate tag pages, chip blocks, myst.yml auto-tags region
-│                                #   - inject_colab_launch.py: post-build "open in Colab" button
+│                                #   - build_doc_tags.py: generate per-tag pages, inject chip blocks, inject section browse-by-tag clouds
+│                                #   - inject_colab_launch.py: post-build "open in Colab" button on every rendered HTML page
 │
 ├── _build_src/                  # Build-time scratch tree (gitignored)
 │                                #   build.sh copies en/ and ja/ here, runs
@@ -97,7 +97,7 @@ uv run jupyter nbconvert --to notebook --execute --inplace docs/en/<section>/foo
 ./build.sh serve-en    # browse at http://localhost:8000
 ```
 
-That's the day-to-day loop. `build.sh` copies your source into a gitignored `_build_src/` scratch tree, injects auto-managed content (chip blocks, browse-by-tag clouds, per-tag pages, `myst.yml` Tags toc) there, and runs mystmd from the scratch tree — so your committed source files never gain build-time content. API generation and copying are also bundled into `build`, so you don't need to run those steps yourself.
+That's the day-to-day loop. `build.sh` copies your source into a gitignored `_build_src/` scratch tree, injects tag-related auto-managed content (chip blocks, browse-by-tag clouds, per-tag pages) there, and runs mystmd from the scratch tree — so your committed source files never gain tag-related build-time content. API generation and copying are also bundled into `build`, so you don't need to run those steps yourself. (`generate_api.py` does write the API Reference TOC entries back into committed `myst.yml`; that's a separate, intentional channel — `build_doc_tags.py` itself does not touch `myst.yml`.)
 
 #### All `build.sh` commands
 

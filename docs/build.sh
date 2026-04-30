@@ -66,9 +66,9 @@ generate_api() {
 
 generate_doc_tags() {
     # Inject auto-managed regions (chip blocks, browse-by-tag clouds,
-    # myst.yml Tags toc, per-tag pages) into the build-dir copy of the
-    # docs tree pointed at by $1. Defaults to the current dir when
-    # invoked without an argument (back-compat for ad-hoc runs).
+    # per-tag pages) into the build-dir copy of the docs tree pointed
+    # at by $1. Defaults to the current dir when invoked without an
+    # argument (back-compat for ad-hoc runs).
     local docs_root="${1:-$(pwd)}"
     echo "Generating doc tag indexes (docs root: ${docs_root})..."
     DOCS_ROOT_OVERRIDE="$docs_root" uv run python scripts/build_doc_tags.py
@@ -79,8 +79,8 @@ setup_build_src() {
     # Build everything inside docs/_build_src/ so the committed source
     # tree never receives auto-managed injections. Sequence:
     #   1. rm + recreate docs/_build_src/<lang>/ as a copy of docs/<lang>/
-    #   2. run build_doc_tags.py against _build_src/ (injects chips,
-    #      browse-by-tag, myst.yml Tags toc; generates per-tag pages)
+    #   2. run build_doc_tags.py against _build_src/ (injects chip
+    #      blocks and browse-by-tag clouds; generates per-tag pages)
     #   3. jupytext --update so chip-injected .py propagates into .ipynb
     #      cells (preserves committed outputs). Includes integration/
     #      because jupytext only syncs cell sources — no execution, no

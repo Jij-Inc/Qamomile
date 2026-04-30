@@ -44,11 +44,11 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 # Allow build.sh to point the script at a build-dir copy of ``docs/`` via
-# an env var, so auto-managed content (chip blocks, browse-by-tag,
-# myst.yml Tags toc region, per-tag pages) is injected into a gitignored
-# scratch tree at build time instead of being committed alongside the
-# hand-written source. Falls back to the in-repo ``docs/`` so contributors
-# can still run the script ad hoc against a working tree.
+# an env var, so auto-managed content (chip blocks, browse-by-tag
+# clouds, per-tag pages) is injected into a gitignored scratch tree at
+# build time instead of being committed alongside the hand-written
+# source. Falls back to the in-repo ``docs/`` so contributors can still
+# run the script ad hoc against a working tree.
 DOCS_ROOT = Path(os.environ.get("DOCS_ROOT_OVERRIDE", REPO_ROOT / "docs")).resolve()
 
 # Sections whose .py files participate in tagging. Adding a new section
@@ -218,7 +218,10 @@ def _extract_h1(body: str) -> str | None:
     """
     for line in body.splitlines():
         stripped = line.lstrip()
-        if stripped.startswith("# ") and not stripped.startswith("##"):
+        # ``startswith("# ")`` already excludes ``"## "`` etc. since the
+        # second char must be a space; no extra ``startswith("##")`` guard
+        # is needed.
+        if stripped.startswith("# "):
             return stripped[2:].strip()
     return None
 
@@ -547,11 +550,13 @@ def _render_browse_by_tag_block(
 ) -> str:
     """Render the proximity-grouped chip cloud for one section.
 
-    Each tag is placed in its closest non-empty bucket (``same`` first,
-    then ``descendant``, ``ancestor``, ``cousin``). The count shown is
-    the number of articles inside that bucket — articles that fall into
-    farther buckets do not contribute to the displayed count, since the
-    tag is suppressed from those buckets.
+    Each tag is placed in its closest non-empty bucket — currently
+    ``same`` (article in this section) or ``cousin`` (article elsewhere).
+    The count shown is the number of articles inside that bucket;
+    articles that fall into farther buckets do not contribute to the
+    displayed count, since the tag is suppressed from those buckets.
+    (When nested sections come back, ``descendant`` / ``ancestor`` slot
+    in here — see ``_BUCKET_ORDER``.)
     """
     bucket_labels = strings["bucket_labels"]
     assert isinstance(bucket_labels, dict)
@@ -711,9 +716,11 @@ def _build_for_locale(lang: str) -> tuple[list[Path], list[Path]]:
         )
         written.append(page)
 
-    # 3. Refresh the auto-managed browse-by-tag block inside each
-    # section's hand-written index.md. Sections that haven't opted in
-    # (no sentinel block in their index.md) are silently skipped.
+    # 3. Inject (or refresh) the browse-by-tag block in each section's
+    # hand-written index.md. ``_inject_browse_by_tag`` handles both:
+    # an existing sentinel pair (Case 1, replace in place) and a fully
+    # hand-written index without sentinels (Case 2, synthesise the
+    # entire ``## Browse by tag`` section before the first H2).
     for section in SECTIONS:
         index_path = DOCS_ROOT / lang / section / "index.md"
         modified = _inject_browse_by_tag(index_path, section, tag_map, strings)

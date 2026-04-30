@@ -49,10 +49,10 @@ copy-api: generate-api
 	@for lang in $(LANGS); do mkdir -p $$lang/api; cp -r api/. $$lang/api/; done
 	@echo "✓ API reference copied to language directories"
 
-# Auto-managed regions (chip blocks, browse-by-tag clouds, myst.yml
-# Tags toc, per-tag pages) are generated into a build-dir copy of the
-# docs tree, never into the committed source. The actual injection runs
-# inside build.sh's setup_build_src; this target is a thin wrapper for
+# Auto-managed regions (chip blocks, browse-by-tag clouds, per-tag
+# pages) are generated into a build-dir copy of the docs tree, never
+# into the committed source. The actual injection runs inside
+# build.sh's setup_build_src; this target is a thin wrapper for
 # ad-hoc invocation against the working tree.
 generate-doc-tags:
 	@echo "Generating doc tag pages (in-place; usually only useful for previewing)..."
