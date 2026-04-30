@@ -5,6 +5,7 @@ import math
 
 import networkx as nx
 import numpy as np
+import ommx.v1
 import pytest
 
 import qamomile.observable as qm_o
@@ -206,7 +207,13 @@ class TestPCEConverterInit:
         assert converter.spin_model.vartype == VarType.SPIN
 
     def test_from_ommx_instance(self):
-        """An ``ommx.v1.Instance`` is converted via ``to_qubo`` and reports BINARY."""
+        """An ``ommx.v1.Instance`` is converted via ``to_qubo`` and reports BINARY.
+
+        Verifies that PCEConverter follows the same caller-instance
+        immutability contract as MathematicalProblemConverter:
+        ``to_qubo`` is called on a deep copy stored as ``self.instance``,
+        so the caller's instance is left exactly as they passed it.
+        """
         jm = pytest.importorskip("jijmodeling")
 
         problem = jm.Problem("simple")
@@ -221,13 +228,16 @@ class TestPCEConverterInit:
             p += x
 
         instance = problem.eval({})
+        snapshot = instance.to_bytes()
         converter = PCEConverter(instance, k=2)
 
         assert converter.instance is not None
-        assert converter.instance.to_bytes() == instance.to_bytes()
         assert converter.original_vartype == VarType.BINARY
         assert converter.spin_model.vartype == VarType.SPIN
         assert converter.spin_model.num_bits == 3
+        # Caller's instance must be byte-identical after construction —
+        # PCEConverter operates on a deep copy of the OMMX instance.
+        assert instance.to_bytes() == snapshot
 
     def test_invalid_instance_type(self):
         """Non-Instance / non-BinaryModel inputs raise ``TypeError``."""
@@ -387,6 +397,130 @@ class TestPCEConverterDecode:
 
         assert sampleset.vartype == VarType.BINARY
         assert sampleset.samples[0] == {10: 0, 20: 1, 30: 0}
+
+
+class TestPCEConverterDecodeOMMX:
+    """Tests for ``PCEConverter.decode`` on the OMMX-backed return path.
+
+    When constructed from an ``ommx.v1.Instance``, ``decode`` should
+    return an ``ommx.v1.SampleSet`` so feasibility, original objective,
+    and per-constraint diagnostics are available through OMMX's API —
+    matching ``MathematicalProblemConverter.decode``'s polymorphic
+    behaviour.
+    """
+
+    @staticmethod
+    def _build_ommx_instance() -> ommx.v1.Instance:
+        """Build a small unconstrained 3-binary OMMX instance.
+
+        Objective: ``x0 * x1 - x1 * x2 + x0`` (minimize).
+        """
+        dvs = [ommx.v1.DecisionVariable.binary(i, name=f"x{i}") for i in range(3)]
+        obj = dvs[0] * dvs[1] + (-1.0) * dvs[1] * dvs[2] + dvs[0]
+        return ommx.v1.Instance.from_components(
+            decision_variables=dvs,
+            objective=obj,
+            constraints=[],
+            sense=ommx.v1.Instance.MINIMIZE,
+        )
+
+    def test_decode_returns_ommx_sampleset_for_ommx_input(self):
+        """OMMX input → ``decode`` returns ``ommx.v1.SampleSet``."""
+        instance = self._build_ommx_instance()
+        converter = PCEConverter(instance, k=2)
+
+        # Spins [+1, -1, +1] → bits [0, 1, 0]
+        sample_set = converter.decode([0.7, -0.3, 0.5])
+
+        assert isinstance(sample_set, ommx.v1.SampleSet)
+        # Single-sample decode → single sample id.
+        assert len(sample_set.sample_ids) == 1
+        sid = sample_set.sample_ids[0]
+        sol = sample_set.get(sid)
+        bits = [int(round(sol.decision_variables_df.loc[i, "value"])) for i in range(3)]
+        assert bits == [0, 1, 0]
+
+    def test_decode_objective_matches_manual_evaluation(self):
+        """OMMX-reported objective equals a manual evaluation on the bits."""
+        instance = self._build_ommx_instance()
+        converter = PCEConverter(instance, k=2)
+
+        # [+1, +1, -1] → bits [0, 0, 1]
+        sample_set = converter.decode([0.5, 0.6, -0.7])
+        sid = sample_set.sample_ids[0]
+        bits = [
+            int(round(sample_set.get(sid).decision_variables_df.loc[i, "value"]))
+            for i in range(3)
+        ]
+        # Objective: x0*x1 - x1*x2 + x0
+        manual = bits[0] * bits[1] + (-1.0) * bits[1] * bits[2] + bits[0]
+        assert sample_set.summary.loc[sid, "objective"] == pytest.approx(manual)
+
+    def test_decode_feasibility_with_constraint(self):
+        """An OMMX equality constraint surfaces in ``SampleSet.feasible``."""
+        n = 3
+        dvs = [ommx.v1.DecisionVariable.binary(i, name=f"x{i}") for i in range(n)]
+        obj = dvs[0] * dvs[1] + (-1.0) * dvs[1] * dvs[2]
+        # x0 + x1 + x2 == 2 — feasibility is determined by the rounded bits.
+        constraint = (sum(dvs) == 2).set_id(0).add_name("eq")
+        instance = ommx.v1.Instance.from_components(
+            decision_variables=dvs,
+            objective=obj,
+            constraints=[constraint],
+            sense=ommx.v1.Instance.MINIMIZE,
+        )
+        converter = PCEConverter(instance, k=2)
+
+        # [+1, -1, +1] → bits [0, 1, 0] — sum = 1, infeasible.
+        infeasible_set = converter.decode([0.7, -0.3, 0.5])
+        sid_inf = infeasible_set.sample_ids[0]
+        assert not bool(infeasible_set.summary.loc[sid_inf, "feasible"])
+
+        # [-1, -1, +1] → bits [1, 1, 0] — sum = 2, feasible.
+        feasible_set = converter.decode([-0.4, -0.2, 0.9])
+        sid_f = feasible_set.sample_ids[0]
+        assert bool(feasible_set.summary.loc[sid_f, "feasible"])
+
+    def test_decode_integer_variable_slack_round_trip(self):
+        """Integer DVs are reconstructed from QUBO slack bits in the SampleSet.
+
+        Verifies that the deep-copy + ``to_qubo`` retention pattern lets
+        ``evaluate_samples`` map the slack bits added by ``to_qubo`` back to
+        the original integer decision variable, matching
+        ``MathematicalProblemConverter`` behaviour for integer DVs.
+        """
+        x = ommx.v1.DecisionVariable.binary(0, name="x")
+        y = ommx.v1.DecisionVariable.integer(1, lower=0, upper=3, name="y")
+        instance = ommx.v1.Instance.from_components(
+            decision_variables=[x, y],
+            objective=x + 2 * y,
+            constraints=[],
+            sense=ommx.v1.Instance.MAXIMIZE,
+        )
+        converter = PCEConverter(instance, k=2)
+
+        # Use a constant +1 expectations vector — round to all-spin-up,
+        # which maps to all-zero bits. The exact decoded values depend on
+        # spin_model variable count; we just assert the original DVs are
+        # reconstructed and respect their bounds.
+        n_vars = converter.spin_model.num_bits
+        sample_set = converter.decode([0.5] * n_vars)
+
+        sid = sample_set.sample_ids[0]
+        df = sample_set.get(sid).decision_variables_df
+
+        # Original DVs (id 0 binary, id 1 integer) must appear with values
+        # respecting their declared kinds and bounds. Slack DVs added by
+        # to_qubo are also present in the post-qubo instance — that is
+        # fine; we only assert the originals are correct.
+        assert 0 in df.index
+        assert 1 in df.index
+        x_val = float(df.loc[0, "value"])
+        y_val = float(df.loc[1, "value"])
+        assert x_val in (0.0, 1.0)
+        assert 0.0 <= y_val <= 3.0
+        # Integer reconstruction must produce an integer-valued result.
+        assert y_val == pytest.approx(round(y_val))
 
 
 class TestPCEEndToEnd:

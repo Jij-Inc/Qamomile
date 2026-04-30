@@ -39,6 +39,7 @@ from qamomile.circuit.frontend.qkernel import QKernel
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.transpiler import Transpiler
 from qamomile.optimization.binary_model import BinaryModel, BinarySampleSet, VarType
+from qamomile.optimization.converter import binary_sampleset_to_ommx_samples
 from qamomile.optimization.qrao.rounding import SignRounder
 
 __all__ = ["PCEConverter", "PCEEncoder", "SignRounder"]
@@ -205,6 +206,13 @@ class PCEConverter:
     expectation values rather than a sample set, which is incompatible
     with ``MathematicalProblemConverter.decode``.
 
+    The polymorphic return type of :meth:`decode`, however, is aligned
+    with the rest of the converter family: an OMMX-backed converter
+    returns an :class:`ommx.v1.SampleSet` (so feasibility, original
+    objective, and per-constraint diagnostics are available through
+    OMMX's own API), while a :class:`BinaryModel`-backed converter
+    returns a :class:`BinarySampleSet` in the model's original vartype.
+
     Attributes:
         instance (ommx.v1.Instance | None): The original OMMX instance if
             one was supplied, otherwise ``None``.
@@ -255,10 +263,20 @@ class PCEConverter:
             self.original_vartype: VarType = instance.vartype
             self.spin_model: BinaryModel = instance.change_vartype(VarType.SPIN)
         elif isinstance(instance, ommx.v1.Instance):
-            self.instance = instance
+            # Deep-copy via bytes round-trip before to_qubo: to_qubo mutates
+            # the instance it is called on (appends slack decision variables
+            # for non-binary vars, absorbs constraints into the objective via
+            # the penalty method). Mutating the caller's instance silently is
+            # surprising; copy first so the caller keeps an untouched view.
+            # The deep copy retains original-constraint metadata internally,
+            # so evaluate_samples on it still reports feasibility against the
+            # user's original constraints, and slack bits added by to_qubo
+            # are reconstructed back into the original decision variables
+            # (e.g., integers rebuilt from log-encoded slack bits) by
+            # evaluate_samples automatically.
+            self.instance = ommx.v1.Instance.from_bytes(instance.to_bytes())
             self.original_vartype = VarType.BINARY
-            instance_copy = ommx.v1.Instance.from_bytes(instance.to_bytes())
-            qubo, constant = instance_copy.to_qubo()
+            qubo, constant = self.instance.to_qubo()
             self.spin_model = BinaryModel.from_qubo(qubo, constant).change_vartype(
                 VarType.SPIN
             )
@@ -373,15 +391,30 @@ class PCEConverter:
             parameters=parameters,
         )
 
-    def decode(self, expectations: list[float]) -> BinarySampleSet:
-        """Decode Pauli expectation values into a binary sample set.
+    def decode(
+        self,
+        expectations: list[float],
+    ) -> BinarySampleSet | ommx.v1.SampleSet:
+        """Decode Pauli expectation values into a sample set.
 
         Uses :class:`SignRounder` to convert each expectation
         :math:`\\langle P_i \\rangle` into a spin value
-        :math:`s_i \\in \\{+1, -1\\}`, computes the energy of the resulting
-        assignment from the stored SPIN model, and returns a single-sample
-        :class:`BinarySampleSet` in the original vartype of the input
-        problem.
+        :math:`s_i \\in \\{+1, -1\\}` and computes the energy of the
+        resulting assignment from the stored SPIN model. The return type
+        tracks the input that built this converter — matching the
+        polymorphic behaviour of
+        :meth:`MathematicalProblemConverter.decode`:
+
+        * Built from an :class:`ommx.v1.Instance` — returns an
+          :class:`ommx.v1.SampleSet` evaluated against the stored OMMX
+          instance, so feasibility, original objective, and per-constraint
+          violations are available through OMMX's own API
+          (``.summary``, ``.best_feasible``, ``.feasible``,
+          ``.objectives``, ...).
+        * Built from a :class:`BinaryModel` — returns a single-sample
+          :class:`BinarySampleSet` (``num_occurrences=[1]``) labelled with
+          the computed energy, expressed in the original vartype
+          (``BINARY`` or ``SPIN``) of the input problem.
 
         Args:
             expectations (list[float]): Expectation values of the encoding
@@ -391,20 +424,20 @@ class PCEConverter:
                 consulted.
 
         Returns:
-            BinarySampleSet: A sample set containing one sample
-            (``num_occurrences=[1]``) labelled with the computed energy,
-            expressed in the original vartype (``BINARY`` or ``SPIN``) of
-            the input problem.
+            BinarySampleSet | ommx.v1.SampleSet: see method description.
 
         Raises:
             ValueError: If the length of ``expectations`` does not match
                 the number of variables in the stored spin model.
 
         Example:
-            >>> # A problem with 3 variables.
+            >>> # A BinaryModel-backed converter with 3 SPIN variables.
             >>> sampleset = converter.decode([0.4, -0.1, 0.8])
             >>> sampleset.samples
-            [{0: 1, 1: -1, 2: 1}]  # if original_vartype is SPIN
+            [{0: 1, 1: -1, 2: 1}]
+            >>> # An OMMX-backed converter returns an ommx SampleSet.
+            >>> sample_set = ommx_converter.decode([0.4, -0.1, 0.8])
+            >>> sample_set.best_feasible.objective
         """
         num_vars = self.spin_model.num_bits
         if len(expectations) != num_vars:
@@ -412,17 +445,30 @@ class PCEConverter:
                 f"Expected {num_vars} expectation values, got {len(expectations)}."
             )
 
-        rounder = SignRounder()
-        spins = rounder.round(expectations)
+        spins = SignRounder().round(expectations)
 
         idx_map = self.spin_model.index_new_to_origin
         spin_sample: dict[int, int] = {
             idx_map[new_idx]: spins[new_idx] for new_idx in range(len(spins))
         }
         energy = self.spin_model.calc_energy(spins)
+        binary_sample = {i: (1 - s) // 2 for i, s in spin_sample.items()}
 
+        # OMMX path: build a BINARY single-sample BinarySampleSet, route it
+        # through the shared helper, and let evaluate_samples report the
+        # original (un-penalized) objective and feasibility.
+        if self.instance is not None:
+            binary_sampleset = BinarySampleSet(
+                samples=[binary_sample],
+                num_occurrences=[1],
+                energy=[energy],
+                vartype=VarType.BINARY,
+            )
+            ommx_samples = binary_sampleset_to_ommx_samples(binary_sampleset)
+            return self.instance.evaluate_samples(ommx_samples)
+
+        # BinaryModel path: return in the model's original vartype.
         if self.original_vartype == VarType.BINARY:
-            binary_sample = {i: (1 - s) // 2 for i, s in spin_sample.items()}
             return BinarySampleSet(
                 samples=[binary_sample],
                 num_occurrences=[1],
