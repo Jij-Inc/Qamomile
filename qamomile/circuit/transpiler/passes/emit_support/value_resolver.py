@@ -70,18 +70,6 @@ class ValueResolver:
             idx = None
             if idx_value.is_constant():
                 idx = int(idx_value.get_const())
-            elif idx_value.name and idx_value.name in bindings:
-                idx = self._resolve_numeric_index(bindings[idx_value.name])
-                if idx is None:
-                    bound_val = bindings[idx_value.name]
-                    return QubitResolutionResult(
-                        success=False,
-                        failure_reason=ResolutionFailureReason.INDEX_NOT_NUMERIC,
-                        failure_details=(
-                            f"Index '{idx_value.name}' resolved to non-numeric type: "
-                            f"{type(bound_val).__name__}"
-                        ),
-                    )
             elif idx_value.uuid in bindings:
                 idx = self._resolve_numeric_index(bindings[idx_value.uuid])
                 if idx is None:
@@ -90,8 +78,9 @@ class ValueResolver:
                         success=False,
                         failure_reason=ResolutionFailureReason.INDEX_NOT_NUMERIC,
                         failure_details=(
-                            f"Index (uuid: {idx_value.uuid[:8]}...) resolved to "
-                            f"non-numeric type: {type(bound_val).__name__}"
+                            f"Index '{idx_value.name}' (uuid: "
+                            f"{idx_value.uuid[:8]}...) resolved to non-numeric "
+                            f"type: {type(bound_val).__name__}"
                         ),
                     )
             elif idx_value.parent_array is not None:
@@ -112,8 +101,8 @@ class ValueResolver:
                     success=False,
                     failure_reason=ResolutionFailureReason.SYMBOLIC_INDEX_NOT_BOUND,
                     failure_details=(
-                        f"Index variable '{idx_value.name}' is not bound. "
-                        f"Neither name nor uuid found in bindings."
+                        f"Index variable '{idx_value.name}' (uuid: "
+                        f"{idx_value.uuid[:8]}...) is not bound."
                     ),
                 )
 
@@ -382,8 +371,6 @@ class ValueResolver:
                     idx = None
                     if idx_value.is_constant():
                         idx = int(idx_value.get_const())
-                    elif idx_value.name and idx_value.name in bindings:
-                        idx = self._resolve_numeric_index(bindings[idx_value.name])
                     elif idx_value.uuid in bindings:
                         idx = self._resolve_numeric_index(bindings[idx_value.uuid])
 
