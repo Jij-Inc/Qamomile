@@ -44,9 +44,9 @@ project:
       hidden: true
     - file: tags/binary-model.md
       hidden: true
-    - file: tags/hamiltonian-simulation.md
+    - file: tags/collaboration.md
       hidden: true
-    - file: tags/integration.md
+    - file: tags/hamiltonian-simulation.md
       hidden: true
     - file: tags/optimization.md
       hidden: true
