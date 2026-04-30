@@ -648,6 +648,11 @@ def _clean_stale(directory: Path, keep: set[Path]) -> list[Path]:
     return removed
 
 
+# --------------------------------------------------------------------- #
+# Generic write helpers                                                 #
+# --------------------------------------------------------------------- #
+
+
 def _write_if_changed(path: Path, content: str) -> Path | None:
     """Write ``content`` to ``path`` only if it differs from the existing file.
 
