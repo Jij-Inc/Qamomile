@@ -258,7 +258,8 @@ class PCEConverter(abc.ABC):
         elif isinstance(instance, ommx.v1.Instance):
             self.instance = instance
             self.original_vartype = VarType.BINARY
-            qubo, constant = instance.to_qubo()
+            instance_copy = ommx.v1.Instance.from_bytes(instance.to_bytes())
+            qubo, constant = instance_copy.to_qubo()
             self.spin_model = BinaryModel.from_qubo(qubo, constant).change_vartype(
                 VarType.SPIN
             )
