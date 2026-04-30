@@ -1,5 +1,7 @@
 # Qamomileドキュメントへようこそ
 
+**Qamomile**（カモミール、/ˈkæməˌmiːl/）は、カモミールの花にちなんで名付けられました。カモミールは穏やかさと明瞭さの象徴として知られるハーブです。
+
 Qamomileは量子プログラミングSDKです。型付きPython関数で量子回路を記述し、Qiskit・CUDA-Q・QURI Parts・qBraidなどのQuantum SDKで実行できます。また、シンボリックな代数的リソース推定やブラックボックス（オラクル）を含むような実行そのものができない回路のリソース推定も可能です。
 
 > **注意** Qamomileは現在もアクティブに開発中であり、リリース間で破壊的変更が加わる可能性があります。不具合を見つけた場合は、[GitHub Issues](https://github.com/Jij-Inc/Qamomile/issues/new)でお知らせいただければ幸いです。
@@ -15,6 +17,7 @@ Qamomileは量子プログラミングSDKです。型付きPython関数で量子
 
 - [QAOAでMaxCutを解く](vqa/qaoa_maxcut) — QAOA回路をゼロから構築してMaxCutを解き、組み込みの`qaoa_state`と比較する
 - [PCEでMaxCutを解く](vqa/pce_maxcut) — `PCEConverter(k=2)`とtanh緩和した目的関数で、20変数のMaxCutをわずか3量子ビットで解く
+- [水素分子のためのVQE](vqa/vqe_for_hydrogen) — OpenFermionで分子ハミルトニアンを構築し、VQEで基底状態エネルギーを求める
 
 ## 最適化
 

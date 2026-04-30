@@ -70,7 +70,7 @@ class ValueResolver:
             idx = None
             if idx_value.is_constant():
                 idx = int(idx_value.get_const())
-            elif idx_value.name in bindings:
+            elif idx_value.name and idx_value.name in bindings:
                 idx = self._resolve_numeric_index(bindings[idx_value.name])
                 if idx is None:
                     bound_val = bindings[idx_value.name]
@@ -145,6 +145,96 @@ class ValueResolver:
             ),
         )
 
+    # ------------------------------------------------------------------
+    # Unified bindings lookup
+    # ------------------------------------------------------------------
+
+    def lookup_in_bindings(
+        self,
+        value: "Value",
+        bindings: dict[str, Any],
+        *,
+        index_array: bool = False,
+    ) -> Any:
+        """Canonical resolution chain for a Value against ``bindings``.
+
+        All other resolver methods (``resolve_bound_value``,
+        ``resolve_classical_value``, ``resolve_int_value``,
+        ``resolve_operand_for_binding``) wrap this single chain. Centralizing
+        precedence here prevents the historical drift where one resolver
+        checked ``is_parameter`` before UUID and another checked it after,
+        which manifested as obscure binding failures when name-keyed writes
+        were dropped from the emit pass.
+
+        Resolution order (each step returns immediately on a hit):
+
+        1. ``value`` is already a concrete Python scalar (no ``uuid``).
+        2. ``value.is_constant()`` — return ``value.get_const()``.
+        3. ``value.is_parameter()`` and its parameter name is in
+           ``bindings`` — return that.
+        4. ``value.uuid`` is in ``bindings`` — return that. This is where
+           emit-time-computed intermediates (``evaluate_binop`` /
+           ``evaluate_classical_predicate`` results) and phi aliases live.
+        5. ``value.name`` is in ``bindings`` — return that. This is where
+           kernel parameters and loop iteration variables live. NOT a
+           reliable channel for auto-generated tmp names like
+           ``"uint_tmp"`` — those are intentionally written by UUID only.
+        6. (When ``index_array=True``) ``value`` is an array element with
+           a resolvable parent in ``bindings`` — index into it.
+
+        Args:
+            value: The IR Value (or already-concrete Python scalar) to
+                resolve.
+            bindings: The active bindings dict.
+            index_array: When True, also resolve array-element accesses
+                via ``parent_array`` indexing. Off by default because not
+                all callers want to index into bound containers.
+
+        Returns:
+            The resolved Python value, or ``None`` if no step matched.
+        """
+        # 1. Already concrete (Python scalar that was passed through).
+        if not hasattr(value, "uuid"):
+            return value
+        # 2. IR constant.
+        if hasattr(value, "is_constant") and value.is_constant():
+            return value.get_const()
+        # 3. Kernel parameter — keyed by parameter name (the only
+        #    legitimate name-keyed path; user supplies parameters by name
+        #    at the public API boundary).
+        if hasattr(value, "is_parameter") and value.is_parameter():
+            param_name = value.parameter_name()
+            if param_name and param_name in bindings:
+                return bindings[param_name]
+        # 4. UUID-keyed entries (intermediates, loop variables, runtime
+        #    exprs, phi aliases — every internally-created binding keys
+        #    on Value UUID).
+        if value.uuid in bindings:
+            return bindings[value.uuid]
+        # 5. User-parameter compat path: a non-empty Value name that
+        #    matches a binding entry. Reaches here for:
+        #      - kernel parameters whose ``is_parameter()`` flag was
+        #        dropped during a transform (e.g. some inline/substitute
+        #        paths) but whose ``name`` still matches the original
+        #        parameter (``theta``, ``n``, ``obs``, …);
+        #      - parameter array shape dimensions bound by name
+        #        (``indices_dim0``, ``key_dim0``).
+        #    Phase 1 anonymous tmp Values (``name=""``) skip this path
+        #    naturally — there is no remaining "name collision among
+        #    auto-generated tmps" risk. Eliminating this step entirely
+        #    requires guaranteeing ``is_parameter()`` survives all IR
+        #    transforms, which is a separate, larger refactor.
+        if getattr(value, "name", None) and value.name in bindings:
+            return bindings[value.name]
+        # 6. Array-element access via parent_array (opt-in).
+        if (
+            index_array
+            and getattr(value, "parent_array", None) is not None
+            and getattr(value, "element_indices", None)
+        ):
+            return self._index_into_array(value, bindings)
+        return None
+
     def resolve_operand_for_binding(
         self,
         operand: "Value",
@@ -152,20 +242,11 @@ class ValueResolver:
     ) -> Any:
         """Resolve an operand to a concrete value for block parameter binding.
 
-        Resolution order:
-        1. Constant value (``operand.get_const()``)
-        2. Parameter name lookup in *bindings*
-        3. Value name lookup in *bindings*
+        Used when calling a sub-block (e.g. a controlled-U body): each
+        param operand at the call site must resolve to a value to seed the
+        callee's parameter bindings.
         """
-        if operand.is_constant():
-            return operand.get_const()
-        if operand.is_parameter():
-            outer_name = operand.parameter_name()
-            if outer_name and outer_name in bindings:
-                return bindings[outer_name]
-        if operand.name in bindings:
-            return bindings[operand.name]
-        return None
+        return self.lookup_in_bindings(operand, bindings)
 
     def bind_block_params(
         self,
@@ -197,23 +278,12 @@ class ValueResolver:
     ) -> Any:
         """Resolve a Value to its raw bound Python object.
 
-        Looks up in order: scalar constant, ``bindings[uuid]``
-        (emit-time intermediates such as BinOp results and in-kernel
-        Observables), ``bindings[name]`` (kernel parameters), then
-        parent-array element access when ``value`` is ``arr[i]``.
-        Returns ``None`` when no binding matches. Does **not** coerce
-        the result — callers that need a numeric scalar should go
-        through :meth:`resolve_classical_value`.
+        Wraps :meth:`lookup_in_bindings` with ``index_array=True`` so that
+        ``arr[i]`` accesses against a bound container resolve to the
+        element. Does **not** coerce the result — callers that need a
+        numeric scalar should go through :meth:`resolve_classical_value`.
         """
-        if value.is_constant():
-            return value.get_const()
-        if value.uuid in bindings:
-            return bindings[value.uuid]
-        if value.name in bindings:
-            return bindings[value.name]
-        if value.parent_array is not None and value.element_indices:
-            return self._index_into_array(value, bindings)
-        return None
+        return self.lookup_in_bindings(value, bindings, index_array=True)
 
     def resolve_classical_value(
         self,
@@ -241,8 +311,23 @@ class ValueResolver:
         v: "Value",
         bindings: dict[str, Any],
     ) -> Any:
+        """Index into a bound array container at the operand's element indices.
+
+        Refuses to index when the parent array's name is in
+        ``self.parameters``. That short-circuit is the same invariant
+        ``fold_classical_op(... EMIT_RESPECT_PARAMS)`` enforces at the
+        op level: a runtime parameter array's "value" is symbolic, and
+        any concrete data the user supplied alongside is a placeholder
+        — silently indexing into the placeholder is exactly what
+        produced the silent miscompilation in Issue #354 B-series. This
+        guard is defense-in-depth: even if a future caller forgets the
+        op-level guard, array indexing for runtime parameters returns
+        ``None`` here.
+        """
         parent = v.parent_array
         if parent is None:
+            return None
+        if parent.name in self.parameters:
             return None
         container = bindings.get(parent.name)
         if container is None:
@@ -275,31 +360,10 @@ class ValueResolver:
         failure to ``emit_for_unrolled``, which converts it into a hard
         compile error.
         """
-        from qamomile.circuit.ir.value import Value
-
-        if isinstance(val, (int, float)):
-            return int(val)
-        if isinstance(val, Value):
-            if val.is_constant():
-                return int(val.get_const())
-            if val.is_parameter():
-                param_name = val.parameter_name()
-                if param_name and param_name in bindings:
-                    idx = self._resolve_numeric_index(bindings[param_name])
-                    if idx is not None:
-                        return idx
-                    return None
-            if val.uuid in bindings:
-                idx = self._resolve_numeric_index(bindings[val.uuid])
-                if idx is not None:
-                    return idx
-                return None
-            if val.name in bindings:
-                idx = self._resolve_numeric_index(bindings[val.name])
-                if idx is not None:
-                    return idx
-                return None
-        return None
+        raw = self.lookup_in_bindings(val, bindings)
+        if raw is None:
+            return None
+        return self._resolve_numeric_index(raw)
 
     def get_parameter_key(
         self,
@@ -318,7 +382,7 @@ class ValueResolver:
                     idx = None
                     if idx_value.is_constant():
                         idx = int(idx_value.get_const())
-                    elif idx_value.name in bindings:
+                    elif idx_value.name and idx_value.name in bindings:
                         idx = self._resolve_numeric_index(bindings[idx_value.name])
                     elif idx_value.uuid in bindings:
                         idx = self._resolve_numeric_index(bindings[idx_value.uuid])

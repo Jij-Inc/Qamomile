@@ -1,5 +1,7 @@
 # Welcome to Qamomile Documentation
 
+**Qamomile** (pronounced /ˈkæməˌmiːl/, like "chamomile") is named after the chamomile flower — a symbol of calm and clarity.
+
 Qamomile is a quantum programming SDK. Write quantum circuits as typed Python functions and run them on quantum SDKs like Qiskit, CUDA-Q, QURI Parts, and qBraid. Furthermore, Qamomile supports symbolic algebraic resource estimation and can estimate resources for circuits containing black-box oracles — even when the circuit itself cannot be executed.
 
 > **Note** Qamomile is under active development, and breaking changes may be introduced between releases. If you find a bug, we'd really appreciate it if you could let us know via [GitHub Issues](https://github.com/Jij-Inc/Qamomile/issues/new).
@@ -17,6 +19,7 @@ Qamomile is a quantum programming SDK. Write quantum circuits as typed Python fu
 
 - [QAOA for MaxCut](vqa/qaoa_maxcut) — Build a QAOA circuit from scratch to solve MaxCut, then compare with the built-in `qaoa_state`
 - [PCE for MaxCut](vqa/pce_maxcut) — Solve a 20-variable MaxCut instance on just 3 qubits with `PCEConverter(k=2)` and a tanh-relaxed objective
+- [VQE for Hydrogen Molecule](vqa/vqe_for_hydrogen) — Build a molecular Hamiltonian with OpenFermion and find the ground state energy using VQE
 
 ## Optimization
 

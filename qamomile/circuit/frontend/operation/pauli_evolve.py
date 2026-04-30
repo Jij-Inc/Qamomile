@@ -11,8 +11,6 @@ from typing import cast
 from qamomile.circuit.frontend.handle import Float, Observable, Qubit, Vector
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
-from qamomile.circuit.ir.types.primitives import QubitType
-from qamomile.circuit.ir.value import ArrayValue
 
 
 def pauli_evolve(
@@ -63,24 +61,23 @@ def pauli_evolve(
     consumed = q.consume("pauli_evolve")
     qubits_value = consumed.value
 
-    # Create new result qubit array value
-    result_array = ArrayValue(
-        type=QubitType(),
-        name=f"{qubits_value.name}_evolved",
-        shape=qubits_value.shape,
-    )
+    # Bump the SSA version of the input array. ``next_version`` preserves
+    # ``logical_id`` and ``shape`` so the result is recognised as the same
+    # logical register across the IR (resource allocation, inline-pass
+    # remapping for nested @qkernel calls, visualization, etc.) -- creating
+    # a fresh ArrayValue here would mint a new logical_id and drop the
+    # caller-side qubit identity, breaking measurement after a nested
+    # @qkernel that uses pauli_evolve internally (issue #354).
+    result_array = qubits_value.next_version()
 
-    # Create PauliEvolveOp
     op = PauliEvolveOp(
         operands=[qubits_value, hamiltonian.value, gamma.value],
         results=[result_array],
     )
 
-    # Emit to tracer
     tracer = get_current_tracer()
     tracer.add_operation(op)
 
-    # Return new Vector[Qubit] wrapping the result
     result_vector = cast(
         Vector[Qubit],
         Vector._create_from_value(value=result_array, shape=consumed._shape),

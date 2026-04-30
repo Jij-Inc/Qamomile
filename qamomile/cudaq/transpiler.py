@@ -452,9 +452,13 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
 
                 start, stop, step = resolve_loop_bounds(self._resolver, op, bindings)
                 if start is not None and stop is not None and step is not None:
+                    from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
+                        _bind_loop_var,
+                    )
+
                     for i in range(start, stop, step):
                         loop_bindings = bindings.copy()
-                        loop_bindings[op.loop_var] = i
+                        _bind_loop_var(loop_bindings, op, i)
                         self._emit_cudaq_controlled_ops(
                             circuit,
                             op.operations,

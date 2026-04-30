@@ -54,12 +54,33 @@ if TYPE_CHECKING:
     from qamomile.circuit.ir.block import Block
 
 
+_INTERNAL_TMP_NAMES: frozenset[str] = frozenset({"uint_tmp", "float_tmp", "bit_tmp"})
+
+
 class CircuitAnalyzer:
     """Analyzes IR blocks for circuit visualization.
 
     Handles qubit mapping, value resolution, label generation,
     and width estimation. Has no matplotlib dependency.
     """
+
+    @staticmethod
+    def _is_internal_temp_name(name: str | None) -> bool:
+        """Return True if `name` is an IR-internal placeholder.
+
+        These default names (``uint_tmp`` / ``float_tmp`` / ``bit_tmp``
+        from `qamomile.circuit.frontend.handle.primitives`) label
+        anonymous Values produced by BinOp and handle construction.
+        They are implementation detail and must never reach user-facing
+        rendered labels.
+
+        Args:
+            name: Candidate display string.
+
+        Returns:
+            True if `name` equals one of the reserved placeholders.
+        """
+        return name in _INTERNAL_TMP_NAMES
 
     def __init__(
         self,
@@ -614,8 +635,14 @@ class CircuitAnalyzer:
         Returns:
             VisualCircuit containing the VisualNode tree.
         """
+        # Pre-evaluate top-level intermediate BinOps so that CallBlock
+        # arguments derived from them (e.g. final_base = reps * 2 * n)
+        # resolve to numeric or symbolic strings instead of leaking the
+        # IR-internal placeholder name "uint_tmp" downstream.
+        top_param_values: dict = {}
+        self._evaluate_loop_body_intermediates(graph.operations, top_param_values)
         children = self._build_visual_nodes(
-            graph.operations, qubit_map, {}, {}, depth=0, scope_path=()
+            graph.operations, qubit_map, {}, top_param_values, depth=0, scope_path=()
         )
         return VisualCircuit(
             children=children,
@@ -781,11 +808,11 @@ class CircuitAnalyzer:
             estimated_width = self._estimate_gate_width(op, param_values)
             qubit_indices: list[int] = []
             for operand in op.operands:
-                idx = self._resolve_operand_to_qubit_index(
+                indices = self._resolve_operand_to_qubit_indices(
                     operand, qubit_map, logical_id_remap, param_values
                 )
-                if idx is not None:
-                    qubit_indices.append(idx)
+                if indices is not None:
+                    qubit_indices.extend(indices)
             return VGate(
                 node_key=node_key,
                 label=label,
@@ -800,11 +827,11 @@ class CircuitAnalyzer:
             gate_width = self.style.gate_width
             qubit_indices = []
             if op.operands:
-                idx = self._resolve_operand_to_qubit_index(
+                indices = self._resolve_operand_to_qubit_indices(
                     op.operands[0], qubit_map, logical_id_remap, param_values
                 )
-                if idx is not None:
-                    qubit_indices.append(idx)
+                if indices is not None:
+                    qubit_indices.extend(indices)
             return VGate(
                 node_key=node_key,
                 label="M",
@@ -817,9 +844,11 @@ class CircuitAnalyzer:
             gate_width = self.style.gate_width
             qubit_indices = []
             if op.operands:
-                qubit_indices = self._resolve_operand_to_qubit_indices(
+                indices = self._resolve_operand_to_qubit_indices(
                     op.operands[0], qubit_map, logical_id_remap, param_values
                 )
+                if indices is not None:
+                    qubit_indices = indices
             return VGate(
                 node_key=node_key,
                 label="M",
@@ -833,20 +862,20 @@ class CircuitAnalyzer:
             box_width = self._estimate_block_label_box_width(label)
             qubit_indices = []
             for operand in op.operands:
-                qubit_indices.extend(
-                    self._resolve_operand_to_qubit_indices(
-                        operand, qubit_map, logical_id_remap, param_values
-                    )
+                indices = self._resolve_operand_to_qubit_indices(
+                    operand, qubit_map, logical_id_remap, param_values
                 )
+                if indices is not None:
+                    qubit_indices.extend(indices)
             # Fresh-return pattern: if no qubit operands, resolve from results
             if not qubit_indices:
                 for result_val in op.results:
                     if isinstance(result_val.type, QubitType):
-                        qubit_indices.extend(
-                            self._resolve_operand_to_qubit_indices(
-                                result_val, qubit_map, logical_id_remap, param_values
-                            )
+                        indices = self._resolve_operand_to_qubit_indices(
+                            result_val, qubit_map, logical_id_remap, param_values
                         )
+                        if indices is not None:
+                            qubit_indices.extend(indices)
             return VGate(
                 node_key=node_key,
                 label=label,
@@ -861,11 +890,11 @@ class CircuitAnalyzer:
             box_width = self._estimate_label_box_width(label)
             qubit_indices = []
             for qval in list(op.control_qubits) + list(op.target_qubits):
-                idx = self._resolve_operand_to_qubit_index(
+                indices = self._resolve_operand_to_qubit_indices(
                     qval, qubit_map, logical_id_remap, param_values
                 )
-                if idx is not None:
-                    qubit_indices.append(idx)
+                if indices is not None:
+                    qubit_indices.extend(indices)
             return VGate(
                 node_key=node_key,
                 label=label,
@@ -883,18 +912,18 @@ class CircuitAnalyzer:
             # Control qubits first, then target qubits
             control_indices: list[int] = []
             for qval in op.control_operands:
-                idx = self._resolve_operand_to_qubit_index(
+                indices = self._resolve_operand_to_qubit_indices(
                     qval, qubit_map, logical_id_remap, param_values
                 )
-                if idx is not None:
-                    control_indices.append(idx)
+                if indices is not None:
+                    control_indices.extend(indices)
             target_indices: list[int] = []
             for qval in op.target_operands:
-                idx = self._resolve_operand_to_qubit_index(
+                indices = self._resolve_operand_to_qubit_indices(
                     qval, qubit_map, logical_id_remap, param_values
                 )
-                if idx is not None:
-                    target_indices.append(idx)
+                if indices is not None:
+                    target_indices.extend(indices)
             return VGate(
                 node_key=node_key,
                 label=label,
@@ -922,9 +951,11 @@ class CircuitAnalyzer:
         box_width = self._estimate_label_box_width(label)
         qubit_indices: list[int] = []
         if op.operands:
-            qubit_indices = self._resolve_operand_to_qubit_indices(
+            indices = self._resolve_operand_to_qubit_indices(
                 op.operands[0], qubit_map, logical_id_remap, param_values
             )
+            if indices is not None:
+                qubit_indices = indices
         return VGate(
             node_key=node_key,
             label=label,
@@ -951,11 +982,11 @@ class CircuitAnalyzer:
             assert isinstance(block_value, Block)
             affected_qubits: list[int] = []
             for operand in op.operands:
-                affected_qubits.extend(
-                    self._resolve_operand_to_qubit_indices(
-                        operand, qubit_map, logical_id_remap, param_values
-                    )
+                indices = self._resolve_operand_to_qubit_indices(
+                    operand, qubit_map, logical_id_remap, param_values
                 )
+                if indices is not None:
+                    affected_qubits.extend(indices)
             actual_inputs = op.operands
             block_name = block_value.name or "block"
         elif isinstance(op, ControlledUOperation):
@@ -963,18 +994,18 @@ class CircuitAnalyzer:
             assert isinstance(block_value, Block)
             control_qubit_indices: list[int] = []
             for operand in op.control_operands:
-                idx = self._resolve_operand_to_qubit_index(
+                indices = self._resolve_operand_to_qubit_indices(
                     operand, qubit_map, logical_id_remap, param_values
                 )
-                if idx is not None:
-                    control_qubit_indices.append(idx)
+                if indices is not None:
+                    control_qubit_indices.extend(indices)
             affected_qubits = list(control_qubit_indices)
             for operand in op.target_operands:
-                idx = self._resolve_operand_to_qubit_index(
+                indices = self._resolve_operand_to_qubit_indices(
                     operand, qubit_map, logical_id_remap, param_values
                 )
-                if idx is not None:
-                    affected_qubits.append(idx)
+                if indices is not None:
+                    affected_qubits.extend(indices)
             actual_inputs = list(op.target_operands)
             u_name = getattr(block_value, "name", "U") or "U"
             block_name = u_name
@@ -983,11 +1014,11 @@ class CircuitAnalyzer:
             assert isinstance(block_value, Block)
             affected_qubits = []
             for operand in list(op.control_qubits) + list(op.target_qubits):
-                idx = self._resolve_operand_to_qubit_index(
+                indices = self._resolve_operand_to_qubit_indices(
                     operand, qubit_map, logical_id_remap, param_values
                 )
-                if idx is not None:
-                    affected_qubits.append(idx)
+                if indices is not None:
+                    affected_qubits.extend(indices)
             actual_inputs = list(op.target_qubits)
             block_name = op.name
         else:
@@ -1012,19 +1043,20 @@ class CircuitAnalyzer:
                 resolved = self._resolve_operand_to_qubit_indices(
                     result_val, qubit_map, logical_id_remap, param_values
                 )
-                for idx in resolved:
-                    if idx not in affected_qubits:
-                        affected_qubits.append(idx)
+                if resolved is not None:
+                    for idx in resolved:
+                        if idx not in affected_qubits:
+                            affected_qubits.append(idx)
 
         # Fresh-return fallback: resolve from results (same as box mode)
         if not affected_qubits and isinstance(op, CallBlockOperation):
             for result_val in op.results:
                 if isinstance(result_val.type, QubitType):
-                    affected_qubits.extend(
-                        self._resolve_operand_to_qubit_indices(
-                            result_val, qubit_map, logical_id_remap, param_values
-                        )
+                    indices = self._resolve_operand_to_qubit_indices(
+                        result_val, qubit_map, logical_id_remap, param_values
                     )
+                    if indices is not None:
+                        affected_qubits.extend(indices)
 
         max_gate_width = self._max_block_gate_width(
             block_value.operations, child_param_values
@@ -1100,7 +1132,7 @@ class CircuitAnalyzer:
         if self._is_zero_iteration_loop(start_val, stop_val_raw, step_val):
             return VSkip(node_key=node_key)
 
-        affected_qubits = self._analyze_loop_affected_qubits(
+        affected_qubits, affected_qubits_precise = self._analyze_loop_affected_qubits(
             op, qubit_map, logical_id_remap, param_values
         )
 
@@ -1116,6 +1148,7 @@ class CircuitAnalyzer:
                 affected_qubits=affected_qubits,
                 folded_width=folded_width,
                 kind=VFoldedKind.FOR,
+                affected_qubits_precise=affected_qubits_precise,
             )
 
         # Unfolded: measure each iteration
@@ -1150,6 +1183,7 @@ class CircuitAnalyzer:
             affected_qubits=affected_qubits,
             kind=VUnfoldedKind.FOR,
             iteration_widths=iteration_widths,
+            affected_qubits_precise=affected_qubits_precise,
         )
 
     def _build_vwhile(
@@ -1167,7 +1201,7 @@ class CircuitAnalyzer:
         ``WhileOperation``.  It will be connected once While-loop visualization
         is fully enabled.
         """
-        affected_qubits = self._analyze_loop_affected_qubits(
+        affected_qubits, affected_qubits_precise = self._analyze_loop_affected_qubits(
             op, qubit_map, logical_id_remap, param_values
         )
         header = "while cond:"
@@ -1196,6 +1230,7 @@ class CircuitAnalyzer:
             affected_qubits=affected_qubits,
             folded_width=folded_width,
             kind=VFoldedKind.WHILE,
+            affected_qubits_precise=affected_qubits_precise,
         )
 
     def _build_vif(
@@ -1215,12 +1250,14 @@ class CircuitAnalyzer:
         ``IfOperation``.  It will be connected once If-operation visualization
         is fully enabled.
         """
-        affected_qubits = self._collect_if_affected_qubits(
+        affected_qubits, affected_qubits_precise = self._collect_if_affected_qubits(
             op, qubit_map, logical_id_remap, param_values
         )
 
         cond = op.condition
-        cond_name = getattr(cond, "name", None) or "cond"
+        cond_name = getattr(cond, "name", None)
+        if cond_name is None or self._is_internal_temp_name(cond_name):
+            cond_name = "cond"
         condition_label = f"if {cond_name}:"
 
         if self.fold_loops:
@@ -1250,6 +1287,7 @@ class CircuitAnalyzer:
                 affected_qubits=affected_qubits,
                 folded_width=folded_width,
                 kind=VFoldedKind.IF,
+                affected_qubits_precise=affected_qubits_precise,
             )
 
         # Unfolded: build both branches
@@ -1288,6 +1326,7 @@ class CircuitAnalyzer:
             kind=VUnfoldedKind.IF,
             iteration_widths=iteration_widths,
             condition_label=condition_label,
+            affected_qubits_precise=affected_qubits_precise,
         )
 
     def _build_vfor_items(
@@ -1301,7 +1340,7 @@ class CircuitAnalyzer:
         scope_path: tuple,
     ) -> VFoldedBlock | VUnfoldedSequence | VSkip:
         """Build a Visual IR node for a ForItemsOperation."""
-        affected_qubits = self._analyze_loop_affected_qubits(
+        affected_qubits, affected_qubits_precise = self._analyze_loop_affected_qubits(
             op, qubit_map, logical_id_remap, param_values
         )
 
@@ -1310,9 +1349,12 @@ class CircuitAnalyzer:
         if len(op.key_vars) > 1:
             key_str = f"({key_str})"
         dict_value = op.operands[0] if op.operands else None
-        dict_name = (
-            getattr(dict_value, "name", "dict") if dict_value is not None else "dict"
-        )
+        if dict_value is None:
+            dict_name = "dict"
+        else:
+            dict_name = getattr(dict_value, "name", None)
+            if dict_name is None or self._is_internal_temp_name(dict_name):
+                dict_name = "dict"
         header = f"for {key_str}, {op.value_var} in {dict_name}"
 
         # Materialize entries
@@ -1343,6 +1385,7 @@ class CircuitAnalyzer:
                 affected_qubits=affected_qubits,
                 folded_width=folded_width,
                 kind=VFoldedKind.FOR_ITEMS,
+                affected_qubits_precise=affected_qubits_precise,
             )
 
         entries = materialized
@@ -1400,6 +1443,7 @@ class CircuitAnalyzer:
             affected_qubits=affected_qubits,
             kind=VUnfoldedKind.FOR_ITEMS,
             iteration_widths=iteration_widths,
+            affected_qubits_precise=affected_qubits_precise,
         )
 
     def _compute_folded_for_info(
@@ -1521,13 +1565,38 @@ class CircuitAnalyzer:
             return True
         return False
 
+    @staticmethod
+    def _qubit_bearing_operands(op: Operation) -> list[Value] | None:
+        """Return the operands of `op` that may reference qubits.
+
+        Used by the loop- and if-affect analyzers to pick out operands
+        to feed into ``_resolve_operand_to_affected_qubits``. Returns
+        None for control-flow operations, which the caller must handle
+        via recursion rather than operand resolution.
+
+        Args:
+            op: IR operation to inspect.
+
+        Returns:
+            A list of operand Values to resolve, or None when the op is
+            a control-flow construct (For/While/If/ForItems) that the
+            caller handles separately.
+        """
+        if isinstance(op, (GateOperation, CallBlockOperation, ControlledUOperation)):
+            return list(op.operands)
+        if isinstance(op, CompositeGateOperation):
+            return list(op.control_qubits) + list(op.target_qubits)
+        if isinstance(op, (MeasureOperation, MeasureVectorOperation)):
+            return list(op.operands[:1])
+        return None
+
     def _analyze_loop_affected_qubits(
         self,
         op: ForOperation | WhileOperation | ForItemsOperation,
         qubit_map: dict[str, int],
         logical_id_remap: dict[str, str] | None = None,
         param_values: dict | None = None,
-    ) -> list[int]:
+    ) -> tuple[list[int], bool]:
         """Analyze which qubits are affected by a loop operation.
 
         Args:
@@ -1537,7 +1606,12 @@ class CircuitAnalyzer:
             param_values: Parameter values for resolving loop range and indices.
 
         Returns:
-            List of affected qubit indices.
+            Tuple ``(indices, is_precise)`` where ``indices`` is the list
+            of affected qubit wire indices and ``is_precise`` is True
+            when every operand was resolved during the precise
+            iteration walk (including any nested control-flow
+            recursion). False when the conservative fallback was used,
+            meaning the result may over-approximate.
         """
         if logical_id_remap is None:
             logical_id_remap = {}
@@ -1567,127 +1641,88 @@ class CircuitAnalyzer:
                             op.operations, iter_params
                         )
                         for inner_op in op.operations:
-                            operands: list = []
-                            if isinstance(inner_op, GateOperation):
-                                operands = list(inner_op.operands)
-                            elif isinstance(inner_op, CallBlockOperation):
-                                operands = list(inner_op.operands)
-                            elif isinstance(inner_op, ControlledUOperation):
-                                operands = list(inner_op.operands)
-                            elif isinstance(inner_op, CompositeGateOperation):
-                                operands = list(inner_op.control_qubits) + list(
-                                    inner_op.target_qubits
+                            if isinstance(
+                                inner_op,
+                                (ForOperation, WhileOperation, ForItemsOperation),
+                            ):
+                                nested, nested_precise = (
+                                    self._analyze_loop_affected_qubits(
+                                        inner_op,
+                                        qubit_map,
+                                        logical_id_remap,
+                                        iter_params,
+                                    )
                                 )
-                            elif isinstance(inner_op, MeasureOperation):
-                                operands = list(inner_op.operands[:1])
+                                precise_affected.update(nested)
+                                if not nested_precise:
+                                    all_resolved = False
+                                continue
+                            if isinstance(inner_op, IfOperation):
+                                nested, nested_precise = (
+                                    self._collect_if_affected_qubits(
+                                        inner_op,
+                                        qubit_map,
+                                        logical_id_remap,
+                                        iter_params,
+                                    )
+                                )
+                                precise_affected.update(nested)
+                                if not nested_precise:
+                                    all_resolved = False
+                                continue
+                            operands = self._qubit_bearing_operands(inner_op)
+                            if operands is None:
+                                # Unknown op type — degrade to the recursive
+                                # fallback to avoid silently dropping qubits.
+                                all_resolved = False
+                                continue
                             for operand in operands:
-                                idx = self._resolve_operand_to_qubit_index(
+                                indices = self._resolve_operand_to_affected_qubits(
                                     operand,
                                     qubit_map,
                                     logical_id_remap,
                                     iter_params,
                                 )
-                                if idx is not None:
-                                    precise_affected.add(idx)
+                                if indices is None:
+                                    if isinstance(operand.type, QubitType):
+                                        all_resolved = False
                                 else:
-                                    all_resolved = False
+                                    precise_affected.update(indices)
                     if all_resolved and precise_affected:
-                        return list(precise_affected)
+                        return list(precise_affected), True
 
         # Fallback to conservative analysis
-        affected = set()
+        affected: set[int] = set()
 
-        def get_qubit_index_or_expand(operand: Value) -> int | None:
-            """Get qubit index, expanding symbolic array indices into `affected`."""
-            is_array_element = (
-                hasattr(operand, "parent_array") and operand.parent_array is not None
-            )
-            if is_array_element:
-                assert operand.parent_array is not None
-                parent_lid = operand.parent_array.logical_id
-                parent_lid = logical_id_remap.get(parent_lid, parent_lid)
-                if parent_lid in qubit_map:
-                    # As the first level if-condition checked this is an array element,
-                    # this assertion must be passed.
-                    assertion_message = "[FOR DEVELOPER] Operand must have element_indices for array element access."
-                    assert operand.element_indices, assertion_message
-
-                    idx_value = operand.element_indices[0]
-                    if not idx_value.is_constant():
-                        base_idx = qubit_map[parent_lid]
-                        size = None
-                        if (
-                            hasattr(operand.parent_array, "shape")
-                            and operand.parent_array.shape
-                        ):
-                            size_val = operand.parent_array.shape[0]
-                            if size_val.is_constant():
-                                size = size_val.get_const()
-                        # Fallback: count qubit_map entries with matching pattern
-                        if size is None or not isinstance(size, int):
-                            count = 0
-                            while f"{parent_lid}_[{count}]" in qubit_map:
-                                count += 1
-                            if count > 0:
-                                for i in range(count):
-                                    affected.add(base_idx + i)
-                        else:
-                            for i in range(size):
-                                affected.add(base_idx + i)
-                        return None  # Already added all
-
-            return self._resolve_operand_to_qubit_index(
+        def add_affected(operand: Value) -> None:
+            """Resolve `operand` and merge its wire indices into `affected`."""
+            indices = self._resolve_operand_to_affected_qubits(
                 operand, qubit_map, logical_id_remap
             )
+            if indices is not None:
+                affected.update(indices)
 
         def collect_from_ops(ops: list[Operation]) -> None:
             """Recursively collect qubit indices from all operations into `affected` set."""
             for inner_op in ops:
-                if isinstance(inner_op, GateOperation):
-                    for operand in inner_op.operands:
-                        idx = get_qubit_index_or_expand(operand)
-                        if idx is not None:
-                            affected.add(idx)
-                elif isinstance(inner_op, CallBlockOperation):
-                    for operand in inner_op.operands:
-                        idx = get_qubit_index_or_expand(operand)
-                        if idx is not None:
-                            affected.add(idx)
-                elif isinstance(inner_op, ControlledUOperation):
-                    for operand in inner_op.operands:
-                        idx = get_qubit_index_or_expand(operand)
-                        if idx is not None:
-                            affected.add(idx)
-                elif isinstance(inner_op, CompositeGateOperation):
-                    for operand in list(inner_op.control_qubits) + list(
-                        inner_op.target_qubits
-                    ):
-                        idx = get_qubit_index_or_expand(operand)
-                        if idx is not None:
-                            affected.add(idx)
-                elif isinstance(inner_op, MeasureOperation):
-                    if inner_op.operands:
-                        idx = get_qubit_index_or_expand(inner_op.operands[0])
-                        if idx is not None:
-                            affected.add(idx)
-                elif isinstance(inner_op, MeasureVectorOperation):
-                    if inner_op.operands:
-                        indices = self._resolve_operand_to_qubit_indices(
-                            inner_op.operands[0], qubit_map, logical_id_remap
-                        )
-                        affected.update(indices)
-                elif isinstance(inner_op, ForOperation):
+                if isinstance(
+                    inner_op,
+                    (ForOperation, WhileOperation, ForItemsOperation),
+                ):
                     collect_from_ops(inner_op.operations)
-                elif isinstance(inner_op, WhileOperation):
-                    collect_from_ops(inner_op.operations)
-                elif isinstance(inner_op, IfOperation):
+                    continue
+                if isinstance(inner_op, IfOperation):
                     collect_from_ops(inner_op.true_operations)
                     collect_from_ops(inner_op.false_operations)
-                elif isinstance(inner_op, ForItemsOperation):
-                    collect_from_ops(inner_op.operations)
+                    continue
+                operands = self._qubit_bearing_operands(inner_op)
+                if operands is None:
+                    continue
+                for operand in operands:
+                    add_affected(operand)
 
         collect_from_ops(op.operations)
-        return list(affected)
+        return list(affected), False
 
     def _collect_if_affected_qubits(
         self,
@@ -1695,15 +1730,11 @@ class CircuitAnalyzer:
         qubit_map: dict[str, int],
         logical_id_remap: dict[str, str] | None = None,
         param_values: dict | None = None,
-    ) -> list[int]:
+    ) -> tuple[list[int], bool]:
         """Collect qubit indices affected by an IfOperation.
 
         Recursively walks both true and false branches to collect all
         qubit indices that are operands of any operation.
-
-        Note: This method is implemented for future use but currently not called,
-        because it is only invoked by ``_build_vif``, which itself is not yet
-        connected to the dispatcher.
 
         Args:
             op: IfOperation to analyze.
@@ -1712,7 +1743,9 @@ class CircuitAnalyzer:
             param_values: Parameter values for resolving expressions.
 
         Returns:
-            List of affected qubit indices.
+            Tuple ``(indices, is_precise)``. ``is_precise`` is True
+            when every operand — including those inside nested
+            control flow — resolved cleanly.
         """
         if logical_id_remap is None:
             logical_id_remap = {}
@@ -1720,52 +1753,37 @@ class CircuitAnalyzer:
             param_values = {}
 
         affected: set[int] = set()
+        is_precise = True
 
         def collect_qubits(ops: list[Operation]) -> None:
+            nonlocal is_precise
             for inner_op in ops:
-                operands: list = []
-                if isinstance(inner_op, GateOperation):
-                    operands = list(inner_op.operands)
-                elif isinstance(inner_op, CallBlockOperation):
-                    operands = list(inner_op.operands)
-                elif isinstance(inner_op, ControlledUOperation):
-                    operands = list(inner_op.operands)
-                elif isinstance(inner_op, CompositeGateOperation):
-                    operands = list(inner_op.control_qubits) + list(
-                        inner_op.target_qubits
-                    )
-                elif isinstance(inner_op, MeasureOperation):
-                    operands = list(inner_op.operands[:1])
-                elif isinstance(inner_op, MeasureVectorOperation):
-                    if inner_op.operands:
-                        indices = self._resolve_operand_to_qubit_indices(
-                            inner_op.operands[0], qubit_map, logical_id_remap
-                        )
-                        affected.update(indices)
-                    continue
-                elif isinstance(inner_op, ForOperation):
+                if isinstance(
+                    inner_op,
+                    (ForOperation, WhileOperation, ForItemsOperation),
+                ):
                     collect_qubits(inner_op.operations)
                     continue
-                elif isinstance(inner_op, WhileOperation):
-                    collect_qubits(inner_op.operations)
-                    continue
-                elif isinstance(inner_op, IfOperation):
+                if isinstance(inner_op, IfOperation):
                     collect_qubits(inner_op.true_operations)
                     collect_qubits(inner_op.false_operations)
                     continue
-                elif isinstance(inner_op, ForItemsOperation):
-                    collect_qubits(inner_op.operations)
+                operands = self._qubit_bearing_operands(inner_op)
+                if operands is None:
                     continue
                 for operand in operands:
-                    idx = self._resolve_operand_to_qubit_index(
+                    indices = self._resolve_operand_to_affected_qubits(
                         operand, qubit_map, logical_id_remap, param_values
                     )
-                    if idx is not None:
-                        affected.add(idx)
+                    if indices is None:
+                        if isinstance(operand.type, QubitType):
+                            is_precise = False
+                    else:
+                        affected.update(indices)
 
         collect_qubits(op.true_operations)
         collect_qubits(op.false_operations)
-        return list(affected)
+        return list(affected), is_precise
 
     def _resolve_controlled_u_power(
         self,
@@ -2009,7 +2027,7 @@ class CircuitAnalyzer:
         # Named parameter
         if value.is_parameter():
             name = value.parameter_name() or value.name
-            if name:
+            if name and not self._is_internal_temp_name(name):
                 return name
         # Array element (e.g., weights[e])
         if hasattr(value, "parent_array") and value.parent_array is not None:
@@ -2021,8 +2039,14 @@ class CircuitAnalyzer:
                     idx_parts.append(idx)
                 return f"{array_name}[{','.join(idx_parts)}]"
 
-        # Fallback: name
-        if hasattr(value, "name") and value.name:
+        # Fallback: name (refuse IR-internal placeholders so that
+        # "uint_tmp"/"float_tmp"/"bit_tmp" never leak into rendered
+        # expressions).
+        if (
+            hasattr(value, "name")
+            and value.name
+            and not self._is_internal_temp_name(value.name)
+        ):
             return value.name
         return None
 
@@ -2204,55 +2228,149 @@ class CircuitAnalyzer:
                             return element_key
         return lid
 
-    def _resolve_operand_to_qubit_index(
+    def _resolve_array_size(
+        self,
+        array_value: Value,
+        resolved_lid: str,
+        qubit_map: dict[str, int],
+        param_values: dict,
+    ) -> int | None:
+        """Resolve the length of an `ArrayValue`.
+
+        Tries `shape[0].get_const()`, then `_evaluate_value` against
+        `param_values`, and finally a scan of `qubit_map` keys
+        matching `"{resolved_lid}_[{i}]"`.
+
+        Args:
+            array_value: The array whose length to resolve. Expected
+                to expose a `shape` attribute.
+            resolved_lid: Logical id used to index `qubit_map` for the
+                element-key scan fallback.
+            qubit_map: Mapping from logical_id to qubit wire index.
+                Used only for the scan fallback.
+            param_values: Parameter values for evaluating a symbolic
+                shape.
+
+        Returns:
+            The array length as an int, or None if no strategy
+            succeeds.
+        """
+        if hasattr(array_value, "shape") and array_value.shape:
+            size_value = array_value.shape[0]
+            if size_value.is_constant():
+                c = size_value.get_const()
+                if isinstance(c, int):
+                    return c
+            else:
+                ev = self._evaluate_value(size_value, param_values)
+                if isinstance(ev, (int, float)):
+                    return int(ev)
+        count = 0
+        while f"{resolved_lid}_[{count}]" in qubit_map:
+            count += 1
+        if count > 0:
+            return count
+        return None
+
+    def _resolve_parent_array_element(
         self,
         operand: Value,
         qubit_map: dict[str, int],
-        logical_id_remap: dict[str, str] | None = None,
-        param_values: dict | None = None,
+        logical_id_remap: dict[str, str],
+        param_values: dict,
     ) -> int | None:
-        """Resolve a single operand to its qubit wire index.
-
-        Handles logical_id_remap lookup, direct qubit_map, parent_array + element_indices,
-        and BinOp evaluation for computed indices.
+        """Resolve a `q[i]` operand to its wire index when `i` is concrete.
 
         Args:
-            operand: IR Value representing a qubit operand.
+            operand: IR Value expected to have `parent_array` and
+                `element_indices`. Operands without a `parent_array`
+                return None.
             qubit_map: Mapping from logical_id to qubit wire index.
-            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
-            param_values: Parameter values for evaluating computed indices.
+            logical_id_remap: Remap from dummy logical_ids to actual
+                logical_ids.
+            param_values: Parameter values for evaluating a symbolic
+                `element_indices[0]`.
 
         Returns:
-            Qubit wire index or None if unresolvable.
+            The wire index `qubit_map[parent_lid] + int(i)` when the
+            operand is a parent-array element access with a resolvable
+            index. None if the operand is not a parent-array element
+            access, the parent is not in `qubit_map`, `element_indices`
+            is absent, or the index is symbolic and cannot be evaluated.
         """
-        if logical_id_remap is None:
-            logical_id_remap = {}
-        if param_values is None:
-            param_values = {}
+        if not (hasattr(operand, "parent_array") and operand.parent_array is not None):
+            return None
+        parent_lid = logical_id_remap.get(
+            operand.parent_array.logical_id, operand.parent_array.logical_id
+        )
+        if parent_lid not in qubit_map:
+            return None
+        if not (hasattr(operand, "element_indices") and operand.element_indices):
+            return None
+        idx_value = operand.element_indices[0]
+        if idx_value.is_constant():
+            idx = idx_value.get_const()
+        else:
+            idx = self._evaluate_value(idx_value, param_values)
+        if idx is None:
+            return None
+        return qubit_map[parent_lid] + int(idx)
 
+    def _resolve_non_element_operand(
+        self,
+        operand: Value,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str],
+        param_values: dict,
+    ) -> list[int] | None:
+        """Resolve a non-element operand to qubit wire indices.
+
+        Dispatches the three non-`parent_array` operand shapes: a
+        whole `ArrayValue` with `shape`, a synthetic `ArrayValue`
+        from `expval()` tuple input, and a direct `logical_id`
+        lookup.
+
+        Args:
+            operand: IR Value that is not a `parent_array` element
+                access.
+            qubit_map: Mapping from logical_id to qubit wire index.
+            logical_id_remap: Remap from dummy logical_ids to actual
+                logical_ids.
+            param_values: Parameter values for evaluating symbolic
+                shapes.
+
+        Returns:
+            None if the operand is unresolvable (logical_id not in
+            `qubit_map`, or shape symbolic and unevaluable). An
+            empty list if the operand is resolved but touches zero
+            qubits (e.g. concrete `shape[0] == 0`). Otherwise, a
+            list of wire indices.
+        """
         resolved_lid = logical_id_remap.get(operand.logical_id, operand.logical_id)
 
-        # Parent array element access — check FIRST for array elements
-        # so that param_values can resolve symbolic indices correctly
-        if hasattr(operand, "parent_array") and operand.parent_array is not None:
-            parent_lid = operand.parent_array.logical_id
-            parent_lid = logical_id_remap.get(parent_lid, parent_lid)
-            if parent_lid in qubit_map:
-                if hasattr(operand, "element_indices") and operand.element_indices:
-                    idx_value = operand.element_indices[0]
-                    idx = None
-                    if idx_value.is_constant():
-                        idx = idx_value.get_const()
-                    else:
-                        idx = self._evaluate_value(idx_value, param_values)
-                    if idx is not None:
-                        return qubit_map[parent_lid] + int(idx)
-                # Fallback to base index
-                return qubit_map[parent_lid]
+        if (
+            isinstance(operand, ArrayValue)
+            and hasattr(operand, "shape")
+            and operand.shape
+            and resolved_lid in qubit_map
+        ):
+            base_idx = qubit_map[resolved_lid]
+            size = self._resolve_array_size(
+                operand, resolved_lid, qubit_map, param_values
+            )
+            if size is not None:
+                return [base_idx + k for k in range(size)]
+            return None
 
-        # Direct lookup (non-array-element operands)
+        if isinstance(operand, ArrayValue) and operand.get_element_uuids():
+            return [
+                qubit_map[uuid]
+                for uuid in operand.get_element_uuids()
+                if uuid in qubit_map
+            ]
+
         if resolved_lid in qubit_map:
-            return qubit_map[resolved_lid]
+            return [qubit_map[resolved_lid]]
 
         return None
 
@@ -2262,72 +2380,112 @@ class CircuitAnalyzer:
         qubit_map: dict[str, int],
         logical_id_remap: dict[str, str] | None = None,
         param_values: dict | None = None,
-    ) -> list[int]:
-        """Resolve an operand to qubit wire indices, expanding ArrayValue.
+    ) -> list[int] | None:
+        """Resolve an operand to qubit wire indices for single-gate placement.
 
-        For ArrayValue operands with known size, returns all element indices.
-        For scalar operands, wraps the single index in a list.
+        Entry point for gate-building callers. When `operand` is
+        `q[i]` with a symbolic `i` that cannot be evaluated, the
+        result collapses to the parent array's base wire index —
+        a single-qubit approximation that keeps the gate on one wire
+        visually. Loop-affect analysis that needs to expand that
+        case to the full array should call
+        `_resolve_operand_to_affected_qubits` instead.
 
         Args:
-            operand: IR Value representing a qubit operand.
+            operand: IR Value representing a qubit or qubit-array
+                operand.
             qubit_map: Mapping from logical_id to qubit wire index.
-            logical_id_remap: Mapping from dummy logical_ids to actual logical_ids.
-            param_values: Parameter values for evaluating computed indices.
+            logical_id_remap: Optional remap from dummy logical_ids
+                (used during CallBlock inlining) to actual
+                logical_ids. Defaults to None (empty remap).
+            param_values: Optional parameter values for evaluating
+                computed indices and shapes. Defaults to None.
 
         Returns:
-            List of qubit wire indices (may be empty if unresolvable).
+            None if the operand is unresolvable. An empty list if
+            the operand resolves to zero qubits. Otherwise, a list
+            of wire indices.
         """
         if logical_id_remap is None:
             logical_id_remap = {}
+        if param_values is None:
+            param_values = {}
 
-        resolved_lid = logical_id_remap.get(operand.logical_id, operand.logical_id)
-
-        # Expand ArrayValue to all individual qubits
-        if (
-            isinstance(operand, ArrayValue)
-            and hasattr(operand, "shape")
-            and operand.shape
-            and resolved_lid in qubit_map
-        ):
-            base_idx = qubit_map[resolved_lid]
-            size_value = operand.shape[0]
-            array_size = None
-            if size_value.is_constant():
-                c = size_value.get_const()
-                if c is not None and isinstance(c, int):
-                    array_size = c
-            elif param_values:
-                ev = self._evaluate_value(size_value, param_values)
-                if ev is not None and isinstance(ev, (int, float)):
-                    array_size = int(ev)
-            if array_size is not None:
-                return [base_idx + ai for ai in range(array_size)]
-            # Last resort: scan qubit_map for element keys
-            element_indices = []
-            i = 0
-            while f"{resolved_lid}_[{i}]" in qubit_map:
-                element_indices.append(qubit_map[f"{resolved_lid}_[{i}]"])
-                i += 1
-            if element_indices:
-                return element_indices
-
-        # Handle synthetic ArrayValue from expval() tuple input
-        if isinstance(operand, ArrayValue) and operand.get_element_uuids():
-            indices = []
-            for qubit_uuid in operand.get_element_uuids():
-                idx = qubit_map.get(qubit_uuid)
-                if idx is not None:
-                    indices.append(idx)
-            if indices:
-                return indices
-
-        # Single operand resolution
-        idx = self._resolve_operand_to_qubit_index(
+        idx = self._resolve_parent_array_element(
             operand, qubit_map, logical_id_remap, param_values
         )
         if idx is not None:
             return [idx]
-        return []
+
+        if hasattr(operand, "parent_array") and operand.parent_array is not None:
+            parent_lid = logical_id_remap.get(
+                operand.parent_array.logical_id, operand.parent_array.logical_id
+            )
+            if parent_lid in qubit_map:
+                return [qubit_map[parent_lid]]
+
+        return self._resolve_non_element_operand(
+            operand, qubit_map, logical_id_remap, param_values
+        )
+
+    def _resolve_operand_to_affected_qubits(
+        self,
+        operand: Value,
+        qubit_map: dict[str, int],
+        logical_id_remap: dict[str, str] | None = None,
+        param_values: dict | None = None,
+    ) -> list[int] | None:
+        """Resolve an operand to all wires it may touch across iterations.
+
+        Entry point for loop-affect analysis. When `operand` is
+        `q[i]` with a symbolic `i` that cannot be evaluated, the
+        result expands to every element of the parent array — the
+        correct semantics for "across all iterations this loop
+        touches every element of `q`". If the parent array's size
+        cannot be resolved either, returns None so callers can
+        propagate `all_resolved = False`.
+
+        Args:
+            operand: IR Value representing a qubit or qubit-array
+                operand.
+            qubit_map: Mapping from logical_id to qubit wire index.
+            logical_id_remap: Optional remap from dummy logical_ids
+                to actual logical_ids. Defaults to None.
+            param_values: Optional parameter values for evaluating
+                computed indices and shapes. Defaults to None.
+
+        Returns:
+            None if the operand is unresolvable. An empty list if
+            the operand resolves to zero qubits. Otherwise, a list
+            of wire indices.
+        """
+        if logical_id_remap is None:
+            logical_id_remap = {}
+        if param_values is None:
+            param_values = {}
+
+        idx = self._resolve_parent_array_element(
+            operand, qubit_map, logical_id_remap, param_values
+        )
+        if idx is not None:
+            return [idx]
+
+        if hasattr(operand, "parent_array") and operand.parent_array is not None:
+            parent_lid = logical_id_remap.get(
+                operand.parent_array.logical_id, operand.parent_array.logical_id
+            )
+            if parent_lid in qubit_map:
+                base_idx = qubit_map[parent_lid]
+                size = self._resolve_array_size(
+                    operand.parent_array, parent_lid, qubit_map, param_values
+                )
+                if size is not None:
+                    return [base_idx + k for k in range(size)]
+                return None
+
+        return self._resolve_non_element_operand(
+            operand, qubit_map, logical_id_remap, param_values
+        )
 
     def _evaluate_loop_range(
         self, op: ForOperation, param_values: dict
@@ -2493,6 +2651,35 @@ class CircuitAnalyzer:
                 child_param_values[dummy_input.logical_id] = (
                     actual_input.parameter_name() or actual_input.name
                 )
+            else:
+                # actual_input is a BinOp result (or similar unresolved
+                # non-parameter Value). Try numeric evaluation via
+                # graph.operations first — after top-level
+                # pre-evaluation in build_visual_ir this usually
+                # succeeds.
+                evaluated = self._evaluate_value(actual_input, param_values)
+                if evaluated is not None and isinstance(evaluated, (int, float)):
+                    child_param_values[dummy_input.logical_id] = evaluated
+                else:
+                    # Fall back to a symbolic expression so downstream
+                    # renders e.g. "reps*2*n" instead of "uint_tmp".
+                    # `_format_value_as_expression` is called with empty
+                    # `loop_vars` and `operations=None` here, so it may
+                    # legitimately return its unresolved sentinel "?"
+                    # for values that a richer downstream context could
+                    # still resolve. Treat "?" the same as a temp-name
+                    # miss and forward the logical_id so the downstream
+                    # renderer gets a second chance with its own context.
+                    expr = self._format_value_as_expression(actual_input, set(), None)
+                    if expr and expr != "?" and not self._is_internal_temp_name(expr):
+                        child_param_values[dummy_input.logical_id] = expr
+                    else:
+                        # Last resort: forward the logical_id so
+                        # downstream lookups can still chase the
+                        # defining BinOp via logical_id_remap.
+                        new_logical_id_remap[dummy_input.logical_id] = (
+                            actual_input.logical_id
+                        )
 
         # Propagate ArrayValue shape dimensions and const_array data
         for dummy_input, actual_input in zip(block_value.input_values, actual_inputs):
@@ -2697,9 +2884,15 @@ class CircuitAnalyzer:
                     symbolic = self._resolve_binop_as_symbolic(
                         theta, param_values or {}, body_operations
                     )
-                    if symbolic is not None:
+                    if symbolic is not None and not self._is_internal_temp_name(
+                        symbolic
+                    ):
                         return self._format_symbolic_expression(symbolic)
-                    if hasattr(theta, "name") and theta.name:
+                    if (
+                        hasattr(theta, "name")
+                        and theta.name
+                        and not self._is_internal_temp_name(theta.name)
+                    ):
                         return self._format_symbolic_param(theta.name)
 
         return None
@@ -2732,17 +2925,69 @@ class CircuitAnalyzer:
             if evaluated is not None and isinstance(evaluated, (int, float)):
                 return self._format_parameter(evaluated)
 
+        # Defining BinOp in scope — expand recursively before consulting
+        # pre-computed symbolic strings. Keeps kernel parameters
+        # symbolic (renders "r*2*n" rather than "r*2*2" because
+        # _format_value_as_expression does not consult param_values for
+        # numeric folding).
+        if self._operand_is_binop_result(operand, body_operations):
+            expr = self._format_value_as_expression(operand, loop_vars, body_operations)
+            if expr and not self._is_internal_temp_name(expr):
+                return self._format_symbolic_param(expr)
+
+        # Symbolic string from pre-evaluation (e.g., _build_symbolic_binop
+        # storing "reps*2*n" keyed by logical_id). Reached only when the
+        # operand lacks a visible defining BinOp — typical for top-level
+        # intermediates that were pre-evaluated during build_visual_ir.
+        if param_values is not None and operand.logical_id in param_values:
+            pv = param_values[operand.logical_id]
+            if isinstance(pv, str) and not self._is_internal_temp_name(pv):
+                return self._format_symbolic_param(pv)
+
         # Array element: resolve index and apply TeX formatting
         if hasattr(operand, "parent_array") and operand.parent_array is not None:
             arr = operand.parent_array.name or "params"
             idx = self._resolve_index_expression(operand, loop_vars, body_operations)
             return self._format_symbolic_param(f"{arr}[{idx}]")
 
-        # Named parameter: apply TeX formatting
-        if hasattr(operand, "name") and operand.name:
+        # Named parameter: apply TeX formatting. Skip IR-internal
+        # placeholders to avoid leaking "uint_tmp" etc.
+        if (
+            hasattr(operand, "name")
+            and operand.name
+            and not self._is_internal_temp_name(operand.name)
+        ):
             return self._format_symbolic_param(operand.name)
 
         return None
+
+    def _operand_is_binop_result(
+        self,
+        operand: Value,
+        operations: list | None,
+    ) -> bool:
+        """Return True if `operand` is the result Value of a BinOp in scope.
+
+        Args:
+            operand: IR Value to test.
+            operations: Operations list to search. Falls back to
+                ``self.graph.operations`` when None.
+
+        Returns:
+            True if a matching BinOp is found, else False.
+        """
+        ops = operations
+        if ops is None:
+            graph = getattr(self, "graph", None)
+            ops = graph.operations if graph else []
+        for op in ops:
+            if (
+                isinstance(op, BinOp)
+                and op.results
+                and id(op.results[0]) == id(operand)
+            ):
+                return True
+        return False
 
     def _format_operation_as_expression(
         self,
@@ -2775,9 +3020,15 @@ class CircuitAnalyzer:
             if not op.operands:
                 return None
 
-            # Collect all qubit operand strings
+            # Collect qubit operand strings. Rotation gates (rx/ry/rz
+            # etc.) store their angle as the last operand via
+            # GateOperation.rotation(); exclude it here by filtering on
+            # QubitType so the result LHS and argument list show only
+            # qubit operands.
             qubit_strs = []
             for operand in op.operands:
+                if not isinstance(operand.type, QubitType):
+                    continue
                 if (
                     hasattr(operand, "parent_array")
                     and operand.parent_array is not None
@@ -3057,8 +3308,14 @@ class CircuitAnalyzer:
                 return f"{array_name}[{','.join(idx_parts)}]"
             return array_name
 
-        # Named value fallback (e.g., edges_dim0 for unbound array shapes)
-        if hasattr(value, "name") and value.name:
+        # Named value fallback (e.g., edges_dim0 for unbound array
+        # shapes). Refuse IR-internal placeholders to avoid leaking
+        # "uint_tmp" etc. to rendered labels.
+        if (
+            hasattr(value, "name")
+            and value.name
+            and not self._is_internal_temp_name(value.name)
+        ):
             return value.name
 
         return next(iter(loop_vars)) if loop_vars else "?"
@@ -3243,10 +3500,34 @@ class CircuitAnalyzer:
                         resolved_name = self._resolve_symbolic_array_name(
                             actual_input, param_values or {}
                         )
+                        pv_str = (
+                            param_values.get(actual_input.logical_id)
+                            if param_values
+                            else None
+                        )
                         if resolved_name is not None:
                             params.append(self._format_symbolic_param(resolved_name))
+                        elif self._operand_is_binop_result(actual_input, None):
+                            # BinOp result: expand recursively (e.g. reps*2*n)
+                            # rather than falling through to the block's
+                            # formal parameter name.
+                            expr = self._format_value_as_expression(
+                                actual_input, set(), None
+                            )
+                            if expr and not self._is_internal_temp_name(expr):
+                                params.append(self._format_symbolic_param(expr))
+                            else:
+                                params.append(self._format_symbolic_param(arg_name))
+                        elif isinstance(
+                            pv_str, str
+                        ) and not self._is_internal_temp_name(pv_str):
+                            # Pre-computed symbolic string from top-level
+                            # BinOp pre-evaluation in build_visual_ir.
+                            params.append(self._format_symbolic_param(pv_str))
                         elif actual_input.is_parameter():
                             param_name = actual_input.parameter_name() or arg_name
+                            if self._is_internal_temp_name(param_name):
+                                param_name = arg_name
                             params.append(self._format_symbolic_param(param_name))
                         else:
                             params.append(self._format_symbolic_param(arg_name))
@@ -3283,7 +3564,9 @@ class CircuitAnalyzer:
             GateOperationType.Y: r"$Y$",
             GateOperationType.Z: r"$Z$",
             GateOperationType.T: r"$T$",
+            GateOperationType.TDG: r"$T^{\dagger}$",
             GateOperationType.S: r"$S$",
+            GateOperationType.SDG: r"$S^{\dagger}$",
             GateOperationType.CX: r"$CX$",
             GateOperationType.CZ: r"$CZ$",
             GateOperationType.SWAP: r"$SWAP$",
@@ -3331,7 +3614,9 @@ class CircuitAnalyzer:
                                 param_str = self._format_symbolic_param(resolved_name)
                             else:
                                 name = theta.parameter_name() or theta.name
-                                param_str = self._format_symbolic_param(name)
+                                if self._is_internal_temp_name(name):
+                                    name = "?"
+                                param_str = self._format_symbolic_param(name or "?")
                 else:
                     # Generic Value — try evaluating (handles array elements, BinOps)
                     evaluated = self._evaluate_value(theta, param_values or {})
@@ -3341,6 +3626,9 @@ class CircuitAnalyzer:
                         param_values
                         and theta.logical_id in param_values
                         and isinstance(param_values[theta.logical_id], str)
+                        and not self._is_internal_temp_name(
+                            param_values[theta.logical_id]
+                        )
                     ):
                         param_str = self._format_symbolic_param(
                             param_values[theta.logical_id]
@@ -3355,12 +3643,17 @@ class CircuitAnalyzer:
                             symbolic = self._resolve_binop_as_symbolic(
                                 theta, param_values or {}
                             )
-                            if symbolic is not None:
+                            if symbolic is not None and not self._is_internal_temp_name(
+                                symbolic
+                            ):
                                 param_str = self._format_symbolic_expression(symbolic)
                             else:
-                                param_str = self._format_symbolic_param(
-                                    theta.name or "?"
-                                )
+                                fallback = theta.name
+                                if fallback is None or self._is_internal_temp_name(
+                                    fallback
+                                ):
+                                    fallback = "?"
+                                param_str = self._format_symbolic_param(fallback)
             else:
                 # Unknown type, convert to string (defensive fallback)
                 param_str = str(theta)  # type: ignore[unreachable]

@@ -35,9 +35,14 @@ TUTORIAL_PATTERNS = [
     "docs/ja/vqa/**/*.ipynb",
     # We will not execute the following directories:
     # - collaboration: they may require API keys and may have side effects.
-    # - release_notes: they may be quite version specific
-    #   and may not follow the same structure as other tutorials.
+    # - release_notes: markdown-only; nothing to execute.
 ]
+
+# Tutorials that require optional dependency groups (e.g. chemistry)
+# and should be skipped when those dependencies are not installed.
+OPTIONAL_SKIP_MODULES = {
+    "vqe_for_hydrogen": "openfermion",
+}
 
 
 def discover_tutorial_files() -> list[Path]:
@@ -88,6 +93,10 @@ def test_tutorial_executes_without_error(tutorial_file: Path, tmp_path, monkeypa
     monkeypatch.setenv("QAMOMILE_DOCS_TEST", "1")
 
     assert tutorial_file.exists(), f"Tutorial file not found: {tutorial_file}"
+
+    for stem, module in OPTIONAL_SKIP_MODULES.items():
+        if stem in tutorial_file.stem:
+            pytest.importorskip(module)
 
     try:
         if tutorial_file.suffix == ".ipynb":

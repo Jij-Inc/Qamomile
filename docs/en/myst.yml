@@ -28,11 +28,15 @@ project:
         - file: tutorial/06_reuse_patterns.ipynb
         - file: tutorial/07_hamiltonian_simulation.ipynb
         - file: tutorial/08_hermitian_decomposition.ipynb
+        - file: tutorial/09_compilation_and_transpilation.ipynb
+        - file: tutorial/10_quantum_error_correction.ipynb
+        - file: tutorial/11_steane_code.ipynb
     - title: VQA
       file: vqa/index.md
       children:
         - file: vqa/qaoa_maxcut.ipynb
         - file: vqa/pce_maxcut.ipynb
+        - file: vqa/vqe_for_hydrogen.ipynb
     - title: Optimization
       file: optimization/index.md
       children:
@@ -45,8 +49,10 @@ project:
     - title: Release Notes
       file: release_notes/index.md
       children:
+        - file: release_notes/v0_12_0.md
+        - file: release_notes/v0_11_1.md
         - file: release_notes/v0_11_0.md
-        - file: release_notes/v0_10_0.ipynb
+        - file: release_notes/v0_10_0.md
 
 # --- API Reference (auto-generated) ---
     - title: API Reference
