@@ -258,12 +258,17 @@ Key invariants worth remembering:
   builds from there. The committed source carries no chip block or
   `## Browse by tag` heading — those are synthesised into the
   build-dir copy.
-- **`myst.yml` is fully hand-written.** Article children and per-tag
-  pages are discovered via `pattern:` toc entries
-  (`<section>/*.ipynb`, `tags/*.md`), so adding a new article does
-  not require editing `myst.yml`. Article ordering inside a
-  section's sidebar is alphabetical by filename — use `01_`, `02_`
-  prefixes if you need a curated order (the way `tutorial/` does).
+- **`myst.yml` is hand-written for the tag mechanism.** Article
+  children and per-tag pages are discovered via `pattern:` toc
+  entries (`<section>/*.ipynb`, `tags/*.md`), so adding a new article
+  or new tag does not require editing `myst.yml`. Article ordering
+  inside a section's sidebar is alphabetical by filename — use
+  `01_`, `02_` prefixes if you need a curated order (the way
+  `tutorial/` does). The one exception is the `API Reference` toc
+  region: `docs/generate_api.py` (via `docs/api_gen/toc.py`'s
+  `inject_toc()`) rewrites that region between BEGIN/END markers as
+  part of API doc generation. `build_doc_tags.py` itself never
+  touches `myst.yml`.
 - The committed source must therefore stay clean. PRs that touch
   tag taxonomy should only diff `tags:` frontmatter lines, not
   chip-block bodies.

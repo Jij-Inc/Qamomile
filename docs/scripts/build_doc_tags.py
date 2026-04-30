@@ -663,6 +663,20 @@ def _clean_stale(directory: Path, keep: set[Path]) -> list[Path]:
     return removed
 
 
+def _write_if_changed(path: Path, content: str) -> Path | None:
+    """Write ``content`` to ``path`` only if it differs from the existing file.
+
+    Returns ``path`` when a write occurred, otherwise ``None``. This is the
+    skip-if-equal contract used elsewhere in the script (chip injection,
+    browse-by-tag), extended to the unconditional tag-page writers so the
+    audit log only mentions paths that actually changed.
+    """
+    if path.is_file() and path.read_text(encoding="utf-8") == content:
+        return None
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
 # --------------------------------------------------------------------- #
 # Per-locale build                                                      #
 # --------------------------------------------------------------------- #
@@ -705,16 +719,18 @@ def _build_for_locale(lang: str) -> tuple[list[Path], list[Path]]:
     removed.extend(_clean_stale(tags_dir, keep))
 
     tags_index = tags_dir / "index.md"
-    tags_index.write_text(_render_tags_index(tag_map, strings), encoding="utf-8")
-    written.append(tags_index)
+    written_index = _write_if_changed(
+        tags_index, _render_tags_index(tag_map, strings)
+    )
+    if written_index is not None:
+        written.append(written_index)
 
     for tag in all_tags:
         page = tags_dir / f"{tag}.md"
-        page.write_text(
-            _render_tag_page(tag, tag_map[tag], strings, all_tags),
-            encoding="utf-8",
-        )
-        written.append(page)
+        rendered = _render_tag_page(tag, tag_map[tag], strings, all_tags)
+        written_page = _write_if_changed(page, rendered)
+        if written_page is not None:
+            written.append(written_page)
 
     # 3. Inject (or refresh) the browse-by-tag block in each section's
     # hand-written index.md. ``_inject_browse_by_tag`` handles both:
@@ -747,14 +763,27 @@ def _build_for_locale(lang: str) -> tuple[list[Path], list[Path]]:
     return written, removed
 
 
+def _audit_path(p: Path) -> str:
+    """Format ``p`` as a repo-relative path when possible, else absolute.
+
+    Used by ``main()``'s per-file audit lines so an ad-hoc invocation with
+    ``DOCS_ROOT_OVERRIDE`` pointing outside the repo prints a usable path
+    instead of crashing on ``Path.relative_to``.
+    """
+    try:
+        return str(p.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(p)
+
+
 def main() -> None:
     """Regenerate every locale and print a one-line audit per file."""
     for lang in ("en", "ja"):
         written, removed = _build_for_locale(lang)
         for p in written:
-            print(f"wrote {p.relative_to(REPO_ROOT)}")
+            print(f"wrote {_audit_path(p)}")
         for p in removed:
-            print(f"removed {p.relative_to(REPO_ROOT)}")
+            print(f"removed {_audit_path(p)}")
 
 
 if __name__ == "__main__":

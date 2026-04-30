@@ -25,7 +25,6 @@ project:
       file: algorithm/index.md
       children:
         - pattern: algorithm/*.ipynb
-
     - pattern: "tags/*.md"
       hidden: true
     - title: Usage

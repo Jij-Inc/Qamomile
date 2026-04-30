@@ -103,9 +103,9 @@ That's the day-to-day loop. `build.sh` copies your source into a gitignored `_bu
 
 | Command | Description |
 |---------|-------------|
-| `./build.sh build` | Build both languages (no sync) |
-| `./build.sh build-en` | Build English only (no sync) |
-| `./build.sh build-ja` | Build Japanese only (no sync) |
+| `./build.sh build` | Build both languages (no sync) — bundles `generate_api` + `copy_api` |
+| `./build.sh build-en` | Build English only (no sync). Skips `generate_api` / `copy_api` — run `./build.sh build` once first if `docs/api/` is empty, otherwise mystmd fails to resolve `api/index` |
+| `./build.sh build-ja` | Build Japanese only (no sync). Same caveat as `build-en` |
 | `./build.sh sync` | Convert all `.py` → `.ipynb` (both languages) |
 | `./build.sh sync-en` | Convert English `.py` → `.ipynb` |
 | `./build.sh sync-ja` | Convert Japanese `.py` → `.ipynb` |
