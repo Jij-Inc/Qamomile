@@ -127,22 +127,6 @@ a.tag-chip::before {
   opacity: 0.55;
 }
 
-/* Count badge sitting just to the right of a chip. Kept as a sibling
- * (not a child of the <a>) because MyST/markdown-it expands nested
- * inline elements inside an anchor into a duplicate <a> with the same
- * href, which would render the count as its own ghost chip. */
-.tag-count {
-  display: inline-block;
-  padding: 0.04em 0.55em;
-  margin: 0.18em 0.18em 0.18em -0.05em;
-  background-color: rgba(168, 116, 48, 0.16);
-  color: #8B5E25;
-  border-radius: 999px;
-  font-size: 0.78em;
-  font-weight: 600;
-  vertical-align: 0.05em;
-}
-
 /* Dark mode: deeper amber tint that reads against the dark background. */
 .dark a.tag-chip {
   background-color: rgba(110, 74, 28, 0.45);
@@ -152,11 +136,6 @@ a.tag-chip::before {
 .dark a.tag-chip:hover {
   background-color: rgba(168, 116, 48, 0.6);
   color: #FDF8F0;
-}
-
-.dark .tag-count {
-  background-color: rgba(212, 160, 92, 0.22);
-  color: #F0DCC0;
 }
 
 /* Google Colab launch button (injected at build output) */
