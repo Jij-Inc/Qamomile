@@ -453,10 +453,7 @@ def _inject_tag_chips(article: Article, strings: dict[str, object]) -> Path | No
     # collapsing any accidental surrounding blank lines.
     if CHIP_BLOCK_RE.search(text):
         new_text = CHIP_BLOCK_RE.sub(canonical, text, count=1)
-        if new_text == text:
-            return None
-        article.py_path.write_text(new_text, encoding="utf-8")
-        return article.py_path
+        return _write_if_changed(article.py_path, new_text)
 
     # Case 2: no sentinel yet — find the H1 in the first markdown cell
     # and insert the block right after it. Drop any existing blank `#`
@@ -483,10 +480,7 @@ def _inject_tag_chips(article: Article, strings: dict[str, object]) -> Path | No
         + "".join(cell_lines[after:])
     )
     new_text = text[:cell_start] + new_cell + text[cell_end:]
-    if new_text == text:
-        return None
-    article.py_path.write_text(new_text, encoding="utf-8")
-    return article.py_path
+    return _write_if_changed(article.py_path, new_text)
 
 
 def _strip_chip_block(py_path: Path) -> Path | None:
@@ -503,10 +497,7 @@ def _strip_chip_block(py_path: Path) -> Path | None:
     if not CHIP_BLOCK_RE.search(text):
         return None
     new_text = CHIP_BLOCK_RE.sub("#\n", text, count=1)
-    if new_text == text:
-        return None
-    py_path.write_text(new_text, encoding="utf-8")
-    return py_path
+    return _write_if_changed(py_path, new_text)
 
 
 # --------------------------------------------------------------------- #
@@ -622,10 +613,7 @@ def _inject_browse_by_tag(
     if BROWSE_BLOCK_RE.search(text):
         canonical = f"{BROWSE_BEGIN}\n{block_body}\n{BROWSE_END}"
         new_text = BROWSE_BLOCK_RE.sub(canonical, text, count=1)
-        if new_text == text:
-            return None
-        index_path.write_text(new_text, encoding="utf-8")
-        return index_path
+        return _write_if_changed(index_path, new_text)
 
     # Case 2: no sentinels — synthesize the whole section and insert it
     # right before the first H2. An index template without any H2 (an
@@ -640,10 +628,7 @@ def _inject_browse_by_tag(
         new_text = text[: h2_match.start()] + section_md + text[h2_match.start() :]
     else:
         new_text = text.rstrip() + "\n\n" + section_md
-    if new_text == text:
-        return None
-    index_path.write_text(new_text, encoding="utf-8")
-    return index_path
+    return _write_if_changed(index_path, new_text)
 
 
 # --------------------------------------------------------------------- #
@@ -667,9 +652,9 @@ def _write_if_changed(path: Path, content: str) -> Path | None:
     """Write ``content`` to ``path`` only if it differs from the existing file.
 
     Returns ``path`` when a write occurred, otherwise ``None``. This is the
-    skip-if-equal contract used elsewhere in the script (chip injection,
-    browse-by-tag), extended to the unconditional tag-page writers so the
-    audit log only mentions paths that actually changed.
+    single skip-if-equal helper for every writer in the script — chip
+    injection, chip stripping, browse-by-tag injection, tag pages, and the
+    tags index — so the audit log only mentions paths that actually changed.
     """
     if path.is_file() and path.read_text(encoding="utf-8") == content:
         return None
