@@ -98,6 +98,11 @@ setup_build_src() {
         cp -R "${_lang}" "${build_src_root}/"
         rm -rf "${build_src_root}/${_lang}/_build"
     done
+    # myst.yml inside each <lang>/ references ../assets/custom-theme.css
+    # (the chip-pill CSS, the logo, the colab-launch JS). When mystmd
+    # builds from _build_src/<lang>/, that ../assets/ resolves to
+    # _build_src/assets/, so the assets dir has to exist there too.
+    cp -R assets "${build_src_root}/"
 
     generate_doc_tags "$build_src_root"
 
