@@ -20,6 +20,10 @@ Qamomile is a quantum programming SDK. Write quantum circuits as typed Python fu
 - [QAOA for MaxCut](vqa/qaoa_maxcut) — Build a QAOA circuit from scratch to solve MaxCut, then compare with the built-in `qaoa_state`
 - [VQE for Hydrogen Molecule](vqa/vqe_for_hydrogen) — Build a molecular Hamiltonian with OpenFermion and find the ground state energy using VQE
 
+## Sample-based Algorithms
+
+- [Implementing Quantum-enhanced MCMC](sample_based/qe_mcmc) — Implement Quantum-enhanced MCMC using Trotter-decomposed time evolution
+
 ## Optimization
 
 - [QAOA for Graph Partitioning](optimization/qaoa_graph_partition) — Solve graph partitioning with QAOA end-to-end

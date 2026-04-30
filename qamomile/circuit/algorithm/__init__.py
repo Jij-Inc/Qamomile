@@ -1,6 +1,7 @@
 """Algorithm building blocks for quantum circuits."""
 
 from .basic import (
+    computational_basis_state,
     cx_entangling_layer,
     cz_entangling_layer,
     rx_layer,
@@ -45,6 +46,7 @@ __all__ = [
     "cz_entangling_layer",
     "cx_entangling_layer",
     "superposition_vector",
+    "computational_basis_state",
     # FQAOA
     "initial_occupations",
     "givens_rotation",

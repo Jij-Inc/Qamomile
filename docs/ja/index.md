@@ -18,6 +18,10 @@ Qamomileは量子プログラミングSDKです。型付きPython関数で量子
 - [QAOAでMaxCutを解く](vqa/qaoa_maxcut) — QAOA回路をゼロから構築してMaxCutを解き、組み込みの`qaoa_state`と比較する
 - [水素分子のためのVQE](vqa/vqe_for_hydrogen) — OpenFermionで分子ハミルトニアンを構築し、VQEで基底状態エネルギーを求める
 
+## サンプリングベースアルゴリズム
+
+- [Quantum-enhanced MCMCを実装する](sample_based/qe_mcmc) — トロッター分解による時間発展を利用して、Quantum-enhanced MCMCを実装
+
 ## 最適化
 
 - [QAOAによるグラフ分割](optimization/qaoa_graph_partition) — QAOAでグラフ分割問題をエンドツーエンドで解く

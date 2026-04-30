@@ -36,6 +36,10 @@ project:
       children:
         - file: vqa/qaoa_maxcut.ipynb
         - file: vqa/vqe_for_hydrogen.ipynb
+    - title: サンプリングベースアルゴリズム
+      file: sample_based/index.md
+      children:
+        - file: sample_based/qe_mcmc.ipynb
     - title: 最適化
       file: optimization/index.md
       children:

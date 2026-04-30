@@ -6,6 +6,8 @@ that can be composed to build variational ansatze.
 
 from __future__ import annotations
 
+import math
+
 import qamomile.circuit as qmc
 
 
@@ -170,4 +172,43 @@ def phase_gadget(
         left = indices[rev]
         right = indices[rev_next]
         q[left], q[right] = qmc.cx(q[left], q[right])
+    return q
+
+
+@qmc.qkernel
+def computational_basis_state(
+    n: qmc.UInt,
+    q: qmc.Vector[qmc.Qubit],
+    bits: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Qubit]:
+    """Prepare the computational basis state labeled by ``bits``.
+
+    Applies ``Rx(pi * bits[i])`` to ``q[i]``: identity when ``bits[i] == 0``
+    and ``X`` (up to a ``-i`` global phase) when ``bits[i] == 1``. Equivalent
+    to a conditional ``X`` for any measurement-based use case, but uses a
+    parameterized rotation so the circuit can be transpiled even when
+    ``bits`` is supplied as a runtime parameter (the runtime ``if`` form
+    cannot be emitted because backends require ``if`` conditions to be
+    compile-time constants or measurement results).
+
+    The explicit length ``n`` keeps the circuit's qubit count fixed at
+    compile time independently of ``bits``. Bind ``n`` at transpile so the
+    for-loop bound is concrete even when ``bits`` is left as a runtime
+    parameter; otherwise the transpile would fail with an unresolved-shape
+    error on ``bits.shape[0]``.
+
+    Assumes ``q`` starts in :math:`\\lvert 0 \\rangle^{\\otimes n}` and
+    ``q.shape[0] == bits.shape[0] == n``.
+
+    Args:
+        n (qmc.UInt): Length of the registers. Bind at transpile time.
+        q (qmc.Vector[qmc.Qubit]): Qubit register, expected to start in |0>^n.
+        bits (qmc.Vector[qmc.UInt]): Classical bit register specifying the target state.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Qubit register prepared in the |bits> state
+        (up to a global phase).
+    """
+    for i in qmc.range(n):
+        q[i] = qmc.rx(q[i], math.pi * bits[i])
     return q
