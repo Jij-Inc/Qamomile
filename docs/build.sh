@@ -91,10 +91,12 @@ setup_build_src() {
     rm -rf "$build_src_root"
     mkdir -p "$build_src_root"
     for _lang in "${LANGS[@]}"; do
-        rsync -a \
-            --exclude='_build/' \
-            --exclude='_build_src/' \
-            "${_lang}/" "${build_src_root}/${_lang}/"
+        # cp -R is portable across the Linux RTD image and local macOS
+        # (rsync isn't installed in the RTD build env). Copy the whole
+        # lang dir then prune the build artifacts that we never want
+        # in the scratch tree.
+        cp -R "${_lang}" "${build_src_root}/"
+        rm -rf "${build_src_root}/${_lang}/_build"
     done
 
     generate_doc_tags "$build_src_root"
