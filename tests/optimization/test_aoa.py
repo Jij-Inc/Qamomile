@@ -68,7 +68,8 @@ def test_transpile_with_custom_pair_indices_smoke():
 	executable = converter.transpile(
 		transpiler,
 		p=1,
-		pair_indices=np.asarray([(0, 1)], dtype=np.uint64),
+		initial_state="uniform",
+		pair_indices_mixer=np.asarray([(0, 1)], dtype=np.uint64),
 	)
 
 	job = executable.sample(

@@ -27,13 +27,19 @@ from .qaoa import (
     qaoa_state,
     x_mixer,
 )
-from .aoa import(
+from .aoa import (
     aoa_layers,
-    aoa_state,
+    aoa_state_dicke,
+    aoa_state_superposition,
     hubo_aoa_layers,
-    hubo_aoa_state,
+    hubo_aoa_state_dicke,
+    hubo_aoa_state_superposition,
     xy_mixer,
 )
+
+# Backward-compatible aliases for previous API names.
+aoa_state = aoa_state_superposition
+hubo_aoa_state = hubo_aoa_state_superposition
 from .trotter import trotterized_time_evolution
 
 __all__ = [
@@ -48,8 +54,12 @@ __all__ = [
     # AOA
     "aoa_layers",
     "aoa_state",
+    "aoa_state_superposition",
+    "aoa_state_dicke",
     "hubo_aoa_layers",
     "hubo_aoa_state",
+    "hubo_aoa_state_superposition",
+    "hubo_aoa_state_dicke",
     "xy_mixer",
     # Basic layers
     "rx_layer",
