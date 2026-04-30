@@ -232,36 +232,28 @@ def _tag_map(articles: Iterable[Article]) -> dict[str, list[Article]]:
 # --------------------------------------------------------------------- #
 
 
-def _chip_html(tag: str, href: str, count: int | None = None) -> str:
+def _chip_html(tag: str, href: str) -> str:
     """Render a single ``<a class="tag-chip">`` chip.
 
     The chip is plain HTML that MyST passes through verbatim; styling
-    lives in ``docs/assets/custom-theme.css`` (``a.tag-chip``). When a
-    ``count`` is given it is embedded directly in the link text as
-    ``"tag (n)"`` rather than wrapped in a nested element — earlier
-    revisions tried both nested ``<span>`` (which MyST/markdown-it
-    expanded into a duplicate anchor) and an adjacent sibling badge
-    (which wrapped onto its own line in narrow viewports). Keeping
-    everything inside the same ``<a>`` makes the rendered chip a
-    single, unbreakable pill.
+    lives in ``docs/assets/custom-theme.css`` (``a.tag-chip``).
     """
-    label = tag if count is None else f"{tag} ({count})"
-    return f'<a class="tag-chip" href="{href}">{label}</a>'
+    return f'<a class="tag-chip" href="{href}">{tag}</a>'
 
 
-def _chip_from_section(tag: str, count: int | None = None) -> str:
+def _chip_from_section(tag: str) -> str:
     """Render a tag chip linking from a section landing page (e.g. algorithm/index.md)."""
-    return _chip_html(tag, f"../tags/{tag}.md", count)
+    return _chip_html(tag, f"../tags/{tag}.md")
 
 
-def _chip_from_tags_dir(tag: str, count: int | None = None) -> str:
+def _chip_from_tags_dir(tag: str) -> str:
     """Render a tag chip linking from inside docs/<lang>/tags/."""
-    return _chip_html(tag, f"./{tag}.md", count)
+    return _chip_html(tag, f"./{tag}.md")
 
 
-def _chip_from_article(tag: str, count: int | None = None) -> str:
+def _chip_from_article(tag: str) -> str:
     """Render a tag chip linking from a section article (sibling of section dir)."""
-    return _chip_html(tag, f"../tags/{tag}.md", count)
+    return _chip_html(tag, f"../tags/{tag}.md")
 
 
 def _render_tags_index(
@@ -280,8 +272,7 @@ def _render_tags_index(
     parts.append("")
     if tag_map:
         chip_line = " ".join(
-            _chip_from_tags_dir(t, len(tag_map[t]))
-            for t in sorted(tag_map)
+            _chip_from_tags_dir(t) for t in sorted(tag_map)
         )
         parts.append(chip_line)
         parts.append("")
@@ -584,8 +575,7 @@ def _render_browse_by_tag_block(
         if not tag_counts:
             continue
         chip_line = " ".join(
-            _chip_from_section(t, tag_counts[t])
-            for t in sorted(tag_counts)
+            _chip_from_section(t) for t in sorted(tag_counts)
         )
         lines.append(f"**{bucket_labels[bucket]}:** {chip_line}")
     return "\n\n".join(lines)

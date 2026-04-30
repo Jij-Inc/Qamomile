@@ -517,4 +517,4 @@ for name, error_type, error_pos in shor_cases:
 # - Shor's 9-qubit code, which separately detects the $X$ and $Z$ components and corrects a single $X$, $Y$, or $Z$ error.
 # - A stabilizer interpretation of the same circuits.
 #
-# A natural next step is [Steane [[7,1,3]] Code and CSS Construction](11_steane_code.ipynb), where $X$-type and $Z$-type stabilizers are organized more systematically.
+# A natural next step is [Steane [[7,1,3]] Code and CSS Construction](09_steane_code.ipynb), where $X$-type and $Z$-type stabilizers are organized more systematically.

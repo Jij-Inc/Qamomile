@@ -14,28 +14,28 @@
 
 # %% [markdown]
 # ---
-# title: Steane [[7,1,3]] 符号
+# title: Steane [[7,1,3]] Code
 # tags: [qec, tutorial]
 # ---
 #
-# # 量子誤り訂正(2): Steane [[7,1,3]] 符号
+# # Quantum Error Correction (2): Steane [[7,1,3]] Code
 #
 # <!-- BEGIN auto-tags -->
-# **タグ:** <a class="tag-chip" href="../tags/qec.md">qec</a> <a class="tag-chip" href="../tags/tutorial.md">tutorial</a>
+# **Tags:** <a class="tag-chip" href="../tags/qec.md">qec</a> <a class="tag-chip" href="../tags/tutorial.md">tutorial</a>
 # <!-- END auto-tags -->
 #
-# [前章](10_quantum_error_correction.ipynb)では、3量子ビット符号と Shor の9量子ビット符号を実装しました。本章では、より構造がきれいな **Steane [[7,1,3]] 符号** を扱います。
+# In the [previous tutorial](08_quantum_error_correction.ipynb), we implemented the 3-qubit repetition codes and Shor's 9-qubit code. Here we move to the **Steane [[7,1,3]] code**, a cleaner and more structured code.
 #
-# Steane 符号は、古典の Hamming [7,4,3] 符号から作る CSS 符号です。7つの物理量子ビットで1つの論理量子ビットを守り、任意の単一量子ビット Pauli エラー($X$, $Y$, $Z$)を訂正できます。
+# The Steane code is a CSS code built from the classical Hamming [7,4,3] code. It protects one logical qubit with seven physical qubits and corrects any single-qubit Pauli error: $X$, $Y$, or $Z$.
 #
-# このチュートリアルで実装することは3つです。
+# We will implement three things:
 #
-# 1. Hamming 符号の構造から Steane 符号のスタビライザーを作る。
-# 2. 6つのスタビライザーを測り、シンドロームから単一エラーを訂正する。
-# 3. 物理 $H$ を7つ並べるだけで論理 Hadamard $\bar{H}$ になることを確認する。
+# 1. Build Steane stabilizers from the Hamming code structure.
+# 2. Measure six stabilizers and correct a single error from the syndrome.
+# 3. Verify that seven physical Hadamard gates implement the logical Hadamard $\bar{H}$.
 
 # %%
-# 最新のQamomileをpipからインストールします。
+# Install the latest Qamomile from pip.
 # # !pip install qamomile
 # # or
 # # !uv add qamomile
@@ -72,9 +72,9 @@ def _is_steane_zero_word(outcome) -> bool:
 
 
 # %% [markdown]
-# ## 1. Hamming 符号から CSS 符号へ
+# ## 1. From Hamming Codes to CSS Codes
 #
-# 古典 Hamming [7,4,3] 符号のパリティ検査行列を次のように取ります。
+# Use the following parity-check matrix for the classical Hamming [7,4,3] code:
 #
 # $$
 # H =
@@ -82,39 +82,39 @@ def _is_steane_zero_word(outcome) -> bool:
 # 0 & 0 & 0 & 1 & 1 & 1 & 1 \\
 # 0 & 1 & 1 & 0 & 0 & 1 & 1 \\
 # 1 & 0 & 1 & 0 & 1 & 0 & 1
-# \end{pmatrix}
+# \end{pmatrix}.
 # $$
 #
-# 列 $j$ は $j+1$ の2進表現です。そのため、3ビットのシンドロームを読むだけで、どのビットに誤りが起きたかが一意に分かります。
+# Column $j$ is the binary representation of $j+1$. Therefore, a 3-bit syndrome identifies the error location directly.
 #
-# CSS 符号では、同じパリティ検査行列から2種類のスタビライザーを作ります。
+# A CSS code creates two kinds of stabilizers from this matrix:
 #
-# - $Z$ 型スタビライザー: $X$ エラーを検出する。
-# - $X$ 型スタビライザー: $Z$ エラーを検出する。
+# - $Z$-type stabilizers detect $X$ errors.
+# - $X$-type stabilizers detect $Z$ errors.
 #
-# Steane 符号の生成子は次の6つです。
+# The Steane code has six generators:
 #
-# | 種類 | スタビライザー | 検出するエラー |
+# | Type | Stabilizer | Detects |
 # | --- | --- | --- |
-# | $X$ 型 | $X_3X_4X_5X_6$ | $Z$ |
-# | $X$ 型 | $X_1X_2X_5X_6$ | $Z$ |
-# | $X$ 型 | $X_0X_2X_4X_6$ | $Z$ |
-# | $Z$ 型 | $Z_3Z_4Z_5Z_6$ | $X$ |
-# | $Z$ 型 | $Z_1Z_2Z_5Z_6$ | $X$ |
-# | $Z$ 型 | $Z_0Z_2Z_4Z_6$ | $X$ |
+# | $X$ type | $X_3X_4X_5X_6$ | $Z$ |
+# | $X$ type | $X_1X_2X_5X_6$ | $Z$ |
+# | $X$ type | $X_0X_2X_4X_6$ | $Z$ |
+# | $Z$ type | $Z_3Z_4Z_5Z_6$ | $X$ |
+# | $Z$ type | $Z_1Z_2Z_5Z_6$ | $X$ |
+# | $Z$ type | $Z_0Z_2Z_4Z_6$ | $X$ |
 
 # %% [markdown]
-# ## 2. $\lvert0_L\rangle$ のエンコード
+# ## 2. Encoding $\lvert0_L\rangle$
 #
-# Steane 符号の $\lvert0_L\rangle$ は、偶重みの Hamming 符号語8個の重ね合わせです。
+# The Steane logical $\lvert0_L\rangle$ is the superposition of the eight even-weight Hamming codewords:
 #
 # $$
 # \lvert0_L\rangle =
 # \frac{1}{2\sqrt{2}}
-# \sum_{c \in C,\; w(c)\ {\rm even}} \lvert c\rangle
+# \sum_{c \in C,\; w(c)\ {\rm even}} \lvert c\rangle.
 # $$
 #
-# 次の回路では、3つの $X$ 型スタビライザーに対応するパターンを順に作り、$\lvert0\rangle^{\otimes 7}$ から $\lvert0_L\rangle$ を準備します。
+# The following circuit prepares $\lvert0_L\rangle$ from $\lvert0\rangle^{\otimes 7}$ by building the three $X$-type stabilizer patterns.
 
 
 # %%
@@ -147,30 +147,30 @@ def encode_zero_and_measure() -> qmc.Vector[qmc.Bit]:
 
 
 # %% [markdown]
-# エンコーダを測定して、出てくるビット列が偶重み Hamming 符号語だけになっているか確認します。
+# Measure the encoder output and check that all observed bitstrings are even Hamming codewords.
 
 # %%
-print("|0_L⟩ をエンコードして測定")
+print("Encode and measure |0_L>")
 exe = transpiler.transpile(encode_zero_and_measure)
 result = exe.sample(_seeded_executor, shots=1024).result()
 valid = sum(count for outcome, count in result.results if _is_steane_zero_word(outcome))
 total = sum(count for _, count in result.results)
-print(f"  偶重み Hamming 符号語の割合: {valid / total:.3f}")
-print(f"  観測された符号語数: {len(result.results)}")
+print(f"  even Hamming codeword ratio: {valid / total:.3f}")
+print(f"  observed codewords: {len(result.results)}")
 
 # %% [markdown]
-# ## 3. シンドローム測定と訂正
+# ## 3. Syndrome Measurement and Correction
 #
-# Steane 符号では $X$ エラーと $Z$ エラーを別々に扱えます。
+# The Steane code decodes $X$ and $Z$ errors independently.
 #
-# - $Z$ 型スタビライザーを測ると、$X$ 成分のシンドロームが得られる。
-# - $X$ 型スタビライザーを測ると、$Z$ 成分のシンドロームが得られる。
+# - Measuring the $Z$-type stabilizers gives the syndrome for the $X$ component.
+# - Measuring the $X$-type stabilizers gives the syndrome for the $Z$ component.
 #
-# シンドローム表は Hamming 符号の列そのものです。
+# The syndrome table is the Hamming matrix column table:
 #
-# | 誤り位置 | シンドローム $(s_2,s_1,s_0)$ |
+# | Error location | Syndrome $(s_2,s_1,s_0)$ |
 # | --- | --- |
-# | なし | $(0,0,0)$ |
+# | none | $(0,0,0)$ |
 # | $q_0$ | $(0,0,1)$ |
 # | $q_1$ | $(0,1,0)$ |
 # | $q_2$ | $(0,1,1)$ |
@@ -179,7 +179,7 @@ print(f"  観測された符号語数: {len(result.results)}")
 # | $q_5$ | $(1,1,0)$ |
 # | $q_6$ | $(1,1,1)$ |
 #
-# 実装では `error_type` を `1=X`, `2=Y`, `3=Z` として渡します。`error_pos` は `0..6` の物理量子ビット位置です。
+# In the implementation, pass `error_type` as `1=X`, `2=Y`, or `3=Z`. The `error_pos` parameter is the physical qubit index `0..6`.
 
 
 # %%
@@ -279,12 +279,12 @@ def steane_run(
 
 
 # %% [markdown]
-# $X$, $Y$, $Z$ の全単一エラー、つまり 21 通りを実行します。訂正後に測定したビット列がすべて $\lvert0_L\rangle$ の符号語であれば成功です。
+# Run all 21 single errors: $X$, $Y$, and $Z$ on each of the seven physical qubits. After correction, every measured bitstring should still be a $\lvert0_L\rangle$ codeword.
 
 # %%
-print("Steane 符号: X/Y/Z × 7 位置の単一エラーを訂正")
-print(f"  {'誤り':4s} | {'位置':5s} | |0_L⟩ 符号語")
-print(f"  {'-' * 4}-+-{'-' * 5}-+-{'-' * 12}")
+print("Steane code: correct X/Y/Z on all 7 locations")
+print(f"  {'err':4s} | {'pos':5s} | |0_L> codeword")
+print(f"  {'-' * 4}-+-{'-' * 5}-+-{'-' * 14}")
 
 for name, error_type in [("X", 1), ("Y", 2), ("Z", 3)]:
     for pos in range(7):
@@ -300,18 +300,18 @@ for name, error_type in [("X", 1), ("Y", 2), ("Z", 3)]:
         print(f"  {name:4s} | q[{pos}]  | {valid / total:.3f}")
 
 # %% [markdown]
-# すべて 1.000 になれば、どの位置の $X$, $Y$, $Z$ エラーでも $\lvert0_L\rangle$ の符号空間へ戻せています。$Y=iXZ$ なので、$Y$ エラーでは $X$ 成分と $Z$ 成分の両方が検出され、両方の訂正が入ります。
+# A ratio of 1.000 means the state returns to the $\lvert0_L\rangle$ code space for every single-qubit Pauli error. A $Y=iXZ$ error triggers both the $X$-component and $Z$-component corrections.
 
 # %% [markdown]
-# ## 4. 横断的 Hadamard
+# ## 4. Transversal Hadamard
 #
-# Steane 符号の重要な性質として、論理 Hadamard $\bar{H}$ を物理 Hadamard 7個で実装できます。
+# A key feature of the Steane code is that the logical Hadamard $\bar{H}$ is implemented by applying physical Hadamard gates to all seven qubits:
 #
 # $$
-# \bar{H} = H^{\otimes 7}
+# \bar{H} = H^{\otimes 7}.
 # $$
 #
-# これは $X$ 型と $Z$ 型のスタビライザーが同じ Hamming パターンを持つためです。各物理量子ビットに独立にゲートを当てるだけなので、1つの物理ゲートの失敗が複数量子ビットへ広がりにくく、フォールトトレラント計算で重要です。
+# This works because the $X$-type and $Z$-type stabilizers have the same Hamming pattern. Transversal gates are important in fault-tolerant computation because one physical gate failure does not spread across many qubits.
 
 
 # %%
@@ -349,23 +349,23 @@ def _logical_x_parity(outcome) -> int:
 
 
 # %% [markdown]
-# まず、$\bar{H}\lvert0_L\rangle=\lvert+_L\rangle$ になっていることを確認します。$\lvert+_L\rangle$ は論理 $X$ の +1 固有状態なので、$X$ 基底で測ると $q_0 \oplus q_1 \oplus q_2 = 0$ になります。
+# First check that $\bar{H}\lvert0_L\rangle=\lvert+_L\rangle$. The state $\lvert+_L\rangle$ is a +1 eigenstate of logical $X$, so measuring in the $X$ basis should give $q_0 \oplus q_1 \oplus q_2 = 0$.
 
 # %%
-print("横断的 H: |0_L⟩ -> |+_L⟩")
+print("Transversal H: |0_L> -> |+_L>")
 exe_plus = transpiler.transpile(transversal_hadamard_to_plus_l)
 result_plus = exe_plus.sample(_seeded_executor, shots=1024).result()
 parity_zero = sum(
     count for outcome, count in result_plus.results if _logical_x_parity(outcome) == 0
 )
 total_plus = sum(count for _, count in result_plus.results)
-print(f"  q[0]⊕q[1]⊕q[2] = 0 の割合: {parity_zero / total_plus:.3f}")
+print(f"  q[0] xor q[1] xor q[2] = 0 ratio: {parity_zero / total_plus:.3f}")
 
 # %% [markdown]
-# 次に、横断的 $H$ を2回当てると $\bar{H}^2=I$ なので $\lvert0_L\rangle$ に戻ることを確認します。
+# Next check the round trip. Applying transversal $H$ twice should return to $\lvert0_L\rangle$ because $\bar{H}^2=I$.
 
 # %%
-print("横断的 H の round trip: |0_L⟩ -> H -> H -> |0_L⟩")
+print("Transversal H round trip: |0_L> -> H -> H -> |0_L>")
 exe_round_trip = transpiler.transpile(transversal_hadamard_round_trip)
 result_round_trip = exe_round_trip.sample(_seeded_executor, shots=1024).result()
 valid = sum(
@@ -374,21 +374,21 @@ valid = sum(
     if _is_steane_zero_word(outcome)
 )
 total = sum(count for _, count in result_round_trip.results)
-print(f"  |0_L⟩ 符号語の割合: {valid / total:.3f}")
+print(f"  |0_L> codeword ratio: {valid / total:.3f}")
 
 # %% [markdown]
-# ## 5. まとめ
+# ## 5. Summary
 #
-# 本章では Steane [[7,1,3]] 符号を実装しました。
+# In this tutorial, we implemented the Steane [[7,1,3]] code.
 #
-# - Hamming [7,4,3] 符号から、3つの $X$ 型スタビライザーと3つの $Z$ 型スタビライザーを作った。
-# - $Z$ 型スタビライザーで $X$ 成分を、$X$ 型スタビライザーで $Z$ 成分を検出した。
-# - 21 通りの単一 Pauli エラー($X/Y/Z \times 7$ 位置)を訂正できることを確認した。
-# - 物理 $H$ 7個が論理 Hadamard $\bar{H}$ として働くことを確認した。
+# - Built three $X$-type and three $Z$-type stabilizers from the Hamming [7,4,3] code.
+# - Used $Z$-type stabilizers to detect the $X$ component and $X$-type stabilizers to detect the $Z$ component.
+# - Verified correction for all 21 single Pauli errors: $X/Y/Z \times 7$ locations.
+# - Verified that seven physical Hadamard gates act as the logical Hadamard $\bar{H}$.
 #
-# Steane 符号は Shor 符号より少ない物理量子ビットで同じ距離 $d=3$ を持ち、CSS 符号と横断的 Clifford ゲートの基本例になっています。
+# Compared with Shor's code, the Steane code uses fewer physical qubits for the same distance $d=3$ and gives a clean example of CSS structure and transversal Clifford gates.
 #
-# ### 次へ
+# ### Next
 #
-# - [量子誤り訂正(1)](10_quantum_error_correction.ipynb) — 3量子ビット bit-flip / phase-flip / Shor 符号
-# - 表面符号 — 2D 格子上のローカルなスタビライザーと繰り返しシンドローム測定
+# - [Quantum Error Correction (1)](08_quantum_error_correction.ipynb) — 3-qubit bit-flip / phase-flip / Shor codes
+# - Surface codes — local stabilizers on a 2D lattice and repeated syndrome measurement

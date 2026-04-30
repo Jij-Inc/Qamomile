@@ -26,9 +26,9 @@ project:
         - file: tutorial/04_execution_models.ipynb
         - file: tutorial/05_classical_flow_patterns.ipynb
         - file: tutorial/06_reuse_patterns.ipynb
-        - file: tutorial/09_compilation_and_transpilation.ipynb
-        - file: tutorial/10_quantum_error_correction.ipynb
-        - file: tutorial/11_steane_code.ipynb
+        - file: tutorial/07_compilation_and_transpilation.ipynb
+        - file: tutorial/08_quantum_error_correction.ipynb
+        - file: tutorial/09_steane_code.ipynb
     - title: アルゴリズム
       file: algorithm/index.md
       children:
