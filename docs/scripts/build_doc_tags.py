@@ -237,15 +237,17 @@ def _chip_html(tag: str, href: str, count: int | None = None) -> str:
 
     The chip is plain HTML that MyST passes through verbatim; styling
     lives in ``docs/assets/custom-theme.css`` (``a.tag-chip``). Pass
-    ``count`` to embed the per-bucket / per-tag article count inside
-    the pill — it shows up on the right side of the chip with a divider
-    line. Omit ``count`` for chips that just navigate (e.g. inline
-    chips at the top of an article).
+    ``count`` to attach the per-bucket / per-tag article count next to
+    the pill as an adjacent ``<span class="tag-count">`` — kept outside
+    the ``<a>`` because MyST/markdown-it expands nested inline elements
+    inside an anchor into a second anchor with the same href, which
+    duplicates the chip in the rendered HTML. Omit ``count`` for chips
+    that just navigate (e.g. inline chips at the top of an article).
     """
-    inner = tag
+    chip = f'<a class="tag-chip" href="{href}">{tag}</a>'
     if count is not None:
-        inner += f'<span class="tag-count">{count}</span>'
-    return f'<a class="tag-chip" href="{href}">{inner}</a>'
+        chip += f'<span class="tag-count">{count}</span>'
+    return chip
 
 
 def _chip_from_section(tag: str, count: int | None = None) -> str:
