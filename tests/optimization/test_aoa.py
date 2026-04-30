@@ -83,3 +83,54 @@ def test_transpile_with_custom_pair_indices_smoke():
 	for sample, count in result.results:
 		assert len(sample) == model.num_bits
 		assert count > 0
+
+
+def test_transpile_without_block_size_defaults_to_full_register_uniform():
+	model = _make_4bit_quadratic_model()
+	converter = AOAConverter(model)
+	transpiler = QiskitTranspiler()
+
+	executable = converter.transpile(
+		transpiler,
+		p=1,
+		initial_state="uniform",
+		mixer="ring",
+	)
+
+	job = executable.sample(
+		transpiler.executor(),
+		shots=8,
+		bindings={"gammas": [0.2], "betas": [0.3]},
+	)
+	result = job.result()
+
+	assert len(result.results) > 0
+	for sample, count in result.results:
+		assert len(sample) == model.num_bits
+		assert count > 0
+
+
+def test_transpile_without_block_size_defaults_to_full_register_dicke():
+	model = _make_4bit_quadratic_model()
+	converter = AOAConverter(model)
+	transpiler = QiskitTranspiler()
+
+	executable = converter.transpile(
+		transpiler,
+		p=1,
+		initial_state="dicke",
+		hamming_weight=1,
+		mixer="ring",
+	)
+
+	job = executable.sample(
+		transpiler.executor(),
+		shots=8,
+		bindings={"gammas": [0.2], "betas": [0.3]},
+	)
+	result = job.result()
+
+	assert len(result.results) > 0
+	for sample, count in result.results:
+		assert len(sample) == model.num_bits
+		assert count > 0

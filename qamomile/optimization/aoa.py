@@ -253,17 +253,20 @@ class AOAConverter(QAOAConverter):
             pair_indices_mixer (numpy.ndarray | None): Explicit mixer schedule
                 as an array of shape ``(num_pairs, 2)``. When provided,
                 ``mixer`` is ignored.
-            block_size (int | None): Size of each one-hot block. Required when
-                ``pair_indices_mixer`` is not provided because built-in
-                schedules need the block structure.
+            block_size (int | None): Size of each block on which preparing a Dicke state and on which XY mixer acts. 
+                If omitted, defaults to the full register size ``n`` (single block).
 
         Returns:
             ExecutableProgram: The compiled circuit program.
         """
+        effective_block_size = (
+            self.spin_model.num_bits if block_size is None else block_size
+        )
+
         resolved_pair_indices_mixer = self._resolve_pair_indices(
             mixer=mixer,
             pair_indices=pair_indices_mixer,
-            block_size=block_size,
+            block_size=effective_block_size,
         )
 
         quadratic = not self.spin_model.higher
@@ -277,7 +280,7 @@ class AOAConverter(QAOAConverter):
                 triplets_angles_dicke,
             ) = self._compute_dicke_composition_schedule(
                 hamming_weight=hamming_weight,
-                block_size=block_size,
+                block_size=effective_block_size,
             )
 
         match (quadratic, initial_state):
