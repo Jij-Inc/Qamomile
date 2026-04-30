@@ -104,6 +104,36 @@ except Exception as e:
 # Always use index-based access: `for i in qmc.range(n): q[i] = qmc.h(q[i])`.
 
 # %% [markdown]
+# ## Broadcasting Single-Qubit Gates Over an Array
+#
+# When the same single-qubit gate is applied to every qubit in a register, you
+# can pass the array directly instead of writing the index loop. This is
+# equivalent to the explicit `for i in qmc.range(n): q[i] = qmc.gate(q[i])`
+# pattern — under the hood it emits the same IR loop, so resource estimation,
+# transpilation, and visualization see no difference. For rotation gates the
+# same scalar angle is shared across every qubit; per-qubit angles still need
+# an explicit loop indexing into a parameter vector.
+
+
+# %%
+@qmc.qkernel
+def rotation_layer_broadcast(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(n, name="q")
+    q = qmc.h(q)
+    q = qmc.ry(q, theta)
+    return qmc.measure(q)
+
+
+rotation_layer_broadcast.draw(n=4, theta=0.3, fold_loops=False)
+
+# %% [markdown]
+# Both `rotation_layer` (above) and `rotation_layer_broadcast` produce the
+# same circuit. The broadcast form is the idiomatic choice for whole-register
+# layers; reach for the explicit loop when each qubit needs a different angle
+# (for example, indexing into `Vector[Float]`) or when only a slice of the
+# register is touched.
+
+# %% [markdown]
 # ## The Bind/Sweep Pattern
 #
 # This is the central workflow pattern for parameterized qkernels:
