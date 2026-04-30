@@ -19,16 +19,13 @@ This documentation system uses a modern workflow where:
 
 ### Notebook Execution Strategy
 
-ReadTheDocs has a build time limit that is too short to execute all notebooks during hosting.
-Therefore, notebooks must be **pre-executed before pushing** to the branch:
+ReadTheDocs has a build time limit that is too short to execute all notebooks during hosting. Therefore, notebooks must be **pre-executed before pushing** to the branch:
 
 ```
 .py (source) → jupytext → .ipynb (notebook) → jupyter execute → .ipynb (with outputs)
 ```
 
 ReadTheDocs builds with `execute.enabled: false`, assuming that executed `.ipynb` files with outputs already exist in the branch.
-
-**Future plan**: We are considering a GitHub Actions workflow that automatically detects `.py` changes on merge to `main`, converts and executes the notebooks, and commits the resulting `.ipynb` files back — eliminating the need for manual notebook management.
 
 ## Directory Structure
 
@@ -41,10 +38,12 @@ docs/
 ├── index.html                   # Redirects to ./en/
 ├── myst.yml                     # Top-level MyST stub
 │
-├── assets/                      # Shared images and resources
+├── assets/                      # Shared images and resources (incl. custom-theme.css)
 ├── api_gen/                     # API doc generation package (uses griffe)
 ├── api/                         # Generated API reference (shared source)
-├── scripts/                     # Build helper scripts (e.g., inject_colab_launch.py)
+├── scripts/                     # Build helper scripts
+│                                #   - build_doc_tags.py: regenerate tag pages, chip blocks, myst.yml auto-tags region
+│                                #   - inject_colab_launch.py: post-build "open in Colab" button
 ├── qamomile-lp/                 # Landing page assets
 │
 ├── en/                          # English documentation
@@ -52,46 +51,33 @@ docs/
 │   ├── index.md                 # Landing page
 │   ├── _build/                  # Build output (gitignored)
 │   ├── api/                     # Copied from docs/api/ at build time
-│   ├── tutorial/                # SDK tutorials (.py sources + .ipynb)
-│   ├── algorithm/               # Algorithm examples (flat, tag-filterable)
-│   ├── usage/                  # Module usage guides (BinaryModel, etc.)
-│   └── collaboration/           # External integration tutorials (API keys required)
+│   ├── tutorial/                # SDK fundamentals (kernels, parameters, execution, …)
+│   ├── algorithm/               # Algorithm walkthroughs (QAOA, VQE, QEC, Hamiltonian sim, …)
+│   ├── usage/                   # Per-module how-to guides (BinaryModel, …)
+│   ├── collaboration/           # External-platform integration (qBraid; needs API key)
+│   ├── release_notes/           # Per-version changelog
+│   └── tags/                    # Auto-generated tag pages (gitignored)
 │
 └── ja/                          # Japanese documentation (mirrors en/ structure)
-    ├── myst.yml
-    ├── index.md
-    ├── _build/
-    ├── api/
-    ├── tutorial/
-    ├── algorithm/
-    ├── usage/
-    └── collaboration/
 ```
 
 ## Quick Start
 
 ### Prerequisites
 
-Ensure you have the development dependencies installed:
-
 ```bash
 uv sync
 ```
 
-This installs `jupyter-book`, `jupytext`, `griffe`, and other required packages.
-
-If you would like to develop/execute notebooks requiring optional dependencies such as quri-parts, please install those optionals:
+This installs `jupyter-book`, `jupytext`, `griffe`, and the rest of the dev dependencies. To execute notebooks that need optional extras:
 
 ```bash
-uv sync --extra OPTIONAL_DEPENDENCY
+uv sync --extra OPTIONAL_DEPENDENCY    # e.g. quri_parts, cudaq-cu13
 ```
-
 
 ### Building Documentation
 
-We recommend using `build.sh` as the primary build tool. A `Makefile` with equivalent targets is also available (`make <command>`).
-
-#### Available commands
+`build.sh` is the primary entry point; an equivalent `Makefile` is also available (`make <command>`).
 
 | Command | Description |
 |---------|-------------|
@@ -114,40 +100,24 @@ We recommend using `build.sh` as the primary build tool. A `Makefile` with equiv
 | `./build.sh fresh-en` | Clean, sync, rebuild, and serve English docs |
 | `./build.sh fresh-ja` | Clean, sync, rebuild, and serve Japanese docs |
 
+`build-{en,ja}` automatically runs `docs/scripts/build_doc_tags.py` first, so the chip blocks, tag pages, and `myst.yml` auto-tags region are always up to date in the rendered output.
+
 #### Typical workflow
 
 ```bash
-# 1. First time or after cleaning: target .py → .ipynb and build
-uv run jupytext --to ipynb target.py
+# Edit one file → preview just that one
+uv run jupytext --to ipynb --update docs/en/<section>/foo.py
+uv run jupyter nbconvert --to notebook --execute --inplace docs/en/<section>/foo.ipynb
+./build.sh build       # picks up the change
 
-# 2. Execute the notebook locally
-uv run jupyter nbconvert --to notebook --execute --inplace target.ipynb
-
-# 3. Rebuild without re-syncing (e.g., after config changes)
-./build.sh build
-
-# 4. Preview locally
-./build.sh serve-en
+./build.sh serve-en    # browse at http://localhost:8000
 ```
 
-Note that, if you run `sync` command at the first step, almost all the `.py` files will be converted into `.ipynb` without outputs. Use `sync-build` instead to sync, execute, and build in one step.
-
-### Viewing Documentation Locally
-
-After building, serve the documentation in your browser:
-
-```bash
-./build.sh serve-en   # English at http://localhost:8000
-./build.sh serve-ja   # Japanese at http://localhost:8000
-```
-
-Then open: http://localhost:8000
+`./build.sh sync` alone produces `.ipynb` without outputs. Use `sync-build` (or run `execute` after `sync`) when you actually need executed notebooks.
 
 ## API Reference Generation
 
 API reference pages are auto-generated from `qamomile` docstrings.
-
-### How it works
 
 1. `generate_api.py` uses the `api_gen/` package (built on `griffe`) to introspect the `qamomile` package
 2. Generates MyST-compatible Markdown files into `docs/api/`
@@ -157,32 +127,17 @@ API generation and copying are automatically included in `./build.sh build`. No 
 
 ## Development Workflow
 
-### Writing/Editing Documentation
+### Editing an existing page
 
-1. **Edit Python files** (`.py`) in the appropriate directory.
-
-2. **Use jupytext percent format**:
-   ```python
-   # %% [markdown]
-   # # Section Title
-   # This is markdown content
-
-   # %%
-   import qamomile.circuit as qmc
-
-   # Your Python code here
-   ```
-
-3. **Build, execute and preview**:
+1. Edit the `.py` source — never the `.ipynb` directly.
+2. Re-sync and re-execute:
    ```bash
-   uv run jupytext --to notebook target.py
-   uv run jupyter nbconvert --to notebook --execute --inplace target.ipynb
-   ./build.sh serve-en       # or serve-ja for Japanese
+   uv run jupytext --to ipynb --update docs/en/<section>/foo.py
+   uv run jupyter nbconvert --to notebook --execute --inplace docs/en/<section>/foo.ipynb
    ```
+3. Preview: `./build.sh serve-en` (or `serve-ja`).
 
-### Creating New Pages
-
-What you need to do by hand:
+### Creating a new page
 
 1. **Create the `.py` file** in both `en/` and `ja/` with the standard
    jupytext header, a frontmatter block carrying `title` and `tags`,
@@ -213,9 +168,9 @@ What you need to do by hand:
    # Content goes here...
    ```
 
-   Tag values are language-agnostic — keep them identical between
+   `tags:` values are language-agnostic — keep them identical between
    `en/` and `ja/`. Only `title` differs. Tags must be in
-   `ALLOWED_TAGS` (see [Tags](#tags-on-documentation-pages) below).
+   `ALLOWED_TAGS` (see [Tags](#tags) below).
 
 2. **Add the page to the main `toc:` in both `en/myst.yml` and
    `ja/myst.yml`**, under the matching section:
@@ -228,27 +183,26 @@ What you need to do by hand:
        - file: algorithm/your_new_topic.ipynb   # ← add this
    ```
 
-   The auto-managed `# --- BEGIN doc tags ... # --- END doc tags ---`
-   region elsewhere in `myst.yml` is regenerated by the build script —
-   do not hand-edit it.
+   Do NOT hand-edit the `# --- BEGIN doc tags ... # --- END doc tags ---`
+   region — it is regenerated by the script.
 
-3. **Update the section landing page** by adding a bullet/link to the
-   new page in `tutorial/index.md` / `algorithm/index.md` /
-   `usage/index.md` / `collaboration/index.md` as appropriate.
+3. **Update the section landing page** by adding a bullet/link in the
+   matching `<section>/index.md` (each section's `index.md` is
+   hand-written).
 
 4. **Add to test patterns** if the new page is in a directory not yet
    covered by `tests/docs/test_tutorials.py` `TUTORIAL_PATTERNS`.
-   Collaboration is explicitly not included since those tutorials may
-   require API keys.
+   `collaboration/` is intentionally excluded since those notebooks
+   may need an API key.
 
-5. **Run the doc-tag generator** so chip blocks, tag pages, and the
-   `myst.yml` auto-tags region pick up the new article:
+5. **Regenerate auto-managed regions** (chip blocks, tag pages,
+   `myst.yml` auto-tags region):
 
    ```bash
    uv run python docs/scripts/build_doc_tags.py
    ```
 
-6. **Generate, execute, and commit the `.ipynb`**:
+6. **Generate and execute the `.ipynb`**:
 
    ```bash
    uv run jupytext --to ipynb --update docs/en/<section>/your_new_topic.py
@@ -265,55 +219,52 @@ What you need to do by hand:
    ./build.sh serve-en
    ```
 
-#### Tags on documentation pages
+#### Checklist for new pages
 
-Articles under `en/{tutorial,algorithm,usage,collaboration}/` and
-their `ja/` counterparts are tag-filterable. Give each `.py` a MyST
-frontmatter block at the top of its first markdown cell, e.g.:
+- [ ] `.py` file created in both `en/` and `ja/`, with frontmatter
+      (`title`, `tags`) at the top of the first markdown cell
+- [ ] All tags are in `ALLOWED_TAGS` (otherwise CI's
+      `test_tag_whitelist` fails)
+- [ ] Page added to the main `toc:` in both `en/myst.yml` and
+      `ja/myst.yml`
+- [ ] Page linked from `<section>/index.md`, and from the top-level
+      `en/index.md` / `ja/index.md` if appropriate
+- [ ] `uv run python docs/scripts/build_doc_tags.py` re-run so chip
+      blocks / tag pages / `myst.yml` auto-tags region are current
+- [ ] `.ipynb` generated and executed (outputs present)
+- [ ] Test patterns cover the new directory (if applicable)
+- [ ] Build succeeds and page renders correctly
+
+### Tags
+
+Articles under `{tutorial,algorithm,usage,collaboration}/` (in both
+`en/` and `ja/`) are tag-filterable. Each `.py` declares its tags in
+the frontmatter at the top of its first markdown cell:
 
 ```python
 # %% [markdown]
 # ---
-# title: My New Algorithm
-# tags: [qaoa, optimization, variational]
+# title: My Article
+# tags: [qaoa, optimization]
 # ---
 #
-# # My New Algorithm
-# ...
+# # My Article
 ```
 
-Tags are language-agnostic (the same string for `en` and `ja`); only
-`title` differs per locale.
-
-##### Allowed tags (whitelist)
-
-The script enforces a whitelist of allowed tags — anything outside it
-fails the build with an `UnknownTagError` pointing at the offending
-file. The current set lives in `ALLOWED_TAGS` inside
-`docs/scripts/build_doc_tags.py`. The taxonomy is intentionally small;
-adding a new tag is a deliberate two-line patch:
-
-1. Append the tag to `ALLOWED_TAGS`.
-2. Use it in the article's `tags:` frontmatter.
-
-Both go in the same commit. We avoid free-form tagging because tag
-soup makes the cloud noisy and makes navigation worse than no tags.
-
-From these frontmatter blocks, `docs/scripts/build_doc_tags.py` regenerates:
+Tags are language-agnostic (same string for `en` and `ja`). From these
+declarations, `docs/scripts/build_doc_tags.py` regenerates:
 
 | Output | Path | In git? |
 |---|---|---|
 | Tag landing page | `docs/<lang>/tags/index.md` | gitignored |
 | Per-tag pages | `docs/<lang>/tags/<tag>.md` | gitignored |
-| Inline tag chips | sentinel block inside each tagged `.py` | committed |
-| Browse-by-tag chip cloud | sentinel block inside each section's `index.md` | committed |
-| `Tags` toc block | sentinel region inside each `myst.yml` | committed |
+| Inline tag chips at the top of each article | sentinel block inside the `.py` | committed |
+| Browse-by-tag chip cloud on each section's `index.md` | sentinel block in `index.md` | committed |
+| `Tags` toc block in `myst.yml` | sentinel region in `myst.yml` | committed |
 
-Section index pages (`tutorial/index.md`, `algorithm/index.md`, …) are
-hand-written and tracked in git. The script only refreshes the chip
-line *inside* the sentinel block; it never touches the surrounding
-prose. To opt a section into the chip cloud, drop the sentinel pair in
-the right place:
+Section index pages are hand-written; the script only refreshes the
+chip line *inside* the sentinel block. To opt a section into the chip
+cloud, drop the sentinel pair in the right place:
 
 ```markdown
 ## Browse by tag
@@ -324,62 +275,32 @@ the right place:
 
 Sentinels:
 
-- Inline chip block in `.py`: `# <!-- BEGIN auto-tags -->` / `# <!-- END auto-tags -->`
-- Browse-by-tag block in `index.md`: `<!-- BEGIN browse-by-tag -->` / `<!-- END browse-by-tag -->`
-- `Tags` toc block in `myst.yml`: `# --- BEGIN doc tags (auto-generated) ---` / `# --- END doc tags (auto-generated) ---`
+| Where | Begin / End |
+|---|---|
+| Inline chip block inside an article `.py` | `# <!-- BEGIN auto-tags -->` / `# <!-- END auto-tags -->` |
+| Browse-by-tag block inside a section `index.md` | `<!-- BEGIN browse-by-tag -->` / `<!-- END browse-by-tag -->` |
+| Auto-managed `Tags` toc block in `myst.yml` | `# --- BEGIN doc tags (auto-generated) ---` / `# --- END doc tags (auto-generated) ---` |
 
-`./build.sh build-{en,ja}` (and `make build-{en,ja}`) run the generator
-before the MyST build, so RTD and local builds stay in sync without any
-manual step. After editing tags or chip-affecting content locally, run
-the generator yourself if you want the auto-managed regions in
-`myst.yml` and the chip blocks inside `.py` files to be up to date in
-your working tree:
+`./build.sh build-{en,ja}` runs the generator before MyST builds, so
+RTD and local builds stay in sync without manual steps. Run the
+generator yourself if you want the auto-managed regions to be current
+in your working tree before commit.
 
-```bash
-uv run python docs/scripts/build_doc_tags.py
-```
+#### Tag whitelist
 
-##### Tag whitelist & enforcement
+Allowed tags live in `ALLOWED_TAGS` inside
+`docs/scripts/build_doc_tags.py`. The taxonomy is intentionally small.
+The whitelist is **enforced by CI** via
+`tests/docs/test_tag_whitelist.py` — any PR that uses a tag outside
+the set fails the unit-test job. There is no pre-commit hook and no
+build-time validation: a stray tag in your local working tree will
+not crash the build, only the test fails on the PR.
 
-Allowed tags are listed in `ALLOWED_TAGS` inside
-`docs/scripts/build_doc_tags.py`. CI enforces the whitelist via
-`tests/docs/test_tag_whitelist.py`, which fails on any PR that uses a
-tag outside the set. There is intentionally no pre-commit hook and no
-build-time validation: the test catches the drift on every PR, which
-is sufficient.
-
-**Adding a new tag** is a deliberate maintainer decision, not a
-side-effect of writing an article. Stay within the existing set unless
-the project owner has explicitly approved the new tag — see
-`CLAUDE.md` for the policy.
-
-Release notes (`release_notes/`) are intentionally out of scope and
-never tagged.
-
-#### Checklist for new pages
-
-- [ ] `.py` file created in both `en/` and `ja/`, with frontmatter
-      (`title`, `tags`) at the top of the first markdown cell
-- [ ] All tags are in `ALLOWED_TAGS` (otherwise CI's
-      `test_tag_whitelist` will fail)
-- [ ] Page added to the main `toc:` in both `en/myst.yml` and
-      `ja/myst.yml` (the auto-tags region is regenerated by the
-      generator script)
-- [ ] Page linked from `<section>/index.md` (each section's `index.md`
-      is hand-written) and from the top-level `en/index.md` /
-      `ja/index.md` if appropriate
-- [ ] Generator script run so chip blocks / tag pages /
-      `myst.yml` auto-tags region are up to date:
-      `uv run python docs/scripts/build_doc_tags.py`
-- [ ] `.ipynb` generated and executed (outputs present)
-- [ ] Test patterns cover the new directory (if applicable)
-- [ ] Build succeeds and page renders correctly
-
-## Configuration Files
-
-### `myst.yml` (Jupyter Book 2 Configuration)
-
-Each language directory has its own `myst.yml` combining configuration and table of contents. Key structure:
+**Adding a new tag is a deliberate maintainer decision**, not a
+side-effect of writing an article. Stay within the existing set
+unless the project owner has explicitly approved the new tag — see
+`CLAUDE.md` for the full policy. Release notes (`release_notes/`) are
+intentionally out of scope and never tagged.
 
 ## Jupytext Format
 
@@ -392,70 +313,46 @@ All Python source files use the **percent format**:
 # %%
 # Python code cells start with this marker
 print("Hello, Quantum World!")
-
-# %% [markdown]
-# You can mix markdown and code cells freely
 ```
 
-### Key Features:
-
-- **Metadata in header**: Jupytext and kernel configuration at top of file
+- **Metadata in header**: jupytext + kernelspec at top of file
 - **Cell markers**: `# %%` for code, `# %% [markdown]` for text
-- **Clean diffs**: Git sees normal Python file changes
-- **IDE friendly**: Full Python tooling support
-
-## All Build Commands
-
-See the [Building Documentation](#building-documentation) section for the full command table. All `./build.sh <command>` targets are also available as `make <command>`.
+- **Clean diffs**: git sees normal Python file changes
+- **IDE friendly**: full Python tooling support
 
 ## Troubleshooting
 
-### Problem: "No module named 'qamomile'"
+### "No module named 'qamomile'"
 
-**Solution**: Ensure you're in the project environment and qamomile is installed:
+Ensure dev dependencies are installed in the active env:
 
 ```bash
 uv sync
 ```
 
-### Problem: Notebooks not updating after code changes
+### Notebooks not updating after code changes
 
-**Solution**: Clear the execution cache:
+Clear the execution cache, then re-sync:
 
 ```bash
 ./build.sh clean-all
 ./build.sh sync-build
 ```
 
-### Problem: Port 8000 already in use
-
-**Solution**: Kill the existing server or use a different port:
+### Port 8000 already in use
 
 ```bash
-# Kill existing server
 pkill -f "python -m http.server"
-
-# Or manually serve on different port
+# or use a different port
 cd en/_build/html && python -m http.server 8001
 ```
 
-### Problem: Jupyter Book not found
+### `test_tag_whitelist` fails on a PR
 
-**Solution**: Install development dependencies:
-
-```bash
-uv sync
-```
-
-## Contributing
-
-When contributing documentation:
-
-1. **Edit `.py` source files** — not `.ipynb` directly
-2. **Follow the numbered convention** for tutorials (`NN_topic_name.py`)
-3. **Test your changes**: Run `./build.sh sync-build-en` or `sync-build-ja`
-4. **Check outputs**: Use `./build.sh serve-en` or `serve-ja` to preview
-5. **API changes**: API reference is auto-regenerated on every build
+The article carries a tag that isn't in `ALLOWED_TAGS`. Either fix
+the typo in the article's frontmatter, or — if the tag is genuinely
+new and approved — extend `ALLOWED_TAGS` in
+`docs/scripts/build_doc_tags.py` (see policy in `CLAUDE.md`).
 
 ## Additional Resources
 
