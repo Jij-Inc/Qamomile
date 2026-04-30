@@ -200,17 +200,46 @@ def _parse_article_frontmatter(cell_md: str) -> tuple[dict, str]:
     return fm, rest
 
 
+def _extract_h1(body: str) -> str | None:
+    """Return the first H1 heading text in a markdown ``body``, or ``None``.
+
+    Scans line-by-line for the first ``# `` heading (rejecting ``##``+).
+    Used as a fallback for the article title when frontmatter ``title:``
+    is omitted, which is the recommended style — the body's H1 is what
+    MyST already renders as the page heading, so duplicating it in
+    frontmatter is unnecessary.
+    """
+    for line in body.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("# ") and not stripped.startswith("##"):
+            return stripped[2:].strip()
+    return None
+
+
 def _load_article(py_path: Path, section: str) -> Article | None:
     """Read ``py_path`` and return an :class:`Article`, or ``None``.
 
     Returns ``None`` when the file has no frontmatter / no ``tags``.
+
+    Title resolution falls back through three sources, in order:
+
+    1. ``title:`` in the article frontmatter (legacy / explicit override).
+    2. The first H1 heading in the markdown body — the recommended
+       source. Authors only need to write the H1 once.
+    3. The filename stem, title-cased (e.g. ``qaoa_maxcut`` →
+       ``Qaoa Maxcut``). A last-resort safety net so tag pages still
+       render something meaningful for an article missing both.
     """
     text = py_path.read_text(encoding="utf-8")
     _, _, cell = _extract_first_markdown_cell(text)
-    fm, _body = _parse_article_frontmatter(cell)
+    fm, body = _parse_article_frontmatter(cell)
     if not fm or not fm.get("tags"):
         return None
-    title = str(fm.get("title") or py_path.stem.replace("_", " ").title())
+    title = str(
+        fm.get("title")
+        or _extract_h1(body)
+        or py_path.stem.replace("_", " ").title()
+    )
     raw_tags = fm.get("tags") or []
     if not isinstance(raw_tags, list):
         return None
