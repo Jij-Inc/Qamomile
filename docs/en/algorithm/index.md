@@ -6,11 +6,6 @@ slug: algorithm
 
 Concrete quantum algorithm examples built with Qamomile.
 
-## Browse by tag
-
-<!-- BEGIN browse-by-tag -->
-<!-- END browse-by-tag -->
-
 ## All articles
 
 - [QAOA for MaxCut](qaoa_maxcut) — Build a QAOA circuit from scratch to solve MaxCut, then compare with the built-in `qaoa_state`

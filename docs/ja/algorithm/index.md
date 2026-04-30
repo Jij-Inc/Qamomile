@@ -6,11 +6,6 @@ slug: algorithm
 
 Qamomileで実装した具体的な量子アルゴリズム例です。
 
-## タグで探す
-
-<!-- BEGIN browse-by-tag -->
-<!-- END browse-by-tag -->
-
 ## すべての記事
 
 - [QAOAでMaxCutを解く](qaoa_maxcut) — QAOA回路をゼロから構築してMaxCutを解き、組み込みの`qaoa_state`と比較する

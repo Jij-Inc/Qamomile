@@ -43,10 +43,10 @@ project:
       file: usage/index.md
       children:
         - file: usage/binary_model.ipynb
-    - title: コラボレーション
-      file: collaboration/index.md
+    - title: インテグレーション
+      file: integration/index.md
       children:
-        - file: collaboration/qbraid_executor.ipynb
+        - file: integration/qbraid_executor.ipynb
     - title: リリースノート
       file: release_notes/index.md
       children:

@@ -6,11 +6,6 @@ slug: tutorial
 
 Qamomileを基礎から学ぶステップバイステップガイドです。
 
-## タグで探す
-
-<!-- BEGIN browse-by-tag -->
-<!-- END browse-by-tag -->
-
 ## すべてのチュートリアル
 
 1. [はじめての量子カーネル](01_your_first_quantum_kernel) — カーネルの定義・可視化・実行、アフィンルール

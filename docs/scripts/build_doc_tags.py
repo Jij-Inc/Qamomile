@@ -656,29 +656,51 @@ def _inject_browse_by_tag(
     tag_map: dict[str, list[Article]],
     strings: dict[str, object],
 ) -> Path | None:
-    """Refresh the auto-managed browse-by-tag block in a section index.
+    """Inject the auto-managed browse-by-tag block into a section index.
 
-    Looks for a sentinel block::
+    Two cases, mirroring the chip-block injection in article ``.py``
+    files:
 
-        <!-- BEGIN browse-by-tag -->
-        ...
-        <!-- END browse-by-tag -->
-
-    inside ``index_path`` and rewrites its body with the proximity-
-    grouped tag cloud (see :func:`_render_browse_by_tag_block`). Section
-    index files without the sentinels are left alone — that's how a
-    section opts out.
+    1. The index already carries the sentinel pair
+       ``<!-- BEGIN browse-by-tag --> ... <!-- END browse-by-tag -->``
+       — replace the body in place.
+    2. No sentinel pair — synthesize the entire "Browse by tag"
+       section (heading + sentinels + chip cloud) and insert it
+       immediately before the first ``## `` heading in the body. This
+       is the supported flow for the build-dir model: contributors
+       keep the committed ``index.md`` free of any browse-by-tag
+       boilerplate, and ``build_doc_tags.py`` materialises the section
+       inside the ``_build_src/`` copy.
 
     Returns the path if the file was modified, otherwise ``None``.
     """
     if not index_path.is_file():
         return None
     text = index_path.read_text(encoding="utf-8")
-    if not BROWSE_BLOCK_RE.search(text):
-        return None
-    block = _render_browse_by_tag_block(tag_map, index_section, strings)
-    canonical = f"{BROWSE_BEGIN}\n{block}\n{BROWSE_END}"
-    new_text = BROWSE_BLOCK_RE.sub(canonical, text, count=1)
+    block_body = _render_browse_by_tag_block(tag_map, index_section, strings)
+
+    # Case 1: sentinels present — fill them in place.
+    if BROWSE_BLOCK_RE.search(text):
+        canonical = f"{BROWSE_BEGIN}\n{block_body}\n{BROWSE_END}"
+        new_text = BROWSE_BLOCK_RE.sub(canonical, text, count=1)
+        if new_text == text:
+            return None
+        index_path.write_text(new_text, encoding="utf-8")
+        return index_path
+
+    # Case 2: no sentinels — synthesize the whole section and insert it
+    # right before the first H2. An index template without any H2 (an
+    # empty section landing) gets the section appended at the end.
+    heading = str(strings["browse_by_tag"])
+    section_md = (
+        f"## {heading}\n\n"
+        f"{BROWSE_BEGIN}\n{block_body}\n{BROWSE_END}\n\n"
+    )
+    h2_match = re.search(r"^## ", text, re.MULTILINE)
+    if h2_match is not None:
+        new_text = text[: h2_match.start()] + section_md + text[h2_match.start() :]
+    else:
+        new_text = text.rstrip() + "\n\n" + section_md
     if new_text == text:
         return None
     index_path.write_text(new_text, encoding="utf-8")

@@ -6,11 +6,6 @@ slug: tutorial
 
 Step-by-step guides to learn Qamomile.
 
-## Browse by tag
-
-<!-- BEGIN browse-by-tag -->
-<!-- END browse-by-tag -->
-
 ## All tutorials
 
 1. [Your First Quantum Kernel](01_your_first_quantum_kernel) — Define, visualize, and execute a kernel; the affine rule

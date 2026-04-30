@@ -251,12 +251,15 @@ build pipeline and the conventions for adding or editing pages.
 
 Key invariants worth remembering:
 
-- **Auto-managed content (chip blocks, browse-by-tag clouds,
+- **Auto-managed content (chip blocks, browse-by-tag sections,
   per-tag pages, `myst.yml` Tags toc) is never committed.**
   `build.sh build` copies the docs tree into a gitignored
   `docs/_build_src/`, runs `build_doc_tags.py` and `jupytext
-  --update` against the copy, and builds from there. Source files
-  carry only empty sentinel markers; do not hand-fill them.
+  --update` against the copy, and builds from there. The committed
+  source carries no chip block or `## Browse by tag` heading — those
+  are synthesised into the build-dir copy. Only `myst.yml` keeps a
+  static empty sentinel pair to anchor the Tags toc injection. Do
+  not hand-fill any of these.
 - The committed source must therefore stay clean. PRs that touch
   tag taxonomy should only diff `tags:` frontmatter lines, not
   chip-block bodies.

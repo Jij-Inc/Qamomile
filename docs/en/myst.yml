@@ -44,10 +44,10 @@ project:
       file: usage/index.md
       children:
         - file: usage/binary_model.ipynb
-    - title: Collaboration
-      file: collaboration/index.md
+    - title: Integration
+      file: integration/index.md
       children:
-        - file: collaboration/qbraid_executor.ipynb
+        - file: integration/qbraid_executor.ipynb
     - title: Release Notes
       file: release_notes/index.md
       children:

@@ -196,9 +196,11 @@ For reference, the underlying flow:
    at build time.
 
 3. **Update the section landing page** by adding a bullet/link in the
-   matching `<section>/index.md` (each section's `index.md` is
-   hand-written; the empty `<!-- BEGIN browse-by-tag --> ... <!-- END
-   browse-by-tag -->` sentinel pair stays untouched).
+   matching `<section>/index.md`. Each section's `index.md` is
+   hand-written and contains only the intro paragraph plus the
+   article list; the `## Browse by tag` heading and chip cloud are
+   synthesised into the build-dir copy automatically, so don't add
+   them yourself.
 
 4. **Add to test patterns** if the new page is in a directory not yet
    covered by `tests/docs/test_tutorials.py` `TUTORIAL_PATTERNS`.
@@ -253,14 +255,17 @@ pipeline runs `docs/scripts/build_doc_tags.py` against `_build_src/`
 | Browse-by-tag chip cloud on each section's `index.md` | injected into `_build_src/<lang>/<section>/index.md` | no |
 | `Tags` toc block in `myst.yml` | injected into `_build_src/<lang>/myst.yml` | no |
 
-The committed source files only carry empty sentinel markers so the
-script knows where to inject in the build-dir copy:
+Where the script injects in the build-dir copy:
 
-| Where | Sentinel pair (kept empty in committed source) |
+| Where | How the script finds the spot |
 |---|---|
-| Article `.py` body | none — the script inserts a chip block right after the first H1 inside `_build_src/` |
-| Section `index.md` | `<!-- BEGIN browse-by-tag -->` / `<!-- END browse-by-tag -->` |
-| `myst.yml` toc | `# --- BEGIN doc tags (auto-generated) ---` / `# --- END doc tags (auto-generated) ---` |
+| Article `.py` body | inserted right after the first H1 |
+| Section `index.md` | a whole `## Browse by tag` section is synthesized and inserted right before the first H2 (e.g. before `## All articles`) |
+| `myst.yml` toc | empty sentinel pair `# --- BEGIN doc tags (auto-generated) --- ... # --- END doc tags (auto-generated) ---` is filled in place |
+
+The committed source therefore carries no chip block, no
+browse-by-tag heading, and no per-tag toc entries — just a static
+empty sentinel pair in `myst.yml`.
 
 `./build.sh build-{en,ja}` runs `setup_build_src` (copy → inject →
 jupytext sync) before MyST builds, so RTD and local builds stay in
