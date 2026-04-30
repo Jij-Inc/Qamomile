@@ -180,15 +180,39 @@ def _parse_article_frontmatter(cell_md: str) -> tuple[dict, str]:
 
 
 def _extract_summary(body_md: str) -> str:
-    """Return the first non-H1 paragraph of the markdown body."""
+    """Return the first real prose paragraph after the H1.
+
+    Skips both blank lines *and* the inline ``<!-- BEGIN auto-tags --> ...
+    <!-- END auto-tags -->`` chip block injected by this very script — the
+    chip block is presentational and would otherwise leak into the article
+    cards on tag/index pages, producing duplicate "Tags:" lines.
+    """
+    # Sentinel strings live at module scope but reproduce the visible form
+    # here (the .py-comment prefix has already been stripped by the caller).
+    chip_begin = "<!-- BEGIN auto-tags -->"
+    chip_end = "<!-- END auto-tags -->"
+
     lines = body_md.splitlines()
     i = 0
     while i < len(lines) and not lines[i].startswith("# "):
         i += 1
     if i < len(lines):
-        i += 1  # skip past H1
-    while i < len(lines) and not lines[i].strip():
-        i += 1
+        i += 1  # past H1
+    # Skip blanks and any chip block(s) that sit between the H1 and the
+    # first real paragraph.
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if not stripped:
+            i += 1
+            continue
+        if stripped == chip_begin:
+            i += 1
+            while i < len(lines) and lines[i].strip() != chip_end:
+                i += 1
+            if i < len(lines):
+                i += 1  # past END
+            continue
+        break
     buf: list[str] = []
     while i < len(lines) and lines[i].strip():
         buf.append(lines[i].strip())
