@@ -15,13 +15,13 @@
 # %% [markdown]
 # ---
 # title: How to use BinaryModel
-# tags: [qamomile-optimization, binary-model]
+# tags: [qamomile-optimization, binary-model, usage]
 # ---
 #
 # # How to use `BinaryModel`
 #
 # <!-- BEGIN auto-tags -->
-# **Tags:** <a class="tag-chip" href="../tags/qamomile-optimization.md">qamomile-optimization</a> <a class="tag-chip" href="../tags/binary-model.md">binary-model</a>
+# **Tags:** <a class="tag-chip" href="../tags/qamomile-optimization.md">qamomile-optimization</a> <a class="tag-chip" href="../tags/binary-model.md">binary-model</a> <a class="tag-chip" href="../tags/usage.md">usage</a>
 # <!-- END auto-tags -->
 #
 # This tutorial walks through `BinaryModel`, the core class in Qamomile's optimization module for describing unconstrained optimization problems over binary variables. `BinaryModel` supports both `binary` (0/1) and `spin` (-1/1) variable types, and the two representations can be converted into each other through the `change_vartype` method.
@@ -480,4 +480,4 @@ for original_index1, original_index2 in qubo_from_ommx.keys():
 # %% [markdown]
 # ## Related topics
 # - [Solving MaxCut with QAOA: Building the Circuit from Scratch](../algorithm/qaoa_maxcut): an example that creates a QUBO dictionary from a random graph built with networkx, defines a `BinaryModel` directly, and applies QAOA.
-# - [QAOA for Graph Partitioning](qaoa_graph_partition): an example that applies QAOA to an OMMX instance using Qamomile's `QAOAConverter`. It only touches `BinaryModel` directly for the normalization step, but it's a realistic end-to-end example based on an OMMX instance.
+# - [QAOA for Graph Partitioning](../algorithm/qaoa_graph_partition): an example that applies QAOA to an OMMX instance using Qamomile's `QAOAConverter`. It only touches `BinaryModel` directly for the normalization step, but it's a realistic end-to-end example based on an OMMX instance.

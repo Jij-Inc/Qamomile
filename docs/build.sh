@@ -12,7 +12,7 @@ LANGS=(en ja)
 # collaboration is excluded because those notebooks may require API keys
 # and can't be automatically synced/executed.
 # release_notes is excluded because it is markdown-only; nothing to sync or execute.
-TARGET_DIRS=(tutorial algorithm optimization)
+TARGET_DIRS=(tutorial algorithm usage)
 
 # Color output
 RED='\033[0;31m'

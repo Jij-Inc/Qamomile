@@ -133,7 +133,7 @@ print(f"Constant:               {spin_model.constant}")
 # > **Note:** `BinaryModel` also provides `from_qubo()` and `from_hubo()` for
 # > problems that are naturally expressed in the binary domain (e.g.,
 # > assignment problems, constrained problems with penalty terms). See
-# > [QAOA for Graph Partitioning](../optimization/qaoa_graph_partition) for a
+# > [QAOA for Graph Partitioning](qaoa_graph_partition) for a
 # > QUBO / JijModeling-based workflow.
 
 # %% [markdown]
@@ -540,5 +540,5 @@ print(f"Built-in mean energy: {decoded_builtin.energy_mean():.4f}")
 #
 # - For problems that are naturally expressed with **binary variables** or
 #   that require **constraints** (penalty terms), see
-#   [QAOA for Graph Partitioning](../optimization/qaoa_graph_partition),
+#   [QAOA for Graph Partitioning](qaoa_graph_partition),
 #   which uses the higher-level `QAOAConverter` together with JijModeling.

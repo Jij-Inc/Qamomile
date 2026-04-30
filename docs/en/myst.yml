@@ -35,6 +35,7 @@ project:
       file: algorithm/index.md
       children:
         - file: algorithm/qaoa_maxcut.ipynb
+        - file: algorithm/qaoa_graph_partition.ipynb
         - file: algorithm/vqe_for_hydrogen.ipynb
 
 # --- BEGIN doc tags (auto-generated) ---
@@ -66,16 +67,17 @@ project:
       hidden: true
     - file: tags/tutorial.md
       hidden: true
+    - file: tags/usage.md
+      hidden: true
     - file: tags/variational.md
       hidden: true
     - file: tags/vqe.md
       hidden: true
     # --- END doc tags (auto-generated) ---
-    - title: Optimization
-      file: optimization/index.md
+    - title: Usage
+      file: usage/index.md
       children:
-        - file: optimization/binary_model.ipynb
-        - file: optimization/qaoa_graph_partition.ipynb
+        - file: usage/binary_model.ipynb
     - title: Collaboration
       file: collaboration/index.md
       children:

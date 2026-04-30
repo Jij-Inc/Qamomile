@@ -18,12 +18,12 @@ Qamomileは量子プログラミングSDKです。型付きPython関数で量子
 具体的なアルゴリズム例 — [タグから探す](algorithm/index.md):
 
 - [QAOAでMaxCutを解く](algorithm/qaoa_maxcut) — QAOA回路をゼロから構築してMaxCutを解き、組み込みの`qaoa_state`と比較する
-- [QAOAによるグラフ分割](optimization/qaoa_graph_partition) — JijModelingと`QAOAConverter`でエンドツーエンド
+- [QAOAによるグラフ分割](algorithm/qaoa_graph_partition) — JijModelingと`QAOAConverter`でエンドツーエンド
 - [水素分子のためのVQE](algorithm/vqe_for_hydrogen) — OpenFermionで分子ハミルトニアンを構築し、VQEで基底状態エネルギーを求める
 
-## 最適化
+## 使い方
 
-- [`BinaryModel`の使い方](optimization/binary_model) — BinaryExpr、QUBO/HUBO/Ising、OMMXから制約なしバイナリ/スピンモデルを構築する
+- [`BinaryModel`の使い方](usage/binary_model) — BinaryExpr、QUBO/HUBO/Ising、OMMXから制約なしバイナリ/スピンモデルを構築する
 
 ## 対応Quantum SDK
 

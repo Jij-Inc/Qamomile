@@ -3,7 +3,7 @@
 This script is the source of truth for tag-based discovery UX across the
 documentation. It scans every tagged article under
 
-    docs/<lang>/{tutorial,algorithm,optimization,collaboration}/*.py
+    docs/<lang>/{tutorial,algorithm,usage,collaboration}/*.py
 
 (reading the MyST ``title`` / ``tags`` frontmatter inside the first
 ``# %% [markdown]`` cell), and writes:
@@ -47,7 +47,7 @@ DOCS_ROOT = REPO_ROOT / "docs"
 SECTIONS: tuple[str, ...] = (
     "tutorial",
     "algorithm",
-    "optimization",
+    "usage",
     "collaboration",
 )
 
@@ -70,7 +70,7 @@ STRINGS: dict[str, dict[str, object]] = {
         "section_titles": {
             "tutorial": "Tutorials",
             "algorithm": "Algorithms",
-            "optimization": "Optimization",
+            "usage": "Usage",
             "collaboration": "Collaboration",
         },
         "bucket_labels": {
@@ -94,7 +94,7 @@ STRINGS: dict[str, dict[str, object]] = {
         "section_titles": {
             "tutorial": "チュートリアル",
             "algorithm": "アルゴリズム",
-            "optimization": "最適化",
+            "usage": "使い方",
             "collaboration": "コラボレーション",
         },
         "bucket_labels": {

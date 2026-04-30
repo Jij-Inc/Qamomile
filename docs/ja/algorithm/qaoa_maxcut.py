@@ -116,7 +116,7 @@ print(f"Quadratic terms (J_ij): {spin_model.quad}")
 print(f"Constant:               {spin_model.constant}")
 
 # %% [markdown]
-# > **Note:** `BinaryModel`はQUBO向けの`from_qubo()`や高次版の`from_hubo()`も提供しており、割当問題や制約（ペナルティ項）を伴う問題のようにバイナリ領域で自然に定式化される問題に利用できます。QUBO/JijModelingベースのワークフローについては[QAOAによるグラフ分割](../optimization/qaoa_graph_partition)を参照してください。
+# > **Note:** `BinaryModel`はQUBO向けの`from_qubo()`や高次版の`from_hubo()`も提供しており、割当問題や制約（ペナルティ項）を伴う問題のようにバイナリ領域で自然に定式化される問題に利用できます。QUBO/JijModelingベースのワークフローについては[QAOAによるグラフ分割](qaoa_graph_partition)を参照してください。
 
 # %% [markdown]
 # ## 厳密解（全探索）
@@ -467,4 +467,4 @@ print(f"Built-in mean energy: {decoded_builtin.energy_mean():.4f}")
 #
 # **次のステップ:**
 #
-# - **バイナリ変数**で自然に定式化される問題や、**制約**（ペナルティ項）が必要な問題については、JijModelingと高レベルの`QAOAConverter`を使う[QAOAによるグラフ分割](../optimization/qaoa_graph_partition)を参照してください。
+# - **バイナリ変数**で自然に定式化される問題や、**制約**（ペナルティ項）が必要な問題については、JijModelingと高レベルの`QAOAConverter`を使う[QAOAによるグラフ分割](qaoa_graph_partition)を参照してください。

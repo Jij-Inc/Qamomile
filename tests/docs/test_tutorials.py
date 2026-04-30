@@ -29,10 +29,10 @@ TUTORIAL_PATTERNS = [
     "docs/ja/algorithm/**/*.py",
     "docs/en/algorithm/**/*.ipynb",
     "docs/ja/algorithm/**/*.ipynb",
-    "docs/en/optimization/**/*.py",
-    "docs/ja/optimization/**/*.py",
-    "docs/en/optimization/**/*.ipynb",
-    "docs/ja/optimization/**/*.ipynb",
+    "docs/en/usage/**/*.py",
+    "docs/ja/usage/**/*.py",
+    "docs/en/usage/**/*.ipynb",
+    "docs/ja/usage/**/*.ipynb",
     # We will not execute the following directories:
     # - collaboration: they may require API keys and may have side effects.
     # - release_notes: markdown-only; nothing to execute.
