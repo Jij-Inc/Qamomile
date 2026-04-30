@@ -21,7 +21,7 @@
 #
 # 量子誤り訂正(Quantum Error Correction; QEC)は、壊れやすい量子状態を複数の物理量子ビットへ分散し、状態そのものを測らずにエラーだけを検出して戻す技術です。
 #
-# このチュートリアルでは、次の流れを Qamomile の `@qkernel` で実装します。
+# 本記事では、次の流れを Qamomile の `@qkernel` で実装します。
 #
 # 1. 3量子ビット bit-flip 符号で、単一の $X$ エラーを訂正する。
 # 2. Hadamard 変換で phase-flip 符号を作り、単一の $Z$ エラーを訂正する。
@@ -68,7 +68,7 @@ def _sample_first_bit(
     runtime_bindings: dict[str, object] | None = None,
     shots: int = 256,
 ) -> dict[int, int]:
-    """Compile a tutorial kernel and return the first-bit count distribution."""
+    """Compile an example kernel and return the first-bit count distribution."""
     executable = transpiler.transpile(
         kernel,
         bindings=bindings or {},
@@ -509,7 +509,7 @@ for name, error_type, error_pos in shor_cases:
 # %% [markdown]
 # ## 6. まとめ
 #
-# このチュートリアルでは、量子誤り訂正を次の順に実装しました。
+# 本記事では、量子誤り訂正を次の順に実装しました。
 #
 # - 3量子ビット bit-flip 符号で $Z$ パリティを測り、単一 $X$ エラーを訂正した。
 # - Hadamard 変換で phase-flip 符号を作り、$X$ パリティを測って単一 $Z$ エラーを訂正した。

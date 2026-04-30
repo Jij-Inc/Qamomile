@@ -28,7 +28,7 @@
 # first order), symmetrise the step (Strang, second order), or nest the
 # symmetric step recursively via Suzuki's construction (any even order).
 #
-# This tutorial builds these approximations end-to-end in Qamomile on a
+# This article builds these approximations end-to-end in Qamomile on a
 # one-qubit Rabi Hamiltonian so the Trotter error is measurable. We start
 # with $S_1$ and $S_2$, then write the full Suzuki fractal recursion as a
 # **self-recursive** `@qkernel` that takes the target order as a `UInt`
@@ -303,7 +303,7 @@ def rabi_from_algorithm(
 
 # %% [markdown]
 # The helper accepts `order = 1` or any positive even integer and applies
-# `step` Trotter slices of size `gamma / step`, so the rest of this tutorial's
+# `step` Trotter slices of size `gamma / step`, so the rest of this article's
 # plots could be reproduced by binding `order` and `step` on this single
 # kernel. Use it when you do not need to customise the splitting and fall
 # back to the explicit form above when you want to see (or tweak) the

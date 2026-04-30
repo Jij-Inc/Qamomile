@@ -21,7 +21,7 @@
 #
 # Quantum error correction (QEC) protects fragile quantum states by spreading one logical state across multiple physical qubits. The key point is that we do not measure the logical state directly. Instead, we measure only enough information to identify the error.
 #
-# In this tutorial, we implement three codes with Qamomile's `@qkernel`.
+# In this article, we implement three codes with Qamomile's `@qkernel`.
 #
 # 1. Correct a single $X$ error with the 3-qubit bit-flip code.
 # 2. Turn that idea into a phase-flip code with Hadamard gates, and correct a single $Z$ error.
@@ -68,7 +68,7 @@ def _sample_first_bit(
     runtime_bindings: dict[str, object] | None = None,
     shots: int = 256,
 ) -> dict[int, int]:
-    """Compile a tutorial kernel and return the first-bit count distribution."""
+    """Compile an example kernel and return the first-bit count distribution."""
     executable = transpiler.transpile(
         kernel,
         bindings=bindings or {},
@@ -505,7 +505,7 @@ for name, error_type, error_pos in shor_cases:
 # %% [markdown]
 # ## 6. Summary
 #
-# In this tutorial, we implemented:
+# In this article, we implemented:
 #
 # - The 3-qubit bit-flip code, using $Z$ parity checks to correct a single $X$ error.
 # - The 3-qubit phase-flip code, using $X$ parity checks to correct a single $Z$ error.

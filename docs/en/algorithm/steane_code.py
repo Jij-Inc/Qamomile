@@ -19,7 +19,7 @@
 #
 # # Quantum Error Correction (2): Steane [[7,1,3]] Code
 #
-# In the [previous tutorial](quantum_error_correction.ipynb), we implemented the 3-qubit repetition codes and Shor's 9-qubit code. Here we move to the **Steane [[7,1,3]] code**, a cleaner and more structured code.
+# In the [previous article](quantum_error_correction.ipynb), we implemented the 3-qubit repetition codes and Shor's 9-qubit code. Here we move to the **Steane [[7,1,3]] code**, a cleaner and more structured code.
 #
 # The Steane code is a CSS code built from the classical Hamming [7,4,3] code. It protects one logical qubit with seven physical qubits and corrects any single-qubit Pauli error: $X$, $Y$, or $Z$.
 #
@@ -374,7 +374,7 @@ print(f"  |0_L> codeword ratio: {valid / total:.3f}")
 # %% [markdown]
 # ## 5. Summary
 #
-# In this tutorial, we implemented the Steane [[7,1,3]] code.
+# In this article, we implemented the Steane [[7,1,3]] code.
 #
 # - Built three $X$-type and three $Z$-type stabilizers from the Hamming [7,4,3] code.
 # - Used $Z$-type stabilizers to detect the $X$ component and $X$-type stabilizers to detect the $Z$ component.
