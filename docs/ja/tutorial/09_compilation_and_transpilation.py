@@ -70,7 +70,7 @@
 # パスを実行する前に、出力することになる対象に名前を付けておきましょう。
 #
 # ### `Block`
-# 
+#
 # `Block` (`qamomile.circuit.ir.block`) はパイプラインを流れるコンテナです。以下を保持します:
 #
 # - `operations`: `Operation`インスタンスの順序付きリスト
@@ -104,7 +104,7 @@
 # `BlockKind.AFFINE`は、このaffine型不変条件（「各量子値は高々1回だけ使われている」）が検証可能な状態でブロックが仕上がっていることを意味します。実際の検証は`AffineValidationPass`が担当し、違反すると`AffineTypeError`が送出されます。
 #
 # ### `Value` と`Operation`
-# 
+#
 # **`Value`** (`qamomile.circuit.ir.value`) はSSAスタイルの型付き値です。`Qubit`に限らず`Float`、`UInt`、`Bit`などすべての値が`Value`として表現されます。ゲート適用や古典演算でその値が更新されるたびに、`Value.next_version()`が新しい`Value`を生成します。このとき`version`と`uuid`は新しくなりますが、`logical_id`と型・メタデータは保たれます。
 #
 # `logical_id`は「SSAのバージョンをまたいで**同じ論理的な変数**を指す」ための安定した識別子です。たとえば`q = qmc.h(q)`で新しい`Value`が作られても、元の`q`と同じ`logical_id`を持ちます。これは物理量子ビットへのマッピングではなく、IR上で「同じ変数の別バージョン」を結びつけるためのもので、`Float`パラメータや`Bit`などにも同じ仕組みが使われます（バックエンドの物理量子ビット割り当ては後段の`emit`で`ResourceAllocator`が決めます）。
@@ -202,7 +202,10 @@ block = transpiler.to_block(demo_kernel, bindings=bindings, parameters=parameter
 pretty_print_block(block)
 print("after to_block:   ", summarise(block))
 print("parameters:       ", list(block.parameters))
-print("CallBlockOps:     ", sum(1 for op in block.operations if isinstance(op, CallBlockOperation)))
+print(
+    "CallBlockOps:     ",
+    sum(1 for op in block.operations if isinstance(op, CallBlockOperation)),
+)
 # 注意: `CallBlockOperation`は`ForOperation`の本体内部にも存在しうるので、
 # 必ずしもトップレベルのリストにあるとは限りません。
 
@@ -264,7 +267,10 @@ print(pretty_print_block(block))
 # %%
 block = transpiler.partial_eval(block, bindings=bindings)
 print("after partial_eval:", summarise(block))
-print("ForOperations:    ", sum(1 for op in block.operations if isinstance(op, ForOperation)))
+print(
+    "ForOperations:    ",
+    sum(1 for op in block.operations if isinstance(op, ForOperation)),
+)
 
 # %% [markdown]
 # `UInt`を未バインドのまま残してループ境界に使うと、下流の`validate_symbolic_shapes`パスが該当する値の名前とともに`QamomileCompileError`を送出します。これは「このカーネルは実はコンパイル時に構造化されていない」という状況を、後段での分かりにくいクラッシュではなく読みやすいエラーへ変換することを担当するパスです。
@@ -293,7 +299,9 @@ print("after analyze:    ", summarise(block))
 plan = transpiler.plan(block)
 for i, step in enumerate(plan.steps):
     seg = step.segment
-    print(f"  step {i}: {type(step).__name__} ({type(seg).__name__}, {len(seg.operations)} ops)")
+    print(
+        f"  step {i}: {type(step).__name__} ({type(seg).__name__}, {len(seg.operations)} ops)"
+    )
 print("total unbound parameters:", list(plan.parameters))
 
 # %% [markdown]
@@ -432,6 +440,7 @@ print(executable.quantum_circuit)
 # ### 6.1 小さなデモカーネル
 #
 # 3量子ビット分のHadamard重ね合わせを`QFixed`として測定するだけの最小例を用意します。
+
 
 # %%
 @qmc.qkernel

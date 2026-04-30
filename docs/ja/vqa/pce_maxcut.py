@@ -299,8 +299,7 @@ cost_history: list[float] = []
 
 def measure_expectations(thetas: list[float]) -> list[float]:
     return [
-        exe.run(executor, bindings={"thetas": thetas}).result()
-        for exe in executables
+        exe.run(executor, bindings={"thetas": thetas}).result() for exe in executables
     ]
 
 
@@ -328,9 +327,7 @@ def loss(params: np.ndarray) -> float:
 rng = np.random.default_rng(42)
 initial_params = rng.uniform(-np.pi, np.pi, num_thetas)
 
-res = minimize(
-    loss, initial_params, method="BFGS", options={"maxiter": maxiter}
-)
+res = minimize(loss, initial_params, method="BFGS", options={"maxiter": maxiter})
 
 print(f"Final loss: {res.fun:+.4f}")
 

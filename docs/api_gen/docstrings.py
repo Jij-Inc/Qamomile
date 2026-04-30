@@ -60,11 +60,13 @@ def write_docstring(
             lines.append("| Name | Type | Description |")
             lines.append("|------|------|-------------|")
             for param in section.value:
-                ann = _escape_table_cell(str(param.annotation)) if param.annotation else ""
-                desc = (
-                    _escape_table_cell(param.description)
-                    if param.description
+                ann = (
+                    _escape_table_cell(str(param.annotation))
+                    if param.annotation
                     else ""
+                )
+                desc = (
+                    _escape_table_cell(param.description) if param.description else ""
                 )
                 lines.append(f"| `{param.name}` | `{ann}` | {desc} |")
             lines.append("")

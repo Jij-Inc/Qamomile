@@ -47,9 +47,7 @@ class CrossRefRegistry:
                 else:
                     break
             up = len(parts_from) - common
-            rel = PurePosixPath(
-                "/".join([".."] * up + list(parts_to[common:]))
-            )
+            rel = PurePosixPath("/".join([".."] * up + list(parts_to[common:])))
         return f"{rel}#{anchor}"
 
     def make_link(

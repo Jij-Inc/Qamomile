@@ -242,7 +242,10 @@ parameters = ["theta"]
 block = transpiler.to_block(demo_kernel, bindings=bindings, parameters=parameters)
 print("after to_block:   ", summarise(block))
 print("parameters:       ", list(block.parameters))
-print("CallBlockOps:     ", sum(1 for op in block.operations if isinstance(op, CallBlockOperation)))
+print(
+    "CallBlockOps:     ",
+    sum(1 for op in block.operations if isinstance(op, CallBlockOperation)),
+)
 # Note: `CallBlockOperation`s may live inside a `ForOperation` body too —
 # they are not necessarily in the top-level list.
 
@@ -325,7 +328,10 @@ print(pretty_print_block(block))
 # %%
 block = transpiler.partial_eval(block, bindings=bindings)
 print("after partial_eval:", summarise(block))
-print("ForOperations:    ", sum(1 for op in block.operations if isinstance(op, ForOperation)))
+print(
+    "ForOperations:    ",
+    sum(1 for op in block.operations if isinstance(op, ForOperation)),
+)
 
 # %% [markdown]
 # If you left a `UInt` unbound and tried to use it as a loop bound, the
@@ -371,7 +377,9 @@ print("after analyze:    ", summarise(block))
 plan = transpiler.plan(block)
 for i, step in enumerate(plan.steps):
     seg = step.segment
-    print(f"  step {i}: {type(step).__name__} ({type(seg).__name__}, {len(seg.operations)} ops)")
+    print(
+        f"  step {i}: {type(step).__name__} ({type(seg).__name__}, {len(seg.operations)} ops)"
+    )
 print("total unbound parameters:", list(plan.parameters))
 
 # %% [markdown]
@@ -570,6 +578,7 @@ print(executable.quantum_circuit)
 #
 # A 3-qubit Hadamard superposition measured as a `QFixed` is enough to
 # exercise every step.
+
 
 # %%
 @qmc.qkernel

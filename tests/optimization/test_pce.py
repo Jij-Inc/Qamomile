@@ -598,9 +598,7 @@ class TestPCEEndToEnd:
                 bindings={"n": n, "P": P_i},
                 parameters=["thetas"],
             )
-            result = executable.run(
-                executor, bindings={"thetas": [0.0] * n}
-            ).result()
+            result = executable.run(executor, bindings={"thetas": [0.0] * n}).result()
             assert isinstance(result, float)
             assert math.isfinite(result)
             # ⟨ψ|P|ψ⟩ for any single Pauli string must lie in [-1, 1].
@@ -712,13 +710,9 @@ class TestPCERandomGraphs:
         converter = PCEConverter(ising, k=k)
 
         # Capacity invariant.
-        assert (
-            math.comb(converter.num_qubits, k) * (3**k) >= ising.num_bits
-        )
+        assert math.comb(converter.num_qubits, k) * (3**k) >= ising.num_bits
         if converter.num_qubits > k:
-            assert (
-                math.comb(converter.num_qubits - 1, k) * (3**k) < ising.num_bits
-            )
+            assert math.comb(converter.num_qubits - 1, k) * (3**k) < ising.num_bits
 
         # Encoding shape.
         assert len(converter.encoder.pauli_encoding) == n

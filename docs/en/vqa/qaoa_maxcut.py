@@ -421,8 +421,7 @@ plt.show()
 # %%
 if best_qaoa_sample is not None:
     color_map = [
-        "#FF6B6B" if best_qaoa_sample[i] == +1 else "#4ECDC4"
-        for i in range(num_nodes)
+        "#FF6B6B" if best_qaoa_sample[i] == +1 else "#4ECDC4" for i in range(num_nodes)
     ]
     plt.figure(figsize=(5, 4))
     nx.draw(

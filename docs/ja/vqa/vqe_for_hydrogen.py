@@ -63,7 +63,9 @@ molecule = of_chem.MolecularData(geometry, basis, multiplicity, charge, descript
 molecule = of_pyscf.run_pyscf(molecule, run_scf=True, run_fci=True)
 n_qubit = molecule.n_qubits
 n_electron = molecule.n_electrons
-fermionic_hamiltonian = of_trans.get_fermion_operator(molecule.get_molecular_hamiltonian())
+fermionic_hamiltonian = of_trans.get_fermion_operator(
+    molecule.get_molecular_hamiltonian()
+)
 jw_hamiltonian = of_trans.jordan_wigner(fermionic_hamiltonian)
 
 
@@ -71,6 +73,7 @@ jw_hamiltonian = of_trans.jordan_wigner(fermionic_hamiltonian)
 # ## Qamomile ハミルトニアンへの変換
 #
 # このセクションでは、OpenFermionのハミルトニアンをQamomileフォーマットに変換します。Jordan-Wigner変換を適用してフェルミ粒子演算子を量子ビット演算子へ変換し、その後、カスタム変換関数を用いてQamomileに適したハミルトニアン表現を作成します。
+
 
 # %%
 def operator_to_qamomile(operators: tuple[tuple[int, str], ...]) -> qm_o.Hamiltonian:
@@ -81,6 +84,7 @@ def operator_to_qamomile(operators: tuple[tuple[int, str], ...]) -> qm_o.Hamilto
         H *= pauli[ope[1]](ope[0])
     return H
 
+
 def openfermion_to_qamomile(of_h) -> qm_o.Hamiltonian:
     H = qm_o.Hamiltonian()
     for k, v in of_h.terms.items():
@@ -90,6 +94,7 @@ def openfermion_to_qamomile(of_h) -> qm_o.Hamiltonian:
             H += operator_to_qamomile(k) * v
     return H
 
+
 hamiltonian = openfermion_to_qamomile(jw_hamiltonian)
 
 
@@ -97,6 +102,7 @@ hamiltonian = openfermion_to_qamomile(jw_hamiltonian)
 # ## VQE アンザッツの作成
 #
 # このセクションでは、VQEアルゴリズムのための EfficientSU2 アンザッツを `@qkernel` デコレータを用いて作成します。アンザッツとは、試行波動関数を準備するパラメータ付き量子回路です。`ry_layer`、`rz_layer` および線形 CX エンタングル層を組み合わせて構築し、最後に `expval` でハミルトニアンの期待値を計算します。
+
 
 # %%
 @qmc.qkernel
@@ -183,6 +189,7 @@ plt.show()
 # %% [markdown]
 # ## 原子同士の距離を変更する
 
+
 # %%
 def hydrogen_molecule(bond_length):
     basis = "sto-3g"
@@ -197,6 +204,7 @@ def hydrogen_molecule(bond_length):
     )
     jw_hamiltonian = of_trans.jordan_wigner(fermionic_hamiltonian)
     return openfermion_to_qamomile(jw_hamiltonian), molecule.fci_energy
+
 
 n_points = 3 if docs_test_mode else 15
 bond_lengths = np.linspace(0.2, 1.5, n_points)

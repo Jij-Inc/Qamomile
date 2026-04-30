@@ -63,7 +63,9 @@ molecule = of_chem.MolecularData(geometry, basis, multiplicity, charge, descript
 molecule = of_pyscf.run_pyscf(molecule, run_scf=True, run_fci=True)
 n_qubit = molecule.n_qubits
 n_electron = molecule.n_electrons
-fermionic_hamiltonian = of_trans.get_fermion_operator(molecule.get_molecular_hamiltonian())
+fermionic_hamiltonian = of_trans.get_fermion_operator(
+    molecule.get_molecular_hamiltonian()
+)
 jw_hamiltonian = of_trans.jordan_wigner(fermionic_hamiltonian)
 
 
@@ -71,6 +73,7 @@ jw_hamiltonian = of_trans.jordan_wigner(fermionic_hamiltonian)
 # ## Converting to a Qamomile Hamiltonian
 #
 # In this section, we convert the OpenFermion Hamiltonian to the Qamomile format. After applying the Jordan–Wigner transformation to convert fermionic operators to qubit operators, we use custom conversion functions to create a Hamiltonian representation compatible with Qamomile.
+
 
 # %%
 def operator_to_qamomile(operators: tuple[tuple[int, str], ...]) -> qm_o.Hamiltonian:
@@ -81,6 +84,7 @@ def operator_to_qamomile(operators: tuple[tuple[int, str], ...]) -> qm_o.Hamilto
         H *= pauli[ope[1]](ope[0])
     return H
 
+
 def openfermion_to_qamomile(of_h) -> qm_o.Hamiltonian:
     H = qm_o.Hamiltonian()
     for k, v in of_h.terms.items():
@@ -90,6 +94,7 @@ def openfermion_to_qamomile(of_h) -> qm_o.Hamiltonian:
             H += operator_to_qamomile(k) * v
     return H
 
+
 hamiltonian = openfermion_to_qamomile(jw_hamiltonian)
 
 
@@ -97,6 +102,7 @@ hamiltonian = openfermion_to_qamomile(jw_hamiltonian)
 # ## Creating the VQE Ansatz
 #
 # In this section, we create an EfficientSU2 ansatz for the VQE algorithm using the `@qkernel` decorator. An ansatz is a parametrized quantum circuit that prepares a trial wavefunction. We build it by combining `ry_layer`, `rz_layer`, and a linear CX entangling layer, and finally compute the expectation value of the Hamiltonian using `expval`.
+
 
 # %%
 @qmc.qkernel
@@ -183,6 +189,7 @@ plt.show()
 # %% [markdown]
 # ## Changing the Distance Between Atoms
 
+
 # %%
 def hydrogen_molecule(bond_length):
     basis = "sto-3g"
@@ -197,6 +204,7 @@ def hydrogen_molecule(bond_length):
     )
     jw_hamiltonian = of_trans.jordan_wigner(fermionic_hamiltonian)
     return openfermion_to_qamomile(jw_hamiltonian), molecule.fci_energy
+
 
 n_points = 3 if docs_test_mode else 15
 bond_lengths = np.linspace(0.2, 1.5, n_points)
