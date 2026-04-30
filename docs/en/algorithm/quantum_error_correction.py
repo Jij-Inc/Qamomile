@@ -14,29 +14,29 @@
 
 # %% [markdown]
 # ---
-# title: 量子誤り訂正入門
-# tags: [qec, tutorial]
+# title: Introduction to Quantum Error Correction
+# tags: [qec]
 # ---
 #
-# # 量子誤り訂正入門
+# # Introduction to Quantum Error Correction
 #
 # <!-- BEGIN auto-tags -->
-# **タグ:** <a class="tag-chip" href="../tags/qec.md">qec</a> <a class="tag-chip" href="../tags/tutorial.md">tutorial</a>
+# **Tags:** <a class="tag-chip" href="../tags/qec.md">qec</a>
 # <!-- END auto-tags -->
 #
-# 量子誤り訂正(Quantum Error Correction; QEC)は、壊れやすい量子状態を複数の物理量子ビットへ分散し、状態そのものを測らずにエラーだけを検出して戻す技術です。
+# Quantum error correction (QEC) protects fragile quantum states by spreading one logical state across multiple physical qubits. The key point is that we do not measure the logical state directly. Instead, we measure only enough information to identify the error.
 #
-# このチュートリアルでは、次の流れを Qamomile の `@qkernel` で実装します。
+# In this tutorial, we implement three codes with Qamomile's `@qkernel`.
 #
-# 1. 3量子ビット bit-flip 符号で、単一の $X$ エラーを訂正する。
-# 2. Hadamard 変換で phase-flip 符号を作り、単一の $Z$ エラーを訂正する。
-# 3. 両者を組み合わせた Shor の9量子ビット符号で、単一の $X$, $Y$, $Z$ エラーを訂正する。
-# 4. 最後にスタビライザー形式で、ここまでの回路を統一的に整理する。
+# 1. Correct a single $X$ error with the 3-qubit bit-flip code.
+# 2. Turn that idea into a phase-flip code with Hadamard gates, and correct a single $Z$ error.
+# 3. Combine both ideas into Shor's 9-qubit code, which corrects a single $X$, $Y$, or $Z$ error.
+# 4. Reinterpret the circuits with the stabilizer formalism.
 #
-# 主役は一貫して **シンドローム測定** です。論理状態を直接測るのではなく、補助量子ビット(ancilla)を使って「どこに、どの種類のエラーが起きたか」だけを取り出します。
+# The central tool throughout is **syndrome measurement**: use ancilla qubits to learn where the error happened without reading out the logical state itself.
 
 # %%
-# 最新のQamomileをpipからインストールします。
+# Install the latest Qamomile from pip.
 # # !pip install qamomile
 # # or
 # # !uv add qamomile
@@ -88,33 +88,35 @@ def _sample_first_bit(
 
 
 # %% [markdown]
-# ## 1. 何を訂正したいのか
+# ## 1. What We Need To Correct
 #
-# 古典の繰り返し符号では、ビット $b$ を `bbb` と3回送れば、1ビット壊れても多数決で復元できます。量子でも似た発想を使いたくなりますが、そのままでは動きません。
+# In a classical repetition code, we can send a bit $b$ as `bbb` and recover from one flipped bit by majority vote. The same idea cannot be copied directly into quantum computing.
 #
-# - 未知の量子状態 $\lvert\psi\rangle$ はコピーできない(複製禁止定理)。
-# - 論理状態を直接測ると、重ね合わせが壊れる。
+# - An unknown quantum state $\lvert\psi\rangle$ cannot be cloned.
+# - Measuring the logical state directly destroys superposition.
 #
-# 量子誤り訂正は、コピーの代わりに **エンタングルメント** で情報を分散し、直接測定の代わりに **シンドローム測定** でエラー情報だけを測ります。
+# Quantum error correction works around both issues. It uses entanglement instead of copying, and it measures **syndromes** instead of measuring the logical information.
 #
-# 標準的な手順は次の5段階です。
+# The standard flow is:
 #
 # ```text
 # encode -> error -> syndrome measurement -> correction -> encoded state
 # ```
 
 # %% [markdown]
-# ## 2. 3量子ビット bit-flip 符号
+# ## 2. The 3-Qubit Bit-Flip Code
 #
-# まず、bit-flip エラー $X$ だけを訂正する符号から始めます。論理状態
+# We start with the simplest code: a code that corrects only bit-flip errors, represented by $X$.
+#
+# A logical state
 #
 # $$\alpha\lvert 0\rangle + \beta\lvert 1\rangle$$
 #
-# を3つの物理量子ビットへ
+# is encoded into three physical qubits as
 #
-# $$\alpha\lvert 000\rangle + \beta\lvert 111\rangle$$
+# $$\alpha\lvert 000\rangle + \beta\lvert 111\rangle.$$
 #
-# として埋め込みます。CNOTで相関を作っているだけなので、未知状態のコピーではありません。
+# This is not cloning. The two CNOT gates create correlations with the data qubit.
 
 
 # %%
@@ -128,23 +130,23 @@ def encode_3qubit_bitflip(
 
 
 # %% [markdown]
-# ### シンドローム
+# ### Syndrome Measurement
 #
-# bit-flip 符号では、次の2つの $Z$ パリティを測ります。
+# The bit-flip code measures two $Z$ parities:
 #
 # - $S_0 = Z_0Z_1$
 # - $S_1 = Z_0Z_2$
 #
-# 符号空間 $\{\lvert000\rangle, \lvert111\rangle\}$ では、どちらも「同じ値か」を見るだけです。単一の $X$ エラーが入ると、どのパリティが反転したかでエラー位置が分かります。
+# In the code space $\{\lvert000\rangle,\lvert111\rangle\}$, both parities say that the two compared qubits are equal. A single $X$ error flips a unique pattern of parities, so the syndrome identifies the error location.
 #
-# | エラー | $(s_0, s_1)$ | 訂正 |
+# | Error | $(s_0, s_1)$ | Correction |
 # | --- | --- | --- |
-# | なし | $(0, 0)$ | なし |
+# | none | $(0, 0)$ | none |
 # | $X_0$ | $(1, 1)$ | $X_0$ |
 # | $X_1$ | $(1, 0)$ | $X_1$ |
 # | $X_2$ | $(0, 1)$ | $X_2$ |
 #
-# $Z_iZ_j$ の測定は、ancilla を用意して `CX(data[i], anc); CX(data[j], anc); measure(anc)` と書けます。ancilla だけを測るので、論理状態そのものは直接読みません。
+# To measure $Z_iZ_j$, prepare an ancilla and apply `CX(data[i], anc); CX(data[j], anc); measure(anc)`. Only the ancilla is measured.
 
 
 # %%
@@ -182,19 +184,19 @@ def bitflip_syndrome_run(
 
 
 # %% [markdown]
-# `error_pos` はコンパイル時パラメータです。`0`, `1`, `2` のいずれかならその位置に $X$ を注入し、`3` ならどの分岐にも入らないのでエラーなしとして扱います。
+# `error_pos` is a compile-time parameter. Values `0`, `1`, and `2` inject an $X$ error at that location. The value `3` does not match any branch, so it means no error.
 #
-# まず論理 $\lvert1\rangle$ を準備し、どの位置に $X$ が入っても `data[0]` が1に戻ることを確認します。
+# First prepare logical $\lvert1\rangle$. After correction, `data[0]` should always be 1.
 
 # %%
 bitflip_cases = [
-    ("エラーなし", 3),
+    ("no error", 3),
     ("X on data[0]", 0),
     ("X on data[1]", 1),
     ("X on data[2]", 2),
 ]
 
-print("3量子ビット bit-flip 符号: 論理 |1⟩")
+print("3-qubit bit-flip code: logical |1>")
 for label, error_pos in bitflip_cases:
     counts = _sample_first_bit(
         bitflip_syndrome_run,
@@ -202,19 +204,17 @@ for label, error_pos in bitflip_cases:
         parameters=["theta"],
         runtime_bindings={"theta": math.pi},
     )
-    print(
-        f"  {label:14s}: data[0]=0 が {counts[0]:3d} 回, data[0]=1 が {counts[1]:3d} 回"
-    )
+    print(f"  {label:14s}: data[0]=0 -> {counts[0]:3d}, data[0]=1 -> {counts[1]:3d}")
 
 # %% [markdown]
-# 重ね合わせでも同じです。$\theta=\pi/3$ で
+# The code also preserves amplitudes. With $\theta=\pi/3$, the prepared state has
 #
-# $$\cos(\pi/6)\lvert0\rangle + \sin(\pi/6)\lvert1\rangle$$
+# $$P(data[0]=1)=\sin^2(\pi/6)=0.25.$$
 #
-# を準備すると、理論上 $P(data[0]=1)=\sin^2(\pi/6)=0.25$ です。エラー位置によらずこの確率が保たれれば、振幅情報も壊れていないことが分かります。
+# That probability should be unchanged by the injected error.
 
 # %%
-print("3量子ビット bit-flip 符号: 重ね合わせ状態")
+print("3-qubit bit-flip code: superposition input")
 for label, error_pos in bitflip_cases:
     counts = _sample_first_bit(
         bitflip_syndrome_run,
@@ -227,20 +227,18 @@ for label, error_pos in bitflip_cases:
     print(f"  {label:14s}: P(data[0]=1) = {counts[1] / total:.3f}")
 
 # %% [markdown]
-# ## 3. 3量子ビット phase-flip 符号
+# ## 3. The 3-Qubit Phase-Flip Code
 #
-# phase-flip エラーは $Z$ で表されます。Hadamard 変換を挟むと
+# Phase-flip errors are represented by $Z$. Hadamard gates swap $X$ and $Z$:
 #
-# $$H Z H = X,\qquad H X H = Z$$
+# $$H Z H = X,\qquad H X H = Z.$$
 #
-# なので、$H$ 基底では phase-flip は bit-flip として見えます。したがって phase-flip 符号は、bit-flip 符号をエンコードした後に各量子ビットへ $H$ を当てれば作れます。
-#
-# 論理基底は
+# So a phase-flip code is just the bit-flip code in the Hadamard basis. Its logical basis states are:
 #
 # - $\lvert0_L\rangle=\lvert+++\rangle$
 # - $\lvert1_L\rangle=\lvert---\rangle$
 #
-# です。測るスタビライザーも $Z$ パリティから $X$ パリティへ入れ替わります。
+# The stabilizers are $X$ parities instead of $Z$ parities.
 
 
 # %%
@@ -256,11 +254,11 @@ def encode_3qubit_phaseflip(
 
 
 # %% [markdown]
-# $X_iX_j$ の測定では、ancilla を $\lvert+\rangle$ にしてから、ancilla を制御としてデータ量子ビットへ CNOT を当てます。最後に ancilla へもう一度 $H$ を当て、$Z$ 基底で測ります。
+# To measure $X_iX_j$, prepare the ancilla in $\lvert+\rangle$, use it as the control for CNOTs into the data qubits, then apply another $H$ and measure the ancilla.
 #
-# | エラー | $(s_0, s_1)$ | 訂正 |
+# | Error | $(s_0, s_1)$ | Correction |
 # | --- | --- | --- |
-# | なし | $(0, 0)$ | なし |
+# | none | $(0, 0)$ | none |
 # | $Z_0$ | $(1, 1)$ | $Z_0$ |
 # | $Z_1$ | $(1, 0)$ | $Z_1$ |
 # | $Z_2$ | $(0, 1)$ | $Z_2$ |
@@ -302,43 +300,41 @@ def phaseflip_syndrome_run(error_pos: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 
 
 # %% [markdown]
-# ここでは論理 $\lvert0_L\rangle=\lvert+++\rangle$ を使います。訂正後の `data[0]` は $\lvert+\rangle$ に戻るので、最後に $H$ を当ててから測れば常に0になります。
+# We prepare logical $\lvert0_L\rangle=\lvert+++\rangle$. After correction, `data[0]` is back in $\lvert+\rangle$, so applying one final $H$ makes it measure as 0.
 
 # %%
 phaseflip_cases = [
-    ("エラーなし", 3),
+    ("no error", 3),
     ("Z on data[0]", 0),
     ("Z on data[1]", 1),
     ("Z on data[2]", 2),
 ]
 
-print("3量子ビット phase-flip 符号: 論理 |0_L⟩ = |+++⟩")
+print("3-qubit phase-flip code: logical |0_L> = |+++>")
 for label, error_pos in phaseflip_cases:
     counts = _sample_first_bit(
         phaseflip_syndrome_run,
         bindings={"error_pos": error_pos},
     )
-    print(
-        f"  {label:14s}: data[0]=0 が {counts[0]:3d} 回, data[0]=1 が {counts[1]:3d} 回"
-    )
+    print(f"  {label:14s}: data[0]=0 -> {counts[0]:3d}, data[0]=1 -> {counts[1]:3d}")
 
 # %% [markdown]
-# ## 4. Shor の9量子ビット符号
+# ## 4. Shor's 9-Qubit Code
 #
-# bit-flip 符号は $X$ エラーだけ、phase-flip 符号は $Z$ エラーだけを訂正します。任意の単一量子ビット Pauli エラーを直すには、両方を組み合わせます。
+# The bit-flip code corrects only $X$ errors, and the phase-flip code corrects only $Z$ errors. To correct any single-qubit Pauli error, we combine both ideas.
 #
-# Shor 符号は次の連結符号です。
+# Shor's code is a concatenated code:
 #
-# 1. 1量子ビットを3量子ビット phase-flip 符号でエンコードする。
-# 2. その3つの量子ビットを、それぞれ3量子ビット bit-flip 符号でエンコードする。
+# 1. Encode one qubit with the 3-qubit phase-flip code.
+# 2. Encode each of those three qubits with the 3-qubit bit-flip code.
 #
-# 9量子ビットを3つのブロック
+# We view the 9 qubits as three blocks:
 #
 # ```text
 # (q0, q1, q2), (q3, q4, q5), (q6, q7, q8)
 # ```
 #
-# と見ます。各ブロック内の $X$ エラーは $Z$ パリティで検出し、ブロック間の $Z$ エラーは $X$ パリティで検出します。$Y=iXZ$ は両方のシンドロームが立つので、$X$ 訂正と $Z$ 訂正を独立に行えば直せます。
+# The within-block $Z$ parities detect the $X$ component. The across-block $X$ parities detect the $Z$ component. Since $Y=iXZ$, a $Y$ error triggers both parts and is corrected by applying both corrections.
 
 
 # %%
@@ -353,12 +349,12 @@ def encode_shor(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
 
 
 # %% [markdown]
-# Shor 符号のシンドロームは8ビットです。
+# Shor's syndrome has eight bits.
 #
-# - `anc[0..5]`: 各ブロック内の $Z$ パリティ。どの物理量子ビットに $X$ 成分があるかを検出する。
-# - `anc[6..7]`: ブロック間の $X$ パリティ。どのブロックに $Z$ 成分があるかを検出する。
+# - `anc[0..5]`: within-block $Z$ parities, used to locate the $X$ component.
+# - `anc[6..7]`: across-block $X$ parities, used to locate the block containing the $Z$ component.
 #
-# 訂正後の状態はまだ9量子ビットにエンコードされています。動作確認では読みやすさのため、最後にエンコーダの逆を当てて `q[0]` に論理ビットを戻してから測定します。これは検証用の後処理であり、誤り訂正そのものはシンドローム測定と古典フィードバックで完結しています。
+# After correction, the logical state is still encoded across nine qubits. For this demonstration, we apply the inverse encoder at the end so that the logical bit is readable from `q[0]`. This final inverse is only a verification step; the correction itself is done by syndrome measurement and feedback.
 
 
 # %%
@@ -473,7 +469,7 @@ def shor_syndrome_run(
 
 
 # %% [markdown]
-# 代表として、3つのブロックから1つずつ位置を選び、$X$, $Y$, $Z$ エラーを注入します。論理 $\lvert1\rangle$ が保たれていれば、すべて `q[0]=1` になります。
+# We test one representative qubit from each block. If the logical $\lvert1\rangle$ is preserved, `q[0]` is always 1.
 
 # %%
 shor_cases = [
@@ -482,8 +478,8 @@ shor_cases = [
     ("Z", 3, 8),
 ]
 
-print("Shor 9量子ビット符号: 論理 |1⟩")
-print(f"  {'エラー':6s} | {'位置':5s} | P(q[0]=1)")
+print("Shor 9-qubit code: logical |1>")
+print(f"  {'error':6s} | {'pos':5s} | P(q[0]=1)")
 print(f"  {'-' * 6}-+-{'-' * 5}-+-{'-' * 9}")
 for name, error_type, error_pos in shor_cases:
     counts = _sample_first_bit(
@@ -496,29 +492,29 @@ for name, error_type, error_pos in shor_cases:
     print(f"  {name:6s} | q[{error_pos}]  | {counts[1] / total:.3f}")
 
 # %% [markdown]
-# Shor 符号は、単一量子ビットの任意の Pauli エラーを訂正できます。一般の小さなノイズも Pauli エラーの線形結合として扱えるため、まず Pauli エラーを直せることが量子誤り訂正の出発点になります。
+# Shor's code corrects any single-qubit Pauli error. Since small general noise can be expanded in the Pauli basis, correcting Pauli errors is the starting point for quantum error correction.
 
 # %% [markdown]
-# ## 5. スタビライザー形式で見る
+# ## 5. Stabilizer View
 #
-# ここまでの符号は、どれもスタビライザーで表せます。スタビライザーとは、符号空間の状態を変えない Pauli 演算子の集合です。測定結果が $+1$ なら符号空間内、$-1$ ならエラーによって外へ出たことを意味します。
+# All three codes can be described with stabilizers. A stabilizer is a Pauli operator that leaves every valid code state unchanged. A $+1$ measurement means the state is still in the corresponding parity sector; a $-1$ measurement reveals part of the error syndrome.
 #
-# | 符号 | スタビライザー生成子 | 訂正できる単一エラー |
+# | Code | Stabilizer generators | Corrects |
 # | --- | --- | --- |
-# | 3量子ビット bit-flip | $Z_0Z_1$, $Z_0Z_2$ | $X$ |
-# | 3量子ビット phase-flip | $X_0X_1$, $X_0X_2$ | $Z$ |
-# | Shor 9量子ビット | $Z_0Z_1$, $Z_0Z_2$, $Z_3Z_4$, $Z_3Z_5$, $Z_6Z_7$, $Z_6Z_8$, $X_0X_1X_2X_3X_4X_5$, $X_3X_4X_5X_6X_7X_8$ | $X$, $Y$, $Z$ |
+# | 3-qubit bit-flip | $Z_0Z_1$, $Z_0Z_2$ | single $X$ |
+# | 3-qubit phase-flip | $X_0X_1$, $X_0X_2$ | single $Z$ |
+# | Shor 9-qubit | $Z_0Z_1$, $Z_0Z_2$, $Z_3Z_4$, $Z_3Z_5$, $Z_6Z_7$, $Z_6Z_8$, $X_0X_1X_2X_3X_4X_5$, $X_3X_4X_5X_6X_7X_8$ | single $X$, $Y$, or $Z$ |
 #
-# 表面符号や Steane 符号でも基本は同じです。スタビライザーごとに ancilla を用意し、パリティを測り、シンドロームから訂正 Pauli を決めます。
+# Larger codes such as the Steane code and the surface code use the same pattern: prepare one ancilla per stabilizer, measure the parity, then apply a correction based on the syndrome.
 
 # %% [markdown]
-# ## 6. まとめ
+# ## 6. Summary
 #
-# このチュートリアルでは、量子誤り訂正を次の順に実装しました。
+# In this tutorial, we implemented:
 #
-# - 3量子ビット bit-flip 符号で $Z$ パリティを測り、単一 $X$ エラーを訂正した。
-# - Hadamard 変換で phase-flip 符号を作り、$X$ パリティを測って単一 $Z$ エラーを訂正した。
-# - Shor 符号でブロック内の $X$ 成分とブロック間の $Z$ 成分を別々に検出し、単一 $X$, $Y$, $Z$ エラーを訂正した。
-# - それらをスタビライザー形式で統一的に見直した。
+# - The 3-qubit bit-flip code, using $Z$ parity checks to correct a single $X$ error.
+# - The 3-qubit phase-flip code, using $X$ parity checks to correct a single $Z$ error.
+# - Shor's 9-qubit code, which separately detects the $X$ and $Z$ components and corrects a single $X$, $Y$, or $Z$ error.
+# - A stabilizer interpretation of the same circuits.
 #
-# 次のステップとしては、[Steane [[7,1,3]] 符号と CSS 構成](09_steane_code.ipynb) が自然です。CSS 符号では、$X$ 型と $Z$ 型のスタビライザーをより体系的に組み合わせます。
+# A natural next step is [Steane [[7,1,3]] Code and CSS Construction](steane_code.ipynb), where $X$-type and $Z$-type stabilizers are organized more systematically.

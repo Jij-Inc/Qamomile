@@ -15,7 +15,7 @@
 # %% [markdown]
 # ---
 # title: 再利用パターン: QKernelの合成とコンポジットゲート
-# tags: [tutorial]
+# tags: []
 # ---
 #
 # # 再利用パターン：QKernelの合成とコンポジットゲート

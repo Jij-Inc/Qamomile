@@ -15,7 +15,7 @@
 # %% [markdown]
 # ---
 # title: Reuse Patterns: QKernel Composition and Composite Gates
-# tags: [tutorial]
+# tags: []
 # ---
 #
 # # Reuse Patterns: QKernel Composition and Composite Gates

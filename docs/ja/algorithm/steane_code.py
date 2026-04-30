@@ -15,16 +15,16 @@
 # %% [markdown]
 # ---
 # title: Steane [[7,1,3]] 符号
-# tags: [qec, tutorial]
+# tags: [qec]
 # ---
 #
 # # 量子誤り訂正(2): Steane [[7,1,3]] 符号
 #
 # <!-- BEGIN auto-tags -->
-# **タグ:** <a class="tag-chip" href="../tags/qec.md">qec</a> <a class="tag-chip" href="../tags/tutorial.md">tutorial</a>
+# **タグ:** <a class="tag-chip" href="../tags/qec.md">qec</a>
 # <!-- END auto-tags -->
 #
-# [前章](08_quantum_error_correction.ipynb)では、3量子ビット符号と Shor の9量子ビット符号を実装しました。本章では、より構造がきれいな **Steane [[7,1,3]] 符号** を扱います。
+# [前章](quantum_error_correction.ipynb)では、3量子ビット符号と Shor の9量子ビット符号を実装しました。本章では、より構造がきれいな **Steane [[7,1,3]] 符号** を扱います。
 #
 # Steane 符号は、古典の Hamming [7,4,3] 符号から作る CSS 符号です。7つの物理量子ビットで1つの論理量子ビットを守り、任意の単一量子ビット Pauli エラー($X$, $Y$, $Z$)を訂正できます。
 #
@@ -390,5 +390,5 @@ print(f"  |0_L⟩ 符号語の割合: {valid / total:.3f}")
 #
 # ### 次へ
 #
-# - [量子誤り訂正(1)](08_quantum_error_correction.ipynb) — 3量子ビット bit-flip / phase-flip / Shor 符号
+# - [量子誤り訂正(1)](quantum_error_correction.ipynb) — 3量子ビット bit-flip / phase-flip / Shor 符号
 # - 表面符号 — 2D 格子上のローカルなスタビライザーと繰り返しシンドローム測定

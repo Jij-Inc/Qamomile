@@ -16,13 +16,13 @@
 # %% [markdown]
 # ---
 # title: QAOA for MaxCut
-# tags: [qaoa, optimization, variational, algorithm, binary-model]
+# tags: [qaoa, optimization, variational]
 # ---
 #
 # # QAOA for MaxCut: Building the Circuit from Scratch
 #
 # <!-- BEGIN auto-tags -->
-# **Tags:** <a class="tag-chip" href="../tags/qaoa.md">qaoa</a> <a class="tag-chip" href="../tags/optimization.md">optimization</a> <a class="tag-chip" href="../tags/variational.md">variational</a> <a class="tag-chip" href="../tags/algorithm.md">algorithm</a> <a class="tag-chip" href="../tags/binary-model.md">binary-model</a>
+# **Tags:** <a class="tag-chip" href="../tags/qaoa.md">qaoa</a> <a class="tag-chip" href="../tags/optimization.md">optimization</a> <a class="tag-chip" href="../tags/variational.md">variational</a>
 # <!-- END auto-tags -->
 #
 # This tutorial walks through the Quantum Approximate Optimization Algorithm

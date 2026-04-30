@@ -15,14 +15,10 @@
 # %% [markdown]
 # ---
 # title: Compilation and Transpilation
-# tags: [tutorial]
+# tags: []
 # ---
 #
 # # Compilation and Transpilation: Under the Hood
-#
-# <!-- BEGIN auto-tags -->
-# **Tags:** <a class="tag-chip" href="../tags/tutorial.md">tutorial</a>
-# <!-- END auto-tags -->
 #
 # Tutorials 01–07 used the transpiler as a black box: write a `@qkernel`, call
 # `transpiler.transpile(...)`, get an executable. This chapter opens the box.

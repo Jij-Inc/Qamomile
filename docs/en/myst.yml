@@ -26,24 +26,20 @@ project:
         - file: tutorial/04_execution_models.ipynb
         - file: tutorial/05_classical_flow_patterns.ipynb
         - file: tutorial/06_reuse_patterns.ipynb
-        - file: tutorial/07_hamiltonian_simulation.ipynb
-        - file: tutorial/08_hermitian_decomposition.ipynb
-        - file: tutorial/09_compilation_and_transpilation.ipynb
-        - file: tutorial/10_quantum_error_correction.ipynb
-        - file: tutorial/11_steane_code.ipynb
+        - file: tutorial/07_hermitian_decomposition.ipynb
+        - file: tutorial/08_compilation_and_transpilation.ipynb
     - title: Algorithms
       file: algorithm/index.md
       children:
         - file: algorithm/qaoa_maxcut.ipynb
         - file: algorithm/qaoa_graph_partition.ipynb
         - file: algorithm/vqe_for_hydrogen.ipynb
+        - file: algorithm/hamiltonian_simulation.ipynb
+        - file: algorithm/quantum_error_correction.ipynb
+        - file: algorithm/steane_code.ipynb
 
 # --- BEGIN doc tags (auto-generated) ---
     - file: tags/index.md
-      hidden: true
-    - file: tags/algorithm.md
-      hidden: true
-    - file: tags/binary-model.md
       hidden: true
     - file: tags/collaboration.md
       hidden: true
@@ -62,10 +58,6 @@ project:
     - file: tags/resource-estimation.md
       hidden: true
     - file: tags/trotterization.md
-      hidden: true
-    - file: tags/tutorial.md
-      hidden: true
-    - file: tags/usage.md
       hidden: true
     - file: tags/variational.md
       hidden: true
