@@ -1,6 +1,5 @@
 ---
 slug: algorithm
-title: Algorithms
 ---
 
 # Algorithms
