@@ -223,7 +223,8 @@ class TestPCEConverterInit:
         instance = problem.eval({})
         converter = PCEConverter(instance, k=2)
 
-        assert converter.instance is instance
+        assert converter.instance is not None
+        assert converter.instance.to_bytes() == instance.to_bytes()
         assert converter.original_vartype == VarType.BINARY
         assert converter.spin_model.vartype == VarType.SPIN
         assert converter.spin_model.num_bits == 3
