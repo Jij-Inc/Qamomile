@@ -14,6 +14,7 @@ Qamomileは量子プログラミングSDKです。型付きPython関数で量子
 ## VQA
 
 - [QAOAでMaxCutを解く](vqa/qaoa_maxcut) — QAOA回路をゼロから構築してMaxCutを解き、組み込みの`qaoa_state`と比較する
+- [PCEでMaxCutを解く](vqa/pce_maxcut) — `PCEConverter(k=2)`とtanh緩和した目的関数で、20変数のMaxCutをわずか3量子ビットで解く
 
 ## 最適化
 

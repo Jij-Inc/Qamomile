@@ -32,6 +32,7 @@ project:
       file: vqa/index.md
       children:
         - file: vqa/qaoa_maxcut.ipynb
+        - file: vqa/pce_maxcut.ipynb
     - title: 最適化
       file: optimization/index.md
       children:
@@ -63,15 +64,16 @@ project:
             - file: api/circuit/transpiler
             - file: api/circuit/visualization
         - file: api/cudaq
+        - file: api/linalg
         - file: api/observable
         - file: api/optimization/index
           children:
             - file: api/optimization/binary_model
             - file: api/optimization/converter
             - file: api/optimization/fqaoa
+            - file: api/optimization/pce
             - file: api/optimization/qaoa
             - file: api/optimization/qrao
-            - file: api/optimization/utils
         - file: api/qbraid
         - file: api/qiskit/index
           children:
