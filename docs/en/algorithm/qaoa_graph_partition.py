@@ -15,13 +15,13 @@
 # %% [markdown]
 # ---
 # title: QAOA for Graph Partitioning
-# tags: [qaoa, optimization, variational]
+# tags: [optimization, variational]
 # ---
 #
 # # QAOA for Graph Partitioning
 #
 # <!-- BEGIN auto-tags -->
-# **Tags:** <a class="tag-chip" href="../tags/qaoa.md">qaoa</a> <a class="tag-chip" href="../tags/optimization.md">optimization</a> <a class="tag-chip" href="../tags/variational.md">variational</a>
+# **Tags:** <a class="tag-chip" href="../tags/optimization.md">optimization</a> <a class="tag-chip" href="../tags/variational.md">variational</a>
 # <!-- END auto-tags -->
 #
 # This tutorial demonstrates how to solve the **graph partitioning problem**

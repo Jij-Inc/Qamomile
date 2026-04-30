@@ -15,13 +15,13 @@
 # %% [markdown]
 # ---
 # title: Steane [[7,1,3]] 符号
-# tags: [qec]
+# tags: [error-correction]
 # ---
 #
 # # 量子誤り訂正(2): Steane [[7,1,3]] 符号
 #
 # <!-- BEGIN auto-tags -->
-# **タグ:** <a class="tag-chip" href="../tags/qec.md">qec</a>
+# **タグ:** <a class="tag-chip" href="../tags/error-correction.md">error-correction</a>
 # <!-- END auto-tags -->
 #
 # [前章](quantum_error_correction.ipynb)では、3量子ビット符号と Shor の9量子ビット符号を実装しました。本章では、より構造がきれいな **Steane [[7,1,3]] 符号** を扱います。

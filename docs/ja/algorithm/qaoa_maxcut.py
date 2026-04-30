@@ -16,13 +16,13 @@
 # %% [markdown]
 # ---
 # title: QAOAでMaxCutを解く
-# tags: [qaoa, optimization, variational]
+# tags: [optimization, variational]
 # ---
 #
 # # QAOAでMaxCutを解く: 回路をゼロから構築する
 #
 # <!-- BEGIN auto-tags -->
-# **タグ:** <a class="tag-chip" href="../tags/qaoa.md">qaoa</a> <a class="tag-chip" href="../tags/optimization.md">optimization</a> <a class="tag-chip" href="../tags/variational.md">variational</a>
+# **タグ:** <a class="tag-chip" href="../tags/optimization.md">optimization</a> <a class="tag-chip" href="../tags/variational.md">variational</a>
 # <!-- END auto-tags -->
 #
 # このチュートリアルでは、Qamomileの低レベル回路プリミティブを使って、QAOA (Quantum Approximate Optimization Algorithm) のパイプラインをステップごとに構築します。高レベルな`QAOAConverter`は使わずに、以下の手順で進めます:

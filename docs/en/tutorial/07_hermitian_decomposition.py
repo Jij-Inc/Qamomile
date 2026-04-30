@@ -15,13 +15,13 @@
 # %% [markdown]
 # ---
 # title: From a Hermitian Matrix to a Quantum Circuit
-# tags: [hamiltonian-simulation, pauli-decomposition]
+# tags: [primitives, encoding, simulation]
 # ---
 #
 # # From a Hermitian Matrix to a Quantum Circuit
 #
 # <!-- BEGIN auto-tags -->
-# **Tags:** <a class="tag-chip" href="../tags/hamiltonian-simulation.md">hamiltonian-simulation</a> <a class="tag-chip" href="../tags/pauli-decomposition.md">pauli-decomposition</a>
+# **Tags:** <a class="tag-chip" href="../tags/primitives.md">primitives</a> <a class="tag-chip" href="../tags/encoding.md">encoding</a> <a class="tag-chip" href="../tags/simulation.md">simulation</a>
 # <!-- END auto-tags -->
 #
 # In many quantum algorithms you start from a **Hermitian matrix** — a Hamiltonian given as a dense $2^n \times 2^n$ numpy array — and you want to simulate its time evolution $e^{-iHt}$ on a quantum computer. The standard path is:

@@ -58,17 +58,28 @@ SECTIONS: tuple[str, ...] = (
 # — this script itself does not validate, so a stray tag does not crash
 # the build, only the test fails on the PR.
 ALLOWED_TAGS: frozenset[str] = frozenset({
-    "hamiltonian-simulation",
-    "integration",
+    # Domain
+    "chemistry",
+    "differential-equation",
+    "error-correction",
+    "finance",
+    "linear-system",
+    "machine-learning",
     "optimization",
-    "pauli-decomposition",
-    "qaoa",
-    "qbraid",
-    "qec",
-    "resource-estimation",
-    "trotterization",
+    # Method family
+    "oracle-based",
+    "sample-based",
+    "simulation",
     "variational",
-    "vqe",
+    # Article type
+    "primitives",
+    # Technique
+    "circuit-compilation",
+    "encoding",
+    # Other
+    "resource-estimation",
+    # Section
+    "integration",
 })
 
 # Locale-aware copy. Keep the taxonomy identical across locales; only
