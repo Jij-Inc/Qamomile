@@ -21,7 +21,7 @@
 # # Resource Estimation
 #
 # <!-- BEGIN auto-tags -->
-# **Tags:** [`resource-estimation`](../tags/resource-estimation.md) · [`tutorial`](../tags/tutorial.md)
+# **Tags:** <a class="tag-chip" href="../tags/resource-estimation.md">resource-estimation</a> <a class="tag-chip" href="../tags/tutorial.md">tutorial</a>
 # <!-- END auto-tags -->
 #
 # Before running a quantum kernel on real hardware, you may want to know its required resources, such as qubit count and gate count. Or, you may want to know the resource requirements of a quantum kernel you defined in the first place. Qamomile's `estimate_resources()` fills this need **without executing the qkernel**. It works with both concrete and symbolic (parameterized) qkernels.

@@ -21,7 +21,7 @@
 # # Hamiltonian Simulation with Suzuki–Trotter (Rabi oscillation)
 #
 # <!-- BEGIN auto-tags -->
-# **Tags:** [`hamiltonian-simulation`](../tags/hamiltonian-simulation.md) · [`trotterization`](../tags/trotterization.md) · [`algorithm`](../tags/algorithm.md)
+# **Tags:** <a class="tag-chip" href="../tags/hamiltonian-simulation.md">hamiltonian-simulation</a> <a class="tag-chip" href="../tags/trotterization.md">trotterization</a> <a class="tag-chip" href="../tags/algorithm.md">algorithm</a>
 # <!-- END auto-tags -->
 #
 # Simulating the time evolution $e^{-iHt}$ of a quantum system is one of the

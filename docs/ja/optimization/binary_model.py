@@ -21,7 +21,7 @@
 # # `BinaryModel`の使い方
 #
 # <!-- BEGIN auto-tags -->
-# **タグ:** [`qamomile-optimization`](../tags/qamomile-optimization.md) · [`binary-model`](../tags/binary-model.md)
+# **タグ:** <a class="tag-chip" href="../tags/qamomile-optimization.md">qamomile-optimization</a> <a class="tag-chip" href="../tags/binary-model.md">binary-model</a>
 # <!-- END auto-tags -->
 #
 # 本チュートリアルでは、Qamomileの最適化機能にある`BinaryModel`の使い方について説明します。Qamomileの`BinaryModel`では、二値変数を用いた制約なし最適化問題を定義することができます。特に、変数のタイプとして`binary`と`spin`の両方をサポートしており、`BinaryModel`のメンバ関数`change_vartype`を使うことで、これらのタイプを相互に変換することもできます。

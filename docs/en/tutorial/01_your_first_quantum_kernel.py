@@ -21,7 +21,7 @@
 # # Your First Quantum Kernel
 #
 # <!-- BEGIN auto-tags -->
-# **Tags:** [`tutorial`](../tags/tutorial.md)
+# **Tags:** <a class="tag-chip" href="../tags/tutorial.md">tutorial</a>
 # <!-- END auto-tags -->
 #
 # This chapter introduces the basic workflow for a first-time Qamomile user to define and run a quantum kernel. Note that this chapter does not dive into quantum computing fundamentals or quantum algorithm details.

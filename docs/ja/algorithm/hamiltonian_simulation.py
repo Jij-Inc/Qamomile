@@ -21,7 +21,7 @@
 # # Suzuki–Trotter分解によるハミルトニアンシミュレーション (Rabi振動)
 #
 # <!-- BEGIN auto-tags -->
-# **タグ:** [`hamiltonian-simulation`](../tags/hamiltonian-simulation.md) · [`trotterization`](../tags/trotterization.md) · [`algorithm`](../tags/algorithm.md)
+# **タグ:** <a class="tag-chip" href="../tags/hamiltonian-simulation.md">hamiltonian-simulation</a> <a class="tag-chip" href="../tags/trotterization.md">trotterization</a> <a class="tag-chip" href="../tags/algorithm.md">algorithm</a>
 # <!-- END auto-tags -->
 #
 # 量子系の時間発展$e^{-iHt}$をシミュレーションすることは、量子コンピュータの代表的な応用の1つです。ハミルトニアンが非可換な部分に分割されるとき、つまり$H = A + B$かつ$[A, B] \neq 0$のとき、素朴な分解$e^{-i(A+B)t} = e^{-iAt}\,e^{-iBt}$は成立しません。標準的な対処法が**Trotter–Suzuki積公式**で、各項の短時間発展を交互に並べます。誤差は、ステップ幅を小さくすれば減り(Lie–Trotter、1次)、ステップを対称化すれば減り(Strang、2次)、対称ステップをSuzukiの構成で再帰的に入れ子にすればさらに減ります(任意の偶数次)。

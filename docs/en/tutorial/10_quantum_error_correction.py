@@ -21,7 +21,7 @@
 # # Introduction to Quantum Error Correction
 #
 # <!-- BEGIN auto-tags -->
-# **Tags:** [`qec`](../tags/qec.md) · [`tutorial`](../tags/tutorial.md)
+# **Tags:** <a class="tag-chip" href="../tags/qec.md">qec</a> <a class="tag-chip" href="../tags/tutorial.md">tutorial</a>
 # <!-- END auto-tags -->
 #
 # Quantum error correction (QEC) protects fragile quantum states by spreading one logical state across multiple physical qubits. The key point is that we do not measure the logical state directly. Instead, we measure only enough information to identify the error.

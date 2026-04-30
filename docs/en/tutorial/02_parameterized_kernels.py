@@ -21,7 +21,7 @@
 # # Parameterized Quantum Kernels
 #
 # <!-- BEGIN auto-tags -->
-# **Tags:** [`tutorial`](../tags/tutorial.md)
+# **Tags:** <a class="tag-chip" href="../tags/tutorial.md">tutorial</a>
 # <!-- END auto-tags -->
 #
 # In Tutorial 01 we built qkernels with a fixed number of qubits. Qamomile allows you to treat values that determine circuit structure — such as the number of qubits and layers — as symbolic parameters. For instance, you can write a qkernel that contains `n` qubits and applies H gates to all of them, or one that applies a certain sequence of gates for `p` iterations. In Qamomile, parameters for circuit structure and those for rotation angles are required to be bound at different times: structure parameters must be bound at transpile time, while rotation angles must be bound at runtime.

@@ -21,7 +21,7 @@
 # # はじめての量子カーネル
 #
 # <!-- BEGIN auto-tags -->
-# **タグ:** [`tutorial`](../tags/tutorial.md)
+# **タグ:** <a class="tag-chip" href="../tags/tutorial.md">tutorial</a>
 # <!-- END auto-tags -->
 #
 # 本チュートリアルでは、Qamomileを初めて使用するユーザーが量子カーネルを定義し、実行するまでの基本的なワークフローを紹介します。一方で、本チュートリアルでは量子計算の基礎や量子アルゴリズムの詳細には踏み込まないことに注意してください。

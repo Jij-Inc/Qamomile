@@ -21,7 +21,7 @@
 # # How to use `BinaryModel`
 #
 # <!-- BEGIN auto-tags -->
-# **Tags:** [`qamomile-optimization`](../tags/qamomile-optimization.md) · [`binary-model`](../tags/binary-model.md)
+# **Tags:** <a class="tag-chip" href="../tags/qamomile-optimization.md">qamomile-optimization</a> <a class="tag-chip" href="../tags/binary-model.md">binary-model</a>
 # <!-- END auto-tags -->
 #
 # This tutorial walks through `BinaryModel`, the core class in Qamomile's optimization module for describing unconstrained optimization problems over binary variables. `BinaryModel` supports both `binary` (0/1) and `spin` (-1/1) variable types, and the two representations can be converted into each other through the `change_vartype` method.

@@ -21,7 +21,7 @@
 # # QAOA for Graph Partitioning
 #
 # <!-- BEGIN auto-tags -->
-# **Tags:** [`qaoa`](../tags/qaoa.md) · [`qamomile-optimization`](../tags/qamomile-optimization.md) · [`optimization`](../tags/optimization.md) · [`variational`](../tags/variational.md) · [`algorithm`](../tags/algorithm.md)
+# **Tags:** <a class="tag-chip" href="../tags/qaoa.md">qaoa</a> <a class="tag-chip" href="../tags/qamomile-optimization.md">qamomile-optimization</a> <a class="tag-chip" href="../tags/optimization.md">optimization</a> <a class="tag-chip" href="../tags/variational.md">variational</a> <a class="tag-chip" href="../tags/algorithm.md">algorithm</a>
 # <!-- END auto-tags -->
 #
 # This tutorial demonstrates how to solve the **graph partitioning problem**

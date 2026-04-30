@@ -74,7 +74,7 @@ STRINGS: dict[str, dict[str, object]] = {
             "collaboration": "Collaboration",
         },
         "bucket_labels": {
-            "same": "Same level",
+            "same": "In this section",
             "cousin": "In other sections",
         },
     },
@@ -98,7 +98,7 @@ STRINGS: dict[str, dict[str, object]] = {
             "collaboration": "コラボレーション",
         },
         "bucket_labels": {
-            "same": "同じ階層",
+            "same": "このセクション",
             "cousin": "他のセクション",
         },
     },
@@ -232,19 +232,35 @@ def _tag_map(articles: Iterable[Article]) -> dict[str, list[Article]]:
 # --------------------------------------------------------------------- #
 
 
-def _chip_from_section(tag: str) -> str:
+def _chip_html(tag: str, href: str, count: int | None = None) -> str:
+    """Render a single ``<a class="tag-chip">`` chip.
+
+    The chip is plain HTML that MyST passes through verbatim; styling
+    lives in ``docs/assets/custom-theme.css`` (``a.tag-chip``). Pass
+    ``count`` to embed the per-bucket / per-tag article count inside
+    the pill — it shows up on the right side of the chip with a divider
+    line. Omit ``count`` for chips that just navigate (e.g. inline
+    chips at the top of an article).
+    """
+    inner = tag
+    if count is not None:
+        inner += f'<span class="tag-count">{count}</span>'
+    return f'<a class="tag-chip" href="{href}">{inner}</a>'
+
+
+def _chip_from_section(tag: str, count: int | None = None) -> str:
     """Render a tag chip linking from a section landing page (e.g. algorithm/index.md)."""
-    return f"[`{tag}`](../tags/{tag}.md)"
+    return _chip_html(tag, f"../tags/{tag}.md", count)
 
 
-def _chip_from_tags_dir(tag: str) -> str:
+def _chip_from_tags_dir(tag: str, count: int | None = None) -> str:
     """Render a tag chip linking from inside docs/<lang>/tags/."""
-    return f"[`{tag}`](./{tag}.md)"
+    return _chip_html(tag, f"./{tag}.md", count)
 
 
-def _chip_from_article(tag: str) -> str:
+def _chip_from_article(tag: str, count: int | None = None) -> str:
     """Render a tag chip linking from a section article (sibling of section dir)."""
-    return f"[`{tag}`](../tags/{tag}.md)"
+    return _chip_html(tag, f"../tags/{tag}.md", count)
 
 
 def _render_tags_index(
@@ -262,8 +278,8 @@ def _render_tags_index(
     parts.append(str(strings["tags_index_lead"]))
     parts.append("")
     if tag_map:
-        chip_line = " · ".join(
-            f"{_chip_from_tags_dir(t)} ({len(tag_map[t])})"
+        chip_line = " ".join(
+            _chip_from_tags_dir(t, len(tag_map[t]))
             for t in sorted(tag_map)
         )
         parts.append(chip_line)
@@ -300,7 +316,7 @@ def _render_tag_page(
         parts.append("---")
         parts.append("")
         parts.append(f"**{strings['browse_by_tag']}:** ")
-        parts.append(" · ".join(_chip_from_tags_dir(t) for t in other_tags))
+        parts.append(" ".join(_chip_from_tags_dir(t) for t in other_tags))
         parts.append("")
     parts.append("---")
     parts.append("")
@@ -319,6 +335,8 @@ def _render_tag_page(
             chips = " ".join(
                 _chip_from_tags_dir(t) for t in a.tags if t != tag
             )
+            # (chips already space-separated; tag-chip CSS handles its own
+            # margin so no extra ` · ` separator is needed)
             parts.append(f"### [{a.title}](../{a.section}/{a.slug}.ipynb)")
             parts.append("")
             if chips:
@@ -350,7 +368,7 @@ CHIP_BLOCK_RE = re.compile(
 
 def _build_chip_block(article: Article, strings: dict[str, object]) -> str:
     """Build the per-article chip block (already prefixed with ``# `` for .py)."""
-    chips = " · ".join(_chip_from_article(t) for t in article.tags)
+    chips = " ".join(_chip_from_article(t) for t in article.tags)
     return (
         f"{CHIP_BEGIN}\n"
         f"# **{strings['tags_label']}:** {chips}\n"
@@ -564,8 +582,8 @@ def _render_browse_by_tag_block(
         tag_counts = bucketed[bucket]
         if not tag_counts:
             continue
-        chip_line = " · ".join(
-            f"{_chip_from_section(t)} ({tag_counts[t]})"
+        chip_line = " ".join(
+            _chip_from_section(t, tag_counts[t])
             for t in sorted(tag_counts)
         )
         lines.append(f"**{bucket_labels[bucket]}:** {chip_line}")

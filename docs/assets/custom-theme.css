@@ -93,6 +93,60 @@
 .dark\:focus\:border-blue-500:focus:is(.dark *) { border-color: #C08A40 !important; }
 .dark\:focus\:ring-blue-500:focus:is(.dark *) { --tw-ring-color: #C08A40 !important; }
 
+/* === Tag chips ===
+ * Pill-shaped clickable tag labels emitted by docs/scripts/build_doc_tags.py.
+ * They appear in:
+ *   - the Browse-by-tag block injected into each section index.md,
+ *   - the global tags landing page (tags/index.md),
+ *   - the Browse-by-tag header and article cards on per-tag pages,
+ *   - the auto-tags chip block at the top of every tagged article.
+ */
+a.tag-chip {
+  display: inline-block;
+  padding: 0.15em 0.75em;
+  margin: 0.18em 0.12em;
+  background-color: #F9EDD8;
+  color: #8B5E25;
+  border-radius: 999px;
+  font-size: 0.88em;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+a.tag-chip:hover {
+  background-color: #F0DCC0;
+  color: #6E4A1C;
+  text-decoration: none;
+}
+
+a.tag-chip::before {
+  content: "#";
+  margin-right: 0.25em;
+  opacity: 0.55;
+}
+
+a.tag-chip .tag-count {
+  margin-left: 0.5em;
+  padding-left: 0.55em;
+  border-left: 1px solid currentColor;
+  opacity: 0.7;
+  font-size: 0.85em;
+  font-weight: 400;
+}
+
+/* Dark mode: deeper amber tint that reads against the dark background. */
+.dark a.tag-chip {
+  background-color: rgba(110, 74, 28, 0.45);
+  color: #F0DCC0;
+}
+
+.dark a.tag-chip:hover {
+  background-color: rgba(168, 116, 48, 0.6);
+  color: #FDF8F0;
+}
+
 /* Google Colab launch button (injected at build output) */
 .qamomile-colab-button {
   display: inline-flex;

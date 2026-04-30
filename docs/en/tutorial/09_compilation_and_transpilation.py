@@ -21,7 +21,7 @@
 # # Compilation and Transpilation: Under the Hood
 #
 # <!-- BEGIN auto-tags -->
-# **Tags:** [`tutorial`](../tags/tutorial.md)
+# **Tags:** <a class="tag-chip" href="../tags/tutorial.md">tutorial</a>
 # <!-- END auto-tags -->
 #
 # Tutorials 01–07 used the transpiler as a black box: write a `@qkernel`, call
