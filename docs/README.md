@@ -53,7 +53,7 @@ docs/
 │   ├── tutorial/                # SDK fundamentals (kernels, parameters, execution, …)
 │   ├── algorithm/               # Algorithm walkthroughs (QAOA, VQE, QEC, Hamiltonian sim, …)
 │   ├── usage/                   # Per-module how-to guides (BinaryModel, …)
-│   ├── collaboration/           # External-platform integration (qBraid; needs API key)
+│   ├── integration/             # External-library / platform integration notes (qBraid; needs API key)
 │   ├── release_notes/           # Per-version changelog
 │   └── tags/                    # Auto-generated tag pages (gitignored)
 │
@@ -191,7 +191,7 @@ API generation and copying are automatically included in `./build.sh build`. No 
 
 4. **Add to test patterns** if the new page is in a directory not yet
    covered by `tests/docs/test_tutorials.py` `TUTORIAL_PATTERNS`.
-   `collaboration/` is intentionally excluded since those notebooks
+   `integration/` is intentionally excluded since those notebooks
    may need an API key.
 
 5. **Regenerate auto-managed regions** (chip blocks, tag pages,
@@ -236,7 +236,7 @@ API generation and copying are automatically included in `./build.sh build`. No 
 
 ### Tags
 
-Articles under `{tutorial,algorithm,usage,collaboration}/` (in both
+Articles under `{tutorial,algorithm,usage,integration}/` (in both
 `en/` and `ja/`) are tag-filterable. Each `.py` declares its tags in
 the frontmatter at the top of its first markdown cell:
 

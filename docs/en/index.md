@@ -63,7 +63,7 @@ from qamomile.qbraid import QBraidExecutor
 
 - [Algorithms](algorithm/index.md) — Concrete walkthroughs of variational and quantum algorithms (QAOA, VQE, …) end-to-end with Qamomile.
 - [Usage](usage/index.md) — How-to guides for individual Qamomile modules (`BinaryModel`, future module-walkthroughs).
-- [Collaboration](collaboration/index.md) — Integrations with external quantum platforms and services (qBraid, …).
+- [Integration](integration/index.md) — Notes on using Qamomile with external libraries and quantum platforms (qBraid, …).
 - [Release Notes](release_notes/index.md) — Per-version changelog with feature highlights and breaking changes.
 
 For SDK-level fundamentals (kernels, parameters, execution, transpilation, QEC primitives), see the [Tutorials](tutorial/index.md) section.

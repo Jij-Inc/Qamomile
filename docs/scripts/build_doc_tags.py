@@ -3,7 +3,7 @@
 This script is the source of truth for tag-based discovery UX across the
 documentation. It scans every tagged article under
 
-    docs/<lang>/{tutorial,algorithm,usage,collaboration}/*.py
+    docs/<lang>/{tutorial,algorithm,usage,integration}/*.py
 
 (reading the MyST ``title`` / ``tags`` frontmatter inside the first
 ``# %% [markdown]`` cell), and writes:
@@ -48,7 +48,7 @@ SECTIONS: tuple[str, ...] = (
     "tutorial",
     "algorithm",
     "usage",
-    "collaboration",
+    "integration",
 )
 
 # Whitelist of tags every article is allowed to carry. The taxonomy is
@@ -58,8 +58,8 @@ SECTIONS: tuple[str, ...] = (
 # — this script itself does not validate, so a stray tag does not crash
 # the build, only the test fails on the PR.
 ALLOWED_TAGS: frozenset[str] = frozenset({
-    "collaboration",
     "hamiltonian-simulation",
+    "integration",
     "optimization",
     "pauli-decomposition",
     "qaoa",
@@ -91,7 +91,7 @@ STRINGS: dict[str, dict[str, object]] = {
             "tutorial": "Tutorials",
             "algorithm": "Algorithms",
             "usage": "Usage",
-            "collaboration": "Collaboration",
+            "integration": "Integration",
         },
         "bucket_labels": {
             "same": "In this section",
@@ -115,7 +115,7 @@ STRINGS: dict[str, dict[str, object]] = {
             "tutorial": "チュートリアル",
             "algorithm": "アルゴリズム",
             "usage": "使い方",
-            "collaboration": "コラボレーション",
+            "integration": "インテグレーション",
         },
         "bucket_labels": {
             "same": "このセクション",

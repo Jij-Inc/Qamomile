@@ -115,7 +115,7 @@ qBraid is out of scope (executor-only wrapper around Qiskit, requires API key). 
 ### I. Documentation
 
 - **Jupytext percent-format `.py` is the source of truth.** Every tutorial `.py` must have a committed `.ipynb` that (a) exists, (b) stays in sync when its `.py` changes, (c) contains execution outputs. Any of these failing is **P1**. An `.ipynb`-only change (no corresponding `.py` update) is **P2** — it bypasses the source-of-truth.
-- **Docs test coverage**: new tutorial paths (outside `collaboration/`) must be in `TUTORIAL_PATTERNS` in `tests/docs/test_tutorials.py`. Missing is **P1**.
+- **Docs test coverage**: new tutorial paths (outside `integration/`) must be in `TUTORIAL_PATTERNS` in `tests/docs/test_tutorials.py`. Missing is **P1**.
 - **en/ja parity**: `docs/en/` and `docs/ja/` must share file structure and content — only the natural language differs. Missing or outdated counterpart is **P1**.
 - **Tag whitelist (`ALLOWED_TAGS` in `docs/scripts/build_doc_tags.py`)**: every `tags:` entry in an article's MyST frontmatter MUST already be in `ALLOWED_TAGS`. Adding a new tag to the whitelist as a side-effect of introducing an article is **P1** — the taxonomy is deliberately small and curated, and an unannounced expansion of it is precisely what the whitelist exists to prevent. If a new tag is genuinely needed, the PR should call it out explicitly and the `ALLOWED_TAGS` change should be a separate, documented decision (not a quiet line in a docs PR).
 - Jupyter Book 2 with MyST.

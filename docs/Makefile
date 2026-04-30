@@ -3,7 +3,7 @@
 
 # Languages and tutorial directories
 LANGS := en ja
-# collaboration is excluded because those notebooks may require API keys
+# integration is excluded because those notebooks may require API keys
 # and can't be automatically synced/executed.
 # release_notes is excluded because it is markdown-only; nothing to sync or execute.
 TARGET_DIRS := tutorial algorithm usage
@@ -56,7 +56,7 @@ generate-doc-tags:
 	@echo "✓ Doc tag pages generated"
 
 # Sync .py -> .ipynb for a single language (used via sync-en, sync-ja)
-# We don't convert collaboration/ because those notebooks need API-KEYs.
+# We don't convert integration/ because those notebooks need API-KEYs.
 define sync-lang
 	@echo "Converting $(1) .py files to .ipynb..."
 	@for dir in $(TARGET_DIRS); do \

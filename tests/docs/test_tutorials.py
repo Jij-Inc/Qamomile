@@ -34,7 +34,7 @@ TUTORIAL_PATTERNS = [
     "docs/en/usage/**/*.ipynb",
     "docs/ja/usage/**/*.ipynb",
     # We will not execute the following directories:
-    # - collaboration: they may require API keys and may have side effects.
+    # - integration: they may require API keys and may have side effects.
     # - release_notes: markdown-only; nothing to execute.
 ]
 

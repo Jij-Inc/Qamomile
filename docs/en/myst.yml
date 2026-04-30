@@ -41,9 +41,9 @@ project:
 # --- BEGIN doc tags (auto-generated) ---
     - file: tags/index.md
       hidden: true
-    - file: tags/collaboration.md
-      hidden: true
     - file: tags/hamiltonian-simulation.md
+      hidden: true
+    - file: tags/integration.md
       hidden: true
     - file: tags/optimization.md
       hidden: true

@@ -9,7 +9,7 @@ cd "$(dirname "$0")"
 
 # Languages and target directories
 LANGS=(en ja)
-# collaboration is excluded because those notebooks may require API keys
+# integration is excluded because those notebooks may require API keys
 # and can't be automatically synced/executed.
 # release_notes is excluded because it is markdown-only; nothing to sync or execute.
 TARGET_DIRS=(tutorial algorithm usage)
@@ -94,7 +94,7 @@ sync_lang() {
         fi
         uv run jupytext --to ipynb "${py_files[@]}"
     done
-    # We don't convert collaboration/ because those notebooks need API-KEYs.
+    # We don't convert integration/ because those notebooks need API-KEYs.
     info "${lang} notebooks synced"
 }
 

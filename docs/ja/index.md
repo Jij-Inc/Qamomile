@@ -63,7 +63,7 @@ from qamomile.qbraid import QBraidExecutor
 
 - [アルゴリズム](algorithm/index.md) — 変分・量子アルゴリズム(QAOA, VQEなど)をQamomileでend-to-endに動かす具体例集。
 - [使い方](usage/index.md) — 個別モジュール(`BinaryModel`など)のHow-toガイド。
-- [コラボレーション](collaboration/index.md) — 外部量子プラットフォームやサービス(qBraidなど)との連携。
+- [インテグレーション](integration/index.md) — Qamomileと外部ライブラリ・量子プラットフォーム(qBraidなど)を組み合わせて使うときのノート。
 - [リリースノート](release_notes/index.md) — バージョン別の変更履歴・主な機能追加・破壊的変更まとめ。
 
 SDK自体の基礎(カーネル、パラメータ、実行、トランスパイル、QEC基礎)については[チュートリアル](tutorial/index.md)を参照してください。
