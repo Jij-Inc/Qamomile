@@ -21,8 +21,6 @@ Concrete algorithm examples — [browse by tag](algorithm/index.md):
 
 - [QAOA for MaxCut](algorithm/qaoa_maxcut) — Build QAOA from scratch to solve MaxCut
 - [QAOA for Graph Partitioning](optimization/qaoa_graph_partition) — End-to-end with JijModeling and `QAOAConverter`
-- [Hamiltonian Simulation with Suzuki–Trotter](algorithm/hamiltonian_simulation) — Rabi oscillation and convergence orders
-- [From a Hermitian Matrix to a Quantum Circuit](algorithm/hermitian_decomposition) — Dense Hermitian matrix to a Pauli sum and time-evolution circuit
 - [VQE for the Hydrogen Molecule](algorithm/vqe_for_hydrogen) — Build a molecular Hamiltonian with OpenFermion and find the ground state energy using VQE
 
 ## Optimization

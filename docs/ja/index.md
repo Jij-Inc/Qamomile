@@ -19,8 +19,6 @@ Qamomileは量子プログラミングSDKです。型付きPython関数で量子
 
 - [QAOAでMaxCutを解く](algorithm/qaoa_maxcut) — QAOA回路をゼロから構築してMaxCutを解き、組み込みの`qaoa_state`と比較する
 - [QAOAによるグラフ分割](optimization/qaoa_graph_partition) — JijModelingと`QAOAConverter`でエンドツーエンド
-- [Suzuki–Trotterによるハミルトニアンシミュレーション](algorithm/hamiltonian_simulation) — Rabi振動と収束次数
-- [エルミート行列から量子回路へ](algorithm/hermitian_decomposition) — 密なエルミート行列からPauli和、そして時間発展回路まで
 - [水素分子のためのVQE](algorithm/vqe_for_hydrogen) — OpenFermionで分子ハミルトニアンを構築し、VQEで基底状態エネルギーを求める
 
 ## 最適化
