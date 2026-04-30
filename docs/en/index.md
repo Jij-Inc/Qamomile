@@ -12,28 +12,6 @@ Qamomile is a quantum programming SDK. Write quantum circuits as typed Python fu
 pip install qamomile
 ```
 
-## Quick Example
-
-```python
-import qamomile.circuit as qmc
-from qamomile.qiskit import QiskitTranspiler
-
-@qmc.qkernel
-def bell_state() -> tuple[qmc.Bit, qmc.Bit]:
-    q0 = qmc.qubit(name="q0")
-    q1 = qmc.qubit(name="q1")
-    q0 = qmc.h(q0)
-    q0, q1 = qmc.cx(q0, q1)
-    return qmc.measure(q0), qmc.measure(q1)
-
-transpiler = QiskitTranspiler()
-exe = transpiler.transpile(bell_state)
-result = exe.sample(transpiler.executor(), shots=1000).result()
-
-for outcome, count in result.results:
-    print(f"  {outcome}: {count}")
-```
-
 ## Supported Quantum SDKs
 
 Qamomile supports multiple quantum SDKs as execution backends. Qiskit is included by default; the others are optional extras.
