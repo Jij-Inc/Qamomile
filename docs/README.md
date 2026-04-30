@@ -44,7 +44,6 @@ docs/
 ├── scripts/                     # Build helper scripts
 │                                #   - build_doc_tags.py: regenerate tag pages, chip blocks, myst.yml auto-tags region
 │                                #   - inject_colab_launch.py: post-build "open in Colab" button
-├── qamomile-lp/                 # Landing page assets
 │
 ├── en/                          # English documentation
 │   ├── myst.yml                 # Jupyter Book 2 config + TOC
