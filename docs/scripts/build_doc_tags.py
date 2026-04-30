@@ -391,9 +391,11 @@ def _render_tag_page(
         parts.append(f"## {section_titles[section]}")
         parts.append("")
         for a in section_articles:
-            chips = " ".join(
-                _chip_from_tags_dir(t) for t in a.tags if t != tag
-            )
+            # Show every tag the article carries, including the current
+            # tag page's tag. Hiding it here used to read as "where did
+            # the tag we landed on go?" — a confusing experience even
+            # though we know why we're on the page.
+            chips = " ".join(_chip_from_tags_dir(t) for t in a.tags)
             # (chips already space-separated; tag-chip CSS handles its own
             # margin so no extra ` · ` separator is needed)
             parts.append(f"### [{a.title}](../{a.section}/{a.slug}.ipynb)")
