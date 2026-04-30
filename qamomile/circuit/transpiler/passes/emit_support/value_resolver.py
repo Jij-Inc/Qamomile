@@ -70,41 +70,43 @@ class ValueResolver:
             idx = None
             if idx_value.is_constant():
                 idx = int(idx_value.get_const())
-            elif idx_value.uuid in bindings:
-                idx = self._resolve_numeric_index(bindings[idx_value.uuid])
-                if idx is None:
-                    bound_val = bindings[idx_value.uuid]
-                    return QubitResolutionResult(
-                        success=False,
-                        failure_reason=ResolutionFailureReason.INDEX_NOT_NUMERIC,
-                        failure_details=(
-                            f"Index '{idx_value.name}' (uuid: "
-                            f"{idx_value.uuid[:8]}...) resolved to non-numeric "
-                            f"type: {type(bound_val).__name__}"
-                        ),
-                    )
-            elif idx_value.parent_array is not None:
-                nested_result = self.resolve_classical_value(idx_value, bindings)
-                if nested_result is None:
-                    array_name = idx_value.parent_array.name
-                    return QubitResolutionResult(
-                        success=False,
-                        failure_reason=ResolutionFailureReason.NESTED_ARRAY_RESOLUTION_FAILED,
-                        failure_details=(
-                            f"Nested array access '{array_name}[...]' could not be resolved. "
-                            f"Array '{array_name}' may not be in bindings."
-                        ),
-                    )
-                idx = int(nested_result)
             else:
-                return QubitResolutionResult(
-                    success=False,
-                    failure_reason=ResolutionFailureReason.SYMBOLIC_INDEX_NOT_BOUND,
-                    failure_details=(
-                        f"Index variable '{idx_value.name}' (uuid: "
-                        f"{idx_value.uuid[:8]}...) is not bound."
-                    ),
-                )
+                raw = self.lookup_in_bindings(idx_value, bindings)
+                if raw is not None:
+                    idx = self._resolve_numeric_index(raw)
+                    if idx is None:
+                        return QubitResolutionResult(
+                            success=False,
+                            failure_reason=ResolutionFailureReason.INDEX_NOT_NUMERIC,
+                            failure_details=(
+                                f"Index '{idx_value.name}' (uuid: "
+                                f"{idx_value.uuid[:8]}...) resolved to "
+                                f"non-numeric type: {type(raw).__name__}"
+                            ),
+                        )
+            if idx is None:
+                if idx_value.parent_array is not None:
+                    nested_result = self.resolve_classical_value(idx_value, bindings)
+                    if nested_result is None:
+                        array_name = idx_value.parent_array.name
+                        return QubitResolutionResult(
+                            success=False,
+                            failure_reason=ResolutionFailureReason.NESTED_ARRAY_RESOLUTION_FAILED,
+                            failure_details=(
+                                f"Nested array access '{array_name}[...]' could not be resolved. "
+                                f"Array '{array_name}' may not be in bindings."
+                            ),
+                        )
+                    idx = int(nested_result)
+                else:
+                    return QubitResolutionResult(
+                        success=False,
+                        failure_reason=ResolutionFailureReason.SYMBOLIC_INDEX_NOT_BOUND,
+                        failure_details=(
+                            f"Index variable '{idx_value.name}' (uuid: "
+                            f"{idx_value.uuid[:8]}...) is not bound."
+                        ),
+                    )
 
             if idx is not None:
                 array_qubit_addr = QubitAddress(parent_uuid, idx)
@@ -368,12 +370,7 @@ class ValueResolver:
             if parent_name in self.parameters:
                 if value.element_indices and len(value.element_indices) > 0:
                     idx_value = value.element_indices[0]
-                    idx = None
-                    if idx_value.is_constant():
-                        idx = int(idx_value.get_const())
-                    elif idx_value.uuid in bindings:
-                        idx = self._resolve_numeric_index(bindings[idx_value.uuid])
-
+                    idx = self.resolve_int_value(idx_value, bindings)
                     if idx is not None:
                         return f"{parent_name}[{idx}]"
 
