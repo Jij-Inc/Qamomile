@@ -83,6 +83,7 @@ project:
     - title: Release Notes
       file: release_notes/index.md
       children:
+        - file: release_notes/v0_12_0.md
         - file: release_notes/v0_11_1.md
         - file: release_notes/v0_11_0.md
         - file: release_notes/v0_10_0.md
@@ -103,6 +104,7 @@ project:
             - file: api/circuit/transpiler
             - file: api/circuit/visualization
         - file: api/cudaq
+        - file: api/linalg
         - file: api/observable
         - file: api/optimization/index
           children:
@@ -111,7 +113,6 @@ project:
             - file: api/optimization/fqaoa
             - file: api/optimization/qaoa
             - file: api/optimization/qrao
-            - file: api/optimization/utils
         - file: api/qbraid
         - file: api/qiskit/index
           children:
