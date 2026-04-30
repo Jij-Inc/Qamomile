@@ -247,12 +247,19 @@ Shipping a new backend without retro-actively extending algorithm/stdlib coverag
 When making any change under `docs/` (article `.py`/`.ipynb`,
 section landing pages, build scripts, tag taxonomy, etc.), **read
 `docs/README.md` first**. It is the source-of-truth for the docs
-build pipeline (`.py` → jupytext → `.ipynb`, then `build.sh`), the
-auto-managed sentinel regions (article chip blocks, section
-browse-by-tag clouds, `myst.yml` Tags toc), and the conventions
-for adding or editing pages. Skipping this means you'll likely
-hand-edit auto-managed regions, regenerate artifacts incorrectly,
-or miss the steps required to keep `.py` and `.ipynb` in sync.
+build pipeline and the conventions for adding or editing pages.
+
+Key invariants worth remembering:
+
+- **Auto-managed content (chip blocks, browse-by-tag clouds,
+  per-tag pages, `myst.yml` Tags toc) is never committed.**
+  `build.sh build` copies the docs tree into a gitignored
+  `docs/_build_src/`, runs `build_doc_tags.py` and `jupytext
+  --update` against the copy, and builds from there. Source files
+  carry only empty sentinel markers; do not hand-fill them.
+- The committed source must therefore stay clean. PRs that touch
+  tag taxonomy should only diff `tags:` frontmatter lines, not
+  chip-block bodies.
 
 ## Documentation Tags (Whitelist)
 

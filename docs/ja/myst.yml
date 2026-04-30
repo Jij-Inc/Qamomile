@@ -38,26 +38,6 @@ project:
         - file: algorithm/quantum_error_correction.ipynb
         - file: algorithm/steane_code.ipynb
 # --- BEGIN doc tags (auto-generated) ---
-    - file: tags/index.md
-      hidden: true
-    - file: tags/chemistry.md
-      hidden: true
-    - file: tags/encoding.md
-      hidden: true
-    - file: tags/error-correction.md
-      hidden: true
-    - file: tags/integration.md
-      hidden: true
-    - file: tags/optimization.md
-      hidden: true
-    - file: tags/primitives.md
-      hidden: true
-    - file: tags/resource-estimation.md
-      hidden: true
-    - file: tags/simulation.md
-      hidden: true
-    - file: tags/variational.md
-      hidden: true
     # --- END doc tags (auto-generated) ---
     - title: 使い方
       file: usage/index.md

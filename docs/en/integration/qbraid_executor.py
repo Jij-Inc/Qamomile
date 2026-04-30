@@ -19,10 +19,6 @@
 #
 # # qBraid Support - QBraidExecutor
 #
-# <!-- BEGIN auto-tags -->
-# **Tags:** <a class="tag-chip" href="../tags/integration.md">integration</a> <a class="tag-chip" href="../tags/optimization.md">optimization</a>
-# <!-- END auto-tags -->
-#
 # This page introduces [qBraid](https://www.qbraid.com/) support in Qamomile and shows how to run a Qamomile workflow with `QBraidExecutor`. Qamomile currently connects to qBraid through its Qiskit integration, so the usual flow is `qkernel` -> `QiskitTranspiler` -> `QBraidExecutor`.
 
 # %%

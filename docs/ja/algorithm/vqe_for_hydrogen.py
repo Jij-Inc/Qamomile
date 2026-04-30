@@ -19,10 +19,6 @@
 #
 # # 水素分子のための変分量子固有値ソルバー（VQE）
 #
-# <!-- BEGIN auto-tags -->
-# **タグ:** <a class="tag-chip" href="../tags/chemistry.md">chemistry</a> <a class="tag-chip" href="../tags/variational.md">variational</a>
-# <!-- END auto-tags -->
-#
 # このチュートリアルでは、水素分子（H₂）の基底状態エネルギーを求めるための変分量子固有値ソルバー（VQE）アルゴリズムの実装について解説します。分子ハミルトニアンの生成には [OpenFermion](https://quantumai.google/openfermion) を使用します。
 #
 # ワークフローは以下の通りです：

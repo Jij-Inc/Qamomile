@@ -49,9 +49,13 @@ copy-api: generate-api
 	@for lang in $(LANGS); do mkdir -p $$lang/api; cp -r api/. $$lang/api/; done
 	@echo "✓ API reference copied to language directories"
 
-# Regenerate tag indexes, per-tag pages, and inline chips from frontmatter
+# Auto-managed regions (chip blocks, browse-by-tag clouds, myst.yml
+# Tags toc, per-tag pages) are generated into a build-dir copy of the
+# docs tree, never into the committed source. The actual injection runs
+# inside build.sh's setup_build_src; this target is a thin wrapper for
+# ad-hoc invocation against the working tree.
 generate-doc-tags:
-	@echo "Generating doc tag pages..."
+	@echo "Generating doc tag pages (in-place; usually only useful for previewing)..."
 	@uv run python scripts/build_doc_tags.py
 	@echo "✓ Doc tag pages generated"
 
@@ -103,21 +107,18 @@ execute-ja:
 execute: execute-en execute-ja
 	@echo "✓ All notebooks executed"
 
-# Build targets (no sync)
-build-en: copy-api generate-doc-tags
-	@echo "Building English documentation..."
-	cd en && uv run jupyter-book build --html
-	@uv run python scripts/inject_colab_launch.py en
-	@echo "✓ English documentation built: en/_build/html/index.html"
+# Build targets — delegate to build.sh so the build-dir setup, tag-page
+# injection, and post-build colab-launch step stay defined in one place.
+# build.sh handles _build_src/ copy, build_doc_tags.py injection,
+# jupytext --update, mystmd build, and the final cp back to <lang>/_build/.
+build-en:
+	@./build.sh build-en
 
-build-ja: copy-api generate-doc-tags
-	@echo "Building Japanese documentation..."
-	cd ja && uv run jupyter-book build --html
-	@uv run python scripts/inject_colab_launch.py ja
-	@echo "✓ Japanese documentation built: ja/_build/html/index.html"
+build-ja:
+	@./build.sh build-ja
 
-build: copy-api build-en build-ja
-	@echo "✓ Both English and Japanese documentation built successfully"
+build:
+	@./build.sh build
 
 # Sync + execute + build targets
 sync-build-en: sync-en execute-en build-en
@@ -137,6 +138,7 @@ clean:
 		rm -rf $$lang/_build; \
 		rm -rf $$lang/api; \
 	done
+	@rm -rf _build_src
 	@rm -rf _site
 	@echo "✓ Cleaned generated .ipynb files and build outputs"
 

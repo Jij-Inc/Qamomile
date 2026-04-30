@@ -19,10 +19,6 @@
 #
 # # qBraidサポート - QBraidExecutor
 #
-# <!-- BEGIN auto-tags -->
-# **タグ:** <a class="tag-chip" href="../tags/integration.md">integration</a> <a class="tag-chip" href="../tags/optimization.md">optimization</a>
-# <!-- END auto-tags -->
-#
 # このページでは、Qamomileの[qBraid](https://www.qbraid.com/)サポートを紹介し、`QBraidExecutor`を使ってQamomileのワークフローを実行する方法を説明します。現状のQamomileはQiskit経由でqBraidと連携するため、基本的な流れは `qkernel` -> `QiskitTranspiler` -> `QBraidExecutor` です。
 
 # %%

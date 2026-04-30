@@ -19,10 +19,6 @@
 #
 # # エルミート行列から量子回路へ
 #
-# <!-- BEGIN auto-tags -->
-# **タグ:** <a class="tag-chip" href="../tags/primitives.md">primitives</a> <a class="tag-chip" href="../tags/encoding.md">encoding</a> <a class="tag-chip" href="../tags/simulation.md">simulation</a>
-# <!-- END auto-tags -->
-#
 # 量子アルゴリズムの多くは、密な$2^n \times 2^n$のnumpy配列として与えられた**エルミート行列**（ハミルトニアン）から出発し、その時間発展$e^{-iHt}$を量子コンピュータ上でシミュレーションしたいという状況からはじまります。定石は以下の2ステップです。
 #
 # 1. $H$をPauli文字列の重み付き和に分解する。

@@ -19,10 +19,6 @@
 #
 # # 量子誤り訂正入門
 #
-# <!-- BEGIN auto-tags -->
-# **タグ:** <a class="tag-chip" href="../tags/error-correction.md">error-correction</a>
-# <!-- END auto-tags -->
-#
 # 量子誤り訂正(Quantum Error Correction; QEC)は、壊れやすい量子状態を複数の物理量子ビットへ分散し、状態そのものを測らずにエラーだけを検出して戻す技術です。
 #
 # このチュートリアルでは、次の流れを Qamomile の `@qkernel` で実装します。

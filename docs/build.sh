@@ -65,9 +65,52 @@ generate_api() {
 }
 
 generate_doc_tags() {
-    echo "Generating doc tag indexes, per-tag pages, and inline chips..."
-    uv run python scripts/build_doc_tags.py
+    # Inject auto-managed regions (chip blocks, browse-by-tag clouds,
+    # myst.yml Tags toc, per-tag pages) into the build-dir copy of the
+    # docs tree pointed at by $1. Defaults to the current dir when
+    # invoked without an argument (back-compat for ad-hoc runs).
+    local docs_root="${1:-$(pwd)}"
+    echo "Generating doc tag indexes (docs root: ${docs_root})..."
+    DOCS_ROOT_OVERRIDE="$docs_root" uv run python scripts/build_doc_tags.py
     info "Doc tag pages generated"
+}
+
+setup_build_src() {
+    # Build everything inside docs/_build_src/ so the committed source
+    # tree never receives auto-managed injections. Sequence:
+    #   1. rm + recreate docs/_build_src/<lang>/ as a copy of docs/<lang>/
+    #   2. run build_doc_tags.py against _build_src/ (injects chips,
+    #      browse-by-tag, myst.yml Tags toc; generates per-tag pages)
+    #   3. jupytext --update so chip-injected .py propagates into .ipynb
+    #      cells (preserves committed outputs). Includes integration/
+    #      because jupytext only syncs cell sources — no execution, no
+    #      API-key dependency.
+    local build_src_root="$(pwd)/_build_src"
+    local _lang _dir _py_files
+    echo "Setting up _build_src/ ..."
+    rm -rf "$build_src_root"
+    mkdir -p "$build_src_root"
+    for _lang in "${LANGS[@]}"; do
+        rsync -a \
+            --exclude='_build/' \
+            --exclude='_build_src/' \
+            "${_lang}/" "${build_src_root}/${_lang}/"
+    done
+
+    generate_doc_tags "$build_src_root"
+
+    local sync_dirs=("${TARGET_DIRS[@]}" "integration")
+    for _lang in "${LANGS[@]}"; do
+        for _dir in "${sync_dirs[@]}"; do
+            shopt -s nullglob
+            _py_files=("${build_src_root}/${_lang}/${_dir}"/*.py)
+            shopt -u nullglob
+            [ ${#_py_files[@]} -eq 0 ] && continue
+            uv run jupytext --to ipynb --update "${_py_files[@]}"
+        done
+    done
+
+    info "_build_src/ ready"
 }
 
 copy_api() {
@@ -112,14 +155,12 @@ execute_lang() {
     info "${lang} notebooks executed"
 }
 
-# Build documentation for a single language (no sync)
-build_lang() {
+# Build a single language from docs/_build_src/<lang>/ (assumes
+# setup_build_src already ran).
+_build_lang_from_build_src() {
     local lang="$1"
-    # Regenerate tag indexes, per-tag pages, and inline chips from
-    # frontmatter before each build.
-    generate_doc_tags
     echo "Building ${lang} documentation..."
-    cd "$lang"
+    cd "_build_src/${lang}"
     if is_rtd && [[ -n "${READTHEDOCS_VERSION:-}" ]]; then
         local base_url="/${READTHEDOCS_VERSION}/${lang}"
         info "Read the Docs detected. Using BASE_URL=${base_url}"
@@ -130,9 +171,22 @@ build_lang() {
         fi
         uv run jupyter-book build --html
     fi
-    cd ..
+    cd ../..
+    # Move the html output back to docs/<lang>/_build/ so the existing
+    # post-build step (colab-launch injection) and the .readthedocs.yaml
+    # copy step both find it where they used to.
+    rm -rf "${lang}/_build"
+    cp -r "_build_src/${lang}/_build" "${lang}/_build"
     uv run python scripts/inject_colab_launch.py "$lang"
     info "${lang} documentation built: ${lang}/_build/html/index.html"
+}
+
+# Build documentation for a single language (no sync). Public entry
+# point — runs setup_build_src then builds just this lang.
+build_lang() {
+    local lang="$1"
+    setup_build_src
+    _build_lang_from_build_src "$lang"
 }
 
 # Sync, execute, and build documentation for a single language
@@ -182,8 +236,9 @@ fresh_lang() {
 build_all() {
     generate_api
     copy_api
-    build_lang en
-    build_lang ja
+    setup_build_src
+    _build_lang_from_build_src en
+    _build_lang_from_build_src ja
     info "Both English and Japanese documentation built successfully"
 }
 
@@ -196,6 +251,7 @@ clean() {
         rm -rf "${lang}/_build"
         rm -rf "${lang}/api"
     done
+    rm -rf "_build_src"
     info "Cleaned generated .ipynb files and build outputs"
 }
 

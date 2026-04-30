@@ -32,6 +32,7 @@ out of scope and never scanned.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,7 +41,13 @@ from typing import Iterable
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-DOCS_ROOT = REPO_ROOT / "docs"
+# Allow build.sh to point the script at a build-dir copy of ``docs/`` via
+# an env var, so auto-managed content (chip blocks, browse-by-tag,
+# myst.yml Tags toc region, per-tag pages) is injected into a gitignored
+# scratch tree at build time instead of being committed alongside the
+# hand-written source. Falls back to the in-repo ``docs/`` so contributors
+# can still run the script ad hoc against a working tree.
+DOCS_ROOT = Path(os.environ.get("DOCS_ROOT_OVERRIDE", REPO_ROOT / "docs")).resolve()
 
 # Sections whose .py files participate in tagging. Adding a new section
 # is a matter of appending its directory name here.
