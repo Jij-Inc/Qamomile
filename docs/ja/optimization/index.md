@@ -9,7 +9,9 @@ Qamomile の最適化モジュールの使い方ガイドです。
 ## タグで探す
 
 <!-- BEGIN browse-by-tag -->
-[`algorithm`](../tags/algorithm.md) (5) · [`binary-model`](../tags/binary-model.md) (2) · [`collaboration`](../tags/collaboration.md) (1) · [`hamiltonian-simulation`](../tags/hamiltonian-simulation.md) (2) · [`optimization`](../tags/optimization.md) (2) · [`pauli-decomposition`](../tags/pauli-decomposition.md) (1) · [`qamomile-optimization`](../tags/qamomile-optimization.md) (2) · [`qaoa`](../tags/qaoa.md) (2) · [`qbraid`](../tags/qbraid.md) (1) · [`qec`](../tags/qec.md) (2) · [`resource-estimation`](../tags/resource-estimation.md) (1) · [`trotterization`](../tags/trotterization.md) (1) · [`tutorial`](../tags/tutorial.md) (7) · [`variational`](../tags/variational.md) (3) · [`vqe`](../tags/vqe.md) (1)
+**同じ階層:** [`algorithm`](../tags/algorithm.md) (1) · [`binary-model`](../tags/binary-model.md) (1) · [`optimization`](../tags/optimization.md) (1) · [`qamomile-optimization`](../tags/qamomile-optimization.md) (2) · [`qaoa`](../tags/qaoa.md) (1) · [`variational`](../tags/variational.md) (1)
+
+**他のセクション:** [`collaboration`](../tags/collaboration.md) (1) · [`hamiltonian-simulation`](../tags/hamiltonian-simulation.md) (2) · [`pauli-decomposition`](../tags/pauli-decomposition.md) (1) · [`qbraid`](../tags/qbraid.md) (1) · [`qec`](../tags/qec.md) (2) · [`resource-estimation`](../tags/resource-estimation.md) (1) · [`trotterization`](../tags/trotterization.md) (1) · [`tutorial`](../tags/tutorial.md) (7) · [`vqe`](../tags/vqe.md) (1)
 <!-- END browse-by-tag -->
 
 ## すべての記事

@@ -11,13 +11,15 @@ documentation. It scans every tagged article under
 * ``docs/<lang>/tags/<tag>.md`` — one page per tag, listing every
   article that carries that tag, grouped by section.
 * ``docs/<lang>/tags/index.md`` — a tag-cloud landing page.
-* ``docs/<lang>/algorithm/index.md`` — algorithm landing page (this
-  section keeps its auto-generated index for tag-first browsing).
 * The auto-managed ``Tags`` block inside ``docs/<lang>/myst.yml``,
   bracketed by sentinel comments.
 * An auto-managed ``<!-- BEGIN auto-tags --> ... <!-- END auto-tags -->``
   chip block inside each tagged ``.py`` file's first markdown cell, so
   every rendered article shows clickable tag chips at the top.
+* An auto-managed ``<!-- BEGIN browse-by-tag --> ... <!-- END browse-by-tag -->``
+  region inside each section's hand-written ``index.md``, populated
+  with a proximity-grouped tag cloud (same level / subsections /
+  parent sections / other sections).
 
 Run from anywhere::
 
@@ -71,6 +73,10 @@ STRINGS: dict[str, dict[str, object]] = {
             "optimization": "Optimization",
             "collaboration": "Collaboration",
         },
+        "bucket_labels": {
+            "same": "Same level",
+            "cousin": "In other sections",
+        },
     },
     "ja": {
         "tags_index_title": "タグ",
@@ -90,6 +96,10 @@ STRINGS: dict[str, dict[str, object]] = {
             "algorithm": "アルゴリズム",
             "optimization": "最適化",
             "collaboration": "コラボレーション",
+        },
+        "bucket_labels": {
+            "same": "同じ階層",
+            "cousin": "他のセクション",
         },
     },
 }
@@ -494,12 +504,81 @@ BROWSE_BLOCK_RE = re.compile(
     re.escape(BROWSE_BEGIN) + r"[\s\S]*?" + re.escape(BROWSE_END),
 )
 
+# Bucket order = increasing distance from the index.md that hosts the
+# chip cloud. Each tag is shown in its closest non-empty bucket only
+# (the "highest-only" rule), which keeps the cloud compact when a tag
+# spans sections. The current flat layout produces only ``same`` and
+# ``cousin``; descendant / ancestor buckets are intentionally absent
+# until a section grows nested children.
+_BUCKET_ORDER: tuple[str, ...] = ("same", "cousin")
+_BUCKET_PRIORITY: dict[str, int] = {b: i for i, b in enumerate(_BUCKET_ORDER)}
+
+
+def _classify_for_index(article_section: str, index_section: str) -> str:
+    """Classify ``article_section`` relative to ``index_section``.
+
+    Returns ``same`` when the article lives in the same section as the
+    index, ``cousin`` otherwise. (If we ever introduce nested sections,
+    this is the place to teach the classifier about ``descendant`` and
+    ``ancestor`` again.)
+    """
+    if article_section == index_section:
+        return "same"
+    return "cousin"
+
+
+def _render_browse_by_tag_block(
+    tag_map: dict[str, list[Article]],
+    index_section: str,
+    strings: dict[str, object],
+) -> str:
+    """Render the proximity-grouped chip cloud for one section.
+
+    Each tag is placed in its closest non-empty bucket (``same`` first,
+    then ``descendant``, ``ancestor``, ``cousin``). The count shown is
+    the number of articles inside that bucket — articles that fall into
+    farther buckets do not contribute to the displayed count, since the
+    tag is suppressed from those buckets.
+    """
+    bucket_labels = strings["bucket_labels"]
+    assert isinstance(bucket_labels, dict)
+
+    bucketed: dict[str, dict[str, int]] = {b: {} for b in _BUCKET_ORDER}
+    for tag, articles in tag_map.items():
+        if not articles:
+            continue
+        # Find the closest bucket this tag reaches, count only articles
+        # in that bucket.
+        closest = min(
+            (_classify_for_index(a.section, index_section) for a in articles),
+            key=lambda b: _BUCKET_PRIORITY[b],
+        )
+        count = sum(
+            1 for a in articles
+            if _classify_for_index(a.section, index_section) == closest
+        )
+        bucketed[closest][tag] = count
+
+    lines: list[str] = []
+    for bucket in _BUCKET_ORDER:
+        tag_counts = bucketed[bucket]
+        if not tag_counts:
+            continue
+        chip_line = " · ".join(
+            f"{_chip_from_section(t)} ({tag_counts[t]})"
+            for t in sorted(tag_counts)
+        )
+        lines.append(f"**{bucket_labels[bucket]}:** {chip_line}")
+    return "\n\n".join(lines)
+
 
 def _inject_browse_by_tag(
     index_path: Path,
+    index_section: str,
     tag_map: dict[str, list[Article]],
+    strings: dict[str, object],
 ) -> Path | None:
-    """Refresh the auto-managed browse-by-tag chip line in a section index.
+    """Refresh the auto-managed browse-by-tag block in a section index.
 
     Looks for a sentinel block::
 
@@ -507,10 +586,10 @@ def _inject_browse_by_tag(
         ...
         <!-- END browse-by-tag -->
 
-    inside ``index_path`` and rewrites its body with the current global
-    tag-cloud chip line. Sections whose ``index.md`` does not contain
-    the sentinels are left alone — that's how a section opts out of the
-    injected block.
+    inside ``index_path`` and rewrites its body with the proximity-
+    grouped tag cloud (see :func:`_render_browse_by_tag_block`). Section
+    index files without the sentinels are left alone — that's how a
+    section opts out.
 
     Returns the path if the file was modified, otherwise ``None``.
     """
@@ -519,14 +598,8 @@ def _inject_browse_by_tag(
     text = index_path.read_text(encoding="utf-8")
     if not BROWSE_BLOCK_RE.search(text):
         return None
-    if tag_map:
-        chip_line = " · ".join(
-            f"{_chip_from_section(t)} ({len(tag_map[t])})"
-            for t in sorted(tag_map)
-        )
-    else:
-        chip_line = ""
-    canonical = f"{BROWSE_BEGIN}\n{chip_line}\n{BROWSE_END}"
+    block = _render_browse_by_tag_block(tag_map, index_section, strings)
+    canonical = f"{BROWSE_BEGIN}\n{block}\n{BROWSE_END}"
     new_text = BROWSE_BLOCK_RE.sub(canonical, text, count=1)
     if new_text == text:
         return None
@@ -604,12 +677,12 @@ def _build_for_locale(lang: str) -> tuple[list[Path], list[Path]]:
         )
         written.append(page)
 
-    # 3. Refresh the auto-managed browse-by-tag chip line inside each
+    # 3. Refresh the auto-managed browse-by-tag block inside each
     # section's hand-written index.md. Sections that haven't opted in
     # (no sentinel block in their index.md) are silently skipped.
     for section in SECTIONS:
         index_path = DOCS_ROOT / lang / section / "index.md"
-        modified = _inject_browse_by_tag(index_path, tag_map)
+        modified = _inject_browse_by_tag(index_path, section, tag_map, strings)
         if modified is not None:
             written.append(modified)
 
