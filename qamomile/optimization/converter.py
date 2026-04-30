@@ -62,14 +62,13 @@ def binary_sampleset_to_ommx_samples(
             f"must have the same length; got {n_samples} samples and "
             f"{n_occ} num_occurrences."
         )
-    if hasattr(binary_sampleset, "energy") and binary_sampleset.energy is not None:
-        n_energies = len(binary_sampleset.energy)
-        if n_samples != n_energies:
-            raise ValueError(
-                "binary_sampleset.samples and binary_sampleset.energy "
-                f"must have the same length; got {n_samples} samples and "
-                f"{n_energies} energies."
-            )
+    n_energies = len(binary_sampleset.energy)
+    if n_samples != n_energies:
+        raise ValueError(
+            "binary_sampleset.samples and binary_sampleset.energy "
+            f"must have the same length; got {n_samples} samples and "
+            f"{n_energies} energies."
+        )
 
     ommx_samples = ommx.v1.Samples({})
     next_id = 0
