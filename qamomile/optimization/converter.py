@@ -21,9 +21,9 @@ def binary_sampleset_to_ommx_samples(
     :class:`BinarySampleSet` to OMMX's
     :class:`ommx.v1.Samples`. It is the helper that
     :meth:`MathematicalProblemConverter.decode` and
-    :meth:`PCEConverter.decode` use to feed samples into
-    :meth:`ommx.v1.Instance.evaluate_samples` for feasibility and
-    original-objective evaluation.
+    :meth:`~qamomile.optimization.pce.PCEConverter.decode` use to feed
+    samples into :meth:`ommx.v1.Instance.evaluate_samples` for feasibility
+    and original-objective evaluation.
 
     Args:
         binary_sampleset (BinarySampleSet): A sample set with
