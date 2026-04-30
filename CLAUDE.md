@@ -252,14 +252,18 @@ build pipeline and the conventions for adding or editing pages.
 Key invariants worth remembering:
 
 - **Auto-managed content (chip blocks, browse-by-tag sections,
-  per-tag pages, `myst.yml` Tags toc) is never committed.**
-  `build.sh build` copies the docs tree into a gitignored
-  `docs/_build_src/`, runs `build_doc_tags.py` and `jupytext
-  --update` against the copy, and builds from there. The committed
-  source carries no chip block or `## Browse by tag` heading — those
-  are synthesised into the build-dir copy. Only `myst.yml` keeps a
-  static empty sentinel pair to anchor the Tags toc injection. Do
-  not hand-fill any of these.
+  per-tag pages) is never committed.** `build.sh build` copies the
+  docs tree into a gitignored `docs/_build_src/`, runs
+  `build_doc_tags.py` and `jupytext --update` against the copy, and
+  builds from there. The committed source carries no chip block or
+  `## Browse by tag` heading — those are synthesised into the
+  build-dir copy.
+- **`myst.yml` is fully hand-written.** Article children and per-tag
+  pages are discovered via `pattern:` toc entries
+  (`<section>/*.ipynb`, `tags/*.md`), so adding a new article does
+  not require editing `myst.yml`. Article ordering inside a
+  section's sidebar is alphabetical by filename — use `01_`, `02_`
+  prefixes if you need a curated order (the way `tutorial/` does).
 - The committed source must therefore stay clean. PRs that touch
   tag taxonomy should only diff `tags:` frontmatter lines, not
   chip-block bodies.

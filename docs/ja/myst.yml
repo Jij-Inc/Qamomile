@@ -20,33 +20,21 @@ project:
     - title: チュートリアル
       file: tutorial/index.md
       children:
-        - file: tutorial/01_your_first_quantum_kernel.ipynb
-        - file: tutorial/02_parameterized_kernels.ipynb
-        - file: tutorial/03_resource_estimation.ipynb
-        - file: tutorial/04_execution_models.ipynb
-        - file: tutorial/05_classical_flow_patterns.ipynb
-        - file: tutorial/06_reuse_patterns.ipynb
-        - file: tutorial/07_hermitian_decomposition.ipynb
-        - file: tutorial/08_compilation_and_transpilation.ipynb
+        - pattern: tutorial/*.ipynb
     - title: アルゴリズム
       file: algorithm/index.md
       children:
-        - file: algorithm/qaoa_maxcut.ipynb
-        - file: algorithm/qaoa_graph_partition.ipynb
-        - file: algorithm/vqe_for_hydrogen.ipynb
-        - file: algorithm/hamiltonian_simulation.ipynb
-        - file: algorithm/quantum_error_correction.ipynb
-        - file: algorithm/steane_code.ipynb
-# --- BEGIN doc tags (auto-generated) ---
-    # --- END doc tags (auto-generated) ---
+        - pattern: algorithm/*.ipynb
+    - pattern: "tags/*.md"
+      hidden: true
     - title: 使い方
       file: usage/index.md
       children:
-        - file: usage/binary_model.ipynb
+        - pattern: usage/*.ipynb
     - title: インテグレーション
       file: integration/index.md
       children:
-        - file: integration/qbraid_executor.ipynb
+        - pattern: integration/*.ipynb
     - title: リリースノート
       file: release_notes/index.md
       children:

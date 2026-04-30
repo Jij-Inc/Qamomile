@@ -11,15 +11,17 @@ documentation. It scans every tagged article under
 * ``docs/<lang>/tags/<tag>.md`` — one page per tag, listing every
   article that carries that tag, grouped by section.
 * ``docs/<lang>/tags/index.md`` — a tag-cloud landing page.
-* The auto-managed ``Tags`` block inside ``docs/<lang>/myst.yml``,
-  bracketed by sentinel comments.
-* An auto-managed ``<!-- BEGIN auto-tags --> ... <!-- END auto-tags -->``
-  chip block inside each tagged ``.py`` file's first markdown cell, so
-  every rendered article shows clickable tag chips at the top.
-* An auto-managed ``<!-- BEGIN browse-by-tag --> ... <!-- END browse-by-tag -->``
-  region inside each section's hand-written ``index.md``, populated
-  with a proximity-grouped tag cloud (same level / subsections /
-  parent sections / other sections).
+* A chip block inserted right after the first H1 inside each tagged
+  ``.py`` file's first markdown cell, so every rendered article shows
+  clickable tag chips at the top.
+* A "Browse by tag" section (heading + chip cloud) inserted before
+  the first ``## `` heading in each section's ``index.md``,
+  presenting a proximity-grouped tag cloud (this section / other
+  sections).
+
+The per-tag pages are picked up by mystmd via a
+``- pattern: "tags/*.md"`` toc entry in ``myst.yml`` — the script
+does **not** enumerate them in toc itself.
 
 Run from anywhere::
 
@@ -505,72 +507,6 @@ def _strip_chip_block(py_path: Path) -> Path | None:
 
 
 # --------------------------------------------------------------------- #
-# myst.yml auto-managed Tags region                                     #
-# --------------------------------------------------------------------- #
-
-TAGS_TOC_BEGIN = "# --- BEGIN doc tags (auto-generated) ---"
-TAGS_TOC_END = "# --- END doc tags (auto-generated) ---"
-# Legacy sentinel (left over from the algorithm-only generator) — the
-# script accepts either pair on input but always writes the new pair.
-LEGACY_TAGS_TOC_BEGIN = "# --- BEGIN algorithm tags (auto-generated) ---"
-LEGACY_TAGS_TOC_END = "# --- END algorithm tags (auto-generated) ---"
-
-
-def _render_tags_toc_block(all_tags: list[str]) -> str:
-    """Render the auto-managed Tags toc block for ``myst.yml``.
-
-    Emits the global ``tags/index.md`` and every per-tag page as a flat
-    list of toc entries, each marked ``hidden: true``. This keeps the
-    pages buildable (so the URLs resolve) without ever showing a
-    ``Tag: <name>`` entry in the rendered navigation. Earlier versions
-    used a parent ``Tags`` group with ``hidden: true``, but that
-    setting did not propagate to children in the rendered sidebar.
-    """
-    lines = [TAGS_TOC_BEGIN]
-    lines.append("    - file: tags/index.md")
-    lines.append("      hidden: true")
-    for tag in all_tags:
-        lines.append(f"    - file: tags/{tag}.md")
-        lines.append("      hidden: true")
-    lines.append("    " + TAGS_TOC_END)
-    return "\n".join(lines)
-
-
-def _update_myst_yml(lang: str, all_tags: list[str]) -> Path | None:
-    """Rewrite the auto-managed Tags block in ``docs/<lang>/myst.yml``.
-
-    Recognises both the new ``# --- BEGIN doc tags ...`` sentinels and
-    the legacy ``# --- BEGIN algorithm tags ...`` ones; writes back the
-    new sentinels. Returns the path if the file was modified.
-    """
-    myst_path = DOCS_ROOT / lang / "myst.yml"
-    if not myst_path.is_file():
-        return None
-    text = myst_path.read_text(encoding="utf-8")
-
-    has_new = TAGS_TOC_BEGIN in text and TAGS_TOC_END in text
-    has_legacy = LEGACY_TAGS_TOC_BEGIN in text and LEGACY_TAGS_TOC_END in text
-    if not (has_new or has_legacy):
-        return None
-
-    if has_new:
-        begin, end = TAGS_TOC_BEGIN, TAGS_TOC_END
-    else:
-        begin, end = LEGACY_TAGS_TOC_BEGIN, LEGACY_TAGS_TOC_END
-
-    pattern = re.compile(
-        r"[ \t]*" + re.escape(begin) + r"[\s\S]*?" + re.escape(end),
-        re.MULTILINE,
-    )
-    new_block = _render_tags_toc_block(all_tags)
-    new_text = pattern.sub(new_block, text, count=1)
-    if new_text == text:
-        return None
-    myst_path.write_text(new_text, encoding="utf-8")
-    return myst_path
-
-
-# --------------------------------------------------------------------- #
 # Section index.md browse-by-tag injection                              #
 # --------------------------------------------------------------------- #
 
@@ -796,10 +732,10 @@ def _build_for_locale(lang: str) -> tuple[list[Path], list[Path]]:
         except OSError:
             pass
 
-    # 5. Update myst.yml auto-managed Tags region.
-    myst_updated = _update_myst_yml(lang, all_tags)
-    if myst_updated is not None:
-        written.append(myst_updated)
+    # myst.yml itself does not need rewriting — it carries a single
+    # ``- pattern: "tags/*.md"`` toc entry that mystmd resolves at
+    # build time, so the per-tag pages we just wrote are picked up
+    # automatically without enumerating them in toc.
 
     return written, removed
 

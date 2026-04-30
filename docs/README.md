@@ -180,32 +180,25 @@ For reference, the underlying flow:
    `en/` and `ja/`. Tags must be in `ALLOWED_TAGS` (see
    [Tags](#tags) below).
 
-2. **Add the page to the main `toc:` in both `en/myst.yml` and
-   `ja/myst.yml`**, under the matching section:
-
-   ```yaml
-   - title: Algorithms
-     file: algorithm/index.md
-     children:
-       - file: algorithm/qaoa_maxcut.ipynb
-       - file: algorithm/your_new_topic.ipynb   # ← add this
-   ```
-
-   Leave the empty `# --- BEGIN doc tags ... # --- END doc tags ---`
-   sentinel pair alone — `build.sh` fills it in inside `_build_src/`
-   at build time.
-
-3. **Update the section landing page** by adding a bullet/link in the
-   matching `<section>/index.md`. Each section's `index.md` is
+2. **Update the section landing page** by adding a bullet/link in
+   the matching `<section>/index.md`. Each section's `index.md` is
    hand-written and contains only the intro paragraph plus the
    article list; the `## Browse by tag` heading and chip cloud are
    synthesised into the build-dir copy automatically, so don't add
-   them yourself.
+   them yourself. The article ordering inside the section's
+   sidebar nav is whatever your filename sorts to alphabetically
+   (mystmd discovers the .ipynb files via a glob in `myst.yml`); use
+   `01_`, `02_`, … prefixes if you need a curated order.
 
-4. **Add to test patterns** if the new page is in a directory not yet
-   covered by `tests/docs/test_tutorials.py` `TUTORIAL_PATTERNS`.
-   `integration/` is intentionally excluded since those notebooks
-   may need an API key.
+3. **You don't need to touch `myst.yml`.** The toc uses
+   `pattern: <section>/*.ipynb`, so any new `.ipynb` you drop into
+   the section is auto-discovered. (Per-tag pages and the per-tag
+   listing are similarly discovered via `pattern: tags/*.md`.)
+
+4. **Add to test patterns** if the new page is in a directory not
+   yet covered by `tests/docs/test_tutorials.py`
+   `TUTORIAL_PATTERNS`. `integration/` is intentionally excluded
+   since those notebooks may need an API key.
 
 5. **Generate and execute the `.ipynb`**:
 
@@ -267,12 +260,13 @@ Update each of the following:
      and `"<new>": "<Japanese title>"` to `STRINGS["ja"]["section_titles"]`
      so the section's name renders correctly on tag pages.
 4. **Add the section to each `myst.yml` toc** (en/ja), under the
-   hand-written part:
+   hand-written part. Use a `pattern:` child so any future article
+   in the section is auto-discovered without further toc edits:
    ```yaml
    - title: <English title>
      file: <new>/index.md
      children:
-       - file: <new>/first_article.ipynb
+       - pattern: <new>/*.ipynb
    ```
 5. **Add a top-level link in `docs/{en,ja}/index.md`** alongside
    the other section bullets.
@@ -301,8 +295,10 @@ Update each of the following:
 
 After step 4, run `./build.sh build` to verify the new section
 appears in the rendered nav and that auto-managed content (chip
-blocks on articles, browse-by-tag cloud on the new index.md, Tags
-toc in `myst.yml`) shows up correctly inside `_build_src/`.
+blocks on articles, browse-by-tag cloud on the new `index.md`)
+shows up correctly inside `_build_src/`. The Tags toc itself is
+discovered via the existing `pattern: "tags/*.md"` entry in
+`myst.yml`, so it does not need touching.
 
 #### Adding a nested subsection (currently unsupported)
 
@@ -350,30 +346,30 @@ pipeline runs `docs/scripts/build_doc_tags.py` against `_build_src/`
 
 | Output | Where it ends up | In git? |
 |---|---|---|
-| Tag landing page | `docs/<lang>/tags/index.md` (committed source dir; gitignored) and `_build_src/<lang>/tags/index.md` (rendered from) | no |
-| Per-tag pages | same as above, one `<tag>.md` per tag | no |
+| Tag landing page | `_build_src/<lang>/tags/index.md` | no |
+| Per-tag pages | `_build_src/<lang>/tags/<tag>.md` (one per tag) | no |
 | Inline tag chips at the top of each article | injected into the `.py`/`.ipynb` inside `_build_src/<lang>/<section>/` | no |
 | Browse-by-tag chip cloud on each section's `index.md` | injected into `_build_src/<lang>/<section>/index.md` | no |
-| `Tags` toc block in `myst.yml` | injected into `_build_src/<lang>/myst.yml` | no |
 
 Where the script injects in the build-dir copy:
 
 | Where | How the script finds the spot |
 |---|---|
 | Article `.py` body | inserted right after the first H1 |
-| Section `index.md` | a whole `## Browse by tag` section is synthesized and inserted right before the first H2 (e.g. before `## All articles`) |
-| `myst.yml` toc | empty sentinel pair `# --- BEGIN doc tags (auto-generated) --- ... # --- END doc tags (auto-generated) ---` is filled in place |
+| Section `index.md` | a whole `## Browse by tag` section is synthesised and inserted right before the first H2 (e.g. before `## All articles`) |
 
-The committed source therefore carries no chip block, no
-browse-by-tag heading, and no per-tag toc entries — just a static
-empty sentinel pair in `myst.yml`.
+The per-tag pages are picked up by mystmd via a single
+`- pattern: "tags/*.md"` toc entry in `myst.yml` (with
+`hidden: true`), so the script does **not** maintain any region
+inside `myst.yml`. The committed source therefore has zero
+auto-managed regions to track — articles, section index pages,
+and `myst.yml` are all hand-written.
 
 `./build.sh build-{en,ja}` runs `setup_build_src` (copy → inject →
 jupytext sync) before MyST builds, so RTD and local builds stay in
-sync without manual steps. The committed source files never receive
-auto-managed injections, so PRs that change tag taxonomy or article
-tags only diff the actual `tags:` frontmatter line, not the chip-block
-churn that comes with it.
+sync without manual steps. PRs that change tag taxonomy or article
+tags only diff the actual `tags:` frontmatter line, not the
+chip-block churn that comes with it.
 
 #### Tag whitelist
 
