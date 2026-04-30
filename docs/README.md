@@ -160,7 +160,7 @@ API generation and copying are automatically included in `./build.sh build`. No 
    # %% [markdown]
    # ---
    # title: Your Page Title
-   # tags: [qaoa, optimization]
+   # tags: [optimization, variational]
    # ---
    #
    # # Your Page Title
@@ -244,7 +244,7 @@ the frontmatter at the top of its first markdown cell:
 # %% [markdown]
 # ---
 # title: My Article
-# tags: [qaoa, optimization]
+# tags: [optimization, variational]
 # ---
 #
 # # My Article
