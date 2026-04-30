@@ -15,7 +15,8 @@ from qamomile.optimization.binary_model import (
     VarType,
     binary,
 )
-from qamomile.optimization.pce import PCEConverter, PCEEncoder, SignRounder
+from qamomile.optimization.pce import PCEConverter, PCEEncoder
+from qamomile.optimization.qrao.rounding import SignRounder
 
 
 def _make_spin_model(num_vars: int) -> BinaryModel:
@@ -640,25 +641,22 @@ class TestPCEEndToEnd:
 
         backends: list[tuple[str, Transpiler]] = []
         try:
-            pytest.importorskip("qiskit")
             from qamomile.qiskit import QiskitTranspiler
 
             backends.append(("qiskit", QiskitTranspiler()))
-        except pytest.skip.Exception:
+        except ImportError:
             pass
         try:
-            pytest.importorskip("quri_parts")
             from qamomile.quri_parts import QuriPartsTranspiler
 
             backends.append(("quri_parts", QuriPartsTranspiler()))
-        except pytest.skip.Exception:
+        except ImportError:
             pass
         try:
-            pytest.importorskip("cudaq")
             from qamomile.cudaq import CudaqTranspiler
 
             backends.append(("cudaq", CudaqTranspiler()))
-        except pytest.skip.Exception:
+        except ImportError:
             pass
 
         if len(backends) < 2:

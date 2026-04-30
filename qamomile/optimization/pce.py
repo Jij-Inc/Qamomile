@@ -39,10 +39,13 @@ from qamomile.circuit.frontend.qkernel import QKernel
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.transpiler import Transpiler
 from qamomile.optimization.binary_model import BinaryModel, BinarySampleSet, VarType
-from qamomile.optimization.converter import binary_sampleset_to_ommx_samples
+from qamomile.optimization.converter import (
+    binary_sampleset_to_ommx_samples,
+    normalize_problem_input,
+)
 from qamomile.optimization.qrao.rounding import SignRounder
 
-__all__ = ["PCEConverter", "PCEEncoder", "SignRounder"]
+__all__ = ["PCEConverter", "PCEEncoder"]
 
 
 class PCEEncoder:
@@ -86,8 +89,13 @@ class PCEEncoder:
             raise ValueError("PCEEncoder requires a SPIN-type BinaryModel.")
         if spin_model.higher:
             raise ValueError(
-                "PCEEncoder does not support higher-order (HUBO) terms. "
-                "All interaction terms must be at most quadratic."
+                "PCEEncoder rejects higher-order (HUBO) terms. The Pauli-"
+                "correlator enumeration itself does not require quadratic "
+                "structure, but PCE as published targets quadratic Ising — "
+                "its tanh-relaxed cost surrogate and Edwards–Erdős "
+                "regularizer assume pairwise interactions. Extending PCE "
+                "to HUBO would require re-deriving the surrogate; we "
+                "reject HUBO inputs here to make that boundary explicit."
             )
 
         self.spin_model: BinaryModel = spin_model
@@ -267,31 +275,12 @@ class PCEConverter:
                 problem contains higher-order (HUBO) terms (raised by
                 :class:`PCEEncoder`).
         """
-        if isinstance(instance, BinaryModel):
-            self.instance: ommx.v1.Instance | None = None
-            self.original_vartype: VarType = instance.vartype
-            self.spin_model: BinaryModel = instance.change_vartype(VarType.SPIN)
-        elif isinstance(instance, ommx.v1.Instance):
-            # Deep-copy via bytes round-trip before to_qubo: to_qubo mutates
-            # the instance it is called on (appends slack decision variables
-            # for non-binary vars, absorbs constraints into the objective via
-            # the penalty method). Mutating the caller's instance silently is
-            # surprising; copy first so the caller keeps an untouched view.
-            # The deep copy retains original-constraint metadata internally,
-            # so evaluate_samples on it still reports feasibility against the
-            # user's original constraints, and slack bits added by to_qubo
-            # are reconstructed back into the original decision variables
-            # (e.g., integers rebuilt from log-encoded slack bits) by
-            # evaluate_samples automatically.
-            self.instance = ommx.v1.Instance.from_bytes(instance.to_bytes())
-            self.original_vartype = VarType.BINARY
-            qubo, constant = self.instance.to_qubo()
-            self.spin_model = BinaryModel.from_qubo(qubo, constant).change_vartype(
-                VarType.SPIN
-            )
-        else:
-            raise TypeError("instance must be ommx.v1.Instance or BinaryModel")
-
+        self.instance: ommx.v1.Instance | None
+        self.original_vartype: VarType
+        self.spin_model: BinaryModel
+        self.instance, self.original_vartype, self.spin_model = normalize_problem_input(
+            instance
+        )
         self._encoder: PCEEncoder = PCEEncoder(self.spin_model, k=k)
 
     @property

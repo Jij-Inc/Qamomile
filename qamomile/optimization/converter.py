@@ -7,6 +7,66 @@ from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.optimization.binary_model import BinaryModel, BinarySampleSet, VarType
 
 
+def normalize_problem_input(
+    instance: ommx.v1.Instance | BinaryModel,
+) -> tuple[ommx.v1.Instance | None, VarType, BinaryModel]:
+    """Normalize a problem input into ``(stored_instance, original_vartype, spin_model)``.
+
+    Shared canonical entry point used by every converter that consumes a
+    combinatorial optimization problem expressed either as an OMMX
+    :class:`ommx.v1.Instance` or a Qamomile :class:`BinaryModel`. The
+    :class:`MathematicalProblemConverter` base class and
+    :class:`~qamomile.optimization.pce.PCEConverter` (which deliberately
+    does not inherit from that base) both delegate to this helper so the
+    OMMX deep-copy / ``to_qubo`` semantics live in exactly one place.
+
+    For OMMX inputs, the instance is deep-copied via a bytes round-trip
+    before ``to_qubo`` is called: ``to_qubo`` mutates the instance it is
+    called on (it appends slack decision variables for non-binary vars
+    and absorbs constraints into the objective via the penalty method).
+    Mutating the caller's instance silently is surprising; copying first
+    leaves the caller's view untouched. The deep copy retains
+    original-constraint metadata internally, so downstream
+    ``evaluate_samples`` reports feasibility against the user's
+    *original* constraints, and slack bits added by ``to_qubo`` are
+    reconstructed back into the original decision variables (e.g.,
+    integers rebuilt from log-encoded slack bits) by ``evaluate_samples``
+    automatically.
+
+    Args:
+        instance (ommx.v1.Instance | BinaryModel): The combinatorial
+            optimization problem. ``ommx.v1.Instance`` inputs are
+            deep-copied and converted via ``to_qubo()``; ``BinaryModel``
+            inputs retain their declared vartype as the target output
+            vartype.
+
+    Returns:
+        tuple[ommx.v1.Instance | None, VarType, BinaryModel]: A triple
+        ``(stored_instance, original_vartype, spin_model)``.
+
+        * ``stored_instance``: the deep-copied ``Instance`` for OMMX
+          inputs (post ``to_qubo``), or ``None`` for ``BinaryModel``
+          inputs.
+        * ``original_vartype``: the declared vartype of the input — used
+          by converters' ``decode`` paths to return results in the
+          caller's preferred representation.
+        * ``spin_model``: the problem rewritten in SPIN form, which is
+          the natural domain for sign rounding and Pauli encoding.
+
+    Raises:
+        TypeError: If ``instance`` is neither an :class:`ommx.v1.Instance`
+            nor a :class:`BinaryModel`.
+    """
+    if isinstance(instance, BinaryModel):
+        return None, instance.vartype, instance.change_vartype(VarType.SPIN)
+    if isinstance(instance, ommx.v1.Instance):
+        stored = ommx.v1.Instance.from_bytes(instance.to_bytes())
+        qubo, constant = stored.to_qubo()
+        spin_model = BinaryModel.from_qubo(qubo, constant).change_vartype(VarType.SPIN)
+        return stored, VarType.BINARY, spin_model
+    raise TypeError("instance must be ommx.v1.Instance or BinaryModel")
+
+
 def binary_sampleset_to_ommx_samples(
     binary_sampleset: BinarySampleSet,
 ) -> ommx.v1.Samples:
@@ -87,28 +147,9 @@ class MathematicalProblemConverter(abc.ABC):
         self,
         instance: ommx.v1.Instance | BinaryModel,
     ) -> None:
-        if isinstance(instance, BinaryModel):
-            self.instance = None
-            self.original_vartype = instance.vartype
-            self.spin_model = instance.change_vartype(VarType.SPIN)
-        elif isinstance(instance, ommx.v1.Instance):
-            # Deep-copy via bytes round-trip before to_qubo: to_qubo mutates
-            # the instance it is called on (appends slack decision variables
-            # for non-binary vars, absorbs constraints into the objective via
-            # the penalty method). Mutating the caller's instance silently is
-            # surprising; copy first so the caller keeps an untouched view.
-            # The deep copy retains original-constraint metadata internally,
-            # so evaluate_samples on it still reports feasibility against the
-            # user's original constraints.
-            self.instance = ommx.v1.Instance.from_bytes(instance.to_bytes())
-            self.original_vartype = VarType.BINARY  # OMMX uses BINARY
-            qubo, constant = self.instance.to_qubo()
-            self.spin_model = BinaryModel.from_qubo(qubo, constant).change_vartype(
-                VarType.SPIN
-            )
-        else:
-            raise TypeError("instance must be ommx.v1.Instance or BinaryModel")
-
+        self.instance, self.original_vartype, self.spin_model = normalize_problem_input(
+            instance
+        )
         self.__post_init__()
 
     def __post_init__(self) -> None:
