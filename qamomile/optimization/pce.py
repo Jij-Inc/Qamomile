@@ -415,7 +415,10 @@ class PCEConverter:
         rounder = SignRounder()
         spins = rounder.round(expectations)
 
-        spin_sample: dict[int, int] = dict(enumerate(spins))
+        idx_map = self.spin_model.index_new_to_origin
+        spin_sample: dict[int, int] = {
+            idx_map[new_idx]: spins[new_idx] for new_idx in range(len(spins))
+        }
         energy = self.spin_model.calc_energy(spins)
 
         if self.original_vartype == VarType.BINARY:

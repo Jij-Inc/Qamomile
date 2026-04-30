@@ -352,6 +352,42 @@ class TestPCEConverterDecode:
         with pytest.raises(ValueError, match="Expected 3 expectation values"):
             converter.decode([0.1, 0.2, 0.3, 0.4])
 
+    def test_decode_non_contiguous_ids_spin(self):
+        """Decoded sample keys match the original non-contiguous variable IDs (SPIN)."""
+        # Variables 10, 20, 30 — BinaryModel remaps them to 0, 1, 2 internally.
+        ising = BinaryModel.from_ising(
+            linear={10: 1.0, 20: -1.0, 30: 0.5},
+            quad={(10, 20): 1.0},
+            constant=0.0,
+        )
+        converter = PCEConverter(ising, k=2)
+
+        # Spins: [+1, -1, +1] via sign rounding of [0.7, -0.3, 0.5]
+        sampleset = converter.decode([0.7, -0.3, 0.5])
+
+        assert sampleset.vartype == VarType.SPIN
+        assert sampleset.samples[0] == {10: 1, 20: -1, 30: 1}
+
+    def test_decode_non_contiguous_ids_binary(self):
+        """Decoded sample keys match the original non-contiguous variable IDs (BINARY)."""
+        # Variables 10, 20, 30 in a BINARY model.
+        x10 = binary(10)
+        x20 = binary(20)
+        x30 = binary(30)
+
+        problem = BinaryExpr()
+        problem += x10 * x20
+        problem += -1.0 * x20 * x30
+
+        model = BinaryModel(problem)
+        converter = PCEConverter(model, k=2)
+
+        # Expectations [0.7, -0.3, 0.5] → spins [+1, -1, +1] → binaries [0, 1, 0]
+        sampleset = converter.decode([0.7, -0.3, 0.5])
+
+        assert sampleset.vartype == VarType.BINARY
+        assert sampleset.samples[0] == {10: 0, 20: 1, 30: 0}
+
 
 class TestPCEEndToEnd:
     """End-to-end workflow tests for PCE without quantum execution."""
