@@ -20,7 +20,7 @@ from qamomile.circuit.frontend.ast_transform import (
     collect_quantum_rebind_violations,
     transform_control_flow,
 )
-from qamomile.circuit.frontend.constructors import qubit_array
+from qamomile.circuit.frontend.constructors import bit, float_, qubit_array, uint
 from qamomile.circuit.frontend.func_to_block import (
     create_dummy_input,
     func_to_block,
@@ -52,6 +52,54 @@ def _get_array_element_type(pt: Any) -> type | None:
     if hasattr(pt, "__args__") and pt.__args__:
         return pt.__args__[0]
     return getattr(pt, "element_type", None)
+
+
+def _promote_literal_to_handle(value: Any, expected_type: Any) -> Any:
+    """Promote a Python literal to a scalar Handle based on the callee's annotation.
+
+    When a sub-`@qkernel` declares a scalar parameter (`UInt`, `Float`,
+    `Bit`), allow the call site to pass a raw Python literal and wrap it
+    transparently. This mirrors the literal-acceptance pattern in built-in
+    gate primitives such as ``qmc.rx`` (which take ``float | Float``) and
+    saves users from manually calling ``qmc.uint(0)`` / ``qmc.float_(0.5)``
+    / ``qmc.bit(True)`` at every call site.
+
+    The promotion is conservative — it only triggers when the declared
+    type is exactly one of the three scalar handle classes and the value
+    is the corresponding Python primitive. Anything else (already a
+    Handle, an array-typed parameter, an incompatible literal) is
+    returned unchanged so downstream validation produces the existing
+    clear error.
+
+    Args:
+        value: The argument bound for this parameter. Can be any object.
+        expected_type: The callee's declared annotation for this parameter.
+            Typically a Handle class (``UInt``, ``Float``, ``Bit``,
+            ``Vector[Qubit]``, ...) or a parameterized generic.
+
+    Returns:
+        Either a freshly-constructed scalar Handle wrapping the literal,
+        or ``value`` unchanged if no promotion rule applies.
+
+    Note:
+        ``bool`` is a subclass of ``int`` in Python, so the rules below
+        explicitly exclude bools from int/float promotion paths to avoid
+        ``True`` silently becoming ``UInt(1)`` or ``Float(1.0)``. A
+        ``bool`` is only promoted when the declared type is ``Bit``.
+    """
+    if isinstance(value, Handle):
+        return value
+    is_bool = isinstance(value, bool)
+    if expected_type is UInt:
+        if isinstance(value, int) and not is_bool:
+            return uint(value)
+    elif expected_type is Float:
+        if isinstance(value, float) or (isinstance(value, int) and not is_bool):
+            return float_(float(value))
+    elif expected_type is Bit:
+        if is_bool:
+            return bit(value)
+    return value
 
 
 def _handle_types_equal(a: Any, b: Any) -> bool:
@@ -305,6 +353,17 @@ class QKernel(Generic[P, R]):
         # Bind arguments to signature to handle positional/keyword mapping
         bound_args = self.signature.bind(*args, **kwargs)
         bound_args.apply_defaults()
+
+        # Auto-promote raw Python literals to scalar Handles (UInt/Float/Bit)
+        # so that calls like ``ry_layer(q, thetas, 0)`` work the same as
+        # ``ry_layer(q, thetas, qmc.uint(0))``. Mirrors the literal-acceptance
+        # pattern used by built-in gate primitives.
+        for arg_name, arg_value in list(bound_args.arguments.items()):
+            expected_type = self.input_types.get(arg_name)
+            if expected_type is not None:
+                bound_args.arguments[arg_name] = _promote_literal_to_handle(
+                    arg_value, expected_type
+                )
 
         # Prepare inputs for the IR call (unwrap Handles to Values)
         inputs_map = {}
