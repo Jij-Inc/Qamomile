@@ -28,6 +28,23 @@ Therefore, notebooks must be **pre-executed before pushing** to the branch:
 
 ReadTheDocs builds with `execute.enabled: false`, assuming that executed `.ipynb` files with outputs already exist in the branch.
 
+> **Important — do NOT set `QAMOMILE_DOCS_TEST` when executing docs**
+>
+> Several tutorials (e.g. `optimization/qaoa_graph_partition.py`,
+> `vqa/qaoa_maxcut.py`, `vqa/vqe_for_hydrogen.py`,
+> `tutorial/05_classical_flow_patterns.py`) read the
+> `QAMOMILE_DOCS_TEST` environment variable and switch to a **reduced
+> workload** (fewer optimizer iterations, fewer shots) when it equals
+> `"1"`. This flag exists only so that `tests/docs/test_tutorials.py`
+> can run quickly in CI — it is **not** the configuration we want to
+> ship in the rendered docs.
+>
+> When you execute notebooks for the actual docs build (locally,
+> via `./build.sh execute*` / `sync-build*`, or in any pre-push
+> workflow), make sure `QAMOMILE_DOCS_TEST` is **unset** (or not
+> equal to `"1"`) so the notebooks run with the full settings and
+> produce the high-quality outputs intended for readers.
+
 **Future plan**: We are considering a GitHub Actions workflow that automatically detects `.py` changes on merge to `main`, converts and executes the notebooks, and commits the resulting `.ipynb` files back — eliminating the need for manual notebook management.
 
 ## Directory Structure
