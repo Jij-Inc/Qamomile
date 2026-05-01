@@ -141,14 +141,16 @@ executable = transpiler.transpile(my_circuit, bindings={"theta": 0.5})
 
 `Transpiler.transpile()` runs the following passes in order. `BlockKind`
 advances as preconditions are met. Every pass other than
-`entrypoint_validate` is idempotent and exposed as a public method on
-`Transpiler` for step-by-step debugging; `entrypoint_validate` runs inline
-inside `transpile()` as a structural check (no public method today).
+`validate_entrypoint` is idempotent and exposed as a public method on
+`Transpiler` for step-by-step debugging; `validate_entrypoint`
+(implemented by `EntrypointValidationPass`, whose `.name` is
+`"validate_entrypoint"`) runs inline inside `transpile()` as a structural
+check (no public method today).
 
 ```
 QKernel
    │  to_block                    (trace Python AST → IR)
-   │  entrypoint_validate         (internal — require classical I/O on entrypoint kernels)
+   │  validate_entrypoint         (internal: EntrypointValidationPass — require classical I/O on entrypoint kernels)
    ▼
 Block [HIERARCHICAL]
    │  substitute                  (optional rule-based block / strategy replacement)
@@ -404,19 +406,21 @@ harmless and preserves the existing review thread.
 
 ### No `@`-mentions
 
-Never include `@username` or `@org/team` strings in **any** GitHub-tracked
-text — commit messages, PR titles / bodies, issue titles / bodies, **and
-PR / code review comments and replies posted to those threads** —
-because they trigger unintended GitHub notifications. The rule covers
-the entire scope listed at the top of this section; review-thread
-replies are not an exception, even when the reply is short or only
-quotes a previous reviewer comment. This rule applies to bare Python
-decorators in running prose too: refer to them descriptively (e.g.,
-"the qkernel decorator") instead of typing `@qkernel` directly in the
-prose. If you must show the literal decorator syntax, only do so inside
-a fenced code block or an inline code span — GitHub does not parse
-mentions in either. In normal prose, write "the qkernel decorator"
-instead.
+Never include **bare** `@username` or `@org/team` mention tokens in
+normal GitHub-tracked text — commit messages, PR titles / bodies, issue
+titles / bodies, **and PR / code review comments and replies posted to
+those threads** — because they trigger unintended GitHub notifications.
+The rule covers the entire scope listed at the top of this section;
+review-thread replies are not an exception, even when the reply is
+short or only quotes a previous reviewer comment. This rule applies to
+bare Python decorators in running prose too: refer to them
+descriptively (e.g., "the qkernel decorator") instead of typing
+`@qkernel` directly in prose. If you must show a literal `@…` string
+(decorator syntax, an actual user handle being discussed, etc.), do so
+**only** inside a fenced code block or an inline code span — GitHub
+does not parse mentions in either, so a code-wrapped `@qkernel` is fine
+and is the only permitted way to render the literal symbol. In normal
+prose, write "the qkernel decorator" instead.
 
 - ✅ "Update the qkernel decorator so metadata survives `next_version`."
 - ❌ "Update `@qkernel` so metadata survives `next_version`." (the
