@@ -171,30 +171,39 @@ See [docs/en/tutorial/09_compilation_and_transpilation.py](docs/en/tutorial/09_c
 
 ### Binding vs. Parameter Contract
 
-`Transpiler.transpile(kernel, bindings=..., parameters=...)` enforces a
-**disjoint partition** of the kernel's arguments — the API rejects any
-overlapping name with `ValueError` ([transpiler.py][overlap-check]):
+**Project rule: `bindings` and `parameters` MUST be strictly disjoint** —
+a kernel argument name must never appear in both. This rule is a hard
+project-level constraint; treat it as inviolable when writing kernels,
+helpers, or higher-level wrappers around `transpile()`. The API also
+enforces it at the function boundary by raising `ValueError` immediately
+on any overlap ([transpiler.py][overlap-check]); historically the absence
+of this check caused silent miscompilation of control-flow predicates
+depending on parameter-array elements (see #354 / 7198bfe9).
 
-- **Each kernel argument must appear in exactly one of `bindings` or
-  `parameters`.** Specifying the same name in both is invalid; every argument
-  must be assigned to one of them (modulo arguments with Python defaults, or
-  `Qubit` / `Observable` inputs handled implicitly by the frontend).
-  - `bindings={...}` — values resolved at compile time, substituted into the
-    IR by `resolve_parameter_shapes` / `partial_eval`. The value is baked
-    into the emitted circuit.
-  - `parameters=[...]` — argument names that survive the pipeline as runtime
-    parameters in the emitted backend circuit.
-- **Arguments driving a classical-value `if` branch (one whose condition is
-  not a measurement-backed `Bit`) must be in `bindings` so
+- **Never specify the same name in both `bindings` and `parameters`.**
+  - `bindings={...}` — values resolved at compile time, substituted into
+    the IR by `resolve_parameter_shapes` / `partial_eval`. The value is
+    baked into the emitted circuit.
+  - `parameters=[...]` — argument names that survive the pipeline as
+    runtime parameters in the emitted backend circuit.
+- **Required classical arguments (those without Python defaults) must be
+  resolved exactly one way.** Bind them via `bindings`, list them in an
+  explicit `parameters=[...]`, or rely on `parameters=None` to let
+  `QKernel.build()` auto-detect them — auto-detect picks up classical
+  arguments that have neither a `bindings` value nor a Python default and
+  treats them as runtime parameters. Classical arguments with Python
+  defaults may be omitted from both `bindings` and `parameters`, in which
+  case the default is used.
+- **Arguments driving a classical-value `if` branch (one whose condition
+  is not a measurement-backed `Bit`) must be in `bindings` so
   `CompileTimeIfLoweringPass` can resolve the condition at compile time.**
-  Per the disjoint partition rule above, this means such arguments
-  cannot simultaneously be in `parameters` — leaving them in `parameters`
-  keeps the condition symbolic and the compile fails. The same rule
-  applies to any other compile-time structural decision such as
-  `qmc.range(...)` bounds. Measurement-backed `if bit:` / `while bit:`
-  (where `bit = qmc.measure(q)`) is unrelated — that is runtime control
-  flow handled at emit time by backends with a supporting
-  `MeasurementMode`.
+  Per the no-overlap rule above, such arguments therefore cannot
+  simultaneously appear in `parameters`; leaving them symbolic causes
+  compilation to fail. The same applies to any other compile-time
+  structural decision such as `qmc.range(...)` bounds. Measurement-backed
+  `if bit:` / `while bit:` (where `bit = qmc.measure(q)`) is unrelated —
+  that is runtime control flow handled at emit time by backends with a
+  supporting `MeasurementMode`.
 
 [overlap-check]: qamomile/circuit/transpiler/transpiler.py#L475-L487
 
@@ -371,16 +380,18 @@ harmless and preserves the existing review thread.
 
 Never include `@username` or `@org/team` strings in commit messages, PR
 titles / bodies, or issue titles / bodies — they trigger unintended GitHub
-notifications. This rule applies to bare Python decorators in running prose
-too: refer to them descriptively (e.g., "the qkernel decorator") instead of
-typing `@qkernel` directly in the prose. Inside fenced code blocks the
-decorator syntax is fine, since GitHub does not parse mentions there.
+notifications. This rule applies to bare Python decorators in running
+prose too: refer to them descriptively (e.g., "the qkernel decorator")
+instead of typing `@qkernel` directly in the prose. If you must show the
+literal decorator syntax, only do so inside a fenced code block or an
+inline code span — GitHub does not parse mentions in either. In normal
+prose, write "the qkernel decorator" instead.
 
 - ✅ "Update the qkernel decorator so metadata survives `next_version`."
 - ❌ "Update `@qkernel` so metadata survives `next_version`." (the
-  `@qkernel` is wrapped in code here only so this example itself doesn't
-  trigger a GitHub mention render; in real prose, never type the literal
-  `@qkernel` symbol — write "the qkernel decorator" instead)
+  `@qkernel` is wrapped in inline code here only so this example itself
+  doesn't render as a mention; outside a fenced code block or inline code
+  span, never type the literal `@qkernel` symbol in prose)
 
 ### No unsolicited external links
 
