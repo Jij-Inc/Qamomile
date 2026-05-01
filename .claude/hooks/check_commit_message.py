@@ -120,9 +120,11 @@ def _strip_backtick_code(text: str) -> str:
         text: The candidate commit-message text.
 
     Returns:
-        ``text`` with all backtick-wrapped code spans replaced by spaces so
-        ``@`` characters inside them are not flagged. Spaces preserve token
-        offsets in case future error reporting wants to point at a column.
+        ``text`` with all backtick-wrapped code spans replaced by a single
+        space each, so ``@`` characters inside them are not flagged. The
+        replacement is intentionally not length-preserving — the downstream
+        scanner only needs to know whether a bare ``@<word>`` exists, not
+        where it is in the original message.
     """
     # Fenced code blocks first (greedy across newlines, but non-greedy for
     # the closing fence to avoid swallowing the whole message).

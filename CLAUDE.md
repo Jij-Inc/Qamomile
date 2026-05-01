@@ -77,12 +77,17 @@ Pre-expanding an abstract concept into per-element / per-qubit / per-step concre
 
 ### Core Pipeline Flow
 
+This is a high-level overview of the layers a `@qkernel` flows through.
+For the canonical, ordered pass sequence — including every transformation
+the pipeline runs and the `BlockKind` boundary each pass advances — see
+"Transpiler Pipeline Stages" below.
+
 ```
 @qkernel Python function
          ↓
     Frontend (AST transform → tracing → Block with operations)
          ↓
-    Transpiler Pipeline (to_block → inline → partial_eval → analyze → plan → emit)
+    Transpiler Pipeline (multi-pass IR rewriting; canonical sequence below)
          ↓
     Backend Execution (Qiskit, QuriParts, CUDA-Q, etc.)
 ```
@@ -202,8 +207,11 @@ depending on parameter-array elements (see #354 / 7198bfe9).
   compilation to fail. The same applies to any other compile-time
   structural decision such as `qmc.range(...)` bounds. Measurement-backed
   `if bit:` / `while bit:` (where `bit = qmc.measure(q)`) is unrelated —
-  that is runtime control flow handled at emit time by backends with a
-  supporting `MeasurementMode`.
+  that is runtime control flow handled at emit time by backends whose
+  emitters report support for the corresponding constructs
+  (`GateEmitter.supports_if_else()` / `supports_while_loop()`), with the
+  appropriate measurement handling on the same backend (`MeasurementMode`)
+  when mid-circuit measurement is required.
 
 [overlap-check]: qamomile/circuit/transpiler/transpiler.py#L475-L487
 
