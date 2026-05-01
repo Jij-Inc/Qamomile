@@ -1043,6 +1043,88 @@ class TestControlledBuiltinSynthesisInternals:
         # safe internal identifier here, NOT the original ``Qubit`` name.
         assert cg._qkernel.name.startswith("_qmc_controlled_wrapper_")
 
+    def test_keyword_callable_name_falls_back_to_internal_id(self):
+        """A callable whose ``__name__`` is a Python keyword must not crash compile().
+
+        Regression for the Copilot #9 review: ``"class".isidentifier()`` is
+        ``True`` but ``def class(...)`` is a ``SyntaxError``, so the
+        synthesizer must additionally consult ``keyword.iskeyword`` and
+        fall back to the safe ``_qmc_controlled_wrapper_<n>`` identifier.
+        """
+
+        # ``def class(...)`` is itself unparseable, so build a function
+        # under a normal name and then rebind ``__name__`` to a keyword.
+        def some_gate(q: qmc.Qubit) -> qmc.Qubit:
+            return qmc.h(q)
+
+        some_gate.__name__ = "class"
+
+        cg = qmc.controlled(some_gate)
+        assert isinstance(cg, ControlledGate)
+        assert cg._qkernel.name.startswith("_qmc_controlled_wrapper_")
+
+    def test_int_param_lowered_as_uint_type(self):
+        """A wrapped kernel that declares ``int`` lowers raw int kwargs to UIntType.
+
+        Regression for the Copilot #8 review: previously
+        ``_params_to_operands`` always wrapped raw scalars as
+        ``FloatType``, which mismatched the wrapper-side ``UInt``
+        annotation that ``_classify_callable_param`` produces for ``int``
+        parameters.  After the fix, the controlled-U operand for the
+        ``int`` parameter carries a ``UIntType`` constant that lines up
+        with the wrapped block's ``input_values``.
+        """
+        from qamomile.circuit.ir.operation.gate import ControlledUOperation
+        from qamomile.circuit.ir.types.primitives import UIntType
+
+        def gate_with_int_param(q: qmc.Qubit, n: int) -> qmc.Qubit:
+            # ``n`` is unused at runtime — we only need the IR plumbing
+            # to round-trip the parameter through controlled-U emit.
+            return qmc.h(q)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            c = qmc.qubit(name="c")
+            t = qmc.qubit(name="t")
+            cg = qmc.controlled(gate_with_int_param)
+            c, t = cg(c, t, n=3)
+            return qmc.measure(t)
+
+        block = circuit.block
+        ctrl_ops = [
+            op for op in block.operations if isinstance(op, ControlledUOperation)
+        ]
+        assert len(ctrl_ops) == 1
+        # operands = [ctrl_value, target_value, n_value] for num_controls=1.
+        n_operand = ctrl_ops[0].operands[2]
+        assert isinstance(n_operand.type, UIntType), (
+            f"expected UIntType for an ``int``-annotated kernel parameter, "
+            f"got {type(n_operand.type).__name__}"
+        )
+        assert n_operand.get_const() == 3
+
+    def test_float_param_still_lowered_as_float_type(self):
+        """Sanity: float-annotated params keep using FloatType (no regression)."""
+        from qamomile.circuit.ir.operation.gate import ControlledUOperation
+        from qamomile.circuit.ir.types.primitives import FloatType
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            c = qmc.qubit(name="c")
+            t = qmc.qubit(name="t")
+            cg = qmc.controlled(qmc.rx)
+            c, t = cg(c, t, angle=0.5)
+            return qmc.measure(t)
+
+        block = circuit.block
+        ctrl_ops = [
+            op for op in block.operations if isinstance(op, ControlledUOperation)
+        ]
+        assert len(ctrl_ops) == 1
+        angle_operand = ctrl_ops[0].operands[2]
+        assert isinstance(angle_operand.type, FloatType)
+        assert angle_operand.get_const() == 0.5
+
     def test_dynamic_callable_is_released_on_gc(self):
         """Once the user drops a dynamically-defined callable, the wrapper cache must release it.
 
