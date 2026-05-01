@@ -158,11 +158,10 @@ def _find_at_mentions(message: str) -> list[str]:
 
     The ``@`` must be at a token boundary — i.e., NOT preceded by an
     alphanumeric, ``.``, ``_``, or ``-`` character. This intentionally
-    skips email addresses (``noreply@anthropic.com``) and ssh-style URLs
-    (``git@github.com``), which GitHub's own mention parser also ignores
-    for the same boundary reason. Without this, the Co-Authored-By
-    trailer the harness asks Claude to add to every commit (containing
-    ``<noreply@anthropic.com>``) would be falsely rejected.
+    skips email addresses (for example ``noreply@example.com``) and
+    ssh-style URLs (for example ``git@github.com``), so they are not
+    misclassified as user mentions. GitHub's own mention parser also
+    ignores these forms for the same boundary reason.
 
     Args:
         message: The commit-message text after extraction.
