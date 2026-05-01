@@ -1275,8 +1275,8 @@ class TestRound2Reviewer:
         ``qmc.UInt`` constructor surface.
         """
         from qamomile.circuit.ir.operation import SliceArrayOperation
+        from qamomile.circuit.ir.types.primitives import QubitType, UIntType
         from qamomile.circuit.ir.value import ArrayValue, Value
-        from qamomile.circuit.ir.types.primitives import UIntType, QubitType
         from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
             CompileTimeIfLoweringPass,
         )
@@ -1525,7 +1525,6 @@ class TestRound3Reviewer:
         """
         pytest.importorskip("qiskit")
         from qamomile.circuit.transpiler.errors import SliceLinearityViolationError
-        from qamomile.qiskit import QiskitTranspiler
 
         @qmc.qkernel
         def kern(obs: qmc.Observable) -> qmc.Float:
@@ -1688,7 +1687,6 @@ class TestRound4Reviewer:
     def test_disjoint_views_with_destructive_consume_each_allowed(self):
         """``measure(q[0::2]); measure(q[1::2])`` over disjoint slots is fine."""
         pytest.importorskip("qiskit")
-        from qamomile.qiskit import QiskitTranspiler
 
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Bit]:
