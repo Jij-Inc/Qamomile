@@ -820,7 +820,9 @@ _HAS_QURI_PARTS = True
 try:  # pragma: no cover - presence check
     import quri_parts.qulacs  # noqa: F401
 
-    from qamomile.quri_parts import QuriPartsTranspiler as _QuriPartsTranspilerCheck  # noqa: F401
+    from qamomile.quri_parts import (
+        QuriPartsTranspiler as _QuriPartsTranspilerCheck,  # noqa: F401
+    )
 except ImportError:  # pragma: no cover
     _HAS_QURI_PARTS = False
 
