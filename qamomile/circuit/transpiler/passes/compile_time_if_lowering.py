@@ -291,12 +291,33 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             ],
         )
 
-        new_results = list(op.results)
+        # Phi substitution must reach into ``SliceArrayOperation`` result
+        # metadata too.  The result is a sliced ``ArrayValue`` whose
+        # ``slice_start`` / ``slice_step`` / ``slice_of`` Values may be
+        # phi-output references when the slice bounds come from an
+        # ``if`` branch.  Without substituting the result fields, the
+        # post-fold ``SliceLinearityCheckPass`` sees a still-symbolic
+        # ``slice_start`` and silently skips coverage registration,
+        # letting aliased direct-parent accesses slip through.
+        from qamomile.circuit.ir.operation import SliceArrayOperation
 
-        changed = any(
-            new_operands[i] is not op.operands[i]
-            for i in range(len(op.operands))
-            if isinstance(op.operands[i], ValueBase)
+        new_results: list[Value] = list(op.results)
+        results_changed = False
+        if isinstance(op, SliceArrayOperation):
+            for i, r in enumerate(op.results):
+                if isinstance(r, ValueBase):
+                    sub_r = substitutor.substitute_value(r)
+                    if sub_r is not r:
+                        new_results[i] = sub_r
+                        results_changed = True
+
+        changed = (
+            any(
+                new_operands[i] is not op.operands[i]
+                for i in range(len(op.operands))
+                if isinstance(op.operands[i], ValueBase)
+            )
+            or results_changed
         )
 
         # Handle control-flow recursion.
@@ -339,7 +360,9 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
 
         result_op = op
         if changed:
-            result_op = dataclasses.replace(op, operands=new_operands)
+            result_op = dataclasses.replace(
+                op, operands=new_operands, results=new_results
+            )
 
         # theta is now part of operands, handled by the operands
         # substitution above.

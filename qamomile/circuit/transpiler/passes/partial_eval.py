@@ -35,5 +35,12 @@ class PartialEvaluationPass(Pass[Block, Block]):
                 f"block, got {input.kind}",
             )
 
-        folded = ConstantFoldingPass(self._bindings).run(input)
+        # Keep ``SliceArrayOperation`` nodes through partial_eval so
+        # the downstream ``SliceLinearityCheckPass`` can use them as
+        # view-declaration markers and detect direct-access-over-view
+        # aliases independently of the order in which the view is
+        # first referenced.  They are stripped immediately after the
+        # linearity check by ``StripSliceArrayOpsPass`` so segmentation
+        # still sees a classical-op-free quantum segment stream.
+        folded = ConstantFoldingPass(self._bindings, strip_slice_ops=False).run(input)
         return CompileTimeIfLoweringPass(self._bindings).run(folded)

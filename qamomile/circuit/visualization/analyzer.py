@@ -1912,6 +1912,8 @@ class CircuitAnalyzer:
                         if isinstance(rhs_val, (int, float)) and rhs_val < 0:
                             return result
                         return int(result)
+                    elif op.kind == BinOpKind.MIN:
+                        return lhs_val if lhs_val <= rhs_val else rhs_val
                 return None
 
         return None
@@ -2110,6 +2112,8 @@ class CircuitAnalyzer:
             if rhs_str == "1":
                 return lhs_str
             return f"{lhs_str}/{rhs_str}"
+        elif binop.kind == BinOpKind.MIN:
+            return f"min({lhs_str},{rhs_str})"
         else:
             _extra_ops: dict[BinOpKind, str] = {
                 BinOpKind.FLOORDIV: "//",
@@ -3284,6 +3288,8 @@ class CircuitAnalyzer:
                 rhs_str = self._format_value_as_expression(
                     op.rhs, loop_vars, operations
                 )
+                if op.kind == BinOpKind.MIN:
+                    return f"min({lhs_str},{rhs_str})"
                 _binop_symbols: dict[BinOpKind, str] = {
                     BinOpKind.ADD: "+",
                     BinOpKind.SUB: "-",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, TypeVar
 
-from qamomile.circuit.frontend.handle.array import Vector
+from qamomile.circuit.frontend.handle.array import Vector, VectorView
 from qamomile.circuit.frontend.handle.primitives import QFixed, Qubit
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.cast import CastOperation
@@ -110,13 +110,45 @@ def _cast_vector_qubit_to_qfixed(
 
     frac_bits = num_qubits - int_bits
 
-    # Use canonical composite keys matching allocator registration ({array_uuid}_{i})
-    # instead of borrowed element UUIDs which are ephemeral.
+    # Compose carrier keys in **root-space**.  When ``source`` is a
+    # ``VectorView`` over ``q[start::step]`` (possibly nested), the
+    # physical qubit slots backing the cast are root-space indices
+    # ``root[i_0], root[i_1], ..., root[i_{N-1}]`` — not
+    # ``view[0..N-1]``.  The allocator registers qubits under the root
+    # array's uuid; using the view's own uuid here would miss in
+    # ``qubit_map`` and the cast would emit no measurements.
+    #
+    # ``VectorView._slice_covered_indices`` already enumerates the
+    # root-space indices for compile-time-known slices (the same data
+    # the borrow tracker uses), so we use it directly: no IR chain walk,
+    # no symbolic-bound resolution.  When it is ``None`` the slice has
+    # symbolic bounds and we cannot enumerate carriers at trace time;
+    # cast on such a view is rejected here rather than producing a
+    # silently broken QFixed downstream.
+    if isinstance(source, VectorView):
+        covered = source._slice_covered_indices
+        if covered is None:
+            raise ValueError(
+                f"cast() on a view with symbolic slice bounds is not "
+                f"supported (view of '{source._slice_parent.value.name}'). "
+                f"Use literal-bounded slicing for cast operands."
+            )
+        if len(covered) != num_qubits:
+            raise ValueError(
+                f"cast() internal error: view length {num_qubits} does not "
+                f"match covered-index count {len(covered)}."
+            )
+        root_av = source._slice_parent.value
+        root_indices = covered
+    else:
+        root_av = source.value
+        root_indices = tuple(range(num_qubits))
+
     qubit_uuids: list[str] = []
     qubit_logical_ids: list[str] = []
-    for i in range(num_qubits):
-        qubit_uuids.append(f"{source.value.uuid}_{i}")
-        qubit_logical_ids.append(f"{source.value.logical_id}_{i}")
+    for root_idx in root_indices:
+        qubit_uuids.append(f"{root_av.uuid}_{root_idx}")
+        qubit_logical_ids.append(f"{root_av.logical_id}_{root_idx}")
 
     # Consume the source (move semantics - prevents reuse)
     source = source.consume(operation_name="cast")

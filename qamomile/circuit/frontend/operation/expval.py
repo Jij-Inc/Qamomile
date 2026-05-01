@@ -75,6 +75,20 @@ def expval(
             element_logical_ids=tuple(q.logical_id for q in qubit_values),
         )
     else:
+        # Guard for Vector[Qubit] operands: if any slot of the array was
+        # physically destroyed by a prior destructive view operation
+        # (e.g. ``measure(q[1::2])``), using the whole array in
+        # ``expval`` would try to estimate over a partially-collapsed
+        # quantum state.  Detect this at trace time so the error is
+        # surfaced before reaching the backend.
+        #
+        # We only call this on ``Vector`` (which is an ``ArrayBase``
+        # subclass and has ``_check_no_consumed_slots``).  A bare
+        # ``Qubit`` handle — supported for back-compat even though the
+        # public type signature requires ``Vector | tuple`` — cannot
+        # carry consumed-slot markers and is skipped.
+        if isinstance(qubits, Vector):
+            qubits._check_no_consumed_slots("expval")
         qubits_value = qubits.value
 
     # Create result Float value

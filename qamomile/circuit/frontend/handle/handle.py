@@ -18,17 +18,58 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
 )
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import QubitConsumedError
+from qamomile.circuit.transpiler.passes.eval_utils import evaluate_binop_values
 
 if typing.TYPE_CHECKING:
     from .array import ArrayBase
     from .primitives import UInt
 
 
-def _emit_binop(lhs: Value, rhs: Value, result: Value, kind: BinOpKind) -> None:
-    """Emit a BinOp to the current tracer."""
+def _emit_binop(
+    lhs: Value, rhs: Value, result: "Handle | Value", kind: BinOpKind
+) -> None:
+    """Emit a BinOp to the current tracer, or fold eagerly when both
+    operands are compile-time constants.
+
+    When both ``lhs`` and ``rhs`` carry a concrete constant
+    (``Value.is_constant()``), the operation is evaluated immediately
+    and the result is materialised as a constant ``Value`` rather than
+    a BinOp in the trace.  This eliminates trivial residual ops like
+    ``lo + 0`` (where ``lo`` is constant) that would otherwise leave
+    symbolic shapes in downstream ``ArrayValue.shape`` and break
+    stdlib helpers (e.g. :func:`qamomile.circuit.stdlib.qft._get_size`)
+    which require concrete sizes at trace time.
+
+    The eager-fold path requires a mutable :class:`Handle` for
+    ``result`` so the constant Value can be installed in place; passing
+    a raw :class:`Value` keeps the legacy emit-only behaviour for the
+    rare callers that don't construct a handle.
+
+    Args:
+        lhs: Left operand Value.
+        rhs: Right operand Value.
+        result: Either the result Handle (whose ``value`` is mutated
+            on fold) or a raw Value (emit-only legacy path).
+        kind: The :class:`BinOpKind` to apply.
+    """
+    if isinstance(result, Handle) and lhs.is_constant() and rhs.is_constant():
+        lhs_v = lhs.get_const()
+        rhs_v = rhs.get_const()
+        if lhs_v is not None and rhs_v is not None:
+            folded = evaluate_binop_values(kind, lhs_v, rhs_v)
+            if folded is not None:
+                result.value = result.value.with_const(folded)
+                if hasattr(result, "init_value"):
+                    try:
+                        result.init_value = type(result.init_value)(folded)
+                    except (TypeError, ValueError):
+                        result.init_value = folded
+                return
+
+    result_value = result.value if isinstance(result, Handle) else result
     binop = BinOp(
         operands=[lhs, rhs],
-        results=[result],
+        results=[result_value],
         kind=kind,
     )
     tracer = get_current_tracer()
@@ -183,7 +224,7 @@ class ArithmeticMixin:
     def __add__(self, other):
         other = self._coerce(other)
         result = self._make_result()
-        _emit_binop(self.value, other.value, result.value, BinOpKind.ADD)
+        _emit_binop(self.value, other.value, result, BinOpKind.ADD)
         return result
 
     def __radd__(self, other):
@@ -192,19 +233,19 @@ class ArithmeticMixin:
     def __sub__(self, other):
         other = self._coerce(other)
         result = self._make_result()
-        _emit_binop(self.value, other.value, result.value, BinOpKind.SUB)
+        _emit_binop(self.value, other.value, result, BinOpKind.SUB)
         return result
 
     def __rsub__(self, other):
         other = self._coerce(other)
         result = self._make_result()
-        _emit_binop(other.value, self.value, result.value, BinOpKind.SUB)
+        _emit_binop(other.value, self.value, result, BinOpKind.SUB)
         return result
 
     def __mul__(self, other):
         other = self._coerce(other)
         result = self._make_result()
-        _emit_binop(self.value, other.value, result.value, BinOpKind.MUL)
+        _emit_binop(self.value, other.value, result, BinOpKind.MUL)
         return result
 
     def __rmul__(self, other):
@@ -213,11 +254,11 @@ class ArithmeticMixin:
     def __truediv__(self, other):
         other = self._coerce(other)
         result = self._make_float_result()  # Division always returns Float
-        _emit_binop(self.value, other.value, result.value, BinOpKind.DIV)
+        _emit_binop(self.value, other.value, result, BinOpKind.DIV)
         return result
 
     def __rtruediv__(self, other):
         other = self._coerce(other)
         result = self._make_float_result()
-        _emit_binop(other.value, self.value, result.value, BinOpKind.DIV)
+        _emit_binop(other.value, self.value, result, BinOpKind.DIV)
         return result

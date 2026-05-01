@@ -18,6 +18,7 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureVectorOperation,
 )
 from qamomile.circuit.ir.value import ArrayValue
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.gate_emitter import MeasurementMode
 
 from .qubit_address import ClbitMap, QubitAddress, QubitMap
@@ -85,35 +86,97 @@ def emit_measure_vector(
     clbit_map: ClbitMap,
     bindings: dict[str, Any],
 ) -> None:
-    """Emit vector measurement."""
+    """Emit vector measurement.
+
+    Resolves the qubit operand's slice_of chain so that measuring a
+    view (``measure(q[1::2])``) correctly targets the root parent's
+    physical qubits.
+
+    Behaviour for unresolvable inputs differs by case:
+
+    * Unknown vector length (``_resolve_size`` returns ``None``) — the
+      function defers silently. This handles transpile-only paths
+      (e.g. unbound parameter-size arrays) where downstream late-
+      binding callers still handle the emit correctly.
+    * Resolvable length but a sliced view that resolves to **zero**
+      physical qubits — raises ``EmitError``. Previously this produced
+      executions returning ``[(None, N)]``, a data-integrity hazard,
+      so the silent path is intentionally narrowed to view-on-empty
+      cases only.
+    * Resolvable length but slice bounds are themselves symbolic —
+      raises ``EmitError`` from ``resolve_slice_chain``.
+
+    Raises:
+        EmitError: When a sliced view resolves to zero physical qubits,
+            or when slice bounds remain symbolic at emit time.
+    """
     qubits_array = op.operands[0]
     bits_array = op.results[0]
 
-    if isinstance(qubits_array, ArrayValue) and isinstance(bits_array, ArrayValue):
-        element_uuids = qubits_array.get_element_uuids()
+    if not (
+        isinstance(qubits_array, ArrayValue) and isinstance(bits_array, ArrayValue)
+    ):
+        return
 
-        shape = qubits_array.shape
-        if shape:
-            size_val = shape[0]
-            # Use allocator's _resolve_size to handle dynamic sizes (e.g., hi_dim0)
-            size = emit_pass._allocator._resolve_size(size_val, bindings)
-            if size is not None:
-                for i in range(size):
-                    if element_uuids and i < len(element_uuids):
-                        qubit_addr = QubitAddress.from_composite_key(element_uuids[i])
-                    else:
-                        qubit_addr = QubitAddress(qubits_array.uuid, i)
+    element_uuids = qubits_array.get_element_uuids()
+    shape = qubits_array.shape
+    if not shape:
+        return
 
-                    clbit_addr = QubitAddress(bits_array.uuid, i)
-                    if qubit_addr in qubit_map and clbit_addr in clbit_map:
-                        q_idx = qubit_map[qubit_addr]
-                        c_idx = clbit_map[clbit_addr]
-                        emit_pass._emitter.emit_measure(circuit, q_idx, c_idx)
-                        if (
-                            emit_pass._emitter.measurement_mode
-                            == MeasurementMode.STATIC
-                        ):
-                            emit_pass._measurement_qubit_map[c_idx] = q_idx
+    size_val = shape[0]
+    # Use allocator's _resolve_size to handle dynamic sizes (e.g., hi_dim0).
+    # ``None`` means the length is not yet resolvable at this emit site
+    # (e.g. transpile-only paths with unbound parameter-size arrays);
+    # silently defer — the prior behaviour — rather than raising, so
+    # downstream passes that handle late binding still succeed.
+    size = emit_pass._allocator._resolve_size(size_val, bindings)
+    if size is None:
+        return
+
+    # Walk slice chain once up front. For a root array this is
+    # (root=qubits_array, start=0, step=1) and the loop body is identical
+    # to the pre-view behaviour; for a view the (start, step) translate
+    # view-local indices to root-space positions.
+    root_av, start, step = emit_pass._resolver.resolve_slice_chain(
+        qubits_array, bindings, operation="MeasureVectorOperation"
+    )
+    is_view = root_av is not qubits_array
+
+    emitted = 0
+    for i in range(size):
+        if not is_view and element_uuids and i < len(element_uuids):
+            # Non-view fast path: preserve the composite-key lookup so
+            # arrays whose elements were registered under explicit UUIDs
+            # (e.g. qfixed, function returns) keep resolving correctly.
+            qubit_addr = QubitAddress.from_composite_key(element_uuids[i])
+        else:
+            qubit_addr = QubitAddress(root_av.uuid, start + step * i)
+
+        clbit_addr = QubitAddress(bits_array.uuid, i)
+        if qubit_addr in qubit_map and clbit_addr in clbit_map:
+            q_idx = qubit_map[qubit_addr]
+            c_idx = clbit_map[clbit_addr]
+            emit_pass._emitter.emit_measure(circuit, q_idx, c_idx)
+            if emit_pass._emitter.measurement_mode == MeasurementMode.STATIC:
+                emit_pass._measurement_qubit_map[c_idx] = q_idx
+            emitted += 1
+
+    # Raise on the specific "view produced zero measurements" case that
+    # previously silently returned ``[(None, shots)]`` — a data-integrity
+    # hazard.  For non-view arrays we preserve the legacy silent-skip
+    # behaviour: their elements may legitimately be registered through
+    # other paths (pauli_evolve result, qfixed, sub-kernel returns) and
+    # raising here would regress established tests without catching new
+    # bugs.
+    if is_view and emitted == 0 and size > 0:
+        raise EmitError(
+            f"MeasureVectorOperation on view '{qubits_array.name}' emitted "
+            f"no measurements: none of the {size} element(s) resolved to a "
+            f"physical qubit. This typically indicates an unsupported "
+            f"slice or a missing allocator registration for the root "
+            f"parent '{root_av.name}'.",
+            operation="MeasureVectorOperation",
+        )
 
 
 def emit_measure_qfixed(

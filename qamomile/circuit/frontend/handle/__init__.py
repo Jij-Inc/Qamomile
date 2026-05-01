@@ -1,4 +1,4 @@
-from .array import Matrix, Tensor, Vector
+from .array import Matrix, Tensor, Vector, VectorView
 from .containers import Dict, Tuple
 from .hamiltonian import Observable
 from .handle import Handle
@@ -12,6 +12,7 @@ __all__ = [
     "Float",
     "Bit",
     "Vector",
+    "VectorView",
     "Matrix",
     "Tensor",
     "Observable",

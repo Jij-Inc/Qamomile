@@ -355,6 +355,18 @@ class QKernel(Generic[P, R]):
         """
         Executes the kernel.
         If called within a tracing context, it emits a CallBlockOperation.
+
+        ``VectorView`` arguments flow through the same
+        ``CallBlockOperation`` path as plain ``Vector`` arguments: the
+        view's sliced ``ArrayValue`` (with its ``slice_of`` /
+        ``slice_start`` / ``slice_step`` metadata) is a first-class IR
+        Value, so it can be an operand of the call and be substituted
+        into the callee's dummy input by ``InlinePass``.  The emit-time
+        resolver walks the ``slice_of`` chain back to the root parent,
+        so the callee transparently operates on the slice's qubit
+        subset.  This also means self-recursive kernels with view
+        arguments (butterfly / divide-and-conquer patterns) work out of
+        the box — the forward-ref back-patching handles the recursion.
         """
         tracer = get_current_tracer()
 

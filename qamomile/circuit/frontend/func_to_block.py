@@ -285,6 +285,38 @@ def create_dummy_input(
     return create_dummy_handle(value_type, name, emit_init)
 
 
+def _validate_returned_arrays(result: typing.Any) -> None:
+    """Call ``validate_all_returned`` on quantum arrays in the trace result.
+
+    The frontend's ``ArrayBase.validate_all_returned`` is otherwise only
+    triggered by ``consume`` paths (measure / expval / passing to another
+    kernel).  A kernel that takes a borrow and then returns the parent
+    without consuming it — e.g. ``qv = q[0]; return q`` — escapes the
+    consume-driven check entirely.  Running the validator on every
+    returned quantum array handle at trace end closes that hole; it
+    reuses the existing error machinery (``UnreturnedBorrowError``) so
+    users see the same diagnostic they would from a consume failure.
+
+    Args:
+        result: Whatever ``func(**dummy_inputs)`` returned — a Handle,
+            a tuple of Handles, or ``None`` for void.  Non-quantum
+            arrays and scalars are silently skipped.
+    """
+    from qamomile.circuit.frontend.handle.array import ArrayBase
+
+    def _visit(obj: typing.Any) -> None:
+        if obj is None:
+            return
+        if isinstance(obj, tuple):
+            for item in obj:
+                _visit(item)
+            return
+        if isinstance(obj, ArrayBase) and obj.value.type.is_quantum():
+            obj.validate_all_returned()
+
+    _visit(result)
+
+
 def func_to_block(func: typing.Callable) -> Block:
     """Convert a function to a hierarchical Block.
 
@@ -352,6 +384,15 @@ def func_to_block(func: typing.Callable) -> Block:
     tracer = Tracer()
     with trace(tracer):
         result = func(**dummy_inputs)  # type: ignore
+
+    # Validate that returned / live quantum arrays have no unreturned
+    # borrows.  The existing ``validate_all_returned`` is consume-driven
+    # (fires on measure / expval / passing to another kernel), so a
+    # kernel that does ``qv = q[0]; return q`` — taking a borrow and
+    # returning the parent without consuming it — would silently pass.
+    # Running the check explicitly at trace end closes that hole
+    # without needing a dedicated consume operation.
+    _validate_returned_arrays(result)
 
     operations = tracer.operations
 

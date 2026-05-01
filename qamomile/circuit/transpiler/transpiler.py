@@ -33,6 +33,9 @@ from qamomile.circuit.transpiler.passes.parameter_shape_resolution import (
 )
 from qamomile.circuit.transpiler.passes.partial_eval import PartialEvaluationPass
 from qamomile.circuit.transpiler.passes.separate import SegmentationPass
+from qamomile.circuit.transpiler.passes.slice_linearity_check import (
+    SliceLinearityCheckPass,
+)
 from qamomile.circuit.transpiler.passes.substitution import (
     SubstitutionConfig,
     SubstitutionPass,
@@ -364,6 +367,51 @@ class Transpiler(ABC, Generic[T]):
         """
         return CompileTimeIfLoweringPass(bindings).run(block)
 
+    def strip_slice_ops(self, block: Block) -> Block:
+        """Pass 1.95: Remove ``SliceArrayOperation`` nodes from the block.
+
+        ``PartialEvaluationPass`` keeps these declarative ops through
+        constant folding so :meth:`slice_linearity_check` can use them
+        as view-declaration markers. Once the linearity check has run,
+        segmentation and downstream passes expect a classical-op-free
+        quantum stream — this pass performs that cleanup.
+        """
+        from qamomile.circuit.transpiler.passes.strip_slice_ops import (
+            StripSliceArrayOpsPass,
+        )
+
+        return StripSliceArrayOpsPass().run(block)
+
+    def slice_linearity_check(self, block: Block) -> Block:
+        """Pass 1.9: Post-fold slice-view linearity checker.
+
+        Runs after :meth:`partial_eval` has resolved slice bounds to
+        concrete values.  Catches the slice-view linearity violations
+        that the trace-time frontend check cannot detect on its own —
+        specifically, slices whose bounds were *symbolic* at trace
+        time (so the frontend bulk-borrow tracker had to skip them)
+        and aliasing scenarios that only become visible once those
+        bounds are folded to constants:
+
+        1. A view whose newly-concrete coverage overlaps another live
+           view of the same root parent.
+        2. A view whose newly-concrete coverage hits a slot that was
+           consumed by a destructive view operation earlier in the
+           block.
+        3. A view that reaches the end of the block while still
+           recorded as the owner of the parent's slots (i.e. it was
+           never used or never released).
+
+        Direct element borrows (``q[i]``) emit no IR operation, so the
+        IR-level pass cannot observe them; the trace-time validation
+        in :func:`func_to_block._validate_returned_arrays` covers that
+        path.
+
+        The pass is a pass-through for the IR — it only raises on
+        violations and leaves the block unchanged on success.
+        """
+        return SliceLinearityCheckPass().run(block)
+
     def analyze(self, block: Block) -> Block:
         """Pass 2: Validate and analyze dependencies."""
         return self._analyze_pass.run(block)
@@ -500,6 +548,8 @@ class Transpiler(ABC, Generic[T]):
         affine = self.unroll_recursion(affine, bindings)
         validated = self.affine_validate(affine)
         partially_evaluated = self.partial_eval(validated, bindings)
+        partially_evaluated = self.slice_linearity_check(partially_evaluated)
+        partially_evaluated = self.strip_slice_ops(partially_evaluated)
         analyzed = self.analyze(partially_evaluated)
         # Lower measurement-derived classical ops to ``RuntimeClassicalExpr``
         # so emit can dispatch them through a dedicated backend hook

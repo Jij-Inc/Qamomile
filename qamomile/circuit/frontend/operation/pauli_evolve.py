@@ -61,13 +61,16 @@ def pauli_evolve(
     consumed = q.consume("pauli_evolve")
     qubits_value = consumed.value
 
-    # Bump the SSA version of the input array. ``next_version`` preserves
-    # ``logical_id`` and ``shape`` so the result is recognised as the same
-    # logical register across the IR (resource allocation, inline-pass
-    # remapping for nested @qkernel calls, visualization, etc.) -- creating
-    # a fresh ArrayValue here would mint a new logical_id and drop the
-    # caller-side qubit identity, breaking measurement after a nested
-    # @qkernel that uses pauli_evolve internally (issue #354).
+    # Bump the SSA version of the input array.  ``next_version`` preserves
+    # ``logical_id``, ``shape``, and ``slice_of`` / ``slice_start`` /
+    # ``slice_step`` so the result is recognised as the same logical
+    # register across the IR (resource allocation, inline-pass remapping
+    # for nested @qkernel calls, visualization).  Creating a fresh
+    # ArrayValue here would mint a new logical_id and drop the caller-side
+    # qubit identity (breaks measurement after nested @qkernel — issue
+    # #354), and would also lose the slice chain (breaks ``expval`` on the
+    # result of ``pauli_evolve(q[1::2], H, gamma)``, which must walk back
+    # to the root parent's physical qubits).
     result_array = qubits_value.next_version()
 
     op = PauliEvolveOp(

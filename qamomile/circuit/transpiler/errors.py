@@ -289,6 +289,70 @@ class UnreturnedBorrowError(AffineTypeError):
     pass
 
 
+class SliceLinearityViolationError(AffineTypeError):
+    """Aliasing detected between a slice view and a direct parent access.
+
+    Raised by :class:`SliceLinearityCheckPass` at transpile time when
+    a parent array slot is simultaneously held by a ``VectorView`` and
+    accessed directly, or when two overlapping views cover the same
+    slot.  For slices with constant bounds this is normally caught at
+    trace time; this error covers the post-fold case when slice bounds
+    were symbolic UInt parameters resolved by bindings.
+
+    Example of incorrect code (detected only after bindings resolve
+    ``lo``/``hi`` to concrete values)::
+
+        region = q[lo:hi]     # bindings give lo=0, hi=4 → covers {0,1,2,3}
+        qa = region[0]        # borrows parent slot 0 via the view
+        qb = q[0]             # borrows parent slot 0 directly
+        # SliceLinearityViolationError: slot 0 is held by a slice view
+    """
+
+    pass
+
+
+class UnreturnedBorrowAtBlockEndError(AffineTypeError):
+    """Block completed with a slice view still owning parent slots.
+
+    Raised by :class:`SliceLinearityCheckPass` when the root block's
+    operation sequence finishes with a slice view still recorded as
+    the owner of one or more parent slots — i.e. a view that was
+    sliced but never used (so opportunistic drain didn't fire) and
+    never destructively consumed (so the consumed-slot marker wasn't
+    installed either).
+
+    Direct element borrows (``q[i]``) emit no IR operation, so this
+    IR-level pass does **not** detect them; that path is covered by
+    the trace-time validator
+    (``func_to_block._validate_returned_arrays`` and
+    ``ArrayBase.validate_all_returned``), which raises
+    :class:`UnreturnedBorrowError` from the frontend.
+
+    Example of incorrect code (caught post-fold, after bindings
+    resolve the slice bounds)::
+
+        @qmc.qkernel
+        def kern(lo: qmc.UInt, hi: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+            q = qmc.qubit_array(4, "q")
+            view = q[lo:hi]    # slice constructed but never used
+            return q           # → UnreturnedBorrowAtBlockEndError after
+                               #   bindings make {lo, hi} concrete
+
+    Correct code either uses the view (so opportunistic drain
+    releases the parent slots) or skips slicing it::
+
+        @qmc.qkernel
+        def kern(lo: qmc.UInt, hi: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+            q = qmc.qubit_array(4, "q")
+            view = q[lo:hi]
+            for i in qmc.range(view.shape[0]):
+                view[i] = qmc.h(view[i])  # use the view; parent released
+            return q
+    """
+
+    pass
+
+
 class QubitRebindError(AffineTypeError):
     """Quantum variable reassigned from a different quantum source.
 
