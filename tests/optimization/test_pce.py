@@ -637,27 +637,30 @@ class TestPCEEndToEnd:
         """
         converter, n, observables, ansatz = self._build_pce_setup()
 
+        import importlib.util
+
         from qamomile.circuit.transpiler.transpiler import Transpiler
 
+        # Probe for the underlying SDKs first. ``qamomile.{backend}`` packages
+        # often defer the SDK import until the first ``transpile`` /
+        # ``executor`` call (e.g. ``quri_parts.circuit`` is imported lazily
+        # inside ``QuriPartsGateEmitter.create_circuit``), so a try/except
+        # around ``from qamomile.<backend> import ...`` does not catch a
+        # missing SDK — the ImportError fires later, mid-test. Use
+        # ``find_spec`` to check existence without importing.
         backends: list[tuple[str, Transpiler]] = []
-        try:
+        if importlib.util.find_spec("qiskit") is not None:
             from qamomile.qiskit import QiskitTranspiler
 
             backends.append(("qiskit", QiskitTranspiler()))
-        except ImportError:
-            pass
-        try:
+        if importlib.util.find_spec("quri_parts") is not None:
             from qamomile.quri_parts import QuriPartsTranspiler
 
             backends.append(("quri_parts", QuriPartsTranspiler()))
-        except ImportError:
-            pass
-        try:
+        if importlib.util.find_spec("cudaq") is not None:
             from qamomile.cudaq import CudaqTranspiler
 
             backends.append(("cudaq", CudaqTranspiler()))
-        except ImportError:
-            pass
 
         if len(backends) < 2:
             pytest.skip("Need at least two installed backends to cross-check.")
