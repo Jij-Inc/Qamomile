@@ -795,3 +795,378 @@ class TestControlledGateRandomState:
             spec, num_controls, target_state, power=power
         )
         assert statevectors_equal(actual, expected)
+
+
+# =============================================================================
+# Built-in gate acceptance: controlled(qmc.rx) without an @qkernel wrapper
+# =============================================================================
+#
+# The factory below now auto-wraps a plain built-in gate function in a
+# synthesized @qkernel.  These tests cover (a) the acceptance/rejection
+# rules of the wrapper-synthesis path, (b) IR parity between the built-in
+# call form and a hand-written @qkernel wrapper, and (c) end-to-end
+# execution on each supported backend.
+
+
+# -- Backend availability (mirrors test_gate_broadcast.py) --------------------
+
+_HAS_QISKIT = True
+try:  # pragma: no cover - presence check
+    from qamomile.qiskit import QiskitTranspiler as _QiskitTranspilerCheck  # noqa: F401
+except ImportError:  # pragma: no cover
+    _HAS_QISKIT = False
+
+_HAS_QURI_PARTS = True
+try:  # pragma: no cover - presence check
+    import quri_parts.qulacs  # noqa: F401
+
+    from qamomile.quri_parts import QuriPartsTranspiler as _QuriPartsTranspilerCheck  # noqa: F401
+except ImportError:  # pragma: no cover
+    _HAS_QURI_PARTS = False
+
+_HAS_CUDAQ = True
+try:  # pragma: no cover - presence check
+    import cudaq  # noqa: F401
+
+    from qamomile.cudaq import CudaqTranspiler as _CudaqTranspilerCheck  # noqa: F401
+except ImportError:  # pragma: no cover
+    _HAS_CUDAQ = False
+
+
+def _qiskit_transpiler_factory():
+    from qamomile.qiskit import QiskitTranspiler
+
+    return QiskitTranspiler()
+
+
+def _quri_parts_transpiler_factory():
+    from qamomile.quri_parts import QuriPartsTranspiler
+
+    return QuriPartsTranspiler()
+
+
+def _cudaq_transpiler_factory():
+    from qamomile.cudaq import CudaqTranspiler
+
+    return CudaqTranspiler()
+
+
+_BUILTIN_BACKENDS = [
+    pytest.param(
+        _qiskit_transpiler_factory,
+        id="qiskit",
+        marks=pytest.mark.skipif(not _HAS_QISKIT, reason="qiskit not installed"),
+    ),
+    pytest.param(
+        _quri_parts_transpiler_factory,
+        id="quri_parts",
+        marks=pytest.mark.skipif(
+            not _HAS_QURI_PARTS, reason="quri_parts/qulacs not installed"
+        ),
+    ),
+    pytest.param(
+        _cudaq_transpiler_factory,
+        id="cudaq",
+        marks=pytest.mark.skipif(not _HAS_CUDAQ, reason="cudaq not installed"),
+    ),
+]
+
+
+# -- Acceptance: controlled() factory takes built-ins -------------------------
+
+
+class TestControlledAcceptsBuiltinGate:
+    """``controlled()`` accepts built-in gate functions directly."""
+
+    @pytest.mark.parametrize(
+        "gate_fn",
+        [qmc.h, qmc.x, qmc.y, qmc.z, qmc.s, qmc.t, qmc.rx, qmc.ry, qmc.rz, qmc.p],
+    )
+    def test_single_qubit_gates_accepted(self, gate_fn):
+        cg = qmc.controlled(gate_fn)
+        assert isinstance(cg, ControlledGate)
+
+    @pytest.mark.parametrize("gate_fn", [qmc.cx, qmc.cz, qmc.swap, qmc.cp, qmc.rzz])
+    def test_two_qubit_gates_accepted(self, gate_fn):
+        cg = qmc.controlled(gate_fn)
+        assert isinstance(cg, ControlledGate)
+
+    def test_three_qubit_gate_accepted(self):
+        cg = qmc.controlled(qmc.ccx)
+        assert isinstance(cg, ControlledGate)
+
+    @pytest.mark.parametrize("nc", [1, 2, 3])
+    def test_built_in_with_num_controls(self, nc):
+        cg = qmc.controlled(qmc.rx, num_controls=nc)
+        assert cg._num_controls == nc
+
+    def test_qkernel_passthrough_uses_same_instance(self):
+        """A QKernel argument is passed straight through, not re-wrapped."""
+
+        @qmc.qkernel
+        def my_gate(q: qmc.Qubit) -> qmc.Qubit:
+            return qmc.h(q)
+
+        cg = qmc.controlled(my_gate)
+        assert cg._qkernel is my_gate
+
+
+# -- Rejection: errors for unsupported callables -----------------------------
+
+
+class TestControlledBuiltinErrors:
+    """Errors raised when a callable cannot be auto-wrapped."""
+
+    def test_non_callable_raises_type_error(self):
+        with pytest.raises(TypeError, match="QKernel or a built-in gate"):
+            qmc.controlled(42)  # type: ignore[arg-type]
+
+    def test_missing_annotation_raises_type_error(self):
+        def bad(q):  # no annotation
+            return qmc.h(q)
+
+        with pytest.raises(TypeError, match="no type annotation"):
+            qmc.controlled(bad)
+
+    def test_unsupported_annotation_raises_type_error(self):
+        def bad(q: str) -> str:  # str is not Qubit/Float/UInt
+            return q
+
+        with pytest.raises(TypeError, match="annotation"):
+            qmc.controlled(bad)
+
+    def test_no_qubit_param_raises_type_error(self):
+        def classical_only(theta: float) -> float:
+            return theta
+
+        with pytest.raises(TypeError, match="no Qubit parameters"):
+            qmc.controlled(classical_only)
+
+    def test_var_args_raises_type_error(self):
+        def variadic(*qs: qmc.Qubit) -> qmc.Qubit:
+            return qs[0]
+
+        with pytest.raises(TypeError, match="\\*args/\\*\\*kwargs"):
+            qmc.controlled(variadic)
+
+
+# -- IR parity: built-in form vs hand-written @qkernel form ------------------
+
+
+class TestControlledBuiltinIRParity:
+    """Built-in form produces an IR equivalent to the hand-written wrapper."""
+
+    @staticmethod
+    def _gate_kinds(block) -> list:
+        """Return the ordered list of GateOperationType values in a block."""
+        from qamomile.circuit.ir.operation.gate import (
+            GateOperation as IRGateOperation,
+        )
+
+        return [
+            op.gate_type for op in block.operations if isinstance(op, IRGateOperation)
+        ]
+
+    def test_rx_gate_block_matches_wrapper(self):
+        """controlled(qmc.rx).block has the same gate sequence as controlled(_rx_gate).block."""
+        cg_builtin = qmc.controlled(qmc.rx)
+        cg_wrapped = qmc.controlled(_rx_gate)
+        assert self._gate_kinds(cg_builtin._qkernel.block) == self._gate_kinds(
+            cg_wrapped._qkernel.block
+        )
+
+    def test_h_gate_block_matches_wrapper(self):
+        cg_builtin = qmc.controlled(qmc.h)
+        cg_wrapped = qmc.controlled(_h_gate)
+        assert self._gate_kinds(cg_builtin._qkernel.block) == self._gate_kinds(
+            cg_wrapped._qkernel.block
+        )
+
+    def test_cp_gate_block_matches_wrapper(self):
+        cg_builtin = qmc.controlled(qmc.cp)
+        cg_wrapped = qmc.controlled(_cp_gate)
+        assert self._gate_kinds(cg_builtin._qkernel.block) == self._gate_kinds(
+            cg_wrapped._qkernel.block
+        )
+
+    def test_cx_gate_block_matches_wrapper(self):
+        cg_builtin = qmc.controlled(qmc.cx)
+        cg_wrapped = qmc.controlled(_cx_gate)
+        assert self._gate_kinds(cg_builtin._qkernel.block) == self._gate_kinds(
+            cg_wrapped._qkernel.block
+        )
+
+
+# -- Cross-backend execution: built-in form transpiles + runs ----------------
+
+
+def _make_controlled_builtin_circuit(gate_fn, theta: float | None = None):
+    """Build a kernel that flips control(s) to |1> then applies ``controlled(gate_fn)``."""
+    if theta is None:
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            c = qmc.qubit(name="c")
+            t = qmc.qubit(name="t")
+            c = qmc.x(c)
+            cg = qmc.controlled(gate_fn)
+            c, t = cg(c, t)
+            return qmc.measure(t)
+
+    else:
+
+        @qmc.qkernel
+        def circuit(angle: qmc.Float) -> qmc.Bit:
+            c = qmc.qubit(name="c")
+            t = qmc.qubit(name="t")
+            c = qmc.x(c)
+            cg = qmc.controlled(gate_fn)
+            c, t = cg(c, t, angle=angle)
+            return qmc.measure(t)
+
+    return circuit
+
+
+@pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+class TestControlledBuiltinCrossBackend:
+    """controlled(builtin) transpiles + samples on every supported backend."""
+
+    def test_sample_controlled_x_flips_target(self, transpiler_factory):
+        """controlled(qmc.x) with control=|1> flips the target every shot."""
+        circuit = _make_controlled_builtin_circuit(qmc.x, theta=None)
+        t = transpiler_factory()
+        exe = t.transpile(circuit)
+        results = exe.sample(t.executor(), shots=64).result().results
+        for value, _count in results:
+            assert value == 1, (
+                f"expected 1, got {value} on {transpiler_factory().__class__.__name__}"
+            )
+
+    def test_sample_controlled_rx_pi_flips_target(self, transpiler_factory):
+        """controlled(qmc.rx) with control=|1> and angle=pi flips the target every shot.
+
+        ``angle`` is bound at transpile time (rather than promoted to a
+        runtime parameter) because QuriParts' controlled-rotation emit
+        path does not yet support symbolic angles inside controlled
+        gates — see ``LinearMappedParametricQuantumCircuit`` errors when
+        binding parameters used inside CRX.  This test is about the
+        wrapper-synthesis path, not about parametric controlled-rotation
+        support, so a concrete angle keeps the assertion meaningful on
+        every backend.
+        """
+        circuit = _make_controlled_builtin_circuit(qmc.rx, theta=math.pi)
+        t = transpiler_factory()
+        exe = t.transpile(circuit, bindings={"angle": math.pi})
+        results = exe.sample(t.executor(), shots=64).result().results
+        for value, _count in results:
+            assert value == 1
+
+
+@pytest.mark.skipif(not _HAS_QISKIT, reason="qiskit not installed")
+class TestControlledBuiltinStatevectorParity:
+    """Built-in form produces the same Qiskit statevector as the wrapped form."""
+
+    @pytest.mark.parametrize("num_controls", [1, 2])
+    @pytest.mark.parametrize("seed", [0, 1, 42])
+    def test_rx_builtin_matches_wrapper(self, qiskit_transpiler, num_controls, seed):
+        rng = np.random.default_rng(seed)
+        theta = float(rng.uniform(-math.pi, math.pi))
+
+        spec_builtin = GateSpec(qmc.rx, 1, theta, rx_matrix)
+        spec_wrapper = GateSpec(_rx_gate, 1, theta, rx_matrix)
+
+        circ_builtin = _make_controlled_circuit(
+            spec_builtin, num_controls, activate_controls=True
+        )
+        circ_wrapper = _make_controlled_circuit(
+            spec_wrapper, num_controls, activate_controls=True
+        )
+
+        sv_builtin = _get_statevector(
+            qiskit_transpiler, circ_builtin, spec_builtin.bindings
+        )
+        sv_wrapper = _get_statevector(
+            qiskit_transpiler, circ_wrapper, spec_wrapper.bindings
+        )
+        assert statevectors_equal(sv_builtin, sv_wrapper)
+
+    @pytest.mark.parametrize("num_controls", [1, 2])
+    @pytest.mark.parametrize("seed", [0, 1, 42])
+    def test_cp_builtin_matches_wrapper(self, qiskit_transpiler, num_controls, seed):
+        rng = np.random.default_rng(seed)
+        theta = float(rng.uniform(-math.pi, math.pi))
+
+        spec_builtin = GateSpec(qmc.cp, 2, theta, cp_matrix)
+        spec_wrapper = GateSpec(_cp_gate, 2, theta, cp_matrix)
+
+        circ_builtin = _make_controlled_circuit(
+            spec_builtin, num_controls, activate_controls=True
+        )
+        circ_wrapper = _make_controlled_circuit(
+            spec_wrapper, num_controls, activate_controls=True
+        )
+
+        sv_builtin = _get_statevector(
+            qiskit_transpiler, circ_builtin, spec_builtin.bindings
+        )
+        sv_wrapper = _get_statevector(
+            qiskit_transpiler, circ_wrapper, spec_wrapper.bindings
+        )
+        assert statevectors_equal(sv_builtin, sv_wrapper)
+
+    def test_h_builtin_matches_wrapper(self, qiskit_transpiler):
+        spec_builtin = GateSpec(qmc.h, 1, None, h_matrix)
+        spec_wrapper = GateSpec(_h_gate, 1, None, h_matrix)
+
+        circ_builtin = _make_controlled_circuit(spec_builtin, 1, activate_controls=True)
+        circ_wrapper = _make_controlled_circuit(spec_wrapper, 1, activate_controls=True)
+
+        sv_builtin = _get_statevector(qiskit_transpiler, circ_builtin, {})
+        sv_wrapper = _get_statevector(qiskit_transpiler, circ_wrapper, {})
+        assert statevectors_equal(sv_builtin, sv_wrapper)
+
+
+# -- Expectation-value path: ensure the estimator pipeline accepts builtins --
+
+
+@pytest.mark.skipif(not _HAS_QISKIT, reason="qiskit not installed")
+class TestControlledBuiltinExpval:
+    """Built-in form is exercised through the expectation-value path too."""
+
+    def test_expval_matches_wrapper(self, qiskit_transpiler):
+        """<Z_t> on (X|1>)|0> after controlled-X should equal -1 for both forms."""
+        import qamomile.observable as qm_o
+
+        @qmc.qkernel
+        def circuit_builtin(obs: qmc.Observable) -> qmc.Float:
+            c = qmc.qubit(name="c")
+            t = qmc.qubit(name="t")
+            c = qmc.x(c)
+            cg = qmc.controlled(qmc.x)
+            c, t = cg(c, t)
+            return qmc.expval((c, t), obs)
+
+        @qmc.qkernel
+        def circuit_wrapper(obs: qmc.Observable) -> qmc.Float:
+            c = qmc.qubit(name="c")
+            t = qmc.qubit(name="t")
+            c = qmc.x(c)
+            cg = qmc.controlled(_x_gate)
+            c, t = cg(c, t)
+            return qmc.expval((c, t), obs)
+
+        # Z on the target qubit (index 1).
+        H = qm_o.Hamiltonian.zero(num_qubits=2)
+        H += qm_o.Z(1)
+
+        exe_b = qiskit_transpiler.transpile(circuit_builtin, bindings={"obs": H})
+        exe_w = qiskit_transpiler.transpile(circuit_wrapper, bindings={"obs": H})
+
+        val_b = exe_b.run(qiskit_transpiler.executor()).result()
+        val_w = exe_w.run(qiskit_transpiler.executor()).result()
+
+        # Both controls=|1> and target=|0> → CX flips target → final state |11>
+        # → <Z_target> on |1> = -1.
+        assert np.isclose(val_b, -1.0, atol=1e-6)
+        assert np.isclose(val_w, -1.0, atol=1e-6)
+        assert np.isclose(val_b, val_w, atol=1e-9)
