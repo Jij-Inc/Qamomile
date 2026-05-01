@@ -6,6 +6,7 @@ import inspect
 import linecache
 import threading
 import types as _types
+import weakref
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -40,6 +41,26 @@ ParamValue = Union[float, int, Float, UInt]
 # ``linecache`` entries even when the same gate is wrapped multiple times.
 _synthesized_kernel_counter = 0
 _synthesized_kernel_lock = threading.Lock()
+
+# Cache from a built-in gate callable to its synthesized ``QKernel`` wrapper.
+# A ``WeakKeyDictionary`` lets the entry vanish automatically when the
+# original callable is garbage-collected, so we never grow the
+# ``linecache`` unboundedly in long-running processes that repeatedly call
+# ``controlled(qmc.rx)`` etc.  Callables that don't support weak refs
+# (a small set of C-implemented builtins) silently bypass the cache.
+_synthesized_kernel_cache: "weakref.WeakKeyDictionary[Callable[..., Any], Any]" = (
+    weakref.WeakKeyDictionary()
+)
+
+# Names that the synthesized wrapper's body references directly (via
+# annotations and the forwarding call).  If the original callable's
+# ``__name__`` collides with any of these, defining the wrapper with that
+# same name would shadow the injected binding and break type-hint
+# resolution at decoration time, so we fall back to a fresh internal
+# identifier in that case.
+_RESERVED_WRAPPER_NAMES = frozenset(
+    {"Qubit", "Float", "UInt", "tuple", "__qmc_target__"}
+)
 
 
 class ControlledGate:
@@ -498,6 +519,17 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
     it.  The synthesized wrapper has no control flow, so the AST transform
     is effectively a no-op.
 
+    The synthesized wrapper declares its parameters in ``qubits-first``
+    order (required by the downstream controlled-U emit pass, which
+    assumes the wrapped block's inputs are ``[qubit..., param...]``) but
+    forwards arguments to ``fn`` **by keyword** in ``fn``'s original
+    order.  This means callables whose qubit and classical parameters are
+    interleaved (e.g. ``def gate(c: Qubit, theta: float, t: Qubit)``)
+    still receive each argument at the correct position.  Successful
+    syntheses are cached per callable in a ``WeakKeyDictionary`` so
+    repeated calls reuse the same ``QKernel`` and the ``linecache`` does
+    not grow without bound.
+
     Args:
         fn: The callable to wrap.  Each parameter must have a type
             annotation that resolves to ``Qubit``, ``Float``/``float``, or
@@ -510,9 +542,11 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
         ``Qubit``/``Float``/``UInt`` annotations.
 
     Raises:
-        TypeError: If ``fn`` is not callable, has ``*args``/``**kwargs``,
-            lacks an annotation on any parameter, has an unsupported
-            annotation, or has no qubit parameters at all.
+        TypeError: If ``fn`` is not callable, uses ``*args``/``**kwargs``
+            or positional-only parameters, lacks an annotation on any
+            parameter, has an unsupported annotation, has no qubit
+            parameters at all, or fails to compile as a wrapper for any
+            other reason.
     """
     from qamomile.circuit.frontend.qkernel import QKernel, qkernel as _qkernel_decorator
 
@@ -531,6 +565,17 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
             f"controlled(): expected a QKernel or a built-in gate function, "
             f"got {type(fn).__name__}."
         )
+
+    # Cache lookup: a previous ``controlled(fn)`` call for the same callable
+    # already produced a wrapper QKernel, so reuse it.  Some C-implemented
+    # builtins (rare for gate functions) cannot be weak-referenced; in that
+    # case the cache silently no-ops via the TypeError fallbacks below.
+    try:
+        cached = _synthesized_kernel_cache.get(fn)
+    except TypeError:
+        cached = None
+    if cached is not None:
+        return cast("QKernel", cached)
 
     fn_name = getattr(fn, "__name__", "anonymous_gate")
 
@@ -553,18 +598,29 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
         # silently swallowed and re-emitted as "no type annotation".
         type_hints = {}
 
+    # The wrapper's parameter order must be ``qubits-first`` because the
+    # downstream ``ControlledUOperation`` emit pass assumes the wrapped
+    # ``Block``'s ``input_values`` are laid out as ``[qubit..., param...]``
+    # (matching ``ControlledGate.__call__``'s operand convention).
+    # Re-ordering only affects the wrapper's *declaration*; the actual
+    # forwarding call below uses keyword arguments, so the original
+    # callable receives each parameter at the right position even when
+    # its own signature interleaves qubits and classical params (e.g.
+    # ``def gate(c: Qubit, theta: float, t: Qubit)``).
     qubit_args: list[str] = []
     classical_args: list[tuple[str, str]] = []  # (name, "Float" | "UInt")
+    original_call_order: list[str] = []
 
     for param_name, param in sig.parameters.items():
         if param.kind in (
             inspect.Parameter.VAR_POSITIONAL,
             inspect.Parameter.VAR_KEYWORD,
+            inspect.Parameter.POSITIONAL_ONLY,
         ):
             raise TypeError(
-                f"controlled(): callable {fn_name!r} uses *args/**kwargs, "
-                f"which cannot be auto-wrapped. Wrap it in @qmc.qkernel "
-                f"manually."
+                f"controlled(): callable {fn_name!r} uses *args/**kwargs or "
+                f"positional-only parameters, which cannot be auto-wrapped. "
+                f"Wrap it in @qmc.qkernel manually."
             )
         annotation = type_hints.get(param_name, param.annotation)
         if annotation is inspect.Parameter.empty:
@@ -588,6 +644,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
                 f"Union[Qubit, Vector[Qubit]]) are supported. Wrap the "
                 f"function in @qmc.qkernel manually."
             )
+        original_call_order.append(param_name)
 
     if not qubit_args:
         raise TypeError(
@@ -597,26 +654,43 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
 
     n_qubits = len(qubit_args)
     param_decls = [f"{q}: Qubit" for q in qubit_args]
-    invocation_args = list(qubit_args)
     for c_name, c_type in classical_args:
         param_decls.append(f"{c_name}: {c_type}")
-        invocation_args.append(c_name)
+    # Forward by keyword in the *original* order so callables whose qubit
+    # and classical params are interleaved still receive each argument at
+    # the correct position.  ``POSITIONAL_ONLY`` is rejected above, so all
+    # surviving params are name-addressable.
+    invocation = ", ".join(f"{name}={name}" for name in original_call_order)
 
     return_anno = (
         "Qubit" if n_qubits == 1 else f"tuple[{', '.join(['Qubit'] * n_qubits)}]"
-    )
-
-    # Use a name-mangled identifier so collisions with user-defined names
-    # in the wrapper namespace are impossible.
-    src = (
-        f"def {fn_name}({', '.join(param_decls)}) -> {return_anno}:\n"
-        f"    return __qmc_target__({', '.join(invocation_args)})\n"
     )
 
     global _synthesized_kernel_counter
     with _synthesized_kernel_lock:
         _synthesized_kernel_counter += 1
         seq = _synthesized_kernel_counter
+
+    # Choose the wrapper's source-level identifier.  Prefer the original
+    # callable name (so QKernel display + ``transform_control_flow``'s
+    # ``name_space[func.__name__]`` lookup show the gate name), but fall
+    # back to a fresh ``_qmc_controlled_wrapper_<seq>`` identifier when
+    # ``fn_name`` is not a valid Python identifier (e.g. ``<lambda>``) or
+    # would collide with names we inject into the exec namespace
+    # (``Qubit`` / ``Float`` / ``UInt`` / ``tuple`` / ``__qmc_target__``).
+    # The collision case matters because the wrapper's annotations refer
+    # to those injected names directly; shadowing them with a same-named
+    # function definition would break type-hint resolution.
+    if fn_name.isidentifier() and fn_name not in _RESERVED_WRAPPER_NAMES:
+        wrapper_internal_name = fn_name
+    else:
+        wrapper_internal_name = f"_qmc_controlled_wrapper_{seq}"
+
+    src = (
+        f"def {wrapper_internal_name}({', '.join(param_decls)}) -> "
+        f"{return_anno}:\n"
+        f"    return __qmc_target__({invocation})\n"
+    )
 
     # Filenames in ``<...>`` form bypass on-disk lookup in inspect/linecache
     # but still pass through ``linecache.getlines``.  Using ``mtime=None``
@@ -632,10 +706,29 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
         "tuple": tuple,
         "__qmc_target__": fn,
     }
-    code = compile(src, filename, "exec")
-    exec(code, namespace)
-    wrapper_fn = namespace[fn_name]
-    return _qkernel_decorator(wrapper_fn)
+    try:
+        code = compile(src, filename, "exec")
+        exec(code, namespace)
+        wrapper_fn = namespace[wrapper_internal_name]
+    except Exception as e:
+        # Drop the half-populated linecache entry on failure so a retry
+        # with a corrected callable does not leave dead source behind.
+        linecache.cache.pop(filename, None)
+        raise TypeError(
+            f"controlled(): failed to synthesize a wrapper for {fn_name!r}: "
+            f"{e}. Wrap the function in @qmc.qkernel manually."
+        ) from e
+
+    qkernel_inst = _qkernel_decorator(wrapper_fn)
+
+    # Populate the cache; ignore weakref failures for non-weakrefable
+    # callables (the wrapper is still returned, just not memoized).
+    try:
+        _synthesized_kernel_cache[fn] = qkernel_inst
+    except TypeError:
+        pass
+
+    return qkernel_inst
 
 
 def controlled(

@@ -951,6 +951,89 @@ class TestControlledBuiltinErrors:
         with pytest.raises(TypeError, match="\\*args/\\*\\*kwargs"):
             qmc.controlled(variadic)
 
+    def test_positional_only_raises_type_error(self):
+        """Positional-only params can't be forwarded by name; reject early."""
+
+        def positional_only(q: qmc.Qubit, /) -> qmc.Qubit:
+            return qmc.h(q)
+
+        with pytest.raises(TypeError, match="positional-only"):
+            qmc.controlled(positional_only)
+
+
+# -- Wrapper synthesis: caching + interleaved signature handling ------------
+
+
+class TestControlledBuiltinSynthesisInternals:
+    """Cover the wrapper-synthesis edge cases the Copilot review flagged."""
+
+    def test_repeated_calls_reuse_same_qkernel(self):
+        """Calling controlled(fn) twice on the same callable returns the same wrapper.
+
+        The synthesized ``QKernel`` is cached in a ``WeakKeyDictionary`` so
+        long-running processes don't grow ``linecache`` unboundedly.
+        """
+        cg1 = qmc.controlled(qmc.rx)
+        cg2 = qmc.controlled(qmc.rx)
+        assert cg1._qkernel is cg2._qkernel
+
+    def test_distinct_callables_get_distinct_wrappers(self):
+        """Different gate functions must not collide in the cache."""
+        cg_rx = qmc.controlled(qmc.rx)
+        cg_ry = qmc.controlled(qmc.ry)
+        assert cg_rx._qkernel is not cg_ry._qkernel
+
+    def test_interleaved_qubit_classical_signature_forwards_correctly(
+        self, qiskit_transpiler
+    ):
+        """A callable with (Qubit, float, Qubit) signature must forward args correctly.
+
+        The pre-fix wrapper rebuilt the signature as "all qubits first" and
+        then forwarded ``__qmc_target__(c, t, theta)`` positionally, which
+        re-bound ``theta`` to the second qubit.  After the fix the wrapper
+        invokes the target by keyword, so the interleaved order is
+        respected and ``theta`` actually reaches the rotation.
+        """
+
+        def gate_with_interleaved_params(
+            ctrl_qubit: qmc.Qubit,
+            theta: float,
+            tgt_qubit: qmc.Qubit,
+        ) -> tuple[qmc.Qubit, qmc.Qubit]:
+            ctrl_qubit, tgt_qubit = qmc.cp(ctrl_qubit, tgt_qubit, theta)
+            return ctrl_qubit, tgt_qubit
+
+        # If the wrapper mis-forwarded args, transpile would either crash
+        # (Qubit handle passed where Float is expected) or silently emit a
+        # wrong gate.  Successful transpile on Qiskit confirms forwarding.
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Bit:
+            qs = [qmc.qubit(name=f"q{i}") for i in range(3)]
+            qs = [qmc.x(qs[0]), qmc.x(qs[1]), qs[2]]  # |1,1,0>
+            cg = qmc.controlled(gate_with_interleaved_params)
+            qs[0], qs[1], qs[2] = cg(qs[0], qs[1], qs[2], theta=math.pi)
+            return qmc.measure(qs[2])
+
+        executable = qiskit_transpiler.transpile(circuit, bindings={"theta": math.pi})
+        # Just confirm transpile succeeded — wrong forwarding would have
+        # raised by now (handle-type mismatch in expand-controlled-U).
+        assert executable is not None
+
+    def test_unusual_callable_name_does_not_break_synthesis(self):
+        """A callable named ``Qubit`` must not collide with the namespace's Qubit type.
+
+        Pre-fix, ``def Qubit(...)`` would have shadowed the injected ``Qubit``
+        type during ``exec`` and broken type-hint resolution.  Post-fix the
+        wrapper uses a fixed ``_qmc_controlled_wrapper_<n>`` internal name,
+        and the original name is restored only via ``__name__`` for display.
+        """
+
+        def Qubit(q: qmc.Qubit) -> qmc.Qubit:  # noqa: N802 - test the corner case
+            return qmc.h(q)
+
+        cg = qmc.controlled(Qubit)
+        assert isinstance(cg, ControlledGate)
+
 
 # -- IR parity: built-in form vs hand-written @qkernel form ------------------
 
@@ -1040,9 +1123,7 @@ class TestControlledBuiltinCrossBackend:
         exe = t.transpile(circuit)
         results = exe.sample(t.executor(), shots=64).result().results
         for value, _count in results:
-            assert value == 1, (
-                f"expected 1, got {value} on {transpiler_factory().__class__.__name__}"
-            )
+            assert value == 1, f"expected 1, got {value} on {t.__class__.__name__}"
 
     def test_sample_controlled_rx_pi_flips_target(self, transpiler_factory):
         """controlled(qmc.rx) with control=|1> and angle=pi flips the target every shot.
