@@ -25,9 +25,19 @@ nothing to track; the frontend trace-time validator
 ``ArrayBase.validate_all_returned``) is the source of truth for
 direct-element-borrow violations.
 
-State shape: a single dict keyed by ``(f"const:<idx>",)`` for slots
-covered by compile-time-constant slices, or ``(f"sym:<uuid>",)`` for
-symbolic-bound slices that the pass cannot enumerate slot-wise.
+State shape: a single dict keyed by a 2-tuple
+``(root_uuid, slot_descriptor)`` where ``root_uuid`` is the uuid of
+the **root** parent ArrayValue (after walking the ``slice_of``
+chain) and ``slot_descriptor`` is ``f"const:<idx>"`` for slots
+covered by compile-time-constant slices, or ``f"sym:<view_uuid>"``
+for symbolic-bound slices that cannot be enumerated slot-wise.
+
+Namespacing by root uuid is required so that borrow / consumed
+state on one register (``a``) does not block access to the
+identically-named slot on another register (``b``); without it,
+``measure(a[1::2])`` would incorrectly mark ``b[1]`` and ``b[3]``
+as destroyed.
+
 Values are either an :class:`ArrayValue` (the slice view that owns
 the slot) or a ``_ConsumedSlotMarker`` (a slot already destroyed by
 a prior destructive view consume).  ``isinstance`` on the value
@@ -62,7 +72,80 @@ from qamomile.circuit.transpiler.errors import (
 
 from . import Pass
 
-BorrowKey = tuple[str, ...]
+BorrowKey = tuple[str, str]
+
+
+def _root_of(av: ArrayValue) -> ArrayValue:
+    """Walk ``av``'s ``slice_of`` chain to its root parent ArrayValue.
+
+    For a non-sliced array returns ``av`` unchanged; for a (possibly
+    nested) view returns the underlying root parent that physically
+    backs the slots — the only register identity that's stable across
+    affine remappings.
+
+    Args:
+        av: A possibly-sliced ArrayValue.
+
+    Returns:
+        The root ArrayValue at the bottom of the ``slice_of`` chain.
+    """
+    cur = av
+    while cur.slice_of is not None:
+        cur = cur.slice_of
+    return cur
+
+
+def _const_key(root_av: ArrayValue, idx: int) -> BorrowKey:
+    """Build a borrow key for a compile-time-known slot, namespaced by root.
+
+    The key is ``(root_av.logical_id, f"const:{idx}")``.  ``logical_id``
+    (rather than ``uuid``) is used because passes such as
+    ``partial_eval`` may version-bump an ``ArrayValue`` between the
+    point where a destructive view consume installs the marker and the
+    point where a later operand checks it; ``logical_id`` is preserved
+    across version bumps, while ``uuid`` is regenerated.  Using the
+    logical id keeps the marker addressable for the same logical
+    register throughout the block, while still partitioning state per
+    register so register ``a``'s consumed slots never alias register
+    ``b``'s slots.
+
+    Args:
+        root_av: The root parent ArrayValue (after ``_root_of`` walk).
+        idx: Concrete root-space slot index.
+
+    Returns:
+        Two-element tuple suitable as a key into the ``State`` dict.
+    """
+    return (root_av.logical_id, f"const:{idx}")
+
+
+def _sym_key(root_av: ArrayValue, view_uuid: str) -> BorrowKey:
+    """Build a symbolic borrow key for a view whose coverage is unresolved.
+
+    Used when a sliced view's bounds remain symbolic at the linearity
+    check site; coverage cannot be enumerated, so a single placeholder
+    keyed under the view's own uuid is registered instead.  Uses
+    ``logical_id`` for the root namespace for the same reason as
+    :func:`_const_key`.
+
+    Args:
+        root_av: The root parent ArrayValue.
+        view_uuid: The sliced ArrayValue's uuid (the view itself, not
+            the root).
+
+    Returns:
+        Two-element tuple suitable as a key into the ``State`` dict.
+    """
+    return (root_av.logical_id, f"sym:{view_uuid}")
+
+
+def _slot_descriptor(key: BorrowKey) -> str:
+    """Return the human-readable slot descriptor portion of a borrow key.
+
+    For ``(root_uuid, "const:3")`` returns ``"const:3"``.  Used by the
+    error formatters which only care about the slot, not the namespace.
+    """
+    return key[1]
 
 
 class _ConsumedSlotMarker:
@@ -261,32 +344,56 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
             self._walk(op.true_operations, true_state)
             false_state = dict(state)
             self._walk(op.false_operations, false_state)
-            # Conservative union: if either branch left a slot held,
-            # the post-If state considers it held (so subsequent ops
-            # get the stricter treatment).
+            # Conservative union with a consumption-priority rule.  If
+            # either branch destroyed a slot the post-If state must
+            # treat it as destroyed; otherwise a downstream operand
+            # would be wrongly accepted just because the *other* branch
+            # left the slot intact.  For non-destroyed entries we keep
+            # whichever side recorded ownership (subsequent ops get
+            # the stricter view-held treatment).
             merged: State = {}
             for k, v in true_state.items():
                 merged[k] = v
             for k, v in false_state.items():
-                if k not in merged:
+                existing = merged.get(k)
+                if isinstance(v, _ConsumedSlotMarker):
+                    merged[k] = _CONSUMED_SLOT  # consumption wins
+                elif existing is None:
                     merged[k] = v
             state.clear()
             state.update(merged)
             return
 
         # For/ForItems/While: simulate one iteration.  We use a copy so
-        # loop-internal borrows cancel at iteration end; post-loop view
-        # ownership is inherited from the body's final state for the
-        # merged set.
+        # loop-internal borrows cancel at iteration end, then merge the
+        # body's final state back into the outer state with a
+        # conservative policy:
+        #
+        # 1. ``_ConsumedSlotMarker`` is sticky.  Once a slot is destroyed
+        #    inside any iteration it stays destroyed for all subsequent
+        #    operations, regardless of what the outer state had — this
+        #    is the semantic that prevents the symbolic-view destructive
+        #    consume inside a loop from being lost across the boundary.
+        # 2. New view ownership recorded inside the loop body (where
+        #    the outer state had no entry for the slot) is carried
+        #    forward — the view is still alive after the loop.
+        # 3. Pre-existing entries that the body did not consume are left
+        #    untouched.  The body might not have run on a given input
+        #    (zero-trip loop), so dropping or rewriting outer state on
+        #    the basis of one simulated iteration would be unsound.
+        # 4. A body that writes a *different* ArrayValue owner over a
+        #    pre-existing entry is intentionally ignored.  The slot
+        #    cannot legitimately switch owners without an explicit
+        #    consume, and the body simulation is one iteration, so any
+        #    transient ownership swap is dropped to avoid corrupting
+        #    the outer state's view of the live slice graph.
         for body in op.nested_op_lists():
             body_state = dict(state)
             self._walk(body, body_state)
-            # Carry slice-view ownership across iteration boundaries
-            # (views defined before the loop remain live after the loop
-            # body).  Direct element borrows that persisted are left
-            # alone — the outer block end-check will flag them.
             for k, v in body_state.items():
-                if k not in state and isinstance(v, ArrayValue):
+                if isinstance(v, _ConsumedSlotMarker):
+                    state[k] = _CONSUMED_SLOT
+                elif k not in state and isinstance(v, ArrayValue):
                     state[k] = v
 
     # ------------------------------------------------------------------
@@ -336,7 +443,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                     length = self._const_int(shape[0])
                     if length is not None:
                         for idx in range(length):
-                            key = (f"const:{idx}",)
+                            key = _const_key(v, idx)
                             if isinstance(state.get(key), _ConsumedSlotMarker):
                                 raise SliceLinearityViolationError(
                                     f"Whole-array operand '{v.name}' (slot {idx}) "
@@ -378,7 +485,8 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                 # Any subsequent operand access — direct or via
                 # another view — is invalid.
                 raise SliceLinearityViolationError(
-                    f"Operand '{v.name}' accesses slot {key[0]} after it was "
+                    f"Operand '{v.name}' accesses slot "
+                    f"{_slot_descriptor(key)} after it was "
                     f"consumed by a destructive view operation; the physical "
                     f"qubit is no longer available."
                 )
@@ -453,21 +561,25 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                     # semantic possible without concrete coverage).
                     self._release_by_owner_uuid(v.uuid, state)
                     continue
+                view_root = _root_of(v)
                 for slot in covered:
-                    key = (f"const:{slot}",)
+                    key = _const_key(view_root, slot)
                     if is_destructive:
                         state[key] = _CONSUMED_SLOT
                     elif key in state:
                         del state[key]
                 continue
 
-            # Root operand: full release.
-            root_uuid = v.uuid
+            # Root operand: full release.  Match owners by logical_id
+            # to align with ``_owner_root_uuid``'s logical-id semantics
+            # (see its docstring on why uuid is unsafe across version
+            # bumps).
+            root_logical_id = v.logical_id
             to_remove: list[BorrowKey] = []
             to_consume: list[BorrowKey] = []
             for k, owner in state.items():
                 owner_root = self._owner_root_uuid(owner)
-                if owner_root is not None and owner_root == root_uuid:
+                if owner_root is not None and owner_root == root_logical_id:
                     to_remove.append(k)
             for k in to_remove:
                 del state[k]
@@ -481,7 +593,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                     length = self._const_int(shape[0])
                     if length is not None:
                         for idx in range(length):
-                            to_consume.append((f"const:{idx}",))
+                            to_consume.append(_const_key(v, idx))
                 for k in to_consume:
                     state[k] = _CONSUMED_SLOT
 
@@ -516,7 +628,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
         Walks ``av`` (and any chain through ``slice_of``) to find slice
         views whose bounds are now concrete; for each such view, bulk
         registers its covered root-parent slots in ``state`` keyed
-        under ``(f"const:<idx>",)`` with the view as the owner.  A view
+        under ``(root_uuid, f"const:<idx>")`` with the view as the owner.  A view
         already present in ``state`` is idempotently skipped.
 
         Args:
@@ -575,7 +687,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
         touched_views_coverage: dict[str, set[int]] = {}
         for j in range(length):
             idx = root_start + root_step * j
-            key = (f"const:{idx}",)
+            key = _const_key(root, idx)
             existing = state.get(key)
             if existing is None:
                 continue
@@ -614,7 +726,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                 # Same logical view — release all of the old view's
                 # registrations before installing the new one below.
                 for slot in other_full:
-                    old_key = (f"const:{slot}",)
+                    old_key = _const_key(root, slot)
                     if state.get(old_key) is other_view:
                         del state[old_key]
             elif new_covered.issubset(other_full):
@@ -628,7 +740,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                 # since the outer handle is no longer usable) before
                 # registering the inner.
                 for slot in other_full:
-                    old_key = (f"const:{slot}",)
+                    old_key = _const_key(root, slot)
                     if state.get(old_key) is other_view:
                         del state[old_key]
             elif other_uuid not in self._used_view_uuids:
@@ -642,7 +754,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                 # below — the permissive drain only applies to
                 # sliced-but-never-touched placeholders.
                 for slot in other_full:
-                    old_key = (f"const:{slot}",)
+                    old_key = _const_key(root, slot)
                     if state.get(old_key) is other_view:
                         del state[old_key]
             else:
@@ -656,7 +768,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                 )
 
         for idx in new_covered:
-            key = (f"const:{idx}",)
+            key = _const_key(root, idx)
             state[key] = av
 
     def _collect_view_coverage(self, view: "ArrayValue") -> set[int] | None:
@@ -701,7 +813,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
     # ------------------------------------------------------------------
 
     def _resolve_qubit_key(self, v: Value) -> BorrowKey | None:
-        """Resolve an element Value to its root-parent ``(idx,)`` key.
+        """Resolve an element Value to its root-namespaced borrow key.
 
         Walks the ``parent_array.slice_of`` chain if present, composing
         the affine maps to translate the view-local index to the root
@@ -709,13 +821,19 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
         is symbolic / non-constant — those are outside the scope of
         this pass's guarantees.
 
+        The returned key is ``(root.uuid, f"const:<idx>")`` so borrow
+        state is partitioned per root array; without this, a slot index
+        ``i`` on register ``a`` would alias the same index on register
+        ``b`` and one register's destructive view consume could spuriously
+        block the other.
+
         Args:
             v: Qubit element Value with ``parent_array`` and
                 ``element_indices``.
 
         Returns:
-            ``(f"const:<idx>",)`` when the physical index is known, else
-            ``None``.
+            ``(root_uuid, f"const:<idx>")`` when the physical index is
+            known, else ``None``.
         """
         if v.parent_array is None or not v.element_indices:
             return None
@@ -734,7 +852,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
             idx = start + step * idx
             parent = parent.slice_of
 
-        return (f"const:{idx}",)
+        return _const_key(parent, idx)
 
     @staticmethod
     def _const_int(v: ValueBase | None) -> int | None:
@@ -756,26 +874,33 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
 
     @staticmethod
     def _owner_root_uuid(owner: Owner) -> str | None:
-        """Return the root parent uuid for a borrow owner.
+        """Return the root parent identity for a borrow owner.
+
+        Despite the historical name, this returns ``logical_id`` rather
+        than ``uuid``: ``uuid`` is bumped on every ``next_version`` while
+        ``logical_id`` is preserved, and the borrow tracker needs an
+        identity that's stable across pipeline-internal version bumps
+        so the marker installed by an earlier op still matches a later
+        op's operand.
 
         Args:
             owner: Either a direct-borrow Value or a slice-view ArrayValue.
 
         Returns:
-            Root parent uuid; for direct Values this is ``parent_array.uuid``
-            at the root of any slice chain.  For view owners, the same
-            after walking ``slice_of`` to the root.
+            Root parent ``logical_id`` for both ArrayValue and Value
+            owners (after walking ``slice_of`` to the root), or ``None``
+            when the owner has no usable parent.
         """
         if isinstance(owner, ArrayValue):
             root = owner
             while root.slice_of is not None:
                 root = root.slice_of
-            return root.uuid
+            return root.logical_id
         if isinstance(owner, Value) and owner.parent_array is not None:
             root = owner.parent_array
             while root.slice_of is not None:
                 root = root.slice_of
-            return root.uuid
+            return root.logical_id
         return None
 
     @staticmethod
@@ -819,7 +944,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
         """
         lines: list[str] = []
         for key, owner in state.items():
-            idx_str = key[0].split(":", 1)[1]
+            idx_str = _slot_descriptor(key).split(":", 1)[1]
             if isinstance(owner, ArrayValue):
                 root = owner
                 while root.slice_of is not None:
@@ -846,12 +971,12 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
             view: Slice view currently holding the slot.
             direct: Element Value attempting direct access.
             op: Operation where the conflict manifested.
-            key: The colliding ``(f"const:<idx>",)`` key.
+            key: The colliding ``(root_uuid, f"const:<idx>")`` key.
 
         Returns:
             Human-readable error body.
         """
-        idx_str = key[0].split(":", 1)[1]
+        idx_str = _slot_descriptor(key).split(":", 1)[1]
         root = view
         while root.slice_of is not None:
             root = root.slice_of
@@ -876,12 +1001,12 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
             existing: The Value currently holding the slot.
             new_v: The Value attempting a fresh borrow.
             op: Operation where the conflict manifested.
-            key: The colliding ``(f"const:<idx>",)`` key.
+            key: The colliding ``(root_uuid, f"const:<idx>")`` key.
 
         Returns:
             Human-readable error body.
         """
-        idx_str = key[0].split(":", 1)[1]
+        idx_str = _slot_descriptor(key).split(":", 1)[1]
         return (
             f"Element '{new_v.name}' and '{existing.name}' alias on slot "
             f"{idx_str} at '{type(op).__name__}'.\n"

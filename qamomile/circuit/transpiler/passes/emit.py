@@ -345,15 +345,30 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
             # addresses. For a root array this simply returns
             # (qubits_value, 0, 1) and behaves identically to the
             # pre-view lookup path.
-            try:
+            if qubits_value.slice_of is None:
+                # Non-sliced array: ``resolve_slice_chain`` will not
+                # walk and cannot raise on bound resolution.  Wrap
+                # defensively against unexpected errors but keep the
+                # legacy fallback semantics — never observed in
+                # practice, just paranoia for backwards compat.
+                try:
+                    root_av, start, step = self._resolver.resolve_slice_chain(
+                        qubits_value, self.bindings, operation="ExpvalSegment"
+                    )
+                except Exception:
+                    root_av, start, step = qubits_value, 0, 1
+            else:
+                # Sliced view: let ``EmitError`` propagate.  Catching
+                # here used to silently downgrade the lookup to the
+                # element_uuid path, which then produced an empty
+                # qubit_map and a backend-side observable / circuit
+                # width mismatch far away from the real cause.  When
+                # slice bounds genuinely cannot be resolved under the
+                # active bindings the user needs the EmitError that
+                # ``resolve_slice_chain`` already raises.
                 root_av, start, step = self._resolver.resolve_slice_chain(
                     qubits_value, self.bindings, operation="ExpvalSegment"
                 )
-            except Exception:
-                # If bounds don't resolve, fall back to the direct
-                # element_uuid lookup — preserves previous behaviour
-                # for non-view arrays without slice metadata.
-                root_av, start, step = qubits_value, 0, 1
 
             if root_av is qubits_value:
                 # Non-view case: match legacy direct element_uuid lookup

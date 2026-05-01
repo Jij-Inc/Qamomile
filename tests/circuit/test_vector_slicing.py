@@ -1923,3 +1923,116 @@ class TestRound4Reviewer:
             if inst.operation.name == "measure"
         )
         assert measured_q == [2, 3, 4]
+
+
+class TestRound5Reviewer:
+    """Regression tests for Copilot Round 5 review findings.
+
+    Covers three additional silent-fail / cross-contamination bugs the
+    earlier rounds missed:
+
+    R5-A: ``_build_qubit_map`` swallows ``EmitError`` from
+    ``resolve_slice_chain`` for sliced operands and falls back to the
+    element_uuid path, producing an empty qubit_map and a far-away
+    backend width-mismatch error.
+    R5-B: ``SliceLinearityCheckPass`` borrow-state keyed only by
+    slot index aliases independent registers — consuming ``a[1]``
+    spuriously blocks ``b[1]``.
+    R5-C: The loop-body state merge inside ``_walk_nested`` only
+    propagates *new* keys back to the outer state, dropping
+    consumed-slot markers installed inside the loop and view
+    ownership transitions for views created before the loop.
+    """
+
+    # ----- R5-B: borrow keys must be namespaced per root array --------------
+
+    def test_consume_view_on_one_register_does_not_block_other_register(self):
+        """``measure(a[1::2]); expval(b, Z(1))`` over disjoint registers must succeed."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern(obs: qmc.Observable) -> qmc.Float:
+            a = qmc.qubit_array(4, "a")
+            b = qmc.qubit_array(4, "b")
+            _ = qmc.measure(a[1::2])
+            # b's slot 1 must remain accessible — the consumed-slot
+            # markers from a's destructive view must not bleed into b.
+            return qmc.expval(b, obs)
+
+        H = qm_o.Z(1)
+        transpiler = QiskitTranspiler()
+        # If borrow keys were not namespaced, this would raise
+        # SliceLinearityViolationError or a stage-later EmitError; we
+        # only need the kernel to trace and transpile cleanly.
+        exe = transpiler.transpile(kern, bindings={"obs": H})
+        assert exe is not None
+
+    def test_disjoint_registers_can_each_consume_view_independently(self):
+        """Each register independently tracks its own consumed slots."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            a = qmc.qubit_array(4, "a")
+            b = qmc.qubit_array(4, "b")
+            _ = qmc.measure(a[1::2])  # destroys a[1], a[3]
+            return qmc.measure(b[1::2])  # must NOT see a's markers
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(kern, bindings={})
+        qc = exe.compiled_quantum[0].circuit
+        # Both views measure 2 qubits each on their own register.
+        assert qc.num_clbits >= 2
+
+    # ----- R5-C: loop-body state must propagate consumed markers -------------
+
+    def test_destructive_view_consume_inside_for_loop_persists_post_loop(self):
+        """A destructive view consume inside a loop body must mark consumed slots."""
+        from qamomile.circuit.transpiler.errors import (
+            QubitConsumedError,
+            SliceLinearityViolationError,
+        )
+
+        @qmc.qkernel
+        def kern(obs: qmc.Observable) -> qmc.Float:
+            q = qmc.qubit_array(4, "q")
+            for _ in qmc.range(1):
+                _ = qmc.measure(q[1::2])  # destroys q[1], q[3]
+            # After the loop, expval(q, ...) must be rejected — the
+            # destructive consume's markers must propagate out of the
+            # loop body state into the outer state.
+            return qmc.expval(q, obs)
+
+        H = qm_o.Z(0)
+        with pytest.raises((QubitConsumedError, SliceLinearityViolationError)):
+            _ = kern.build(obs=H)
+
+    def test_consumed_marker_in_loop_body_does_not_leak_across_registers(self):
+        """The loop-body merge respects the per-root namespace.
+
+        Combines R5-B (per-root namespacing) and R5-C (loop-body
+        merge): a destructive view consume on register ``a`` inside a
+        ``for`` body must mark ``a``'s slots post-loop, but must not
+        bleed into register ``b`` (whose identical-numbered slot would
+        have collided under a non-namespaced key).
+        """
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern(obs: qmc.Observable) -> qmc.Float:
+            a = qmc.qubit_array(4, "a")
+            b = qmc.qubit_array(4, "b")
+            for _ in qmc.range(1):
+                _ = qmc.measure(a[1::2])  # destroys a[1], a[3]
+            # b is untouched — must stay valid.
+            return qmc.expval(b, obs)
+
+        H = qm_o.Z(1)
+        transpiler = QiskitTranspiler()
+        # b's expval must succeed despite a's destructive consume sharing
+        # the same slot indices {1, 3}.
+        exe = transpiler.transpile(kern, bindings={"obs": H})
+        assert exe is not None
