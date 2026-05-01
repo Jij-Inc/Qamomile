@@ -7,33 +7,149 @@ from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.optimization.binary_model import BinaryModel, BinarySampleSet, VarType
 
 
+def normalize_problem_input(
+    instance: ommx.v1.Instance | BinaryModel,
+) -> tuple[ommx.v1.Instance | None, VarType, BinaryModel]:
+    """Normalize a problem input into ``(stored_instance, original_vartype, spin_model)``.
+
+    Shared canonical entry point used by every converter that consumes a
+    combinatorial optimization problem expressed either as an OMMX
+    :class:`ommx.v1.Instance` or a Qamomile :class:`BinaryModel`. The
+    :class:`MathematicalProblemConverter` base class and
+    :class:`~qamomile.optimization.pce.PCEConverter` (which deliberately
+    does not inherit from that base) both delegate to this helper so the
+    OMMX deep-copy / ``to_qubo`` semantics live in exactly one place.
+
+    For OMMX inputs, the instance is deep-copied via a bytes round-trip
+    before ``to_qubo`` is called: ``to_qubo`` mutates the instance it is
+    called on (it appends slack decision variables for non-binary vars
+    and absorbs constraints into the objective via the penalty method).
+    Mutating the caller's instance silently is surprising; copying first
+    leaves the caller's view untouched. The deep copy retains
+    original-constraint metadata internally, so downstream
+    ``evaluate_samples`` reports feasibility against the user's
+    *original* constraints, and slack bits added by ``to_qubo`` are
+    reconstructed back into the original decision variables (e.g.,
+    integers rebuilt from log-encoded slack bits) by ``evaluate_samples``
+    automatically.
+
+    Args:
+        instance (ommx.v1.Instance | BinaryModel): The combinatorial
+            optimization problem. ``ommx.v1.Instance`` inputs are
+            deep-copied and converted via ``to_qubo()``; ``BinaryModel``
+            inputs retain their declared vartype as the target output
+            vartype.
+
+    Returns:
+        tuple[ommx.v1.Instance | None, VarType, BinaryModel]: A triple
+        ``(stored_instance, original_vartype, spin_model)``.
+
+        * ``stored_instance``: the deep-copied ``Instance`` for OMMX
+          inputs (post ``to_qubo``), or ``None`` for ``BinaryModel``
+          inputs.
+        * ``original_vartype``: the declared vartype of the input — used
+          by converters' ``decode`` paths to return results in the
+          caller's preferred representation.
+        * ``spin_model``: the problem rewritten in SPIN form, which is
+          the natural domain for sign rounding and Pauli encoding.
+
+    Raises:
+        TypeError: If ``instance`` is neither an :class:`ommx.v1.Instance`
+            nor a :class:`BinaryModel`.
+    """
+    if isinstance(instance, BinaryModel):
+        return None, instance.vartype, instance.change_vartype(VarType.SPIN)
+    if isinstance(instance, ommx.v1.Instance):
+        stored = ommx.v1.Instance.from_bytes(instance.to_bytes())
+        qubo, constant = stored.to_qubo()
+        spin_model = BinaryModel.from_qubo(qubo, constant).change_vartype(VarType.SPIN)
+        return stored, VarType.BINARY, spin_model
+    raise TypeError("instance must be ommx.v1.Instance or BinaryModel")
+
+
+def binary_sampleset_to_ommx_samples(
+    binary_sampleset: BinarySampleSet,
+) -> ommx.v1.Samples:
+    """Convert a BINARY sample set into an OMMX ``Samples`` container.
+
+    Each unique sample state is appended once with a list of sample IDs of
+    length ``num_occurrences``, so OMMX-side aggregation reflects the
+    original shot counts without duplicating the underlying state. States
+    with ``num_occurrences == 0`` are skipped.
+
+    This is the canonical bridge from Qamomile's
+    :class:`BinarySampleSet` to OMMX's
+    :class:`ommx.v1.Samples`. It is the helper that
+    :meth:`MathematicalProblemConverter.decode` and
+    :meth:`~qamomile.optimization.pce.PCEConverter.decode` use to feed
+    samples into :meth:`ommx.v1.Instance.evaluate_samples` for feasibility
+    and original-objective evaluation.
+
+    Args:
+        binary_sampleset (BinarySampleSet): A sample set with
+            ``vartype=VarType.BINARY``. SPIN sample sets must be converted
+            to BINARY first because OMMX expects 0/1 decision-variable
+            values.
+
+    Returns:
+        ommx.v1.Samples: An OMMX Samples object with
+        ``sum(num_occurrences)`` sample IDs, where IDs sharing the same
+        state are grouped together. The returned object is empty when the
+        input has no samples.
+
+    Raises:
+        ValueError: If ``binary_sampleset.vartype`` is not
+            ``VarType.BINARY``. SPIN sample sets must be converted first.
+        ValueError: If the lengths of ``binary_sampleset.samples`` and
+            ``binary_sampleset.num_occurrences`` are inconsistent (and,
+            when present, ``binary_sampleset.energy`` as well).
+    """
+    # Compare via the enum's str value: bound TypeVar VT can be narrowed
+    # to the default (BINARY) by static type-checkers, which then flag
+    # the guard's non-BINARY branch as unreachable. The str(...) cast
+    # bypasses that narrowing without changing runtime semantics.
+    if str(binary_sampleset.vartype) != str(VarType.BINARY):
+        raise ValueError(
+            "binary_sampleset_to_ommx_samples requires vartype=BINARY; "
+            f"got {binary_sampleset.vartype}. Convert to BINARY first."
+        )
+
+    n_samples = len(binary_sampleset.samples)
+    n_occ = len(binary_sampleset.num_occurrences)
+    if n_samples != n_occ:
+        raise ValueError(
+            "binary_sampleset.samples and binary_sampleset.num_occurrences "
+            f"must have the same length; got {n_samples} samples and "
+            f"{n_occ} num_occurrences."
+        )
+    n_energies = len(binary_sampleset.energy)
+    if n_samples != n_energies:
+        raise ValueError(
+            "binary_sampleset.samples and binary_sampleset.energy "
+            f"must have the same length; got {n_samples} samples and "
+            f"{n_energies} energies."
+        )
+
+    ommx_samples = ommx.v1.Samples({})
+    next_id = 0
+    for sample, occ in zip(binary_sampleset.samples, binary_sampleset.num_occurrences):
+        if occ <= 0:
+            continue
+        sample_ids = list(range(next_id, next_id + occ))
+        next_id += occ
+        state = ommx.v1.State({idx: float(val) for idx, val in sample.items()})
+        ommx_samples.append(sample_ids, state)
+    return ommx_samples
+
+
 class MathematicalProblemConverter(abc.ABC):
     def __init__(
         self,
         instance: ommx.v1.Instance | BinaryModel,
     ) -> None:
-        if isinstance(instance, BinaryModel):
-            self.instance = None
-            self.original_vartype = instance.vartype
-            self.spin_model = instance.change_vartype(VarType.SPIN)
-        elif isinstance(instance, ommx.v1.Instance):
-            # Deep-copy via bytes round-trip before to_qubo: to_qubo mutates
-            # the instance it is called on (appends slack decision variables
-            # for non-binary vars, absorbs constraints into the objective via
-            # the penalty method). Mutating the caller's instance silently is
-            # surprising; copy first so the caller keeps an untouched view.
-            # The deep copy retains original-constraint metadata internally,
-            # so evaluate_samples on it still reports feasibility against the
-            # user's original constraints.
-            self.instance = ommx.v1.Instance.from_bytes(instance.to_bytes())
-            self.original_vartype = VarType.BINARY  # OMMX uses BINARY
-            qubo, constant = self.instance.to_qubo()
-            self.spin_model = BinaryModel.from_qubo(qubo, constant).change_vartype(
-                VarType.SPIN
-            )
-        else:
-            raise TypeError("instance must be ommx.v1.Instance or BinaryModel")
-
+        self.instance, self.original_vartype, self.spin_model = normalize_problem_input(
+            instance
+        )
         self.__post_init__()
 
     def __post_init__(self) -> None:
@@ -108,57 +224,9 @@ class MathematicalProblemConverter(abc.ABC):
         """
         binary_sampleset = self.decode_to_binary_sampleset(samples)
         if self.instance is not None:
-            ommx_samples = self._binary_sampleset_to_ommx_samples(binary_sampleset)
+            ommx_samples = binary_sampleset_to_ommx_samples(binary_sampleset)
             return self.instance.evaluate_samples(ommx_samples)
         return binary_sampleset
-
-    @staticmethod
-    def _binary_sampleset_to_ommx_samples(
-        binary_sampleset: BinarySampleSet,
-    ) -> ommx.v1.Samples:
-        """Convert a BINARY sample set into an OMMX ``Samples`` container.
-
-        Each unique sample state is appended once with a list of sample IDs
-        of length ``num_occurrences``, so OMMX-side aggregation reflects the
-        original shot counts without duplicating the underlying state.
-
-        Args:
-            binary_sampleset: A :class:`BinarySampleSet` with
-                ``vartype=VarType.BINARY`` (the OMMX-input branch of
-                :meth:`decode` always produces BINARY here).
-
-        Returns:
-            ommx.v1.Samples: An OMMX Samples object with
-            ``sum(num_occurrences)`` sample IDs, where IDs sharing the same
-            state are grouped together.
-
-        Raises:
-            ValueError: If ``binary_sampleset.vartype`` is not
-                ``VarType.BINARY``. OMMX expects 0/1 decision-variable
-                values, so SPIN sample sets must be converted first.
-        """
-        # Compare via the enum's str value: bound TypeVar VT can be narrowed
-        # to the default (BINARY) by static type-checkers, which then flag
-        # the guard's non-BINARY branch as unreachable. The str(...) cast
-        # bypasses that narrowing without changing runtime semantics.
-        if str(binary_sampleset.vartype) != str(VarType.BINARY):
-            raise ValueError(
-                "_binary_sampleset_to_ommx_samples requires vartype=BINARY; "
-                f"got {binary_sampleset.vartype}. Convert to BINARY first."
-            )
-
-        ommx_samples = ommx.v1.Samples({})
-        next_id = 0
-        for sample, occ in zip(
-            binary_sampleset.samples, binary_sampleset.num_occurrences
-        ):
-            if occ <= 0:
-                continue
-            sample_ids = list(range(next_id, next_id + occ))
-            next_id += occ
-            state = ommx.v1.State({idx: float(val) for idx, val in sample.items()})
-            ommx_samples.append(sample_ids, state)
-        return ommx_samples
 
     def decode_to_binary_sampleset(
         self,
