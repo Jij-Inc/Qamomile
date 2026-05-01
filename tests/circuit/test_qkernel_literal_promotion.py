@@ -138,14 +138,23 @@ class TestUIntLiteralPromotion:
         assert total == 512
 
     @pytest.mark.parametrize("transpiler_factory", BACKENDS)
-    def test_int_literal_emits_same_outcome_set_as_qmc_uint(self, transpiler_factory):
-        """``ry_layer(q, thetas, 0)`` produces the same set of measurement outcomes as ``qmc.uint(0)``.
+    def test_int_literal_sampling_matches_qmc_uint_distribution(
+        self, transpiler_factory
+    ):
+        """Sampling distributions for ``ry_layer(q, thetas, 0)`` and ``qmc.uint(0)`` are statistically close.
 
-        Counts can differ by shot noise (independent RNG seeds across the
-        two ``executor()`` calls), but the support of the distribution
-        must be identical: both circuits must visit the same set of
-        bitstrings. Numerical-equivalence of the two forms is established
-        more strictly via expectation values in
+        Compares the empirical probability distributions of the two
+        forms via total variation distance. Set-equality on observed
+        bitstrings would be flaky on a non-uniform HEA distribution
+        (low-probability outcomes can be missed by one run and not the
+        other), so we instead bound the TVD by a generous threshold
+        well above the expected sampling-noise scale.
+
+        For ``shots=4096`` and ``2^3 = 8`` outcomes, per-outcome std
+        is ``≤ √(p(1-p)/N) ≤ 0.008``, so a TVD threshold of ``0.1`` is
+        comfortably above shot noise across independent RNG seeds.
+        Numerical equivalence of the two forms is established more
+        strictly via expectation values in
         ``test_int_literal_offset_expval_matches_analytic`` below.
         """
 
@@ -172,7 +181,7 @@ class TestUIntLiteralPromotion:
         t = transpiler_factory()
         bindings_compile = {"n": n}
         bindings_runtime = {"thetas": thetas}
-        shots = 4096  # enough that all 2^n outcomes appear with high probability
+        shots = 4096
 
         exe_int = t.transpile(hea_int, bindings=bindings_compile, parameters=["thetas"])
         exe_uint = t.transpile(
@@ -189,14 +198,20 @@ class TestUIntLiteralPromotion:
             .result()
             .results
         )
-        # Same set of measured bitstrings (counts may differ by shot noise).
-        assert set(out_int.keys()) == set(out_uint.keys()), (
-            f"[{transpiler_factory.__name__}] outcome support differs: "
-            f"int-literal={set(out_int.keys())}, qmc.uint(0)={set(out_uint.keys())}"
-        )
         # Total shot count is exact.
         assert sum(out_int.values()) == shots
         assert sum(out_uint.values()) == shots
+
+        # Statistical closeness: empirical TVD between the two distributions.
+        all_keys = set(out_int.keys()) | set(out_uint.keys())
+        tvd = 0.5 * sum(
+            abs(out_int.get(k, 0) / shots - out_uint.get(k, 0) / shots)
+            for k in all_keys
+        )
+        assert tvd < 0.1, (
+            f"[{transpiler_factory.__name__}] empirical TVD={tvd:.3f} between "
+            f"int-literal and qmc.uint(0) sampling distributions exceeds 0.1"
+        )
 
     @pytest.mark.parametrize("transpiler_factory", BACKENDS)
     @pytest.mark.parametrize("seed", [0, 1, 42])
@@ -300,6 +315,37 @@ class TestFloatLiteralPromotion:
         expected = 2.0 * math.cos(theta)
         assert np.isclose(out_lit, expected, atol=1e-6)
         assert np.isclose(out_lit, out_wrap, atol=1e-6)
+
+    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    @pytest.mark.parametrize("theta_int", [0, 1, -2, 3])
+    def test_int_literal_promotes_to_float_param(self, transpiler_factory, theta_int):
+        """``int`` passed to a ``Float`` parameter is promoted via natural ``int → float`` coercion.
+
+        Mirrors how Python APIs accept ``int`` where ``float`` is expected
+        (e.g., ``math.cos(0)`` returns ``1.0``). Locks the design choice
+        that ``int → Float`` promotion is intentional, distinct from the
+        symmetric ``bool`` exclusion validated by
+        ``test_bool_for_uint_param_raises``. The expval after RY(θ) on
+        |0>^n satisfies ``<Z_0 + Z_1> = 2 cos(θ)`` for any real θ, so an
+        ``int`` literal must yield the same closed-form value as its
+        ``float`` counterpart.
+        """
+
+        @qmc.qkernel
+        def outer_int(obs: qmc.Observable) -> qmc.Float:
+            q = qmc.qubit_array(2, name="q")
+            q = _ry_only(q, theta_int)  # raw int literal where Float is declared
+            return qmc.expval(q, obs)
+
+        H = _sum_z_hamiltonian(2)
+        t = transpiler_factory()
+        exe = t.transpile(outer_int, bindings={"obs": H})
+        out = exe.run(t.executor()).result()
+        expected = 2.0 * math.cos(float(theta_int))
+        assert np.isclose(out, expected, atol=1e-6), (
+            f"[{transpiler_factory.__name__}, theta_int={theta_int}] "
+            f"expected {expected}, got {out}"
+        )
 
 
 # ---------------------------------------------------------------------------

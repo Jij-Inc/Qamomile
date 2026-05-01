@@ -64,12 +64,20 @@ def _promote_literal_to_handle(value: Any, expected_type: Any) -> Any:
     saves users from manually calling ``qmc.uint(0)`` / ``qmc.float_(0.5)``
     / ``qmc.bit(True)`` at every call site.
 
-    The promotion is conservative — it only triggers when the declared
-    type is exactly one of the three scalar handle classes and the value
-    is the corresponding Python primitive. Anything else (already a
-    Handle, an array-typed parameter, an incompatible literal) is
-    returned unchanged so downstream validation produces the existing
-    clear error.
+    Promotion rules (applied only when ``expected_type`` is exactly one
+    of the three scalar Handle classes):
+
+    - ``UInt`` accepts ``int`` (excluding ``bool``).
+    - ``Float`` accepts ``int`` (excluding ``bool``) or ``float`` —
+      ``int → Float`` mirrors Python's natural numeric coercion (e.g.,
+      ``math.cos(0)`` returns ``1.0``).
+    - ``Bit`` accepts ``bool`` only. ``int`` values like ``0`` / ``1``
+      are NOT promoted — symmetric to ``bool`` being excluded from the
+      int-numeric paths.
+
+    Anything else (already a Handle, an array-typed parameter, an
+    incompatible literal) is returned unchanged so downstream
+    validation produces the existing clear error.
 
     Args:
         value: The argument bound for this parameter. Can be any object.
@@ -82,7 +90,7 @@ def _promote_literal_to_handle(value: Any, expected_type: Any) -> Any:
         or ``value`` unchanged if no promotion rule applies.
 
     Note:
-        ``bool`` is a subclass of ``int`` in Python, so the rules below
+        ``bool`` is a subclass of ``int`` in Python, so the rules above
         explicitly exclude bools from int/float promotion paths to avoid
         ``True`` silently becoming ``UInt(1)`` or ``Float(1.0)``. A
         ``bool`` is only promoted when the declared type is ``Bit``.
