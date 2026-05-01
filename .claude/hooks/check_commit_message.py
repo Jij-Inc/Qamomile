@@ -13,10 +13,14 @@ from ``CLAUDE.md``. The script handles the commit-message forms most
 commonly produced by Claude Code:
 
 - ``git commit -m "single-line"`` / ``git commit -m 'single-line'``
+  (POSIX single quotes are literal — backslashes inside are *not*
+  interpreted as escapes, matching shell semantics)
 - ``git commit -m "$(cat <<'EOF' ... EOF)"`` (HEREDOC, quoted or unquoted
   delimiter, with or without surrounding quotes around the subshell)
 - Multiple ``-m`` flags (each contribution treated as its own paragraph,
   matching ``git commit``'s own concatenation behavior)
+- Combined short-option groups whose trailing flag is ``m`` — ``-am``,
+  ``-sm``, ``-asm``, etc. (commonly ``git commit -am "msg"``)
 
 Forms the script intentionally does **not** inspect — and which therefore
 fall open (allow) — include editor-based commits (no ``-m``), ``-F`` /
@@ -38,18 +42,26 @@ import sys
 def _extract_commit_message(command: str) -> str | None:
     """Return the proposed commit-message text from a ``git commit`` command.
 
-    Iterates every ``-m`` flag in the command (``git commit`` concatenates
-    multiple ``-m`` values into one message, joined by blank lines) and,
-    for each, tries the recognized argument forms in order:
+    Iterates every ``-m``-bearing short-option group in the command
+    (``git commit`` concatenates multiple ``-m`` values into one message,
+    joined by blank lines) and, for each, tries the recognized argument
+    forms in order:
 
     1. ``-m "$(cat <<EOF ... EOF)"`` / ``-m '$(cat <<EOF ... EOF)'`` /
        ``-m $(cat <<EOF ... EOF)`` — HEREDOC inside a subshell, with
        optional surrounding quotes; quoted (``<<'EOF'``) and unquoted
        (``<<EOF``) delimiter variants.
-    2. ``-m "..."`` (plain double-quoted, escapes allowed).
-    3. ``-m '...'`` (plain single-quoted, no shell escapes inside).
+    2. ``-m "..."`` (plain double-quoted, shell-style escapes allowed).
+    3. ``-m '...'`` (plain single-quoted, NO escapes — POSIX single
+       quotes are literal, including any backslashes inside).
 
-    All matched ``-m`` segments are joined by a blank line so the
+    Short-option groups that include ``m`` as the trailing flag are also
+    recognized: ``-am``, ``-sm``, ``-asm`` etc. — common with
+    ``git commit -am "msg"``. Because ``-m`` consumes the rest of the
+    short-option group as its value in standard getopt parsing, ``m`` is
+    only valid at the end of the group; ``[a-zA-Z]*m\\b`` captures that.
+
+    All matched message segments are joined by a blank line so the
     downstream scanner sees the full effective message, matching what
     ``git commit`` itself would record.
 
@@ -59,7 +71,7 @@ def _extract_commit_message(command: str) -> str | None:
 
     Returns:
         The concatenated message body, or ``None`` when the command is
-        not a ``git commit`` or no recognized ``-m`` argument could be
+        not a ``git commit`` or no recognized message argument could be
         located. ``None`` causes the caller to fall open (allow).
     """
     if not re.search(r"\bgit\s+commit\b", command):
@@ -67,10 +79,13 @@ def _extract_commit_message(command: str) -> str | None:
 
     messages: list[str] = []
 
-    # Walk every ``-m`` flag in order. ``\b`` keeps us from misfiring on
-    # ``--message-id`` style long flags. ``re.MULTILINE`` is unnecessary
-    # because ``-m`` is matched against the raw command string.
-    for flag_match in re.finditer(r"(?:^|\s)-m\b", command):
+    # Walk every short-option group whose trailing flag is ``m`` —
+    # matches a bare ``-m`` as well as ``-am`` / ``-sm`` / ``-asm`` /
+    # any combination of letters followed by ``m\b``. ``getopt`` requires
+    # ``m`` to be last because it takes a value, so this pattern is
+    # complete for the realistic Claude Code-produced shapes. Long flags
+    # like ``--message-id`` are not matched (they start with ``--``).
+    for flag_match in re.finditer(r"(?:^|\s)-[a-zA-Z]*m\b", command):
         remainder = command[flag_match.end() :]
 
         # 1) HEREDOC inside a subshell. Surrounding quote (if any) before
@@ -86,7 +101,8 @@ def _extract_commit_message(command: str) -> str | None:
             messages.append(heredoc_match.group(3))
             continue
 
-        # 2) Plain double-quoted with escape handling.
+        # 2) Plain double-quoted with shell-style escape handling
+        #    (``\"``, ``\\``, etc.).
         plain_double = re.match(
             r'\s+"((?:[^"\\]|\\.)*)"',
             remainder,
@@ -96,9 +112,12 @@ def _extract_commit_message(command: str) -> str | None:
             messages.append(plain_double.group(1))
             continue
 
-        # 3) Plain single-quoted (shell does not interpret escapes here).
+        # 3) Plain single-quoted: POSIX single quotes are LITERAL — no
+        #    escape interpretation, no embedded ``'``. Match any non-quote
+        #    character. Backslashes inside (Windows paths, regex
+        #    fragments) pass through unchanged.
         plain_single = re.match(
-            r"\s+'((?:[^'\\]|\\.)*)'",
+            r"\s+'([^']*)'",
             remainder,
             re.DOTALL,
         )
