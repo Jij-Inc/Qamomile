@@ -437,6 +437,12 @@ current conversation. When in doubt, omit the link or ask the user to
 supply one. Internal references to other issues / PRs in this repo
 (e.g., `#354`) are fine when factually relevant.
 
+This rule targets **editorial** content — prose humans read. URLs that
+are functional metadata consumed by tooling rather than read by people
+(e.g., `$schema` references in JSON / YAML config files, dependency
+URLs in lockfiles, IDE / editor schema hints) are out of scope and may
+be added when the tool requires them.
+
 - ✅ "Implements the Trotter circuit (see #337 for the design discussion)."
 - ❌ "Implements the Trotter circuit (see `<external-url>`)." (the URL is
   shown as a `<external-url>` placeholder rather than a real address so

@@ -82,64 +82,94 @@ def _extract_commit_message(command: str) -> str | None:
         return None
 
     messages: list[str] = []
+    pos = 0
+    flag_re = re.compile(r"(?:^|\s)-[a-zA-Z]*m\b")
 
-    # Walk every short-option group whose trailing flag is ``m`` —
-    # matches a bare ``-m`` as well as ``-am`` / ``-sm`` / ``-asm`` /
-    # any combination of letters followed by ``m\b``. ``getopt`` requires
-    # ``m`` to be last because it takes a value, so this pattern is
-    # complete for the realistic Claude Code-produced shapes. Long flags
-    # like ``--message-id`` are not matched (they start with ``--``).
-    for flag_match in re.finditer(r"(?:^|\s)-[a-zA-Z]*m\b", command):
-        remainder = command[flag_match.end() :]
-
-        # ``\s*`` (not ``\s+``) lets us also match the no-space attached
-        # forms ``-m"msg"`` / ``-am'msg'`` / ``-am$(cat <<EOF...)``, which
-        # ``git commit`` accepts. The flag walker's trailing ``\b`` already
-        # ensures the position is right before a non-word character (``"``,
-        # ``'``, or ``$``), so ``\s*`` only allows the optional separator.
-        #
-        # 1) HEREDOC inside a subshell. Surrounding quote (if any) before
-        #    ``$(`` and after ``)`` must match. The closing ``\1`` must be
-        #    on its own line; ``re.DOTALL`` lets ``.*?`` span newlines.
-        heredoc_match = re.match(
-            r'\s*(["\']?)\$\(\s*cat\s+<<-?\s*[\'"]?(\w+)[\'"]?\s*\n'
-            r"(.*?)\n\2\s*\)\1",
-            remainder,
-            re.DOTALL,
-        )
-        if heredoc_match:
-            messages.append(heredoc_match.group(3))
+    # Walk forward through the command, *advancing past each consumed
+    # message segment*, so a literal ``-m`` substring inside a previously
+    # extracted message body cannot be re-scanned as another flag.
+    # ``re.finditer`` over the full command would be vulnerable to that
+    # — e.g., ``git commit -m "msg with -m inside"`` would surface the
+    # inner ``-m`` as a phantom flag. Sequential search avoids it
+    # entirely.
+    while pos < len(command):
+        flag_match = flag_re.search(command, pos)
+        if flag_match is None:
+            break
+        result = _try_match_flag_value(command[flag_match.end() :])
+        if result is None:
+            # No recognized value form after this flag — skip just past
+            # the flag (treat as fall-through; the actual ``git commit``
+            # invocation may be malformed, in which case the hook falls
+            # open and ``git commit`` itself will surface the error).
+            pos = flag_match.end()
             continue
-
-        # 2) Plain double-quoted with shell-style escape handling
-        #    (``\"``, ``\\``, etc.).
-        plain_double = re.match(
-            r'\s*"((?:[^"\\]|\\.)*)"',
-            remainder,
-            re.DOTALL,
-        )
-        if plain_double:
-            messages.append(plain_double.group(1))
-            continue
-
-        # 3) Plain single-quoted: POSIX single quotes are LITERAL — no
-        #    escape interpretation, no embedded ``'``. Match any non-quote
-        #    character. Backslashes inside (Windows paths, regex
-        #    fragments) pass through unchanged.
-        plain_single = re.match(
-            r"\s*'([^']*)'",
-            remainder,
-            re.DOTALL,
-        )
-        if plain_single:
-            messages.append(plain_single.group(1))
-            continue
+        value, consumed = result
+        messages.append(value)
+        pos = flag_match.end() + consumed
 
     if not messages:
         return None
 
     # ``git commit`` joins multiple ``-m`` values with a blank line.
     return "\n\n".join(messages)
+
+
+def _try_match_flag_value(remainder: str) -> tuple[str, int] | None:
+    """Try the three recognized argument forms on the text after a flag.
+
+    ``\\s*`` (not ``\\s+``) lets us also match the no-space attached
+    forms ``-m"msg"`` / ``-am'msg'`` / ``-am$(cat <<EOF...)``, which
+    ``git commit`` accepts. The flag walker's trailing ``\\b`` already
+    ensures the position is right before a non-word character (``"``,
+    ``'``, or ``$``), so ``\\s*`` only allows the optional separator.
+
+    Args:
+        remainder: The slice of the command immediately after a matched
+            ``-m``-bearing flag (i.e., ``command[flag_match.end():]``).
+
+    Returns:
+        ``(value, consumed_chars)`` on a successful match, where
+        ``value`` is the extracted message text and ``consumed_chars``
+        is the number of characters of ``remainder`` taken by the
+        flag's value (used by the caller to advance past the segment).
+        ``None`` when none of the three forms match.
+    """
+    # 1) HEREDOC inside a subshell. Surrounding quote (if any) before
+    #    ``$(`` and after ``)`` must match. The closing ``\1`` must be
+    #    on its own line; ``re.DOTALL`` lets ``.*?`` span newlines.
+    heredoc_match = re.match(
+        r'\s*(["\']?)\$\(\s*cat\s+<<-?\s*[\'"]?(\w+)[\'"]?\s*\n'
+        r"(.*?)\n\2\s*\)\1",
+        remainder,
+        re.DOTALL,
+    )
+    if heredoc_match:
+        return heredoc_match.group(3), heredoc_match.end()
+
+    # 2) Plain double-quoted with shell-style escape handling
+    #    (``\"``, ``\\``, etc.).
+    plain_double = re.match(
+        r'\s*"((?:[^"\\]|\\.)*)"',
+        remainder,
+        re.DOTALL,
+    )
+    if plain_double:
+        return plain_double.group(1), plain_double.end()
+
+    # 3) Plain single-quoted: POSIX single quotes are LITERAL — no
+    #    escape interpretation, no embedded ``'``. Match any non-quote
+    #    character. Backslashes inside (Windows paths, regex
+    #    fragments) pass through unchanged.
+    plain_single = re.match(
+        r"\s*'([^']*)'",
+        remainder,
+        re.DOTALL,
+    )
+    if plain_single:
+        return plain_single.group(1), plain_single.end()
+
+    return None
 
 
 def _strip_backtick_code(text: str) -> str:
