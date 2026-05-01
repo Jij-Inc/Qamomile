@@ -133,7 +133,17 @@ copy_api() {
 sync_lang() {
     local lang="$1"
     echo "Converting ${lang} .py files to .ipynb..."
-    for dir in "${TARGET_DIRS[@]}"; do
+    # Include integration/ here even though TARGET_DIRS excludes it.
+    # Rationale: jupytext only rewrites cell sources — it does not
+    # execute the notebook, so syncing integration/ has no API-key
+    # dependency. Without this include, ``./build.sh sync`` would
+    # leave docs/<lang>/integration/*.ipynb stale relative to its
+    # .py source whenever a contributor updated only the .py and ran
+    # the sync target. This list must stay in lock-step with the
+    # ``sync_dirs`` defined inside ``setup_build_src`` (which already
+    # includes integration/ for the same reason).
+    local sync_dirs=("${TARGET_DIRS[@]}" "integration")
+    for dir in "${sync_dirs[@]}"; do
         local py_files=()
         shopt -s nullglob
         py_files=("${lang}/${dir}"/*.py)
@@ -144,7 +154,8 @@ sync_lang() {
         fi
         uv run jupytext --to ipynb "${py_files[@]}"
     done
-    # We don't convert integration/ because those notebooks need API-KEYs.
+    # execute_lang still excludes integration/ because executing those
+    # notebooks does need API keys.
     info "${lang} notebooks synced"
 }
 

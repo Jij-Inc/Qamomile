@@ -60,10 +60,15 @@ generate-doc-tags:
 	@echo "✓ Doc tag pages generated"
 
 # Sync .py -> .ipynb for a single language (used via sync-en, sync-ja)
-# We don't convert integration/ because those notebooks need API-KEYs.
+# Includes integration/ even though TARGET_DIRS excludes it: jupytext
+# only rewrites cell sources (no execution), so it has no API-key
+# dependency. Excluding integration/ here would leave its .ipynb stale
+# whenever a contributor edits only the .py and runs ``make sync``.
+# execute-* still excludes integration/ because executing it needs API
+# keys.
 define sync-lang
 	@echo "Converting $(1) .py files to .ipynb..."
-	@for dir in $(TARGET_DIRS); do \
+	@for dir in $(TARGET_DIRS) integration; do \
 		py_files=$$(find $(1)/$$dir -maxdepth 1 -name '*.py' 2>/dev/null); \
 		if [ -z "$$py_files" ]; then \
 			echo "! No .py files in $(1)/$$dir, skipping"; \
