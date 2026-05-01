@@ -175,9 +175,16 @@ executable = converter.transpile(transpiler, p=p)
 # %%
 import os
 import numpy as np
+from qiskit_aer import AerSimulator
 from scipy.optimize import minimize
 
-executor = transpiler.executor()
+# シミュレータをseedしておくことで、notebookを再実行してもCOBYLAの軌道と
+# 最終的なサンプリング分布が再現される。seedなしの場合、ショットごとに
+# 異なる乱数が引かれるためCOBYLAはノイズのあるコスト面を辿り、
+# 実行のたびに(等価ではあるが)異なる局所最適解に収束する。
+executor = transpiler.executor(
+    backend=AerSimulator(seed_simulator=901, max_parallel_threads=1)
+)
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 sample_shots = 256 if docs_test_mode else 2048
 maxiter = 25 if docs_test_mode else 1000
@@ -242,49 +249,25 @@ sample_result = executable.sample(
     bindings={"gammas": gammas_opt, "betas": betas_opt},
 ).result()
 
-# 以下の per-state ループ（samples / energy / num_occurrences）を
-# そのまま動かすため、QUBO ドメインの BinarySampleSet を使用する。
-# decode() がデフォルトで返す ommx.v1.SampleSet API
-# （`sample_set.feasible`, `sample_set.summary_with_constraints`,
-# `sample_set.best_feasible`）への移行は次の PR で行う。
-decoded = converter.decode_to_binary_sampleset(sample_result)
+# OMMXベースのコンバーターで`decode()`を呼ぶと、元の(ペナルティを含まない)
+# インスタンスで評価された`ommx.v1.SampleSet`が返る。実行可能性、真の目的関数値、
+# 制約ごとの違反量がOMMXのAPIから直接得られるため、自前の実行可能性判定や
+# 目的関数値計算ヘルパーは不要。
+sample_set = converter.decode(sample_result)
 
 # %% [markdown]
 # ## 結果の分析
 #
 # ### 実行可能性のチェック
 #
-# QAOA のサンプルは**候補解**であり、元の制約を満たすとは限りません。制約 $\sum x_u = |V|/2$ は QUBO のペナルティとして組み込まれているため、制約を満たさないビット列も出力に含まれる可能性があります。
+# QAOAのサンプルは**候補解**であり、元の制約を満たすとは限りません。制約$\sum x_u = |V|/2$はQUBOのペナルティとして組み込まれているため、制約を満たさないビット列も出力に含まれる可能性があります。
 #
-# サンプルを有効な分割として解釈する前に、実行可能性でフィルタリングする必要があります。
-
-
-# %%
-def is_feasible(sample: dict[int, int]) -> bool:
-    """サンプルが均等分割の制約を満たすかチェック"""
-    return sum(sample.values()) == num_nodes // 2
-
-
-def count_cut_edges(sample: dict[int, int], graph: nx.Graph) -> int:
-    """真の目的関数値（2つの分割間のエッジ数）を計算"""
-    cuts = 0
-    for u, v in graph.edges():
-        if sample.get(u, 0) != sample.get(v, 0):
-            cuts += 1
-    return cuts
-
+# `SampleSet.summary`はショットごとに1行を持つDataFrameで、`feasible`列には*元の*制約に対する実行可能性がすでに格納されています。実行可能なショット数はそこから直接取得できます。
 
 # %%
-feasible_results = []
-for sample, energy, occ in zip(
-    decoded.samples, decoded.energy, decoded.num_occurrences
-):
-    if is_feasible(sample):
-        obj = count_cut_edges(sample, G)
-        feasible_results.append((sample, obj, occ))
-
-total_feasible = sum(occ for _, _, occ in feasible_results)
-total_samples = sum(decoded.num_occurrences)
+summary = sample_set.summary
+total_feasible = int(summary["feasible"].sum())
+total_samples = len(summary)
 
 print(
     f"Feasible samples: {total_feasible} / {total_samples} "
@@ -294,37 +277,37 @@ print(
 # %% [markdown]
 # ### 最良の実行可能解
 #
-# 実行可能なサンプルの中から、カットエッジ数（真の目的関数）が最小のものを選択します。
+# `SampleSet.best_feasible`は、実行可能解のうち目的関数値が最良(ここでは最小)のものを返します。コンバーターをOMMXの`Instance`から構築しているため、報告される目的関数値は*元の*ペナルティを含まないもの、すなわちカットエッジ数そのものです。決定変数の値は`decision_variables_df`に元の変数IDをキーとして格納されています。
 
 # %%
-if feasible_results:
-    feasible_results.sort(key=lambda x: x[1])
-    best_sample, best_obj, best_count = feasible_results[0]
+if total_feasible > 0:
+    best = sample_set.best_feasible
+    best_obj = int(round(best.objective))
+    best_sample = {
+        i: int(round(best.decision_variables_df.loc[i, "value"]))
+        for i in range(num_nodes)
+    }
     print(f"Best feasible solution: {best_sample}")
     print(f"Cut edges:             {best_obj}")
-    print(f"Occurrences:           {best_count}")
 else:
     print("No feasible solution found. Try increasing p or maxiter.")
     best_sample = None
+    best_obj = None
 
 # %% [markdown]
 # ### 目的関数値の分布
 #
-# 実行可能なサンプルのみについて、真の目的関数値（カットエッジ数）の分布を表示します。
+# 実行可能なサンプルのみについて、真の目的関数値(カットエッジ数)の分布を表示します。`summary`にはショットごとに元の目的関数値が格納されているため、実行可能なスライスに対して`value_counts()`を呼ぶだけで分布が得られます。
 
 # %%
-from collections import Counter
-
-if feasible_results:
-    obj_counts = Counter()
-    for _, obj, occ in feasible_results:
-        obj_counts[obj] += occ
-
-    objs = sorted(obj_counts.keys())
-    counts = [obj_counts[o] for o in objs]
+if total_feasible > 0:
+    feasible_objectives = (
+        summary.loc[summary["feasible"], "objective"].round().astype(int)
+    )
+    obj_counts = feasible_objectives.value_counts().sort_index()
 
     plt.figure(figsize=(8, 4))
-    plt.bar([str(o) for o in objs], counts, color="#2696EB")
+    plt.bar([str(o) for o in obj_counts.index], obj_counts.values, color="#2696EB")
     plt.xlabel("Cut edges (objective value)")
     plt.ylabel("Frequency")
     plt.title("Distribution of Feasible Solutions")
