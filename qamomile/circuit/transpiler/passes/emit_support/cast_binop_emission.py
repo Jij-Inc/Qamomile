@@ -14,12 +14,12 @@ if TYPE_CHECKING:
 
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
-    BinOpKind,
     CompOp,
     CondOp,
     NotOp,
 )
 from qamomile.circuit.ir.operation.cast import CastOperation
+from qamomile.circuit.transpiler.gate_emitter import default_combine_symbolic
 from qamomile.circuit.transpiler.passes.eval_utils import (
     FoldPolicy,
     fold_classical_op,
@@ -151,25 +151,26 @@ def evaluate_binop(
     if lhs is None or rhs is None:
         return
 
-    # Symbolic arithmetic over backend Parameter objects. Concrete-only
-    # operands have already been handled by ``fold_classical_op`` above,
-    # so we land here only when at least one operand is a backend
-    # Parameter; ``0``-valued defaults guard against div-by-zero on the
-    # symbolic side without losing the symbolic result for the common case.
-    result = None
-    match op.kind:
-        case BinOpKind.ADD:
-            result = lhs + rhs
-        case BinOpKind.SUB:
-            result = lhs - rhs
-        case BinOpKind.MUL:
-            result = lhs * rhs
-        case BinOpKind.DIV:
-            result = lhs / rhs if rhs != 0 else 0.0
-        case BinOpKind.FLOORDIV:
-            result = lhs // rhs if rhs != 0 else 0
-        case BinOpKind.POW:
-            result = lhs**rhs
+    # Symbolic arithmetic. Concrete-only operands have already been
+    # handled by ``fold_classical_op`` above, so we land here only when
+    # at least one operand is a backend Parameter (or a previously
+    # combined symbolic value). The actual operator dispatch is delegated
+    # to the backend emitter's ``combine_symbolic`` if it provides one,
+    # so that backends whose Parameter type lacks Python operator
+    # overloads (e.g. QURI Parts' Rust-backed Parameter, which raises
+    # ``TypeError`` for ``param * float``) can substitute a backend-native
+    # representation such as a linear-combination dict. Backends with
+    # arithmetic-capable Parameters (Qiskit ``ParameterExpression``,
+    # CUDA-Q parameters) need not implement the hook — we fall back to
+    # ``default_combine_symbolic`` which performs the original Python
+    # operator dispatch.
+    if op.kind is None:
+        return
+    combine = getattr(emit_pass._emitter, "combine_symbolic", None)
+    if callable(combine):
+        result = combine(op.kind, lhs, rhs)
+    else:
+        result = default_combine_symbolic(op.kind, lhs, rhs)
 
     if result is not None and op.results:
         _set_emit_value(bindings, op.results[0].uuid, result)
