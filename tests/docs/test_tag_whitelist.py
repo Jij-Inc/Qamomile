@@ -1,10 +1,21 @@
-"""Verify every documentation article only uses tags in the whitelist.
+"""Verify every documentation article carries the right tag invariants.
 
-The whitelist lives in ``docs/scripts/build_doc_tags.py`` as
-``ALLOWED_TAGS``. This test is the *only* enforcement point: the
-script itself no longer validates (so a stray tag during local
-development does not crash the build), and there is no pre-commit
-hook. CI catches the tag drift before merge, which is sufficient.
+Three invariants are enforced per article (en + ja, every section):
+
+1. The article declares ``tags:`` in its first markdown cell's MyST
+   frontmatter — empty / missing tags fail.
+2. The tag list contains the **section tag** matching the article's
+   containing directory (``tutorial`` / ``algorithm`` / ``usage`` /
+   ``integration``). Section tags are the foundation of the
+   discovery UX — every article is reachable via its section's
+   ``tags/<section>.md`` page.
+3. Every tag in the list is in ``ALLOWED_TAGS`` (the whitelist in
+   ``docs/scripts/build_doc_tags.py``).
+
+This test is the *only* enforcement point: ``build_doc_tags.py``
+itself does no validation (so a stray tag during local development
+does not crash the build), and there is no pre-commit hook. CI
+catches every violation before merge.
 
 Runs in the default unit-test step (no ``docs`` marker) — it only
 parses frontmatter, not executes notebooks, so it stays cheap.
@@ -56,15 +67,34 @@ _ARTICLE_PATHS = _all_article_paths()
     _ARTICLE_PATHS,
     ids=[str(p.relative_to(PROJECT_ROOT)) for p, _ in _ARTICLE_PATHS],
 )
-def test_article_tags_are_in_whitelist(py_path: Path, section: str) -> None:
-    """Each article's frontmatter tags must be a subset of ALLOWED_TAGS.
-
-    Untagged articles (``_load_article`` returns ``None``) are accepted —
-    an empty tag list does not pollute the taxonomy.
+def test_article_tags_satisfy_invariants(py_path: Path, section: str) -> None:
+    """Each article must (1) declare tags, (2) include its section tag,
+    and (3) keep every tag inside ALLOWED_TAGS.
     """
     article = _btags._load_article(py_path, section)
-    if article is None:
-        return
+
+    # Invariant 1: tags: frontmatter is mandatory.
+    # ``_load_article`` returns None when the .py has no frontmatter or
+    # the frontmatter has an empty / missing ``tags:`` list. Both cases
+    # are violations now that section tags are required.
+    assert article is not None, (
+        f"{py_path.relative_to(PROJECT_ROOT)} is missing the `tags:` "
+        f"frontmatter (or it is empty). Every article must declare at "
+        f"least its section tag ({section!r})."
+    )
+
+    # Invariant 2: the section tag must be present.
+    # We surface the article's containing directory through the chip
+    # cloud / per-tag page UX, so the article must carry the matching
+    # tag — otherwise it would not appear under tags/<section>.md.
+    assert section in article.tags, (
+        f"{py_path.relative_to(PROJECT_ROOT)} does not carry its section "
+        f"tag {section!r}. Articles under docs/<lang>/{section}/ must "
+        f"include {section!r} in their `tags:` list (alongside any "
+        f"topical tags)."
+    )
+
+    # Invariant 3: every tag is in the whitelist.
     unknown = sorted(set(article.tags) - _btags.ALLOWED_TAGS)
     assert not unknown, (
         f"{py_path.relative_to(PROJECT_ROOT)} uses unknown tag(s) {unknown}. "

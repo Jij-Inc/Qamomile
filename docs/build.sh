@@ -85,12 +85,20 @@ setup_build_src() {
     #      cells (preserves committed outputs). Includes integration/
     #      because jupytext only syncs cell sources — no execution, no
     #      API-key dependency.
+    #
+    # Pass one or more locale names as arguments to scope the work to
+    # those locales (used by build_lang); pass no arguments to set up
+    # every locale in $LANGS (used by build_all).
+    local langs=("$@")
+    if [ ${#langs[@]} -eq 0 ]; then
+        langs=("${LANGS[@]}")
+    fi
     local build_src_root="$(pwd)/_build_src"
     local _lang _dir _py_files
-    echo "Setting up _build_src/ ..."
+    echo "Setting up _build_src/ for: ${langs[*]} ..."
     rm -rf "$build_src_root"
     mkdir -p "$build_src_root"
-    for _lang in "${LANGS[@]}"; do
+    for _lang in "${langs[@]}"; do
         # cp -R is portable across the Linux RTD image and local macOS
         # (rsync isn't installed in the RTD build env). Copy the whole
         # lang dir then prune the build artifacts that we never want
@@ -104,10 +112,13 @@ setup_build_src() {
     # _build_src/assets/, so the assets dir has to exist there too.
     cp -R assets "${build_src_root}/"
 
+    # build_doc_tags.py auto-skips locales whose root dir is absent
+    # from the build-dir, so a single-locale invocation only does work
+    # for the locales we actually copied above.
     generate_doc_tags "$build_src_root"
 
     local sync_dirs=("${TARGET_DIRS[@]}" "integration")
-    for _lang in "${LANGS[@]}"; do
+    for _lang in "${langs[@]}"; do
         for _dir in "${sync_dirs[@]}"; do
             shopt -s nullglob
             _py_files=("${build_src_root}/${_lang}/${_dir}"/*.py)
@@ -117,14 +128,21 @@ setup_build_src() {
         done
     done
 
-    info "_build_src/ ready"
+    info "_build_src/ ready (${langs[*]})"
 }
 
 copy_api() {
+    # NOTE: ``local _lang`` is mandatory. Without it the loop variable
+    # would leak into the caller's scope and clobber the caller's own
+    # ``local lang="$1"`` (build_lang sets that, then calls copy_api,
+    # then calls setup_build_src "$lang" — which would receive the
+    # wrong locale once copy_api's loop finishes on the last LANGS
+    # element). Same trap exists in clean / clean_all / execute_lang.
+    local _lang
     echo "Copying API reference to language directories..."
-    for lang in "${LANGS[@]}"; do
-        mkdir -p "${lang}/api"
-        cp -r api/. "${lang}/api/"
+    for _lang in "${LANGS[@]}"; do
+        mkdir -p "${_lang}/api"
+        cp -r api/. "${_lang}/api/"
     done
     info "API reference copied"
 }
@@ -162,6 +180,7 @@ sync_lang() {
 # Execute .ipynb notebooks for a single language
 execute_lang() {
     local lang="$1"
+    local dir nb
     echo "Executing ${lang} notebooks..."
     for dir in "${TARGET_DIRS[@]}"; do
         for nb in "${lang}/${dir}"/*.ipynb; do
@@ -213,7 +232,7 @@ build_lang() {
     local lang="$1"
     generate_api
     copy_api
-    setup_build_src
+    setup_build_src "$lang"
     _build_lang_from_build_src "$lang"
 }
 
@@ -272,23 +291,25 @@ build_all() {
 }
 
 clean() {
+    local _lang _dir
     echo "Cleaning generated files..."
-    for lang in "${LANGS[@]}"; do
-        for dir in "${TARGET_DIRS[@]}"; do
-            rm -f "${lang}/${dir}"/*.ipynb
+    for _lang in "${LANGS[@]}"; do
+        for _dir in "${TARGET_DIRS[@]}"; do
+            rm -f "${_lang}/${_dir}"/*.ipynb
         done
-        rm -rf "${lang}/_build"
-        rm -rf "${lang}/api"
+        rm -rf "${_lang}/_build"
+        rm -rf "${_lang}/api"
     done
     rm -rf "_build_src"
     info "Cleaned generated .ipynb files and build outputs"
 }
 
 clean_all() {
+    local _lang
     clean
     echo "Cleaning execution cache..."
-    for lang in "${LANGS[@]}"; do
-        rm -rf "${lang}/_build/.jupyter_cache"
+    for _lang in "${LANGS[@]}"; do
+        rm -rf "${_lang}/_build/.jupyter_cache"
     done
     info "All generated files and cache removed"
 }

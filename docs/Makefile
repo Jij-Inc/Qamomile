@@ -50,14 +50,20 @@ copy-api: generate-api
 	@echo "✓ API reference copied to language directories"
 
 # Auto-managed regions (chip blocks, browse-by-tag clouds, per-tag
-# pages) are generated into a build-dir copy of the docs tree, never
-# into the committed source. The actual injection runs inside
-# build.sh's setup_build_src; this target is a thin wrapper for
-# ad-hoc invocation against the working tree.
+# pages) must be generated into an isolated docs copy, never into the
+# committed source tree. The main build flow does this inside
+# build.sh's setup_build_src; this target provides a safe ad-hoc entry
+# point for previewing by creating a temporary docs root and pointing
+# build_doc_tags.py at it via DOCS_ROOT_OVERRIDE. The temp directory
+# is left in place so the caller can inspect the generated chip
+# blocks / tag pages; it is the caller's responsibility to remove it
+# (or rely on the OS' /tmp cleanup).
 generate-doc-tags:
-	@echo "Generating doc tag pages (in-place; usually only useful for previewing)..."
-	@uv run python scripts/build_doc_tags.py
-	@echo "✓ Doc tag pages generated"
+	@tmp_dir=$$(mktemp -d -t qamomile-doc-tags-preview-XXXXXX); \
+	echo "Generating doc tag pages in temporary docs root: $$tmp_dir"; \
+	find . -mindepth 1 -maxdepth 1 ! -name '_build_src' ! -name '_build' -exec cp -R {} "$$tmp_dir"/ \; ; \
+	DOCS_ROOT_OVERRIDE="$$tmp_dir" uv run python scripts/build_doc_tags.py; \
+	echo "✓ Doc tag pages generated in $$tmp_dir (committed source untouched)"
 
 # Sync .py -> .ipynb for a single language (used via sync-en, sync-ja)
 # Includes integration/ even though TARGET_DIRS excludes it: jupytext

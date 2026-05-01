@@ -681,10 +681,16 @@ def _write_if_changed(path: Path, content: str) -> Path | None:
 def _build_for_locale(lang: str) -> tuple[list[Path], list[Path]]:
     """Generate everything for one locale.
 
-    Returns ``(written, removed)`` paths for caller logging.
+    Returns ``(written, removed)`` paths for caller logging. When the
+    locale's root directory is absent under ``DOCS_ROOT`` (e.g. when
+    ``build.sh build-en`` set up only ``_build_src/en/``), returns
+    ``([], [])`` so single-locale build pipelines do not crash trying
+    to write into a non-existent ``<lang>/tags/`` directory.
     """
     if lang not in STRINGS:
         raise ValueError(f"unknown locale {lang!r}")
+    if not (DOCS_ROOT / lang).is_dir():
+        return [], []
     strings = STRINGS[lang]
 
     articles, untagged_paths = _walk_articles(lang)
