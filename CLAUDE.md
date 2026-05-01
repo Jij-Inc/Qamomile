@@ -404,14 +404,19 @@ harmless and preserves the existing review thread.
 
 ### No `@`-mentions
 
-Never include `@username` or `@org/team` strings in commit messages, PR
-titles / bodies, or issue titles / bodies — they trigger unintended GitHub
-notifications. This rule applies to bare Python decorators in running
-prose too: refer to them descriptively (e.g., "the qkernel decorator")
-instead of typing `@qkernel` directly in the prose. If you must show the
-literal decorator syntax, only do so inside a fenced code block or an
-inline code span — GitHub does not parse mentions in either. In normal
-prose, write "the qkernel decorator" instead.
+Never include `@username` or `@org/team` strings in **any** GitHub-tracked
+text — commit messages, PR titles / bodies, issue titles / bodies, **and
+PR / code review comments and replies posted to those threads** —
+because they trigger unintended GitHub notifications. The rule covers
+the entire scope listed at the top of this section; review-thread
+replies are not an exception, even when the reply is short or only
+quotes a previous reviewer comment. This rule applies to bare Python
+decorators in running prose too: refer to them descriptively (e.g.,
+"the qkernel decorator") instead of typing `@qkernel` directly in the
+prose. If you must show the literal decorator syntax, only do so inside
+a fenced code block or an inline code span — GitHub does not parse
+mentions in either. In normal prose, write "the qkernel decorator"
+instead.
 
 - ✅ "Update the qkernel decorator so metadata survives `next_version`."
 - ❌ "Update `@qkernel` so metadata survives `next_version`." (the
@@ -421,10 +426,11 @@ prose, write "the qkernel decorator" instead.
 
 ### No unsolicited external links
 
-Do not add external URLs (arXiv, blog posts, docs sites, vendor pages, etc.)
-to commits / PRs / issues unless the user has explicitly provided that URL
-in the current conversation. When in doubt, omit the link or ask the user
-to supply one. Internal references to other issues / PRs in this repo
+Do not add external URLs (arXiv, blog posts, docs sites, vendor pages,
+etc.) to commits, PRs, issues, **or PR / code review comments and
+replies** unless the user has explicitly provided that URL in the
+current conversation. When in doubt, omit the link or ask the user to
+supply one. Internal references to other issues / PRs in this repo
 (e.g., `#354`) are fine when factually relevant.
 
 - ✅ "Implements the Trotter circuit (see #337 for the design discussion)."
