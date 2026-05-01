@@ -14,7 +14,7 @@
 
 # %% [markdown]
 # ---
-# tags: [optimization]
+# tags: [usage, optimization]
 # ---
 #
 # # How to use `BinaryModel`

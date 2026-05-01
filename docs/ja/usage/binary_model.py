@@ -14,7 +14,7 @@
 
 # %% [markdown]
 # ---
-# tags: [optimization]
+# tags: [usage, optimization]
 # ---
 #
 # # `BinaryModel`の使い方

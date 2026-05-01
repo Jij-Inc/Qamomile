@@ -14,7 +14,7 @@
 
 # %% [markdown]
 # ---
-# tags: []
+# tags: [tutorial]
 # ---
 #
 # # Classical Control Flow Patterns

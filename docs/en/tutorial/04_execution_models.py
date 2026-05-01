@@ -14,7 +14,7 @@
 
 # %% [markdown]
 # ---
-# tags: []
+# tags: [tutorial]
 # ---
 #
 # # Execution Models: `sample()` vs `run()`

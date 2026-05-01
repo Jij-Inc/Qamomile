@@ -15,7 +15,7 @@
 
 # %% [markdown]
 # ---
-# tags: [optimization, variational]
+# tags: [algorithm, optimization, variational]
 # ---
 #
 # # QAOA for MaxCut: Building the Circuit from Scratch

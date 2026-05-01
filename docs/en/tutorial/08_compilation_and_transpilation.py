@@ -14,7 +14,7 @@
 
 # %% [markdown]
 # ---
-# tags: []
+# tags: [tutorial]
 # ---
 #
 # # Compilation and Transpilation: Under the Hood

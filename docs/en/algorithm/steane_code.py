@@ -14,7 +14,7 @@
 
 # %% [markdown]
 # ---
-# tags: [error-correction]
+# tags: [algorithm, error-correction]
 # ---
 #
 # # Quantum Error Correction (2): Steane [[7,1,3]] Code

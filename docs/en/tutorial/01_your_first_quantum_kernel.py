@@ -14,7 +14,7 @@
 
 # %% [markdown]
 # ---
-# tags: []
+# tags: [tutorial]
 # ---
 #
 # # Your First Quantum Kernel

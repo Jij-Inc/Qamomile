@@ -14,7 +14,7 @@
 
 # %% [markdown]
 # ---
-# tags: [resource-estimation]
+# tags: [tutorial, resource-estimation]
 # ---
 #
 # # リソース推定

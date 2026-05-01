@@ -14,7 +14,7 @@
 
 # %% [markdown]
 # ---
-# tags: [chemistry, variational]
+# tags: [algorithm, chemistry, variational]
 # ---
 #
 # # 水素分子のための変分量子固有値ソルバー（VQE）

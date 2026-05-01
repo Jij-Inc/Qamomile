@@ -169,7 +169,7 @@ For reference, the underlying flow:
 
    # %% [markdown]
    # ---
-   # tags: [optimization, variational]
+   # tags: [algorithm, optimization, variational]
    # ---
    #
    # # Your Page Title
@@ -178,7 +178,9 @@ For reference, the underlying flow:
 
    `tags:` values are language-agnostic — keep them identical between
    `en/` and `ja/`. Tags must be in `ALLOWED_TAGS` (see
-   [Tags](#tags) below).
+   [Tags](#tags) below). Every article carries the **section tag**
+   that matches its containing directory (`tutorial`, `algorithm`,
+   `usage`, or `integration`) plus any topical tags that apply.
 
 2. **Update the section landing page** by adding a bullet/link in
    the matching `<section>/index.md`. Each section's `index.md` is

@@ -67,6 +67,12 @@ SECTIONS: tuple[str, ...] = (
 # — this script itself does not validate, so a stray tag does not crash
 # the build, only the test fails on the PR.
 ALLOWED_TAGS: frozenset[str] = frozenset({
+    # Section (1:1 with directory layout — every article carries the
+    # tag that matches its containing section)
+    "tutorial",
+    "algorithm",
+    "usage",
+    "integration",
     # Domain
     "chemistry",
     "differential-equation",

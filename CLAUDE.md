@@ -280,6 +280,17 @@ whitelist in `docs/scripts/build_doc_tags.py` (`ALLOWED_TAGS`). The
 whitelist is checked in CI by `tests/docs/test_tag_whitelist.py`, so
 any article with an out-of-whitelist tag fails on every PR.
 
+The whitelist contains two kinds of tags:
+
+- **Section tags** (`tutorial`, `algorithm`, `usage`, `integration`)
+  map 1:1 to the directory layout. **Every article must carry the
+  section tag matching its containing directory.** This keeps cross-
+  section discovery available via the per-tag pages even when the
+  reader is browsing by topic rather than by section.
+- **Topical tags** (domain / method family / article type / technique
+  / other) describe what the article is about. An article carries
+  zero or more topical tags in addition to its section tag.
+
 **Do NOT modify `ALLOWED_TAGS` unless the user has explicitly asked
 to add/remove a tag in this conversation.** A new tag is a deliberate
 taxonomy decision that the maintainer wants to make consciously, not a

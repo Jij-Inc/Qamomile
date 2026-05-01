@@ -14,7 +14,7 @@
 
 # %% [markdown]
 # ---
-# tags: [primitive, simulation]
+# tags: [algorithm, primitive, simulation]
 # ---
 #
 # # Suzuki–Trotter分解によるハミルトニアンシミュレーション (Rabi振動)

@@ -14,7 +14,7 @@
 
 # %% [markdown]
 # ---
-# tags: [error-correction]
+# tags: [algorithm, error-correction]
 # ---
 #
 # # 量子誤り訂正入門

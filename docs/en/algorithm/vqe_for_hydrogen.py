@@ -14,7 +14,7 @@
 
 # %% [markdown]
 # ---
-# tags: [chemistry, variational]
+# tags: [algorithm, chemistry, variational]
 # ---
 #
 # # Variational Quantum Eigensolver (VQE) for the Hydrogen Molecule

@@ -15,7 +15,7 @@
 
 # %% [markdown]
 # ---
-# tags: [optimization, variational]
+# tags: [algorithm, optimization, variational]
 # ---
 #
 # # QAOAでMaxCutを解く: 回路をゼロから構築する
