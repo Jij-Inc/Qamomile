@@ -252,12 +252,12 @@ sample_result = executable.sample(
     bindings={"gammas": gammas_opt, "betas": betas_opt},
 ).result()
 
-# Use the QUBO-domain BinarySampleSet so the existing per-state
-# loop below (samples / energy / num_occurrences) keeps working.
-# A follow-up PR will migrate this section to the OMMX SampleSet
-# API (`sample_set.feasible`, `sample_set.summary_with_constraints`,
-# `sample_set.best_feasible`) that decode() returns by default.
-decoded = converter.decode_to_binary_sampleset(sample_result)
+# `decode()` on an OMMX-backed converter returns an `ommx.v1.SampleSet`
+# evaluated against the *original* (un-penalized) instance, so
+# feasibility, the true objective, and per-constraint diagnostics are
+# available through OMMX's own API — no hand-rolled feasibility or
+# objective helper is needed.
+sample_set = converter.decode(sample_result)
 
 # %% [markdown]
 # ## Analyze the Results
@@ -269,36 +269,14 @@ decoded = converter.decode_to_binary_sampleset(sample_result)
 # folded into the QUBO as a penalty, so infeasible bitstrings can still
 # appear in the output.
 #
-# We must filter samples by feasibility before interpreting them as
-# valid partitions.
-
-
-# %%
-def is_feasible(sample: dict[int, int]) -> bool:
-    """Check if a sample satisfies the equal partition constraint."""
-    return sum(sample.values()) == num_nodes // 2
-
-
-def count_cut_edges(sample: dict[int, int], graph: nx.Graph) -> int:
-    """Compute the true objective: number of edges between the two partitions."""
-    cuts = 0
-    for u, v in graph.edges():
-        if sample.get(u, 0) != sample.get(v, 0):
-            cuts += 1
-    return cuts
-
+# `SampleSet.summary` is a DataFrame with one row per shot whose
+# `feasible` column already encodes feasibility against the *original*
+# constraints, so we can read the feasible-shot count straight off it.
 
 # %%
-feasible_results = []
-for sample, energy, occ in zip(
-    decoded.samples, decoded.energy, decoded.num_occurrences
-):
-    if is_feasible(sample):
-        obj = count_cut_edges(sample, G)
-        feasible_results.append((sample, obj, occ))
-
-total_feasible = sum(occ for _, _, occ in feasible_results)
-total_samples = sum(decoded.num_occurrences)
+summary = sample_set.summary
+total_feasible = int(summary["feasible"].sum())
+total_samples = len(summary)
 
 print(
     f"Feasible samples: {total_feasible} / {total_samples} "
@@ -308,39 +286,45 @@ print(
 # %% [markdown]
 # ### Best Feasible Solution
 #
-# Among the feasible samples, we select the one with the fewest cut edges
-# (the true objective).
+# `SampleSet.best_feasible` returns the feasible sample with the
+# best (here: smallest) objective. Because the converter was built from
+# an OMMX `Instance`, the reported objective is the *original*
+# un-penalized one — i.e. the number of cut edges itself — and the
+# decision-variable values come back keyed by the original variable
+# IDs in `decision_variables_df`.
 
 # %%
-if feasible_results:
-    feasible_results.sort(key=lambda x: x[1])
-    best_sample, best_obj, best_count = feasible_results[0]
+if total_feasible > 0:
+    best = sample_set.best_feasible
+    best_obj = int(round(best.objective))
+    best_sample = {
+        i: int(round(best.decision_variables_df.loc[i, "value"]))
+        for i in range(num_nodes)
+    }
     print(f"Best feasible solution: {best_sample}")
     print(f"Cut edges:             {best_obj}")
-    print(f"Occurrences:           {best_count}")
 else:
     print("No feasible solution found. Try increasing p or maxiter.")
     best_sample = None
+    best_obj = None
 
 # %% [markdown]
 # ### Objective Value Distribution
 #
 # We plot the distribution of the true objective value (cut edges)
-# for feasible samples only.
+# for feasible samples only. `summary` already has the original
+# objective per shot, so a `value_counts()` on the feasible slice
+# gives the histogram directly.
 
 # %%
-from collections import Counter
-
-if feasible_results:
-    obj_counts = Counter()
-    for _, obj, occ in feasible_results:
-        obj_counts[obj] += occ
-
-    objs = sorted(obj_counts.keys())
-    counts = [obj_counts[o] for o in objs]
+if total_feasible > 0:
+    feasible_objectives = (
+        summary.loc[summary["feasible"], "objective"].round().astype(int)
+    )
+    obj_counts = feasible_objectives.value_counts().sort_index()
 
     plt.figure(figsize=(8, 4))
-    plt.bar([str(o) for o in objs], counts, color="#2696EB")
+    plt.bar([str(o) for o in obj_counts.index], obj_counts.values, color="#2696EB")
     plt.xlabel("Cut edges (objective value)")
     plt.ylabel("Frequency")
     plt.title("Distribution of Feasible Solutions")
