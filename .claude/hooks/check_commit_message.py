@@ -3,23 +3,29 @@
 
 Reads PreToolUse hook input from stdin (the standard hook payload schema —
 ``tool_name``, ``tool_input.command``). When the Bash command is a ``git
-commit`` whose message contains an ``@<word>`` token outside of
-backtick-wrapped code, prints a ``permissionDecision`` of ``deny`` with a
-clear reason; otherwise prints ``{}`` and exits 0.
+commit`` and the script can extract the proposed message text, it scans
+the text and prints a ``permissionDecision`` of ``deny`` with a clear
+reason if a bare ``@<word>`` token appears outside of backtick-wrapped
+code; otherwise prints ``{}`` and exits 0.
 
-This enforces the project's ``### No @-mentions`` rule from ``CLAUDE.md`` —
-it cannot be bypassed by a forgetful agent because the harness runs this
-hook before the Bash tool actually executes the commit.
-
-Recognized commit-message forms:
+**Best-effort enforcement** of the project's ``### No @-mentions`` rule
+from ``CLAUDE.md``. The script handles the commit-message forms most
+commonly produced by Claude Code:
 
 - ``git commit -m "single-line"`` / ``git commit -m 'single-line'``
-- ``git commit -m "$(cat <<'EOF' ... EOF)"`` (HEREDOC)
-- ``git commit -m "$(cat <<EOF ... EOF)"``
+- ``git commit -m "$(cat <<'EOF' ... EOF)"`` (HEREDOC, quoted or unquoted
+  delimiter, with or without surrounding quotes around the subshell)
+- Multiple ``-m`` flags (each contribution treated as its own paragraph,
+  matching ``git commit``'s own concatenation behavior)
 
-Forms not recognized fall open (allow) — better to under-block than to
-falsely reject a legitimate commit. The script only ever rejects when it
-has positively identified a bare ``@``-mention in extracted message text.
+Forms the script intentionally does **not** inspect — and which therefore
+fall open (allow) — include editor-based commits (no ``-m``), ``-F`` /
+``--file``, ``--amend`` reusing a previous message, custom shell
+wrappers, and any commit whose message extraction fails. A fall-open
+result is preferred over a false-positive that would block a legitimate
+commit. Treat this hook as a strong nudge against casual mistakes, not a
+complete enforcement boundary; the underlying rule still has to be
+followed by humans and agents in cases the script can't see.
 """
 
 from __future__ import annotations
@@ -32,40 +38,79 @@ import sys
 def _extract_commit_message(command: str) -> str | None:
     """Return the proposed commit-message text from a ``git commit`` command.
 
+    Iterates every ``-m`` flag in the command (``git commit`` concatenates
+    multiple ``-m`` values into one message, joined by blank lines) and,
+    for each, tries the recognized argument forms in order:
+
+    1. ``-m "$(cat <<EOF ... EOF)"`` / ``-m '$(cat <<EOF ... EOF)'`` /
+       ``-m $(cat <<EOF ... EOF)`` — HEREDOC inside a subshell, with
+       optional surrounding quotes; quoted (``<<'EOF'``) and unquoted
+       (``<<EOF``) delimiter variants.
+    2. ``-m "..."`` (plain double-quoted, escapes allowed).
+    3. ``-m '...'`` (plain single-quoted, no shell escapes inside).
+
+    All matched ``-m`` segments are joined by a blank line so the
+    downstream scanner sees the full effective message, matching what
+    ``git commit`` itself would record.
+
     Args:
         command: The full Bash command string as captured in
             ``tool_input.command``.
 
     Returns:
-        The extracted message body (subject + body, joined by newlines),
-        or ``None`` when the command is not a ``git commit`` or the
-        message could not be located in any recognized form.
+        The concatenated message body, or ``None`` when the command is
+        not a ``git commit`` or no recognized ``-m`` argument could be
+        located. ``None`` causes the caller to fall open (allow).
     """
     if not re.search(r"\bgit\s+commit\b", command):
         return None
 
-    # 1) HEREDOC form: ``-m "$(cat <<'EOF' ... EOF)"`` or ``<<EOF ... EOF``.
-    #    The terminator must appear at the start of a line. We allow the
-    #    quoted (``<<'EOF'``) and unquoted (``<<EOF``) variants.
-    heredoc_match = re.search(
-        r"<<-?\s*['\"]?(\w+)['\"]?\s*\n(.*?)\n\1\s*$",
-        command,
-        re.DOTALL | re.MULTILINE,
-    )
-    if heredoc_match:
-        return heredoc_match.group(2)
+    messages: list[str] = []
 
-    # 2) Plain single-quoted: ``-m '...'`` (no escapes inside in shell).
-    plain_single = re.search(r"-m\s+'((?:[^'\\]|\\.)*)'", command, re.DOTALL)
-    if plain_single:
-        return plain_single.group(1)
+    # Walk every ``-m`` flag in order. ``\b`` keeps us from misfiring on
+    # ``--message-id`` style long flags. ``re.MULTILINE`` is unnecessary
+    # because ``-m`` is matched against the raw command string.
+    for flag_match in re.finditer(r"(?:^|\s)-m\b", command):
+        remainder = command[flag_match.end() :]
 
-    # 3) Plain double-quoted: ``-m "..."`` allowing escaped ``\"``.
-    plain_double = re.search(r'-m\s+"((?:[^"\\]|\\.)*)"', command, re.DOTALL)
-    if plain_double:
-        return plain_double.group(1)
+        # 1) HEREDOC inside a subshell. Surrounding quote (if any) before
+        #    ``$(`` and after ``)`` must match. The closing ``\1`` must be
+        #    on its own line; ``re.DOTALL`` lets ``.*?`` span newlines.
+        heredoc_match = re.match(
+            r'\s+(["\']?)\$\(\s*cat\s+<<-?\s*[\'"]?(\w+)[\'"]?\s*\n'
+            r"(.*?)\n\2\s*\)\1",
+            remainder,
+            re.DOTALL,
+        )
+        if heredoc_match:
+            messages.append(heredoc_match.group(3))
+            continue
 
-    return None
+        # 2) Plain double-quoted with escape handling.
+        plain_double = re.match(
+            r'\s+"((?:[^"\\]|\\.)*)"',
+            remainder,
+            re.DOTALL,
+        )
+        if plain_double:
+            messages.append(plain_double.group(1))
+            continue
+
+        # 3) Plain single-quoted (shell does not interpret escapes here).
+        plain_single = re.match(
+            r"\s+'((?:[^'\\]|\\.)*)'",
+            remainder,
+            re.DOTALL,
+        )
+        if plain_single:
+            messages.append(plain_single.group(1))
+            continue
+
+    if not messages:
+        return None
+
+    # ``git commit`` joins multiple ``-m`` values with a blank line.
+    return "\n\n".join(messages)
 
 
 def _strip_backtick_code(text: str) -> str:
