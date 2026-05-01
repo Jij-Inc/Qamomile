@@ -367,6 +367,21 @@ class Transpiler(ABC, Generic[T]):
         """
         return CompileTimeIfLoweringPass(bindings).run(block)
 
+    def strip_slice_ops(self, block: Block) -> Block:
+        """Pass 1.95: Remove ``SliceArrayOperation`` nodes from the block.
+
+        ``PartialEvaluationPass`` keeps these declarative ops through
+        constant folding so :meth:`slice_linearity_check` can use them
+        as view-declaration markers. Once the linearity check has run,
+        segmentation and downstream passes expect a classical-op-free
+        quantum stream — this pass performs that cleanup.
+        """
+        from qamomile.circuit.transpiler.passes.strip_slice_ops import (
+            StripSliceArrayOpsPass,
+        )
+
+        return StripSliceArrayOpsPass().run(block)
+
     def slice_linearity_check(self, block: Block) -> Block:
         """Pass 1.9: Post-fold block-wide borrow checker.
 
@@ -479,6 +494,7 @@ class Transpiler(ABC, Generic[T]):
         validated = self.affine_validate(affine)
         partially_evaluated = self.partial_eval(validated, bindings)
         partially_evaluated = self.slice_linearity_check(partially_evaluated)
+        partially_evaluated = self.strip_slice_ops(partially_evaluated)
         analyzed = self.analyze(partially_evaluated)
         analyzed = self.validate_symbolic_shapes(analyzed)
         separated = self.plan(analyzed)

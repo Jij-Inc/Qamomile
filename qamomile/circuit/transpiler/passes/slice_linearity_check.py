@@ -159,9 +159,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
         # — they record physically-destroyed slots — and must be
         # excluded from the unreturned-borrow check.
         outstanding = {
-            k: v
-            for k, v in state.items()
-            if not isinstance(v, _ConsumedSlotMarker)
+            k: v for k, v in state.items() if not isinstance(v, _ConsumedSlotMarker)
         }
         if outstanding:
             raise UnreturnedBorrowAtBlockEndError(
@@ -556,9 +554,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
         # whose covered sets are identical represent the same logical
         # view — the earlier one's lifetime implicitly ended when the
         # later one was constructed.
-        new_covered: set[int] = {
-            root_start + root_step * j for j in range(length)
-        }
+        new_covered: set[int] = {root_start + root_step * j for j in range(length)}
 
         # Collect distinct existing views whose slots intersect this
         # view's coverage, then decide per-view whether to replace
@@ -587,9 +583,7 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
             else:
                 # Direct element borrow collides with the new view.
                 raise SliceLinearityViolationError(
-                    self._format_view_registration_conflict(
-                        existing, av, idx, root
-                    )
+                    self._format_view_registration_conflict(existing, av, idx, root)
                 )
 
         for other_uuid, other_view in touched_views.items():
@@ -599,7 +593,10 @@ class SliceLinearityCheckPass(Pass[Block, Block]):
                 # we can't prove coverage equality, so be conservative.
                 raise SliceLinearityViolationError(
                     self._format_view_registration_conflict(
-                        other_view, av, next(iter(touched_views_coverage[other_uuid])), root
+                        other_view,
+                        av,
+                        next(iter(touched_views_coverage[other_uuid])),
+                        root,
                     )
                 )
             if other_full == new_covered:

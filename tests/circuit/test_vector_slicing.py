@@ -774,9 +774,7 @@ class TestPostFoldLinearity:
         from qamomile.qiskit import QiskitTranspiler
 
         @qmc.qkernel
-        def circuit(
-            num: qmc.UInt, lo: qmc.UInt, hi: qmc.UInt
-        ) -> qmc.Vector[qmc.Bit]:
+        def circuit(num: qmc.UInt, lo: qmc.UInt, hi: qmc.UInt) -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(num, "q")
             # Force lo2 to stay symbolic at trace time via BinOp so
             # the frontend cannot catch the alias and we must rely on
@@ -789,9 +787,7 @@ class TestPostFoldLinearity:
 
         transpiler = QiskitTranspiler()
         with pytest.raises((SliceLinearityViolationError, QubitConsumedError)):
-            transpiler.transpile(
-                circuit, bindings={"num": 4, "lo": 0, "hi": 4}
-            )
+            transpiler.transpile(circuit, bindings={"num": 4, "lo": 0, "hi": 4})
 
     def test_nested_const_view_locks_parent_slot(self):
         """Constant nested view (``q[0::2][1:3]``) locks the covered root slot.
@@ -1088,8 +1084,7 @@ class TestWholeViewEmit:
             qs = {qc.qubits.index(qobj) for qobj in inst.qubits}
             controlled_qubits |= qs
         assert controlled_qubits == {1, 3}, (
-            f"controlled-Z on q[1::2] touched {controlled_qubits}, "
-            f"expected {{1, 3}}"
+            f"controlled-Z on q[1::2] touched {controlled_qubits}, expected {{1, 3}}"
         )
 
     def test_expval_does_not_mutate_user_hamiltonian_binding(self):
@@ -1147,9 +1142,7 @@ class TestWholeViewEmit:
         from qamomile.qiskit import QiskitTranspiler
 
         @qmc.qkernel
-        def kern(
-            H: qmc.Observable, gamma: qmc.Float, obs: qmc.Observable
-        ) -> qmc.Float:
+        def kern(H: qmc.Observable, gamma: qmc.Float, obs: qmc.Observable) -> qmc.Float:
             q = qmc.qubit_array(4, "q")
             # Flip only qubit 1 so <Z> distinguishes physical qubit 1
             # (-1) from any other qubit (+1).
@@ -1305,9 +1298,7 @@ class TestRound2Reviewer:
         )
 
         subst = {phi_start.uuid: folded_start}
-        lowered = CompileTimeIfLoweringPass(bindings={})._apply_substitution(
-            op, subst
-        )
+        lowered = CompileTimeIfLoweringPass(bindings={})._apply_substitution(op, subst)
         # Both operand and result-side slice_start must have been
         # substituted to the folded const value.
         assert lowered.operands[1] is folded_start
@@ -1801,6 +1792,7 @@ class TestRound4Reviewer:
 
     def test_cast_symbolic_bound_view_rejected(self):
         """``cast(q[lo:hi], QFixed)`` with UInt-symbolic bounds raises a clear error."""
+
         @qmc.qkernel
         def kern(lo: qmc.UInt, hi: qmc.UInt) -> qmc.Float:
             q = qmc.qubit_array(4, "q")
@@ -1875,8 +1867,16 @@ class TestRound4Reviewer:
 
         transpiler = QiskitTranspiler()
         bindings = {"lo": 1, "hi": 3}
-        qc_direct = transpiler.transpile(kern_direct, bindings=bindings).compiled_quantum[0].circuit
-        qc_binop = transpiler.transpile(kern_binop, bindings=bindings).compiled_quantum[0].circuit
+        qc_direct = (
+            transpiler.transpile(kern_direct, bindings=bindings)
+            .compiled_quantum[0]
+            .circuit
+        )
+        qc_binop = (
+            transpiler.transpile(kern_binop, bindings=bindings)
+            .compiled_quantum[0]
+            .circuit
+        )
 
         # Same gate sequence on the same physical qubits
         names_direct = [inst.operation.name for inst in qc_direct.data]

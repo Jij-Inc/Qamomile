@@ -49,11 +49,7 @@ def _emit_binop(
             on fold) or a raw Value (emit-only legacy path).
         kind: The :class:`BinOpKind` to apply.
     """
-    if (
-        isinstance(result, Handle)
-        and lhs.is_constant()
-        and rhs.is_constant()
-    ):
+    if isinstance(result, Handle) and lhs.is_constant() and rhs.is_constant():
         lhs_v = lhs.get_const()
         rhs_v = rhs.get_const()
         if lhs_v is not None and rhs_v is not None:

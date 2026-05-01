@@ -63,11 +63,23 @@ def pauli_evolve(
     consumed = q.consume("pauli_evolve")
     qubits_value = consumed.value
 
-    # Create new result qubit array value
+    # Create new result qubit array value.  When the input is a
+    # sliced view (``pauli_evolve(q[1::2], H, gamma)``), forward its
+    # ``slice_of`` chain onto the result so that downstream
+    # operations — in particular ``expval(result, Z(0))`` — walk the
+    # same chain back to the root parent's physical qubits instead
+    # of landing on qubit 0 by default.  ``pauli_evolve`` is
+    # in-place at the physical-qubit level; preserving the chain is
+    # the semantically correct mapping.  For a non-view input
+    # ``slice_of`` is ``None`` and the result remains a plain array
+    # (no behavioural change for the existing non-view path).
     result_array = ArrayValue(
         type=QubitType(),
         name=f"{qubits_value.name}_evolved",
         shape=qubits_value.shape,
+        slice_of=qubits_value.slice_of,
+        slice_start=qubits_value.slice_start,
+        slice_step=qubits_value.slice_step,
     )
 
     # Create PauliEvolveOp

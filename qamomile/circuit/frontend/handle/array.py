@@ -1068,13 +1068,21 @@ def _uint_min(a: int | UInt, b: int | UInt) -> int | UInt:
     if a_const is not None and b_const is not None:
         return a_const if a_const <= b_const else b_const
 
-    a_uint = a if isinstance(a, UInt) else UInt(
-        value=Value(type=UIntType(), name="uint_const").with_const(int(a)),
-        init_value=int(a),
+    a_uint = (
+        a
+        if isinstance(a, UInt)
+        else UInt(
+            value=Value(type=UIntType(), name="uint_const").with_const(int(a)),
+            init_value=int(a),
+        )
     )
-    b_uint = b if isinstance(b, UInt) else UInt(
-        value=Value(type=UIntType(), name="uint_const").with_const(int(b)),
-        init_value=int(b),
+    b_uint = (
+        b
+        if isinstance(b, UInt)
+        else UInt(
+            value=Value(type=UIntType(), name="uint_const").with_const(int(b)),
+            init_value=int(b),
+        )
     )
     result = UInt(value=Value(type=UIntType(), name="uint_min"), init_value=0)
     _emit_binop(a_uint.value, b_uint.value, result, BinOpKind.MIN)

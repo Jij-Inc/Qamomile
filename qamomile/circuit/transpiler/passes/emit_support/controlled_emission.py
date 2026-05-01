@@ -312,9 +312,18 @@ def emit_controlled_u_with_index_spec(
             operation="ControlledUOperation",
         )
 
+    # Walk any ``slice_of`` chain on the operand so that a view
+    # (``controlled(x_gate)(q[1::2], target_indices=[1])``) resolves
+    # to the root parent's physical qubits via the composed affine
+    # map ``root_idx = start + step * view_local_idx``.  For a
+    # non-view ArrayValue the helper returns ``(vector_value, 0, 1)``
+    # and the loop body is identical to the pre-view code path.
+    root_av, slice_start, slice_step = emit_pass._resolver.resolve_slice_chain(
+        vector_value, bindings, operation="ControlledUOperation"
+    )
     all_phys_indices = []
     for i in range(vector_size):
-        qubit_addr = QubitAddress(vector_value.uuid, i)
+        qubit_addr = QubitAddress(root_av.uuid, slice_start + slice_step * i)
         if qubit_addr in qubit_map:
             all_phys_indices.append(qubit_map[qubit_addr])
         else:

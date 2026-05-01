@@ -132,10 +132,16 @@ def emit_pauli_evolve(
                 operation="PauliEvolveOp",
             )
 
-    # Resolve qubit indices from the input array
+    # Resolve qubit indices from the input array. For a sliced view
+    # (``pauli_evolve(q[1::2], H, gamma)``) walk the ``slice_of`` chain
+    # to the root ArrayValue so every view-local index ``i`` maps to
+    # ``start + step * i`` in the root array's physical qubit space.
+    root_av, slice_start, slice_step = emit_pass._resolver.resolve_slice_chain(
+        input_array, bindings, operation="PauliEvolveOp"
+    )
     qubit_indices: list[int] = []
     for i in range(num_h_qubits):
-        addr = QubitAddress(input_array.uuid, i)
+        addr = QubitAddress(root_av.uuid, slice_start + slice_step * i)
         if addr in qubit_map:
             qubit_indices.append(qubit_map[addr])
         else:
@@ -203,9 +209,18 @@ def emit_pauli_evolve(
                 emit_pass._emitter.emit_s(circuit, qi)
             # Z and I: no basis change
 
-    # Map result array to same physical qubits
+    # Map result array to same physical qubits. Resolve the result's
+    # own slice chain so downstream ``resolve_qubit_index_detailed``
+    # callers that walk to the root find the registered mapping, while
+    # direct lookups via the result array's own uuid also still work.
     result_array = op.evolved_qubits
+    result_root, result_start, result_step = emit_pass._resolver.resolve_slice_chain(
+        result_array, bindings, operation="PauliEvolveOp"
+    )
     for i, phys_idx in enumerate(qubit_indices):
-        result_addr = QubitAddress(result_array.uuid, i)
-        if result_addr not in qubit_map:
-            qubit_map[result_addr] = phys_idx
+        direct_addr = QubitAddress(result_array.uuid, i)
+        if direct_addr not in qubit_map:
+            qubit_map[direct_addr] = phys_idx
+        root_addr = QubitAddress(result_root.uuid, result_start + result_step * i)
+        if root_addr not in qubit_map:
+            qubit_map[root_addr] = phys_idx
