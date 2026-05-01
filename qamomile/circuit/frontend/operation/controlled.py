@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import keyword
 import linecache
 import threading
 import types as _types
@@ -123,25 +124,39 @@ class ControlledGate:
             return power
         raise TypeError(f"power must be int or UInt, got {type(power).__name__}.")
 
-    @staticmethod
     def _params_to_operands(
+        self,
         params: dict[str, ParamValue],
         operands: list[Any],
     ) -> None:
         """Append parameter values to the operands list.
 
-        Handle types are unwrapped to their underlying Value.
-        Raw float/int values are wrapped as constant FloatType Values.
+        Handle types are unwrapped to their underlying Value.  Raw scalar
+        values are coerced to the IR type the wrapped kernel actually
+        declares for that parameter — ``UIntType`` when the kernel's
+        annotation is ``UInt`` / ``int``, ``FloatType`` otherwise.  This
+        prevents an ``int`` argument to a ``UInt``-annotated parameter
+        from sneaking in as a ``FloatType`` constant and violating IR
+        invariants downstream (e.g. ``ForOperation`` requires ``UIntType``
+        operands at expand-controlled-U time).
         """
+        kernel_input_types: dict[str, Any] = getattr(self._qkernel, "input_types", {})
         for param_name, param_value in params.items():
             if isinstance(param_value, Handle):
                 operands.append(param_value.value)
+                continue
+            declared = kernel_input_types.get(param_name)
+            if declared is UInt or declared is int:
+                param_val = Value(
+                    type=UIntType(),
+                    name=f"ctrl_param_{param_name}",
+                ).with_const(int(param_value))
             else:
                 param_val = Value(
                     type=FloatType(),
                     name=f"ctrl_param_{param_name}",
                 ).with_const(float(param_value))
-                operands.append(param_val)
+            operands.append(param_val)
 
     @staticmethod
     def _wrap_qubit_outputs(
@@ -692,12 +707,21 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
         # callable name (so QKernel display + ``transform_control_flow``'s
         # ``name_space[func.__name__]`` lookup show the gate name), but
         # fall back to a fresh ``_qmc_controlled_wrapper_<seq>`` identifier
-        # when ``fn_name`` is not a valid Python identifier (e.g.
-        # ``<lambda>``) or would collide with one of the names we inject
-        # into the exec namespace (``Qubit``, ``Float``, ``UInt``, ...);
-        # shadowing those bindings with a same-named function definition
-        # would break type-hint resolution at decoration time.
-        if fn_name.isidentifier() and fn_name not in _RESERVED_WRAPPER_NAMES:
+        # when ``fn_name``:
+        #   * is not a valid Python identifier (e.g. ``<lambda>``),
+        #   * is a reserved Python keyword (``def class(...):`` is a
+        #     ``SyntaxError`` even though ``"class".isidentifier()`` is
+        #     ``True``),
+        #   * or would collide with one of the names we inject into the
+        #     exec namespace (``Qubit``, ``Float``, ``UInt``, ...);
+        #     shadowing those bindings with a same-named function
+        #     definition would break type-hint resolution at decoration
+        #     time.
+        if (
+            fn_name.isidentifier()
+            and not keyword.iskeyword(fn_name)
+            and fn_name not in _RESERVED_WRAPPER_NAMES
+        ):
             wrapper_internal_name = fn_name
         else:
             wrapper_internal_name = f"_qmc_controlled_wrapper_{seq}"
