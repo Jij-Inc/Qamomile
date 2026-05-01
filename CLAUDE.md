@@ -62,7 +62,7 @@ Dependency direction: `optimization → circuit ← backends`. No reverse depend
 
 How the codebase already follows this:
 
-- **Vector measurement** is a single `MeasureVectorOperation` ([qamomile/circuit/ir/operation/gate.py#L410](qamomile/circuit/ir/operation/gate.py#L410)) — never expanded into N per-qubit `MeasureOperation`s at IR level. Each backend's `emit_measure_vector` decides how to lower per-qubit.
+- **Vector measurement** is a single `MeasureVectorOperation` ([qamomile/circuit/ir/operation/gate.py#L410](qamomile/circuit/ir/operation/gate.py#L410)) — never expanded into N per-qubit `MeasureOperation`s at IR level. How a vector measurement turns into actual measurement instructions is delegated entirely to emit time: a backend with a native vector-measurement primitive can emit it as one operation, while backends without one can iterate per-qubit. The IR does not commit to per-qubit semantics.
 - **`MeasureQFixedOperation`** lives at an even higher abstraction (HYBRID quantum measurement + classical decode). At `plan`'s pre-segmentation lowering, it is split into `MeasureVectorOperation + DecodeQFixedOperation` so segmentation can route the halves into the right (quantum / classical) segment — but **each half stays abstract**: `MeasureVectorOperation` still represents "measure this whole Vector" (not per-qubit), `DecodeQFixedOperation` is a clean classical op.
 - **Composite gates** (QFT / QPE / IQFT) stay as `CompositeGateOperation` boxes; backends with a native `CompositeGateEmitter` emit a single high-level gate, others fall back to library decomposition. The IR is identical either way.
 - **Loops** (`qmc.range(...)`) stay as `ForOperation`s with symbolic bounds when possible; `LoopAnalyzer` decides unroll vs. runtime loop at emit time.
