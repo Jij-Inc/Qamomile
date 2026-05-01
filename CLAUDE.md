@@ -62,7 +62,7 @@ Dependency direction: `optimization → circuit ← backends`. No reverse depend
 
 How the codebase already follows this:
 
-- **Vector measurement** is a single `MeasureVectorOperation` ([qamomile/circuit/ir/operation/gate.py:410](qamomile/circuit/ir/operation/gate.py:410)) — never expanded into N per-qubit `MeasureOperation`s at IR level. Each backend's `emit_measure_vector` decides how to lower per-qubit.
+- **Vector measurement** is a single `MeasureVectorOperation` ([qamomile/circuit/ir/operation/gate.py#L410](qamomile/circuit/ir/operation/gate.py#L410)) — never expanded into N per-qubit `MeasureOperation`s at IR level. Each backend's `emit_measure_vector` decides how to lower per-qubit.
 - **`MeasureQFixedOperation`** lives at an even higher abstraction (HYBRID quantum measurement + classical decode). At `plan`'s pre-segmentation lowering, it is split into `MeasureVectorOperation + DecodeQFixedOperation` so segmentation can route the halves into the right (quantum / classical) segment — but **each half stays abstract**: `MeasureVectorOperation` still represents "measure this whole Vector" (not per-qubit), `DecodeQFixedOperation` is a clean classical op.
 - **Composite gates** (QFT / QPE / IQFT) stay as `CompositeGateOperation` boxes; backends with a native `CompositeGateEmitter` emit a single high-level gate, others fall back to library decomposition. The IR is identical either way.
 - **Loops** (`qmc.range(...)`) stay as `ForOperation`s with symbolic bounds when possible; `LoopAnalyzer` decides unroll vs. runtime loop at emit time.
@@ -135,13 +135,15 @@ executable = transpiler.transpile(my_circuit, bindings={"theta": 0.5})
 ### Transpiler Pipeline Stages
 
 `Transpiler.transpile()` runs the following passes in order. `BlockKind`
-advances as preconditions are met; each pass is idempotent and exposed as a
-public method for step-by-step debugging.
+advances as preconditions are met. Every pass other than
+`entrypoint_validate` is idempotent and exposed as a public method on
+`Transpiler` for step-by-step debugging; `entrypoint_validate` runs inline
+inside `transpile()` as a structural check (no public method today).
 
 ```
 QKernel
    │  to_block                    (trace Python AST → IR)
-   │  entrypoint_validate         (require classical I/O on entrypoint kernels)
+   │  entrypoint_validate         (internal — require classical I/O on entrypoint kernels)
    ▼
 Block [HIERARCHICAL]
    │  substitute                  (optional rule-based block / strategy replacement)
@@ -170,25 +172,31 @@ See [docs/en/tutorial/09_compilation_and_transpilation.py](docs/en/tutorial/09_c
 ### Binding vs. Parameter Contract
 
 `Transpiler.transpile(kernel, bindings=..., parameters=...)` enforces a
-**disjoint partition** of the kernel's arguments:
+**disjoint partition** of the kernel's arguments — the API rejects any
+overlapping name with `ValueError` ([transpiler.py][overlap-check]):
 
 - **Each kernel argument must appear in exactly one of `bindings` or
   `parameters`.** Specifying the same name in both is invalid; every argument
   must be assigned to one of them (modulo arguments with Python defaults, or
   `Qubit` / `Observable` inputs handled implicitly by the frontend).
   - `bindings={...}` — values resolved at compile time, substituted into the
-    IR by `resolve_parameter_shapes` / `partial_eval`.
+    IR by `resolve_parameter_shapes` / `partial_eval`. The value is baked
+    into the emitted circuit.
   - `parameters=[...]` — argument names that survive the pipeline as runtime
     parameters in the emitted backend circuit.
 - **Arguments driving a classical-value `if` branch (one whose condition is
-  not a measurement-backed `Bit`) must always be in `bindings`.**
-  `CompileTimeIfLoweringPass` needs the value at compile time to lower the
-  branch; leaving it in `parameters` keeps the condition symbolic and the
-  compile fails. The same rule applies to any other compile-time structural
-  decision such as `qmc.range(...)` bounds. Measurement-backed `if bit:` /
-  `while bit:` (where `bit = qmc.measure(q)`) is unrelated to this rule —
-  that is runtime control flow handled at emit time by backends with a
-  supporting `MeasurementMode`.
+  not a measurement-backed `Bit`) must be in `bindings` so
+  `CompileTimeIfLoweringPass` can resolve the condition at compile time.**
+  Per the disjoint partition rule above, this means such arguments
+  cannot simultaneously be in `parameters` — leaving them in `parameters`
+  keeps the condition symbolic and the compile fails. The same rule
+  applies to any other compile-time structural decision such as
+  `qmc.range(...)` bounds. Measurement-backed `if bit:` / `while bit:`
+  (where `bit = qmc.measure(q)`) is unrelated — that is runtime control
+  flow handled at emit time by backends with a supporting
+  `MeasurementMode`.
+
+[overlap-check]: qamomile/circuit/transpiler/transpiler.py
 
 ## Docstring Convention (MANDATORY)
 
@@ -323,8 +331,21 @@ Translation rules (tone, spacing, terminology, soft line breaks, etc.) are defin
 ## Commits, Pull Requests, and Issues
 
 The rules below apply to any text Claude writes that lands in the project's
-permanent record — commit messages, PR titles / bodies, and issue titles /
-bodies. Consult this section **before** creating any commit, PR, or issue.
+permanent record or on GitHub — commit messages, PR titles / bodies, issue
+titles / bodies, PR review comments, code review replies, and inline source
+code comments. Consult this section **before** creating any commit, PR, or
+issue.
+
+### Use English
+
+All text that lands in the project's permanent record or on GitHub — commit
+messages, PR titles / bodies, issue titles / bodies, PR / code review
+comments and replies, and inline source code comments — MUST be written in
+**English**. English is the project's lingua franca so that contributors
+regardless of native-language background can read, search, and respond to
+the shared record. Japanese (or other languages) is appropriate only in
+private chat / Slack / live verbal discussion, never in checked-in text or
+GitHub-tracked artifacts.
 
 ### Run `/local-review` before opening a PR
 

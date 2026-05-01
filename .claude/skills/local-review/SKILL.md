@@ -43,7 +43,7 @@ Qamomile prefers to **keep the IR as abstract as possible and delegate concretiz
 
 Existing examples of the principle in code:
 
-- **Vector measurement** is a single `MeasureVectorOperation` (`qamomile/circuit/ir/operation/gate.py:410`) — not expanded into N per-qubit `MeasureOperation`s at IR level. Per-qubit lowering happens in `emit_measure_vector`.
+- **Vector measurement** is a single `MeasureVectorOperation` (`qamomile/circuit/ir/operation/gate.py#L410`) — not expanded into N per-qubit `MeasureOperation`s at IR level. Per-qubit lowering happens in `emit_measure_vector`.
 - **`MeasureQFixedOperation`** is HYBRID (quantum measurement + classical decode). It is split into `MeasureVectorOperation + DecodeQFixedOperation` only at `plan`'s pre-segmentation lowering — late enough that the IR keeps the highest abstraction that still admits a clean classical/quantum segmentation boundary, and each resulting half remains as abstract as possible (no per-qubit expansion).
 - **Composite gates** (QFT / QPE / IQFT) stay as `CompositeGateOperation`; native lowering is opt-in via `CompositeGateEmitter`.
 - **Symbolic loop bounds** stay as `ForOperation`; `LoopAnalyzer` decides unroll-vs-runtime-loop at emit time.
