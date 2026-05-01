@@ -189,9 +189,19 @@ _build_lang_from_build_src() {
 }
 
 # Build documentation for a single language (no sync). Public entry
-# point — runs setup_build_src then builds just this lang.
+# point — runs generate_api + copy_api + setup_build_src then builds
+# just this lang. We always run the API generation pair so the build
+# is self-contained: a contributor running ``./build.sh build-en`` on
+# a fresh clone (where ``docs/api/`` is gitignored and absent) does
+# not get a missing-toc-entry error from mystmd. The pair is fast and
+# idempotent, so re-running them on every single-locale build is an
+# acceptable cost; ``build_all`` calls them once up front and then
+# delegates to ``_build_lang_from_build_src`` directly so we don't
+# double-run.
 build_lang() {
     local lang="$1"
+    generate_api
+    copy_api
     setup_build_src
     _build_lang_from_build_src "$lang"
 }
@@ -205,8 +215,9 @@ sync_build_lang() {
 }
 
 sync_build_all() {
-    generate_api
-    copy_api
+    # build_lang inside each sync_build_lang now runs generate_api +
+    # copy_api itself (so single-locale builds are self-contained), so
+    # we don't need to call them up front here.
     sync_build_lang en
     sync_build_lang ja
     info "Both English and Japanese documentation synced and built successfully"
