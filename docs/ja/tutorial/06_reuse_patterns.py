@@ -85,6 +85,32 @@ qc = transpiler.to_circuit(ghz_with_helper, bindings={"n": 4})
 print(qc.draw())
 
 # %% [markdown]
+# ### ヘルパーへのスカラーリテラルの受け渡し
+#
+# ヘルパーqkernelがスカラー型(`UInt`,`Float`,`Bit`)のパラメータを宣言している場合、呼び出し側ではPythonの生のリテラルをそのまま渡せます。Qamomileが`int`を`UInt`、`float`を`Float`、`bool`を`Bit`に自動昇格します。`helper(q, 0, 0.5)`は`helper(q, qmc.uint(0), qmc.float_(0.5))`と等価です。明示的な`qmc.uint`/`qmc.float_`/`qmc.bit`コンストラクタは、値に名前を付けたい場合や複数の呼び出し箇所で共有したい場合にのみ使えば十分です。
+
+
+# %%
+@qmc.qkernel
+def rotate_first(
+    q: qmc.Vector[qmc.Qubit],
+    idx: qmc.UInt,
+    angle: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    q[idx] = qmc.ry(q[idx], angle)
+    return q
+
+
+@qmc.qkernel
+def helper_with_literals(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(n, name="q")
+    q = rotate_first(q, 0, 0.5)  # int・floatリテラルをそのまま渡せる
+    return qmc.measure(q)
+
+
+helper_with_literals.draw(n=3, fold_loops=False)
+
+# %% [markdown]
 # ## パターン2：`@composite_gate`
 #
 # 再利用可能なブロックを回路図で**名前付きボックス**として表示したい場合`@composite_gate`でを使うこともできます。また、より高度な内容としてコンポジットゲートにすることで複数の実装方式を与えるといったカスタム設定を与えることも可能です。
