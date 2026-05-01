@@ -1,6 +1,19 @@
 # For mpl test
 tests/circuit/visualization/baseline/*
 
+# Build-time scratch tree. ./docs/build.sh copies docs/<lang>/ here,
+# runs build_doc_tags.py and jupytext --update against the copy, then
+# mystmd builds from this dir. The committed source tree never receives
+# tag-related auto-managed injections (chip blocks, browse-by-tag
+# clouds, per-tag pages) — they only exist inside _build_src/.
+docs/_build_src/
+
+# Per-tag pages auto-generated into the build-dir copy of docs/<lang>/
+# (kept gitignored as well in case build_doc_tags.py is invoked ad hoc
+# against the source tree without DOCS_ROOT_OVERRIDE).
+docs/en/tags/
+docs/ja/tags/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

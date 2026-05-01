@@ -242,6 +242,68 @@ Pure refactors that provably preserve IR output are exempt but still encouraged 
 
 Shipping a new backend without retro-actively extending algorithm/stdlib coverage leaves the backend silently unvalidated against real quantum programs.
 
+## Documentation Editing
+
+When making any change under `docs/` (article `.py`/`.ipynb`,
+section landing pages, build scripts, tag taxonomy, etc.), **read
+`docs/README.md` first**. It is the source-of-truth for the docs
+build pipeline and the conventions for adding or editing pages.
+
+Key invariants worth remembering:
+
+- **Auto-managed content (chip blocks, browse-by-tag sections,
+  per-tag pages) is never committed.** `build.sh build` copies the
+  docs tree into a gitignored `docs/_build_src/`, runs
+  `build_doc_tags.py` and `jupytext --update` against the copy, and
+  builds from there. The committed source carries no chip block or
+  `## Browse by tag` heading — those are synthesised into the
+  build-dir copy.
+- **`myst.yml` is hand-written for the tag mechanism.** Article
+  children and per-tag pages are discovered via `pattern:` toc
+  entries (`<section>/*.ipynb`, `tags/*.md`), so adding a new article
+  or new tag does not require editing `myst.yml`. Article ordering
+  inside a section's sidebar is alphabetical by filename — use
+  `01_`, `02_` prefixes if you need a curated order (the way
+  `tutorial/` does). The one exception is the `API Reference` toc
+  region: `docs/generate_api.py` (via `docs/api_gen/toc.py`'s
+  `inject_toc()`) rewrites that region between BEGIN/END markers as
+  part of API doc generation. `build_doc_tags.py` itself never
+  touches `myst.yml`.
+- The committed source must therefore stay clean. PRs that touch
+  tag taxonomy should only diff `tags:` frontmatter lines, not
+  chip-block bodies.
+
+## Documentation Tags (Whitelist)
+
+The doc-tag taxonomy is intentionally small and is enforced by a
+whitelist in `docs/scripts/build_doc_tags.py` (`ALLOWED_TAGS`). The
+whitelist is checked in CI by `tests/docs/test_tag_whitelist.py`, so
+any article with an out-of-whitelist tag fails on every PR.
+
+The whitelist contains two kinds of tags:
+
+- **Section tags** (`tutorial`, `algorithm`, `usage`, `integration`)
+  map 1:1 to the directory layout. **Every article must carry the
+  section tag matching its containing directory.** This keeps cross-
+  section discovery available via the per-tag pages even when the
+  reader is browsing by topic rather than by section.
+- **Topical tags** (domain / method family / article type / technique
+  / other) describe what the article is about. An article carries
+  zero or more topical tags in addition to its section tag.
+
+**Do NOT modify `ALLOWED_TAGS` unless the user has explicitly asked
+to add/remove a tag in this conversation.** A new tag is a deliberate
+taxonomy decision that the maintainer wants to make consciously, not a
+side-effect of writing an article. If a contributor needs a tag that
+doesn't exist:
+
+- Stop and ask the user whether the tag should be admitted, *before*
+  editing `ALLOWED_TAGS`.
+- If approved, the same commit must add the tag to `ALLOWED_TAGS` and
+  use it in the article frontmatter.
+- Don't reach for "it would be nice to also add `<tag>`" rationales.
+  Suggest staying within the existing set unless the user disagrees.
+
 ## Documentation Translation
 
 To translate English docs (`docs/en/`) into Japanese (`docs/ja/`), use the `/translate` skill:

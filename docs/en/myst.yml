@@ -20,31 +20,21 @@ project:
     - title: Tutorials
       file: tutorial/index.md
       children:
-        - file: tutorial/01_your_first_quantum_kernel.ipynb
-        - file: tutorial/02_parameterized_kernels.ipynb
-        - file: tutorial/03_resource_estimation.ipynb
-        - file: tutorial/04_execution_models.ipynb
-        - file: tutorial/05_classical_flow_patterns.ipynb
-        - file: tutorial/06_reuse_patterns.ipynb
-        - file: tutorial/07_hamiltonian_simulation.ipynb
-        - file: tutorial/08_hermitian_decomposition.ipynb
-        - file: tutorial/09_compilation_and_transpilation.ipynb
-        - file: tutorial/10_quantum_error_correction.ipynb
-        - file: tutorial/11_steane_code.ipynb
-    - title: VQA
-      file: vqa/index.md
+        - pattern: tutorial/*.ipynb
+    - title: Algorithms
+      file: algorithm/index.md
       children:
-        - file: vqa/qaoa_maxcut.ipynb
-        - file: vqa/vqe_for_hydrogen.ipynb
-    - title: Optimization
-      file: optimization/index.md
+        - pattern: algorithm/*.ipynb
+    - pattern: "tags/*.md"
+      hidden: true
+    - title: Usage
+      file: usage/index.md
       children:
-        - file: optimization/binary_model.ipynb
-        - file: optimization/qaoa_graph_partition.ipynb
-    - title: Collaboration
-      file: collaboration/index.md
+        - pattern: usage/*.ipynb
+    - title: Integration
+      file: integration/index.md
       children:
-        - file: collaboration/qbraid_executor.ipynb
+        - pattern: integration/*.ipynb
     - title: Release Notes
       file: release_notes/index.md
       children:

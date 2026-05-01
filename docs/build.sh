@@ -9,10 +9,10 @@ cd "$(dirname "$0")"
 
 # Languages and target directories
 LANGS=(en ja)
-# collaboration is excluded because those notebooks may require API keys
+# integration is excluded because those notebooks may require API keys
 # and can't be automatically synced/executed.
 # release_notes is excluded because it is markdown-only; nothing to sync or execute.
-TARGET_DIRS=(tutorial optimization vqa)
+TARGET_DIRS=(tutorial algorithm usage)
 
 # Color output
 RED='\033[0;31m'
@@ -64,11 +64,85 @@ generate_api() {
     info "API reference generated"
 }
 
+generate_doc_tags() {
+    # Inject auto-managed regions (chip blocks, browse-by-tag clouds,
+    # per-tag pages) into the build-dir copy of the docs tree pointed
+    # at by $1. Defaults to the current dir when invoked without an
+    # argument (back-compat for ad-hoc runs).
+    local docs_root="${1:-$(pwd)}"
+    echo "Generating doc tag indexes (docs root: ${docs_root})..."
+    DOCS_ROOT_OVERRIDE="$docs_root" uv run python scripts/build_doc_tags.py
+    info "Doc tag pages generated"
+}
+
+setup_build_src() {
+    # Build everything inside docs/_build_src/ so the committed source
+    # tree never receives auto-managed injections. Sequence:
+    #   1. rm + recreate docs/_build_src/<lang>/ as a copy of docs/<lang>/
+    #   2. run build_doc_tags.py against _build_src/ (injects chip
+    #      blocks and browse-by-tag clouds; generates per-tag pages)
+    #   3. jupytext --update so chip-injected .py propagates into .ipynb
+    #      cells (preserves committed outputs). Includes integration/
+    #      because jupytext only syncs cell sources — no execution, no
+    #      API-key dependency.
+    #
+    # Pass one or more locale names as arguments to scope the work to
+    # those locales (used by build_lang); pass no arguments to set up
+    # every locale in $LANGS (used by build_all).
+    local langs=("$@")
+    if [ ${#langs[@]} -eq 0 ]; then
+        langs=("${LANGS[@]}")
+    fi
+    local build_src_root="$(pwd)/_build_src"
+    local _lang _dir _py_files
+    echo "Setting up _build_src/ for: ${langs[*]} ..."
+    rm -rf "$build_src_root"
+    mkdir -p "$build_src_root"
+    for _lang in "${langs[@]}"; do
+        # cp -R is portable across the Linux RTD image and local macOS
+        # (rsync isn't installed in the RTD build env). Copy the whole
+        # lang dir then prune the build artifacts that we never want
+        # in the scratch tree.
+        cp -R "${_lang}" "${build_src_root}/"
+        rm -rf "${build_src_root}/${_lang}/_build"
+    done
+    # myst.yml inside each <lang>/ references ../assets/custom-theme.css
+    # (the chip-pill CSS, the logo, the colab-launch JS). When mystmd
+    # builds from _build_src/<lang>/, that ../assets/ resolves to
+    # _build_src/assets/, so the assets dir has to exist there too.
+    cp -R assets "${build_src_root}/"
+
+    # build_doc_tags.py auto-skips locales whose root dir is absent
+    # from the build-dir, so a single-locale invocation only does work
+    # for the locales we actually copied above.
+    generate_doc_tags "$build_src_root"
+
+    local sync_dirs=("${TARGET_DIRS[@]}" "integration")
+    for _lang in "${langs[@]}"; do
+        for _dir in "${sync_dirs[@]}"; do
+            shopt -s nullglob
+            _py_files=("${build_src_root}/${_lang}/${_dir}"/*.py)
+            shopt -u nullglob
+            [ ${#_py_files[@]} -eq 0 ] && continue
+            uv run jupytext --to ipynb --update "${_py_files[@]}"
+        done
+    done
+
+    info "_build_src/ ready (${langs[*]})"
+}
+
 copy_api() {
+    # NOTE: ``local _lang`` is mandatory. Without it the loop variable
+    # would leak into the caller's scope and clobber the caller's own
+    # ``local lang="$1"`` (build_lang sets that, then calls copy_api,
+    # then calls setup_build_src "$lang" — which would receive the
+    # wrong locale once copy_api's loop finishes on the last LANGS
+    # element). Same trap exists in clean / clean_all / execute_lang.
+    local _lang
     echo "Copying API reference to language directories..."
-    for lang in "${LANGS[@]}"; do
-        mkdir -p "${lang}/api"
-        cp -r api/. "${lang}/api/"
+    for _lang in "${LANGS[@]}"; do
+        mkdir -p "${_lang}/api"
+        cp -r api/. "${_lang}/api/"
     done
     info "API reference copied"
 }
@@ -77,7 +151,17 @@ copy_api() {
 sync_lang() {
     local lang="$1"
     echo "Converting ${lang} .py files to .ipynb..."
-    for dir in "${TARGET_DIRS[@]}"; do
+    # Include integration/ here even though TARGET_DIRS excludes it.
+    # Rationale: jupytext only rewrites cell sources — it does not
+    # execute the notebook, so syncing integration/ has no API-key
+    # dependency. Without this include, ``./build.sh sync`` would
+    # leave docs/<lang>/integration/*.ipynb stale relative to its
+    # .py source whenever a contributor updated only the .py and ran
+    # the sync target. This list must stay in lock-step with the
+    # ``sync_dirs`` defined inside ``setup_build_src`` (which already
+    # includes integration/ for the same reason).
+    local sync_dirs=("${TARGET_DIRS[@]}" "integration")
+    for dir in "${sync_dirs[@]}"; do
         local py_files=()
         shopt -s nullglob
         py_files=("${lang}/${dir}"/*.py)
@@ -88,13 +172,15 @@ sync_lang() {
         fi
         uv run jupytext --to ipynb "${py_files[@]}"
     done
-    # We don't convert collaboration/ because those notebooks need API-KEYs.
+    # execute_lang still excludes integration/ because executing those
+    # notebooks does need API keys.
     info "${lang} notebooks synced"
 }
 
 # Execute .ipynb notebooks for a single language
 execute_lang() {
     local lang="$1"
+    local dir nb
     echo "Executing ${lang} notebooks..."
     for dir in "${TARGET_DIRS[@]}"; do
         for nb in "${lang}/${dir}"/*.ipynb; do
@@ -106,11 +192,12 @@ execute_lang() {
     info "${lang} notebooks executed"
 }
 
-# Build documentation for a single language (no sync)
-build_lang() {
+# Build a single language from docs/_build_src/<lang>/ (assumes
+# setup_build_src already ran).
+_build_lang_from_build_src() {
     local lang="$1"
     echo "Building ${lang} documentation..."
-    cd "$lang"
+    cd "_build_src/${lang}"
     if is_rtd && [[ -n "${READTHEDOCS_VERSION:-}" ]]; then
         local base_url="/${READTHEDOCS_VERSION}/${lang}"
         info "Read the Docs detected. Using BASE_URL=${base_url}"
@@ -121,9 +208,32 @@ build_lang() {
         fi
         uv run jupyter-book build --html
     fi
-    cd ..
+    cd ../..
+    # Move the html output back to docs/<lang>/_build/ so the existing
+    # post-build step (colab-launch injection) and the .readthedocs.yaml
+    # copy step both find it where they used to.
+    rm -rf "${lang}/_build"
+    cp -r "_build_src/${lang}/_build" "${lang}/_build"
     uv run python scripts/inject_colab_launch.py "$lang"
     info "${lang} documentation built: ${lang}/_build/html/index.html"
+}
+
+# Build documentation for a single language (no sync). Public entry
+# point — runs generate_api + copy_api + setup_build_src then builds
+# just this lang. We always run the API generation pair so the build
+# is self-contained: a contributor running ``./build.sh build-en`` on
+# a fresh clone (where ``docs/api/`` is gitignored and absent) does
+# not get a missing-toc-entry error from mystmd. The pair is fast and
+# idempotent, so re-running them on every single-locale build is an
+# acceptable cost; ``build_all`` calls them once up front and then
+# delegates to ``_build_lang_from_build_src`` directly so we don't
+# double-run.
+build_lang() {
+    local lang="$1"
+    generate_api
+    copy_api
+    setup_build_src "$lang"
+    _build_lang_from_build_src "$lang"
 }
 
 # Sync, execute, and build documentation for a single language
@@ -135,8 +245,9 @@ sync_build_lang() {
 }
 
 sync_build_all() {
-    generate_api
-    copy_api
+    # build_lang inside each sync_build_lang now runs generate_api +
+    # copy_api itself (so single-locale builds are self-contained), so
+    # we don't need to call them up front here.
     sync_build_lang en
     sync_build_lang ja
     info "Both English and Japanese documentation synced and built successfully"
@@ -173,28 +284,32 @@ fresh_lang() {
 build_all() {
     generate_api
     copy_api
-    build_lang en
-    build_lang ja
+    setup_build_src
+    _build_lang_from_build_src en
+    _build_lang_from_build_src ja
     info "Both English and Japanese documentation built successfully"
 }
 
 clean() {
+    local _lang _dir
     echo "Cleaning generated files..."
-    for lang in "${LANGS[@]}"; do
-        for dir in "${TARGET_DIRS[@]}"; do
-            rm -f "${lang}/${dir}"/*.ipynb
+    for _lang in "${LANGS[@]}"; do
+        for _dir in "${TARGET_DIRS[@]}"; do
+            rm -f "${_lang}/${_dir}"/*.ipynb
         done
-        rm -rf "${lang}/_build"
-        rm -rf "${lang}/api"
+        rm -rf "${_lang}/_build"
+        rm -rf "${_lang}/api"
     done
+    rm -rf "_build_src"
     info "Cleaned generated .ipynb files and build outputs"
 }
 
 clean_all() {
+    local _lang
     clean
     echo "Cleaning execution cache..."
-    for lang in "${LANGS[@]}"; do
-        rm -rf "${lang}/_build/.jupyter_cache"
+    for _lang in "${LANGS[@]}"; do
+        rm -rf "${_lang}/_build/.jupyter_cache"
     done
     info "All generated files and cache removed"
 }

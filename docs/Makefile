@@ -3,10 +3,10 @@
 
 # Languages and tutorial directories
 LANGS := en ja
-# collaboration is excluded because those notebooks may require API keys
+# integration is excluded because those notebooks may require API keys
 # and can't be automatically synced/executed.
 # release_notes is excluded because it is markdown-only; nothing to sync or execute.
-TARGET_DIRS := tutorial optimization vqa
+TARGET_DIRS := tutorial algorithm usage
 
 .PHONY: help build build-en build-ja sync sync-en sync-ja execute execute-en execute-ja sync-build sync-build-en sync-build-ja generate-api copy-api clean clean-all serve-en serve-ja fresh-en fresh-ja build-site serve-site
 
@@ -49,11 +49,32 @@ copy-api: generate-api
 	@for lang in $(LANGS); do mkdir -p $$lang/api; cp -r api/. $$lang/api/; done
 	@echo "✓ API reference copied to language directories"
 
+# Auto-managed regions (chip blocks, browse-by-tag clouds, per-tag
+# pages) must be generated into an isolated docs copy, never into the
+# committed source tree. The main build flow does this inside
+# build.sh's setup_build_src; this target provides a safe ad-hoc entry
+# point for previewing by creating a temporary docs root and pointing
+# build_doc_tags.py at it via DOCS_ROOT_OVERRIDE. The temp directory
+# is left in place so the caller can inspect the generated chip
+# blocks / tag pages; it is the caller's responsibility to remove it
+# (or rely on the OS' /tmp cleanup).
+generate-doc-tags:
+	@tmp_dir=$$(mktemp -d -t qamomile-doc-tags-preview-XXXXXX); \
+	echo "Generating doc tag pages in temporary docs root: $$tmp_dir"; \
+	find . -mindepth 1 -maxdepth 1 ! -name '_build_src' ! -name '_build' -exec cp -R {} "$$tmp_dir"/ \; ; \
+	DOCS_ROOT_OVERRIDE="$$tmp_dir" uv run python scripts/build_doc_tags.py; \
+	echo "✓ Doc tag pages generated in $$tmp_dir (committed source untouched)"
+
 # Sync .py -> .ipynb for a single language (used via sync-en, sync-ja)
-# We don't convert collaboration/ because those notebooks need API-KEYs.
+# Includes integration/ even though TARGET_DIRS excludes it: jupytext
+# only rewrites cell sources (no execution), so it has no API-key
+# dependency. Excluding integration/ here would leave its .ipynb stale
+# whenever a contributor edits only the .py and runs ``make sync``.
+# execute-* still excludes integration/ because executing it needs API
+# keys.
 define sync-lang
 	@echo "Converting $(1) .py files to .ipynb..."
-	@for dir in $(TARGET_DIRS); do \
+	@for dir in $(TARGET_DIRS) integration; do \
 		py_files=$$(find $(1)/$$dir -maxdepth 1 -name '*.py' 2>/dev/null); \
 		if [ -z "$$py_files" ]; then \
 			echo "! No .py files in $(1)/$$dir, skipping"; \
@@ -97,21 +118,18 @@ execute-ja:
 execute: execute-en execute-ja
 	@echo "✓ All notebooks executed"
 
-# Build targets (no sync)
-build-en: copy-api
-	@echo "Building English documentation..."
-	cd en && uv run jupyter-book build --html
-	@uv run python scripts/inject_colab_launch.py en
-	@echo "✓ English documentation built: en/_build/html/index.html"
+# Build targets — delegate to build.sh so the build-dir setup, tag-page
+# injection, and post-build colab-launch step stay defined in one place.
+# build.sh handles _build_src/ copy, build_doc_tags.py injection,
+# jupytext --update, mystmd build, and the final cp back to <lang>/_build/.
+build-en:
+	@./build.sh build-en
 
-build-ja: copy-api
-	@echo "Building Japanese documentation..."
-	cd ja && uv run jupyter-book build --html
-	@uv run python scripts/inject_colab_launch.py ja
-	@echo "✓ Japanese documentation built: ja/_build/html/index.html"
+build-ja:
+	@./build.sh build-ja
 
-build: copy-api build-en build-ja
-	@echo "✓ Both English and Japanese documentation built successfully"
+build:
+	@./build.sh build
 
 # Sync + execute + build targets
 sync-build-en: sync-en execute-en build-en
@@ -131,6 +149,7 @@ clean:
 		rm -rf $$lang/_build; \
 		rm -rf $$lang/api; \
 	done
+	@rm -rf _build_src
 	@rm -rf _site
 	@echo "✓ Cleaned generated .ipynb files and build outputs"
 
