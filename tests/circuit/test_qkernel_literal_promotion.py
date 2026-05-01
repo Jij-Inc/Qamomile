@@ -32,6 +32,7 @@ import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
+import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.basic import (
     cz_entangling_layer,
     ry_layer,
@@ -65,14 +66,6 @@ try:  # pragma: no cover - presence check, not behaviour
 except ImportError:  # pragma: no cover - covered when cudaq is absent
     _HAS_CUDAQ = False
     CudaqTranspiler = None  # type: ignore[assignment]
-
-_HAS_OBSERVABLE = True
-try:  # pragma: no cover - presence check, not behaviour
-    import qamomile.observable as qm_o
-except ImportError:  # pragma: no cover - never expected, defensive
-    _HAS_OBSERVABLE = False
-    qm_o = None  # type: ignore[assignment]
-
 
 BACKENDS = [
     pytest.param(
@@ -314,8 +307,13 @@ class TestFloatLiteralPromotion:
 # ---------------------------------------------------------------------------
 #
 # Less common, but the symmetry argument applies: a callee declaring
-# ``flag: qmc.Bit`` should accept ``True``/``False``/``0``/``1`` at the
-# call site. Compile-time folding then erases the dead branch.
+# ``flag: qmc.Bit`` should accept Python ``bool`` (``True`` / ``False``)
+# at the call site. ``int`` values like ``0`` / ``1`` are intentionally
+# NOT promoted to ``Bit`` — this mirrors the symmetric exclusion of
+# ``bool`` from the ``int → UInt`` and ``int → Float`` paths. Each scalar
+# Handle accepts only the Python primitive that semantically matches it;
+# users who want a Bit-typed integer literal can wrap it explicitly via
+# ``qmc.bit(0)``. Compile-time folding then erases the dead branch.
 
 
 @qmc.qkernel
@@ -441,6 +439,26 @@ class TestNonPromotableArgsRaise:
         @qmc.qkernel
         def caller() -> qmc.Bit:
             return takes_bit("yes")  # type: ignore[arg-type]
+
+        with pytest.raises(TypeError, match="must be a Handle instance"):
+            caller.block  # noqa: B018
+
+    def test_int_for_bit_param_raises(self):
+        """``int`` (``0`` / ``1``) is intentionally excluded from ``Bit`` promotion.
+
+        Symmetric to ``bool`` being excluded from ``UInt`` / ``Float``: each
+        scalar Handle only accepts its semantic Python primitive. Users who
+        want a Bit-typed integer literal must wrap it explicitly via
+        ``qmc.bit(0)`` so the intent is unambiguous at the call site.
+        """
+
+        @qmc.qkernel
+        def takes_bit(flag: qmc.Bit) -> qmc.Bit:
+            return flag
+
+        @qmc.qkernel
+        def caller() -> qmc.Bit:
+            return takes_bit(1)  # type: ignore[arg-type]
 
         with pytest.raises(TypeError, match="must be a Handle instance"):
             caller.block  # noqa: B018
