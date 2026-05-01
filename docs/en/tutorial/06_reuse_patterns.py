@@ -88,6 +88,32 @@ qc = transpiler.to_circuit(ghz_with_helper, bindings={"n": 4})
 print(qc.draw())
 
 # %% [markdown]
+# ### Passing scalar literals to helpers
+#
+# When a helper qkernel declares a scalar parameter (`UInt`, `Float`, or `Bit`), you can pass a raw Python literal at the call site — Qamomile auto-promotes `int` to `UInt`, `float` to `Float`, and `bool` to `Bit`. Writing `helper(q, 0, 0.5)` is equivalent to `helper(q, qmc.uint(0), qmc.float_(0.5))`. Use the explicit `qmc.uint` / `qmc.float_` / `qmc.bit` constructors only when you want to name the value or share it across multiple call sites.
+
+
+# %%
+@qmc.qkernel
+def rotate_first(
+    q: qmc.Vector[qmc.Qubit],
+    idx: qmc.UInt,
+    angle: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    q[idx] = qmc.ry(q[idx], angle)
+    return q
+
+
+@qmc.qkernel
+def helper_with_literals(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(n, name="q")
+    q = rotate_first(q, 0, 0.5)  # int and float literals are accepted directly
+    return qmc.measure(q)
+
+
+helper_with_literals.draw(n=3, fold_loops=False)
+
+# %% [markdown]
 # ## Pattern 2: `@composite_gate`
 #
 # When you want a reusable block to appear as a **named box** in circuit diagrams, promote it with `@composite_gate`. Also, as a more advanced use case, making it a composite gate allows you to give it custom settings such as giving it multiple ways of implementation.
