@@ -150,11 +150,11 @@ check (no public method today).
 ```
 QKernel
    │  to_block                    (trace Python AST → IR)
-   │  validate_entrypoint         (internal: EntrypointValidationPass — require classical I/O on entrypoint kernels)
+   │  validate_entrypoint         (internal: EntrypointValidationPass — requires classical I/O on entrypoint kernels)
    ▼
 Block [HIERARCHICAL]
    │  substitute                  (optional rule-based block / strategy replacement)
-   │  resolve_parameter_shapes    (concretise Vector shape dims from bindings)
+   │  resolve_parameter_shapes    (concretize Vector shape dims from bindings)
    │  inline                      (remove CallBlockOperations)
    ▼
 Block [AFFINE]
