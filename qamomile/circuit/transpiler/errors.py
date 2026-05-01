@@ -312,31 +312,41 @@ class SliceLinearityViolationError(AffineTypeError):
 
 
 class UnreturnedBorrowAtBlockEndError(AffineTypeError):
-    """Block completed with borrows still outstanding.
+    """Block completed with a slice view still owning parent slots.
 
     Raised by :class:`SliceLinearityCheckPass` when the root block's
-    operation sequence finishes with borrows remaining in the tracker
-    — either a view that was never drained/consumed, or a direct
-    element borrow that was never written back.  Qamomile's frontend
-    validation is ``consume``-driven (it fires only when the parent
-    array is passed somewhere that consumes it); this IR-level check
-    is the backstop that catches kernels which return their parent
-    array without consuming it first.
+    operation sequence finishes with a slice view still recorded as
+    the owner of one or more parent slots — i.e. a view that was
+    sliced but never used (so opportunistic drain didn't fire) and
+    never destructively consumed (so the consumed-slot marker wasn't
+    installed either).
 
-    Example of incorrect code::
+    Direct element borrows (``q[i]``) emit no IR operation, so this
+    IR-level pass does **not** detect them; that path is covered by
+    the trace-time validator
+    (``func_to_block._validate_returned_arrays`` and
+    ``ArrayBase.validate_all_returned``), which raises
+    :class:`UnreturnedBorrowError` from the frontend.
 
-        @qmc.qkernel
-        def kern() -> qmc.Vector[qmc.Qubit]:
-            q = qmc.qubit_array(4, "q")
-            qv = q[0]          # borrowed
-            return q           # ``qv`` never returned → UnreturnedBorrowAtBlockEndError
-
-    Correct code returns the borrow::
+    Example of incorrect code (caught post-fold, after bindings
+    resolve the slice bounds)::
 
         @qmc.qkernel
-        def kern() -> qmc.Vector[qmc.Qubit]:
+        def kern(lo: qmc.UInt, hi: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
             q = qmc.qubit_array(4, "q")
-            q[0] = qmc.h(q[0]) # borrow and return in one statement
+            view = q[lo:hi]    # slice constructed but never used
+            return q           # → UnreturnedBorrowAtBlockEndError after
+                               #   bindings make {lo, hi} concrete
+
+    Correct code either uses the view (so opportunistic drain
+    releases the parent slots) or skips slicing it::
+
+        @qmc.qkernel
+        def kern(lo: qmc.UInt, hi: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+            q = qmc.qubit_array(4, "q")
+            view = q[lo:hi]
+            for i in qmc.range(view.shape[0]):
+                view[i] = qmc.h(view[i])  # use the view; parent released
             return q
     """
 

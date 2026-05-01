@@ -1,26 +1,37 @@
-"""Post-fold block-wide linearity checker.
+"""Post-fold block-wide slice-view linearity checker.
 
-Mirrors the frontend's ``ArrayBase._borrowed_indices`` borrow-tracker
-semantics on the IR after :class:`ConstantFoldingPass` has resolved
-slice bounds to concrete values.  Two classes of bugs are caught here
-that the trace-time checker cannot see on its own:
+Mirrors the slice-view subset of the frontend's
+``ArrayBase._borrowed_indices`` borrow-tracker semantics on the IR
+after :class:`ConstantFoldingPass` has resolved slice bounds to
+concrete values.  This pass catches the bugs that the trace-time
+checker cannot see on its own — specifically, slices whose bounds
+were ``UInt`` at trace time so their covered slot set wasn't
+enumerable until bindings were applied:
 
-1. Aliasing between a slice view with symbolic bounds and a direct
-   access to the parent — those bounds are ``UInt`` at trace time, so
-   the covered slot set isn't enumerable until bindings are applied
-   during :class:`ConstantFoldingPass`.
-2. ``return q`` or ``measure(q)`` completing while a borrow is still
-   outstanding — the frontend's ``validate_all_returned`` is driven by
-   ``consume`` and does not fire when a kernel returns its parent array
-   without consuming it first.  The block walker in this pass raises
-   :class:`UnreturnedBorrowAtBlockEndError` when the state dict is
-   non-empty at completion.
+1. Aliasing between a (now-concrete) slice view and another live
+   view of the same root parent.
+2. A view whose newly-concrete coverage hits a slot that was
+   consumed by a destructive view operation earlier in the block.
+3. A view reaching the end of the block while still recorded as the
+   owner of its parent's slots — i.e. never released through the
+   normal opportunistic-drain or destructive-consume paths.  When
+   the state dict is non-empty at completion the pass raises
+   :class:`UnreturnedBorrowAtBlockEndError`.
 
-State shape mirrors the frontend: a single polymorphic dict keyed by
-``(f"const:<idx>",)`` or ``(f"sym:<uuid>",)`` with values of either
-``Value`` (direct borrow, the element Value currently checked out) or
-``ArrayValue`` (a slice view that owns that slot).  ``isinstance`` on
-the value dispatches the two error messages.
+Direct element borrows (``q[i]``) are intentionally **not** observed
+here.  Element access emits no IR operation, so the IR layer has
+nothing to track; the frontend trace-time validator
+(``func_to_block._validate_returned_arrays`` and
+``ArrayBase.validate_all_returned``) is the source of truth for
+direct-element-borrow violations.
+
+State shape: a single dict keyed by ``(f"const:<idx>",)`` for slots
+covered by compile-time-constant slices, or ``(f"sym:<uuid>",)`` for
+symbolic-bound slices that the pass cannot enumerate slot-wise.
+Values are either an :class:`ArrayValue` (the slice view that owns
+the slot) or a ``_ConsumedSlotMarker`` (a slot already destroyed by
+a prior destructive view consume).  ``isinstance`` on the value
+dispatches the two violation messages.
 """
 
 from __future__ import annotations

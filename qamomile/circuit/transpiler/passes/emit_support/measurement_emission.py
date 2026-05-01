@@ -90,14 +90,25 @@ def emit_measure_vector(
 
     Resolves the qubit operand's slice_of chain so that measuring a
     view (``measure(q[1::2])``) correctly targets the root parent's
-    physical qubits. If no qubit in the vector can be resolved, raises
-    ``EmitError`` rather than silently dropping the measurement — a
-    silent drop previously produced executions returning ``[(None, N)]``,
-    which is a data-integrity hazard.
+    physical qubits.
+
+    Behaviour for unresolvable inputs differs by case:
+
+    * Unknown vector length (``_resolve_size`` returns ``None``) — the
+      function defers silently. This handles transpile-only paths
+      (e.g. unbound parameter-size arrays) where downstream late-
+      binding callers still handle the emit correctly.
+    * Resolvable length but a sliced view that resolves to **zero**
+      physical qubits — raises ``EmitError``. Previously this produced
+      executions returning ``[(None, N)]``, a data-integrity hazard,
+      so the silent path is intentionally narrowed to view-on-empty
+      cases only.
+    * Resolvable length but slice bounds are themselves symbolic —
+      raises ``EmitError`` from ``resolve_slice_chain``.
 
     Raises:
-        EmitError: When the requested vector length is unknown, or when
-            every element fails to resolve to a physical qubit.
+        EmitError: When a sliced view resolves to zero physical qubits,
+            or when slice bounds remain symbolic at emit time.
     """
     qubits_array = op.operands[0]
     bits_array = op.results[0]

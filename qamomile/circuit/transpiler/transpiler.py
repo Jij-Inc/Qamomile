@@ -383,21 +383,32 @@ class Transpiler(ABC, Generic[T]):
         return StripSliceArrayOpsPass().run(block)
 
     def slice_linearity_check(self, block: Block) -> Block:
-        """Pass 1.9: Post-fold block-wide borrow checker.
+        """Pass 1.9: Post-fold slice-view linearity checker.
 
         Runs after :meth:`partial_eval` has resolved slice bounds to
-        concrete values.  Catches two classes of linearity violations
-        that the trace-time frontend check cannot detect on its own:
+        concrete values.  Catches the slice-view linearity violations
+        that the trace-time frontend check cannot detect on its own —
+        specifically, slices whose bounds were *symbolic* at trace
+        time (so the frontend bulk-borrow tracker had to skip them)
+        and aliasing scenarios that only become visible once those
+        bounds are folded to constants:
 
-        1. Aliasing between a slice view whose bounds were symbolic at
-           trace time and a direct access to the same parent slot.
-        2. ``return q`` / ``measure(q)`` reaching the end of the block
-           with borrows still outstanding — closes the pre-existing
-           silent hole where the frontend's consume-driven validation
-           would miss un-returned element borrows.
+        1. A view whose newly-concrete coverage overlaps another live
+           view of the same root parent.
+        2. A view whose newly-concrete coverage hits a slot that was
+           consumed by a destructive view operation earlier in the
+           block.
+        3. A view that reaches the end of the block while still
+           recorded as the owner of the parent's slots (i.e. it was
+           never used or never released).
 
-        The pass is a pass-through for the IR; it only raises on
-        violations (and leaves the block unchanged on success).
+        Direct element borrows (``q[i]``) emit no IR operation, so the
+        IR-level pass cannot observe them; the trace-time validation
+        in :func:`func_to_block._validate_returned_arrays` covers that
+        path.
+
+        The pass is a pass-through for the IR — it only raises on
+        violations and leaves the block unchanged on success.
         """
         return SliceLinearityCheckPass().run(block)
 

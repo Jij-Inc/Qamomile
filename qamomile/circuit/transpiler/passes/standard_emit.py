@@ -196,14 +196,19 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             if isinstance(op, QInitOperation):
                 continue
             elif isinstance(op, SliceArrayOperation):
-                # ConstantFoldingPass is expected to strip this op
-                # before emit; reaching here is a compiler-internal
-                # invariant violation.  Fail loudly rather than
-                # silently emitting nothing.
+                # SliceArrayOperation is intentionally preserved through
+                # partial_eval / constant_fold so SliceLinearityCheckPass
+                # can validate it post-fold; ``StripSliceArrayOpsPass``
+                # (invoked from ``Transpiler.strip_slice_ops`` after the
+                # linearity check) is responsible for removing it before
+                # this point.  Reaching here means the strip stage was
+                # skipped or ran out of order — a compiler-internal
+                # invariant violation.  Fail loudly rather than silently
+                # emitting nothing.
                 raise RuntimeError(
-                    "SliceArrayOperation reached emit — ConstantFoldingPass "
-                    "should have stripped it.  This is a compiler bug; "
-                    "please report it."
+                    "SliceArrayOperation reached emit — StripSliceArrayOpsPass "
+                    "should have stripped it after SliceLinearityCheckPass.  "
+                    "This is a compiler bug; please report it."
                 )
             elif isinstance(op, GateOperation):
                 emit_gate(self, circuit, op, qubit_map, bindings)

@@ -1876,14 +1876,30 @@ class TestRound4Reviewer:
             .circuit
         )
 
-        # Same gate sequence on the same physical qubits
-        names_direct = [inst.operation.name for inst in qc_direct.data]
-        names_binop = [inst.operation.name for inst in qc_binop.data]
-        assert "qft" in names_binop, (
-            f"BinOp-derived view should emit qft; got {names_binop} "
-            f"(direct emitted {names_direct})"
+        # Structural equivalence between the direct- and BinOp-bounded
+        # views: same number of operations on the same target qubits in
+        # the same order.  Avoid asserting on ``operation.name`` strings
+        # — the native QFT instruction is rendered as ``qft`` / ``QFT``
+        # / ``QFTGate`` depending on the Qiskit version, so a string
+        # check would be brittle across the supported matrix.
+        def _signature(circuit):
+            return [
+                (
+                    type(inst.operation).__name__,
+                    tuple(q._index for q in inst.qubits),
+                )
+                for inst in circuit.data
+            ]
+
+        direct_sig = _signature(qc_direct)
+        binop_sig = _signature(qc_binop)
+        assert direct_sig == binop_sig, (
+            f"BinOp-derived view should produce the same circuit as the "
+            f"direct view.\n  direct: {direct_sig}\n  binop:  {binop_sig}"
         )
-        assert names_direct == names_binop
+        # Sanity guard — the direct path always emits something; if it
+        # were empty the equivalence above would be vacuously true.
+        assert direct_sig, "direct view emitted no operations (test is vacuous)"
 
     def test_cast_on_binop_derived_view_emits_measurements(self):
         """``cast(q[lo+0:hi+0], QFixed)`` resolves carriers with bound parameters."""
