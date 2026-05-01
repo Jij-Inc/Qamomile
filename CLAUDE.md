@@ -196,7 +196,7 @@ overlapping name with `ValueError` ([transpiler.py][overlap-check]):
   flow handled at emit time by backends with a supporting
   `MeasurementMode`.
 
-[overlap-check]: qamomile/circuit/transpiler/transpiler.py
+[overlap-check]: qamomile/circuit/transpiler/transpiler.py#L475-L487
 
 ## Docstring Convention (MANDATORY)
 
@@ -365,7 +365,10 @@ typing `@qkernel` directly in the prose. Inside fenced code blocks the
 decorator syntax is fine, since GitHub does not parse mentions there.
 
 - ✅ "Update the qkernel decorator so metadata survives `next_version`."
-- ❌ "Update @qkernel so metadata survives `next_version`."
+- ❌ "Update `@qkernel` so metadata survives `next_version`." (the
+  `@qkernel` is wrapped in code here only so this example itself doesn't
+  trigger a GitHub mention render; in real prose, never type the literal
+  `@qkernel` symbol — write "the qkernel decorator" instead)
 
 ### No unsolicited external links
 
