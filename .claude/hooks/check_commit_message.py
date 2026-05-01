@@ -55,6 +55,10 @@ def _extract_commit_message(command: str) -> str | None:
     3. ``-m '...'`` (plain single-quoted, NO escapes — POSIX single
        quotes are literal, including any backslashes inside).
 
+    The whitespace between the flag and the value is optional, so the
+    no-space attached forms ``-m"msg"`` / ``-m'msg'`` (which
+    ``git commit`` accepts) are also matched.
+
     Short-option groups that include ``m`` as the trailing flag are also
     recognized: ``-am``, ``-sm``, ``-asm`` etc. — common with
     ``git commit -am "msg"``. Because ``-m`` consumes the rest of the
@@ -88,11 +92,17 @@ def _extract_commit_message(command: str) -> str | None:
     for flag_match in re.finditer(r"(?:^|\s)-[a-zA-Z]*m\b", command):
         remainder = command[flag_match.end() :]
 
+        # ``\s*`` (not ``\s+``) lets us also match the no-space attached
+        # forms ``-m"msg"`` / ``-am'msg'`` / ``-am$(cat <<EOF...)``, which
+        # ``git commit`` accepts. The flag walker's trailing ``\b`` already
+        # ensures the position is right before a non-word character (``"``,
+        # ``'``, or ``$``), so ``\s*`` only allows the optional separator.
+        #
         # 1) HEREDOC inside a subshell. Surrounding quote (if any) before
         #    ``$(`` and after ``)`` must match. The closing ``\1`` must be
         #    on its own line; ``re.DOTALL`` lets ``.*?`` span newlines.
         heredoc_match = re.match(
-            r'\s+(["\']?)\$\(\s*cat\s+<<-?\s*[\'"]?(\w+)[\'"]?\s*\n'
+            r'\s*(["\']?)\$\(\s*cat\s+<<-?\s*[\'"]?(\w+)[\'"]?\s*\n'
             r"(.*?)\n\2\s*\)\1",
             remainder,
             re.DOTALL,
@@ -104,7 +114,7 @@ def _extract_commit_message(command: str) -> str | None:
         # 2) Plain double-quoted with shell-style escape handling
         #    (``\"``, ``\\``, etc.).
         plain_double = re.match(
-            r'\s+"((?:[^"\\]|\\.)*)"',
+            r'\s*"((?:[^"\\]|\\.)*)"',
             remainder,
             re.DOTALL,
         )
@@ -117,7 +127,7 @@ def _extract_commit_message(command: str) -> str | None:
         #    character. Backslashes inside (Windows paths, regex
         #    fragments) pass through unchanged.
         plain_single = re.match(
-            r"\s+'([^']*)'",
+            r"\s*'([^']*)'",
             remainder,
             re.DOTALL,
         )
@@ -189,22 +199,29 @@ def _allow() -> None:
 def _deny(mentions: list[str]) -> None:
     """Emit a PreToolUse ``deny`` decision with an actionable reason.
 
+    Every literal ``@…`` token in the reason text — including the
+    detected mentions and the placeholder names in the rule explanation
+    (``@username``, ``@org/team``, ``@qkernel``) — is wrapped in
+    backticks so the message is safe to paste into a GitHub-tracked
+    comment / PR thread without itself triggering mention notifications.
+
     Args:
         mentions: The matched ``@<word>`` tokens (deduped before being
             interpolated into the user-facing reason string).
     """
-    unique = sorted(set(mentions))
+    formatted_mentions = [f"`{mention}`" for mention in sorted(set(mentions))]
     reason = (
         "Commit message contains bare @-mention(s): "
-        f"{', '.join(unique)}.\n\n"
-        "Project rule (CLAUDE.md '### No @-mentions'): never write @username, "
-        "@org/team, or bare Python decorators like @qkernel in commit messages, "
-        "PR / issue titles or bodies, or review comments — they trigger "
-        "unintended GitHub mention rendering / notifications.\n\n"
+        f"{', '.join(formatted_mentions)}.\n\n"
+        "Project rule (CLAUDE.md '### No @-mentions'): never write "
+        "`@username`, `@org/team`, or bare Python decorators like "
+        "`@qkernel` in commit messages, PR / issue titles or bodies, "
+        "or review comments — they trigger unintended GitHub mention "
+        "rendering / notifications.\n\n"
         "Fix: rewrite the offending token in descriptive prose "
-        '(e.g. "the qkernel decorator" instead of @qkernel), or — only if the '
-        "code form is genuinely required — wrap it in backticks (`@qkernel`). "
-        "Then redo the commit."
+        '(e.g. "the qkernel decorator" instead of `@qkernel`), or — '
+        "only if the code form is genuinely required — wrap it in "
+        "backticks (`@qkernel`). Then redo the commit."
     )
     output = {
         "hookSpecificOutput": {
