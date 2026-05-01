@@ -372,6 +372,24 @@ current branch. Address every finding it reports, then re-run
 **no remaining issues** — only then create the PR. A clean `/local-review`
 run is a precondition for PR creation, not a post-merge polish step.
 
+### Reply to GitHub review threads when addressing feedback
+
+Whenever a PR review comment is addressed — whether by a code change, a
+documentation update, or a reasoned disagreement that leaves the line as
+is — post a reply directly in that comment's GitHub thread describing the
+resolution. A short, specific note is enough:
+
+- "Fixed in `<commit-sha>`: `<one-line summary of the change>`."
+- "Out of scope for this PR; tracked as a follow-up at `<reference>`."
+- "Disagreed because `<reason>` — left as is."
+
+Do **not** rely on the reviewer (or a review bot) to infer that a new
+commit resolves their comment by reading the diff alone. Every individual
+review comment should end up with at least one explicit reply explaining
+the resolution. This keeps the discussion self-contained, makes the
+conversation easy to audit later, and prevents the same concern from
+being re-raised in the next review pass.
+
 ### Sync PR branches with `merge`, not `rebase` + force-push
 
 When a PR branch needs to incorporate the latest `main` (for example, when
