@@ -183,9 +183,17 @@ executable = converter.transpile(transpiler, p=p)
 # %%
 import os
 import numpy as np
+from qiskit_aer import AerSimulator
 from scipy.optimize import minimize
 
-executor = transpiler.executor()
+# Seed the simulator so re-executing the notebook reproduces the same
+# COBYLA trajectory and final sampling distribution. Without a seed,
+# every shot draws fresh randomness, COBYLA sees a noisy cost surface,
+# and each notebook run converges to a different (but equivalent) local
+# optimum.
+executor = transpiler.executor(
+    backend=AerSimulator(seed_simulator=901, max_parallel_threads=1)
+)
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 sample_shots = 256 if docs_test_mode else 2048
 maxiter = 25 if docs_test_mode else 1000
