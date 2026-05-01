@@ -438,4 +438,8 @@ supply one. Internal references to other issues / PRs in this repo
 (e.g., `#354`) are fine when factually relevant.
 
 - ✅ "Implements the Trotter circuit (see #337 for the design discussion)."
-- ❌ "Implements the Trotter circuit (see https://arxiv.org/abs/... )."
+- ❌ "Implements the Trotter circuit (see `<external-url>`)." (the URL is
+  shown as a `<external-url>` placeholder rather than a real address so
+  this example itself doesn't render as a clickable external link;
+  outside this kind of placeholder, never paste a literal external URL
+  in prose unless the user explicitly provided it)
