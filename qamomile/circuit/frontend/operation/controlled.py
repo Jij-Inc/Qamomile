@@ -525,10 +525,15 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
     forwards arguments to ``fn`` **by keyword** in ``fn``'s original
     order.  This means callables whose qubit and classical parameters are
     interleaved (e.g. ``def gate(c: Qubit, theta: float, t: Qubit)``)
-    still receive each argument at the correct position.  Successful
-    syntheses are cached per callable in a ``WeakKeyDictionary`` so
-    repeated calls reuse the same ``QKernel`` and the ``linecache`` does
-    not grow without bound.
+    still receive each argument at the correct position.
+
+    Successful syntheses are cached per callable in a
+    ``WeakKeyDictionary`` keyed by ``fn``; the cached ``QKernel``'s
+    block is constructed eagerly and the wrapper holds only a
+    ``weakref.proxy`` to ``fn``, so once the caller releases ``fn`` the
+    cache entry (and its ``linecache`` source) is freed automatically.
+    Concurrent calls for the same ``fn`` are de-duplicated under a
+    module lock so we never compile the same wrapper twice.
 
     Args:
         fn: The callable to wrap.  Each parameter must have a type
@@ -566,10 +571,9 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
             f"got {type(fn).__name__}."
         )
 
-    # Cache lookup: a previous ``controlled(fn)`` call for the same callable
-    # already produced a wrapper QKernel, so reuse it.  Some C-implemented
-    # builtins (rare for gate functions) cannot be weak-referenced; in that
-    # case the cache silently no-ops via the TypeError fallbacks below.
+    # Fast cache lookup outside the lock for the common case (same gate
+    # already wrapped).  ``WeakKeyDictionary.get`` itself is thread-safe
+    # against concurrent reads.
     try:
         cached = _synthesized_kernel_cache.get(fn)
     except TypeError:
@@ -666,67 +670,114 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
         "Qubit" if n_qubits == 1 else f"tuple[{', '.join(['Qubit'] * n_qubits)}]"
     )
 
+    # Synthesize and register under the shared lock so concurrent
+    # ``controlled(fn)`` calls cannot race to (a) re-use the same
+    # filename-counter sequence, (b) double-mutate ``linecache.cache``,
+    # or (c) populate the cache with two distinct wrappers for the same
+    # callable.  We also re-check the cache inside the lock — another
+    # thread may have synthesized while we waited.
     global _synthesized_kernel_counter
     with _synthesized_kernel_lock:
+        try:
+            cached = _synthesized_kernel_cache.get(fn)
+        except TypeError:
+            cached = None
+        if cached is not None:
+            return cast("QKernel", cached)
+
         _synthesized_kernel_counter += 1
         seq = _synthesized_kernel_counter
 
-    # Choose the wrapper's source-level identifier.  Prefer the original
-    # callable name (so QKernel display + ``transform_control_flow``'s
-    # ``name_space[func.__name__]`` lookup show the gate name), but fall
-    # back to a fresh ``_qmc_controlled_wrapper_<seq>`` identifier when
-    # ``fn_name`` is not a valid Python identifier (e.g. ``<lambda>``) or
-    # would collide with names we inject into the exec namespace
-    # (``Qubit`` / ``Float`` / ``UInt`` / ``tuple`` / ``__qmc_target__``).
-    # The collision case matters because the wrapper's annotations refer
-    # to those injected names directly; shadowing them with a same-named
-    # function definition would break type-hint resolution.
-    if fn_name.isidentifier() and fn_name not in _RESERVED_WRAPPER_NAMES:
-        wrapper_internal_name = fn_name
-    else:
-        wrapper_internal_name = f"_qmc_controlled_wrapper_{seq}"
+        # Choose the wrapper's source-level identifier.  Prefer the original
+        # callable name (so QKernel display + ``transform_control_flow``'s
+        # ``name_space[func.__name__]`` lookup show the gate name), but
+        # fall back to a fresh ``_qmc_controlled_wrapper_<seq>`` identifier
+        # when ``fn_name`` is not a valid Python identifier (e.g.
+        # ``<lambda>``) or would collide with one of the names we inject
+        # into the exec namespace (``Qubit``, ``Float``, ``UInt``, ...);
+        # shadowing those bindings with a same-named function definition
+        # would break type-hint resolution at decoration time.
+        if fn_name.isidentifier() and fn_name not in _RESERVED_WRAPPER_NAMES:
+            wrapper_internal_name = fn_name
+        else:
+            wrapper_internal_name = f"_qmc_controlled_wrapper_{seq}"
 
-    src = (
-        f"def {wrapper_internal_name}({', '.join(param_decls)}) -> "
-        f"{return_anno}:\n"
-        f"    return __qmc_target__({invocation})\n"
-    )
+        src = (
+            f"def {wrapper_internal_name}({', '.join(param_decls)}) -> "
+            f"{return_anno}:\n"
+            f"    return __qmc_target__({invocation})\n"
+        )
 
-    # Filenames in ``<...>`` form bypass on-disk lookup in inspect/linecache
-    # but still pass through ``linecache.getlines``.  Using ``mtime=None``
-    # makes ``linecache.checkcache`` skip the entry, so the cache survives.
-    filename = f"<qamomile-controlled-wrapper-{fn_name}-{seq}>"
-    src_lines = src.splitlines(keepends=True)
-    linecache.cache[filename] = (len(src), None, src_lines, filename)
+        # Filenames in ``<...>`` form bypass on-disk lookup in
+        # inspect/linecache but still pass through ``linecache.getlines``.
+        # ``mtime=None`` makes ``linecache.checkcache`` skip the entry so
+        # the cache survives across calls.
+        filename = f"<qamomile-controlled-wrapper-{fn_name}-{seq}>"
+        src_lines = src.splitlines(keepends=True)
+        linecache.cache[filename] = (len(src), None, src_lines, filename)
 
-    namespace: dict[str, Any] = {
-        "Qubit": Qubit,
-        "Float": Float,
-        "UInt": UInt,
-        "tuple": tuple,
-        "__qmc_target__": fn,
-    }
-    try:
-        code = compile(src, filename, "exec")
-        exec(code, namespace)
-        wrapper_fn = namespace[wrapper_internal_name]
-    except Exception as e:
-        # Drop the half-populated linecache entry on failure so a retry
-        # with a corrected callable does not leave dead source behind.
-        linecache.cache.pop(filename, None)
-        raise TypeError(
-            f"controlled(): failed to synthesize a wrapper for {fn_name!r}: "
-            f"{e}. Wrap the function in @qmc.qkernel manually."
-        ) from e
+        # Use ``weakref.proxy`` for the forwarded target so the cached
+        # ``QKernel`` does not transitively keep ``fn`` alive: the wrapper
+        # captures the proxy in its globals, not ``fn`` itself.  This is
+        # what lets ``WeakKeyDictionary`` actually free its entry once
+        # the original callable becomes unreachable.  The wrapper is only
+        # *called* once — during ``func_to_block`` below, while ``fn`` is
+        # still strongly referenced by our caller — so post-build use of
+        # ``cg._qkernel.block`` never re-invokes the proxy.  Some
+        # C-implemented callables don't support weak references; in that
+        # case fall back to a strong ref (the cache then simply holds
+        # those entries indefinitely, which matches the prior behavior).
+        target_ref: Any
+        try:
+            target_ref = weakref.proxy(fn)
+        except TypeError:
+            target_ref = fn
 
-    qkernel_inst = _qkernel_decorator(wrapper_fn)
+        namespace: dict[str, Any] = {
+            "Qubit": Qubit,
+            "Float": Float,
+            "UInt": UInt,
+            "tuple": tuple,
+            "__qmc_target__": target_ref,
+        }
+        try:
+            code = compile(src, filename, "exec")
+            exec(code, namespace)
+            wrapper_fn = namespace[wrapper_internal_name]
+            qkernel_inst = _qkernel_decorator(wrapper_fn)
+            # Force ``Block`` construction now, while ``fn`` is still
+            # strongly referenced by our caller.  After this point the
+            # wrapper / proxy is never invoked again — ``cg._qkernel.block``
+            # only consumes the already-built IR — so it's safe for ``fn``
+            # to be GC'd later, releasing this cache entry along with it.
+            _ = qkernel_inst.block
+        except Exception as e:
+            # Drop the half-populated linecache entry on failure so a
+            # retry with a corrected callable does not leave dead source
+            # behind.
+            linecache.cache.pop(filename, None)
+            raise TypeError(
+                f"controlled(): failed to synthesize a wrapper for "
+                f"{fn_name!r}: {e}. Wrap the function in @qmc.qkernel "
+                f"manually."
+            ) from e
 
-    # Populate the cache; ignore weakref failures for non-weakrefable
-    # callables (the wrapper is still returned, just not memoized).
-    try:
-        _synthesized_kernel_cache[fn] = qkernel_inst
-    except TypeError:
-        pass
+        # Populate the cache; ignore weakref failures for non-weakrefable
+        # callables (the wrapper is still returned, just not memoized).
+        try:
+            _synthesized_kernel_cache[fn] = qkernel_inst
+        except TypeError:
+            pass
+
+        # When ``fn`` is GC'd the WeakKeyDictionary entry vanishes on its
+        # own, but ``linecache.cache`` is a plain dict and would otherwise
+        # leak the synthesized source.  ``weakref.finalize`` runs the
+        # cleanup callback exactly when ``fn`` becomes unreachable; for
+        # non-weakrefable callables registration silently no-ops.
+        try:
+            weakref.finalize(fn, linecache.cache.pop, filename, None)
+        except TypeError:
+            pass
 
     return qkernel_inst
 

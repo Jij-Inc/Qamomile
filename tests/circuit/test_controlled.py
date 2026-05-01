@@ -1022,10 +1022,16 @@ class TestControlledBuiltinSynthesisInternals:
     def test_unusual_callable_name_does_not_break_synthesis(self):
         """A callable named ``Qubit`` must not collide with the namespace's Qubit type.
 
-        Pre-fix, ``def Qubit(...)`` would have shadowed the injected ``Qubit``
-        type during ``exec`` and broken type-hint resolution.  Post-fix the
-        wrapper uses a fixed ``_qmc_controlled_wrapper_<n>`` internal name,
-        and the original name is restored only via ``__name__`` for display.
+        Pre-fix, ``def Qubit(...)`` would have shadowed the injected
+        ``Qubit`` type during ``exec`` and broken type-hint resolution.
+        Post-fix the wrapper falls back to a fresh
+        ``_qmc_controlled_wrapper_<n>`` source-level identifier whenever
+        the callable's ``__name__`` collides with one of the injected
+        names (``Qubit`` / ``Float`` / ``UInt`` / ``tuple`` /
+        ``__qmc_target__``) or is not a valid Python identifier; otherwise
+        the original name is preserved.  ``__name__`` is *not* rewritten
+        on the wrapper — that would re-introduce the collision against
+        ``transform_control_flow``'s ``name_space[func.__name__]`` lookup.
         """
 
         def Qubit(q: qmc.Qubit) -> qmc.Qubit:  # noqa: N802 - test the corner case
@@ -1033,6 +1039,56 @@ class TestControlledBuiltinSynthesisInternals:
 
         cg = qmc.controlled(Qubit)
         assert isinstance(cg, ControlledGate)
+        # Implementation detail: the synthesized wrapper falls back to the
+        # safe internal identifier here, NOT the original ``Qubit`` name.
+        assert cg._qkernel.name.startswith("_qmc_controlled_wrapper_")
+
+    def test_dynamic_callable_is_released_on_gc(self):
+        """Once the user drops a dynamically-defined callable, the wrapper cache must release it.
+
+        Regression for the Copilot #5 review: an earlier draft used
+        ``WeakKeyDictionary`` but the wrapper's globals captured ``fn``
+        with a strong ref via ``__qmc_target__``, so the cache transitively
+        kept ``fn`` alive forever.  Post-fix the wrapper holds a
+        ``weakref.proxy(fn)`` and ``Block`` is built eagerly (so the
+        proxy is never re-invoked), letting the cache + linecache entries
+        die with ``fn``.
+        """
+        import gc
+        import linecache as _linecache_module
+        import weakref
+
+        from qamomile.circuit.frontend.operation.controlled import (
+            _synthesized_kernel_cache,
+        )
+
+        def _ephemeral_gate(q: qmc.Qubit, theta: float) -> qmc.Qubit:
+            return qmc.rx(q, theta)
+
+        fn_ref = weakref.ref(_ephemeral_gate)
+
+        cg = qmc.controlled(_ephemeral_gate)
+        assert _ephemeral_gate in _synthesized_kernel_cache
+        # Pin the linecache filename for the post-GC check.  The
+        # AST-transformed ``self.func`` is re-compiled under the
+        # ``<qamomile-dsl>`` synthetic filename, so we read the original
+        # wrapper's filename from ``raw_func`` instead.
+        wrapper_filename = cg._qkernel.raw_func.__code__.co_filename
+        assert wrapper_filename in _linecache_module.cache
+
+        # Drop every strong ref the test holds; only the cache (weakly)
+        # references the callable now.
+        del cg
+        del _ephemeral_gate
+        gc.collect()
+
+        assert fn_ref() is None, (
+            "WeakKeyDictionary failed to release the callable; the wrapper "
+            "is still keeping it alive (cache leak regression)."
+        )
+        # The weakref.finalize hook drops the linecache entry when ``fn``
+        # is collected.
+        assert wrapper_filename not in _linecache_module.cache
 
 
 # -- IR parity: built-in form vs hand-written @qkernel form ------------------
