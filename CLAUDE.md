@@ -355,6 +355,18 @@ current branch. Address every finding it reports, then re-run
 **no remaining issues** — only then create the PR. A clean `/local-review`
 run is a precondition for PR creation, not a post-merge polish step.
 
+### Sync PR branches with `merge`, not `rebase` + force-push
+
+When a PR branch needs to incorporate the latest `main` (for example, when
+the documentation or code in this PR depends on a recent commit on `main`
+that has not yet propagated to the branch's parent), use a regular
+`git merge origin/main` on the PR branch, **not** `git rebase origin/main`
+followed by a force-push. Force-pushing rewrites the commit SHAs that
+reviewers and review bots may have already anchored their comments to,
+disturbs the chronological view of the PR, and creates extra noise for
+everyone re-reading the diff. A merge commit on a feature branch is
+harmless and preserves the existing review thread.
+
 ### No `@`-mentions
 
 Never include `@username` or `@org/team` strings in commit messages, PR
