@@ -7,11 +7,8 @@ from typing import Any
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
-    BinOpKind,
     CompOp,
-    CompOpKind,
     CondOp,
-    CondOpKind,
     NotOp,
     PhiOp,
 )
@@ -99,28 +96,21 @@ class ClassicalExecutor:
         results: dict[str, Any],
         scoped_locals: dict[str, Any],
     ) -> None:
-        """Execute binary operation."""
+        """Execute binary operation.
+
+        Kind dispatch is delegated to ``eval_utils.evaluate_binop_values`` so
+        the same op semantics are used by compile-time folding, runtime
+        execution, and emit-time inlining.
+        """
+        from qamomile.circuit.transpiler.passes.eval_utils import (
+            evaluate_binop_values,
+        )
+
         lhs = self._get_value(op.operands[0], context, results, scoped_locals)
         rhs = self._get_value(op.operands[1], context, results, scoped_locals)
-
-        match op.kind:
-            case BinOpKind.ADD:
-                result_value = lhs + rhs
-            case BinOpKind.SUB:
-                result_value = lhs - rhs
-            case BinOpKind.MUL:
-                result_value = lhs * rhs
-            case BinOpKind.DIV:
-                result_value = lhs / rhs
-            case BinOpKind.FLOORDIV:
-                result_value = lhs // rhs
-            case BinOpKind.POW:
-                result_value = lhs**rhs
-            case BinOpKind.MIN:
-                result_value = lhs if lhs <= rhs else rhs
-            case _:
-                raise ExecutionError(f"Unknown BinOp kind: {op.kind}")
-
+        result_value = evaluate_binop_values(op.kind, lhs, rhs)
+        if result_value is None:
+            raise ExecutionError(f"BinOp evaluation failed: kind={op.kind}")
         if op.results:
             results[op.results[0].uuid] = result_value
 
@@ -132,25 +122,15 @@ class ClassicalExecutor:
         scoped_locals: dict[str, Any],
     ) -> None:
         """Execute comparison operation."""
+        from qamomile.circuit.transpiler.passes.eval_utils import (
+            evaluate_compop_values,
+        )
+
         lhs = self._get_value(op.operands[0], context, results, scoped_locals)
         rhs = self._get_value(op.operands[1], context, results, scoped_locals)
-
-        match op.kind:
-            case CompOpKind.EQ:
-                result_value = lhs == rhs
-            case CompOpKind.NEQ:
-                result_value = lhs != rhs
-            case CompOpKind.LT:
-                result_value = lhs < rhs
-            case CompOpKind.LE:
-                result_value = lhs <= rhs
-            case CompOpKind.GT:
-                result_value = lhs > rhs
-            case CompOpKind.GE:
-                result_value = lhs >= rhs
-            case _:
-                raise ExecutionError(f"Unknown CompOp kind: {op.kind}")
-
+        result_value = evaluate_compop_values(op.kind, lhs, rhs)
+        if result_value is None:
+            raise ExecutionError(f"CompOp evaluation failed: kind={op.kind}")
         if op.results:
             results[op.results[0].uuid] = result_value
 
@@ -162,9 +142,14 @@ class ClassicalExecutor:
         scoped_locals: dict[str, Any],
     ) -> None:
         """Execute not operation."""
-        operand = self._get_value(op.operands[0], context, results, scoped_locals)
-        result_value = not operand
+        from qamomile.circuit.transpiler.passes.eval_utils import (
+            evaluate_notop_value,
+        )
 
+        operand = self._get_value(op.operands[0], context, results, scoped_locals)
+        result_value = evaluate_notop_value(operand)
+        if result_value is None:
+            raise ExecutionError("NotOp evaluation failed")
         if op.results:
             results[op.results[0].uuid] = result_value
 
@@ -176,17 +161,15 @@ class ClassicalExecutor:
         scoped_locals: dict[str, Any],
     ) -> None:
         """Execute conditional operation (AND, OR)."""
+        from qamomile.circuit.transpiler.passes.eval_utils import (
+            evaluate_condop_values,
+        )
+
         lhs = self._get_value(op.operands[0], context, results, scoped_locals)
         rhs = self._get_value(op.operands[1], context, results, scoped_locals)
-
-        match op.kind:
-            case CondOpKind.AND:
-                result_value = lhs and rhs
-            case CondOpKind.OR:
-                result_value = lhs or rhs
-            case _:
-                raise ExecutionError(f"Unknown CondOp kind: {op.kind}")
-
+        result_value = evaluate_condop_values(op.kind, lhs, rhs)
+        if result_value is None:
+            raise ExecutionError(f"CondOp evaluation failed: kind={op.kind}")
         if op.results:
             results[op.results[0].uuid] = result_value
 

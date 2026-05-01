@@ -15,7 +15,13 @@ import re
 from typing import Any, Generic, TypeVar
 
 from qamomile.circuit.ir.operation import Operation, SliceArrayOperation
-from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOp,
+    CompOp,
+    CondOp,
+    NotOp,
+    RuntimeClassicalExpr,
+)
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
 from qamomile.circuit.ir.operation.control_flow import (
@@ -46,6 +52,7 @@ from qamomile.circuit.transpiler.passes.emit_support import (
 )
 from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
     evaluate_binop,
+    evaluate_classical_predicate,
     handle_cast,
 )
 from qamomile.circuit.transpiler.passes.emit_support.composite_gate_emission import (
@@ -226,6 +233,33 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 handle_cast(self, op, qubit_map)
             elif isinstance(op, BinOp):
                 evaluate_binop(self, op, bindings)
+            elif isinstance(op, RuntimeClassicalExpr):
+                # Pre-emit ``ClassicalLoweringPass`` already identified this
+                # op as runtime-only. Hand off to the backend hook directly;
+                # no fold attempt — the IR has already declared the verdict.
+                self._emit_runtime_classical_expr(circuit, op, clbit_map, bindings)
+            elif isinstance(op, (CompOp, CondOp, NotOp)):
+                evaluate_classical_predicate(self, op, bindings)
+                # If the predicate could not be folded at compile time (e.g.
+                # operands are runtime measurement bits), give the backend a
+                # chance to build a runtime expression that downstream
+                # if/while emission can consume as a classical condition.
+                # Note: post-``ClassicalLoweringPass``, most measurement-
+                # derived predicates have already been rewritten to
+                # ``RuntimeClassicalExpr`` (handled above). This fallback
+                # remains for predicates that depend on emit-time-bound
+                # values not visible to the lowering pass (e.g. computed
+                # from a loop variable that wraps a measurement somehow).
+                if op.results and op.results[0].uuid not in bindings:
+                    runtime_expr = self._build_runtime_predicate_expr(
+                        circuit, op, clbit_map, bindings
+                    )
+                    if runtime_expr is not None:
+                        set_runtime_expr = getattr(bindings, "set_runtime_expr", None)
+                        if callable(set_runtime_expr):
+                            set_runtime_expr(op.results[0].uuid, runtime_expr)
+                        else:
+                            bindings[op.results[0].uuid] = runtime_expr
             elif isinstance(op, HasNestedOps):
                 raise NotImplementedError(
                     f"Unhandled control flow: {type(op).__name__}"
@@ -289,6 +323,77 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         bindings: dict[str, Any],
     ) -> None:
         emit_pauli_evolve(self, circuit, op, qubit_map, bindings)
+
+    def _emit_runtime_classical_expr(
+        self,
+        circuit: T,
+        op: RuntimeClassicalExpr,
+        clbit_map: ClbitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Backend hook: lower ``RuntimeClassicalExpr`` to a backend expr.
+
+        The default implementation raises ``EmitError``. A backend that
+        supports runtime classical expressions (e.g. Qiskit 2.x with
+        ``qiskit.circuit.classical.expr``) overrides this to translate the
+        IR op to its native expression type and store it in
+        ``bindings`` (preferably via ``EmitContext.set_runtime_expr``)
+        keyed by the op's result UUID, so that ``_emit_if`` /
+        ``_emit_while`` can consume it.
+
+        Args:
+            circuit: The backend circuit being built.
+            op: The runtime classical expression to lower.
+            clbit_map: Map from ``QubitAddress`` → physical clbit index.
+            bindings: Current bindings; the result should be written here.
+
+        Raises:
+            EmitError: If the backend does not support runtime classical
+                expressions.
+        """
+        from qamomile.circuit.transpiler.errors import EmitError
+
+        raise EmitError(
+            f"Backend {type(self).__name__!r} does not support runtime "
+            f"classical expressions (RuntimeClassicalExpr). The IR contains "
+            f"a measurement-derived classical op (kind={op.kind}) that "
+            f"cannot be folded at compile time. Either bind the upstream "
+            f"parameters to compile-time constants or use a backend with "
+            f"dynamic-circuit support."
+        )
+
+    def _build_runtime_predicate_expr(
+        self,
+        circuit: T,
+        op: "CompOp | CondOp | NotOp",
+        clbit_map: ClbitMap,
+        bindings: dict[str, Any],
+    ) -> Any:
+        """Build a backend-specific runtime expression for a classical predicate.
+
+        Hook for backends that support classical-bit-level expressions in
+        ``if`` / ``while`` conditions (e.g. Qiskit's
+        ``qiskit.circuit.classical.expr``). When a ``CompOp`` / ``CondOp`` /
+        ``NotOp`` cannot be folded at compile time because its operands are
+        runtime measurement bits, the emit dispatch calls this hook to give
+        the backend a chance to express the predicate as a clbit-level
+        expression. The returned object is stored in ``bindings`` keyed by
+        the op's result UUID and later consumed by ``_emit_if`` /
+        ``_emit_while``.
+
+        Args:
+            circuit: The backend circuit being built (for clbit lookups).
+            op: The unresolved classical predicate.
+            clbit_map: Map from ``QubitAddress`` → physical clbit index.
+            bindings: Current bindings (read-only here; mutation happens at
+                the caller).
+
+        Returns:
+            A backend-native expression object, or ``None`` if the backend
+            does not support runtime classical predicates (default for the
+            base class).
+        """
+        return None
 
     def _emit_controlled_fallback(
         self,

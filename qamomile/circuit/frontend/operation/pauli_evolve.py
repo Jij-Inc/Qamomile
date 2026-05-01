@@ -11,8 +11,6 @@ from typing import cast
 from qamomile.circuit.frontend.handle import Float, Observable, Qubit, Vector
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
-from qamomile.circuit.ir.types.primitives import QubitType
-from qamomile.circuit.ir.value import ArrayValue
 
 
 def pauli_evolve(
@@ -63,36 +61,26 @@ def pauli_evolve(
     consumed = q.consume("pauli_evolve")
     qubits_value = consumed.value
 
-    # Create new result qubit array value.  When the input is a
-    # sliced view (``pauli_evolve(q[1::2], H, gamma)``), forward its
-    # ``slice_of`` chain onto the result so that downstream
-    # operations — in particular ``expval(result, Z(0))`` — walk the
-    # same chain back to the root parent's physical qubits instead
-    # of landing on qubit 0 by default.  ``pauli_evolve`` is
-    # in-place at the physical-qubit level; preserving the chain is
-    # the semantically correct mapping.  For a non-view input
-    # ``slice_of`` is ``None`` and the result remains a plain array
-    # (no behavioural change for the existing non-view path).
-    result_array = ArrayValue(
-        type=QubitType(),
-        name=f"{qubits_value.name}_evolved",
-        shape=qubits_value.shape,
-        slice_of=qubits_value.slice_of,
-        slice_start=qubits_value.slice_start,
-        slice_step=qubits_value.slice_step,
-    )
+    # Bump the SSA version of the input array.  ``next_version`` preserves
+    # ``logical_id``, ``shape``, and ``slice_of`` / ``slice_start`` /
+    # ``slice_step`` so the result is recognised as the same logical
+    # register across the IR (resource allocation, inline-pass remapping
+    # for nested @qkernel calls, visualization).  Creating a fresh
+    # ArrayValue here would mint a new logical_id and drop the caller-side
+    # qubit identity (breaks measurement after nested @qkernel — issue
+    # #354), and would also lose the slice chain (breaks ``expval`` on the
+    # result of ``pauli_evolve(q[1::2], H, gamma)``, which must walk back
+    # to the root parent's physical qubits).
+    result_array = qubits_value.next_version()
 
-    # Create PauliEvolveOp
     op = PauliEvolveOp(
         operands=[qubits_value, hamiltonian.value, gamma.value],
         results=[result_array],
     )
 
-    # Emit to tracer
     tracer = get_current_tracer()
     tracer.add_operation(op)
 
-    # Return new Vector[Qubit] wrapping the result
     result_vector = cast(
         Vector[Qubit],
         Vector._create_from_value(value=result_array, shape=consumed._shape),
