@@ -2,7 +2,20 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Union, cast
+import inspect
+import linecache
+import threading
+import types as _types
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 from qamomile.circuit.frontend.handle import Handle
 from qamomile.circuit.frontend.handle.primitives import Float, Qubit, UInt
@@ -22,6 +35,11 @@ if TYPE_CHECKING:
 
 # Type alias for parameter values
 ParamValue = Union[float, int, Float, UInt]
+
+# Counter for synthesized-wrapper filenames; ensures distinct
+# ``linecache`` entries even when the same gate is wrapped multiple times.
+_synthesized_kernel_counter = 0
+_synthesized_kernel_lock = threading.Lock()
 
 
 class ControlledGate:
@@ -431,27 +449,243 @@ class ControlledGate:
         return tuple([control_out] + tgt_outs)
 
 
-def controlled(qkernel: "QKernel", num_controls: int | UInt = 1) -> ControlledGate:
-    """Create a controlled version of a quantum gate (QKernel).
+def _classify_callable_param(annotation: Any) -> str:
+    """Classify a callable's parameter annotation for ``controlled()`` wrapping.
+
+    Built-in gate functions (``qmc.rx``, ``qmc.h``, etc.) typically annotate
+    their qubit operand as ``Qubit | Vector[Qubit]`` because they support
+    both scalar and broadcast invocation.  When wrapping for ``controlled``
+    we always invoke them with a single ``Qubit``, so we treat any union
+    that includes ``Qubit`` as a qubit parameter and likewise for
+    ``Float``/``UInt``.
 
     Args:
-        qkernel: A QKernel defining the gate to control.
-        num_controls: Number of control qubits (default: 1).
-            Can be int (concrete) or UInt (symbolic).
+        annotation: The parameter annotation, already resolved via
+            ``get_type_hints`` so string forms have been turned into real
+            type objects.
 
     Returns:
-        ControlledGate that can be called with (*controls, *targets, **params)
+        One of ``"qubit"``, ``"float"``, ``"uint"``, or ``"unknown"``.
+    """
+    if annotation is Qubit:
+        return "qubit"
+    if annotation is float or annotation is Float:
+        return "float"
+    if annotation is int or annotation is UInt:
+        return "uint"
+
+    origin = get_origin(annotation)
+    if origin in (Union, _types.UnionType):
+        for arg in get_args(annotation):
+            kind = _classify_callable_param(arg)
+            if kind != "unknown":
+                return kind
+        return "unknown"
+
+    return "unknown"
+
+
+def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
+    """Synthesize a ``@qkernel`` wrapper around a built-in gate callable.
+
+    Inspects the callable's signature to classify each parameter, then
+    generates a tiny wrapper function that simply forwards the call.  The
+    wrapper is decorated with ``@qkernel`` so that the rest of the
+    ``controlled`` machinery can consume it unchanged.
+
+    The wrapper's source is registered with ``linecache`` so that
+    ``inspect.getsource`` (used by ``transform_control_flow``) can retrieve
+    it.  The synthesized wrapper has no control flow, so the AST transform
+    is effectively a no-op.
+
+    Args:
+        fn: The callable to wrap.  Each parameter must have a type
+            annotation that resolves to ``Qubit``, ``Float``/``float``, or
+            ``UInt``/``int`` — possibly inside a ``Union`` (e.g., the
+            ``Union[Qubit, Vector[Qubit]]`` used by broadcast gate
+            functions).
+
+    Returns:
+        A ``QKernel`` whose body is ``return fn(*args)`` with concrete
+        ``Qubit``/``Float``/``UInt`` annotations.
+
+    Raises:
+        TypeError: If ``fn`` is not callable, has ``*args``/``**kwargs``,
+            lacks an annotation on any parameter, has an unsupported
+            annotation, or has no qubit parameters at all.
+    """
+    from qamomile.circuit.frontend.qkernel import QKernel, qkernel as _qkernel_decorator
+
+    if isinstance(fn, QKernel):
+        return fn
+
+    # Duck-typed kernel-like objects (e.g. test mocks with a stubbed
+    # ``.block``) are passed through unchanged so the existing
+    # ``ControlledGate`` consumer continues to work without coupling the
+    # synthesis path to a strict ``isinstance`` check.
+    if hasattr(fn, "block"):
+        return cast("QKernel", fn)
+
+    if not callable(fn):
+        raise TypeError(
+            f"controlled(): expected a QKernel or a built-in gate function, "
+            f"got {type(fn).__name__}."
+        )
+
+    fn_name = getattr(fn, "__name__", "anonymous_gate")
+
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError) as e:
+        raise TypeError(
+            f"controlled(): cannot inspect signature of {fn_name!r}: {e}. "
+            f"Wrap the function in @qmc.qkernel manually."
+        ) from e
+
+    try:
+        type_hints = get_type_hints(fn)
+    except (NameError, TypeError):
+        # Forward refs that cannot resolve at this point fall back to
+        # raw annotations; classification then proceeds against
+        # ``param.annotation`` directly.  We catch only the two
+        # exception types ``get_type_hints`` actually raises so a real
+        # bug (e.g. an import error in the caller's module) is not
+        # silently swallowed and re-emitted as "no type annotation".
+        type_hints = {}
+
+    qubit_args: list[str] = []
+    classical_args: list[tuple[str, str]] = []  # (name, "Float" | "UInt")
+
+    for param_name, param in sig.parameters.items():
+        if param.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            raise TypeError(
+                f"controlled(): callable {fn_name!r} uses *args/**kwargs, "
+                f"which cannot be auto-wrapped. Wrap it in @qmc.qkernel "
+                f"manually."
+            )
+        annotation = type_hints.get(param_name, param.annotation)
+        if annotation is inspect.Parameter.empty:
+            raise TypeError(
+                f"controlled(): parameter {param_name!r} of {fn_name!r} has "
+                f"no type annotation. Wrap the function in @qmc.qkernel "
+                f"manually."
+            )
+        kind = _classify_callable_param(annotation)
+        if kind == "qubit":
+            qubit_args.append(param_name)
+        elif kind == "float":
+            classical_args.append((param_name, "Float"))
+        elif kind == "uint":
+            classical_args.append((param_name, "UInt"))
+        else:
+            raise TypeError(
+                f"controlled(): parameter {param_name!r} of {fn_name!r} has "
+                f"annotation {annotation!r}; only Qubit, Float, UInt (or "
+                f"unions including those types, e.g. "
+                f"Union[Qubit, Vector[Qubit]]) are supported. Wrap the "
+                f"function in @qmc.qkernel manually."
+            )
+
+    if not qubit_args:
+        raise TypeError(
+            f"controlled(): callable {fn_name!r} has no Qubit parameters; "
+            f"a controlled gate requires at least one target qubit."
+        )
+
+    n_qubits = len(qubit_args)
+    param_decls = [f"{q}: Qubit" for q in qubit_args]
+    invocation_args = list(qubit_args)
+    for c_name, c_type in classical_args:
+        param_decls.append(f"{c_name}: {c_type}")
+        invocation_args.append(c_name)
+
+    return_anno = (
+        "Qubit" if n_qubits == 1 else f"tuple[{', '.join(['Qubit'] * n_qubits)}]"
+    )
+
+    # Use a name-mangled identifier so collisions with user-defined names
+    # in the wrapper namespace are impossible.
+    src = (
+        f"def {fn_name}({', '.join(param_decls)}) -> {return_anno}:\n"
+        f"    return __qmc_target__({', '.join(invocation_args)})\n"
+    )
+
+    global _synthesized_kernel_counter
+    with _synthesized_kernel_lock:
+        _synthesized_kernel_counter += 1
+        seq = _synthesized_kernel_counter
+
+    # Filenames in ``<...>`` form bypass on-disk lookup in inspect/linecache
+    # but still pass through ``linecache.getlines``.  Using ``mtime=None``
+    # makes ``linecache.checkcache`` skip the entry, so the cache survives.
+    filename = f"<qamomile-controlled-wrapper-{fn_name}-{seq}>"
+    src_lines = src.splitlines(keepends=True)
+    linecache.cache[filename] = (len(src), None, src_lines, filename)
+
+    namespace: dict[str, Any] = {
+        "Qubit": Qubit,
+        "Float": Float,
+        "UInt": UInt,
+        "tuple": tuple,
+        "__qmc_target__": fn,
+    }
+    code = compile(src, filename, "exec")
+    exec(code, namespace)
+    wrapper_fn = namespace[fn_name]
+    return _qkernel_decorator(wrapper_fn)
+
+
+def controlled(
+    qkernel: QKernel | Callable[..., Any],
+    num_controls: int | UInt = 1,
+) -> ControlledGate:
+    """Create a controlled version of a quantum gate.
+
+    Accepts either a ``@qmc.qkernel``-decorated function or a plain built-in
+    gate callable (``qmc.rx``, ``qmc.h``, ``qmc.cp``, ...).  When given a
+    plain callable, a thin ``@qkernel`` wrapper is synthesized automatically
+    by inspecting the callable's signature, so users no longer need to
+    write a one-line wrapper just to control a primitive gate.
+
+    Args:
+        qkernel: A ``QKernel`` defining the gate to control, or a built-in
+            gate callable whose parameters are annotated with ``Qubit``,
+            ``Float``/``float``, or ``UInt``/``int`` (possibly inside a
+            ``Union`` such as ``Union[Qubit, Vector[Qubit]]``).
+        num_controls: Number of control qubits (default: 1).  Can be ``int``
+            (concrete) or ``UInt`` (symbolic).
+
+    Returns:
+        A ``ControlledGate`` that can be called with
+        ``(*controls, *targets, **params)``.
+
+    Raises:
+        TypeError: If ``qkernel`` is a callable that cannot be auto-wrapped
+            (missing annotations, unsupported types, or no qubit
+            parameters).
+        ValueError: If ``num_controls`` is a concrete ``int`` less than 1.
 
     Example:
-        @qmc.qkernel
-        def rx_gate(q: Qubit, theta: float) -> Qubit:
-            return qmc.rx(q, theta)
+        Built-in gates can be controlled directly, with no wrapper::
 
-        crx = qmc.controlled(rx_gate)
-        ctrl_out, tgt_out = crx(ctrl_qubit, target_qubit, theta=0.5)
+            crx = qmc.controlled(qmc.rx)
+            ctrl_out, tgt_out = crx(ctrl, target, angle=0.5)
 
-        # Double-controlled
-        ccrx = qmc.controlled(rx_gate, num_controls=2)
-        c0, c1, tgt = ccrx(ctrl0, ctrl1, target, theta=0.5)
+            cch = qmc.controlled(qmc.h, num_controls=2)
+            c0, c1, tgt = cch(ctrl0, ctrl1, target)
+
+        ``@qmc.qkernel`` arguments are still supported for cases that need
+        custom logic::
+
+            @qmc.qkernel
+            def rx_then_h(q: Qubit, theta: float) -> Qubit:
+                q = qmc.rx(q, theta)
+                q = qmc.h(q)
+                return q
+
+            ctrl_out, tgt_out = qmc.controlled(rx_then_h)(ctrl, target, theta=0.5)
     """
-    return ControlledGate(qkernel, num_controls=num_controls)
+    return ControlledGate(_qkernel_for_callable(qkernel), num_controls=num_controls)
