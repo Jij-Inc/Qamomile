@@ -9,13 +9,11 @@ from a named built-in schedule.
 from __future__ import annotations
 
 import enum
-import typing as typ
 import warnings
 
 import numpy as np
 
 import qamomile.circuit as qmc
-from qamomile.optimization.schedules.dicke import dicke_state_composition_schedule
 from qamomile.circuit.algorithm.aoa import (
     aoa_state_basis_state,
     aoa_state_dicke,
@@ -26,6 +24,7 @@ from qamomile.circuit.algorithm.aoa import (
 )
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.transpiler import Transpiler
+from qamomile.optimization.schedules.dicke import dicke_state_composition_schedule
 
 from .qaoa import QAOAConverter
 
@@ -183,15 +182,15 @@ class AOAConverter(QAOAConverter):
             ValueError: If neither explicit pairs nor a valid built-in mixer
                 configuration is provided.
         """
+        mixer = MixerName(mixer)
+
         if pair_indices is not None:
-            if MixerName(mixer) != MixerName.RING:
+            if mixer != MixerName.RING:
                 warnings.warn(
                     f"pair_indices was provided; the mixer={mixer!r} argument is ignored.",
                     stacklevel=3,
                 )
             return self._normalize_pair_indices(pair_indices)
-
-        mixer = MixerName(mixer)
 
         if block_size is None:
             raise ValueError(
@@ -208,15 +207,14 @@ class AOAConverter(QAOAConverter):
             )
 
         num_blocks = self.spin_model.num_bits // block_size
-        if mixer == MixerName.RING:
-            return self._build_ring_pair_indices(num_blocks, block_size)
-        if mixer == MixerName.FULLY_CONNECTED:
-            return self._build_fully_connected_pair_indices(num_blocks, block_size)
-        raise ValueError(
-            f"Unknown mixer {mixer!r}. Must be 'ring' or 'fully-connected' "
-            "when pair_indices is not provided."
-        )
-    
+        match mixer:
+            case MixerName.RING:
+                return self._build_ring_pair_indices(num_blocks, block_size)
+            case MixerName.FULLY_CONNECTED:
+                return self._build_fully_connected_pair_indices(num_blocks, block_size)
+            case _:
+                assert False, f"unreachable: unhandled MixerName {mixer!r}"
+
     def _compute_dicke_composition_schedule(
         self,
         hamming_weight: int,
@@ -310,7 +308,7 @@ class AOAConverter(QAOAConverter):
             pair_indices_mixer (numpy.ndarray | None): Explicit mixer schedule
                 as an array of shape ``(num_pairs, 2)``. When provided,
                 ``mixer`` is ignored.
-            block_size (int | None): Size of each block on which preparing a Dicke state and on which XY mixer acts. 
+            block_size (int | None): Size of each block on which preparing a Dicke state and on which XY mixer acts.
                 If omitted, defaults to the full register size ``n`` (single block).
 
         Returns:
@@ -347,6 +345,9 @@ class AOAConverter(QAOAConverter):
                 hamming_weight=hamming_weight,
                 block_size=effective_block_size,
             )
+        else:
+            # UNIFORM: no extra basis-state setup required
+            assert initial_state == InitialState.UNIFORM
 
         match (quadratic, initial_state):
             case (True, InitialState.UNIFORM):
@@ -398,8 +399,9 @@ class AOAConverter(QAOAConverter):
                     initial_ones=initial_ones,
                 )
             case _:
-                raise ValueError(f"Unsupported configuration: quadratic={quadratic}, "
-                                 f"initial_state={initial_state!r}.")
+                assert False, (
+                    f"unreachable: quadratic={quadratic}, initial_state={initial_state!r}"
+                )
 
     def _transpile_quadratic(
         self,
@@ -409,13 +411,13 @@ class AOAConverter(QAOAConverter):
         pair_indices_mixer: np.ndarray,
     ) -> ExecutableProgram:
         """Transpile a quadratic-only model using the AOA circuit.
-        
+
         Args:
             transpiler (Transpiler): Backend transpiler to use.
             p (int): Number of AOA layers.
             pair_indices_mixer (numpy.ndarray): Explicit mixer schedule as an array of
                 shape ``(num_pairs, 2)``.
-        
+
         Returns:
             ExecutableProgram: The compiled circuit program.
         """
@@ -452,7 +454,7 @@ class AOAConverter(QAOAConverter):
             },
             parameters=["gammas", "betas"],
         )
-    
+
     def _transpile_quadratic_dicke(
         self,
         transpiler: Transpiler,
@@ -466,7 +468,7 @@ class AOAConverter(QAOAConverter):
         triplets_angles_dicke: np.ndarray,
     ) -> ExecutableProgram:
         """Transpile a quadratic-only model using the AOA circuit with Dicke state preparation.
-        
+
         Args:
             transpiler (Transpiler): Backend transpiler to use.
             p (int): Number of AOA layers.
@@ -477,7 +479,7 @@ class AOAConverter(QAOAConverter):
             triplets_indices_dicke (numpy.ndarray): Indices for the 3-qubit SCS blocks.
             pair_angles_dicke (numpy.ndarray): Rotation angles for the 2-qubit SCS blocks.
             triplets_angles_dicke (numpy.ndarray): Rotation angles for the 3-qubit SCS blocks.
-        
+
         Returns:
             ExecutableProgram: The compiled circuit program.
         """
@@ -641,7 +643,7 @@ class AOAConverter(QAOAConverter):
             },
             parameters=["gammas", "betas"],
         )
-    
+
     def _transpile_hubo_dicke(
         self,
         transpiler: Transpiler,

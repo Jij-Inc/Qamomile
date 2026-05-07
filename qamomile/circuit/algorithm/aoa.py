@@ -1,6 +1,6 @@
 """AOA (Alternating Operator Ansatz) circuit building blocks.
 
-This module provides the quantum circuit components for the Alternating Operator Ansatz (AOA), 
+This module provides the quantum circuit components for the Alternating Operator Ansatz (AOA),
 including Givens circuit for efficient initial Dicke state preparation and xy mixer.
 
 All functions are decorated with ``@qm_c.qkernel`` and use Handle-typed
@@ -12,8 +12,9 @@ import numpy as np
 import qamomile.circuit as qmc
 
 from . import basic as _basic
-from .state_preparation.dicke import prepare_dicke
 from .qaoa import hubo_ising_cost, ising_cost
+from .state_preparation.dicke import prepare_dicke
+
 
 @qmc.qkernel
 def xy_pair_rotation(
@@ -22,16 +23,17 @@ def xy_pair_rotation(
     j: qmc.UInt,
     beta: qmc.Float,
 ) -> qmc.Vector[qmc.Qubit]:
-    """
-    Apply exp(-i beta (X_i X_j + Y_i Y_j)) to qubits i and j.
-    The decomposition into CNOT,RX and RZ gates is exact.
+    """Apply exp(-i beta/2 (X_i X_j + Y_i Y_j)) to qubits i and j.
+
+    The effective rotation angle is beta/2; the decomposition into CNOT, RX,
+    and RZ gates is exact.
 
     Args:
         q (qmc.Vector[qmc.Qubit]): Qubit register.
         i (qmc.UInt): Index of the first qubit in the pair.
         j (qmc.UInt): Index of the second qubit in the pair.
         beta (qmc.Float): Rotation angle for the XY interaction.
-    
+
     Returns:
         qmc.Vector[qmc.Qubit]: Updated qubit register after applying the XY rotation.
     """
@@ -45,14 +47,14 @@ def xy_pair_rotation(
     q[j] = qmc.rx(q[j], -0.5 * np.pi)
     return q
 
+
 @qmc.qkernel
 def xy_mixer(
     q: qmc.Vector[qmc.Qubit],
     beta: qmc.Float,
     pair_indices_mixer: qmc.Matrix[qmc.UInt],
 ) -> qmc.Vector[qmc.Qubit]:
-    """
-    Apply a parity XY mixer on each one-hot color register.
+    """Apply a parity XY mixer on each one-hot color register.
 
     The Python side precomputes the qubit pairs for the parity schedule and
     passes them as ``pair_indices_mixer``.
@@ -61,7 +63,7 @@ def xy_mixer(
         q (qmc.Vector[qmc.Qubit]): Qubit register.
         beta (qmc.Float): Rotation angle for the XY interaction.
         pair_indices_mixer (qmc.Matrix[qmc.UInt]): Matrix of shape (num_pairs, 2) containing the qubit index pairs for the XY mixer.
-    
+
     Returns:
         qmc.Vector[qmc.Qubit]: Updated qubit register after applying the XY mixer.
     """
@@ -76,6 +78,7 @@ def xy_mixer(
         )
 
     return q
+
 
 @qmc.qkernel
 def aoa_layers(
@@ -110,6 +113,7 @@ def aoa_layers(
         q = xy_mixer(q, betas[layer], pair_indices_mixer)
     return q
 
+
 @qmc.qkernel
 def aoa_state_superposition(
     p: qmc.UInt,
@@ -139,6 +143,61 @@ def aoa_state_superposition(
     q = _basic.superposition_vector(n)
     q = aoa_layers(p, quad, linear, q, gammas, betas, pair_indices_mixer)
     return q
+
+
+@qmc.qkernel
+def basis_state_preparation(
+    n: qmc.UInt,
+    initial_ones: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Qubit]:
+    """Prepare a computational basis state from a list of ``|1>`` indices.
+
+    Args:
+        n (qmc.UInt): Number of qubits.
+        initial_ones (qmc.Vector[qmc.UInt]): Indices initialized to ``|1>``.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Qubit register in the requested basis state.
+    """
+    q = qmc.qubit_array(n, name="q")
+    for idx in qmc.range(initial_ones.shape[0]):
+        qubit_index = initial_ones[idx]
+        q[qubit_index] = qmc.x(q[qubit_index])
+    return q
+
+
+@qmc.qkernel
+def aoa_state_basis_state(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    n: qmc.UInt,
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+    pair_indices_mixer: qmc.Matrix[qmc.UInt],
+    initial_ones: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Qubit]:
+    """Generate AOA state starting from a computational basis state.
+
+    Args:
+        p (qmc.UInt): Number of AOA layers.
+        quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]):
+            Quadratic coefficients of the Ising model.
+        linear (qmc.Dict[qmc.UInt, qmc.Float]):
+            Linear coefficients of the Ising model.
+        n (qmc.UInt): Number of qubits.
+        gammas (qmc.Vector[qmc.Float]): Cost-layer parameters, one per layer.
+        betas (qmc.Vector[qmc.Float]): Mixer-layer parameters, one per layer.
+        pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs for the XY mixer.
+        initial_ones (qmc.Vector[qmc.UInt]): Indices initialized to ``|1>``.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: AOA state vector.
+    """
+    q = basis_state_preparation(n, initial_ones)
+    q = aoa_layers(p, quad, linear, q, gammas, betas, pair_indices_mixer)
+    return q
+
 
 @qmc.qkernel
 def aoa_state_dicke(
@@ -176,7 +235,14 @@ def aoa_state_dicke(
     Returns:
         qmc.Vector[qmc.Qubit]: AOA state vector.
     """
-    q = prepare_dicke(n, initial_ones, pair_indices_dicke, triplets_indices_dicke, pair_angles_dicke, triplets_angles_dicke)
+    q = prepare_dicke(
+        n,
+        initial_ones,
+        pair_indices_dicke,
+        triplets_indices_dicke,
+        pair_angles_dicke,
+        triplets_angles_dicke,
+    )
     q = aoa_layers(p, quad, linear, q, gammas, betas, pair_indices_mixer)
     return q
 
@@ -252,6 +318,43 @@ def hubo_aoa_state_superposition(
     q = hubo_aoa_layers(p, quad, linear, higher, q, gammas, betas, pair_indices_mixer)
     return q
 
+
+@qmc.qkernel
+def hubo_aoa_state_basis_state(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    higher: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+    n: qmc.UInt,
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+    pair_indices_mixer: qmc.Matrix[qmc.UInt],
+    initial_ones: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Qubit]:
+    """Generate HUBO AOA state starting from a computational basis state.
+
+    Args:
+        p (qmc.UInt): Number of AOA layers.
+        quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]):
+            Quadratic coefficients of the Ising model.
+        linear (qmc.Dict[qmc.UInt, qmc.Float]):
+            Linear coefficients of the Ising model.
+        higher (qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float]):
+            Higher-order coefficients keyed by index vectors.
+        n (qmc.UInt): Number of qubits.
+        gammas (qmc.Vector[qmc.Float]): Cost-layer parameters, one per layer.
+        betas (qmc.Vector[qmc.Float]): Mixer-layer parameters, one per layer.
+        pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs for the XY mixer.
+        initial_ones (qmc.Vector[qmc.UInt]): Indices initialized to ``|1>``.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: HUBO AOA state vector.
+    """
+    q = basis_state_preparation(n, initial_ones)
+    q = hubo_aoa_layers(p, quad, linear, higher, q, gammas, betas, pair_indices_mixer)
+    return q
+
+
 @qmc.qkernel
 def hubo_aoa_state_dicke(
     p: qmc.UInt,
@@ -291,6 +394,13 @@ def hubo_aoa_state_dicke(
     Returns:
         qmc.Vector[qmc.Qubit]: HUBO AOA state vector.
     """
-    q = prepare_dicke(n, initial_ones, pair_indices_dicke, triplets_indices_dicke, pair_angles_dicke, triplets_angles_dicke)
+    q = prepare_dicke(
+        n,
+        initial_ones,
+        pair_indices_dicke,
+        triplets_indices_dicke,
+        pair_angles_dicke,
+        triplets_angles_dicke,
+    )
     q = hubo_aoa_layers(p, quad, linear, higher, q, gammas, betas, pair_indices_mixer)
     return q

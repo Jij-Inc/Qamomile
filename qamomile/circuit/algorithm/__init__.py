@@ -1,5 +1,17 @@
 """Algorithm building blocks for quantum circuits."""
 
+from .aoa import (
+    aoa_layers,
+    aoa_state_basis_state,
+    aoa_state_dicke,
+    aoa_state_superposition,
+    basis_state_preparation,
+    hubo_aoa_layers,
+    hubo_aoa_state_basis_state,
+    hubo_aoa_state_dicke,
+    hubo_aoa_state_superposition,
+    xy_mixer,
+)
 from .basic import (
     cx_entangling_layer,
     cz_entangling_layer,
@@ -27,19 +39,6 @@ from .qaoa import (
     qaoa_state,
     x_mixer,
 )
-from .aoa import (
-    aoa_layers,
-    aoa_state_dicke,
-    aoa_state_superposition,
-    hubo_aoa_layers,
-    hubo_aoa_state_dicke,
-    hubo_aoa_state_superposition,
-    xy_mixer,
-)
-
-# Backward-compatible aliases for previous API names.
-aoa_state = aoa_state_superposition
-hubo_aoa_state = hubo_aoa_state_superposition
 from .trotter import trotterized_time_evolution
 
 __all__ = [
@@ -52,14 +51,15 @@ __all__ = [
     "hubo_qaoa_layers",
     "hubo_qaoa_state",
     # AOA
+    "basis_state_preparation",
     "aoa_layers",
-    "aoa_state",
     "aoa_state_superposition",
     "aoa_state_dicke",
+    "aoa_state_basis_state",
     "hubo_aoa_layers",
-    "hubo_aoa_state",
     "hubo_aoa_state_superposition",
     "hubo_aoa_state_dicke",
+    "hubo_aoa_state_basis_state",
     "xy_mixer",
     # Basic layers
     "rx_layer",

@@ -1,17 +1,15 @@
-""" This helpers contains the helpers that precompute the indexes of the SCS blocks for the Dicke state preparation algorithm.
-
-"""
+"""This helpers contains the helpers that precompute the indexes of the SCS blocks for the Dicke state preparation algorithm."""
 
 import numpy as np
 
+
 def _scs_schedule(n_dicke: int, k_dicke: int):
-    """
-    Build one SCS column for an n_dicke-qubit register with weight k_dicke.
+    """Build one SCS column for an n_dicke-qubit register with weight k_dicke.
 
     Args:
         n_dicke (int): Number of qubits in the Dicke state.
         k_dicke (int): Hamming weight of the Dicke state.
-    
+
     Returns:
         pair_indices (np.ndarray): Indices for the 2-qubit SCS block.
         triplets_indices (np.ndarray): Indices for the 3-qubit SCS blocks.
@@ -31,10 +29,10 @@ def _scs_schedule(n_dicke: int, k_dicke: int):
     pair_indices.append([n - 1, n])
     pair_angles.append(2 * np.arccos(1 / np.sqrt(n_dicke)))
 
-    # Clamp upper bound to n so that n-l never goes negative.
-    for l in range(2, min(k_dicke + 1, n + 1)):
-        triplets_indices.append([n - l, n - l + 1, n])
-        triplets_angles.append(2 * np.arccos(np.sqrt(l / n_dicke)))
+    # Clamp upper bound to n so that n-k never goes negative.
+    for k in range(2, min(k_dicke + 1, n + 1)):
+        triplets_indices.append([n - k, n - k + 1, n])
+        triplets_angles.append(2 * np.arccos(np.sqrt(k / n_dicke)))
 
     return (
         np.array(pair_indices, dtype=np.uint32),
@@ -43,9 +41,9 @@ def _scs_schedule(n_dicke: int, k_dicke: int):
         np.array(triplets_angles, dtype=float),
     )
 
+
 def bartschi_eidenbenz_schedule(n_dicke: int, k_dicke: int):
-    """
-    Build the Bartschi-Eidenbenz schedule for an n_dicke-qubit register with weight k_dicke.
+    """Build the Bartschi-Eidenbenz schedule for an n_dicke-qubit register with weight k_dicke.
 
     Args:
         n_dicke (int): Number of qubits in the Dicke state.
@@ -128,7 +126,9 @@ def dicke_state_composition_schedule(
         # Use the same basis-state convention as other Dicke utilities:
         # initialize the last k qubits of each block to |1>.
         if hamming_weight > 0:
-            local_initial_ones = np.arange(block_size - hamming_weight, block_size, dtype=np.uint32)
+            local_initial_ones = np.arange(
+                block_size - hamming_weight, block_size, dtype=np.uint32
+            )
             all_initial_ones.extend((local_initial_ones + start).tolist())
 
         local_pairs, local_triplets, local_pair_angles, local_triplets_angles = (
