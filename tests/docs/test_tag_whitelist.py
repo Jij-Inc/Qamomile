@@ -49,7 +49,13 @@ def _load_build_doc_tags():
     spec = importlib.util.spec_from_file_location("build_doc_tags", SCRIPT)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    sys.modules.setdefault("build_doc_tags", module)
+    # ``setdefault`` would leave a stale ``build_doc_tags`` entry from
+    # an earlier import in place, so anything else that imports the
+    # module later in the same process would see a different object
+    # than the one we just executed and returned. Overwrite
+    # unconditionally so the entry in ``sys.modules`` and our return
+    # value always refer to the same module instance.
+    sys.modules["build_doc_tags"] = module
     saved_override = os.environ.pop("DOCS_ROOT_OVERRIDE", None)
     try:
         spec.loader.exec_module(module)
