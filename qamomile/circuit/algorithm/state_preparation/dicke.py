@@ -3,7 +3,7 @@
 This module includes the main Dicke state preparation algorithm, as well as the necessary components.
 The method relies on Split & Cyclic Shift (SCS) blocks
 
-All functions are decorated with ``@qm_c.qkernel`` and use Handle-typed
+All functions are decorated with ``@qmc.qkernel`` and use Handle-typed
 parameters so they can be composed inside other ``@qkernel`` functions.
 
 References:
@@ -100,9 +100,16 @@ def prepare_dicke(
 ) -> qmc.Vector[qmc.Qubit]:
     """Prepare a Dicke state using the Bartschi-Eidenbenz SCS construction.
 
+    The schedule arrays must be precomputed with
+    :func:`~qamomile.optimization.schedules.dicke.bartschi_eidenbenz_schedule`
+    (single block) or
+    :func:`~qamomile.optimization.schedules.dicke.dicke_state_composition_schedule`
+    (multi-block).
+
     Args:
         n (qmc.UInt): Number of qubits in the register.
-        initial_ones (qmc.Vector[qmc.UInt]): Indices of the qubits that are initially in the |1> state.
+        initial_ones (qmc.Vector[qmc.UInt]): Indices of the qubits that are
+            initially in the ``|1>`` state.
         pair_indices (qmc.Matrix[qmc.UInt]): Precomputed indices for the 2-qubit SCS blocks.
         triplets_indices (qmc.Matrix[qmc.UInt]): Precomputed indices for the 3-qubit SCS blocks.
         pair_angles (qmc.Vector[qmc.Float]): Precomputed angles for the 2-qubit SCS blocks.
@@ -110,6 +117,13 @@ def prepare_dicke(
 
     Returns:
         qmc.Vector[qmc.Qubit]: Qubit register prepared in the Dicke state.
+
+    Example:
+        >>> import numpy as np
+        >>> from qamomile.optimization.schedules.dicke import bartschi_eidenbenz_schedule
+        >>> initial_ones = np.array([3], dtype=np.uint32)  # |D^4_1>: last qubit = |1>
+        >>> pi, ti, pa, ta = bartschi_eidenbenz_schedule(n_dicke=4, k_dicke=1)
+        >>> q = prepare_dicke(4, initial_ones, pi, ti, pa, ta)
     """
     q = qmc.qubit_array(n, name="q")
 

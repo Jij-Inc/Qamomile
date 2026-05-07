@@ -3,7 +3,9 @@
 import numpy as np
 
 
-def _scs_schedule(n_dicke: int, k_dicke: int):
+def _scs_schedule(
+    n_dicke: int, k_dicke: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Build one SCS column for an n_dicke-qubit register with weight k_dicke.
 
     Args:
@@ -11,10 +13,14 @@ def _scs_schedule(n_dicke: int, k_dicke: int):
         k_dicke (int): Hamming weight of the Dicke state.
 
     Returns:
-        pair_indices (np.ndarray): Indices for the 2-qubit SCS block.
-        triplets_indices (np.ndarray): Indices for the 3-qubit SCS blocks.
-        pair_angles (np.ndarray): Rotation angles for the 2-qubit SCS block.
-        triplets_angles (np.ndarray): Rotation angles for the 3-qubit SCS blocks.
+        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        ``(pair_indices, triplets_indices, pair_angles, triplets_angles)``
+        where ``pair_indices`` has shape ``(1, 2)``, ``triplets_indices``
+        has shape ``(max(0, k-1), 3)``, and the two angle arrays have
+        matching lengths.
+
+    Raises:
+        ValueError: If ``k_dicke`` is outside ``[0, n_dicke]``.
     """
     if not (0 <= k_dicke <= n_dicke):
         raise ValueError("Require 0 <= k <= n")
@@ -42,7 +48,9 @@ def _scs_schedule(n_dicke: int, k_dicke: int):
     )
 
 
-def bartschi_eidenbenz_schedule(n_dicke: int, k_dicke: int):
+def bartschi_eidenbenz_schedule(
+    n_dicke: int, k_dicke: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Build the Bartschi-Eidenbenz schedule for an n_dicke-qubit register with weight k_dicke.
 
     Args:
@@ -50,10 +58,10 @@ def bartschi_eidenbenz_schedule(n_dicke: int, k_dicke: int):
         k_dicke (int): Hamming weight of the Dicke state.
 
     Returns:
-        pair_indices (np.ndarray): Indices for the 2-qubit SCS blocks.
-        triplets_indices (np.ndarray): Indices for the 3-qubit SCS blocks.
-        pair_angles (np.ndarray): Rotation angles for the 2-qubit SCS blocks.
-        triplets_angles (np.ndarray): Rotation angles for the 3-qubit SCS blocks.
+        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        ``(pair_indices, triplets_indices, pair_angles, triplets_angles)``
+        — stacked SCS column outputs in descending column order, suitable
+        for direct use with :func:`~qamomile.circuit.algorithm.state_preparation.dicke.prepare_dicke`.
     """
 
     pair_indices = []
@@ -94,14 +102,16 @@ def dicke_state_composition_schedule(
         hamming_weight: Dicke Hamming weight ``k`` for each block ``|D^block_size_k>``.
 
     Returns:
-        initial_ones: Global qubit indices initialized in ``|1>``.
-        pair_indices: Global 2-qubit SCS schedule.
-        triplets_indices: Global 3-qubit SCS schedule.
-        pair_angles: Angles for 2-qubit SCS schedule.
-        triplets_angles: Angles for 3-qubit SCS schedule.
+        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        ``(initial_ones, pair_indices, triplets_indices, pair_angles,
+        triplets_angles)`` — global qubit indices and SCS rotation
+        parameters for the full register, ready for use with
+        :func:`~qamomile.circuit.algorithm.state_preparation.dicke.prepare_dicke`.
 
     Raises:
-        ValueError: If inputs are invalid.
+        ValueError: If ``n_qubits <= 0``; if ``block_size <= 0``; if
+            ``n_qubits`` is not divisible by ``block_size``; or if
+            ``hamming_weight`` is outside ``[0, block_size]``.
     """
     if n_qubits <= 0:
         raise ValueError("n_qubits must be > 0.")

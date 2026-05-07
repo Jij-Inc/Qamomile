@@ -30,12 +30,32 @@ from .qaoa import QAOAConverter
 
 
 class InitialState(enum.StrEnum):
+    """Initial state selector for :class:`AOAConverter`.
+
+    Attributes:
+        UNIFORM: Uniform superposition prepared by a Hadamard layer.
+        DICKE: Product of Dicke states prepared via the Bartschi-Eidenbenz
+            SCS construction.
+        SINGLE_BASIS_STATE: Computational basis state with the requested
+            Hamming weight per block (last ``k`` qubits of each block set
+            to ``|1>``).
+    """
+
     UNIFORM = "uniform"
     DICKE = "dicke"
     SINGLE_BASIS_STATE = "single_basis_state"
 
 
 class MixerName(enum.StrEnum):
+    """Built-in XY mixer schedule selector for :class:`AOAConverter`.
+
+    Attributes:
+        RING: Parity-style ring schedule — adjacent pairs in two alternating
+            layers, plus a wrap-around pair when ``block_size > 2``.
+        FULLY_CONNECTED: All pairs within each block, greedily partitioned
+            into non-overlapping batches.
+    """
+
     RING = "ring"
     FULLY_CONNECTED = "fully-connected"
 
@@ -51,6 +71,8 @@ class AOAConverter(QAOAConverter):
     qubit index pairs.
 
     Example:
+        >>> from qamomile.optimization.binary_model import BinaryModel
+        >>> from qamomile.qiskit.transpiler import QiskitTranspiler
         >>> model = BinaryModel.from_hubo({(0, 1, 2): 1.0, (0,): -2.0})
         >>> converter = AOAConverter(model)
         >>> executable = converter.transpile(
@@ -308,11 +330,22 @@ class AOAConverter(QAOAConverter):
             pair_indices_mixer (numpy.ndarray | None): Explicit mixer schedule
                 as an array of shape ``(num_pairs, 2)``. When provided,
                 ``mixer`` is ignored.
-            block_size (int | None): Size of each block on which preparing a Dicke state and on which XY mixer acts.
-                If omitted, defaults to the full register size ``n`` (single block).
+            block_size (int | None): Size of each block on which the Dicke
+                state is prepared and on which the XY mixer acts. Must divide
+                ``spin_model.num_bits`` and be ``> 1`` when a built-in mixer
+                schedule is used. If omitted, defaults to the full register
+                size (single block).
 
         Returns:
             ExecutableProgram: The compiled circuit program.
+
+        Raises:
+            ValueError: If ``initial_state`` is not a recognised
+                :class:`InitialState` member; if ``mixer`` is not a recognised
+                :class:`MixerName` member; if ``pair_indices_mixer`` has the
+                wrong shape; if ``block_size`` is ``<= 1`` or does not divide
+                ``spin_model.num_bits`` when a built-in mixer is requested; or
+                if ``hamming_weight`` is outside ``[0, block_size]``.
         """
         initial_state = InitialState(initial_state)
         mixer = MixerName(mixer)

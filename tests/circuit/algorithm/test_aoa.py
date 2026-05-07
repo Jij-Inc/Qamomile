@@ -436,12 +436,8 @@ def test_aoa_state_dicke_expval_z_sum_is_zero(name, TranspilerCls):
 def test_xy_pair_rotation_expval_matches_exact_xy_unitary(name, TranspilerCls, beta):
     """Tests that xy_pair_rotation applies exp(-i*beta/2*(X@X + Y@Y)) exactly.
 
-    The circuit implements exp(-i*beta/2*(XX+YY)), so the effective rotation angle
-    is beta/2 (note: the docstring of xy_pair_rotation claims exp(-i*beta*(XX+YY));
-    the convention used here is half that angle).
-
     Starting from |01> (q[1]=1, q[0]=0), the propagator acts on the
-    {|01>, |10>} subspace as exp(-i*beta/2*2*sigma_x):
+    {|01>, |10>} subspace as exp(-i*beta/2*(XX+YY)):
         exp(-i*beta/2*(XX+YY))|01> = cos(beta)|01> - i*sin(beta)|10>
     The expectation value of Z(0)-Z(1) on this state is:
         <Z(0)-Z(1)> = cos^2(beta)*(+1-(-1)) + sin^2(beta)*(-1-(+1))

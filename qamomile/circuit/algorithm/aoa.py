@@ -3,7 +3,7 @@
 This module provides the quantum circuit components for the Alternating Operator Ansatz (AOA),
 including Givens circuit for efficient initial Dicke state preparation and xy mixer.
 
-All functions are decorated with ``@qm_c.qkernel`` and use Handle-typed
+All functions are decorated with ``@qmc.qkernel`` and use Handle-typed
 parameters so they can be composed inside other ``@qkernel`` functions.
 """
 
@@ -25,8 +25,7 @@ def xy_pair_rotation(
 ) -> qmc.Vector[qmc.Qubit]:
     """Apply exp(-i beta/2 (X_i X_j + Y_i Y_j)) to qubits i and j.
 
-    The effective rotation angle is beta/2; the decomposition into CNOT, RX,
-    and RZ gates is exact.
+    The decomposition into CNOT, RX, and RZ gates is exact.
 
     Args:
         q (qmc.Vector[qmc.Qubit]): Qubit register.
@@ -54,10 +53,10 @@ def xy_mixer(
     beta: qmc.Float,
     pair_indices_mixer: qmc.Matrix[qmc.UInt],
 ) -> qmc.Vector[qmc.Qubit]:
-    """Apply a parity XY mixer on each one-hot color register.
+    """Apply XY pair rotations along the supplied mixer schedule.
 
-    The Python side precomputes the qubit pairs for the parity schedule and
-    passes them as ``pair_indices_mixer``.
+    Each row of ``pair_indices_mixer`` selects a qubit pair on which
+    :func:`xy_pair_rotation` is applied with the same ``beta``.
 
     Args:
         q (qmc.Vector[qmc.Qubit]): Qubit register.
@@ -226,7 +225,7 @@ def aoa_state_dicke(
         gammas (qmc.Vector[qmc.Float]): Cost-layer parameters, one per layer.
         betas (qmc.Vector[qmc.Float]): Mixer-layer parameters, one per layer.
         pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs for the XY mixer parity schedule.
-        initial_ones (qmc.Vector[qmc.UInt]): Indices of the qubits that are initially in the |1> state for Dicke state preparation.
+        initial_ones (qmc.Vector[qmc.UInt]): Indices of the qubits that are initially in the ``|1>`` state for Dicke state preparation.
         pair_indices_dicke (qmc.Matrix[qmc.UInt]): Precomputed indices for the 2-qubit SCS blocks for Dicke state preparation.
         triplets_indices_dicke (qmc.Matrix[qmc.UInt]): Precomputed indices for the 3-qubit SCS blocks for Dicke state preparation.
         pair_angles_dicke (qmc.Vector[qmc.Float]): Precomputed angles for the 2-qubit SCS blocks for Dicke state preparation.
@@ -385,7 +384,7 @@ def hubo_aoa_state_dicke(
         gammas (qmc.Vector[qmc.Float]): Cost-layer parameters, one per layer.
         betas (qmc.Vector[qmc.Float]): Mixer-layer parameters, one per layer.
         pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs for the XY mixer parity schedule.
-        initial_ones (qmc.Vector[qmc.UInt]): Indices of the qubits that are initially in the |1> state for Dicke state preparation.
+        initial_ones (qmc.Vector[qmc.UInt]): Indices of the qubits that are initially in the ``|1>`` state for Dicke state preparation.
         pair_indices_dicke (qmc.Matrix[qmc.UInt]): Precomputed indices for the 2-qubit SCS blocks for Dicke state preparation.
         triplets_indices_dicke (qmc.Matrix[qmc.UInt]): Precomputed indices for the 3-qubit SCS blocks for Dicke state preparation.
         pair_angles_dicke (qmc.Vector[qmc.Float]): Precomputed angles for the 2-qubit SCS blocks for Dicke state preparation.
