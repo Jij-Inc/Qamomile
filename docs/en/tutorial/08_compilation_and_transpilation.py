@@ -734,7 +734,7 @@ except ModuleNotFoundError:
 # Three differences worth calling out:
 #
 # 1. **Circuit type.** Qiskit emits a `QuantumCircuit` with embedded
-#    `Parameter` objects; QURI Parts emits a `LinearMappedUnboundParametricQuantumCircuit`
+#    `Parameter` objects; QURI Parts emits a `LinearMappedParametricQuantumCircuit`
 #    whose parameters are QURI Parts `Parameter` instances. Both round-trip
 #    through Qamomile's `parameter_names` the same way.
 # 2. **Measurement.** Qiskit's circuit ends in `measure` instructions

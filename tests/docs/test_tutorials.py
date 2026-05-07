@@ -42,6 +42,7 @@ TUTORIAL_PATTERNS = [
 # and should be skipped when those dependencies are not installed.
 OPTIONAL_SKIP_MODULES = {
     "vqe_for_hydrogen": "openfermion",
+    "qsci": "quri_parts",
 }
 
 
