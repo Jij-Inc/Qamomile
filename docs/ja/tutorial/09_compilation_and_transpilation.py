@@ -539,7 +539,7 @@ except ModuleNotFoundError:
 # %% [markdown]
 # 指摘すべき違いは3つあります:
 #
-# 1. **回路の型。** Qiskitは`Parameter`オブジェクトを埋め込んだ`QuantumCircuit`をemitします。QURI PartsはパラメータがQURI Partsの`Parameter`インスタンスである`LinearMappedUnboundParametricQuantumCircuit`をemitします。どちらもQamomileの`parameter_names`を同じ形で往復します。
+# 1. **回路の型。** Qiskitは`Parameter`オブジェクトを埋め込んだ`QuantumCircuit`をemitします。QURI PartsはパラメータがQURI Partsの`Parameter`インスタンスである`LinearMappedParametricQuantumCircuit`をemitします。どちらもQamomileの`parameter_names`を同じ形で往復します。
 # 2. **測定。** Qiskitの回路は`measure`命令で終わります（`measurement_mode=NATIVE`）。QURI Partsの回路は測定ゲートを持ちません。サンプリングは実行時にexecutorが処理します（`measurement_mode=STATIC`）。
 # 3. **複合ゲート。** カーネルが`qmc.qft(...)`を使う場合、Qiskitの`QiskitQFTEmitter`は`QFTGate`ボックスを配置しますが、QURI Partsバックエンドはライブラリパス経由で分解します。IRは同じですが、実現される回路は異なります。カーネルごとに`TranspilerConfig.with_strategies({"qft": "approximate"})`で上書きできます。
 
