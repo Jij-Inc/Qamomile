@@ -61,7 +61,8 @@ copy-api: generate-api
 generate-doc-tags:
 	@tmp_dir=$$(mktemp -d -t qamomile-doc-tags-preview-XXXXXX); \
 	echo "Generating doc tag pages in temporary docs root: $$tmp_dir"; \
-	find . -mindepth 1 -maxdepth 1 ! -name '_build_src' ! -name '_build' -exec cp -R {} "$$tmp_dir"/ \; ; \
+	find . -mindepth 1 -maxdepth 1 ! -name '_build_src' ! -name '_build' ! -name '_site' ! -name 'api' -exec cp -R {} "$$tmp_dir"/ \; ; \
+	rm -rf "$$tmp_dir"/*/_build "$$tmp_dir"/*/api "$$tmp_dir"/*/.jupyter_cache; \
 	DOCS_ROOT_OVERRIDE="$$tmp_dir" uv run python scripts/build_doc_tags.py; \
 	echo "✓ Doc tag pages generated in $$tmp_dir (committed source untouched)"
 

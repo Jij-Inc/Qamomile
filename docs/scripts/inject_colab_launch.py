@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -51,6 +52,13 @@ from pathlib import Path
 
 SCRIPT_TAG_ID = "qamomile-colab-launch-script"
 SCRIPT_FILE_NAME = "colab-launch.js"
+
+# Match ``<head>`` even if it grows attributes (e.g. ``<head prefix="og: ...">``).
+# We anchor on the literal ``<head`` followed by a word boundary so we don't
+# also match ``<header>``, then accept any non-``>`` characters up to the
+# closing ``>``. ``re.IGNORECASE`` because HTML tag names are
+# case-insensitive in spec, even though mystmd lowercases its output today.
+HEAD_OPEN_RE = re.compile(r"<head\b[^>]*>", re.IGNORECASE)
 
 # Inline-CSS pass: avoids FOUC across the whole theme override. mystmd
 # bundles docs/assets/custom-theme.css into the last
@@ -130,11 +138,12 @@ def inline_theme_css(html_path: Path, css_text: str) -> bool:
     content = html_path.read_text(encoding="utf-8")
     if f'id="{THEME_CSS_STYLE_ID}"' in content:
         return False
-    head_open = "<head>"
-    if head_open not in content:
+    match = HEAD_OPEN_RE.search(content)
+    if match is None:
         return False
     style_block = f'<style id="{THEME_CSS_STYLE_ID}">{css_text}</style>'
-    new = content.replace(head_open, head_open + style_block, 1)
+    insert_at = match.end()
+    new = content[:insert_at] + style_block + content[insert_at:]
     html_path.write_text(new, encoding="utf-8")
     return True
 

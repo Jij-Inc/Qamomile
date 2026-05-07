@@ -245,11 +245,25 @@ sync_build_lang() {
 }
 
 sync_build_all() {
-    # build_lang inside each sync_build_lang now runs generate_api +
-    # copy_api itself (so single-locale builds are self-contained), so
-    # we don't need to call them up front here.
-    sync_build_lang en
-    sync_build_lang ja
+    # Mirror build_all's pattern: run generate_api + copy_api ONCE up
+    # front, then drive the per-locale work via the lower-level
+    # primitives (sync_lang / execute_lang / setup_build_src /
+    # _build_lang_from_build_src) instead of going through the
+    # self-contained build_lang. Going through build_lang in a loop
+    # would re-run generate_api + copy_api for every locale, which
+    # noticeably slows ./build.sh sync-build for no benefit.
+    generate_api
+    copy_api
+    sync_lang en
+    sync_lang ja
+    execute_lang en
+    execute_lang ja
+    # All committed source is now in sync; copy both locales into the
+    # build-dir in a single setup_build_src call so the chip injection
+    # and tag-page generation happen once across both locales.
+    setup_build_src
+    _build_lang_from_build_src en
+    _build_lang_from_build_src ja
     info "Both English and Japanese documentation synced and built successfully"
 }
 
