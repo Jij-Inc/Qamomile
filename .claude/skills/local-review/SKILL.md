@@ -37,6 +37,26 @@ Dependencies flow only downstream. The practical rules:
 - **Transpiler passes** are IR-centric: each pass primarily reads / writes IR and must not depend on Frontend **implementation details** (AST machinery, tracer internals, frontend-only helpers). Passes at the compile-entry / config boundary may legitimately accept or type-reference Frontend surface types such as `QKernel` and `DecompositionConfig` as configuration inputs — e.g., `SubstitutionPass` takes `QKernel` as a substitution target and imports it under `TYPE_CHECKING` + runtime-late import (see `qamomile/circuit/transpiler/passes/substitution.py:34,276`). That pattern is NOT a layer violation. Flag only passes that reach into Frontend behavior or non-boundary internals.
 - **Backend** depends on IR and Transpiler public APIs. Backend MUST NOT import from Frontend.
 
+### B-bis. IR Abstraction Level
+
+Qamomile prefers to **keep the IR as abstract as possible and delegate concretization to the transpile target** (backend emit / runtime). The IR encodes *what the program means*; how a backend realizes it (per-qubit instruction encoding, native composite-gate equivalents, runtime loop / branch lowering) is the backend's job. Concretizing too early at the IR layer locks Qamomile into a single backend's view and bypasses the emit-time extension surfaces — `GateEmitter` (per-gate emission), `CompositeGateEmitter` (native lowering of composite gates), and the emit pass itself when something needs structural customization.
+
+Existing examples of the principle in code:
+
+- **Vector measurement** is a single `MeasureVectorOperation` (`qamomile/circuit/ir/operation/gate.py#L410`) — not expanded into N per-qubit `MeasureOperation`s at IR level. How it turns into actual measurement instructions is left to emit time: backends with a native vector primitive can emit one operation, others can iterate per-qubit. The IR does not commit to per-qubit semantics.
+- **`MeasureQFixedOperation`** is HYBRID (quantum measurement + classical decode). It is split into `MeasureVectorOperation + DecodeQFixedOperation` only at `plan`'s pre-segmentation lowering — late enough that the IR keeps the highest abstraction that still admits a clean classical/quantum segmentation boundary, and each resulting half remains as abstract as possible (no per-qubit expansion).
+- **Composite gates** (QFT / QPE / IQFT) stay as `CompositeGateOperation`; native lowering is opt-in via `CompositeGateEmitter`.
+- **Symbolic loop bounds** stay as `ForOperation`; `LoopAnalyzer` decides unroll-vs-runtime-loop at emit time.
+
+Reviewer rules:
+
+- A new IR op or transpiler pass that pre-expands an abstract concept into per-element / per-qubit / per-step concretization at IR level — **without** a stated reason such as enabling segmentation or breaking a HYBRID kind into pure halves — is a **P1** design regression.
+- A new pass that performs concretization (per-qubit expansion, native-gate substitution, loop unrolling) at a stage **earlier than necessary** — when the same lowering could happen later (typically `plan` or `emit`) — is **P1**.
+- A new pass or op that hard-codes backend-specific lowering inside the IR layer — instead of leaving it to emit time where `GateEmitter`, `CompositeGateEmitter`, or the emit pass itself can express the lowering — is **P1** (also a Section B violation).
+- Splitting a HYBRID op into pure-quantum + pure-classical halves at IR level **is** acceptable when needed for segmentation (`MeasureQFixed → MeasureVector + DecodeQFixed` is the canonical example). The check is whether each resulting half stays as abstract as possible.
+
+When ambiguous, prefer (a) a single abstract op over multiple low-level ones, and (b) lowering at the **latest stage** where the IR still cleanly expresses the abstraction.
+
 ### C. @qkernel & Converter Pattern
 
 - Quantum building blocks exposed for composition by algorithm or optimization converters (QAOA / QRAO / FQAOA ansatz pieces, stdlib algorithms like QFT / QPE / IQFT, mixer / cost-Hamiltonian prep, etc.) MUST use `@qm.qkernel` (or `@qmc.qkernel`). `CompositeGate._decompose()` methods and emitter-side decomposition strategies are separate patterns (class method / strategy protocol) and are out of scope for this rule.
