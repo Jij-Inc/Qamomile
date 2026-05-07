@@ -107,34 +107,77 @@ THEME_INIT_SCRIPT = (
     "(function(){"
     "var d=document.documentElement;"
     'd.classList.add("qamomile-preloading");'
+    # Theme: prefer the user's stored choice; fall back to the OS
+    # preference. Treat "dark" / "light" as explicit overrides; any
+    # other value (including "system" / "auto" / null) defers to the
+    # media query so a user with no stored preference and a dark OS
+    # gets dark on first paint.
     "try{"
     'var stored=localStorage.getItem("myst:theme");'
-    'var dark=stored?stored==="dark":'
-    'window.matchMedia("(prefers-color-scheme: dark)").matches;'
+    'var dark=stored==="dark"||((stored!=="light")&&'
+    'window.matchMedia("(prefers-color-scheme: dark)").matches);'
     'if(dark)d.classList.add("dark");'
     "}catch(e){}"
+    # Reveal: lift the preloading class once everything's settled.
+    # Three triggers race; first one wins:
+    #   1. window.load + 2 RAF — hydration is normally complete by
+    #      then on a typical machine.
+    #   2. 2-second safety timeout — guarantees the page never stays
+    #      hidden longer than that even if `load` is unusually
+    #      delayed (slow CDN, large image, etc.).
+    #   3. First user-driven event — if the user is already
+    #      interacting (mousemove, click, keydown, touch), they've
+    #      seen enough that further hiding is hostile UX.
+    "var revealed=false;"
+    "function reveal(){"
+    "if(revealed)return;"
+    "revealed=true;"
+    'd.classList.remove("qamomile-preloading");'
+    "}"
     'window.addEventListener("load",function(){'
     "requestAnimationFrame(function(){"
-    "requestAnimationFrame(function(){"
-    'd.classList.remove("qamomile-preloading");'
+    "requestAnimationFrame(reveal);"
     "});"
     "});"
+    "setTimeout(reveal,2000);"
+    '["mousemove","keydown","click","touchstart"].forEach(function(e){'
+    "window.addEventListener(e,reveal,{once:true,passive:true});"
     "});"
     "})();"
 )
 
-# Blanket transition-suppression rule. Lives inside the inline theme
-# <style> block (see :func:`inline_theme_css`) so the rule is parsed
-# in the same first-style-pass that interprets the rest of the theme
-# overrides; the ``html.qamomile-preloading`` class is set by
-# THEME_INIT_SCRIPT a moment earlier, which means the first paint
-# happens with every transition silenced. The ``!important`` is
-# needed because Tailwind's ``transition-colors`` etc. set the
-# ``transition-property`` directly on each element with normal
-# specificity. Once ``qamomile-preloading`` is removed (post-load,
-# two RAF ticks in), the rule no longer matches and Tailwind's
-# transition utilities resume their normal behavior.
+# Preload guard: lives inside the inline theme <style> block (see
+# :func:`inline_theme_css`) so the rule is parsed in the same first-
+# style-pass that interprets the rest of the theme overrides. The
+# ``html.qamomile-preloading`` class is set by THEME_INIT_SCRIPT a
+# moment earlier (inline <script> at the start of <head>), so the
+# first paint already has these rules in effect. Once
+# ``qamomile-preloading`` is removed (post-load + 2 RAF, or a 2-second
+# safety timeout, whichever comes first), the rules stop matching and
+# normal styling / transitions resume.
+#
+# Two layers of suppression:
+#
+# 1. ``html.qamomile-preloading body { visibility: hidden !important; }``
+#    hides the body until the page is fully wired up. Any remaining
+#    FOUC source — late-arriving CDN stylesheet, React hydration
+#    re-render, font swap, layout shift from JS-injected colab
+#    button — happens off-screen. When the class is removed, the
+#    body becomes visible in its already-final state. This is the
+#    standard "flash of content" guard used by most React docs sites.
+#
+# 2. ``transition: none !important`` on every element while preloading
+#    is a backstop in case anything DOES paint before body is
+#    revealed (e.g. browsers occasionally render with ``visibility:
+#    hidden`` lifted briefly during interleaved compositing). With
+#    transitions silenced, no animation can become visible even if
+#    that happens.
+#
+# ``!important`` is required on both rules because Tailwind's
+# ``transition-colors`` etc. set the relevant properties directly on
+# each element with normal specificity.
 PRELOAD_GUARD_CSS = (
+    "html.qamomile-preloading body{visibility:hidden!important;}"
     "html.qamomile-preloading,"
     "html.qamomile-preloading *,"
     "html.qamomile-preloading *::before,"
