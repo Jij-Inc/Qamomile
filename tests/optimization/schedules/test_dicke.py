@@ -9,6 +9,7 @@ from qamomile.optimization.schedules.dicke import (
 
 
 def test_scs_schedule_for_weight_two_builds_one_pair_and_one_triplet():
+	"""Tests that _scs_schedule for n=4, k=2 returns exactly one pair and one triplet with correct indices and angles."""
 	pair_indices, triplets_indices, pair_angles, triplets_angles = _scs_schedule(4, 2)
 
 	np.testing.assert_array_equal(pair_indices, np.asarray([[2, 3]], dtype=np.uint32))
@@ -18,6 +19,7 @@ def test_scs_schedule_for_weight_two_builds_one_pair_and_one_triplet():
 
 
 def test_bartschi_eidenbenz_schedule_stacks_columns_in_descending_size_order():
+	"""Tests that bartschi_eidenbenz_schedule concatenates SCS columns in descending qubit-register order."""
 	pair_indices, triplets_indices, pair_angles, triplets_angles = bartschi_eidenbenz_schedule(4, 2)
 
 	expected_pairs = np.asarray([[2, 3], [1, 2], [0, 1]], dtype=np.uint32)
@@ -30,6 +32,7 @@ def test_bartschi_eidenbenz_schedule_stacks_columns_in_descending_size_order():
 
 
 def test_dicke_state_composition_schedule_repeats_local_schedule_per_block():
+	"""Tests that dicke_state_composition_schedule tiles the local BE schedule across blocks with correct index offsets."""
 	initial_ones, pair_indices, triplets_indices, pair_angles, triplets_angles = (
 		dicke_state_composition_schedule(n_qubits=6, block_size=3, hamming_weight=2)
 	)
@@ -60,5 +63,6 @@ def test_dicke_state_composition_schedule_repeats_local_schedule_per_block():
 	],
 )
 def test_dicke_state_composition_schedule_validates_inputs(kwargs, message):
+	"""Tests that dicke_state_composition_schedule raises ValueError for invalid n_qubits, block_size, or hamming_weight."""
 	with pytest.raises(ValueError, match=message):
 		dicke_state_composition_schedule(**kwargs)

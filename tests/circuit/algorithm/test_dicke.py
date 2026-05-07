@@ -1,23 +1,88 @@
-"""Tests for qamomile/circuit/algorithm/dicke.py primitives."""
+"""Tests for qamomile/circuit/algorithm/state_preparation/dicke.py primitives."""
+
+import re
 
 import numpy as np
 import pytest
 
-pytest.importorskip("qiskit")
-
 import qamomile.circuit as qmc
-from qamomile.circuit.algorithm.dicke import prepare_dicke, scs_gate_2q, scs_gate_3q
+import qamomile.observable as qm_o
+from qamomile.circuit.algorithm.state_preparation.dicke import prepare_dicke, scs_gate_2q, scs_gate_3q
 from qamomile.optimization.schedules.dicke import dicke_state_composition_schedule
-from qamomile.qiskit.transpiler import QiskitTranspiler
 
+# ---------------------------------------------------------------------------
+# Backend registry
+# ---------------------------------------------------------------------------
 
-def _gate_counts(qc):
-	counts = {}
+BACKENDS: list[tuple[str, type]] = []
+try:
+	import qiskit  # noqa: F401
+	from qamomile.qiskit.transpiler import QiskitTranspiler
+	BACKENDS.append(("qiskit", QiskitTranspiler))
+except ImportError:
+	pass
+try:
+	import quri_parts  # noqa: F401
+	from qamomile.quri_parts.transpiler import QuriPartsTranspiler
+	BACKENDS.append(("quri_parts", QuriPartsTranspiler))
+except ImportError:
+	pass
+try:
+	import cudaq  # noqa: F401
+	from qamomile.cudaq.transpiler import CudaqTranspiler
+	BACKENDS.append(("cudaq", CudaqTranspiler))
+except ImportError:
+	pass
+
+if not BACKENDS:
+	pytest.skip("No quantum backend available", allow_module_level=True)
+
+# ---------------------------------------------------------------------------
+# Per-backend gate-count helpers
+# ---------------------------------------------------------------------------
+
+def _qiskit_gate_counts(exe) -> dict[str, int]:
+	qc = exe.compiled_quantum[0].circuit
+	counts: dict[str, int] = {}
 	for inst in qc.data:
 		name = inst.operation.name
 		counts[name] = counts.get(name, 0) + 1
 	return counts
 
+_QURI_PARTS_CANONICAL: dict[str, str] = {
+	"H": "h", "X": "x", "Y": "y", "Z": "z",
+	"S": "s", "Sdag": "sdg", "T": "t", "Tdag": "tdg",
+	"CNOT": "cx", "CZ": "cz", "SWAP": "swap",
+	"RX": "rx", "ParametricRX": "rx",
+	"RY": "ry", "ParametricRY": "ry",
+	"RZ": "rz", "ParametricRZ": "rz",
+	"PauliRotation": "rzz", "ParametricPauliRotation": "rzz",
+}
+
+def _quri_parts_gate_counts(exe) -> dict[str, int]:
+	circuit = exe.compiled_quantum[0].circuit
+	counts: dict[str, int] = {}
+	for gate in circuit.gates:
+		canon = _QURI_PARTS_CANONICAL.get(gate.name, gate.name.lower())
+		counts[canon] = counts.get(canon, 0) + 1
+	return counts
+
+_CUDAQ_PATTERNS: dict[str, re.Pattern] = {
+	"cx": re.compile(r"x\.ctrl\("),
+	"rx": re.compile(r"\brx\("),
+	"ry": re.compile(r"\bry\("),
+	"rz": re.compile(r"\brz\("),
+	"h":  re.compile(r"\bh\("),
+	"x":  re.compile(r"\bx\("),
+}
+
+def _cudaq_gate_counts(exe) -> dict[str, int]:
+	source = exe.compiled_quantum[0].source
+	return {name: len(pat.findall(source)) for name, pat in _CUDAQ_PATTERNS.items()}
+
+# ---------------------------------------------------------------------------
+# Wrapper qkernels (needed to transpile sub-functions with concrete bindings)
+# ---------------------------------------------------------------------------
 
 @qmc.qkernel
 def _wrap_scs_gate_2q(
@@ -64,33 +129,85 @@ def _wrap_prepare_dicke(
 	return qmc.measure(q)
 
 
-def test_scs_gate_2q_uses_expected_cnot_and_ry_counts():
-	transpiler = QiskitTranspiler()
+@qmc.qkernel
+def _wrap_prepare_dicke_expval(
+	n: qmc.UInt,
+	initial_ones: qmc.Vector[qmc.UInt],
+	pair_indices: qmc.Matrix[qmc.UInt],
+	triplets_indices: qmc.Matrix[qmc.UInt],
+	pair_angles: qmc.Vector[qmc.Float],
+	triplets_angles: qmc.Vector[qmc.Float],
+	hamiltonian: qmc.Observable,
+) -> qmc.Float:
+	q = prepare_dicke(
+		n,
+		initial_ones,
+		pair_indices,
+		triplets_indices,
+		pair_angles,
+		triplets_angles,
+	)
+	return qmc.expval(q, hamiltonian)
+
+# ---------------------------------------------------------------------------
+# Primitive tests
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Primitive tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name,TranspilerCls", BACKENDS)
+def test_scs_gate_2q_uses_expected_cnot_and_ry_counts(name, TranspilerCls):
+	"""Tests that the 2-qubit SCS gate emits exactly 4 CX and 2 RY gates."""
+	transpiler = TranspilerCls()
 	exe = transpiler.transpile(
 		_wrap_scs_gate_2q,
 		bindings={"n": 2, "t": 0, "c": 1, "theta": 0.3},
 	)
-	qc = exe.compiled_quantum[0].circuit
-	counts = _gate_counts(qc)
 
-	assert counts.get("cx", 0) == 4
-	assert counts.get("ry", 0) == 2
+	match name:
+		case "qiskit":
+			counts = _qiskit_gate_counts(exe)
+			assert counts.get("cx", 0) == 4
+			assert counts.get("ry", 0) == 2
+		case "quri_parts":
+			counts = _quri_parts_gate_counts(exe)
+			assert counts.get("cx", 0) == 4
+			assert counts.get("ry", 0) == 2
+		case "cudaq":
+			counts = _cudaq_gate_counts(exe)
+			assert counts.get("cx", 0) == 4
+			assert counts.get("ry", 0) == 2
 
 
-def test_scs_gate_3q_uses_expected_cnot_and_ry_counts():
-	transpiler = QiskitTranspiler()
+@pytest.mark.parametrize("name,TranspilerCls", BACKENDS)
+def test_scs_gate_3q_uses_expected_cnot_and_ry_counts(name, TranspilerCls):
+	"""Tests that the 3-qubit SCS gate emits exactly 6 CX and 4 RY gates."""
+	transpiler = TranspilerCls()
 	exe = transpiler.transpile(
 		_wrap_scs_gate_3q,
 		bindings={"n": 3, "t": 0, "c1": 1, "c2": 2, "theta": 0.3},
 	)
-	qc = exe.compiled_quantum[0].circuit
-	counts = _gate_counts(qc)
 
-	assert counts.get("cx", 0) == 6
-	assert counts.get("ry", 0) == 4
+	match name:
+		case "qiskit":
+			counts = _qiskit_gate_counts(exe)
+			assert counts.get("cx", 0) == 6
+			assert counts.get("ry", 0) == 4
+		case "quri_parts":
+			counts = _quri_parts_gate_counts(exe)
+			assert counts.get("cx", 0) == 6
+			assert counts.get("ry", 0) == 4
+		case "cudaq":
+			counts = _cudaq_gate_counts(exe)
+			assert counts.get("cx", 0) == 6
+			assert counts.get("ry", 0) == 4
 
 
-def test_prepare_dicke_applies_basis_initialization_and_scs_rotations():
+@pytest.mark.parametrize("name,TranspilerCls", BACKENDS)
+def test_prepare_dicke_applies_basis_initialization_and_scs_rotations(name, TranspilerCls):
+	"""Tests that prepare_dicke applies X gates for initial Hamming weight and the correct number of SCS rotation gates."""
 	(
 		initial_ones,
 		pair_indices,
@@ -99,7 +216,7 @@ def test_prepare_dicke_applies_basis_initialization_and_scs_rotations():
 		triplets_angles,
 	) = dicke_state_composition_schedule(n_qubits=3, block_size=3, hamming_weight=2)
 
-	transpiler = QiskitTranspiler()
+	transpiler = TranspilerCls()
 	exe = transpiler.transpile(
 		_wrap_prepare_dicke,
 		bindings={
@@ -111,9 +228,63 @@ def test_prepare_dicke_applies_basis_initialization_and_scs_rotations():
 			"triplets_angles": triplets_angles,
 		},
 	)
-	qc = exe.compiled_quantum[0].circuit
-	counts = _gate_counts(qc)
 
-	assert counts.get("x", 0) == len(initial_ones)
-	assert counts.get("ry", 0) == 2 * len(pair_indices) + 4 * len(triplets_indices)
-	assert counts.get("cx", 0) == 4 * len(pair_indices) + 6 * len(triplets_indices)
+	expected_x = len(initial_ones)
+	expected_ry = 2 * len(pair_indices) + 4 * len(triplets_indices)
+	expected_cx = 4 * len(pair_indices) + 6 * len(triplets_indices)
+
+	match name:
+		case "qiskit":
+			counts = _qiskit_gate_counts(exe)
+			assert counts.get("x", 0) == expected_x
+			assert counts.get("ry", 0) == expected_ry
+			assert counts.get("cx", 0) == expected_cx
+		case "quri_parts":
+			counts = _quri_parts_gate_counts(exe)
+			assert counts.get("x", 0) == expected_x
+			assert counts.get("ry", 0) == expected_ry
+			assert counts.get("cx", 0) == expected_cx
+		case "cudaq":
+			counts = _cudaq_gate_counts(exe)
+			assert counts.get("x", 0) == expected_x
+			assert counts.get("ry", 0) == expected_ry
+			assert counts.get("cx", 0) == expected_cx
+
+
+@pytest.mark.parametrize("name,TranspilerCls", BACKENDS)
+def test_prepare_dicke_expval_z_sum_is_zero(name, TranspilerCls):
+	"""Tests that <D^2_1|Z_0 + Z_1|D^2_1> = 0 via the estimator (run) path.
+
+	|D^2_1> = (|01> + |10>) / sqrt(2) is the 2-qubit Dicke state with Hamming
+	weight 1. By symmetry, <Z_0> = <Z_1> = 0, so <Z_0 + Z_1> = 0 exactly.
+	This test exercises the expval / estimator code path that is not covered
+	by the sampling tests.
+	"""
+	(
+		initial_ones,
+		pair_indices,
+		triplets_indices,
+		pair_angles,
+		triplets_angles,
+	) = dicke_state_composition_schedule(n_qubits=2, block_size=2, hamming_weight=1)
+
+	H = qm_o.Z(0) + qm_o.Z(1)
+
+	transpiler = TranspilerCls()
+	exe = transpiler.transpile(
+		_wrap_prepare_dicke_expval,
+		bindings={
+			"n": 2,
+			"initial_ones": initial_ones,
+			"pair_indices": pair_indices,
+			"triplets_indices": triplets_indices,
+			"pair_angles": pair_angles,
+			"triplets_angles": triplets_angles,
+			"hamiltonian": H,
+		},
+	)
+
+	job = exe.run(transpiler.executor())
+	result = job.result()
+
+	assert abs(result) < 1e-6

@@ -12,7 +12,7 @@ import numpy as np
 import qamomile.circuit as qmc
 
 from . import basic as _basic
-from .dicke import prepare_dicke
+from .state_preparation.dicke import prepare_dicke
 from .qaoa import hubo_ising_cost, ising_cost
 
 @qmc.qkernel

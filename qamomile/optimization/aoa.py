@@ -8,21 +8,37 @@ from a named built-in schedule.
 
 from __future__ import annotations
 
+import enum
 import typing as typ
 import warnings
 
 import numpy as np
 
 import qamomile.circuit as qmc
-from qamomile.optimization.schedules.dicke import bartschi_eidenbenz_schedule, dicke_state_composition_schedule
-from qamomile.circuit.algorithm.aoa import aoa_state_superposition, aoa_state_dicke, hubo_aoa_state_superposition, hubo_aoa_state_dicke
+from qamomile.optimization.schedules.dicke import dicke_state_composition_schedule
+from qamomile.circuit.algorithm.aoa import (
+    aoa_state_basis_state,
+    aoa_state_dicke,
+    aoa_state_superposition,
+    hubo_aoa_state_basis_state,
+    hubo_aoa_state_dicke,
+    hubo_aoa_state_superposition,
+)
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.transpiler import Transpiler
 
 from .qaoa import QAOAConverter
 
-InitialState = typ.Literal["uniform", "dicke"]
-MixerName = typ.Literal["ring", "fully-connected"]
+
+class InitialState(enum.StrEnum):
+    UNIFORM = "uniform"
+    DICKE = "dicke"
+    SINGLE_BASIS_STATE = "single_basis_state"
+
+
+class MixerName(enum.StrEnum):
+    RING = "ring"
+    FULLY_CONNECTED = "fully-connected"
 
 
 class AOAConverter(QAOAConverter):
@@ -146,7 +162,7 @@ class AOAConverter(QAOAConverter):
     def _resolve_pair_indices(
         self,
         *,
-        mixer: MixerName,
+        mixer: str | MixerName,
         pair_indices: np.ndarray | None,
         block_size: int | None,
     ) -> np.ndarray:
@@ -168,12 +184,14 @@ class AOAConverter(QAOAConverter):
                 configuration is provided.
         """
         if pair_indices is not None:
-            if mixer != "ring":
+            if MixerName(mixer) != MixerName.RING:
                 warnings.warn(
                     f"pair_indices was provided; the mixer={mixer!r} argument is ignored.",
                     stacklevel=3,
                 )
             return self._normalize_pair_indices(pair_indices)
+
+        mixer = MixerName(mixer)
 
         if block_size is None:
             raise ValueError(
@@ -190,9 +208,9 @@ class AOAConverter(QAOAConverter):
             )
 
         num_blocks = self.spin_model.num_bits // block_size
-        if mixer == "ring":
+        if mixer == MixerName.RING:
             return self._build_ring_pair_indices(num_blocks, block_size)
-        if mixer == "fully-connected":
+        if mixer == MixerName.FULLY_CONNECTED:
             return self._build_fully_connected_pair_indices(num_blocks, block_size)
         raise ValueError(
             f"Unknown mixer {mixer!r}. Must be 'ring' or 'fully-connected' "
@@ -221,14 +239,45 @@ class AOAConverter(QAOAConverter):
         n_qubits = self.spin_model.num_bits
         return dicke_state_composition_schedule(n_qubits, block_size, hamming_weight)
 
+    def _compute_basis_state_initial_ones(
+        self,
+        hamming_weight: int,
+        block_size: int,
+    ) -> np.ndarray:
+        """Build basis-state ``|1>`` indices per block for a target Hamming weight.
+
+        Args:
+            hamming_weight: Number of ``|1>`` qubits per block.
+            block_size: Number of qubits per block.
+
+        Returns:
+            numpy.ndarray: Global qubit indices initialized in ``|1>``.
+
+        Raises:
+            ValueError: If ``hamming_weight`` is outside ``[0, block_size]``.
+        """
+        if not (0 <= hamming_weight <= block_size):
+            raise ValueError("Require 0 <= hamming_weight <= block_size.")
+
+        n_qubits = self.spin_model.num_bits
+        num_blocks = n_qubits // block_size
+
+        initial_ones: list[int] = []
+        for block_idx in range(num_blocks):
+            start = block_idx * block_size
+            for local_idx in range(block_size - hamming_weight, block_size):
+                initial_ones.append(start + local_idx)
+
+        return np.asarray(initial_ones, dtype=np.uint32)
+
     def transpile(
         self,
         transpiler: Transpiler,
         *,
         p: int,
-        initial_state: InitialState = "dicke",
+        initial_state: str | InitialState = InitialState.DICKE,
         hamming_weight: int = 1,
-        mixer: MixerName = "ring",
+        mixer: str | MixerName = MixerName.RING,
         pair_indices_mixer: np.ndarray | None = None,
         block_size: int | None = None,
     ) -> ExecutableProgram:
@@ -242,14 +291,22 @@ class AOAConverter(QAOAConverter):
         Args:
             transpiler (Transpiler): Backend transpiler to use.
             p (int): Number of AOA layers.
-            initial_state (Literal["uniform", "dicke"]): Initial state for the
-                AOA circuit. ``"uniform"`` uses the equal superposition;
-                ``"dicke"`` prepares a product of Dicke states via the
-                Bartschi-Eidenbenz SCS construction.
-            hamming_weight (int): Dicke Hamming weight per block. Only used
-                when ``initial_state="dicke"``.
-            mixer (Literal["ring", "fully-connected"]): Named built-in mixer
-                schedule to use when ``pair_indices_mixer`` is not provided.
+            initial_state (str | InitialState): Initial state for the AOA
+                circuit. ``InitialState.UNIFORM`` (``"uniform"``) uses the
+                equal superposition; ``InitialState.DICKE`` (``"dicke"``)
+                prepares a product of Dicke states via the Bartschi-Eidenbenz
+                SCS construction; ``InitialState.SINGLE_BASIS_STATE``
+                (``"single_basis_state"``) prepares one computational basis
+                state per block with the requested Hamming weight. Plain
+                strings are accepted and normalised
+                automatically.
+            hamming_weight (int): Target Hamming weight per block. Used when
+                ``initial_state`` is ``InitialState.DICKE`` or
+                ``InitialState.SINGLE_BASIS_STATE``.
+            mixer (str | MixerName): Named built-in mixer schedule to use when
+                ``pair_indices_mixer`` is not provided. Plain strings such as
+                ``"ring"`` or ``"fully-connected"`` are accepted and
+                normalised automatically.
             pair_indices_mixer (numpy.ndarray | None): Explicit mixer schedule
                 as an array of shape ``(num_pairs, 2)``. When provided,
                 ``mixer`` is ignored.
@@ -259,6 +316,9 @@ class AOAConverter(QAOAConverter):
         Returns:
             ExecutableProgram: The compiled circuit program.
         """
+        initial_state = InitialState(initial_state)
+        mixer = MixerName(mixer)
+
         effective_block_size = (
             self.spin_model.num_bits if block_size is None else block_size
         )
@@ -271,7 +331,7 @@ class AOAConverter(QAOAConverter):
 
         quadratic = not self.spin_model.higher
 
-        if initial_state == "dicke":
+        if initial_state == InitialState.DICKE:
             (
                 initial_ones,
                 pair_indices_dicke,
@@ -282,15 +342,20 @@ class AOAConverter(QAOAConverter):
                 hamming_weight=hamming_weight,
                 block_size=effective_block_size,
             )
+        elif initial_state == InitialState.SINGLE_BASIS_STATE:
+            initial_ones = self._compute_basis_state_initial_ones(
+                hamming_weight=hamming_weight,
+                block_size=effective_block_size,
+            )
 
         match (quadratic, initial_state):
-            case (True, "uniform"):
+            case (True, InitialState.UNIFORM):
                 return self._transpile_quadratic(
                     transpiler,
                     p=p,
                     pair_indices_mixer=resolved_pair_indices_mixer,
                 )
-            case (True, "dicke"):
+            case (True, InitialState.DICKE):
                 return self._transpile_quadratic_dicke(
                     transpiler,
                     p=p,
@@ -301,13 +366,20 @@ class AOAConverter(QAOAConverter):
                     pair_angles_dicke=pair_angles_dicke,
                     triplets_angles_dicke=triplets_angles_dicke,
                 )
-            case (False, "uniform"):
+            case (True, InitialState.SINGLE_BASIS_STATE):
+                return self._transpile_quadratic_basis_state(
+                    transpiler,
+                    p=p,
+                    pair_indices_mixer=resolved_pair_indices_mixer,
+                    initial_ones=initial_ones,
+                )
+            case (False, InitialState.UNIFORM):
                 return self._transpile_hubo(
                     transpiler,
                     p=p,
                     pair_indices_mixer=resolved_pair_indices_mixer,
                 )
-            case (False, "dicke"):
+            case (False, InitialState.DICKE):
                 return self._transpile_hubo_dicke(
                     transpiler,
                     p=p,
@@ -317,6 +389,13 @@ class AOAConverter(QAOAConverter):
                     triplets_indices_dicke=triplets_indices_dicke,
                     pair_angles_dicke=pair_angles_dicke,
                     triplets_angles_dicke=triplets_angles_dicke,
+                )
+            case (False, InitialState.SINGLE_BASIS_STATE):
+                return self._transpile_hubo_basis_state(
+                    transpiler,
+                    p=p,
+                    pair_indices_mixer=resolved_pair_indices_mixer,
+                    initial_ones=initial_ones,
                 )
             case _:
                 raise ValueError(f"Unsupported configuration: quadratic={quadratic}, "
@@ -447,6 +526,63 @@ class AOAConverter(QAOAConverter):
                 "triplets_indices_dicke": triplets_indices_dicke,
                 "pair_angles_dicke": pair_angles_dicke,
                 "triplets_angles_dicke": triplets_angles_dicke,
+            },
+            parameters=["gammas", "betas"],
+        )
+
+    def _transpile_quadratic_basis_state(
+        self,
+        transpiler: Transpiler,
+        *,
+        p: int,
+        pair_indices_mixer: np.ndarray,
+        initial_ones: np.ndarray,
+    ) -> ExecutableProgram:
+        """Transpile a quadratic-only model with basis-state initialization.
+
+        Args:
+            transpiler (Transpiler): Backend transpiler to use.
+            p (int): Number of AOA layers.
+            pair_indices_mixer (numpy.ndarray): Explicit mixer schedule as an array of
+                shape ``(num_pairs, 2)``.
+            initial_ones (numpy.ndarray): Indices of qubits initialized in ``|1>``.
+
+        Returns:
+            ExecutableProgram: The compiled circuit program.
+        """
+
+        @qmc.qkernel
+        def aoa_sampling_basis_state(
+            p: qmc.UInt,
+            quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+            linear: qmc.Dict[qmc.UInt, qmc.Float],
+            gammas: qmc.Vector[qmc.Float],
+            betas: qmc.Vector[qmc.Float],
+            n: qmc.UInt,
+            pair_indices_mixer: qmc.Matrix[qmc.UInt],
+            initial_ones: qmc.Vector[qmc.UInt],
+        ) -> qmc.Vector[qmc.Bit]:
+            q = aoa_state_basis_state(
+                p=p,
+                quad=quad,
+                linear=linear,
+                n=n,
+                gammas=gammas,
+                betas=betas,
+                pair_indices_mixer=pair_indices_mixer,
+                initial_ones=initial_ones,
+            )
+            return qmc.measure(q)
+
+        return transpiler.transpile(
+            aoa_sampling_basis_state,
+            bindings={
+                "linear": self.spin_model.linear,
+                "quad": self.spin_model.quad,
+                "n": self.spin_model.num_bits,
+                "p": p,
+                "pair_indices_mixer": pair_indices_mixer,
+                "initial_ones": initial_ones,
             },
             parameters=["gammas", "betas"],
         )
@@ -582,6 +718,66 @@ class AOAConverter(QAOAConverter):
                 "triplets_indices_dicke": triplets_indices_dicke,
                 "pair_angles_dicke": pair_angles_dicke,
                 "triplets_angles_dicke": triplets_angles_dicke,
+            },
+            parameters=["gammas", "betas"],
+        )
+
+    def _transpile_hubo_basis_state(
+        self,
+        transpiler: Transpiler,
+        *,
+        p: int,
+        pair_indices_mixer: np.ndarray,
+        initial_ones: np.ndarray,
+    ) -> ExecutableProgram:
+        """Transpile a HUBO model with basis-state initialization.
+
+        Args:
+            transpiler (Transpiler): Backend transpiler to use.
+            p (int): Number of AOA layers.
+            pair_indices_mixer (numpy.ndarray): Mixer schedule as an array of
+                shape ``(num_pairs, 2)``.
+            initial_ones (numpy.ndarray): Indices of qubits initialized in ``|1>``.
+
+        Returns:
+            ExecutableProgram: The compiled circuit program.
+        """
+
+        @qmc.qkernel
+        def aoa_sampling_hubo_basis_state(
+            p: qmc.UInt,
+            quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+            linear: qmc.Dict[qmc.UInt, qmc.Float],
+            higher: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+            gammas: qmc.Vector[qmc.Float],
+            betas: qmc.Vector[qmc.Float],
+            n: qmc.UInt,
+            pair_indices_mixer: qmc.Matrix[qmc.UInt],
+            initial_ones: qmc.Vector[qmc.UInt],
+        ) -> qmc.Vector[qmc.Bit]:
+            q = hubo_aoa_state_basis_state(
+                p=p,
+                quad=quad,
+                linear=linear,
+                higher=higher,
+                n=n,
+                gammas=gammas,
+                betas=betas,
+                pair_indices_mixer=pair_indices_mixer,
+                initial_ones=initial_ones,
+            )
+            return qmc.measure(q)
+
+        return transpiler.transpile(
+            aoa_sampling_hubo_basis_state,
+            bindings={
+                "linear": self.spin_model.linear,
+                "quad": self.spin_model.quad,
+                "higher": self.spin_model.higher,
+                "n": self.spin_model.num_bits,
+                "p": p,
+                "pair_indices_mixer": pair_indices_mixer,
+                "initial_ones": initial_ones,
             },
             parameters=["gammas", "betas"],
         )

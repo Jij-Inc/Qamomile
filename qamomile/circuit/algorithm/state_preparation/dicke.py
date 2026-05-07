@@ -96,7 +96,7 @@ def prepare_dicke(
     triplets_indices: qmc.Matrix[qmc.UInt],
     pair_angles: qmc.Vector[qmc.Float],
     triplets_angles: qmc.Vector[qmc.Float],
-) -> qmc.Vector[qmc.Bit]:
+) -> qmc.Vector[qmc.Qubit]:
     """
     Prepare a Dicke state using the Bartschi-Eidenbenz SCS construction.
     
@@ -109,7 +109,7 @@ def prepare_dicke(
         triplets_angles (qmc.Vector[qmc.Float]): Precomputed angles for the 3-qubit SCS blocks.
     
     Returns:
-        qmc.Vector[qmc.Bit]: Qubit register prepared in the Dicke state.
+        qmc.Vector[qmc.Qubit]: Qubit register prepared in the Dicke state.
     """
     q = qmc.qubit_array(n, name="q")
 
