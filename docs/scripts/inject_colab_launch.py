@@ -34,7 +34,17 @@ The three passes:
    ``<head>`` so every theme rule is parsed before any external
    stylesheet has arrived.
 
-3. Inject the colab-launch ``<script>`` tag right before ``</head>``
+3. Inject a synchronous theme-init ``<script>`` at the start of
+   ``<head>``. mystmd persists ``light``/``dark`` in
+   ``localStorage["myst:theme"]``, but its React-driven theme
+   detection only runs after hydration; meanwhile the SSR HTML ships
+   with ``<html class="">`` and ``<body>`` carries
+   ``transition-colors duration-500``, so dark-mode users see the
+   light theme paint and then animate to dark over half a second.
+   Setting the class synchronously before any external stylesheet has
+   loaded eliminates that animation.
+
+4. Inject the colab-launch ``<script>`` tag right before ``</head>``
    on every HTML. The script then renders the "Open in Colab" button
    client-side, gated to ``.ipynb``-derived pages by the path check
    that pass 1 protects.
@@ -59,6 +69,34 @@ SCRIPT_FILE_NAME = "colab-launch.js"
 # closing ``>``. ``re.IGNORECASE`` because HTML tag names are
 # case-insensitive in spec, even though mystmd lowercases its output today.
 HEAD_OPEN_RE = re.compile(r"<head\b[^>]*>", re.IGNORECASE)
+
+# Synchronous dark-mode init script. mystmd persists the user's theme
+# choice in localStorage["myst:theme"] (values: "light" or "dark") and
+# falls back to ``window.matchMedia("(prefers-color-scheme: dark)")``
+# when nothing is stored. The SPA's React tree sets the matching class
+# on <html> AFTER hydration — but the SSR HTML ships with
+# ``<html class="">`` (light) and <body> carries ``transition-colors
+# duration-500``, so on every page load the browser paints the light
+# theme first, then **animates** the colors to dark over 500ms once
+# the JS bundle hydrates and adds ``class="dark"``. That animation is
+# the FOUC the user sees, and inlining the theme CSS does not stop it
+# because the CSS variables flip after first paint.
+#
+# Fix: a tiny synchronous <script> in <head> reads the same storage
+# key + media query and sets ``class="dark"`` on <html> BEFORE any
+# external stylesheet has loaded, so the browser computes its initial
+# styles with the correct theme already applied. ``try/catch`` swallows
+# any storage / matchMedia error so the script is safe in private
+# browsing modes and old browsers (graceful light fallback).
+THEME_INIT_SCRIPT_ID = "qamomile-theme-init"
+THEME_INIT_SCRIPT = (
+    "(function(){try{"
+    'var stored=localStorage.getItem("myst:theme");'
+    'var dark=stored?stored==="dark":'
+    'window.matchMedia("(prefers-color-scheme: dark)").matches;'
+    'if(dark)document.documentElement.classList.add("dark");'
+    "}catch(e){}})();"
+)
 
 # Inline-CSS pass: avoids FOUC across the whole theme override. mystmd
 # bundles docs/assets/custom-theme.css into the last
@@ -148,6 +186,45 @@ def inline_theme_css(html_path: Path, css_text: str) -> bool:
     return True
 
 
+def init_theme_script(html_path: Path) -> bool:
+    """Insert a synchronous theme-init ``<script>`` at the start of ``<head>``.
+
+    See the :data:`THEME_INIT_SCRIPT` docstring for the full rationale —
+    in short, mystmd's React-driven theme detection runs only after
+    hydration, so dark-mode users see the light theme paint first and
+    then animate to dark over 500ms (the ``transition-colors duration-500``
+    on ``<body>``). Setting ``<html class="dark">`` synchronously
+    before first paint stops that animation entirely.
+
+    Inserted right after the opening ``<head>`` tag, before the inline
+    ``<style>`` block, so the class is in place when the browser
+    computes its first set of styles. The block carries a stable
+    ``id`` for idempotency.
+
+    Args:
+        html_path: Path to the HTML file under
+            ``docs/<lang>/_build/html/``.
+
+    Returns:
+        True when the file was patched. False if the page already
+        carries the inline ``<script>`` (idempotent re-run) or has no
+        ``<head>`` to anchor against.
+    """
+    content = html_path.read_text(encoding="utf-8")
+    if f'id="{THEME_INIT_SCRIPT_ID}"' in content:
+        return False
+    match = HEAD_OPEN_RE.search(content)
+    if match is None:
+        return False
+    script_block = (
+        f'<script id="{THEME_INIT_SCRIPT_ID}">{THEME_INIT_SCRIPT}</script>'
+    )
+    insert_at = match.end()
+    new = content[:insert_at] + script_block + content[insert_at:]
+    html_path.write_text(new, encoding="utf-8")
+    return True
+
+
 def inject_script_tag(html_path: Path, script_src: str) -> bool:
     """Insert the colab-launch ``<script>`` tag right before ``</head>``.
 
@@ -203,7 +280,7 @@ def rewrite_build_src_paths(target_path: Path, language: str) -> bool:
 
 def patch_language_build(
     docs_root: Path, language: str
-) -> tuple[int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, int]:
     """Run all post-build patches for one language's build output.
 
     Patches applied:
@@ -211,15 +288,19 @@ def patch_language_build(
     1. Rewrite build-dir paths in GitHub URLs across both ``*.html`` and
        the SPA's ``*.json`` data layer (see
        :func:`rewrite_build_src_paths`).
-    2. Inject the colab-launch ``<script>`` tag into every ``*.html``
-       (see :func:`inject_script_tag`).
-    3. Inline the full theme CSS into every ``*.html``'s ``<head>`` so
+    2. Inline the full theme CSS into every ``*.html``'s ``<head>`` so
        first paint already carries the warm-amber theme overrides
        (see :func:`inline_theme_css`).
+    3. Inject a synchronous theme-init ``<script>`` at the start of
+       ``<head>`` (see :func:`init_theme_script`) — this runs BEFORE
+       first paint so dark-mode users don't see a 500 ms light→dark
+       transition animation.
+    4. Inject the colab-launch ``<script>`` tag right before
+       ``</head>`` on every ``*.html`` (see :func:`inject_script_tag`).
 
     Returns:
         ``(injected_count, rewritten_count, css_inlined_count,
-        total_html, total_json)``.
+        theme_init_count, total_html, total_json)``.
     """
     html_root = docs_root / language / "_build" / "html"
     if not html_root.exists():
@@ -240,6 +321,7 @@ def patch_language_build(
     injected_count = 0
     rewritten_count = 0
     css_inlined_count = 0
+    theme_init_count = 0
 
     # Rewrite build-dir paths across HTML + JSON. JSON is the SPA's data
     # layer; without rewriting it, post-navigation re-hydration puts the
@@ -249,12 +331,21 @@ def patch_language_build(
         if rewrite_build_src_paths(target, language):
             rewritten_count += 1
 
-    # Inline theme CSS + inject the script tag into HTML only. JSON pages
-    # are not navigated to directly; the SPA loads them via the host
-    # HTML, which already carries both patches.
+    # Inline theme CSS + inject the theme-init script + inject the
+    # colab script tag, all into HTML only. JSON pages are not
+    # navigated to directly; the SPA loads them via the host HTML,
+    # which already carries the patches. The theme-init script runs
+    # AFTER inline_theme_css below — both insert at the same offset
+    # (right after the opening <head>), so the later insert ends up
+    # earlier in the output. That's intentional: we want the script
+    # to run before the inline <style> is parsed so the browser
+    # computes its first set of styles with the correct dark/light
+    # class already on <html>.
     for html_file in html_files:
         if inline_theme_css(html_file, theme_css):
             css_inlined_count += 1
+        if init_theme_script(html_file):
+            theme_init_count += 1
         relative_script = os.path.relpath(output_script, html_file.parent)
         relative_script = Path(relative_script).as_posix()
         if inject_script_tag(html_file, relative_script):
@@ -264,6 +355,7 @@ def patch_language_build(
         injected_count,
         rewritten_count,
         css_inlined_count,
+        theme_init_count,
         len(html_files),
         len(json_files),
     )
@@ -279,12 +371,14 @@ def main() -> int:
             injected_count,
             rewritten_count,
             css_inlined_count,
+            theme_init_count,
             total_html,
             total_json,
         ) = patch_language_build(docs_root, language)
         print(
             f"{language}: injected script tag into {injected_count}/{total_html} HTML, "
             f"inlined theme CSS into {css_inlined_count}/{total_html} HTML, "
+            f"injected theme-init script into {theme_init_count}/{total_html} HTML, "
             f"rewrote build-dir paths in {rewritten_count}/{total_html + total_json} "
             f"({total_html} HTML + {total_json} JSON)"
         )
