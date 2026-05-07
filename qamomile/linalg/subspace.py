@@ -34,7 +34,6 @@ from collections.abc import Sequence
 from typing import Union
 
 import numpy as np
-import scipy.linalg
 
 import qamomile.observable as qm_o
 
@@ -227,9 +226,7 @@ def _coerce_basis_value(b: BasisLike) -> int:
         return _PAULI_TO_BASIS_CODE[b]
     if isinstance(b, (int, np.integer)):
         if int(b) not in (0, 1, 2):
-            raise ValueError(
-                f"basis code must be 0/1/2 (got {int(b)})"
-            )
+            raise ValueError(f"basis code must be 0/1/2 (got {int(b)})")
         return int(b)
     raise ValueError(f"unsupported basis label: {b!r}")
 
@@ -261,8 +258,7 @@ def _coerce_samples(
         raise ValueError(f"samples must be 2D, got shape {bits.shape}")
     if bits.shape[1] < num_qubits:
         raise ValueError(
-            f"samples must have at least {num_qubits} columns, "
-            f"got shape {bits.shape}"
+            f"samples must have at least {num_qubits} columns, got shape {bits.shape}"
         )
     bits = bits[:, :num_qubits]
     if ((bits != 0) & (bits != 1)).any():
@@ -318,15 +314,13 @@ def _coerce_bases(
     if arr.ndim == 1:
         if arr.shape[0] != num_qubits:
             raise ValueError(
-                f"bases of shape {arr.shape} does not match "
-                f"num_qubits={num_qubits}"
+                f"bases of shape {arr.shape} does not match num_qubits={num_qubits}"
             )
         arr = np.broadcast_to(arr, (n_samples, num_qubits)).copy()
     elif arr.ndim == 2:
         if arr.shape != (n_samples, num_qubits):
             raise ValueError(
-                f"bases shape {arr.shape} does not match "
-                f"({n_samples}, {num_qubits})"
+                f"bases shape {arr.shape} does not match ({n_samples}, {num_qubits})"
             )
     else:
         raise ValueError(f"bases must be 1D or 2D, got shape {arr.shape}")
@@ -386,6 +380,11 @@ def subspace_hamiltonian(
     if constant:
         sub_h += complex(constant) * np.eye(n, dtype=np.complex128)
 
+    # ``diff`` is independent of the Pauli term, so compute it once and
+    # reuse across all terms instead of rebuilding the (n, n, num_qubits)
+    # tensor for every term.
+    diff = bits[:, None, :] ^ bits[None, :, :]
+
     for pauli_ops, coeff in hamiltonian.terms.items():
         flip_mask = np.zeros(num_qubits, dtype=np.int8)
         phase_sites: list[int] = []
@@ -401,7 +400,6 @@ def subspace_hamiltonian(
                 phase_sites.append(op.index)
             # Pauli.I contributes no flip and no phase.
 
-        diff = bits[:, None, :] ^ bits[None, :, :]
         pair_mask = np.all(diff == flip_mask, axis=-1)
         if not pair_mask.any():
             continue
@@ -412,12 +410,7 @@ def subspace_hamiltonian(
         else:
             signs_j = np.ones(n, dtype=np.float64)
 
-        sub_h += (
-            complex(coeff)
-            * (1j**y_count)
-            * pair_mask
-            * signs_j[None, :]
-        )
+        sub_h += complex(coeff) * (1j**y_count) * pair_mask * signs_j[None, :]
 
     return sub_h
 
@@ -497,21 +490,47 @@ def generalized_subspace_matrices(
 
     h_sub = complex(hamiltonian.constant) * s_sub
 
+    # Per-term contribution =
+    #     (product of overlap factors on untouched qubits)
+    #   × (product of Pauli factors on touched qubits).
+    # Computing it this way avoids materialising a fresh
+    # ``(n, n, num_qubits)`` copy per term.
     for pauli_ops, coeff in hamiltonian.terms.items():
-        factors = overlap_per_q.copy()
+        touched: list[int] = []
+        for op in pauli_ops:
+            if op.pauli == qm_o.Pauli.I:
+                continue
+            touched.append(op.index)
+
+        if not touched:
+            h_sub = h_sub + complex(coeff) * s_sub
+            continue
+
+        untouched_mask = np.ones(num_qubits, dtype=bool)
+        untouched_mask[touched] = False
+        if untouched_mask.any():
+            untouched_prod = overlap_per_q[:, :, untouched_mask].prod(axis=-1)
+        else:
+            untouched_prod = np.ones((n, n), dtype=np.complex128)
+
+        pauli_prod = np.ones((n, n), dtype=np.complex128)
         for op in pauli_ops:
             if op.pauli == qm_o.Pauli.I:
                 continue
             q = op.index
             p_code = _PAULI_TO_BASIS_CODE[op.pauli]
-            factors[:, :, q] = _LOCAL_PAULI[
-                p_code,
-                bra_basis[:, :, q],
-                bra_bit[:, :, q],
-                ket_basis[:, :, q],
-                ket_bit[:, :, q],
-            ]
-        h_sub = h_sub + complex(coeff) * factors.prod(axis=-1)
+            pauli_prod = (
+                pauli_prod
+                * _LOCAL_PAULI[
+                    p_code,
+                    bra_basis[:, :, q],
+                    bra_bit[:, :, q],
+                    ket_basis[:, :, q],
+                    ket_bit[:, :, q],
+                ]
+            )
+
+        h_sub = h_sub + complex(coeff) * untouched_prod * pauli_prod
 
     return h_sub, s_sub
 
@@ -531,12 +550,13 @@ def solve_subspace(
     When ``bases`` is ``None`` every sample is treated as a Z-basis
     bitstring, ``S_sub`` is the identity (assuming distinct samples),
     and a standard Hermitian eigendecomposition of
-    :func:`subspace_hamiltonian` is returned. Otherwise ``H_sub v =
-    λ S_sub v`` is solved via :func:`scipy.linalg.eigh`. If ``S_sub``
-    is rank-deficient — duplicate or near-duplicate samples make the
-    overlap singular — the routine falls back to projecting onto the
-    range of ``S_sub`` using ``overlap_tol`` as the cutoff on the
-    overlap eigenvalues.
+    :func:`subspace_hamiltonian` is returned. Otherwise the generalised
+    eigenvalue problem ``H_sub v = λ S_sub v`` is reduced to a standard
+    Hermitian one by whitening ``S_sub`` via its eigendecomposition,
+    using ``overlap_tol`` as the cutoff on the overlap eigenvalues. The
+    same projection step automatically handles a rank-deficient
+    ``S_sub`` (duplicate or near-duplicate samples make the overlap
+    singular).
 
     Args:
         samples: Iterable of length-``num_qubits`` bitstrings.
@@ -557,9 +577,12 @@ def solve_subspace(
         ``S_sub``.
 
     Raises:
-        ValueError: If ``overlap_tol`` is negative or any input fails
+        ValueError: If ``overlap_tol`` is negative, any input fails
             validation in :func:`subspace_hamiltonian` /
-            :func:`generalized_subspace_matrices`.
+            :func:`generalized_subspace_matrices`, or every overlap
+            eigenvalue is below ``overlap_tol`` (the supplied basis
+            spans no usable directions; lower ``overlap_tol`` or pass a
+            better-conditioned set of samples).
 
     Example:
         >>> import qamomile.observable as qm_o
@@ -598,13 +621,20 @@ def solve_subspace(
     h_sym = 0.5 * (h_sub + h_sub.conj().T)
     s_sym = 0.5 * (s_sub + s_sub.conj().T)
 
+    # Whiten the (generalised) eigenvalue problem via the overlap
+    # eigendecomposition: this works for both well- and rank-deficient
+    # ``S_sub`` and avoids a SciPy dependency. We diagonalise ``S_sym``,
+    # drop directions with eigenvalues below ``overlap_tol``, and solve
+    # the resulting standard Hermitian problem with NumPy.
     overlap_eigvals, overlap_eigvecs = np.linalg.eigh(s_sym)
     keep = overlap_eigvals > overlap_tol
-    if keep.all():
-        eigvals, eigvecs = scipy.linalg.eigh(h_sym, s_sym)
-        return eigvals, eigvecs
+    if not keep.any():
+        raise ValueError(
+            f"All overlap eigenvalues are below overlap_tol={overlap_tol}; "
+            f"max overlap eigenvalue is {float(overlap_eigvals.max()):.3e}. "
+            "Lower overlap_tol or supply a better-conditioned sample/basis set."
+        )
 
-    # Project H onto range(S) using the kept overlap eigenvectors.
     u = overlap_eigvecs[:, keep]
     s_kept = overlap_eigvals[keep]
     inv_sqrt = u / np.sqrt(s_kept)[None, :]

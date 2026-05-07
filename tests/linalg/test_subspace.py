@@ -89,9 +89,7 @@ def test_z_basis_proper_subspace_matches_projection(seed: int) -> None:
 
     rng = np.random.default_rng(seed)
     chosen = rng.choice(1 << num_qubits, size=4, replace=False)
-    samples = [
-        tuple((int(idx) >> q) & 1 for q in range(num_qubits)) for idx in chosen
-    ]
+    samples = [tuple((int(idx) >> q) & 1 for q in range(num_qubits)) for idx in chosen]
     h_sub = subspace_hamiltonian(samples, H)
     expected = h_full[np.ix_(chosen, chosen)]
     np.testing.assert_allclose(h_sub, expected, atol=1e-10)
@@ -147,15 +145,18 @@ def test_all_z_basis_matches_z_fast_path(num_qubits: int) -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "basis", [qm_o.Pauli.X, qm_o.Pauli.Y, qm_o.Pauli.Z]
-)
+@pytest.mark.parametrize("basis", [qm_o.Pauli.X, qm_o.Pauli.Y, qm_o.Pauli.Z])
 @pytest.mark.parametrize("num_qubits", [1, 2, 3])
 def test_uniform_basis_matches_rotated_oracle(
     basis: qm_o.Pauli, num_qubits: int
 ) -> None:
     """Uniform-basis subspace equals ``U^† H_full U`` for the matching ``U``."""
-    H = _random_hermitian_hamiltonian(num_qubits, seed=hash((basis, num_qubits)) & 0xFFFF)
+    # Use a deterministic seed (Python's built-in ``hash`` is randomised
+    # per interpreter unless ``PYTHONHASHSEED`` is set, which would make
+    # the generated Hamiltonian non-reproducible across runs).
+    H = _random_hermitian_hamiltonian(
+        num_qubits, seed=1000 + 10 * num_qubits + basis.value
+    )
     h_full = H.to_numpy()
 
     samples = _all_bitstrings(num_qubits)
@@ -174,12 +175,8 @@ def test_y_basis_eigenstates_diagonalize_y() -> None:
     """``|+i⟩`` is the +1 eigenstate, ``|-i⟩`` the -1 eigenstate of Y."""
     H = qm_o.Y(0)
     samples = [(0,), (1,)]
-    h_sub, s_sub = generalized_subspace_matrices(
-        samples, (qm_o.Pauli.Y,), H
-    )
-    np.testing.assert_allclose(
-        h_sub, np.diag([1.0 + 0.0j, -1.0 + 0.0j]), atol=1e-12
-    )
+    h_sub, s_sub = generalized_subspace_matrices(samples, (qm_o.Pauli.Y,), H)
+    np.testing.assert_allclose(h_sub, np.diag([1.0 + 0.0j, -1.0 + 0.0j]), atol=1e-12)
     np.testing.assert_allclose(s_sub, np.eye(2), atol=1e-12)
 
 
@@ -256,9 +253,7 @@ def test_generalized_rejects_bases_shape_mismatch() -> None:
 def test_generalized_empty_samples() -> None:
     """No samples yields zero-sized ``H_sub`` and ``S_sub``."""
     H = qm_o.X(0)
-    h_sub, s_sub = generalized_subspace_matrices(
-        [], (qm_o.Pauli.X,), H
-    )
+    h_sub, s_sub = generalized_subspace_matrices([], (qm_o.Pauli.X,), H)
     assert h_sub.shape == (0, 0)
     assert s_sub.shape == (0, 0)
 
@@ -279,9 +274,7 @@ def test_solve_z_basis_full_eigenvalues(num_qubits: int) -> None:
 def test_solve_x_basis_recovers_minus_x_ground_state() -> None:
     """Sampling ``|+⟩`` of ``-X`` recovers ``-1`` ground-state energy."""
     H = -qm_o.X(0)
-    eigvals, _ = solve_subspace(
-        [(0,)], H, bases=(qm_o.Pauli.X,)
-    )
+    eigvals, _ = solve_subspace([(0,)], H, bases=(qm_o.Pauli.X,))
     assert eigvals.shape == (1,)
     np.testing.assert_allclose(eigvals[0], -1.0, atol=1e-12)
 
@@ -316,6 +309,17 @@ def test_solve_rejects_negative_overlap_tol() -> None:
     H = qm_o.X(0)
     with pytest.raises(ValueError):
         solve_subspace([(0,)], H, bases=(qm_o.Pauli.X,), overlap_tol=-1e-12)
+
+
+def test_solve_raises_when_overlap_tol_kills_all_directions() -> None:
+    """If ``overlap_tol`` is so large that every overlap eigenvalue is
+    discarded, ``solve_subspace`` must raise rather than silently
+    return an empty eigenpair tuple."""
+    H = qm_o.X(0)
+    # ``overlap_tol`` larger than any eigenvalue of S (which is at most 1
+    # since S is a Gram matrix of unit vectors) forces ``keep`` all-False.
+    with pytest.raises(ValueError, match="overlap_tol"):
+        solve_subspace([(0,)], H, bases=(qm_o.Pauli.X,), overlap_tol=10.0)
 
 
 def test_solve_empty_samples() -> None:
