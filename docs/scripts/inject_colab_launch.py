@@ -70,32 +70,76 @@ SCRIPT_FILE_NAME = "colab-launch.js"
 # case-insensitive in spec, even though mystmd lowercases its output today.
 HEAD_OPEN_RE = re.compile(r"<head\b[^>]*>", re.IGNORECASE)
 
-# Synchronous dark-mode init script. mystmd persists the user's theme
-# choice in localStorage["myst:theme"] (values: "light" or "dark") and
-# falls back to ``window.matchMedia("(prefers-color-scheme: dark)")``
-# when nothing is stored. The SPA's React tree sets the matching class
-# on <html> AFTER hydration — but the SSR HTML ships with
-# ``<html class="">`` (light) and <body> carries ``transition-colors
-# duration-500``, so on every page load the browser paints the light
-# theme first, then **animates** the colors to dark over 500ms once
-# the JS bundle hydrates and adds ``class="dark"``. That animation is
-# the FOUC the user sees, and inlining the theme CSS does not stop it
-# because the CSS variables flip after first paint.
+# Synchronous theme-init + transition-suppression script. Two
+# entangled FOUC sources are addressed in one ``<script>`` block:
 #
-# Fix: a tiny synchronous <script> in <head> reads the same storage
-# key + media query and sets ``class="dark"`` on <html> BEFORE any
-# external stylesheet has loaded, so the browser computes its initial
-# styles with the correct theme already applied. ``try/catch`` swallows
-# any storage / matchMedia error so the script is safe in private
-# browsing modes and old browsers (graceful light fallback).
+# (a) Dark-mode flash. mystmd persists the user's theme choice in
+#     ``localStorage["myst:theme"]`` (values: "light" / "dark") and
+#     falls back to ``window.matchMedia("(prefers-color-scheme:
+#     dark)")`` when nothing is stored. The SPA's React tree sets the
+#     matching class on <html> AFTER hydration, but the SSR HTML
+#     ships with ``<html class="">`` (light) and <body> carries
+#     ``transition-colors duration-500``, so dark-mode users see the
+#     light theme paint first and then animate to dark over 500 ms
+#     once the JS bundle hydrates. Setting ``class="dark"`` on
+#     <html> synchronously here, before any external stylesheet has
+#     even started loading, eliminates that animation.
+#
+# (b) "Non-theme" transition flashes. Even after (a), light-mode
+#     users still see a faint color flicker on every page load.
+#     Cause: mystmd's React hydration toggles many other classes
+#     (navbar shadow, sidebar collapse state, focus rings,
+#     skip-link visibility, …) and Tailwind's ``transition-colors``
+#     / ``transition-shadow`` / ``transition-all`` utilities animate
+#     each toggle over 200–700 ms. The user perceives that as a
+#     persistent FOUC even when the theme itself is stable. We can't
+#     surgically silence each utility, so we adopt the standard
+#     ``preload-class`` pattern: add ``html.qamomile-preloading`` at
+#     the very start of head, the inline <style> below contains a
+#     blanket ``transition: none !important`` rule scoped to that
+#     class, and a ``window.load`` handler removes the class two
+#     ``requestAnimationFrame`` ticks later (= guaranteed past the
+#     first paint AND past hydration's mount-time reflows). After
+#     that, all transitions work normally for actual user
+#     interactions (theme toggle, hover, etc.).
 THEME_INIT_SCRIPT_ID = "qamomile-theme-init"
 THEME_INIT_SCRIPT = (
-    "(function(){try{"
+    "(function(){"
+    "var d=document.documentElement;"
+    'd.classList.add("qamomile-preloading");'
+    "try{"
     'var stored=localStorage.getItem("myst:theme");'
     'var dark=stored?stored==="dark":'
     'window.matchMedia("(prefers-color-scheme: dark)").matches;'
-    'if(dark)document.documentElement.classList.add("dark");'
-    "}catch(e){}})();"
+    'if(dark)d.classList.add("dark");'
+    "}catch(e){}"
+    'window.addEventListener("load",function(){'
+    "requestAnimationFrame(function(){"
+    "requestAnimationFrame(function(){"
+    'd.classList.remove("qamomile-preloading");'
+    "});"
+    "});"
+    "});"
+    "})();"
+)
+
+# Blanket transition-suppression rule. Lives inside the inline theme
+# <style> block (see :func:`inline_theme_css`) so the rule is parsed
+# in the same first-style-pass that interprets the rest of the theme
+# overrides; the ``html.qamomile-preloading`` class is set by
+# THEME_INIT_SCRIPT a moment earlier, which means the first paint
+# happens with every transition silenced. The ``!important`` is
+# needed because Tailwind's ``transition-colors`` etc. set the
+# ``transition-property`` directly on each element with normal
+# specificity. Once ``qamomile-preloading`` is removed (post-load,
+# two RAF ticks in), the rule no longer matches and Tailwind's
+# transition utilities resume their normal behavior.
+PRELOAD_GUARD_CSS = (
+    "html.qamomile-preloading,"
+    "html.qamomile-preloading *,"
+    "html.qamomile-preloading *::before,"
+    "html.qamomile-preloading *::after"
+    "{transition:none!important;animation-duration:0s!important;}"
 )
 
 # Inline-CSS pass: avoids FOUC across the whole theme override. mystmd
@@ -130,16 +174,23 @@ def parse_args() -> argparse.Namespace:
 
 
 def _read_theme_css(docs_root: Path) -> str:
-    """Return the full content of ``docs/assets/custom-theme.css``.
+    """Return ``docs/assets/custom-theme.css`` plus the preload guard rule.
 
-    The whole file is inlined (Tailwind color overrides, tag-chip
-    styles, colab-button styles, dark-mode variants — ~6.5 KB total)
-    rather than just one section: ``custom-theme.css``'s biggest
-    contribution to FOUC is the ``.text-blue-* / .bg-blue-* /
-    .border-blue-*`` overrides that re-paint nearly every nav / link /
-    button on the page when ``myst-theme.css`` finally arrives, so
-    inlining only a single subsection (e.g. just chips) leaves the
-    bigger flash unaddressed.
+    Two pieces are concatenated into the single inline ``<style>``
+    block:
+
+    1. The full content of ``custom-theme.css`` (~6.5 KB). The whole
+       file is inlined rather than just one section because the
+       biggest FOUC contributor is the ``.text-blue-* / .bg-blue-* /
+       .border-blue-*`` overrides that re-paint nearly every nav /
+       link / button on the page when ``myst-theme.css`` finally
+       arrives — inlining only a single subsection (e.g. just chips)
+       leaves the bigger flash unaddressed.
+    2. ``PRELOAD_GUARD_CSS`` — the blanket
+       ``html.qamomile-preloading * { transition: none !important; }``
+       rule that suppresses every transition / animation while the
+       page is hydrating, paired with the matching class added by
+       ``THEME_INIT_SCRIPT`` synchronously at the start of <head>.
 
     Raises:
         RuntimeError: when ``custom-theme.css`` is missing — fail loud
@@ -149,7 +200,7 @@ def _read_theme_css(docs_root: Path) -> str:
     css_path = docs_root / "assets" / "custom-theme.css"
     if not css_path.exists():
         raise RuntimeError(f"Missing source CSS: {css_path}")
-    return css_path.read_text(encoding="utf-8").strip()
+    return css_path.read_text(encoding="utf-8").strip() + "\n" + PRELOAD_GUARD_CSS
 
 
 def inline_theme_css(html_path: Path, css_text: str) -> bool:
