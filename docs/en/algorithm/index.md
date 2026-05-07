@@ -14,3 +14,4 @@ Concrete quantum algorithm examples built with Qamomile.
 - [Hamiltonian Simulation with Suzuki–Trotter](hamiltonian_simulation) — Trotter–Suzuki product formulas on the Rabi model with empirical convergence orders
 - [Introduction to Quantum Error Correction](quantum_error_correction) — 3-qubit bit-flip/phase-flip codes, Shor's 9-qubit code, and stabilizers
 - [Steane [[7,1,3]] Code](steane_code) — CSS construction, syndrome decoding, and transversal Hadamard
+- [Quantum Selected Configuration Interaction (QSCI)](qsci) — Sample bitstrings from a quantum state, build an effective Hamiltonian, and diagonalize it classically with a strict variational guarantee

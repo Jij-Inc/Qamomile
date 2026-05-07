@@ -108,3 +108,20 @@ def test_article_tags_satisfy_invariants(py_path: Path, section: str) -> None:
 def test_allowed_tags_is_nonempty() -> None:
     """Sanity: at least one tag should be allowed (else nothing renders)."""
     assert _btags.ALLOWED_TAGS, "ALLOWED_TAGS is empty"
+
+
+def test_article_discovery_is_nonempty() -> None:
+    """Sanity: article-path discovery must turn up at least one article.
+
+    Without this guard, an unexpected ``DOCS_ROOT`` / path issue (e.g. a
+    typo'd ``SECTIONS`` entry or a refactor that moves the docs tree)
+    would leave ``_ARTICLE_PATHS`` empty. The parametrized
+    ``test_article_tags_satisfy_invariants`` would then expand to zero
+    cases and silently pass — defeating the entire enforcement point.
+    Assert that discovery actually walked something.
+    """
+    assert _ARTICLE_PATHS, (
+        "Article discovery returned no (path, section) pairs. Check that "
+        f"DOCS_ROOT={_btags.DOCS_ROOT!s} points at the docs tree and that "
+        f"SECTIONS={_btags.SECTIONS!r} matches the on-disk directory names."
+    )
