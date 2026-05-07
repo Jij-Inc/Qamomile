@@ -104,7 +104,7 @@ def helper_with_literals(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     return qmc.measure(q)
 
 
-helper_with_literals.draw(n=3, fold_loops=False)
+helper_with_literals.draw(n=3, fold_loops=False, inline=True)
 
 # %% [markdown]
 # ## パターン2：`@composite_gate`
