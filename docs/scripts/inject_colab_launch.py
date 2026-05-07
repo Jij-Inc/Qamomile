@@ -2,11 +2,11 @@
 """Post-build HTML patches for the Qamomile docs.
 
 Originally just a colab-launch script-tag injector; the script has
-since absorbed two more passes that all run against the same set of
+since absorbed three more passes that all run against the same set of
 ``docs/<lang>/_build/html/*.html`` (and ``*.json``) files, so they live
 together for a single rglob walk.
 
-The three passes:
+The four passes:
 
 1. Rewrite build-dir paths in GitHub URLs (HTML + JSON). ``./build.sh
    build`` runs mystmd from ``docs/_build_src/<lang>/`` so the
@@ -70,6 +70,19 @@ SCRIPT_FILE_NAME = "colab-launch.js"
 # case-insensitive in spec, even though mystmd lowercases its output today.
 HEAD_OPEN_RE = re.compile(r"<head\b[^>]*>", re.IGNORECASE)
 
+# Optional ``<meta charset=...>`` declaration. The HTML5 spec requires
+# the charset declaration to appear within the first 1024 bytes of the
+# document — pushing 6.5 KB of inline <style> ahead of it would make
+# servers without an explicit ``Content-Type: text/html; charset=utf-8``
+# header (some RTD configurations, some local previews) fall back to
+# guessing the encoding, which corrupts ja pages. So when a meta-charset
+# is present, we insert AFTER it; otherwise (theoretical fallback for
+# weird HTML) we keep the old behaviour and insert right after <head>.
+META_CHARSET_RE = re.compile(
+    r'<meta\s[^>]*charset\s*=\s*["\']?[^"\'\s>]+["\']?[^>]*/?>',
+    re.IGNORECASE,
+)
+
 # Synchronous theme-init + transition-suppression script. Two
 # entangled FOUC sources are addressed in one ``<script>`` block:
 #
@@ -107,15 +120,26 @@ THEME_INIT_SCRIPT = (
     "(function(){"
     "var d=document.documentElement;"
     'd.classList.add("qamomile-preloading");'
-    # Theme: prefer the user's stored choice; fall back to the OS
-    # preference. Treat "dark" / "light" as explicit overrides; any
-    # other value (including "system" / "auto" / null) defers to the
-    # media query so a user with no stored preference and a dark OS
-    # gets dark on first paint.
+    # Theme detection — must match mystmd's logic exactly so React
+    # hydration doesn't flip the class right after our synchronous
+    # init runs. mystmd's bundle uses:
+    #
+    #   matchMedia("(prefers-color-scheme: light)").matches
+    #     ? "light"
+    #     : "dark"
+    #
+    # i.e. the system fallback queries "light" (not "dark") and
+    # treats any non-match — including the "no preference" case — as
+    # dark. If we instead query "(prefers-color-scheme: dark)", a
+    # user with no OS preference would have us add NO class (light)
+    # while React hydrates with dark, triggering body's
+    # ``transition-colors duration-500`` animation. We mirror mystmd
+    # bit-for-bit: explicit "dark" / "light" override, otherwise
+    # invert ``matches("(prefers-color-scheme: light)")``.
     "try{"
     'var stored=localStorage.getItem("myst:theme");'
-    'var dark=stored==="dark"||((stored!=="light")&&'
-    'window.matchMedia("(prefers-color-scheme: dark)").matches);'
+    "var dark=stored===\"dark\"||(stored!==\"light\"&&"
+    "!window.matchMedia(\"(prefers-color-scheme: light)\").matches);"
     'if(dark)d.classList.add("dark");'
     "}catch(e){}"
     # Reveal: lift the preloading class once everything's settled.
@@ -270,14 +294,43 @@ def inline_theme_css(html_path: Path, css_text: str) -> bool:
     content = html_path.read_text(encoding="utf-8")
     if f'id="{THEME_CSS_STYLE_ID}"' in content:
         return False
-    match = HEAD_OPEN_RE.search(content)
-    if match is None:
+    insert_at = _head_insertion_point(content)
+    if insert_at is None:
         return False
     style_block = f'<style id="{THEME_CSS_STYLE_ID}">{css_text}</style>'
-    insert_at = match.end()
     new = content[:insert_at] + style_block + content[insert_at:]
     html_path.write_text(new, encoding="utf-8")
     return True
+
+
+def _head_insertion_point(content: str) -> int | None:
+    """Return the byte offset to insert head-level patches at.
+
+    Prefers the position immediately after a ``<meta charset=...>`` tag
+    when one exists, falling back to right after the opening ``<head>``
+    tag otherwise. Reason for the preference: HTML5 requires the
+    charset declaration in the first 1024 bytes; inserting our 6.5 KB
+    of inline <style> before it would push it past that window and
+    break encoding sniffing on servers that don't send an explicit
+    Content-Type charset header (notably an issue for ja pages).
+
+    Returns ``None`` when neither anchor is found (e.g. a 404 stub
+    with no <head>).
+    """
+    head_match = HEAD_OPEN_RE.search(content)
+    if head_match is None:
+        return None
+    charset_match = META_CHARSET_RE.search(content, head_match.end())
+    # Don't trust a charset tag that lives outside the head we just
+    # matched — bail back to <head>'s end if it appears suspiciously
+    # late (post-</head>). Cheap heuristic: cap the search window at
+    # the first </head> closing tag.
+    head_close = content.find("</head>", head_match.end())
+    if charset_match is not None and (
+        head_close < 0 or charset_match.end() <= head_close
+    ):
+        return charset_match.end()
+    return head_match.end()
 
 
 def init_theme_script(html_path: Path) -> bool:
@@ -307,13 +360,12 @@ def init_theme_script(html_path: Path) -> bool:
     content = html_path.read_text(encoding="utf-8")
     if f'id="{THEME_INIT_SCRIPT_ID}"' in content:
         return False
-    match = HEAD_OPEN_RE.search(content)
-    if match is None:
+    insert_at = _head_insertion_point(content)
+    if insert_at is None:
         return False
     script_block = (
         f'<script id="{THEME_INIT_SCRIPT_ID}">{THEME_INIT_SCRIPT}</script>'
     )
-    insert_at = match.end()
     new = content[:insert_at] + script_block + content[insert_at:]
     html_path.write_text(new, encoding="utf-8")
     return True

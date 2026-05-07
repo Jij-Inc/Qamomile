@@ -24,6 +24,7 @@ parses frontmatter, not executes notebooks, so it stays cheap.
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -34,12 +35,27 @@ SCRIPT = PROJECT_ROOT / "docs" / "scripts" / "build_doc_tags.py"
 
 
 def _load_build_doc_tags():
-    """Import ``build_doc_tags.py`` as a module without making it a package."""
+    """Import ``build_doc_tags.py`` as a module without making it a package.
+
+    ``build_doc_tags.py`` reads ``DOCS_ROOT_OVERRIDE`` at import time
+    to decide which docs tree to scan. CI must always validate the
+    in-repo ``docs/`` tree regardless of the caller's environment, so
+    we strip ``DOCS_ROOT_OVERRIDE`` before executing the module — a
+    leftover value (from a previous ``./build.sh`` invocation in the
+    same shell, or from a CI job that sets it for an unrelated step)
+    would otherwise make the tests pass/fail nondeterministically by
+    silently scanning the wrong directory.
+    """
     spec = importlib.util.spec_from_file_location("build_doc_tags", SCRIPT)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules.setdefault("build_doc_tags", module)
-    spec.loader.exec_module(module)
+    saved_override = os.environ.pop("DOCS_ROOT_OVERRIDE", None)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if saved_override is not None:
+            os.environ["DOCS_ROOT_OVERRIDE"] = saved_override
     return module
 
 
