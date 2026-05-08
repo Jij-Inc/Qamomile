@@ -150,7 +150,7 @@ The **documentation** counterpart of this rule lives in Section I-bis below — 
 
   Readers open these notebooks via the "Open in Colab" button, where Qamomile is not pre-installed. The leading `# ` keeps the cell a no-op for the local docs build; Colab users uncomment it. Rules:
   - The install line MUST always include `qamomile` so the cell works on a fresh Colab VM.
-  - If the article uses an optional Qamomile extra (a backend transpiler/executor behind a `[…]` extra in `pyproject.toml`), install with that extra: `qamomile[quri_parts]` for `qamomile.quri_parts.QuriPartsTranspiler` / `QuriPartsExecutor`, `qamomile[qbraid]` for `qamomile.qbraid.QBraidExecutor`, `qamomile[cudaq-cu13]` (or `cudaq-cu12`) for `qamomile.cudaq.CudaqTranspiler`.
+  - If the article uses an optional Qamomile extra (a backend transpiler/executor behind a `[…]` extra in `pyproject.toml`), install with that extra: `qamomile[quri_parts]` for `qamomile.quri_parts.QuriPartsTranspiler` / `QuriPartsExecutor`, `qamomile[qbraid]` for `qamomile.qbraid.QBraidExecutor`, `qamomile[cudaq-cu12]` (or `qamomile[cudaq-cu13]` on a CUDA 13.x toolchain) for `qamomile.cudaq.CudaqTranspiler`.
   - If the article needs additional non-Qamomile packages (e.g. `openfermion`, `pyscf`, `openfermionpyscf`), put them on the same `pip install` line so the cell is self-contained.
   - JA mirror localises the comment but keeps the shell command identical.
 

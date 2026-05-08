@@ -220,7 +220,7 @@ For reference, the underlying flow:
      `pyproject.toml`), install with that extra. Today's options:
      - `qamomile[quri_parts]` — `qamomile.quri_parts.QuriPartsTranspiler` / `QuriPartsExecutor`
      - `qamomile[qbraid]` — `qamomile.qbraid.QBraidExecutor`
-     - `qamomile[cudaq-cu13]` (or `cudaq-cu12`) — `qamomile.cudaq.CudaqTranspiler`
+     - `qamomile[cudaq-cu12]` (or `qamomile[cudaq-cu13]` on a CUDA 13.x toolchain) — `qamomile.cudaq.CudaqTranspiler`
    - **If the notebook needs additional non-Qamomile packages** (e.g.
      `openfermion`, `pyscf`, `openfermionpyscf` for the H₂ VQE), add
      them on the same `pip install` line so the cell is self-
