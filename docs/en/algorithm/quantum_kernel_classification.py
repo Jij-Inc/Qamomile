@@ -13,6 +13,9 @@
 # ---
 
 # %% [markdown]
+# ---
+# tags: [algorithm, machine-learning]
+# ---
 # # Quantum Kernel Classification
 #
 # This tutorial demonstrates **quantum kernel methods** for binary
