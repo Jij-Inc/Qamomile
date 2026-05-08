@@ -675,6 +675,27 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
                 f"positional-only parameters, which cannot be auto-wrapped. "
                 f"Wrap it in @qmc.qkernel manually."
             )
+        # Reject parameter names that collide with a reserved
+        # wrapper-internal binding.  Most damaging is a parameter named
+        # ``__qmc_target__``: the synthesized body is
+        # ``return __qmc_target__(...)``, and a parameter of the same
+        # name would shadow the injected forwarding target with the
+        # caller-supplied scalar value, raising a confusing ``TypeError``
+        # ("'float' object is not callable") at block-construction time.
+        # Param names that match the injected types (``Qubit`` / ``Float``
+        # / ``UInt`` / ``tuple``) are rejected for the same reason
+        # defensively — annotation evaluation happens before the
+        # parameter binding so it usually still resolves to the type, but
+        # any future change to that ordering would silently corrupt
+        # type-hint resolution.  Catching it up-front keeps the contract
+        # symmetric with the ``__name__`` collision guard above.
+        if param_name in _RESERVED_WRAPPER_NAMES:
+            raise TypeError(
+                f"controlled(): parameter {param_name!r} of {fn_name!r} "
+                f"collides with a reserved wrapper-internal name "
+                f"({sorted(_RESERVED_WRAPPER_NAMES)}). Wrap the function "
+                f"in @qmc.qkernel manually or rename the parameter."
+            )
         annotation = type_hints.get(param_name, param.annotation)
         if annotation is inspect.Parameter.empty:
             raise TypeError(

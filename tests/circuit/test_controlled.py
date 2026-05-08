@@ -960,6 +960,38 @@ class TestControlledBuiltinErrors:
         with pytest.raises(TypeError, match="positional-only"):
             qmc.controlled(positional_only)
 
+    def test_param_named_qmc_target_raises_type_error(self):
+        """A parameter named ``__qmc_target__`` would shadow the forwarding global.
+
+        The synthesized wrapper body is ``return __qmc_target__(...)`` and
+        ``__qmc_target__`` is the injected forwarding callable.  A
+        parameter of the same name would shadow it with the
+        caller-supplied value, leading to a confusing
+        ``"<value> is not callable"`` at block-construction time.  The
+        guard rejects it up-front with a clear message instead.
+        """
+
+        def shadowing(q: qmc.Qubit, __qmc_target__: float) -> qmc.Qubit:
+            return qmc.rx(q, __qmc_target__)
+
+        with pytest.raises(TypeError, match="reserved wrapper-internal"):
+            qmc.controlled(shadowing)
+
+    def test_param_named_qubit_raises_type_error(self):
+        """A parameter named ``Qubit`` collides with the injected type binding.
+
+        Defensive guard: although Python annotation evaluation happens
+        before parameter binding (so the type resolves correctly today),
+        any future change to that ordering would silently corrupt
+        type-hint resolution.  We reject the symmetric case up-front.
+        """
+
+        def shadowing_type(q: qmc.Qubit, Qubit: float) -> qmc.Qubit:  # noqa: N803
+            return qmc.rx(q, Qubit)
+
+        with pytest.raises(TypeError, match="reserved wrapper-internal"):
+            qmc.controlled(shadowing_type)
+
 
 # -- Wrapper synthesis: caching + interleaved signature handling ------------
 
