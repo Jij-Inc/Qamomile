@@ -43,6 +43,9 @@
 # The resulting kernel matrix can be plugged into any kernel-based
 # classifier such as an SVM.
 
+# %%
+# # !pip install qamomile
+
 # %% [markdown]
 # ## Hyperparameters
 
@@ -97,8 +100,7 @@ plt.show()
 # ## Classical Preprocessing
 #
 # In this notebook we encode input features as rotation angles.
-# We apply a two-stage preprocessing to construct a classical
-# feature lift $f(x)$:
+# We apply a two-stage classical feature map $f(x)$:
 #
 # 1. Scale the raw 2D coordinates into $[0, \pi]$.
 # 2. Construct nonlinear features $(x_0 - x_1)^2$ and $(x_0 + x_1)^2$
@@ -213,8 +215,7 @@ def feature_block_dagger(
 # The kernel value $k(x, x')$ is the probability of measuring $|00\rangle$.
 #
 # We repeat the feature block `layers` times for increased expressiveness.
-# Since `layers` is a structure parameter, it is bound at transpile time
-# (not a runtime parameter).
+# Since `layers` is a structure parameter, it is bound at transpile time.
 
 # %%
 @qmc.qkernel
