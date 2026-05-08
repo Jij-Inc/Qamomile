@@ -17,8 +17,13 @@ itself does no validation (so a stray tag during local development
 does not crash the build), and there is no pre-commit hook. CI
 catches every violation before merge.
 
-Runs in the default unit-test step (no ``docs`` marker) — it only
-parses frontmatter, not executes notebooks, so it stays cheap.
+Carries the ``docs`` pytest marker for category alignment with the
+rest of ``tests/docs/`` — even though this file is cheap (frontmatter
+parse only, no notebook execution), the marker name reflects the
+test's *subject matter* (documentation articles), which keeps the
+``tests/docs/`` directory and the ``docs`` marker in lock-step. The
+existing CI workflow's ``Run docs tests`` step (``pytest -m docs``)
+picks it up alongside ``test_tutorials.py``.
 """
 
 from __future__ import annotations
@@ -32,6 +37,13 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = PROJECT_ROOT / "docs" / "scripts" / "build_doc_tags.py"
+
+# Apply the ``docs`` marker to every test in this module so it routes
+# through the workflow's ``Run docs tests`` step alongside the rest of
+# tests/docs/. The marker reflects subject matter, not cost — these
+# checks are cheap (frontmatter parse), but they live in the docs/
+# test bucket for taxonomy.
+pytestmark = pytest.mark.docs
 
 
 def _load_build_doc_tags():
