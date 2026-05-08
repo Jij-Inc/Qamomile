@@ -132,13 +132,67 @@ qBraid is out of scope (executor-only wrapper around Qiskit, requires API key). 
 
 **Severity**: missing cross-backend execution is **P1**; fixed-inputs-only is **P2**; sampler-only or estimator-only when simulatable is **P2**; missing reverse-direction retro-extension in a new-backend PR is **P1**.
 
+The **documentation** counterpart of this rule lives in Section I-bis below — every new algorithm / stdlib / backend that this section requires tests for *also* requires a corresponding doc article. Apply both checks together when reviewing such a PR.
+
 ### I. Documentation
 
 - **Jupytext percent-format `.py` is the source of truth.** Every tutorial `.py` must have a committed `.ipynb` that (a) exists, (b) stays in sync when its `.py` changes, (c) contains execution outputs. Any of these failing is **P1**. An `.ipynb`-only change (no corresponding `.py` update) is **P2** — it bypasses the source-of-truth.
 - **Docs test coverage**: new tutorial paths (outside `integration/`) must be in `TUTORIAL_PATTERNS` in `tests/docs/test_tutorials.py`. Missing is **P1**.
 - **en/ja parity**: `docs/en/` and `docs/ja/` must share file structure and content — only the natural language differs. Missing or outdated counterpart is **P1**.
 - **Tag whitelist (`ALLOWED_TAGS` in `docs/scripts/build_doc_tags.py`)**: every `tags:` entry in an article's MyST frontmatter MUST already be in `ALLOWED_TAGS`. Adding a new tag to the whitelist as a side-effect of introducing an article is **P1** — the taxonomy is deliberately small and curated, and an unannounced expansion of it is precisely what the whitelist exists to prevent. If a new tag is genuinely needed, the PR should call it out explicitly and the `ALLOWED_TAGS` change should be a separate, documented decision (not a quiet line in a docs PR).
+- **Google Colab pip install cell**: every article under `docs/{en,ja}/{tutorial,algorithm,usage,integration}/` MUST have a commented-out pip install cell as its **first code cell** (right after the intro markdown, before any `import qamomile…`), in the project standard form:
+
+  ```python
+  # %%
+  # Install the latest Qamomile through pip!
+  # # !pip install qamomile
+  ```
+
+  Readers open these notebooks via the "Open in Colab" button, where Qamomile is not pre-installed. The leading `# ` keeps the cell a no-op for the local docs build; Colab users uncomment it. Rules:
+  - The install line MUST always include `qamomile` so the cell works on a fresh Colab VM.
+  - If the article uses an optional Qamomile extra (a backend transpiler/executor behind a `[…]` extra in `pyproject.toml`), install with that extra: `qamomile[quri_parts]` for `qamomile.quri_parts.QuriPartsTranspiler` / `QuriPartsExecutor`, `qamomile[qbraid]` for `qamomile.qbraid.QBraidExecutor`, `qamomile[cudaq-cu13]` (or `cudaq-cu12`) for `qamomile.cudaq.CudaqTranspiler`.
+  - If the article needs additional non-Qamomile packages (e.g. `openfermion`, `pyscf`, `openfermionpyscf`), put them on the same `pip install` line so the cell is self-contained.
+  - JA mirror localises the comment but keeps the shell command identical.
+
+  Missing pip install cell, or an install line whose extras / additional packages do not cover what the notebook actually imports, is **P2**. (See `docs/README.md` "Creating a new page" step 2 for the full convention.)
 - Jupyter Book 2 with MyST.
+
+### I-bis. New-Feature Documentation Coverage (MANDATORY)
+
+Mirrors Section H-bis on the documentation side. Tests prove a feature *works*; docs prove a feature *exists* for users. Any addition or non-trivial modification that introduces a new public-facing surface MUST ship with corresponding documentation, **in both `docs/en/` and `docs/ja/`**.
+
+**What needs a doc article**:
+
+| Change in `qamomile/` | Required doc surface |
+|---|---|
+| New file under `qamomile/circuit/algorithm/` (new ansatz, VQE component, QAOA / QRAO / FQAOA variant, optimization helper) | New article under `docs/{en,ja}/algorithm/<name>.py` with a runnable example |
+| New file under `qamomile/circuit/stdlib/` (composite gate, primitive routine like QFT / QPE / IQFT) | A dedicated article under `docs/{en,ja}/tutorial/` (or `algorithm/` if its primary use is algorithmic), **or** a clearly added section in an existing article that covers the family |
+| New SDK backend (new directory under `qamomile/` with its own `Transpiler` / `Executor`) | Article under `docs/{en,ja}/integration/<backend>.py`, mirroring `integration/qbraid_executor.py` |
+| New top-level public module (e.g. a peer of `qamomile.linalg`, `qamomile.observable`) | Dedicated article under `docs/{en,ja}/usage/` |
+| Large new public-API surface inside an existing module (new public class, new public top-level function exported via `__all__`) | At minimum, an existing tutorial / usage / algorithm article touched to introduce the surface |
+| New optional extra in `pyproject.toml`'s `[project.optional-dependencies]` | Consuming article(s) install with the right `qamomile[<extra>]`; `docs/README.md`'s extras list and Section I above are extended |
+
+**What counts as "non-trivial modification"** (mirrors H-bis): IR shape change, parameter / signature change, gate-sequence change, semantic change observable from the public API. Pure refactors that preserve public behavior are exempt — but if the existing article was already wrong / outdated, this is the moment to fix it.
+
+**Required content per new article**:
+
+- Standard jupytext percent-format header.
+- MyST `tags:` frontmatter with the section tag (`tutorial` / `algorithm` / `usage` / `integration`) plus topical tags, all within `ALLOWED_TAGS`.
+- Google Colab pip install cell as the first code cell, with the right extra(s) per Section I.
+- A complete runnable example exercising the new feature, with executed `.ipynb` outputs committed.
+- en/ja parity: the JA mirror has the same structure / cells / outputs, with prose translated.
+- (For new tutorial / algorithm / usage paths) the path added to `TUTORIAL_PATTERNS` in `tests/docs/test_tutorials.py`.
+
+**Severity**:
+
+- New algorithm/stdlib file with **no** corresponding docs article (en or ja or both): **P1**.
+- New SDK backend without `integration/<backend>.py` article: **P1**.
+- Article exists in `en` but not `ja` (or vice versa): **P1** (also a Section I "en/ja parity" violation — report once with both sections cited).
+- Existing article using outdated parameter signatures / removed APIs / removed extras after the diff: **P1**.
+- New top-level public module without a `usage/` article: **P1**.
+- New large public-API surface inside an existing module documented only in docstrings, with no tutorial / algorithm / usage article touching it: **P2**.
+
+When the PR description explicitly defers documentation to a follow-up tracked elsewhere (a linked issue, a written plan), downgrade by one level (P1 → P2, P2 → P3) but still report — the deferral is part of the public record, not a silent omission.
 
 ### J. Numerical Correctness
 
