@@ -969,6 +969,77 @@ class TestControlledBuiltinErrors:
         with pytest.raises(TypeError, match="keyword-only"):
             qmc.controlled(keyword_only)
 
+    def test_unknown_param_raises_type_error(self):
+        """Typo'd or unrelated kwargs must be rejected, not silently dropped.
+
+        Pre-fix, ``cg(c, t, theata=...)`` (typo) silently appended an
+        operand that ``ValueResolver`` would then drop because it
+        didn't match any inner-block classical parameter.  The user
+        got a controlled gate that fired with the default (unbound)
+        angle and no warning.  Now the typo raises ``TypeError``
+        listing the valid parameter names.
+        """
+
+        @qmc.qkernel
+        def gate_with_angle(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
+            return qmc.rx(q, angle)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            c = qmc.qubit(name="c")
+            t = qmc.qubit(name="t")
+            cg = qmc.controlled(gate_with_angle)
+            c, t = cg(c, t, theata=0.5)  # typo!
+            return qmc.measure(t)
+
+        with pytest.raises(TypeError, match="unknown parameter"):
+            _ = circuit.block
+
+    def test_kwarg_order_independent_of_signature_order(self, qiskit_transpiler):
+        """Caller kwarg order must not matter — operands follow signature order.
+
+        Before the fix, ``_params_to_operands`` iterated ``params.items()``
+        (caller insertion order), and ``ValueResolver`` then bound those
+        operands to the inner block's classical inputs *positionally*.
+        That meant ``cg(c, t, beta=B, alpha=A)`` and
+        ``cg(c, t, alpha=A, beta=B)`` produced circuits where ``alpha``
+        and ``beta`` were *swapped*.  The fix iterates the wrapped
+        kernel's ``input_types`` in signature order, so the resulting
+        statevectors must match regardless of kwarg order.
+        """
+
+        @qmc.qkernel
+        def two_param_gate(
+            q: qmc.Qubit, alpha: qmc.Float, beta: qmc.Float
+        ) -> qmc.Qubit:
+            q = qmc.rx(q, alpha)
+            q = qmc.rz(q, beta)
+            return q
+
+        @qmc.qkernel
+        def kw_natural_order() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(2, name="q")
+            qs[0] = qmc.x(qs[0])
+            cg = qmc.controlled(two_param_gate)
+            qs[0], qs[1] = cg(qs[0], qs[1], alpha=0.7, beta=1.3)
+            return qmc.measure(qs)
+
+        @qmc.qkernel
+        def kw_reversed_order() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(2, name="q")
+            qs[0] = qmc.x(qs[0])
+            cg = qmc.controlled(two_param_gate)
+            qs[0], qs[1] = cg(qs[0], qs[1], beta=1.3, alpha=0.7)
+            return qmc.measure(qs)
+
+        sv_natural = _get_statevector(qiskit_transpiler, kw_natural_order, {})
+        sv_reversed = _get_statevector(qiskit_transpiler, kw_reversed_order, {})
+        assert statevectors_equal(sv_natural, sv_reversed), (
+            "swapping kwarg order produced a different circuit — "
+            "operands must follow the wrapped kernel's signature order, "
+            "not the caller's kwarg insertion order."
+        )
+
     def test_default_value_raises_type_error(self):
         """A parameter with a default value would silently lose it.
 
@@ -1448,25 +1519,38 @@ class TestControlledBuiltinStatevectorParity:
     @pytest.mark.parametrize("num_controls", [1, 2])
     @pytest.mark.parametrize("seed", [0, 1, 42])
     def test_rx_builtin_matches_wrapper(self, qiskit_transpiler, num_controls, seed):
+        """controlled(qmc.rx) and controlled(_rx_gate) yield the same statevector.
+
+        ``qmc.rx``'s parameter is named ``angle`` while the hand-written
+        ``_rx_gate`` wrapper above renames it to ``theta``.  After the
+        signature-order / extras-rejection tightening, the kwarg name
+        must match the *wrapped kernel's* declaration, so we explicitly
+        use ``angle=`` for the builtin and ``theta=`` for the wrapper.
+        Despite the different kwarg names, both paths must produce the
+        same controlled rotation and therefore the same statevector.
+        """
         rng = np.random.default_rng(seed)
         theta = float(rng.uniform(-math.pi, math.pi))
+        nc = num_controls
 
-        spec_builtin = GateSpec(qmc.rx, 1, theta, rx_matrix)
-        spec_wrapper = GateSpec(_rx_gate, 1, theta, rx_matrix)
+        @qmc.qkernel
+        def _builtin_circ() -> qmc.Bit:
+            qs = [qmc.qubit(name=f"q{i}") for i in range(nc + 1)]
+            qs = [qmc.x(qs[i]) if i < nc else qs[i] for i in range(len(qs))]
+            cg = qmc.controlled(qmc.rx, num_controls=nc)
+            out = cg(*qs, angle=theta)
+            return qmc.measure(out[-1])
 
-        circ_builtin = _make_controlled_circuit(
-            spec_builtin, num_controls, activate_controls=True
-        )
-        circ_wrapper = _make_controlled_circuit(
-            spec_wrapper, num_controls, activate_controls=True
-        )
+        @qmc.qkernel
+        def _wrapper_circ() -> qmc.Bit:
+            qs = [qmc.qubit(name=f"q{i}") for i in range(nc + 1)]
+            qs = [qmc.x(qs[i]) if i < nc else qs[i] for i in range(len(qs))]
+            cg = qmc.controlled(_rx_gate, num_controls=nc)
+            out = cg(*qs, theta=theta)
+            return qmc.measure(out[-1])
 
-        sv_builtin = _get_statevector(
-            qiskit_transpiler, circ_builtin, spec_builtin.bindings
-        )
-        sv_wrapper = _get_statevector(
-            qiskit_transpiler, circ_wrapper, spec_wrapper.bindings
-        )
+        sv_builtin = _get_statevector(qiskit_transpiler, _builtin_circ, {})
+        sv_wrapper = _get_statevector(qiskit_transpiler, _wrapper_circ, {})
         assert statevectors_equal(sv_builtin, sv_wrapper)
 
     @pytest.mark.parametrize("num_controls", [1, 2])

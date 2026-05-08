@@ -183,21 +183,86 @@ class ControlledGate:
     ) -> None:
         """Append parameter values to the operands list.
 
-        Handle types are unwrapped to their underlying Value.  Raw scalar
-        values are coerced to the IR type the wrapped kernel actually
-        declares for that parameter — ``UIntType`` when the kernel's
-        annotation is ``UInt`` / ``int``, ``FloatType`` otherwise.  This
-        prevents an ``int`` argument to a ``UInt``-annotated parameter
-        from sneaking in as a ``FloatType`` constant and violating IR
-        invariants downstream (e.g. ``ForOperation`` requires ``UIntType``
-        operands at expand-controlled-U time).
+        Handle types are unwrapped to their underlying ``Value``.  Raw
+        scalar values are coerced to the IR type the wrapped kernel
+        actually declares for that parameter — ``UIntType`` when the
+        kernel's annotation is ``UInt`` / ``int``, ``FloatType``
+        otherwise.  This prevents an ``int`` argument to a
+        ``UInt``-annotated parameter from sneaking in as a
+        ``FloatType`` constant and violating IR invariants downstream
+        (e.g. ``ForOperation`` requires ``UIntType`` operands at
+        expand-controlled-U time).
+
+        Two extra invariants are also enforced when the wrapped object
+        exposes ``input_types`` (i.e. anywhere outside test mocks):
+
+        * **Operand order follows the wrapped kernel's signature**, not
+          the caller's kwarg insertion order.  ``ValueResolver``
+          binds controlled-U parameter operands to the inner block's
+          classical inputs *by position*, so caller-order would silently
+          rebind the wrong values when the user passes kwargs in a
+          different order than the kernel's declaration.
+        * **Unknown / typo'd parameter names raise ``TypeError``** —
+          previously these were silently dropped by the same positional
+          binding, producing a controlled gate with the default
+          (unbound) parameter values and no warning.
+
+        For test mocks (``isinstance(input_types, dict)`` is False) we
+        fall back to the prior caller-order behaviour without
+        validation, since those test fixtures intentionally synthesize
+        ad-hoc parameter dicts.
         """
-        kernel_input_types: dict[str, Any] = getattr(self._qkernel, "input_types", {})
-        for param_name, param_value in params.items():
+        raw = getattr(self._qkernel, "input_types", {})
+        if not isinstance(raw, dict):
+            # Test-mock path: keep prior caller-order, no validation.
+            for param_name, param_value in params.items():
+                if isinstance(param_value, Handle):
+                    operands.append(param_value.value)
+                    continue
+                operands.append(
+                    Value(
+                        type=FloatType(),
+                        name=f"ctrl_param_{param_name}",
+                    ).with_const(float(param_value))
+                )
+            return
+
+        kernel_input_types: dict[str, Any] = raw
+        # Classical-parameter names in the wrapped kernel's signature
+        # order.  Python ``dict`` preserves insertion order (since 3.7),
+        # so iterating ``input_types`` matches the declared signature.
+        classical_names = [
+            name
+            for name, decl in kernel_input_types.items()
+            if decl is UInt or decl is int or decl is Float or decl is float
+        ]
+        classical_set = set(classical_names)
+
+        # Reject unknown parameter names up-front.  The downstream
+        # ``ValueResolver.bind_block_params`` would otherwise drop them
+        # silently, masking caller bugs (typo'd kwargs, kwargs intended
+        # for a different gate, etc.).
+        extras = sorted(set(params) - classical_set)
+        if extras:
+            raise TypeError(
+                f"controlled(): unknown parameter(s) {extras!r}. "
+                f"The wrapped kernel's classical parameters are "
+                f"{classical_names!r}."
+            )
+
+        # Append operands in the kernel's signature order, regardless of
+        # how the caller spelled the kwargs.  Missing names are skipped
+        # silently — this is the existing behaviour for kwargs that the
+        # caller intends to supply at runtime through
+        # ``.sample(bindings=...)``.
+        for param_name in classical_names:
+            if param_name not in params:
+                continue
+            param_value = params[param_name]
             if isinstance(param_value, Handle):
                 operands.append(param_value.value)
                 continue
-            declared = kernel_input_types.get(param_name)
+            declared = kernel_input_types[param_name]
             if declared is UInt or declared is int:
                 param_val = Value(
                     type=UIntType(),
