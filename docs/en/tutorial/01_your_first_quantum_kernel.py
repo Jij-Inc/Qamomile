@@ -106,6 +106,12 @@
 import math
 
 import qamomile.circuit as qmc
+
+# %%
+# Transpiler — by default this tutorial uses Qiskit. If you picked a
+# different tab above (QURI Parts / CUDA-Q), copy the two lines from
+# that tab into this cell in place of the two below, and make sure the
+# matching pip install line further up has been uncommented.
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()

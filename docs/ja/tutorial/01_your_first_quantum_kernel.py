@@ -98,6 +98,12 @@
 import math
 
 import qamomile.circuit as qmc
+
+# %%
+# Transpiler — このチュートリアルはデフォルトでQiskitを使います。
+# 上のタブでQURI PartsまたはCUDA-Qを選んだ場合は、そのタブに書かれた
+# 2行（importとtranspiler = ...）を以下の2行と入れ替えてください。
+# あわせて、上のpipセルで対応する行のコメントも外しておくこと。
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
