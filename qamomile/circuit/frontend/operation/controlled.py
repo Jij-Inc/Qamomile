@@ -646,13 +646,20 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
 
     try:
         type_hints = get_type_hints(fn)
-    except (NameError, TypeError):
-        # Forward refs that cannot resolve at this point fall back to
-        # raw annotations; classification then proceeds against
-        # ``param.annotation`` directly.  We catch only the two
-        # exception types ``get_type_hints`` actually raises so a real
-        # bug (e.g. an import error in the caller's module) is not
-        # silently swallowed and re-emitted as "no type annotation".
+    except (NameError, TypeError, AttributeError):
+        # ``get_type_hints`` raises across a few branches: ``NameError``
+        # for forward refs that cannot resolve, ``TypeError`` for
+        # malformed annotations, and ``AttributeError`` from internal
+        # ``__annotations__`` / namespace probing on certain wrapper
+        # objects.  Catching this set lets us fall back to the raw
+        # ``param.annotation`` while still letting genuinely unrelated
+        # errors (e.g. an import error inside the caller's module) bubble
+        # up rather than being silently re-emitted as "no type
+        # annotation".  ``qamomile/circuit/frontend/qkernel.py`` has the
+        # same fall-back at its own ``get_type_hints`` site, where it
+        # uses a broader ``Exception`` catch — keeping ours narrower
+        # surfaces real bugs faster while still covering the cases that
+        # actually arise in practice.
         type_hints = {}
 
     # The wrapper's parameter order must be ``qubits-first`` because the
