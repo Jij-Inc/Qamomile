@@ -32,7 +32,10 @@
 
 # %%
 # 最新のQamomileをpipからインストールします！
-# # !pip install qamomile
+# Colabで開いている場合は、下のタブで選んだTranspilerに合う行を1つ選び、行頭のコメントを外して実行してください:
+# # !pip install qamomile                  # Qiskit（デフォルト）
+# # !pip install "qamomile[quri_parts]"    # QURI Parts
+# # !pip install "qamomile[cudaq-cu12]"    # CUDA-Q (CUDA 12.x toolchain。CUDA 13.xならcudaq-cu13)。Linux / macOS-arm64 / WSL2のみ。
 
 # %% [markdown]
 # ## MaxCut問題とは？
@@ -248,7 +251,48 @@ def qaoa_ansatz(
 #
 # カーネルをトランスパイルします。問題の構造（Ising係数、量子ビット数、レイヤー数）はバインドし、`gammas`と`betas`はオプティマイザがチューニングするランタイムパラメータとして残します。
 
+# %% [markdown]
+# この記事はデフォルトでQiskitを使います。Qamomileは同じ`@qkernel`を複数の量子SDKへトランスパイルできるので、下のimportを差し替えるだけで他のSDKでも同じ流れで進められます。記事本体のコードはどのSDKを選んでも同一です。Colabの場合は上のpipセルで対応する行のコメントを先に外しておいてください。
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qamomile.qiskit import QiskitTranspiler
+#
+# transpiler = QiskitTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from qamomile.quri_parts import QuriPartsTranspiler
+#
+# transpiler = QuriPartsTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# CUDA 12.x環境では`qamomile[cudaq-cu12]`、CUDA 13.x環境では`qamomile[cudaq-cu13]`を使ってください（インストール済みのCUDA Toolkitに合わせて選択）。CUDA-QはLinux、macOS arm64、Windows（WSL2経由）のみ対応です。
+#
+# ```python
+# from qamomile.cudaq import CudaqTranspiler
+#
+# transpiler = CudaqTranspiler()
+# ```
+# :::
+# ::::
+
 # %%
+# Transpiler — この記事はデフォルトでQiskitを使います。
+# 上のタブでQURI PartsまたはCUDA-Qを選んだ場合は、そのタブに書かれた
+# 2行（importとtranspiler = ...）を以下の2行と入れ替えてください。
+# あわせて、上のpipセルで対応する行のコメントも外しておくこと。
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
@@ -266,25 +310,76 @@ executable = transpiler.transpile(
 )
 
 # %% [markdown]
-# `scipy.optimize.minimize`のCOBYLA法を使います。各反復で回路をサンプリングし、平均エネルギーを評価します。
+# `scipy.optimize.minimize`のCOBYLA法を使います。各反復で回路をサンプリングし、平均エネルギーを評価します。NumPy乱数生成器（初期変分パラメータの固定用）と executor 配下のシミュレータ（ショットごとの再現性用）の両方をシードします。シミュレータをどう再現可能化するかは選んだSDKによって違うので、上のタブで別のSDKを選んだ場合は下のタブブロックから対応するスニペットをコピペしてください。
 #
-# 本チュートリアルでは再現性を確保するため、(i)`AerSimulator`に`seed_simulator=SEED`を渡してショットごとの擬似乱数サンプリングを決定的にし、(ii)NumPy乱数生成器も同じ値でシードして初期変分パラメータを固定し、(iii)スレッド間で乱数ドローが交錯しないよう`max_parallel_threads=1`に設定します。シングルスレッド化は若干の性能低下と引き換えに完全な再現性を得るための設定で、実運用コードでは省略するか、テスト/ドキュメントビルド時のみ有効化する形で構いません。
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qiskit_aer import AerSimulator
+#
+# def make_executor():
+#     return transpiler.executor(
+#         backend=AerSimulator(seed_simulator=SEED, max_parallel_threads=1)
+#     )
+# ```
+#
+# `seed_simulator=SEED`でショットごとのドローを再現可能にし、`max_parallel_threads=1`でAerの並列サンプリングがスレッド間で乱数ドローを混ぜることを防ぎます。実運用コードではスレッド制約を外して性能を取る選択もできます（テスト/ドキュメントビルド時だけ有効化など）。
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# def make_executor():
+#     # qulacs（QURI Partsのデフォルトシミュレータ）はサンプリングのシード指定APIを公開していないため、
+#     # ショットごとの結果はランごとに変動します。最適化は十分なショット数なら同じ近傍に収束しますが、
+#     # 下のコスト履歴のグラフはランごとに完全一致はしません。
+#     return transpiler.executor()
+# ```
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# ```python
+# import cudaq
+#
+# def make_executor():
+#     # cudaqの乱数はプロセスグローバルです。executor生成のたびにset_random_seedを呼ぶと
+#     # ノートブック内の再現性は得られますが、同じプロセス内で並行カーネルが走る場合は安全ではありません。
+#     cudaq.set_random_seed(SEED)
+#     return transpiler.executor()
+# ```
+# :::
+# ::::
 
 # %%
 import os
+
 import numpy as np
-from qiskit_aer import AerSimulator
 from scipy.optimize import minimize
 
 SEED = 42
 
+# %%
+# Executor factory — この記事はデフォルトで Qiskit の AerSimulator (シード固定) を使います。
+# 上のタブで別のSDKを選んだ場合は、対応するタブの `make_executor` 定義で以下を上書きしてください
+# （あわせて記事冒頭のpipセルで対応する行のコメントも外しておくこと）。
+from qiskit_aer import AerSimulator
 
-def make_seeded_backend() -> AerSimulator:
-    """本チュートリアル用に決定的サンプリングを行うAerSimulatorを返す。"""
-    return AerSimulator(seed_simulator=SEED, max_parallel_threads=1)
+
+def make_executor():
+    """本チュートリアル用に決定的サンプリングを行うexecutorを返す。"""
+    return transpiler.executor(
+        backend=AerSimulator(seed_simulator=SEED, max_parallel_threads=1)
+    )
 
 
-executor = transpiler.executor(backend=make_seeded_backend())
+executor = make_executor()
+
+# %%
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 sample_shots = 256 if docs_test_mode else 2048
 maxiter = 20 if docs_test_mode else 500
@@ -427,8 +522,8 @@ exe_builtin = transpiler.transpile(
     parameters=["gammas", "betas"],
 )
 
-executor_manual = transpiler.executor(backend=make_seeded_backend())
-executor_builtin = transpiler.executor(backend=make_seeded_backend())
+executor_manual = make_executor()
+executor_builtin = make_executor()
 
 result_manual = executable.sample(
     executor_manual,

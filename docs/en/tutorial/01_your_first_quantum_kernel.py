@@ -249,14 +249,14 @@ print("probabilities:", result.probabilities())
 # %% [markdown]
 # ## Inspecting the Transpiled Circuit
 #
-# `to_circuit()` transpiles a qkernel with **all** parameters bound and returns the quantum SDK-native circuit (e.g., a Qiskit `QuantumCircuit`). This is useful for debugging — you can see exactly how the circuit looks in the target SDK.
+# `to_circuit()` transpiles a qkernel with **all** parameters bound and returns the **SDK-native circuit object** (e.g., a Qiskit `QuantumCircuit`, a QURI Parts `LinearMappedParametricQuantumCircuit`). Useful when you need to feed the circuit into SDK-specific tooling, or when debugging. The exact type depends on the Transpiler you picked at the top of this tutorial. For an SDK-agnostic visual, use `biased_coin.draw(...)` (shown earlier in this tutorial); to draw the SDK-native circuit, use that SDK's own drawing API (e.g. `circuit.draw()` for Qiskit, `cudaq.draw(...)` for CUDA-Q).
 
 # %%
-qiskit_circuit = transpiler.to_circuit(
+circuit = transpiler.to_circuit(
     biased_coin,
     bindings={"theta": math.pi / 4},
 )
-print(qiskit_circuit)
+print(type(circuit).__name__)
 
 # %% [markdown]
 # ## Multi-Qubit Example

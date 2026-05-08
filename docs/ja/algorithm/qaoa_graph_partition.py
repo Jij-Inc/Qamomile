@@ -35,7 +35,10 @@
 
 # %%
 # 最新のQamomileをpipからインストールします！
-# # !pip install qamomile
+# Colabで開いている場合は、下のタブで選んだTranspilerに合う行を1つ選び、行頭のコメントを外して実行してください:
+# # !pip install qamomile                  # Qiskit（デフォルト）
+# # !pip install "qamomile[quri_parts]"    # QURI Parts
+# # !pip install "qamomile[cudaq-cu12]"    # CUDA-Q (CUDA 12.x toolchain。CUDA 13.xならcudaq-cu13)。Linux / macOS-arm64 / WSL2のみ。
 
 # %% [markdown]
 # ## 問題の定式化
@@ -160,7 +163,48 @@ print(hamiltonian)
 #
 # `converter.transpile()` は `p` 層の QAOA アンザッツ回路を構築し、`ExecutableProgram` にコンパイルします。変分パラメータ `gammas`（コスト層）と `betas`（ミキサー層）はランタイムパラメータとして残ります。
 
+# %% [markdown]
+# この記事はデフォルトでQiskitを使います。Qamomileは同じ`@qkernel`を複数の量子SDKへトランスパイルできるので、下のimportを差し替えるだけで他のSDKでも同じ流れで進められます。記事本体のコードはどのSDKを選んでも同一です。Colabの場合は上のpipセルで対応する行のコメントを先に外しておいてください。
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qamomile.qiskit import QiskitTranspiler
+#
+# transpiler = QiskitTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from qamomile.quri_parts import QuriPartsTranspiler
+#
+# transpiler = QuriPartsTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# CUDA 12.x環境では`qamomile[cudaq-cu12]`、CUDA 13.x環境では`qamomile[cudaq-cu13]`を使ってください（インストール済みのCUDA Toolkitに合わせて選択）。CUDA-QはLinux、macOS arm64、Windows（WSL2経由）のみ対応です。
+#
+# ```python
+# from qamomile.cudaq import CudaqTranspiler
+#
+# transpiler = CudaqTranspiler()
+# ```
+# :::
+# ::::
+
 # %%
+# Transpiler — この記事はデフォルトでQiskitを使います。
+# 上のタブでQURI PartsまたはCUDA-Qを選んだ場合は、そのタブに書かれた
+# 2行（importとtranspiler = ...）を以下の2行と入れ替えてください。
+# あわせて、上のpipセルで対応する行のコメントも外しておくこと。
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
@@ -171,20 +215,67 @@ executable = converter.transpile(transpiler, p=p)
 # ## QAOA パラメータの最適化
 #
 # `executable.sample()` を使って各イテレーションでコストを評価します。オプティマイザはサンプリングされたビット列の平均エネルギーを最小化する `gammas` と `betas` を探索します。
+#
+# executor配下のシミュレータをシードしておくことで、notebookを再実行してもCOBYLAの軌道と最終的なサンプリング分布が再現されます。シードがないと、ショットごとに異なる乱数が引かれるためCOBYLAはノイズのあるコスト面を辿り、実行のたびに（等価だが）異なる局所最適解に収束します。シードの方法は選んだSDKによって違うので、上のタブで別のSDKを選んだ場合は下のタブブロックから対応するスニペットをコピペしてください。
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qiskit_aer import AerSimulator
+#
+# executor = transpiler.executor(
+#     backend=AerSimulator(seed_simulator=901, max_parallel_threads=1)
+# )
+# ```
+#
+# `seed_simulator=901`でショットごとのドローを再現可能にし、`max_parallel_threads=1`でAerの並列サンプリングがスレッド間で乱数ドローを混ぜることを防ぎます。
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# # qulacs（QURI Partsのデフォルトシミュレータ）はサンプリングのシード指定APIを公開していないため、
+# # ショットごとの結果はランごとに変動します。最適化は十分なショット数なら同じ近傍に収束しますが、
+# # コスト軌道はランごとに完全一致はしません。
+# executor = transpiler.executor()
+# ```
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# ```python
+# import cudaq
+#
+# # cudaqの乱数はプロセスグローバルです。set_random_seedはこの後の
+# # cudaq.sample/observe呼び出しすべてに影響します。ノートブック内の再現性には十分ですが、
+# # 同一プロセスで並行カーネルが走る場合は安全ではありません。
+# cudaq.set_random_seed(901)
+# executor = transpiler.executor()
+# ```
+# :::
+# ::::
 
 # %%
 import os
+
 import numpy as np
-from qiskit_aer import AerSimulator
 from scipy.optimize import minimize
 
-# シミュレータをseedしておくことで、notebookを再実行してもCOBYLAの軌道と
-# 最終的なサンプリング分布が再現される。seedなしの場合、ショットごとに
-# 異なる乱数が引かれるためCOBYLAはノイズのあるコスト面を辿り、
-# 実行のたびに(等価ではあるが)異なる局所最適解に収束する。
+# %%
+# Executor — この記事はデフォルトで Qiskit の AerSimulator (シード固定) を使います。
+# 上のタブで別のSDKを選んだ場合は、対応するタブのスニペットで以下を上書きしてください
+# （あわせて記事冒頭のpipセルで対応する行のコメントも外しておくこと）。
+from qiskit_aer import AerSimulator
+
 executor = transpiler.executor(
     backend=AerSimulator(seed_simulator=901, max_parallel_threads=1)
 )
+
+# %%
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 sample_shots = 256 if docs_test_mode else 2048
 maxiter = 25 if docs_test_mode else 1000

@@ -229,14 +229,14 @@ print("probabilities:", result.probabilities())
 # %% [markdown]
 # ## トランスパイル後の回路の確認
 #
-# `to_circuit()`はすべてのパラメータをバインドした状態でトランスパイルし、量子SDK固有の回路（例: Qiskitの`QuantumCircuit`）を返します。量子SDKの形式で回路を確認できるので、デバッグに便利です。
+# `to_circuit()`はすべてのパラメータをバインドした状態でトランスパイルし、**SDK固有の回路オブジェクト**（例: Qiskitの`QuantumCircuit`、QURI Partsの`LinearMappedParametricQuantumCircuit`）を返します。SDK固有のツールに渡したいときやデバッグに便利です。返ってくる型は、上で選んだTranspilerに応じて変わります。SDK非依存に図として確認したい場合はチュートリアル前半の`biased_coin.draw(...)`を、SDK固有の回路図が見たい場合は各SDKの描画API（Qiskitなら`circuit.draw()`、CUDA-Qなら`cudaq.draw(...)`）を使ってください。
 
 # %%
-qiskit_circuit = transpiler.to_circuit(
+circuit = transpiler.to_circuit(
     biased_coin,
     bindings={"theta": math.pi / 4},
 )
-print(qiskit_circuit)
+print(type(circuit).__name__)
 
 # %% [markdown]
 # ## 複数量子ビットの例
