@@ -83,7 +83,7 @@ class TestSubstitutionPass:
             return q
 
         # Build block
-        block = Block.from_block_value(test_kernel.block, {})
+        block = test_kernel.block
 
         # Create pass with strategy override
         config = SubstitutionConfig(
@@ -262,7 +262,7 @@ class TestSignatureValidation:
             return source(q, theta)
 
         # Build block
-        block = Block.from_block_value(main.block, {})
+        block = main.block
 
         # Create pass with incompatible substitution
         pass_ = create_substitution_pass(
@@ -292,7 +292,7 @@ class TestSignatureValidation:
             return source(q, theta)
 
         # Build block
-        block = Block.from_block_value(main.block, {})
+        block = main.block
 
         # Create pass with compatible substitution
         pass_ = create_substitution_pass(

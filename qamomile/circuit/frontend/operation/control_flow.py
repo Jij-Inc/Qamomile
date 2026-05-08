@@ -125,18 +125,24 @@ def for_loop(
     body_tracer = Tracer()
 
     # Create a UInt to represent the loop variable (can be used as array index)
-    # Use the provided var_name so transpiler can identify this loop variable
+    # ``loop_var_value`` is the IR identity carrier (UUID); ``var_name`` is
+    # display-only and survives only for printers / error messages.
+    loop_var_value = Value(type=UIntType(), name=var_name)
     loop_var = UInt(
-        value=Value(type=UIntType(), name=var_name),
+        value=loop_var_value,
         init_value=0,  # Placeholder, actual value is symbolic during tracing
     )
 
     with trace(body_tracer):
         yield loop_var
 
-    # ForOperationを作成
+    # Create ForOperation
     # operands: [start, stop, step]
-    for_op = ForOperation(loop_var=var_name, operations=body_tracer.operations)
+    for_op = ForOperation(
+        loop_var=var_name,
+        loop_var_value=loop_var_value,
+        operations=body_tracer.operations,
+    )
     for_op.operands.append(_value_to_ir_value(start, "start"))
     for_op.operands.append(_value_to_ir_value(stop, "stop"))
     for_op.operands.append(_value_to_ir_value(step, "step"))
@@ -156,6 +162,7 @@ def _create_handle_from_value(value: Value, template_handle: Handle) -> Handle:
         return Bit(value=value)
     elif isinstance(template_handle, ArrayBase):
         cls = type(template_handle)
+        assert isinstance(value, ArrayValue)
         return cls._create_from_value(value=value, shape=template_handle._shape)
     else:
         # Fallback: return a generic Handle
@@ -182,7 +189,7 @@ def _fresh_handle_copy_for_tracing(h: typing.Any) -> typing.Any:
     # each branch starts with an empty borrow set.  Without this,
     # shallow copy shares the same _borrowed_indices dict and borrowing
     # an element in one branch would cause QubitConsumedError in the other.
-    if hasattr(c, "_borrowed_indices"):
+    if isinstance(c, ArrayBase):
         c._borrowed_indices = {}
     return c
 
@@ -211,11 +218,11 @@ def _value_to_ir_value(val: typing.Any, name_prefix: str = "const") -> Value:
     # Convert primitive to Value
     if isinstance(val, (int, float, bool)):
         if isinstance(val, bool):
-            return Value(type=BitType(), name=name_prefix, params={"const": val})
+            return Value(type=BitType(), name=name_prefix).with_const(val)
         elif isinstance(val, float):
-            return Value(type=FloatType(), name=name_prefix, params={"const": val})
+            return Value(type=FloatType(), name=name_prefix).with_const(val)
         else:  # int
-            return Value(type=UIntType(), name=name_prefix, params={"const": val})
+            return Value(type=UIntType(), name=name_prefix).with_const(val)
 
     # Unsupported type
     raise TypeError(f"Cannot convert {type(val)} to IR Value")
@@ -379,6 +386,37 @@ def emit_if(
                     f"but false branch returned {type(false_val).__name__}. "
                     f"Both branches of an if-else must return the same variables."
                 )
+            # Phi minimization (scalar handles only): when both branches
+            # return the *same* IR Value AND neither branch consumed it,
+            # the phi would be a no-op merge. Skipping it keeps the IR
+            # SSA-minimal and avoids generating phi-versioned aliases
+            # (e.g. ``j_phi_4``) for read-only scalar loop variables,
+            # which downstream emit-time loop unrolling cannot bind.
+            #
+            # Array handles (Vector/Matrix/Tensor) are excluded from this
+            # optimization: their `.value` (ArrayValue) is not updated
+            # when elements are written via ``arr[i] = ...``, so identity
+            # of `.value` doesn't reliably indicate "unchanged". For arrays
+            # we conservatively keep the phi.
+            from qamomile.circuit.frontend.handle.array import ArrayBase
+
+            true_v = true_val.value if hasattr(true_val, "value") else true_val
+            false_v = false_val.value if hasattr(false_val, "value") else false_val
+            true_consumed = getattr(true_val, "_consumed", False)
+            false_consumed = getattr(false_val, "_consumed", False)
+            is_array_handle = isinstance(true_val, ArrayBase) or isinstance(
+                false_val, ArrayBase
+            )
+            if (
+                not is_array_handle
+                and isinstance(true_v, Value)
+                and isinstance(false_v, Value)
+                and true_v is false_v
+                and not true_consumed
+                and not false_consumed
+            ):
+                merged_results.append(true_val)
+                continue
             phi_output, merged_handle = _create_phi_for_values(
                 condition_value, true_val, false_val, if_op
             )
@@ -496,15 +534,21 @@ def for_items(
         key_type is not None and is_array_type(key_type) and len(key_var_names) == 1
     )
 
+    # Track the IR Values for each key/value variable so we can store them
+    # on the ForItemsOperation. Identity (for emit-time bindings + loop
+    # body refs) flows through these UUIDs; the string names are
+    # display-only.
+    key_var_values: list[Value] = []
     if _key_is_vector:
         # Create a symbolic Vector[UInt] handle for the key variable
         kv_name = key_var_names[0]
-        dim0_value = Value(type=UIntType(), name=f"{kv_name}_dim0", params={})
+        dim0_value = Value(type=UIntType(), name=f"{kv_name}_dim0")
         array_value = ArrayValue(
             type=UIntType(),
             name=kv_name,
             shape=(dim0_value,),
         )
+        key_var_values.append(array_value)
         dim0_handle = UInt(value=dim0_value)
         key_result = object.__new__(Vector)
         key_result.value = array_value
@@ -515,13 +559,15 @@ def for_items(
         key_result.name = kv_name
         key_result.id = str(id(key_result))
         key_result._consumed = False
-        key_result.element_type = UInt
+        key_result.element_type = UInt  # type: ignore[assignment]
     else:
         # Create symbolic key handles (UInt for each key variable)
         key_handles = []
         for kv_name in key_var_names:
+            kv_value = Value(type=UIntType(), name=kv_name)
+            key_var_values.append(kv_value)
             key_handle = UInt(
-                value=Value(type=UIntType(), name=kv_name),
+                value=kv_value,
                 init_value=0,  # Placeholder, actual value bound at emit time
             )
             key_handles.append(key_handle)
@@ -533,8 +579,9 @@ def for_items(
             key_result = tuple(key_handles)
 
     # Create symbolic value handle (Float for Ising coefficients)
+    value_var_value = Value(type=FloatType(), name=value_var_name)
     value_handle = Float(
-        value=Value(type=FloatType(), name=value_var_name),
+        value=value_var_value,
         init_value=0.0,  # Placeholder, actual value bound at emit time
     )
 
@@ -546,8 +593,10 @@ def for_items(
         key_vars=key_var_names,
         value_var=value_var_name,
         key_is_vector=_key_is_vector,
+        key_var_values=tuple(key_var_values),
+        value_var_value=value_var_value,
         operations=body_tracer.operations,
     )
-    for_items_op.operands.append(d.value)  # The DictValue being iterated
+    for_items_op.operands.append(d.value)  # type: ignore[arg-type]  # DictValue is not Value but stored as operand
 
     parent_tracer.add_operation(for_items_op)

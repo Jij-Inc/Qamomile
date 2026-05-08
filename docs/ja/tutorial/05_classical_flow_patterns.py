@@ -7,12 +7,16 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.18.1
 #   kernelspec:
-#     display_name: qamomile
+#     display_name: Python 3
 #     language: python
-#     name: qamomile
+#     name: python3
 # ---
 
 # %% [markdown]
+# ---
+# tags: [tutorial]
+# ---
+#
 # # 古典制御フローパターン
 #
 # 量子回路の構造は古典制御フローに依存することが多くあります。量子ビットのイテレーション、グラフのエッジに基づくゲート適用、ゲート列の条件分岐などです。Qamomileでは`qmc.range`、`qmc.items`、`if`分岐、`while`ループでこれらをサポートしています。
@@ -28,6 +32,8 @@
 # # !pip install qamomile
 
 # %%
+import os
+
 import qamomile.circuit as qmc
 from qamomile.qiskit import QiskitTranspiler
 
@@ -158,11 +164,14 @@ def conditional_flip() -> qmc.Bit:
 
 # %%
 exe = transpiler.transpile(conditional_flip)
-executor = transpiler.executor()
-job = exe.sample(executor, bindings={}, shots=100)
-result = job.result()
-for value, count in result.results:
-    print(f"  bit={value}: {count} shots")
+if os.environ.get("QAMOMILE_DOCS_TEST") == "1":
+    print("docs test mode では dynamic circuit の実行を省略します。")
+else:
+    executor = transpiler.executor()
+    job = exe.sample(executor, bindings={}, shots=100)
+    result = job.result()
+    for value, count in result.results:
+        print(f"  bit={value}: {count} shots")
 
 # %% [markdown]
 # `q0`は |1⟩ として準備されているため、測定結果は常に1となり、`q1`は常に反転されます。全てのショットで1が返るはずです。

@@ -12,6 +12,9 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOpKind,
     CompOp,
     CompOpKind,
+    CondOp,
+    CondOpKind,
+    NotOp,
 )
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import QubitConsumedError
@@ -43,6 +46,50 @@ def _emit_compop(lhs: Value, rhs: Value, result: Value, kind: CompOpKind) -> Non
     tracer.add_operation(compop)
 
 
+def _emit_condop(lhs: Value, rhs: Value, result: Value, kind: CondOpKind) -> None:
+    """Emit a CondOp (logical AND/OR) to the current tracer.
+
+    Used by ``Bit.__and__`` / ``__or__`` to lift Python's ``&`` / ``|``
+    on Bit handles into the IR. Distinct from ``BinOp`` because the
+    semantics is short-circuit-style boolean logic, not bitwise integer
+    arithmetic.
+
+    Args:
+        lhs: Left operand Value.
+        rhs: Right operand Value.
+        result: Result Value (``BitType``) the op writes into.
+        kind: ``CondOpKind.AND`` or ``CondOpKind.OR``.
+
+    Returns:
+        None.
+    """
+    condop = CondOp(
+        operands=[lhs, rhs],
+        results=[result],
+        kind=kind,
+    )
+    tracer = get_current_tracer()
+    tracer.add_operation(condop)
+
+
+def _emit_notop(operand: Value, result: Value) -> None:
+    """Emit a NotOp (logical negation) to the current tracer.
+
+    Used by ``Bit.__invert__`` to lift Python's ``~`` on a Bit handle
+    into the IR.
+
+    Args:
+        operand: Operand Value to negate.
+        result: Result Value (``BitType``) the op writes into.
+
+    Returns:
+        None.
+    """
+    notop = NotOp(operands=[operand], results=[result])
+    tracer = get_current_tracer()
+    tracer.add_operation(notop)
+
+
 @dataclasses.dataclass
 class Handle(abc.ABC):
     value: Value
@@ -61,7 +108,7 @@ class Handle(abc.ABC):
         """
         return self.value.type.is_quantum()
 
-    def consume(self, operation_name: str = "unknown") -> "Handle":
+    def consume(self, operation_name: str = "unknown") -> typing.Self:
         """Mark this handle as consumed and return a fresh handle.
 
         Args:

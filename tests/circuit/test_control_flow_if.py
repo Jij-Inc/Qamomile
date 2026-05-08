@@ -92,15 +92,14 @@ class TestIfElseScalarQubit:
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 1
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        assert len(if_ops[0].results) == 2
-        results = if_ops[0].results
-        assert results[0].type == BitType()
-        assert results[1].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 2
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        # Phi-minimization: only q1 (reassigned in both branches) gets a
+        # phi; cond is read-only and elided.
+        assert len(if_ops[0].results) == 1
+        assert if_ops[0].results[0].type == QubitType()
+        assert len(if_ops[0].phi_ops) == 1
+        assert isinstance(if_ops[0].phi_ops[0], PhiOp)
+        assert len(if_ops[0].phi_ops[0].operands) == 3
+        assert len(if_ops[0].phi_ops[0].results) == 1
 
     def test_if_else_multiple_qubits_in_branches(self):
         """Multiple qubits operated on in both branches should work."""
@@ -125,12 +124,12 @@ class TestIfElseScalarQubit:
         assert len(if_ops[0].false_operations) == 2
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
         assert if_ops[0].false_operations[1].gate_type == GateOperationType.X  # type: ignore
-        assert len(if_ops[0].results) == 3
+        # Phi-minimization: q1 and q2 both reassigned; cond elided.
+        assert len(if_ops[0].results) == 2
         results = if_ops[0].results
-        assert results[0].type == BitType()
+        assert results[0].type == QubitType()
         assert results[1].type == QubitType()
-        assert results[2].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 3
+        assert len(if_ops[0].phi_ops) == 2
         for phi in if_ops[0].phi_ops:
             assert isinstance(phi, PhiOp)
             assert len(phi.operands) == 3
@@ -157,15 +156,11 @@ class TestIfElseScalarQubit:
         assert len(if_ops[0].false_operations) == 2
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
         assert if_ops[0].false_operations[1].gate_type == GateOperationType.X  # type: ignore
-        assert len(if_ops[0].results) == 2
-        results = if_ops[0].results
-        assert results[0].type == BitType()
-        assert results[1].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 2
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        # Phi-minimization: q1 reassigned in both branches; cond elided.
+        assert len(if_ops[0].results) == 1
+        assert if_ops[0].results[0].type == QubitType()
+        assert len(if_ops[0].phi_ops) == 1
+        assert isinstance(if_ops[0].phi_ops[0], PhiOp)
 
     def test_if_only_no_else(self):
         """If without else should work. The false branch is empty (returns vars as-is),
@@ -184,15 +179,13 @@ class TestIfElseScalarQubit:
         assert len(if_ops[0].true_operations) == 1
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 0
-        assert len(if_ops[0].results) == 2
-        results = if_ops[0].results
-        assert results[0].type == BitType()
-        assert results[1].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 2
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        # Phi-minimization: q1 reassigned in true branch (else-pass implicit
+        # identity differs by Handle but same Value identity isn't preserved
+        # because true branch reassigned), so q1 phi is created. cond is
+        # read-only and elided.
+        assert len(if_ops[0].results) == 1
+        assert if_ops[0].results[0].type == QubitType()
+        assert len(if_ops[0].phi_ops) == 1
 
     def test_if_else_classical_only_in_one_branch(self):
         """One branch with no qubit operations should work.
@@ -216,15 +209,10 @@ class TestIfElseScalarQubit:
         assert len(if_ops[0].true_operations) == 1
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 0
-        assert len(if_ops[0].results) == 2
-        results = if_ops[0].results
-        assert results[0].type == BitType()
-        assert results[1].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 2
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        # Phi-minimization: q1 reassigned in true branch only; cond elided.
+        assert len(if_ops[0].results) == 1
+        assert if_ops[0].results[0].type == QubitType()
+        assert len(if_ops[0].phi_ops) == 1
 
     def test_nested_if_else(self):
         """Nested if-else inside a branch should build successfully."""
@@ -253,12 +241,12 @@ class TestIfElseScalarQubit:
         assert isinstance(outer_if.true_operations[1], IfOperation)
         assert len(outer_if.false_operations) == 1
         assert outer_if.false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        assert len(outer_if.results) == 3
-        results = outer_if.results
-        assert results[0].type == BitType()
-        assert results[1].type == QubitType()
-        assert results[2].type == QubitType()
-        assert len(outer_if.phi_ops) == 3
+        # Phi-minimization: q1 reassigned in both branches and q2 measured
+        # (consumed) in true branch — both get phis. cond1 is read-only and
+        # elided.
+        assert len(outer_if.results) == 2
+        assert all(r.type == QubitType() for r in outer_if.results)
+        assert len(outer_if.phi_ops) == 2
         for phi in outer_if.phi_ops:
             assert isinstance(phi, PhiOp)
             assert len(phi.operands) == 3
@@ -274,15 +262,11 @@ class TestIfElseScalarQubit:
         assert inner_if.true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(inner_if.false_operations) == 1
         assert inner_if.false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        assert len(inner_if.results) == 2
-        results = inner_if.results
-        assert results[0].type == BitType()
-        assert results[1].type == QubitType()
-        assert len(inner_if.phi_ops) == 2
-        for phi in inner_if.phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        # Phi-minimization: only q1 reassigned in both inner branches.
+        assert len(inner_if.results) == 1
+        assert inner_if.results[0].type == QubitType()
+        assert len(inner_if.phi_ops) == 1
+        assert isinstance(inner_if.phi_ops[0], PhiOp)
 
 
 class TestIfElseErrorHandling:
@@ -321,15 +305,13 @@ class TestIfElseWithSymbolicVector:
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 1
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        assert len(if_ops[0].results) == 2
-        results = if_ops[0].results
-        assert results[0].type == BitType()
-        assert results[1].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 2
-        for phi in if_ops[0].phi_ops:
-            assert isinstance(phi, PhiOp)
-            assert len(phi.operands) == 3
-            assert len(phi.results) == 1
+        # Phi-minimization: cond is read-only and elided; qs (Vector) is
+        # always preserved as a phi (element writes don't update the
+        # outer ArrayValue identity, so phi creation is conservative).
+        assert len(if_ops[0].results) == 1
+        assert if_ops[0].results[0].type == QubitType()
+        assert len(if_ops[0].phi_ops) == 1
+        assert isinstance(if_ops[0].phi_ops[0], PhiOp)
 
     def test_if_else_symbolic_vector_different_elements(self):
         """Different elements of a parameter Vector in each branch."""
@@ -350,11 +332,14 @@ class TestIfElseWithSymbolicVector:
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 1
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        assert len(if_ops[0].results) == 2
+        # Phi-minimization: cond (read-only Bit) is elided.
+
+        assert len(if_ops[0].results) == 1
+
         results = if_ops[0].results
-        assert results[0].type == BitType()
-        assert results[1].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 2
+        assert results[0].type == QubitType()
+
+        assert len(if_ops[0].phi_ops) == 1
         for phi in if_ops[0].phi_ops:
             assert isinstance(phi, PhiOp)
             assert len(phi.operands) == 3
@@ -376,11 +361,14 @@ class TestIfElseWithSymbolicVector:
         assert len(if_ops[0].true_operations) == 1
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 0
-        assert len(if_ops[0].results) == 2
+        # Phi-minimization: cond (read-only Bit) is elided.
+
+        assert len(if_ops[0].results) == 1
+
         results = if_ops[0].results
-        assert results[0].type == BitType()
-        assert results[1].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 2
+        assert results[0].type == QubitType()
+
+        assert len(if_ops[0].phi_ops) == 1
         for phi in if_ops[0].phi_ops:
             assert isinstance(phi, PhiOp)
             assert len(phi.operands) == 3
@@ -411,12 +399,15 @@ class TestIfElseWithSymbolicVector:
         assert len(if_ops[0].false_operations) == 2
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
         assert if_ops[0].false_operations[1].gate_type == GateOperationType.X  # type: ignore
-        assert len(if_ops[0].results) == 3
+        # Phi-minimization: cond (read-only Bit) is elided.
+
+        assert len(if_ops[0].results) == 2
+
         results = if_ops[0].results
-        assert results[0].type == BitType()
+        assert results[0].type == QubitType()
         assert results[1].type == QubitType()
-        assert results[2].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 3
+
+        assert len(if_ops[0].phi_ops) == 2
         for phi in if_ops[0].phi_ops:
             assert isinstance(phi, PhiOp)
             assert len(phi.operands) == 3
@@ -443,11 +434,14 @@ class TestIfElseWithSymbolicVector:
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 1
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        assert len(if_ops[0].results) == 2
+        # Phi-minimization: cond (read-only Bit) is elided.
+
+        assert len(if_ops[0].results) == 1
+
         results = if_ops[0].results
-        assert results[0].type == BitType()
-        assert results[1].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 2
+        assert results[0].type == QubitType()
+
+        assert len(if_ops[0].phi_ops) == 1
         for phi in if_ops[0].phi_ops:
             assert isinstance(phi, PhiOp)
             assert len(phi.operands) == 3
@@ -480,11 +474,14 @@ class TestIfElseWithQubitArray:
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 1
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        assert len(if_ops[0].results) == 2
+        # Phi-minimization: cond (read-only Bit) is elided.
+
+        assert len(if_ops[0].results) == 1
+
         results = if_ops[0].results
-        assert results[0].type == BitType()
-        assert results[1].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 2
+        assert results[0].type == QubitType()
+
+        assert len(if_ops[0].phi_ops) == 1
         for phi in if_ops[0].phi_ops:
             assert isinstance(phi, PhiOp)
             assert len(phi.operands) == 3
@@ -511,11 +508,14 @@ class TestIfElseWithQubitArray:
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 1
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        assert len(if_ops[0].results) == 2
+        # Phi-minimization: cond (read-only Bit) is elided.
+
+        assert len(if_ops[0].results) == 1
+
         results = if_ops[0].results
-        assert results[0].type == BitType()
-        assert results[1].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 2
+        assert results[0].type == QubitType()
+
+        assert len(if_ops[0].phi_ops) == 1
         for phi in if_ops[0].phi_ops:
             assert isinstance(phi, PhiOp)
             assert len(phi.operands) == 3
@@ -539,11 +539,14 @@ class TestIfElseWithQubitArray:
         assert len(if_ops[0].true_operations) == 1
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 0
-        assert len(if_ops[0].results) == 2
+        # Phi-minimization: cond (read-only Bit) is elided.
+
+        assert len(if_ops[0].results) == 1
+
         results = if_ops[0].results
-        assert results[0].type == BitType()
-        assert results[1].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 2
+        assert results[0].type == QubitType()
+
+        assert len(if_ops[0].phi_ops) == 1
         for phi in if_ops[0].phi_ops:
             assert isinstance(phi, PhiOp)
             assert len(phi.operands) == 3
@@ -574,12 +577,15 @@ class TestIfElseWithQubitArray:
         assert len(if_ops[0].false_operations) == 2
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
         assert if_ops[0].false_operations[1].gate_type == GateOperationType.X  # type: ignore
-        assert len(if_ops[0].results) == 3
+        # Phi-minimization: cond (read-only Bit) is elided.
+
+        assert len(if_ops[0].results) == 2
+
         results = if_ops[0].results
-        assert results[0].type == BitType()
+        assert results[0].type == QubitType()
         assert results[1].type == QubitType()
-        assert results[2].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 3
+
+        assert len(if_ops[0].phi_ops) == 2
         for phi in if_ops[0].phi_ops:
             assert isinstance(phi, PhiOp)
             assert len(phi.operands) == 3
@@ -607,11 +613,14 @@ class TestIfElseWithQubitArray:
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 1
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        assert len(if_ops[0].results) == 2
+        # Phi-minimization: cond (read-only Bit) is elided.
+
+        assert len(if_ops[0].results) == 1
+
         results = if_ops[0].results
-        assert results[0].type == BitType()
-        assert results[1].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 2
+        assert results[0].type == QubitType()
+
+        assert len(if_ops[0].phi_ops) == 1
         for phi in if_ops[0].phi_ops:
             assert isinstance(phi, PhiOp)
             assert len(phi.operands) == 3
@@ -637,11 +646,14 @@ class TestIfElseWithQubitArray:
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 1
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        assert len(if_ops[0].results) == 2
+        # Phi-minimization: cond (read-only Bit) is elided.
+
+        assert len(if_ops[0].results) == 1
+
         results = if_ops[0].results
-        assert results[0].type == BitType()
-        assert results[1].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 2
+        assert results[0].type == QubitType()
+
+        assert len(if_ops[0].phi_ops) == 1
         for phi in if_ops[0].phi_ops:
             assert isinstance(phi, PhiOp)
             assert len(phi.operands) == 3
@@ -671,12 +683,15 @@ class TestIfElseWithQubitArray:
         assert len(if_ops[0].false_operations) == 2
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
         assert if_ops[0].false_operations[1].gate_type == GateOperationType.X  # type: ignore
-        assert len(if_ops[0].results) == 3
+        # Phi-minimization: cond (read-only Bit) is elided.
+
+        assert len(if_ops[0].results) == 2
+
         results = if_ops[0].results
-        assert results[0].type == BitType()
+        assert results[0].type == QubitType()
         assert results[1].type == QubitType()
-        assert results[2].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 3
+
+        assert len(if_ops[0].phi_ops) == 2
         for phi in if_ops[0].phi_ops:
             assert isinstance(phi, PhiOp)
             assert len(phi.operands) == 3
@@ -704,11 +719,14 @@ class TestIfElseWithQubitArray:
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 1
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        assert len(if_ops[0].results) == 2
+        # Phi-minimization: cond (read-only Bit) is elided.
+
+        assert len(if_ops[0].results) == 1
+
         results = if_ops[0].results
-        assert results[0].type == BitType()
-        assert results[1].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 2
+        assert results[0].type == QubitType()
+
+        assert len(if_ops[0].phi_ops) == 1
         for phi in if_ops[0].phi_ops:
             assert isinstance(phi, PhiOp)
             assert len(phi.operands) == 3
@@ -731,11 +749,14 @@ class TestIfElseWithQubitArray:
         assert len(if_ops[0].true_operations) == 1
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 0
-        assert len(if_ops[0].results) == 2
+        # Phi-minimization: cond (read-only Bit) is elided.
+
+        assert len(if_ops[0].results) == 1
+
         results = if_ops[0].results
-        assert results[0].type == BitType()
-        assert results[1].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 2
+        assert results[0].type == QubitType()
+
+        assert len(if_ops[0].phi_ops) == 1
         for phi in if_ops[0].phi_ops:
             assert isinstance(phi, PhiOp)
             assert len(phi.operands) == 3
@@ -832,11 +853,14 @@ class TestIfElseWithQubitArray:
         assert len(if_ops[0].false_operations) == 3
         for op in if_ops[0].false_operations:
             assert op.gate_type == GateOperationType.H  # type: ignore
-        assert len(if_ops[0].results) == 2
+        # Phi-minimization: cond (read-only Bit) is elided.
+
+        assert len(if_ops[0].results) == 1
+
         results = if_ops[0].results
-        assert results[0].type == BitType()
-        assert results[1].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 2
+        assert results[0].type == QubitType()
+
+        assert len(if_ops[0].phi_ops) == 1
         for phi in if_ops[0].phi_ops:
             assert isinstance(phi, PhiOp)
             assert len(phi.operands) == 3
@@ -864,11 +888,14 @@ class TestIfElseWithQubitArray:
         assert if_ops[0].true_operations[1].gate_type == GateOperationType.H  # type: ignore
         assert len(if_ops[0].false_operations) == 1
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.X  # type: ignore
-        assert len(if_ops[0].results) == 2
+        # Phi-minimization: cond (read-only Bit) is elided.
+
+        assert len(if_ops[0].results) == 1
+
         results = if_ops[0].results
-        assert results[0].type == BitType()
-        assert results[1].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 2
+        assert results[0].type == QubitType()
+
+        assert len(if_ops[0].phi_ops) == 1
         for phi in if_ops[0].phi_ops:
             assert isinstance(phi, PhiOp)
             assert len(phi.operands) == 3
@@ -902,12 +929,15 @@ class TestIfElseWithQubitArray:
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
         assert if_ops[0].false_operations[1].gate_type == GateOperationType.H  # type: ignore
         assert if_ops[0].false_operations[2].gate_type == GateOperationType.X  # type: ignore
-        assert len(if_ops[0].results) == 3
+        # Phi-minimization: cond (read-only Bit) is elided.
+
+        assert len(if_ops[0].results) == 2
+
         results = if_ops[0].results
-        assert results[0].type == BitType()
+        assert results[0].type == QubitType()
         assert results[1].type == QubitType()
-        assert results[2].type == QubitType()
-        assert len(if_ops[0].phi_ops) == 3
+
+        assert len(if_ops[0].phi_ops) == 2
         for phi in if_ops[0].phi_ops:
             assert isinstance(phi, PhiOp)
             assert len(phi.operands) == 3
@@ -1634,3 +1664,103 @@ class TestIfSharedNewLocalLiveness:
         # Should not raise SyntaxError — q2 is only stored after the if
         graph = circuit.build()
         assert graph is not None
+
+
+class TestBoolBindingWithDynamicIf:
+    """Compile-time ``bool`` binding coexists with runtime measurement-driven ifs.
+
+    Guards the end-to-end path used by teleportation-style qkernels that mix:
+      * a compile-time ``if is_plus:`` branch folded by the lowering pass, and
+      * runtime ``if m0:`` / ``if m1:`` branches driven by mid-circuit
+        measurement results that must survive lowering.
+    """
+
+    @staticmethod
+    def _teleport_plus_minus():
+        @qkernel
+        def teleport_plus_minus(
+            is_plus: bool,
+        ) -> tuple[qm.Bit, qm.Bit, qm.Bit]:
+            psi = qm.qubit(name="psi")
+            alice = qm.qubit(name="alice")
+            bob = qm.qubit(name="bob")
+
+            if is_plus:
+                psi = qm.h(psi)
+            else:
+                psi = qm.h(psi)
+                psi = qm.z(psi)
+
+            alice = qm.h(alice)
+            alice, bob = qm.cx(alice, bob)
+            psi, alice = qm.cx(psi, alice)
+            psi = qm.h(psi)
+
+            m0 = qm.measure(psi)
+            m1 = qm.measure(alice)
+
+            if m1:
+                bob = qm.x(bob)
+            if m0:
+                bob = qm.z(bob)
+
+            bob = qm.h(bob)
+            return m0, m1, qm.measure(bob)
+
+        return teleport_plus_minus
+
+    @pytest.mark.parametrize("is_plus", [True, False])
+    def test_build_accepts_bool_binding(self, is_plus):
+        """Build must accept a Python bool binding and keep all three IfOps traced."""
+        kernel = self._teleport_plus_minus()
+        graph = kernel.build(is_plus=is_plus)
+        if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
+        # Build stage does not fold compile-time ifs; all three IfOps are present.
+        assert len(if_ops) == 3
+
+    @pytest.mark.parametrize("is_plus", [True, False])
+    def test_compile_time_lowering_keeps_only_dynamic_ifs(self, is_plus):
+        """After lowering, the ``is_plus`` branch is folded but ``m0``/``m1`` remain."""
+        qiskit = pytest.importorskip("qamomile.qiskit")
+        kernel = self._teleport_plus_minus()
+        transpiler = qiskit.QiskitTranspiler()
+        bindings = {"is_plus": is_plus}
+        block = transpiler.to_block(kernel, bindings=bindings)
+        block = transpiler.inline(transpiler.substitute(block))
+        block = transpiler.affine_validate(block)
+        block = transpiler.constant_fold(block, bindings=bindings)
+        block = transpiler.lower_compile_time_ifs(block, bindings=bindings)
+
+        if_ops = [op for op in block.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 2, (
+            "Only the two measurement-conditioned IfOperations should survive "
+            "compile-time lowering; got "
+            f"{len(if_ops)}."
+        )
+
+    @pytest.mark.parametrize("is_plus", [True, False])
+    def test_qiskit_sample_gives_deterministic_x_basis_outcome(self, is_plus):
+        """Bob's X-basis outcome (third bit) is deterministic: 0 for |+>, 1 for |->."""
+        qiskit = pytest.importorskip("qamomile.qiskit")
+        kernel = self._teleport_plus_minus()
+        transpiler = qiskit.QiskitTranspiler()
+        executable = transpiler.transpile(kernel, bindings={"is_plus": is_plus})
+        result = executable.sample(transpiler.executor(), shots=1024).result()
+
+        expected_bob_bit = 0 if is_plus else 1
+        total_shots = sum(count for _, count in result.results)
+        assert total_shots == 1024
+        for outcome, _count in result.results:
+            assert outcome[2] == expected_bob_bit, (
+                f"Teleportation corrected the X-basis measurement incorrectly: "
+                f"is_plus={is_plus} produced outcome {outcome}, expected the "
+                f"third bit to be {expected_bob_bit}."
+            )
+        # Sanity check that m0/m1 actually vary (i.e., the dynamic ifs fire both
+        # code paths) — every teleportation run distributes across all four
+        # (m0, m1) combinations with non-trivial probability.
+        seen_m0_m1 = {(outcome[0], outcome[1]) for outcome, _ in result.results}
+        assert len(seen_m0_m1) >= 2, (
+            "Expected m0/m1 to vary across shots; the dynamic IfOperations "
+            "may not be executing."
+        )

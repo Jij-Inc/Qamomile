@@ -109,8 +109,8 @@ class QFT(CompositeGate):
 
     def _decompose(
         self,
-        qubits: tuple[Qubit, ...],
-    ) -> tuple[Qubit, ...]:
+        qubits: Vector[Qubit] | tuple[Qubit, ...],
+    ) -> Vector[Qubit] | tuple[Qubit, ...] | None:
         """Decompose QFT into elementary gates.
 
         Args:
@@ -221,8 +221,8 @@ class IQFT(CompositeGate):
 
     def _decompose(
         self,
-        qubits: tuple[Qubit, ...],
-    ) -> tuple[Qubit, ...]:
+        qubits: Vector[Qubit] | tuple[Qubit, ...],
+    ) -> Vector[Qubit] | tuple[Qubit, ...] | None:
         """Decompose IQFT into elementary gates.
 
         Args:

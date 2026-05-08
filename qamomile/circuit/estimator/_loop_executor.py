@@ -99,7 +99,7 @@ def find_parametric_symbols(
     syms: set[sp.Symbol] = set()
     for expr in (start, stop, step):
         if isinstance(expr, sp.Expr):
-            syms |= expr.free_symbols
+            syms |= expr.free_symbols  # type: ignore[arg-type]
     return syms
 
 
@@ -352,9 +352,10 @@ def _fit_exp_linear(
     if not sol:
         return None
 
-    a_val = sol.get(a)
-    b_val = sol.get(b)
-    c_val = sol.get(c)
+    sol_dict: dict[sp.Expr, sp.Expr] = sol  # type: ignore[assignment]
+    a_val = sol_dict.get(a)
+    b_val = sol_dict.get(b)
+    c_val = sol_dict.get(c)
     if a_val is None or b_val is None or c_val is None:
         return None
 

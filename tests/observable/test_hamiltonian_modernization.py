@@ -5,10 +5,12 @@ This test suite validates:
 - Factory methods (zero, identity, single_pauli)
 - Iterator protocol (__iter__, __len__)
 - Qubit remapping (remap_qubits)
+- Dense NumPy conversion (to_numpy)
 - Pauli multiplication table
 - Backward compatibility
 """
 
+import numpy as np
 import pytest
 
 from qamomile.observable.hamiltonian import (
@@ -232,6 +234,32 @@ class TestRemapQubits:
             pauli_indices = {op.pauli: op.index for op in ops}
             assert pauli_indices[Pauli.X] == 1  # X was on 0, now on 1
             assert pauli_indices[Pauli.Y] == 0  # Y was on 1, now on 0
+
+
+class TestToNumpy:
+    """Test dense NumPy conversion."""
+
+    def test_identity_respects_num_qubits(self):
+        h = Hamiltonian.identity(coeff=2.5, num_qubits=3)
+        expected = 2.5 * np.eye(8, dtype=complex)
+        np.testing.assert_allclose(h.to_numpy(), expected, atol=1e-12)
+
+    def test_multi_qubit_term_uses_little_endian_qubit_order(self):
+        h = X(1) * Z(0) + 0.5 * Y(1)
+        x = np.array([[0, 1], [1, 0]], dtype=complex)
+        y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+        z = np.array([[1, 0], [0, -1]], dtype=complex)
+        i = np.eye(2, dtype=complex)
+
+        expected = np.kron(x, z) + 0.5 * np.kron(y, i)
+        np.testing.assert_allclose(h.to_numpy(), expected, atol=1e-12)
+
+    def test_complex_coefficients_are_preserved(self):
+        h = Hamiltonian.single_pauli(Pauli.X, 0, coeff=1j) + (2.0 - 0.5j)
+        expected = (2.0 - 0.5j) * np.eye(2, dtype=complex) + 1j * np.array(
+            [[0, 1], [1, 0]], dtype=complex
+        )
+        np.testing.assert_allclose(h.to_numpy(), expected, atol=1e-12)
 
 
 class TestPauliMultiplicationTable:

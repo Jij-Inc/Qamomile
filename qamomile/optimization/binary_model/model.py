@@ -5,8 +5,8 @@ from typing import Generic
 
 import numpy as np
 
+from qamomile._utils import is_close_zero
 from qamomile.circuit.transpiler.job import SampleResult
-from qamomile.optimization.utils import is_close_zero
 
 from .expr import VT, BinaryExpr, VarType
 from .normalize import normalize_by_abs_max, normalize_by_factor, normalize_by_rms

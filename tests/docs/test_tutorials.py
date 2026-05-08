@@ -23,22 +23,27 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 TUTORIAL_PATTERNS = [
     "docs/en/tutorial/**/*.py",
     "docs/ja/tutorial/**/*.py",
-    "docs/en/optimization/**/*.py",
-    "docs/ja/optimization/**/*.py",
     "docs/en/tutorial/**/*.ipynb",
     "docs/ja/tutorial/**/*.ipynb",
-    "docs/en/optimization/**/*.ipynb",
-    "docs/ja/optimization/**/*.ipynb",
-    "docs/en/vqa/**/*.py",
-    "docs/ja/vqa/**/*.py",
-    "docs/en/vqa/**/*.ipynb",
-    "docs/ja/vqa/**/*.ipynb",
+    "docs/en/algorithm/**/*.py",
+    "docs/ja/algorithm/**/*.py",
+    "docs/en/algorithm/**/*.ipynb",
+    "docs/ja/algorithm/**/*.ipynb",
+    "docs/en/usage/**/*.py",
+    "docs/ja/usage/**/*.py",
+    "docs/en/usage/**/*.ipynb",
+    "docs/ja/usage/**/*.ipynb",
     # We will not execute the following directories:
-    # - algorithm: kernel matrix computation is too expensive for CI (O(n^2) circuits).
-    # - collaboration: they may require API keys and may have side effects.
-    # - release_notes: they may be quite version specific
-    #   and may not follow the same structure as other tutorials.
+    # - integration: they may require API keys and may have side effects.
+    # - release_notes: markdown-only; nothing to execute.
 ]
+
+# Tutorials that require optional dependency groups (e.g. chemistry)
+# and should be skipped when those dependencies are not installed.
+OPTIONAL_SKIP_MODULES = {
+    "vqe_for_hydrogen": "openfermion",
+    "qsci": "quri_parts",
+}
 
 
 def discover_tutorial_files() -> list[Path]:
@@ -47,6 +52,11 @@ def discover_tutorial_files() -> list[Path]:
         for f in PROJECT_ROOT.glob(pattern):
             # Skip Jupyter checkpoint files
             if ".ipynb_checkpoints" in str(f):
+                continue
+            # Skip notebooks when a paired .py tutorial exists.
+            # The paired Python file exercises the same content without
+            # requiring notebook-kernel orchestration.
+            if f.suffix == ".ipynb" and f.with_suffix(".py").exists():
                 continue
             tutorial_files.append(f)
     return sorted(tutorial_files)
@@ -81,8 +91,13 @@ TUTORIAL_FILES = discover_tutorial_files()
 def test_tutorial_executes_without_error(tutorial_file: Path, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(plt, "show", lambda *args, **kwargs: None)
+    monkeypatch.setenv("QAMOMILE_DOCS_TEST", "1")
 
     assert tutorial_file.exists(), f"Tutorial file not found: {tutorial_file}"
+
+    for stem, module in OPTIONAL_SKIP_MODULES.items():
+        if stem in tutorial_file.stem:
+            pytest.importorskip(module)
 
     try:
         if tutorial_file.suffix == ".ipynb":

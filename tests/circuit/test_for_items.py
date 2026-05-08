@@ -43,7 +43,7 @@ class TestForItemsContextManager:
         from qamomile.circuit.ir.value import DictValue
 
         # Create a dummy Dict handle
-        dv = DictValue(name="ising", entries=[], params={"parameter": "ising"})
+        dv = DictValue(name="ising", entries=[]).with_parameter("ising")
         dict_handle = Dict(value=dv, _entries=[])
 
         # Create tracer and use for_items

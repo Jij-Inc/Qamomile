@@ -27,7 +27,7 @@ class ClassicalMapping:
 
 @dataclass
 class OutputMapping:
-    """Maps Graph output position to physical resource."""
+    """Maps Block output position to a physical resource."""
 
     output_index: int  # Position in tuple (0 for single return)
     value_uuid: str

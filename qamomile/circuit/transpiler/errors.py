@@ -24,6 +24,18 @@ class ValidationError(QamomileCompileError):
         super().__init__(message)
 
 
+class EntrypointValidationError(ValidationError):
+    """Error when a top-level transpilation entrypoint has unsupported I/O."""
+
+    pass
+
+
+class FrontendTransformError(QamomileCompileError):
+    """Error during frontend AST-to-builder lowering."""
+
+    pass
+
+
 class DependencyError(QamomileCompileError):
     """Error when quantum operation depends on non-parameter classical value.
 

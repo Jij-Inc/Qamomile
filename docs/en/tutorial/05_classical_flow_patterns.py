@@ -7,12 +7,16 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.18.1
 #   kernelspec:
-#     display_name: qamomile
+#     display_name: Python 3
 #     language: python
-#     name: qamomile
+#     name: python3
 # ---
 
 # %% [markdown]
+# ---
+# tags: [tutorial]
+# ---
+#
 # # Classical Control Flow Patterns
 #
 # Quantum circuits often have structure that depends on classical control flow: iterating over qubits, applying gates based on a graph's edges, or choosing between gate sequences. Qamomile supports these patterns through `qmc.range`, `qmc.items`, `if` branching, and `while` loops.
@@ -28,6 +32,8 @@
 # # !pip install qamomile
 
 # %%
+import os
+
 import qamomile.circuit as qmc
 from qamomile.qiskit import QiskitTranspiler
 
@@ -158,11 +164,14 @@ def conditional_flip() -> qmc.Bit:
 
 # %%
 exe = transpiler.transpile(conditional_flip)
-executor = transpiler.executor()
-job = exe.sample(executor, bindings={}, shots=100)
-result = job.result()
-for value, count in result.results:
-    print(f"  bit={value}: {count} shots")
+if os.environ.get("QAMOMILE_DOCS_TEST") == "1":
+    print("Skipping dynamic-circuit execution in docs test mode.")
+else:
+    executor = transpiler.executor()
+    job = exe.sample(executor, bindings={}, shots=100)
+    result = job.result()
+    for value, count in result.results:
+        print(f"  bit={value}: {count} shots")
 
 # %% [markdown]
 # Since `q0` is prepared as |1⟩, the measurement always yields 1, so `q1` always gets flipped — every shot should return 1.

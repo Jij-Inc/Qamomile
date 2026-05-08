@@ -106,7 +106,7 @@ class TestTupleValue:
     def test_tuple_value_is_parameter(self):
         """Test TupleValue parameter detection."""
         elem = Value(type=UIntType(), name="i")
-        tv1 = TupleValue(name="idx", elements=(elem,), params={"parameter": "idx"})
+        tv1 = TupleValue(name="idx", elements=(elem,)).with_parameter("idx")
         tv2 = TupleValue(name="idx", elements=(elem,))
 
         assert tv1.is_parameter()
@@ -133,7 +133,7 @@ class TestDictValue:
 
     def test_dict_value_is_parameter(self):
         """Test DictValue parameter detection."""
-        dv1 = DictValue(name="ising", entries=[], params={"parameter": "ising"})
+        dv1 = DictValue(name="ising", entries=[]).with_parameter("ising")
         dv2 = DictValue(name="ising", entries=[])
 
         assert dv1.is_parameter()

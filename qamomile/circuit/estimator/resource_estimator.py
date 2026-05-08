@@ -15,7 +15,7 @@ from qamomile.circuit.estimator.gate_counter import GateCount, count_gates
 from qamomile.circuit.estimator.qubits_counter import qubits_counter
 
 if TYPE_CHECKING:
-    from qamomile.circuit.ir.block_value import BlockValue
+    from qamomile.circuit.ir.block import Block
     from qamomile.circuit.ir.operation.operation import Operation
 
 
@@ -61,8 +61,8 @@ class ResourceEstimate:
                 subs_dict[sp.Symbol(key, integer=True, positive=True)] = val
 
         def _subs_eval(expr: sp.Expr) -> sp.Expr:
-            if isinstance(expr, (int, float)):
-                return sp.Integer(expr)
+            if isinstance(expr, (int, float)):  # type: ignore[unreachable]
+                return sp.Integer(expr)  # type: ignore[unreachable]
             return expr.subs(subs_dict).doit()
 
         return ResourceEstimate(
@@ -161,7 +161,7 @@ class ResourceEstimate:
 
 
 def estimate_resources(
-    block: BlockValue | list[Operation],
+    block: Block | list[Operation],
     *,
     bindings: dict[str, Any] | None = None,
 ) -> ResourceEstimate:
@@ -171,7 +171,7 @@ def estimate_resources(
     Combines qubit counting and gate counting.
 
     Args:
-        block: BlockValue or list of Operations to analyze
+        block: Block or list of Operations to analyze
         bindings: Optional concrete parameter bindings (scalars and dicts).
 
     Returns:
@@ -258,11 +258,11 @@ def estimate_resources(
         gate_count.clifford_gates,
         gate_count.rotation_gates,
     ]:
-        all_symbols.update(expr.free_symbols)
+        all_symbols.update(expr.free_symbols)  # type: ignore[arg-type]
     for oracle_expr in gate_count.oracle_calls.values():
-        all_symbols.update(oracle_expr.free_symbols)
+        all_symbols.update(oracle_expr.free_symbols)  # type: ignore[arg-type]
     for oracle_expr in gate_count.oracle_queries.values():
-        all_symbols.update(oracle_expr.free_symbols)
+        all_symbols.update(oracle_expr.free_symbols)  # type: ignore[arg-type]
 
     parameters = {str(sym): sym for sym in sorted(all_symbols, key=str)}
 

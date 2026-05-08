@@ -328,15 +328,14 @@ class TestCompositeGate:
         assert isinstance(ops[0], QInitOperation)
         assert isinstance(ops[1], CompositeGateOperation)
         op = ops[1]
-        # Target operand is the last operand (after BlockValue)
+        # Target operand is the last operand.
         target_operand = op.operands[-1]
         target_result = op.results[-1]
         assert target_result.version == target_operand.version + 1
         assert target_result.logical_id == target_operand.logical_id
 
     def test_operands_order_in_ir(self):
-        """Operands are ordered: [BlockValue, ...controls, ...targets]."""
-        from qamomile.circuit.ir.block_value import BlockValue
+        """Operands are ordered: [...controls, ...targets]."""
 
         class ControlledGate(CompositeGate):
             custom_name = "ctrl_gate"
@@ -369,13 +368,12 @@ class TestCompositeGate:
         assert isinstance(ops[1], QInitOperation)
         assert isinstance(ops[2], CompositeGateOperation)
         op = ops[2]
-        # operands[0] = BlockValue (implementation)
-        assert isinstance(op.operands[0], BlockValue)
-        # operands[1] = control qubit value, operands[2] = target qubit value
+        assert op.implementation is not None
+        # operands[0] = control qubit value, operands[1] = target qubit value
         ctrl_value = ops[0].results[0]
         tgt_value = ops[1].results[0]
-        assert op.operands[1].logical_id == ctrl_value.logical_id
-        assert op.operands[2].logical_id == tgt_value.logical_id
+        assert op.operands[0].logical_id == ctrl_value.logical_id
+        assert op.operands[1].logical_id == tgt_value.logical_id
         assert op.num_control_qubits == 1
         assert op.num_target_qubits == 1
 
@@ -543,7 +541,7 @@ class TestCompositeGate:
             assert isinstance(r.parent_array, ArrayValue)
             assert len(r.element_indices) == 1
             assert isinstance(r.element_indices[0], Value)
-            assert r.element_indices[0].params["const"] == index
+            assert r.element_indices[0].get_const() == index
 
 
 class TestQFTAndIQFTClasses:
@@ -833,6 +831,9 @@ class TestCompositeGateTranspilation:
         job = executable.sample(seeded_executor, shots=shots)
         result = job.result()
 
+        # num_outcomes = number of distinct measurement bitstrings, i.e. 2**n.
+        # Under H^⊗n on |0...0> all outcomes are equally likely (probability
+        # 1/num_outcomes each), independent of `shots` (the number of shots).
         num_outcomes = 2**n
         counts = {i: 0 for i in range(num_outcomes)}
         for bits, count in result.results:
@@ -842,12 +843,24 @@ class TestCompositeGateTranspilation:
         assert sum(counts.values()) == shots
         assert len([c for c in counts.values() if c > 0]) == num_outcomes
 
+        # Each per-outcome count is a Binomial(shots, 1/num_outcomes) marginal
+        # of the multinomial sampling distribution, so the 4 + 8 + 16 = 28
+        # checks aggregated across n in {2, 3, 4} are not independent -- but
+        # Bonferroni (union bound) is still a valid upper bound. A naive
+        # 3-sigma tolerance has a two-sided Gaussian tail of ~0.27% per
+        # outcome; multiplied by 28 outcomes this gives an aggregate flake
+        # rate of ~7.6% per CI run, which matches the reported flakes. At
+        # k_sigma = 5, summing the *exact* binomial two-sided tails over
+        # all 28 outcomes gives an aggregate bound of ~2.2e-5 per CI run.
+        # The simulator RNG is still pinned in `seeded_executor` (see
+        # conftest.py) so any failure is reproducible.
         expected = shots / num_outcomes
         sigma = (expected * (1 - 1 / num_outcomes)) ** 0.5
+        k_sigma = 5
         for outcome, count in counts.items():
-            assert abs(count - expected) < 3 * sigma, (
+            assert abs(count - expected) < k_sigma * sigma, (
                 f"n={n}, outcome={outcome}: count={count}, "
-                f"expected={expected:.0f} +/- {3 * sigma:.0f}"
+                f"expected={expected:.0f} +/- {k_sigma * sigma:.0f}"
             )
 
     def test_bell_pair_sampling(self, qiskit_transpiler, seeded_executor):
@@ -934,6 +947,9 @@ class TestCompositeGateTranspilation:
         job = executable.sample(seeded_executor, shots=shots)
         result = job.result()
 
+        # num_outcomes = number of distinct measurement bitstrings, i.e. 2**n.
+        # Under H^⊗n on |0...0> all outcomes are equally likely (probability
+        # 1/num_outcomes each), independent of `shots` (the number of shots).
         num_outcomes = 2**n
         counts = {i: 0 for i in range(num_outcomes)}
         for bits, count in result.results:
@@ -1248,19 +1264,15 @@ class TestAllocateGateInvariant:
             GateOperationType,
         )
         from qamomile.circuit.ir.types.primitives import QubitType, UIntType
-        from qamomile.circuit.transpiler.passes.emit_base import ResourceAllocator
+        from qamomile.circuit.transpiler.passes.emit_support import ResourceAllocator
 
         parent_array = ArrayValue(
             type=QubitType(),
             name="q_array",
-            shape=(Value(type=UIntType(), name="dim0", params={"const": 3}),),
+            shape=(Value(type=UIntType(), name="dim0").with_const(3),),
         )
 
-        idx_value = Value(
-            type=UIntType(),
-            name="idx",
-            params={"const": 0},
-        )
+        idx_value = Value(type=UIntType(), name="idx").with_const(0)
 
         element_qubit = Value(
             type=QubitType(),
@@ -1301,3 +1313,52 @@ class TestBackwardsCompatibility:
         assert qft is not None
         assert iqft is not None
         assert qpe is not None
+
+
+class TestVectorQubitParamRejection:
+    """A function-form @composite_gate decorator wrapping a @qkernel that
+    takes a Vector[Qubit] parameter must raise a clear TypeError pointing
+    users to supported alternatives. Without this, the decorator silently
+    computed num_target_qubits=0 and the call site failed with a confusing
+    arity-mismatch error.
+    """
+
+    def test_vector_qubit_param_raises_typeerror(self):
+        """Decorating a Vector[Qubit] qkernel raises with helpful message."""
+        import qamomile.circuit as qmc
+
+        with pytest.raises(TypeError) as excinfo:
+
+            @qmc.composite_gate
+            @qmc.qkernel
+            def encode(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+                return q
+
+        msg = str(excinfo.value)
+        # Both supported alternatives should be surfaced.
+        assert "@qkernel directly" in msg
+        assert "subclass CompositeGate" in msg
+
+    def test_vector_qubit_with_decorator_args_raises_typeerror(self):
+        """Same rejection through the parameterized decorator form."""
+        import qamomile.circuit as qmc
+
+        with pytest.raises(TypeError, match="array-of-qubit"):
+
+            @qmc.composite_gate(name="enc")
+            @qmc.qkernel
+            def encode(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+                return q
+
+    def test_fixed_arity_qubit_params_still_work(self):
+        """Regression: fixed-arity Qubit-only signatures still decorate cleanly."""
+        import qamomile.circuit as qmc
+
+        @qmc.composite_gate(name="entangle")
+        @qmc.qkernel
+        def entangle(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
+            q0, q1 = qmc.cx(q0, q1)
+            return q0, q1
+
+        assert entangle.num_target_qubits == 2
+        assert entangle.custom_name == "entangle"

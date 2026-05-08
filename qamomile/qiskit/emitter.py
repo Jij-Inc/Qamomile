@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from qamomile.circuit.transpiler.gate_emitter import MeasurementMode
+
 if TYPE_CHECKING:
     from qiskit import QuantumCircuit
     from qiskit.circuit import Gate
@@ -18,6 +20,11 @@ class QiskitGateEmitter:
 
     Emits individual quantum gates to Qiskit QuantumCircuit objects.
     """
+
+    @property
+    def measurement_mode(self) -> MeasurementMode:
+        """Qiskit emits real measurement gates."""
+        return MeasurementMode.NATIVE
 
     def create_circuit(self, num_qubits: int, num_clbits: int) -> "QuantumCircuit":
         """Create a new Qiskit QuantumCircuit."""
@@ -234,7 +241,7 @@ class _QiskitForLoopContext:
         self._loop_param = None
 
     def __enter__(self):
-        self._context = self.circuit.for_loop(self.indexset)
+        self._context = self.circuit.for_loop(self.indexset)  # type: ignore[call-overload]
         self._loop_param = self._context.__enter__()
         return self._loop_param
 
@@ -283,7 +290,7 @@ class _QiskitWhileContext:
         self._context = None
 
     def __enter__(self):
-        self._context = self.circuit.while_loop(
+        self._context = self.circuit.while_loop(  # type: ignore[call-overload]
             (self.circuit.clbits[self.clbit], self.value)
         )
         self._context.__enter__()
