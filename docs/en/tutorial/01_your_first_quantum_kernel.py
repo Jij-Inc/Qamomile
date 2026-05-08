@@ -103,11 +103,6 @@
 # ::::
 
 # %%
-import math
-
-import qamomile.circuit as qmc
-
-# %%
 # Transpiler — by default this tutorial uses Qiskit. If you picked a
 # different tab above (QURI Parts / CUDA-Q), copy the two lines from
 # that tab into this cell in place of the two below, and make sure the
@@ -115,6 +110,11 @@ import qamomile.circuit as qmc
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
+
+# %%
+import math
+
+import qamomile.circuit as qmc
 
 # %% [markdown]
 # ## First QKernel: The Biased Coin

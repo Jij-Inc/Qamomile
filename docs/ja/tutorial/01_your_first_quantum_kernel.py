@@ -95,11 +95,6 @@
 # ::::
 
 # %%
-import math
-
-import qamomile.circuit as qmc
-
-# %%
 # Transpiler — このチュートリアルはデフォルトでQiskitを使います。
 # 上のタブでQURI PartsまたはCUDA-Qを選んだ場合は、そのタブに書かれた
 # 2行（importとtranspiler = ...）を以下の2行と入れ替えてください。
@@ -107,6 +102,11 @@ import qamomile.circuit as qmc
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
+
+# %%
+import math
+
+import qamomile.circuit as qmc
 
 # %% [markdown]
 # ## 最初の量子カーネル：偏りのあるコイン
