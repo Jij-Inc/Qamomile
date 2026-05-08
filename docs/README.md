@@ -201,7 +201,37 @@ For reference, the underlying flow:
    that matches its containing directory (`tutorial`, `algorithm`,
    `usage`, or `integration`) plus any topical tags that apply.
 
-2. **Update the section landing page** by adding a bullet/link in
+2. **Add a Google Colab pip install cell** as the **first code cell**
+   of every article (right after the intro markdown, before any
+   `import qamomile…` line). Readers open these notebooks via the
+   "Open in Colab" button, where Qamomile is not pre-installed; the
+   cell is commented out so it is a no-op when notebooks are executed
+   locally during the docs build, and Colab users only need to
+   uncomment it. Use the project standard form:
+
+   ```python
+   # %%
+   # Install the latest Qamomile through pip!
+   # # !pip install qamomile
+   ```
+
+   - **If the notebook uses an optional Qamomile extra** (a backend
+     transpiler/executor that lives behind a `[…]` extra in
+     `pyproject.toml`), install with that extra. Today's options:
+     - `qamomile[quri_parts]` — `qamomile.quri_parts.QuriPartsTranspiler` / `QuriPartsExecutor`
+     - `qamomile[qbraid]` — `qamomile.qbraid.QBraidExecutor`
+     - `qamomile[cudaq-cu13]` (or `cudaq-cu12`) — `qamomile.cudaq.CudaqTranspiler`
+   - **If the notebook needs additional non-Qamomile packages** (e.g.
+     `openfermion`, `pyscf`, `openfermionpyscf` for the H₂ VQE), add
+     them on the same `pip install` line so the cell is self-
+     contained.
+   - **Always include `qamomile`** in the install line — even when an
+     extra is also requested — so the cell works on a fresh Colab VM.
+   - **Localise the comment** in the JA mirror (`# 最新のQamomileを
+     pipからインストールします！`) but **keep the shell command
+     identical** between en/ja.
+
+3. **Update the section landing page** by adding a bullet/link in
    the matching `<section>/index.md`. Each section's `index.md` is
    hand-written and contains only the intro paragraph plus the
    article list; the `## Browse by tag` heading and chip cloud are
@@ -211,17 +241,17 @@ For reference, the underlying flow:
    (mystmd discovers the .ipynb files via a glob in `myst.yml`); use
    `01_`, `02_`, … prefixes if you need a curated order.
 
-3. **You don't need to touch `myst.yml`.** The toc uses
+4. **You don't need to touch `myst.yml`.** The toc uses
    `pattern: <section>/*.ipynb`, so any new `.ipynb` you drop into
    the section is auto-discovered. (Per-tag pages and the per-tag
    listing are similarly discovered via `pattern: tags/*.md`.)
 
-4. **Add to test patterns** if the new page is in a directory not
+5. **Add to test patterns** if the new page is in a directory not
    yet covered by `tests/docs/test_tutorials.py`
    `TUTORIAL_PATTERNS`. `integration/` is intentionally excluded
    since those notebooks may need an API key.
 
-5. **Generate and execute the `.ipynb`**:
+6. **Generate and execute the `.ipynb`**:
 
    ```bash
    uv run jupytext --to ipynb --update docs/en/<section>/your_new_topic.py
@@ -229,9 +259,9 @@ For reference, the underlying flow:
    # repeat for ja/
    ```
 
-6. **`git add` + commit + push.**
+7. **`git add` + commit + push.**
 
-7. **Build and verify**:
+8. **Build and verify**:
 
    ```bash
    ./build.sh build
