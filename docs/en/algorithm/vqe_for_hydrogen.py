@@ -30,8 +30,10 @@
 # We show how to solve quantum chemistry problems using quantum computing, focusing on finding the minimum-energy structure of the H₂ molecule.
 
 # %%
-# Required packages can be installed with the following command
-# # !pip install openfermion pyscf openfermionpyscf
+# Install the latest Qamomile through pip together with the extra
+# packages this notebook needs (OpenFermion + PySCF for the molecular
+# Hamiltonian).
+# # !pip install qamomile openfermion pyscf openfermionpyscf
 
 # %%
 import os

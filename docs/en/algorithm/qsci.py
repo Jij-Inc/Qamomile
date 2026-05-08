@@ -50,6 +50,12 @@
 # matrix products).
 
 # %%
+# Install the latest Qamomile through pip!
+# This notebook uses the QURI Parts transpiler/executor, so install with
+# the `quri_parts` extra.
+# # !pip install "qamomile[quri_parts]"
+
+# %%
 import os
 
 import matplotlib.pyplot as plt

@@ -40,6 +40,10 @@
 # 分解の内部では**Fast Walsh-Hadamard Transform**を使い、NumPyだけで$O(n \cdot 4^n)$時間で走ります。Qiskit依存はありません。
 
 # %%
+# 最新のQamomileをpipからインストールします！
+# # !pip install qamomile
+
+# %%
 import numpy as np
 
 import qamomile.circuit as qmc

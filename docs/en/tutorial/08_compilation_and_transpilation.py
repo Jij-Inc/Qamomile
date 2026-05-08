@@ -36,7 +36,9 @@
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install qamomile
+# This notebook compares the Qiskit and QURI Parts transpilers, so install
+# with the `quri_parts` extra to reproduce the side-by-side section.
+# # !pip install "qamomile[quri_parts]"
 
 # %% [markdown]
 # ## 1. The Pipeline at a Glance

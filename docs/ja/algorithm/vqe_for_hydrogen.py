@@ -30,8 +30,10 @@
 # 量子コンピューティングを用いた量子化学問題の解法を紹介し、特にH₂分子の最小エネルギー構造の探索に焦点を当てます。
 
 # %%
-# 必要なパッケージは以下のコマンドでインストールできます
-# # !pip install openfermion pyscf openfermionpyscf
+# 最新のQamomileをpipからインストールします！
+# このノートブックでは分子ハミルトニアンの構築にOpenFermionとPySCFを使うため、
+# それらも合わせてインストールします。
+# # !pip install qamomile openfermion pyscf openfermionpyscf
 
 # %%
 import os

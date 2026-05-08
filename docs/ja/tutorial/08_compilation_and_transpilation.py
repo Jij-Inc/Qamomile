@@ -32,9 +32,11 @@
 
 # %%
 # 最新のQamomileをpipからインストールします！
-# # !pip install qamomile
+# このノートブックではQiskitとQURI Partsのトランスパイラを比較するため、
+# 後半の比較セクションを再現するには`quri_parts` extra付きでインストールしてください。
+# # !pip install "qamomile[quri_parts]"
 # # or
-# # !uv add qamomile
+# # !uv add "qamomile[quri_parts]"
 
 # %% [markdown]
 # ## 1. パイプラインの全体像

@@ -40,6 +40,10 @@
 # The decomposition uses the **Fast Walsh-Hadamard Transform** internally and runs in $O(n \cdot 4^n)$ time with only NumPy — no Qiskit dependency.
 
 # %%
+# Install the latest Qamomile through pip!
+# # !pip install qamomile
+
+# %%
 import numpy as np
 
 import qamomile.circuit as qmc
