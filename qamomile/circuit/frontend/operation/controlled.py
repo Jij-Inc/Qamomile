@@ -264,11 +264,34 @@ class ControlledGate:
                 continue
             declared = kernel_input_types[param_name]
             if declared is UInt or declared is int:
+                # ``bool`` is technically an ``int`` subclass but its
+                # meaning differs; reject explicitly to match the
+                # qkernel decorator's literal-promotion rules.  ``float``
+                # would be silently truncated by ``int(...)``; reject too
+                # so callers must opt in via an explicit ``int(value)``
+                # if truncation is genuinely intended.
+                if isinstance(param_value, bool) or not isinstance(param_value, int):
+                    raise TypeError(
+                        f"controlled(): parameter {param_name!r} is "
+                        f"declared as UInt/int but received "
+                        f"{type(param_value).__name__} ({param_value!r}). "
+                        f"Pass a Python int (or a UInt handle) instead."
+                    )
                 param_val = Value(
                     type=UIntType(),
                     name=f"ctrl_param_{param_name}",
                 ).with_const(int(param_value))
             else:
+                # Float-declared param.  Accept Python int / float
+                # (auto-promote ``int`` as the qkernel decorator does)
+                # but reject ``bool`` so ``True`` doesn't surprise as
+                # ``1.0``.
+                if isinstance(param_value, bool):
+                    raise TypeError(
+                        f"controlled(): parameter {param_name!r} is "
+                        f"declared as Float/float but received bool "
+                        f"({param_value!r}). Pass a numeric value instead."
+                    )
                 param_val = Value(
                     type=FloatType(),
                     name=f"ctrl_param_{param_name}",

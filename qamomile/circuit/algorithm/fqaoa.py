@@ -13,11 +13,6 @@ import numpy as np
 
 import qamomile.circuit as qmc
 
-# ``qmc.controlled`` accepts the built-in ``qmc.ry`` gate function
-# directly — no need for a one-line ``@qkernel`` wrapper.  The kwarg name
-# at the call site mirrors ``qmc.ry``'s parameter name (``angle``).
-_controlled_ry = qmc.controlled(qmc.ry)
-
 
 @qmc.qkernel
 def initial_occupations(
@@ -37,9 +32,18 @@ def givens_rotation(
     j: qmc.UInt,
     theta: qmc.Float,
 ) -> qmc.Vector[qmc.Qubit]:
-    """Apply a single Givens rotation between qubits *i* and *j*."""
+    """Apply a single Givens rotation between qubits *i* and *j*.
+
+    The controlled-RY factory is constructed inside the function rather
+    than at module level so importing ``fqaoa`` does not trigger
+    eager wrapper synthesis (compile/exec + tracing) for every install.
+    The synthesized wrapper is cached per-callable inside
+    ``qmc.controlled``, so the only real cost happens on the first
+    Givens rotation; subsequent calls hit the cache.
+    """
+    controlled_ry = qmc.controlled(qmc.ry)
     q[j], q[i] = qmc.cx(q[j], q[i])
-    q[i], q[j] = _controlled_ry(q[i], q[j], angle=-2.0 * theta)
+    q[i], q[j] = controlled_ry(q[i], q[j], angle=-2.0 * theta)
     q[j], q[i] = qmc.cx(q[j], q[i])
     return q
 

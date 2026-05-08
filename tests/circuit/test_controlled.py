@@ -1040,6 +1040,61 @@ class TestControlledBuiltinErrors:
             "not the caller's kwarg insertion order."
         )
 
+    def test_uint_param_rejects_float(self):
+        """A UInt-declared param must reject Python float (no silent truncate).
+
+        Pre-fix, ``cg(c, t, n=3.7)`` silently truncated to ``n=3`` via
+        ``int(3.7)``.  Now we raise ``TypeError`` so callers must opt in
+        via an explicit ``int(value)`` if truncation is intended.
+        """
+
+        @qmc.qkernel
+        def with_uint(q: qmc.Qubit, n: qmc.UInt) -> qmc.Qubit:
+            return qmc.h(q)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            c = qmc.qubit(name="c")
+            t = qmc.qubit(name="t")
+            cg = qmc.controlled(with_uint)
+            c, t = cg(c, t, n=3.7)  # float for UInt-declared param
+            return qmc.measure(t)
+
+        with pytest.raises(TypeError, match="declared as UInt"):
+            _ = circuit.block
+
+    def test_uint_param_rejects_bool(self):
+        """``bool`` is technically ``int`` but not a meaningful UInt value."""
+
+        @qmc.qkernel
+        def with_uint(q: qmc.Qubit, n: qmc.UInt) -> qmc.Qubit:
+            return qmc.h(q)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            c = qmc.qubit(name="c")
+            t = qmc.qubit(name="t")
+            cg = qmc.controlled(with_uint)
+            c, t = cg(c, t, n=True)
+            return qmc.measure(t)
+
+        with pytest.raises(TypeError, match="declared as UInt"):
+            _ = circuit.block
+
+    def test_float_param_rejects_bool(self):
+        """A Float-declared param must reject ``bool`` (avoid True→1.0 surprise)."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            c = qmc.qubit(name="c")
+            t = qmc.qubit(name="t")
+            cg = qmc.controlled(qmc.rx)
+            c, t = cg(c, t, angle=True)
+            return qmc.measure(t)
+
+        with pytest.raises(TypeError, match="declared as Float"):
+            _ = circuit.block
+
     def test_default_value_raises_type_error(self):
         """A parameter with a default value would silently lose it.
 
@@ -1204,6 +1259,40 @@ class TestControlledBuiltinSynthesisInternals:
         assert cg1._qkernel is cg2._qkernel, (
             "non-weakrefable callable should still hit the strong-ref "
             "fallback cache on repeated controlled() calls."
+        )
+
+    def test_no_eager_synthesis_at_module_import(self):
+        """Library modules must not trigger wrapper synthesis at import time.
+
+        Eager ``qmc.controlled(builtin_gate)`` calls at module level run
+        ``compile``/``exec`` + a full block trace at every ``import``,
+        which can add up for users who pull in many algorithm modules.
+        The current implementation moves any such call inside the
+        function that needs it and relies on the per-callable cache for
+        repeated use; this regression guards against future drift.
+
+        We currently audit ``qamomile.circuit.algorithm.fqaoa`` (the
+        only in-tree module that previously did this).  When new
+        modules add their own ``qmc.controlled(...)`` callsites they
+        should be added to the audit list here.
+        """
+        import inspect
+
+        from qamomile.circuit.algorithm import fqaoa
+
+        src = inspect.getsource(fqaoa)
+        # Module-level lines start in column 0 and are not blank.  Lines
+        # inside ``def`` / ``class`` / etc. bodies always begin with
+        # whitespace, so this filter approximates module scope.
+        module_level = "\n".join(
+            line for line in src.splitlines() if line and not line[0].isspace()
+        )
+        assert "qmc.controlled" not in module_level, (
+            "qamomile.circuit.algorithm.fqaoa calls qmc.controlled at "
+            "module scope, which triggers eager wrapper synthesis at "
+            "import time. Move the call inside the function that needs "
+            "it (the per-callable cache will absorb the cost on first "
+            "use)."
         )
 
     def test_distinct_callables_get_distinct_wrappers(self):
