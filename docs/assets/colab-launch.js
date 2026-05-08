@@ -8,7 +8,10 @@
 
   const BUTTON_ID = "qamomile-colab-button";
   const SOURCE_REPO = "Jij-Inc/Qamomile";
-  const SOURCE_BRANCH = "main";
+  // TEMP: pointing at the PR branch so the PR-preview docs build's
+  // "Open in Colab" button opens the branch's notebooks. Revert to
+  // "main" before merging this PR.
+  const SOURCE_BRANCH = "claude/romantic-diffie-8ca3f7";
 
   function extractNotebookPath(editHref) {
     try {
