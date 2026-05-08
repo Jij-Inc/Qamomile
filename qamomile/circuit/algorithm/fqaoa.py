@@ -13,13 +13,10 @@ import numpy as np
 
 import qamomile.circuit as qmc
 
-
-@qmc.qkernel
-def _ry_gate(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
-    return qmc.ry(q, theta)
-
-
-_controlled_ry = qmc.controlled(_ry_gate)
+# ``qmc.controlled`` accepts the built-in ``qmc.ry`` gate function
+# directly — no need for a one-line ``@qkernel`` wrapper.  The kwarg name
+# at the call site mirrors ``qmc.ry``'s parameter name (``angle``).
+_controlled_ry = qmc.controlled(qmc.ry)
 
 
 @qmc.qkernel
@@ -42,7 +39,7 @@ def givens_rotation(
 ) -> qmc.Vector[qmc.Qubit]:
     """Apply a single Givens rotation between qubits *i* and *j*."""
     q[j], q[i] = qmc.cx(q[j], q[i])
-    q[i], q[j] = _controlled_ry(q[i], q[j], theta=-2.0 * theta)
+    q[i], q[j] = _controlled_ry(q[i], q[j], angle=-2.0 * theta)
     q[j], q[i] = qmc.cx(q[j], q[i])
     return q
 
