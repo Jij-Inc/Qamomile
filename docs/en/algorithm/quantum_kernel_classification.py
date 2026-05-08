@@ -47,7 +47,7 @@
 # classifier such as an SVM.
 
 # %%
-# # !pip install qamomile
+# !pip install qamomile scikit-learn
 
 # %% [markdown]
 # ## Hyperparameters
@@ -70,10 +70,14 @@ C_SVC = 1.0
 # concentric circles — a classic example where a linear classifier fails.
 
 # %%
+import warnings
+
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.datasets import make_circles
 from sklearn.model_selection import train_test_split
+
+warnings.filterwarnings("ignore", message="FigureCanvasAgg is non-interactive")
 
 X_raw, y = make_circles(
     n_samples=N_SAMPLES,
@@ -100,10 +104,11 @@ plt.ylabel("x2")
 plt.show()
 
 # %% [markdown]
-# ## Classical Preprocessing
+# ## Classical Preprocessing (Feature Lifting)
 #
-# In this notebook we encode input features as rotation angles.
-# We apply a two-stage classical feature map $f(x)$:
+# Before encoding data into the quantum circuit, we apply a classical **feature lifting** step that maps the original 2D input into a higher-dimensional space. By adding nonlinear combinations of the raw features, we give the quantum feature map richer structure to work with.
+#
+# The two-stage pipeline is:
 #
 # 1. Scale the raw 2D coordinates into $[0, \pi]$.
 # 2. Construct nonlinear features $(x_0 - x_1)^2$ and $(x_0 + x_1)^2$

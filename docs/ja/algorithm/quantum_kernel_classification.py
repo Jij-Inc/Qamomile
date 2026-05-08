@@ -22,11 +22,11 @@
 #
 # 以下の手順で進めます:
 #
-# 1. 線形分離できないデータセット (`make_circles`) を準備する。
-# 2. `@qkernel` で**特徴マップ**回路 $U(x)$ を構築する。
+# 1. 線形分離できないデータセット(`make_circles`)を準備する。
+# 2. `@qkernel`で**特徴マップ**回路 $U(x)$ を構築する。
 # 3. **オーバーラップカーネル** $k(x, x') = |\langle 0^n | U(x')^\dagger U(x) | 0^n \rangle|^2$ を構成する。
-# 4. グラム行列を計算し、`kernel="precomputed"` で SVM を学習する。
-# 5. 古典的な線形カーネルと RBF カーネルと比較する。
+# 4. グラム行列を計算し、`kernel="precomputed"`でSVMを学習する。
+# 5. 古典的な線形カーネルとRBFカーネルと比較する。
 
 # %% [markdown]
 # ## 背景: 量子カーネル法
@@ -37,10 +37,10 @@
 # k(x, x') = |\langle 0^n | U(x')^\dagger \, U(x) | 0^n \rangle|^2
 # $$
 #
-# $|0^n\rangle$ に $U(x')^\dagger U(x)$ を適用し、全ゼロビット列が得られる確率を測定することでこのオーバーラップを推定します。得られたカーネル行列はSVMなどの任意のカーネルベース分類器に渡すことができます。
+# $|0^n\rangle$に$U(x')^\dagger U(x)$を適用し、全ゼロビット列が得られる確率を測定することでこのオーバーラップを推定します。得られたカーネル行列はSVMなどの任意のカーネルベース分類器に渡すことができます。
 
 # %%
-# # !pip install qamomile
+# !pip install qamomile scikit-learn
 
 # %% [markdown]
 # ## ハイパーパラメータ
@@ -62,10 +62,14 @@ C_SVC = 1.0
 # scikit-learnの `make_circles` を使い、同心円状の2クラスデータを生成します。線形分類器が失敗する典型的な例です。
 
 # %%
+import warnings
+
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.datasets import make_circles
 from sklearn.model_selection import train_test_split
+
+warnings.filterwarnings("ignore", message="FigureCanvasAgg is non-interactive")
 
 X_raw, y = make_circles(
     n_samples=N_SAMPLES,
@@ -92,9 +96,11 @@ plt.ylabel("x2")
 plt.show()
 
 # %% [markdown]
-# ## 古典的な前処理
+# ## 古典的な前処理（特徴リフティング）
 #
-# このnotebookでは入力特徴を回転角としてエンコードします。古典的な特徴写像 $f(x)$ を構築する2段階の前処理を行います:
+# 量子回路にデータをエンコードする前に、古典的な**特徴リフティング**を適用して元の2次元入力をより高次元の空間に写像します。生の特徴の非線形な組み合わせを追加することで、量子特徴マップがより豊かな構造を活用できるようにします。
+#
+# 2段階のパイプラインは以下の通りです:
 #
 # 1. 生の2次元座標を $[0, \pi]$ にスケーリング。
 # 2. 非線形特徴 $(x_0 - x_1)^2$ と $(x_0 + x_1)^2$ を構築し、それらも $[0, \pi]$ にスケーリング。
