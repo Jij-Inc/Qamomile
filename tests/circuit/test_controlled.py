@@ -967,6 +967,23 @@ class TestControlledBuiltinErrors:
 class TestControlledBuiltinSynthesisInternals:
     """Cover the wrapper-synthesis edge cases the Copilot review flagged."""
 
+    def test_reserved_names_match_namespace_keys(self):
+        """``_RESERVED_WRAPPER_NAMES`` is auto-derived from ``_wrapper_namespace``.
+
+        The two used to be hand-maintained in different places, so a
+        future change to the injected names in ``_wrapper_namespace``
+        could silently de-sync the collision guard.  The pair is now
+        derived from a single source; this assertion pins that
+        invariant so the regression is caught in CI rather than
+        re-emerging as a shadow bug at runtime.
+        """
+        from qamomile.circuit.frontend.operation.controlled import (
+            _RESERVED_WRAPPER_NAMES,
+            _wrapper_namespace,
+        )
+
+        assert _RESERVED_WRAPPER_NAMES == frozenset(_wrapper_namespace(None).keys())
+
     def test_repeated_calls_reuse_same_qkernel(self):
         """Calling controlled(fn) twice on the same callable returns the same wrapper.
 

@@ -53,15 +53,49 @@ _synthesized_kernel_cache: "weakref.WeakKeyDictionary[Callable[..., Any], Any]" 
     weakref.WeakKeyDictionary()
 )
 
+
+def _wrapper_namespace(target_ref: Any) -> dict[str, Any]:
+    """Build the exec namespace used when compiling a synthesized wrapper.
+
+    This is the **single source of truth** for the names injected into
+    the wrapper's compile-time namespace (used in annotations, the
+    return type, and the forwarding call).  ``_RESERVED_WRAPPER_NAMES``
+    below is derived from the keys returned here, so adding a new
+    injection (e.g. a future ``Bit`` annotation) requires only one edit
+    and the name-collision guard updates automatically — there is no
+    second list to keep in sync.
+
+    Args:
+        target_ref: The object bound to ``__qmc_target__`` in the
+            namespace so the synthesized ``return __qmc_target__(...)``
+            forwards to it.  In normal use this is either the original
+            callable or a ``weakref.proxy`` of it; ``None`` is allowed
+            when the namespace is built only to enumerate keys (see
+            ``_RESERVED_WRAPPER_NAMES``).
+
+    Returns:
+        A fresh ``dict`` suitable for passing as the ``globals``
+        argument of ``exec()``.
+    """
+    return {
+        "Qubit": Qubit,
+        "Float": Float,
+        "UInt": UInt,
+        "tuple": tuple,
+        "__qmc_target__": target_ref,
+    }
+
+
 # Names that the synthesized wrapper's body references directly (via
 # annotations and the forwarding call).  If the original callable's
 # ``__name__`` collides with any of these, defining the wrapper with that
 # same name would shadow the injected binding and break type-hint
 # resolution at decoration time, so we fall back to a fresh internal
-# identifier in that case.
-_RESERVED_WRAPPER_NAMES = frozenset(
-    {"Qubit", "Float", "UInt", "tuple", "__qmc_target__"}
-)
+# identifier in that case.  The set is derived from
+# ``_wrapper_namespace`` so that any future change to the injected names
+# stays consistent with the collision guard automatically — there is no
+# second list to keep in sync.
+_RESERVED_WRAPPER_NAMES: frozenset[str] = frozenset(_wrapper_namespace(None).keys())
 
 
 class ControlledGate:
@@ -757,13 +791,7 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
         except TypeError:
             target_ref = fn
 
-        namespace: dict[str, Any] = {
-            "Qubit": Qubit,
-            "Float": Float,
-            "UInt": UInt,
-            "tuple": tuple,
-            "__qmc_target__": target_ref,
-        }
+        namespace: dict[str, Any] = _wrapper_namespace(target_ref)
         try:
             code = compile(src, filename, "exec")
             exec(code, namespace)
