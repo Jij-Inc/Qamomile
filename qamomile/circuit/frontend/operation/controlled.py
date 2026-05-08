@@ -599,8 +599,15 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
             functions).
 
     Returns:
-        A ``QKernel`` whose body is ``return fn(*args)`` with concrete
-        ``Qubit``/``Float``/``UInt`` annotations.
+        A ``QKernel`` whose body forwards every argument by keyword to
+        the original callable (``return __qmc_target__(name=name, ...)``
+        in ``fn``'s original signature order, where ``__qmc_target__``
+        is the wrapper-globals binding for ``fn``).  The wrapper itself
+        declares its parameters in ``qubits-first`` order with concrete
+        ``Qubit`` / ``Float`` / ``UInt`` annotations matching the
+        downstream emit pass's ``[qubit..., param...]`` block layout —
+        kwargs forwarding is what reconciles that with ``fn``'s
+        possibly-interleaved signature.
 
     Raises:
         TypeError: If ``fn`` is not callable, uses ``*args``/``**kwargs``
