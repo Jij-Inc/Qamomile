@@ -311,7 +311,6 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
             register_classical_phi_aliases,
             register_phi_outputs,
-            remap_static_phi_outputs,
         )
 
         condition = op.condition
@@ -330,9 +329,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 "when runtime if/while is detected)."
             )
 
-        cond_arg = self._resolve_runtime_condition_text(
-            condition, clbit_map, bindings
-        )
+        cond_arg = self._resolve_runtime_condition_text(condition, clbit_map, bindings)
         context = self._emitter.emit_if_start(circuit, cond_arg)
         self._emit_operations(
             circuit, op.true_operations, qubit_map, clbit_map, bindings
@@ -386,9 +383,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             raise ValueError("WhileOperation requires a condition operand")
 
         condition = op.operands[0]
-        condition_value = (
-            condition.value if hasattr(condition, "value") else condition
-        )
+        condition_value = condition.value if hasattr(condition, "value") else condition
 
         if not self._emitter.supports_while_loop():
             raise EmitError(
@@ -400,9 +395,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             condition_value, clbit_map, bindings
         )
         context = self._emitter.emit_while_start(circuit, cond_arg)
-        self._emit_operations(
-            circuit, op.operations, qubit_map, clbit_map, bindings
-        )
+        self._emit_operations(circuit, op.operations, qubit_map, clbit_map, bindings)
         self._emitter.emit_while_end(circuit, context)
 
     def _resolve_runtime_condition_text(

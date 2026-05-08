@@ -43,19 +43,15 @@ Two SDK gaps that map to article-level decisions:
 
 from __future__ import annotations
 
-import os
 import runpy
-import sys
 import tempfile
 from pathlib import Path
 
-import pytest
-
 import matplotlib
+import pytest
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Article-top Transpiler import substitutions (same for every article).
