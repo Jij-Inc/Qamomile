@@ -346,8 +346,8 @@ class TestCountsNormalization:
 
     def test_integration_sample_with_short_key(self):
         """QiskitTranspiler + QBraidExecutor: short key decodes without None."""
-        from qamomile.qiskit import QiskitTranspiler
         import qamomile.circuit as qm
+        from qamomile.qiskit import QiskitTranspiler
 
         @qm.qkernel
         def three_bit_kernel() -> tuple[qm.Bit, qm.Bit, qm.Bit]:
@@ -367,8 +367,8 @@ class TestCountsNormalization:
 
     def test_integration_run_with_short_key(self):
         """QiskitTranspiler + QBraidExecutor: short key decodes without None."""
-        from qamomile.qiskit import QiskitTranspiler
         import qamomile.circuit as qm
+        from qamomile.qiskit import QiskitTranspiler
 
         @qm.qkernel
         def three_bit_kernel() -> tuple[qm.Bit, qm.Bit, qm.Bit]:

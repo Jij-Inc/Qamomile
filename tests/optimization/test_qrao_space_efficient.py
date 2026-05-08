@@ -2,10 +2,12 @@
 
 import math
 
-import pytest
-import numpy as np
 import networkx as nx
+import numpy as np
+import pytest
 
+import qamomile.observable as qm_o
+from qamomile.optimization.binary_model import BinaryExpr, BinaryModel, VarType, binary
 from qamomile.optimization.qrao import (
     QRACSpaceEfficientConverter,
     QRACSpaceEfficientEncoder,
@@ -15,8 +17,6 @@ from qamomile.optimization.qrao.qrao_space_efficient import (
     numbering_space_efficient_encode,
     qrac_space_efficient_encode_ising,
 )
-from qamomile.optimization.binary_model import binary, BinaryExpr, BinaryModel, VarType
-import qamomile.observable as qm_o
 
 
 class TestSpaceEfficientEncoder:
@@ -350,7 +350,9 @@ class TestSpaceEfficientEncodeIsingCoefficients:
 class TestSpaceEfficientRandomGraphs:
     """Property-based tests with random Erdős–Rényi graphs."""
 
-    @pytest.mark.parametrize("seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999])
+    @pytest.mark.parametrize(
+        "seed", [42, 123, 456, 789, 1024, 2048, 3333, 5555, 7777, 9999]
+    )
     def test_random_graph(self, seed):
         rng = np.random.default_rng(seed)
         n = int(rng.integers(4, 15))

@@ -5,7 +5,7 @@ with a Qiskit-inspired layout style.
 """
 
 from .drawer import MatplotlibDrawer
-from .style import CircuitStyle, DEFAULT_STYLE
+from .style import DEFAULT_STYLE, CircuitStyle
 
 __all__ = [
     "MatplotlibDrawer",

@@ -10,7 +10,7 @@ from typing import Any
 
 from matplotlib.figure import Figure
 
-from qamomile.circuit.ir.graph import Graph
+from qamomile.circuit.ir.block import Block
 
 from .analyzer import CircuitAnalyzer
 from .layout import CircuitLayoutEngine
@@ -27,7 +27,7 @@ class MatplotlibDrawer:
     - Inline mode (inline=True): Expands CallBlockOperation contents
     """
 
-    def __init__(self, graph: Graph, style: CircuitStyle | None = None):
+    def __init__(self, graph: Block, style: CircuitStyle | None = None):
         """Initialize the drawer.
 
         Args:

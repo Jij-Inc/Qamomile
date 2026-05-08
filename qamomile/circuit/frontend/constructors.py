@@ -2,16 +2,16 @@ import typing
 
 import qamomile.circuit.ir.types as ir_type
 from qamomile.circuit.ir.operation.operation import QInitOperation
-from qamomile.circuit.ir.value import Value, ArrayValue
+from qamomile.circuit.ir.value import ArrayValue, Value
 
 from .handle import (
     Bit,
     Float,
+    Matrix,
     Qubit,
+    Tensor,
     UInt,
     Vector,
-    Matrix,
-    Tensor,
 )
 from .tracer import get_current_tracer
 
@@ -26,8 +26,7 @@ def uint(arg: int | str) -> UInt:
     """Create a UInt handle from an integer literal or declare a named UInt parameter."""
     name = str(arg) if isinstance(arg, str) else "uint_const"
     if isinstance(arg, int):
-        # Set params={"const": arg} so Value.is_constant() returns True
-        value = Value(type=ir_type.UIntType(), name=name, params={"const": arg})
+        value = Value(type=ir_type.UIntType(), name=name).with_const(arg)
         return UInt(value=value, init_value=arg)
     else:
         value = Value(type=ir_type.UIntType(), name=name)
@@ -44,8 +43,7 @@ def float_(arg: float | str) -> Float:
     """Create a Float handle from a float literal or declare a named Float parameter."""
     name = str(arg) if isinstance(arg, str) else "float_const"
     if isinstance(arg, float):
-        # Set params={"const": arg} so Value.is_constant() returns True
-        value = Value(type=ir_type.FloatType(), name=name, params={"const": arg})
+        value = Value(type=ir_type.FloatType(), name=name).with_const(arg)
         return Float(value=value, init_value=arg)
     elif isinstance(arg, str):
         value = Value(type=ir_type.FloatType(), name=name)
@@ -66,15 +64,13 @@ def bit(arg: bool | str | int) -> Bit:
     """Create a Bit handle from a boolean/int literal or declare a named Bit parameter."""
     name = str(arg) if isinstance(arg, str) else "bit_const"
     if isinstance(arg, bool):
-        # Set params={"const": arg} so Value.is_constant() returns True
-        value = Value(type=ir_type.BitType(), name=name, params={"const": arg})
+        value = Value(type=ir_type.BitType(), name=name).with_const(arg)
         return Bit(value=value, init_value=arg)
     elif isinstance(arg, str):
         value = Value(type=ir_type.BitType(), name=name)
         return Bit(name=arg, value=value)
     elif isinstance(arg, int):
-        # Set params={"const": bool(arg)} so Value.is_constant() returns True
-        value = Value(type=ir_type.BitType(), name=name, params={"const": bool(arg)})
+        value = Value(type=ir_type.BitType(), name=name).with_const(bool(arg))
         return Bit(value=value, init_value=bool(arg))
     else:
         raise TypeError("Argument must be of type bool, str, or int")

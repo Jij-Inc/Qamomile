@@ -7,12 +7,16 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.18.1
 #   kernelspec:
-#     display_name: qamomile
+#     display_name: Python 3
 #     language: python
-#     name: qamomile
+#     name: python3
 # ---
 
 # %% [markdown]
+# ---
+# tags: [tutorial]
+# ---
+#
 # # Reuse Patterns: QKernel Composition and Composite Gates
 #
 # As circuits grow, you want to avoid copy-pasting gate sequences. Qamomile offers two complementary reuse mechanisms:
@@ -30,6 +34,10 @@
 #    you know the oracle will use ~40 T-gates, but you haven't implemented it yet.
 #    A stub composite gate lets you estimate the total cost of the algorithm
 #    without the full oracle implementation.
+
+# %%
+# Install the latest Qamomile through pip!
+# # !pip install qamomile
 
 # %%
 import qamomile.circuit as qmc
@@ -82,6 +90,32 @@ print("GHZ result:", result.results)
 # %%
 qc = transpiler.to_circuit(ghz_with_helper, bindings={"n": 4})
 print(qc.draw())
+
+# %% [markdown]
+# ### Passing scalar literals to helpers
+#
+# When a helper qkernel declares a scalar parameter (`UInt`, `Float`, or `Bit`), you can pass a raw Python literal at the call site — Qamomile auto-promotes `int` to `UInt`, `float` to `Float`, and `bool` to `Bit`. Writing `helper(q, 0, 0.5)` is equivalent to `helper(q, qmc.uint(0), qmc.float_(0.5))`. Use the explicit `qmc.uint` / `qmc.float_` / `qmc.bit` constructors only when you want to name the value or share it across multiple call sites.
+
+
+# %%
+@qmc.qkernel
+def rotate_first(
+    q: qmc.Vector[qmc.Qubit],
+    idx: qmc.UInt,
+    angle: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    q[idx] = qmc.ry(q[idx], angle)
+    return q
+
+
+@qmc.qkernel
+def helper_with_literals(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(n, name="q")
+    q = rotate_first(q, 0, 0.5)  # int and float literals are accepted directly
+    return qmc.measure(q)
+
+
+helper_with_literals.draw(n=3, fold_loops=False, inline=True)
 
 # %% [markdown]
 # ## Pattern 2: `@composite_gate`

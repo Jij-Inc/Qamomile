@@ -28,9 +28,8 @@ import qamomile.circuit as qmc
 pytest.importorskip("quri_parts")
 pytest.importorskip("quri_parts.qulacs")
 
-from qamomile.quri_parts import QuriPartsTranspiler
 from qamomile.qiskit import QiskitTranspiler
-
+from qamomile.quri_parts import QuriPartsTranspiler
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -38,14 +37,15 @@ from qamomile.qiskit import QiskitTranspiler
 
 
 def _sample_values(
-    transpiler, kernel, shots=256,
-    transpile_kwargs=None, sample_kwargs=None,
+    transpiler,
+    kernel,
+    shots=256,
+    transpile_kwargs=None,
+    sample_kwargs=None,
 ):
     """Transpile, sample, and return the list of (value, count) results."""
     executable = transpiler.transpile(kernel, **(transpile_kwargs or {}))
-    job = executable.sample(
-        transpiler.executor(), shots=shots, **(sample_kwargs or {})
-    )
+    job = executable.sample(transpiler.executor(), shots=shots, **(sample_kwargs or {}))
     return job.result().results
 
 
@@ -96,8 +96,8 @@ class TestSingleQubitPartialMeasurement:
     @qmc.qkernel
     def measure_last_of_three() -> qmc.Bit:
         """3 qubits, X on q2 only, measure q2 (should be 1)."""
-        q0 = qmc.qubit("q0")
-        q1 = qmc.qubit("q1")
+        _ = qmc.qubit("q0")
+        _ = qmc.qubit("q1")
         q2 = qmc.qubit("q2")
         q2 = qmc.x(q2)
         return qmc.measure(q2)
@@ -265,7 +265,9 @@ class TestMixedQubitVectorMeasurement:
         """X on scalar, measure scalar + vector → (1, (0, 0))."""
         t = transpiler_factory()
         results = _sample_values(t, self.mixed_both_measured)
-        _assert_all_equal(results, (1, (0, 0)), label=f"[{transpiler_factory.__name__}] ")
+        _assert_all_equal(
+            results, (1, (0, 0)), label=f"[{transpiler_factory.__name__}] "
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +313,8 @@ class TestParametricPartialMeasurement:
             sample_kwargs={"bindings": {"theta": theta_val}},
         )
         _assert_all_equal(
-            results, 0,
+            results,
+            0,
             label=f"[{transpiler_factory.__name__}, theta={theta_val}] ",
         )
 
@@ -331,7 +334,8 @@ class TestParametricPartialMeasurement:
             sample_kwargs={"bindings": {"theta": theta_val}},
         )
         _assert_all_equal(
-            results, 1,
+            results,
+            1,
             label=f"[{transpiler_factory.__name__}, theta={theta_val}] ",
         )
 

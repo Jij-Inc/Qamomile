@@ -6,26 +6,25 @@ into QURI Parts quantum circuits.
 
 from __future__ import annotations
 
-from typing import Any, Sequence, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Sequence
 
-from qamomile.circuit.transpiler.transpiler import Transpiler
-from qamomile.circuit.transpiler.passes.emit import EmitPass
-from qamomile.circuit.transpiler.passes.separate import SeparatePass
-from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
 from qamomile.circuit.transpiler.executable import (
-    QuantumExecutor,
     ParameterMetadata,
+    QuantumExecutor,
 )
+from qamomile.circuit.transpiler.passes.emit import EmitPass
+from qamomile.circuit.transpiler.passes.separate import SegmentationPass
+from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
+from qamomile.circuit.transpiler.transpiler import Transpiler
 
 from .emitter import QuriPartsGateEmitter
 from .exceptions import QamomileQuriPartsTranspileError
 
 if TYPE_CHECKING:
+    import qamomile.observable as qm_o
     import quri_parts.circuit as qp_c
     import quri_parts.core.operator as qp_o
     from quri_parts.circuit import ImmutableBoundParametricQuantumCircuit
-
-    import qamomile.observable as qm_o
 
 
 class QuriPartsEmitPass(
@@ -51,7 +50,7 @@ class QuriPartsEmitPass(
         emitter = QuriPartsGateEmitter()
         # QURI Parts has no native composite gate emitters
         composite_emitters: list[Any] = []
-        super().__init__(emitter, bindings, parameters, composite_emitters)
+        super().__init__(emitter, bindings, parameters, composite_emitters)  # type: ignore[arg-type]
 
 
 class QuriPartsExecutor(
@@ -152,7 +151,7 @@ class QuriPartsExecutor(
         num_qubits = circuit.qubit_count
         return {format(k, f"0{num_qubits}b"): v for k, v in counter.items()}
 
-    def bind_parameters(
+    def bind_parameters(  # type: ignore[override]
         self,
         circuit: "qp_c.LinearMappedUnboundParametricQuantumCircuit",
         bindings: dict[str, Any],
@@ -214,9 +213,9 @@ class QuriPartsExecutor(
         if isinstance(hamiltonian, qm_o.Hamiltonian):
             from qamomile.quri_parts.observable import hamiltonian_to_quri_operator
 
-            hamiltonian = hamiltonian_to_quri_operator(hamiltonian)
+            hamiltonian = hamiltonian_to_quri_operator(hamiltonian)  # type: ignore[assignment]
 
-        return self.estimate_expectation(circuit, hamiltonian, params or [])
+        return self.estimate_expectation(circuit, hamiltonian, params or [])  # type: ignore[arg-type]
 
     def estimate_expectation(
         self,
@@ -242,7 +241,7 @@ class QuriPartsExecutor(
         Returns:
             Real part of the expectation value
         """
-        from quri_parts.core.state import quantum_state, apply_circuit
+        from quri_parts.core.state import apply_circuit, quantum_state
 
         cb_state = quantum_state(circuit.qubit_count, bits=0)
         circuit_state = apply_circuit(circuit, cb_state)
@@ -258,9 +257,7 @@ class QuriPartsExecutor(
             )
         else:
             # Bound or non-parametric circuit → use non-parametric estimator
-            estimate = self.non_parametric_estimator(
-                hamiltonian, circuit_state
-            )
+            estimate = self.non_parametric_estimator(hamiltonian, circuit_state)
 
         return estimate.value.real
 
@@ -286,9 +283,9 @@ class QuriPartsTranspiler(
         circuit = transpiler.to_circuit(bell_state)
     """
 
-    def _create_separate_pass(self) -> SeparatePass:
-        """Create default separation pass (no backend-specific overrides)."""
-        return SeparatePass()
+    def _create_segmentation_pass(self) -> SegmentationPass:
+        """Create default segmentation pass (no backend-specific overrides)."""
+        return SegmentationPass()
 
     def _create_emit_pass(
         self,
@@ -298,7 +295,7 @@ class QuriPartsTranspiler(
         """Create QURI Parts emission pass with gate emitter."""
         return QuriPartsEmitPass(bindings, parameters)
 
-    def executor(
+    def executor(  # type: ignore[override]
         self,
         sampler: Any = None,
         estimator: Any = None,

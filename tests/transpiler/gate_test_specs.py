@@ -343,7 +343,9 @@ GATE_SPECS: dict[str, GateSpec] = {
         "RZZ", GateCategory.TWO_QUBIT_ROTATION, 2, has_angle=True, matrix_fn=rzz_matrix
     ),
     # Three-qubit gates
-    "TOFFOLI": GateSpec("TOFFOLI", GateCategory.THREE_QUBIT, 3, matrix_fn=toffoli_matrix),
+    "TOFFOLI": GateSpec(
+        "TOFFOLI", GateCategory.THREE_QUBIT, 3, matrix_fn=toffoli_matrix
+    ),
     # Controlled single-qubit gates
     "CH": GateSpec("CH", GateCategory.CONTROLLED, 2, matrix_fn=ch_matrix),
     "CY": GateSpec("CY", GateCategory.CONTROLLED, 2, matrix_fn=cy_matrix),

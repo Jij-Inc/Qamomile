@@ -52,7 +52,7 @@ Bitstring Format:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Generic, Sequence, TypeVar, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Generic, Sequence, TypeVar
 
 from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
 

@@ -12,13 +12,14 @@ Example:
 
 from __future__ import annotations
 
-from typing import Any, Sequence, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Sequence
 
 from qamomile.circuit.transpiler.errors import ExecutionError
-from qamomile.circuit.transpiler.executable import QuantumExecutor, ParameterMetadata
+from qamomile.circuit.transpiler.executable import ParameterMetadata, QuantumExecutor
 
 if TYPE_CHECKING:
     from qiskit import QuantumCircuit
+
     import qamomile.observable as qm_o
 
 
@@ -163,7 +164,9 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
         if provider is not None:
             return provider.get_device(device_id)
 
-        from qbraid import QbraidProvider as _QbraidProvider
+        from qbraid import (
+            QbraidProvider as _QbraidProvider,  # type: ignore[attr-defined]
+        )
 
         if api_key is not None:
             p = _QbraidProvider(api_key=api_key)

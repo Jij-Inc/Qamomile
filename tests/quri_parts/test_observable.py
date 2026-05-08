@@ -4,16 +4,16 @@ Covers hamiltonian_to_quri_operator and to_quri_operator with various
 Hamiltonian configurations including edge cases.
 """
 
-import pytest
 import numpy as np
+import pytest
 
 pytestmark = pytest.mark.quri_parts
 
 # Skip entire module if QURI Parts operator support is not installed.
 pytest.importorskip("quri_parts.core.operator")
 
-import qamomile.observable as qm_o
-from qamomile.quri_parts.observable import (
+import qamomile.observable as qm_o  # noqa: E402
+from qamomile.quri_parts.observable import (  # noqa: E402
     hamiltonian_to_quri_operator,
     to_quri_operator,
 )

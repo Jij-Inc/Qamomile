@@ -7,12 +7,16 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.18.1
 #   kernelspec:
-#     display_name: qamomile
+#     display_name: Python 3
 #     language: python
-#     name: qamomile
+#     name: python3
 # ---
 
 # %% [markdown]
+# ---
+# tags: [tutorial]
+# ---
+#
 # # 古典制御フローパターン
 #
 # 量子回路の構造は古典制御フローに依存することが多くあります。量子ビットのイテレーション、グラフのエッジに基づくゲート適用、ゲート列の条件分岐などです。Qamomileでは`qmc.range`、`qmc.items`、`if`分岐、`while`ループでこれらをサポートしています。
@@ -24,6 +28,12 @@
 # - 測定結果に対する`if` / `while`による回路途中の分岐
 
 # %%
+# 最新のQamomileをpipからインストールします！
+# # !pip install qamomile
+
+# %%
+import os
+
 import qamomile.circuit as qmc
 from qamomile.qiskit import QiskitTranspiler
 
@@ -55,6 +65,12 @@ def hadamard_chain(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 hadamard_chain.draw(n=5, fold_loops=False)
 
 # %% [markdown]
+# :::{note}
+# `qmc.range`のループ変数は**単一の変数**でなければなりません（例：`for i in qmc.range(n)`）。
+# `for [i, j] in qmc.range(n)` のようなタプル・リストのアンパックはサポートされておらず、`SyntaxError`が発生します。
+# :::
+
+# %% [markdown]
 # ## `qmc.items`によるスパースな相互作用データの処理
 #
 # QAOAやVQEなど多くの量子アルゴリズムでは、グラフや相互作用マップで決まる特定の量子ビットペアにのみゲートを適用します。全ペアをループするのではなく、相互作用の**辞書**を渡して`qmc.items()`でイテレーションできます。
@@ -81,6 +97,19 @@ def sparse_coupling(
 
     return qmc.measure(q)
 
+
+# %% [markdown]
+# :::{note}
+# `qmc.items`は以下のループパターンをサポートしています：
+#
+# - `for key, value in qmc.items(d)` — スカラーキー
+# - `for (i, j), value in qmc.items(d)` — タプルキー
+# - `for key, value in d.items()` — メソッド呼び出し形式
+#
+# **value**側は単一の変数でなければなりません。value位置でのタプルアンパック
+# （例：`for _, (i, j) in qmc.items(d)`）は**サポートされておらず**、`SyntaxError`が発生します。
+# 同様に、`for pair in qmc.items(d)` のような単一ターゲットパターンもサポートされていません。
+# :::
 
 # %% [markdown]
 # ## `transpiler.to_circuit()`による確認
@@ -135,11 +164,14 @@ def conditional_flip() -> qmc.Bit:
 
 # %%
 exe = transpiler.transpile(conditional_flip)
-executor = transpiler.executor()
-job = exe.sample(executor, bindings={}, shots=100)
-result = job.result()
-for value, count in result.results:
-    print(f"  bit={value}: {count} shots")
+if os.environ.get("QAMOMILE_DOCS_TEST") == "1":
+    print("docs test mode では dynamic circuit の実行を省略します。")
+else:
+    executor = transpiler.executor()
+    job = exe.sample(executor, bindings={}, shots=100)
+    result = job.result()
+    for value, count in result.results:
+        print(f"  bit={value}: {count} shots")
 
 # %% [markdown]
 # `q0`は |1⟩ として準備されているため、測定結果は常に1となり、`q1`は常に反転されます。全てのショットで1が返るはずです。

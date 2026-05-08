@@ -1,8 +1,17 @@
+from __future__ import annotations
+
 import dataclasses
+from typing import TYPE_CHECKING
 
-from qamomile.circuit.ir.value import Value
+from .primitives import QuantumTypeMixin, UIntType, ValueType
 
-from .primitives import ValueType, UIntType, QuantumTypeMixin
+if TYPE_CHECKING:
+    # ``Value`` is referenced only in annotations below.  Keeping the import
+    # behind ``TYPE_CHECKING`` breaks the circular dependency between
+    # ``qamomile.circuit.ir.value`` (which imports ``.types``) and this
+    # module (which lives under ``.types``).  See
+    # ``qamomile/circuit/ir/value.py`` for the other side of the cycle.
+    from qamomile.circuit.ir.value import Value
 
 
 @dataclasses.dataclass

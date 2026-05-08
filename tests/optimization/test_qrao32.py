@@ -1,19 +1,19 @@
 """Tests for QRAO32 (Quantum Random Access Optimization with (3,2,p)-QRAC)."""
 
-import pytest
-import numpy as np
 import networkx as nx
+import numpy as np
+import pytest
 
+import qamomile.observable as qm_o
+from qamomile.optimization.binary_model import BinaryExpr, BinaryModel, VarType, binary
 from qamomile.optimization.qrao import QRAC32Converter, QRAC32Encoder, SignRounder
 from qamomile.optimization.qrao.qrao32 import (
     build_physical_qubit_map,
+    create_prime_operator,
     create_x_prime,
     create_y_prime,
     create_z_prime,
-    create_prime_operator,
 )
-from qamomile.optimization.binary_model import binary, BinaryExpr, BinaryModel, VarType
-import qamomile.observable as qm_o
 
 
 class TestPrimeOperators:

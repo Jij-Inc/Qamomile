@@ -7,12 +7,16 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.18.1
 #   kernelspec:
-#     display_name: qamomile
+#     display_name: Python 3
 #     language: python
-#     name: qamomile
+#     name: python3
 # ---
 
 # %% [markdown]
+# ---
+# tags: [tutorial]
+# ---
+#
 # # パラメータ付き量子カーネル
 #
 # チュートリアル01では、固定数の量子ビットを持つ量子カーネルを構築しました。Qamomileでは量子ビット数やレイヤー数といった回路の構造を決めるような値をシンボリックなパラメータとして扱うことができます。例えば、`n`量子ビットを用意して、各量子ビットにHゲートを作用させるというような量子カーネルを書いたり、`p`回分、特定のゲート列を掛けるといった量子カーネルを書くことができます。このような回路構造そのものを定めるパラメータと、引数として与える回転ゲートの角度パラメータ（例えば、変分パラメータ）はQamomileにおいて固定する必要があるタイミングが異なります。端的に言えば、回路構造を定めるパラメータはトランスパイル時に、回転角度のようなパラメータは実行時（ランタイム）に固定する必要があります。
@@ -22,6 +26,10 @@
 # - 量子カーネル入力における`UInt`と`Float`の役割
 # - パラメータ化された回路のための`qubit_array()`と`qmc.range()`
 # - **バインド/スイープパターン**：一度トランスパイルし、複数回実行する
+
+# %%
+# 最新のQamomileをpipからインストールします！
+# # !pip install qamomile
 
 # %% [markdown]
 # ## `UInt`と`Float`の役割
@@ -93,6 +101,26 @@ except Exception as e:
 
 # %% [markdown]
 # 常にインデックスベースのアクセスを使用してください：`for i in qmc.range(n): q[i] = qmc.h(q[i])`。
+
+# %% [markdown]
+# ## 単一量子ビットゲートを配列にブロードキャストする
+#
+# 同じ単一量子ビットゲートをレジスタ全体の各量子ビットに適用する場合は、インデックスのループを書く代わりに、配列をそのままゲートに渡せます。これは `for i in qmc.range(n): q[i] = qmc.gate(q[i])` と同じ明示ループの記法と等価で、内部的にも同一のIRループに展開されるため、リソース見積もり、トランスパイル、可視化のいずれにおいても挙動は変わりません。回転ゲートの場合は、同一のスカラ角度がすべての量子ビットに適用されます。量子ビットごとに異なる角度を渡す場合は、引き続き明示ループでパラメータベクトルをインデックスする必要があります。
+
+
+# %%
+@qmc.qkernel
+def rotation_layer_broadcast(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(n, name="q")
+    q = qmc.h(q)
+    q = qmc.ry(q, theta)
+    return qmc.measure(q)
+
+
+rotation_layer_broadcast.draw(n=4, theta=0.3, fold_loops=False)
+
+# %% [markdown]
+# `rotation_layer`（上）と `rotation_layer_broadcast` は同じ回路を生成します。レジスタ全体に同一のゲートを並べる「層」を書くときはブロードキャスト記法が慣用的な選択です。各量子ビットに異なる角度（例：`Vector[Float]`をインデックスする）を渡したい場合や、レジスタの一部のみを操作する場合は、引き続き明示ループを使ってください。
 
 # %% [markdown]
 # ## バインド/スイープパターン

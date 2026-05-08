@@ -15,8 +15,8 @@ import pytest
 
 pytestmark = pytest.mark.quri_parts
 
-import qamomile.circuit as qmc
-from tests.transpiler.gate_test_specs import (
+import qamomile.circuit as qmc  # noqa: E402
+from tests.transpiler.gate_test_specs import (  # noqa: E402
     GATE_SPECS,
     all_zeros_state,
     bell_state,
@@ -35,19 +35,18 @@ from tests.transpiler.gate_test_specs import (
 pytest.importorskip("quri_parts")
 pytest.importorskip("quri_parts.qulacs")
 
-from quri_parts.circuit import gate_names
-from quri_parts.core.operator import SinglePauli
-from qamomile.circuit.transpiler.errors import EmitError
+from quri_parts.circuit import gate_names  # noqa: E402
+from quri_parts.core.operator import SinglePauli  # noqa: E402
 
-import qamomile.observable as qm_o
-from qamomile.circuit.algorithm.basic import (
+import qamomile.observable as qm_o  # noqa: E402
+from qamomile.circuit.algorithm.basic import (  # noqa: E402
     cz_entangling_layer,
     rx_layer,
     ry_layer,
     rz_layer,
     superposition_vector,
 )
-from qamomile.circuit.algorithm.fqaoa import (
+from qamomile.circuit.algorithm.fqaoa import (  # noqa: E402
     cost_layer,
     fqaoa_state,
     givens_rotation,
@@ -55,16 +54,21 @@ from qamomile.circuit.algorithm.fqaoa import (
     initial_occupations,
     mixer_layer,
 )
-from qamomile.circuit.algorithm.qaoa import (
+from qamomile.circuit.algorithm.qaoa import (  # noqa: E402
     ising_cost,
     qaoa_layers,
     qaoa_state,
     x_mixer,
 )
-from qamomile.circuit.ir.block import BlockKind
-from qamomile.circuit.transpiler.executable import ExecutableProgram
-from qamomile.circuit.transpiler.segments import SimplifiedProgram
-from qamomile.quri_parts import QuriPartsTranspiler
+from qamomile.circuit.ir.block import BlockKind  # noqa: E402
+from qamomile.circuit.transpiler.errors import EmitError  # noqa: E402
+from qamomile.circuit.transpiler.executable import ExecutableProgram  # noqa: E402
+from qamomile.circuit.transpiler.segments import (  # noqa: E402
+    ClassicalStep,
+    ProgramPlan,
+    QuantumStep,
+)
+from qamomile.quri_parts import QuriPartsTranspiler  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -2417,11 +2421,48 @@ class TestControlFlowQAOAPattern:
             g = cz_gates[len(even_pairs_list) + idx]
             assert g.control_indices == (start,) and g.target_indices == (start + 1,)
 
-    # NOTE: test_qaoa_single_layer_parametric is NOT ported because it uses
-    # `gamma * Jij` where gamma is a Parameter and Jij is a float — this
-    # triggers TypeError: unsupported operand type(s) for *: 'Parameter' and
-    # 'float' in QuriParts. This is a fundamental limitation of QURI Parts'
-    # Parameter type not supporting arithmetic with float operands.
+    def test_qaoa_single_layer_parametric(self):
+        """QAOA layer with parameters=["gamma","beta"] — bind and execute.
+
+        Verifies that ``gamma * Jij`` (Parameter × Float BinOp) survives
+        emission as a QURI Parts linear-combination dict and produces a
+        bindable parametric circuit.
+        """
+
+        @qmc.qkernel
+        def qaoa_layer(
+            n: qmc.UInt,
+            ising: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+            gamma: qmc.Float,
+            beta: qmc.Float,
+        ) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n, "q")
+            for i in qmc.range(n):
+                q[i] = qmc.h(q[i])
+            for (i, j), Jij in qmc.items(ising):
+                q[i], q[j] = qmc.rzz(q[i], q[j], gamma * Jij)
+            for i in qmc.range(n):
+                q[i] = qmc.rx(q[i], beta)
+            return qmc.measure(q)
+
+        ising = {(0, 1): 1.0}
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(
+            qaoa_layer,
+            bindings={"n": 2, "ising": ising},
+            parameters=["gamma", "beta"],
+        )
+        assert exe.has_parameters
+        # Bind and execute — exercises the linear-form dict emission path
+        executor = transpiler.executor()
+        job = exe.sample(
+            executor,
+            shots=100,
+            bindings={"gamma": 0.5, "beta": 0.3},
+        )
+        result = job.result()
+        assert result is not None
+        assert len(result.results) > 0
 
 
 # ============================================================================
@@ -2530,10 +2571,10 @@ class TestTranspilerPassesPipeline:
         validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated)
         analyzed = transpiler.analyze(folded)
-        separated = transpiler.separate(analyzed)
+        separated = transpiler.plan(analyzed)
 
-        assert isinstance(separated, SimplifiedProgram)
-        assert separated.quantum is not None
+        assert isinstance(separated, ProgramPlan)
+        assert any(isinstance(s, QuantumStep) for s in separated.steps)
 
     def test_emit(self, transpiler):
         """emit() generates backend-specific circuit."""
@@ -2549,7 +2590,7 @@ class TestTranspilerPassesPipeline:
         validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated)
         analyzed = transpiler.analyze(folded)
-        separated = transpiler.separate(analyzed)
+        separated = transpiler.plan(analyzed)
         exe = transpiler.emit(separated)
 
         assert isinstance(exe, ExecutableProgram)
@@ -2603,7 +2644,7 @@ class TestTranspilerPassesPipeline:
         validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated)
         analyzed = transpiler.analyze(folded)
-        separated = transpiler.separate(analyzed)
+        separated = transpiler.plan(analyzed)
         exe_step = transpiler.emit(separated)
         qc_step = exe_step.compiled_quantum[0].circuit
         sv_step = _run_statevector(qc_step)
@@ -2673,7 +2714,7 @@ class TestTranspilerConfigPortable:
         assert substituted is not block
 
     def test_separate_segments_simple_circuit(self):
-        """separate() produces SimplifiedProgram with quantum segment."""
+        """separate() produces ProgramPlan with quantum segment."""
         transpiler = QuriPartsTranspiler()
 
         @qmc.qkernel
@@ -2687,13 +2728,13 @@ class TestTranspilerConfigPortable:
         validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated)
         analyzed = transpiler.analyze(folded)
-        separated = transpiler.separate(analyzed)
+        separated = transpiler.plan(analyzed)
 
-        assert isinstance(separated, SimplifiedProgram)
-        assert separated.quantum is not None
-        assert len(separated.quantum.operations) > 0
+        assert isinstance(separated, ProgramPlan)
+        quantum_step = next(s for s in separated.steps if isinstance(s, QuantumStep))
+        assert len(quantum_step.segment.operations) > 0
         # Simple H+measure circuit should have no classical prep
-        assert separated.classical_prep is None
+        assert not isinstance(separated.steps[0], ClassicalStep)
 
     def test_separate_segments_with_classical_post(self):
         """QPE produces classical_post segment for QFixed decoding."""
@@ -2717,12 +2758,19 @@ class TestTranspilerConfigPortable:
         validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated, bindings={"phase": np.pi / 2})
         analyzed = transpiler.analyze(folded)
-        separated = transpiler.separate(analyzed)
+        separated = transpiler.plan(analyzed)
 
-        assert isinstance(separated, SimplifiedProgram)
-        assert separated.quantum is not None
-        # QPE returns QFixed → Float, so classical_post should handle the decode
-        assert separated.classical_post is not None
+        assert isinstance(separated, ProgramPlan)
+        assert any(isinstance(s, QuantumStep) for s in separated.steps)
+        # QPE returns QFixed -> Float, so classical_post should handle the decode
+        seen_quantum = False
+        has_classical_post = False
+        for s in separated.steps:
+            if isinstance(s, QuantumStep):
+                seen_quantum = True
+            elif seen_quantum and isinstance(s, ClassicalStep):
+                has_classical_post = True
+        assert has_classical_post
 
     def test_approximate_qft_fewer_gates(self):
         """Approximate QFT strategy produces fewer gates than standard."""
@@ -3057,12 +3105,7 @@ class TestParametricGates:
     # -- BinOp parametric tests --
 
     def test_parametric_mul_binop(self):
-        """theta * c via items() loop, bind and verify numerical result.
-
-        Note: QURI Parts' Rust-backed Parameter does not support arithmetic
-        operators (*, +, -) with floats, so BinOp with unbound parameters
-        is not possible. We test with fully bound parameters instead.
-        """
+        """theta * c via items() loop, fully bound — verifies fold path."""
 
         @qmc.qkernel
         def circuit(
@@ -3083,11 +3126,7 @@ class TestParametricGates:
         assert np.isclose(rx_gates[0].params[0], 3.0, atol=1e-10)
 
     def test_parametric_add_binop(self):
-        """theta + o via items() loop, bind and verify numerical result.
-
-        Note: QURI Parts' Rust-backed Parameter does not support arithmetic
-        operators, so BinOp with unbound parameters is not possible.
-        """
+        """theta + o via items() loop, fully bound — verifies fold path."""
 
         @qmc.qkernel
         def circuit(
@@ -3108,11 +3147,7 @@ class TestParametricGates:
         assert np.isclose(rx_gates[0].params[0], 1.5, atol=1e-10)
 
     def test_parametric_sub_binop(self):
-        """theta - o via items() loop, bind and verify numerical result.
-
-        Note: QURI Parts' Rust-backed Parameter does not support arithmetic
-        operators, so BinOp with unbound parameters is not possible.
-        """
+        """theta - o via items() loop, fully bound — verifies fold path."""
 
         @qmc.qkernel
         def circuit(
@@ -3128,6 +3163,93 @@ class TestParametricGates:
             circuit, bindings={"theta": 1.0, "offset": {0: 0.5}}
         )
         gates = _get_gates(qc)
+        rx_gates = [g for g in gates if g.name == gate_names.RX]
+        assert len(rx_gates) == 1
+        assert np.isclose(rx_gates[0].params[0], 0.5, atol=1e-10)
+
+    # -- Symbolic (unbound parameter) BinOp tests --
+    #
+    # These exercise the new ``GateEmitter.combine_symbolic`` path: the
+    # parameter is left as a runtime parameter (``parameters=["theta"]``)
+    # so the BinOp is not constant-folded and the QURI Parts emitter must
+    # produce a linear-combination dict.
+
+    def test_symbolic_mul_binop_param_times_const(self):
+        """theta * c with theta unbound — produces ParametricRX with coeff."""
+
+        @qmc.qkernel
+        def circuit(
+            theta: qmc.Float,
+            coeff: qmc.Dict[qmc.UInt, qmc.Float],
+        ) -> qmc.Bit:
+            q = qmc.qubit("q")
+            for _, c in qmc.items(coeff):
+                q = qmc.rx(q, theta * c)
+            return qmc.measure(q)
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(
+            circuit,
+            bindings={"coeff": {0: 2.0}},
+            parameters=["theta"],
+        )
+        qc = exe.compiled_quantum[0].circuit
+        # Parametric RX should be present (not folded)
+        assert qc.parameter_count == 1
+        # Bind theta=1.5 → angle = 3.0
+        gates = _get_gates(qc, parameter_bindings=[1.5])
+        rx_gates = [g for g in gates if g.name == gate_names.RX]
+        assert len(rx_gates) == 1
+        assert np.isclose(rx_gates[0].params[0], 3.0, atol=1e-10)
+
+    def test_symbolic_add_binop_param_plus_const(self):
+        """theta + o with theta unbound — linear form {theta: 1, CONST: o}."""
+
+        @qmc.qkernel
+        def circuit(
+            theta: qmc.Float,
+            offset: qmc.Dict[qmc.UInt, qmc.Float],
+        ) -> qmc.Bit:
+            q = qmc.qubit("q")
+            for _, o in qmc.items(offset):
+                q = qmc.rx(q, theta + o)
+            return qmc.measure(q)
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(
+            circuit,
+            bindings={"offset": {0: 0.5}},
+            parameters=["theta"],
+        )
+        qc = exe.compiled_quantum[0].circuit
+        assert qc.parameter_count == 1
+        gates = _get_gates(qc, parameter_bindings=[1.0])
+        rx_gates = [g for g in gates if g.name == gate_names.RX]
+        assert len(rx_gates) == 1
+        assert np.isclose(rx_gates[0].params[0], 1.5, atol=1e-10)
+
+    def test_symbolic_sub_binop_param_minus_const(self):
+        """theta - o with theta unbound — verifies linear form sign."""
+
+        @qmc.qkernel
+        def circuit(
+            theta: qmc.Float,
+            offset: qmc.Dict[qmc.UInt, qmc.Float],
+        ) -> qmc.Bit:
+            q = qmc.qubit("q")
+            for _, o in qmc.items(offset):
+                q = qmc.rx(q, theta - o)
+            return qmc.measure(q)
+
+        transpiler = QuriPartsTranspiler()
+        exe = transpiler.transpile(
+            circuit,
+            bindings={"offset": {0: 0.5}},
+            parameters=["theta"],
+        )
+        qc = exe.compiled_quantum[0].circuit
+        assert qc.parameter_count == 1
+        gates = _get_gates(qc, parameter_bindings=[1.0])
         rx_gates = [g for g in gates if g.name == gate_names.RX]
         assert len(rx_gates) == 1
         assert np.isclose(rx_gates[0].params[0], 0.5, atol=1e-10)
@@ -4137,7 +4259,6 @@ class TestAlgorithmBasicLayers:
     def test_variational_ansatz_pattern(self, seed):
         """Full variational ansatz: RY -> CZ -> RY -> CZ -> RY."""
         rng = np.random.default_rng(seed)
-        n_qubits = 3
 
         @qmc.qkernel
         def ansatz(thetas: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
@@ -6583,7 +6704,7 @@ class TestCompileTimeIfArrayQuantumPhi:
 
 
 class TestCompileTimeIfPhiPropagation:
-    """Compile-time IfOperation lowering before SeparatePass.
+    """Compile-time IfOperation lowering before SegmentationPass.
 
     Tests that compile-time resolvable IfOperations (including expression-
     derived conditions) are lowered before separation.

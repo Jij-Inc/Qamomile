@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Generic, TypeVar, Iterator, Literal, overload
+from typing import Generic, Iterator, Literal, TypeVar, overload
 
-from qamomile.circuit.ir.value import Value, TupleValue, DictValue
 from qamomile.circuit.ir.types.primitives import UIntType
+from qamomile.circuit.ir.value import DictValue, TupleValue, Value
 
 from .handle import Handle
 from .primitives import UInt
-
 
 # Type variables for generic containers
 K = TypeVar("K", bound=Handle)
@@ -33,7 +32,7 @@ class Tuple(Handle, Generic[K, V]):
         ```
     """
 
-    value: TupleValue
+    value: TupleValue  # type: ignore[assignment]  # intentional narrowing from Value
     _elements: tuple[Handle, ...] = dataclasses.field(default_factory=tuple)
 
     @overload
@@ -98,7 +97,7 @@ class Dict(Handle, Generic[K, V]):
         ```
     """
 
-    value: DictValue
+    value: DictValue  # type: ignore[assignment]  # intentional narrowing from Value
     _entries: list[tuple[Handle, Handle]] = dataclasses.field(default_factory=list)
     _size: UInt | None = None
     _key_type: type | None = None
@@ -119,7 +118,6 @@ class Dict(Handle, Generic[K, V]):
                 value=Value(
                     type=UIntType(),
                     name=f"{self.value.name}_size",
-                    params={"const": len(self._entries)} if self._entries else {},
-                )
+                ).with_const(len(self._entries))
             )
         return self._size

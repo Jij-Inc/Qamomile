@@ -1,12 +1,12 @@
 """Tests for QRAO21 (Quantum Random Access Optimization with (2,1,p)-QRAC)."""
 
-import pytest
-import numpy as np
 import networkx as nx
+import numpy as np
+import pytest
 
-from qamomile.optimization.qrao import QRAC21Converter, QRAC21Encoder, SignRounder
-from qamomile.optimization.binary_model import binary, BinaryExpr, BinaryModel, VarType
 import qamomile.observable as qm_o
+from qamomile.optimization.binary_model import BinaryExpr, BinaryModel, VarType, binary
+from qamomile.optimization.qrao import QRAC21Converter, QRAC21Encoder, SignRounder
 
 
 class TestQRAC21Encoder:

@@ -7,12 +7,16 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.18.1
 #   kernelspec:
-#     display_name: qamomile
+#     display_name: Python 3
 #     language: python
-#     name: qamomile
+#     name: python3
 # ---
 
 # %% [markdown]
+# ---
+# tags: [tutorial]
+# ---
+#
 # # Parameterized Quantum Kernels
 #
 # In Tutorial 01 we built qkernels with a fixed number of qubits. Qamomile allows you to treat values that determine circuit structure — such as the number of qubits and layers — as symbolic parameters. For instance, you can write a qkernel that contains `n` qubits and applies H gates to all of them, or one that applies a certain sequence of gates for `p` iterations. In Qamomile, parameters for circuit structure and those for rotation angles are required to be bound at different times: structure parameters must be bound at transpile time, while rotation angles must be bound at runtime.
@@ -22,6 +26,10 @@
 # - The typical roles of `UInt` and `Float` in qkernel inputs
 # - `qubit_array()` and `qmc.range()` for parameterized circuits
 # - The **bind/sweep** pattern: transpile once, execute many times
+
+# %%
+# Install the latest Qamomile through pip!
+# # !pip install qamomile
 
 # %% [markdown]
 # ## Typical Roles of `UInt` and `Float`
@@ -93,6 +101,36 @@ except Exception as e:
 
 # %% [markdown]
 # Always use index-based access: `for i in qmc.range(n): q[i] = qmc.h(q[i])`.
+
+# %% [markdown]
+# ## Broadcasting Single-Qubit Gates Over an Array
+#
+# When the same single-qubit gate is applied to every qubit in a register, you
+# can pass the array directly instead of writing the index loop. This is
+# equivalent to the explicit `for i in qmc.range(n): q[i] = qmc.gate(q[i])`
+# pattern — under the hood it emits the same IR loop, so resource estimation,
+# transpilation, and visualization see no difference. For rotation gates the
+# same scalar angle is shared across every qubit; per-qubit angles still need
+# an explicit loop indexing into a parameter vector.
+
+
+# %%
+@qmc.qkernel
+def rotation_layer_broadcast(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(n, name="q")
+    q = qmc.h(q)
+    q = qmc.ry(q, theta)
+    return qmc.measure(q)
+
+
+rotation_layer_broadcast.draw(n=4, theta=0.3, fold_loops=False)
+
+# %% [markdown]
+# Both `rotation_layer` (above) and `rotation_layer_broadcast` produce the
+# same circuit. The broadcast form is the idiomatic choice for whole-register
+# layers; reach for the explicit loop when each qubit needs a different angle
+# (for example, indexing into `Vector[Float]`) or when only a slice of the
+# register is touched.
 
 # %% [markdown]
 # ## The Bind/Sweep Pattern

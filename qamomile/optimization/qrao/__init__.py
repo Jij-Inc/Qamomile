@@ -4,10 +4,10 @@ This module provides QRAC-based encoders and converters for quantum optimization
 """
 
 from .base_encoder import BaseQRACEncoder, GraphColoringQRACEncoder
-from .qrao21 import QRAC21Encoder, QRAC21Converter
-from .qrao31 import QRAC31Encoder, QRAC31Converter
-from .qrao32 import QRAC32Encoder, QRAC32Converter
-from .qrao_space_efficient import QRACSpaceEfficientEncoder, QRACSpaceEfficientConverter
+from .qrao21 import QRAC21Converter, QRAC21Encoder
+from .qrao31 import QRAC31Converter, QRAC31Encoder
+from .qrao32 import QRAC32Converter, QRAC32Encoder
+from .qrao_space_efficient import QRACSpaceEfficientConverter, QRACSpaceEfficientEncoder
 from .rounding import SignRounder
 
 __all__ = [

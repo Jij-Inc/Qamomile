@@ -35,8 +35,8 @@ References:
 """
 
 # Core estimators
-from qamomile.circuit.estimator.qubits_counter import qubits_counter
 from qamomile.circuit.estimator.gate_counter import GateCount, count_gates
+from qamomile.circuit.estimator.qubits_counter import qubits_counter
 from qamomile.circuit.estimator.resource_estimator import (
     ResourceEstimate,
     estimate_resources,

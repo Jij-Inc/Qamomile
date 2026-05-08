@@ -4,19 +4,14 @@ import pytest
 
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.block import Block, BlockKind
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
-    CompositeGateType,
-)
 from qamomile.circuit.transpiler.passes.substitution import (
-    SubstitutionPass,
-    SubstitutionConfig,
-    SubstitutionRule,
     SignatureCompatibilityError,
+    SubstitutionConfig,
+    SubstitutionPass,
+    SubstitutionRule,
     check_signature_compatibility,
     create_substitution_pass,
 )
-from qamomile.circuit.stdlib.qft import QFT
 
 
 class TestSubstitutionRule:
@@ -88,7 +83,7 @@ class TestSubstitutionPass:
             return q
 
         # Build block
-        block = Block.from_block_value(test_kernel.block, {})
+        block = test_kernel.block
 
         # Create pass with strategy override
         config = SubstitutionConfig(
@@ -267,7 +262,7 @@ class TestSignatureValidation:
             return source(q, theta)
 
         # Build block
-        block = Block.from_block_value(main.block, {})
+        block = main.block
 
         # Create pass with incompatible substitution
         pass_ = create_substitution_pass(
@@ -297,7 +292,7 @@ class TestSignatureValidation:
             return source(q, theta)
 
         # Build block
-        block = Block.from_block_value(main.block, {})
+        block = main.block
 
         # Create pass with compatible substitution
         pass_ = create_substitution_pass(

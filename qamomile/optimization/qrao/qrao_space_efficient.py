@@ -9,12 +9,13 @@ of the product of their Paulis.
 """
 
 from __future__ import annotations
+
 import typing
 
 import numpy as np
 
 import qamomile.observable as qm_o
-from qamomile.optimization.utils import is_close_zero
+from qamomile._utils import is_close_zero
 from qamomile.optimization.binary_model import BinaryModel, VarType
 
 from .base_converter import QRACConverterBase

@@ -11,6 +11,9 @@ if TYPE_CHECKING:
     from qiskit.circuit import QuantumCircuit
 
 
+_SIMULATOR_SEED = 901
+
+
 @pytest.fixture
 def qiskit_transpiler():
     """Get Qiskit transpiler."""
@@ -23,9 +26,11 @@ def qiskit_transpiler():
 @pytest.fixture
 def seeded_executor(qiskit_transpiler):
     """Executor with fixed seed for reproducible sampling."""
-    from qiskit_aer import AerSimulator
+    from qiskit.providers.basic_provider import BasicSimulator
 
-    return qiskit_transpiler.executor(backend=AerSimulator(seed_simulator=901))
+    backend = BasicSimulator()
+    backend.set_options(seed_simulator=_SIMULATOR_SEED)
+    return qiskit_transpiler.executor(backend=backend)
 
 
 def run_statevector(qc: "QuantumCircuit") -> np.ndarray:
@@ -37,12 +42,7 @@ def run_statevector(qc: "QuantumCircuit") -> np.ndarray:
     Returns:
         numpy array of complex amplitudes.
     """
-    from qiskit import transpile
-    from qiskit_aer import AerSimulator
+    from qiskit.quantum_info import Statevector
 
-    qc.remove_final_measurements()
-    simulator = AerSimulator(method="statevector")
-    qc = transpile(qc, simulator)
-    qc.save_statevector()
-    result = simulator.run(qc).result()
-    return np.array(result.get_statevector())
+    qc = qc.remove_final_measurements(inplace=False)
+    return np.array(Statevector.from_instruction(qc).data)

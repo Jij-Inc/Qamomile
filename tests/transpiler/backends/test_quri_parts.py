@@ -16,7 +16,7 @@ pytestmark = pytest.mark.quri_parts
 pytest.importorskip("quri_parts")
 pytest.importorskip("quri_parts.qulacs")
 
-from tests.transpiler.base_test import TranspilerTestSuite
+from tests.transpiler.base_test import TranspilerTestSuite  # noqa: E402
 
 
 class TestQuriPartsTranspiler(TranspilerTestSuite):

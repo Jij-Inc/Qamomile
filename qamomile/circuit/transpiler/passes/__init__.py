@@ -4,10 +4,10 @@ from abc import ABC, abstractmethod
 from typing import Generic, TypeVar
 
 from qamomile.circuit.transpiler.errors import (
-    QamomileCompileError,
-    DependencyError,
-    ValidationError,
     AffineTypeError,
+    DependencyError,
+    QamomileCompileError,
+    ValidationError,
 )
 
 InputT = TypeVar("InputT")
@@ -30,13 +30,13 @@ class Pass(ABC, Generic[InputT, OutputT]):
 
 
 # Import submodule passes after Pass is defined to avoid circular imports
-from .constant_fold import ConstantFoldingPass  # noqa: E402
-from .compile_time_if_lowering import CompileTimeIfLoweringPass  # noqa: E402
 from .affine_validate import AffineValidationPass  # noqa: E402
+from .compile_time_if_lowering import CompileTimeIfLoweringPass  # noqa: E402
+from .constant_fold import ConstantFoldingPass  # noqa: E402
 from .control_flow_visitor import (  # noqa: E402
     ControlFlowVisitor,
-    OperationTransformer,
     OperationCollector,
+    OperationTransformer,
     ValueCollector,
 )
 from .validate_while import ValidateWhileContractPass  # noqa: E402

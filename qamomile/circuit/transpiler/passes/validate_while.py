@@ -19,8 +19,7 @@ from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
 from qamomile.circuit.ir.operation.control_flow import (
-    ForItemsOperation,
-    ForOperation,
+    HasNestedOps,
     IfOperation,
     WhileOperation,
 )
@@ -72,20 +71,15 @@ class ValidateWhileContractPass(Pass[Block, Block]):
                     producer_map[result.uuid] = op
 
             # Recurse into control flow bodies
-            if isinstance(op, WhileOperation):
-                self._build_producer_map(op.operations, producer_map)
-            elif isinstance(op, ForOperation):
-                self._build_producer_map(op.operations, producer_map)
-            elif isinstance(op, ForItemsOperation):
-                self._build_producer_map(op.operations, producer_map)
-            elif isinstance(op, IfOperation):
-                # Also register phi_ops results
-                for phi in op.phi_ops:
-                    for result in phi.results:
-                        if isinstance(result, Value):
-                            producer_map[result.uuid] = phi
-                self._build_producer_map(op.true_operations, producer_map)
-                self._build_producer_map(op.false_operations, producer_map)
+            if isinstance(op, HasNestedOps):
+                # IfOperation phi_ops results need their own producer entries
+                if isinstance(op, IfOperation):
+                    for phi in op.phi_ops:
+                        for result in phi.results:
+                            if isinstance(result, Value):
+                                producer_map[result.uuid] = phi
+                for op_list in op.nested_op_lists():
+                    self._build_producer_map(op_list, producer_map)
 
     def _validate_whiles(
         self,
@@ -96,15 +90,9 @@ class ValidateWhileContractPass(Pass[Block, Block]):
         for op in operations:
             if isinstance(op, WhileOperation):
                 self._validate_while_condition(op, producer_map)
-                # Also recurse into while body
-                self._validate_whiles(op.operations, producer_map)
-            elif isinstance(op, ForOperation):
-                self._validate_whiles(op.operations, producer_map)
-            elif isinstance(op, ForItemsOperation):
-                self._validate_whiles(op.operations, producer_map)
-            elif isinstance(op, IfOperation):
-                self._validate_whiles(op.true_operations, producer_map)
-                self._validate_whiles(op.false_operations, producer_map)
+            if isinstance(op, HasNestedOps):
+                for op_list in op.nested_op_lists():
+                    self._validate_whiles(op_list, producer_map)
 
     def _validate_while_condition(
         self,

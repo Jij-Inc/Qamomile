@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any, Union, cast
 
 from qamomile.circuit.frontend.handle import Handle
 from qamomile.circuit.frontend.handle.primitives import Float, Qubit, UInt
 from qamomile.circuit.frontend.tracer import get_current_tracer
-from qamomile.circuit.ir.operation.gate import ControlledUOperation
+from qamomile.circuit.ir.operation.gate import (
+    ConcreteControlledU,
+    ControlledUOperation,
+    IndexSpecControlledU,
+    SymbolicControlledU,
+)
 from qamomile.circuit.ir.types.primitives import FloatType, UIntType
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.errors import QubitAliasError
 
 if TYPE_CHECKING:
@@ -79,6 +84,91 @@ class ControlledGate:
             return power
         raise TypeError(f"power must be int or UInt, got {type(power).__name__}.")
 
+    @staticmethod
+    def _params_to_operands(
+        params: dict[str, ParamValue],
+        operands: list[Any],
+    ) -> None:
+        """Append parameter values to the operands list.
+
+        Handle types are unwrapped to their underlying Value.
+        Raw float/int values are wrapped as constant FloatType Values.
+        """
+        for param_name, param_value in params.items():
+            if isinstance(param_value, Handle):
+                operands.append(param_value.value)
+            else:
+                param_val = Value(
+                    type=FloatType(),
+                    name=f"ctrl_param_{param_name}",
+                ).with_const(float(param_value))
+                operands.append(param_val)
+
+    @staticmethod
+    def _wrap_qubit_outputs(
+        consumed_handles: list[Any],
+        results: list[Value],
+        offset: int = 0,
+    ) -> list[Qubit]:
+        """Create output Qubit handles from consumed handles and result Values.
+
+        Each output Qubit preserves the parent/indices metadata from the
+        corresponding consumed handle for array write-back support.
+        """
+        output = []
+        for i, handle in enumerate(consumed_handles):
+            output.append(
+                Qubit(
+                    value=results[offset + i],
+                    parent=handle.parent,
+                    indices=handle.indices,
+                )
+            )
+        return output
+
+    def _build_and_emit_op(
+        self,
+        operands: list[Any],
+        results: list[Value],
+        num_controls: int | Value,
+        power: int | Value,
+        *,
+        target_indices: list[Value] | None = None,
+        controlled_indices: list[Value] | None = None,
+    ) -> ControlledUOperation:
+        """Create the appropriate ControlledUOperation subclass and add to tracer."""
+        block = self._qkernel.block
+        op: ControlledUOperation
+        if target_indices is not None or controlled_indices is not None:
+            op = IndexSpecControlledU(
+                operands=operands,
+                results=results,
+                num_controls=num_controls,
+                power=power,
+                target_indices=target_indices,
+                controlled_indices=controlled_indices,
+                block=block,
+            )
+        elif isinstance(num_controls, Value):
+            op = SymbolicControlledU(
+                operands=operands,
+                results=results,
+                num_controls=num_controls,
+                power=power,
+                block=block,
+            )
+        else:
+            op = ConcreteControlledU(
+                operands=operands,
+                results=results,
+                num_controls=num_controls,
+                power=power,
+                block=block,
+            )
+        tracer = get_current_tracer()
+        tracer.add_operation(op)
+        return op
+
     def __call__(
         self,
         *args: Any,
@@ -111,7 +201,7 @@ class ControlledGate:
         Returns:
             Tuple of output handles, or single Vector when using index spec.
         """
-        power = self._normalize_power(power)
+        normalized_power = self._normalize_power(power)
 
         if target_indices is not None and controlled_indices is not None:
             raise ValueError(
@@ -121,13 +211,13 @@ class ControlledGate:
 
         if target_indices is not None or controlled_indices is not None:
             return self._call_with_index_spec(
-                args, power, target_indices, controlled_indices, params
+                args, normalized_power, target_indices, controlled_indices, params
             )
 
         num_controls = self._num_controls
 
         if isinstance(num_controls, UInt):
-            return self._call_symbolic(args, power, params)
+            return self._call_symbolic(args, normalized_power, params)
 
         # --- Concrete path (existing logic, unchanged) ---
 
@@ -163,75 +253,30 @@ class ControlledGate:
             t.consume(operation_name="ControlledU[target]") for t in target_args
         )
 
-        # Get BlockValue from qkernel
-        block = self._qkernel.block
-
-        # Build operands: [BlockValue, control(s), target(s), param(s)]
-        operands: list[Any] = [block]
-
-        for ctrl in controls:
-            operands.append(ctrl.value)
-
-        for tgt in target_args:
-            operands.append(tgt.value)
-
-        # Add parameter values
-        for param_name, param_value in params.items():
-            if isinstance(param_value, Handle):
-                # Handle types (Float, UInt, etc.) have a .value attribute
-                operands.append(param_value.value)
-            else:
-                # Create constant Value for raw float/int
-                param_val = Value(
-                    type=FloatType(),
-                    name=f"ctrl_param_{param_name}",
-                    params={"const": float(param_value)},
-                )
-                operands.append(param_val)
+        # Build operands: [control(s), target(s), param(s)]
+        operands: list[Any] = [c.value for c in controls] + [
+            t.value for t in target_args
+        ]
+        self._params_to_operands(params, operands)
 
         # Build results: [control_out(s), target_out(s)]
-        results: list[Value] = []
-        for ctrl in controls:
-            results.append(ctrl.value.next_version())
-        for tgt in target_args:
-            results.append(tgt.value.next_version())
+        results: list[Value] = [c.value.next_version() for c in controls] + [
+            t.value.next_version() for t in target_args
+        ]
 
-        # Create ControlledUOperation with power
-        op = ControlledUOperation(
-            operands=operands,
-            results=results,
-            num_controls=num_controls,
-            power=power,
+        self._build_and_emit_op(
+            operands,
+            results,
+            num_controls,
+            normalized_power,
         )
 
-        # Add to tracer
-        tracer = get_current_tracer()
-        tracer.add_operation(op)
-
         # Return output handles
-        output_qubits: list[Qubit] = []
-
-        # Control qubit outputs
-        for i, ctrl in enumerate(controls):
-            output_qubits.append(
-                Qubit(
-                    value=results[i],
-                    parent=ctrl.parent,
-                    indices=ctrl.indices,
-                )
-            )
-
-        # Target qubit outputs
-        for i, tgt in enumerate(target_args):
-            output_qubits.append(
-                Qubit(
-                    value=results[num_controls + i],
-                    parent=tgt.parent,
-                    indices=tgt.indices,
-                )
-            )
-
-        return tuple(output_qubits)
+        ctrl_outs = self._wrap_qubit_outputs(list(controls), results)
+        tgt_outs = self._wrap_qubit_outputs(
+            list(target_args), results, offset=num_controls
+        )
+        return tuple(ctrl_outs + tgt_outs)
 
     def _call_with_index_spec(
         self,
@@ -277,8 +322,7 @@ class ControlledGate:
                     val = Value(
                         type=UIntType(),
                         name=f"idx_{idx}",
-                        params={"const": idx},
-                    )
+                    ).with_const(idx)
                     result.append(val)
                 elif isinstance(idx, UInt):
                     result.append(idx.value)
@@ -299,43 +343,28 @@ class ControlledGate:
         # Consume the Vector (affine type)
         vector = vector.consume(operation_name="ControlledU[index_spec]")
 
-        block = self._qkernel.block
+        # operands: [ArrayValue, params...]
+        operands: list[Any] = [vector.value]
+        self._params_to_operands(params, operands)
 
-        # operands: [BlockValue, ArrayValue, params...]
-        operands: list[Any] = [block, vector.value]
-        for param_name, param_value in params.items():
-            if isinstance(param_value, Handle):
-                operands.append(param_value.value)
-            else:
-                param_val = Value(
-                    type=FloatType(),
-                    name=f"ctrl_param_{param_name}",
-                    params={"const": float(param_value)},
-                )
-                operands.append(param_val)
+        results: list[Value[Any]] = [vector.value.next_version()]
 
-        # results: [ArrayValue (updated Vector)]
-        results = [vector.value.next_version()]
-
-        # Get num_controls as IR Value
         nc = self._num_controls
         if isinstance(nc, UInt):
             nc = nc.value
 
-        op = ControlledUOperation(
-            operands=operands,
-            results=results,
-            num_controls=nc,
-            power=power,
+        self._build_and_emit_op(
+            operands,
+            results,
+            nc,
+            power,
             target_indices=ti_values,
             controlled_indices=ci_values,
         )
 
-        tracer = get_current_tracer()
-        tracer.add_operation(op)
-
-        # Return a single Vector (not tuple)
-        return Vector._create_from_value(results[0], vector.shape, vector.value.name)
+        return Vector._create_from_value(
+            cast(ArrayValue[Any], results[0]), vector.shape, vector.value.name
+        )
 
     def _call_symbolic(
         self,
@@ -368,68 +397,38 @@ class ControlledGate:
         control_vector = control_vector.consume(operation_name="ControlledU[controls]")
 
         # Consume target qubits
-        consumed_targets = []
-        for tgt in target_args:
-            consumed_targets.append(tgt.consume(operation_name="ControlledU[target]"))
+        consumed_targets = [
+            tgt.consume(operation_name="ControlledU[target]") for tgt in target_args
+        ]
 
-        # Get BlockValue from qkernel
-        block = self._qkernel.block
-
-        # Build operands: [BlockValue, control_vector, target(s), param(s)]
-        operands: list[Any] = [block, control_vector.value]
-        for tgt in consumed_targets:
-            operands.append(tgt.value)
-
-        # Add parameter values
-        for param_name, param_value in params.items():
-            if isinstance(param_value, Handle):
-                operands.append(param_value.value)
-            else:
-                param_val = Value(
-                    type=FloatType(),
-                    name=f"ctrl_param_{param_name}",
-                    params={"const": float(param_value)},
-                )
-                operands.append(param_val)
+        # Build operands: [control_vector, target(s), param(s)]
+        operands: list[Any] = [control_vector.value] + [
+            t.value for t in consumed_targets
+        ]
+        self._params_to_operands(params, operands)
 
         # Build results: [control_vector_out, target_out(s)]
-        results: list[Value] = []
-        results.append(control_vector.value.next_version())
-        for tgt in consumed_targets:
-            results.append(tgt.value.next_version())
+        results: list[Value] = [control_vector.value.next_version()] + [
+            t.value.next_version() for t in consumed_targets
+        ]
 
-        # Create ControlledUOperation with symbolic num_controls
-        op = ControlledUOperation(
-            operands=operands,
-            results=results,
-            num_controls=num_controls.value,  # IR Value, not UInt handle
-            power=power,
+        self._build_and_emit_op(
+            operands,
+            results,
+            num_controls.value,
+            power,
         )
-
-        # Add to tracer
-        tracer = get_current_tracer()
-        tracer.add_operation(op)
-
-        # Return output handles
-        output_handles: list[Any] = []
 
         # Control vector output
-        control_out = Vector._create_from_value(
-            results[0], control_vector.shape, control_vector.value.name
+        control_out: Vector[Any] = Vector._create_from_value(
+            cast(ArrayValue[Any], results[0]),
+            control_vector.shape,
+            control_vector.value.name,
         )
-        output_handles.append(control_out)
 
         # Target outputs
-        for i, tgt in enumerate(consumed_targets):
-            output_handles.append(
-                Qubit(
-                    value=results[1 + i],
-                    parent=tgt.parent,
-                    indices=tgt.indices,
-                )
-            )
-
-        return tuple(output_handles)
+        tgt_outs = self._wrap_qubit_outputs(consumed_targets, results, offset=1)
+        return tuple([control_out] + tgt_outs)
 
 
 def controlled(qkernel: "QKernel", num_controls: int | UInt = 1) -> ControlledGate:

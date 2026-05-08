@@ -4,8 +4,7 @@ import random
 import numpy as np
 import pytest
 
-from qamomile.optimization.binary_model import BinaryModel, BinaryExpr, VarType
-
+from qamomile.optimization.binary_model import BinaryExpr, BinaryModel, VarType
 
 # ---- coefficients property ----
 

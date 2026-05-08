@@ -34,10 +34,12 @@ Features:
 
 from __future__ import annotations
 
-import math
 import dataclasses
 import enum
+import math
 from typing import Iterator
+
+import numpy as np
 
 
 class Pauli(enum.Enum):
@@ -54,7 +56,17 @@ class Pauli(enum.Enum):
     X = 0
     Y = 1
     Z = 2
-    I = 3
+    I = 3  # noqa: E741
+
+
+# Dense 2x2 matrices for each single-qubit Pauli. Hoisted to module level
+# so ``Hamiltonian.to_numpy()`` does not rebuild them on every call.
+_PAULI_MATRICES: dict[Pauli, np.ndarray] = {
+    Pauli.I: np.eye(2, dtype=np.complex128),
+    Pauli.X: np.array([[0, 1], [1, 0]], dtype=np.complex128),
+    Pauli.Y: np.array([[0, -1j], [1j, 0]], dtype=np.complex128),
+    Pauli.Z: np.array([[1, 0], [0, -1]], dtype=np.complex128),
+}
 
 
 # Pauli multiplication table: (P1, P2) -> (Result, Phase)
@@ -162,7 +174,9 @@ class Hamiltonian:
         return cls(num_qubits=num_qubits)
 
     @classmethod
-    def identity(cls, coeff: float | complex = 1.0, num_qubits: int | None = None) -> Hamiltonian:
+    def identity(
+        cls, coeff: float | complex = 1.0, num_qubits: int | None = None
+    ) -> Hamiltonian:
         """Create a scalar times identity Hamiltonian."""
         h = cls(num_qubits=num_qubits)
         h.constant = coeff
@@ -170,19 +184,14 @@ class Hamiltonian:
 
     @classmethod
     def single_pauli(
-        cls,
-        pauli: Pauli,
-        index: int,
-        coeff: float | complex = 1.0
+        cls, pauli: Pauli, index: int, coeff: float | complex = 1.0
     ) -> Hamiltonian:
         """Create a single Pauli term Hamiltonian."""
         h = cls()
         h.add_term((PauliOperator(pauli, index),), coeff)
         return h
 
-    def add_term(
-        self, operators: tuple[PauliOperator, ...], coeff: float | complex
-    ):
+    def add_term(self, operators: tuple[PauliOperator, ...], coeff: float | complex):
         """
         Adds a term to the Hamiltonian.
 
@@ -294,7 +303,9 @@ class Hamiltonian:
                     h_str += "+" + term_str if coeff.real > 0 else "-" + term_str
                 else:
                     h_str += (
-                        f"+{coeff}" + term_str if coeff.real > 0 else f"{coeff}" + term_str
+                        f"+{coeff}" + term_str
+                        if coeff.real > 0
+                        else f"{coeff}" + term_str
                     )
 
             counter += 1
@@ -360,6 +371,33 @@ class Hamiltonian:
             h.add_term(remapped_ops, coeff)
 
         return h
+
+    def to_numpy(self) -> np.ndarray:
+        """Convert the Hamiltonian to a dense NumPy matrix.
+
+        Qubit 0 is mapped to the least-significant bit of computational-basis
+        indices, matching :meth:`qamomile.linalg.HermitianMatrix.to_hamiltonian`.
+        The returned array has shape ``(2**n, 2**n)`` where ``n`` is
+        :attr:`num_qubits`.
+        """
+        num_qubits = self.num_qubits
+        dim = 1 << num_qubits
+        result = np.asarray(self.constant, dtype=np.complex128) * np.eye(
+            dim, dtype=np.complex128
+        )
+
+        for operators, coeff in self._terms.items():
+            factors = [_PAULI_MATRICES[Pauli.I]] * num_qubits
+            for op in operators:
+                factors[op.index] = _PAULI_MATRICES[op.pauli]
+
+            term = np.array([[1.0 + 0.0j]], dtype=np.complex128)
+            for factor in reversed(factors):
+                term = np.kron(term, factor)
+
+            result = result + np.asarray(coeff, dtype=np.complex128) * term
+
+        return result
 
     def __add__(self, other):
         if isinstance(other, Hamiltonian):

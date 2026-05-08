@@ -72,24 +72,24 @@ _TEX_SYMBOLS = {
 }
 
 
-def _default_qubit_columns() -> defaultdict[int, int]:
+def _default_qubit_columns() -> defaultdict[int, float]:
     """Default factory: every qubit starts at column 1."""
-    return defaultdict(lambda: 1)
+    return defaultdict(lambda: 1.0)
 
 
 @dataclass
 class LayoutState:
     """Mutable state shared across layout handler methods."""
 
-    positions: dict[tuple, int] = field(default_factory=dict)
+    positions: dict[tuple, float] = field(default_factory=dict)
     block_ranges: list[dict] = field(default_factory=list)
     block_widths: dict[tuple, float] = field(default_factory=dict)
-    column: int = 1
+    column: float = 1.0
     max_depth: int = 0
     actual_width: float = 1.0
     first_gate_x: float | None = None
     first_gate_half_width: float = 0.0
-    qubit_columns: dict[int, int] = field(default_factory=_default_qubit_columns)
+    qubit_columns: dict[int, float] = field(default_factory=_default_qubit_columns)
     qubit_right_edges: dict[int, float] = field(default_factory=dict)
     qubit_end_positions: dict[int, float] = field(default_factory=dict)
     inlined_op_keys: set[tuple] = field(default_factory=set)
@@ -101,7 +101,7 @@ class LayoutState:
 class LayoutResult:
     """Result of the layout computation."""
 
-    width: int
+    width: float
     positions: dict[tuple, float]
     block_ranges: list[dict]
     max_depth: int

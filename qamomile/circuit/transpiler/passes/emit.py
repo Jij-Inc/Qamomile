@@ -20,15 +20,26 @@ from qamomile.circuit.transpiler.executable import (
     ParameterMetadata,
 )
 from qamomile.circuit.transpiler.passes import Pass
+from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
+    ClbitMap,
+    QubitAddress,
+    QubitMap,
+)
+from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
+    ValueResolver,
+)
 from qamomile.circuit.transpiler.segments import (
     ClassicalSegment,
+    ClassicalStep,
     ExpvalSegment,
+    ExpvalStep,
+    ProgramPlan,
     QuantumSegment,
-    SimplifiedProgram,
+    QuantumStep,
 )
 
 T = TypeVar("T")  # Backend circuit type
-C = TypeVar("C", covariant=True)  # Circuit type for emitter
+C = TypeVar("C", contravariant=True)  # Circuit type for emitter
 
 
 @runtime_checkable
@@ -87,13 +98,13 @@ class CompositeGateEmitter(Protocol[C]):
         ...
 
 
-class EmitPass(Pass[SimplifiedProgram, ExecutableProgram[T]], Generic[T]):
+class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
     """Base class for backend-specific emission passes.
 
     Subclasses implement _emit_quantum_segment() to generate
     backend-specific quantum circuits.
 
-    Input: SimplifiedProgram (enforces C→Q→C pattern)
+    Input: ProgramPlan
     Output: ExecutableProgram with compiled segments
     """
 
@@ -113,45 +124,53 @@ class EmitPass(Pass[SimplifiedProgram, ExecutableProgram[T]], Generic[T]):
                      parameters must be bound at execution time.
             parameters: List of parameter names to preserve as backend parameters.
         """
-        self.bindings = bindings or {}
+        # Wrap user bindings in an ``EmitContext`` so emit-time writers can
+        # progressively migrate to typed methods (``set_value``, ``set_runtime_expr``,
+        # ``push_loop_var``) while existing dict-style writes continue to
+        # work. ``EmitContext`` IS a ``dict``, so downstream signatures
+        # typed as ``dict[str, Any]`` accept it unchanged.
+        from qamomile.circuit.transpiler.emit_context import EmitContext
+
+        if isinstance(bindings, EmitContext):
+            self.bindings = bindings
+        else:
+            self.bindings = EmitContext.from_user_bindings(bindings)
         self.parameters = set(parameters) if parameters else set()
+        self._resolver = ValueResolver(self.parameters)
 
-    def run(self, input: SimplifiedProgram) -> ExecutableProgram[T]:
-        """Emit backend code from simplified program."""
-        # Compile quantum segment (always present)
-        compiled_quantum = [self._compile_quantum(input.quantum)]
-
-        # Compile optional segments
+    def run(self, input: ProgramPlan) -> ExecutableProgram[T]:
+        """Emit backend code from a program plan."""
+        quantum_segments: list[QuantumSegment] = []
         compiled_classical: list[CompiledClassicalSegment] = []
+        classical_segments: list[ClassicalSegment] = []
         compiled_expval: list[CompiledExpvalSegment] = []
-        execution_order: list[tuple[str, int]] = []
+        expval_segments: list[ExpvalSegment] = []
+        compiled_quantum: list[CompiledQuantumSegment[T]] = []
 
-        # Build execution order based on what's present
-        if input.classical_prep:
-            compiled_classical.append(self._compile_classical(input.classical_prep))
-            execution_order.append(("classical", 0))
-
-        # Quantum always present
-        execution_order.append(("quantum", 0))
-
-        # Expval or classical post (mutually exclusive in practice)
-        if input.expval:
-            compiled_expval.append(
-                self._compile_expval(input.expval, 0, input, compiled_quantum)
-            )
-            execution_order.append(("expval", 0))
-
-        if input.classical_post:
-            idx = 1 if input.classical_prep else 0
-            compiled_classical.append(self._compile_classical(input.classical_post))
-            execution_order.append(("classical", idx))
+        for step in input.steps:
+            if isinstance(step, ClassicalStep):
+                classical_segments.append(step.segment)
+                compiled_classical.append(self._compile_classical(step.segment))
+            elif isinstance(step, QuantumStep):
+                quantum_segments.append(step.segment)
+                compiled_quantum.append(self._compile_quantum(step.segment))
+            elif isinstance(step, ExpvalStep):
+                expval_segments.append(step.segment)
+                compiled_expval.append(
+                    self._compile_expval(
+                        step.segment,
+                        step.quantum_step_index,
+                        input,
+                        compiled_quantum,
+                    )
+                )
 
         return ExecutableProgram(
+            plan=input,
             compiled_quantum=compiled_quantum,
             compiled_classical=compiled_classical,
             compiled_expval=compiled_expval,
-            execution_order=execution_order,
-            output_refs=input.output_refs,
+            output_refs=input.abi.output_refs,
         )
 
     def _compile_quantum(
@@ -204,7 +223,7 @@ class EmitPass(Pass[SimplifiedProgram, ExecutableProgram[T]], Generic[T]):
         self,
         segment: ExpvalSegment,
         quantum_segment_index: int,
-        program: SimplifiedProgram,
+        program: ProgramPlan,
         compiled_quantum: list[CompiledQuantumSegment[T]],
     ) -> CompiledExpvalSegment:
         """Compile expval segment by retrieving bound Hamiltonian.
@@ -221,13 +240,10 @@ class EmitPass(Pass[SimplifiedProgram, ExecutableProgram[T]], Generic[T]):
         observable_value = segment.hamiltonian_value
 
         # Retrieve Hamiltonian from bindings
-        if observable_value.name not in self.bindings:
-            raise RuntimeError(
-                f"Observable '{observable_value.name}' not found in bindings. "
-                f"Hamiltonians must be provided as bindings."
-            )
+        if observable_value is None:
+            raise RuntimeError("ExpvalSegment has no hamiltonian_value set.")
 
-        hamiltonian = self.bindings[observable_value.name]
+        hamiltonian = self._resolve_observable_binding(observable_value)
 
         # Validate type
         if not isinstance(hamiltonian, qm_o.Hamiltonian):
@@ -254,6 +270,18 @@ class EmitPass(Pass[SimplifiedProgram, ExecutableProgram[T]], Generic[T]):
             result_ref=segment.result_ref,
             qubit_map=qubit_map,
         )
+
+    def _resolve_observable_binding(self, observable_value: Value) -> Any:
+        """Resolve an observable Value to its bound Hamiltonian."""
+        hamiltonian = self._resolver.resolve_bound_value(
+            observable_value, self.bindings
+        )
+        if hamiltonian is None:
+            raise RuntimeError(
+                f"Observable '{observable_value.name}' not found in bindings. "
+                f"Hamiltonians must be provided as bindings."
+            )
+        return hamiltonian
 
     def _build_qubit_map(
         self,
@@ -291,15 +319,16 @@ class EmitPass(Pass[SimplifiedProgram, ExecutableProgram[T]], Generic[T]):
         # Check if qubits_value is an ArrayValue with qubit_values
         # (created when tuple of qubits is passed to expval)
         if isinstance(qubits_value, ArrayValue):
-            qubit_values = qubits_value.params.get("qubit_values", [])
-            for i, qv in enumerate(qubit_values):
-                # qv is a Value object; look up its UUID in the qubit_map
-                if hasattr(qv, "uuid") and qv.uuid in uuid_to_physical:
-                    qubit_map[i] = uuid_to_physical[qv.uuid]
+            for i, qubit_uuid in enumerate(qubits_value.get_element_uuids()):
+                addr = QubitAddress(qubit_uuid)
+                if addr in uuid_to_physical:
+                    qubit_map[i] = uuid_to_physical[addr]
         else:
             # Single qubit or Vector case - map index 0 to the qubit
-            if hasattr(qubits_value, "uuid") and qubits_value.uuid in uuid_to_physical:
-                qubit_map[0] = uuid_to_physical[qubits_value.uuid]
+            if hasattr(qubits_value, "uuid"):
+                addr = QubitAddress(qubits_value.uuid)
+                if addr in uuid_to_physical:
+                    qubit_map[0] = uuid_to_physical[addr]
 
         return qubit_map
 
@@ -308,7 +337,7 @@ class EmitPass(Pass[SimplifiedProgram, ExecutableProgram[T]], Generic[T]):
         self,
         operations: list[Operation],
         bindings: dict[str, Any],
-    ) -> tuple[T, dict[str, int], dict[str, int]]:
+    ) -> tuple[T, QubitMap, ClbitMap]:
         """Generate backend-specific quantum circuit.
 
         Args:

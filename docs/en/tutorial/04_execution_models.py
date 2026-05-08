@@ -7,12 +7,16 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.18.1
 #   kernelspec:
-#     display_name: qamomile
+#     display_name: Python 3
 #     language: python
-#     name: qamomile
+#     name: python3
 # ---
 
 # %% [markdown]
+# ---
+# tags: [tutorial]
+# ---
+#
 # # Execution Models: `sample()` vs `run()`
 #
 # Qamomile provides two execution methods depending on what your qkernel returns:
@@ -23,6 +27,10 @@
 # | `Float` (from `expval`) | `run()` | `float` — expectation value |
 #
 # This chapter explains both methods and introduces **observables** for expectation-value computation.
+
+# %%
+# Install the latest Qamomile through pip!
+# # !pip install qamomile
 
 # %%
 import qamomile.circuit as qmc

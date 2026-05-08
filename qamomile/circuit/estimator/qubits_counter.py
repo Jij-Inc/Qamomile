@@ -1,4 +1,4 @@
-"""Qubit resource counting for BlockValue.
+"""Qubit resource counting for Block.
 
 This module counts the number of qubits required by a quantum circuit,
 using ExprResolver for value resolution and shared engine helpers for
@@ -11,17 +11,19 @@ from typing import overload
 
 import sympy as sp
 
-from qamomile.circuit.ir.block_value import BlockValue
+from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
+    HasNestedOps,
     IfOperation,
     WhileOperation,
 )
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.operation import Operation, QInitOperation
+from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.types.primitives import QubitType
 from qamomile.circuit.ir.value import ArrayValue
 
@@ -71,7 +73,7 @@ def _count_input_qubits(
     input_values: list,
     resolver: ExprResolver,
 ) -> sp.Expr:
-    """Count qubit-typed values in BlockValue.input_values.
+    """Count qubit-typed values in Block.input_values.
 
     Only used at the top level to count qubits passed as function arguments.
     """
@@ -92,8 +94,8 @@ def _count_input_qubits(
 # ------------------------------------------------------------------ #
 
 
-def _is_clean_call(block: BlockValue) -> bool:
-    """Check if a BlockValue is a 'clean call'.
+def _is_clean_call(block: Block) -> bool:
+    """Check if a Block is a 'clean call'.
 
     A clean call returns only the qubits it received as inputs.
     Any internally allocated qubits (ancillas) are freed before return,
@@ -103,7 +105,7 @@ def _is_clean_call(block: BlockValue) -> bool:
     False (safe fallback — will overcount, never undercount).
     """
     input_logical_ids = {v.logical_id for v in block.input_values}
-    for rv in block.return_values:
+    for rv in block.output_values:
         if rv.type.is_quantum():
             if rv.logical_id not in input_logical_ids:
                 return False
@@ -118,7 +120,7 @@ def _is_clean_call(block: BlockValue) -> bool:
 def _build_controlled_u_child_resolver(
     op: ControlledUOperation,
     resolver: ExprResolver,
-) -> tuple[BlockValue | None, ExprResolver | None]:
+) -> tuple[Block | None, ExprResolver | None]:
     """Build child resolver for ControlledUOperation's inner block.
 
     Handles both index_spec mode (qubit operands identified by index)
@@ -129,12 +131,12 @@ def _build_controlled_u_child_resolver(
     """
 
     controlled_block = op.block
-    if not isinstance(controlled_block, BlockValue):
+    if not isinstance(controlled_block, Block):
         return None, None
 
     extra: dict[str, sp.Expr] = {}
     if op.has_index_spec:
-        param_operands = op.operands[2:]
+        param_operands = op.operands[1:]
         param_idx = 0
         for formal_input in controlled_block.input_values:
             if not formal_input.type.is_quantum():
@@ -188,7 +190,7 @@ def _count_composite_split(
     meta_ancilla: sp.Expr = sp.Integer(0)
     impl_alloc: sp.Expr = sp.Integer(0)
 
-    if isinstance(impl, BlockValue):
+    if isinstance(impl, Block):
         impl_alloc = _count_from_operations(impl.operations, resolver)
 
     if op.resource_metadata is not None:
@@ -196,7 +198,7 @@ def _count_composite_split(
 
     total_alloc = impl_alloc + meta_ancilla
 
-    if isinstance(impl, BlockValue) and _is_clean_call(impl):
+    if isinstance(impl, Block) and _is_clean_call(impl):
         return total_alloc, True
     if impl is None and op.resource_metadata is not None:
         # Stub with metadata only: ancilla are reusable by definition
@@ -212,7 +214,7 @@ def _count_composite_total(
 
     count: sp.Expr = sp.Integer(0)
     impl = op.implementation
-    if isinstance(impl, BlockValue):
+    if isinstance(impl, Block):
         count += _count_from_operations(impl.operations, resolver)
     if op.resource_metadata is not None:
         count += sp.Integer(op.resource_metadata.ancilla_qubits)
@@ -248,8 +250,8 @@ def _count_loop_body_split(
                 persistent += _count_qinit(op, resolver)  # type: ignore
 
             case CallBlockOperation():
-                called_block = op.operands[0]
-                if isinstance(called_block, BlockValue):
+                called_block = op.block
+                if isinstance(called_block, Block):
                     child = resolver.call_child_scope(op)
                     inner_alloc = _count_from_operations(called_block.operations, child)
                     if _is_clean_call(called_block):
@@ -312,6 +314,20 @@ def _count_loop_body_split(
                 persistent += inner_p * cardinality  # type: ignore
                 reusable = sp.Max(reusable, inner_r)
 
+            case PauliEvolveOp():
+                # PauliEvolveOp operates in-place on existing qubits;
+                # no additional qubit allocation required.
+                continue
+
+            case HasNestedOps():
+                import warnings
+
+                warnings.warn(
+                    f"Unhandled control flow type {type(op).__name__} "
+                    f"in qubit counting; its qubits will not be counted.",
+                    stacklevel=2,
+                )
+
             case _:
                 continue
 
@@ -367,8 +383,8 @@ def _count_from_operations(
                 count += sp.Max(true_count, false_count)  # type: ignore
 
             case CallBlockOperation():
-                called_block = op.operands[0]
-                if isinstance(called_block, BlockValue):
+                called_block = op.block
+                if isinstance(called_block, Block):
                     child = resolver.call_child_scope(op)
                     count += _count_from_operations(  # type: ignore
                         called_block.operations, child
@@ -392,6 +408,19 @@ def _count_from_operations(
             case CompositeGateOperation():
                 count += _count_composite_total(op, resolver)  # type: ignore
 
+            case PauliEvolveOp():
+                # PauliEvolveOp operates in-place; no new qubits.
+                continue
+
+            case HasNestedOps():
+                import warnings
+
+                warnings.warn(
+                    f"Unhandled control flow type {type(op).__name__} "
+                    f"in qubit counting; its qubits will not be counted.",
+                    stacklevel=2,
+                )
+
             case _:
                 continue
 
@@ -404,17 +433,17 @@ def _count_from_operations(
 
 
 @overload
-def qubits_counter(block: BlockValue) -> sp.Expr: ...
+def qubits_counter(block: Block) -> sp.Expr: ...
 
 
 @overload
 def qubits_counter(block: list[Operation]) -> sp.Expr: ...
 
 
-def qubits_counter(block: BlockValue | list[Operation]) -> sp.Expr:
-    """Count the number of qubits required by a BlockValue.
+def qubits_counter(block: Block | list[Operation]) -> sp.Expr:
+    """Count the number of qubits required by a Block.
 
-    This function analyzes the operations in a BlockValue and counts
+    This function analyzes the operations in a Block and counts
     the total number of qubits that need to be allocated. It handles:
 
     - QInitOperation: Counts single qubits and qubit arrays
@@ -424,20 +453,20 @@ def qubits_counter(block: BlockValue | list[Operation]) -> sp.Expr:
     - ControlledUOperation: Recursively counts the unitary block
 
     Args:
-        block: The BlockValue to analyze.
+        block: The Block to analyze.
 
     Returns:
         The qubit count as a sympy expression. May contain symbols
         for parametric dimensions (e.g., if array sizes are parameters).
 
     Example:
-        >>> from qamomile.circuit.ir.block_value import BlockValue
-        >>> block = some_block_value()
+        >>> from qamomile.circuit.ir.block import Block
+        >>> block = some_block()
         >>> count = qubits_counter(block)
         >>> print(count)  # e.g., "n + 3" for parametric n
     """
 
-    if isinstance(block, BlockValue):
+    if isinstance(block, Block):
         resolver = ExprResolver(block=block)
         input_qubits = _count_input_qubits(block.input_values, resolver)
         ops_qubits = _count_from_operations(block.operations, resolver)

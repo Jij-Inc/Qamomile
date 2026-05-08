@@ -439,7 +439,6 @@ class TestIQFT:
         )
 
 
-
 class TestQFTIQFT:
     """Test QFT followed by IQFT produces identity."""
 

@@ -1,10 +1,11 @@
 from __future__ import annotations
+
 import dataclasses
 import enum
 from collections import Counter
 from typing import Generic, TypeVar
 
-from qamomile.optimization.utils import is_close_zero
+from qamomile._utils import is_close_zero
 
 
 class VarType(enum.StrEnum):

@@ -7,12 +7,16 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.18.1
 #   kernelspec:
-#     display_name: qamomile
+#     display_name: Python 3
 #     language: python
-#     name: qamomile
+#     name: python3
 # ---
 
 # %% [markdown]
+# ---
+# tags: [tutorial]
+# ---
+#
 # # 再利用パターン：QKernelの合成とコンポジットゲート
 #
 # 回路が大きくなると、ゲート列のコピー＆ペーストを避けたくなります。Qamomileは2つの再利用メカニズムを提供しています：
@@ -23,6 +27,10 @@
 # さらにトップダウン設計のための第3のパターンもあります：
 #
 # 3. **スタブゲート** — 実装本体を持たないゲートで、リソース推定に使います。例えば、グローバー探索アルゴリズムを設計しており、オラクルが約40個のTゲートを使用することはわかっているが、まだ実装していないとします。スタブゲートを使用すると、完全なオラクル実装なしでアルゴリズムの総コストを推定できます。
+
+# %%
+# 最新のQamomileをpipからインストールします！
+# # !pip install qamomile
 
 # %%
 import qamomile.circuit as qmc
@@ -75,6 +83,32 @@ print("GHZ result:", result.results)
 # %%
 qc = transpiler.to_circuit(ghz_with_helper, bindings={"n": 4})
 print(qc.draw())
+
+# %% [markdown]
+# ### ヘルパーへのスカラーリテラルの受け渡し
+#
+# ヘルパーqkernelがスカラー型(`UInt`,`Float`,`Bit`)のパラメータを宣言している場合、呼び出し側ではPythonの生のリテラルをそのまま渡せます。Qamomileが`int`を`UInt`、`float`を`Float`、`bool`を`Bit`に自動昇格します。`helper(q, 0, 0.5)`は`helper(q, qmc.uint(0), qmc.float_(0.5))`と等価です。明示的な`qmc.uint`/`qmc.float_`/`qmc.bit`コンストラクタは、値に名前を付けたい場合や複数の呼び出し箇所で共有したい場合にのみ使えば十分です。
+
+
+# %%
+@qmc.qkernel
+def rotate_first(
+    q: qmc.Vector[qmc.Qubit],
+    idx: qmc.UInt,
+    angle: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    q[idx] = qmc.ry(q[idx], angle)
+    return q
+
+
+@qmc.qkernel
+def helper_with_literals(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(n, name="q")
+    q = rotate_first(q, 0, 0.5)  # int・floatリテラルをそのまま渡せる
+    return qmc.measure(q)
+
+
+helper_with_literals.draw(n=3, fold_loops=False, inline=True)
 
 # %% [markdown]
 # ## パターン2：`@composite_gate`

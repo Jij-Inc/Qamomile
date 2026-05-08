@@ -3,7 +3,6 @@
 import qamomile.circuit as qm
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 
-
 # -- Helper kernels ----------------------------------------------------------
 
 
@@ -261,8 +260,11 @@ class TestControlledUTranspileIntegration:
 # -- Power field strict-int-cast unit tests ----------------------------------
 
 
-import pytest
-from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
+import pytest  # noqa: E402
+
+from qamomile.circuit.transpiler.passes.constant_fold import (  # noqa: E402
+    ConstantFoldingPass,
+)
 
 
 class TestConstantFoldPowerStrictValidation:

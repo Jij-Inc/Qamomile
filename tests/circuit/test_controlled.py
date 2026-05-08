@@ -143,21 +143,20 @@ class TestControlledGateCall:
         assert len(result) == 3
         op = tracer.operations[0]
         assert op.num_controls == 1
-        # block + 1 control + 2 targets = 4 operands
-        assert len(op.operands) == 4
+        assert len(op.operands) == 3
 
     def test_operands_structure(self):
-        """operands = [block, ctrl_vals..., tgt_vals...]"""
+        """operands = [ctrl_vals..., tgt_vals...] and block is stored separately."""
         qk = _mock_qkernel()
         cg = ControlledGate(qk, num_controls=2)
         c0, c1, tgt = _make_qubit("c0"), _make_qubit("c1"), _make_qubit("tgt")
         with trace() as tracer:
             cg(c0, c1, tgt)
         op = tracer.operations[0]
-        assert op.operands[0] is qk.block
-        assert op.operands[1] is c0.value
-        assert op.operands[2] is c1.value
-        assert op.operands[3] is tgt.value
+        assert op.block is qk.block
+        assert op.operands[0] is c0.value
+        assert op.operands[1] is c1.value
+        assert op.operands[2] is tgt.value
 
     def test_results_and_output_handles(self):
         """Results are next-versioned, preserve logical_id, and are wired to output handles."""
@@ -183,7 +182,7 @@ class TestControlledGateCall:
         mock_idx = (MagicMock(name="idx0"),)
         ctrl = _make_qubit("ctrl", parent=mock_parent, indices=mock_idx)
         tgt = _make_qubit("tgt")
-        with trace() as tracer:
+        with trace() as tracer:  # noqa: F841
             result = cg(ctrl, tgt)
         assert result[0].parent is mock_parent
         assert result[0].indices is mock_idx
@@ -195,11 +194,10 @@ class TestControlledGateCall:
         with trace() as tracer:
             cg(_make_qubit("ctrl"), _make_qubit("tgt"), theta=0.5)
         op = tracer.operations[0]
-        # block + ctrl + tgt + param = 4 operands
-        assert len(op.operands) == 4
-        param_val = op.operands[3]
+        assert len(op.operands) == 3
+        param_val = op.operands[2]
         assert isinstance(param_val, Value)
-        assert param_val.params["const"] == 0.5
+        assert param_val.get_const() == 0.5
 
     def test_handle_type_param_uses_value_directly(self):
         cg = ControlledGate(_mock_qkernel(), num_controls=1)
@@ -207,17 +205,16 @@ class TestControlledGateCall:
         with trace() as tracer:
             cg(_make_qubit("ctrl"), _make_qubit("tgt"), theta=theta)
         op = tracer.operations[0]
-        assert op.operands[3] is theta.value
+        assert op.operands[2] is theta.value
 
     def test_multiple_params(self):
         cg = ControlledGate(_mock_qkernel(), num_controls=1)
         with trace() as tracer:
             cg(_make_qubit("ctrl"), _make_qubit("tgt"), alpha=1.0, beta=2.0)
         op = tracer.operations[0]
-        # block + ctrl + tgt + 2 params = 5
-        assert len(op.operands) == 5
-        assert op.operands[3].params["const"] == 1.0
-        assert op.operands[4].params["const"] == 2.0
+        assert len(op.operands) == 4
+        assert op.operands[2].get_const() == 1.0
+        assert op.operands[3].get_const() == 2.0
 
     @pytest.mark.parametrize("power", [1, 2, 3, 5])
     def test_power_parameter_forwarded(self, power):
@@ -254,9 +251,9 @@ class TestControlledGateCall:
         cg = ControlledGate(_mock_qkernel(), num_controls=1)
         with trace() as tracer:
             cg(_make_qubit("ctrl"), _make_qubit("tgt"), theta=3)
-        param_val = tracer.operations[0].operands[3]
-        assert param_val.params["const"] == 3.0
-        assert isinstance(param_val.params["const"], float)
+        param_val = tracer.operations[0].operands[2]
+        assert param_val.get_const() == 3.0
+        assert isinstance(param_val.get_const(), float)
 
     def test_target_operands_with_params(self):
         """target_operands includes parameter Values when params are passed."""
@@ -270,14 +267,14 @@ class TestControlledGateCall:
         target_ops = op.target_operands
         assert len(target_ops) == 2
         assert target_ops[0] is tgt.value
-        assert target_ops[1].params["const"] == 0.5
+        assert target_ops[1].get_const() == 0.5
 
     def test_consume_prevents_reuse(self):
         """Qubit passed to controlled gate cannot be reused afterward."""
         cg = ControlledGate(_mock_qkernel(), num_controls=1)
         ctrl = _make_qubit("ctrl")
         tgt = _make_qubit("tgt")
-        with trace() as tracer:
+        with trace() as tracer:  # noqa: F841
             cg(ctrl, tgt)
             with pytest.raises(QubitConsumedError):
                 cg(ctrl, _make_qubit("tgt2"))
@@ -287,7 +284,7 @@ class TestControlledGateCall:
         cg = ControlledGate(_mock_qkernel(), num_controls=1)
         ctrl = _make_qubit("ctrl")
         tgt = _make_qubit("tgt")
-        with trace() as tracer:
+        with trace() as tracer:  # noqa: F841
             cg(ctrl, tgt)
             with pytest.raises(QubitConsumedError):
                 cg(_make_qubit("ctrl2"), tgt)
@@ -296,7 +293,7 @@ class TestControlledGateCall:
         """Same qubit as both control and target raises QubitAliasError."""
         cg = ControlledGate(_mock_qkernel(), num_controls=1)
         q = _make_qubit("q")
-        with trace() as tracer:
+        with trace() as tracer:  # noqa: F841
             with pytest.raises(QubitAliasError):
                 cg(q, q)
 
@@ -305,7 +302,7 @@ class TestControlledGateCall:
         cg = ControlledGate(_mock_qkernel(), num_controls=2)
         q = _make_qubit("q")
         tgt = _make_qubit("tgt")
-        with trace() as tracer:
+        with trace() as tracer:  # noqa: F841
             with pytest.raises(QubitAliasError):
                 cg(q, q, tgt)
 
@@ -328,7 +325,7 @@ class TestControlledValidation:
         """Passing fewer qubits than num_controls (no targets) raises ValueError."""
         cg = ControlledGate(_mock_qkernel(), num_controls=3)
         qs = [_make_qubit(f"q{i}") for i in range(3)]  # 3 controls, 0 targets
-        with trace() as tracer:
+        with trace() as tracer:  # noqa: F841
             with pytest.raises(ValueError):
                 cg(*qs)
 
@@ -371,7 +368,7 @@ class TestControlledPowerValidation:
         from qamomile.circuit.ir.types.primitives import UIntType
 
         cg = ControlledGate(_mock_qkernel(), num_controls=1)
-        uint_val = Value(type=UIntType(), name="power_k", params={"const": 4})
+        uint_val = Value(type=UIntType(), name="power_k").with_const(4)
         uint_power = UIntHandle(value=uint_val)
         with trace() as tracer:
             cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=uint_power)

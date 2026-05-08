@@ -7,12 +7,16 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.18.1
 #   kernelspec:
-#     display_name: qamomile
+#     display_name: Python 3
 #     language: python
-#     name: qamomile
+#     name: python3
 # ---
 
 # %% [markdown]
+# ---
+# tags: [tutorial]
+# ---
+#
 # # Classical Control Flow Patterns
 #
 # Quantum circuits often have structure that depends on classical control flow: iterating over qubits, applying gates based on a graph's edges, or choosing between gate sequences. Qamomile supports these patterns through `qmc.range`, `qmc.items`, `if` branching, and `while` loops.
@@ -24,6 +28,12 @@
 # - `if` and `while` on measurement results for mid-circuit branching
 
 # %%
+# Install the latest Qamomile through pip!
+# # !pip install qamomile
+
+# %%
+import os
+
 import qamomile.circuit as qmc
 from qamomile.qiskit import QiskitTranspiler
 
@@ -55,6 +65,12 @@ def hadamard_chain(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 hadamard_chain.draw(n=5, fold_loops=False)
 
 # %% [markdown]
+# :::{note}
+# The loop variable in `qmc.range` must be a **single variable** (e.g. `for i in qmc.range(n)`).
+# Tuple or list unpacking such as `for [i, j] in qmc.range(n)` is not supported and will raise a `SyntaxError`.
+# :::
+
+# %% [markdown]
 # ## `qmc.items` for Sparse Interaction Data
 #
 # Many quantum algorithms (QAOA, VQE) apply gates only on specific pairs of qubits, determined by a graph or interaction map. Rather than looping over all pairs, you can pass a **dictionary** of interactions and iterate with `qmc.items()`.
@@ -81,6 +97,19 @@ def sparse_coupling(
 
     return qmc.measure(q)
 
+
+# %% [markdown]
+# :::{note}
+# `qmc.items` supports these loop patterns:
+#
+# - `for key, value in qmc.items(d)` — scalar key
+# - `for (i, j), value in qmc.items(d)` — tuple key
+# - `for key, value in d.items()` — method-call form
+#
+# The **value** target must be a single variable. Tuple unpacking in the value position
+# (e.g. `for _, (i, j) in qmc.items(d)`) is **not** supported and will raise a `SyntaxError`.
+# Similarly, single-target patterns like `for pair in qmc.items(d)` are not supported.
+# :::
 
 # %% [markdown]
 # ## Inspecting with `transpiler.to_circuit()`
@@ -135,11 +164,14 @@ def conditional_flip() -> qmc.Bit:
 
 # %%
 exe = transpiler.transpile(conditional_flip)
-executor = transpiler.executor()
-job = exe.sample(executor, bindings={}, shots=100)
-result = job.result()
-for value, count in result.results:
-    print(f"  bit={value}: {count} shots")
+if os.environ.get("QAMOMILE_DOCS_TEST") == "1":
+    print("Skipping dynamic-circuit execution in docs test mode.")
+else:
+    executor = transpiler.executor()
+    job = exe.sample(executor, bindings={}, shots=100)
+    result = job.result()
+    for value, count in result.results:
+        print(f"  bit={value}: {count} shots")
 
 # %% [markdown]
 # Since `q0` is prepared as |1⟩, the measurement always yields 1, so `q1` always gets flipped — every shot should return 1.

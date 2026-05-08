@@ -1,10 +1,10 @@
 import ast
 import inspect
 import textwrap
+import types
 import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, NoReturn
-
 
 from qamomile.circuit.frontend.operation.control_flow import (
     emit_if,
@@ -15,46 +15,46 @@ from qamomile.circuit.frontend.operation.control_flow import (
 
 
 class VariableCollector(ast.NodeVisitor):
-    """ブロック内で使用・変更される変数を収集します。
+    """Collect variables used and mutated within a block.
 
-    以下を除外:
-    - 関数呼び出しの関数名 (func in Call)
-    - 属性アクセスのグローバルなベースオブジェクト (value in Attribute)
-    - グローバル変数（モジュール、組み込み関数など）
+    Excludes:
+    - Function names in calls (func in Call)
+    - Global base objects in attribute accesses (value in Attribute)
+    - Global variables (modules, builtins, etc.)
     """
 
     def __init__(self, global_names: set[str] | None = None):
         self.vars = set()
-        self._exclude = set()  # 除外する名前
+        self._exclude = set()  # names to exclude
         self._global_names = global_names or set()
         self._first_context: dict[str, str] = {}  # name -> "Store" | "Load"
         self._load_names: set[str] = set()
         self._store_names: set[str] = set()
 
     def visit_Call(self, node: ast.Call):
-        """関数呼び出しの関数名を除外"""
+        """Exclude the function name of a call."""
         if isinstance(node.func, ast.Name):
-            # 直接関数呼び出し: func()
+            # Direct function call: func()
             self._exclude.add(node.func.id)
-        # 引数は通常通り処理
+        # Process arguments normally
         for arg in node.args:
             self.visit(arg)
         for keyword in node.keywords:
             self.visit(keyword.value)
-        # node.func が属性アクセスの場合は visit_Attribute で処理
+        # If node.func is an attribute access, handle it in visit_Attribute
         if isinstance(node.func, ast.Attribute):
             self.visit(node.func)
 
     def visit_Attribute(self, node: ast.Attribute):
-        """属性アクセスのベース名を記録する。
+        """Record the base name of an attribute access.
 
-        モジュール名などグローバル名 (`qm.h`) は従来どおり除外し、
-        ユーザー変数 (`qs.shape`) は Load として扱う。
+        Global names such as module names (`qm.h`) are excluded as before,
+        while user variables (`qs.shape`) are treated as Load.
         """
         if isinstance(node.value, ast.Name):
             name = node.value.id
             if name in self._global_names:
-                # qm.x の qm を除外
+                # Exclude qm in qm.x
                 self._exclude.add(name)
             else:
                 self.vars.add(name)
@@ -62,24 +62,24 @@ class VariableCollector(ast.NodeVisitor):
                 if name not in self._first_context:
                     self._first_context[name] = "Load"
         else:
-            # ネストした属性アクセス (a.b.c) の場合は再帰
+            # Recurse for nested attribute accesses (a.b.c)
             self.visit(node.value)
 
     def visit_Assign(self, node: ast.Assign):
-        """右辺を先に走査し、Python の評価順序に合わせる。
+        """Visit the RHS first to match Python's evaluation order.
 
-        `q1 = qm.h(q1)` → 右辺 q1 (Load) が先 → first_context は "Load"
-        `cond2 = qm.measure(q2)` → 右辺 q2 (Load) が先、左辺 cond2 (Store) が後
+        `q1 = qm.h(q1)` → RHS q1 (Load) is first → first_context is "Load"
+        `cond2 = qm.measure(q2)` → RHS q2 (Load) first, LHS cond2 (Store) after
         """
         self.visit(node.value)
         for target in node.targets:
             self.visit(target)
 
     def visit_AugAssign(self, node: ast.AugAssign):
-        """AugAssign (e.g. x += 1) は暗黙の Read-before-Write。
+        """AugAssign (e.g. x += 1) is an implicit Read-before-Write.
 
-        右辺を先に走査し、Name ターゲットは Load + Store として記録する。
-        first_context は "Load"（既存値の読み出しが先行するため）。
+        Visit the RHS first and record Name targets as both Load and Store.
+        first_context is "Load" (the existing value is read first).
         """
         self.visit(node.value)
         target = node.target
@@ -96,11 +96,11 @@ class VariableCollector(ast.NodeVisitor):
             self.visit(target)
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
-        """内部関数定義の走査をスキップする。"""
+        """Skip traversal of inner function definitions."""
         pass
 
     def visit_Name(self, node: ast.Name):
-        """変数名を収集（除外リストにないもののみ）"""
+        """Collect variable names (only those not in the exclude list)."""
         if isinstance(node.id, str):
             if node.id not in self._exclude and node.id not in self._global_names:
                 self.vars.add(node.id)
@@ -116,22 +116,22 @@ class VariableCollector(ast.NodeVisitor):
 
     @property
     def locally_defined_vars(self) -> set[str]:
-        """このスコープ内で初めて定義（Store）される変数。"""
+        """Variables first defined (Store) within this scope."""
         return {name for name, ctx in self._first_context.items() if ctx == "Store"}
 
     @property
     def incoming_vars(self) -> set[str]:
-        """外部スコープから渡される必要がある変数（初回が Load）。"""
+        """Variables that must come from an outer scope (first use is Load)."""
         return self.vars - self.locally_defined_vars
 
     @property
     def load_vars(self) -> set[str]:
-        """Load コンテキストで参照される変数（実際に読まれる変数）。"""
+        """Variables referenced in Load context (actually read)."""
         return self._load_names & self.vars
 
     @property
     def store_vars(self) -> set[str]:
-        """Store コンテキストで代入される変数。"""
+        """Variables assigned in Store context."""
         return self._store_names & self.vars
 
 
@@ -147,15 +147,15 @@ class ControlFlowTransformer(ast.NodeTransformer):
         namespace: dict[str, Any] | None = None,
     ) -> None:
         self.counter: int = 0
-        # 変数名 -> 型注釈ノード(ast.AST) を保持する辞書
+        # Dict mapping variable name -> type annotation node (ast.AST)
         self.type_registry: dict[str, ast.AST] = {}
-        # グローバル変数名（モジュール、組み込み関数など）
+        # Global variable names (modules, builtins, etc.)
         self._global_names = global_names or set()
         # Scope tracking for visit_If input/output separation
         self._outer_defined_vars: frozenset[str] = frozenset()
         self._after_stmt_read_vars: frozenset[str] = frozenset()
         self._after_stmt_load_vars: frozenset[str] = frozenset()
-        # 関数パラメータ名（ループ変数シャドウイング検出用）
+        # Function parameter names (for loop-variable shadowing detection)
         self._param_names = param_names or set()
         # Namespace for resolving callables (used in while condition QKernel check)
         self._namespace = namespace or {}
@@ -241,9 +241,8 @@ class ControlFlowTransformer(ast.NodeTransformer):
         return node
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> Any:
-        """
-        a: int = 0 のような型注釈付き代入を検出し、型情報を登録します。
-        """
+        """Detect annotated assignments such as ``a: int = 0`` and register
+        the type information."""
         if isinstance(node.target, ast.Name):
             self.type_registry[node.target.id] = node.annotation
         return self.generic_visit(node)
@@ -255,23 +254,23 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 collector.visit(node)
         else:
             collector.visit(nodes)
-        # 登録済みの型がある変数、または出現した変数を対象とする
-        # グローバル変数（モジュール、組み込み関数など）は除外される
+        # Targets variables that have a registered type or that appear in the nodes.
+        # Global variables (modules, builtins, etc.) are excluded.
         return sorted(list(collector.vars))
 
     def _get_annotation(self, var_name: str) -> ast.AST | None:
-        """登録済みの型情報を取得します（ディープコピーして返す）"""
+        """Return the registered type annotation (returning a deep copy is preferred)."""
         if var_name in self.type_registry:
-            # ASTノードは使い回すとlocation情報などでバグりやすいためコピー推奨ですが、
-            # ここでは簡易的に参照を返します（unparse時は問題なし）
+            # Reusing AST nodes is bug-prone due to location metadata, so copying
+            # is preferred; here we return the reference directly (safe for unparse).
             return self.type_registry[var_name]
         return None
 
     def _make_arguments(self, var_names: list[str]) -> ast.arguments:
-        """型注釈付きの引数リストを作成"""
+        """Build an argument list with type annotations."""
         args_list = []
         for name in var_names:
-            # 型情報の取得
+            # Look up the annotation
             annotation = self._get_annotation(name)
             args_list.append(ast.arg(arg=name, annotation=annotation))  # type: ignore
 
@@ -286,20 +285,20 @@ class ControlFlowTransformer(ast.NodeTransformer):
         )
 
     def _create_return_annotation(self, var_names: list[str]) -> ast.AST | None:
-        """戻り値の型注釈を作成 (例: int や tuple[int, int])"""
+        """Build a return type annotation (e.g. ``int`` or ``tuple[int, int]``)."""
         if not var_names:
             return ast.Constant(value=None)
 
-        # 変数が1つならその型を返す
+        # Single variable: return its annotation
         if len(var_names) == 1:
             return self._get_annotation(var_names[0])
 
-        # 変数が複数の場合: tuple[Type1, Type2] を作成
+        # Multiple variables: build tuple[Type1, Type2]
         # ast.Subscript(value=Name(id='tuple'), slice=Tuple(elts=[...]))
         elts: list[ast.expr] = []
         for name in var_names:
             ann = self._get_annotation(name)
-            # 型情報がない場合は Any として扱うか、Noneを入れる
+            # Fall back to Any when no annotation is registered
             if ann is None:
                 elts.append(ast.Name(id="Any", ctx=ast.Load()))
             else:
@@ -357,7 +356,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         new_body = list(body_nodes)
         new_body.append(self._create_return_node(ret_vars))
 
-        # 戻り値の型注釈が指定されていなければ自動生成
+        # Auto-generate the return type annotation if not specified
         if return_type_ast is None:
             return_type_ast = self._create_return_annotation(ret_vars)
 
@@ -589,7 +588,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             raise SyntaxError("while ... else is not supported in @qkernel")
         # Check for quantum operations in while condition
         self._check_no_quantum_ops_in_condition(node.test, node.lineno)
-        # ネストされた制御フローを先に変換 (with definition tracking)
+        # Transform nested control flow first (with definition tracking)
         saved_outer = self._outer_defined_vars
         saved_after = self._after_stmt_read_vars
         saved_after_load = self._after_stmt_load_vars
@@ -615,7 +614,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         self._after_stmt_read_vars = saved_after
         self._after_stmt_load_vars = saved_after_load
 
-        # lambda: <condition> を作成
+        # Build ``lambda: <condition>``
         lambda_node = ast.Lambda(
             args=ast.arguments(
                 posonlyargs=[],
@@ -629,14 +628,14 @@ class ControlFlowTransformer(ast.NodeTransformer):
             body=node.test,
         )
 
-        # while_loop(lambda: cond) コールを作成
+        # Build the ``while_loop(lambda: cond)`` call
         while_loop_call = ast.Call(
             func=ast.Name(id="while_loop", ctx=ast.Load()),
             args=[lambda_node],
             keywords=[],
         )
 
-        # with文を作成
+        # Build the with-statement
         with_item = ast.withitem(context_expr=while_loop_call, optional_vars=None)
         with_stmt = ast.With(
             items=[with_item],
@@ -678,146 +677,158 @@ class ControlFlowTransformer(ast.NodeTransformer):
         return False
 
     def _extract_tuple_vars(self, target: ast.expr) -> list[str]:
-        """Extract variable names from tuple unpacking target.
+        """Extract variable names from tuple/list unpacking target.
 
         Examples:
             i -> ["i"]
             (i, j) -> ["i", "j"]
             ((i, j), k) -> ["i", "j", "k"]
+            [i, j] -> ["i", "j"]
         """
         if isinstance(target, ast.Name):
             return [target.id]
-        elif isinstance(target, ast.Tuple):
+        elif isinstance(target, (ast.Tuple, ast.List)):
             var_names = []
             for elt in target.elts:
                 var_names.extend(self._extract_tuple_vars(elt))
             return var_names
         else:
-            raise NotImplementedError(f"Unsupported target type: {type(target)}")
-
-    def visit_For(self, node: ast.For) -> Any:
-        if node.orelse:
-            raise SyntaxError("for ... else is not supported in @qkernel")
-        # ネストされた制御フローを先に変換 (with definition tracking)
-        saved_outer = self._outer_defined_vars
-        saved_after = self._after_stmt_read_vars
-        saved_after_load = self._after_stmt_load_vars
-        initial_defined = set(self._outer_defined_vars)
-        bound_vars = set(self._extract_tuple_vars(node.target))
-        initial_defined.update(bound_vars)
-        body_entry_live_in = self._loop_body_entry_live_in(
-            node.body, set(saved_after_load), bound_vars=bound_vars
-        )
-        flattened_body = self._visit_body_with_tracking(
-            node.body,
-            initial_defined,
-            outer_after_loads=frozenset(set(saved_after_load) | body_entry_live_in),
-        )
-        self._outer_defined_vars = saved_outer
-        self._after_stmt_read_vars = saved_after
-        self._after_stmt_load_vars = saved_after_load
-
-        # Check for parameter shadowing (common to all for-loop variants)
-        all_binding_names = self._extract_tuple_vars(node.target)
-        for var_name in all_binding_names:
-            if var_name in self._param_names:
-                raise SyntaxError(
-                    f"Loop variable '{var_name}' shadows a function parameter. "
-                    f"Use a different variable name to avoid silent value loss."
-                )
-
-        # Check for items() iteration first
-        if self._is_items_call(node.iter):
-            return self._transform_for_items(node, flattened_body)
-
-        # Check for range() iteration
-        if self._is_range_call(node.iter):
-            return self._transform_for_range(node, flattened_body)
-
-        # Handle direct sequence iteration (for item in seq:)
-        return self._transform_for_sequence(node, flattened_body)
-
-    def _transform_for_range(
-        self, node: ast.For, flattened_body: list[ast.stmt]
-    ) -> ast.With:
-        """Transform 'for i in range(...)' to 'with for_loop(...)'.
-
-        Supports patterns:
-            for i in range(stop):  ->  for_loop(0, stop, 1)
-            for i in range(start, stop):  ->  for_loop(start, stop, 1)
-            for i in range(start, stop, step):  ->  for_loop(start, stop, step)
-        """
-
-        num_args = len(node.iter.args)  # type: ignore
-        if num_args < 1 or num_args > 3:
-            raise NotImplementedError(
-                "range() requires 1-3 arguments: range(stop), range(start, stop), or range(start, stop, step)"
+            raise SyntaxError(
+                f"Unsupported loop target type in @qkernel: {ast.dump(target)}"
             )
 
-        # range の引数を取得
-        # range(stop) -> for_loop(0, stop, 1)
-        # range(start, stop) -> for_loop(start, stop, 1)
-        # range(start, stop, step) -> for_loop(start, stop, step)
-        if num_args == 1:
-            start_arg = ast.Constant(value=0)
-            stop_arg = node.iter.args[0]  # type: ignore
-            step_arg = ast.Constant(value=1)
-        elif num_args == 2:
-            start_arg = node.iter.args[0]  # type: ignore
-            stop_arg = node.iter.args[1]  # type: ignore
-            step_arg = ast.Constant(value=1)
-        else:  # num_args == 3
-            start_arg = node.iter.args[0]  # type: ignore
-            stop_arg = node.iter.args[1]  # type: ignore
-            step_arg = node.iter.args[2]  # type: ignore
+    def _validate_items_loop(self, node: ast.For) -> list[str]:
+        """Validate an items() for-loop and return binding variable names.
 
-        # ループ変数名を取得
-        if isinstance(node.target, ast.Name):
-            loop_var_name = node.target.id
+        Checks the call-site arguments and target pattern for items() /
+        module.items() / d.items() forms.
+        """
+        assert isinstance(node.iter, ast.Call)
+        call = node.iter
+        # from qamomile.circuit import items; items(d) form
+        if isinstance(call.func, ast.Name):
+            if call.keywords:
+                raise SyntaxError(
+                    "items() does not support keyword arguments in @qkernel; "
+                    "use items(d)."
+                )
+            if len(call.args) != 1:
+                raise SyntaxError(
+                    "items() requires exactly one dict argument: items(d)"
+                )
+        # Attribute form: distinguish module.items(d) vs d.items()
+        elif isinstance(call.func, ast.Attribute):
+            func_value = call.func.value
+            # Resolve the receiver to check if it's a module object
+            receiver_obj = (
+                self._namespace.get(func_value.id)
+                if isinstance(func_value, ast.Name)
+                else None
+            )
+            if isinstance(receiver_obj, types.ModuleType):
+                # module.items(d) form: require exactly 1 positional arg, no keywords
+                assert isinstance(func_value, ast.Name)
+                alias = func_value.id
+                if call.keywords:
+                    raise SyntaxError(
+                        f"items() does not support keyword arguments in @qkernel; "
+                        f"use {alias}.items(d)."
+                    )
+                if len(call.args) != 1:
+                    raise SyntaxError(
+                        f"items() requires exactly one dict argument: {alias}.items(d)"
+                    )
+            else:
+                # d.items() form (parameter, global dict, local variable, etc.):
+                # dict.items() takes no arguments.
+                if call.args or call.keywords:
+                    receiver_expr = ast.unparse(call.func.value)
+                    raise SyntaxError(
+                        "items() iteration over a dict must use "
+                        f"'{receiver_expr}.items()' with no arguments."
+                    )
+
+        # items(): target must be a 2-element tuple (key, value)
+        if not (isinstance(node.target, ast.Tuple) and len(node.target.elts) == 2):
+            raise SyntaxError(
+                "items() iteration requires 'for key, value in items(d)' or 'for key, value in d.items()' pattern. "
+                f"Got: {ast.dump(node.target)}"
+            )
+        key_target = node.target.elts[0]
+        value_target = node.target.elts[1]
+        # key may be a tuple like (i, j) or a simple Name
+        if not isinstance(key_target, (ast.Name, ast.Tuple)):
+            raise SyntaxError(
+                "Key target in items() iteration must be a variable or tuple of variables, "
+                f"got: {ast.dump(key_target)}"
+            )
+        # reject nested tuple unpacking in key, e.g. (i, (j, k))
+        if isinstance(key_target, ast.Tuple) and not all(
+            isinstance(e, ast.Name) for e in key_target.elts
+        ):
+            raise SyntaxError(
+                "Nested tuple unpacking in items() key is not supported. "
+                f"Use a flat tuple like (i, j) instead, got: {ast.dump(key_target)}"
+            )
+        # value must be a simple Name
+        if not isinstance(value_target, ast.Name):
+            raise SyntaxError(
+                "Value target in items() iteration must be a simple variable, "
+                f"got: {ast.dump(value_target)}"
+            )
+        return self._extract_tuple_vars(node.target)
+
+    def _validate_range_loop(self, node: ast.For) -> list[str]:
+        """Validate a range() for-loop and return binding variable names.
+
+        Checks the call-site arguments and target for range() /
+        module.range() forms.
+        """
+        assert isinstance(node.iter, ast.Call)
+        range_call = node.iter
+        # Derive the caller name from the AST for error messages
+        if isinstance(range_call.func, ast.Attribute) and isinstance(
+            range_call.func.value, ast.Name
+        ):
+            range_callee = f"{range_call.func.value.id}.range"
         else:
-            loop_var_name = "_loop_idx"
+            range_callee = "range"
+        range_label = f"{range_callee}()"
+        num_args = len(range_call.args)
+        # Keyword arguments (e.g. range(stop=n)) are not consumed by
+        # _transform_for_range; reject them explicitly to avoid silent loss.
+        if getattr(range_call, "keywords", None):
+            raise SyntaxError(
+                f"{range_label} does not support keyword arguments in @qkernel; "
+                f"use positional arguments like {range_callee}(stop) or "
+                f"{range_callee}(start, stop, step)."
+            )
+        # range(): requires 1-3 positional arguments
+        if num_args < 1 or num_args > 3:
+            raise SyntaxError(
+                f"{range_label} requires 1-3 arguments: "
+                f"{range_callee}(stop), {range_callee}(start, stop), or "
+                f"{range_callee}(start, stop, step)"
+            )
+        # range(): target must be a single variable
+        if not isinstance(node.target, ast.Name):
+            raise SyntaxError(
+                f"{range_label} iteration requires a single loop variable, "
+                f"got: {ast.dump(node.target)}"
+            )
+        return [node.target.id]
 
-        # for_loop(start, stop, step, var_name) コールを作成
-        for_loop_call = ast.Call(
-            func=ast.Name(id="for_loop", ctx=ast.Load()),
-            args=[start_arg, stop_arg, step_arg, ast.Constant(value=loop_var_name)],
-            keywords=[],
-        )
-
-        # ループ変数を as i として設定
-        with_item = ast.withitem(
-            context_expr=for_loop_call,
-            optional_vars=node.target,  # i をそのまま使用
-        )
-
-        with_stmt = ast.With(
-            items=[with_item],
-            body=flattened_body,
-            lineno=node.lineno,
-            col_offset=node.col_offset,
-        )
-
-        return with_stmt
-
-    def _transform_for_sequence(
-        self, node: ast.For, _flattened_body: list[ast.stmt]
-    ) -> NoReturn:
-        """Prohibit direct sequence iteration to prevent common bugs.
+    def _validate_sequence_loop(self, node: ast.For) -> NoReturn:
+        """Reject direct sequence iteration in @qkernel.
 
         Direct iteration like 'for item in vector:' doesn't support in-place
-        modification in @qkernel contexts. This method raises an error to
-        prevent silent bugs where reassignments don't affect the original array.
-
-        Raises:
-            SyntaxError: Always raised to prevent direct iteration.
+        modification in @qkernel contexts.  Always raises ``SyntaxError``.
         """
-        # Get the source code representation if possible
         if isinstance(node.target, ast.Name):
             item_var = node.target.id
         else:
             item_var = "item"
 
-        # Try to get a readable representation of the iterable
         iter_str = ast.unparse(node.iter) if hasattr(ast, "unparse") else "vector"
 
         raise SyntaxError(
@@ -834,6 +845,133 @@ class ControlFlowTransformer(ast.NodeTransformer):
             f"      {iter_str}[i] = qmc.operation({iter_str}[i])\n"
         )
 
+    def _validate_for_loop(self, node: ast.For) -> list[str]:
+        """Validate a for-loop node and return binding variable names.
+
+        Dispatches to kind-specific validators and checks parameter
+        shadowing.  Raises ``SyntaxError`` for invalid patterns so that
+        ``QKernel.__init__`` propagates them instead of falling back to
+        the original function.
+        """
+        if self._is_items_call(node.iter):
+            binding_names = self._validate_items_loop(node)
+        elif self._is_range_call(node.iter):
+            binding_names = self._validate_range_loop(node)
+        else:
+            self._validate_sequence_loop(node)  # always raises
+
+        # Check for parameter shadowing (common to all for-loop variants)
+        for var_name in binding_names:
+            if var_name in self._param_names:
+                raise SyntaxError(
+                    f"Loop variable '{var_name}' shadows a function parameter. "
+                    f"Use a different variable name to avoid silent value loss."
+                )
+
+        return binding_names
+
+    def visit_For(self, node: ast.For) -> Any:
+        if node.orelse:
+            raise SyntaxError("for ... else is not supported in @qkernel")
+
+        # Validate target per loop-kind BEFORE extracting binding names.
+        # This raises SyntaxError for invalid placeholder-loop targets
+        # instead of generic NotImplementedError that would be swallowed
+        # by QKernel.__init__'s fallback.
+        all_binding_names = self._validate_for_loop(node)
+
+        # Transform nested control flow first (with definition tracking)
+        saved_outer = self._outer_defined_vars
+        saved_after = self._after_stmt_read_vars
+        saved_after_load = self._after_stmt_load_vars
+        initial_defined = set(self._outer_defined_vars)
+        bound_vars = set(all_binding_names)
+        initial_defined.update(bound_vars)
+        body_entry_live_in = self._loop_body_entry_live_in(
+            node.body, set(saved_after_load), bound_vars=bound_vars
+        )
+        flattened_body = self._visit_body_with_tracking(
+            node.body,
+            initial_defined,
+            outer_after_loads=frozenset(set(saved_after_load) | body_entry_live_in),
+        )
+        self._outer_defined_vars = saved_outer
+        self._after_stmt_read_vars = saved_after
+        self._after_stmt_load_vars = saved_after_load
+
+        # Dispatch to the appropriate transform.
+        # Sequence iteration is already rejected by _validate_for_loop.
+        if self._is_items_call(node.iter):
+            return self._transform_for_items(node, flattened_body)
+
+        if self._is_range_call(node.iter):
+            return self._transform_for_range(node, flattened_body)
+
+        # [FOR DEVELOPER]
+        # Since _validate_for_loop should have rejected any non-items, non-range loops,
+        # reaching this point indicates a bug in the validation logic.
+        # (sequence pattern has been explicitly rejected by _validate_sequence_loop).
+        # Raising an explicit error helps catch such issues during development.
+        raise AssertionError(
+            "Unreachable: _validate_for_loop should have rejected this loop. "
+            f"iter={ast.dump(node.iter)}"
+        )
+
+    def _transform_for_range(
+        self, node: ast.For, flattened_body: list[ast.stmt]
+    ) -> ast.With:
+        """Transform 'for i in range(...)' to 'with for_loop(...)'.
+
+        Supports patterns:
+            for i in range(stop):  ->  for_loop(0, stop, 1)
+            for i in range(start, stop):  ->  for_loop(start, stop, 1)
+            for i in range(start, stop, step):  ->  for_loop(start, stop, step)
+        """
+
+        # Read range() arguments (arity already validated in _validate_for_loop)
+        num_args = len(node.iter.args)  # type: ignore
+        # range(stop) -> for_loop(0, stop, 1)
+        # range(start, stop) -> for_loop(start, stop, 1)
+        # range(start, stop, step) -> for_loop(start, stop, step)
+        if num_args == 1:
+            start_arg = ast.Constant(value=0)
+            stop_arg = node.iter.args[0]  # type: ignore
+            step_arg = ast.Constant(value=1)
+        elif num_args == 2:
+            start_arg = node.iter.args[0]  # type: ignore
+            stop_arg = node.iter.args[1]  # type: ignore
+            step_arg = ast.Constant(value=1)
+        else:  # num_args == 3
+            start_arg = node.iter.args[0]  # type: ignore
+            stop_arg = node.iter.args[1]  # type: ignore
+            step_arg = node.iter.args[2]  # type: ignore
+
+        # Read the loop variable name (already validated in _validate_for_loop)
+        assert isinstance(node.target, ast.Name)
+        loop_var_name = node.target.id
+
+        # Build the ``for_loop(start, stop, step, var_name)`` call
+        for_loop_call = ast.Call(
+            func=ast.Name(id="for_loop", ctx=ast.Load()),
+            args=[start_arg, stop_arg, step_arg, ast.Constant(value=loop_var_name)],
+            keywords=[],
+        )
+
+        # Bind the loop variable via ``as i``
+        with_item = ast.withitem(
+            context_expr=for_loop_call,
+            optional_vars=node.target,  # reuse ``i`` as-is
+        )
+
+        with_stmt = ast.With(
+            items=[with_item],
+            body=flattened_body,
+            lineno=node.lineno,
+            col_offset=node.col_offset,
+        )
+
+        return with_stmt
+
     def _transform_for_items(
         self, node: ast.For, flattened_body: list[ast.stmt]
     ) -> ast.With:
@@ -846,32 +984,22 @@ class ControlFlowTransformer(ast.NodeTransformer):
             for (i, j), value in d.items():  ->  for_items(d, ["i", "j"], "value")
         """
         # Extract the dict argument from items(d) or d.items() call
+        # (_validate_for_loop guarantees one of these patterns)
         if node.iter.args:  # type: ignore  # items(d) pattern
             dict_arg = node.iter.args[0]  # type: ignore
-        elif isinstance(node.iter.func, ast.Attribute):  # type: ignore  # d.items() pattern
+        else:  # d.items() pattern
             dict_arg = node.iter.func.value  # type: ignore
-        else:
-            raise NotImplementedError("items() requires a dict argument")
 
-        # Parse the target pattern: (key, value) or just key, value
-        if isinstance(node.target, ast.Tuple) and len(node.target.elts) == 2:
-            key_target = node.target.elts[0]
-            value_target = node.target.elts[1]
-        else:
-            raise NotImplementedError(
-                "items() iteration requires 'for key, value in items(d)' pattern. "
-                f"Got: {ast.dump(node.target)}"
-            )
+        # Parse the target pattern: (key, value) — validated by _validate_for_loop
+        assert isinstance(node.target, ast.Tuple)
+        key_target = node.target.elts[0]
+        value_target = node.target.elts[1]
 
         # Extract key variable names (may be tuple like (i, j))
         key_vars = self._extract_tuple_vars(key_target)
 
-        # Extract value variable name (must be a simple name)
-        if not isinstance(value_target, ast.Name):
-            raise NotImplementedError(
-                "Value target in items() iteration must be a simple variable, "
-                f"got: {ast.dump(value_target)}"
-            )
+        # Extract value variable name (validated by _validate_for_loop)
+        assert isinstance(value_target, ast.Name)
         value_var = value_target.id
 
         # Create for_items(dict, key_vars, value_var) call
@@ -904,7 +1032,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         return with_stmt
 
     def visit_If(self, node: ast.If) -> Any:
-        # 変換前のASTから変数を収集（generic_visit 後だと生成名が混入する）
+        # Collect variables from the pre-transform AST (post generic_visit would include generated names)
         collector_test = VariableCollector(global_names=self._global_names)
         collector_test.visit(node.test)
 
@@ -982,7 +1110,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 "'return' inside for/while in @qkernel if-else is not supported"
             )
 
-        # ネストされた制御フローを変換 (with definition tracking)
+        # Transform nested control flow (with definition tracking)
         saved_outer = self._outer_defined_vars
         saved_after = self._after_stmt_read_vars
         saved_after_load = self._after_stmt_load_vars
@@ -1009,7 +1137,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         self._after_stmt_read_vars = saved_after
         self._after_stmt_load_vars = saved_after_load
 
-        # 明示的 return の検出と変換
+        # Detect and transform explicit returns
         orelse_body = node.orelse if node.orelse else []
         body_has_return = self._has_top_level_return(node.body)
         orelse_has_return = self._has_top_level_return(orelse_body)
@@ -1054,7 +1182,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             lineno=node.lineno,
         )  # type: ignore
 
-        # True Body: params=input_vars, return=output_vars
+        # True Body: inputs=input_vars, return=output_vars
         true_def, true_name = self._create_inner_func(
             "body",
             true_body,
@@ -1063,7 +1191,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             return_var_names=output_vars,
         )
 
-        # False Body: params=input_vars, return=output_vars
+        # False Body: inputs=input_vars, return=output_vars
         false_def, false_name = self._create_inner_func(
             "body",
             false_body,
@@ -1095,9 +1223,11 @@ class ControlFlowTransformer(ast.NodeTransformer):
         result_stmts: list[ast.stmt] = [cond_def, true_def, false_def]
 
         if has_return:
-            # _if_ret_N = None (初期化)
+            assert ret_var_name is not None
+            # _if_ret_N = None (initialization)
+            ret_name_store: ast.expr = ast.Name(id=ret_var_name, ctx=ast.Store())
             init_stmt = ast.Assign(
-                targets=[ast.Name(id=ret_var_name, ctx=ast.Store())],
+                targets=[ret_name_store],
                 value=ast.Constant(value=None),
                 lineno=node.lineno,
             )
@@ -1106,6 +1236,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         result_stmts.append(assign_node)
 
         if has_return:
+            assert ret_var_name is not None
             # return _if_ret_N
             outer_return = ast.Return(
                 value=ast.Name(id=ret_var_name, ctx=ast.Load()),
@@ -1129,11 +1260,11 @@ def transform_control_flow(func: Callable):
     src = textwrap.dedent(src)
     tree = ast.parse(src)
 
-    # グローバル変数名を取得（モジュール、組み込み関数など）
+    # Collect global names (modules, builtins, etc.)
     global_names = set(func.__globals__.keys())
 
-    # クロージャ変数も除外する（VariableCollector が target_vars に含めないようにする）
-    # クロージャの値は後で name_space に注入されるため、内部関数からアクセス可能
+    # Exclude closure variables too (so VariableCollector does not add them to target_vars).
+    # Closure values are injected into name_space later, so inner functions can still access them.
     if func.__closure__ is not None:
         global_names.update(func.__code__.co_freevars)
 
@@ -1159,14 +1290,14 @@ def transform_control_flow(func: Callable):
     )
     tree = transformer.visit(tree)
 
-    # デコレータを削除（再帰を防ぐ）
+    # Strip decorators (to prevent recursion)
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == func.__name__:
             node.decorator_list = []
 
     ast.fix_missing_locations(tree)
 
-    # 元の関数のグローバル変数を継承
+    # Inherit the original function's globals
     name_space = func.__globals__.copy()
     name_space.update(
         {
@@ -1178,7 +1309,7 @@ def transform_control_flow(func: Callable):
         }
     )
 
-    # クロージャ変数（関数内でインポートされた名前など）を追加
+    # Add closure variables (e.g. names imported inside the function).
     # Empty cells indicate forward references not yet bound at definition time.
     # Skipping them would cause NameError at runtime, so we fail-closed here
     # and let QKernel.__init__ fall back to the original function.

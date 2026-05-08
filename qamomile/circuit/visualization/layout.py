@@ -20,11 +20,11 @@ from .visual_ir import (
     VGate,
     VGateKind,
     VInlineBlock,
+    VisualCircuit,
+    VisualNode,
     VSkip,
     VUnfoldedKind,
     VUnfoldedSequence,
-    VisualCircuit,
-    VisualNode,
 )
 
 
@@ -416,7 +416,7 @@ class CircuitLayoutEngine:
 
     def _compute_qubit_y_positions(
         self, num_qubits: int, block_ranges: list[dict]
-    ) -> list[float]:
+    ) -> tuple[list[float], dict[int, float], dict[int, float]]:
         """Compute y-positions with variable spacing based on block borders.
 
         Each qubit's vertical extent is calculated from all block borders
@@ -458,7 +458,9 @@ class CircuitLayoutEngine:
         max_below = {q: 0.0 for q in range(num_qubits)}
 
         # Count overlapping borders per (topmost_qubit, position)
-        overlap_counts = defaultdict(lambda: defaultdict(int))
+        overlap_counts: defaultdict[int, defaultdict[tuple, int]] = defaultdict(
+            lambda: defaultdict(int)
+        )
         for br in block_ranges:
             top_q = min(br["qubit_indices"])
             pos_key = (br["start_x"], br["end_x"])

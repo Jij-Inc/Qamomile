@@ -32,7 +32,6 @@ from qamomile.circuit.transpiler.passes.value_mapping import (
     ValueSubstitutor,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -43,9 +42,11 @@ def _make_value(name: str, type_cls: type = UIntType) -> Value:
     return Value(type=type_cls(), name=name)
 
 
-def _make_const_value(name: str, const: int | float, type_cls: type = UIntType) -> Value:
-    """Create a constant Value with a ``const`` param entry."""
-    return Value(type=type_cls(), name=name, params={"const": const})
+def _make_const_value(
+    name: str, const: int | float, type_cls: type = UIntType
+) -> Value:
+    """Create a constant Value."""
+    return Value(type=type_cls(), name=name).with_const(const)
 
 
 def _make_array_value(

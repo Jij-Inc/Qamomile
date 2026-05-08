@@ -1,16 +1,20 @@
 """Tests for Tuple and Dict types in qkernel."""
 
-import pytest
 import qamomile.circuit as qmc
-from qamomile.circuit.ir.types.primitives import TupleType, DictType, UIntType, FloatType
-from qamomile.circuit.ir.value import TupleValue, DictValue, Value
-from qamomile.circuit.frontend.handle.containers import Tuple, Dict
 from qamomile.circuit.frontend.func_to_block import (
-    handle_type_map,
-    is_tuple_type,
-    is_dict_type,
     create_dummy_input,
+    handle_type_map,
+    is_dict_type,
+    is_tuple_type,
 )
+from qamomile.circuit.frontend.handle.containers import Dict, Tuple
+from qamomile.circuit.ir.types.primitives import (
+    DictType,
+    FloatType,
+    TupleType,
+    UIntType,
+)
+from qamomile.circuit.ir.value import DictValue, TupleValue, Value
 
 
 class TestTupleType:
@@ -102,7 +106,7 @@ class TestTupleValue:
     def test_tuple_value_is_parameter(self):
         """Test TupleValue parameter detection."""
         elem = Value(type=UIntType(), name="i")
-        tv1 = TupleValue(name="idx", elements=(elem,), params={"parameter": "idx"})
+        tv1 = TupleValue(name="idx", elements=(elem,)).with_parameter("idx")
         tv2 = TupleValue(name="idx", elements=(elem,))
 
         assert tv1.is_parameter()
@@ -129,7 +133,7 @@ class TestDictValue:
 
     def test_dict_value_is_parameter(self):
         """Test DictValue parameter detection."""
-        dv1 = DictValue(name="ising", entries=[], params={"parameter": "ising"})
+        dv1 = DictValue(name="ising", entries=[]).with_parameter("ising")
         dv2 = DictValue(name="ising", entries=[])
 
         assert dv1.is_parameter()

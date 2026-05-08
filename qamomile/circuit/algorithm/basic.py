@@ -114,6 +114,24 @@ def cz_entangling_layer(
 
 
 @qmc.qkernel
+def cx_entangling_layer(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Apply CX entangling layer with linear connectivity.
+
+    Applies CX gates between consecutive qubits: (0,1), (1,2), ..., (n-2,n-1).
+
+    Args:
+        q (qmc.Vector[qmc.Qubit]): Qubit vector
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Qubit vector after entanglement
+    """
+    n = q.shape[0]
+    for i in qmc.range(n - 1):
+        q[i], q[i + 1] = qmc.cx(q[i], q[i + 1])
+    return q
+
+
+@qmc.qkernel
 def phase_gadget(
     q: qmc.Vector[qmc.Qubit],
     indices: qmc.Vector[qmc.UInt],

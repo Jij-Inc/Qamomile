@@ -37,10 +37,10 @@ from .visual_ir import (
     VGate,
     VGateKind,
     VInlineBlock,
-    VSkip,
-    VUnfoldedSequence,
     VisualCircuit,
     VisualNode,
+    VSkip,
+    VUnfoldedSequence,
 )
 
 if TYPE_CHECKING:
@@ -99,6 +99,7 @@ class MatplotlibRenderer:
             fig: matplotlib Figure.
             vc: VisualCircuit containing pre-resolved Visual IR nodes.
         """
+        assert self.layout is not None
         positions = self.layout.positions
         block_ranges = self.layout.block_ranges
         block_widths = self.layout.block_widths
@@ -201,7 +202,7 @@ class MatplotlibRenderer:
                     border_qubits = block_info["qubit_indices"]
 
                 box_bottom, box_top = self._draw_inlined_block_border(
-                    fig._qm_ax,
+                    fig._qm_ax,  # type: ignore[attr-defined]
                     name=block_info["name"],
                     start_x=block_info["start_x"],
                     end_x=block_info["end_x"],
@@ -216,7 +217,7 @@ class MatplotlibRenderer:
 
                 # Draw control dots and vertical line for ControlledUOperation
                 if ctrl_indices:
-                    ax = fig._qm_ax
+                    ax = fig._qm_ax  # type: ignore[attr-defined]
                     mgw = block_info.get("max_gate_width", self.style.gate_width)
                     bl, br = compute_block_box_bounds(
                         self.style,
@@ -459,7 +460,7 @@ class MatplotlibRenderer:
         layout_width: float | None = None,
     ) -> None:
         """Draw a VGate node using pre-resolved fields."""
-        ax = fig._qm_ax
+        ax = fig._qm_ax  # type: ignore[attr-defined]
         qubit_indices = node.qubit_indices
 
         if not qubit_indices:
@@ -549,6 +550,13 @@ class MatplotlibRenderer:
         elif node.gate_type == GateOperationType.CZ:
             for y in y_coords:
                 self._draw_control_dot(ax, x, y)
+        elif node.gate_type == GateOperationType.TOFFOLI:
+            # Operands: [control1, control2, target]. Render in the
+            # same style as CX — control dots on the two control
+            # wires, target-X on the target wire.
+            for y in y_coords[:-1]:
+                self._draw_control_dot(ax, x, y)
+            self._draw_target_x(ax, x, y_coords[-1])
         elif node.gate_type == GateOperationType.SWAP:
             for y in y_coords:
                 self._draw_swap_x(ax, x, y)
@@ -792,7 +800,7 @@ class MatplotlibRenderer:
         if not affected_qubits:
             return
 
-        ax = fig._qm_ax
+        ax = fig._qm_ax  # type: ignore[attr-defined]
         y_coords = [self.qubit_y[q] for q in affected_qubits]
         min_y = min(y_coords)
         max_y = max(y_coords)
@@ -823,7 +831,7 @@ class MatplotlibRenderer:
             text_color = self.style.if_text_color
             linestyle = "-."
         else:
-            face_color = self.style.for_loop_face_color
+            face_color = self.style.for_loop_face_color  # type: ignore[unreachable]
             edge_color = self.style.for_loop_edge_color
             text_color = self.style.for_loop_text_color
             linestyle = "-"
@@ -903,6 +911,36 @@ class MatplotlibRenderer:
                 zorder=PORDER_TEXT,
             )
 
+        # Participation markers: when the analyzer precisely determined
+        # which wires the loop touches, draw a small control-style dot
+        # centered on each affected wire at the box's left and right
+        # edges so viewers can tell which wires participate vs. which
+        # are passthrough. Skip when the analyzer fell back to
+        # conservative analysis — the affected set may over-
+        # approximate and dots would misleadingly imply certainty.
+        #
+        # Intentional zorder: ``PORDER_GATE - 1`` places each dot
+        # *behind* the folded-block patch (``PORDER_GATE``), so the
+        # opaque box fill hides the half that sits inside the box and
+        # only the outer half protrudes. This mirrors the way a CX
+        # control dot appears to sit on a wire (with the wire partly
+        # hidden behind the dot). Raising the zorder would reveal the
+        # full circle stuck on each edge — not the intended look.
+        if node.affected_qubits_precise:
+            x_left = x_pos - width / 2
+            x_right = x_pos + width / 2
+            for q in affected_qubits:
+                y = self.qubit_y[q]
+                for x in (x_left, x_right):
+                    circle = mpatches.Circle(
+                        (x, y),
+                        radius=0.05,
+                        facecolor=self.style.wire_color,
+                        edgecolor=self.style.wire_color,
+                        zorder=PORDER_GATE - 1,
+                    )
+                    ax.add_patch(circle)
+
     def _add_jupyter_display_support(self, fig: Figure) -> None:
         """Add Jupyter display support to the figure.
 
@@ -920,7 +958,7 @@ class MatplotlibRenderer:
             return buf.read()
 
         # Attach the method to the figure instance
-        fig._repr_png_ = _repr_png_
+        fig._repr_png_ = _repr_png_  # type: ignore[attr-defined]
 
     def _measure_text_bbox(self, ax: Axes, text: str, fontsize: int) -> Bbox:
         """Measure rendered text bbox in display pixels.
@@ -934,9 +972,9 @@ class MatplotlibRenderer:
             matplotlib Bbox of the text in display coordinates.
         """
         if ax.figure.canvas is None or not hasattr(ax.figure.canvas, "get_renderer"):
-            FigureCanvasAgg(ax.figure)
+            FigureCanvasAgg(ax.figure)  # type: ignore[arg-type]
 
-        renderer = ax.figure.canvas.get_renderer()
+        renderer = ax.figure.canvas.get_renderer()  # type: ignore[attr-defined]
         font_props = FontProperties(size=fontsize)
         temp_text = ax.text(
             0, 0, text, fontsize=fontsize, fontproperties=font_props, visible=False
@@ -960,7 +998,7 @@ class MatplotlibRenderer:
 
         xlim = ax.get_xlim()
         ax_bbox = ax.get_position()
-        ax_width_inches = ax_bbox.width * ax.figure.get_figwidth()
+        ax_width_inches = ax_bbox.width * ax.figure.get_figwidth()  # type: ignore[union-attr]
         data_range = xlim[1] - xlim[0]
         pixels_per_data_unit = ax.figure.dpi * ax_width_inches / data_range
 
@@ -983,7 +1021,7 @@ class MatplotlibRenderer:
 
         ylim = ax.get_ylim()
         ax_bbox = ax.get_position()
-        ax_height_inches = ax_bbox.height * ax.figure.get_figheight()
+        ax_height_inches = ax_bbox.height * ax.figure.get_figheight()  # type: ignore[union-attr]
         data_range = ylim[1] - ylim[0]
         pixels_per_data_unit = ax.figure.dpi * ax_height_inches / data_range
 
@@ -1013,9 +1051,10 @@ class MatplotlibRenderer:
                 transform=ax.transAxes,
             )
             ax.axis("off")
-            fig._qm_ax = ax
+            fig._qm_ax = ax  # type: ignore[attr-defined]
             return fig
 
+        assert self.layout is not None
         width = self.layout.width
         block_ranges = self.layout.block_ranges
 
@@ -1125,7 +1164,7 @@ class MatplotlibRenderer:
         ax.set_aspect("equal")
 
         # Store ax in figure for later access
-        fig._qm_ax = ax
+        fig._qm_ax = ax  # type: ignore[attr-defined]
 
         return fig
 
@@ -1142,8 +1181,9 @@ class MatplotlibRenderer:
             num_qubits: Number of qubits.
             qubit_map: Qubit to wire index mapping.
         """
-        ax = fig._qm_ax
+        ax = fig._qm_ax  # type: ignore[attr-defined]
         # Compute wire start/end symmetrically from gate edges
+        assert self.layout is not None
         actual_width = self.layout.actual_width
         first_gate_x = self.layout.first_gate_x
         wire_ext = self.style.wire_extension
@@ -1158,14 +1198,14 @@ class MatplotlibRenderer:
             wire_end = self.qubit_end_positions.get(i, default_wire_end)
             # Measurement-terminated wires use "butt" capstyle to prevent
             # the half-linewidth overhang past the measurement box edge.
-            capstyle = "butt" if i in self.qubit_end_positions else "projecting"
+            capstyle: str = "butt" if i in self.qubit_end_positions else "projecting"
             line = mlines.Line2D(
                 [wire_start, wire_end],
                 [y, y],
                 color=self.style.wire_color,
                 linewidth=1,
                 zorder=PORDER_WIRE,
-                solid_capstyle=capstyle,
+                solid_capstyle=capstyle,  # type: ignore[arg-type]
             )
             ax.add_line(line)
 

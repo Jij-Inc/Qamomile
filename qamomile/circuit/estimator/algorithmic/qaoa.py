@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import sympy as sp
 
-from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
 from qamomile.circuit.estimator.gate_counter import GateCount
+from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
 
 
 def estimate_qaoa(

@@ -43,10 +43,10 @@ from qamomile.circuit.ir.operation.composite_gate import (
 
 # Import strategies
 from qamomile.circuit.stdlib.qft_strategies import (
-    StandardQFTStrategy,
+    ApproximateIQFTStrategy,
     ApproximateQFTStrategy,
     StandardIQFTStrategy,
-    ApproximateIQFTStrategy,
+    StandardQFTStrategy,
 )
 
 if TYPE_CHECKING:
@@ -109,8 +109,8 @@ class QFT(CompositeGate):
 
     def _decompose(
         self,
-        qubits: tuple[Qubit, ...],
-    ) -> tuple[Qubit, ...]:
+        qubits: Vector[Qubit] | tuple[Qubit, ...],
+    ) -> Vector[Qubit] | tuple[Qubit, ...] | None:
         """Decompose QFT into elementary gates.
 
         Args:
@@ -221,8 +221,8 @@ class IQFT(CompositeGate):
 
     def _decompose(
         self,
-        qubits: tuple[Qubit, ...],
-    ) -> tuple[Qubit, ...]:
+        qubits: Vector[Qubit] | tuple[Qubit, ...],
+    ) -> Vector[Qubit] | tuple[Qubit, ...] | None:
         """Decompose IQFT into elementary gates.
 
         Args:

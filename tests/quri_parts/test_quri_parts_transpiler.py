@@ -9,7 +9,7 @@ pytestmark = pytest.mark.quri_parts
 # Skip entire module if QURI Parts circuit support is not installed.
 pytest.importorskip("quri_parts.circuit")
 
-from qamomile.quri_parts import (
+from qamomile.quri_parts import (  # noqa: E402
     QuriPartsGateEmitter,
 )
 
