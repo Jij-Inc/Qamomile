@@ -29,8 +29,7 @@
 # E_{\mathrm{QSCI}} \;\geq\; E_{\mathrm{exact}}.
 # $$
 #
-# The four-step recipe introduced by Kanno *et al.*
-# {cite:p}`10.48550/arXiv.2302.11320` is:
+# The four-step recipe introduced by Kanno *et al.* {cite:p}`10.48550/arXiv.2302.11320` is:
 #
 # 1. Prepare an input state $|\psi_{\mathrm{in}}\rangle$ on the quantum
 #    computer (typically a roughly optimised VQE state).
