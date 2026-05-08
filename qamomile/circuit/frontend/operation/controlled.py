@@ -54,11 +54,22 @@ _synthesized_kernel_lock = threading.RLock()
 # A ``WeakKeyDictionary`` lets the entry vanish automatically when the
 # original callable is garbage-collected, so we never grow the
 # ``linecache`` unboundedly in long-running processes that repeatedly call
-# ``controlled(qmc.rx)`` etc.  Callables that don't support weak refs
-# (a small set of C-implemented builtins) silently bypass the cache.
+# ``controlled(qmc.rx)`` etc.
 _synthesized_kernel_cache: "weakref.WeakKeyDictionary[Callable[..., Any], Any]" = (
     weakref.WeakKeyDictionary()
 )
+
+# Strong-reference fallback cache for callables that do not support weak
+# references (a small set of C-implemented builtins).  Without this,
+# repeated ``controlled(fn)`` calls on the same non-weakrefable callable
+# would re-synthesize a wrapper each time and accumulate ``linecache``
+# entries indefinitely.  Holding a strong reference is acceptable here
+# because such callables are typically module-level / immortal — the
+# entry's lifetime is bounded by the process, exactly like the
+# ``linecache`` source it pairs with.  Hashable-but-not-weakrefable is
+# the only case that lands here; non-hashable callables fall through to
+# no caching at all.
+_synthesized_kernel_cache_strong: dict[Callable[..., Any], Any] = {}
 
 
 def _wrapper_namespace(target_ref: Any) -> dict[str, Any]:
@@ -680,11 +691,29 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
             inspect.Parameter.VAR_POSITIONAL,
             inspect.Parameter.VAR_KEYWORD,
             inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.KEYWORD_ONLY,
         ):
             raise TypeError(
-                f"controlled(): callable {fn_name!r} uses *args/**kwargs or "
-                f"positional-only parameters, which cannot be auto-wrapped. "
+                f"controlled(): callable {fn_name!r} uses *args/**kwargs, "
+                f"positional-only, or keyword-only parameters, which "
+                f"cannot be auto-wrapped (the synthesized wrapper places "
+                f"all params in the standard POSITIONAL_OR_KEYWORD slot). "
                 f"Wrap it in @qmc.qkernel manually."
+            )
+        # Reject default values up-front: the synthesized wrapper does
+        # not propagate them to the wrapper signature, so silently
+        # dropping a default would change the caller's expected
+        # contract (``cg(c, t)`` would unexpectedly require an
+        # otherwise-defaulted kwarg).  Built-in Qamomile gates have no
+        # defaults today, so this only fires for user-supplied helpers,
+        # which are exactly the ones that should be wrapped with
+        # ``@qmc.qkernel`` directly anyway.
+        if param.default is not inspect.Parameter.empty:
+            raise TypeError(
+                f"controlled(): parameter {param_name!r} of {fn_name!r} "
+                f"has a default value ({param.default!r}), which the "
+                f"wrapper synthesizer does not propagate. Wrap the "
+                f"function in @qmc.qkernel manually."
             )
         # Reject parameter names that collide with a reserved
         # wrapper-internal binding.  Most damaging is a parameter named
@@ -764,10 +793,20 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
     # uncontended in the common single-threaded case.
     global _synthesized_kernel_counter
     with _synthesized_kernel_lock:
+        # Look up both caches: ``_synthesized_kernel_cache`` for normal
+        # weakrefable callables, ``_synthesized_kernel_cache_strong`` for
+        # the C-implemented builtins that ``WeakKeyDictionary`` rejects.
         try:
             cached = _synthesized_kernel_cache.get(fn)
         except TypeError:
             cached = None
+        if cached is None:
+            try:
+                cached = _synthesized_kernel_cache_strong.get(fn)
+            except TypeError:
+                # Non-hashable callables (extremely rare) cannot be cached
+                # in either backend; we just synthesize a fresh wrapper.
+                cached = None
         if cached is not None:
             return cast("QKernel", cached)
 
@@ -851,18 +890,29 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
                 f"manually."
             ) from e
 
-        # Populate the cache; ignore weakref failures for non-weakrefable
-        # callables (the wrapper is still returned, just not memoized).
+        # Populate the cache.  Try the weak-key cache first so the
+        # entry can be released when ``fn`` is GC'd.  When ``fn`` cannot
+        # be weakly referenced (a small set of C-implemented builtins),
+        # fall back to a strong-reference cache so repeated
+        # ``controlled(fn)`` calls still memoize the wrapper instead of
+        # re-synthesizing forever and leaking ``linecache`` entries.
+        # Non-hashable callables fall through silently (no cache).
         try:
             _synthesized_kernel_cache[fn] = qkernel_inst
         except TypeError:
-            pass
+            try:
+                _synthesized_kernel_cache_strong[fn] = qkernel_inst
+            except TypeError:
+                pass  # non-hashable: cannot cache, will re-synthesize
 
-        # When ``fn`` is GC'd the WeakKeyDictionary entry vanishes on its
-        # own, but ``linecache.cache`` is a plain dict and would otherwise
-        # leak the synthesized source.  ``weakref.finalize`` runs the
-        # cleanup callback exactly when ``fn`` becomes unreachable; for
-        # non-weakrefable callables registration silently no-ops.
+        # When ``fn`` is GC'd the WeakKeyDictionary entry vanishes on
+        # its own, but ``linecache.cache`` is a plain dict and would
+        # otherwise leak the synthesized source.  ``weakref.finalize``
+        # runs the cleanup callback exactly when ``fn`` becomes
+        # unreachable; for non-weakrefable callables registration
+        # silently no-ops, and the strong-ref cache pinning ``fn`` keeps
+        # the ``linecache`` entry alive for the process lifetime — which
+        # mirrors the lifetime of those C-implemented builtins anyway.
         try:
             weakref.finalize(fn, linecache.cache.pop, filename, None)
         except TypeError:

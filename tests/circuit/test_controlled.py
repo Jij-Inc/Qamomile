@@ -960,6 +960,31 @@ class TestControlledBuiltinErrors:
         with pytest.raises(TypeError, match="positional-only"):
             qmc.controlled(positional_only)
 
+    def test_keyword_only_raises_type_error(self):
+        """Keyword-only params would collapse to POSITIONAL_OR_KEYWORD; reject."""
+
+        def keyword_only(q: qmc.Qubit, *, theta: float) -> qmc.Qubit:
+            return qmc.rx(q, theta)
+
+        with pytest.raises(TypeError, match="keyword-only"):
+            qmc.controlled(keyword_only)
+
+    def test_default_value_raises_type_error(self):
+        """A parameter with a default value would silently lose it.
+
+        The synthesized wrapper places all params as
+        ``POSITIONAL_OR_KEYWORD`` with no default, so the caller's
+        existing contract ``fn(c, t)`` would unexpectedly require the
+        formerly-defaulted kwarg.  Reject up-front and direct the user
+        to ``@qmc.qkernel``.
+        """
+
+        def has_default(q: qmc.Qubit, theta: float = 0.1) -> qmc.Qubit:
+            return qmc.rx(q, theta)
+
+        with pytest.raises(TypeError, match="default value"):
+            qmc.controlled(has_default)
+
     def test_param_named_qmc_target_raises_type_error(self):
         """A parameter named ``__qmc_target__`` would shadow the forwarding global.
 
@@ -1070,6 +1095,45 @@ class TestControlledBuiltinSynthesisInternals:
         cg1 = qmc.controlled(qmc.rx)
         cg2 = qmc.controlled(qmc.rx)
         assert cg1._qkernel is cg2._qkernel
+
+    def test_non_weakrefable_callable_uses_strong_cache(self):
+        """A non-weakrefable callable must still memoize its wrapper.
+
+        ``WeakKeyDictionary`` rejects callables that can't be weakly
+        referenced (a small set of C-implemented builtins).  Without a
+        strong-reference fallback, repeated ``controlled(fn)`` calls on
+        such callables would re-synthesize the wrapper indefinitely and
+        accumulate ``linecache`` entries.
+
+        We simulate the non-weakrefable case with an instance of a
+        ``__slots__``-only class without ``__weakref__`` — a known
+        pattern that ``weakref`` rejects.  The test asserts that
+        ``controlled()`` still returns the same wrapper across calls,
+        which proves the strong-reference cache is engaged.
+        """
+        import weakref as _weakref
+
+        class _NoWeakref:
+            __slots__ = ()
+
+            def __call__(self, q: qmc.Qubit) -> qmc.Qubit:
+                return qmc.h(q)
+
+        non_weakrefable = _NoWeakref()
+
+        # Sanity: this object really is rejected by weakref.
+        with pytest.raises(TypeError):
+            _weakref.ref(non_weakrefable)
+
+        # Decorate ``__call__`` properly: signature classification reads
+        # ``__call__``'s annotations via ``inspect.signature``, which
+        # follows ``__call__`` automatically for class instances.
+        cg1 = qmc.controlled(non_weakrefable)
+        cg2 = qmc.controlled(non_weakrefable)
+        assert cg1._qkernel is cg2._qkernel, (
+            "non-weakrefable callable should still hit the strong-ref "
+            "fallback cache on repeated controlled() calls."
+        )
 
     def test_distinct_callables_get_distinct_wrappers(self):
         """Different gate functions must not collide in the cache."""

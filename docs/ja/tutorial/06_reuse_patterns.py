@@ -291,6 +291,7 @@ print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
 # crx = qmc.controlled(qmc.rx)
 # ```
 
+
 # %%
 @qmc.qkernel
 def controlled_rx_demo() -> qmc.Vector[qmc.Bit]:
