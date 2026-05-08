@@ -25,7 +25,7 @@
 # E_{\mathrm{QSCI}} \;\geq\; E_{\mathrm{exact}}.
 # $$
 #
-# Kanno *et al.*が導入した4ステップのレシピは次のとおりです:
+# Kanno *et al.*{cite:p}`10.48550/arXiv.2302.11320`が導入した4ステップのレシピは次のとおりです:
 #
 # 1. 量子コンピュータ上で入力状態$|\psi_{\mathrm{in}}\rangle$を準備する（典型的には大まかに最適化されたVQE状態）。
 # 2. $|\psi_{\mathrm{in}}\rangle$を計算基底で多数回測定する。
@@ -33,8 +33,6 @@
 # 4. 有効ハミルトニアン$H^{\mathrm{sub}}_{ij} = \langle s_i | H | s_j \rangle$を構築し、古典的に対角化する。
 #
 # このチュートリアルでは4量子ビットの横磁場Isingモデルでフローを通しで歩きます。量子状態の準備とサンプリングは**QURI Parts**バックエンド（Qulacsシミュレータ）で実行し、部分空間の構築と対角化は`qamomile.linalg.solve_subspace`を使います。内部ではベクトル化されたZ基底ルーチン`subspace_hamiltonian`（XOR・パリティ計算のみで行列積不要）を呼びます。
-#
-# 参考文献: K. Kanno, M. Kohda, R. Imai, S. Koh, K. Mitarai, W. Mizukami, and Y. O. Nakagawa, *Quantum-Selected Configuration Interaction: classical diagonalization of Hamiltonians in subspaces selected by quantum computers*, [arXiv:2302.11320](https://arxiv.org/abs/2302.11320) (2023).
 
 # %%
 import os
