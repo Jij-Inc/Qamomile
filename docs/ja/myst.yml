@@ -17,6 +17,7 @@ project:
     cache: true
     exclude_patterns:
       - collaboration/qbraid_executor.ipynb
+      - vqa/hybrid_qnn.ipynb
   toc:
     - file: index.md
     - title: チュートリアル

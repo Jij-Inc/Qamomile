@@ -21,6 +21,13 @@ except ImportError:
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
+# Tutorials that require heavy external dependencies (torch, torchvision) or
+# long-running training and are skipped in CI.
+SKIP_TUTORIALS = {
+    "en/vqa/hybrid_qnn",
+    "ja/vqa/hybrid_qnn",
+}
+
 TUTORIAL_PATTERNS = [
     "docs/en/tutorial/**/*.py",
     "docs/ja/tutorial/**/*.py",
@@ -81,6 +88,10 @@ def test_tutorial_executes_without_error(tutorial_file: Path, tmp_path, monkeypa
     monkeypatch.setattr(plt, "show", lambda *args, **kwargs: None)
 
     assert tutorial_file.exists(), f"Tutorial file not found: {tutorial_file}"
+
+    test_id = get_test_id(tutorial_file)
+    if test_id in SKIP_TUTORIALS:
+        pytest.skip("Long-running tutorial requiring heavy dependencies, skip in CI")
 
     try:
         if tutorial_file.suffix == ".ipynb":

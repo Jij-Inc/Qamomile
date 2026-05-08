@@ -15,7 +15,7 @@
 # %% [markdown]
 # # Hybrid Quantum Neural Network (HQNN)
 #
-# This tutorial demonstrates how to build a **Hybrid Quantum Neural Network** (HQNN) on Fashion-MNIST that combines classical neural network layers with a quantum variational circuit layer. The quantum layer is defined using Qamomile's `@qkernel` API, transpiled to Qiskit, and integrated into a PyTorch training pipeline via the parameter shift rule.
+# This tutorial demonstrates how to build a **Hybrid Quantum Neural Network** (HQNN) on Fashion-MNIST that combines classical neural network layers with a quantum variational circuit layer. The quantum layer is defined using Qamomile's `@qkernel` API and integrated into a PyTorch training pipeline via the parameter shift rule.
 #
 # ## Architecture
 #
@@ -25,6 +25,8 @@
 # Input Image → CNN → π·σ(·) → Quantum Layer → [CNN feats, Q output] → Classifier → Output
 # ```
 #
+# Here, $\pi \cdot \sigma(\cdot)$ denotes element-wise sigmoid scaling: the CNN output is passed through the sigmoid function $\sigma$ and multiplied by $\pi$, mapping each feature to the interval $(0, \pi)$. This ensures that the rotation angles fed into the quantum layer remain bounded, avoiding wrap-around artifacts that can hinder training.
+#
 # The fusion classifier takes both classical CNN features and quantum expectation values, allowing the CNN and quantum layer to learn cooperatively from the start.
 
 # %% [markdown]
@@ -32,6 +34,7 @@
 
 # %%
 import math
+import os
 
 import numpy as np
 import torch
@@ -40,10 +43,9 @@ import matplotlib.pyplot as plt
 from torchvision import datasets, transforms
 
 import qamomile.circuit as qmc
+from qamomile.circuit.algorithm import ry_layer, rz_layer, cz_entangling_layer
 import qamomile.observable as qmo
 from qamomile.qiskit import QiskitTranspiler
-from qamomile.qiskit.observable import hamiltonian_to_sparse_pauli_op
-from qiskit.primitives import StatevectorEstimator
 
 # %%
 N_QUBITS = 4
@@ -61,9 +63,9 @@ print(f"Qubits: {N_QUBITS}, Layers: {N_LAYERS}, Trainable weights: {N_WEIGHTS}")
 # The circuit consists of:
 #
 # 1. **Angle encoding**: Each input feature is encoded as an RY rotation on the corresponding qubit.
-# 2. **Variational layers**: Each layer applies RZ–RY–RZ rotations with trainable weights, followed by a CNOT entanglement ladder.
+# 2. **Variational layers**: Each layer applies RZ–RY–RZ rotations using stdlib layer functions, followed by a CZ entanglement ladder.
 #
-# The circuit returns measurement results as classical bits.
+# The circuit computes the expectation value $\langle H \rangle$ of a given observable.
 
 # %%
 @qmc.qkernel
@@ -72,103 +74,69 @@ def variational_ansatz(
     n_layers: qmc.UInt,
     inputs: qmc.Vector[qmc.Float],
     weights: qmc.Vector[qmc.Float],
-) -> qmc.Vector[qmc.Bit]:
+    hamiltonian: qmc.Observable,
+) -> qmc.Float:
     q = qmc.qubit_array(n_qubits, name="q")
 
     # Angle encoding: embed classical features as RY rotations
     for i in qmc.range(n_qubits):
         q[i] = qmc.ry(q[i], inputs[i])
 
-    # Variational layers
-    for l in qmc.range(n_layers):
-        base = l * n_qubits * 3
-        # RZ-RY-RZ single-qubit rotations
-        for i in qmc.range(n_qubits):
-            q[i] = qmc.rz(q[i], weights[base + i])
-        for i in qmc.range(n_qubits):
-            q[i] = qmc.ry(q[i], weights[base + n_qubits + i])
-        for i in qmc.range(n_qubits):
-            q[i] = qmc.rz(q[i], weights[base + n_qubits * 2 + i])
+    # Variational layers using stdlib layer functions
+    for layer_idx in qmc.range(n_layers):
+        base = layer_idx * n_qubits * 3
+        q = rz_layer(q, weights, base)
+        q = ry_layer(q, weights, base + n_qubits)
+        q = rz_layer(q, weights, base + n_qubits * 2)
+        q = cz_entangling_layer(q)
 
-        # CNOT entanglement ladder
-        for i in qmc.range(n_qubits - 1):
-            q[i], q[i + 1] = qmc.cx(q[i], q[i + 1])
-
-    return qmc.measure(q)
+    return qmc.expval(q, hamiltonian)
 
 
 # %% [markdown]
-# Let's visualize the circuit structure:
+# Let's visualize the circuit structure. With `inline=False`, the stdlib layer functions are shown as compact boxes:
 
 # %%
 variational_ansatz.draw(
     n_qubits=N_QUBITS,
     n_layers=N_LAYERS,
-    inputs=[0.1] * N_QUBITS,
-    weights=[0.1] * N_WEIGHTS,
+    hamiltonian=qmo.Z(0),
+    fold_loops=False,
+    inline=False,
 )
 
 # %% [markdown]
-# ## Transpile to Qiskit
+# ## Transpile and Estimate Resources
 #
-# We transpile the `@qkernel` to a Qiskit `QuantumCircuit`, keeping `inputs` and `weights` as symbolic parameters that can be bound at runtime.
+# We build one observable per qubit ($\langle Z_i \rangle$) and create an executable for each.
+# Qamomile's `estimate_resources()` gives us gate counts without needing to access the backend circuit directly.
 
 # %%
+observables = [qmo.Z(i) for i in range(N_QUBITS)]
+
 transpiler = QiskitTranspiler()
 
-executable = transpiler.transpile(
-    variational_ansatz,
+executables = [
+    transpiler.transpile(
+        variational_ansatz,
+        bindings={"n_qubits": N_QUBITS, "n_layers": N_LAYERS, "hamiltonian": obs},
+        parameters=["inputs", "weights"],
+    )
+    for obs in observables
+]
+
+est = variational_ansatz.estimate_resources(
     bindings={"n_qubits": N_QUBITS, "n_layers": N_LAYERS},
-    parameters=["inputs", "weights"],
 )
-
-# Get the underlying Qiskit circuit (with symbolic parameters)
-qiskit_circuit = executable.get_first_circuit()
-param_metadata = executable.compiled_quantum[0].parameter_metadata
-
-print(f"Circuit depth: {qiskit_circuit.depth()}")
-print(f"Number of parameters: {qiskit_circuit.num_parameters}")
-
-# %% [markdown]
-# ## Define Observables
-#
-# For each qubit we measure the expectation value $\langle Z_i \rangle$.
-# These expectation values become the output of the quantum layer.
-
-# %%
-# Build one Hamiltonian per qubit: <Z_i>
-# We specify num_qubits to match the circuit size
-observables = []
-for i in range(N_QUBITS):
-    h = qmo.Hamiltonian(num_qubits=N_QUBITS)
-    h.add_term((qmo.PauliOperator(qmo.Pauli.Z, i),), 1.0)
-    observables.append(h)
-
-# Convert to Qiskit SparsePauliOp
-qiskit_obs = [hamiltonian_to_sparse_pauli_op(obs) for obs in observables]
-
-# Remove measurements from the circuit for expectation value estimation
-ansatz_no_meas = qiskit_circuit.remove_final_measurements(inplace=False)
-
-estimator = StatevectorEstimator()
-
+print(est)
 
 # %% [markdown]
 # ## Quantum Forward Pass
 #
-# The forward pass binds concrete values to the circuit parameters and evaluates $\langle Z_i \rangle$ for each qubit using the `StatevectorEstimator`.
+# The forward pass binds concrete values to the circuit parameters and evaluates $\langle Z_i \rangle$ for each qubit using Qamomile's executor.
 
 # %%
-def expand_bindings(bindings: dict) -> dict:
-    """Expand vector bindings to indexed format for param_metadata."""
-    result = {}
-    for key, value in bindings.items():
-        if isinstance(value, (list, tuple, np.ndarray)):
-            for i, v in enumerate(value):
-                result[f"{key}[{i}]"] = v
-        else:
-            result[key] = value
-    return result
+executor = transpiler.executor()
 
 
 def quantum_forward(input_vals: np.ndarray, weight_vals: np.ndarray) -> np.ndarray:
@@ -181,16 +149,14 @@ def quantum_forward(input_vals: np.ndarray, weight_vals: np.ndarray) -> np.ndarr
     Returns:
         Expectation values, shape (N_QUBITS,).
     """
-    indexed = expand_bindings({"inputs": list(input_vals), "weights": list(weight_vals)})
-    binding_dict = param_metadata.to_binding_dict(indexed)
-    bound_circuit = ansatz_no_meas.assign_parameters(binding_dict)
-
-    # Batch all observable evaluations in a single estimator call
-    pubs = [(bound_circuit, obs) for obs in qiskit_obs]
-    job = estimator.run(pubs)
-    results = job.result()
-
-    return np.array([float(r.data.evs) for r in results])
+    runtime_bindings = {
+        "inputs": list(input_vals),
+        "weights": list(weight_vals),
+    }
+    return np.array(
+        [exe.run(executor, bindings=runtime_bindings).result() for exe in executables],
+        dtype=float,
+    )
 
 
 # %%
@@ -215,7 +181,7 @@ print("Expectation values:", expvals)
 # \Big]
 # $$
 #
-# We implement this as a custom `torch.autograd.Function` so that PyTorch can backpropagate through the quantum layer.
+# We implement this as a custom `torch.autograd.Function` so that PyTorch can backpropagate through the quantum layer. The implementation uses in-place parameter shifts to avoid allocating copies on every iteration.
 
 # %%
 SHIFT = math.pi / 2
@@ -238,39 +204,35 @@ class QuantumFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         inputs, weights = ctx.saved_tensors
-        weights_np = weights.detach().cpu().numpy()
+        weights_np = weights.detach().cpu().numpy().copy()
 
         grad_inputs = torch.zeros_like(inputs)
         grad_weights = torch.zeros(weights.shape[0], dtype=weights.dtype, device=weights.device)
 
         for b, inp in enumerate(inputs):
-            inp_np = inp.detach().cpu().numpy()
+            inp_np = inp.detach().cpu().numpy().copy()
             g_out = grad_output[b].detach().cpu().numpy()  # shape (N_QUBITS,)
 
-            # Gradient w.r.t. weights
+            # Gradient w.r.t. weights (in-place shift to avoid copies)
             for k in range(len(weights_np)):
-                shifted_plus = weights_np.copy()
-                shifted_plus[k] += SHIFT
-                shifted_minus = weights_np.copy()
-                shifted_minus[k] -= SHIFT
+                weights_np[k] += SHIFT
+                fwd_plus = quantum_forward(inp_np, weights_np)
+                weights_np[k] -= 2 * SHIFT
+                fwd_minus = quantum_forward(inp_np, weights_np)
+                weights_np[k] += SHIFT  # restore
 
-                fwd_plus = quantum_forward(inp_np, shifted_plus)
-                fwd_minus = quantum_forward(inp_np, shifted_minus)
                 param_grad = (fwd_plus - fwd_minus) / 2.0  # shape (N_QUBITS,)
-
                 grad_weights[k] += np.dot(g_out, param_grad)
 
-            # Gradient w.r.t. inputs
+            # Gradient w.r.t. inputs (in-place shift to avoid copies)
             for k in range(len(inp_np)):
-                shifted_plus = inp_np.copy()
-                shifted_plus[k] += SHIFT
-                shifted_minus = inp_np.copy()
-                shifted_minus[k] -= SHIFT
+                inp_np[k] += SHIFT
+                fwd_plus = quantum_forward(inp_np, weights_np)
+                inp_np[k] -= 2 * SHIFT
+                fwd_minus = quantum_forward(inp_np, weights_np)
+                inp_np[k] += SHIFT  # restore
 
-                fwd_plus = quantum_forward(shifted_plus, weights_np)
-                fwd_minus = quantum_forward(shifted_minus, weights_np)
                 input_grad = (fwd_plus - fwd_minus) / 2.0
-
                 grad_inputs[b, k] = np.dot(g_out, input_grad)
 
         return grad_inputs, grad_weights
@@ -296,13 +258,11 @@ class QLayer(nn.Module):
 # %% [markdown]
 # ## Prepare Data (Fashion-MNIST)
 #
-# We use a subset of [Fashion-MNIST](https://github.com/zalandoresearch/fashion-mnist) with 4 visually distinct classes. Fashion-MNIST consists of 28×28 grayscale clothing images.
+# We use a subset of [Fashion-MNIST](https://github.com/zalandoresearch/fashion-mnist) with 4 visually distinct classes. Fashion-MNIST consists of 28x28 grayscale clothing images.
 #
 # To keep computation time reasonable, we select 4 classes (T-shirt, Trouser, Sandal, Bag) with 60 training and 30 test samples per class.
 
 # %%
-import os
-
 N_CLASSES = 4
 SELECTED_CLASSES = [0, 1, 5, 8]  # T-shirt, Trouser, Sandal, Bag
 CLASS_NAMES = ["T-shirt", "Trouser", "Sandal", "Bag"]
