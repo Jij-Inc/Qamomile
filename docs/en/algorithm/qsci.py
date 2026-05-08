@@ -29,7 +29,8 @@
 # E_{\mathrm{QSCI}} \;\geq\; E_{\mathrm{exact}}.
 # $$
 #
-# The four-step recipe introduced by Kanno *et al.* is:
+# The four-step recipe introduced by Kanno *et al.*
+# {cite:p}`10.48550/arXiv.2302.11320` is:
 #
 # 1. Prepare an input state $|\psi_{\mathrm{in}}\rangle$ on the quantum
 #    computer (typically a roughly optimised VQE state).
@@ -48,12 +49,6 @@
 # `qamomile.linalg.solve_subspace`, which internally calls the
 # vectorised Z-basis routine `subspace_hamiltonian` (XOR / parity, no
 # matrix products).
-#
-# Reference: K. Kanno, M. Kohda, R. Imai, S. Koh, K. Mitarai, W. Mizukami,
-# and Y. O. Nakagawa, *Quantum-Selected Configuration Interaction:
-# classical diagonalization of Hamiltonians in subspaces selected by
-# quantum computers*, [arXiv:2302.11320](https://arxiv.org/abs/2302.11320)
-# (2023).
 
 # %%
 import os
