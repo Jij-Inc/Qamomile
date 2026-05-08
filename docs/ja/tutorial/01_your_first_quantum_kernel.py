@@ -44,7 +44,7 @@
 # Colabで開いている場合は、下のタブで選んだTranspilerに合う行を1つ選び、行頭のコメントを外して実行してください:
 # # !pip install qamomile                  # Qiskit（デフォルト）
 # # !pip install "qamomile[quri_parts]"    # QURI Parts
-# # !pip install "qamomile[cudaq-cu13]"    # CUDA-Q（Linux / macOS-arm64 / WSL2のみ）
+# # !pip install "qamomile[cudaq-cu12]"    # CUDA-Q (CUDA 12.x toolchain。CUDA 13.xならcudaq-cu13)。Linux / macOS-arm64 / WSL2のみ。
 
 # %% [markdown]
 # ## インストール
@@ -84,7 +84,7 @@
 # :::{tab-item} CUDA-Q
 # :sync: cudaq
 #
-# 古いCUDA環境では`qamomile[cudaq-cu13]`の代わりに`qamomile[cudaq-cu12]`を使ってください。CUDA-QはLinux、macOS arm64、Windows（WSL2経由）のみ対応です。
+# CUDA 12.x環境では`qamomile[cudaq-cu12]`、CUDA 13.x環境では`qamomile[cudaq-cu13]`を使ってください（インストール済みのCUDA Toolkitに合わせて選択）。CUDA-QはLinux、macOS arm64、Windows（WSL2経由）のみ対応です。
 #
 # ```python
 # from qamomile.cudaq import CudaqTranspiler
