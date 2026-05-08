@@ -41,7 +41,10 @@
 
 # %%
 # 最新のQamomileをpipからインストールします！
-# # !pip install qamomile
+# Colabで開いている場合は、下のタブで選んだTranspilerに合う行を1つ選び、行頭のコメントを外して実行してください:
+# # !pip install qamomile                  # Qiskit（デフォルト）
+# # !pip install "qamomile[quri_parts]"    # QURI Parts
+# # !pip install "qamomile[cudaq-cu13]"    # CUDA-Q（Linux / macOS-arm64 / WSL2のみ）
 
 # %% [markdown]
 # ## インストール
@@ -53,6 +56,43 @@
 # ```
 #
 # このチュートリアルでは、具体的な量子SDKとしてQiskitを使用します。QuriPartsもサポートされており、トランスパイル可能な量子SDKは今後も増えていく予定です。
+
+# %% [markdown]
+# このチュートリアルではQiskitをデフォルトで使います。Qamomileは同じ`@qkernel`を複数の量子SDKへトランスパイルできるので、下のimportを差し替えるだけで他のSDKでも同じ流れで進められます。チュートリアル本体のコードはどのSDKを選んでも同一です。Colabの場合は上のpipセルで対応する行のコメントを先に外しておいてください。
+#
+# ::::{tab-set}
+# :::{tab-item} Qiskit
+# :sync: qiskit
+#
+# ```python
+# from qamomile.qiskit import QiskitTranspiler
+#
+# transpiler = QiskitTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} QURI Parts
+# :sync: quri_parts
+#
+# ```python
+# from qamomile.quri_parts import QuriPartsTranspiler
+#
+# transpiler = QuriPartsTranspiler()
+# ```
+# :::
+#
+# :::{tab-item} CUDA-Q
+# :sync: cudaq
+#
+# 古いCUDA環境では`qamomile[cudaq-cu13]`の代わりに`qamomile[cudaq-cu12]`を使ってください。CUDA-QはLinux、macOS arm64、Windows（WSL2経由）のみ対応です。
+#
+# ```python
+# from qamomile.cudaq import CudaqTranspiler
+#
+# transpiler = CudaqTranspiler()
+# ```
+# :::
+# ::::
 
 # %%
 import math
