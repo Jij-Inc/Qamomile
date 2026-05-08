@@ -620,16 +620,6 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
             f"got {type(fn).__name__}."
         )
 
-    # Fast cache lookup outside the lock for the common case (same gate
-    # already wrapped).  ``WeakKeyDictionary.get`` itself is thread-safe
-    # against concurrent reads.
-    try:
-        cached = _synthesized_kernel_cache.get(fn)
-    except TypeError:
-        cached = None
-    if cached is not None:
-        return cast("QKernel", cached)
-
     fn_name = getattr(fn, "__name__", "anonymous_gate")
 
     try:
@@ -740,12 +730,17 @@ def _qkernel_for_callable(fn: Callable[..., Any]) -> QKernel:
         "Qubit" if n_qubits == 1 else f"tuple[{', '.join(['Qubit'] * n_qubits)}]"
     )
 
-    # Synthesize and register under the shared lock so concurrent
-    # ``controlled(fn)`` calls cannot race to (a) re-use the same
+    # All cache reads and writes — and the synthesis itself — happen
+    # under the shared lock.  ``WeakKeyDictionary`` is *not* safe for
+    # concurrent read/write: an unlocked ``get()`` can race with a
+    # background weakref cleanup or with another thread populating the
+    # cache and produce hard-to-reproduce errors, so we deliberately
+    # forgo a lock-free fast path.  The same lock also protects against
+    # concurrent ``controlled(fn)`` calls racing to (a) re-use the same
     # filename-counter sequence, (b) double-mutate ``linecache.cache``,
     # or (c) populate the cache with two distinct wrappers for the same
-    # callable.  We also re-check the cache inside the lock — another
-    # thread may have synthesized while we waited.
+    # callable.  Cache hits are still cheap because Python locks are
+    # uncontended in the common single-threaded case.
     global _synthesized_kernel_counter
     with _synthesized_kernel_lock:
         try:
