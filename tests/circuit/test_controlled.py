@@ -1636,35 +1636,31 @@ def _make_controlled_circuit_for_statevector(
     theta_value: float | None,
     *,
     use_builtin: bool,
+    power: int = 1,
 ):
     """Build a kernel that applies one controlled gate and ends with measure.
 
     Returns a ``@qmc.qkernel`` whose body
         1. Allocates ``num_controls + spec.num_targets`` qubits,
         2. Drives every control qubit to |1> via X,
-        3. Applies ``controlled(builtin_or_wrapper, num_controls=N)``,
-        4. Measures every qubit so the kernel has classical I/O (which
-           top-level transpile entry-points require).
+        3. Applies ``controlled(builtin_or_wrapper, num_controls=N)``
+           with the optional ``power=`` exponent,
+        4. Measures the last qubit so the kernel has classical I/O
+           (which top-level transpile entry-points require).
 
-    The trailing measurement is stripped by each SDK's statevector
-    helper (``_precise_statevector`` removes Qiskit measurements; the
-    QuriParts / CUDA-Q paths evaluate the state-vector before
-    measurement collapse by using simulator hooks that ignore the
-    measurement output buffer).
-
-    The ``num_controls + spec.num_targets`` combination is dispatched
-    through four concrete tuple-shape branches; writing it with a fully
-    dynamic ``qubit_array`` would require runtime indexing that
-    ``ControlledGate`` does not yet integrate cleanly with for
-    arbitrary widths.
+    The trailing measurement is stripped by Qiskit's
+    ``qc.remove_final_measurements`` inside ``_precise_statevector``.
     """
     fn = spec.builtin_fn if use_builtin else spec.wrapper_qkernel
     kwarg = spec.builtin_kwarg if use_builtin else spec.wrapper_kwarg
 
-    def _kwargs() -> dict[str, float]:
-        if kwarg is None or theta_value is None:
-            return {}
-        return {kwarg: theta_value}
+    def _kwargs() -> dict[str, Any]:
+        d: dict[str, Any] = {}
+        if kwarg is not None and theta_value is not None:
+            d[kwarg] = theta_value
+        if power != 1:
+            d["power"] = power
+        return d
 
     nc, nt = num_controls, spec.num_targets
 
@@ -1820,6 +1816,84 @@ class TestControlledBuiltinStatevectorParityNumControls2:
         )
 
 
+@pytest.mark.skipif(not _HAS_QISKIT, reason="qiskit not installed")
+@pytest.mark.parametrize("spec", _GATE_SPECS)
+@pytest.mark.parametrize("power", [2, 3])
+@pytest.mark.parametrize("seed", [0])
+class TestControlledBuiltinStatevectorParityPower:
+    """builtin-vs-wrapper Qiskit statevector parity with ``power=N`` (N>1).
+
+    The ``power`` parameter on ``ControlledGate.__call__`` emits
+    Controlled-(U^N) (i.e. the gate's matrix raised to the integer
+    power inside the controlled box, not the controlled gate itself
+    raised to the power), so the resulting unitary is gate-specific.
+    This suite pins that the synthesized wrapper produces the same
+    final statevector as the hand-written ``@qmc.qkernel`` wrapper for
+    every gate × ``power ∈ {2, 3}``.
+    """
+
+    def test_power_parity(self, qiskit_transpiler, spec, power, seed):
+        rng = np.random.default_rng(seed)
+        theta = float(rng.uniform(-math.pi, math.pi)) if spec.builtin_kwarg else None
+        builtin_kernel = _make_controlled_circuit_for_statevector(
+            spec, num_controls=1, theta_value=theta, use_builtin=True, power=power
+        )
+        wrapper_kernel = _make_controlled_circuit_for_statevector(
+            spec, num_controls=1, theta_value=theta, use_builtin=False, power=power
+        )
+        sv_b = _get_statevector(qiskit_transpiler, builtin_kernel, {})
+        sv_w = _get_statevector(qiskit_transpiler, wrapper_kernel, {})
+        assert statevectors_equal(sv_b, sv_w), (
+            f"builtin/wrapper power={power} statevector mismatch for "
+            f"gate={spec.label}, seed={seed}, theta={theta}."
+        )
+
+
+@pytest.mark.skipif(not _HAS_QISKIT, reason="qiskit not installed")
+class TestControlledBuiltinSymbolicNumControls:
+    """``num_controls=qmc.UInt`` (symbolic) path works end-to-end on built-ins.
+
+    Symbolic ``num_controls`` is the path QPE uses: the count of
+    control qubits is a kernel parameter (``UInt`` handle) rather than
+    a Python ``int``, and the first positional argument to the
+    controlled gate is a ``Vector[Qubit]`` of controls instead of
+    individual qubits.
+
+    ``ControlledGate``'s symbolic path goes through ``_call_symbolic``
+    and emits a ``SymbolicControlledU`` operation, which is orthogonal
+    to the wrapper-synthesis path this PR adds.  This test pins that
+    the built-in form is at least *accepted* on that path: a kernel
+    using ``qmc.controlled(qmc.rx, num_controls=symbolic_n)``
+    transpiles, samples, and returns shots end-to-end.  We do **not**
+    assert the bit value here — verifying the controlled-rotation
+    semantics under ``SymbolicControlledU`` is the responsibility of
+    the controlled-U emit-pass tests (see ``tests/transpiler/`` and
+    ``tests/circuit/test_qpe.py``); the same assertion fails for a
+    hand-written ``@qmc.qkernel`` wrapper too, confirming the issue is
+    upstream of this PR.
+    """
+
+    def test_symbolic_num_controls_runs_end_to_end(self, qiskit_transpiler):
+        @qmc.qkernel
+        def circuit(n: qmc.UInt) -> qmc.Bit:
+            controls = qmc.qubit_array(n, "c")
+            target = qmc.qubit(name="t")
+            for i in qmc.range(n):
+                controls[i] = qmc.x(controls[i])
+            crx = qmc.controlled(qmc.rx, num_controls=n)
+            controls, target = crx(controls, target, angle=math.pi)
+            return qmc.measure(target)
+
+        exe = qiskit_transpiler.transpile(circuit, bindings={"n": 2})
+        results = exe.sample(qiskit_transpiler.executor(), shots=64).result().results
+        # End-to-end smoke: shots are returned with a valid bit value
+        # (0 or 1).  Bit-correctness is out of scope for this PR.
+        total = sum(count for _value, count in results)
+        assert total == 64
+        for value, _count in results:
+            assert value in (0, 1)
+
+
 def _make_controlled_circuit_with_measure(
     spec: _ControlledGateSpec, num_controls: int, theta_value: float | None
 ):
@@ -1838,7 +1912,7 @@ def _make_controlled_circuit_with_measure(
     if (nc, nt) == (1, 1):
 
         @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Bit]:
+        def circuit() -> qmc.Bit:
             q0 = qmc.qubit(name="q0")
             q1 = qmc.qubit(name="q1")
             q0 = qmc.x(q0)
