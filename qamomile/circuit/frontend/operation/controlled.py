@@ -40,8 +40,15 @@ ParamValue = Union[float, int, Float, UInt]
 
 # Counter for synthesized-wrapper filenames; ensures distinct
 # ``linecache`` entries even when the same gate is wrapped multiple times.
+# An ``RLock`` (rather than ``Lock``) is required because we eagerly
+# build ``qkernel_inst.block`` *inside* the lock — that build executes
+# the synthesized wrapper, which calls the user-supplied ``fn``, and
+# ``fn`` may itself call ``controlled(...)`` (e.g. a helper that
+# constructs another controlled gate during its body).  A non-reentrant
+# lock would deadlock the same thread on this re-entry; ``RLock`` lets
+# the recursive ``_qkernel_for_callable`` call proceed normally.
 _synthesized_kernel_counter = 0
-_synthesized_kernel_lock = threading.Lock()
+_synthesized_kernel_lock = threading.RLock()
 
 # Cache from a built-in gate callable to its synthesized ``QKernel`` wrapper.
 # A ``WeakKeyDictionary`` lets the entry vanish automatically when the

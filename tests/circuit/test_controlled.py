@@ -999,6 +999,51 @@ class TestControlledBuiltinErrors:
 class TestControlledBuiltinSynthesisInternals:
     """Cover the wrapper-synthesis edge cases the Copilot review flagged."""
 
+    def test_recursive_controlled_inside_wrapped_fn_does_not_deadlock(self):
+        """A wrapped callable that itself calls controlled() must not deadlock.
+
+        The synthesizer holds ``_synthesized_kernel_lock`` while eagerly
+        building the wrapper's ``Block`` (so ``fn`` is still strongly
+        referenced when the body executes).  That build invokes the
+        wrapped callable, which may call ``controlled(...)`` again — a
+        re-entry into ``_qkernel_for_callable`` from the same thread.
+        ``threading.Lock`` would deadlock here; ``RLock`` lets the
+        re-entry succeed.
+
+        We run the call on a worker thread with a hard timeout so a
+        regression manifests as a clear failure rather than hanging the
+        suite indefinitely.
+        """
+        import threading
+
+        def outer_helper(q: qmc.Qubit) -> qmc.Qubit:
+            # Force a recursive controlled() call during outer_helper's
+            # block construction.  The inner gate doesn't matter — what
+            # matters is that the inner controlled() re-enters the lock.
+            _ = qmc.controlled(qmc.rx)
+            return qmc.h(q)
+
+        result_holder: dict[str, object] = {}
+
+        def worker():
+            try:
+                result_holder["cg"] = qmc.controlled(outer_helper)
+            except Exception as e:  # pragma: no cover - defensive
+                result_holder["error"] = e
+
+        # ``daemon=True`` so a regression (deadlocked worker) doesn't hang
+        # the pytest process at exit — the assertion below fails first,
+        # and the daemon thread is collected on interpreter shutdown.
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        thread.join(timeout=5.0)
+        assert not thread.is_alive(), (
+            "controlled() hung — likely a deadlock from a non-reentrant lock "
+            "while re-entering _qkernel_for_callable from a wrapped callable."
+        )
+        assert "error" not in result_holder, result_holder.get("error")
+        assert isinstance(result_holder["cg"], ControlledGate)
+
     def test_reserved_names_match_namespace_keys(self):
         """``_RESERVED_WRAPPER_NAMES`` is auto-derived from ``_wrapper_namespace``.
 
