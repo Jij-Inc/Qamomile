@@ -201,13 +201,141 @@ For reference, the underlying flow:
    that matches its containing directory (`tutorial`, `algorithm`,
    `usage`, or `integration`) plus any topical tags that apply.
 
-2. **Add a Google Colab pip install cell** as the **first code cell**
-   of every article (right after the intro markdown, before any
-   `import qamomile…` line). Readers open these notebooks via the
-   "Open in Colab" button, where Qamomile is not pre-installed; the
-   cell is commented out so it is a no-op when notebooks are executed
-   locally during the docs build, and Colab users only need to
-   uncomment it. Use the project standard form:
+2. **Add a Google Colab setup block** as the first thing after the
+   intro markdown. Readers open these notebooks via the "Open in
+   Colab" button, where Qamomile is not pre-installed; the install
+   cells are commented out so they're no-ops during the local docs
+   build, and Colab users only need to uncomment one line. The exact
+   shape of this block depends on whether the article is **SDK-generic**
+   (uses Qamomile-level abstractions only — `transpiler` is built once
+   and the rest of the article works regardless of the underlying SDK)
+   or **SDK-pinned** (the article's topic is one specific SDK, like
+   `algorithm/qsci` for QURI Parts, `integration/qbraid_executor` for
+   qBraid, or `tutorial/08_compilation_and_transpilation` which
+   compares two SDKs side by side).
+
+   ### 2a. SDK-generic article — multi-pattern install + Transpiler tabs
+
+   Three cells in this exact order, directly below the intro
+   markdown. [docs/en/tutorial/01_your_first_quantum_kernel.py](en/tutorial/01_your_first_quantum_kernel.py)
+   is the canonical reference — diff against it when adding a new
+   SDK-generic article.
+
+   **Cell ① — multi-pattern pip install** (one commented line per
+   supported SDK):
+
+   ```python
+   # %%
+   # Install the latest Qamomile through pip!
+   # (Google Colab) Pick the line that matches your chosen Transpiler tab
+   # below and remove the leading "# " from it to run.
+   # # !pip install qamomile                  # Qiskit (default)
+   # # !pip install "qamomile[quri_parts]"    # QURI Parts
+   # # !pip install "qamomile[cudaq-cu12]"    # CUDA-Q on a CUDA 12.x toolchain (use cudaq-cu13 on CUDA 13.x). Linux / macOS-arm64 / WSL2 only.
+   ```
+
+   If the article needs additional non-Qamomile packages (e.g.
+   `openfermion`, `pyscf`, `openfermionpyscf` for the H₂ VQE), append
+   them to **all three** install lines so each is self-contained.
+
+   **Cell ② — Transpiler tab block** (markdown cell with a MyST
+   `tab-set` introducing the SDK choice):
+
+   ```markdown
+   # %% [markdown]
+   # This article uses Qiskit by default. Qamomile transpiles the same
+   # `@qkernel` to multiple quantum SDKs, so you can follow it with another
+   # SDK by swapping the import shown below — the rest of the article code
+   # is identical regardless of the SDK you pick. On Colab, uncomment the
+   # matching `pip install` line in the cell above first.
+   #
+   # ::::{tab-set}
+   # :::{tab-item} Qiskit
+   # :sync: qiskit
+   #
+   # ```python
+   # from qamomile.qiskit import QiskitTranspiler
+   #
+   # transpiler = QiskitTranspiler()
+   # ```
+   # :::
+   # :::{tab-item} QURI Parts
+   # :sync: quri_parts
+   #
+   # ```python
+   # from qamomile.quri_parts import QuriPartsTranspiler
+   #
+   # transpiler = QuriPartsTranspiler()
+   # ```
+   # :::
+   # :::{tab-item} CUDA-Q
+   # :sync: cudaq
+   #
+   # Use `qamomile[cudaq-cu12]` for a CUDA 12.x toolchain or
+   # `qamomile[cudaq-cu13]` for a CUDA 13.x toolchain — pick the one that
+   # matches your installed CUDA Toolkit. CUDA-Q is supported on Linux,
+   # macOS arm64, and Windows-via-WSL2 only.
+   #
+   # ```python
+   # from qamomile.cudaq import CudaqTranspiler
+   #
+   # transpiler = CudaqTranspiler()
+   # ```
+   # :::
+   # ::::
+   ```
+
+   - The `:sync:` keys keep all tab-sets on the page in sync, so a
+     reader who picks "QURI Parts" once sees the same pick everywhere.
+   - On the docs site this renders as a real tab UI. On Colab the
+     `:::` directives degrade to plain text but the inner code blocks
+     still render — readers can still copy from them.
+
+   **Cell ③ — Transpiler executable cell** (the cell readers actually
+   edit when switching SDKs), placed **directly under** Cell ② with no
+   unrelated cell in between:
+
+   ```python
+   # %%
+   # Transpiler — by default this article uses Qiskit. If you picked a
+   # different tab above (QURI Parts / CUDA-Q), copy the two lines from
+   # that tab into this cell in place of the two below, and make sure the
+   # matching pip install line further up has been uncommented.
+   from qamomile.qiskit import QiskitTranspiler
+
+   transpiler = QiskitTranspiler()
+   ```
+
+   Other generic imports (`numpy`, `qamomile.circuit`,
+   `qamomile.observable`, …) go in a **separate** cell after Cell ③ —
+   keeping them out of Cell ③ keeps "the tab above" literal: the next
+   thing the reader's eye lands on is the executable they'll modify.
+
+   ### 2b. SDK-pinned article — simple single-line install
+
+   Articles whose topic IS a specific SDK keep the simple form.
+   Examples: [docs/en/algorithm/qsci.py](en/algorithm/qsci.py)
+   (QSCI walk-through using QURI Parts),
+   [docs/en/integration/qbraid_executor.py](en/integration/qbraid_executor.py)
+   (qBraid integration),
+   [docs/en/tutorial/08_compilation_and_transpilation.py](en/tutorial/08_compilation_and_transpilation.py)
+   (deliberate Qiskit-vs-QURI-Parts comparison).
+
+   ```python
+   # %%
+   # Install the latest Qamomile through pip!
+   # # !pip install "qamomile[quri_parts]"
+   ```
+
+   No tab block — forcing one on a topic-pinned article would be
+   misleading because the body code is genuinely tied to that SDK.
+
+   ### 2c. Article that doesn't use a Transpiler at all
+
+   Articles like
+   [docs/en/tutorial/03_resource_estimation.py](en/tutorial/03_resource_estimation.py)
+   (estimation only, no transpile) and
+   [docs/en/usage/binary_model.py](en/usage/binary_model.py) keep just:
 
    ```python
    # %%
@@ -215,21 +343,16 @@ For reference, the underlying flow:
    # # !pip install qamomile
    ```
 
-   - **If the notebook uses an optional Qamomile extra** (a backend
-     transpiler/executor that lives behind a `[…]` extra in
-     `pyproject.toml`), install with that extra. Today's options:
-     - `qamomile[quri_parts]` — `qamomile.quri_parts.QuriPartsTranspiler` / `QuriPartsExecutor`
-     - `qamomile[qbraid]` — `qamomile.qbraid.QBraidExecutor`
-     - `qamomile[cudaq-cu12]` (or `qamomile[cudaq-cu13]` on a CUDA 13.x toolchain) — `qamomile.cudaq.CudaqTranspiler`
-   - **If the notebook needs additional non-Qamomile packages** (e.g.
-     `openfermion`, `pyscf`, `openfermionpyscf` for the H₂ VQE), add
-     them on the same `pip install` line so the cell is self-
-     contained.
-   - **Always include `qamomile`** in the install line — even when an
-     extra is also requested — so the cell works on a fresh Colab VM.
-   - **Localise the comment** in the JA mirror (`# 最新のQamomileを
-     pipからインストールします！`) but **keep the shell command
-     identical** between en/ja.
+   ### Common rules across all variants
+
+   - **Always include `qamomile`** in at least one install line so the
+     cell works on a fresh Colab VM.
+   - **Localise comments** in the JA mirror (e.g.
+     `# 最新のQamomileをpipからインストールします！`) but **keep the
+     shell command identical** between en/ja. Tab labels (`Qiskit`,
+     `QURI Parts`, `CUDA-Q`) and `:sync:` keys (`qiskit`,
+     `quri_parts`, `cudaq`) also stay identical between en/ja so the
+     synced-tabs feature works across the bilingual build.
 
 3. **Update the section landing page** by adding a bullet/link in
    the matching `<section>/index.md`. Each section's `index.md` is
