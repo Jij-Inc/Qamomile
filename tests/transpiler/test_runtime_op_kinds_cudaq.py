@@ -22,6 +22,11 @@ import qamomile.circuit as qmc
 
 cudaq = pytest.importorskip("cudaq")
 
+# Gate the whole module on the CUDA-Q job: the same pattern
+# ``tests/transpiler/backends/test_cudaq.py`` uses, so ``pytest -m cudaq``
+# selects this file too.
+pytestmark = pytest.mark.cudaq
+
 
 @pytest.fixture
 def cudaq_transpiler():

@@ -216,7 +216,7 @@ sv_exact = expm(-1j * T * H_mat) @ np.array([1.0, 0.0], dtype=complex)
 #
 # def statevector(circuit) -> np.ndarray:
 #     # ``transpiler.to_circuit(...)`` returns a CUDA-Q artifact; the
-#     # underlying ``cudaq.kernel`` is on its ``compiled_kernel`` field.
+#     # underlying ``cudaq.kernel`` is on its ``kernel_func`` field.
 #     # ``cudaq.get_state`` evaluates the kernel and returns a state
 #     # object whose ``__array__`` is the statevector.
 #     state = cudaq.get_state(circuit.kernel_func)

@@ -175,7 +175,7 @@ sv_exact = expm(-1j * T * H_mat) @ np.array([1.0, 0.0], dtype=complex)
 #
 # def statevector(circuit) -> np.ndarray:
 #     # `transpiler.to_circuit(...)`はCUDA-Qのartifactを返します。背後の
-#     # `cudaq.kernel`は`compiled_kernel`属性に保持されています。
+#     # `cudaq.kernel`は`kernel_func`属性に保持されています。
 #     # `cudaq.get_state`はカーネルを評価し、`__array__`が状態ベクトルになる
 #     # state objectを返します。
 #     state = cudaq.get_state(circuit.kernel_func)
