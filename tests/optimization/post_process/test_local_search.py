@@ -544,6 +544,187 @@ class TestOmmxInput:
         assert np.isclose(result.objective, -1.0)
 
 
+class TestPartialEvaluatedInstance:
+    """LocalSearch on instances with substituted (fixed) decision variables.
+
+    :meth:`ommx.v1.Instance.partial_evaluate` substitutes a value for one
+    or more decision variables: the substituted variables drop out of
+    :meth:`used_decision_variable_ids` (and out of the internal
+    ``BinaryModel`` ``LocalSearch`` builds), but reappear in any returned
+    :class:`ommx.v1.Solution` via their ``substituted_value``. The tests
+    here cover that the search runs correctly over the remaining variables
+    and that the Solution still carries the fixed value alongside the
+    optimized ones — independent of which position is fixed.
+    """
+
+    @pytest.fixture
+    def three_var_ommx(self) -> ommx.v1.Instance:
+        """Minimize ``-2*x0 - x1 - 3*x2`` over binary {x0, x1, x2}.
+
+        Brute-forced objective values:
+          (0,0,0)=0;  (0,0,1)=-3; (0,1,0)=-1; (0,1,1)=-4;
+          (1,0,0)=-2; (1,0,1)=-5; (1,1,0)=-3; (1,1,1)=-6 (unique min).
+
+        Every coefficient is negative, so for any single-variable
+        substitution the residual sub-problem is a linear-only model with
+        only-negative coefficients — starting from the all-zero remainder,
+        both ``best`` and ``first`` flip every remaining bit to 1 and
+        terminate, yielding the same final state.
+        """
+        x0 = ommx.v1.DecisionVariable.binary(id=0, name="x0")
+        x1 = ommx.v1.DecisionVariable.binary(id=1, name="x1")
+        x2 = ommx.v1.DecisionVariable.binary(id=2, name="x2")
+        return ommx.v1.Instance.from_components(
+            decision_variables=[x0, x1, x2],
+            objective=-2 * x0 - x1 - 3 * x2,
+            constraints=[],
+            sense=ommx.v1.Instance.MINIMIZE,
+        )
+
+    # (fixed_id, fixed_val, expected_state, expected_objective)
+    # See fixture docstring for the brute-force derivation.
+    @pytest.mark.parametrize(
+        ("fixed_id", "fixed_val", "expected_state", "expected_objective"),
+        [
+            (0, 0, {0: 0.0, 1: 1.0, 2: 1.0}, -4.0),
+            (0, 1, {0: 1.0, 1: 1.0, 2: 1.0}, -6.0),
+            (1, 0, {0: 1.0, 1: 0.0, 2: 1.0}, -5.0),
+            (1, 1, {0: 1.0, 1: 1.0, 2: 1.0}, -6.0),
+            (2, 0, {0: 1.0, 1: 1.0, 2: 0.0}, -3.0),
+            (2, 1, {0: 1.0, 1: 1.0, 2: 1.0}, -6.0),
+        ],
+    )
+    @pytest.mark.parametrize("method", ["best", "first"])
+    def test_partial_evaluate_each_position(
+        self,
+        three_var_ommx,
+        fixed_id,
+        fixed_val,
+        expected_state,
+        expected_objective,
+        method,
+    ):
+        """LocalSearch optimizes the residual problem after a single fix.
+
+        For each of the three positions, fix the variable to either 0 or
+        1, run the search from the all-zero remainder, and assert that
+        the returned :class:`ommx.v1.Solution` reports the optimum of
+        the residual problem with the fixed value preserved on its
+        original ID.
+        """
+        fixed_inst = three_var_ommx.partial_evaluate({fixed_id: fixed_val})
+
+        # Sanity check on the fixture: the fixed variable drops out of
+        # `used_decision_variable_ids` (so LocalSearch will not search
+        # over it) but stays in `decision_variables` carrying its
+        # `substituted_value` (so the Solution can still report it).
+        assert fixed_id not in fixed_inst.used_decision_variable_ids()
+
+        ls = LocalSearch(fixed_inst)
+        assert ls.num_bits == 2  # 3 variables minus the one fixed one
+
+        result = ls.run([0] * ls.num_bits, method=method)
+
+        assert isinstance(result, ommx.v1.Solution)
+        assert dict(result.state.entries) == expected_state
+        assert np.isclose(result.objective, expected_objective)
+        assert result.feasible
+
+    @pytest.mark.parametrize("method", ["best", "first"])
+    def test_partial_evaluate_two_fixed(self, three_var_ommx, method):
+        """Fixing two variables leaves a single-variable residual problem.
+
+        Fix ``x0=1`` and ``x2=0``; the residual is ``-x1`` over a single
+        binary variable, so the optimum is ``x1=1`` with objective
+        ``-2 - 1 = -3``. The Solution still reports all three IDs.
+        """
+        fixed_inst = three_var_ommx.partial_evaluate({0: 1, 2: 0})
+        assert fixed_inst.used_decision_variable_ids() == {1}
+
+        ls = LocalSearch(fixed_inst)
+        assert ls.num_bits == 1
+
+        result = ls.run([0], method=method)
+
+        assert isinstance(result, ommx.v1.Solution)
+        assert dict(result.state.entries) == {0: 1.0, 1: 1.0, 2: 0.0}
+        assert np.isclose(result.objective, -3.0)
+        assert result.feasible
+
+    @pytest.mark.parametrize("method", ["best", "first"])
+    def test_warm_start_from_partial_evaluated_solution(self, three_var_ommx, method):
+        """Warm-starting from the partial-evaluated instance's own Solution.
+
+        Evaluating the partial-evaluated instance at the all-zero
+        remainder yields a Solution whose ``state.entries`` covers every
+        decision variable — including the fixed one (filled in from its
+        ``substituted_value``). LocalSearch reads the entries via
+        :meth:`_initial_state_from_solution`, which only consults the
+        used (un-fixed) IDs, so warm-start agrees with the matching
+        list-based start.
+        """
+        fixed_inst = three_var_ommx.partial_evaluate({1: 1})
+        warm = fixed_inst.evaluate({0: 0, 2: 0})
+        assert isinstance(warm, ommx.v1.Solution)
+        # Sanity: the fixed variable IS reported, even though it is not
+        # in `used_decision_variable_ids`.
+        assert dict(warm.state.entries) == {0: 0.0, 1: 1.0, 2: 0.0}
+
+        result = LocalSearch(fixed_inst).run(warm, method=method)
+
+        assert isinstance(result, ommx.v1.Solution)
+        # Optimum of -2*x0 - 1 - 3*x2 is at (x0, x2) = (1, 1).
+        assert dict(result.state.entries) == {0: 1.0, 1: 1.0, 2: 1.0}
+        assert np.isclose(result.objective, -6.0)
+        assert result.feasible
+
+    def test_warm_start_solution_without_instance_raises(
+        self, spin_model, three_var_ommx
+    ):
+        """Solution warm-start requires an ommx.v1.Instance constructor.
+
+        A ``LocalSearch`` constructed from a :class:`BinaryModel` has no
+        instance to interpret the Solution's variable IDs against, so
+        the call must fail loudly rather than silently fabricate state
+        for missing IDs.
+        """
+        sol = three_var_ommx.evaluate({0: 0, 1: 0, 2: 0})
+        ls = LocalSearch(spin_model)  # BinaryModel, not ommx.v1.Instance
+        with pytest.raises(ValueError, match="constructed from a BinaryModel"):
+            ls.run(sol, method="best")
+
+    def test_warm_start_solution_missing_used_id_raises(self):
+        """Solution missing one of the instance's used IDs raises ValueError.
+
+        Build a Solution from a 2-variable instance and feed it to a
+        ``LocalSearch`` for a 3-variable instance — the Solution lacks
+        ``id=2``, which is still "used" on the 3-variable side, so the
+        validation in :meth:`_initial_state_from_solution` must trip
+        rather than silently default the missing ID to 0.
+        """
+        x0 = ommx.v1.DecisionVariable.binary(id=0)
+        x1 = ommx.v1.DecisionVariable.binary(id=1)
+        x2 = ommx.v1.DecisionVariable.binary(id=2)
+
+        small = ommx.v1.Instance.from_components(
+            decision_variables=[x0, x1],
+            objective=-x0 - x1,
+            constraints=[],
+            sense=ommx.v1.Instance.MINIMIZE,
+        )
+        sol_small = small.evaluate({0: 0, 1: 0})
+
+        larger = ommx.v1.Instance.from_components(
+            decision_variables=[x0, x1, x2],
+            objective=-x0 - x1 - x2,
+            constraints=[],
+            sense=ommx.v1.Instance.MINIMIZE,
+        )
+        ls = LocalSearch(larger)
+        with pytest.raises(ValueError, match="Missing IDs"):
+            ls.run(sol_small, method="best")
+
+
 class TestConstantOnlyModel:
     @pytest.mark.parametrize("method", ["best", "first"])
     def test_constant_only_model_no_crash(self, method):
