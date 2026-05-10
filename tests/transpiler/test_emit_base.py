@@ -661,6 +661,7 @@ class TestLoopAnalyzerBinOp:
             operands=[start, stop, step],
             results=[],
             loop_var="i",
+            loop_var_value=loop_var_val,
             operations=[binop, gate],
         )
 
@@ -731,6 +732,7 @@ class TestLoopAnalyzerBinOp:
             operands=[start, stop, step],
             results=[],
             loop_var="i",
+            loop_var_value=loop_var_val,
             operations=[inner_for],
         )
 
@@ -758,6 +760,7 @@ class TestLoopAnalyzerBinOp:
             operands=[start, stop, step],
             results=[],
             loop_var="i",
+            loop_var_value=loop_var_val,
             operations=[if_op],
         )
 
@@ -785,6 +788,7 @@ class TestLoopAnalyzerBinOp:
             operands=[start, stop, step],
             results=[],
             loop_var="i",
+            loop_var_value=loop_var_val,
             operations=[if_op],
         )
 
@@ -811,6 +815,7 @@ class TestLoopAnalyzerBinOp:
             operands=[start, stop, step],
             results=[],
             loop_var="i",
+            loop_var_value=loop_var_val,
             operations=[while_op],
         )
 
@@ -845,6 +850,7 @@ class TestLoopAnalyzerBinOp:
             operands=[start, stop, step],
             results=[],
             loop_var="i",
+            loop_var_value=loop_var_val,
             operations=[for_items_op],
         )
 
@@ -884,6 +890,7 @@ class TestLoopAnalyzerThetaArrayAccess:
             operands=[start, stop, step],
             results=[],
             loop_var="i",
+            loop_var_value=loop_idx,
             operations=[gate],
         )
 

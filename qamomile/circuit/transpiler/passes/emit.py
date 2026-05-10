@@ -124,7 +124,17 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
                      parameters must be bound at execution time.
             parameters: List of parameter names to preserve as backend parameters.
         """
-        self.bindings = bindings or {}
+        # Wrap user bindings in an ``EmitContext`` so emit-time writers can
+        # progressively migrate to typed methods (``set_value``, ``set_runtime_expr``,
+        # ``push_loop_var``) while existing dict-style writes continue to
+        # work. ``EmitContext`` IS a ``dict``, so downstream signatures
+        # typed as ``dict[str, Any]`` accept it unchanged.
+        from qamomile.circuit.transpiler.emit_context import EmitContext
+
+        if isinstance(bindings, EmitContext):
+            self.bindings = bindings
+        else:
+            self.bindings = EmitContext.from_user_bindings(bindings)
         self.parameters = set(parameters) if parameters else set()
         self._resolver = ValueResolver(self.parameters)
 

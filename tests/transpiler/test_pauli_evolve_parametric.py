@@ -62,15 +62,25 @@ class TestScalarParametricGamma:
 
 class TestArrayElementParametricGamma:
     def test_parametric_gamma_per_layer(self):
+        """Shape comes from a compile-time scalar; gamma stays runtime-symbolic.
+
+        Pre-disjointness this test passed ``gamma=[0,0,0]`` in bindings as
+        a shape hint while also marking ``gamma`` as a runtime parameter. That
+        overlap pattern is now rejected by ``Transpiler.transpile``; the
+        QAOA-style pattern (separate compile-time depth + runtime array)
+        is the supported alternative.
+        """
+
         @qmc.qkernel
         def kernel(
             n: qmc.UInt,
+            p: qmc.UInt,
             gamma: qmc.Vector[qmc.Float],
             hamiltonian: qmc.Observable,
         ) -> qmc.Vector[qmc.Bit]:
             q = superposition_vector(n)
-            for p in qmc.range(gamma.shape[0]):
-                q = qmc.pauli_evolve(q, hamiltonian, gamma[p])
+            for k in qmc.range(p):
+                q = qmc.pauli_evolve(q, hamiltonian, gamma[k])
             return qmc.measure(q)
 
         H = _make_zz_h()
@@ -79,8 +89,8 @@ class TestArrayElementParametricGamma:
             kernel,
             bindings={
                 "n": H.num_qubits,
+                "p": 3,
                 "hamiltonian": H,
-                "gamma": [0.0, 0.0, 0.0],  # shape hint for p=3
             },
             parameters=["gamma"],
         )
@@ -94,27 +104,40 @@ class TestFullQAOAExecution:
     """End-to-end: user's ipynb pattern with parametric gamma AND beta."""
 
     def _kernels(self):
+        """Build a QAOA expval kernel with compile-time depth ``p``.
+
+        Migrated from the pre-disjointness pattern that passed
+        ``gamma=[0.0]*p`` as a shape hint while also marking ``gamma`` as
+        a runtime parameter; the new contract takes the depth as its own
+        compile-time scalar so ``gamma``/``beta`` stay purely runtime-symbolic.
+
+        Returns:
+            The compiled-once expval kernel parameterized over ``p``.
+        """
+
         @qmc.qkernel
         def qaoa_circuit(
             n: qmc.UInt,
+            p: qmc.UInt,
             gamma: qmc.Vector[qmc.Float],
             beta: qmc.Vector[qmc.Float],
             hamiltonian: qmc.Observable,
         ) -> qmc.Vector[qmc.Qubit]:
             q = superposition_vector(n)
-            for p in qmc.range(gamma.shape[0]):
-                q = qmc.pauli_evolve(q, hamiltonian, gamma[p])
-                q = x_mixer(q, beta[p])
+            for k in qmc.range(p):
+                q = qmc.pauli_evolve(q, hamiltonian, gamma[k])
+                q = x_mixer(q, beta[k])
             return q
 
         @qmc.qkernel
         def qaoa_exp(
             n: qmc.UInt,
+            p: qmc.UInt,
             gamma: qmc.Vector[qmc.Float],
             beta: qmc.Vector[qmc.Float],
             hamiltonian: qmc.Observable,
         ) -> qmc.Float:
-            q = qaoa_circuit(n, gamma, beta, hamiltonian)
+            q = qaoa_circuit(n, p, gamma, beta, hamiltonian)
             return qmc.expval(q, hamiltonian)
 
         return qaoa_exp
@@ -129,9 +152,8 @@ class TestFullQAOAExecution:
             qaoa_exp,
             bindings={
                 "n": H.num_qubits,
+                "p": 2,
                 "hamiltonian": H,
-                "gamma": [0.0, 0.0],  # shape hint for p=2
-                "beta": [0.0, 0.0],
             },
             parameters=["gamma", "beta"],
         )
@@ -165,9 +187,8 @@ class TestFullQAOAExecution:
             qaoa_exp,
             bindings={
                 "n": H.num_qubits,
+                "p": 1,
                 "hamiltonian": H,
-                "gamma": [0.0],
-                "beta": [0.0],
             },
             parameters=["gamma", "beta"],
         )

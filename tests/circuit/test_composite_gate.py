@@ -1313,3 +1313,52 @@ class TestBackwardsCompatibility:
         assert qft is not None
         assert iqft is not None
         assert qpe is not None
+
+
+class TestVectorQubitParamRejection:
+    """A function-form @composite_gate decorator wrapping a @qkernel that
+    takes a Vector[Qubit] parameter must raise a clear TypeError pointing
+    users to supported alternatives. Without this, the decorator silently
+    computed num_target_qubits=0 and the call site failed with a confusing
+    arity-mismatch error.
+    """
+
+    def test_vector_qubit_param_raises_typeerror(self):
+        """Decorating a Vector[Qubit] qkernel raises with helpful message."""
+        import qamomile.circuit as qmc
+
+        with pytest.raises(TypeError) as excinfo:
+
+            @qmc.composite_gate
+            @qmc.qkernel
+            def encode(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+                return q
+
+        msg = str(excinfo.value)
+        # Both supported alternatives should be surfaced.
+        assert "@qkernel directly" in msg
+        assert "subclass CompositeGate" in msg
+
+    def test_vector_qubit_with_decorator_args_raises_typeerror(self):
+        """Same rejection through the parameterized decorator form."""
+        import qamomile.circuit as qmc
+
+        with pytest.raises(TypeError, match="array-of-qubit"):
+
+            @qmc.composite_gate(name="enc")
+            @qmc.qkernel
+            def encode(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+                return q
+
+    def test_fixed_arity_qubit_params_still_work(self):
+        """Regression: fixed-arity Qubit-only signatures still decorate cleanly."""
+        import qamomile.circuit as qmc
+
+        @qmc.composite_gate(name="entangle")
+        @qmc.qkernel
+        def entangle(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
+            q0, q1 = qmc.cx(q0, q1)
+            return q0, q1
+
+        assert entangle.num_target_qubits == 2
+        assert entangle.custom_name == "entangle"
