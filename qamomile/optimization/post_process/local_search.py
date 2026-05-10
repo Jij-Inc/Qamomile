@@ -188,7 +188,12 @@ class LocalSearch:
 
         Raises:
             ValueError: If *method* is not recognized, *initial_state* has
-                wrong length or invalid values, or *max_iter* is less than -1.
+                wrong length or invalid values, *max_iter* is less than -1,
+                or *initial_state* is an :class:`ommx.v1.Solution` that
+                does not cover the instance's used decision variables (or
+                ``LocalSearch`` was constructed from a :class:`BinaryModel`,
+                so there is no instance for the Solution to be interpreted
+                against).
         """
         if max_iter < -1:
             raise ValueError(
@@ -260,10 +265,19 @@ class LocalSearch:
         :attr:`BinaryModel.index_new_to_origin`. Values are rounded to the
         nearest integer (ommx reports binary/integer variables as floats).
 
-        Missing keys default to ``0`` — this covers slack bits introduced
-        by :meth:`ommx.v1.Instance.to_hubo` on constrained instances,
-        which naturally aren't present on a Solution obtained from the
-        unconstrained / pre-penalty instance.
+        Validates that *solution* corresponds to ``self._ommx_instance``:
+        every used decision variable of the instance (i.e. every ID in
+        ``self._ommx_instance.used_decision_variable_ids()``) must appear
+        in ``solution.state.entries``. This prevents silent
+        misinterpretation of a Solution that was generated for a different
+        instance — without the check, missing IDs would default to ``0``
+        and the search would warm-start from a fabricated state.
+
+        For a verified Solution, indices that map onto used decision
+        variables are looked up directly in ``entries`` (no fallback);
+        only slack bits introduced by :meth:`ommx.v1.Instance.to_hubo` on
+        constrained instances — which the user's Solution naturally does
+        not carry — fall through to ``0``.
 
         Args:
             solution: The ommx Solution to warm-start from.
@@ -272,12 +286,44 @@ class LocalSearch:
             A list of length :attr:`num_bits` in the internal BinaryModel's
             vartype domain (±1 for SPIN, 0/1 for BINARY). The domain is
             validated by :meth:`run` after this conversion.
+
+        Raises:
+            ValueError: If this ``LocalSearch`` was constructed from a
+                :class:`BinaryModel` rather than an
+                :class:`ommx.v1.Instance` (no instance to interpret the
+                Solution against), or if *solution* is missing any of the
+                instance's used decision-variable IDs.
         """
+        if self._ommx_instance is None:
+            raise ValueError(
+                "Cannot warm-start from an ommx.v1.Solution when LocalSearch "
+                "was constructed from a BinaryModel: the Solution's variable "
+                "IDs have no ommx.v1.Instance to be interpreted against. "
+                "Pass a list / ndarray for initial_state instead, or "
+                "construct LocalSearch from the corresponding ommx.v1.Instance."
+            )
+
         entries = dict(solution.state.entries)
-        return [
-            int(round(entries.get(self._model.index_new_to_origin[i], 0)))
-            for i in range(self._model.num_bits)
-        ]
+        used_ids = self._ommx_instance.used_decision_variable_ids()
+        missing = used_ids - entries.keys()
+        if missing:
+            raise ValueError(
+                "ommx.v1.Solution does not cover all used decision variables "
+                f"of the instance. Missing IDs: {sorted(missing)}."
+            )
+
+        state: list[int] = []
+        for i in range(self._model.num_bits):
+            var_id = self._model.index_new_to_origin[i]
+            if var_id in used_ids:
+                # Validation above guarantees var_id is in entries.
+                state.append(int(round(entries[var_id])))
+            else:
+                # Slack bit introduced by `to_hubo` on a constrained
+                # instance — not present on the user's Solution. Default
+                # to 0; the local search will overwrite it as needed.
+                state.append(0)
+        return state
 
     def _to_spin(self, state: np.ndarray) -> np.ndarray:
         """Convert state from the model's vartype to SPIN (±1).
