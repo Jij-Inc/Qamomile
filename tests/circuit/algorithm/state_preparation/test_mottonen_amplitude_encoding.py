@@ -10,6 +10,7 @@ import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.state_preparation import (
     MottonenAmplitudeEncoding,
     amplitude_encoding,
+    amplitude_encoding_from_angles,
     compute_mottonen_amplitude_encoding_ry_angles,
     compute_mottonen_amplitude_encoding_rz_angles,
 )
@@ -798,4 +799,556 @@ class TestEncodingCudaq:
             _build_expval_kernel(amplitudes), bindings={"H": H}
         )
         result = exe.run(self.transpiler.executor()).result()
+        assert float(result) == pytest.approx(expected, abs=1e-8)
+
+
+# ---------------------------------------------------------------------------
+# Parametric amplitude encoding (Vector[Float] angles as kernel parameters)
+# ---------------------------------------------------------------------------
+
+
+def _build_parametric_real_kernel(n_qubits: int) -> qmc.QKernel:
+    """Build a kernel that prepares a state from a Vector[Float] of Ry angles.
+
+    Args:
+        n_qubits (int): Number of qubits in the register.
+
+    Returns:
+        qmc.QKernel: A kernel taking ``ry_angles: Vector[Float]`` of length
+            ``2**n_qubits - 1`` and returning the measured ``Vector[Bit]``.
+    """
+
+    @qmc.qkernel
+    def kernel(ry_angles: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
+        q = qmc.qubit_array(n_qubits, "q")
+        q = amplitude_encoding_from_angles(q, ry_angles)
+        return qmc.measure(q)
+
+    return kernel
+
+
+def _build_parametric_complex_kernel(n_qubits: int) -> qmc.QKernel:
+    """Build a kernel that prepares a state from Vector[Float] Ry + Rz angles.
+
+    Args:
+        n_qubits (int): Number of qubits in the register.
+
+    Returns:
+        qmc.QKernel: A kernel taking ``ry_angles`` and ``rz_angles``
+            (each of length ``2**n_qubits - 1``) and returning the measured
+            ``Vector[Bit]``.
+    """
+
+    @qmc.qkernel
+    def kernel(
+        ry_angles: qmc.Vector[qmc.Float], rz_angles: qmc.Vector[qmc.Float]
+    ) -> qmc.Vector[qmc.Bit]:
+        q = qmc.qubit_array(n_qubits, "q")
+        q = amplitude_encoding_from_angles(q, ry_angles, rz_angles)
+        return qmc.measure(q)
+
+    return kernel
+
+
+def _build_parametric_real_expval_kernel(n_qubits: int) -> qmc.QKernel:
+    """Build an expval kernel parametric over Ry angles.
+
+    Pairs with :func:`_build_parametric_real_kernel` but returns
+    ``<H>`` so the estimator code path is exercised.
+
+    Args:
+        n_qubits (int): Number of qubits in the register.
+
+    Returns:
+        qmc.QKernel: Kernel taking ``ry_angles: Vector[Float]`` and
+            ``H: Observable`` and returning the expectation value as a
+            ``Float``.
+    """
+
+    @qmc.qkernel
+    def kernel(
+        ry_angles: qmc.Vector[qmc.Float], H: qmc.Observable
+    ) -> qmc.Float:
+        q = qmc.qubit_array(n_qubits, "q")
+        q = amplitude_encoding_from_angles(q, ry_angles)
+        return qmc.expval(q, H)
+
+    return kernel
+
+
+def _build_parametric_complex_expval_kernel(n_qubits: int) -> qmc.QKernel:
+    """Build an expval kernel parametric over Ry + Rz angles.
+
+    Args:
+        n_qubits (int): Number of qubits in the register.
+
+    Returns:
+        qmc.QKernel: Kernel taking ``ry_angles`` and ``rz_angles``
+            (Vector[Float]) plus ``H: Observable`` and returning the
+            expectation value as a ``Float``.
+    """
+
+    @qmc.qkernel
+    def kernel(
+        ry_angles: qmc.Vector[qmc.Float],
+        rz_angles: qmc.Vector[qmc.Float],
+        H: qmc.Observable,
+    ) -> qmc.Float:
+        q = qmc.qubit_array(n_qubits, "q")
+        q = amplitude_encoding_from_angles(q, ry_angles, rz_angles)
+        return qmc.expval(q, H)
+
+    return kernel
+
+
+class TestParametricInputValidation:
+    """Length checks at kernel build time for the parametric helper."""
+
+    def test_ry_length_mismatch_raises(self) -> None:
+        """``ry_angles`` length other than ``2**n - 1`` is rejected at build."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            # 2 qubits → expects 3 angles, we provide 5
+            q = amplitude_encoding_from_angles(q, [0.0, 0.0, 0.0, 0.0, 0.0])
+            return qmc.measure(q)
+
+        with pytest.raises(ValueError, match="ry_angles must have length"):
+            kernel.build()
+
+    def test_rz_length_mismatch_raises(self) -> None:
+        """``rz_angles`` length other than ``2**n - 1`` is rejected at build."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, "q")
+            # 2 qubits → expects 3 angles for each stage; ry ok, rz wrong
+            q = amplitude_encoding_from_angles(
+                q, [0.0, 0.0, 0.0], rz_angles=[0.0, 0.0]
+            )
+            return qmc.measure(q)
+
+        with pytest.raises(ValueError, match="rz_angles must have length"):
+            kernel.build()
+
+
+class TestParametricEncodingQiskit:
+    """Statevector + sampler verification of the parametric path on Qiskit.
+
+    Exercises both ``bindings`` (compile-time fixed angles) and
+    ``parameters`` (runtime-parametric angles) entry points, and both
+    real and complex catalogues.
+    """
+
+    @pytest.mark.parametrize(
+        "amplitudes",
+        [pytest.param(amps, id=name) for name, amps in _FIXED_AMPLITUDES],
+    )
+    def test_real_via_bindings(
+        self, qiskit_transpiler, amplitudes: list[float]
+    ) -> None:
+        """Real amps via compile-time-bound Ry-angle Vector[Float]."""
+        n = int(round(np.log2(len(amplitudes))))
+        ry = compute_mottonen_amplitude_encoding_ry_angles(amplitudes).tolist()
+        kernel = _build_parametric_real_kernel(n)
+        qc = qiskit_transpiler.to_circuit(kernel, bindings={"ry_angles": ry})
+        sv = run_statevector(qc).real
+        expected = _normalize(amplitudes)
+        assert _state_fidelity(sv, expected) == pytest.approx(1.0, abs=1e-8)
+
+    @pytest.mark.parametrize(
+        "amplitudes",
+        [pytest.param(amps, id=name) for name, amps in _FIXED_AMPLITUDES],
+    )
+    def test_real_via_runtime_parameters(
+        self, qiskit_transpiler, seeded_executor, amplitudes: list[float]
+    ) -> None:
+        """Real amps via runtime-bound Ry-angle Vector[Float].
+
+        The circuit is compiled once with ``parameters=["ry_angles"]``
+        (resulting in ``2**n - 1`` Qiskit parameters) and then re-bound
+        via ``executable.sample(bindings=...)`` — confirms the
+        emitted gates accept Float handles and the sampler picks up
+        runtime values.
+        """
+        n = int(round(np.log2(len(amplitudes))))
+        kernel = _build_parametric_real_kernel(n)
+        exe = qiskit_transpiler.transpile(kernel, parameters=["ry_angles"])
+        # Circuit should carry 2**n - 1 parametric rotations
+        circuit = exe.compiled_quantum[0].circuit
+        assert len(circuit.parameters) == 2**n - 1
+
+        ry = compute_mottonen_amplitude_encoding_ry_angles(amplitudes).tolist()
+        results = (
+            exe.sample(
+                seeded_executor, shots=_SHOTS, bindings={"ry_angles": ry}
+            )
+            .result()
+            .results
+        )
+        expected_probs = np.abs(_normalize(amplitudes)) ** 2
+        observed_probs = np.zeros_like(expected_probs)
+        total = 0
+        for bits, count in results:
+            observed_probs[_bits_to_index(bits)] = count / _SHOTS
+            total += count
+        assert total == _SHOTS
+        for i, p_exp in enumerate(expected_probs):
+            assert abs(observed_probs[i] - p_exp) < _shot_noise_tolerance(
+                p_exp, _SHOTS
+            ), f"bin {i}: got {observed_probs[i]:.4f}, expected {p_exp:.4f}"
+
+    @pytest.mark.parametrize(
+        "amplitudes",
+        [pytest.param(amps, id=name) for name, amps in _FIXED_COMPLEX_AMPLITUDES],
+    )
+    def test_complex_via_bindings(
+        self, qiskit_transpiler, amplitudes: list[complex]
+    ) -> None:
+        """Complex amps via compile-time-bound Ry + Rz Vector[Float] pair."""
+        n = int(round(np.log2(len(amplitudes))))
+        ry = compute_mottonen_amplitude_encoding_ry_angles(amplitudes).tolist()
+        rz = compute_mottonen_amplitude_encoding_rz_angles(amplitudes).tolist()
+        kernel = _build_parametric_complex_kernel(n)
+        qc = qiskit_transpiler.to_circuit(
+            kernel, bindings={"ry_angles": ry, "rz_angles": rz}
+        )
+        sv = run_statevector(qc)
+        expected = _normalize(amplitudes)
+        assert _state_fidelity(sv, expected) == pytest.approx(1.0, abs=1e-8)
+
+    @pytest.mark.parametrize(
+        "amplitudes",
+        [pytest.param(amps, id=name) for name, amps in _FIXED_COMPLEX_AMPLITUDES],
+    )
+    def test_complex_via_runtime_parameters(
+        self,
+        qiskit_transpiler,
+        seeded_executor,
+        amplitudes: list[complex],
+    ) -> None:
+        """Complex amps via runtime-bound Ry + Rz Vector[Float] pair."""
+        n = int(round(np.log2(len(amplitudes))))
+        kernel = _build_parametric_complex_kernel(n)
+        exe = qiskit_transpiler.transpile(
+            kernel, parameters=["ry_angles", "rz_angles"]
+        )
+        circuit = exe.compiled_quantum[0].circuit
+        # 2 stages of 2**n - 1 parametric rotations each
+        assert len(circuit.parameters) == 2 * (2**n - 1)
+
+        ry = compute_mottonen_amplitude_encoding_ry_angles(amplitudes).tolist()
+        rz = compute_mottonen_amplitude_encoding_rz_angles(amplitudes).tolist()
+        results = (
+            exe.sample(
+                seeded_executor,
+                shots=_SHOTS,
+                bindings={"ry_angles": ry, "rz_angles": rz},
+            )
+            .result()
+            .results
+        )
+        expected_probs = np.abs(_normalize(amplitudes)) ** 2
+        observed_probs = np.zeros_like(expected_probs)
+        total = 0
+        for bits, count in results:
+            observed_probs[_bits_to_index(bits)] = count / _SHOTS
+            total += count
+        assert total == _SHOTS
+        for i, p_exp in enumerate(expected_probs):
+            assert abs(observed_probs[i] - p_exp) < _shot_noise_tolerance(
+                p_exp, _SHOTS
+            ), f"bin {i}: got {observed_probs[i]:.4f}, expected {p_exp:.4f}"
+
+    def test_circuit_reuse_with_different_amplitudes(
+        self, qiskit_transpiler, seeded_executor
+    ) -> None:
+        """Same compiled circuit can be re-bound to different amplitude vectors.
+
+        The whole point of the runtime-parametric path: compile once,
+        sample many times with different angles.
+        """
+        n = 2
+        kernel = _build_parametric_real_kernel(n)
+        exe = qiskit_transpiler.transpile(kernel, parameters=["ry_angles"])
+
+        for amplitudes in [
+            [1.0, 2.0, 3.0, 4.0],
+            [1.0, 0.0, 0.0, 1.0],
+            [1.0, -1.0, 1.0, -1.0],
+        ]:
+            ry = compute_mottonen_amplitude_encoding_ry_angles(
+                np.asarray(amplitudes)
+            ).tolist()
+            results = (
+                exe.sample(
+                    seeded_executor, shots=_SHOTS, bindings={"ry_angles": ry}
+                )
+                .result()
+                .results
+            )
+            expected_probs = _normalize(amplitudes) ** 2
+            observed_probs = np.zeros_like(expected_probs)
+            for bits, count in results:
+                observed_probs[_bits_to_index(bits)] = count / _SHOTS
+            for i, p_exp in enumerate(expected_probs):
+                assert abs(observed_probs[i] - p_exp) < _shot_noise_tolerance(
+                    p_exp, _SHOTS
+                ), f"amps={amplitudes} bin {i}: got {observed_probs[i]:.4f}"
+
+    @pytest.mark.parametrize(
+        "amplitudes, pauli, qubit_idx, expected",
+        [pytest.param(amps, p, q, e, id=name) for name, amps, p, q, e in _EXPVAL_CASES],
+    )
+    def test_expval_via_runtime_parameters(
+        self,
+        qiskit_transpiler,
+        amplitudes: list[float] | list[complex],
+        pauli: str,
+        qubit_idx: int,
+        expected: float,
+    ) -> None:
+        """``<H>`` matches the analytic value when angles + H are runtime bindings."""
+        n_qubits = int(round(np.log2(len(amplitudes))))
+        is_complex = any(
+            isinstance(a, complex) and a.imag != 0 for a in amplitudes
+        )
+        H = _pad_observable(n_qubits, _make_pauli(pauli, qubit_idx))
+        ry = compute_mottonen_amplitude_encoding_ry_angles(amplitudes).tolist()
+
+        if is_complex:
+            rz = compute_mottonen_amplitude_encoding_rz_angles(amplitudes).tolist()
+            kernel = _build_parametric_complex_expval_kernel(n_qubits)
+            exe = qiskit_transpiler.transpile(
+                kernel,
+                parameters=["ry_angles", "rz_angles"],
+                bindings={"H": H},
+            )
+            result = exe.run(
+                qiskit_transpiler.executor(),
+                bindings={"ry_angles": ry, "rz_angles": rz},
+            ).result()
+        else:
+            kernel = _build_parametric_real_expval_kernel(n_qubits)
+            exe = qiskit_transpiler.transpile(
+                kernel, parameters=["ry_angles"], bindings={"H": H}
+            )
+            result = exe.run(
+                qiskit_transpiler.executor(), bindings={"ry_angles": ry}
+            ).result()
+
+        assert float(result) == pytest.approx(expected, abs=1e-8)
+
+
+@pytest.mark.quri_parts
+class TestParametricEncodingQuriParts:
+    """Parametric path on the QuriParts backend (sampler + expval)."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self) -> None:
+        pytest.importorskip("quri_parts")
+        pytest.importorskip("quri_parts.qulacs")
+        from qamomile.quri_parts.transpiler import QuriPartsTranspiler
+
+        self.transpiler = QuriPartsTranspiler()
+
+    @pytest.mark.parametrize(
+        "amplitudes",
+        [pytest.param(amps, id=name) for name, amps in _FIXED_AMPLITUDES]
+        + [pytest.param(amps, id=name) for name, amps in _FIXED_COMPLEX_AMPLITUDES],
+    )
+    def test_runtime_parametric_sampler(
+        self, amplitudes: list[float] | list[complex]
+    ) -> None:
+        """Sampler histogram matches |amplitudes|^2 when angles are bound at run time."""
+        n = int(round(np.log2(len(amplitudes))))
+        is_complex = any(isinstance(a, complex) and a.imag != 0 for a in amplitudes)
+        ry = compute_mottonen_amplitude_encoding_ry_angles(amplitudes).tolist()
+        if is_complex:
+            rz = compute_mottonen_amplitude_encoding_rz_angles(amplitudes).tolist()
+            kernel = _build_parametric_complex_kernel(n)
+            exe = self.transpiler.transpile(
+                kernel, parameters=["ry_angles", "rz_angles"]
+            )
+            results = (
+                exe.sample(
+                    self.transpiler.executor(),
+                    shots=_SHOTS,
+                    bindings={"ry_angles": ry, "rz_angles": rz},
+                )
+                .result()
+                .results
+            )
+        else:
+            kernel = _build_parametric_real_kernel(n)
+            exe = self.transpiler.transpile(kernel, parameters=["ry_angles"])
+            results = (
+                exe.sample(
+                    self.transpiler.executor(),
+                    shots=_SHOTS,
+                    bindings={"ry_angles": ry},
+                )
+                .result()
+                .results
+            )
+
+        expected_probs = np.abs(_normalize(amplitudes)) ** 2
+        observed_probs = np.zeros_like(expected_probs)
+        total = 0
+        for bits, count in results:
+            observed_probs[_bits_to_index(bits)] = count / _SHOTS
+            total += count
+        assert total == _SHOTS
+        for i, p_exp in enumerate(expected_probs):
+            assert abs(observed_probs[i] - p_exp) < _shot_noise_tolerance(
+                p_exp, _SHOTS
+            ), f"bin {i}: got {observed_probs[i]:.4f}, expected {p_exp:.4f}"
+
+    @pytest.mark.parametrize(
+        "amplitudes, pauli, qubit_idx, expected",
+        [pytest.param(amps, p, q, e, id=name) for name, amps, p, q, e in _EXPVAL_CASES],
+    )
+    def test_runtime_parametric_expval(
+        self,
+        amplitudes: list[float] | list[complex],
+        pauli: str,
+        qubit_idx: int,
+        expected: float,
+    ) -> None:
+        """``<H>`` on the encoded state matches the analytic value (runtime params)."""
+        n_qubits = int(round(np.log2(len(amplitudes))))
+        is_complex = any(
+            isinstance(a, complex) and a.imag != 0 for a in amplitudes
+        )
+        H = _pad_observable(n_qubits, _make_pauli(pauli, qubit_idx))
+        ry = compute_mottonen_amplitude_encoding_ry_angles(amplitudes).tolist()
+
+        if is_complex:
+            rz = compute_mottonen_amplitude_encoding_rz_angles(amplitudes).tolist()
+            kernel = _build_parametric_complex_expval_kernel(n_qubits)
+            exe = self.transpiler.transpile(
+                kernel,
+                parameters=["ry_angles", "rz_angles"],
+                bindings={"H": H},
+            )
+            result = exe.run(
+                self.transpiler.executor(),
+                bindings={"ry_angles": ry, "rz_angles": rz},
+            ).result()
+        else:
+            kernel = _build_parametric_real_expval_kernel(n_qubits)
+            exe = self.transpiler.transpile(
+                kernel, parameters=["ry_angles"], bindings={"H": H}
+            )
+            result = exe.run(
+                self.transpiler.executor(), bindings={"ry_angles": ry}
+            ).result()
+
+        assert float(result) == pytest.approx(expected, abs=1e-8)
+
+
+@pytest.mark.cudaq
+class TestParametricEncodingCudaq:
+    """Parametric path on the CUDA-Q backend (sampler + expval)."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self) -> None:
+        pytest.importorskip("cudaq")
+        from qamomile.cudaq.transpiler import CudaqTranspiler
+
+        self.transpiler = CudaqTranspiler()
+
+    @pytest.mark.parametrize(
+        "amplitudes",
+        [pytest.param(amps, id=name) for name, amps in _FIXED_AMPLITUDES]
+        + [pytest.param(amps, id=name) for name, amps in _FIXED_COMPLEX_AMPLITUDES],
+    )
+    def test_runtime_parametric_sampler(
+        self, amplitudes: list[float] | list[complex]
+    ) -> None:
+        """Sampler histogram matches |amplitudes|^2 when angles are bound at run time."""
+        n = int(round(np.log2(len(amplitudes))))
+        is_complex = any(isinstance(a, complex) and a.imag != 0 for a in amplitudes)
+        ry = compute_mottonen_amplitude_encoding_ry_angles(amplitudes).tolist()
+        if is_complex:
+            rz = compute_mottonen_amplitude_encoding_rz_angles(amplitudes).tolist()
+            kernel = _build_parametric_complex_kernel(n)
+            exe = self.transpiler.transpile(
+                kernel, parameters=["ry_angles", "rz_angles"]
+            )
+            results = (
+                exe.sample(
+                    self.transpiler.executor(),
+                    shots=_SHOTS,
+                    bindings={"ry_angles": ry, "rz_angles": rz},
+                )
+                .result()
+                .results
+            )
+        else:
+            kernel = _build_parametric_real_kernel(n)
+            exe = self.transpiler.transpile(kernel, parameters=["ry_angles"])
+            results = (
+                exe.sample(
+                    self.transpiler.executor(),
+                    shots=_SHOTS,
+                    bindings={"ry_angles": ry},
+                )
+                .result()
+                .results
+            )
+
+        expected_probs = np.abs(_normalize(amplitudes)) ** 2
+        observed_probs = np.zeros_like(expected_probs)
+        total = 0
+        for bits, count in results:
+            observed_probs[_bits_to_index(bits)] = count / _SHOTS
+            total += count
+        assert total == _SHOTS
+        for i, p_exp in enumerate(expected_probs):
+            assert abs(observed_probs[i] - p_exp) < _shot_noise_tolerance(
+                p_exp, _SHOTS
+            ), f"bin {i}: got {observed_probs[i]:.4f}, expected {p_exp:.4f}"
+
+    @pytest.mark.parametrize(
+        "amplitudes, pauli, qubit_idx, expected",
+        [pytest.param(amps, p, q, e, id=name) for name, amps, p, q, e in _EXPVAL_CASES],
+    )
+    def test_runtime_parametric_expval(
+        self,
+        amplitudes: list[float] | list[complex],
+        pauli: str,
+        qubit_idx: int,
+        expected: float,
+    ) -> None:
+        """``<H>`` on the encoded state matches the analytic value (runtime params)."""
+        n_qubits = int(round(np.log2(len(amplitudes))))
+        is_complex = any(
+            isinstance(a, complex) and a.imag != 0 for a in amplitudes
+        )
+        H = _pad_observable(n_qubits, _make_pauli(pauli, qubit_idx))
+        ry = compute_mottonen_amplitude_encoding_ry_angles(amplitudes).tolist()
+
+        if is_complex:
+            rz = compute_mottonen_amplitude_encoding_rz_angles(amplitudes).tolist()
+            kernel = _build_parametric_complex_expval_kernel(n_qubits)
+            exe = self.transpiler.transpile(
+                kernel,
+                parameters=["ry_angles", "rz_angles"],
+                bindings={"H": H},
+            )
+            result = exe.run(
+                self.transpiler.executor(),
+                bindings={"ry_angles": ry, "rz_angles": rz},
+            ).result()
+        else:
+            kernel = _build_parametric_real_expval_kernel(n_qubits)
+            exe = self.transpiler.transpile(
+                kernel, parameters=["ry_angles"], bindings={"H": H}
+            )
+            result = exe.run(
+                self.transpiler.executor(), bindings={"ry_angles": ry}
+            ).result()
+
         assert float(result) == pytest.approx(expected, abs=1e-8)

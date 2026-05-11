@@ -64,7 +64,7 @@ from collections.abc import Sequence
 import numpy as np
 
 from qamomile.circuit.frontend.composite_gate import CompositeGate
-from qamomile.circuit.frontend.handle import Qubit, Vector
+from qamomile.circuit.frontend.handle import Float, Qubit, Vector
 from qamomile.circuit.frontend.handle.utils import get_size
 from qamomile.circuit.frontend.operation.qubit_gates import cx, ry, rz
 from qamomile.circuit.ir.operation.composite_gate import (
@@ -75,6 +75,7 @@ from qamomile.circuit.ir.operation.composite_gate import (
 __all__ = [
     "MottonenAmplitudeEncoding",
     "amplitude_encoding",
+    "amplitude_encoding_from_angles",
     "compute_mottonen_amplitude_encoding_ry_angles",
     "compute_mottonen_amplitude_encoding_rz_angles",
 ]
@@ -419,7 +420,7 @@ def _compute_disentangling_angles(
 def _emit_mottonen_gates(
     qubits: list[Qubit],
     num_qubits: int,
-    angles: Sequence[float],
+    angles: Sequence[float] | np.ndarray | Vector[Float],
     gate: str = "ry",
 ) -> None:
     """Emit a Gray-walk Ry / CNOT or Rz / CNOT sequence in place on *qubits*.
@@ -429,12 +430,20 @@ def _emit_mottonen_gates(
     chunk-splitting convention used by :func:`_compute_all_ry_angles`
     and :func:`_compute_disentangling_angles`).
 
+    *angles* may be either a concrete numerical sequence (Python list,
+    NumPy array of dtype float) or a ``Vector[Float]`` handle — the
+    latter is what makes the runtime-parametric path
+    (:func:`amplitude_encoding_from_angles`) work: indexing a
+    ``Vector[Float]`` with a Python ``int`` produces a ``Float`` handle
+    that ``qmc.ry`` / ``qmc.rz`` accept directly.
+
     Args:
         qubits (list[Qubit]): Mutable list of length ``num_qubits`` of
             qubit handles.  Entries are overwritten as gates are applied.
         num_qubits (int): Number of qubits in the register.
-        angles (Sequence[float]): Flat sequence of rotation angles of
-            length ``2**num_qubits - 1``, laid out level by level.
+        angles (Sequence[float] | np.ndarray | Vector[Float]): Flat
+            sequence of rotation angles of length ``2**num_qubits - 1``,
+            laid out level by level.
         gate (str): ``"ry"`` for the magnitude stage or ``"rz"`` for the
             phase stage.  Defaults to ``"ry"``.
 
@@ -739,4 +748,109 @@ def amplitude_encoding(
     result = gate(*qubit_list)
     for i in range(n):
         qubits[i] = result[i]
+    return qubits
+
+
+def amplitude_encoding_from_angles(
+    qubits: Vector[Qubit],
+    ry_angles: Sequence[float] | np.ndarray | Vector[Float],
+    rz_angles: Sequence[float] | np.ndarray | Vector[Float] | None = None,
+) -> Vector[Qubit]:
+    """Apply Möttönen amplitude encoding from pre-computed Ry / Rz angles.
+
+    Companion to :func:`amplitude_encoding` for the **parametric** use
+    case: the user pre-computes the Gray-walk Ry (and optionally Rz)
+    angles classically with
+    :func:`compute_mottonen_amplitude_encoding_ry_angles` and
+    :func:`compute_mottonen_amplitude_encoding_rz_angles`, then passes
+    them in as either concrete sequences or as ``Vector[Float]``
+    handles obtained from kernel parameters.  In the latter case the
+    angles can be left as runtime parameters
+    (``transpiler.transpile(kernel, parameters=["ry_angles", ...])``)
+    so the same compiled circuit can be re-bound to different
+    amplitude vectors without recompilation — useful inside hybrid
+    optimisation loops.
+
+    Unlike :func:`amplitude_encoding`, this function does NOT wrap the
+    emission in a :class:`MottonenAmplitudeEncoding` ``CompositeGate``
+    box on the IR side; the Ry / Rz / CNOT Gray-walk gates are emitted
+    directly into the surrounding kernel.  Resource estimation /
+    visualization will therefore see the elementary gates rather than
+    a single high-level op.
+
+    Args:
+        qubits (Vector[Qubit]): Vector of ``n`` qubit handles, expected
+            to start in :math:`|0\\rangle^{\\otimes n}`.
+        ry_angles (Sequence[float] | np.ndarray | Vector[Float]):
+            Gray-walk Ry angles for the magnitude stage.  Must have
+            length ``2**n - 1``.
+        rz_angles (Sequence[float] | np.ndarray | Vector[Float] | None):
+            Gray-walk Rz angles for the phase stage.  Pass ``None``
+            (default) to skip the Rz stage entirely (real-amplitude
+            path); otherwise must have length ``2**n - 1`` as well.
+
+    Returns:
+        Vector[Qubit]: The same *qubits* vector, with each element
+            updated to the post-encoding qubit handle.
+
+    Raises:
+        ValueError: If ``ry_angles`` / ``rz_angles`` is a concrete
+            sequence whose length does not match ``2**n - 1``, or if the
+            ``qubits`` vector has an unresolved symbolic shape that
+            ``get_size`` cannot reduce to a concrete integer.  When the
+            angle argument is a ``Vector[Float]`` handle the length check
+            is skipped (the shape may be symbolic at trace time); a
+            runtime mismatch then surfaces as a backend bind-time error
+            instead.
+
+    Example::
+
+        # Pre-compute classically (outside the kernel)
+        ry = compute_mottonen_amplitude_encoding_ry_angles(amps)
+        rz = compute_mottonen_amplitude_encoding_rz_angles(amps)
+
+        @qmc.qkernel
+        def prepare(
+            ry_a: qmc.Vector[qmc.Float],
+            rz_a: qmc.Vector[qmc.Float],
+        ) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, name="q")
+            q = amplitude_encoding_from_angles(q, ry_a, rz_a)
+            return qmc.measure(q)
+
+        exe = transpiler.transpile(prepare, parameters=["ry_a", "rz_a"])
+        # Same compiled circuit, re-bound at "runtime":
+        exe.run(transpiler.executor(),
+                bindings={"ry_a": ry.tolist(), "rz_a": rz.tolist()})
+    """
+    n = get_size(qubits)
+    expected_len = 2**n - 1
+
+    # Length validation only applies to concrete sequences.  ``Vector[Float]``
+    # handles obtained from kernel parameters carry a symbolic shape at
+    # trace time, so a static check would either spuriously fail (symbolic
+    # shape resolves to 0) or require resolving bindings inside this helper.
+    # In the parametric case the user contracts to bind exactly ``2**n - 1``
+    # values; a mismatch surfaces at backend bind time.
+    if not isinstance(ry_angles, Vector):
+        ry_len = len(ry_angles)
+        if ry_len != expected_len:
+            raise ValueError(
+                f"ry_angles must have length 2**n - 1 = {expected_len} for "
+                f"n={n} qubits, got {ry_len}"
+            )
+    if rz_angles is not None and not isinstance(rz_angles, Vector):
+        rz_len = len(rz_angles)
+        if rz_len != expected_len:
+            raise ValueError(
+                f"rz_angles must have length 2**n - 1 = {expected_len} for "
+                f"n={n} qubits, got {rz_len}"
+            )
+
+    qubit_list: list[Qubit] = [qubits[i] for i in range(n)]
+    _emit_mottonen_gates(qubit_list, n, ry_angles, gate="ry")
+    if rz_angles is not None:
+        _emit_mottonen_gates(qubit_list, n, rz_angles, gate="rz")
+    for i in range(n):
+        qubits[i] = qubit_list[i]
     return qubits

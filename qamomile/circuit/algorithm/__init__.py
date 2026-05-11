@@ -30,6 +30,7 @@ from .qaoa import (
 from .state_preparation import (
     MottonenAmplitudeEncoding,
     amplitude_encoding,
+    amplitude_encoding_from_angles,
     compute_mottonen_amplitude_encoding_ry_angles,
     compute_mottonen_amplitude_encoding_rz_angles,
 )
@@ -63,6 +64,7 @@ __all__ = [
     # State preparation
     "MottonenAmplitudeEncoding",
     "amplitude_encoding",
+    "amplitude_encoding_from_angles",
     "compute_mottonen_amplitude_encoding_ry_angles",
     "compute_mottonen_amplitude_encoding_rz_angles",
     # Trotterization
