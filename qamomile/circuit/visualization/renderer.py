@@ -550,6 +550,13 @@ class MatplotlibRenderer:
         elif node.gate_type == GateOperationType.CZ:
             for y in y_coords:
                 self._draw_control_dot(ax, x, y)
+        elif node.gate_type == GateOperationType.TOFFOLI:
+            # Operands: [control1, control2, target]. Render in the
+            # same style as CX — control dots on the two control
+            # wires, target-X on the target wire.
+            for y in y_coords[:-1]:
+                self._draw_control_dot(ax, x, y)
+            self._draw_target_x(ax, x, y_coords[-1])
         elif node.gate_type == GateOperationType.SWAP:
             for y in y_coords:
                 self._draw_swap_x(ax, x, y)
@@ -903,6 +910,36 @@ class MatplotlibRenderer:
                 fontsize=self.style.subfont_size,
                 zorder=PORDER_TEXT,
             )
+
+        # Participation markers: when the analyzer precisely determined
+        # which wires the loop touches, draw a small control-style dot
+        # centered on each affected wire at the box's left and right
+        # edges so viewers can tell which wires participate vs. which
+        # are passthrough. Skip when the analyzer fell back to
+        # conservative analysis — the affected set may over-
+        # approximate and dots would misleadingly imply certainty.
+        #
+        # Intentional zorder: ``PORDER_GATE - 1`` places each dot
+        # *behind* the folded-block patch (``PORDER_GATE``), so the
+        # opaque box fill hides the half that sits inside the box and
+        # only the outer half protrudes. This mirrors the way a CX
+        # control dot appears to sit on a wire (with the wire partly
+        # hidden behind the dot). Raising the zorder would reveal the
+        # full circle stuck on each edge — not the intended look.
+        if node.affected_qubits_precise:
+            x_left = x_pos - width / 2
+            x_right = x_pos + width / 2
+            for q in affected_qubits:
+                y = self.qubit_y[q]
+                for x in (x_left, x_right):
+                    circle = mpatches.Circle(
+                        (x, y),
+                        radius=0.05,
+                        facecolor=self.style.wire_color,
+                        edgecolor=self.style.wire_color,
+                        zorder=PORDER_GATE - 1,
+                    )
+                    ax.add_patch(circle)
 
     def _add_jupyter_display_support(self, fig: Figure) -> None:
         """Add Jupyter display support to the figure.

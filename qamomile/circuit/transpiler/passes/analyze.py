@@ -13,6 +13,93 @@ from qamomile.circuit.transpiler.errors import DependencyError, ValidationError
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowVisitor
 
+# ---------------------------------------------------------------------------
+# Public dataflow utilities
+#
+# These helpers were originally private methods of ``AnalyzePass`` but are
+# exposed at module scope so that other passes (e.g. ``ClassicalLoweringPass``)
+# can reuse the same measurement-taint analysis without instantiating
+# ``AnalyzePass`` or duplicating the worklist algorithm.
+# ---------------------------------------------------------------------------
+
+
+def build_dependency_graph(operations: list[Operation]) -> dict[str, set[str]]:
+    """Build a map from each value UUID to the UUIDs it depends on.
+
+    Walks operations recursively (through ``HasNestedOps``) and records,
+    for each result UUID, the set of operand UUIDs that produced it.
+    Used downstream by measurement-taint analysis.
+
+    Args:
+        operations: Top-level operations of the block.
+
+    Returns:
+        Mapping ``result_uuid -> set(operand_uuid, ...)``.
+    """
+
+    class DependencyGraphBuilder(ControlFlowVisitor):
+        def __init__(self):
+            self.graph: dict[str, set[str]] = {}
+
+        def visit_operation(self, op: Operation) -> None:
+            operand_uuids = {v.uuid for v in op.operands if isinstance(v, ValueBase)}
+            for result in op.results:
+                if result.uuid not in self.graph:
+                    self.graph[result.uuid] = set()
+                self.graph[result.uuid].update(operand_uuids)
+
+    builder = DependencyGraphBuilder()
+    builder.visit_operations(operations)
+    return builder.graph
+
+
+def find_measurement_results(operations: list[Operation]) -> set[str]:
+    """Find all value UUIDs that are direct results of ``MeasureOperation``.
+
+    Walks operations recursively (through ``HasNestedOps``) and collects
+    every measurement result's UUID. The seed for taint propagation.
+    """
+
+    class MeasurementResultCollector(ControlFlowVisitor):
+        def __init__(self):
+            self.result_uuids: set[str] = set()
+
+        def visit_operation(self, op: Operation) -> None:
+            if isinstance(op, MeasureOperation):
+                for result in op.results:
+                    self.result_uuids.add(result.uuid)
+
+    collector = MeasurementResultCollector()
+    collector.visit_operations(operations)
+    return collector.result_uuids
+
+
+def find_measurement_derived_values(
+    dependency_graph: dict[str, set[str]],
+    measurement_uuids: set[str],
+) -> set[str]:
+    """Forward-propagate measurement taint through the dependency graph.
+
+    Args:
+        dependency_graph: ``result_uuid -> set(operand_uuid, ...)``.
+        measurement_uuids: Seed set (results of ``MeasureOperation``).
+
+    Returns:
+        The set of all UUIDs transitively derived from a measurement,
+        including the seeds themselves.
+    """
+    derived: set[str] = set()
+    worklist = list(measurement_uuids)
+    while worklist:
+        current = worklist.pop()
+        if current in derived:
+            continue
+        derived.add(current)
+        for uuid, deps in dependency_graph.items():
+            if current in deps and uuid not in derived:
+                worklist.append(uuid)
+    return derived
+
 
 class AnalyzePass(Pass[Block, Block]):
     """Analyze and validate an affine block.
@@ -78,25 +165,13 @@ class AnalyzePass(Pass[Block, Block]):
         self,
         operations: list[Operation],
     ) -> dict[str, set[str]]:
-        """Build a map from each value UUID to the UUIDs it depends on."""
+        """Build a map from each value UUID to the UUIDs it depends on.
 
-        class DependencyGraphBuilder(ControlFlowVisitor):
-            def __init__(self):
-                self.graph: dict[str, set[str]] = {}
-
-            def visit_operation(self, op: Operation) -> None:
-                # Each result depends on all operands (using ValueBase for all value types)
-                operand_uuids = {
-                    v.uuid for v in op.operands if isinstance(v, ValueBase)
-                }
-                for result in op.results:
-                    if result.uuid not in self.graph:
-                        self.graph[result.uuid] = set()
-                    self.graph[result.uuid].update(operand_uuids)
-
-        builder = DependencyGraphBuilder()
-        builder.visit_operations(operations)
-        return builder.graph
+        Thin wrapper for the module-level :func:`build_dependency_graph` so
+        external passes can reuse the same logic without instantiating
+        ``AnalyzePass``.
+        """
+        return build_dependency_graph(operations)
 
     def _validate_quantum_dependencies(
         self,
@@ -223,20 +298,8 @@ class AnalyzePass(Pass[Block, Block]):
         self,
         operations: list[Operation],
     ) -> set[str]:
-        """Find all value UUIDs that are measurement results."""
-
-        class MeasurementResultCollector(ControlFlowVisitor):
-            def __init__(self):
-                self.result_uuids: set[str] = set()
-
-            def visit_operation(self, op: Operation) -> None:
-                if isinstance(op, MeasureOperation):
-                    for result in op.results:
-                        self.result_uuids.add(result.uuid)
-
-        collector = MeasurementResultCollector()
-        collector.visit_operations(operations)
-        return collector.result_uuids
+        """Wrapper for :func:`find_measurement_results`."""
+        return find_measurement_results(operations)
 
     def _find_measurement_derived_values(
         self,
@@ -244,20 +307,15 @@ class AnalyzePass(Pass[Block, Block]):
         measurement_uuids: set[str],
         derived: set[str],
     ) -> None:
-        """Find all values that are derived from measurements."""
-        # Use a worklist algorithm to find all derived values
-        worklist = list(measurement_uuids)
+        """Populate ``derived`` with all measurement-derived UUIDs.
 
-        while worklist:
-            current = worklist.pop()
-            if current in derived:
-                continue
-            derived.add(current)
-
-            # Find values that depend on current
-            for uuid, deps in dependency_graph.items():
-                if current in deps and uuid not in derived:
-                    worklist.append(uuid)
+        Wrapper for :func:`find_measurement_derived_values` that updates
+        the caller's ``derived`` set in place (preserves the original
+        method signature).
+        """
+        derived.update(
+            find_measurement_derived_values(dependency_graph, measurement_uuids)
+        )
 
     def _depends_on_measurement(
         self,

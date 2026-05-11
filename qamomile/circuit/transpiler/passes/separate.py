@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation.arithmetic_operations import RuntimeClassicalExpr
 from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
 from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
@@ -299,6 +300,23 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
 
             if current_kind is None:
                 current_kind = op_kind
+
+            # Runtime classical expressions bridge a measurement to a
+            # runtime IfOperation/WhileOperation inside a single quantum
+            # segment. After ``ClassicalLoweringPass``, every measurement-
+            # derived classical op is represented as ``RuntimeClassicalExpr``,
+            # so this is a single type-check — no operand-typing heuristic
+            # needed. Examples that work under this rule but the old
+            # BitType-only heuristic could not handle:
+            #   ``if (s0 + 2 * s1 + 4 * s2) == 5:``  (UInt-typed BinOp/CompOp)
+            #   ``if measure(q) == bound_uint_param:`` (mixed Bit/UInt)
+            if (
+                op_kind == OperationKind.CLASSICAL
+                and current_kind == OperationKind.QUANTUM
+                and isinstance(op, RuntimeClassicalExpr)
+            ):
+                current_ops.append(op)
+                continue
 
             if op_kind != current_kind and op_kind in (
                 OperationKind.QUANTUM,

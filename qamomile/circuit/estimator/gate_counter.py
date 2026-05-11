@@ -314,7 +314,7 @@ def _handle_pauli_evolve(
     # Try to resolve Hamiltonian from bindings
     obs_value = op.observable
     hamiltonian = None
-    if hasattr(obs_value, "name") and obs_value.name in bindings:
+    if hasattr(obs_value, "name") and obs_value.name and obs_value.name in bindings:
         hamiltonian = bindings[obs_value.name]
     if hamiltonian is None and hasattr(obs_value, "uuid"):
         hamiltonian = bindings.get(obs_value.uuid)

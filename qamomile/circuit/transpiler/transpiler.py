@@ -368,6 +368,28 @@ class Transpiler(ABC, Generic[T]):
         """Pass 2: Validate and analyze dependencies."""
         return self._analyze_pass.run(block)
 
+    def classical_lowering(self, block: Block) -> Block:
+        """Pass 2.25: Lower measurement-derived classical ops.
+
+        Identifies ``CompOp`` / ``CondOp`` / ``NotOp`` / ``BinOp``
+        instances whose operand dataflow traces back to a measurement and
+        rewrites them to ``RuntimeClassicalExpr``. Compile-time-foldable
+        and emit-time-foldable (loop-bound, parameter-bound) classical
+        ops are left unchanged.
+
+        Runs after ``analyze`` so the measurement-taint analysis has the
+        full dependency graph available, and before
+        ``validate_symbolic_shapes`` / ``plan`` / ``emit`` so downstream
+        passes can rely on the cleaner IR (in particular: future
+        segmentation work can dispatch on ``RuntimeClassicalExpr`` type
+        instead of the BitType-only heuristic).
+        """
+        from qamomile.circuit.transpiler.passes.classical_lowering import (
+            ClassicalLoweringPass,
+        )
+
+        return ClassicalLoweringPass().run(block)
+
     def validate_symbolic_shapes(self, block: Block) -> Block:
         """Pass 2.5: Reject unresolved parameter shape dims in loop bounds.
 
@@ -415,13 +437,22 @@ class Transpiler(ABC, Generic[T]):
 
         Args:
             kernel: The QKernel to compile
-            bindings: Parameter values to bind (also resolves array shapes)
+            bindings: Parameter values to bind (also resolves array shapes).
+                Names in ``bindings`` and ``parameters`` must be disjoint —
+                a name is either compile-time bound or runtime symbolic,
+                never both.
             parameters: Parameter names to preserve as backend parameters
 
         Returns:
             ExecutableProgram ready for execution
 
         Raises:
+            ValueError: If a name appears in both ``bindings`` and
+                ``parameters``. A name being in both is ambiguous (placeholder
+                value vs runtime symbol) and used to silently miscompile
+                control-flow predicates that depended on parameter-array
+                elements; rejecting the overlap up front keeps the contract
+                unambiguous.
             QamomileCompileError: If compilation fails (validation, dependency errors)
 
         Note:
@@ -441,6 +472,19 @@ class Transpiler(ABC, Generic[T]):
             9. plan: Build ProgramPlan (segment into C->Q->C steps)
             10. emit: Generate backend-specific code
         """
+        if bindings and parameters:
+            overlap = set(parameters) & set(bindings.keys())
+            if overlap:
+                raise ValueError(
+                    f"Parameter name(s) {sorted(overlap)} appear in both "
+                    f"`parameters` and `bindings`. A name must be either "
+                    f"compile-time bound (in `bindings`) or runtime symbolic "
+                    f"(in `parameters`), not both. "
+                    f"If you want this value baked into the circuit, remove "
+                    f"it from `parameters`. If you want it as a runtime "
+                    f"parameter, remove it from `bindings`."
+                )
+
         entrypoint_validator = EntrypointValidationPass()
 
         # Pass bindings and parameters to to_block for proper shape resolution
@@ -457,6 +501,14 @@ class Transpiler(ABC, Generic[T]):
         validated = self.affine_validate(affine)
         partially_evaluated = self.partial_eval(validated, bindings)
         analyzed = self.analyze(partially_evaluated)
+        # Lower measurement-derived classical ops to ``RuntimeClassicalExpr``
+        # so emit can dispatch them through a dedicated backend hook
+        # instead of fold-or-translate logic over ``CompOp``/``CondOp``/
+        # ``NotOp``/``BinOp``. Non-runtime (foldable) classical ops are
+        # left untouched and continue through the existing emit-time fold
+        # path. Runs before symbolic-shape validation and segmentation
+        # so those passes see the rewritten IR.
+        analyzed = self.classical_lowering(analyzed)
         analyzed = self.validate_symbolic_shapes(analyzed)
         separated = self.plan(analyzed)
         return self.emit(separated, bindings, parameters)

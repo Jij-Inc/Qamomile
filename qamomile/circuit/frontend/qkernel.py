@@ -20,7 +20,7 @@ from qamomile.circuit.frontend.ast_transform import (
     collect_quantum_rebind_violations,
     transform_control_flow,
 )
-from qamomile.circuit.frontend.constructors import qubit_array
+from qamomile.circuit.frontend.constructors import bit, float_, qubit_array, uint
 from qamomile.circuit.frontend.func_to_block import (
     create_dummy_input,
     func_to_block,
@@ -52,6 +52,62 @@ def _get_array_element_type(pt: Any) -> type | None:
     if hasattr(pt, "__args__") and pt.__args__:
         return pt.__args__[0]
     return getattr(pt, "element_type", None)
+
+
+def _promote_literal_to_handle(value: Any, expected_type: Any) -> Any:
+    """Promote a Python literal to a scalar Handle based on the callee's annotation.
+
+    When a sub-`@qkernel` declares a scalar parameter (`UInt`, `Float`,
+    `Bit`), allow the call site to pass a raw Python literal and wrap it
+    transparently. This mirrors the literal-acceptance pattern in built-in
+    gate primitives such as ``qmc.rx`` (which take ``float | Float``) and
+    saves users from manually calling ``qmc.uint(0)`` / ``qmc.float_(0.5)``
+    / ``qmc.bit(True)`` at every call site.
+
+    Promotion rules (applied only when ``expected_type`` is exactly one
+    of the three scalar Handle classes):
+
+    - ``UInt`` accepts ``int`` (excluding ``bool``).
+    - ``Float`` accepts ``int`` (excluding ``bool``) or ``float`` —
+      ``int → Float`` mirrors Python's natural numeric coercion (e.g.,
+      ``math.cos(0)`` returns ``1.0``).
+    - ``Bit`` accepts ``bool`` only. ``int`` values like ``0`` / ``1``
+      are NOT promoted — symmetric to ``bool`` being excluded from the
+      int-numeric paths.
+
+    Anything else (already a Handle, an array-typed parameter, an
+    incompatible literal) is returned unchanged so downstream
+    validation produces the existing clear error.
+
+    Args:
+        value: The argument bound for this parameter. Can be any object.
+        expected_type: The callee's declared annotation for this parameter.
+            Typically a Handle class (``UInt``, ``Float``, ``Bit``,
+            ``Vector[Qubit]``, ...) or a parameterized generic.
+
+    Returns:
+        Either a freshly-constructed scalar Handle wrapping the literal,
+        or ``value`` unchanged if no promotion rule applies.
+
+    Note:
+        ``bool`` is a subclass of ``int`` in Python, so the rules above
+        explicitly exclude bools from int/float promotion paths to avoid
+        ``True`` silently becoming ``UInt(1)`` or ``Float(1.0)``. A
+        ``bool`` is only promoted when the declared type is ``Bit``.
+    """
+    if isinstance(value, Handle):
+        return value
+    is_bool = isinstance(value, bool)
+    if expected_type is UInt:
+        if isinstance(value, int) and not is_bool:
+            return uint(value)
+    elif expected_type is Float:
+        if isinstance(value, float) or (isinstance(value, int) and not is_bool):
+            return float_(float(value))
+    elif expected_type is Bit:
+        if is_bool:
+            return bit(value)
+    return value
 
 
 def _handle_types_equal(a: Any, b: Any) -> bool:
@@ -306,6 +362,17 @@ class QKernel(Generic[P, R]):
         bound_args = self.signature.bind(*args, **kwargs)
         bound_args.apply_defaults()
 
+        # Auto-promote raw Python literals to scalar Handles (UInt/Float/Bit)
+        # so that calls like ``ry_layer(q, thetas, 0)`` work the same as
+        # ``ry_layer(q, thetas, qmc.uint(0))``. Mirrors the literal-acceptance
+        # pattern used by built-in gate primitives.
+        for arg_name, arg_value in list(bound_args.arguments.items()):
+            expected_type = self.input_types.get(arg_name)
+            if expected_type is not None:
+                bound_args.arguments[arg_name] = _promote_literal_to_handle(
+                    arg_value, expected_type
+                )
+
         # Prepare inputs for the IR call (unwrap Handles to Values)
         inputs_map = {}
         # Track borrow provenance for input-derived quantum scalar handles.
@@ -428,7 +495,10 @@ class QKernel(Generic[P, R]):
         """Auto-detect parameters: non-Qubit arguments without value or default."""
         detected: list[str] = []
         for name, param in self.signature.parameters.items():
-            param_type = param.annotation
+            # Prefer the resolved type hint from ``self.input_types`` so that
+            # ``from __future__ import annotations`` stringified annotations
+            # (e.g. ``"qmc.Vector[qmc.Float]"``) are compared as real types.
+            param_type = self.input_types.get(name, param.annotation)
 
             # Skip Qubit types
             if param_type is Qubit:
@@ -486,7 +556,10 @@ class QKernel(Generic[P, R]):
             if name in parameters:
                 continue
 
-            param_type = param.annotation
+            # Prefer the resolved type hint from ``self.input_types`` so that
+            # ``from __future__ import annotations`` stringified annotations
+            # are compared as real types.
+            param_type = self.input_types.get(name, param.annotation)
 
             # Qubit types are created as dummy inputs
             if param_type is Qubit:
@@ -793,7 +866,10 @@ class QKernel(Generic[P, R]):
             dummy_inputs: dict[str, Handle] = {}
 
             for name, param in self.signature.parameters.items():
-                param_type = param.annotation
+                # Prefer the resolved type hint from ``self.input_types`` so
+                # that ``from __future__ import annotations`` stringified
+                # annotations are handled correctly.
+                param_type = self.input_types.get(name, param.annotation)
 
                 # Scalar Observable is always a parameter; unbound
                 # Vector[Observable] is too so its shape stays symbolic
@@ -923,8 +999,8 @@ class QKernel(Generic[P, R]):
 
     def _has_qubit_array_params(self) -> bool:
         """Check if kernel has any Qubit array parameters (Vector[Qubit], etc.)."""
-        for param in self.signature.parameters.values():
-            pt = param.annotation
+        for name, param in self.signature.parameters.items():
+            pt = self.input_types.get(name, param.annotation)
             if is_array_type(pt) and _get_array_element_type(pt) is Qubit:
                 return True
         return False
@@ -960,7 +1036,9 @@ class QKernel(Generic[P, R]):
         build_kwargs: dict[str, Any] = {}
         for key, val in kwargs.items():
             if key in self.signature.parameters:
-                pt = self.signature.parameters[key].annotation
+                pt = self.input_types.get(
+                    key, self.signature.parameters[key].annotation
+                )
                 if is_array_type(pt):
                     elem = _get_array_element_type(pt)
                     if elem is Qubit and isinstance(val, int):
@@ -970,7 +1048,7 @@ class QKernel(Generic[P, R]):
 
         missing = []
         for name, param in self.signature.parameters.items():
-            pt = param.annotation
+            pt = self.input_types.get(name, param.annotation)
             if is_array_type(pt):
                 elem = _get_array_element_type(pt)
                 if elem is Qubit and name not in qubit_sizes:

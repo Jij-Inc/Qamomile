@@ -261,3 +261,84 @@ class TestShapePropagationWithTranspiler:
         assert result is not None
         for bitstring, _count in result.results:
             assert len(bitstring) == 4
+
+
+class TestNestedElementExtractionPattern:
+    """Regression test for the inline pass dropping cloned parent_array refs.
+
+    A @qkernel taking ``Vector[Qubit]`` that extracts individual ``q[i]``
+    elements and passes them to a nested @qkernel helper used to crash at
+    emit time with ``AssertionError: Array element key '...' not found in
+    qubit_map``. The bug was that ``_inline_call`` resolved call_args by raw
+    UUID lookup, so cloned-element values whose ``parent_array`` had been
+    remapped to the caller's concrete array kept the stale clone reference.
+    """
+
+    @pytest.fixture
+    def qiskit_transpiler(self):
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        return QiskitTranspiler()
+
+    def test_nested_element_extraction_pattern(self, qiskit_transpiler):
+        """Outer kernel takes Vector[Qubit], extracts q[i] elements, passes
+        them to a nested helper that takes individual Qubit args."""
+
+        @qmc.qkernel
+        def helper(
+            a: qmc.Qubit, b: qmc.Qubit, c: qmc.Qubit
+        ) -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
+            a, b = qmc.cx(a, b)
+            a, c = qmc.cx(a, c)
+            return a, b, c
+
+        @qmc.qkernel
+        def outer(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            q[0], q[1], q[2] = helper(q[0], q[1], q[2])
+            return q
+
+        @qmc.qkernel
+        def main() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, name="q")
+            q = outer(q)
+            return qmc.measure(q)
+
+        # Should compile without the resource_allocator assertion
+        executor = qiskit_transpiler.transpile(main)
+        qc = executor.compiled_quantum[0].circuit
+
+        # Should emit two CX gates and three measurements
+        gate_names = [inst.operation.name for inst in qc.data]
+        assert gate_names.count("cx") == 2
+        assert gate_names.count("measure") == 3
+
+    def test_doubly_nested_element_extraction(self, qiskit_transpiler):
+        """Three levels deep: outer → middle (Vector[Qubit]) → leaf (Qubit args)."""
+
+        @qmc.qkernel
+        def leaf(a: qmc.Qubit, b: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
+            a, b = qmc.cx(a, b)
+            return a, b
+
+        @qmc.qkernel
+        def middle(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            q[0], q[1] = leaf(q[0], q[1])
+            return q
+
+        @qmc.qkernel
+        def outer(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+            q = middle(q)
+            return q
+
+        @qmc.qkernel
+        def main() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, name="q")
+            q = outer(q)
+            return qmc.measure(q)
+
+        executor = qiskit_transpiler.transpile(main)
+        qc = executor.compiled_quantum[0].circuit
+        gate_names = [inst.operation.name for inst in qc.data]
+        assert gate_names.count("cx") == 1
+        assert gate_names.count("measure") == 2
