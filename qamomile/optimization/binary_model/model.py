@@ -224,9 +224,7 @@ class BinaryModel(Generic[VT]):
             if len(reduced) == 0:
                 expr.constant += coeff
                 continue
-            expr.coefficients[reduced] = (
-                expr.coefficients.get(reduced, 0.0) + coeff
-            )
+            expr.coefficients[reduced] = expr.coefficients.get(reduced, 0.0) + coeff
         if simplify:
             expr.coefficients = {
                 k: v for k, v in expr.coefficients.items() if not is_close_zero(v)

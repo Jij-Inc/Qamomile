@@ -242,9 +242,7 @@ def test_from_higher_ising_manually():
     higher_ising = {(0,): 1.0, (0, 1): 2.0, (0, 1, 3): 4.0}
     constant = 8.0
 
-    bm = BinaryModel.from_higher_ising(
-        higher_ising=higher_ising, constant=constant
-    )
+    bm = BinaryModel.from_higher_ising(higher_ising=higher_ising, constant=constant)
 
     assert bm.vartype == VarType.SPIN
     assert np.isclose(bm.constant, constant)
@@ -253,7 +251,9 @@ def test_from_higher_ising_manually():
     # Coefficients stored under remapped sequential indices
     assert np.isclose(bm.coefficients[(0,)], 1.0)
     assert np.isclose(bm.coefficients[(0, 1)], 2.0)
-    assert np.isclose(bm.coefficients[(0, 1, 2)], 4.0)  # original index 3 → sequential 2
+    assert np.isclose(
+        bm.coefficients[(0, 1, 2)], 4.0
+    )  # original index 3 → sequential 2
 
     # Energy equivalence via round-trip: SPIN → BINARY → SPIN
     bin_bm = bm.change_vartype(VarType.BINARY)
@@ -313,9 +313,7 @@ def test_from_higher_ising_duplicate_indices_pair_cancel():
         UserWarning,
         match="Duplicate variable indices in higher Ising term",
     ):
-        bm = BinaryModel.from_higher_ising(
-            higher_ising={(0, 0, 2): 3.0}, constant=0.0
-        )
+        bm = BinaryModel.from_higher_ising(higher_ising={(0, 0, 2): 3.0}, constant=0.0)
 
     # (0,0,2): index 0 appears twice → cancels; index 2 remains.
     # After remapping the single surviving original index 2 → new index 0.
@@ -375,9 +373,7 @@ def test_from_higher_ising_4th_order():
     higher_ising = {(0, 1, 2, 3): 2.0, (0, 1): 1.0, (2,): -1.0}
     constant = 3.0
 
-    bm = BinaryModel.from_higher_ising(
-        higher_ising=higher_ising, constant=constant
-    )
+    bm = BinaryModel.from_higher_ising(higher_ising=higher_ising, constant=constant)
     assert bm.vartype == VarType.SPIN
     assert bm.order == 4
 
@@ -396,9 +392,7 @@ def test_from_higher_ising_5th_order():
     higher_ising = {(0, 1, 2, 3, 4): 1.0, (0, 2): 0.5, (3,): -1.0}
     constant = 0.0
 
-    bm = BinaryModel.from_higher_ising(
-        higher_ising=higher_ising, constant=constant
-    )
+    bm = BinaryModel.from_higher_ising(higher_ising=higher_ising, constant=constant)
     assert bm.vartype == VarType.SPIN
     assert bm.order == 5
 
@@ -443,9 +437,7 @@ def test_from_higher_ising_equivalence_random(seed):
         higher_ising[indices] = float(rng.standard_normal())
     constant = float(rng.standard_normal())
 
-    bm = BinaryModel.from_higher_ising(
-        higher_ising=higher_ising, constant=constant
-    )
+    bm = BinaryModel.from_higher_ising(higher_ising=higher_ising, constant=constant)
     assert bm.vartype == VarType.SPIN
 
     bin_bm = bm.change_vartype(VarType.BINARY)
