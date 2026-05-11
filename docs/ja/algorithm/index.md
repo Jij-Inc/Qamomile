@@ -15,3 +15,4 @@ Qamomileで実装した具体的な量子アルゴリズム例です。
 - [量子誤り訂正入門](quantum_error_correction) — 3量子ビットbit-flip/phase-flip符号からShor 9量子ビット符号、スタビライザー形式まで
 - [Steane [[7,1,3]] 符号](steane_code) — Hamming [7,4,3] 符号からのCSS構成、6スタビライザー、横断的Hadamard
 - [Quantum Selected Configuration Interaction (QSCI)](qsci) — 量子状態からビット列をサンプリングして有効ハミルトニアンを構築し、変分原理の保証付きで古典的に対角化する
+- [ハイブリッド量子ニューラルネットワーク (HQNN)](hybrid_qnn) — CNN＋量子変分回路をFashion-MNISTでend-to-end学習、パラメータシフトルールによる勾配計算
