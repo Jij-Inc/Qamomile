@@ -170,9 +170,9 @@ def vqe_ansatz(
 
 
 # %% [markdown]
-# ## Qiskitを用いたVQEの実行
+# ## VQEの実行
 #
-# このセクションでは、`QiskitTranspiler` を使って VQE カーネルを実行可能オブジェクトにトランスパイルします。デフォルトの executor がこのオブジェクトを実行し、qkernel で定義した `expval` による期待値を返します。そのため、ユーザーは最適化ループのみ実装すれば問題ありません。
+# このセクションでは、記事冒頭で作った `transpiler` を使って VQE カーネルを実行可能オブジェクトにトランスパイルします。デフォルトの executor が実行可能オブジェクトを走らせ、qkernel が `expval` で定義した期待値を返してくれるので、ユーザーが書くのは最適化ループだけです。実際に emit + 実行を担う SDK は、記事冒頭の Transpiler/Executor タブで切り替えられます。
 
 # %%
 reps = 4

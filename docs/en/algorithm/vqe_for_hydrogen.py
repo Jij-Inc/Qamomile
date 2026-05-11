@@ -184,9 +184,9 @@ def vqe_ansatz(
 
 
 # %% [markdown]
-# ## Running VQE with Qiskit
+# ## Running VQE
 #
-# In this section, we transpile the VQE kernel to an executable object using `QiskitTranspiler`. The default executor runs this object and returns the expectation value, which the defined qkernel computes using `expval`. Thus, the user only needs to implement the optimisation loop.
+# In this section, we transpile the VQE kernel to an executable object using the `transpiler` constructed at the top of this article. The default executor runs the executable and returns the expectation value that the qkernel computes via `expval`; only the optimisation loop is left for us to implement. The Transpiler / Executor tab block already in this article controls which SDK actually carries out that emit + execute pair — swap tabs to switch SDKs.
 
 # %%
 reps = 4

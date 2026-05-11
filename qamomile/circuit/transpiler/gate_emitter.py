@@ -419,10 +419,22 @@ class GateEmitter(Protocol[T]):
     def emit_if_start(
         self,
         circuit: T,
-        clbit: int,
+        clbit_or_expr: int | str,
         value: int = 1,
     ) -> Any:
         """Start a native if context.
+
+        The ``clbit_or_expr`` parameter is normally an ``int`` (the
+        physical clbit index of a single measurement bit). Source-text
+        backends (currently CUDA-Q's ``CudaqKernelEmitter``) also
+        accept a pre-built Python source-text expression (``str``)
+        produced by ``StandardEmitPass._emit_runtime_classical_expr``
+        — this lets compound predicates like ``s0 and s1`` flow
+        through the same control-flow protocol without a separate
+        method. Backends that don't support compound predicates may
+        ignore the ``str`` case (e.g. Qiskit takes a different
+        override path that bypasses this method for compound
+        conditions).
 
         Returns context for the if/else block.
         """
@@ -443,10 +455,13 @@ class GateEmitter(Protocol[T]):
     def emit_while_start(
         self,
         circuit: T,
-        clbit: int,
+        clbit_or_expr: int | str,
         value: int = 1,
     ) -> Any:
-        """Start a native while loop context."""
+        """Start a native while loop context.
+
+        See :meth:`emit_if_start` for the ``int | str`` shape.
+        """
         raise NotImplementedError("Backend does not support native while loops")
 
     def emit_while_end(self, circuit: T, context: Any) -> None:
