@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.handle import Qubit, Vector
+from qamomile.circuit.frontend.handle.utils import get_size as _get_size
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateType,
     ResourceMetadata,
@@ -276,30 +277,6 @@ class IQFT(CompositeGate):
                 "total_gates": num_h + num_cp + num_swap,
             },
         )
-
-
-def _get_size(arr: Vector[Qubit]) -> int:
-    """Get array size as Python int.
-
-    Args:
-        arr: A Vector of Qubits
-
-    Returns:
-        The size of the array as an integer
-
-    Raises:
-        ValueError: If the array doesn't have a fixed size
-    """
-    size = arr.shape[0]
-    if isinstance(size, int):
-        return size
-    if hasattr(size, "value") and size.value.is_constant():
-        val = size.value.get_const()
-        if val is not None:
-            return int(val)
-    if hasattr(size, "init_value"):
-        return int(size.init_value)
-    raise ValueError("Array must have fixed size")
 
 
 def qft(qubits: Vector[Qubit]) -> Vector[Qubit]:

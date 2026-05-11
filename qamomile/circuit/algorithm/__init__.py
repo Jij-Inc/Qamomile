@@ -27,6 +27,11 @@ from .qaoa import (
     qaoa_state,
     x_mixer,
 )
+from .state_preparation import (
+    MottonenAmplitudeEncoding,
+    amplitude_encoding,
+    compute_mottonen_amplitude_encoding_thetas,
+)
 from .trotter import trotterized_time_evolution
 
 __all__ = [
@@ -54,6 +59,10 @@ __all__ = [
     "cost_layer",
     "fqaoa_layers",
     "fqaoa_state",
+    # State preparation
+    "MottonenAmplitudeEncoding",
+    "amplitude_encoding",
+    "compute_mottonen_amplitude_encoding_thetas",
     # Trotterization
     "trotterized_time_evolution",
 ]
