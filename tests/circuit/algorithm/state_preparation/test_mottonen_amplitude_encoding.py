@@ -10,14 +10,15 @@ import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.state_preparation import (
     MottonenAmplitudeEncoding,
     amplitude_encoding,
-    compute_mottonen_amplitude_encoding_thetas,
+    compute_mottonen_amplitude_encoding_ry_angles,
+    compute_mottonen_amplitude_encoding_rz_angles,
 )
 from qamomile.circuit.ir.operation.composite_gate import CompositeGateType
 from tests.circuit.conftest import run_statevector
 
-# Catalogue of amplitudes shared by every backend test.  Each entry is a list
-# of (id, amplitudes) — keeping it module-level lets all parametrisations
-# stay aligned.
+# Catalogue of REAL amplitudes shared by every backend test.  Each entry is
+# a list of (id, amplitudes) — keeping it module-level lets all
+# parametrisations stay aligned.
 _FIXED_AMPLITUDES: list[tuple[str, list[float]]] = [
     ("1q-basis-0", [1.0, 0.0]),
     ("1q-basis-1", [0.0, 1.0]),
@@ -29,6 +30,18 @@ _FIXED_AMPLITUDES: list[tuple[str, list[float]]] = [
     ("2q-asymmetric", [1.0, 2.0, 3.0, 4.0]),
     ("2q-signed", [1.0, -1.0, 1.0, -1.0]),
     ("3q-signed", [1.0, 2.0, 3.0, -4.0, 5.0, -6.0, 7.0, 8.0]),
+]
+
+# Catalogue of COMPLEX amplitudes — exercises the magnitude + phase
+# decomposition (iterative disentangling).  Includes pure-phase, mixed,
+# and sparse complex cases.
+_FIXED_COMPLEX_AMPLITUDES: list[tuple[str, list[complex]]] = [
+    ("1q-imag", [1.0 + 0j, 0.0 + 1j]),
+    ("1q-mixed", [1.0 + 1j, 1.0 + 0j]),
+    ("2q-phases", [1.0 + 0j, 0.0 + 1j, -1.0 + 0j, 0.0 - 1j]),
+    ("2q-mixed", [1.0 + 0j, 1.0 + 1j, 1.0 - 1j, 0.0 + 2j]),
+    ("2q-sparse-complex", [1.0 + 0j, 0.0 + 0j, 0.0 + 0j, 0.0 + 1j]),
+    ("3q-mixed", [1 + 0j, 1j, -1 + 0j, -1j, 1 + 1j, 1 - 1j, -1 + 1j, -1 - 1j]),
 ]
 
 _SEEDS = [901, 902, 903, 904, 905]
@@ -54,25 +67,40 @@ _STD_TOLERANCE = 5.0
 #   <X_0> on [a_0, a_1] = 2 * a_0 * a_1 (per-pair off-diagonal): the four
 #     amplitudes split into pairs (a_0,a_1)=(1/2,-1/2) and (a_2,a_3)=(1/2,-1/2),
 #     so <X_0> = 2*(1/2)*(-1/2) + 2*(1/2)*(-1/2) = -1.
-_EXPVAL_CASES: list[tuple[str, list[float], str, int, float]] = [
+_EXPVAL_CASES: list[tuple[str, list[float] | list[complex], str, int, float]] = [
     # (id,        amplitudes,                 pauli, qubit_index, expected)
+    # ----- Real amplitudes -----
     ("asymm-Z0", [1.0, 2.0, 3.0, 4.0], "Z", 0, -1.0 / 3.0),
     ("asymm-Z1", [1.0, 2.0, 3.0, 4.0], "Z", 1, -2.0 / 3.0),
     ("signed-Z0", [1.0, -1.0, 1.0, -1.0], "Z", 0, 0.0),
     ("signed-X0", [1.0, -1.0, 1.0, -1.0], "X", 0, -1.0),
+    # ----- Complex amplitudes -----
+    # |+y> = (|0> + i|1>)/sqrt(2): pure Y eigenstate with eigenvalue +1.
+    ("plus-y-Y0", [1.0 + 0j, 0.0 + 1j], "Y", 0, 1.0),
+    # Same state, transverse: <Z_0> = <X_0> = 0.
+    ("plus-y-Z0", [1.0 + 0j, 0.0 + 1j], "Z", 0, 0.0),
+    # 2-qubit complex amps a = [1, 1+1j, 1-1j, 2j] / 3, probs [1, 2, 2, 4] / 9.
+    # <Z_0> = p_0 + p_2 - p_1 - p_3 = (1 + 2 - 2 - 4) / 9 = -1/3.
+    # <Z_1> = p_0 + p_1 - p_2 - p_3 = (1 + 2 - 2 - 4) / 9 = -1/3.
+    ("2q-mixed-Z0", [1 + 0j, 1 + 1j, 1 - 1j, 0 + 2j], "Z", 0, -1.0 / 3.0),
+    ("2q-mixed-Z1", [1 + 0j, 1 + 1j, 1 - 1j, 0 + 2j], "Z", 1, -1.0 / 3.0),
 ]
 
 
-def _normalize(amps: list[float]) -> np.ndarray:
-    """Return *amps* as a unit-norm float array.
+def _normalize(amps: list[float] | list[complex]) -> np.ndarray:
+    """Return *amps* as a unit-norm array (real or complex per input dtype).
 
     Args:
-        amps (list[float]): Real amplitudes (any non-zero norm).
+        amps (list[float] | list[complex]): Amplitudes (any non-zero norm).
 
     Returns:
-        np.ndarray: Array of dtype ``float`` with unit Euclidean norm.
+        np.ndarray: Array with unit Euclidean norm.  Complex dtype if any
+            element is complex, else float.
     """
-    arr = np.asarray(amps, dtype=float)
+    if any(isinstance(x, complex) for x in amps):
+        arr = np.asarray(amps, dtype=complex)
+    else:
+        arr = np.asarray(amps, dtype=float)
     return arr / np.linalg.norm(arr)
 
 
@@ -153,19 +181,167 @@ class TestCompositeGateMetadata:
         assert gate.custom_name == "mottonen_amplitude_encoding"
 
     @pytest.mark.parametrize("n_qubits", [1, 2, 3, 4])
-    def test_resources(self, n_qubits: int) -> None:
-        """Reported gate counts match the Gray-walk decomposition formulas."""
+    def test_resources_real(self, n_qubits: int) -> None:
+        """Real input: single-stage RY counts match the Gray-walk formulas."""
         gate = MottonenAmplitudeEncoding(np.ones(2**n_qubits))
         assert gate.num_target_qubits == n_qubits
         r = gate._resources()
         meta = r.custom_metadata
         assert meta["num_ry_gates"] == 2**n_qubits - 1
+        assert meta["num_rz_gates"] == 0
         assert meta["num_cnot_gates"] == 2**n_qubits - 2
         assert meta["num_qubits"] == n_qubits
+        assert meta["complex_input"] is False
         assert r.t_gates == 0
         assert r.total_gates == (2**n_qubits - 1) + (2**n_qubits - 2)
         assert r.single_qubit_gates == 2**n_qubits - 1
         assert r.two_qubit_gates == 2**n_qubits - 2
+
+    @pytest.mark.parametrize("n_qubits", [1, 2, 3, 4])
+    def test_resources_complex(self, n_qubits: int) -> None:
+        """Complex input: two-stage RY + RZ counts double the gate budget."""
+        amps = np.ones(2**n_qubits, dtype=complex) + 1j * np.arange(2**n_qubits)
+        gate = MottonenAmplitudeEncoding(amps)
+        assert gate.num_target_qubits == n_qubits
+        r = gate._resources()
+        meta = r.custom_metadata
+        assert meta["num_ry_gates"] == 2**n_qubits - 1
+        assert meta["num_rz_gates"] == 2**n_qubits - 1
+        assert meta["num_cnot_gates"] == 2 * (2**n_qubits - 2)
+        assert meta["num_qubits"] == n_qubits
+        assert meta["complex_input"] is True
+        rot = 2 * (2**n_qubits - 1)
+        cnot = 2 * (2**n_qubits - 2)
+        assert r.t_gates == 0
+        assert r.total_gates == rot + cnot
+        assert r.single_qubit_gates == rot
+        assert r.two_qubit_gates == cnot
+
+
+# ---------------------------------------------------------------------------
+# Ry / Rz stage ordering
+# ---------------------------------------------------------------------------
+
+
+def _build_unitary_via_emission(
+    n: int,
+    ry_per_level: list[np.ndarray],
+    rz_per_level: list[np.ndarray],
+    mode: str,
+) -> np.ndarray:
+    """Build the n-qubit unitary that the Ry / Rz Gray-walk emission realises.
+
+    Used by :class:`TestRyRzOrdering` to assert sweep/interleave equivalence.
+
+    Args:
+        n (int): Number of qubits.
+        ry_per_level (list[np.ndarray]): Gray-walk RY angles, per level.
+        rz_per_level (list[np.ndarray]): Gray-walk RZ angles, per level.
+        mode (str): ``"sweep"`` (all Ry levels then all Rz levels) or
+            ``"interleave"`` (per-level Ry then Rz, repeated).
+
+    Returns:
+        np.ndarray: The ``2**n x 2**n`` unitary as a column-by-column
+            simulation, obtained by applying the emission to each
+            computational basis state.
+    """
+    from qamomile.circuit.algorithm.state_preparation.mottonen_amplitude_encoding import (
+        _get_cnot_controls,
+    )
+
+    N = 2**n
+
+    def ry_m(t: float) -> np.ndarray:
+        c, s = np.cos(t / 2), np.sin(t / 2)
+        return np.array([[c, -s], [s, c]], dtype=complex)
+
+    def rz_m(t: float) -> np.ndarray:
+        return np.diag([np.exp(-1j * t / 2), np.exp(1j * t / 2)])
+
+    def apply_1q(st: np.ndarray, qb: int, m: np.ndarray) -> np.ndarray:
+        new = np.zeros_like(st)
+        for idx in range(N):
+            b = (idx >> qb) & 1
+            other = idx & ~(1 << qb)
+            for nb in (0, 1):
+                new[other | (nb << qb)] += m[nb, b] * st[idx]
+        return new
+
+    def apply_cnot(st: np.ndarray, c: int, t: int) -> np.ndarray:
+        new = st.copy()
+        for idx in range(N):
+            if (idx >> c) & 1:
+                new[idx], new[idx ^ (1 << t)] = st[idx ^ (1 << t)], st[idx]
+        return new
+
+    def emit_one_level(
+        st: np.ndarray, k: int, angles: np.ndarray, gate_m
+    ) -> np.ndarray:
+        tgt = n - 1 - k
+        if k == 0:
+            return apply_1q(st, tgt, gate_m(float(angles[0])))
+        seq = _get_cnot_controls(k)
+        for step in range(2**k):
+            st = apply_1q(st, tgt, gate_m(float(angles[step])))
+            ctrl = n - 1 - seq[step]
+            st = apply_cnot(st, ctrl, tgt)
+        return st
+
+    U = np.zeros((N, N), dtype=complex)
+    for col in range(N):
+        st = np.zeros(N, dtype=complex)
+        st[col] = 1.0
+        match mode:
+            case "sweep":
+                for k in range(n):
+                    st = emit_one_level(st, k, ry_per_level[k], ry_m)
+                for k in range(n):
+                    st = emit_one_level(st, k, rz_per_level[k], rz_m)
+            case "interleave":
+                for k in range(n):
+                    st = emit_one_level(st, k, ry_per_level[k], ry_m)
+                    st = emit_one_level(st, k, rz_per_level[k], rz_m)
+            case _:
+                raise ValueError(
+                    f"mode must be 'sweep' or 'interleave', got {mode!r}"
+                )
+        U[:, col] = st
+    return U
+
+
+class TestRyRzOrdering:
+    """Verify the structural equivalence of sweep vs interleave emission.
+
+    The implementation emits "all Ry levels then all Rz levels"
+    (sweep), not the per-level interleaved order suggested by the
+    Möttönen-Vartiainen disentangling derivation.  Pairwise
+    ``[U_y^(k), U_z^(k')]`` is not zero in general, but the FULL
+    products coincide as unitaries — including for arbitrary angles
+    unrelated to any specific amplitude vector.
+    """
+
+    @pytest.mark.parametrize("seed", _SEEDS)
+    @pytest.mark.parametrize("n", [2, 3, 4])
+    def test_sweep_equals_interleave_for_arbitrary_angles(
+        self, n: int, seed: int
+    ) -> None:
+        """For random per-level angles, sweep and interleave produce the same unitary.
+
+        Locks the non-trivial algebraic identity that the implementation
+        relies on for ``_decompose``: emitting the two stages as two
+        separate Gray-walk sweeps (RY first, then RZ) is mathematically
+        equivalent to the Möttönen-Vartiainen interleaved order
+        (per-level RY then RZ), not just on ``|0>^n`` but as full
+        unitaries.
+        """
+        rng = np.random.default_rng(seed)
+        ry_per_level = [rng.standard_normal(2**k) for k in range(n)]
+        rz_per_level = [rng.standard_normal(2**k) for k in range(n)]
+        u_sweep = _build_unitary_via_emission(n, ry_per_level, rz_per_level, "sweep")
+        u_interleave = _build_unitary_via_emission(
+            n, ry_per_level, rz_per_level, "interleave"
+        )
+        np.testing.assert_allclose(u_sweep, u_interleave, atol=1e-10)
 
 
 # ---------------------------------------------------------------------------
@@ -188,14 +364,14 @@ class TestComputeAngles:
         self, n_qubits: int, expected: np.ndarray
     ) -> None:
         """Uniform amplitudes reduce to a known closed form."""
-        thetas = compute_mottonen_amplitude_encoding_thetas(np.ones(2**n_qubits))
-        np.testing.assert_allclose(thetas, expected, atol=1e-12)
+        ry_angles = compute_mottonen_amplitude_encoding_ry_angles(np.ones(2**n_qubits))
+        np.testing.assert_allclose(ry_angles, expected, atol=1e-12)
 
     def test_length_invariants(self) -> None:
         """Output length matches ``2**n - 1`` for every supported size."""
         for n in _QUBIT_COUNTS:
-            thetas = compute_mottonen_amplitude_encoding_thetas(np.ones(2**n))
-            assert thetas.shape == (2**n - 1,)
+            ry_angles = compute_mottonen_amplitude_encoding_ry_angles(np.ones(2**n))
+            assert ry_angles.shape == (2**n - 1,)
 
 
 # ---------------------------------------------------------------------------
@@ -211,34 +387,55 @@ class TestInputValidation:
         [
             ([1.0, 0.0, 0.0], "power of 2"),
             ([], "power of 2"),
+            ([1.0], "power of 2"),  # length 1 = 2**0 = 0 qubits, rejected
             ([0.0, 0.0], "all zeros"),
         ],
     )
     def test_invalid_amplitudes_raise(
         self, amplitudes: list[float], match: str
     ) -> None:
-        """Non-power-of-two, empty, and all-zero inputs are rejected."""
+        """Non-power-of-two (or under-length), empty, and all-zero inputs are rejected."""
         with pytest.raises(ValueError, match=match):
             MottonenAmplitudeEncoding(amplitudes)
 
-    def test_complex_amplitudes_rejected(self) -> None:
-        """Complex inputs with non-zero imaginary part raise ``TypeError``."""
-        with pytest.raises(TypeError, match="real amplitudes"):
-            compute_mottonen_amplitude_encoding_thetas(
-                np.array([1.0 + 1j, 0.0], dtype=complex)
-            )
+    def test_complex_nonzero_imag_accepted(self) -> None:
+        """Complex inputs with non-zero imaginary part are accepted (full path).
 
-    def test_complex_with_zero_imag_accepted(self) -> None:
+        ``[1+1j, 1+0j]`` normalises to ``[(1+1j)/sqrt(3), 1/sqrt(3)]``.
+        The magnitudes are ``[sqrt(2)/sqrt(3), 1/sqrt(3)]`` and the
+        phase difference is ``arg(1 / (1+1j)) = -pi/4``, so
+
+        * Ry angle: ``2 * arctan2(1/sqrt(3), sqrt(2)/sqrt(3))
+                     = 2 * arctan2(1, sqrt(2))``,
+        * Rz angle: ``-pi/4``.
+        """
+        amps = np.array([1.0 + 1j, 1.0 + 0j], dtype=complex)
+        ry_angles = compute_mottonen_amplitude_encoding_ry_angles(amps)
+        rz_angles = compute_mottonen_amplitude_encoding_rz_angles(amps)
+        expected_ry = 2.0 * np.arctan2(1.0, np.sqrt(2.0))
+        expected_rz = -np.pi / 4.0
+        np.testing.assert_allclose(ry_angles, [expected_ry], atol=1e-12)
+        np.testing.assert_allclose(rz_angles, [expected_rz], atol=1e-12)
+
+    def test_complex_zero_imag_takes_real_path(self) -> None:
         """Complex inputs with zero imaginary part coerce cleanly to the real angle.
 
         ``[1+0j, 0+0j]`` normalises to ``[1, 0]`` so the single Gray-walk
-        angle is ``2 * arctan2(0, 1) = 0``.  Asserting the value (not just
-        the shape) catches regressions in the complex-to-real coercion.
+        Ry angle is ``2 * arctan2(0, 1) = 0`` and the phase stage is a
+        no-op (Rz angles are all zero by the real-input shortcut).
         """
-        thetas = compute_mottonen_amplitude_encoding_thetas(
-            np.array([1.0 + 0j, 0.0 + 0j], dtype=complex)
-        )
-        np.testing.assert_allclose(thetas, [0.0], atol=1e-12)
+        amps = np.array([1.0 + 0j, 0.0 + 0j], dtype=complex)
+        ry_angles = compute_mottonen_amplitude_encoding_ry_angles(amps)
+        rz_angles = compute_mottonen_amplitude_encoding_rz_angles(amps)
+        np.testing.assert_allclose(ry_angles, [0.0], atol=1e-12)
+        np.testing.assert_allclose(rz_angles, [0.0], atol=1e-12)
+
+    def test_rz_angles_are_zero_for_real_input(self) -> None:
+        """``compute_..._rz_angles`` returns zeros for real inputs of any size."""
+        for n in _QUBIT_COUNTS:
+            rz_angles = compute_mottonen_amplitude_encoding_rz_angles(np.ones(2**n))
+            assert rz_angles.shape == (2**n - 1,)
+            np.testing.assert_allclose(rz_angles, np.zeros(2**n - 1), atol=1e-12)
 
     def test_qubit_count_mismatch_raises(self) -> None:
         """``amplitude_encoding`` rejects qubit / amplitude mismatches."""
@@ -258,7 +455,9 @@ class TestInputValidation:
 # ---------------------------------------------------------------------------
 
 
-def _build_measure_kernel(amplitudes: list[float]) -> qmc.QKernel:
+def _build_measure_kernel(
+    amplitudes: list[float] | list[complex],
+) -> qmc.QKernel:
     """Build a kernel that prepares *amplitudes* and measures the register.
 
     Args:
@@ -281,7 +480,9 @@ def _build_measure_kernel(amplitudes: list[float]) -> qmc.QKernel:
     return kernel
 
 
-def _build_expval_kernel(amplitudes: list[float]) -> qmc.QKernel:
+def _build_expval_kernel(
+    amplitudes: list[float] | list[complex],
+) -> qmc.QKernel:
     """Build a kernel that returns ``<H>`` on the prepared state.
 
     Args:
@@ -355,9 +556,22 @@ class TestEncodingQiskit:
     def test_fixed_amplitudes_statevector(
         self, qiskit_transpiler, amplitudes: list[float]
     ) -> None:
-        """Each catalogued amplitude vector is faithfully encoded."""
+        """Each catalogued real amplitude vector is faithfully encoded."""
         qc = qiskit_transpiler.to_circuit(_build_measure_kernel(amplitudes))
         sv = run_statevector(qc).real
+        expected = _normalize(amplitudes)
+        assert _state_fidelity(sv, expected) == pytest.approx(1.0, abs=1e-8)
+
+    @pytest.mark.parametrize(
+        "amplitudes",
+        [pytest.param(amps, id=name) for name, amps in _FIXED_COMPLEX_AMPLITUDES],
+    )
+    def test_fixed_complex_amplitudes_statevector(
+        self, qiskit_transpiler, amplitudes: list[complex]
+    ) -> None:
+        """Each catalogued complex amplitude vector is faithfully encoded."""
+        qc = qiskit_transpiler.to_circuit(_build_measure_kernel(amplitudes))
+        sv = run_statevector(qc)  # keep full complex
         expected = _normalize(amplitudes)
         assert _state_fidelity(sv, expected) == pytest.approx(1.0, abs=1e-8)
 
@@ -374,22 +588,38 @@ class TestEncodingQiskit:
         expected = _normalize(amplitudes)
         assert _state_fidelity(sv, expected) == pytest.approx(1.0, abs=1e-8)
 
+    @pytest.mark.parametrize("n_qubits", _QUBIT_COUNTS)
+    @pytest.mark.parametrize("seed", _SEEDS)
+    def test_random_complex_amplitudes_statevector(
+        self, qiskit_transpiler, n_qubits: int, seed: int
+    ) -> None:
+        """Random complex amplitudes (1..4 qubits) round-trip exactly."""
+        rng = np.random.default_rng(seed + 10000)  # disjoint seed space
+        re = rng.standard_normal(2**n_qubits)
+        im = rng.standard_normal(2**n_qubits)
+        amplitudes = (re + 1j * im).tolist()
+        qc = qiskit_transpiler.to_circuit(_build_measure_kernel(amplitudes))
+        sv = run_statevector(qc)
+        expected = _normalize(amplitudes)
+        assert _state_fidelity(sv, expected) == pytest.approx(1.0, abs=1e-8)
+
     @pytest.mark.parametrize(
         "amplitudes",
-        [pytest.param(amps, id=name) for name, amps in _FIXED_AMPLITUDES],
+        [pytest.param(amps, id=name) for name, amps in _FIXED_AMPLITUDES]
+        + [pytest.param(amps, id=name) for name, amps in _FIXED_COMPLEX_AMPLITUDES],
     )
     def test_fixed_amplitudes_sampler(
         self,
         qiskit_transpiler,
         seeded_executor,
-        amplitudes: list[float],
+        amplitudes: list[float] | list[complex],
     ) -> None:
         """Empirical histogram matches |amplitudes|^2 within shot noise."""
         kernel = _build_measure_kernel(amplitudes)
         exe = qiskit_transpiler.transpile(kernel)
         results = exe.sample(seeded_executor, shots=_SHOTS).result().results
 
-        expected_probs = _normalize(amplitudes) ** 2
+        expected_probs = np.abs(_normalize(amplitudes)) ** 2
         observed_probs = np.zeros_like(expected_probs)
         total = 0
         for bits, count in results:
@@ -412,7 +642,7 @@ class TestEncodingQiskit:
     def test_expval(
         self,
         qiskit_transpiler,
-        amplitudes: list[float],
+        amplitudes: list[float] | list[complex],
         pauli: str,
         qubit_idx: int,
         expected: float,
@@ -451,15 +681,18 @@ class TestEncodingQuriParts:
 
     @pytest.mark.parametrize(
         "amplitudes",
-        [pytest.param(amps, id=name) for name, amps in _FIXED_AMPLITUDES],
+        [pytest.param(amps, id=name) for name, amps in _FIXED_AMPLITUDES]
+        + [pytest.param(amps, id=name) for name, amps in _FIXED_COMPLEX_AMPLITUDES],
     )
-    def test_fixed_amplitudes_sampler(self, amplitudes: list[float]) -> None:
+    def test_fixed_amplitudes_sampler(
+        self, amplitudes: list[float] | list[complex]
+    ) -> None:
         """Empirical histogram matches |amplitudes|^2 within shot noise."""
         kernel = _build_measure_kernel(amplitudes)
         exe = self.transpiler.transpile(kernel)
         results = exe.sample(self.transpiler.executor(), shots=_SHOTS).result().results
 
-        expected_probs = _normalize(amplitudes) ** 2
+        expected_probs = np.abs(_normalize(amplitudes)) ** 2
         observed_probs = np.zeros_like(expected_probs)
         total = 0
         for bits, count in results:
@@ -481,7 +714,7 @@ class TestEncodingQuriParts:
     )
     def test_expval(
         self,
-        amplitudes: list[float],
+        amplitudes: list[float] | list[complex],
         pauli: str,
         qubit_idx: int,
         expected: float,
@@ -520,15 +753,18 @@ class TestEncodingCudaq:
 
     @pytest.mark.parametrize(
         "amplitudes",
-        [pytest.param(amps, id=name) for name, amps in _FIXED_AMPLITUDES],
+        [pytest.param(amps, id=name) for name, amps in _FIXED_AMPLITUDES]
+        + [pytest.param(amps, id=name) for name, amps in _FIXED_COMPLEX_AMPLITUDES],
     )
-    def test_fixed_amplitudes_sampler(self, amplitudes: list[float]) -> None:
+    def test_fixed_amplitudes_sampler(
+        self, amplitudes: list[float] | list[complex]
+    ) -> None:
         """Empirical histogram matches |amplitudes|^2 within shot noise."""
         kernel = _build_measure_kernel(amplitudes)
         exe = self.transpiler.transpile(kernel)
         results = exe.sample(self.transpiler.executor(), shots=_SHOTS).result().results
 
-        expected_probs = _normalize(amplitudes) ** 2
+        expected_probs = np.abs(_normalize(amplitudes)) ** 2
         observed_probs = np.zeros_like(expected_probs)
         total = 0
         for bits, count in results:
@@ -550,7 +786,7 @@ class TestEncodingCudaq:
     )
     def test_expval(
         self,
-        amplitudes: list[float],
+        amplitudes: list[float] | list[complex],
         pauli: str,
         qubit_idx: int,
         expected: float,

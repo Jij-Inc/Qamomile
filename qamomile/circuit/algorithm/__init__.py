@@ -30,7 +30,8 @@ from .qaoa import (
 from .state_preparation import (
     MottonenAmplitudeEncoding,
     amplitude_encoding,
-    compute_mottonen_amplitude_encoding_thetas,
+    compute_mottonen_amplitude_encoding_ry_angles,
+    compute_mottonen_amplitude_encoding_rz_angles,
 )
 from .trotter import trotterized_time_evolution
 
@@ -62,7 +63,8 @@ __all__ = [
     # State preparation
     "MottonenAmplitudeEncoding",
     "amplitude_encoding",
-    "compute_mottonen_amplitude_encoding_thetas",
+    "compute_mottonen_amplitude_encoding_ry_angles",
+    "compute_mottonen_amplitude_encoding_rz_angles",
     # Trotterization
     "trotterized_time_evolution",
 ]
