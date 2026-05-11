@@ -460,9 +460,12 @@ def _build_measure_kernel(
     """Build a kernel that prepares *amplitudes* and measures the register.
 
     Args:
-        amplitudes (list[float]): Real amplitude vector of length
-            ``2**n``.  Drives the register size
-            (``n = log2(len(amplitudes))``).
+        amplitudes (list[float] | list[complex]): Real or complex
+            amplitude vector of length ``2**n``.  Drives the register
+            size (``n = log2(len(amplitudes))``).  Complex inputs route
+            through the two-stage (Ry + Rz) Möttönen path; real inputs
+            (and complex inputs with identically-zero imaginary part)
+            stay on the single-stage Ry path.
 
     Returns:
         qmc.QKernel: Kernel returning ``Vector[Bit]`` (full-register
@@ -485,9 +488,11 @@ def _build_expval_kernel(
     """Build a kernel that returns ``<H>`` on the prepared state.
 
     Args:
-        amplitudes (list[float]): Real amplitude vector of length
-            ``2**n``.  Drives the register size
-            (``n = log2(len(amplitudes))``).
+        amplitudes (list[float] | list[complex]): Real or complex
+            amplitude vector of length ``2**n``.  Drives the register
+            size (``n = log2(len(amplitudes))``).  Both Möttönen paths
+            (single-stage Ry and two-stage Ry + Rz) feed the same
+            ``qmc.expval`` consumer.
 
     Returns:
         qmc.QKernel: Kernel taking an ``H: Observable`` runtime binding

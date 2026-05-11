@@ -58,6 +58,7 @@ Pipeline
 
 from __future__ import annotations
 
+import functools
 import math
 from collections.abc import Sequence
 
@@ -141,6 +142,7 @@ def _get_cnot_controls(k: int) -> list[int]:
     return controls
 
 
+@functools.lru_cache(maxsize=None)
 def _compute_angle_transform_matrix(k: int) -> np.ndarray:
     """Build the :math:`M^{(k)}` matrix that maps per-state angles to Gray-walk angles.
 
@@ -155,21 +157,31 @@ def _compute_angle_transform_matrix(k: int) -> np.ndarray:
     transform from Möttönen-Vartiainen for decomposing a uniformly
     controlled rotation into elementary RY / CNOT gates.
 
+    Cached at module scope (``functools.lru_cache``) because every
+    public entry point (``amplitude_encoding``,
+    ``amplitude_encoding_from_angles``, the two ``compute_*_angles``
+    helpers) calls :func:`_to_gray_walk_basis`, which in turn rebuilds
+    one matrix per level on every invocation.  The result depends only
+    on ``k``, so a per-process cache is safe.  The returned array is
+    marked read-only to prevent callers from accidentally mutating the
+    cached buffer.
+
     Args:
         k (int): Number of control qubits for the uniformly controlled
             rotation.
 
     Returns:
-        np.ndarray: A ``(2**k, 2**k)`` array implementing the linear
-            transform.
+        np.ndarray: A read-only ``(2**k, 2**k)`` array implementing the
+            linear transform.
     """
     size = 2**k
     matrix = np.zeros((size, size))
     for i in range(size):
         g_i = _gray_code(i)
         for j in range(size):
-            parity = bin(j & g_i).count("1") & 1
+            parity = (j & g_i).bit_count() & 1
             matrix[i, j] = (2.0**-k) * (1.0 if parity == 0 else -1.0)
+    matrix.flags.writeable = False
     return matrix
 
 
@@ -264,12 +276,12 @@ def _compute_all_ry_angles(
             entry has length ``2**k`` and holds the Gray-walk Ry angles
             for that level.
     """
-    ry_angles_per_level: list[np.ndarray] = [np.empty(0)] * num_qubits
+    ry_angles_per_level: list[np.ndarray] = [np.empty(2**k) for k in range(num_qubits)]
     for k in range(num_qubits):
         chunk_size = 2 ** (num_qubits - k)
         half_chunk = chunk_size // 2
 
-        per_chunk_angles = np.empty(2**k)
+        per_chunk_angles = ry_angles_per_level[k]
         for i in range(2**k):
             chunk = amplitudes[i * chunk_size : (i + 1) * chunk_size]
             if half_chunk == 1:
@@ -278,7 +290,6 @@ def _compute_all_ry_angles(
                 norm_upper = float(np.linalg.norm(chunk[:half_chunk]))
                 norm_lower = float(np.linalg.norm(chunk[half_chunk:]))
                 per_chunk_angles[i] = 2.0 * math.atan2(norm_lower, norm_upper)
-        ry_angles_per_level[k] = per_chunk_angles
 
     return _to_gray_walk_basis(ry_angles_per_level, num_qubits)
 
@@ -367,14 +378,16 @@ def _compute_disentangling_angles(
             ``k``-th entry holds ``2**k`` angles for level ``k`` of the
             forward emission.
     """
-    ry_angles_per_level: list[np.ndarray] = [np.empty(0)] * num_qubits
-    rz_angles_per_level: list[np.ndarray] = [np.empty(0)] * num_qubits
+    ry_angles_per_level: list[np.ndarray] = [np.empty(2**k) for k in range(num_qubits)]
+    rz_angles_per_level: list[np.ndarray] = [np.empty(2**k) for k in range(num_qubits)]
 
     current = amplitudes.astype(complex).copy()
     for j in range(num_qubits):
+        # Forward level k = num_qubits - 1 - j has 2**(num_qubits-1-j) = num_pairs angles.
+        forward_level = num_qubits - 1 - j
         num_pairs = len(current) // 2
-        ry_at_level = np.empty(num_pairs)
-        rz_at_level = np.empty(num_pairs)
+        ry_at_level = ry_angles_per_level[forward_level]
+        rz_at_level = rz_angles_per_level[forward_level]
         new_current = np.empty(num_pairs, dtype=complex)
 
         for c in range(num_pairs):
@@ -400,10 +413,6 @@ def _compute_disentangling_angles(
 
             new_current[c] = mag * np.exp(1j * avg_phase)
 
-        # Forward level k = num_qubits - 1 - j has 2**(num_qubits-1-j) = num_pairs angles.
-        forward_level = num_qubits - 1 - j
-        ry_angles_per_level[forward_level] = ry_at_level
-        rz_angles_per_level[forward_level] = rz_at_level
         current = new_current
 
     return (
@@ -716,13 +725,18 @@ def amplitude_encoding(
     * A concrete Python ``Sequence[float]`` / ``Sequence[complex]`` /
       ``np.ndarray``.  Use this when the amplitudes are known where you
       build the kernel (closed over from the surrounding Python scope).
+      This is the only form that supports **complex** amplitude vectors.
     * A ``Vector[Float]`` handle obtained from a kernel parameter that
       is **bound at compile time** via
       ``transpiler.transpile(kernel, bindings={"amps": [...]})``.  The
       handle's bound concrete values are extracted at trace time and
       flow through the same angle-computation path.  This makes
       ``bindings={"amps": ...}`` ergonomic without forcing the user to
-      pre-compute Möttönen angles.
+      pre-compute Möttönen angles.  ``Vector[Float]`` carries real
+      numbers only; for complex amplitudes via a kernel parameter,
+      either pass a concrete ``np.ndarray`` directly (closure form), or
+      use :func:`amplitude_encoding_from_angles` with separate
+      ``ry_angles`` and ``rz_angles`` parameters.
     * **Not** a ``Vector[Float]`` left symbolic by
       ``parameters=["amps"]`` — the angle computation requires concrete
       values at trace time.  Use :func:`amplitude_encoding_from_angles`
@@ -733,11 +747,14 @@ def amplitude_encoding(
         qubits (Vector[Qubit]): Vector of ``n`` qubit handles, expected
             to start in :math:`|0\\rangle^{\\otimes n}`.
         amplitudes (Sequence[float] | Sequence[complex] | np.ndarray | Vector[Float]):
-            Amplitude vector of length ``2**n``.  Real or complex; it is
-            normalised automatically.  ``Vector[Float]`` is accepted only
-            when its concrete values are available at trace time (i.e.,
-            it came from a ``bindings={...}`` entry, not from
-            ``parameters=[...]``).
+            Amplitude vector of length ``2**n``.  Concrete sequences and
+            ``np.ndarray`` accept both real and complex inputs and are
+            normalised automatically.  ``Vector[Float]`` is accepted
+            only when (a) its concrete values are available at trace
+            time (i.e., it came from a ``bindings={...}`` entry, not
+            from ``parameters=[...]``) and (b) the values are real;
+            complex amplitudes via a kernel parameter must instead go
+            through :func:`amplitude_encoding_from_angles`.
 
     Returns:
         Vector[Qubit]: The same *qubits* vector, with each element
