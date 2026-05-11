@@ -503,6 +503,49 @@ def test_order():
     assert model.order == 0
 
 
+# ---- BinaryExpr.reduce_indices ----
+
+
+@pytest.mark.parametrize(
+    "inds, expected",
+    [
+        ((), ()),
+        ((5,), (5,)),
+        ((2, 1, 0), (0, 1, 2)),
+        ((0, 0, 2), (2,)),
+        ((0, 0, 1, 1, 2), (2,)),
+        ((0, 0), ()),
+        ((0, 1, 1, 2, 2), (0,)),
+        ((0, 0, 0), (0,)),
+    ],
+)
+def test_reduce_indices_spin(inds, expected):
+    """SPIN: pairs cancel via s_i**2 = 1; surviving indices returned sorted."""
+    assert BinaryExpr.reduce_indices(VarType.SPIN, inds) == expected
+
+
+@pytest.mark.parametrize(
+    "inds, expected",
+    [
+        ((), ()),
+        ((5,), (5,)),
+        ((2, 1, 0), (0, 1, 2)),
+        ((0, 0, 2), (0, 2)),
+        ((0, 0, 1, 1, 2), (0, 1, 2)),
+        ((0, 0), (0,)),
+    ],
+)
+def test_reduce_indices_binary(inds, expected):
+    """BINARY: duplicates collapse via x_i**2 = x_i; returned sorted."""
+    assert BinaryExpr.reduce_indices(VarType.BINARY, inds) == expected
+
+
+def test_reduce_indices_rejects_unknown_vartype():
+    """reduce_indices raises ValueError when given a non-VarType value."""
+    with pytest.raises(ValueError, match="Unknown vartype"):
+        BinaryExpr.reduce_indices("not a vartype", (0, 1))  # type: ignore[arg-type]
+
+
 # ---- BinaryExpr.__imul__ idempotency ----
 
 
