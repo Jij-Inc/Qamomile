@@ -206,7 +206,7 @@ U = eigvecs @ np.diag(np.exp(-1j * t_value * eigvals)) @ eigvecs.conj().T
 psi_exact = U @ psi0
 
 # %% [markdown]
-# トランスパイル後の回路から状態ベクトルを取り出す方法、そして`psi_exact`に対してどれだけ厳しく assert できるかは、SDKによって違います。Qamomile の Qiskit emit pass は `pauli_evolve` を Qiskit 標準の `PauliEvolutionGate` に流していて、これは行列指数関数を解析的に評価するため、生成される ユニタリは厳密に $e^{-iHt}$ で fidelity は 1 に丸まります。一方 QURI Parts と CUDA-Q の emit pass は現状デフォルトの phase-gadget 分解（実質1次 Trotter）にフォールバックしているので、項が非可換だと近似ユニタリになります（この2量子ビット例 $t=0.8$ では fidelity 約 0.9）。タブブロックはこの違いを反映しています：Qiskit は厳格 assertion、他は fidelity の下限テスト。
+# トランスパイル後の回路から状態ベクトルを取り出す方法、そして`psi_exact`に対してどれだけ厳しく assert できるかは SDK ごとに違います。Qamomile の Qiskit emit pass は `pauli_evolve` を Qiskit 標準の `PauliEvolutionGate`（解析的な行列指数関数評価）に流すので、生成されるユニタリは厳密に $e^{-iHt}$、fidelity は 1 に丸まります。QURI Parts と CUDA-Q の emit pass にはまだ対応する native 経路がなく、現状は 1 次 Trotter にフォールバックしている — そのため項が非可換だと近似ユニタリ（この2量子ビット例 $t=0.8$ では fidelity 約 0.9）になります。Qiskit タブは厳格 assertion、他 2 つは fidelity の下限テストにしているのはこのためです。
 #
 # ::::{tab-set}
 # :::{tab-item} Qiskit
@@ -297,7 +297,7 @@ print(f"fidelity (|<exact|qamomile>|): {fidelity:.12f}")
 assert abs(fidelity - 1.0) < 1e-8
 
 # %% [markdown]
-# Qiskit ではフィデリティは数値的に$1$と区別できません — Qamomile の Qiskit emit pass は Qiskit 標準の`PauliEvolutionGate`を使うので、回路は行列指数関数と完全に同じユニタリを実現します。QURI Parts と CUDA-Q では同じ Pauli 分解が現状デフォルトの phase-gadget 経路（1次 Trotter）で emit されるので、それぞれの emit pass にネイティブ解析経路が入るまでは近似ユニタリ（この例で fidelity $\\approx 0.9$）になります。
+# Qiskit では厳格な $1\\mathrm{e}{-8}$ 許容差で assertion が通ります — Qamomile の Qiskit emit pass が `pauli_evolve` を `PauliEvolutionGate` に流すので、生成される ユニタリは厳密に $e^{-iHt}$ です。QURI Parts と CUDA-Q では同じ分解が現状 1 次 Trotter で emit されるため、この例の fidelity は 0.9 付近に留まります（QURI Parts と CUDA-Q の emit pass に native 解析経路が入るまで）。
 #
 # ## まとめ
 #

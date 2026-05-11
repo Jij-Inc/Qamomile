@@ -337,6 +337,13 @@ try:
 except Exception as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
+else:
+    # The ``else`` branch runs only if neither the decorator nor
+    # ``.draw()`` raised. Surfacing that as an AssertionError turns
+    # "silent success" into a docs-test failure so we notice if the
+    # affine-type check ever stops firing — the example would then be
+    # silently teaching a broken claim.
+    raise AssertionError("Expected bad_rebind to raise; it did not.")
 
 # %% [markdown]
 # The fix is simple: always write `q = qmc.h(q)`, not just `qmc.h(q)`.

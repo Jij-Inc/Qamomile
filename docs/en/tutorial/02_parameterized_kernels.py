@@ -152,6 +152,13 @@ try:
 except Exception as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
+else:
+    # The ``else`` branch runs only if neither the decorator nor
+    # ``.draw()`` raised. Surfacing that as an AssertionError turns
+    # "silent success" into a docs-test failure so we notice if the
+    # iteration check ever stops firing — the example would then be
+    # silently teaching a broken claim.
+    raise AssertionError("Expected bad_iteration to raise; it did not.")
 
 # %% [markdown]
 # Always use index-based access: `for i in qmc.range(n): q[i] = qmc.h(q[i])`.

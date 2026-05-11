@@ -312,6 +312,12 @@ try:
 except Exception as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
+else:
+    # ``else``節は decorator も ``.draw()`` も例外を出さなかったときに実行されます。
+    # ここで AssertionError を発火させることで、affine型チェックが将来何かの拍子で
+    # 動かなくなった場合に docs テストが silent pass せず必ず検知できます。
+    # (silent pass のままだと「壊れた主張を教え続ける」状態になってしまう)
+    raise AssertionError("bad_rebindはエラーになることを期待しているが、通ってしまった。")
 
 # %% [markdown]
 # 修正は簡単です：`qmc.h(q)`ではなく、常に`q = qmc.h(q)`と書いてください。

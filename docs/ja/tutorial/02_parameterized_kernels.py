@@ -144,6 +144,13 @@ try:
 except Exception as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
+else:
+    # ``else``節は decorator も ``.draw()`` も例外を出さなかったときに実行されます。
+    # ここで AssertionError を発火させることで、イテレーションチェックが将来何かの拍子で
+    # 動かなくなった場合に docs テストが silent pass せず必ず検知できます。
+    raise AssertionError(
+        "bad_iterationはエラーになることを期待しているが、通ってしまった。"
+    )
 
 # %% [markdown]
 # 常にインデックスベースのアクセスを使用してください：`for i in qmc.range(n): q[i] = qmc.h(q[i])`。

@@ -61,6 +61,15 @@
 #
 # transpiler = QuriPartsTranspiler()
 # ```
+#
+# **Heads-up — this article does not run end-to-end on QURI Parts.**
+# The later sections measure a qubit mid-circuit and then branch on
+# the result via `if bit:` / `while bit:`. The QURI Parts default
+# simulator (qulacs) does not expose mid-circuit measurement at the
+# public-API level, so the runtime control-flow demos will not
+# execute on this backend regardless of Qamomile's emit pass. Stick
+# with the Qiskit or CUDA-Q tab if you want to follow the article
+# end-to-end.
 # :::
 #
 # :::{tab-item} CUDA-Q
@@ -177,7 +186,10 @@ circuit = transpiler.to_circuit(
     sparse_coupling,
     bindings={"n": 3, "edges": edge_data, "gamma": 0.4},
 )
-print(circuit)
+# Qiskit's ``QuantumCircuit.__str__`` gives an ASCII diagram. Other
+# SDKs return a different concrete type whose ``__str__`` is just an
+# object ``repr`` — print the type name so this cell is SDK-portable.
+print(type(circuit).__name__)
 
 # %% [markdown]
 # Only the three edges in `edge_data` produce RZZ gates — no wasted operations.
@@ -253,12 +265,20 @@ def repeat_until_zero() -> qmc.Bit:
 
 
 # %% [markdown]
-# This transpiles to a Qiskit `while_loop` instruction. We can inspect the generated circuit structure:
+# This transpiles to whatever runtime-loop primitive the backend
+# offers — Qiskit emits a `while_loop` instruction inside a
+# `QuantumCircuit`; CUDA-Q emits a `while:` block inside the
+# `@cudaq.kernel` source. We can inspect the generated circuit
+# structure (the printed type tells you which SDK-native object came
+# back):
 
 # %%
 exe_while = transpiler.transpile(repeat_until_zero)
 qc_while = exe_while.compiled_quantum[0].circuit
-print(qc_while)
+# As with the previous section, fall back to the type name so this
+# cell is SDK-portable — Qiskit's QuantumCircuit prints an ASCII
+# diagram, CUDA-Q's artifact prints a generic ``__repr__``.
+print(type(qc_while).__name__)
 
 # %% [markdown]
 # ### Combining `if` and `while`

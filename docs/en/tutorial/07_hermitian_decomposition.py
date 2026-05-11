@@ -215,16 +215,15 @@ psi_exact = U @ psi0
 
 # %% [markdown]
 # Reading the statevector out of the transpiled circuit (and how
-# tightly we can assert against `psi_exact`) is SDK-specific.
-# Qamomile's Qiskit emit pass routes `pauli_evolve` through Qiskit's
-# native `PauliEvolutionGate`, which evaluates the matrix exponential
-# analytically — so the realised unitary is exactly $e^{-iHt}$ and the
-# fidelity rounds to 1. The QURI Parts and CUDA-Q emit passes
-# currently fall back to the default phase-gadget decomposition
-# (effectively first-order Trotter), so for non-commuting Hamiltonian
-# terms the realised unitary is approximate (~0.9 fidelity for this
-# 2-qubit example at $t=0.8$). The tab block reflects this: the
-# Qiskit assertion is strict, the others test a fidelity floor.
+# tightly we can assert against `psi_exact`) is SDK-specific. Qamomile's
+# Qiskit emit pass routes `pauli_evolve` through Qiskit's native
+# `PauliEvolutionGate` (analytic matrix exponential) so the realised
+# unitary is exactly $e^{-iHt}$ and the fidelity rounds to 1. The QURI
+# Parts and CUDA-Q emit passes don't yet have a corresponding native
+# path and currently fall back to first-order Trotter, which gives an
+# approximate unitary (~0.9 fidelity for this 2-qubit example at
+# $t=0.8$). The Qiskit tab therefore asserts strict equality; the
+# other two test a fidelity floor.
 #
 # ::::{tab-set}
 # :::{tab-item} Qiskit
@@ -321,7 +320,7 @@ print(f"fidelity (|<exact|qamomile>|): {fidelity:.12f}")
 assert abs(fidelity - 1.0) < 1e-8
 
 # %% [markdown]
-# On Qiskit the fidelity is numerically indistinguishable from $1$ — Qamomile's Qiskit emit pass uses Qiskit's native `PauliEvolutionGate`, so the circuit realises exactly the same unitary as the direct matrix exponential. On QURI Parts and CUDA-Q the same Pauli decomposition is currently emitted via the default phase-gadget path (first-order Trotter), so the realised unitary is approximate ($\\approx 0.9$ fidelity for this example) until those emit passes gain a native analytic path.
+# On Qiskit the assertion succeeds at the strict $1\\mathrm{e}{-8}$ tolerance: Qamomile's Qiskit emit pass routes `pauli_evolve` through `PauliEvolutionGate`, so the realised unitary is exactly $e^{-iHt}$. On QURI Parts and CUDA-Q the same decomposition currently emits as first-order Trotter — fidelity stays around $0.9$ for this example, until the QURI Parts and CUDA-Q emit passes grow a native analytic path.
 #
 # ## Recap
 #

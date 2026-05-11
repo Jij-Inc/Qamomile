@@ -56,6 +56,8 @@
 #
 # transpiler = QuriPartsTranspiler()
 # ```
+#
+# **注意 — この記事は QURI Parts では最後まで通りません。** 後半のセクションは中間測定 (`qmc.measure`) の結果で`if bit:` / `while bit:`で分岐するパターンを扱いますが、QURI Partsのデフォルトシミュレータ (qulacs) は公開APIレベルで中間測定をサポートしていないため、Qamomileのemit pass の有無に関係なく runtime control-flow のデモは実行できません。最後まで通したい場合は Qiskit か CUDA-Q タブを選んでください。
 # :::
 #
 # :::{tab-item} CUDA-Q
@@ -169,7 +171,9 @@ circuit = transpiler.to_circuit(
     sparse_coupling,
     bindings={"n": 3, "edges": edge_data, "gamma": 0.4},
 )
-print(circuit)
+# Qiskit の ``QuantumCircuit.__str__`` は ASCII 回路図を返しますが、
+# 他SDKは objectのreprを返すだけです。SDK 横断で動くよう、ここでは型名を print します。
+print(type(circuit).__name__)
 
 # %% [markdown]
 # `edge_data`の3つのエッジのみがRZZゲートを生成します。
@@ -245,12 +249,14 @@ def repeat_until_zero() -> qmc.Bit:
 
 
 # %% [markdown]
-# これはQiskitの`while_loop`命令にトランスパイルされます。生成された回路構造を確認できます:
+# これは backend ごとに固有のランタイムループプリミティブにトランスパイルされます — Qiskit は `QuantumCircuit` 内の `while_loop` 命令、CUDA-Q は `@cudaq.kernel` 内の `while:` ブロックとして emit します。生成された回路の型名で SDK-native オブジェクトを確認できます:
 
 # %%
 exe_while = transpiler.transpile(repeat_until_zero)
 qc_while = exe_while.compiled_quantum[0].circuit
-print(qc_while)
+# 前のセクション同様、型名にフォールバックしてSDK横断で動くようにします — Qiskit の
+# QuantumCircuit は ASCII 図を出しますが、CUDA-Q のartifactは generic な ``__repr__`` です。
+print(type(qc_while).__name__)
 
 # %% [markdown]
 # ### `if`と`while`の組み合わせ
