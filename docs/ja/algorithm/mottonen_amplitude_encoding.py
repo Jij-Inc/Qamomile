@@ -44,7 +44,6 @@
 
 # %%
 import numpy as np
-from qiskit.providers.basic_provider import BasicSimulator
 from qiskit.quantum_info import Statevector
 
 import qamomile.circuit as qmc
