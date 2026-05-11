@@ -803,6 +803,81 @@ class TestEncodingCudaq:
 
 
 # ---------------------------------------------------------------------------
+# amplitude_encoding via bound Vector[Float] amplitudes
+# ---------------------------------------------------------------------------
+
+
+def _build_amplitude_encoding_bound_kernel(n_qubits: int) -> qmc.QKernel:
+    """Build a kernel taking a Vector[Float] of *amplitudes* (bound, real).
+
+    Args:
+        n_qubits (int): Number of qubits in the register.
+
+    Returns:
+        qmc.QKernel: Kernel taking ``amps: Vector[Float]`` of length
+            ``2**n_qubits`` and returning the measured ``Vector[Bit]``.
+    """
+
+    @qmc.qkernel
+    def kernel(amps: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
+        q = qmc.qubit_array(n_qubits, "q")
+        q = amplitude_encoding(q, amps)
+        return qmc.measure(q)
+
+    return kernel
+
+
+class TestAmplitudeEncodingBoundVector:
+    """``amplitude_encoding`` accepts a Vector[Float] kernel parameter when bound.
+
+    The same ``MottonenAmplitudeEncoding`` CompositeGate path runs;
+    only the entry-point ergonomics differ from the closure-based call.
+    """
+
+    @pytest.mark.parametrize(
+        "amplitudes",
+        [pytest.param(amps, id=name) for name, amps in _FIXED_AMPLITUDES],
+    )
+    def test_bound_amplitudes_statevector(
+        self, qiskit_transpiler, amplitudes: list[float]
+    ) -> None:
+        """Bindings-bound Vector[Float] amplitudes produce the right statevector."""
+        n = int(round(np.log2(len(amplitudes))))
+        kernel = _build_amplitude_encoding_bound_kernel(n)
+        qc = qiskit_transpiler.to_circuit(kernel, bindings={"amps": amplitudes})
+        sv = run_statevector(qc).real
+        expected = _normalize(amplitudes)
+        assert _state_fidelity(sv, expected) == pytest.approx(1.0, abs=1e-8)
+
+    def test_runtime_parameter_rejected(self, qiskit_transpiler) -> None:
+        """``parameters=["amps"]`` raises a directing error toward the angle path."""
+        kernel = _build_amplitude_encoding_bound_kernel(2)
+        with pytest.raises(ValueError, match="amplitude_encoding_from_angles"):
+            qiskit_transpiler.transpile(kernel, parameters=["amps"])
+
+    def test_bound_amplitudes_emits_composite_gate(self, qiskit_transpiler) -> None:
+        """Bound-Vector path keeps the high-level CompositeGate in the IR.
+
+        Distinguishes the bound path from
+        ``amplitude_encoding_from_angles``, which emits flat RY/CNOT
+        directly.  Verified by counting block operations in the traced
+        kernel — the bound path produces a single composite-gate
+        invocation while the angle path expands inline.
+        """
+        kernel = _build_amplitude_encoding_bound_kernel(2)
+        block = kernel.build(amps=[1.0, 2.0, 3.0, 4.0])
+        from qamomile.circuit.ir.operation.composite_gate import (
+            CompositeGateOperation,
+        )
+
+        composite_ops = [
+            op for op in block.operations if isinstance(op, CompositeGateOperation)
+        ]
+        assert len(composite_ops) == 1
+        assert composite_ops[0].custom_name == "mottonen_amplitude_encoding"
+
+
+# ---------------------------------------------------------------------------
 # Parametric amplitude encoding (Vector[Float] angles as kernel parameters)
 # ---------------------------------------------------------------------------
 

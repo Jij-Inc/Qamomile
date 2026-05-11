@@ -701,7 +701,7 @@ def compute_mottonen_amplitude_encoding_rz_angles(
 
 def amplitude_encoding(
     qubits: Vector[Qubit],
-    amplitudes: Sequence[float] | Sequence[complex] | np.ndarray,
+    amplitudes: Sequence[float] | Sequence[complex] | np.ndarray | Vector[Float],
 ) -> Vector[Qubit]:
     """Apply Möttönen amplitude encoding to *qubits* in place.
 
@@ -711,12 +711,33 @@ def amplitude_encoding(
     see the class docstring for the gate-count tradeoff between the two
     paths.
 
+    *amplitudes* may be supplied as one of three forms:
+
+    * A concrete Python ``Sequence[float]`` / ``Sequence[complex]`` /
+      ``np.ndarray``.  Use this when the amplitudes are known where you
+      build the kernel (closed over from the surrounding Python scope).
+    * A ``Vector[Float]`` handle obtained from a kernel parameter that
+      is **bound at compile time** via
+      ``transpiler.transpile(kernel, bindings={"amps": [...]})``.  The
+      handle's bound concrete values are extracted at trace time and
+      flow through the same angle-computation path.  This makes
+      ``bindings={"amps": ...}`` ergonomic without forcing the user to
+      pre-compute Möttönen angles.
+    * **Not** a ``Vector[Float]`` left symbolic by
+      ``parameters=["amps"]`` — the angle computation requires concrete
+      values at trace time.  Use :func:`amplitude_encoding_from_angles`
+      with ``parameters=["ry_angles", "rz_angles"]`` for the
+      runtime-parametric case.
+
     Args:
         qubits (Vector[Qubit]): Vector of ``n`` qubit handles, expected
             to start in :math:`|0\\rangle^{\\otimes n}`.
-        amplitudes (Sequence[float] | Sequence[complex] | np.ndarray):
+        amplitudes (Sequence[float] | Sequence[complex] | np.ndarray | Vector[Float]):
             Amplitude vector of length ``2**n``.  Real or complex; it is
-            normalised automatically.
+            normalised automatically.  ``Vector[Float]`` is accepted only
+            when its concrete values are available at trace time (i.e.,
+            it came from a ``bindings={...}`` entry, not from
+            ``parameters=[...]``).
 
     Returns:
         Vector[Qubit]: The same *qubits* vector, with each element
@@ -725,23 +746,55 @@ def amplitude_encoding(
     Raises:
         ValueError: If the amplitude length is not a power of two (or
             is less than 2, i.e., would map to a zero-qubit register),
-            all amplitudes are zero, or the qubit count does not match
-            ``log2(len(amplitudes))``.
+            all amplitudes are zero, the qubit count does not match
+            ``log2(len(amplitudes))``, or *amplitudes* is a
+            ``Vector[Float]`` handle whose concrete values are not
+            available at trace time (use
+            :func:`amplitude_encoding_from_angles` with
+            ``parameters=[...]`` for runtime-parametric angles).
 
     Example::
 
+        # Concrete Python amplitudes
         @qmc.qkernel
         def prepare() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(2, name="q")
             q = amplitude_encoding(q, [1.0, 0.0, 0.0, 1.0])
             return qmc.measure(q)
+
+        # Bound Vector[Float] kernel parameter
+        @qmc.qkernel
+        def prepare(amps: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, name="q")
+            q = amplitude_encoding(q, amps)
+            return qmc.measure(q)
+
+        transpiler.transpile(prepare, bindings={"amps": [1.0, 0.0, 0.0, 1.0]})
     """
     n = get_size(qubits)
-    gate = MottonenAmplitudeEncoding(amplitudes)
+
+    if isinstance(amplitudes, Vector):
+        const_array = amplitudes.value.get_const_array()
+        if const_array is None:
+            raise ValueError(
+                "amplitude_encoding received a Vector[Float] handle without "
+                "concrete values at trace time. Bind it via "
+                "transpiler.transpile(kernel, bindings={...}) for compile-time "
+                "amplitudes, or use amplitude_encoding_from_angles with "
+                "parameters=[...] for runtime-parametric angles."
+            )
+        concrete_amplitudes: Sequence[float] | Sequence[complex] | np.ndarray = (
+            np.asarray(const_array)
+        )
+    else:
+        concrete_amplitudes = amplitudes
+
+    gate = MottonenAmplitudeEncoding(concrete_amplitudes)
     if gate.num_target_qubits != n:
         raise ValueError(
             f"amplitude_encoding requires {gate.num_target_qubits} qubits "
-            f"for an amplitude vector of length {len(amplitudes)}, got {n}"
+            f"for an amplitude vector of length {len(concrete_amplitudes)}, "
+            f"got {n}"
         )
 
     qubit_list: list[Qubit] = [qubits[i] for i in range(n)]
