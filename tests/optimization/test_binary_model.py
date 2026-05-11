@@ -261,7 +261,9 @@ def test_from_higher_ising_manually():
 
     for bits in range(2**bm.num_bits):
         state = [1 if (bits >> i) & 1 == 0 else -1 for i in range(bm.num_bits)]
-        assert np.isclose(bm.calc_energy(state), roundtrip_bm.calc_energy(state))
+        assert np.isclose(
+            bm.calc_energy(state), roundtrip_bm.calc_energy(state), atol=1e-10
+        )
 
 
 def test_from_higher_ising_equivalence_with_from_ising():
@@ -384,9 +386,9 @@ def test_from_higher_ising_4th_order():
 
     for bits in range(2**bm.num_bits):
         state = [1 if (bits >> i) & 1 == 0 else -1 for i in range(bm.num_bits)]
-        assert np.isclose(bm.calc_energy(state), roundtrip_bm.calc_energy(state)), (
-            f"Energy mismatch for state {state}"
-        )
+        assert np.isclose(
+            bm.calc_energy(state), roundtrip_bm.calc_energy(state), atol=1e-10
+        ), f"Energy mismatch for state {state}"
 
 
 def test_from_higher_ising_5th_order():
@@ -405,9 +407,9 @@ def test_from_higher_ising_5th_order():
 
     for bits in range(2**bm.num_bits):
         state = [1 if (bits >> i) & 1 == 0 else -1 for i in range(bm.num_bits)]
-        assert np.isclose(bm.calc_energy(state), roundtrip_bm.calc_energy(state)), (
-            f"Energy mismatch for state {state}"
-        )
+        assert np.isclose(
+            bm.calc_energy(state), roundtrip_bm.calc_energy(state), atol=1e-10
+        ), f"Energy mismatch for state {state}"
 
 
 def test_from_higher_ising_with_simplify():
@@ -456,7 +458,7 @@ def test_from_higher_ising_equivalence_random(seed):
             state = [int(rng.choice([-1, 1])) for _ in range(bm.num_bits)]
             bm_energy = bm.calc_energy(state)
             rt_energy = roundtrip_bm.calc_energy(state)
-            assert np.isclose(bm_energy, rt_energy), (
+            assert np.isclose(bm_energy, rt_energy, atol=1e-10), (
                 f"Energy mismatch: BM={bm_energy}, RT={rt_energy} for state={state}"
             )
 
