@@ -303,9 +303,7 @@ def _build_unitary_via_emission(
                     st = emit_one_level(st, k, ry_per_level[k], ry_m)
                     st = emit_one_level(st, k, rz_per_level[k], rz_m)
             case _:
-                raise ValueError(
-                    f"mode must be 'sweep' or 'interleave', got {mode!r}"
-                )
+                raise ValueError(f"mode must be 'sweep' or 'interleave', got {mode!r}")
         U[:, col] = st
     return U
 
@@ -941,9 +939,7 @@ def _build_parametric_real_expval_kernel(n_qubits: int) -> qmc.QKernel:
     """
 
     @qmc.qkernel
-    def kernel(
-        ry_angles: qmc.Vector[qmc.Float], H: qmc.Observable
-    ) -> qmc.Float:
+    def kernel(ry_angles: qmc.Vector[qmc.Float], H: qmc.Observable) -> qmc.Float:
         q = qmc.qubit_array(n_qubits, "q")
         q = amplitude_encoding_from_angles(q, ry_angles)
         return qmc.expval(q, H)
@@ -999,9 +995,7 @@ class TestParametricInputValidation:
         def kernel() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(2, "q")
             # 2 qubits → expects 3 angles for each stage; ry ok, rz wrong
-            q = amplitude_encoding_from_angles(
-                q, [0.0, 0.0, 0.0], rz_angles=[0.0, 0.0]
-            )
+            q = amplitude_encoding_from_angles(q, [0.0, 0.0, 0.0], rz_angles=[0.0, 0.0])
             return qmc.measure(q)
 
         with pytest.raises(ValueError, match="rz_angles must have length"):
@@ -1056,9 +1050,7 @@ class TestParametricEncodingQiskit:
 
         ry = compute_mottonen_amplitude_encoding_ry_angles(amplitudes).tolist()
         results = (
-            exe.sample(
-                seeded_executor, shots=_SHOTS, bindings={"ry_angles": ry}
-            )
+            exe.sample(seeded_executor, shots=_SHOTS, bindings={"ry_angles": ry})
             .result()
             .results
         )
@@ -1106,9 +1098,7 @@ class TestParametricEncodingQiskit:
         """Complex amps via runtime-bound Ry + Rz Vector[Float] pair."""
         n = int(round(np.log2(len(amplitudes))))
         kernel = _build_parametric_complex_kernel(n)
-        exe = qiskit_transpiler.transpile(
-            kernel, parameters=["ry_angles", "rz_angles"]
-        )
+        exe = qiskit_transpiler.transpile(kernel, parameters=["ry_angles", "rz_angles"])
         circuit = exe.compiled_quantum[0].circuit
         # 2 stages of 2**n - 1 parametric rotations each
         assert len(circuit.parameters) == 2 * (2**n - 1)
@@ -1157,9 +1147,7 @@ class TestParametricEncodingQiskit:
                 np.asarray(amplitudes)
             ).tolist()
             results = (
-                exe.sample(
-                    seeded_executor, shots=_SHOTS, bindings={"ry_angles": ry}
-                )
+                exe.sample(seeded_executor, shots=_SHOTS, bindings={"ry_angles": ry})
                 .result()
                 .results
             )
@@ -1186,9 +1174,7 @@ class TestParametricEncodingQiskit:
     ) -> None:
         """``<H>`` matches the analytic value when angles + H are runtime bindings."""
         n_qubits = int(round(np.log2(len(amplitudes))))
-        is_complex = any(
-            isinstance(a, complex) and a.imag != 0 for a in amplitudes
-        )
+        is_complex = any(isinstance(a, complex) and a.imag != 0 for a in amplitudes)
         H = _pad_observable(n_qubits, _make_pauli(pauli, qubit_idx))
         ry = compute_mottonen_amplitude_encoding_ry_angles(amplitudes).tolist()
 
@@ -1293,9 +1279,7 @@ class TestParametricEncodingQuriParts:
     ) -> None:
         """``<H>`` on the encoded state matches the analytic value (runtime params)."""
         n_qubits = int(round(np.log2(len(amplitudes))))
-        is_complex = any(
-            isinstance(a, complex) and a.imag != 0 for a in amplitudes
-        )
+        is_complex = any(isinstance(a, complex) and a.imag != 0 for a in amplitudes)
         H = _pad_observable(n_qubits, _make_pauli(pauli, qubit_idx))
         ry = compute_mottonen_amplitude_encoding_ry_angles(amplitudes).tolist()
 
@@ -1399,9 +1383,7 @@ class TestParametricEncodingCudaq:
     ) -> None:
         """``<H>`` on the encoded state matches the analytic value (runtime params)."""
         n_qubits = int(round(np.log2(len(amplitudes))))
-        is_complex = any(
-            isinstance(a, complex) and a.imag != 0 for a in amplitudes
-        )
+        is_complex = any(isinstance(a, complex) and a.imag != 0 for a in amplitudes)
         H = _pad_observable(n_qubits, _make_pauli(pauli, qubit_idx))
         ry = compute_mottonen_amplitude_encoding_ry_angles(amplitudes).tolist()
 

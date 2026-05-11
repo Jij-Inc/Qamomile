@@ -239,6 +239,7 @@ for label, gate in (("real", gate_real), ("complex", gate_complex)):
 # still runs classically and the IR carries a single
 # `MottonenAmplitudeEncoding` composite gate.
 
+
 # %%
 @qmc.qkernel
 def prepare_via_binding(amps: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
@@ -247,9 +248,7 @@ def prepare_via_binding(amps: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
     return qmc.measure(q)
 
 
-qc = transpiler.to_circuit(
-    prepare_via_binding, bindings={"amps": [1.0, 2.0, 3.0, 4.0]}
-)
+qc = transpiler.to_circuit(prepare_via_binding, bindings={"amps": [1.0, 2.0, 3.0, 4.0]})
 sv = Statevector.from_instruction(qc.remove_final_measurements(inplace=False)).data
 print(f"fidelity (mode B) = {fidelity(sv, normalize([1.0, 2.0, 3.0, 4.0])):.6f}")
 
@@ -368,6 +367,7 @@ for trial_amps in (
 #
 # which we now reproduce with the estimator path.
 
+
 # %%
 @qmc.qkernel
 def expval_kernel(H: qmc.Observable) -> qmc.Float:
@@ -379,7 +379,7 @@ def expval_kernel(H: qmc.Observable) -> qmc.Float:
 H = qm_o.Z(0) + 0.0 * qm_o.Z(1)  # pad to 2-qubit width
 exe_expval = transpiler.transpile(expval_kernel, bindings={"H": H})
 result = exe_expval.run(executor).result()
-print(f"<Z_0> = {float(result):+.6f}   (analytic: {-1/3:+.6f})")
+print(f"<Z_0> = {float(result):+.6f}   (analytic: {-1 / 3:+.6f})")
 
 # %% [markdown]
 # ## When to use which

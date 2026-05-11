@@ -187,6 +187,7 @@ for label, gate in (("real", gate_real), ("complex", gate_complex)):
 #
 # 振幅をカーネルパラメータとして公開したい場合（ドキュメント目的、異なるベクトルを掃引する目的、あるいはカーネル定義をマジックナンバーから解放するため）は、パラメータを`Vector[Float]`として宣言し、`bindings={...}`で値を渡します。実装はtrace時にハンドルの`array_runtime_metadata`からバインド済みの具体データを読み出すため、角度計算は依然として古典的に走り、IRには単一の`MottonenAmplitudeEncoding`コンポジットゲートが残ります。
 
+
 # %%
 @qmc.qkernel
 def prepare_via_binding(amps: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
@@ -195,9 +196,7 @@ def prepare_via_binding(amps: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
     return qmc.measure(q)
 
 
-qc = transpiler.to_circuit(
-    prepare_via_binding, bindings={"amps": [1.0, 2.0, 3.0, 4.0]}
-)
+qc = transpiler.to_circuit(prepare_via_binding, bindings={"amps": [1.0, 2.0, 3.0, 4.0]})
 sv = Statevector.from_instruction(qc.remove_final_measurements(inplace=False)).data
 print(f"fidelity (mode B) = {fidelity(sv, normalize([1.0, 2.0, 3.0, 4.0])):.6f}")
 
@@ -289,6 +288,7 @@ for trial_amps in (
 #
 # となり、estimator経路でこれを再現します。
 
+
 # %%
 @qmc.qkernel
 def expval_kernel(H: qmc.Observable) -> qmc.Float:
@@ -300,7 +300,7 @@ def expval_kernel(H: qmc.Observable) -> qmc.Float:
 H = qm_o.Z(0) + 0.0 * qm_o.Z(1)  # 2量子ビット幅にパディング
 exe_expval = transpiler.transpile(expval_kernel, bindings={"H": H})
 result = exe_expval.run(executor).result()
-print(f"<Z_0> = {float(result):+.6f}   (analytic: {-1/3:+.6f})")
+print(f"<Z_0> = {float(result):+.6f}   (analytic: {-1 / 3:+.6f})")
 
 # %% [markdown]
 # ## どれをいつ使うか
